@@ -257,6 +257,35 @@ def test_assistant_runtime_unknown_slash_command_returns_clarification(tmp_path:
     assert out["meta"]["assistant"]["route"] == "command"
 
 
+def test_assistant_runtime_unknown_slash_command_does_not_call_llm(tmp_path: Path) -> None:
+    def _translate(
+        _text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmTranslationResult:
+        raise AssertionError("slash commands are resolved only by the command catalog")
+
+    out = handle_assistant_message(
+        InboundRequest(
+            text="/not-a-command",
+            sender_id="local",
+            message_id="msg_unknown_catalog_command",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        settings=AssistantSettings(
+            mode="llm_router",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        translate_intent_fn=_translate,
+    )
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "NEEDS_CLARIFICATION"
+    assert "使用 /help" in out["error"]["hint"]
+    assert out["meta"]["assistant"]["route"] == "command"
+    assert out["meta"]["assistant"]["llm"]["reason"] == "command"
+
+
 def test_assistant_runtime_keeps_llm_disabled_for_unrecognized_text(tmp_path: Path) -> None:
     out = handle_assistant_message(
         InboundRequest(
@@ -1070,6 +1099,19 @@ def test_llm_intent_schema_rejects_write_intents_and_extra_arguments() -> None:
     assert confirm_result.intent is None
     assert confirm_result.error is not None
     assert confirm_result.error.code == "PERMISSION_DENIED"
+
+    unsupported_intent_result = parse_llm_translation_payload(
+        {
+            "schema_version": LLM_INTENT_SCHEMA_VERSION,
+            "intent": "unsupported_project_command",
+            "arguments": {},
+            "confidence": 0.95,
+        },
+        settings=LlmTranslatorSettings(enabled=True),
+    )
+    assert unsupported_intent_result.intent is None
+    assert unsupported_intent_result.error is not None
+    assert unsupported_intent_result.error.code == "PERMISSION_DENIED"
 
     extra_result = parse_llm_translation_payload(
         {
