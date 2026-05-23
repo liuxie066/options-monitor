@@ -73,7 +73,20 @@ def parse_inbound_text(text: str, *, now_fn: Callable[[], date] | None = None) -
         return InboundIntent(name="help", arguments={})
     if compact in {"你好", "您好", "hi", "hello", "嗨"}:
         return InboundIntent(name="small_talk", arguments={"kind": "hello"})
-    if compact in {"你能做什么", "能做什么", "你会什么", "功能", "菜单"}:
+    if compact in {
+        "你能做什么",
+        "我能做什么",
+        "能做什么",
+        "你会什么",
+        "有什么功能",
+        "有哪些功能",
+        "可用功能",
+        "可用命令",
+        "命令",
+        "指令",
+        "功能",
+        "菜单",
+    }:
         return InboundIntent(name="help", arguments={})
 
     if compact in {"待确认", "当前预览", "待确认记录", "pending", "pendingoperations"} or lower in {
@@ -87,13 +100,13 @@ def parse_inbound_text(text: str, *, now_fn: Callable[[], date] | None = None) -
     if operation_intent is not None:
         return operation_intent
 
-    if compact in {"状态", "运行状态", "系统状态", "status"} or lower in {"status", "runtime status"}:
+    if compact in {"状态", "运行状态", "系统状态", "系统怎么样", "运行怎么样", "status"} or lower in {"status", "runtime status"}:
         return InboundIntent(name="runtime_status", arguments={})
 
-    if "健康检查" in compact or compact in {"健康", "检查", "healthcheck", "doctor"} or lower in {"healthcheck", "doctor"}:
+    if "健康检查" in compact or compact in {"健康", "检查", "自检", "诊断", "healthcheck", "doctor"} or lower in {"healthcheck", "doctor"}:
         return InboundIntent(name="healthcheck", arguments={})
 
-    if "配置检查" in compact or "配置校验" in compact or lower in {"config validate", "config_validate"}:
+    if "配置检查" in compact or "配置校验" in compact or compact in {"配置是否正常", "检查配置"} or lower in {"config validate", "config_validate"}:
         return InboundIntent(name="config_validate", arguments={})
 
     if _looks_like_positions(compact, lower):
@@ -473,7 +486,14 @@ def _looks_like_income(compact: str, lower: str) -> bool:
 
 
 def _looks_like_runs(compact: str, lower: str) -> bool:
-    return "最近运行" in compact or "运行记录" in compact or lower in {"runs", "recent runs"} or lower.startswith("runs ")
+    return (
+        "最近运行" in compact
+        or "运行记录" in compact
+        or "最近任务" in compact
+        or "任务记录" in compact
+        or lower in {"runs", "recent runs"}
+        or lower.startswith("runs ")
+    )
 
 
 def _looks_like_logs(compact: str, lower: str) -> bool:
@@ -493,7 +513,10 @@ def _looks_like_manual_close(compact: str, lower: str) -> bool:
 
 
 def _looks_like_symbol_list(compact: str, lower: str) -> bool:
-    return compact in {"查看监控标的", "监控标的", "监控列表"} or lower in {"symbols", "symbol list", "symbols list"}
+    return (
+        compact in {"查看监控标的", "监控标的", "监控列表", "监控标的有哪些"}
+        or lower in {"symbols", "symbol list", "symbols list"}
+    )
 
 
 def _looks_like_symbol_add(compact: str, lower: str) -> bool:
