@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.130 - 2026-05-23
+
+### Added
+- Added an assistant capability catalog that exposes the project abilities visible to LLM routing while marking write, confirm, symbol-edit, and upgrade flows as known but non-executable by LLM.
+- Added `om assistant capabilities` and capability summaries in `om assistant llm-check` so operators can inspect the LLM routing surface directly.
+
+### Fixed
+- Kept unknown slash commands on the deterministic command path instead of letting the LLM invent unsupported project commands.
+
 ## 1.2.129 - 2026-05-23
 
 ### Fixed

@@ -42,6 +42,8 @@ def test_llm_check_allows_disabled_translator_without_api_key(tmp_path: Path) ->
     assert out["summary"]["ok"] is True
     assert out["summary"]["status"] == "disabled"
     assert out["llm"]["enabled"] is False
+    assert "runtime_status" in out["capabilities"]["llm_executable_intents"]
+    assert "manual_trade_open" in out["capabilities"]["known_non_executable_intents"]
     assert out["llm"]["api_key_configured"] is False
     checks = {item["name"]: item for item in out["checks"]}
     assert checks["enabled"]["status"] == "warn"

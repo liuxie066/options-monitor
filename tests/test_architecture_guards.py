@@ -173,11 +173,14 @@ def test_read_tool_allowlist_has_neutral_owner() -> None:
 
 
 def test_assistant_owns_command_catalog_and_interaction_contracts() -> None:
+    from src.application.agent_runtime.command_catalog import capability_specs as compat_capability_specs
     from src.application.agent_runtime.command_catalog import command_specs as compat_command_specs
+    from src.application.assistant.commands import capability_specs
     from src.application.assistant.commands import command_specs
     from src.application.assistant.contracts import AssistantRequest
     from src.application.inbound.contracts import InboundRequest
 
+    assert compat_capability_specs is capability_specs
     assert compat_command_specs is command_specs
     assert InboundRequest is AssistantRequest
 

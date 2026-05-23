@@ -166,11 +166,12 @@ Check the translator control plane before enabling it in Feishu:
 
 ```bash
 ./om assistant commands --format text
+./om assistant capabilities
 ./om assistant llm-check
 ./om assistant llm-check --live
 ```
 
-`assistant commands` renders the same command catalog used by slash commands, inbound help, and the LLM intent schema. The default LLM check validates `config.assistant.json`, the effective env file, redacted API-key presence, and the resolved provider endpoint URL. `--live` sends one read-only structured translation probe to the configured provider.
+`assistant commands` renders the slash-command help surface. `assistant capabilities` renders the full assistant capability catalog used by the LLM routing manifest: read-only capabilities are executable by LLM routing, while write, confirm, symbol-edit, and upgrade capabilities are visible but non-executable. The default LLM check validates `config.assistant.json`, the effective env file, redacted API-key presence, the resolved provider endpoint URL, and the current capability routing surface. `--live` sends one read-only structured translation probe to the configured provider.
 
 ## Sender Allowlist
 

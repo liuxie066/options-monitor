@@ -11,7 +11,7 @@ from src.application.assistant.agent_loop import (
     build_tool_observation,
     run_read_only_agent_loop,
 )
-from src.application.assistant.commands import command_catalog_payload, command_specs
+from src.application.assistant.commands import command_catalog_payload, command_specs, llm_capability_manifest
 from src.application.assistant.command_parser import parse_assistant_command
 from src.application.assistant.conversation_context import build_conversation_context
 from src.application.assistant.llm_intent_schema import LLM_INTENT_SCHEMA_VERSION, llm_intent_json_schema, llm_intent_schema
@@ -54,15 +54,40 @@ def test_assistant_command_catalog_drives_llm_allowed_surface() -> None:
     llm_denied = {spec.intent_name for spec in command_specs() if not spec.llm_allowed}
     schema = llm_intent_schema()
     payload = command_catalog_payload()
+    capabilities = {item["capability_id"]: item for item in payload["capabilities"]}
 
     assert set(schema["shape"]["intent"]) == llm_allowed
     assert "runtime_status" in llm_allowed
+    assert "manual_trade_open" in llm_denied
+    assert "symbol_add" in llm_denied
+    assert "upgrade_now" in llm_denied
     assert "manual_trade_confirm" in llm_denied
     assert not (llm_allowed & llm_denied)
     assert payload["summary"]["command_count"] == len(command_specs())
+    assert payload["summary"]["capability_count"] == len(command_specs())
+    assert capabilities["manual_trade_open"]["risk_level"] == "preview_write"
+    assert capabilities["manual_trade_open"]["llm_executable"] is False
+    assert capabilities["symbol_add"]["risk_level"] == "preview_write"
+    assert capabilities["upgrade_now"]["risk_level"] == "preview_admin"
     assert "Command：" in payload["help_text"]
     assert "只读查询" in payload["help_text"]
     assert "写操作只会先返回预览" in payload["help_text"]
+
+
+def test_llm_capability_manifest_lists_known_but_non_executable_operations() -> None:
+    manifest = llm_capability_manifest()
+    capabilities = {item["capability_id"]: item for item in manifest["capabilities"]}
+
+    assert "runtime_status" in manifest["llm_executable_intents"]
+    assert capabilities["runtime_status"]["llm_executable"] is True
+    assert capabilities["manual_trade_open"]["llm_executable"] is False
+    assert capabilities["manual_trade_close"]["llm_executable"] is False
+    assert capabilities["manual_trade_update"]["llm_executable"] is False
+    assert capabilities["symbol_add"]["llm_executable"] is False
+    assert capabilities["symbol_edit"]["llm_executable"] is False
+    assert capabilities["symbol_remove"]["llm_executable"] is False
+    assert capabilities["upgrade_now"]["llm_executable"] is False
+    assert "Choose only capabilities" in manifest["routing_rule"]
 
 
 def test_assistant_deterministic_parser_supports_productized_read_aliases() -> None:
@@ -1157,10 +1182,16 @@ def test_llm_intent_schema_rejects_low_confidence_and_missing_required_args() ->
 
 def test_llm_intent_schema_documents_allowed_surface() -> None:
     schema = llm_intent_schema()
+    capabilities = {
+        item["capability_id"]: item
+        for item in schema["capability_manifest"]["capabilities"]
+    }
 
     assert schema["schema_version"] == LLM_INTENT_SCHEMA_VERSION
     assert schema["write_intents_allowed"] is False
     assert "manual_trade_open" not in schema["shape"]["intent"]
+    assert capabilities["manual_trade_open"]["llm_executable"] is False
+    assert capabilities["upgrade_now"]["risk_level"] == "preview_admin"
     assert schema["argument_keys"]["runtime_logs"] == ["kind", "lines", "run_id"]
 
     json_schema = llm_intent_json_schema()
@@ -1232,7 +1263,11 @@ def test_llm_translator_calls_openai_provider_and_parses_structured_response() -
     assert calls[0]["max_output_tokens"] == 777
     assert calls[0]["input_text"] == "帮我看 sy 的持仓"
     assert "Never execute tools" in str(calls[0]["instructions"])
+    assert "Available OM capabilities" in str(calls[0]["instructions"])
+    assert "manual_trade_open" in str(calls[0]["instructions"])
+    assert "llm_executable=false" in str(calls[0]["instructions"])
     assert calls[0]["json_schema"]["properties"]["intent"]["enum"]
+    assert "manual_trade_open" not in calls[0]["json_schema"]["properties"]["intent"]["enum"]
 
 
 def test_llm_translator_calls_deepseek_provider_and_parses_chat_response() -> None:
@@ -1296,6 +1331,7 @@ def test_llm_translator_calls_deepseek_provider_and_parses_chat_response() -> No
     assert calls[0]["max_output_tokens"] == 777
     assert calls[0]["input_text"] == "帮我看 sy 的持仓"
     assert "Example JSON output" in str(calls[0]["instructions"])
+    assert "Available OM capabilities" in str(calls[0]["instructions"])
 
 
 def test_llm_reply_calls_provider_with_constrained_general_reply_prompt() -> None:

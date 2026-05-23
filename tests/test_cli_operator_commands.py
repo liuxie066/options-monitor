@@ -204,6 +204,22 @@ def test_assistant_commands_command_renders_catalog(capsys) -> None:
     assert "/confirm trade|symbol|upgrade" in text
 
 
+def test_assistant_capabilities_command_renders_capability_catalog(capsys) -> None:
+    import src.interfaces.cli.main as cli
+
+    rc = cli.main(["assistant", "capabilities"])
+    payload = _read_json_output(capsys)
+
+    assert rc == 0
+    assert payload["tool_name"] == "assistant.capabilities"
+    assert payload["ok"] is True
+    assert payload["data"]["summary"]["capability_count"] >= payload["data"]["summary"]["slash_command_count"]
+    capabilities = {item["capability_id"]: item for item in payload["data"]["capabilities"]}
+    assert capabilities["runtime_status"]["llm_executable"] is True
+    assert capabilities["manual_trade_open"]["llm_executable"] is False
+    assert capabilities["upgrade_now"]["risk_level"] == "preview_admin"
+
+
 def test_legacy_agent_command_alias_is_hidden_but_supported(capsys) -> None:
     import src.interfaces.cli.main as cli
 
