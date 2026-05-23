@@ -6,7 +6,7 @@ from typing import Any, cast
 
 from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.assistant.contracts import AssistantRequest
-from src.application.assistant.router import ExecuteToolFn, handle_assistant_request
+from src.application.assistant.router import ExecuteToolFn
 
 
 def handle_feishu_payload(
@@ -17,7 +17,6 @@ def handle_feishu_payload(
     audit_db: str | None = None,
     execute_tool_fn: ExecuteToolFn | None = None,
     allowed_senders: str | None = None,
-    use_assistant: bool | None = None,
     assistant_settings: Any | None = None,
     assistant_config_path: str | None = None,
 ) -> dict[str, Any]:
@@ -42,26 +41,15 @@ def handle_feishu_payload(
     kwargs: dict[str, Any] = {"allowed_senders": allowed_senders}
     if execute_tool_fn is not None:
         kwargs["execute_tool_fn"] = execute_tool_fn
-    settings: Any | None = None
-    if use_assistant is False:
-        use_control_plane = False
-    else:
-        settings = assistant_settings or _assistant_settings(
-            config_key=config_key,
-            config_path=config_path,
-            assistant_config_path=assistant_config_path,
-            force_enabled=True if use_assistant is True else None,
-        )
-        assert settings is not None
-        use_control_plane = bool(settings.enabled)
-    if use_control_plane:
-        from src.application.assistant.runtime import handle_assistant_message
+    settings = assistant_settings or _assistant_settings(
+        config_key=config_key,
+        config_path=config_path,
+        assistant_config_path=assistant_config_path,
+    )
+    from src.application.assistant.runtime import handle_assistant_message
 
-        assert settings is not None
-        kwargs["settings"] = settings
-        inbound_result = handle_assistant_message(request, **kwargs)
-    else:
-        inbound_result = handle_assistant_request(request, **kwargs)
+    kwargs["settings"] = settings
+    inbound_result = handle_assistant_message(request, **kwargs)
     data_raw = inbound_result.get("data")
     data = cast(dict[str, Any], data_raw) if isinstance(data_raw, dict) else {}
     return build_response(
@@ -84,7 +72,6 @@ def _assistant_settings(
     config_key: str | None,
     config_path: str | None,
     assistant_config_path: str | None = None,
-    force_enabled: bool | None = None,
 ) -> Any:
     from src.application.assistant.settings import AssistantSettings
     from src.application.assistant.config_loader import load_assistant_config
@@ -97,13 +84,13 @@ def _assistant_settings(
         configured = AssistantSettings.from_runtime_config(assistant_cfg)
         return AssistantSettings(
             mode=configured.mode,
-            enabled=configured.enabled if force_enabled is None else bool(force_enabled),
+            enabled=configured.enabled,
             context_window_messages=configured.context_window_messages,
             default_market_scope=configured.default_market_scope,
             llm=configured.llm,
         )
 
-    return AssistantSettings(enabled=True if force_enabled is None else bool(force_enabled))
+    return AssistantSettings()
 
 
 def feishu_payload_to_inbound_request(

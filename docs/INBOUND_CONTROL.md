@@ -1,6 +1,6 @@
-# Inbound Control
+# Assistant Control And Inbound Transport
 
-`./om inbound handle` is the controlled entry point for remote messages from Feishu, WeChat, Hermes, or other gateways.
+`./om assistant handle` is the controlled entry point for remote messages from Feishu, WeChat, Hermes, or other gateways.
 
 It is not a shell bridge. Gateways should pass one message into OM and let OM parse, authorize, audit, and execute the request through the existing agent-tool contract.
 
@@ -76,16 +76,10 @@ Read commands use the pure-read whitelist. Admin write operations are separate a
 | `/confirm trade|symbol|upgrade [operation_id]` | confirm a pending write preview |
 | `/cancel trade|symbol|upgrade [operation_id]` | cancel a pending write preview |
 
-Local one-shot testing uses the same command facade by default when `assistant.mode` is not disabled:
+Local one-shot testing uses the same command facade:
 
 ```bash
-./om inbound handle --text '/positions sy' --format text
-```
-
-For parser diagnostics, bypass the facade explicitly:
-
-```bash
-./om inbound handle --no-assistant --text '持仓 sy' --format text
+./om assistant handle --text '/positions sy' --format text
 ```
 
 For long-running Feishu WS, `config.assistant.json` controls the facade:
@@ -216,7 +210,7 @@ Override it with:
 export OM_INBOUND_AUDIT_DB=/var/lib/options-monitor/state/inbound_control.sqlite3
 ```
 
-When `--message-id` is supplied, inbound control treats `(channel, message_id)` as idempotent. A repeated message returns the stored response and does not execute the tool again.
+When `--message-id` is supplied, assistant control treats `(channel, message_id)` as idempotent. A repeated message returns the stored response and does not execute the tool again.
 
 The audit table records:
 
@@ -239,14 +233,14 @@ The audit table records:
 Local test:
 
 ```bash
-./om inbound handle --text '持仓 sy' --sender local --channel local --message-id local-1
+./om assistant handle --text '持仓 sy' --sender local --channel local --message-id local-1
 ```
 
 Feishu message call:
 
 ```bash
 OM_FEISHU_BOT_ALLOWED_OPEN_IDS='ou_xxx' \
-./om inbound handle \
+./om assistant handle \
   --text '收益 sy 2026-05' \
   --sender ou_xxx \
   --channel feishu \
@@ -260,12 +254,12 @@ OM_FEISHU_BOT_ALLOWED_OPEN_IDS='ou_xxx' \
 ./om inbound feishu --input-file feishu_event.json --format text
 ```
 
-This adapter only extracts Feishu `im.message.receive_v1` text-message fields and delegates to `./om inbound handle`.
+This adapter only extracts Feishu `im.message.receive_v1` text-message fields and delegates to `./om assistant handle`.
 
 Text output for chat replies:
 
 ```bash
-./om inbound handle --text '状态' --format text
+./om assistant handle --text '状态' --format text
 ```
 
 ## Feishu Long Connection
@@ -281,7 +275,7 @@ Feishu Event Subscription long connection
   -> Feishu message reply API
 ```
 
-It still does not expose arbitrary shell execution. It only forwards Feishu text messages received through the authenticated SDK connection into the same inbound control path. OM no longer supports the HTTPS callback receiver as the production Feishu inbound path.
+It still does not expose arbitrary shell execution. It only forwards Feishu text messages received through the authenticated SDK connection into the same assistant control path. OM no longer supports the HTTPS callback receiver as the production Feishu inbound path.
 
 Required environment values:
 
@@ -367,4 +361,4 @@ Supported write commands:
 | `增加/修改/删除监控标的 ...` | `symbol_*` | `确认监控 [operation_id]` | `取消监控 [operation_id]` |
 | `立即升级` / `立即升级到 v1.2.111` | `upgrade_now` | `确认升级 [operation_id]` | `取消升级 [operation_id]` |
 
-`立即升级` delegates to the same service upgrade path as `./om update apply --auto --confirm`. The preview does not switch releases. Confirmation only records the confirmation and starts an independent `inbound upgrade-worker`; the worker runs the upgrade, writes the final applied/failed result, and sends the final Feishu receipt after service restarts.
+`立即升级` delegates to the same service upgrade path as `./om update apply --auto --confirm`. The preview does not switch releases. Confirmation only records the confirmation and starts an independent `assistant upgrade-worker`; the worker runs the upgrade, writes the final applied/failed result, and sends the final Feishu receipt after service restarts.
