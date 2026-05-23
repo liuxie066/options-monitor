@@ -180,6 +180,7 @@ def preflight_broker_trade_close(
     contracts_to_close: int,
     close_price: float | None,
     as_of_ms: int | None = None,
+    event_type: str = "close",
 ) -> LedgerPreflightResult:
     return _preflight_lot_close(
         repo,
@@ -188,7 +189,7 @@ def preflight_broker_trade_close(
         contracts_to_close=contracts_to_close,
         close_price=close_price,
         as_of_ms=as_of_ms,
-        event_type="close",
+        event_type=str(event_type or "close").strip() or "close",
         source="broker_trade_close_preflight",
         operation_label="broker trade close",
     )

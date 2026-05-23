@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from domain.domain.ledger.position_fields import (
+    EXPIRE_AUTO_CLOSE,
     OpenPositionCommand,
     PositionLotPatch,
     build_close_patch_contract,
@@ -276,6 +279,13 @@ def persist_trade_close_events_with_ledger(
 ) -> list[BrokerTradeOperation]:
     operations: list[BrokerTradeOperation] = []
     close_action = "buy_close" if str(getattr(deal, "side", "") or "").strip().lower() == "buy" else "sell_close"
+    broker_close_event_type = _broker_close_event_type(deal)
+    broker_close_type = EXPIRE_AUTO_CLOSE if broker_close_event_type == "expire_close" else None
+    broker_close_reason = (
+        "broker_expiration_zero_price_close"
+        if broker_close_event_type == "expire_close"
+        else None
+    )
     for match in matches:
         record_id = str(getattr(match, "record_id", "") or "").strip()
         contracts_to_close = int(getattr(match, "contracts_to_close", 0) or 0)
@@ -287,6 +297,7 @@ def persist_trade_close_events_with_ledger(
             contracts_to_close=contracts_to_close,
             close_price=(float(getattr(deal, "price")) if getattr(deal, "price", None) is not None else None),
             as_of_ms=(int(getattr(deal, "trade_time_ms")) if getattr(deal, "trade_time_ms", None) is not None else None),
+            event_type=broker_close_event_type,
         )
         split_deal = _split_close_deal_for_target(
             deal,
@@ -295,6 +306,13 @@ def persist_trade_close_events_with_ledger(
             contracts_to_close=contracts_to_close,
             close_target_resolution=close_target_resolution,
         )
+        if broker_close_type:
+            raw_payload = dict(getattr(split_deal, "raw_payload", {}) or {})
+            raw_payload.setdefault("close_type", broker_close_type)
+            raw_payload.setdefault("broker_close_type", "expiration_zero_close")
+            if broker_close_reason:
+                raw_payload.setdefault("broker_close_reason", broker_close_reason)
+            split_deal = replace(split_deal, raw_payload=raw_payload)
         result = persist_trade_event_fn(repo, split_deal)
         result_payload = _ledger_write_result_from_any(
             result,
@@ -313,6 +331,39 @@ def persist_trade_close_events_with_ledger(
         )
         operations.append(operation)
     return operations
+
+
+def _broker_close_event_type(deal: Any) -> str:
+    return "expire_close" if _is_expiration_zero_price_close(deal) else "close"
+
+
+def _is_expiration_zero_price_close(deal: Any) -> bool:
+    if str(getattr(deal, "position_effect", "") or "").strip().lower() != "close":
+        return False
+    try:
+        if float(getattr(deal, "price")) != 0.0:
+            return False
+    except (TypeError, ValueError):
+        return False
+    expiration = str(getattr(deal, "expiration_ymd", "") or "").strip()
+    if not expiration:
+        return False
+    try:
+        expiration_date = datetime.strptime(expiration, "%Y-%m-%d").date()
+    except ValueError:
+        return False
+    raw_trade_time_ms = getattr(deal, "trade_time_ms", None)
+    if raw_trade_time_ms in (None, ""):
+        return False
+    try:
+        trade_time_ms = int(raw_trade_time_ms)
+    except (TypeError, ValueError):
+        return False
+    for tz_name in ("America/New_York", "Asia/Shanghai"):
+        trade_date = datetime.fromtimestamp(trade_time_ms / 1000, tz=ZoneInfo(tz_name)).date()
+        if trade_date >= expiration_date:
+            return True
+    return False
 
 
 def persist_manual_close_event_with_ledger(
@@ -731,7 +782,15 @@ def preview_broker_trade_close(
 ) -> list[BrokerTradeOperation]:
     operations: list[BrokerTradeOperation] = []
     close_action = "buy_close" if str(getattr(deal, "side", "") or "").strip().lower() == "buy" else "sell_close"
-    close_reason = "auto_trade_buy_to_close" if close_action == "buy_close" else "auto_trade_sell_to_close"
+    broker_close_event_type = _broker_close_event_type(deal)
+    broker_close_type = EXPIRE_AUTO_CLOSE if broker_close_event_type == "expire_close" else None
+    close_reason = (
+        "broker_expiration_zero_price_close"
+        if broker_close_event_type == "expire_close"
+        else "auto_trade_buy_to_close"
+        if close_action == "buy_close"
+        else "auto_trade_sell_to_close"
+    )
     for match in matches:
         fields = repo.get_record_fields(match.record_id)
         operation = BrokerTradeOperation(
@@ -743,6 +802,7 @@ def preview_broker_trade_close(
                 contracts_to_close=match.contracts_to_close,
                 close_price=(float(getattr(deal, "price")) if getattr(deal, "price", None) is not None else None),
                 close_reason=close_reason,
+                close_type=broker_close_type,
                 as_of_ms=getattr(deal, "trade_time_ms", None),
             ),
             matched_by=match.matched_by,

@@ -208,9 +208,9 @@ def _canonical_close_events_for_storage(repo: Any, event: TradeEvent) -> list[Tr
 def _trade_event_from_normalized_deal(deal: Any) -> TradeEvent:
     trade_side = normalize_trade_side(getattr(deal, "side", None)) or ""
     position_effect = normalize_position_effect(getattr(deal, "position_effect", None)) or ""
-    event_type = _event_type_from_position_effect(position_effect)
-    position_side = _position_side_from_trade(effect=position_effect, trade_side=trade_side)
     raw_payload = dict(getattr(deal, "raw_payload", {}) or {})
+    event_type = _event_type_from_position_effect(position_effect, raw_payload=raw_payload)
+    position_side = _position_side_from_trade(effect=position_effect, trade_side=trade_side)
     raw_payload.setdefault("source_type", "broker_trade_event")
     raw_payload.setdefault("side", trade_side)
     order_id = str(getattr(deal, "order_id", "") or "").strip()
@@ -244,10 +244,14 @@ def _trade_event_from_normalized_deal(deal: Any) -> TradeEvent:
     )
 
 
-def _event_type_from_position_effect(position_effect: str) -> str:
+def _event_type_from_position_effect(position_effect: str, *, raw_payload: dict[str, Any] | None = None) -> str:
     if position_effect == "open":
         return "open"
     if position_effect == "close":
+        payload = raw_payload if isinstance(raw_payload, dict) else {}
+        close_type = str(payload.get("close_type") or payload.get("broker_close_type") or "").strip().lower()
+        if close_type in {"expire_auto_close", "expire_close", "expiration_close", "expiration_zero_close"}:
+            return "expire_close"
         return "close"
     if position_effect in {"adjust", "void"}:
         return position_effect

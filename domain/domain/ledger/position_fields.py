@@ -662,14 +662,18 @@ def build_close_patch_contract(
     remaining = max(0, open_qty - qty)
     ts = int(as_of_ms or now_ms())
     if close_type:
-        effective_close_type = str(close_type).strip().lower()
+        effective_close_type = normalize_close_type(close_type) or str(close_type).strip().lower()
     else:
         normalized_side = normalize_side(fields.get("side"), strict=True)
         effective_close_type = (BUY_TO_CLOSE if normalized_side == "short" else SELL_TO_CLOSE)
 
     close_price_value: _PatchValue = _UNSET
     if close_price is not None:
-        close_price_value = normalize_trade_price(close_price, "close_price")
+        close_price_value = normalize_trade_price(
+            close_price,
+            "close_price",
+            allow_zero=(effective_close_type == EXPIRE_AUTO_CLOSE),
+        )
     if remaining == 0:
         status = "close"
         closed_at: _PatchValue = ts
