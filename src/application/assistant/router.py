@@ -7,7 +7,7 @@ from typing import Any, Callable
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response, mask_path
 from src.application.assistant.commands import spec_by_intent
 from src.application.assistant.audit import InboundAuditStore, build_command_id, utc_now_iso
-from src.application.assistant.contracts import InboundIntent, InboundRequest, InboundToolCall
+from src.application.assistant.contracts import AssistantIntent, AssistantRequest, AssistantToolCall
 from src.application.assistant.manual_trade_operations import (
     handle_manual_trade_operation,
     is_manual_trade_operation_intent,
@@ -22,12 +22,12 @@ from src.application.tool_execution import execute_tool
 
 
 ExecuteToolFn = Callable[[str, dict[str, Any]], dict[str, Any]]
-ParseIntentFn = Callable[[str, Callable[[], date] | None], InboundIntent]
+ParseIntentFn = Callable[[str, Callable[[], date] | None], AssistantIntent]
 _COMMAND_SPECS_BY_INTENT = spec_by_intent()
 
 
-def handle_inbound_request(
-    request: InboundRequest,
+def handle_assistant_request(
+    request: AssistantRequest,
     *,
     audit_store: InboundAuditStore | None = None,
     execute_tool_fn: ExecuteToolFn = execute_tool,
@@ -74,8 +74,8 @@ def handle_inbound_request(
         return _duplicate_response(existing)
 
     created_at = utc_now_iso()
-    intent: InboundIntent | None = None
-    call: InboundToolCall | None = None
+    intent: AssistantIntent | None = None
+    call: AssistantToolCall | None = None
     response: dict[str, Any]
     decision = "unknown"
     error_code: str | None = None
@@ -147,7 +147,7 @@ def handle_inbound_request(
             )
 
         if intent.name == "pending_operations":
-            call = InboundToolCall(
+            call = AssistantToolCall(
                 tool_name="inbound.pending",
                 payload={
                     "scope": "current_conversation",
@@ -194,7 +194,7 @@ def handle_inbound_request(
             )
 
         if is_manual_trade_operation_intent(intent):
-            call = InboundToolCall(tool_name="inbound.manual_trade", payload=dict(intent.arguments))
+            call = AssistantToolCall(tool_name="inbound.manual_trade", payload=dict(intent.arguments))
             operation_result = handle_manual_trade_operation(
                 intent,
                 normalized_request,
@@ -223,7 +223,7 @@ def handle_inbound_request(
             )
 
         if is_symbol_operation_intent(intent):
-            call = InboundToolCall(tool_name="inbound.symbols", payload=dict(intent.arguments))
+            call = AssistantToolCall(tool_name="inbound.symbols", payload=dict(intent.arguments))
             operation_result = handle_symbol_operation(
                 intent,
                 normalized_request,
@@ -252,7 +252,7 @@ def handle_inbound_request(
             )
 
         if is_upgrade_operation_intent(intent):
-            call = InboundToolCall(tool_name="inbound.upgrade", payload=dict(intent.arguments))
+            call = AssistantToolCall(tool_name="inbound.upgrade", payload=dict(intent.arguments))
             operation_result = handle_upgrade_operation(
                 intent,
                 normalized_request,
@@ -326,20 +326,20 @@ def _parse_intent(
     *,
     now_fn: Callable[[], date] | None,
     parse_intent_fn: ParseIntentFn | None,
-) -> InboundIntent:
+) -> AssistantIntent:
     if parse_intent_fn is not None:
         return parse_intent_fn(text, now_fn)
     return parse_inbound_text(text, now_fn=now_fn)
 
 
-def _tool_call_from_intent(intent: InboundIntent, *, request: InboundRequest) -> InboundToolCall:
+def _tool_call_from_intent(intent: AssistantIntent, *, request: AssistantRequest) -> AssistantToolCall:
     base = _base_payload(request)
     if intent.name == "runtime_status":
-        return InboundToolCall(tool_name=_catalog_tool_name(intent.name), payload=base)
+        return AssistantToolCall(tool_name=_catalog_tool_name(intent.name), payload=base)
     if intent.name == "healthcheck":
-        return InboundToolCall(tool_name=_catalog_tool_name(intent.name), payload=base)
+        return AssistantToolCall(tool_name=_catalog_tool_name(intent.name), payload=base)
     if intent.name == "config_validate":
-        return InboundToolCall(tool_name=_catalog_tool_name(intent.name), payload=base)
+        return AssistantToolCall(tool_name=_catalog_tool_name(intent.name), payload=base)
     if intent.name == "option_positions_open":
         payload = {
             **base,
@@ -348,7 +348,7 @@ def _tool_call_from_intent(intent: InboundIntent, *, request: InboundRequest) ->
         }
         if intent.arguments.get("account"):
             payload["account"] = intent.arguments["account"]
-        return InboundToolCall(
+        return AssistantToolCall(
             tool_name=_catalog_tool_name(intent.name),
             payload=payload,
         )
@@ -358,11 +358,11 @@ def _tool_call_from_intent(intent: InboundIntent, *, request: InboundRequest) ->
             payload["account"] = intent.arguments["account"]
         if intent.arguments.get("month"):
             payload["month"] = intent.arguments["month"]
-        return InboundToolCall(tool_name=_catalog_tool_name(intent.name), payload=payload)
+        return AssistantToolCall(tool_name=_catalog_tool_name(intent.name), payload=payload)
     if intent.name == "runtime_runs":
-        return InboundToolCall(tool_name=_catalog_tool_name(intent.name), payload={"limit": int(intent.arguments.get("limit") or 10)})
+        return AssistantToolCall(tool_name=_catalog_tool_name(intent.name), payload={"limit": int(intent.arguments.get("limit") or 10)})
     if intent.name == "runtime_logs":
-        return InboundToolCall(
+        return AssistantToolCall(
             tool_name=_catalog_tool_name(intent.name),
             payload={
                 "run_id": intent.arguments["run_id"],
@@ -383,7 +383,7 @@ def _catalog_tool_name(intent_name: str) -> str:
     return spec.tool_name
 
 
-def _base_payload(request: InboundRequest) -> dict[str, Any]:
+def _base_payload(request: AssistantRequest) -> dict[str, Any]:
     payload: dict[str, Any] = {}
     if request.config_path:
         payload["config_path"] = request.config_path
@@ -396,8 +396,8 @@ def _operation_response(
     operation_result: dict[str, Any],
     *,
     command_id: str,
-    request: InboundRequest,
-    intent: InboundIntent,
+    request: AssistantRequest,
+    intent: AssistantIntent,
     sender_decision: dict[str, Any],
     reason: str,
     audit_db: Any,
@@ -431,11 +431,11 @@ def _operation_response(
 def _record_and_return(
     *,
     store: InboundAuditStore,
-    request: InboundRequest,
+    request: AssistantRequest,
     command_id: str,
     created_at: str,
-    intent: InboundIntent | None,
-    call: InboundToolCall | None,
+    intent: AssistantIntent | None,
+    call: AssistantToolCall | None,
     decision: str,
     response: dict[str, Any],
     error_code: str | None = None,
@@ -489,7 +489,7 @@ def _duplicate_response(existing: dict[str, Any]) -> dict[str, Any]:
 def _error_response(
     *,
     command_id: str,
-    request: InboundRequest,
+    request: AssistantRequest,
     err: AgentToolError,
     audit_db: Any | None = None,
 ) -> dict[str, Any]:
@@ -522,11 +522,11 @@ def _decision_for_error(err: AgentToolError) -> str:
     return "failed"
 
 
-def _normalize_request(request: InboundRequest) -> InboundRequest:
+def _normalize_request(request: AssistantRequest) -> AssistantRequest:
     channel = str(request.channel or "local").strip().lower() or "local"
     sender_id = str(request.sender_id or "").strip()
     conversation_id = str(request.conversation_id or "").strip() or f"{channel}:{sender_id}"
-    return InboundRequest(
+    return AssistantRequest(
         text=str(request.text or "").strip(),
         sender_id=sender_id,
         channel=channel,
@@ -536,6 +536,3 @@ def _normalize_request(request: InboundRequest) -> InboundRequest:
         config_path=str(request.config_path).strip() if request.config_path is not None and str(request.config_path).strip() else None,
         audit_db=str(request.audit_db).strip() if request.audit_db is not None and str(request.audit_db).strip() else None,
     )
-
-
-handle_assistant_request = handle_inbound_request

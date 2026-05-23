@@ -20,10 +20,17 @@ Allowed architecture:
 
 ```text
 Feishu / WeChat / Hermes
-  -> ./om inbound handle --text ... --sender ... --channel ...
-  -> OM inbound parser / policy / audit
-  -> existing pure-read om-agent tools
+  -> thin inbound transport adapter
+  -> Assistant runtime command / deterministic / optional LLM routing
+  -> Assistant execution router with sender allowlist, audit, idempotency, and preview/confirm
+  -> existing deterministic OM tools
+  -> canonical Assistant renderer
 ```
+
+`src.application.inbound` owns channel transport only: Feishu payload extraction,
+Feishu long-connection receive/reply/reaction behavior, and the transport-facing
+request contract. Assistant parsing, command catalog, LLM routing, operation
+store, audit, policy, and renderer ownership live in `src.application.assistant`.
 
 Disallowed architecture:
 
@@ -54,7 +61,7 @@ Read commands use the pure-read whitelist. Admin write operations are separate a
 
 ## Assistant Command Facade
 
-`Assistant` is the default command facade above the same inbound parser, policy, audit, and tool execution path. It adds slash commands for users who do not want to remember natural-language phrases:
+`Assistant` is the default command facade above the same allowlist, audit, preview/confirm, and tool execution path. It adds slash commands for users who do not want to remember natural-language phrases:
 
 | Command | Intent |
 |---|---|
@@ -109,7 +116,7 @@ assistant:
     max_output_tokens: 512
 ```
 
-When enabled, LLM translation only runs after command and deterministic parsing fail. It must return an `om-llm-intent-v1` JSON intent into the same inbound router; it must not execute tools or rewrite canonical OM responses. The current intent schema is read-only and only allows help/status/health/config/positions/income/runs/logs/symbols/pending operations.
+When enabled, LLM translation only runs after command and deterministic parsing fail. It must return an `om-llm-intent-v1` JSON intent into the same Assistant execution router; it must not execute tools or rewrite canonical OM responses. The current intent schema is read-only and only allows help/status/health/config/positions/income/runs/logs/symbols/pending operations.
 
 The command surface authority is `src/application/assistant/commands.py`. Slash command metadata, the read-only LLM intent surface, and inbound help text should use that catalog instead of maintaining separate command lists.
 
@@ -270,7 +277,7 @@ Feishu Event Subscription long connection
   -> ./om inbound feishu-ws
   -> ./om inbound feishu
   -> Assistant command facade
-  -> OM inbound allowlist/audit/pure-read tools
+  -> Assistant allowlist/audit/pure-read tools
   -> Feishu message reply API
 ```
 

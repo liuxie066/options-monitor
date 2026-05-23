@@ -88,10 +88,6 @@ class AssistantSettings:
             "llm": self.llm.public_payload(),
         }
 
-
-AgentRuntimeSettings = AssistantSettings
-
-
 def _dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
