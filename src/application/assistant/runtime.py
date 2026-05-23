@@ -393,6 +393,3 @@ def _with_assistant_meta(
     }
     meta["assistant"] = assistant_meta
     return {**response, "meta": meta}
-
-
-handle_agent_message = handle_assistant_message

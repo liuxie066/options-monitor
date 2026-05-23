@@ -161,55 +161,33 @@ def test_llm_intent_surface_is_read_only_only() -> None:
 
 def test_read_tool_allowlist_has_neutral_owner() -> None:
     from src.application import tool_allowlist
-    from src.application.agent_runtime import tool_policy
-    from src.application.inbound import policy as inbound_policy
+    from src.application.assistant import policy as assistant_policy
+    from src.application.assistant import tool_policy
 
-    assert inbound_policy.PURE_READ_TOOLS is tool_allowlist.PURE_READ_TOOLS
+    assert assistant_policy.PURE_READ_TOOLS is tool_allowlist.PURE_READ_TOOLS
     assert tool_policy.PURE_READ_TOOLS is tool_allowlist.PURE_READ_TOOLS
 
-    tool_policy_text = (ROOT / "src" / "application" / "agent_runtime" / "tool_policy.py").read_text(encoding="utf-8")
+    tool_policy_text = (ROOT / "src" / "application" / "assistant" / "tool_policy.py").read_text(encoding="utf-8")
     assert "from src.application.inbound.policy import PURE_READ_TOOLS" not in tool_policy_text
     assert "from src.application.assistant.policy import PURE_READ_TOOLS" not in tool_policy_text
 
 
 def test_assistant_owns_command_catalog_and_interaction_contracts() -> None:
-    from src.application.agent_runtime import capability_catalog_text as compat_runtime_capability_text
-    from src.application.agent_runtime.command_catalog import capability_specs as compat_capability_specs
-    from src.application.agent_runtime.command_catalog import capability_catalog_text as compat_capability_text
-    from src.application.agent_runtime.command_catalog import command_specs as compat_command_specs
     from src.application.assistant.commands import capability_catalog_text
     from src.application.assistant.commands import capability_specs
     from src.application.assistant.commands import command_specs
-    from src.application.assistant.contracts import AssistantRequest
-    from src.application.inbound.contracts import InboundRequest
 
-    assert compat_capability_specs is capability_specs
-    assert compat_command_specs is command_specs
-    assert compat_capability_text is capability_catalog_text
-    assert compat_runtime_capability_text is capability_catalog_text
-    assert InboundRequest is AssistantRequest
+    assert capability_catalog_text()
+    assert capability_specs()
+    assert command_specs()
 
-    offenders: list[str] = []
-    for path in sorted((ROOT / "src" / "application" / "agent_runtime").glob("*.py")):
-        if path.name == "command_catalog.py":
-            continue
-        text = path.read_text(encoding="utf-8")
-        if "src.application.agent_runtime.command_catalog" in text:
-            offenders.append(str(path.relative_to(ROOT)))
-        if "src.application.inbound." in text:
-            offenders.append(str(path.relative_to(ROOT)))
-
-    assert offenders == []
-
-    for path in [
-        ROOT / "src" / "application" / "inbound" / "feishu.py",
-        ROOT / "src" / "application" / "inbound" / "router.py",
-        ROOT / "src" / "application" / "inbound" / "renderer.py",
-    ]:
-        text = path.read_text(encoding="utf-8")
-        assert "src.application.agent_runtime.command_catalog" not in text
+    contracts_text = (ROOT / "src" / "application" / "assistant" / "contracts.py").read_text(encoding="utf-8")
+    assert "InboundRequest" not in contracts_text
+    assert "InboundIntent" not in contracts_text
+    assert "InboundToolCall" not in contracts_text
 
     feishu_text = (ROOT / "src" / "application" / "inbound" / "feishu.py").read_text(encoding="utf-8")
+    assert "src.application.agent_runtime.command_catalog" not in feishu_text
     assert "src.application.agent_runtime import handle_agent_message" not in feishu_text
     assert "src.application.assistant.runtime import handle_assistant_message" in feishu_text
 
@@ -229,8 +207,6 @@ def test_application_uses_assistant_control_plane_not_agent_runtime_backend() ->
     checked_roots = [ROOT / "src" / "application", ROOT / "src" / "interfaces"]
     for root in checked_roots:
         for path in sorted(root.rglob("*.py")):
-            if ROOT / "src" / "application" / "agent_runtime" in path.parents:
-                continue
             text = path.read_text(encoding="utf-8")
             if "src.application.agent_runtime" in text:
                 offenders.append(str(path.relative_to(ROOT)))
@@ -238,54 +214,27 @@ def test_application_uses_assistant_control_plane_not_agent_runtime_backend() ->
     assert offenders == []
 
 
-def test_agent_runtime_backend_modules_are_thin_assistant_wrappers() -> None:
-    backend_modules = [
-        "agent_loop",
-        "command_parser",
-        "config_loader",
-        "conversation_context",
-        "diagnostics",
-        "llm_intent_schema",
-        "llm_reply",
-        "llm_translator",
-        "runtime",
-        "settings",
-        "tool_policy",
-    ]
+def test_agent_runtime_package_is_removed() -> None:
+    assert not (ROOT / "src" / "application" / "agent_runtime").exists()
 
-    for module in backend_modules:
-        path = ROOT / "src" / "application" / "agent_runtime" / f"{module}.py"
-        assert path.read_text(encoding="utf-8") == (
-            "from __future__ import annotations\n\n"
-            f"from src.application.assistant.{module} import *  # noqa: F401,F403\n"
-        )
+    runtime_text = (ROOT / "src" / "application" / "assistant" / "runtime.py").read_text(encoding="utf-8")
+    settings_text = (ROOT / "src" / "application" / "assistant" / "settings.py").read_text(encoding="utf-8")
+    assert "handle_agent_message" not in runtime_text
+    assert "AgentRuntimeSettings" not in settings_text
 
 
-def test_inbound_backend_modules_are_thin_assistant_wrappers() -> None:
-    backend_modules = [
-        "audit",
-        "diagnostics",
-        "manual_trade_operations",
-        "manual_trade_parser",
-        "operation_policy",
-        "operation_signature",
-        "operation_status_text",
-        "operation_store",
-        "parser",
-        "policy",
-        "renderer",
-        "router",
-        "symbol_operations",
-        "upgrade_operations",
-    ]
+def test_inbound_package_exposes_transport_only() -> None:
+    inbound_files = {
+        path.name
+        for path in sorted((ROOT / "src" / "application" / "inbound").glob("*.py"))
+    }
+    assert inbound_files == {"__init__.py", "feishu.py", "feishu_ws.py"}
 
-    for module in backend_modules:
-        path = ROOT / "src" / "application" / "inbound" / f"{module}.py"
-        expected_module = "operation_diagnostics" if module == "diagnostics" else module
-        assert path.read_text(encoding="utf-8") == (
-            "from __future__ import annotations\n\n"
-            f"from src.application.assistant.{expected_module} import *  # noqa: F401,F403\n"
-        )
+    root_text = (ROOT / "src" / "application" / "inbound" / "__init__.py").read_text(encoding="utf-8")
+    assert "handle_assistant_request" not in root_text
+    assert "parse_inbound_text" not in root_text
+    assert "render_inbound_text" not in root_text
+    assert "AssistantRequest" not in root_text
 
 
 def test_config_section_helpers_have_neutral_owner() -> None:
@@ -315,9 +264,8 @@ def test_inbound_cli_public_surface_uses_assistant_naming() -> None:
     assert '"--assistant"' in text
     assert '"--no-assistant"' in text
     assert "AgentRuntime" not in text
-    for line in text.splitlines():
-        if '"--agent-runtime"' in line or '"--no-agent-runtime"' in line:
-            assert "argparse.SUPPRESS" in line
+    assert '"--agent-runtime"' not in text
+    assert '"--no-agent-runtime"' not in text
 
 
 def test_feishu_payload_adapter_public_signature_uses_assistant_naming() -> None:
@@ -328,6 +276,9 @@ def test_feishu_payload_adapter_public_signature_uses_assistant_naming() -> None
     assert "assistant_settings" in params
     assert "use_agent_runtime" not in params
     assert "agent_runtime_settings" not in params
+    source = inspect.getsource(handle_feishu_payload)
+    assert "legacy_kwargs" not in source
+    assert "agent_runtime" not in source
 
 
 def test_runtime_status_tool_is_not_owned_by_openclaw_module() -> None:

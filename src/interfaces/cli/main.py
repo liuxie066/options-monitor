@@ -30,9 +30,9 @@ from src.application.config_yaml import (
 from src.application.config_yaml_init import init_yaml_config
 from src.application.config_yaml_migration import preview_config_yaml_migration
 from src.application.healthcheck import run_healthcheck
-from src.application.assistant.contracts import InboundRequest
+from src.application.assistant.contracts import AssistantRequest
 from src.application.assistant.operation_diagnostics import collect_pending_operations, collect_recent_audit
-from src.application.assistant.router import handle_assistant_request as handle_inbound_request
+from src.application.assistant.router import handle_assistant_request
 from src.application.inbound import (
     build_feishu_ws_settings,
     check_feishu_ws_settings,
@@ -258,8 +258,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     inbound_handle_assistant = inbound_handle.add_mutually_exclusive_group()
     inbound_handle_assistant.add_argument("--assistant", dest="assistant", action="store_true", default=None, help="force routing through the assistant control plane")
     inbound_handle_assistant.add_argument("--no-assistant", dest="assistant", action="store_false", help="bypass assistant routing and use the deterministic inbound parser directly")
-    inbound_handle_assistant.add_argument("--agent-runtime", dest="assistant", action="store_true", help=argparse.SUPPRESS)
-    inbound_handle_assistant.add_argument("--no-agent-runtime", dest="assistant", action="store_false", help=argparse.SUPPRESS)
     inbound_handle.add_argument("--format", choices=("json", "text"), default="json")
     inbound_pending = inbound_sub.add_parser("pending", help="inspect pending inbound operations")
     inbound_pending_sub = inbound_pending.add_subparsers(dest="inbound_pending_command", required=True)
@@ -293,8 +291,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     inbound_feishu_assistant = inbound_feishu.add_mutually_exclusive_group()
     inbound_feishu_assistant.add_argument("--assistant", dest="assistant", action="store_true", default=None, help="force routing through the assistant control plane")
     inbound_feishu_assistant.add_argument("--no-assistant", dest="assistant", action="store_false", help="bypass assistant routing and use the deterministic inbound parser directly")
-    inbound_feishu_assistant.add_argument("--agent-runtime", dest="assistant", action="store_true", help=argparse.SUPPRESS)
-    inbound_feishu_assistant.add_argument("--no-agent-runtime", dest="assistant", action="store_false", help=argparse.SUPPRESS)
     inbound_feishu.add_argument("--format", choices=("json", "text"), default="json")
     inbound_ws = inbound_sub.add_parser("feishu-ws", help="serve the Feishu App long-connection inbound client")
     inbound_ws.add_argument("--config-key", default="us", choices=("us", "hk"))
@@ -929,7 +925,7 @@ def main(argv: list[str] | None = None) -> int:
                     force_enabled=True if force_assistant is True else None,
                 )
                 use_assistant = bool(assistant_settings.enabled)
-            request = InboundRequest(
+            request = AssistantRequest(
                 text=args.text,
                 sender_id=args.sender_id,
                 channel=args.channel,
@@ -943,7 +939,7 @@ def main(argv: list[str] | None = None) -> int:
                 assert assistant_settings is not None
                 out = handle_assistant_message(request, settings=assistant_settings)
             else:
-                out = handle_inbound_request(request)
+                out = handle_assistant_request(request)
             if args.format == "text":
                 data_raw = out.get("data")
                 data: dict[str, Any] = data_raw if isinstance(data_raw, dict) else {}

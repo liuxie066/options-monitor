@@ -8,7 +8,7 @@ from typing import Any, cast
 
 from src.application.agent_tool_config import load_runtime_config, repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_response, mask_path
-from src.application.assistant.contracts import InboundIntent, InboundRequest
+from src.application.assistant.contracts import AssistantIntent, AssistantRequest
 from src.application.assistant.manual_trade_parser import build_manual_trade_draft
 from src.application.assistant.operation_policy import enforce_trade_write_allowed
 from src.application.assistant.operation_signature import verify_operation_signature
@@ -65,13 +65,13 @@ FIELD_LABELS = {
 }
 
 
-def is_manual_trade_operation_intent(intent: InboundIntent) -> bool:
+def is_manual_trade_operation_intent(intent: AssistantIntent) -> bool:
     return intent.name in PREVIEW_INTENTS or intent.name in CONFIRM_INTENTS or intent.name in UPDATE_INTENTS
 
 
 def handle_manual_trade_operation(
-    intent: InboundIntent,
-    request: InboundRequest,
+    intent: AssistantIntent,
+    request: AssistantRequest,
     *,
     command_id: str,
     store: InboundOperationStore,
@@ -134,7 +134,7 @@ def handle_manual_trade_operation(
 def _preview_and_save(
     payload: dict[str, Any],
     *,
-    request: InboundRequest,
+    request: AssistantRequest,
     command_id: str,
     store: InboundOperationStore,
     ttl_seconds: int,
@@ -173,7 +173,7 @@ def _preview_and_save(
     )
 
 
-def _confirm_operation(*, operation_id: str | None, request: InboundRequest, store: InboundOperationStore) -> dict[str, Any]:
+def _confirm_operation(*, operation_id: str | None, request: AssistantRequest, store: InboundOperationStore) -> dict[str, Any]:
     operation_id, operation, operation_resolution = _resolve_manual_trade_operation(
         operation_id=operation_id,
         request=request,
@@ -236,7 +236,7 @@ def _confirm_operation(*, operation_id: str | None, request: InboundRequest, sto
     )
 
 
-def _cancel_operation(*, operation_id: str | None, request: InboundRequest, store: InboundOperationStore) -> dict[str, Any]:
+def _cancel_operation(*, operation_id: str | None, request: AssistantRequest, store: InboundOperationStore) -> dict[str, Any]:
     operation_id, operation, operation_resolution = _resolve_manual_trade_operation(
         operation_id=operation_id,
         request=request,
@@ -255,7 +255,7 @@ def _cancel_operation(*, operation_id: str | None, request: InboundRequest, stor
     )
 
 
-def _update_operation(*, operation_id: str | None, updates: dict[str, Any], request: InboundRequest, store: InboundOperationStore) -> dict[str, Any]:
+def _update_operation(*, operation_id: str | None, updates: dict[str, Any], request: AssistantRequest, store: InboundOperationStore) -> dict[str, Any]:
     operation_id, operation, operation_resolution = _resolve_manual_trade_operation(
         operation_id=operation_id,
         request=request,
@@ -296,7 +296,7 @@ def _update_operation(*, operation_id: str | None, updates: dict[str, Any], requ
 def _resolve_manual_trade_operation(
     *,
     operation_id: str | None,
-    request: InboundRequest,
+    request: AssistantRequest,
     store: InboundOperationStore,
     allow_expired: bool,
     action: str,
@@ -454,11 +454,11 @@ def _format_patch_summary(patch: dict[str, Any]) -> str:
     return "已修改：" + "，".join(parts)
 
 
-def _manual_trade_raw_text(intent: InboundIntent, request: InboundRequest) -> str:
+def _manual_trade_raw_text(intent: AssistantIntent, request: AssistantRequest) -> str:
     return str(intent.arguments.get("raw_text") or request.text or "").strip()
 
 
-def _load_runtime_config_for_request(request: InboundRequest) -> tuple[Any, dict[str, Any]]:
+def _load_runtime_config_for_request(request: AssistantRequest) -> tuple[Any, dict[str, Any]]:
     return load_runtime_config(config_key=request.config_key or "us", config_path=request.config_path)
 
 
@@ -475,7 +475,7 @@ def _build_operation_payload(
     operation_type: str,
     arguments: dict[str, Any],
     *,
-    request: InboundRequest,
+    request: AssistantRequest,
     config_path: Any | None = None,
     diagnostics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:

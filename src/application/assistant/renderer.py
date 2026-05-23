@@ -3,14 +3,14 @@ from __future__ import annotations
 from typing import Any, cast
 
 from src.application.assistant.commands import command_help_text
-from src.application.assistant.contracts import InboundIntent
+from src.application.assistant.contracts import AssistantIntent
 
 
 HELP_TEXT = command_help_text()
 SMALL_TALK_TEXT = "你好。我可以帮你查状态、持仓、收益、健康检查、运行记录、日志、监控标的和待确认操作。发送“你能做什么”或 /help 可以查看完整菜单。"
 
 
-def render_inbound_text(*, intent: InboundIntent | None, tool_result: dict[str, Any] | None, error: dict[str, Any] | None = None) -> str:
+def render_inbound_text(*, intent: AssistantIntent | None, tool_result: dict[str, Any] | None, error: dict[str, Any] | None = None) -> str:
     if error:
         message = str(error.get("message") or "").strip()
         hint = str(error.get("hint") or "").strip()

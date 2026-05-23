@@ -37,6 +37,31 @@ src.interfaces.agent.cli
 -> src.application.agent_tool_handlers
 ```
 
+## Assistant And Inbound Flow
+
+Remote chat control intentionally separates channel transport from Assistant
+control:
+
+```text
+Feishu / future channels
+-> src.application.inbound.feishu(_ws)
+-> src.application.assistant.runtime
+-> src.application.assistant.router
+-> src.application.tool_execution
+-> canonical Assistant renderer
+```
+
+`src.application.inbound` should stay thin: extract channel payloads, enforce
+channel-specific receive/reply mechanics, and build the transport request.
+Command parsing, deterministic natural-language parsing, optional LLM routing,
+bounded agent-loop tracing, sender allowlist checks, SQLite audit,
+preview/confirm operations, and user-facing rendering are owned by
+`src.application.assistant`.
+
+LLM providers are optional. They may translate a message into a structured
+read-only Assistant intent, but deterministic OM tools own facts and write
+actions remain behind preview/confirm gates.
+
 ## Runtime Tick Flow
 
 The live scan/notification flow has one public chain:

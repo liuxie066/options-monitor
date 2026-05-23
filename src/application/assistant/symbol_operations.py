@@ -10,7 +10,7 @@ from src.application.agent_tool_config import resolve_runtime_config_path
 from src.application.agent_tool_contracts import AgentToolError, build_response, mask_path
 from src.application.config_loader import resolve_watchlist_config, set_watchlist_config
 from src.application.config_validator import validate_config
-from src.application.assistant.contracts import InboundIntent, InboundRequest
+from src.application.assistant.contracts import AssistantIntent, AssistantRequest
 from src.application.assistant.operation_policy import enforce_symbol_write_allowed
 from src.application.assistant.operation_signature import verify_operation_signature
 from src.application.assistant.operation_store import InboundOperationStore, operation_is_expired
@@ -25,13 +25,13 @@ CONFIRM_INTENTS = frozenset({"symbol_confirm", "symbol_cancel"})
 SYMBOL_OPERATION_TYPES = PREVIEW_INTENTS
 
 
-def is_symbol_operation_intent(intent: InboundIntent) -> bool:
+def is_symbol_operation_intent(intent: AssistantIntent) -> bool:
     return intent.name in LIST_INTENTS or intent.name in PREVIEW_INTENTS or intent.name in CONFIRM_INTENTS
 
 
 def handle_symbol_operation(
-    intent: InboundIntent,
-    request: InboundRequest,
+    intent: AssistantIntent,
+    request: AssistantRequest,
     *,
     command_id: str,
     store: InboundOperationStore,
@@ -49,7 +49,7 @@ def handle_symbol_operation(
     raise AgentToolError(code="INPUT_ERROR", message=f"unsupported symbol operation intent: {intent.name}")
 
 
-def _list_symbols(request: InboundRequest) -> dict[str, Any]:
+def _list_symbols(request: AssistantRequest) -> dict[str, Any]:
     config_path, cfg = _load_config(request)
     rows = _symbol_rows(cfg)
     text = render_symbol_response(status="listed", operation_id="", payload={}, preview={"symbols": rows, "config_path": str(config_path)})
@@ -59,7 +59,7 @@ def _list_symbols(request: InboundRequest) -> dict[str, Any]:
 def _preview_and_save(
     payload: dict[str, Any],
     *,
-    request: InboundRequest,
+    request: AssistantRequest,
     command_id: str,
     store: InboundOperationStore,
     ttl_seconds: int,
@@ -96,7 +96,7 @@ def _preview_and_save(
     )
 
 
-def _confirm_operation(*, operation_id: str | None, request: InboundRequest, store: InboundOperationStore) -> dict[str, Any]:
+def _confirm_operation(*, operation_id: str | None, request: AssistantRequest, store: InboundOperationStore) -> dict[str, Any]:
     operation_id, operation, operation_resolution = _resolve_symbol_operation(
         operation_id=operation_id,
         request=request,
@@ -149,7 +149,7 @@ def _confirm_operation(*, operation_id: str | None, request: InboundRequest, sto
     )
 
 
-def _cancel_operation(*, operation_id: str | None, request: InboundRequest, store: InboundOperationStore) -> dict[str, Any]:
+def _cancel_operation(*, operation_id: str | None, request: AssistantRequest, store: InboundOperationStore) -> dict[str, Any]:
     operation_id, operation, operation_resolution = _resolve_symbol_operation(
         operation_id=operation_id,
         request=request,
@@ -166,7 +166,7 @@ def _cancel_operation(*, operation_id: str | None, request: InboundRequest, stor
 def _resolve_symbol_operation(
     *,
     operation_id: str | None,
-    request: InboundRequest,
+    request: AssistantRequest,
     store: InboundOperationStore,
     allow_expired: bool,
     action: str,
@@ -234,7 +234,7 @@ def _candidate_hint(prefix: str, candidates: Any) -> str:
     return "\n候选变更：\n" + "\n".join(lines)
 
 
-def _build_operation_payload(operation_type: str, arguments: dict[str, Any], *, request: InboundRequest) -> dict[str, Any]:
+def _build_operation_payload(operation_type: str, arguments: dict[str, Any], *, request: AssistantRequest) -> dict[str, Any]:
     return {"schema_version": "1.0", "operation_type": operation_type, "arguments": arguments, "config": {"config_key": request.config_key, "config_path": request.config_path}}
 
 
@@ -285,10 +285,10 @@ def _apply_symbol_payload(cfg: dict[str, Any], payload: dict[str, Any]) -> dict[
 
 def _load_config_for_payload(payload: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
     config = payload.get("config") if isinstance(payload.get("config"), dict) else {}
-    return _load_config(InboundRequest(text="", sender_id="", channel="local", config_key=str(config.get("config_key") or "us"), config_path=config.get("config_path")))
+    return _load_config(AssistantRequest(text="", sender_id="", channel="local", config_key=str(config.get("config_key") or "us"), config_path=config.get("config_path")))
 
 
-def _load_config(request: InboundRequest) -> tuple[Any, dict[str, Any]]:
+def _load_config(request: AssistantRequest) -> tuple[Any, dict[str, Any]]:
     config_path = resolve_runtime_config_path(config_key=request.config_key or "us", config_path=request.config_path)
     try:
         data = json.loads(config_path.read_text(encoding="utf-8"))

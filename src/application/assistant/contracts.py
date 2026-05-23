@@ -54,16 +54,8 @@ class AssistantToolCall:
         }
 
 
-# Compatibility aliases while inbound is narrowed into channel adapters.
-InboundRequest = AssistantRequest
-InboundIntent = AssistantIntent
-InboundToolCall = AssistantToolCall
-
 __all__ = [
     "AssistantIntent",
     "AssistantRequest",
     "AssistantToolCall",
-    "InboundIntent",
-    "InboundRequest",
-    "InboundToolCall",
 ]

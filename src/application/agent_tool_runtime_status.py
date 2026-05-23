@@ -518,8 +518,6 @@ def _assistant_audit_latest(row: dict[str, Any]) -> dict[str, Any]:
         response = {}
     meta = response.get("meta")
     assistant = meta.get("assistant") if isinstance(meta, dict) else None
-    if not isinstance(assistant, dict):
-        assistant = meta.get("agent_runtime") if isinstance(meta, dict) else None
     assistant_payload = assistant if isinstance(assistant, dict) else {}
     llm = assistant_payload.get("llm")
     llm_payload = llm if isinstance(llm, dict) else {}
