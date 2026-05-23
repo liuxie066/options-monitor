@@ -7,7 +7,7 @@ from src.application.assistant.contracts import InboundIntent
 
 
 HELP_TEXT = command_help_text()
-SMALL_TALK_TEXT = "你好。我可以帮你查状态、健康检查、配置检查、持仓、收益、最近运行、日志、监控标的和待确认操作。发送 /help 可以查看完整命令。"
+SMALL_TALK_TEXT = "你好。我可以帮你查状态、持仓、收益、健康检查、运行记录、日志、监控标的和待确认操作。发送“你能做什么”或 /help 可以查看完整菜单。"
 
 
 def render_inbound_text(*, intent: InboundIntent | None, tool_result: dict[str, Any] | None, error: dict[str, Any] | None = None) -> str:
