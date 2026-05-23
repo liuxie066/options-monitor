@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.135 - 2026-05-23
+
+### Fixed
+- Clarified post-upgrade Feishu WebSocket remediation so root-only env-file deployments point operators to an explicit sudo env-file check.
+
 ## 1.2.134 - 2026-05-23
 
 ### Fixed
