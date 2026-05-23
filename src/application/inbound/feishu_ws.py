@@ -9,11 +9,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, cast
 
-from src.application.agent_runtime.config_loader import load_assistant_config
-from src.application.agent_runtime.settings import DEFAULT_CONTEXT_WINDOW_MESSAGES, AgentRuntimeSettings, LlmTranslatorSettings
+from src.application.assistant.config_loader import load_assistant_config
+from src.application.assistant.settings import DEFAULT_CONTEXT_WINDOW_MESSAGES, AssistantSettings, LlmTranslatorSettings
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response, mask_path
 from src.application.inbound.feishu import handle_feishu_payload
-from src.application.inbound.router import ExecuteToolFn
+from src.application.assistant.router import ExecuteToolFn
 from src.application.secret_resolver import (
     DEFAULT_FEISHU_BOT_APP_ID_ENV,
     DEFAULT_FEISHU_BOT_APP_SECRET_ENV,
@@ -49,10 +49,10 @@ class FeishuWsSettings:
     max_reply_chars: int = DEFAULT_FEISHU_REPLY_MAX_CHARS
     ack_reaction: str = ""
     queue_size: int = DEFAULT_FEISHU_WS_QUEUE_SIZE
-    agent_runtime_mode: str = "deterministic"
-    agent_runtime_enabled: bool = True
-    agent_context_window_messages: int = DEFAULT_CONTEXT_WINDOW_MESSAGES
-    agent_llm: LlmTranslatorSettings = field(default_factory=LlmTranslatorSettings)
+    assistant_mode: str = "deterministic"
+    assistant_enabled: bool = True
+    assistant_context_window_messages: int = DEFAULT_CONTEXT_WINDOW_MESSAGES
+    assistant_llm: LlmTranslatorSettings = field(default_factory=LlmTranslatorSettings)
 
     def validate_for_serve(self) -> None:
         if not self.allowed_senders:
@@ -82,10 +82,10 @@ class FeishuWsSettings:
             "max_reply_chars": int(self.max_reply_chars),
             "ack_reaction": self.ack_reaction,
             "queue_size": int(self.queue_size),
-            "agent_runtime_mode": self.agent_runtime_mode,
-            "agent_runtime_enabled": bool(self.agent_runtime_enabled),
-            "agent_context_window_messages": int(self.agent_context_window_messages),
-            "agent_llm": self.agent_llm.public_payload(),
+            "assistant_mode": self.assistant_mode,
+            "assistant_enabled": bool(self.assistant_enabled),
+            "assistant_context_window_messages": int(self.assistant_context_window_messages),
+            "assistant_llm": self.assistant_llm.public_payload(),
         }
         if sdk_available is not None:
             out["sdk_available"] = bool(sdk_available)
@@ -108,7 +108,7 @@ def build_feishu_ws_settings(
     bot_cfg = resolve_feishu_bot_config(environ=env)
     assistant_cfg = _load_assistant_behavior_config(config_path=assistant_config_path)
     behavior_cfg = _dict(_dict(assistant_cfg.get("inbound")).get("feishu_ws"))
-    agent_runtime_settings = AgentRuntimeSettings.from_runtime_config(assistant_cfg)
+    assistant_settings = AssistantSettings.from_runtime_config(assistant_cfg)
     return FeishuWsSettings(
         config_key=str(config_key or "").strip().lower() or None,
         config_path=_first_text(config_path),
@@ -130,10 +130,10 @@ def build_feishu_ws_settings(
             behavior_cfg.get("queue_size"),
             default=DEFAULT_FEISHU_WS_QUEUE_SIZE,
         ),
-        agent_runtime_mode=agent_runtime_settings.mode,
-        agent_runtime_enabled=agent_runtime_settings.enabled,
-        agent_context_window_messages=agent_runtime_settings.context_window_messages,
-        agent_llm=agent_runtime_settings.llm,
+        assistant_mode=assistant_settings.mode,
+        assistant_enabled=assistant_settings.enabled,
+        assistant_context_window_messages=assistant_settings.context_window_messages,
+        assistant_llm=assistant_settings.llm,
     )
 
 
@@ -182,12 +182,12 @@ def handle_feishu_ws_event(
         config_key=settings.config_key,
         config_path=settings.config_path,
         audit_db=settings.audit_db,
-        use_agent_runtime=settings.agent_runtime_enabled,
-        agent_runtime_settings=AgentRuntimeSettings(
-            mode=settings.agent_runtime_mode,
-            enabled=settings.agent_runtime_enabled,
-            context_window_messages=settings.agent_context_window_messages,
-            llm=settings.agent_llm,
+        use_assistant=settings.assistant_enabled,
+        assistant_settings=AssistantSettings(
+            mode=settings.assistant_mode,
+            enabled=settings.assistant_enabled,
+            context_window_messages=settings.assistant_context_window_messages,
+            llm=settings.assistant_llm,
         ),
         assistant_config_path=settings.assistant_config_path,
         **inbound_kwargs,

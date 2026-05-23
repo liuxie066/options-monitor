@@ -136,7 +136,7 @@ def test_support_bundle_command_forwards_diagnostic_args(monkeypatch, capsys) ->
     }]
 
 
-def test_agent_llm_check_command_forwards_diagnostic_args(monkeypatch, capsys) -> None:
+def test_assistant_llm_check_command_forwards_diagnostic_args(monkeypatch, capsys) -> None:
     import src.interfaces.cli.main as cli
 
     calls: list[dict] = []
@@ -148,7 +148,7 @@ def test_agent_llm_check_command_forwards_diagnostic_args(monkeypatch, capsys) -
     monkeypatch.setattr(cli, "check_llm_translator", _check_llm_translator)
 
     rc = cli.main([
-        "agent",
+        "assistant",
         "llm-check",
         "--assistant-config",
         "config.assistant.json",
@@ -162,7 +162,7 @@ def test_agent_llm_check_command_forwards_diagnostic_args(monkeypatch, capsys) -
     payload = _read_json_output(capsys)
 
     assert rc == 0
-    assert payload["tool_name"] == "agent.llm_check"
+    assert payload["tool_name"] == "assistant.llm_check"
     assert payload["ok"] is True
     assert calls == [{
         "repo_root": cli.repo_base(),
@@ -177,31 +177,50 @@ def test_agent_llm_check_command_forwards_diagnostic_args(monkeypatch, capsys) -
 def test_no_local_env_file_flag_prevents_process_env_bootstrap() -> None:
     import src.interfaces.cli.main as cli
 
-    assert cli._should_bootstrap_process_env(["agent", "llm-check"]) is True
-    assert cli._should_bootstrap_process_env(["agent", "llm-check", "--no-local-env-file"]) is False
+    assert cli._should_bootstrap_process_env(["assistant", "llm-check"]) is True
+    assert cli._should_bootstrap_process_env(["assistant", "llm-check", "--no-local-env-file"]) is False
     assert cli._should_bootstrap_process_env(["support", "bundle", "--no-local-env-file"]) is False
 
 
-def test_agent_commands_command_renders_catalog(capsys) -> None:
+def test_assistant_commands_command_renders_catalog(capsys) -> None:
     import src.interfaces.cli.main as cli
 
-    rc = cli.main(["agent", "commands"])
+    rc = cli.main(["assistant", "commands"])
     payload = _read_json_output(capsys)
 
     assert rc == 0
-    assert payload["tool_name"] == "agent.commands"
+    assert payload["tool_name"] == "assistant.commands"
     assert payload["ok"] is True
     assert payload["data"]["summary"]["llm_allowed_count"] >= 1
     intents = {item["intent_name"] for item in payload["data"]["commands"]}
     assert "runtime_status" in intents
     assert "manual_trade_confirm" in intents
 
-    rc = cli.main(["agent", "commands", "--format", "text"])
+    rc = cli.main(["assistant", "commands", "--format", "text"])
     text = capsys.readouterr().out
 
     assert rc == 0
     assert "/status" in text
     assert "/confirm trade|symbol|upgrade" in text
+
+
+def test_legacy_agent_command_alias_is_hidden_but_supported(capsys) -> None:
+    import src.interfaces.cli.main as cli
+
+    with pytest.raises(SystemExit) as exc:
+        cli.parse_args(["--help"])
+    help_text = capsys.readouterr().out
+
+    assert exc.value.code == 0
+    assert "assistant" in help_text
+    assert " agent " not in help_text
+
+    rc = cli.main(["agent", "commands"])
+    payload = _read_json_output(capsys)
+
+    assert rc == 0
+    assert payload["tool_name"] == "assistant.commands"
+    assert payload["ok"] is True
 
 
 def _runtime_status_envelope(*, ok: bool = True) -> dict:

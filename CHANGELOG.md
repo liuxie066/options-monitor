@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.128 - 2026-05-23
+
+### Changed
+- Consolidated the assistant control plane under `src.application.assistant`, leaving `agent_runtime` and inbound backend modules as thin compatibility wrappers.
+- Made `./om assistant` the public conversational assistant inspection entry while keeping the old `./om agent` command as a hidden compatibility alias.
+- Renamed assistant-facing command specs to `AssistantCommandSpec` while preserving the old `AgentCommandSpec` import alias.
+
+### Fixed
+- Added architecture guards that prevent application code from depending on the old `agent_runtime` backend and keep assistant, inbound channel adapters, and compatibility wrappers separated.
+
 ## 1.2.127 - 2026-05-23
 
 ### Changed

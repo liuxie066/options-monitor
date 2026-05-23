@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from domain.domain.multi_tick import FEISHU_APP_NOTIFICATION_PROVIDER, normalize_notification_provider
-from src.application.inbound.audit import default_audit_db_path
+from src.application.assistant.audit import default_audit_db_path
 from src.application.ledger.api import ledger_store_payload
 from src.application.secret_resolver import (
     resolve_feishu_bot_config,

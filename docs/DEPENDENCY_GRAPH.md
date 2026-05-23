@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 513 (`src`: 262, `domain`: 49, `scripts`: 7, `tests`: 195)
-- Internal import edges: 2461 total, 1103 production/script edges excluding tests
+- Python files scanned: 541 (`src`: 290, `domain`: 49, `scripts`: 7, `tests`: 195)
+- Internal import edges: 2501 total, 1138 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -38,18 +38,18 @@ flowchart LR
   domain_services -->|5| domain
   domain_services -->|2| storage
   infrastructure -->|2| domain
-  interfaces -->|68| application
+  interfaces -->|72| application
   interfaces -->|2| domain
   scripts -->|1| application
   scripts -->|1| domain
   scripts -->|1| infrastructure
   scripts -->|2| storage
   storage -->|1| domain
-  tests -->|893| application
+  tests -->|897| application
   tests -->|230| domain
   tests -->|2| domain_services
   tests -->|82| infrastructure
-  tests -->|107| interfaces
+  tests -->|108| interfaces
   tests -->|8| scripts
   tests -->|18| storage
 ```
@@ -60,7 +60,7 @@ flowchart LR
 |---|---|---|
 | application | domain | 169 |
 | application | infrastructure | 89 |
-| interfaces | application | 68 |
+| interfaces | application | 72 |
 | application | storage | 34 |
 | domain_services | domain | 5 |
 | application | domain_services | 2 |
@@ -77,9 +77,9 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 893 |
+| tests | application | 897 |
 | tests | domain | 230 |
-| tests | interfaces | 107 |
+| tests | interfaces | 108 |
 | tests | infrastructure | 82 |
 | tests | storage | 18 |
 | tests | scripts | 8 |
@@ -91,32 +91,28 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 
 | from | to | imports |
 |---|---|---|
-| src.application | domain.domain | 79 |
-| src.application | src.infrastructure | 55 |
-| src.interfaces | src.application | 49 |
-| src.application.inbound | src.application | 30 |
+| src.application | domain.domain | 80 |
+| src.application | src.infrastructure | 62 |
+| src.interfaces | src.application | 58 |
 | src.application.ledger | domain.domain.ledger | 27 |
+| src.application.inbound | src.application | 26 |
 | src.application | domain.storage | 25 |
+| src.application.agent_runtime | src.application | 17 |
+| src.application | src.application.settings | 16 |
 | src.application | domain.domain.engine | 15 |
 | src.application | src.application.multi_tick | 15 |
-| src.application.agent_runtime | src.application | 12 |
-| src.application.agent_runtime | src.application.inbound | 12 |
 | src.application.ledger | domain.domain | 11 |
 | src.application.trades | src.application | 11 |
+| src.application | src.application.ledger | 9 |
 | src.application.multi_tick | src.application | 9 |
-| src.application | src.application.settings | 8 |
+| src.application | src.application.positions | 8 |
 | src.application | domain.domain.ledger | 8 |
-| src.application | src.application.ledger | 8 |
-| src.application.inbound | src.application.agent_runtime | 8 |
 | src.application.multi_tick | src.infrastructure | 8 |
 | src.application.positions | src.application | 8 |
-| src.application | src.application.positions | 7 |
 | src.application.ledger | src.infrastructure | 7 |
 | src.application.positions | domain.domain.ledger | 7 |
 | src.application.positions | domain.storage | 7 |
 | src.application.trades | domain.domain | 7 |
-| src.application.agent_runtime | src.infrastructure | 6 |
-| src.application.inbound | src.application.settings | 6 |
 | src.application.multi_tick | domain.domain | 6 |
 | src.application.positions | src.infrastructure | 6 |
 | src.application.setup | src.application | 5 |
@@ -126,20 +122,15 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application.positions | src.application.ledger | 4 |
 | src.application.trades | src.application.ledger | 4 |
 | src.application.trades | src.infrastructure | 4 |
-| src.application.agent_runtime | src.application.settings | 3 |
 | src.application | src.application.trades | 3 |
 | src.application.ai_cofunder | src.application | 3 |
-| src.application.inbound | src.infrastructure | 3 |
 | src.application.trades | domain.domain.ledger | 3 |
-| src.interfaces | src.application.agent_runtime | 3 |
-| src.interfaces | src.application.inbound | 3 |
 | src.interfaces | src.application.trades | 3 |
 | src.interfaces | src.application.ledger | 3 |
 | src.interfaces | src.application.positions | 3 |
 | domain.domain | domain.domain.ledger | 3 |
 | src.application | src.application.ai_cofunder | 2 |
-| src.application | src.application.inbound | 2 |
-| src.application | src.application.agent_runtime | 2 |
+| src.application.inbound | src.infrastructure | 2 |
 | src.application.ledger | src.application.settings | 2 |
 | src.application.multi_tick | domain.storage | 2 |
 | src.infrastructure | domain.domain | 2 |
@@ -148,9 +139,18 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | scripts | domain.storage | 2 |
 | src.application.ai_cofunder | domain.domain.engine | 1 |
 | src.application.ai_cofunder | src.application.settings | 1 |
-| src.application.inbound | src.application.ledger | 1 |
-| src.application.inbound | src.application.positions | 1 |
-| src.application.inbound | domain.domain | 1 |
+| src.application.inbound | src.application.settings | 1 |
+| src.application.ledger | src.application | 1 |
+| src.application.ledger | src.application.positions | 1 |
+| src.application.multi_tick | domain.services | 1 |
+| src.application | domain.services | 1 |
+| src.application.setup | src.application.settings | 1 |
+| src.application | src.application.setup | 1 |
+| src.application.trades | src.application.positions | 1 |
+| src.interfaces | src.application.inbound | 1 |
+| src.interfaces | src.application.setup | 1 |
+| src.interfaces | domain.domain | 1 |
+| src.interfaces | src.application.ai_cofunder | 1 |
 
 ## Boundary Checks
 
@@ -166,7 +166,7 @@ This matches the current architecture rule that `domain/domain/` must not import
 
 ### Package-Level Cycles
 
-- 9 packages: `src.application`, `src.application.agent_runtime`, `src.application.ai_cofunder`, `src.application.inbound`, `src.application.ledger`, `src.application.multi_tick`, `src.application.positions`, `src.application.setup`, `src.application.trades`
+- 7 packages: `src.application`, `src.application.ai_cofunder`, `src.application.ledger`, `src.application.multi_tick`, `src.application.positions`, `src.application.setup`, `src.application.trades`
 - 3 packages: `domain.domain`, `domain.domain.engine`, `domain.domain.ledger`
 
 Package-level cycles are expected to be noisier because many flat `src.application.*` modules are compressed into broad buckets. Module-level SCCs are usually the more actionable cleanup targets.
@@ -187,7 +187,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | domain.domain.engine | 18 |
 | src.application.account_config | 18 |
 | domain.storage.repositories | 17 |
-| src.application.inbound.contracts | 15 |
+| src.application.assistant.contracts | 17 |
 | src.application.config_validator | 15 |
 | domain.domain.trade_contract_identity | 14 |
 | src.application.opend_fetch_config | 14 |
@@ -197,7 +197,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 
 | module | outgoing imports |
 |---|---|
-| src.interfaces.cli.main | 48 |
+| src.interfaces.cli.main | 52 |
 | src.application.agent_tool_handlers | 36 |
 | src.application.multi_account_tick | 26 |
 | src.application.ledger.queries | 20 |
@@ -207,7 +207,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.application.tick_notification_flow | 18 |
 | src.application.agent_tool_runtime_status | 15 |
 | src.application.sell_put_steps | 15 |
-| src.application.agent_runtime.runtime | 14 |
+| src.application.assistant.runtime | 14 |
 | src.application.trades.auto_intake | 14 |
 | src.application.account_run | 13 |
 | src.application.ledger.commands | 13 |
