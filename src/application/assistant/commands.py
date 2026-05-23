@@ -237,24 +237,34 @@ def llm_argument_schema_required_keys() -> list[str]:
 
 
 def command_help_text() -> str:
-    read_examples = "、".join(_unique(
-        example
-        for spec in llm_allowed_specs()
-        for example in spec.examples
-        if not example.startswith("/")
-    ))
-    slash_examples = "、".join(_unique(
-        example
-        for spec in COMMAND_SPECS
-        for example in spec.examples
-        if example.startswith("/")
-    ))
-    return (
-        f"可用只读命令：{read_examples}。\n"
-        f"Command：{slash_examples}。\n"
-        "管理员写操作：记录开仓/记录平仓、增加/修改/删除监控标的、立即升级。"
-        "写操作会先返回预览；同一对话只有一条待确认时，可回复：确认记录、确认监控 或 确认升级。"
-        "Command 确认格式：/confirm trade|symbol|upgrade [operation_id]。"
+    return "\n".join(
+        [
+            "我可以帮你处理这些事：",
+            "",
+            "只读查询",
+            "- 状态：状态、/status",
+            "- 健康检查：健康检查、自检、/health",
+            "- 配置检查：配置检查、/config-check",
+            "- 持仓：持仓、持仓 sy、/positions [lx|sy|all]",
+            "- 收益：收益、收益 sy、收益 sy 2026-05、/income [lx|sy] [YYYY-MM|本月|上月]",
+            "- 运行记录：最近运行、/runs [limit]",
+            "- 日志：日志 <run_id>、/logs <run_id>",
+            "- 监控标的：查看监控标的、/symbols",
+            "- 待确认：待确认、/pending",
+            "",
+            "写操作",
+            "- 记录交易：记录开仓、记录平仓",
+            "- 管理监控标的：增加/修改/删除监控标的",
+            "- 升级：立即升级",
+            "",
+            "安全规则",
+            "- 写操作只会先返回预览，不会直接执行。",
+            "- 同一对话只有一条待确认时，可回复：确认记录、确认监控、确认升级。",
+            "- 指定确认：/confirm trade|symbol|upgrade [operation_id]",
+            "- 指定取消：/cancel trade|symbol|upgrade [operation_id]",
+            "",
+            "Command：/help、/status、/health、/config-check、/positions、/income、/runs、/logs、/symbols、/pending。",
+        ]
     )
 
 

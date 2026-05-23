@@ -61,6 +61,19 @@ def test_assistant_command_catalog_drives_llm_allowed_surface() -> None:
     assert not (llm_allowed & llm_denied)
     assert payload["summary"]["command_count"] == len(command_specs())
     assert "Command：" in payload["help_text"]
+    assert "只读查询" in payload["help_text"]
+    assert "写操作只会先返回预览" in payload["help_text"]
+
+
+def test_assistant_deterministic_parser_supports_productized_read_aliases() -> None:
+    from src.application.assistant.parser import parse_inbound_text
+
+    assert parse_inbound_text("我能做什么").name == "help"
+    assert parse_inbound_text("有哪些功能").name == "help"
+    assert parse_inbound_text("自检").name == "healthcheck"
+    assert parse_inbound_text("配置是否正常").name == "config_validate"
+    assert parse_inbound_text("最近任务").name == "runtime_runs"
+    assert parse_inbound_text("监控标的有哪些").name == "symbol_list"
 
 
 def test_assistant_command_parser_maps_typed_confirm_commands() -> None:
