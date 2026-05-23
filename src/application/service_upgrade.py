@@ -18,6 +18,14 @@ from typing import Any, Callable
 from src.application.release_target import compare_versions, parse_version, resolve_upgrade_target
 from src.application.service_drift import service_drift
 
+_CHILD_ENV_PASSTHROUGH_NAMES = {
+    "ANTHROPIC_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "OPENAI_API_KEY",
+}
+
 
 def utc_now_iso(now_fn: Callable[[], datetime] | None = None) -> str:
     now = (now_fn or (lambda: datetime.now(timezone.utc)))()
@@ -723,6 +731,12 @@ def _child_env_from_profile(profile: dict[str, Any]) -> dict[str, str] | None:
         value = str(os.environ.get(key) or "").strip()
         if value:
             env[key] = value
+    for key, value in os.environ.items():
+        if not (key.startswith("OM_") or key in _CHILD_ENV_PASSTHROUGH_NAMES):
+            continue
+        text = str(value or "").strip()
+        if text:
+            env[key] = text
     runtime_root = str(profile.get("runtime_root") or "").strip()
     if runtime_root:
         env["OM_RUNTIME_ROOT"] = runtime_root

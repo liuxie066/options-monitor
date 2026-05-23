@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.132 - 2026-05-23
+
+### Fixed
+- Preserved systemd-loaded OM and LLM environment variables for post-upgrade Feishu WS health checks, preventing root-only env files from causing false service-health failures after release upgrades.
+
 ## 1.2.131 - 2026-05-23
 
 ### Changed
