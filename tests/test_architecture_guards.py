@@ -312,6 +312,16 @@ def test_inbound_cli_public_surface_uses_assistant_naming() -> None:
             assert "argparse.SUPPRESS" in line
 
 
+def test_feishu_payload_adapter_public_signature_uses_assistant_naming() -> None:
+    from src.application.inbound.feishu import handle_feishu_payload
+
+    params = inspect.signature(handle_feishu_payload).parameters
+    assert "use_assistant" in params
+    assert "assistant_settings" in params
+    assert "use_agent_runtime" not in params
+    assert "agent_runtime_settings" not in params
+
+
 def test_runtime_status_tool_is_not_owned_by_openclaw_module() -> None:
     openclaw_text = (ROOT / "src" / "application" / "agent_tool_openclaw.py").read_text(encoding="utf-8")
     runtime_text = (ROOT / "src" / "application" / "agent_tool_runtime_status.py").read_text(encoding="utf-8")

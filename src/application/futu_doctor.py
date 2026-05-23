@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Futu/OpenD doctor checks for application and agent runtime."""
+"""Futu/OpenD doctor checks for application and assistant runtime."""
 
 import importlib.util
 import json
