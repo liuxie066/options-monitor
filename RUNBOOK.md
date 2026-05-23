@@ -167,18 +167,33 @@ cat /home/node/.openclaw/workspace/options-monitor-prod/<report_dir>/symbols_not
 - 立即停定时监控：
   - `openclaw cron disable 9cba60f7-407b-4427-9120-0a176b818de9`
 
-## 维护脚本（手动）
+## 维护入口（手动）
 
 运行产物清理：
 
 ```bash
-cd /home/node/.openclaw/workspace/options-monitor
+cd ~/apps/options-monitor
 
 # 预览（dry-run）
-.venv/bin/python scripts/cleanup_runtime_artifacts.py --keep-days 7
+./om service cleanup \
+  --repo-root ~/apps/options-monitor \
+  --runtime-root /var/lib/options-monitor \
+  --cleanup-output-runs \
+  --output-runs-keep-days 14 \
+  --output-runs-keep-count 200 \
+  --cleanup-runtime-logs \
+  --runtime-logs-keep-days 14
 
-# 执行删除（仅 output_runs）
-.venv/bin/python scripts/cleanup_runtime_artifacts.py --keep-days 7 --apply
+# 执行删除
+./om service cleanup \
+  --repo-root ~/apps/options-monitor \
+  --runtime-root /var/lib/options-monitor \
+  --cleanup-output-runs \
+  --output-runs-keep-days 14 \
+  --output-runs-keep-count 200 \
+  --cleanup-runtime-logs \
+  --runtime-logs-keep-days 14 \
+  --confirm
 ```
 
 辅助诊断工具位于 `scripts/tools/`。

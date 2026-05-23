@@ -577,11 +577,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     service_cleanup_cmd = service_sub.add_parser("cleanup", help="dry-run or clean old releases and selected caches")
     service_cleanup_cmd.add_argument("--repo-root", default=None)
     service_cleanup_cmd.add_argument("--releases-root", default=None)
+    service_cleanup_cmd.add_argument("--runtime-root", default="/var/lib/options-monitor")
     service_cleanup_cmd.add_argument("--keep-releases", type=int, default=2)
     service_cleanup_cmd.add_argument("--include-apt-cache", action="store_true")
     service_cleanup_cmd.add_argument("--journal-vacuum-size", default=None)
     service_cleanup_cmd.add_argument("--cleanup-downloads", action="store_true")
     service_cleanup_cmd.add_argument("--cleanup-pip-cache", action="store_true")
+    service_cleanup_cmd.add_argument("--cleanup-output-runs", action="store_true")
+    service_cleanup_cmd.add_argument("--output-runs-keep-days", type=int, default=14)
+    service_cleanup_cmd.add_argument("--output-runs-keep-count", type=int, default=200)
+    service_cleanup_cmd.add_argument("--cleanup-runtime-logs", action="store_true")
+    service_cleanup_cmd.add_argument("--runtime-logs-keep-days", type=int, default=14)
     service_cleanup_cmd.add_argument("--confirm", action="store_true", help="delete planned paths; without this the command is a dry run")
     service_cleanup_cmd.add_argument("--yes", action="store_true", help="non-interactive confirmation; emits an audit_id")
     update = sub.add_parser("update", help="check, apply, or roll back released versions")
@@ -1441,11 +1447,17 @@ def main(argv: list[str] | None = None) -> int:
             data = service_cleanup(
                 repo_root=args.repo_root or repo_base(),
                 releases_root=args.releases_root,
+                runtime_root=args.runtime_root,
                 keep_releases=args.keep_releases,
                 include_apt_cache=bool(args.include_apt_cache),
                 journal_vacuum_size=args.journal_vacuum_size,
                 cleanup_downloads=bool(args.cleanup_downloads),
                 cleanup_pip_cache=bool(args.cleanup_pip_cache),
+                cleanup_output_runs=bool(args.cleanup_output_runs),
+                output_runs_keep_days=args.output_runs_keep_days,
+                output_runs_keep_count=args.output_runs_keep_count,
+                cleanup_runtime_logs=bool(args.cleanup_runtime_logs),
+                runtime_logs_keep_days=args.runtime_logs_keep_days,
                 confirm=_confirmed(args),
             )
             data = _service_write_contract(data, confirmed=_confirmed(args), rollback_hint="restore deleted release/cache paths from external backup")
