@@ -121,6 +121,8 @@ def handle_assistant_message(
         except AgentToolError as err:
             if err.code != "NEEDS_CLARIFICATION":
                 raise
+            if _looks_like_command(text):
+                raise
             llm_mode = runtime_settings.mode in {"llm_router", "agent_loop"}
             conversation_context = (
                 build_conversation_context(
