@@ -258,11 +258,14 @@ def test_feishu_ws_cli_keeps_runtime_and_assistant_config_flags_separate() -> No
     assert "assistant_config_path=args.assistant_config" in text
 
 
-def test_inbound_cli_public_surface_uses_assistant_naming() -> None:
+def test_cli_public_surface_keeps_assistant_control_and_inbound_transport_separate() -> None:
     text = (ROOT / "src" / "interfaces" / "cli" / "main.py").read_text(encoding="utf-8")
 
-    assert '"--assistant"' in text
-    assert '"--no-assistant"' in text
+    assert 'assistant_sub.add_parser("handle"' in text
+    assert 'inbound_sub.add_parser("handle"' not in text
+    assert 'inbound_sub.add_parser("pending"' not in text
+    assert 'inbound_sub.add_parser("audit"' not in text
+    assert 'inbound_sub.add_parser("upgrade-worker"' not in text
     assert "AgentRuntime" not in text
     assert '"--agent-runtime"' not in text
     assert '"--no-agent-runtime"' not in text
@@ -272,8 +275,8 @@ def test_feishu_payload_adapter_public_signature_uses_assistant_naming() -> None
     from src.application.inbound.feishu import handle_feishu_payload
 
     params = inspect.signature(handle_feishu_payload).parameters
-    assert "use_assistant" in params
     assert "assistant_settings" in params
+    assert "use_assistant" not in params
     assert "use_agent_runtime" not in params
     assert "agent_runtime_settings" not in params
     source = inspect.getsource(handle_feishu_payload)

@@ -82,16 +82,16 @@ def collect_recent_audit(
 def format_pending_operations(operations: list[dict[str, Any]], *, filters: dict[str, Any]) -> str:
     scope = _scope_text(filters)
     if not operations:
-        return f"Inbound pending：0 条\nscope：{scope}\n没有待确认操作。"
+        return f"Assistant pending：0 条\nscope：{scope}\n没有待确认操作。"
     rendered = render_pending_operations(operations)
-    return f"Inbound pending：{len(operations)} 条\nscope：{scope}\n{rendered}"
+    return f"Assistant pending：{len(operations)} 条\nscope：{scope}\n{rendered}"
 
 
 def format_recent_audit(rows: list[dict[str, Any]], *, filters: dict[str, Any]) -> str:
     scope = _scope_text(filters)
     if not rows:
-        return f"Inbound audit recent：0 条\nscope：{scope}\n没有匹配的 inbound 审计记录。"
-    lines = [f"Inbound audit recent：{len(rows)} 条", f"scope：{scope}"]
+        return f"Assistant audit recent：0 条\nscope：{scope}\n没有匹配的 assistant 审计记录。"
+    lines = [f"Assistant audit recent：{len(rows)} 条", f"scope：{scope}"]
     for row in rows:
         ok = "ok" if row.get("result_ok") is True else "failed"
         head = (
