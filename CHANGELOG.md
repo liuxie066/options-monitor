@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.134 - 2026-05-23
+
+### Fixed
+- Fixed post-upgrade Feishu WebSocket health checks for root-only service env directories by explicitly passing the service profile env file and using non-interactive sudo when the upgrade process cannot read that file directly.
+
 ## 1.2.133 - 2026-05-23
 
 ### Added
