@@ -3,6 +3,7 @@ from __future__ import annotations
 from src.application.assistant.commands import (
     AssistantCapabilitySpec,
     AssistantCommandSpec,
+    capability_catalog_text,
     capability_catalog_payload,
     capability_specs,
     command_catalog_payload,
@@ -19,6 +20,7 @@ __all__ = [
     "AssistantSettings",
     "AssistantToolCall",
     "LlmTranslatorSettings",
+    "capability_catalog_text",
     "capability_catalog_payload",
     "capability_specs",
     "command_catalog_payload",
