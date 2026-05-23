@@ -14,6 +14,7 @@ def run_healthcheck(
     opend_telnet_port: int | None = None,
     audit_db: str | None = None,
     profile_path: str | None = None,
+    env_file: str | None = None,
     include_service_status: bool = False,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {}
@@ -31,6 +32,8 @@ def run_healthcheck(
         payload["audit_db"] = str(audit_db)
     if profile_path:
         payload["profile_path"] = str(profile_path)
+    if env_file:
+        payload["env_file"] = str(env_file)
     if include_service_status:
         payload["include_service_status"] = True
     return execute_tool("healthcheck", payload)

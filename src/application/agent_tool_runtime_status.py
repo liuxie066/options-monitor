@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Callable, cast
 
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.environment_status import build_effective_env_with_status
 from src.application.ledger.api import ledger_store_payload
 from src.application.release_target import compare_versions
 from src.application.runtime_config_paths import resolve_data_config_ref
@@ -1797,6 +1798,15 @@ def runtime_status_tool(
     shared_last_run_json_raw = shared_last_run.get("json")
     shared_last_run_json: dict[str, Any] = shared_last_run_json_raw if isinstance(shared_last_run_json_raw, dict) else {}
     latest_status = shared_last_run_json.get("status") or shared_last_run_json.get("last_status")
+    env_file_path = _assistant_env_file_path_from_payload(payload, base=base)
+    effective_env, environment = build_effective_env_with_status(
+        repo_root=base,
+        env_file=env_file_path,
+        mask_path=mask_path,
+    )
+    if effective_env.warnings:
+        warnings.extend(str(item) for item in effective_env.warnings)
+        warning_codes.append("ENV_FILE")
     assistant_runtime = _assistant_runtime_summary(
         base=base,
         runtime_root=ledger_runtime_root,
@@ -1840,6 +1850,7 @@ def runtime_status_tool(
         "latest_scanned_run_required_data_prefetch": latest_scanned_prefetch_summary,
         "trigger_context": trigger_context,
         "notification_diagnosis": notification_diagnosis,
+        "environment": environment,
         "account_summary": {},
         "freshness": {},
         "openclaw_profile": profile_meta or {"loaded": False},
@@ -1883,6 +1894,8 @@ def runtime_status_tool(
     data["summary"]["service_drift_status"] = service_drift_summary.get("status")
     data["summary"]["service_drift_missing_units"] = service_drift.get("missing_installed_units")
     data["summary"]["service_drift_missing_required_units"] = missing_required_units
+    data["summary"]["env_file"] = environment.get("env_file")
+    data["summary"]["env_file_loaded"] = bool(environment.get("env_file_loaded"))
     assistant_config_summary = assistant_runtime.get("config") if isinstance(assistant_runtime.get("config"), dict) else {}
     assistant_llm_summary = assistant_runtime.get("llm") if isinstance(assistant_runtime.get("llm"), dict) else {}
     assistant_audit_summary = assistant_runtime.get("audit") if isinstance(assistant_runtime.get("audit"), dict) else {}

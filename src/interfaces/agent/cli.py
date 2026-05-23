@@ -25,6 +25,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     run_parser.add_argument("--tool", required=True)
     run_parser.add_argument("--input-json", default="{}")
     run_parser.add_argument("--input-file", default=None, help="optional JSON file; overrides --input-json")
+    run_parser.add_argument("--env-file", default=None, help="explicit env file to load before running the tool")
+    run_parser.add_argument("--no-local-env-file", action="store_true", help="do not auto-load .env/options-monitor.env")
 
     add_account_parser = sub.add_parser("add-account", help="append one account to an existing runtime config")
     add_account_parser.add_argument("--market", required=True, choices=("us", "hk"))
@@ -80,10 +82,30 @@ def _enforce_account_write_gate(args: argparse.Namespace) -> None:
         )
 
 
+def _should_bootstrap_process_env(actual_argv: list[str]) -> bool:
+    if "--no-local-env-file" in actual_argv:
+        return False
+    if "--env-file" in actual_argv:
+        return False
+    return True
+
+
+def _bootstrap_runtime_env_from_args(args: argparse.Namespace) -> None:
+    if not getattr(args, "env_file", None):
+        return
+    bootstrap_process_env(
+        repo_root=repo_base(),
+        env_file=getattr(args, "env_file", None),
+        include_local_env_file=not bool(getattr(args, "no_local_env_file", False)),
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
-    if argv is None:
+    actual_argv = list(sys.argv[1:] if argv is None else argv)
+    if argv is None and _should_bootstrap_process_env(actual_argv):
         bootstrap_process_env(repo_root=repo_base(), include_local_env_file=True)
-    args = parse_args(argv)
+    args = parse_args(actual_argv)
+    _bootstrap_runtime_env_from_args(args)
     if args.command == "spec":
         sys.stdout.write(dumps_json(build_tool_manifest()))
         return 0

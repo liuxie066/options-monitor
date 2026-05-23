@@ -203,6 +203,54 @@ def test_healthcheck_reports_feishu_inbound_audit_ready(monkeypatch, tmp_path: P
     assert checks["feishu_inbound"]["value"]["pending_store"]["readable"] is True
 
 
+def test_healthcheck_uses_explicit_env_file_for_feishu_inbound(monkeypatch, tmp_path: Path) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+    import src.application.agent_tool_handlers as tools
+
+    for name in (
+        "OM_ENV_FILE",
+        "OM_FEISHU_BOT_APP_ID",
+        "OM_FEISHU_BOT_APP_SECRET",
+        "OM_FEISHU_BOT_ALLOWED_OPEN_IDS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    cfg_path = _write_healthcheck_config(tmp_path)
+    env_file = tmp_path / "options-monitor.env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "OM_FEISHU_BOT_APP_ID=cli_file",
+                "OM_FEISHU_BOT_APP_SECRET=secret_file",
+                "OM_FEISHU_BOT_ALLOWED_OPEN_IDS=ou_file",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        tools,
+        "_run_futu_doctor",
+        lambda **kwargs: {
+            "ok": True,
+            "sdk": {"ok": True},
+            "watchdog": {"ok": True},
+        },
+    )
+
+    out = run_tool(
+        "healthcheck",
+        {"config_path": str(cfg_path), "env_file": str(env_file), "audit_db": str(tmp_path / "missing.sqlite3")},
+    )
+    checks = {item["name"]: item for item in out["data"]["checks"]}
+    env = out["data"]["environment"]
+
+    assert checks["feishu_inbound"]["value"]["credentials_configured"] is True
+    assert checks["feishu_inbound"]["value"]["allowed_open_ids_count"] == 1
+    assert env["env_file"] == ".../options-monitor.env"
+    assert env["env_file_loaded"] is True
+    assert env["entries"]["OM_FEISHU_BOT_APP_ID"]["source"] == "env_file:.../options-monitor.env"
+
+
 def test_healthcheck_warns_when_feishu_latest_sender_not_allowed(monkeypatch, tmp_path: Path) -> None:
     from src.application.assistant.audit import InboundAuditStore
     from src.application.tool_execution import execute_tool as run_tool
@@ -1472,6 +1520,11 @@ def test_runtime_status_uses_service_profile_assistant_config_and_env_file(tmp_p
     assert data["assistant_runtime"]["llm"]["env_file_loaded"] is True
     assert data["assistant_runtime"]["audit"]["path"] == str(audit_db)
     assert data["assistant_runtime"]["audit"]["latest"]["route"] == "agent_loop"
+    assert data["environment"]["env_file"] == str(env_file)
+    assert data["environment"]["env_file_loaded"] is True
+    assert data["environment"]["entries"]["DEEPSEEK_API_KEY"]["configured"] is True
+    assert data["environment"]["entries"]["DEEPSEEK_API_KEY"]["source"] == f"env_file:{env_file}"
+    assert data["summary"]["env_file_loaded"] is True
 
 
 def test_runtime_status_auto_loads_runtime_service_profile_paths(tmp_path: Path) -> None:

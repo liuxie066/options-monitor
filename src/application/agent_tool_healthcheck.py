@@ -6,6 +6,7 @@ from typing import Any, Callable
 
 from domain.domain.multi_tick import FEISHU_APP_NOTIFICATION_PROVIDER, normalize_notification_provider
 from src.application.assistant.audit import default_audit_db_path
+from src.application.environment_status import build_effective_env_with_status
 from src.application.ledger.api import ledger_store_payload
 from src.application.secret_resolver import (
     resolve_feishu_bot_config,
@@ -42,6 +43,11 @@ def run_healthcheck_tool(
         config_path=payload.get("config_path"),
     )
     warnings: list[str] = []
+    effective_env, environment = build_effective_env_with_status(
+        env_file=payload.get("env_file"),
+        mask_path=mask_path,
+    )
+    warnings.extend(str(item) for item in effective_env.warnings)
     checks: list[dict[str, Any]] = []
     validate_runtime_config(cfg, allow_empty_symbols=True)
     checks.append({"name": "runtime_config", "status": "ok", "message": "config validation passed"})
@@ -86,7 +92,7 @@ def run_healthcheck_tool(
             warnings.append("Configured portfolio.data_config is missing.")
 
     data_cfg = read_json_object_or_empty(data_config_path) if data_config_path.exists() else {}
-    feishu_holdings = resolve_feishu_holdings_config(data_cfg)
+    feishu_holdings = resolve_feishu_holdings_config(data_cfg, environ=effective_env.values)
     feishu_ready = bool(feishu_holdings.app_id and feishu_holdings.app_secret)
     holdings_ready = feishu_holdings.ready
     symbol_names = {
@@ -119,7 +125,7 @@ def run_healthcheck_tool(
         and normalize_notification_provider(notifications.get("provider") or notifications.get("channel"))
         == FEISHU_APP_NOTIFICATION_PROVIDER
     ):
-        bot_cfg = resolve_feishu_bot_config(notifications)
+        bot_cfg = resolve_feishu_bot_config(notifications, environ=effective_env.values)
         target = str(bot_cfg.user_open_id or "").strip()
         if target in {"ou_xxx", "user:ou_xxx", "chat:chat_xxx"}:
             checks.append(
@@ -166,7 +172,11 @@ def run_healthcheck_tool(
                 }
             )
 
-    feishu_inbound_check, feishu_inbound_warnings = _feishu_inbound_check(payload, mask_path=mask_path)
+    feishu_inbound_check, feishu_inbound_warnings = _feishu_inbound_check(
+        payload,
+        mask_path=mask_path,
+        environ=effective_env.values,
+    )
     checks.append(feishu_inbound_check)
     warnings.extend(feishu_inbound_warnings)
     feishu_service_check, feishu_service_warnings = _feishu_ws_service_check(payload, mask_path=mask_path)
@@ -464,6 +474,7 @@ def run_healthcheck_tool(
                 "config_path": mask_path(config_path),
                 "accounts": accounts,
             },
+            "environment": environment,
             "account_paths": account_paths,
             "checks": checks,
             "tools": tools,
@@ -478,8 +489,13 @@ def run_healthcheck_tool(
     )
 
 
-def _feishu_inbound_check(payload: dict[str, Any], *, mask_path: Callable[[Any], str]) -> tuple[dict[str, Any], list[str]]:
-    bot_cfg = resolve_feishu_bot_config()
+def _feishu_inbound_check(
+    payload: dict[str, Any],
+    *,
+    mask_path: Callable[[Any], str],
+    environ: dict[str, str],
+) -> tuple[dict[str, Any], list[str]]:
+    bot_cfg = resolve_feishu_bot_config(environ=environ)
     audit_path = _audit_db_path(payload)
     value: dict[str, Any] = {
         "audit_db": mask_path(audit_path),

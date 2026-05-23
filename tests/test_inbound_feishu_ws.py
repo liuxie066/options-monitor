@@ -227,6 +227,27 @@ def test_feishu_ws_settings_uses_unified_bot_config_without_callback_secrets(tmp
     assert settings.ack_reaction == ""
 
 
+def test_feishu_ws_settings_can_load_bot_config_from_env_file(tmp_path: Path) -> None:
+    env_file = tmp_path / "options-monitor.env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "OM_FEISHU_BOT_APP_ID=bot_app_file",
+                "OM_FEISHU_BOT_APP_SECRET=bot_secret_file",
+                "OM_FEISHU_BOT_ALLOWED_OPEN_IDS=ou_file",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    settings = build_feishu_ws_settings(environ={}, env_file=str(env_file))
+
+    assert settings.app_id == "bot_app_file"
+    assert settings.app_secret == "bot_secret_file"
+    assert settings.allowed_senders == "feishu:ou_file"
+
+
 def test_feishu_ws_settings_reads_behavior_from_assistant_config(tmp_path: Path) -> None:
     assistant_config_path = tmp_path / "config.assistant.json"
     assistant_config_path.write_text(

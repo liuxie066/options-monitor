@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -201,6 +202,8 @@ def _add_assistant_commands(parser: argparse.ArgumentParser) -> None:
     assistant_handle.add_argument("--config-path", default=None)
     assistant_handle.add_argument("--assistant-config", default=None)
     assistant_handle.add_argument("--audit-db", default=None)
+    assistant_handle.add_argument("--env-file", default=None)
+    assistant_handle.add_argument("--no-local-env-file", action="store_true")
     assistant_handle.add_argument("--format", choices=("json", "text"), default="json")
     assistant_commands = assistant_sub.add_parser("commands", help="list supported assistant commands and intents")
     assistant_commands.add_argument("--format", choices=("json", "text"), default="json")
@@ -235,6 +238,8 @@ def _add_assistant_commands(parser: argparse.ArgumentParser) -> None:
     assistant_upgrade_worker = assistant_sub.add_parser("upgrade-worker", help="run one confirmed assistant upgrade operation")
     assistant_upgrade_worker.add_argument("--operation-id", required=True)
     assistant_upgrade_worker.add_argument("--audit-db", default=None)
+    assistant_upgrade_worker.add_argument("--env-file", default=None)
+    assistant_upgrade_worker.add_argument("--no-local-env-file", action="store_true")
     assistant_upgrade_worker.add_argument("--no-final-receipt", action="store_true")
     assistant_upgrade_worker.add_argument("--format", choices=("json", "text"), default="json")
 
@@ -251,6 +256,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     health.add_argument("--opend-telnet-port", type=int, default=None)
     health.add_argument("--audit-db", default=None)
     health.add_argument("--profile-path", default=None)
+    health.add_argument("--env-file", default=None)
+    health.add_argument("--no-local-env-file", action="store_true")
     health.add_argument("--include-service-status", action="store_true")
 
     doctor = sub.add_parser("doctor", help="diagnose runtime readiness and common operator issues")
@@ -261,6 +268,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     doctor.add_argument("--opend-telnet-port", type=int, default=None)
     doctor.add_argument("--audit-db", default=None)
     doctor.add_argument("--profile-path", default=None)
+    doctor.add_argument("--env-file", default=None)
+    doctor.add_argument("--no-local-env-file", action="store_true")
     doctor.add_argument("--include-service-status", action="store_true")
 
     support = sub.add_parser("support", help="collect redacted support diagnostics")
@@ -289,12 +298,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     inbound_feishu.add_argument("--config-path", default=None)
     inbound_feishu.add_argument("--assistant-config", default=None)
     inbound_feishu.add_argument("--audit-db", default=None)
+    inbound_feishu.add_argument("--env-file", default=None)
+    inbound_feishu.add_argument("--no-local-env-file", action="store_true")
     inbound_feishu.add_argument("--format", choices=("json", "text"), default="json")
     inbound_ws = inbound_sub.add_parser("feishu-ws", help="serve the Feishu App long-connection inbound client")
     inbound_ws.add_argument("--config-key", default="us", choices=("us", "hk"))
     inbound_ws.add_argument("--config-path", default=None)
     inbound_ws.add_argument("--assistant-config", default=None)
     inbound_ws.add_argument("--audit-db", default=None)
+    inbound_ws.add_argument("--env-file", default=None)
+    inbound_ws.add_argument("--no-local-env-file", action="store_true")
     inbound_ws.add_argument("--no-reply", action="store_true")
     inbound_ws.add_argument("--reply-in-thread", action="store_true", default=None)
     inbound_ws.add_argument("--max-reply-chars", type=int, default=None)
@@ -306,6 +319,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     status.add_argument("--config-path", default=None)
     status.add_argument("--accounts", nargs="*", default=None)
     status.add_argument("--profile-path", default=None)
+    status.add_argument("--env-file", default=None)
+    status.add_argument("--no-local-env-file", action="store_true")
     status.add_argument("--run-id", default=None)
     status.add_argument("--run-dir", default=None)
     status.add_argument("--report-dir", default=None)
@@ -795,9 +810,25 @@ def _validate_runtime_config(
 def _should_bootstrap_process_env(actual_argv: list[str]) -> bool:
     if "--no-local-env-file" in actual_argv:
         return False
+    if "--env-file" in actual_argv:
+        return False
     if actual_argv and actual_argv[0] in {"settings", "setup"}:
         return False
     return True
+
+
+def _bootstrap_runtime_env_from_args(args: argparse.Namespace) -> None:
+    if not hasattr(args, "env_file"):
+        return
+    if not getattr(args, "env_file", None):
+        return
+    if args.command not in {"healthcheck", "doctor", "status", "inbound", "assistant"}:
+        return
+    bootstrap_process_env(
+        repo_root=repo_base(),
+        env_file=getattr(args, "env_file", None),
+        include_local_env_file=not bool(getattr(args, "no_local_env_file", False)),
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -822,6 +853,7 @@ def main(argv: list[str] | None = None) -> int:
         return int(run_symbols_cli(actual_argv[1:]))
 
     args = parse_args(actual_argv)
+    _bootstrap_runtime_env_from_args(args)
     try:
         if args.command == "healthcheck":
             return _print(
@@ -834,6 +866,7 @@ def main(argv: list[str] | None = None) -> int:
                     audit_db=args.audit_db,
                     profile_path=args.profile_path,
                     include_service_status=bool(args.include_service_status),
+                    env_file=args.env_file,
                 )
             )
 
@@ -847,6 +880,7 @@ def main(argv: list[str] | None = None) -> int:
                 audit_db=args.audit_db,
                 profile_path=args.profile_path,
                 include_service_status=bool(args.include_service_status),
+                env_file=args.env_file,
             )
             return _print(build_response(
                 tool_name="doctor",
@@ -990,6 +1024,8 @@ def main(argv: list[str] | None = None) -> int:
                 reply_in_thread=args.reply_in_thread,
                 max_reply_chars=args.max_reply_chars,
                 queue_size=args.queue_size,
+                environ=os.environ,
+                env_file=args.env_file,
             )
             if args.check:
                 return _print(check_feishu_ws_settings(settings))
