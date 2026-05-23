@@ -17,6 +17,9 @@ class AssistantCommandSpec:
     risk_level: str | None = None
     examples: tuple[str, ...] = ()
     summary: str = ""
+    operation_action: str | None = None
+    operation_target: str | None = None
+    operation_target_aliases: tuple[str, ...] = ()
 
 
 AssistantCapabilitySpec = AssistantCommandSpec
@@ -135,6 +138,9 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         risk_level="confirm_write",
         examples=("确认记录", "/confirm trade|symbol|upgrade [operation_id]"),
         summary="confirm a pending manual trade preview",
+        operation_action="confirm",
+        operation_target="trade",
+        operation_target_aliases=("trade", "record", "records", "manual", "记录", "交易"),
     ),
     AssistantCommandSpec(
         intent_name="manual_trade_cancel",
@@ -147,6 +153,9 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         risk_level="confirm_write",
         examples=("取消记录", "/cancel trade|symbol|upgrade [operation_id]"),
         summary="cancel a pending manual trade preview",
+        operation_action="cancel",
+        operation_target="trade",
+        operation_target_aliases=("trade", "record", "records", "manual", "记录", "交易"),
     ),
     AssistantCommandSpec(
         intent_name="manual_trade_open",
@@ -159,6 +168,8 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         risk_level="preview_write",
         examples=("记录开仓", "record open"),
         summary="preview a manual opening trade record",
+        operation_action="preview",
+        operation_target="trade",
     ),
     AssistantCommandSpec(
         intent_name="manual_trade_close",
@@ -171,6 +182,8 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         risk_level="preview_write",
         examples=("记录平仓", "record close"),
         summary="preview a manual closing trade record",
+        operation_action="preview",
+        operation_target="trade",
     ),
     AssistantCommandSpec(
         intent_name="manual_trade_update",
@@ -183,6 +196,8 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         risk_level="preview_write",
         examples=("权利金改成 1.23", "合约数改成 2"),
         summary="update a pending manual trade preview",
+        operation_action="preview",
+        operation_target="trade",
     ),
     AssistantCommandSpec(
         intent_name="symbol_confirm",
@@ -195,6 +210,9 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         risk_level="confirm_write",
         examples=("确认监控", "/confirm trade|symbol|upgrade [operation_id]"),
         summary="confirm a pending symbol preview",
+        operation_action="confirm",
+        operation_target="symbol",
+        operation_target_aliases=("symbol", "symbols", "monitor", "监控"),
     ),
     AssistantCommandSpec(
         intent_name="symbol_cancel",
@@ -207,6 +225,9 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         risk_level="confirm_write",
         examples=("取消监控", "/cancel trade|symbol|upgrade [operation_id]"),
         summary="cancel a pending symbol preview",
+        operation_action="cancel",
+        operation_target="symbol",
+        operation_target_aliases=("symbol", "symbols", "monitor", "监控"),
     ),
     AssistantCommandSpec(
         intent_name="symbol_add",
@@ -219,6 +240,8 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         risk_level="preview_write",
         examples=("增加监控标的 700 put",),
         summary="preview adding a monitored symbol",
+        operation_action="preview",
+        operation_target="symbol",
     ),
     AssistantCommandSpec(
         intent_name="symbol_edit",
@@ -231,6 +254,8 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         risk_level="preview_write",
         examples=("修改监控标的 HK.00700 sell_put.max_strike=480",),
         summary="preview editing a monitored symbol",
+        operation_action="preview",
+        operation_target="symbol",
     ),
     AssistantCommandSpec(
         intent_name="symbol_remove",
@@ -243,6 +268,8 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         risk_level="preview_write",
         examples=("删除监控标的 腾讯",),
         summary="preview removing a monitored symbol",
+        operation_action="preview",
+        operation_target="symbol",
     ),
     AssistantCommandSpec(
         intent_name="upgrade_confirm",
@@ -255,6 +282,9 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         risk_level="confirm_write",
         examples=("确认升级", "/confirm trade|symbol|upgrade [operation_id]"),
         summary="confirm a pending upgrade preview",
+        operation_action="confirm",
+        operation_target="upgrade",
+        operation_target_aliases=("upgrade", "升级"),
     ),
     AssistantCommandSpec(
         intent_name="upgrade_cancel",
@@ -267,6 +297,9 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         risk_level="confirm_write",
         examples=("取消升级", "/cancel trade|symbol|upgrade [operation_id]"),
         summary="cancel a pending upgrade preview",
+        operation_action="cancel",
+        operation_target="upgrade",
+        operation_target_aliases=("upgrade", "升级"),
     ),
     AssistantCommandSpec(
         intent_name="upgrade_now",
@@ -279,6 +312,8 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         risk_level="preview_admin",
         examples=("立即升级", "立即升级到 v1.2.111"),
         summary="preview a software upgrade operation",
+        operation_action="preview",
+        operation_target="upgrade",
     ),
 )
 
@@ -350,6 +385,26 @@ def spec_by_intent() -> dict[str, AssistantCommandSpec]:
 
 def commands_by_intent() -> dict[str, tuple[str, ...]]:
     return {spec.intent_name: spec.commands for spec in COMMAND_SPECS}
+
+
+def operation_specs(*, action: str | None = None, target: str | None = None) -> tuple[AssistantCommandSpec, ...]:
+    return tuple(
+        spec
+        for spec in COMMAND_SPECS
+        if (action is None or spec.operation_action == action)
+        and (target is None or spec.operation_target == target)
+    )
+
+
+def operation_target_intents(action: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for spec in operation_specs(action=action):
+        aliases = spec.operation_target_aliases or ((spec.operation_target,) if spec.operation_target else ())
+        for alias in aliases:
+            normalized = str(alias or "").strip().lower()
+            if normalized:
+                out[normalized] = spec.intent_name
+    return out
 
 
 def llm_executable_specs() -> tuple[AssistantCommandSpec, ...]:
@@ -437,6 +492,9 @@ def _spec_payload(spec: AssistantCommandSpec) -> dict[str, Any]:
         "risk_level": _risk_level(spec),
         "examples": list(spec.examples),
         "summary": spec.summary,
+        "operation_action": spec.operation_action,
+        "operation_target": spec.operation_target,
+        "operation_target_aliases": list(spec.operation_target_aliases),
     }
 
 
