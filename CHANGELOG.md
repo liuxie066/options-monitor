@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.129 - 2026-05-23
+
+### Fixed
+- Treated broker expiration zero-price option closes as canonical `expire_close` ledger events, allowing assigned or expired option positions to close at `0.0` without failing preflight.
+
 ## 1.2.128 - 2026-05-23
 
 ### Changed
