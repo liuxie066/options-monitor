@@ -76,7 +76,7 @@ def test_feishu_ws_delegates_to_inbound_and_replies(tmp_path: Path) -> None:
     assert replies[0]["text"].startswith("收益统计完成")
 
 
-def test_feishu_ws_can_route_through_agent_runtime(tmp_path: Path) -> None:
+def test_feishu_ws_can_route_through_assistant(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
 
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:

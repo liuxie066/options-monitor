@@ -1904,7 +1904,7 @@ def test_feishu_payload_adapter_extracts_text_message_and_calls_inbound(tmp_path
     assert calls == [("monthly_income_report", {"config_key": "us", "account": "sy", "month": "2026-05"})]
 
 
-def test_feishu_payload_adapter_agent_runtime_reads_assistant_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_feishu_payload_adapter_assistant_reads_assistant_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     data_cfg_path = tmp_path / "portfolio.runtime.json"
     data_cfg_path.write_text(json.dumps({"option_positions": {}}, ensure_ascii=False), encoding="utf-8")
     cfg = _runtime_cfg(str(data_cfg_path))
@@ -1975,7 +1975,7 @@ def test_feishu_payload_adapter_agent_runtime_reads_assistant_config(monkeypatch
     assert settings.llm.max_output_tokens == 770
 
 
-def test_feishu_payload_adapter_defaults_to_agent_runtime_from_assistant_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_feishu_payload_adapter_defaults_to_assistant_from_assistant_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     data_cfg_path = tmp_path / "portfolio.runtime.json"
     data_cfg_path.write_text(json.dumps({"option_positions": {}}, ensure_ascii=False), encoding="utf-8")
     cfg = _runtime_cfg(str(data_cfg_path))
@@ -2092,7 +2092,7 @@ def test_inbound_cli_wires_request(monkeypatch, capsys, tmp_path: Path) -> None:
     ]
 
 
-def test_inbound_cli_agent_runtime_loads_settings_from_config(monkeypatch, capsys, tmp_path: Path) -> None:
+def test_inbound_cli_assistant_loads_settings_from_config(monkeypatch, capsys, tmp_path: Path) -> None:
     import src.interfaces.cli.main as cli
 
     cfg = _runtime_cfg(str(tmp_path / "portfolio.runtime.json"))
@@ -2156,7 +2156,7 @@ def test_inbound_cli_agent_runtime_loads_settings_from_config(monkeypatch, capsy
     assert settings.llm.max_output_tokens == 771
 
 
-def test_inbound_cli_agent_runtime_flag_forces_disabled_config(monkeypatch, capsys, tmp_path: Path) -> None:
+def test_inbound_cli_assistant_flag_forces_disabled_config(monkeypatch, capsys, tmp_path: Path) -> None:
     import src.interfaces.cli.main as cli
 
     cfg = _runtime_cfg(str(tmp_path / "portfolio.runtime.json"))
