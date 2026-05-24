@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.142 - 2026-05-24
+
+### Added
+- Added Strategy Lab dataset/experiment/current MVP entrypoints through `om strategy-lab dataset collect`, `om strategy-lab experiment`, `om strategy-lab current`, and matching agent tools.
+- Added Strategy Lab dataset freezing, preflight gates, conservative recommendations, report rendering, and runtime-root storage for datasets, experiment results, reports, and the current pointer.
+
+### Changed
+- Removed the public `strategy_lab` agent tool and `om strategy-lab replay` CLI surface so Strategy Lab no longer exposes single-run replay as its product entry.
+- Added `strategy_evidence` diagnostics to `healthcheck` / `doctor` for replay artifact row counts and lab-readiness warnings without producing strategy recommendations.
+
 ## 1.2.141 - 2026-05-24
 
 ### Fixed
@@ -1107,7 +1117,7 @@
 ### Added
 - Added offline strategy replay analysis for joined candidate outcome rows, including DTE effectiveness, Delta win-rate buckets, symbol risk/return summaries, filter-value diagnostics, and shadow-only dry-run parameter suggestions.
 - Exposed the replay analyzer through `./om-agent run --tool strategy_replay_analyze` and `./om strategy-replay analyze`.
-- Documented the replay input contract and evidence model in `docs/STRATEGY_REPLAY.md`.
+- Documented the replay input contract and evidence model.
 
 ## 1.2.31 - 2026-05-12
 

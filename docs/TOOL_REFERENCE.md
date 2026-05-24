@@ -83,7 +83,9 @@ om-agent run --tool runtime_status --env-file /etc/options-monitor/options-monit
 | `scan_opportunities` | `om scan` / `om scan-pipeline` |
 | `candidate_rank_explain` | Agent-only read existing candidate CSV ranking explanations |
 | `strategy_replay_analyze` | `om strategy-replay analyze` |
-| `strategy_lab` | `om strategy-lab replay` |
+| `strategy_lab_dataset_collect` | `om strategy-lab dataset collect` |
+| `strategy_lab_experiment` | `om strategy-lab experiment` |
+| `strategy_lab_current` | `om strategy-lab current` |
 | `preview_notification` | `om notify preview` |
 | `runtime_status` | `om status` or raw assistant/runtime artifact summary |
 | `runtime_runs` | `om runs` |
@@ -276,12 +278,18 @@ systemd 的 US/HK tick timer 使用 market timezone 的 `OnCalendar` 在 10 分�
 - 校验 runtime config
 - 检查账户路径
 - 检查 OpenD / SQLite / 通知前置条件
+- 可选检查策略证据文件是否具备后续实验所需的候选、trace/reject 和 outcome/replay 样本
 
 示例：
 
 ```bash
 om doctor --config-key us
 om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
+om doctor --config-key us \
+  --strategy-candidate-path output_shared/reports/sell_put_candidates.csv \
+  --strategy-trace-path output_shared/reports/candidate_filter_trace.jsonl \
+  --strategy-outcome-path output_shared/reports/strategy_replay.csv \
+  --strategy-evidence-min-sample 5
 ```
 
 ### Support Bundle
@@ -420,7 +428,7 @@ om strategy-replay analyze --replay-path output_shared/reports/strategy_replay.c
 注意：
 - 该工具只分析已存在的复盘记录，不重新扫描、不发通知、不写 Feishu。
 - 复盘记录应覆盖通过和被拒绝候选，否则过滤条件价值会缺少 shadow outcome 依据。
-- 详细字段约定见 [STRATEGY_REPLAY.md](STRATEGY_REPLAY.md)。
+- 该工具是历史诊断入口，不属于 Strategy Lab 产品主路径；字段输入以 `replay_path` 中的 CSV/JSON/JSONL 为准。
 
 ---
 
@@ -698,17 +706,79 @@ output_shared/state/current/research.current.json
 
 ---
 
-## 5.18 `strategy_lab`
+## 5.18 Strategy Lab
 
 用途：
-- 从本地候选、拒绝日志、trace、strategy replay 证据运行确定性的策略实验。
-- 当前 replay 引擎支持 `sell_put`、`sell_call`、`yield_enhancement`、`close_advice`；非 `sell_put` 策略只使用证据里明确提供的资金占用、尾部损失或已实现收益字段，缺失时返回 warning/空值，不做推断。
-- 历史行情必须先保存为 frozen historical snapshot，再通过 `historical_snapshot_paths` 输入；replay 过程中不直接调用 Futu API。
-- 输出结构化 result 和 Markdown 报告。
-- 不改策略配置、不写账本、不写交易、不发送通知、不调用 broker。
-- 没有可信权益曲线前会拒绝 `sharpe_ratio` / `sortino_ratio` / `calmar_ratio` 这类标准比率。
+- 从 runtime root 采集候选、拒绝、trace、outcome 和账本样本，冻结成可复现 dataset。
+- 在同一个 dataset 上比较 baseline 和 candidate，输出 `not_evaluable` / `reject` / `watch` / `shadow` 建议。
+- 查看最新实验 current pointer。
 
-历史行情 snapshot：
+边界：
+- 默认 dry-run。
+- `--confirm` 只写 Strategy Lab 自己的 dataset/result/report/current pointer。
+- 不写 `trade_events`、`position_lots`、生产配置、通知、Feishu 或 broker。
+- 样本不足时返回 `not_evaluable`，不输出伪策略结论。
+
+CLI：
+
+```bash
+om strategy-lab dataset collect \
+  --config-key us \
+  --account sy \
+  --strategy-type sell_put
+
+om strategy-lab dataset collect \
+  --config-key us \
+  --account sy \
+  --strategy-type sell_put \
+  --confirm
+
+om strategy-lab experiment \
+  --dataset-id <dataset_id>
+
+om strategy-lab experiment \
+  --dataset-id <dataset_id> \
+  --candidate-grid-path candidate-grid.json \
+  --confirm
+
+om strategy-lab current
+```
+
+Agent tools：
+
+```bash
+om-agent run --tool strategy_lab_dataset_collect --input-json '{"config_key":"us","account":"sy","strategy_type":"sell_put","dry_run":true}'
+om-agent run --tool strategy_lab_experiment --input-json '{"dataset_id":"<dataset_id>","dry_run":true}'
+om-agent run --tool strategy_lab_current --input-json '{}'
+```
+
+Agent 写模式需要全局门禁和确认：
+
+```bash
+OM_AGENT_ENABLE_WRITE_TOOLS=true om-agent run --tool strategy_lab_experiment --input-json '{"dataset_id":"<dataset_id>","confirm":true}'
+```
+
+写入位置：
+
+```text
+output_shared/strategy_lab/datasets/<dataset_id>.json
+output_shared/strategy_lab/experiments/<experiment_id>.json
+output_shared/strategy_lab/reports/<experiment_id>.md
+output_shared/state/current/strategy_lab.current.json
+```
+
+---
+
+## 5.19 Strategy Lab historical data
+
+用途：
+- 将 OpenD/Futu 历史 K 线保存为 frozen snapshot。
+- 作为 dataset-based Strategy Lab 的可选数据输入之一。
+- 默认 dry-run；只有显式 `--confirm` 才连接 OpenD 并写入本地 snapshot。
+
+边界：
+- `om strategy-lab historical fetch` 只负责采集历史行情 snapshot，不运行 replay，不输出策略参数推荐。
+- Strategy Lab 的产品入口是 `dataset collect`、`experiment`、`current`，见 [STRATEGY_LAB_PRD.md](STRATEGY_LAB_PRD.md) 和 [STRATEGY_LAB_SYSTEM_DESIGN.md](STRATEGY_LAB_SYSTEM_DESIGN.md)。
 
 ```bash
 om strategy-lab historical fetch \
@@ -722,59 +792,7 @@ om strategy-lab historical fetch \
 说明：
 - 默认 dry-run，只输出将要请求和写入的位置，不连接 OpenD。
 - `--confirm` 后通过 OpenD/Futu 拉取历史 K 线，并写入 `output_shared/strategy_lab/historical_data/futu-<fingerprint>.json`。
-- 这是 replay 之前的数据导入步骤；replay 本身仍然只读 frozen snapshot。
-
-示例：
-
-```bash
-om strategy-lab replay \
-  --experiment-id sell-put-tight-delta \
-  --account sy \
-  --candidate-path output_shared/reports/sell_put_candidates.csv \
-  --reject-log-path output_shared/reports/sell_put_candidates_reject_log.csv \
-  --historical-snapshot-path output_shared/strategy_lab/historical_data/manual-<fingerprint>.json \
-  --min-dte 20 \
-  --max-dte 35 \
-  --min-abs-delta 0.10 \
-  --max-abs-delta 0.35 \
-  --min-premium 4 \
-  --min-sample 5
-```
-
-Agent 示例：
-
-```bash
-om-agent run --tool strategy_lab --input-json '{
-  "strategy_type": "sell_put",
-  "account": "sy",
-  "candidate_paths": ["output_shared/reports/sell_put_candidates.csv"],
-  "reject_log_paths": ["output_shared/reports/sell_put_candidates_reject_log.csv"],
-  "historical_snapshot_paths": ["output_shared/strategy_lab/historical_data/manual-<fingerprint>.json"],
-  "baseline_params": {"selection_source": "existing", "min_sample": 5},
-  "candidate_params": {
-    "selection_source": "rules",
-    "min_dte": 20,
-    "max_dte": 35,
-    "min_abs_delta": 0.10,
-    "max_abs_delta": 0.35,
-    "min_premium": 4,
-    "min_sample": 5
-  },
-  "write_outputs": false
-}'
-```
-
-写本地实验结果需要三层条件：
-- `write_outputs=true`
-- `confirm=true`
-- `OM_AGENT_ENABLE_WRITE_TOOLS=true`
-
-默认写入位置：
-
-```text
-output_shared/strategy_lab/
-output_shared/state/current/strategy_lab.current.json
-```
+- replay 证据完整性检查归入 `om doctor` / `om healthcheck` 的 `strategy_evidence` 诊断项；策略实验和推荐不在 doctor 中完成。
 
 ---
 

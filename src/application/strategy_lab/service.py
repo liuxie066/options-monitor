@@ -8,7 +8,11 @@ from pathlib import Path
 from typing import Any
 
 from src.application.agent_tool_contracts import AgentToolError, mask_path
+from src.application.runtime_paths import resolve_runtime_root
 from src.application.strategy_lab.contracts import StrategyExperiment, StrategyPolicy, validate_strategy_type
+from src.application.strategy_lab.dataset_collect import collect_strategy_lab_dataset
+from src.application.strategy_lab.experiment_engine import run_strategy_lab_experiment
+from src.application.strategy_lab.experiment_report import build_strategy_lab_experiment_report
 from src.application.strategy_lab.evidence_loader import load_strategy_lab_evidence
 from src.application.strategy_lab.historical_data.cache import (
     historical_snapshots_summary,
@@ -16,10 +20,134 @@ from src.application.strategy_lab.historical_data.cache import (
 )
 from src.application.strategy_lab.report import build_strategy_lab_report
 from src.application.strategy_lab.simulator import run_replay_backtest
+from src.application.strategy_lab.storage import StrategyLabStorage
 
 
 SCHEMA_VERSION = "strategy_lab.v1"
 CURRENT_SCHEMA_VERSION = "strategy_lab_current.v1"
+
+
+def strategy_lab_dataset_collect_tool(
+    payload: Mapping[str, Any],
+    *,
+    base: Path | None = None,
+    now_fn: Callable[[], datetime] | None = None,
+) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    payload_dict = dict(payload)
+    repo_root = Path(base or Path.cwd()).resolve()
+    runtime_root = _runtime_root(payload_dict, repo_root=repo_root)
+    storage = StrategyLabStorage(runtime_root)
+    dataset = collect_strategy_lab_dataset(payload_dict, repo_root=repo_root, runtime_root=runtime_root, now_fn=now_fn)
+    dry_run = _dry_run(payload_dict)
+    dataset_path = storage.dataset_path(dataset.dataset_id)
+    if not dry_run:
+        dataset_path = storage.write_dataset(dataset)
+    data = {
+        "schema_version": "strategy_lab_dataset_collect.v1",
+        "dry_run": dry_run,
+        "write_applied": not dry_run,
+        "backup_path": None,
+        "audit_id": None,
+        "rollback_hint": (
+            None
+            if dry_run
+            else "Remove the written Strategy Lab dataset file if this collected dataset should not be used."
+        ),
+        "dataset": dataset.to_dict(),
+        "output": {
+            "written": not dry_run,
+            "dataset_path": storage.relative(dataset_path),
+        },
+    }
+    return data, list(dataset.warnings), {"runtime_root": mask_path(runtime_root), "repo_root": mask_path(repo_root)}
+
+
+def strategy_lab_experiment_tool(
+    payload: Mapping[str, Any],
+    *,
+    base: Path | None = None,
+    now_fn: Callable[[], datetime] | None = None,
+) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    payload_dict = dict(payload)
+    repo_root = Path(base or Path.cwd()).resolve()
+    runtime_root = _runtime_root(payload_dict, repo_root=repo_root)
+    storage = StrategyLabStorage(runtime_root)
+    dry_run = _dry_run(payload_dict)
+    dataset_id = str(payload_dict.get("dataset_id") or "").strip()
+    dataset_written = False
+    if dataset_id:
+        dataset = storage.read_dataset(dataset_id)
+    else:
+        dataset = collect_strategy_lab_dataset(payload_dict, repo_root=repo_root, runtime_root=runtime_root, now_fn=now_fn)
+        if not dry_run:
+            storage.write_dataset(dataset)
+            dataset_written = True
+    result = run_strategy_lab_experiment(payload_dict, dataset=dataset, base=repo_root)
+    report = build_strategy_lab_experiment_report(result, dataset=dataset)
+    output = {
+        "written": False,
+        "dataset_written": dataset_written,
+        "dataset_path": storage.relative(storage.dataset_path(dataset.dataset_id)),
+        "result_path": None,
+        "report_path": None,
+        "current_path": storage.relative(storage.current_path()),
+    }
+    if not dry_run:
+        output.update(storage.write_experiment(result, report_markdown=str(report["markdown"])))
+        output["written"] = True
+    data = {
+        "schema_version": "strategy_lab_experiment_run.v1",
+        "dry_run": dry_run,
+        "write_applied": not dry_run,
+        "backup_path": None,
+        "audit_id": None,
+        "rollback_hint": (
+            None
+            if dry_run
+            else "Remove the written Strategy Lab experiment/report files and current pointer if this result should be discarded."
+        ),
+        "dataset": {
+            "dataset_id": dataset.dataset_id,
+            "summary": dataset.summary(),
+            "scope": dict(dataset.scope),
+        },
+        "result": result,
+        "report": report,
+        "output": output,
+    }
+    warnings = list(dict.fromkeys([*dataset.warnings, *result.get("warnings", [])]))
+    return data, warnings, {"runtime_root": mask_path(runtime_root), "repo_root": mask_path(repo_root)}
+
+
+def strategy_lab_current_tool(
+    payload: Mapping[str, Any],
+    *,
+    base: Path | None = None,
+) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    payload_dict = dict(payload)
+    repo_root = Path(base or Path.cwd()).resolve()
+    runtime_root = _runtime_root(payload_dict, repo_root=repo_root)
+    storage = StrategyLabStorage(runtime_root)
+    current = storage.read_current()
+    return {
+        "schema_version": "strategy_lab_current_read.v1",
+        "current": current,
+    }, [], {"runtime_root": mask_path(runtime_root), "repo_root": mask_path(repo_root)}
+
+
+def _runtime_root(payload: dict[str, Any], *, repo_root: Path) -> Path:
+    return resolve_runtime_root(
+        repo_root=repo_root,
+        runtime_root=payload.get("runtime_root"),
+    ).runtime_root
+
+
+def _dry_run(payload: dict[str, Any]) -> bool:
+    if _truthy(payload.get("dry_run")):
+        return True
+    if _truthy(payload.get("confirm")) or _truthy(payload.get("apply")) or _truthy(payload.get("yes")):
+        return False
+    return True
 
 
 def strategy_lab_tool(

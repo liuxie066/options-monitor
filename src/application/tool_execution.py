@@ -12,7 +12,7 @@ def build_tool_manifest() -> dict[str, Any]:
 
 def _tool_write_requested(definition: AgentToolDefinition, payload: dict[str, Any]) -> bool:
     name = definition.name
-    if name in {"research", "strategy_lab"}:
+    if name == "research":
         return _truthy(payload.get("write_outputs"))
     if definition.read_only:
         return False
@@ -21,6 +21,10 @@ def _tool_write_requested(definition: AgentToolDefinition, payload: dict[str, An
     if name == "manage_symbols":
         action = str(payload.get("action") or "list").strip().lower()
         return action != "list" and not bool(payload.get("dry_run", False))
+    if name in {"strategy_lab_dataset_collect", "strategy_lab_experiment"}:
+        if bool(payload.get("dry_run", False)):
+            return False
+        return _truthy(payload.get("confirm")) or _truthy(payload.get("apply")) or _truthy(payload.get("yes"))
     if bool(payload.get("dry_run", False)):
         return False
     return bool(definition.side_effects or definition.requires_confirm or definition.risk_level != "read_only")

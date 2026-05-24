@@ -55,9 +55,11 @@ Use the lowest-risk tool that can answer the question.
 | Did cron/tick decide to skip? | `scheduler_status`, `scheduler_decision.json` | Separates scheduler rules from cron execution |
 | Why did a symbol disappear? | `candidate_filter_explain` | Uses trace evidence instead of guessing from final CSV |
 | Why is candidate ranking odd? | `candidate_rank_explain` | Explains existing candidate CSV ranking |
-| What strategy parameters look weak? | `strategy_replay_analyze` | Offline replay analysis, no config mutation |
-| How should a strategy hypothesis be replayed? | `./om strategy-lab replay`, `strategy_lab` | Deterministic replay from local evidence; no strategy config mutation |
-| How should historical market data enter Strategy Lab? | `./om strategy-lab historical fetch` | Fetch into frozen snapshot/cache first; replay only reads snapshots |
+| What strategy parameters look weak? | `strategy_replay_analyze` | Diagnostic replay analysis, no config mutation |
+| What is the Strategy Lab product target? | `docs/STRATEGY_LAB_PRD.md`, `docs/STRATEGY_LAB_SYSTEM_DESIGN.md` | Strategy Lab is dataset-based strategy evaluation, not single-run replay |
+| How do I run Strategy Lab now? | `om strategy-lab dataset collect`, `om strategy-lab experiment`, `om strategy-lab current`; agent tools `strategy_lab_dataset_collect`, `strategy_lab_experiment`, `strategy_lab_current` | Default dry-run; confirmed writes only Strategy Lab outputs |
+| Is replay evidence complete enough for later lab evaluation? | `healthcheck` / `doctor` with `strategy_evidence` inputs | Diagnostic row-count/readiness check, not Strategy Lab recommendation |
+| How should replay rows be analyzed offline? | `strategy_replay_analyze` | Diagnostic evidence analysis, not Strategy Lab product path |
 | Is Sell Put cash constrained? | `query_cash_headroom` | Account-aware cash and collateral view |
 | Is ledger projection trustworthy? | `option_positions_read action=inspect`, Research `ledger` scope | Reads canonical event/projection state |
 | Does close advice have inputs? | `prepare_close_advice_inputs`, then `close_advice` or `get_close_advice` | Keeps refresh and recommendation explicit |
@@ -181,7 +183,8 @@ def rank_candidate_rows(rows: list[dict[str, Any]], *, mode: StrategyMode | str)
 - Candidate ranking explanation: `src/application/agent_tool_candidate_rank.py`
 - Filter trace explanation: `src/application/agent_tool_candidate_filter.py`
 - Replay analysis: `src/application/agent_tool_strategy_replay.py`
-- Docs: `docs/candidate_strategy.md`, `docs/STRATEGY_REPLAY.md`
+- Replay evidence readiness: `healthcheck` / `doctor` `strategy_evidence` check
+- Docs: `docs/candidate_strategy.md`
 
 For "why did this symbol/account not get a candidate", start from `candidate_filter_explain` and trace artifacts, not from final candidate CSV alone.
 

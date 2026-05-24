@@ -157,6 +157,48 @@ def test_healthcheck_works_with_explicit_config_path(monkeypatch, tmp_path: Path
     assert any("starter account label 'user1'" in item for item in out["warnings"])
 
 
+def test_healthcheck_reports_strategy_evidence_diagnostic(monkeypatch, tmp_path: Path) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+    import src.application.agent_tool_handlers as tools
+
+    cfg_path = _write_healthcheck_config(tmp_path)
+    candidate_path = tmp_path / "sell_put_candidates.csv"
+    candidate_path.write_text("symbol,dte\nNVDA,30\nMSFT,31\n", encoding="utf-8")
+    outcome_path = tmp_path / "strategy_replay.csv"
+    outcome_path.write_text("symbol,actual_return\nNVDA,0.02\nMSFT,0.01\n", encoding="utf-8")
+    trace_path = tmp_path / "candidate_filter_trace.jsonl"
+    trace_path.write_text('{"symbol":"NVDA","result":"accepted"}\n', encoding="utf-8")
+
+    monkeypatch.setattr(
+        tools,
+        "_run_futu_doctor",
+        lambda **kwargs: {
+            "ok": True,
+            "sdk": {"ok": True},
+            "watchdog": {"ok": True},
+        },
+    )
+
+    out = run_tool(
+        "healthcheck",
+        {
+            "config_path": str(cfg_path),
+            "strategy_candidate_paths": [str(candidate_path)],
+            "strategy_outcome_paths": [str(outcome_path)],
+            "strategy_trace_paths": [str(trace_path)],
+            "strategy_evidence_min_sample": 2,
+        },
+    )
+
+    assert out["ok"] is True
+    check = next(item for item in out["data"]["checks"] if item["name"] == "strategy_evidence")
+    assert check["status"] == "ok"
+    assert check["value"]["evaluable"] is True
+    assert check["value"]["row_counts"]["candidates"] == 2
+    assert check["value"]["row_counts"]["outcomes"] == 2
+    assert check["value"]["row_counts"]["traces"] == 1
+
+
 def test_healthcheck_reports_feishu_inbound_audit_ready(monkeypatch, tmp_path: Path) -> None:
     from src.application.assistant.audit import InboundAuditStore
     from src.application.tool_execution import execute_tool as run_tool
