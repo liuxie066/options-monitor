@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.140 - 2026-05-24
+
+### Fixed
+- Kept Strategy Lab reject logs out of candidate selection so rejected rows remain diagnostics instead of becoming simulated candidates.
+- Added Strategy Lab evidence diagnostics for artifact row counts, candidate/reject/trace/replay rows, missing candidate fields, and capital-efficiency blockers.
+
 ## 1.2.139 - 2026-05-24
 
 ### Added
