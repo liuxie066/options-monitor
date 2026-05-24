@@ -708,6 +708,22 @@ output_shared/state/current/research.current.json
 - 不改策略配置、不写账本、不写交易、不发送通知、不调用 broker。
 - 没有可信权益曲线前会拒绝 `sharpe_ratio` / `sortino_ratio` / `calmar_ratio` 这类标准比率。
 
+历史行情 snapshot：
+
+```bash
+om strategy-lab historical fetch \
+  --symbols NVDA,MSFT \
+  --start-date 2026-05-01 \
+  --end-date 2026-05-24 \
+  --timeframe 1d \
+  --confirm
+```
+
+说明：
+- 默认 dry-run，只输出将要请求和写入的位置，不连接 OpenD。
+- `--confirm` 后通过 OpenD/Futu 拉取历史 K 线，并写入 `output_shared/strategy_lab/historical_data/futu-<fingerprint>.json`。
+- 这是 replay 之前的数据导入步骤；replay 本身仍然只读 frozen snapshot。
+
 示例：
 
 ```bash

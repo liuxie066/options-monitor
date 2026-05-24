@@ -138,3 +138,55 @@ def test_retry_futu_gateway_call_retries_transient_once(monkeypatch) -> None:
 
     assert out == "ok"
     assert calls["count"] == 2
+
+
+def test_gateway_request_history_kline_returns_page_key() -> None:
+    import sys
+
+    base = Path(__file__).resolve().parents[1]
+    if str(base) not in sys.path:
+        sys.path.insert(0, str(base))
+
+    from src.infrastructure.futu_gateway import build_futu_gateway
+
+    class FakeQuote:
+        def __init__(self) -> None:
+            self.kwargs = None
+
+        def request_history_kline(self, **kwargs):
+            self.kwargs = dict(kwargs)
+            return 0, [{"code": "US.NVDA", "close": 900}], "next-page"
+
+    class FakeBackend:
+        def __init__(self, *, host: str, port: int) -> None:
+            self.host = host
+            self.port = port
+            self.quote = FakeQuote()
+
+        def _ensure_clients(self):
+            return self.quote, None
+
+    class FakeClient:
+        def __init__(self, backend, *, is_option_chain_cache_enabled: bool) -> None:
+            self.backend = backend
+            self.is_option_chain_cache_enabled = is_option_chain_cache_enabled
+
+    gw = build_futu_gateway(backend_cls=FakeBackend, client_cls=FakeClient)
+    out = gw.request_history_kline(
+        code="US.NVDA",
+        start="2026-05-01",
+        end="2026-05-03",
+        ktype="K_DAY",
+        autype="NONE",
+        fields=[],
+        page_req_key=None,
+    )
+
+    assert out == {"data": [{"code": "US.NVDA", "close": 900}], "page_req_key": "next-page"}
+    assert gw.backend.quote.kwargs == {
+        "code": "US.NVDA",
+        "start": "2026-05-01",
+        "end": "2026-05-03",
+        "ktype": "K_DAY",
+        "autype": "NONE",
+    }

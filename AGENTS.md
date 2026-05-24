@@ -102,6 +102,7 @@ Research evidence handoff for MacBook Codex:
 | Runtime status / readiness | `src/application/agent_tool_openclaw.py`, `src/application/healthcheck.py` | Prefer extending read surfaces over adding hidden side effects |
 | Research evidence | `src/application/research/` | Online side collects redacted evidence only; Codex performs analysis locally |
 | Strategy Lab experiments | `src/application/strategy_lab/`, `./om strategy-lab replay`, `strategy_lab` agent tool | Deterministic evidence replay only; no automatic strategy config mutation, ledger/trade writes, notifications, or pseudo-standard ratios |
+| Strategy Lab historical snapshots | `./om strategy-lab historical fetch`, `src/application/strategy_lab/historical_data/` | Fetch/import data into frozen snapshots outside replay; default dry-run, `--confirm` required for OpenD reads and local writes |
 | Config validation | `src/application/config_validator.py`, `src/application/layered_config.py` | Do not weaken production config checks |
 | Agent tools | `src/application/agent_tool_registry.py`, `src/application/agent_tool_handlers.py` | Manifest, handler, and tests must stay in sync |
 | CLI behavior | `src/interfaces/cli/main.py`, `src/interfaces/agent/cli.py` | Preserve public facade behavior where possible |

@@ -17,6 +17,8 @@ from src.application.strategy_lab.contracts import (
 )
 from src.application.strategy_lab.evidence_loader import load_strategy_lab_evidence
 from src.application.strategy_lab.historical_data import (
+    FutuHistoricalFetchOptions,
+    FutuHistoricalMarketDataProvider,
     HISTORICAL_DATA_SCHEMA_VERSION,
     HistoricalBar,
     HistoricalDataCache,
@@ -24,8 +26,10 @@ from src.application.strategy_lab.historical_data import (
     HistoricalDataSnapshot,
     HistoricalMarketDataProvider,
     build_historical_data_snapshot,
+    fetch_historical_data_tool,
     historical_snapshot_summary,
     load_historical_data_snapshots,
+    normalize_historical_symbols,
 )
 from src.application.strategy_lab.report import (
     StrategyLabReport,
@@ -39,6 +43,8 @@ __all__ = [
     "BACKTEST_CONCLUSIONS",
     "BLOCKED_STANDARD_RATIO_METRICS",
     "CORE_METRIC_NAMES",
+    "FutuHistoricalFetchOptions",
+    "FutuHistoricalMarketDataProvider",
     "HISTORICAL_DATA_SCHEMA_VERSION",
     "BacktestResult",
     "CandidateSnapshot",
@@ -56,9 +62,11 @@ __all__ = [
     "StrategyPolicy",
     "build_strategy_lab_report",
     "build_historical_data_snapshot",
+    "fetch_historical_data_tool",
     "historical_snapshot_summary",
     "load_historical_data_snapshots",
     "load_strategy_lab_evidence",
+    "normalize_historical_symbols",
     "render_strategy_lab_markdown",
     "run_replay_backtest",
     "strategy_lab_tool",

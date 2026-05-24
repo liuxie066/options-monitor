@@ -57,6 +57,7 @@ Use the lowest-risk tool that can answer the question.
 | Why is candidate ranking odd? | `candidate_rank_explain` | Explains existing candidate CSV ranking |
 | What strategy parameters look weak? | `strategy_replay_analyze` | Offline replay analysis, no config mutation |
 | How should a strategy hypothesis be replayed? | `./om strategy-lab replay`, `strategy_lab` | Deterministic replay from local evidence; no strategy config mutation |
+| How should historical market data enter Strategy Lab? | `./om strategy-lab historical fetch` | Fetch into frozen snapshot/cache first; replay only reads snapshots |
 | Is Sell Put cash constrained? | `query_cash_headroom` | Account-aware cash and collateral view |
 | Is ledger projection trustworthy? | `option_positions_read action=inspect`, Research `ledger` scope | Reads canonical event/projection state |
 | Does close advice have inputs? | `prepare_close_advice_inputs`, then `close_advice` or `get_close_advice` | Keeps refresh and recommendation explicit |

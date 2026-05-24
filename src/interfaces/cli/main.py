@@ -59,6 +59,7 @@ from src.application.service_deploy import (
 from src.application.service_drift import service_drift
 from src.application.service_upgrade import service_rollback, service_upgrade, service_upgrade_check
 from src.application.strategy_replay import analyze_strategy_replay, read_strategy_replay_file
+from src.application.strategy_lab.historical_data import fetch_historical_data_tool
 from src.application.tick_cron import run_tick_cron
 from src.application.tool_execution import execute_tool
 from src.application.runtime_config_freshness import RuntimeConfigFreshnessError, ensure_runtime_config_freshness
@@ -111,6 +112,28 @@ def _with_warning(payload: dict[str, Any], warning: str) -> dict[str, Any]:
         warnings.append(warning)
     out["warnings"] = warnings
     return out
+
+
+def _format_strategy_lab_historical_fetch(payload: dict[str, Any]) -> str:
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    request = data.get("request") if isinstance(data.get("request"), dict) else {}
+    output = data.get("output") if isinstance(data.get("output"), dict) else {}
+    snapshot = data.get("snapshot") if isinstance(data.get("snapshot"), dict) else {}
+    status = "dry-run" if data.get("dry_run") else "written"
+    lines = [
+        f"Strategy Lab historical fetch: {status}",
+        f"- provider: {data.get('provider') or '-'}",
+        f"- symbols: {', '.join(str(x) for x in request.get('symbols') or []) or '-'}",
+        f"- range: {request.get('start_date') or '-'} -> {request.get('end_date') or '-'}",
+        f"- timeframe: {request.get('timeframe') or '-'}",
+        f"- snapshot_path: {output.get('snapshot_path') or '-'}",
+    ]
+    if snapshot:
+        lines.append(f"- bars: {snapshot.get('bar_count', 0)}")
+    warnings = payload.get("warnings") if isinstance(payload.get("warnings"), list) else []
+    if warnings:
+        lines.append("- warnings: " + "; ".join(str(item) for item in warnings))
+    return "\n".join(lines) + "\n"
 
 
 def _assistant_settings_for_cli(
@@ -426,6 +449,37 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     strategy_replay.add_argument("--no-write-outputs", action="store_true")
     strategy_replay.add_argument("--confirm", action="store_true")
     strategy_replay.add_argument("--json", action="store_true", help="print JSON envelope instead of Markdown report")
+    strategy_historical = strategy_lab_sub.add_parser("historical", help="manage Strategy Lab historical data snapshots")
+    strategy_historical_sub = strategy_historical.add_subparsers(dest="strategy_lab_historical_command", required=True)
+    historical_fetch = strategy_historical_sub.add_parser("fetch", help="fetch historical data into a frozen snapshot")
+    historical_fetch.add_argument("--provider", default="futu", choices=("futu",))
+    historical_fetch.add_argument("--symbols", required=True, help="comma-separated symbols, e.g. NVDA,MSFT or 0700.HK")
+    historical_fetch.add_argument("--start-date", required=True)
+    historical_fetch.add_argument("--end-date", required=True)
+    historical_fetch.add_argument("--asset-type", default="underlying", choices=("underlying", "option"))
+    historical_fetch.add_argument("--timeframe", default="1d", choices=("1d", "1m", "5m", "15m", "30m", "60m"))
+    historical_fetch.add_argument("--adjusted", action="store_true", help="request adjusted price data when supported")
+    historical_fetch.add_argument("--adjustment", default=None, choices=("qfq", "hfq", "none"))
+    historical_fetch.add_argument("--field", action="append", dest="fields", default=None)
+    historical_fetch.add_argument("--config-key", default=None, choices=("us", "hk"))
+    historical_fetch.add_argument("--config-path", default=None)
+    historical_fetch.add_argument("--account", default=None)
+    historical_fetch.add_argument("--host", default=None)
+    historical_fetch.add_argument("--port", type=int, default=None)
+    historical_fetch.add_argument("--output-dir", default=None)
+    historical_fetch.add_argument("--max-count", type=int, default=None)
+    historical_fetch.add_argument("--max-pages", type=int, default=None)
+    historical_fetch.add_argument("--max-wait-sec", type=float, default=None)
+    historical_fetch.add_argument("--window-sec", type=float, default=None)
+    historical_fetch.add_argument("--max-calls", type=int, default=None)
+    historical_fetch.add_argument("--retry-max-attempts", type=int, default=None)
+    historical_fetch.add_argument("--retry-time-budget-sec", type=float, default=None)
+    historical_fetch.add_argument("--retry-base-delay-sec", type=float, default=None)
+    historical_fetch.add_argument("--retry-max-delay-sec", type=float, default=None)
+    historical_fetch.add_argument("--no-retry", action="store_true")
+    historical_fetch.add_argument("--dry-run", action="store_true", help="preview request without calling OpenD")
+    historical_fetch.add_argument("--confirm", action="store_true", help="required to call OpenD and write the snapshot")
+    historical_fetch.add_argument("--json", action="store_true", help="print JSON envelope")
 
     scan = sub.add_parser("scan", help="run opportunity scan")
     scan.add_argument("--config-key", default=None, choices=("us", "hk"))
@@ -1240,6 +1294,50 @@ def main(argv: list[str] | None = None) -> int:
             report = data.get("report") if isinstance(data, dict) else None
             markdown = report.get("markdown") if isinstance(report, dict) else None
             sys.stdout.write(str(markdown or _dumps(out)))
+            return 0
+
+        if args.command == "strategy-lab" and args.strategy_lab_command == "historical" and args.strategy_lab_historical_command == "fetch":
+            payload = {
+                "provider": args.provider,
+                "symbols": args.symbols,
+                "start_date": args.start_date,
+                "end_date": args.end_date,
+                "asset_type": args.asset_type,
+                "timeframe": args.timeframe,
+                "adjusted": bool(args.adjusted),
+                "adjustment": args.adjustment,
+                "fields": args.fields,
+                "config_key": args.config_key,
+                "config_path": args.config_path,
+                "account": args.account,
+                "host": args.host,
+                "port": args.port,
+                "output_dir": args.output_dir,
+                "max_count": args.max_count,
+                "max_pages": args.max_pages,
+                "max_wait_sec": args.max_wait_sec,
+                "window_sec": args.window_sec,
+                "max_calls": args.max_calls,
+                "retry_max_attempts": args.retry_max_attempts,
+                "retry_time_budget_sec": args.retry_time_budget_sec,
+                "retry_base_delay_sec": args.retry_base_delay_sec,
+                "retry_max_delay_sec": args.retry_max_delay_sec,
+                "no_retry": bool(args.no_retry),
+                "dry_run": bool(args.dry_run),
+                "confirm": bool(args.confirm),
+            }
+            payload = {key: value for key, value in payload.items() if value not in (None, [])}
+            data, warnings, meta = fetch_historical_data_tool(payload, base=repo_base())
+            out = build_response(
+                tool_name="strategy-lab.historical.fetch",
+                ok=True,
+                data=data,
+                warnings=warnings,
+                meta=meta,
+            )
+            if args.json:
+                return _print(out)
+            sys.stdout.write(_format_strategy_lab_historical_fetch(out))
             return 0
 
         if args.command == "scan":

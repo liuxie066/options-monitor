@@ -596,6 +596,81 @@ def test_strategy_lab_replay_forwards_experiment_payload(monkeypatch, capsys) ->
     ]
 
 
+def test_strategy_lab_historical_fetch_forwards_payload(monkeypatch, capsys) -> None:
+    import src.interfaces.cli.main as cli
+
+    calls: list[dict] = []
+
+    def _fetch(payload: dict, *, base):
+        calls.append(dict(payload))
+        return (
+            {
+                "schema_version": "strategy_lab_historical_fetch.v1",
+                "provider": "futu",
+                "dry_run": False,
+                "request": {
+                    "symbols": ["NVDA", "0700.HK"],
+                    "start_date": "2026-05-01",
+                    "end_date": "2026-05-03",
+                    "timeframe": "1d",
+                },
+                "output": {"snapshot_path": "output_shared/strategy_lab/historical_data/futu-abc.json"},
+            },
+            [],
+            {"base": str(base)},
+        )
+
+    monkeypatch.setattr(cli, "fetch_historical_data_tool", _fetch)
+
+    rc = cli.main([
+        "strategy-lab",
+        "historical",
+        "fetch",
+        "--symbols",
+        "NVDA,0700.HK",
+        "--start-date",
+        "2026-05-01",
+        "--end-date",
+        "2026-05-03",
+        "--config-key",
+        "us",
+        "--host",
+        "127.0.0.9",
+        "--port",
+        "11119",
+        "--max-count",
+        "100",
+        "--max-pages",
+        "2",
+        "--confirm",
+        "--json",
+    ])
+    payload = _read_json_output(capsys)
+
+    assert rc == 0
+    assert payload["tool_name"] == "strategy-lab.historical.fetch"
+    assert payload["data"]["output"]["snapshot_path"].endswith("futu-abc.json")
+    assert calls == [
+        {
+            "provider": "futu",
+            "symbols": "NVDA,0700.HK",
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-03",
+            "asset_type": "underlying",
+            "timeframe": "1d",
+            "adjusted": False,
+            "config_key": "us",
+            "host": "127.0.0.9",
+            "port": 11119,
+            "max_count": 100,
+            "max_pages": 2,
+            "no_retry": False,
+            "dry_run": False,
+            "confirm": True,
+        }
+    ]
+
+
 def test_top_level_status_json_prints_raw_runtime_status(monkeypatch, capsys) -> None:
     import src.interfaces.cli.main as cli
 
