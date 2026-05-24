@@ -200,6 +200,19 @@ manual trade / trade-intake 会优先使用 runtime root 或 runtime config 路�
 `output_shared/state/multiplier_cache.json`，cache miss 时再按场景实时向 OpenD 刷新；
 不再依赖 `config.us.json` / `config.hk.json` 里的 market config 兜底。
 `trade-intake --mode apply` 会写交易事件并可能发送回执，必须同时带 `--confirm` 或非交互用的 `--yes`。
+重放已进入 `failed_deal_ids` 的单笔成交时，需要使用显式修复入口：
+`om run trade-intake --mode apply --confirm --deal-json <payload.json> --retry-failed`。
+该入口只允许配合 `--deal-json` 使用，不会放开已成功处理成交的重复写入。
+如果账本已经通过手工 repair/expire_close 订正，但 trade-intake state 仍残留旧
+`failed_deal_ids` / `unresolved_deal_ids`，先 dry-run 对账，再显式应用本地 state 修复：
+
+```bash
+om run trade-intake --reconcile-state --deal-id <deal-id>
+om run trade-intake --reconcile-state --deal-id <deal-id> --apply
+```
+
+`--reconcile-state` 只读取账本和 audit 证据，只写 `auto_trade_intake_state.json`，
+不会写 `trade_events` / `position_lots`。
 
 ### Service 入口关系
 

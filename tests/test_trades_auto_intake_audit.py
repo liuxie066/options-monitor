@@ -461,6 +461,79 @@ def test_process_payload_records_retryable_unresolved_diagnostics(tmp_path: Path
     assert any(event.get("phase") == "resolved" and event.get("diagnostics", {}).get("retryable") is True for event in events)
 
 
+def test_process_payload_passes_retry_failed_to_resolver(tmp_path: Path) -> None:
+    deal = NormalizedTradeDeal(
+        broker="富途",
+        futu_account_id="REAL_1",
+        internal_account="lx",
+        deal_id="deal-failed-1",
+        order_id="order-failed-1",
+        symbol="TIGR",
+        option_type="put",
+        side="buy",
+        position_effect="close",
+        contracts=1,
+        price=0.0,
+        strike=6.0,
+        multiplier=100,
+        multiplier_source="payload",
+        expiration_ymd="2026-05-22",
+        currency="USD",
+        trade_time_ms=1779468493916,
+        raw_payload={"deal_id": "deal-failed-1"},
+    )
+
+    class _Result:
+        status = "dry_run"
+        action = "close"
+        reason = "preview_close"
+        deal_id = "deal-failed-1"
+        account = "lx"
+        operations: list[dict] = []
+        diagnostics: dict = {}
+
+        def to_dict(self) -> dict:
+            return {
+                "status": self.status,
+                "action": self.action,
+                "reason": self.reason,
+                "deal_id": self.deal_id,
+                "account": self.account,
+                "operations": self.operations,
+                "diagnostics": self.diagnostics,
+            }
+
+    captured: dict[str, object] = {}
+
+    def _resolve(_deal: object, **kwargs: object) -> _Result:
+        captured.update(kwargs)
+        return _Result()
+
+    out = process_trade_payload(
+        {"deal_id": "deal-failed-1"},
+        repo=object(),
+        state_path=tmp_path / "state.json",
+        audit_path=tmp_path / "audit.jsonl",
+        account_mapping={"REAL_1": "lx"},
+        apply_changes=True,
+        load_trade_intake_state_fn=lambda _path: {
+            "processed_deal_ids": {},
+            "failed_deal_ids": {"deal-failed-1": {"status": "failed"}},
+            "unresolved_deal_ids": {},
+        },
+        write_trade_intake_state_fn=lambda *_args, **_kwargs: None,
+        upsert_deal_state_fn=upsert_deal_state,
+        append_trade_intake_audit_fn=lambda *_args, **_kwargs: None,
+        enrich_trade_payload_fn=None,
+        normalize_trade_deal_fn=lambda payload, futu_account_mapping=None: deal,
+        resolve_trade_deal_fn=_resolve,
+        retry_failed_deal=True,
+    )
+
+    assert out["status"] == "dry_run"
+    assert captured["retry_failed_deal"] is True
+
+
 def test_process_payload_records_failed_state_when_resolver_raises(tmp_path: Path) -> None:
     deal = NormalizedTradeDeal(
         broker="富途",

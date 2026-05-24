@@ -702,6 +702,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     trade_intake.add_argument("--port", type=int, default=11111)
     trade_intake.add_argument("--once", action="store_true")
     trade_intake.add_argument("--deal-json", default=None)
+    trade_intake.add_argument("--retry-failed", action="store_true")
+    trade_intake.add_argument("--reconcile-state", action="store_true")
+    trade_intake.add_argument("--deal-id", action="append", default=None)
+    trade_intake.add_argument("--apply", action="store_true")
+    trade_intake.add_argument("--dry-run", action="store_true")
 
     return parser.parse_args(argv)
 
@@ -1655,6 +1660,16 @@ def main(argv: list[str] | None = None) -> int:
                 intake_argv.append("--once")
             if args.deal_json:
                 intake_argv.extend(["--deal-json", str(args.deal_json)])
+            if args.retry_failed:
+                intake_argv.append("--retry-failed")
+            if args.reconcile_state:
+                intake_argv.append("--reconcile-state")
+            for deal_id in args.deal_id or []:
+                intake_argv.extend(["--deal-id", str(deal_id)])
+            if args.apply:
+                intake_argv.append("--apply")
+            if args.dry_run:
+                intake_argv.append("--dry-run")
             return int(run_trade_intake(intake_argv))
     except AgentToolError as err:
         return _print(build_response(tool_name="om", ok=False, error=build_error_payload(err)))
