@@ -160,12 +160,25 @@ class StrategyLabEvidence:
     warnings: tuple[str, ...] = ()
 
     def summary(self) -> dict[str, Any]:
+        rows_by_kind: dict[str, int] = {}
+        artifact_rows: list[dict[str, Any]] = []
+        for artifact in self.artifacts:
+            rows_by_kind[artifact.kind] = rows_by_kind.get(artifact.kind, 0) + int(artifact.row_count)
+            artifact_rows.append(
+                {
+                    "kind": artifact.kind,
+                    "path": artifact.path,
+                    "row_count": int(artifact.row_count),
+                }
+            )
         return {
             "artifact_count": len(self.artifacts),
             "candidate_count": len(self.candidates),
             "reject_log_count": len(self.reject_logs),
             "trace_count": len(self.traces),
             "replay_row_count": len(self.replay_rows),
+            "artifact_rows_by_kind": rows_by_kind,
+            "artifact_rows": artifact_rows,
             "warnings": list(self.warnings),
         }
 
