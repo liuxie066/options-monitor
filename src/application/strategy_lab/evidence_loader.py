@@ -119,23 +119,35 @@ def _artifact(kind: str, path: Path, rows: list[dict[str, Any]], *, base: Path, 
 def _candidate_snapshots(rows: list[dict[str, Any]], *, kind: str, path: Path, base: Path) -> list[CandidateSnapshot]:
     out: list[CandidateSnapshot] = []
     for idx, row in enumerate(rows, start=1):
+        strategy_type = _strategy_type(row, path=path)
         out.append(
             CandidateSnapshot(
                 row_id=str(_first(row, "row_id", "candidate_id", "contract_symbol", "option_symbol") or f"{kind}-{idx}"),
                 symbol=_text(_first(row, "symbol", "underlying", "ticker"), upper=True),
-                account=_text(_first(row, "account", "account_label"), lower=True),
-                strategy_type=_strategy_type(row),
+                account=_text(_first(row, "account", "account_label"), lower=True) or _account_from_path(path),
+                strategy_type=strategy_type,
                 contract_symbol=_text(_first(row, "contract_symbol", "option_symbol")),
-                option_type=_text(_first(row, "option_type", "type"), lower=True),
-                side=_text(_first(row, "side"), lower=True),
+                option_type=_option_type(row, strategy_type=strategy_type),
+                side=_side(row, strategy_type=strategy_type),
                 strike=_as_float(_first(row, "strike", "strike_price")),
                 expiry=_text(_first(row, "expiry", "expiration", "exp")),
                 dte=_as_int(_first(row, "dte", "DTE", "days_to_expiration")),
                 premium=_as_float(_first(row, "premium", "net_premium", "bid", "mid")),
                 delta=_as_float(_first(row, "delta", "abs_delta", "current_delta")),
-                contracts=_as_int(_first(row, "contracts", "quantity", "qty")),
+                contracts=_as_int(_first(row, "contracts", "quantity", "qty")) or 1,
                 multiplier=_as_float(_first(row, "multiplier", "contract_multiplier")),
-                locked_cash=_as_float(_first(row, "locked_cash", "cash_required", "required_cash", "collateral")),
+                locked_cash=_as_float(
+                    _first(
+                        row,
+                        "locked_cash",
+                        "cash_required",
+                        "required_cash",
+                        "collateral",
+                        "cash_basis",
+                        "cash_required_usd",
+                        "cash_required_cny",
+                    )
+                ),
                 selected=_as_bool(_first(row, "selected", "accepted", "notified", "executed", "passed_filter")),
                 reject_reasons=tuple(_split_reasons(_first(row, "reject_reason", "reject_rule", "engine_reject_reason", "filter_reason", "filter_reasons"))),
                 evidence_ref=EvidenceRef.from_path(kind=kind, path=path, row_index=idx, base=base),
@@ -156,8 +168,20 @@ def _first(row: dict[str, Any], *names: str) -> Any:
     return None
 
 
-def _strategy_type(row: dict[str, Any]) -> str | None:
+def _strategy_type(row: dict[str, Any], *, path: Path | None = None) -> str | None:
     raw = str(_first(row, "strategy_type", "strategy", "mode", "option_strategy") or "").strip().lower().replace("-", "_")
+    parsed = _strategy_type_from_text(raw)
+    if parsed:
+        return parsed
+    parsed = _strategy_type_from_option_fields(row)
+    if parsed:
+        return parsed
+    if path is not None:
+        return _strategy_type_from_path(path)
+    return None
+
+
+def _strategy_type_from_text(raw: str) -> str | None:
     if raw in {"put", "short_put", "sell_put", "cash_secured_put"}:
         return "sell_put"
     if raw in {"call", "short_call", "sell_call", "covered_call"}:
@@ -166,6 +190,50 @@ def _strategy_type(row: dict[str, Any]) -> str | None:
         return "yield_enhancement"
     if raw in {"close", "close_advice"}:
         return "close_advice"
+    return None
+
+
+def _strategy_type_from_path(path: Path) -> str | None:
+    name = path.name.lower().replace("-", "_")
+    if "yield_enhancement" in name:
+        return "yield_enhancement"
+    if "close_advice" in name:
+        return "close_advice"
+    if "sell_put" in name:
+        return "sell_put"
+    if "sell_call" in name:
+        return "sell_call"
+    return None
+
+
+def _account_from_path(path: Path) -> str | None:
+    parent = path.parent
+    if parent.parent.name == "accounts":
+        return _text(parent.name, lower=True)
+    return None
+
+
+def _option_type(row: dict[str, Any], *, strategy_type: str | None) -> str | None:
+    option_type = str(_first(row, "option_type", "type") or "").strip().lower()
+    if option_type:
+        return option_type
+    if strategy_type == "sell_put":
+        return "put"
+    if strategy_type == "sell_call":
+        return "call"
+    return None
+
+
+def _side(row: dict[str, Any], *, strategy_type: str | None) -> str | None:
+    side = str(_first(row, "side") or "").strip().lower()
+    if side:
+        return side
+    if strategy_type in {"sell_put", "sell_call"}:
+        return "short"
+    return None
+
+
+def _strategy_type_from_option_fields(row: dict[str, Any]) -> str | None:
     option_type = str(_first(row, "option_type", "type") or "").strip().lower()
     side = str(_first(row, "side") or "").strip().lower()
     if option_type == "put" and side in {"short", "sell"}:
