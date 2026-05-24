@@ -445,19 +445,19 @@ def test_top_level_status_forwards_env_file(monkeypatch, capsys, tmp_path: Path)
     }]
 
 
-def test_ai_cofunder_collect_forwards_remote_runtime_selection(monkeypatch, capsys) -> None:
+def test_research_collect_forwards_remote_runtime_selection(monkeypatch, capsys) -> None:
     import src.interfaces.cli.main as cli
 
     calls: list[tuple[str, dict]] = []
 
     def _execute_tool(name: str, payload: dict) -> dict:
         calls.append((name, payload))
-        return {"tool_name": "ai_cofunder", "ok": True, "data": {"status": "ok"}}
+        return {"tool_name": "research", "ok": True, "data": {"status": "ok"}}
 
     monkeypatch.setattr(cli, "execute_tool", _execute_tool)
 
     rc = cli.main([
-        "ai-cofunder",
+        "research",
         "collect",
         "--config-key",
         "us",
@@ -490,10 +490,10 @@ def test_ai_cofunder_collect_forwards_remote_runtime_selection(monkeypatch, caps
     payload = _read_json_output(capsys)
 
     assert rc == 0
-    assert payload["tool_name"] == "ai_cofunder"
+    assert payload["tool_name"] == "research"
     assert calls == [
         (
-            "ai_cofunder",
+            "research",
             {
                 "scope": "full",
                 "config_key": "us",
@@ -510,6 +510,85 @@ def test_ai_cofunder_collect_forwards_remote_runtime_selection(monkeypatch, caps
                 "max_notification_chars": 2000,
                 "output": "json",
                 "include_healthcheck": False,
+                "write_outputs": False,
+                "confirm": False,
+            },
+        )
+    ]
+
+
+def test_strategy_lab_replay_forwards_experiment_payload(monkeypatch, capsys) -> None:
+    import src.interfaces.cli.main as cli
+
+    calls: list[tuple[str, dict]] = []
+
+    def _execute_tool(name: str, payload: dict) -> dict:
+        calls.append((name, payload))
+        return {
+            "tool_name": "strategy_lab",
+            "ok": True,
+            "data": {"report": {"markdown": "# Strategy Lab 回测报告\n"}},
+        }
+
+    monkeypatch.setattr(cli, "execute_tool", _execute_tool)
+
+    rc = cli.main([
+        "strategy-lab",
+        "replay",
+        "--experiment-id",
+        "exp-1",
+        "--strategy-type",
+        "sell_put",
+        "--account",
+        "sy",
+        "--candidate-path",
+        "output_shared/reports/sell_put_candidates.csv",
+        "--reject-log-path",
+        "output_shared/reports/sell_put_candidates_reject_log.csv",
+        "--historical-snapshot-path",
+        "output_shared/strategy_lab/historical_data/manual.json",
+        "--min-dte",
+        "20",
+        "--max-dte",
+        "35",
+        "--min-abs-delta",
+        "0.1",
+        "--max-abs-delta",
+        "0.35",
+        "--min-premium",
+        "4",
+        "--max-candidates",
+        "3",
+        "--min-sample",
+        "5",
+        "--exclude-reject-reason",
+        "risk_spread",
+    ])
+
+    assert rc == 0
+    assert capsys.readouterr().out == "# Strategy Lab 回测报告\n"
+    assert calls == [
+        (
+            "strategy_lab",
+            {
+                "experiment_id": "exp-1",
+                "strategy_type": "sell_put",
+                "account": "sy",
+                "candidate_paths": ["output_shared/reports/sell_put_candidates.csv"],
+                "reject_log_paths": ["output_shared/reports/sell_put_candidates_reject_log.csv"],
+                "historical_snapshot_paths": ["output_shared/strategy_lab/historical_data/manual.json"],
+                "baseline_params": {"selection_source": "existing", "min_sample": 5},
+                "candidate_params": {
+                    "selection_source": "rules",
+                    "min_sample": 5,
+                    "min_dte": 20,
+                    "max_dte": 35,
+                    "min_abs_delta": 0.1,
+                    "max_abs_delta": 0.35,
+                    "min_premium": 4.0,
+                    "max_candidates": 3,
+                    "exclude_reject_reasons": ["risk_spread"],
+                },
                 "write_outputs": False,
                 "confirm": False,
             },

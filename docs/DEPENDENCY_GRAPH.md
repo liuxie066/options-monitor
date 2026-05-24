@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 513 (`src`: 262, `domain`: 49, `scripts`: 7, `tests`: 195)
-- Internal import edges: 2472 total, 1106 production/script edges excluding tests
+- Python files scanned: 526 (`src`: 273, `domain`: 49, `scripts`: 7, `tests`: 197)
+- Internal import edges: 2533 total, 1131 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -45,11 +45,11 @@ flowchart LR
   scripts -->|1| infrastructure
   scripts -->|2| storage
   storage -->|1| domain
-  tests -->|898| application
-  tests -->|231| domain
+  tests -->|928| application
+  tests -->|232| domain
   tests -->|2| domain_services
   tests -->|82| infrastructure
-  tests -->|109| interfaces
+  tests -->|114| interfaces
   tests -->|8| scripts
   tests -->|18| storage
 ```
@@ -77,9 +77,9 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 898 |
-| tests | domain | 231 |
-| tests | interfaces | 109 |
+| tests | application | 928 |
+| tests | domain | 232 |
+| tests | interfaces | 114 |
 | tests | infrastructure | 82 |
 | tests | storage | 18 |
 | tests | scripts | 8 |
@@ -96,7 +96,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.interfaces | src.application | 57 |
 | src.application.ledger | domain.domain.ledger | 27 |
 | src.application | domain.storage | 25 |
-| src.application | src.application.settings | 16 |
+| src.application | src.application.settings | 17 |
 | src.application | domain.domain.engine | 15 |
 | src.application | src.application.multi_tick | 15 |
 | src.application.inbound | src.application | 11 |
@@ -122,35 +122,35 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application.trades | src.application.ledger | 4 |
 | src.application.trades | src.infrastructure | 4 |
 | src.application | src.application.trades | 3 |
-| src.application.ai_cofunder | src.application | 3 |
+| src.application.research | src.application | 3 |
 | src.application.trades | domain.domain.ledger | 3 |
 | src.interfaces | src.application.trades | 3 |
 | src.interfaces | src.application.ledger | 3 |
 | src.interfaces | src.application.positions | 3 |
 | domain.domain | domain.domain.ledger | 3 |
-| src.application | src.application.ai_cofunder | 2 |
+| src.application | src.application.research | 2 |
 | src.application.inbound | src.infrastructure | 2 |
 | src.application.ledger | src.application.settings | 2 |
 | src.application.multi_tick | domain.storage | 2 |
+| src.application.strategy_lab | src.application | 2 |
 | src.infrastructure | domain.domain | 2 |
 | src.interfaces | src.application.settings | 2 |
 | domain.services | domain.storage | 2 |
 | scripts | domain.storage | 2 |
-| src.application.ai_cofunder | domain.domain.engine | 1 |
-| src.application.ai_cofunder | src.application.settings | 1 |
+| src.application | src.application.strategy_lab | 1 |
 | src.application.inbound | src.application.settings | 1 |
 | src.application.ledger | src.application | 1 |
 | src.application.ledger | src.application.positions | 1 |
 | src.application.multi_tick | domain.services | 1 |
 | src.application | domain.services | 1 |
+| src.application.research | domain.domain.engine | 1 |
+| src.application.research | src.application.settings | 1 |
 | src.application.setup | src.application.settings | 1 |
 | src.application | src.application.setup | 1 |
 | src.application.trades | src.application.positions | 1 |
 | src.interfaces | src.application.inbound | 1 |
 | src.interfaces | src.application.setup | 1 |
 | src.interfaces | domain.domain | 1 |
-| src.interfaces | src.application.ai_cofunder | 1 |
-| src.interfaces | domain.domain.ledger | 1 |
 
 ## Boundary Checks
 
@@ -166,7 +166,7 @@ This matches the current architecture rule that `domain/domain/` must not import
 
 ### Package-Level Cycles
 
-- 7 packages: `src.application`, `src.application.ai_cofunder`, `src.application.ledger`, `src.application.multi_tick`, `src.application.positions`, `src.application.setup`, `src.application.trades`
+- 8 packages: `src.application`, `src.application.ledger`, `src.application.multi_tick`, `src.application.positions`, `src.application.research`, `src.application.setup`, `src.application.strategy_lab`, `src.application.trades`
 - 3 packages: `domain.domain`, `domain.domain.engine`, `domain.domain.ledger`
 
 Package-level cycles are expected to be noisier because many flat `src.application.*` modules are compressed into broad buckets. Module-level SCCs are usually the more actionable cleanup targets.
@@ -177,11 +177,11 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 
 | module | incoming imports |
 |---|---|
-| src.application.agent_tool_contracts | 44 |
+| src.application.agent_tool_contracts | 46 |
 | domain.domain.ledger.position_fields | 37 |
 | src.infrastructure.io_utils | 33 |
 | src.application.config_loader | 23 |
-| src.application.settings | 22 |
+| src.application.settings | 23 |
 | src.application.ledger.api | 20 |
 | domain.domain.symbol_identity | 20 |
 | domain.domain.engine | 18 |
@@ -198,17 +198,17 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | module | outgoing imports |
 |---|---|
 | src.interfaces.cli.main | 51 |
-| src.application.agent_tool_handlers | 36 |
+| src.application.agent_tool_handlers | 37 |
 | src.application.multi_account_tick | 26 |
 | src.application.ledger.queries | 20 |
 | src.application.pipeline_runtime | 20 |
 | src.application.close_advice_runner | 18 |
 | src.application.multi_tick.required_data_prefetch | 18 |
 | src.application.tick_notification_flow | 18 |
-| src.application.agent_tool_runtime_status | 15 |
+| src.application.agent_tool_runtime_status | 16 |
 | src.application.sell_put_steps | 15 |
+| src.application.trades.auto_intake | 15 |
 | src.application.assistant.runtime | 14 |
-| src.application.trades.auto_intake | 14 |
 | src.application.account_run | 13 |
 | src.application.ledger.commands | 13 |
 | src.application.pipeline_context | 13 |

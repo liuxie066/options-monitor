@@ -105,18 +105,18 @@ healthcheck 会额外给出本地 `ledger_store` 和 `option_positions_bootstrap
 
 ---
 
-## 6. 收集 AI Cofunder 证据
+## 6. 收集 Research 证据
 
-如果目标是让 MacBook 上的 Codex 分析线上版本质量、持仓/交易一致性，或多账户策略影响，使用 AI Cofunder 证据交接：
+如果目标是让 MacBook 上的 Codex 分析线上版本质量、持仓/交易一致性，或多账户策略影响，使用 Research 证据交接：
 
 ```bash
-./om-agent run --tool ai_cofunder --input-json '{"config_key":"us","scope":"full","output":"both","write_outputs":false}'
+./om-agent run --tool research --input-json '{"config_key":"us","scope":"full","output":"both","write_outputs":false}'
 ```
 
 同一个能力也有人工 CLI：
 
 ```bash
-./om ai-cofunder collect --config-key us --scope full --output both --no-write-outputs
+./om research collect --config-key us --scope full --output both --no-write-outputs
 ```
 
 它默认不写文件、不发送通知、不调用在线 AI。线上调度系统的状态需要通过 `scheduler_evidence` 或 `--scheduler-evidence-json` 传入。

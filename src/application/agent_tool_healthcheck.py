@@ -465,7 +465,7 @@ def run_healthcheck_tool(
         "preview_notification": {"available": True, "mode": "read"},
         "runtime_status": {"available": True, "mode": "read"},
         "openclaw_readiness": {"available": True, "mode": "read"},
-        "ai_cofunder": {"available": True, "mode": "read_default_write_optional"},
+        "research": {"available": True, "mode": "read_default_write_optional"},
     }
     critical = [item for item in checks if item["status"] == "error"]
     return (

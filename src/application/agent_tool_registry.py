@@ -526,15 +526,15 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
         examples=({"input": {"config_key": "us", "timeout_sec": 20}},),
     ),
     AgentToolDefinition(
-        name="ai_cofunder",
+        name="research",
         read_only=False,
         description=(
-            "AI Cofunder evidence collector: build a redacted bundle for MacBook Codex to diagnose "
+            "Research evidence collector: build a redacted bundle for MacBook Codex to diagnose "
             "ledger quality, multi-account strategy effects, and runtime quality."
         ),
         requires=("runtime_config", "runtime_artifacts"),
         capabilities=(
-            "ai_cofunder_bundle",
+            "research_bundle",
             "ledger_quality",
             "account_strategy_matrix",
             "runtime_triage",
@@ -543,7 +543,7 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
             "healthcheck_snapshot",
             "local_report",
         ),
-        side_effects=("writes_local_ai_cofunder_reports",),
+        side_effects=("writes_local_research_reports",),
         input_schema={
             "scope": "optional ledger|account-strategy|quality|strategy|full; defaults full",
             "config_key": "us|hk",
@@ -555,10 +555,10 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
             "timeout_sec": "optional int forwarded to healthcheck when include_healthcheck=true",
             "scheduler_evidence": "optional online scheduler evidence object with provider/job/status/exit_code/last_run_id/last_triggered_at/stdout_tail/stderr_tail",
             "output": "optional handoff|json|both; defaults to handoff",
-            "write_outputs": "optional bool; defaults false, true writes ai-cofunder files after write-tool confirmation",
+            "write_outputs": "optional bool; defaults false, true writes research files after write-tool confirmation",
             "confirm": "required true when write_outputs=true",
-            "ai_cofunder_output_dir": "optional output directory; defaults to output_shared/ai_cofunder",
-            "ai_cofunder_current_dir": "optional current-state directory; defaults to output_shared/state/current",
+            "research_output_dir": "optional output directory; defaults to output_shared/research",
+            "research_current_dir": "optional current-state directory; defaults to output_shared/state/current",
             "report_dir": "optional report dir forwarded to runtime_status and strategy evidence",
             "state_dir": "optional legacy state dir forwarded to runtime_status",
             "shared_state_dir": "optional shared state dir forwarded to runtime_status",
@@ -581,6 +581,58 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
             {"input": {"scope": "full", "config_key": "us"}},
             {"input": {"scope": "ledger", "config_key": "us"}},
             {"input": {"scope": "account-strategy", "config_key": "us"}},
+        ),
+    ),
+    AgentToolDefinition(
+        name="strategy_lab",
+        read_only=False,
+        description=(
+            "Run a deterministic Strategy Lab replay experiment from local evidence and render a report; "
+            "does not mutate strategy config, ledger, trades, notifications, or broker state."
+        ),
+        requires=("strategy_evidence",),
+        capabilities=(
+            "strategy_experiment",
+            "sell_put_replay",
+            "strategy_lab_report",
+            "local_report",
+        ),
+        side_effects=("writes_local_strategy_lab_reports",),
+        input_schema={
+            "experiment_id": "optional experiment id; defaults to sell_put_replay",
+            "strategy_type": "optional sell_put|sell_call|yield_enhancement|close_advice; defaults sell_put",
+            "account": "optional account label filter",
+            "start_date": "optional display-only experiment start date",
+            "end_date": "optional display-only experiment end date",
+            "candidate_paths": "optional candidate CSV/JSON/JSONL path or list of paths",
+            "reject_log_paths": "optional reject-log CSV/JSON/JSONL path or list of paths",
+            "trace_paths": "optional candidate trace JSON/JSONL path or list of paths",
+            "strategy_replay_paths": "optional strategy replay CSV/JSON/JSONL path or list of paths",
+            "historical_snapshot_paths": "optional frozen historical-data snapshot JSON path or list of paths; fetched outside the replay engine",
+            "baseline_policy": "optional policy object with name/strategy_type/params",
+            "candidate_policy": "optional policy object with name/strategy_type/params",
+            "baseline_params": "optional baseline policy params; defaults selection_source=existing",
+            "candidate_params": "optional candidate policy params; defaults selection_source=rules",
+            "requested_metrics": "optional metric names; Sharpe/Sortino/Calmar are rejected without an equity curve",
+            "sample_limit": "optional evidence sample row count; defaults 5",
+            "write_outputs": "optional bool; defaults false, true writes local Strategy Lab result/report files",
+            "confirm": "required true when write_outputs=true",
+            "output_dir": "optional output directory; defaults to output_shared/strategy_lab",
+            "current_dir": "optional current-state directory; defaults to output_shared/state/current",
+        },
+        risk_level="local_write",
+        requires_confirm=True,
+        safe_default_input={"strategy_type": "sell_put", "write_outputs": False},
+        examples=(
+            {
+                "input": {
+                    "strategy_type": "sell_put",
+                    "candidate_paths": ["output_shared/reports/sell_put_candidates.csv"],
+                    "baseline_params": {"selection_source": "existing", "min_sample": 5},
+                    "candidate_params": {"selection_source": "rules", "min_sample": 5},
+                    "write_outputs": False,
+                }
+            },
         ),
     ),
 )

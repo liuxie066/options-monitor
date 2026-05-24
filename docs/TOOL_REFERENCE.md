@@ -83,12 +83,13 @@ om-agent run --tool runtime_status --env-file /etc/options-monitor/options-monit
 | `scan_opportunities` | `om scan` / `om scan-pipeline` |
 | `candidate_rank_explain` | Agent-only read existing candidate CSV ranking explanations |
 | `strategy_replay_analyze` | `om strategy-replay analyze` |
+| `strategy_lab` | `om strategy-lab replay` |
 | `preview_notification` | `om notify preview` |
 | `runtime_status` | `om status` or raw assistant/runtime artifact summary |
 | `runtime_runs` | `om runs` |
 | `runtime_logs` | `om logs` |
 | `openclaw_readiness` | Agent-only OpenClaw readiness summary |
-| `ai_cofunder` | `om ai-cofunder collect` |
+| `research` | `om research collect` |
 | `get_close_advice` | `om close-advice` |
 | `query_cash_headroom` | `om sell-put-cash` / `src.application.cash_headroom_query::query_sell_put_cash(...)` |
 | `monthly_income_report` | `om option-positions report monthly-income` |
@@ -636,7 +637,7 @@ om-agent run --tool openclaw_readiness --input-json '{"profile_path":"openclaw.p
 
 ---
 
-## 5.17 `ai_cofunder`
+## 5.17 `research`
 
 用途：
 - 收集线上运行证据，生成给 MacBook Codex 阅读的 redacted bundle / handoff
@@ -648,14 +649,14 @@ om-agent run --tool openclaw_readiness --input-json '{"profile_path":"openclaw.p
 示例：
 
 ```bash
-om-agent run --tool ai_cofunder --input-json '{"config_key":"us","scope":"full","output":"both","write_outputs":false}'
-om ai-cofunder collect --config-key us --scope full --output both --no-write-outputs
+om-agent run --tool research --input-json '{"config_key":"us","scope":"full","output":"both","write_outputs":false}'
+om research collect --config-key us --scope full --output both --no-write-outputs
 ```
 
 带线上调度证据：
 
 ```bash
-om-agent run --tool ai_cofunder --input-json '{
+om-agent run --tool research --input-json '{
   "config_key": "us",
   "scope": "full",
   "output": "both",
@@ -686,14 +687,78 @@ Scope：
 默认写入位置：
 
 ```text
-output_shared/ai_cofunder/
-output_shared/state/current/ai_cofunder.current.json
+output_shared/research/
+output_shared/state/current/research.current.json
 ```
 
 注意：
 - 它是证据打包工具，不是线上 AI 推理功能。
 - `scheduler_evidence` 来自线上调度系统；尽量提供 `last_run_id` 和 `last_triggered_at`，否则本地 runtime 文件不能完整证明线上 cron 是否按时触发。
 - `include_healthcheck=true` 只在 `quality` / `full` scope 下有意义。
+
+---
+
+## 5.18 `strategy_lab`
+
+用途：
+- 从本地候选、拒绝日志、trace、strategy replay 证据运行确定性的策略实验。
+- 当前 replay 引擎支持 `sell_put`、`sell_call`、`yield_enhancement`、`close_advice`；非 `sell_put` 策略只使用证据里明确提供的资金占用、尾部损失或已实现收益字段，缺失时返回 warning/空值，不做推断。
+- 历史行情必须先保存为 frozen historical snapshot，再通过 `historical_snapshot_paths` 输入；replay 过程中不直接调用 Futu API。
+- 输出结构化 result 和 Markdown 报告。
+- 不改策略配置、不写账本、不写交易、不发送通知、不调用 broker。
+- 没有可信权益曲线前会拒绝 `sharpe_ratio` / `sortino_ratio` / `calmar_ratio` 这类标准比率。
+
+示例：
+
+```bash
+om strategy-lab replay \
+  --experiment-id sell-put-tight-delta \
+  --account sy \
+  --candidate-path output_shared/reports/sell_put_candidates.csv \
+  --reject-log-path output_shared/reports/sell_put_candidates_reject_log.csv \
+  --historical-snapshot-path output_shared/strategy_lab/historical_data/manual-<fingerprint>.json \
+  --min-dte 20 \
+  --max-dte 35 \
+  --min-abs-delta 0.10 \
+  --max-abs-delta 0.35 \
+  --min-premium 4 \
+  --min-sample 5
+```
+
+Agent 示例：
+
+```bash
+om-agent run --tool strategy_lab --input-json '{
+  "strategy_type": "sell_put",
+  "account": "sy",
+  "candidate_paths": ["output_shared/reports/sell_put_candidates.csv"],
+  "reject_log_paths": ["output_shared/reports/sell_put_candidates_reject_log.csv"],
+  "historical_snapshot_paths": ["output_shared/strategy_lab/historical_data/manual-<fingerprint>.json"],
+  "baseline_params": {"selection_source": "existing", "min_sample": 5},
+  "candidate_params": {
+    "selection_source": "rules",
+    "min_dte": 20,
+    "max_dte": 35,
+    "min_abs_delta": 0.10,
+    "max_abs_delta": 0.35,
+    "min_premium": 4,
+    "min_sample": 5
+  },
+  "write_outputs": false
+}'
+```
+
+写本地实验结果需要三层条件：
+- `write_outputs=true`
+- `confirm=true`
+- `OM_AGENT_ENABLE_WRITE_TOOLS=true`
+
+默认写入位置：
+
+```text
+output_shared/strategy_lab/
+output_shared/state/current/strategy_lab.current.json
+```
 
 ---
 

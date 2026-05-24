@@ -12,13 +12,14 @@ from pathlib import Path
 DEFAULT_INCLUDE_ROOTS = ("src", "domain", "scripts", "tests")
 PRODUCTION_ROOTS = ("src", "domain", "scripts")
 APPLICATION_SUBPACKAGES = {
-    "ai_cofunder",
+    "research",
     "inbound",
     "ledger",
     "multi_tick",
     "positions",
     "settings",
     "setup",
+    "strategy_lab",
     "trades",
 }
 DOMAIN_SUBPACKAGES = {"engine", "ledger"}
