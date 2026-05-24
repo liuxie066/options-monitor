@@ -41,6 +41,11 @@ def build_strategy_lab_report(result: BacktestResult) -> StrategyLabReport:
         f"- 证据文件数：{result.evidence.summary().get('artifact_count', 0)}",
         f"- 候选行数：{result.evidence.summary().get('candidate_count', 0)}",
         f"- 拒绝日志行数：{result.evidence.summary().get('reject_log_count', 0)}",
+        f"- Trace 行数：{result.evidence.summary().get('trace_count', 0)}",
+        f"- Replay 行数：{result.evidence.summary().get('replay_row_count', 0)}",
+        "",
+        "## 证据诊断",
+        *_evidence_diagnostic_lines(result),
         "",
         "## Baseline 指标",
         *_metric_lines(result.baseline_metrics),
@@ -88,6 +93,9 @@ def _summary(result: BacktestResult) -> dict[str, Any]:
         "candidate_selected_count": candidate_selected,
         "baseline_sample_size": baseline_sample,
         "candidate_sample_size": candidate_sample,
+        "evidence_summary": result.evidence.summary(),
+        "candidate_missing_fields": _candidate_missing_fields(result),
+        "capital_efficiency_blockers": _capital_efficiency_blockers(result.candidate_metrics),
         "net_cash_inflow_lift": result.comparison.get("net_cash_inflow_lift"),
         "realized_pnl_lift": result.comparison.get("realized_pnl_lift"),
         "return_per_locked_cash_day_lift": result.comparison.get("return_per_locked_cash_day_lift"),
@@ -116,6 +124,72 @@ def _metric_lines(metrics: MetricSet) -> list[str]:
     ]
 
 
+def _evidence_diagnostic_lines(result: BacktestResult) -> list[str]:
+    summary = result.evidence.summary()
+    lines = [
+        f"- 可评估候选行：{summary.get('candidate_count', 0)}",
+        f"- 拒绝日志行：{summary.get('reject_log_count', 0)}",
+        f"- Trace 行：{summary.get('trace_count', 0)}",
+        f"- Replay 行：{summary.get('replay_row_count', 0)}",
+    ]
+    missing = _candidate_missing_fields(result)
+    if missing:
+        rendered = "、".join(f"{key} {value}" for key, value in missing.items())
+        lines.append(f"- 候选关键字段缺失：{rendered}")
+    else:
+        lines.append("- 候选关键字段缺失：无")
+    blockers = _capital_efficiency_blockers(result.candidate_metrics)
+    if blockers:
+        lines.append("- 资金效率不可用原因：" + "；".join(blockers))
+    artifact_rows = summary.get("artifact_rows")
+    if isinstance(artifact_rows, list) and artifact_rows:
+        lines.append("- 输入文件行数：")
+        for item in artifact_rows:
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                f"  - {item.get('kind') or '-'} rows={item.get('row_count', 0)} "
+                f"{item.get('path') or '-'}"
+            )
+    return lines
+
+
+def _candidate_missing_fields(result: BacktestResult) -> dict[str, str]:
+    candidates = list(result.evidence.candidates)
+    total = len(candidates)
+    if total <= 0:
+        return {}
+    fields = {
+        "premium": lambda row: row.premium is not None,
+        "dte": lambda row: row.dte is not None,
+        "strike": lambda row: row.strike is not None,
+        "multiplier": lambda row: row.multiplier is not None,
+        "contracts": lambda row: row.contracts is not None,
+        "locked_cash": lambda row: row.locked_cash is not None,
+    }
+    missing: dict[str, str] = {}
+    for name, predicate in fields.items():
+        count = sum(1 for row in candidates if not predicate(row))
+        if count:
+            missing[name] = f"{count}/{total}"
+    return missing
+
+
+def _capital_efficiency_blockers(metrics: MetricSet) -> list[str]:
+    if _float_metric(metrics.capital.get("return_per_locked_cash_day")) is not None:
+        return []
+    selected_count = _int_metric(metrics.execution.get("selected_count")) or 0
+    if selected_count <= 0:
+        return ["无已选候选"]
+    blockers: list[str] = []
+    if _float_metric(metrics.returns.get("net_cash_inflow")) is None:
+        blockers.append("缺少可计算权利金")
+    locked_cash_days = _float_metric(metrics.capital.get("locked_cash_days"))
+    if locked_cash_days in (None, 0):
+        blockers.append("缺少可计算 locked_cash_days")
+    return blockers or ["资金效率字段不足"]
+
+
 def _warning_lines(warnings: tuple[str, ...]) -> list[str]:
     if not warnings:
         return ["- 无"]
@@ -127,7 +201,10 @@ def _next_step_lines(result: BacktestResult) -> list[str]:
     if result.comparison.get("risk_worsening"):
         lines.append("- 风险变差，先缩小样本或收紧筛选条件，不进入影子观察。")
     if result.conclusion == "reject":
-        lines.append("- 当前证据不支持继续推进，保留实验记录即可。")
+        if result.evidence.summary().get("candidate_count", 0) == 0:
+            lines.append("- 当前没有可评估候选行，先修复候选证据采集或换用包含候选的 run。")
+        else:
+            lines.append("- 当前证据不支持继续推进，保留实验记录即可。")
     elif result.conclusion == "watch":
         lines.append("- 先补充样本和数据质量，不改线上策略参数。")
     elif result.conclusion == "shadow":

@@ -360,13 +360,59 @@ def test_strategy_lab_replay_backtest_compares_sell_put_policies(tmp_path: Path)
     result = run_replay_backtest(experiment, evidence)
 
     assert result.baseline_metrics.execution["selected_count"] == 2
-    assert result.candidate_metrics.execution["selected_count"] == 3
-    assert result.candidate_metrics.returns["net_cash_inflow"] == 2400
-    assert result.candidate_metrics.capital["locked_cash_days"] == 3900000
-    assert result.candidate_metrics.capital["return_per_locked_cash_day"] == 2400 / 3900000
-    assert result.candidate_metrics.risk["tail_loss_scenario"] == -147600
-    assert result.comparison["selected_count_lift"] == 1
-    assert result.conclusion in {"shadow", "watch"}
+    assert result.candidate_metrics.execution["selected_count"] == 2
+    assert result.candidate_metrics.execution["reject_log_count"] == 1
+    assert result.candidate_metrics.execution["reject_reason_distribution"] == {"risk_spread": 1}
+    assert result.candidate_metrics.returns["net_cash_inflow"] == 1600
+    assert result.candidate_metrics.capital["locked_cash_days"] == 3380000
+    assert result.candidate_metrics.capital["return_per_locked_cash_day"] == 1600 / 3380000
+    assert result.candidate_metrics.risk["tail_loss_scenario"] == -128400
+    assert result.comparison["selected_count_lift"] == 0
+    assert result.conclusion == "reject"
+
+
+def test_strategy_lab_replay_does_not_promote_reject_logs_to_candidates(tmp_path: Path) -> None:
+    from src.application.strategy_lab import (
+        StrategyExperiment,
+        StrategyPolicy,
+        build_strategy_lab_report,
+        load_strategy_lab_evidence,
+        run_replay_backtest,
+    )
+
+    candidate_path = tmp_path / "sell_put_candidates.csv"
+    candidate_path.write_text(
+        "symbol,account,option_type,side,strike,expiry,dte,premium,delta,selected\n",
+        encoding="utf-8",
+    )
+    reject_path = tmp_path / "sell_put_candidates_reject_log.csv"
+    reject_path.write_text(
+        "symbol,account,option_type,side,strike,expiry,dte,premium,delta,engine_reject_reason,multiplier,contracts\n"
+        "TSLA,sy,put,short,200,2026-06-19,26,8,-0.30,risk_spread,100,1\n",
+        encoding="utf-8",
+    )
+    evidence = load_strategy_lab_evidence(candidate_paths=[candidate_path], reject_log_paths=[reject_path], base=tmp_path)
+    experiment = StrategyExperiment(
+        experiment_id="exp_reject_logs_are_diagnostics",
+        strategy_type="sell_put",
+        account="sy",
+        baseline_policy=StrategyPolicy(name="baseline", strategy_type="sell_put", params={"selection_source": "existing"}),
+        candidate_policy=StrategyPolicy(name="candidate", strategy_type="sell_put", params={"selection_source": "rules"}),
+    )
+
+    result = run_replay_backtest(experiment, evidence)
+    report = build_strategy_lab_report(result)
+
+    assert result.evidence.summary()["candidate_count"] == 0
+    assert result.evidence.summary()["reject_log_count"] == 1
+    assert result.candidate_metrics.execution["candidate_count"] == 0
+    assert result.candidate_metrics.execution["selected_count"] == 0
+    assert result.candidate_metrics.execution["reject_reason_distribution"] == {"risk_spread": 1}
+    assert "candidate_evidence_empty" in result.warnings
+    assert result.conclusion == "reject"
+    assert "可评估候选行：0" in report.markdown
+    assert "资金效率不可用原因：无已选候选" in report.markdown
+    assert "当前没有可评估候选行" in report.markdown
 
 
 def test_strategy_lab_replay_backtest_supports_sell_call_with_explicit_capital(tmp_path: Path) -> None:
@@ -559,11 +605,14 @@ def test_strategy_lab_report_renders_stable_sections_without_pseudo_standard_rat
 
     assert report.summary["experiment_id"] == "exp_sell_put_report"
     assert report.summary["baseline_sample_size"] == 2
-    assert report.summary["candidate_sample_size"] == 3
-    assert report.summary["risk_worsening"] is True
+    assert report.summary["candidate_sample_size"] == 2
+    assert report.summary["risk_worsening"] is False
+    assert report.summary["evidence_summary"]["candidate_count"] == 2
+    assert report.summary["evidence_summary"]["reject_log_count"] == 1
     for section in (
         "## 结论",
         "## 实验范围",
+        "## 证据诊断",
         "## Baseline 指标",
         "## Candidate 指标",
         "## 收益差异",
@@ -573,10 +622,13 @@ def test_strategy_lab_report_renders_stable_sections_without_pseudo_standard_rat
         "## 下一步建议",
     ):
         assert section in report.markdown
-    assert "sample_size：3" in report.markdown
-    assert "risk_worsening：是" in report.markdown
-    assert "locked_cash_days：3,900,000.00" in report.markdown
-    assert "return_per_locked_cash_day：0.000615" in report.markdown
+    assert "sample_size：2" in report.markdown
+    assert "risk_worsening：否" in report.markdown
+    assert "locked_cash_days：3,380,000.00" in report.markdown
+    assert "return_per_locked_cash_day：0.000473" in report.markdown
+    assert "可评估候选行：2" in report.markdown
+    assert "拒绝日志行：1" in report.markdown
+    assert "输入文件行数：" in report.markdown
     assert "Sharpe" not in report.markdown
     assert "Sortino" not in report.markdown
     assert "Calmar" not in report.markdown

@@ -14,17 +14,31 @@ from src.application.strategy_lab.contracts import (
 
 
 def run_replay_backtest(experiment: StrategyExperiment, evidence: StrategyLabEvidence) -> BacktestResult:
-    universe = _strategy_universe(evidence, strategy_type=experiment.strategy_type, account=experiment.account)
+    universe = _strategy_universe(evidence.candidates, strategy_type=experiment.strategy_type, account=experiment.account)
+    reject_rows = _strategy_universe(evidence.reject_logs, strategy_type=experiment.strategy_type, account=experiment.account)
     baseline = _select(experiment.baseline_policy, universe)
     candidate = _select(experiment.candidate_policy, universe)
-    baseline_metrics = _metric_set(baseline, universe=universe, policy=experiment.baseline_policy, strategy_type=experiment.strategy_type)
-    candidate_metrics = _metric_set(candidate, universe=universe, policy=experiment.candidate_policy, strategy_type=experiment.strategy_type)
+    baseline_metrics = _metric_set(
+        baseline,
+        universe=universe,
+        reject_rows=reject_rows,
+        policy=experiment.baseline_policy,
+        strategy_type=experiment.strategy_type,
+    )
+    candidate_metrics = _metric_set(
+        candidate,
+        universe=universe,
+        reject_rows=reject_rows,
+        policy=experiment.candidate_policy,
+        strategy_type=experiment.strategy_type,
+    )
     comparison = _compare(baseline_metrics, candidate_metrics)
     conclusion = _conclusion(comparison, candidate_metrics)
     warnings = tuple(
         item
         for item in (
             *evidence.warnings,
+            "candidate_evidence_empty" if not universe else None,
             *_metric_warnings("baseline", baseline_metrics),
             *_metric_warnings("candidate", candidate_metrics),
         )
@@ -41,10 +55,10 @@ def run_replay_backtest(experiment: StrategyExperiment, evidence: StrategyLabEvi
     )
 
 
-def _strategy_universe(evidence: StrategyLabEvidence, *, strategy_type: str, account: str | None) -> list[CandidateSnapshot]:
+def _strategy_universe(rows_in: tuple[CandidateSnapshot, ...], *, strategy_type: str, account: str | None) -> list[CandidateSnapshot]:
     account_norm = str(account or "").strip().lower() or None
     rows: list[CandidateSnapshot] = []
-    for row in (*evidence.candidates, *evidence.reject_logs):
+    for row in rows_in:
         if account_norm and row.account and row.account != account_norm:
             continue
         if _matches_strategy(row, strategy_type):
@@ -96,7 +110,14 @@ def _passes_rules(row: CandidateSnapshot, params: dict[str, Any]) -> bool:
     return True
 
 
-def _metric_set(selected: list[CandidateSnapshot], *, universe: list[CandidateSnapshot], policy: StrategyPolicy, strategy_type: str) -> MetricSet:
+def _metric_set(
+    selected: list[CandidateSnapshot],
+    *,
+    universe: list[CandidateSnapshot],
+    reject_rows: list[CandidateSnapshot],
+    policy: StrategyPolicy,
+    strategy_type: str,
+) -> MetricSet:
     premium_values = [_premium_value(row) for row in selected]
     realized_pnl_values = [_realized_pnl_value(row) for row in selected]
     locked_cash_values = [_locked_cash(row, strategy_type=strategy_type) for row in selected]
@@ -161,7 +182,8 @@ def _metric_set(selected: list[CandidateSnapshot], *, universe: list[CandidateSn
         execution={
             "candidate_count": len(universe),
             "selected_count": selected_count,
-            "reject_reason_distribution": _reject_reason_distribution(universe),
+            "reject_log_count": len(reject_rows),
+            "reject_reason_distribution": _reject_reason_distribution(reject_rows),
             "avg_holding_days": avg_holding_days,
             "turnover": selected_count,
         },
