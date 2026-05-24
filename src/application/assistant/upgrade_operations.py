@@ -714,12 +714,14 @@ def render_upgrade_response(
         return "\n".join(lines)
     if status == "applied":
         changed = "已切换" if bool(data.get("changed")) else "未切换"
+        active_version = target if bool(data.get("changed")) and target != "-" else current
         return "\n".join(
             [
                 "升级执行完成。",
-                f"当前版本：{current}",
+                f"升级前版本：{current}",
+                f"当前版本：{active_version}",
                 f"目标版本：{target}",
-                f"状态：{upgrade_status}",
+                f"状态：{user_facing_operation_status(status)}",
                 f"结果：{changed}",
                 f"command_id: {operation_id}",
             ]

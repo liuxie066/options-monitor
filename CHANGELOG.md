@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.138 - 2026-05-24
+
+### Fixed
+- Clarified final Feishu upgrade receipts so the pre-upgrade version is labeled separately from the active current version, and internal `applied` status no longer leaks into user-facing text.
+
 ## 1.2.137 - 2026-05-24
 
 ### Added
