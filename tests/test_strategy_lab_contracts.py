@@ -76,7 +76,7 @@ def test_strategy_lab_loader_keeps_candidates_and_reject_logs_separate(tmp_path:
     assert evidence.candidates[0].symbol == "NVDA"
     assert evidence.candidates[0].strategy_type == "sell_put"
     assert evidence.candidates[0].selected is True
-    assert evidence.candidates[0].contracts is None
+    assert evidence.candidates[0].contracts == 1
     assert evidence.candidates[0].multiplier is None
     assert evidence.candidates[0].locked_cash is None
     assert evidence.reject_logs[0].symbol == "TSLA"
@@ -102,6 +102,56 @@ def test_strategy_lab_loader_reads_trace_and_replay_rows(tmp_path: Path) -> None
     assert evidence.summary()["replay_row_count"] == 1
     assert evidence.traces[0]["stage"] == "rank"
     assert evidence.replay_rows[0]["actual_return"] == 0.04
+
+
+def test_strategy_lab_loader_normalizes_first_party_sell_put_candidate_files(tmp_path: Path) -> None:
+    from src.application.strategy_lab import (
+        StrategyExperiment,
+        StrategyPolicy,
+        load_strategy_lab_evidence,
+        run_replay_backtest,
+    )
+
+    candidate_dir = tmp_path / "output_runs" / "run-1" / "accounts" / "lx"
+    candidate_dir.mkdir(parents=True)
+    candidate_path = candidate_dir / "pdd_sell_put_candidates.csv"
+    candidate_path.write_text(
+        "symbol,expiration,dte,contract_symbol,multiplier,currency,strike,bid,mid,net_income,cash_basis,delta\n"
+        "PDD,2026-06-12,21,US.PDD260612P85000,100.0,USD,85.0,0.78,0.865,84.16085,8415.83915,-0.157842633\n",
+        encoding="utf-8",
+    )
+    evidence = load_strategy_lab_evidence(candidate_paths=[candidate_path], base=tmp_path)
+    row = evidence.candidates[0]
+
+    assert row.account == "lx"
+    assert row.strategy_type == "sell_put"
+    assert row.option_type == "put"
+    assert row.side == "short"
+    assert row.contracts == 1
+    assert row.locked_cash == 8415.83915
+
+    experiment = StrategyExperiment(
+        experiment_id="first_party_sell_put",
+        strategy_type="sell_put",
+        account="lx",
+        baseline_policy=StrategyPolicy(
+            name="baseline",
+            strategy_type="sell_put",
+            params={"selection_source": "existing", "min_sample": 1},
+        ),
+        candidate_policy=StrategyPolicy(
+            name="candidate",
+            strategy_type="sell_put",
+            params={"selection_source": "rules", "min_sample": 1},
+        ),
+    )
+    result = run_replay_backtest(experiment, evidence)
+
+    assert result.candidate_metrics.execution["candidate_count"] == 1
+    assert result.candidate_metrics.execution["selected_count"] == 1
+    assert result.candidate_metrics.returns["net_cash_inflow"] == 84.16085
+    assert result.candidate_metrics.capital["locked_cash_days"] == 8415.83915 * 21
+    assert "candidate_evidence_empty" not in result.warnings
 
 
 def test_strategy_lab_historical_snapshot_cache_round_trips_under_repo(tmp_path: Path) -> None:

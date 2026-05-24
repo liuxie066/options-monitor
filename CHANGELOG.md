@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.141 - 2026-05-24
+
+### Fixed
+- Normalized first-party Strategy Lab candidate CSV evidence from `output_runs/*/accounts/<account>/` so account, sell-put strategy type, option side/type, contracts, and cash basis are understood without requiring duplicate columns in every candidate row.
+- Used explicit candidate `net_income` totals when calculating Strategy Lab premium inflow, avoiding incorrect per-share remultiplication for production candidate files.
+
 ## 1.2.140 - 2026-05-24
 
 ### Fixed
