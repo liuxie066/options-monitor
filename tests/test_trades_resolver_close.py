@@ -187,6 +187,36 @@ def test_resolve_trade_close_dry_run_allows_zero_price_on_expiration_date() -> N
     assert result.operations[0]["patch"]["close_price"] == 0.0
 
 
+def test_resolve_trade_close_skips_failed_deal_by_default() -> None:
+    repo = FakeRepo([_record("rec1", 100, 3)])
+
+    result = resolve_trade_deal(
+        _deal(),
+        repo=repo,
+        state={"failed_deal_ids": {"deal-close-1": {"status": "failed", "reason": "exception:LedgerPreflightError"}}},
+        apply_changes=False,
+    )
+
+    assert result.status == "skipped"
+    assert result.reason == "duplicate_deal_id"
+
+
+def test_resolve_trade_close_retries_failed_deal_when_explicitly_allowed() -> None:
+    repo = FakeRepo([_record("rec1", 100, 3)])
+
+    result = resolve_trade_deal(
+        _deal(),
+        repo=repo,
+        state={"failed_deal_ids": {"deal-close-1": {"status": "failed", "reason": "exception:LedgerPreflightError"}}},
+        apply_changes=False,
+        retry_failed_deal=True,
+    )
+
+    assert result.status == "dry_run"
+    assert result.action == "close"
+    assert result.reason == "preview_close"
+
+
 def test_resolve_trade_long_close_dry_run_builds_patches() -> None:
     repo = FakeRepo([_long_record("rec1", 100, 1), _long_record("rec2", 200, 2)])
 
@@ -326,6 +356,57 @@ def test_resolve_trade_close_apply_persists_expiration_zero_price_close(tmp_path
     assert len(close_events) == 1
     assert close_events[0]["raw_payload"]["record_id"] == lot_id
     assert close_events[0]["raw_payload"]["close_type"] == "expire_auto_close"
+    assert close_events[0]["raw_payload"]["broker_close_type"] == "expiration_zero_close"
+    assert repo.get_record_fields(lot_id)["contracts_open"] == 0
+
+
+def test_resolve_trade_close_retry_failed_persists_expiration_zero_price_close(tmp_path) -> None:
+    from domain.domain.option_position_lots import OpenPositionCommand
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="TIGR",
+            option_type="put",
+            side="short",
+            contracts=10,
+            currency="USD",
+            strike=6.0,
+            multiplier=100,
+            expiration_ymd="2026-05-22",
+            premium_per_share=0.2,
+            opened_at_ms=1779129617118,
+        ),
+    )
+    lot_id = repo.list_position_lots()[0]["record_id"]
+
+    result = resolve_trade_deal(
+        _deal(
+            deal_id="5646137975909129735",
+            order_id="FH1C8FA7239D5FA000",
+            symbol="TIGR",
+            contracts=10,
+            price=0.0,
+            strike=6.0,
+            expiration_ymd="2026-05-22",
+            currency="USD",
+            trade_time_ms=1779468493916,
+            raw_payload={"deal_id": "5646137975909129735", "code": "US.TIGR260522P6000"},
+        ),
+        repo=repo,
+        state={"failed_deal_ids": {"5646137975909129735": {"status": "failed", "reason": "exception:LedgerPreflightError"}}},
+        apply_changes=True,
+        retry_failed_deal=True,
+    )
+
+    assert result.status == "applied"
+    assert result.operations[0]["ledger_preflight"]["event_type"] == "expire_close"
+    close_events = [item for item in repo.list_trade_events() if item["position_effect"] == "close"]
+    assert len(close_events) == 1
+    assert close_events[0]["raw_payload"]["record_id"] == lot_id
     assert close_events[0]["raw_payload"]["broker_close_type"] == "expiration_zero_close"
     assert repo.get_record_fields(lot_id)["contracts_open"] == 0
 

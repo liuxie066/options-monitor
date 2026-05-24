@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.136 - 2026-05-24
+
+### Added
+- Added an explicit trade-intake `--retry-failed` replay path for single-deal JSON repair of historical failed deal ids without allowing processed deal ids to be written again.
+- Added `om run trade-intake --reconcile-state` to reconcile historical failed/unresolved intake state from ledger and audit evidence after a manual ledger repair has already corrected the position.
+
+### Fixed
+- Prevented corrected historical trade-intake failures from continuing to degrade runtime status when the ledger already contains the canonical close or skipped non-option evidence.
+
 ## 1.2.135 - 2026-05-23
 
 ### Fixed

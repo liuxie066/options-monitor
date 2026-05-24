@@ -104,6 +104,50 @@ def test_auto_trade_intake_apply_mode_requires_confirm(tmp_path: Path) -> None:
     assert "use --confirm or --yes" in result.stdout
 
 
+def test_auto_trade_intake_retry_failed_requires_deal_json(tmp_path: Path) -> None:
+    config_path = _write_runtime_config(tmp_path)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "src.application.trades.auto_intake",
+            "--config",
+            str(config_path),
+            "--mode",
+            "dry-run",
+            "--retry-failed",
+        ],
+        cwd=str(BASE),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "--retry-failed requires --deal-json replay" in result.stdout
+
+
+def test_auto_trade_intake_dry_run_flag_is_reconcile_state_only(tmp_path: Path) -> None:
+    config_path = _write_runtime_config(tmp_path)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "src.application.trades.auto_intake",
+            "--config",
+            str(config_path),
+            "--dry-run",
+        ],
+        cwd=str(BASE),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "--dry-run is only supported with --reconcile-state" in result.stdout
+
+
 def test_auto_trade_intake_once_defaults_state_paths_to_runtime_root(tmp_path: Path) -> None:
     config_path = _write_runtime_config(tmp_path)
     runtime_root = tmp_path / "runtime"

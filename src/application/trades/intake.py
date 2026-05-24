@@ -357,6 +357,7 @@ def process_trade_payload(
     normalize_trade_deal_fn: Callable[..., Any],
     resolve_trade_deal_fn: Callable[..., Any],
     on_result_fn: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
+    retry_failed_deal: bool = False,
 ) -> dict[str, Any]:
     state = load_trade_intake_state_fn(state_path) if apply_changes else {}
     append_trade_intake_audit_fn(audit_path, build_trade_intake_audit_event("received", payload=payload))
@@ -409,7 +410,13 @@ def process_trade_payload(
         )
     append_trade_intake_audit_fn(audit_path, build_trade_intake_audit_event("normalized", deal=deal))
     try:
-        result = resolve_trade_deal_fn(deal, repo=repo, state=state, apply_changes=apply_changes)
+        result = resolve_trade_deal_fn(
+            deal,
+            repo=repo,
+            state=state,
+            apply_changes=apply_changes,
+            retry_failed_deal=retry_failed_deal,
+        )
         result_dict = result.to_dict()
         result_dict = _attach_runtime_write_diagnostics(
             result_dict=result_dict,

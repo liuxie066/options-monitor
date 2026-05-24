@@ -63,6 +63,14 @@ def is_retryable_unresolved_deal(state: dict[str, Any] | None, deal_id: str | No
     return bucket == "unresolved_deal_ids" and str(payload.get("status") or "").strip().lower() == "unresolved" and bool(payload.get("retryable"))
 
 
+def is_failed_deal(state: dict[str, Any] | None, deal_id: str | None) -> bool:
+    item = lookup_deal_state_entry(state, deal_id)
+    if item is None:
+        return False
+    bucket, payload = item
+    return bucket == "failed_deal_ids" and str(payload.get("status") or "").strip().lower() == "failed"
+
+
 def upsert_deal_state(
     state: dict[str, Any] | None,
     *,
