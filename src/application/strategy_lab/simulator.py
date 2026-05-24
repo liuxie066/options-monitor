@@ -237,6 +237,9 @@ def _metric_warnings(prefix: str, metrics: MetricSet) -> tuple[str, ...]:
 
 
 def _premium_value(row: CandidateSnapshot) -> float | None:
+    explicit = _as_float(_first_raw(row, "net_income", "gross_income", "cash_inflow", "premium_total", "total_premium"))
+    if explicit is not None:
+        return explicit
     if row.premium is None:
         return None
     return row.premium * (_contracts(row) or 1) * (_multiplier(row) or 100.0)
