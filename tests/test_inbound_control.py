@@ -613,8 +613,14 @@ def test_inbound_upgrade_preview_and_confirm(monkeypatch: pytest.MonkeyPatch, tm
     assert worker["ok"] is True
     assert worker["data"]["status"] == "applied"
     assert "升级执行完成" in worker["data"]["response_text"]
+    assert "升级前版本：1.2.110" in worker["data"]["response_text"]
+    assert "当前版本：1.2.111" in worker["data"]["response_text"]
+    assert "当前版本：1.2.110" not in worker["data"]["response_text"]
+    assert "状态：已执行完成" in worker["data"]["response_text"]
+    assert "状态：applied" not in worker["data"]["response_text"]
     assert replies[-1]["message_id"] == "msg_upgrade_confirm"
     assert "升级执行完成" in str(replies[-1]["text"])
+    assert "当前版本：1.2.111" in str(replies[-1]["text"])
     assert replies[-1]["uuid"] == f"{operation_id}:upgrade-final"
     assert calls[-1]["confirm"] is True
     assert calls[-1]["auto"] is True
