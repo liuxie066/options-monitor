@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import json
 import sqlite3
 from pathlib import Path
 from typing import Any, Callable
@@ -17,6 +19,192 @@ from src.application.service_deploy import load_service_profile, service_status_
 
 def _dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def _list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return list(value)
+    return [value]
+
+
+def _read_countable_json_rows(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if not isinstance(value, dict):
+        return []
+    for key in ("rows", "records", "items", "data", "candidates", "replay_rows", "outcomes"):
+        rows = value.get(key)
+        if isinstance(rows, list):
+            return rows
+    return []
+
+
+def _count_evidence_rows(path: Path) -> int:
+    suffix = path.suffix.lower()
+    if suffix == ".csv":
+        with path.open("r", encoding="utf-8-sig", newline="") as fh:
+            return sum(1 for _row in csv.DictReader(fh))
+    if suffix == ".jsonl":
+        with path.open("r", encoding="utf-8") as fh:
+            return sum(1 for line in fh if line.strip())
+    if suffix == ".json":
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return len(_read_countable_json_rows(payload))
+    with path.open("r", encoding="utf-8") as fh:
+        return sum(1 for line in fh if line.strip())
+
+
+def _strategy_evidence_paths(payload: dict[str, Any], *, keys: tuple[str, ...], report_dir: Path | None, patterns: tuple[str, ...]) -> list[Path]:
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for key in keys:
+        for item in _list(payload.get(key)):
+            text = str(item or "").strip()
+            if not text:
+                continue
+            path = Path(text)
+            marker = str(path)
+            if marker not in seen:
+                paths.append(path)
+                seen.add(marker)
+    if report_dir is not None:
+        for pattern in patterns:
+            for path in sorted(report_dir.glob(pattern)):
+                marker = str(path)
+                if marker not in seen:
+                    paths.append(path)
+                    seen.add(marker)
+    return paths
+
+
+def _strategy_evidence_check(payload: dict[str, Any], *, mask_path: Callable[[Any], str]) -> tuple[dict[str, Any] | None, list[str]]:
+    relevant_keys = {
+        "strategy_report_dir",
+        "strategy_candidate_path",
+        "strategy_candidate_paths",
+        "candidate_path",
+        "candidate_paths",
+        "strategy_reject_log_path",
+        "strategy_reject_log_paths",
+        "reject_log_path",
+        "reject_log_paths",
+        "strategy_trace_path",
+        "strategy_trace_paths",
+        "trace_path",
+        "trace_paths",
+        "strategy_replay_path",
+        "strategy_replay_paths",
+        "strategy_outcome_path",
+        "strategy_outcome_paths",
+        "outcome_path",
+        "outcome_paths",
+    }
+    if not any(payload.get(key) for key in relevant_keys):
+        return None, []
+
+    report_dir_value = str(payload.get("strategy_report_dir") or "").strip()
+    report_dir = Path(report_dir_value) if report_dir_value else None
+    warnings: list[str] = []
+    groups = {
+        "candidates": _strategy_evidence_paths(
+            payload,
+            keys=("strategy_candidate_path", "strategy_candidate_paths", "candidate_path", "candidate_paths"),
+            report_dir=report_dir,
+            patterns=("*candidates*.csv", "*candidates*.json", "*candidates*.jsonl"),
+        ),
+        "reject_logs": _strategy_evidence_paths(
+            payload,
+            keys=("strategy_reject_log_path", "strategy_reject_log_paths", "reject_log_path", "reject_log_paths"),
+            report_dir=report_dir,
+            patterns=("*reject*.csv", "*reject*.json", "*reject*.jsonl"),
+        ),
+        "traces": _strategy_evidence_paths(
+            payload,
+            keys=("strategy_trace_path", "strategy_trace_paths", "trace_path", "trace_paths"),
+            report_dir=report_dir,
+            patterns=("*candidate_filter_trace*.json", "*candidate_filter_trace*.jsonl"),
+        ),
+        "outcomes": _strategy_evidence_paths(
+            payload,
+            keys=(
+                "strategy_replay_path",
+                "strategy_replay_paths",
+                "strategy_outcome_path",
+                "strategy_outcome_paths",
+                "outcome_path",
+                "outcome_paths",
+            ),
+            report_dir=report_dir,
+            patterns=("strategy_replay.csv", "strategy_replay.json", "strategy_replay.jsonl", "*outcome*.csv", "*outcome*.json", "*outcome*.jsonl"),
+        ),
+    }
+    try:
+        min_sample = int(payload.get("strategy_evidence_min_sample") or payload.get("min_sample") or 5)
+    except Exception:
+        min_sample = 5
+    min_sample = max(1, min_sample)
+
+    files: dict[str, list[dict[str, Any]]] = {}
+    totals: dict[str, int] = {}
+    problems: list[str] = []
+    for group, paths in groups.items():
+        files[group] = []
+        totals[group] = 0
+        for path in paths:
+            entry: dict[str, Any] = {"path": mask_path(path), "exists": path.exists(), "rows": 0}
+            if not path.exists():
+                entry["error"] = "file_not_found"
+                problems.append(f"{group}: missing {path.name}")
+            elif path.is_dir():
+                entry["error"] = "path_is_directory"
+                problems.append(f"{group}: {path.name} is a directory")
+            else:
+                try:
+                    rows = _count_evidence_rows(path)
+                    entry["rows"] = rows
+                    totals[group] += rows
+                except Exception as exc:
+                    entry["error"] = f"{type(exc).__name__}: {exc}"
+                    problems.append(f"{group}: failed to read {path.name}")
+            files[group].append(entry)
+
+    candidate_rows = totals["candidates"]
+    outcome_rows = totals["outcomes"]
+    trace_rows = totals["traces"]
+    reject_rows = totals["reject_logs"]
+    evaluable = candidate_rows >= min_sample and outcome_rows >= min_sample
+    readiness_notes: list[str] = []
+    if candidate_rows < min_sample:
+        readiness_notes.append(f"candidate_rows_below_min_sample:{candidate_rows}/{min_sample}")
+    if outcome_rows < min_sample:
+        readiness_notes.append(f"outcome_rows_below_min_sample:{outcome_rows}/{min_sample}")
+    if trace_rows == 0 and reject_rows == 0:
+        readiness_notes.append("missing_filter_or_reject_evidence")
+    if problems:
+        readiness_notes.extend(problems)
+
+    if readiness_notes:
+        warnings.append("Strategy evidence is not ready for lab-grade evaluation: " + "; ".join(readiness_notes))
+    return (
+        {
+            "name": "strategy_evidence",
+            "status": ("ok" if evaluable and not problems else "warn"),
+            "message": (
+                f"strategy evidence rows candidates={candidate_rows} "
+                f"reject_logs={reject_rows} traces={trace_rows} outcomes={outcome_rows}"
+            ),
+            "value": {
+                "evaluable": evaluable,
+                "min_sample": min_sample,
+                "row_counts": totals,
+                "files": files,
+                "notes": readiness_notes,
+            },
+        },
+        warnings,
+    )
 
 
 def run_healthcheck_tool(
@@ -222,6 +410,11 @@ def run_healthcheck_tool(
                 "value": {"status": option_positions_bootstrap_status},
             }
         )
+
+    strategy_evidence_check, strategy_evidence_warnings = _strategy_evidence_check(payload, mask_path=mask_path)
+    if strategy_evidence_check is not None:
+        checks.append(strategy_evidence_check)
+        warnings.extend(strategy_evidence_warnings)
 
     mapping_errors: list[str] = []
     mapping_preview: dict[str, dict[str, Any]] = {}

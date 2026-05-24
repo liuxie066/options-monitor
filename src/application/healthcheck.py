@@ -16,6 +16,12 @@ def run_healthcheck(
     profile_path: str | None = None,
     env_file: str | None = None,
     include_service_status: bool = False,
+    strategy_report_dir: str | None = None,
+    strategy_candidate_paths: list[str] | None = None,
+    strategy_reject_log_paths: list[str] | None = None,
+    strategy_trace_paths: list[str] | None = None,
+    strategy_outcome_paths: list[str] | None = None,
+    strategy_evidence_min_sample: int | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {}
     if config_key:
@@ -36,4 +42,16 @@ def run_healthcheck(
         payload["env_file"] = str(env_file)
     if include_service_status:
         payload["include_service_status"] = True
+    if strategy_report_dir:
+        payload["strategy_report_dir"] = str(strategy_report_dir)
+    if strategy_candidate_paths:
+        payload["strategy_candidate_paths"] = list(strategy_candidate_paths)
+    if strategy_reject_log_paths:
+        payload["strategy_reject_log_paths"] = list(strategy_reject_log_paths)
+    if strategy_trace_paths:
+        payload["strategy_trace_paths"] = list(strategy_trace_paths)
+    if strategy_outcome_paths:
+        payload["strategy_outcome_paths"] = list(strategy_outcome_paths)
+    if strategy_evidence_min_sample is not None:
+        payload["strategy_evidence_min_sample"] = int(strategy_evidence_min_sample)
     return execute_tool("healthcheck", payload)

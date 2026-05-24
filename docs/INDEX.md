@@ -29,11 +29,12 @@
 
 ## 业务规则
 - [candidate_strategy.md](candidate_strategy.md)：候选筛选与排序规则
-- [STRATEGY_REPLAY.md](STRATEGY_REPLAY.md)：策略复盘与参数学习
+- [STRATEGY_LAB_PRD.md](STRATEGY_LAB_PRD.md)：Strategy Lab 产品目标、边界、核心流程和验收标准
 
 ## 安全与约束
 - [GUARDRAILS.md](GUARDRAILS.md)：guardrails 与安全门禁
 
 ## 架构
 - [ARCHITECTURE.md](ARCHITECTURE.md)：系统分层、入口点、运行时流程（面向人类开发者）
+- [STRATEGY_LAB_SYSTEM_DESIGN.md](STRATEGY_LAB_SYSTEM_DESIGN.md)：Strategy Lab 目标系统设计、数据流、存储和安全边界
 - [TRADE_POSITION_LEDGER_REDESIGN.md](TRADE_POSITION_LEDGER_REDESIGN.md)：交易与持仓账本重构设计、迁移阶段、风控验收标准
