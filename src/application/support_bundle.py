@@ -11,7 +11,7 @@ from typing import Any, Callable
 
 from src.application.agent_tool_config import load_runtime_config
 from src.application.agent_tool_contracts import build_response, mask_path
-from src.application.ai_cofunder.redaction import redact_value
+from src.application.research.redaction import redact_value
 from src.application.config_validator import validate_config
 from src.application.runtime_paths import resolve_runtime_root
 from src.application.setup import run_setup_check

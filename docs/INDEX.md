@@ -16,7 +16,7 @@
 - [../CLAUDE.md](../CLAUDE.md)：Claude / OpenClaw 特有补充指令
 - [AGENT_INTEGRATION.md](AGENT_INTEGRATION.md)：Agent 集成合同
 - [AGENT_GETTING_STARTED.md](AGENT_GETTING_STARTED.md)：本地 Agent 工具快速开始
-- [AGENT_WIKI.md](AGENT_WIKI.md)：Agent 任务手册（工具选择、AI Cofunder、排障 playbook、模块地图、验证矩阵）
+- [AGENT_WIKI.md](AGENT_WIKI.md)：Agent 任务手册（工具选择、Research、排障 playbook、模块地图、验证矩阵）
 - [TOOL_REFERENCE.md](TOOL_REFERENCE.md)：工具参考
 - [SESSION_SUMMARY.md](SESSION_SUMMARY.md)：Session 间记忆摘要模板
 

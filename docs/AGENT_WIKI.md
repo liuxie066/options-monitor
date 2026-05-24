@@ -22,7 +22,7 @@ Primary entry points:
 | Human/operator command | `./om` |
 | Runtime tick | `./om run tick ...` |
 | Guarded production tick wrapper | `./om run tick-cron ...` |
-| MacBook Codex online-evidence handoff | `./om ai-cofunder collect ...` or `./om-agent run --tool ai_cofunder ...` |
+| MacBook Codex online-evidence handoff | `./om research collect ...` or `./om-agent run --tool research ...` |
 
 ## 2. First Five Minutes
 
@@ -56,19 +56,20 @@ Use the lowest-risk tool that can answer the question.
 | Why did a symbol disappear? | `candidate_filter_explain` | Uses trace evidence instead of guessing from final CSV |
 | Why is candidate ranking odd? | `candidate_rank_explain` | Explains existing candidate CSV ranking |
 | What strategy parameters look weak? | `strategy_replay_analyze` | Offline replay analysis, no config mutation |
+| How should a strategy hypothesis be replayed? | `./om strategy-lab replay`, `strategy_lab` | Deterministic replay from local evidence; no strategy config mutation |
 | Is Sell Put cash constrained? | `query_cash_headroom` | Account-aware cash and collateral view |
-| Is ledger projection trustworthy? | `option_positions_read action=inspect`, AI Cofunder `ledger` scope | Reads canonical event/projection state |
+| Is ledger projection trustworthy? | `option_positions_read action=inspect`, Research `ledger` scope | Reads canonical event/projection state |
 | Does close advice have inputs? | `prepare_close_advice_inputs`, then `close_advice` or `get_close_advice` | Keeps refresh and recommendation explicit |
-| What evidence should MacBook Codex analyze? | `ai_cofunder` | Builds a redacted evidence bundle and handoff |
+| What evidence should MacBook Codex analyze? | `research` | Builds a redacted evidence bundle and handoff |
 
-## 4. AI Cofunder Workflow
+## 4. Research Workflow
 
-AI Cofunder is not an online AI product feature. The online/Linux side collects redacted evidence. MacBook Codex reads the handoff and helps diagnose quality issues, ledger problems, and strategy-improvement directions.
+Research is not an online AI product feature. The online/Linux side collects redacted evidence. MacBook Codex reads the handoff and helps diagnose quality issues, ledger problems, and strategy-improvement directions.
 
 ### Common Server Command
 
 ```bash
-./om ai-cofunder collect \
+./om research collect \
   --config-key us \
   --scope full \
   --output both \
@@ -78,7 +79,7 @@ AI Cofunder is not an online AI product feature. The online/Linux side collects 
 With scheduler evidence from the online job runner:
 
 ```bash
-./om ai-cofunder collect \
+./om research collect \
   --config-key us \
   --scope full \
   --output both \
@@ -89,7 +90,7 @@ With scheduler evidence from the online job runner:
 With a readiness snapshot:
 
 ```bash
-./om ai-cofunder collect \
+./om research collect \
   --config-key us \
   --scope full \
   --include-healthcheck \
@@ -99,7 +100,7 @@ With a readiness snapshot:
 Equivalent agent tool:
 
 ```bash
-./om-agent run --tool ai_cofunder --input-json '{"config_key":"us","scope":"full","output":"both","write_outputs":false}'
+./om-agent run --tool research --input-json '{"config_key":"us","scope":"full","output":"both","write_outputs":false}'
 ```
 
 ### Scopes
@@ -112,19 +113,19 @@ Equivalent agent tool:
 | `strategy` | Candidate CSV, filter trace, and strategy replay evidence |
 | `full` | Combined default |
 
-AI Cofunder keeps candidate CSVs separate from `*_candidates_reject_log.csv` files. Reject logs remain available as rejection evidence, but they must not inflate candidate row counts.
+Research keeps candidate CSVs separate from `*_candidates_reject_log.csv` files. Reject logs remain available as rejection evidence, but they must not inflate candidate row counts.
 
 Default runs do not write files. Writing reports requires `write_outputs=true`, `confirm=true`, and `OM_AGENT_ENABLE_WRITE_TOOLS=true`. Default output locations are:
 
 ```text
-output_shared/ai_cofunder/
-output_shared/state/current/ai_cofunder.current.json
+output_shared/research/
+output_shared/state/current/research.current.json
 ```
 
 MacBook SSH pattern:
 
 ```bash
-ssh prod 'cd /path/to/options-monitor && ./om ai-cofunder collect \
+ssh prod 'cd /path/to/options-monitor && ./om research collect \
   --config-key us \
   --scope full \
   --output handoff \
@@ -135,7 +136,7 @@ ssh prod 'cd /path/to/options-monitor && ./om ai-cofunder collect \
 Recommended Codex prompt:
 
 ```text
-你现在作为 ai-cofunder。请基于下面的 AI Cofunder Handoff 分析线上质量问题，
+你现在作为 OM research analyst。请基于下面的 Research Handoff 分析线上质量问题，
 重点看持仓/交易一致性、多账户对 sell put / sell call / YE 的影响，
 输出：问题判断、证据、优先级、本地修复建议和需要补充的证据。
 ```
@@ -320,7 +321,7 @@ scripts/              -> operational wrappers only; delegate to src/ or domain/
 
 1. Read `runtime_status`.
 2. Add scheduler evidence if the issue involves cron or online jobs.
-3. Collect `ai_cofunder` handoff with `scope=full`.
+3. Collect `research` handoff with `scope=full`.
 4. Inspect findings: scheduler, freshness, account failures, prefetch, notifications, maintenance, trade intake.
 5. Only then decide whether to run focused local tests or modify code.
 
@@ -337,7 +338,7 @@ scripts/              -> operational wrappers only; delegate to src/ or domain/
 1. Confirm accounts are lowercase and present in runtime config.
 2. Read `scheduler_status` per account.
 3. Inspect `tick_metrics` through `runtime_status`.
-4. Use `ai_cofunder` `account-strategy` or `full` scope for candidate/filter trace evidence.
+4. Use `research` `account-strategy` or `full` scope for candidate/filter trace evidence.
 5. Separate expected account constraints from state contamination.
 
 ### Ledger Or Trade Intake Looks Wrong
@@ -367,7 +368,8 @@ Use supported `gh release view --json` fields such as `tagName`, `name`, `url`, 
 | Change area | Suggested checks |
 |---|---|
 | Agent manifest/handler | `python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py` |
-| AI Cofunder | `python3 -m pytest tests/test_ai_cofunder.py` |
+| Research | `python3 -m pytest tests/test_research.py` |
+| Strategy Lab | `python3 -m pytest tests/test_strategy_lab_contracts.py` |
 | Candidate filter/rank | Candidate engine tests, candidate tool tests, focused trace/replay tests |
 | Tick orchestration | `python3 -m pytest tests/test_multi_tick_*.py tests/test_unified_tick_entrypoint.py` |
 | Notifications | `python3 -m pytest tests/test_notify_symbols_markdown.py tests/test_multi_tick_notify_format.py` |

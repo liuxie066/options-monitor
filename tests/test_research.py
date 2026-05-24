@@ -82,13 +82,13 @@ def _tool_kwargs(tmp_path: Path) -> _ToolKwargs:
     }
 
 
-def test_ai_cofunder_reports_scheduler_failure(tmp_path: Path) -> None:
-    from src.application.ai_cofunder.service import ai_cofunder_tool
+def test_research_reports_scheduler_failure(tmp_path: Path) -> None:
+    from src.application.research.service import research_tool
 
     def _runtime_status(_payload):
         return _runtime_status_data(), [], {}
 
-    data, warnings, meta = ai_cofunder_tool(
+    data, warnings, meta = research_tool(
         {
             "config_path": str(tmp_path / "config.us.json"),
             "write_outputs": False,
@@ -110,12 +110,12 @@ def test_ai_cofunder_reports_scheduler_failure(tmp_path: Path) -> None:
     assert data["status"] == "fail"
     assert data["category"] == "scheduler_failed"
     assert findings[0]["code"] == "SCHEDULER_FAILED"
-    assert "AI Cofunder Handoff" in data["handoff_markdown"]
+    assert "Research Handoff" in data["handoff_markdown"]
     assert meta["outputs"]["written"] is False
 
 
-def test_ai_cofunder_does_not_guess_missing_scheduler_evidence(tmp_path: Path) -> None:
-    from src.application.ai_cofunder.service import ai_cofunder_tool
+def test_research_does_not_guess_missing_scheduler_evidence(tmp_path: Path) -> None:
+    from src.application.research.service import research_tool
 
     runtime_data = _runtime_status_data()
     runtime_data["summary"]["ok"] = False
@@ -124,7 +124,7 @@ def test_ai_cofunder_does_not_guess_missing_scheduler_evidence(tmp_path: Path) -
     def _runtime_status(_payload):
         return runtime_data, ["runtime warning"], {}
 
-    data, warnings, _meta = ai_cofunder_tool(
+    data, warnings, _meta = research_tool(
         {
             "config_path": str(tmp_path / "config.us.json"),
             "write_outputs": False,
@@ -140,8 +140,8 @@ def test_ai_cofunder_does_not_guess_missing_scheduler_evidence(tmp_path: Path) -
     assert "RUNTIME_STATUS_WARNINGS" in codes
 
 
-def test_ai_cofunder_preserves_scheduler_run_id_and_downgrades_confirmed_stale_runtime(tmp_path: Path) -> None:
-    from src.application.ai_cofunder.service import ai_cofunder_tool
+def test_research_preserves_scheduler_run_id_and_downgrades_confirmed_stale_runtime(tmp_path: Path) -> None:
+    from src.application.research.service import research_tool
 
     runtime_data = _runtime_status_data()
     runtime_data["summary"]["ok"] = False
@@ -156,7 +156,7 @@ def test_ai_cofunder_preserves_scheduler_run_id_and_downgrades_confirmed_stale_r
     def _runtime_status(_payload):
         return runtime_data, ["runtime output is stale"], {}
 
-    data, _warnings, _meta = ai_cofunder_tool(
+    data, _warnings, _meta = research_tool(
         {
             "config_path": str(tmp_path / "config.us.json"),
             "write_outputs": False,
@@ -181,8 +181,8 @@ def test_ai_cofunder_preserves_scheduler_run_id_and_downgrades_confirmed_stale_r
     assert "scheduler evidence points at the latest runtime run" in stale["message"]
 
 
-def test_ai_cofunder_downgrades_remediated_upgrade_failure_to_warning(tmp_path: Path) -> None:
-    from src.application.ai_cofunder.service import ai_cofunder_tool
+def test_research_downgrades_remediated_upgrade_failure_to_warning(tmp_path: Path) -> None:
+    from src.application.research.service import research_tool
 
     runtime_data = _runtime_status_data()
     runtime_data["summary"]["ok"] = False
@@ -205,7 +205,7 @@ def test_ai_cofunder_downgrades_remediated_upgrade_failure_to_warning(tmp_path: 
     def _runtime_status(_payload):
         return runtime_data, ["service upgrade remediated"], {}
 
-    data, _warnings, _meta = ai_cofunder_tool(
+    data, _warnings, _meta = research_tool(
         {
             "config_path": str(tmp_path / "config.us.json"),
             "write_outputs": False,
@@ -229,8 +229,8 @@ def test_ai_cofunder_downgrades_remediated_upgrade_failure_to_warning(tmp_path: 
     assert not any(item["code"] == "RUNTIME_STATUS_WARNINGS" for item in findings)
 
 
-def test_ai_cofunder_keeps_unrecovered_upgrade_failure_as_runtime_failed(tmp_path: Path) -> None:
-    from src.application.ai_cofunder.service import ai_cofunder_tool
+def test_research_keeps_unrecovered_upgrade_failure_as_runtime_failed(tmp_path: Path) -> None:
+    from src.application.research.service import research_tool
 
     runtime_data = _runtime_status_data()
     runtime_data["summary"]["ok"] = False
@@ -253,7 +253,7 @@ def test_ai_cofunder_keeps_unrecovered_upgrade_failure_as_runtime_failed(tmp_pat
     def _runtime_status(_payload):
         return runtime_data, ["service upgrade failed"], {}
 
-    data, _warnings, _meta = ai_cofunder_tool(
+    data, _warnings, _meta = research_tool(
         {
             "config_path": str(tmp_path / "config.us.json"),
             "write_outputs": False,
@@ -275,8 +275,8 @@ def test_ai_cofunder_keeps_unrecovered_upgrade_failure_as_runtime_failed(tmp_pat
     assert data["bundle"]["runtime_quality"]["findings"][0]["code"] == "SERVICE_UPGRADE_FAILED"
 
 
-def test_ai_cofunder_collects_strategy_evidence_for_handoff(tmp_path: Path) -> None:
-    from src.application.ai_cofunder.service import ai_cofunder_tool
+def test_research_collects_strategy_evidence_for_handoff(tmp_path: Path) -> None:
+    from src.application.research.service import research_tool
 
     report_dir = tmp_path / "reports"
     report_dir.mkdir()
@@ -312,7 +312,7 @@ def test_ai_cofunder_collects_strategy_evidence_for_handoff(tmp_path: Path) -> N
     def _runtime_status(_payload):
         return _runtime_status_data(), [], {}
 
-    data, _warnings, _meta = ai_cofunder_tool(
+    data, _warnings, _meta = research_tool(
         {
             "config_path": str(tmp_path / "config.us.json"),
             "strategy_report_dir": str(report_dir),
@@ -357,8 +357,8 @@ def test_ai_cofunder_collects_strategy_evidence_for_handoff(tmp_path: Path) -> N
     assert "cash_headroom=2" in data["handoff_markdown"]
 
 
-def test_ai_cofunder_collects_strategy_evidence_from_profile_runtime_root(tmp_path: Path) -> None:
-    from src.application.ai_cofunder.service import ai_cofunder_tool
+def test_research_collects_strategy_evidence_from_profile_runtime_root(tmp_path: Path) -> None:
+    from src.application.research.service import research_tool
 
     runtime_root = tmp_path.parent / f"{tmp_path.name}-runtime"
     runs_root = runtime_root / "output_runs"
@@ -411,7 +411,7 @@ def test_ai_cofunder_collects_strategy_evidence_from_profile_runtime_root(tmp_pa
     def _runtime_status(_payload):
         return runtime_data, [], {}
 
-    data, _warnings, _meta = ai_cofunder_tool(
+    data, _warnings, _meta = research_tool(
         {
             "config_path": str(tmp_path / "config.us.json"),
             "profile_path": str(profile_path),
@@ -439,8 +439,8 @@ def test_ai_cofunder_collects_strategy_evidence_from_profile_runtime_root(tmp_pa
     assert account_strategy["trace_rows"] == 1
 
 
-def test_ai_cofunder_builds_redacted_bundle_and_handoff(tmp_path: Path) -> None:
-    from src.application.ai_cofunder.service import ai_cofunder_tool
+def test_research_builds_redacted_bundle_and_handoff(tmp_path: Path) -> None:
+    from src.application.research.service import research_tool
 
     runtime_data = _runtime_status_data()
     runtime_data["latest_run"]["state"]["tick_metrics"]["json"]["accounts"] = [
@@ -451,7 +451,7 @@ def test_ai_cofunder_builds_redacted_bundle_and_handoff(tmp_path: Path) -> None:
     def _runtime_status(_payload):
         return runtime_data, [], {}
 
-    data, warnings, meta = ai_cofunder_tool(
+    data, warnings, meta = research_tool(
         {
             "scope": "full",
             "config_path": str(tmp_path / "config.us.json"),
@@ -472,8 +472,8 @@ def test_ai_cofunder_builds_redacted_bundle_and_handoff(tmp_path: Path) -> None:
     bundle = data["bundle"]
     bundle_json = json.dumps(bundle, ensure_ascii=False)
     assert warnings == []
-    assert data["schema_version"] == "ai_cofunder.v1"
-    assert bundle["schema_version"] == "ai_cofunder_bundle.v1"
+    assert data["schema_version"] == "research.v1"
+    assert bundle["schema_version"] == "research_bundle.v1"
     assert bundle["ledger_quality"]["status"] == "ok"
     assert sorted(bundle["account_strategy_matrix"]["accounts"]) == ["lx", "sy"]
     assert bundle["healthcheck_snapshot"] == {
@@ -483,15 +483,15 @@ def test_ai_cofunder_builds_redacted_bundle_and_handoff(tmp_path: Path) -> None:
     }
     assert bundle["runtime_runs"]["schema_version"] == "runtime_runs.v1"
     assert bundle["runtime_logs"]["schema_version"] == "runtime_logs.v1"
-    assert "AI Cofunder Handoff" in data["handoff_markdown"]
+    assert "Research Handoff" in data["handoff_markdown"]
     assert "Runtime Evidence" in data["handoff_markdown"]
     assert "webhook/token" not in bundle_json
     assert "281756479859383816" not in bundle_json
     assert meta["outputs"]["written"] is False
 
 
-def test_ai_cofunder_ledger_quality_uses_projection_verify_evidence(tmp_path: Path) -> None:
-    from src.application.ai_cofunder.service import ai_cofunder_tool
+def test_research_ledger_quality_uses_projection_verify_evidence(tmp_path: Path) -> None:
+    from src.application.research.service import research_tool
 
     runtime_data = _runtime_status_data()
     runtime_data["projection_verify"] = {
@@ -511,7 +511,7 @@ def test_ai_cofunder_ledger_quality_uses_projection_verify_evidence(tmp_path: Pa
     def _runtime_status(_payload):
         return runtime_data, [], {}
 
-    data, warnings, _meta = ai_cofunder_tool(
+    data, warnings, _meta = research_tool(
         {
             "scope": "full",
             "config_path": str(tmp_path / "config.us.json"),
@@ -538,8 +538,8 @@ def test_ai_cofunder_ledger_quality_uses_projection_verify_evidence(tmp_path: Pa
     assert "projection_verify: status=ok" in data["handoff_markdown"]
 
 
-def test_ai_cofunder_can_include_redacted_healthcheck_snapshot(tmp_path: Path) -> None:
-    from src.application.ai_cofunder.service import ai_cofunder_tool
+def test_research_can_include_redacted_healthcheck_snapshot(tmp_path: Path) -> None:
+    from src.application.research.service import research_tool
 
     def _runtime_status(_payload):
         return _runtime_status_data(), [], {}
@@ -563,7 +563,7 @@ def test_ai_cofunder_can_include_redacted_healthcheck_snapshot(tmp_path: Path) -
             {"config_path": str(tmp_path / "config.us.json")},
         )
 
-    data, warnings, meta = ai_cofunder_tool(
+    data, warnings, meta = research_tool(
         {
             "scope": "full",
             "config_path": str(tmp_path / "config.us.json"),
@@ -595,8 +595,8 @@ def test_ai_cofunder_can_include_redacted_healthcheck_snapshot(tmp_path: Path) -
     assert "***REDACTED_URL***" in snapshot_json
 
 
-def test_ai_cofunder_healthcheck_loads_env_file_from_service_profile(monkeypatch, tmp_path: Path) -> None:
-    from src.application.ai_cofunder.service import ai_cofunder_tool
+def test_research_healthcheck_loads_env_file_from_service_profile(monkeypatch, tmp_path: Path) -> None:
+    from src.application.research.service import research_tool
 
     profile_path = tmp_path / "service.profile.json"
     env_path = tmp_path / "options-monitor.env"
@@ -621,7 +621,7 @@ def test_ai_cofunder_healthcheck_loads_env_file_from_service_profile(monkeypatch
             {"config_path": str(tmp_path / "config.us.json")},
         )
 
-    data, warnings, meta = ai_cofunder_tool(
+    data, warnings, meta = research_tool(
         {
             "scope": "full",
             "config_path": str(tmp_path / "config.us.json"),
@@ -648,18 +648,18 @@ def test_ai_cofunder_healthcheck_loads_env_file_from_service_profile(monkeypatch
     assert os.environ.get("OM_TEST_PROFILE_ENV") is None
 
 
-def test_ai_cofunder_writes_bundle_and_handoff(tmp_path: Path) -> None:
-    from src.application.ai_cofunder.service import ai_cofunder_tool
+def test_research_writes_bundle_and_handoff(tmp_path: Path) -> None:
+    from src.application.research.service import research_tool
 
     def _runtime_status(_payload):
         return _runtime_status_data(), [], {}
 
-    data, warnings, _meta = ai_cofunder_tool(
+    data, warnings, _meta = research_tool(
         {
             "config_path": str(tmp_path / "config.us.json"),
             "write_outputs": True,
-            "ai_cofunder_output_dir": str(tmp_path / "ai_cofunder"),
-            "ai_cofunder_current_dir": str(tmp_path / "current"),
+            "research_output_dir": str(tmp_path / "research"),
+            "research_current_dir": str(tmp_path / "current"),
             "scheduler_evidence": {
                 "provider": "openclaw",
                 "job_name": "us-tick",
@@ -679,20 +679,20 @@ def test_ai_cofunder_writes_bundle_and_handoff(tmp_path: Path) -> None:
     handoff_path = tmp_path / data["outputs"]["handoff_path"]
     current_path = tmp_path / data["outputs"]["current_path"]
     assert bundle_path.exists()
-    assert handoff_path.read_text(encoding="utf-8").startswith("## AI Cofunder Handoff")
+    assert handoff_path.read_text(encoding="utf-8").startswith("## Research Handoff")
     assert current_path.exists()
     bundle_text = bundle_path.read_text(encoding="utf-8")
     assert "webhook/token" not in bundle_text
     assert "***REDACTED_URL***" in bundle_text
 
 
-def test_ai_cofunder_defaults_to_no_output_writes(tmp_path: Path) -> None:
-    from src.application.ai_cofunder.service import ai_cofunder_tool
+def test_research_defaults_to_no_output_writes(tmp_path: Path) -> None:
+    from src.application.research.service import research_tool
 
     def _runtime_status(_payload):
         return _runtime_status_data(), [], {}
 
-    data, _warnings, _meta = ai_cofunder_tool(
+    data, _warnings, _meta = research_tool(
         {
             "config_path": str(tmp_path / "config.us.json"),
             "scheduler_evidence": {
@@ -708,22 +708,22 @@ def test_ai_cofunder_defaults_to_no_output_writes(tmp_path: Path) -> None:
     )
 
     assert data["outputs"] == {"written": False}
-    assert not (tmp_path / "output_shared" / "ai_cofunder").exists()
+    assert not (tmp_path / "output_shared" / "research").exists()
 
 
-def test_ai_cofunder_rejects_output_paths_outside_repo(tmp_path: Path) -> None:
+def test_research_rejects_output_paths_outside_repo(tmp_path: Path) -> None:
     from src.application.agent_tool_contracts import AgentToolError
-    from src.application.ai_cofunder.service import ai_cofunder_tool
+    from src.application.research.service import research_tool
 
     def _runtime_status(_payload):
         return _runtime_status_data(), [], {}
 
     try:
-        ai_cofunder_tool(
+        research_tool(
             {
                 "config_path": str(tmp_path / "config.us.json"),
                 "write_outputs": True,
-                "ai_cofunder_output_dir": str(tmp_path.parent / "outside-ai-cofunder"),
+                "research_output_dir": str(tmp_path.parent / "outside-research"),
                 "scheduler_evidence": {
                     "provider": "openclaw",
                     "job_name": "us-tick",
@@ -741,12 +741,12 @@ def test_ai_cofunder_rejects_output_paths_outside_repo(tmp_path: Path) -> None:
         raise AssertionError("expected AgentToolError")
 
 
-def test_ai_cofunder_agent_tool_write_outputs_requires_gate(monkeypatch, tmp_path: Path) -> None:
+def test_research_agent_tool_write_outputs_requires_gate(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
     monkeypatch.delenv("OM_AGENT_ENABLE_WRITE_TOOLS", raising=False)
     out = run_tool(
-        "ai_cofunder",
+        "research",
         {
             "config_path": str(tmp_path / "config.us.json"),
             "write_outputs": True,
@@ -758,7 +758,7 @@ def test_ai_cofunder_agent_tool_write_outputs_requires_gate(monkeypatch, tmp_pat
     assert out["error"]["code"] == "PERMISSION_DENIED"
 
 
-def test_ai_cofunder_agent_tool_runs_with_local_runtime_artifacts(tmp_path: Path) -> None:
+def test_research_agent_tool_runs_with_local_runtime_artifacts(tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
     cfg_path = tmp_path / "config.us.json"
@@ -822,7 +822,7 @@ def test_ai_cofunder_agent_tool_runs_with_local_runtime_artifacts(tmp_path: Path
     )
 
     out = run_tool(
-        "ai_cofunder",
+        "research",
         {
             "config_path": str(cfg_path),
             "shared_state_dir": str(shared_state_dir),
@@ -841,10 +841,10 @@ def test_ai_cofunder_agent_tool_runs_with_local_runtime_artifacts(tmp_path: Path
     )
 
     assert out["ok"] is True
-    assert out["data"]["schema_version"] == "ai_cofunder.v1"
+    assert out["data"]["schema_version"] == "research.v1"
     assert out["data"]["status"] in {"ok", "warn"}
     assert out["data"]["outputs"]["written"] is False
-    assert "AI Cofunder Handoff" in out["data"]["handoff_markdown"]
+    assert "Research Handoff" in out["data"]["handoff_markdown"]
     bundle = out["data"]["bundle"]
     assert bundle["runtime_runs"]["summary"]["total_count"] == 1
     assert bundle["runtime_runs"]["runs"][0]["run_id"] == "run-1"
