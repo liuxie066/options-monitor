@@ -881,6 +881,141 @@ def test_strategy_lab_service_rejects_output_paths_outside_repo(tmp_path: Path) 
         )
 
 
+def test_strategy_lab_dataset_collect_dry_run_freezes_evidence_without_writing(tmp_path: Path) -> None:
+    from src.application.strategy_lab import strategy_lab_dataset_collect_tool
+
+    candidate_path, reject_path, trace_path, outcome_path = _write_strategy_lab_mvp_fixture(tmp_path)
+
+    data, warnings, meta = strategy_lab_dataset_collect_tool(
+        {
+            "runtime_root": str(tmp_path),
+            "market": "us",
+            "account": "sy",
+            "strategy_type": "sell_put",
+            "candidate_paths": [str(candidate_path)],
+            "reject_log_paths": [str(reject_path)],
+            "trace_paths": [str(trace_path)],
+            "outcome_paths": [str(outcome_path)],
+        },
+        base=tmp_path,
+        now_fn=lambda: datetime(2026, 5, 24, 8, 0, tzinfo=timezone.utc),
+    )
+
+    assert data["schema_version"] == "strategy_lab_dataset_collect.v1"
+    assert data["dry_run"] is True
+    assert data["write_applied"] is False
+    assert data["dataset"]["summary"]["candidate_count"] == 5
+    assert data["dataset"]["summary"]["outcome_count"] == 5
+    assert data["dataset"]["summary"]["reject_count"] == 1
+    assert data["dataset"]["summary"]["trace_count"] == 1
+    assert data["dataset"]["sources"]["artifacts"][0]["sample_rows"][0]["symbol"] == "NVDA"
+    assert data["output"]["dataset_path"].startswith("output_shared/strategy_lab/datasets/")
+    assert warnings == ["strategy_lab_ledger_sqlite_missing:option_positions.sqlite3"]
+    assert meta["runtime_root"] == f".../{tmp_path.name}"
+    assert not (tmp_path / data["output"]["dataset_path"]).exists()
+
+
+def test_strategy_lab_dataset_collect_confirm_writes_dataset(tmp_path: Path) -> None:
+    import json
+
+    from src.application.strategy_lab import strategy_lab_dataset_collect_tool
+
+    candidate_path, reject_path, trace_path, outcome_path = _write_strategy_lab_mvp_fixture(tmp_path)
+
+    data, warnings, _meta = strategy_lab_dataset_collect_tool(
+        {
+            "runtime_root": str(tmp_path),
+            "market": "us",
+            "account": "sy",
+            "strategy_type": "sell_put",
+            "candidate_paths": [str(candidate_path)],
+            "reject_log_paths": [str(reject_path)],
+            "trace_paths": [str(trace_path)],
+            "outcome_paths": [str(outcome_path)],
+            "confirm": True,
+        },
+        base=tmp_path,
+        now_fn=lambda: datetime(2026, 5, 24, 8, 0, tzinfo=timezone.utc),
+    )
+
+    dataset_path = tmp_path / data["output"]["dataset_path"]
+    payload = json.loads(dataset_path.read_text(encoding="utf-8"))
+
+    assert data["dry_run"] is False
+    assert data["write_applied"] is True
+    assert data["output"]["written"] is True
+    assert payload["schema_version"] == "strategy_lab_dataset.v1"
+    assert payload["summary"]["candidate_count"] == 5
+    assert warnings == ["strategy_lab_ledger_sqlite_missing:option_positions.sqlite3"]
+
+
+def test_strategy_lab_experiment_reports_not_evaluable_without_outcomes(tmp_path: Path) -> None:
+    from src.application.strategy_lab import strategy_lab_experiment_tool
+
+    candidate_path, reject_path = _write_sell_put_fixture(tmp_path)
+
+    data, warnings, _meta = strategy_lab_experiment_tool(
+        {
+            "runtime_root": str(tmp_path),
+            "account": "sy",
+            "strategy_type": "sell_put",
+            "candidate_paths": [str(candidate_path)],
+            "reject_log_paths": [str(reject_path)],
+        },
+        base=tmp_path,
+    )
+
+    assert data["dry_run"] is True
+    assert data["write_applied"] is False
+    assert data["result"]["status"] == "not_evaluable"
+    assert data["result"]["recommendation"]["recommendation"] == "not_evaluable"
+    assert "close_or_expiry_outcomes" in data["result"]["preflight"]["missing"]
+    assert "strategy_lab_outcomes_empty" in warnings
+    assert data["report"]["markdown"].startswith("# Strategy Lab 实验报告")
+    assert not (tmp_path / data["output"]["current_path"]).exists()
+
+
+def test_strategy_lab_experiment_confirm_writes_report_and_current_pointer(tmp_path: Path) -> None:
+    import json
+
+    from src.application.strategy_lab import strategy_lab_experiment_tool
+
+    candidate_path, reject_path, trace_path, outcome_path = _write_strategy_lab_mvp_fixture(tmp_path)
+
+    data, warnings, _meta = strategy_lab_experiment_tool(
+        {
+            "runtime_root": str(tmp_path),
+            "account": "sy",
+            "strategy_type": "sell_put",
+            "candidate_paths": [str(candidate_path)],
+            "reject_log_paths": [str(reject_path)],
+            "trace_paths": [str(trace_path)],
+            "outcome_paths": [str(outcome_path)],
+            "candidate_params": {"selection_source": "rules", "max_candidates": 5, "min_sample": 1},
+            "baseline_params": {"selection_source": "existing", "min_sample": 1},
+            "confirm": True,
+        },
+        base=tmp_path,
+        now_fn=lambda: datetime(2026, 5, 24, 8, 0, tzinfo=timezone.utc),
+    )
+
+    result_path = tmp_path / data["output"]["result_path"]
+    report_path = tmp_path / data["output"]["report_path"]
+    current_path = tmp_path / data["output"]["current_path"]
+    current = json.loads(current_path.read_text(encoding="utf-8"))
+
+    assert data["dry_run"] is False
+    assert data["write_applied"] is True
+    assert data["result"]["status"] == "evaluable"
+    assert data["result"]["recommendation"]["recommendation"] in {"reject", "watch", "shadow"}
+    assert result_path.exists()
+    assert report_path.read_text(encoding="utf-8").startswith("# Strategy Lab 实验报告")
+    assert current["schema_version"] == "strategy_lab_current.v1"
+    assert current["dataset_id"] == data["dataset"]["dataset_id"]
+    assert current["result_path"] == data["output"]["result_path"]
+    assert warnings == data["result"]["warnings"]
+
+
 def test_strategy_lab_replay_backtest_stays_in_supported_strategy_set() -> None:
     from src.application.strategy_lab import (
         StrategyExperiment,
@@ -894,6 +1029,38 @@ def test_strategy_lab_replay_backtest_stays_in_supported_strategy_set() -> None:
             baseline_policy=StrategyPolicy(name="baseline", strategy_type="sell_put"),
             candidate_policy=StrategyPolicy(name="candidate", strategy_type="sell_put"),
         )
+
+
+def _write_strategy_lab_mvp_fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+    candidate_path = tmp_path / "sell_put_candidates.csv"
+    candidate_path.write_text(
+        "symbol,account,option_type,side,strike,expiry,dte,premium,delta,selected,multiplier,contracts,locked_cash\n"
+        "NVDA,sy,put,short,900,2026-06-19,26,12,-0.18,true,100,1,90000\n"
+        "MSFT,sy,put,short,400,2026-06-19,26,4,-0.12,true,100,1,40000\n"
+        "AAPL,sy,put,short,180,2026-06-19,26,2,-0.16,true,100,1,18000\n"
+        "TSLA,sy,put,short,200,2026-06-19,26,8,-0.30,true,100,1,20000\n"
+        "AMD,sy,put,short,150,2026-06-19,26,3,-0.22,true,100,1,15000\n",
+        encoding="utf-8",
+    )
+    reject_path = tmp_path / "sell_put_candidates_reject_log.csv"
+    reject_path.write_text(
+        "symbol,account,option_type,side,strike,expiry,dte,premium,delta,engine_reject_reason,multiplier,contracts\n"
+        "META,sy,put,short,500,2026-06-19,26,5,-0.08,delta_too_low,100,1\n",
+        encoding="utf-8",
+    )
+    trace_path = tmp_path / "candidate_filter_trace.jsonl"
+    trace_path.write_text('{"symbol":"NVDA","account":"sy","stage":"rank"}\n', encoding="utf-8")
+    outcome_path = tmp_path / "strategy_replay.csv"
+    outcome_path.write_text(
+        "symbol,account,actual_return,realized_pnl\n"
+        "NVDA,sy,0.03,120\n"
+        "MSFT,sy,0.02,40\n"
+        "AAPL,sy,0.01,20\n"
+        "TSLA,sy,-0.01,-20\n"
+        "AMD,sy,0.02,30\n",
+        encoding="utf-8",
+    )
+    return candidate_path, reject_path, trace_path, outcome_path
 
 
 def _write_sell_put_fixture(tmp_path: Path) -> tuple[Path, Path]:

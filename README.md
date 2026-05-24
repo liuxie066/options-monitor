@@ -397,17 +397,6 @@ python3 -m src.application.option_intake --config /var/lib/options-monitor/confi
 ./om-agent run --tool preview_notification --input-json '{"alerts_path":"output_shared/reports/symbols_alerts.txt","changes_path":"output_shared/reports/symbols_changes.txt","account_label":"lx"}'
 ```
 
-### 离线复盘
-
-策略复盘分析是离线、只读、证据优先的：
-
-```bash
-./om strategy-replay analyze --replay-path output_shared/reports/strategy_replay.csv --min-sample 5
-./om-agent run --tool strategy_replay_analyze --input-json '{"replay_path":"output_shared/reports/strategy_replay.csv","min_sample":5}'
-```
-
-它的目标是回答“历史上哪些 DTE、Delta、过滤阈值更有效”，不是直接改线上配置。
-
 ## 策略模型
 
 ### Sell Put
@@ -445,18 +434,6 @@ Sell Call 的关键区别是它依赖真实持仓上下文：
 ### Close Advice
 
 `close_advice` 基于本地 `option_positions`、required data 和报价生成建议，属于 advisory-only 逻辑，不应被当成自动平仓器。
-
-### Strategy Replay
-
-复盘和学习分析应尽量保留：
-
-- 通过候选
-- 被拒候选
-- 过滤原因
-- 生命周期结果
-- 回撤与收益事实
-
-这样才能避免只看最终入选样本造成的 survivorship bias。
 
 ## 配置心智模型
 
@@ -568,25 +545,25 @@ Research 证据交接：
 
 `research` 是给 MacBook 上的 Codex 分析线上质量和策略问题的证据打包入口。线上侧只收集 redacted bundle / handoff，不调用在线 AI；run 列表和日志摘要与 `./om runs` / `./om logs` 同源，调度系统状态需要通过 `scheduler_evidence` 或 CLI 的 `--scheduler-evidence-json` 显式传入。
 
-Strategy Lab 本地实验：
+Strategy Lab 的产品目标不是单次 replay，而是基于冻结历史样本评估当前策略和候选策略，并输出是否值得调整策略的证据化建议。当前入口：
 
 ```bash
-./om strategy-lab historical fetch --symbols NVDA,MSFT \
-  --start-date 2026-05-01 --end-date 2026-05-24 \
-  --timeframe 1d --confirm
-
-./om strategy-lab replay --account sy \
-  --candidate-path output_shared/reports/sell_put_candidates.csv \
-  --reject-log-path output_shared/reports/sell_put_candidates_reject_log.csv \
-  --historical-snapshot-path output_shared/strategy_lab/historical_data/futu-<fingerprint>.json \
-  --min-dte 20 --max-dte 35 --min-abs-delta 0.10 --max-abs-delta 0.35 --min-premium 4
-
-./om-agent run --tool strategy_lab --input-json '{"strategy_type":"sell_put","candidate_paths":["output_shared/reports/sell_put_candidates.csv"],"write_outputs":false}'
+./om strategy-lab dataset collect --config-key us --account sy --strategy-type sell_put
+./om strategy-lab dataset collect --config-key us --account sy --strategy-type sell_put --confirm
+./om strategy-lab experiment --dataset-id <dataset_id>
+./om strategy-lab experiment --dataset-id <dataset_id> --confirm
+./om strategy-lab current
 ```
 
-`strategy_lab` 只做确定性 replay 和报告，不改策略配置、不写交易/账本、不发送通知；本地输出文件需要显式 `write_outputs=true`、`confirm=true` 和写工具门禁。
+Agent 入口：
 
-历史行情通过 `./om strategy-lab historical fetch` 单独从 OpenD/Futu 拉取并落成 frozen snapshot/cache，再作为 `historical_snapshot_paths` 传入 Strategy Lab；fetch 默认 dry-run，只有 `--confirm` 才会连接 OpenD 并写入 `output_shared/strategy_lab/historical_data/`。replay 过程中不直接调用 Futu API，避免回测结果随网络和数据源漂移。
+```bash
+./om-agent run --tool strategy_lab_dataset_collect --input-json '{"config_key":"us","account":"sy","strategy_type":"sell_put","dry_run":true}'
+./om-agent run --tool strategy_lab_experiment --input-json '{"dataset_id":"<dataset_id>","dry_run":true}'
+./om-agent run --tool strategy_lab_current --input-json '{}'
+```
+
+默认 dry-run；`--confirm` 只写 Strategy Lab 自己的 dataset/result/report/current pointer，不写交易、持仓、生产配置、通知或 broker。产品和系统设计见 [docs/STRATEGY_LAB_PRD.md](docs/STRATEGY_LAB_PRD.md) 与 [docs/STRATEGY_LAB_SYSTEM_DESIGN.md](docs/STRATEGY_LAB_SYSTEM_DESIGN.md)。
 
 写工具门禁：
 
@@ -679,7 +656,6 @@ README 只记录公开入口和边界。生产 cron id、长驻服务启停和�
 - [docs/INBOUND_CONTROL.md](docs/INBOUND_CONTROL.md)：飞书、微信、Hermes 等远程消息入口的安全控制层
 - [docs/TOOL_REFERENCE.md](docs/TOOL_REFERENCE.md)：`om-agent` 工具说明
 - [docs/candidate_strategy.md](docs/candidate_strategy.md)：候选生成和策略边界
-- [docs/STRATEGY_REPLAY.md](docs/STRATEGY_REPLAY.md)：离线复盘字段和分析方法
 - [docs/OPTION_POSITIONS_MIGRATION.md](docs/OPTION_POSITIONS_MIGRATION.md)：option positions 迁移
 - [docs/OPTION_POSITIONS_REPAIR.md](docs/OPTION_POSITIONS_REPAIR.md)：option positions 修复
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)：主要模块边界

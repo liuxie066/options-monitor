@@ -60,6 +60,11 @@ from src.application.service_drift import service_drift
 from src.application.service_upgrade import service_rollback, service_upgrade, service_upgrade_check
 from src.application.strategy_replay import analyze_strategy_replay, read_strategy_replay_file
 from src.application.strategy_lab.historical_data import fetch_historical_data_tool
+from src.application.strategy_lab.service import (
+    strategy_lab_current_tool,
+    strategy_lab_dataset_collect_tool,
+    strategy_lab_experiment_tool,
+)
 from src.application.tick_cron import run_tick_cron
 from src.application.tool_execution import execute_tool
 from src.application.runtime_config_freshness import RuntimeConfigFreshnessError, ensure_runtime_config_freshness
@@ -133,6 +138,70 @@ def _format_strategy_lab_historical_fetch(payload: dict[str, Any]) -> str:
     warnings = payload.get("warnings") if isinstance(payload.get("warnings"), list) else []
     if warnings:
         lines.append("- warnings: " + "; ".join(str(item) for item in warnings))
+    return "\n".join(lines) + "\n"
+
+
+def _format_strategy_lab_dataset_collect(payload: dict[str, Any]) -> str:
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    dataset = data.get("dataset") if isinstance(data.get("dataset"), dict) else {}
+    summary = dataset.get("summary") if isinstance(dataset.get("summary"), dict) else {}
+    scope = dataset.get("scope") if isinstance(dataset.get("scope"), dict) else {}
+    output = data.get("output") if isinstance(data.get("output"), dict) else {}
+    status = "dry-run" if data.get("dry_run") else "written"
+    lines = [
+        f"Strategy Lab dataset collect: {status}",
+        f"- dataset_id: {dataset.get('dataset_id') or '-'}",
+        f"- market/account/strategy: {scope.get('market') or '-'} / {scope.get('account') or 'all'} / {scope.get('strategy_type') or '-'}",
+        f"- window: {scope.get('start_date') or '-'} -> {scope.get('end_date') or '-'}",
+        f"- samples: candidates={summary.get('candidate_count', 0)} outcomes={summary.get('outcome_count', 0)} rejects={summary.get('reject_count', 0)} traces={summary.get('trace_count', 0)}",
+        f"- dataset_path: {output.get('dataset_path') or '-'}",
+    ]
+    warnings = payload.get("warnings") if isinstance(payload.get("warnings"), list) else []
+    if warnings:
+        lines.append("- warnings: " + "; ".join(str(item) for item in warnings))
+    return "\n".join(lines) + "\n"
+
+
+def _format_strategy_lab_experiment(payload: dict[str, Any]) -> str:
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    result = data.get("result") if isinstance(data.get("result"), dict) else {}
+    recommendation = result.get("recommendation") if isinstance(result.get("recommendation"), dict) else {}
+    preflight = result.get("preflight") if isinstance(result.get("preflight"), dict) else {}
+    sample = preflight.get("sample") if isinstance(preflight.get("sample"), dict) else {}
+    dataset = data.get("dataset") if isinstance(data.get("dataset"), dict) else {}
+    output = data.get("output") if isinstance(data.get("output"), dict) else {}
+    status = "dry-run" if data.get("dry_run") else "written"
+    lines = [
+        f"Strategy Lab experiment: {status}",
+        f"- status: {result.get('status') or '-'}",
+        f"- recommendation: {recommendation.get('recommendation') or '-'} ({recommendation.get('reason') or '-'})",
+        f"- dataset_id: {dataset.get('dataset_id') or result.get('dataset_id') or '-'}",
+        f"- experiment_id: {result.get('experiment_id') or '-'}",
+        f"- samples: candidates={sample.get('candidate_count', 0)} outcomes={sample.get('outcome_count', 0)} rejects={sample.get('reject_count', 0)} traces={sample.get('trace_count', 0)}",
+        f"- result_path: {output.get('result_path') or '-'}",
+        f"- report_path: {output.get('report_path') or '-'}",
+        f"- current_path: {output.get('current_path') or '-'}",
+    ]
+    warnings = payload.get("warnings") if isinstance(payload.get("warnings"), list) else []
+    if warnings:
+        lines.append("- warnings: " + "; ".join(str(item) for item in warnings))
+    return "\n".join(lines) + "\n"
+
+
+def _format_strategy_lab_current(payload: dict[str, Any]) -> str:
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    current = data.get("current") if isinstance(data.get("current"), dict) else {}
+    if not current.get("exists"):
+        return f"Strategy Lab current: not found\n- current_path: {current.get('current_path') or '-'}\n"
+    lines = [
+        "Strategy Lab current: found",
+        f"- experiment_id: {current.get('experiment_id') or '-'}",
+        f"- dataset_id: {current.get('dataset_id') or '-'}",
+        f"- status: {current.get('status') or '-'}",
+        f"- recommendation: {current.get('recommendation') or '-'}",
+        f"- result_path: {current.get('result_path') or '-'}",
+        f"- report_path: {current.get('report_path') or '-'}",
+    ]
     return "\n".join(lines) + "\n"
 
 
@@ -267,6 +336,15 @@ def _add_assistant_commands(parser: argparse.ArgumentParser) -> None:
     assistant_upgrade_worker.add_argument("--format", choices=("json", "text"), default="json")
 
 
+def _add_strategy_evidence_diagnostic_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--strategy-report-dir", default=None, help="directory containing strategy diagnostic evidence files")
+    parser.add_argument("--strategy-candidate-path", action="append", dest="strategy_candidate_paths", default=None)
+    parser.add_argument("--strategy-reject-log-path", action="append", dest="strategy_reject_log_paths", default=None)
+    parser.add_argument("--strategy-trace-path", action="append", dest="strategy_trace_paths", default=None)
+    parser.add_argument("--strategy-outcome-path", action="append", dest="strategy_outcome_paths", default=None)
+    parser.add_argument("--strategy-evidence-min-sample", type=int, default=None)
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="options-monitor unified CLI")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -282,6 +360,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     health.add_argument("--env-file", default=None)
     health.add_argument("--no-local-env-file", action="store_true")
     health.add_argument("--include-service-status", action="store_true")
+    _add_strategy_evidence_diagnostic_args(health)
 
     doctor = sub.add_parser("doctor", help="diagnose runtime readiness and common operator issues")
     doctor.add_argument("--config-key", default=None, choices=("us", "hk"))
@@ -294,6 +373,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     doctor.add_argument("--env-file", default=None)
     doctor.add_argument("--no-local-env-file", action="store_true")
     doctor.add_argument("--include-service-status", action="store_true")
+    _add_strategy_evidence_diagnostic_args(doctor)
 
     support = sub.add_parser("support", help="collect redacted support diagnostics")
     support_sub = support.add_subparsers(dest="support_command", required=True)
@@ -413,42 +493,55 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     research_handoff = research_sub.add_parser("handoff", help="render handoff from a collected bundle")
     research_handoff.add_argument("--bundle", required=True)
 
-    strategy_lab = sub.add_parser("strategy-lab", help="run deterministic Strategy Lab experiments")
+    strategy_lab = sub.add_parser("strategy-lab", help="manage Strategy Lab data inputs")
     strategy_lab_sub = strategy_lab.add_subparsers(dest="strategy_lab_command", required=True)
-    strategy_replay = strategy_lab_sub.add_parser("replay", help="run a local replay experiment and render a report")
-    strategy_replay.add_argument("--experiment-id", default=None)
-    strategy_replay.add_argument(
-        "--strategy-type",
-        default="sell_put",
-        choices=("sell_put", "sell-put", "sell_call", "sell-call", "yield_enhancement", "yield-enhancement", "close_advice", "close-advice"),
-    )
-    strategy_replay.add_argument("--account", default=None)
-    strategy_replay.add_argument("--start-date", default=None)
-    strategy_replay.add_argument("--end-date", default=None)
-    strategy_replay.add_argument("--candidate-path", action="append", dest="candidate_paths", default=None)
-    strategy_replay.add_argument("--reject-log-path", action="append", dest="reject_log_paths", default=None)
-    strategy_replay.add_argument("--trace-path", action="append", dest="trace_paths", default=None)
-    strategy_replay.add_argument("--strategy-replay-path", action="append", dest="strategy_replay_paths", default=None)
-    strategy_replay.add_argument("--historical-snapshot-path", action="append", dest="historical_snapshot_paths", default=None)
-    strategy_replay.add_argument("--baseline-source", default="existing", choices=("existing", "rules"))
-    strategy_replay.add_argument("--candidate-source", default="rules", choices=("existing", "rules"))
-    strategy_replay.add_argument("--symbols", default=None, help="comma-separated symbol scope for candidate rules")
-    strategy_replay.add_argument("--min-dte", type=int, default=None)
-    strategy_replay.add_argument("--max-dte", type=int, default=None)
-    strategy_replay.add_argument("--min-abs-delta", type=float, default=None)
-    strategy_replay.add_argument("--max-abs-delta", type=float, default=None)
-    strategy_replay.add_argument("--min-premium", type=float, default=None)
-    strategy_replay.add_argument("--max-premium", type=float, default=None)
-    strategy_replay.add_argument("--max-candidates", type=int, default=None)
-    strategy_replay.add_argument("--min-sample", type=int, default=None)
-    strategy_replay.add_argument("--exclude-reject-reason", action="append", dest="exclude_reject_reasons", default=None)
-    strategy_replay.add_argument("--sample-limit", type=int, default=None)
-    strategy_replay.add_argument("--output-dir", default=None)
-    strategy_replay.add_argument("--current-dir", default=None)
-    strategy_replay.add_argument("--write-outputs", action="store_true")
-    strategy_replay.add_argument("--no-write-outputs", action="store_true")
-    strategy_replay.add_argument("--confirm", action="store_true")
-    strategy_replay.add_argument("--json", action="store_true", help="print JSON envelope instead of Markdown report")
+    strategy_dataset = strategy_lab_sub.add_parser("dataset", help="collect and freeze Strategy Lab datasets")
+    strategy_dataset_sub = strategy_dataset.add_subparsers(dest="strategy_lab_dataset_command", required=True)
+    dataset_collect = strategy_dataset_sub.add_parser("collect", help="collect evidence into a frozen Strategy Lab dataset")
+    dataset_collect.add_argument("--config-key", default=None, choices=("us", "hk"))
+    dataset_collect.add_argument("--market", default=None, choices=("us", "hk"))
+    dataset_collect.add_argument("--runtime-root", default=None)
+    dataset_collect.add_argument("--account", default=None)
+    dataset_collect.add_argument("--strategy-type", default="sell_put", choices=("sell_put", "sell_call", "yield_enhancement", "close_advice"))
+    dataset_collect.add_argument("--start-date", default=None)
+    dataset_collect.add_argument("--end-date", default=None)
+    dataset_collect.add_argument("--candidate-path", action="append", dest="candidate_paths", default=None)
+    dataset_collect.add_argument("--reject-log-path", action="append", dest="reject_log_paths", default=None)
+    dataset_collect.add_argument("--trace-path", action="append", dest="trace_paths", default=None)
+    dataset_collect.add_argument("--outcome-path", action="append", dest="outcome_paths", default=None)
+    dataset_collect.add_argument("--sqlite-path", default=None)
+    dataset_collect.add_argument("--sample-limit", type=int, default=None)
+    dataset_collect.add_argument("--dry-run", action="store_true", help="preview without writing; this is also the default")
+    dataset_collect.add_argument("--confirm", action="store_true", help="write the frozen dataset")
+    dataset_collect.add_argument("--yes", action="store_true", help="non-interactive confirmation alias")
+    dataset_collect.add_argument("--json", action="store_true", help="print JSON envelope")
+    strategy_experiment = strategy_lab_sub.add_parser("experiment", help="run a Strategy Lab experiment")
+    strategy_experiment.add_argument("--dataset-id", default=None)
+    strategy_experiment.add_argument("--config-key", default=None, choices=("us", "hk"))
+    strategy_experiment.add_argument("--market", default=None, choices=("us", "hk"))
+    strategy_experiment.add_argument("--runtime-root", default=None)
+    strategy_experiment.add_argument("--account", default=None)
+    strategy_experiment.add_argument("--strategy-type", default=None, choices=("sell_put", "sell_call", "yield_enhancement", "close_advice"))
+    strategy_experiment.add_argument("--start-date", default=None)
+    strategy_experiment.add_argument("--end-date", default=None)
+    strategy_experiment.add_argument("--candidate-path", action="append", dest="candidate_paths", default=None)
+    strategy_experiment.add_argument("--reject-log-path", action="append", dest="reject_log_paths", default=None)
+    strategy_experiment.add_argument("--trace-path", action="append", dest="trace_paths", default=None)
+    strategy_experiment.add_argument("--outcome-path", action="append", dest="outcome_paths", default=None)
+    strategy_experiment.add_argument("--sqlite-path", default=None)
+    strategy_experiment.add_argument("--candidate-grid-path", default=None)
+    strategy_experiment.add_argument("--candidate-params-json", default=None)
+    strategy_experiment.add_argument("--baseline-params-json", default=None)
+    strategy_experiment.add_argument("--min-candidate-sample", type=int, default=None)
+    strategy_experiment.add_argument("--min-outcome-sample", type=int, default=None)
+    strategy_experiment.add_argument("--min-trace-or-reject-sample", type=int, default=None)
+    strategy_experiment.add_argument("--dry-run", action="store_true", help="preview without writing; this is also the default")
+    strategy_experiment.add_argument("--confirm", action="store_true", help="write experiment result, report, and current pointer")
+    strategy_experiment.add_argument("--yes", action="store_true", help="non-interactive confirmation alias")
+    strategy_experiment.add_argument("--json", action="store_true", help="print JSON envelope")
+    strategy_current = strategy_lab_sub.add_parser("current", help="read current Strategy Lab result pointer")
+    strategy_current.add_argument("--runtime-root", default=None)
+    strategy_current.add_argument("--json", action="store_true", help="print JSON envelope")
     strategy_historical = strategy_lab_sub.add_parser("historical", help="manage Strategy Lab historical data snapshots")
     strategy_historical_sub = strategy_historical.add_subparsers(dest="strategy_lab_historical_command", required=True)
     historical_fetch = strategy_historical_sub.add_parser("fetch", help="fetch historical data into a frozen snapshot")
@@ -857,6 +950,22 @@ def _load_json_payload(*, json_text: str | None, file_path: str | None, stdin_en
     return payload
 
 
+def _load_json_object_arg(value: str | None, *, name: str) -> dict[str, Any] | None:
+    if not value:
+        return None
+    try:
+        payload = json.loads(value)
+    except Exception as exc:
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message=f"{name} must be a JSON object",
+            details={"error": f"{type(exc).__name__}: {exc}"},
+        ) from exc
+    if not isinstance(payload, dict):
+        raise AgentToolError(code="INPUT_ERROR", message=f"{name} must be a JSON object")
+    return payload
+
+
 def _validate_runtime_config(
     *,
     config_key: str | None = None,
@@ -963,6 +1072,12 @@ def main(argv: list[str] | None = None) -> int:
                     profile_path=args.profile_path,
                     include_service_status=bool(args.include_service_status),
                     env_file=args.env_file,
+                    strategy_report_dir=args.strategy_report_dir,
+                    strategy_candidate_paths=args.strategy_candidate_paths,
+                    strategy_reject_log_paths=args.strategy_reject_log_paths,
+                    strategy_trace_paths=args.strategy_trace_paths,
+                    strategy_outcome_paths=args.strategy_outcome_paths,
+                    strategy_evidence_min_sample=args.strategy_evidence_min_sample,
                 )
             )
 
@@ -977,6 +1092,12 @@ def main(argv: list[str] | None = None) -> int:
                 profile_path=args.profile_path,
                 include_service_status=bool(args.include_service_status),
                 env_file=args.env_file,
+                strategy_report_dir=args.strategy_report_dir,
+                strategy_candidate_paths=args.strategy_candidate_paths,
+                strategy_reject_log_paths=args.strategy_reject_log_paths,
+                strategy_trace_paths=args.strategy_trace_paths,
+                strategy_outcome_paths=args.strategy_outcome_paths,
+                strategy_evidence_min_sample=args.strategy_evidence_min_sample,
             )
             return _print(build_response(
                 tool_name="doctor",
@@ -1246,54 +1367,94 @@ def main(argv: list[str] | None = None) -> int:
                 data={"handoff_markdown": render_research_handoff(bundle)},
             ))
 
-        if args.command == "strategy-lab" and args.strategy_lab_command == "replay":
-            baseline_params: dict[str, Any] = {"selection_source": args.baseline_source}
-            candidate_params: dict[str, Any] = {"selection_source": args.candidate_source}
-            if args.min_sample is not None:
-                baseline_params["min_sample"] = args.min_sample
-                candidate_params["min_sample"] = args.min_sample
-            for key, value in {
-                "symbols": args.symbols,
-                "min_dte": args.min_dte,
-                "max_dte": args.max_dte,
-                "min_abs_delta": args.min_abs_delta,
-                "max_abs_delta": args.max_abs_delta,
-                "min_premium": args.min_premium,
-                "max_premium": args.max_premium,
-                "max_candidates": args.max_candidates,
-                "exclude_reject_reasons": args.exclude_reject_reasons,
-            }.items():
-                if value not in (None, []):
-                    candidate_params[key] = value
+        if args.command == "strategy-lab" and args.strategy_lab_command == "dataset" and args.strategy_lab_dataset_command == "collect":
             payload = {
-                "experiment_id": args.experiment_id,
-                "strategy_type": args.strategy_type,
+                "config_key": args.config_key,
+                "market": args.market,
+                "runtime_root": args.runtime_root,
                 "account": args.account,
+                "strategy_type": args.strategy_type,
                 "start_date": args.start_date,
                 "end_date": args.end_date,
                 "candidate_paths": args.candidate_paths,
                 "reject_log_paths": args.reject_log_paths,
                 "trace_paths": args.trace_paths,
-                "strategy_replay_paths": args.strategy_replay_paths,
-                "historical_snapshot_paths": args.historical_snapshot_paths,
-                "baseline_params": baseline_params,
-                "candidate_params": candidate_params,
+                "outcome_paths": args.outcome_paths,
+                "sqlite_path": args.sqlite_path,
                 "sample_limit": args.sample_limit,
-                "output_dir": args.output_dir,
-                "current_dir": args.current_dir,
-                "write_outputs": bool(args.write_outputs),
+                "dry_run": bool(args.dry_run),
                 "confirm": bool(args.confirm),
+                "yes": bool(args.yes),
             }
-            if args.no_write_outputs:
-                payload["write_outputs"] = False
             payload = {key: value for key, value in payload.items() if value not in (None, [])}
-            out = execute_tool("strategy_lab", payload)
-            if args.json or not bool(out.get("ok", False)):
+            data, warnings, meta = strategy_lab_dataset_collect_tool(payload, base=repo_base())
+            out = build_response(
+                tool_name="strategy-lab.dataset.collect",
+                ok=True,
+                data=data,
+                warnings=warnings,
+                meta=meta,
+            )
+            if args.json:
                 return _print(out)
-            data = out.get("data")
-            report = data.get("report") if isinstance(data, dict) else None
-            markdown = report.get("markdown") if isinstance(report, dict) else None
-            sys.stdout.write(str(markdown or _dumps(out)))
+            sys.stdout.write(_format_strategy_lab_dataset_collect(out))
+            return 0
+
+        if args.command == "strategy-lab" and args.strategy_lab_command == "experiment":
+            candidate_params = _load_json_object_arg(args.candidate_params_json, name="--candidate-params-json")
+            baseline_params = _load_json_object_arg(args.baseline_params_json, name="--baseline-params-json")
+            payload = {
+                "dataset_id": args.dataset_id,
+                "config_key": args.config_key,
+                "market": args.market,
+                "runtime_root": args.runtime_root,
+                "account": args.account,
+                "strategy_type": args.strategy_type,
+                "start_date": args.start_date,
+                "end_date": args.end_date,
+                "candidate_paths": args.candidate_paths,
+                "reject_log_paths": args.reject_log_paths,
+                "trace_paths": args.trace_paths,
+                "outcome_paths": args.outcome_paths,
+                "sqlite_path": args.sqlite_path,
+                "candidate_grid_path": args.candidate_grid_path,
+                "candidate_params": candidate_params,
+                "baseline_params": baseline_params,
+                "min_candidate_sample": args.min_candidate_sample,
+                "min_outcome_sample": args.min_outcome_sample,
+                "min_trace_or_reject_sample": args.min_trace_or_reject_sample,
+                "dry_run": bool(args.dry_run),
+                "confirm": bool(args.confirm),
+                "yes": bool(args.yes),
+            }
+            payload = {key: value for key, value in payload.items() if value not in (None, [])}
+            data, warnings, meta = strategy_lab_experiment_tool(payload, base=repo_base())
+            out = build_response(
+                tool_name="strategy-lab.experiment",
+                ok=True,
+                data=data,
+                warnings=warnings,
+                meta=meta,
+            )
+            if args.json:
+                return _print(out)
+            sys.stdout.write(_format_strategy_lab_experiment(out))
+            return 0
+
+        if args.command == "strategy-lab" and args.strategy_lab_command == "current":
+            payload = {"runtime_root": args.runtime_root}
+            payload = {key: value for key, value in payload.items() if value not in (None, [])}
+            data, warnings, meta = strategy_lab_current_tool(payload, base=repo_base())
+            out = build_response(
+                tool_name="strategy-lab.current",
+                ok=True,
+                data=data,
+                warnings=warnings,
+                meta=meta,
+            )
+            if args.json:
+                return _print(out)
+            sys.stdout.write(_format_strategy_lab_current(out))
             return 0
 
         if args.command == "strategy-lab" and args.strategy_lab_command == "historical" and args.strategy_lab_historical_command == "fetch":

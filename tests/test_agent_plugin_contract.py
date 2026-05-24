@@ -33,9 +33,12 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "candidate_rank_explain" in tool_names
     assert "candidate_filter_explain" in tool_names
     assert "strategy_replay_analyze" in tool_names
+    assert "strategy_lab_dataset_collect" in tool_names
+    assert "strategy_lab_experiment" in tool_names
+    assert "strategy_lab_current" in tool_names
     assert "doctor" not in tool_names
     assert "research" in tool_names
-    assert "strategy_lab" in tool_names
+    assert "strategy_lab" not in tool_names
     assert spec["schema_version"] == "1.0"
     assert spec["recommended_flow"] == ["healthcheck", "scan_opportunities", "get_close_advice"]
     get_close_advice = next(item for item in spec["tools"] if item["name"] == "get_close_advice")
@@ -101,6 +104,20 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert strategy_replay["risk_level"] == "read_only"
     assert strategy_replay["requires_confirm"] is False
     assert strategy_replay["safe_default_input"]["min_sample"] == 5
+    assert "strategy_replay_diagnostic" in strategy_replay["capabilities"]
+    strategy_dataset_collect = next(item for item in spec["tools"] if item["name"] == "strategy_lab_dataset_collect")
+    assert strategy_dataset_collect["risk_level"] == "local_write"
+    assert strategy_dataset_collect["requires_confirm"] is True
+    assert strategy_dataset_collect["safe_default_input"] == {"strategy_type": "sell_put", "dry_run": True}
+    assert "writes_strategy_lab_dataset" in strategy_dataset_collect["side_effects"]
+    strategy_experiment = next(item for item in spec["tools"] if item["name"] == "strategy_lab_experiment")
+    assert strategy_experiment["risk_level"] == "local_write"
+    assert strategy_experiment["requires_confirm"] is True
+    assert strategy_experiment["safe_default_input"] == {"strategy_type": "sell_put", "dry_run": True}
+    assert "writes_strategy_lab_current_pointer" in strategy_experiment["side_effects"]
+    strategy_current = next(item for item in spec["tools"] if item["name"] == "strategy_lab_current")
+    assert strategy_current["risk_level"] == "read_only"
+    assert strategy_current["requires_confirm"] is False
     research = next(item for item in spec["tools"] if item["name"] == "research")
     assert research["read_only"] is False
     assert research["risk_level"] == "local_write"
@@ -117,16 +134,6 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "strategy_replay_paths" in research["input_schema"]
     assert "ai_config" not in research["input_schema"]
     assert "healthcheck_snapshot" in research["capabilities"]
-    strategy_lab = next(item for item in spec["tools"] if item["name"] == "strategy_lab")
-    assert strategy_lab["read_only"] is False
-    assert strategy_lab["risk_level"] == "local_write"
-    assert strategy_lab["requires_confirm"] is True
-    assert strategy_lab["safe_default_input"] == {"strategy_type": "sell_put", "write_outputs": False}
-    assert "candidate_paths" in strategy_lab["input_schema"]
-    assert "reject_log_paths" in strategy_lab["input_schema"]
-    assert "historical_snapshot_paths" in strategy_lab["input_schema"]
-    assert "candidate_params" in strategy_lab["input_schema"]
-    assert "writes_local_strategy_lab_reports" in strategy_lab["side_effects"]
 
 
 def test_agent_registry_manifest_and_handlers_stay_in_sync() -> None:
@@ -151,6 +158,39 @@ def test_agent_run_unknown_tool_returns_structured_error() -> None:
     assert out["ok"] is False
     assert out["error"]["code"] == "INPUT_ERROR"
     assert out["schema_version"] == "1.0"
+
+
+def test_strategy_lab_replay_tool_is_not_public() -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    out = run_tool("strategy_lab", {"write_outputs": False})
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "INPUT_ERROR"
+    assert "unknown tool" in out["error"]["message"]
+
+
+def test_strategy_lab_write_tools_are_dry_run_by_default(monkeypatch) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    monkeypatch.delenv("OM_AGENT_ENABLE_WRITE_TOOLS", raising=False)
+
+    out = run_tool("strategy_lab_dataset_collect", {"runtime_root": str(BASE), "strategy_type": "sell_put"})
+
+    assert out["ok"] is True
+    assert out["data"]["dry_run"] is True
+    assert out["data"]["write_applied"] is False
+
+
+def test_strategy_lab_write_tools_require_global_write_enable_for_confirm(monkeypatch) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    monkeypatch.delenv("OM_AGENT_ENABLE_WRITE_TOOLS", raising=False)
+
+    out = run_tool("strategy_lab_dataset_collect", {"strategy_type": "sell_put", "confirm": True})
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "PERMISSION_DENIED"
 
 
 def test_agent_cli_run_loads_explicit_env_file(monkeypatch, tmp_path: Path, capsys) -> None:

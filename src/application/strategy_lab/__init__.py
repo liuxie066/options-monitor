@@ -36,7 +36,12 @@ from src.application.strategy_lab.report import (
     build_strategy_lab_report,
     render_strategy_lab_markdown,
 )
-from src.application.strategy_lab.service import strategy_lab_tool
+from src.application.strategy_lab.service import (
+    strategy_lab_current_tool,
+    strategy_lab_dataset_collect_tool,
+    strategy_lab_experiment_tool,
+    strategy_lab_tool,
+)
 from src.application.strategy_lab.simulator import run_replay_backtest
 
 __all__ = [
@@ -69,6 +74,9 @@ __all__ = [
     "normalize_historical_symbols",
     "render_strategy_lab_markdown",
     "run_replay_backtest",
+    "strategy_lab_current_tool",
+    "strategy_lab_dataset_collect_tool",
+    "strategy_lab_experiment_tool",
     "strategy_lab_tool",
     "validate_metric_names",
     "validate_strategy_type",

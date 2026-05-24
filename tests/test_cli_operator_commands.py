@@ -39,6 +39,12 @@ def test_top_level_doctor_wraps_healthcheck(monkeypatch, capsys) -> None:
         "profile_path": None,
         "env_file": None,
         "include_service_status": False,
+        "strategy_report_dir": None,
+        "strategy_candidate_paths": None,
+        "strategy_reject_log_paths": None,
+        "strategy_trace_paths": None,
+        "strategy_outcome_paths": None,
+        "strategy_evidence_min_sample": None,
     }]
 
 
@@ -79,6 +85,12 @@ def test_top_level_healthcheck_passes_inbound_diagnostics_args(monkeypatch, caps
         "profile_path": "service.profile.json",
         "env_file": None,
         "include_service_status": True,
+        "strategy_report_dir": None,
+        "strategy_candidate_paths": None,
+        "strategy_reject_log_paths": None,
+        "strategy_trace_paths": None,
+        "strategy_outcome_paths": None,
+        "strategy_evidence_min_sample": None,
     }]
 
 
@@ -115,12 +127,60 @@ def test_top_level_healthcheck_forwards_env_file(monkeypatch, capsys, tmp_path: 
         "profile_path": None,
         "env_file": str(env_file),
         "include_service_status": False,
+        "strategy_report_dir": None,
+        "strategy_candidate_paths": None,
+        "strategy_reject_log_paths": None,
+        "strategy_trace_paths": None,
+        "strategy_outcome_paths": None,
+        "strategy_evidence_min_sample": None,
     }]
     assert bootstrap_calls == [{
         "repo_root": cli.repo_base(),
         "env_file": str(env_file),
         "include_local_env_file": True,
     }]
+
+
+def test_top_level_doctor_forwards_strategy_evidence_diagnostics(monkeypatch, capsys) -> None:
+    import src.interfaces.cli.main as cli
+
+    calls: list[dict] = []
+
+    def _healthcheck(**kwargs):
+        calls.append(kwargs)
+        return {"tool_name": "healthcheck", "ok": True, "data": {"status": "pass"}}
+
+    monkeypatch.setattr(cli, "run_healthcheck", _healthcheck)
+
+    rc = cli.main(
+        [
+            "doctor",
+            "--config-key",
+            "us",
+            "--strategy-report-dir",
+            "output_shared/reports",
+            "--strategy-candidate-path",
+            "candidate.csv",
+            "--strategy-reject-log-path",
+            "reject.csv",
+            "--strategy-trace-path",
+            "trace.jsonl",
+            "--strategy-outcome-path",
+            "outcome.csv",
+            "--strategy-evidence-min-sample",
+            "10",
+        ]
+    )
+    payload = _read_json_output(capsys)
+
+    assert rc == 0
+    assert payload["tool_name"] == "doctor"
+    assert calls[0]["strategy_report_dir"] == "output_shared/reports"
+    assert calls[0]["strategy_candidate_paths"] == ["candidate.csv"]
+    assert calls[0]["strategy_reject_log_paths"] == ["reject.csv"]
+    assert calls[0]["strategy_trace_paths"] == ["trace.jsonl"]
+    assert calls[0]["strategy_outcome_paths"] == ["outcome.csv"]
+    assert calls[0]["strategy_evidence_min_sample"] == 10
 
 
 def test_support_bundle_command_forwards_diagnostic_args(monkeypatch, capsys) -> None:
@@ -517,83 +577,11 @@ def test_research_collect_forwards_remote_runtime_selection(monkeypatch, capsys)
     ]
 
 
-def test_strategy_lab_replay_forwards_experiment_payload(monkeypatch, capsys) -> None:
+def test_strategy_lab_replay_is_not_a_public_cli_surface() -> None:
     import src.interfaces.cli.main as cli
 
-    calls: list[tuple[str, dict]] = []
-
-    def _execute_tool(name: str, payload: dict) -> dict:
-        calls.append((name, payload))
-        return {
-            "tool_name": "strategy_lab",
-            "ok": True,
-            "data": {"report": {"markdown": "# Strategy Lab 回测报告\n"}},
-        }
-
-    monkeypatch.setattr(cli, "execute_tool", _execute_tool)
-
-    rc = cli.main([
-        "strategy-lab",
-        "replay",
-        "--experiment-id",
-        "exp-1",
-        "--strategy-type",
-        "sell_put",
-        "--account",
-        "sy",
-        "--candidate-path",
-        "output_shared/reports/sell_put_candidates.csv",
-        "--reject-log-path",
-        "output_shared/reports/sell_put_candidates_reject_log.csv",
-        "--historical-snapshot-path",
-        "output_shared/strategy_lab/historical_data/manual.json",
-        "--min-dte",
-        "20",
-        "--max-dte",
-        "35",
-        "--min-abs-delta",
-        "0.1",
-        "--max-abs-delta",
-        "0.35",
-        "--min-premium",
-        "4",
-        "--max-candidates",
-        "3",
-        "--min-sample",
-        "5",
-        "--exclude-reject-reason",
-        "risk_spread",
-    ])
-
-    assert rc == 0
-    assert capsys.readouterr().out == "# Strategy Lab 回测报告\n"
-    assert calls == [
-        (
-            "strategy_lab",
-            {
-                "experiment_id": "exp-1",
-                "strategy_type": "sell_put",
-                "account": "sy",
-                "candidate_paths": ["output_shared/reports/sell_put_candidates.csv"],
-                "reject_log_paths": ["output_shared/reports/sell_put_candidates_reject_log.csv"],
-                "historical_snapshot_paths": ["output_shared/strategy_lab/historical_data/manual.json"],
-                "baseline_params": {"selection_source": "existing", "min_sample": 5},
-                "candidate_params": {
-                    "selection_source": "rules",
-                    "min_sample": 5,
-                    "min_dte": 20,
-                    "max_dte": 35,
-                    "min_abs_delta": 0.1,
-                    "max_abs_delta": 0.35,
-                    "min_premium": 4.0,
-                    "max_candidates": 3,
-                    "exclude_reject_reasons": ["risk_spread"],
-                },
-                "write_outputs": False,
-                "confirm": False,
-            },
-        )
-    ]
+    with pytest.raises(SystemExit):
+        cli.main(["strategy-lab", "replay"])
 
 
 def test_strategy_lab_historical_fetch_forwards_payload(monkeypatch, capsys) -> None:
@@ -669,6 +657,151 @@ def test_strategy_lab_historical_fetch_forwards_payload(monkeypatch, capsys) -> 
             "confirm": True,
         }
     ]
+
+
+def test_strategy_lab_dataset_collect_forwards_payload(monkeypatch, capsys) -> None:
+    import src.interfaces.cli.main as cli
+
+    calls: list[dict] = []
+
+    def _collect(payload: dict, *, base):
+        calls.append(dict(payload))
+        return (
+            {
+                "schema_version": "strategy_lab_dataset_collect.v1",
+                "dry_run": False,
+                "dataset": {
+                    "dataset_id": "ds-1",
+                    "scope": {"market": "us", "account": "sy", "strategy_type": "sell_put"},
+                    "summary": {"candidate_count": 5, "outcome_count": 5, "reject_count": 1, "trace_count": 1},
+                },
+                "output": {"dataset_path": "output_shared/strategy_lab/datasets/ds-1.json"},
+            },
+            [],
+            {"base": str(base)},
+        )
+
+    monkeypatch.setattr(cli, "strategy_lab_dataset_collect_tool", _collect)
+
+    rc = cli.main([
+        "strategy-lab",
+        "dataset",
+        "collect",
+        "--config-key",
+        "us",
+        "--account",
+        "sy",
+        "--strategy-type",
+        "sell_put",
+        "--candidate-path",
+        "sell_put_candidates.csv",
+        "--outcome-path",
+        "strategy_replay.csv",
+        "--sample-limit",
+        "3",
+        "--confirm",
+        "--json",
+    ])
+    payload = _read_json_output(capsys)
+
+    assert rc == 0
+    assert payload["tool_name"] == "strategy-lab.dataset.collect"
+    assert payload["data"]["dataset"]["dataset_id"] == "ds-1"
+    assert calls == [
+        {
+            "config_key": "us",
+            "account": "sy",
+            "strategy_type": "sell_put",
+            "candidate_paths": ["sell_put_candidates.csv"],
+            "outcome_paths": ["strategy_replay.csv"],
+            "sample_limit": 3,
+            "dry_run": False,
+            "confirm": True,
+            "yes": False,
+        }
+    ]
+
+
+def test_strategy_lab_experiment_forwards_payload(monkeypatch, capsys) -> None:
+    import src.interfaces.cli.main as cli
+
+    calls: list[dict] = []
+
+    def _experiment(payload: dict, *, base):
+        calls.append(dict(payload))
+        return (
+            {
+                "schema_version": "strategy_lab_experiment_run.v1",
+                "dry_run": True,
+                "dataset": {"dataset_id": "ds-1"},
+                "result": {
+                    "experiment_id": "exp-1",
+                    "dataset_id": "ds-1",
+                    "status": "evaluable",
+                    "recommendation": {"recommendation": "watch", "reason": "low_sample"},
+                    "preflight": {"sample": {"candidate_count": 5, "outcome_count": 5, "reject_count": 1, "trace_count": 1}},
+                },
+                "output": {"result_path": None, "report_path": None, "current_path": "output_shared/state/current/strategy_lab.current.json"},
+            },
+            [],
+            {"base": str(base)},
+        )
+
+    monkeypatch.setattr(cli, "strategy_lab_experiment_tool", _experiment)
+
+    rc = cli.main([
+        "strategy-lab",
+        "experiment",
+        "--dataset-id",
+        "ds-1",
+        "--candidate-grid-path",
+        "grid.json",
+        "--candidate-params-json",
+        '{"max_candidates": 5}',
+        "--min-candidate-sample",
+        "5",
+        "--json",
+    ])
+    payload = _read_json_output(capsys)
+
+    assert rc == 0
+    assert payload["tool_name"] == "strategy-lab.experiment"
+    assert payload["data"]["result"]["recommendation"]["recommendation"] == "watch"
+    assert calls == [
+        {
+            "dataset_id": "ds-1",
+            "candidate_grid_path": "grid.json",
+            "candidate_params": {"max_candidates": 5},
+            "min_candidate_sample": 5,
+            "dry_run": False,
+            "confirm": False,
+            "yes": False,
+        }
+    ]
+
+
+def test_strategy_lab_current_forwards_payload(monkeypatch, capsys) -> None:
+    import src.interfaces.cli.main as cli
+
+    calls: list[dict] = []
+
+    def _current(payload: dict, *, base):
+        calls.append(dict(payload))
+        return (
+            {"schema_version": "strategy_lab_current_read.v1", "current": {"exists": False, "current_path": "output_shared/state/current/strategy_lab.current.json"}},
+            [],
+            {"base": str(base)},
+        )
+
+    monkeypatch.setattr(cli, "strategy_lab_current_tool", _current)
+
+    rc = cli.main(["strategy-lab", "current", "--runtime-root", "/tmp/om-runtime", "--json"])
+    payload = _read_json_output(capsys)
+
+    assert rc == 0
+    assert payload["tool_name"] == "strategy-lab.current"
+    assert payload["data"]["current"]["exists"] is False
+    assert calls == [{"runtime_root": "/tmp/om-runtime"}]
 
 
 def test_top_level_status_json_prints_raw_runtime_status(monkeypatch, capsys) -> None:
