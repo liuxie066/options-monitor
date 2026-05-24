@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 1.2.137 - 2026-05-24
+
+### Added
+- Added the `research` evidence collector and agent tool as the public replacement for the old AI Cofunder naming.
+- Added deterministic Strategy Lab replay for `sell_put`, `sell_call`, `yield_enhancement`, and `close_advice`, including CLI and agent-tool entrypoints.
+- Added a frozen historical-data snapshot/cache contract for Strategy Lab so future Futu imports can write evidence snapshots without coupling replay to live broker APIs.
+
+### Changed
+- Updated agent manifests, operator docs, dependency graph artifacts, and CLI docs to use the `research` and `strategy_lab` surfaces.
+- Kept Strategy Lab output writes behind explicit local-write confirmation while leaving replay dry-run/read-only by default.
+
 ## 1.2.136 - 2026-05-24
 
 ### Added

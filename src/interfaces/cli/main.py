@@ -352,43 +352,80 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     logs.add_argument("--file", dest="log_file", default=None)
     logs.add_argument("--json", action="store_true", help="print JSON envelope")
 
-    ai_cofunder = sub.add_parser("ai-cofunder", help="collect AI Cofunder evidence for MacBook Codex")
-    ai_cofunder_sub = ai_cofunder.add_subparsers(dest="ai_cofunder_command", required=True)
-    ai_collect = ai_cofunder_sub.add_parser("collect", help="collect redacted evidence bundle")
-    ai_collect.add_argument("--scope", default="full", choices=("ledger", "account-strategy", "quality", "strategy", "full"))
-    ai_collect.add_argument("--config-key", default=None, choices=("us", "hk"))
-    ai_collect.add_argument("--config-path", default=None)
-    ai_collect.add_argument("--accounts", nargs="*", default=None)
-    ai_collect.add_argument("--profile-path", default=None)
-    ai_collect.add_argument("--report-dir", default=None)
-    ai_collect.add_argument("--state-dir", default=None)
-    ai_collect.add_argument("--shared-state-dir", default=None)
-    ai_collect.add_argument("--accounts-root", default=None)
-    ai_collect.add_argument("--runs-root", default=None)
-    ai_collect.add_argument("--run-id", default=None)
-    ai_collect.add_argument("--run-dir", default=None)
-    ai_collect.add_argument("--runs-limit", type=int, default=None)
-    ai_collect.add_argument("--tail-limit", type=int, default=None)
-    ai_collect.add_argument("--max-run-age-minutes", type=int, default=None)
-    ai_collect.add_argument("--max-notification-chars", type=int, default=None)
-    ai_collect.add_argument("--output", default="handoff", choices=("handoff", "json", "both", "markdown", "md"))
-    ai_collect.add_argument("--scheduler-evidence-json", default=None)
-    ai_collect.add_argument("--scheduler-evidence-file", default=None)
-    ai_collect.add_argument("--candidate-path", action="append", dest="candidate_paths", default=None)
-    ai_collect.add_argument("--trace-path", action="append", dest="trace_paths", default=None)
-    ai_collect.add_argument("--strategy-replay-path", action="append", dest="strategy_replay_paths", default=None)
-    ai_collect.add_argument("--strategy-report-dir", default=None)
-    ai_collect.add_argument("--ranking-limit", type=int, default=None, help="top candidate rows per report included in ranking evidence")
-    ai_collect.add_argument("--include-healthcheck", action="store_true")
-    ai_collect.add_argument("--data-config", default=None)
-    ai_collect.add_argument("--timeout-sec", type=int, default=None)
-    ai_collect.add_argument("--output-dir", default=None)
-    ai_collect.add_argument("--current-dir", default=None)
-    ai_collect.add_argument("--write-outputs", action="store_true")
-    ai_collect.add_argument("--no-write-outputs", action="store_true")
-    ai_collect.add_argument("--confirm", action="store_true")
-    ai_handoff = ai_cofunder_sub.add_parser("handoff", help="render handoff from a collected bundle")
-    ai_handoff.add_argument("--bundle", required=True)
+    research = sub.add_parser("research", help="collect Research evidence for MacBook Codex")
+    research_sub = research.add_subparsers(dest="research_command", required=True)
+    research_collect = research_sub.add_parser("collect", help="collect redacted evidence bundle")
+    research_collect.add_argument("--scope", default="full", choices=("ledger", "account-strategy", "quality", "strategy", "full"))
+    research_collect.add_argument("--config-key", default=None, choices=("us", "hk"))
+    research_collect.add_argument("--config-path", default=None)
+    research_collect.add_argument("--accounts", nargs="*", default=None)
+    research_collect.add_argument("--profile-path", default=None)
+    research_collect.add_argument("--report-dir", default=None)
+    research_collect.add_argument("--state-dir", default=None)
+    research_collect.add_argument("--shared-state-dir", default=None)
+    research_collect.add_argument("--accounts-root", default=None)
+    research_collect.add_argument("--runs-root", default=None)
+    research_collect.add_argument("--run-id", default=None)
+    research_collect.add_argument("--run-dir", default=None)
+    research_collect.add_argument("--runs-limit", type=int, default=None)
+    research_collect.add_argument("--tail-limit", type=int, default=None)
+    research_collect.add_argument("--max-run-age-minutes", type=int, default=None)
+    research_collect.add_argument("--max-notification-chars", type=int, default=None)
+    research_collect.add_argument("--output", default="handoff", choices=("handoff", "json", "both", "markdown", "md"))
+    research_collect.add_argument("--scheduler-evidence-json", default=None)
+    research_collect.add_argument("--scheduler-evidence-file", default=None)
+    research_collect.add_argument("--candidate-path", action="append", dest="candidate_paths", default=None)
+    research_collect.add_argument("--trace-path", action="append", dest="trace_paths", default=None)
+    research_collect.add_argument("--strategy-replay-path", action="append", dest="strategy_replay_paths", default=None)
+    research_collect.add_argument("--strategy-report-dir", default=None)
+    research_collect.add_argument("--ranking-limit", type=int, default=None, help="top candidate rows per report included in ranking evidence")
+    research_collect.add_argument("--include-healthcheck", action="store_true")
+    research_collect.add_argument("--data-config", default=None)
+    research_collect.add_argument("--timeout-sec", type=int, default=None)
+    research_collect.add_argument("--output-dir", default=None)
+    research_collect.add_argument("--current-dir", default=None)
+    research_collect.add_argument("--write-outputs", action="store_true")
+    research_collect.add_argument("--no-write-outputs", action="store_true")
+    research_collect.add_argument("--confirm", action="store_true")
+    research_handoff = research_sub.add_parser("handoff", help="render handoff from a collected bundle")
+    research_handoff.add_argument("--bundle", required=True)
+
+    strategy_lab = sub.add_parser("strategy-lab", help="run deterministic Strategy Lab experiments")
+    strategy_lab_sub = strategy_lab.add_subparsers(dest="strategy_lab_command", required=True)
+    strategy_replay = strategy_lab_sub.add_parser("replay", help="run a local replay experiment and render a report")
+    strategy_replay.add_argument("--experiment-id", default=None)
+    strategy_replay.add_argument(
+        "--strategy-type",
+        default="sell_put",
+        choices=("sell_put", "sell-put", "sell_call", "sell-call", "yield_enhancement", "yield-enhancement", "close_advice", "close-advice"),
+    )
+    strategy_replay.add_argument("--account", default=None)
+    strategy_replay.add_argument("--start-date", default=None)
+    strategy_replay.add_argument("--end-date", default=None)
+    strategy_replay.add_argument("--candidate-path", action="append", dest="candidate_paths", default=None)
+    strategy_replay.add_argument("--reject-log-path", action="append", dest="reject_log_paths", default=None)
+    strategy_replay.add_argument("--trace-path", action="append", dest="trace_paths", default=None)
+    strategy_replay.add_argument("--strategy-replay-path", action="append", dest="strategy_replay_paths", default=None)
+    strategy_replay.add_argument("--historical-snapshot-path", action="append", dest="historical_snapshot_paths", default=None)
+    strategy_replay.add_argument("--baseline-source", default="existing", choices=("existing", "rules"))
+    strategy_replay.add_argument("--candidate-source", default="rules", choices=("existing", "rules"))
+    strategy_replay.add_argument("--symbols", default=None, help="comma-separated symbol scope for candidate rules")
+    strategy_replay.add_argument("--min-dte", type=int, default=None)
+    strategy_replay.add_argument("--max-dte", type=int, default=None)
+    strategy_replay.add_argument("--min-abs-delta", type=float, default=None)
+    strategy_replay.add_argument("--max-abs-delta", type=float, default=None)
+    strategy_replay.add_argument("--min-premium", type=float, default=None)
+    strategy_replay.add_argument("--max-premium", type=float, default=None)
+    strategy_replay.add_argument("--max-candidates", type=int, default=None)
+    strategy_replay.add_argument("--min-sample", type=int, default=None)
+    strategy_replay.add_argument("--exclude-reject-reason", action="append", dest="exclude_reject_reasons", default=None)
+    strategy_replay.add_argument("--sample-limit", type=int, default=None)
+    strategy_replay.add_argument("--output-dir", default=None)
+    strategy_replay.add_argument("--current-dir", default=None)
+    strategy_replay.add_argument("--write-outputs", action="store_true")
+    strategy_replay.add_argument("--no-write-outputs", action="store_true")
+    strategy_replay.add_argument("--confirm", action="store_true")
+    strategy_replay.add_argument("--json", action="store_true", help="print JSON envelope instead of Markdown report")
 
     scan = sub.add_parser("scan", help="run opportunity scan")
     scan.add_argument("--config-key", default=None, choices=("us", "hk"))
@@ -1100,7 +1137,7 @@ def main(argv: list[str] | None = None) -> int:
             sys.stdout.write(format_runtime_logs(data))
             return 0 if envelope.get("ok", True) else 2
 
-        if args.command == "ai-cofunder" and args.ai_cofunder_command == "collect":
+        if args.command == "research" and args.research_command == "collect":
             payload = {
                 "scope": args.scope,
                 "config_key": args.config_key,
@@ -1127,8 +1164,8 @@ def main(argv: list[str] | None = None) -> int:
                 "include_healthcheck": bool(args.include_healthcheck),
                 "data_config": args.data_config,
                 "timeout_sec": args.timeout_sec,
-                "ai_cofunder_output_dir": args.output_dir,
-                "ai_cofunder_current_dir": args.current_dir,
+                "research_output_dir": args.output_dir,
+                "research_current_dir": args.current_dir,
                 "write_outputs": bool(args.write_outputs),
                 "confirm": bool(args.confirm),
             }
@@ -1141,19 +1178,69 @@ def main(argv: list[str] | None = None) -> int:
             if scheduler_evidence is not None:
                 payload["scheduler_evidence"] = scheduler_evidence
             payload = {key: value for key, value in payload.items() if value not in (None, [])}
-            return _print(execute_tool("ai_cofunder", payload))
+            return _print(execute_tool("research", payload))
 
-        if args.command == "ai-cofunder" and args.ai_cofunder_command == "handoff":
-            from src.application.ai_cofunder.service import render_ai_cofunder_handoff
+        if args.command == "research" and args.research_command == "handoff":
+            from src.application.research.service import render_research_handoff
 
             bundle = json.loads(Path(args.bundle).read_text(encoding="utf-8"))
             if not isinstance(bundle, dict):
-                raise AgentToolError(code="INPUT_ERROR", message="ai-cofunder bundle must be a JSON object")
+                raise AgentToolError(code="INPUT_ERROR", message="research bundle must be a JSON object")
             return _print(build_response(
-                tool_name="ai-cofunder.handoff",
+                tool_name="research.handoff",
                 ok=True,
-                data={"handoff_markdown": render_ai_cofunder_handoff(bundle)},
+                data={"handoff_markdown": render_research_handoff(bundle)},
             ))
+
+        if args.command == "strategy-lab" and args.strategy_lab_command == "replay":
+            baseline_params: dict[str, Any] = {"selection_source": args.baseline_source}
+            candidate_params: dict[str, Any] = {"selection_source": args.candidate_source}
+            if args.min_sample is not None:
+                baseline_params["min_sample"] = args.min_sample
+                candidate_params["min_sample"] = args.min_sample
+            for key, value in {
+                "symbols": args.symbols,
+                "min_dte": args.min_dte,
+                "max_dte": args.max_dte,
+                "min_abs_delta": args.min_abs_delta,
+                "max_abs_delta": args.max_abs_delta,
+                "min_premium": args.min_premium,
+                "max_premium": args.max_premium,
+                "max_candidates": args.max_candidates,
+                "exclude_reject_reasons": args.exclude_reject_reasons,
+            }.items():
+                if value not in (None, []):
+                    candidate_params[key] = value
+            payload = {
+                "experiment_id": args.experiment_id,
+                "strategy_type": args.strategy_type,
+                "account": args.account,
+                "start_date": args.start_date,
+                "end_date": args.end_date,
+                "candidate_paths": args.candidate_paths,
+                "reject_log_paths": args.reject_log_paths,
+                "trace_paths": args.trace_paths,
+                "strategy_replay_paths": args.strategy_replay_paths,
+                "historical_snapshot_paths": args.historical_snapshot_paths,
+                "baseline_params": baseline_params,
+                "candidate_params": candidate_params,
+                "sample_limit": args.sample_limit,
+                "output_dir": args.output_dir,
+                "current_dir": args.current_dir,
+                "write_outputs": bool(args.write_outputs),
+                "confirm": bool(args.confirm),
+            }
+            if args.no_write_outputs:
+                payload["write_outputs"] = False
+            payload = {key: value for key, value in payload.items() if value not in (None, [])}
+            out = execute_tool("strategy_lab", payload)
+            if args.json or not bool(out.get("ok", False)):
+                return _print(out)
+            data = out.get("data")
+            report = data.get("report") if isinstance(data, dict) else None
+            markdown = report.get("markdown") if isinstance(report, dict) else None
+            sys.stdout.write(str(markdown or _dumps(out)))
+            return 0
 
         if args.command == "scan":
             symbols = [s.strip().upper() for s in str(args.symbols or "").split(",") if s.strip()] or None

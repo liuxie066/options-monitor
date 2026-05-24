@@ -80,10 +80,10 @@ Do not run Python scripts just to see what happens.
 ./om-agent run --tool scheduler_status --input-json '{"config_key":"us","account":"lx"}'
 ```
 
-AI Cofunder evidence handoff for MacBook Codex:
+Research evidence handoff for MacBook Codex:
 
 ```bash
-./om ai-cofunder collect --config-key us --scope full --output both --no-write-outputs
+./om research collect --config-key us --scope full --output both --no-write-outputs
 ```
 
 ## Module Ownership
@@ -100,7 +100,8 @@ AI Cofunder evidence handoff for MacBook Codex:
 | Trade intake/review | `src/application/trades/` | Preserve idempotency, review, void, and repair semantics |
 | Tick orchestration | `src/application/multi_account_tick.py`, `src/application/multi_tick/` | Keep helper modules narrow |
 | Runtime status / readiness | `src/application/agent_tool_openclaw.py`, `src/application/healthcheck.py` | Prefer extending read surfaces over adding hidden side effects |
-| AI Cofunder evidence | `src/application/ai_cofunder/` | Online side collects redacted evidence only; Codex performs analysis locally |
+| Research evidence | `src/application/research/` | Online side collects redacted evidence only; Codex performs analysis locally |
+| Strategy Lab experiments | `src/application/strategy_lab/`, `./om strategy-lab replay`, `strategy_lab` agent tool | Deterministic evidence replay only; no automatic strategy config mutation, ledger/trade writes, notifications, or pseudo-standard ratios |
 | Config validation | `src/application/config_validator.py`, `src/application/layered_config.py` | Do not weaken production config checks |
 | Agent tools | `src/application/agent_tool_registry.py`, `src/application/agent_tool_handlers.py` | Manifest, handler, and tests must stay in sync |
 | CLI behavior | `src/interfaces/cli/main.py`, `src/interfaces/agent/cli.py` | Preserve public facade behavior where possible |
@@ -145,8 +146,8 @@ Use focused checks for the area touched, then add broader checks when risk warra
 # Agent contract
 python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py
 
-# AI Cofunder
-python3 -m pytest tests/test_ai_cofunder.py
+# Research
+python3 -m pytest tests/test_research.py
 
 # Notification formatting
 python3 -m pytest tests/test_notify_symbols_markdown.py tests/test_multi_tick_notify_format.py

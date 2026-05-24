@@ -31,7 +31,8 @@ from src.application.agent_tool_healthcheck import run_healthcheck_tool
 from src.application.agent_tool_candidate_rank import candidate_rank_explain_tool
 from src.application.agent_tool_candidate_filter import candidate_filter_explain_tool
 from src.application.agent_tool_strategy_replay import strategy_replay_analyze_tool
-from src.application.ai_cofunder import ai_cofunder_tool
+from src.application.research import research_tool
+from src.application.strategy_lab import strategy_lab_tool
 from src.application.agent_tool_notifications import preview_notification_tool
 from src.application.agent_tool_openclaw import openclaw_readiness_tool
 from src.application.agent_tool_runtime_status import runtime_status_tool
@@ -424,8 +425,8 @@ def _openclaw_readiness_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], l
     )
 
 
-def _ai_cofunder_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    return ai_cofunder_tool(
+def _research_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    return research_tool(
         payload,
         runtime_status_tool_fn=_runtime_status_tool,
         healthcheck_tool_fn=_healthcheck_tool,
@@ -433,6 +434,10 @@ def _ai_cofunder_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str
         repo_base=repo_base,
         mask_path=mask_path,
     )
+
+
+def _strategy_lab_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    return strategy_lab_tool(payload, base=repo_base())
 
 
 TOOL_HANDLERS = {
@@ -458,5 +463,6 @@ TOOL_HANDLERS = {
     "runtime_runs": _runtime_runs_tool,
     "runtime_logs": _runtime_logs_tool,
     "openclaw_readiness": _openclaw_readiness_tool,
-    "ai_cofunder": _ai_cofunder_tool,
+    "research": _research_tool,
+    "strategy_lab": _strategy_lab_tool,
 }

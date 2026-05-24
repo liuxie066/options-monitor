@@ -34,7 +34,8 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "candidate_filter_explain" in tool_names
     assert "strategy_replay_analyze" in tool_names
     assert "doctor" not in tool_names
-    assert "ai_cofunder" in tool_names
+    assert "research" in tool_names
+    assert "strategy_lab" in tool_names
     assert spec["schema_version"] == "1.0"
     assert spec["recommended_flow"] == ["healthcheck", "scan_opportunities", "get_close_advice"]
     get_close_advice = next(item for item in spec["tools"] if item["name"] == "get_close_advice")
@@ -60,10 +61,10 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "lines" in runtime_logs["input_schema"]
     assert "log_file" in runtime_logs["input_schema"]
     assert "file" not in runtime_logs["input_schema"]
-    ai_cofunder = next(item for item in spec["tools"] if item["name"] == "ai_cofunder")
-    assert "runs_root" in ai_cofunder["input_schema"]
-    assert "run_id" in ai_cofunder["input_schema"]
-    assert "report_dir" in ai_cofunder["input_schema"]
+    research = next(item for item in spec["tools"] if item["name"] == "research")
+    assert "runs_root" in research["input_schema"]
+    assert "run_id" in research["input_schema"]
+    assert "report_dir" in research["input_schema"]
     income_report = next(item for item in spec["tools"] if item["name"] == "monthly_income_report")
     assert income_report["risk_level"] == "read_only"
     assert income_report["requires_confirm"] is False
@@ -100,22 +101,32 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert strategy_replay["risk_level"] == "read_only"
     assert strategy_replay["requires_confirm"] is False
     assert strategy_replay["safe_default_input"]["min_sample"] == 5
-    ai_cofunder = next(item for item in spec["tools"] if item["name"] == "ai_cofunder")
-    assert ai_cofunder["read_only"] is False
-    assert ai_cofunder["risk_level"] == "local_write"
-    assert ai_cofunder["requires_confirm"] is True
-    assert ai_cofunder["safe_default_input"] == {
+    research = next(item for item in spec["tools"] if item["name"] == "research")
+    assert research["read_only"] is False
+    assert research["risk_level"] == "local_write"
+    assert research["requires_confirm"] is True
+    assert research["safe_default_input"] == {
         "scope": "full",
         "config_key": "us",
         "output": "handoff",
         "write_outputs": False,
     }
-    assert "scope" in ai_cofunder["input_schema"]
-    assert "include_healthcheck" in ai_cofunder["input_schema"]
-    assert "data_config" in ai_cofunder["input_schema"]
-    assert "strategy_replay_paths" in ai_cofunder["input_schema"]
-    assert "ai_config" not in ai_cofunder["input_schema"]
-    assert "healthcheck_snapshot" in ai_cofunder["capabilities"]
+    assert "scope" in research["input_schema"]
+    assert "include_healthcheck" in research["input_schema"]
+    assert "data_config" in research["input_schema"]
+    assert "strategy_replay_paths" in research["input_schema"]
+    assert "ai_config" not in research["input_schema"]
+    assert "healthcheck_snapshot" in research["capabilities"]
+    strategy_lab = next(item for item in spec["tools"] if item["name"] == "strategy_lab")
+    assert strategy_lab["read_only"] is False
+    assert strategy_lab["risk_level"] == "local_write"
+    assert strategy_lab["requires_confirm"] is True
+    assert strategy_lab["safe_default_input"] == {"strategy_type": "sell_put", "write_outputs": False}
+    assert "candidate_paths" in strategy_lab["input_schema"]
+    assert "reject_log_paths" in strategy_lab["input_schema"]
+    assert "historical_snapshot_paths" in strategy_lab["input_schema"]
+    assert "candidate_params" in strategy_lab["input_schema"]
+    assert "writes_local_strategy_lab_reports" in strategy_lab["side_effects"]
 
 
 def test_agent_registry_manifest_and_handlers_stay_in_sync() -> None:
@@ -193,7 +204,7 @@ def test_agent_cli_spec_prints_json_manifest() -> None:
     assert any(str(x.get("name")) == "runtime_logs" for x in payload.get("tools", []))
     assert any(str(x.get("name")) == "candidate_rank_explain" for x in payload.get("tools", []))
     assert not any(str(x.get("name")) == "doctor" for x in payload.get("tools", []))
-    assert any(str(x.get("name")) == "ai_cofunder" for x in payload.get("tools", []))
+    assert any(str(x.get("name")) == "research" for x in payload.get("tools", []))
     assert any(str(x.get("name")) == "candidate_filter_explain" for x in payload.get("tools", []))
     assert any(str(x.get("name")) == "strategy_replay_analyze" for x in payload.get("tools", []))
     assert "init_command" not in payload["launcher"]

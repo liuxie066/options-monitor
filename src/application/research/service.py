@@ -7,17 +7,17 @@ from pathlib import Path
 from typing import Any, Callable
 
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.ai_cofunder.checks import run_deterministic_checks
-from src.application.ai_cofunder.evidence import collect_evidence, redacted_evidence
+from src.application.research.checks import run_deterministic_checks
+from src.application.research.evidence import collect_evidence, redacted_evidence
 from src.application.settings.effective import parse_env_file
 
 
-SCHEMA_VERSION = "ai_cofunder.v1"
-BUNDLE_SCHEMA_VERSION = "ai_cofunder_bundle.v1"
+SCHEMA_VERSION = "research.v1"
+BUNDLE_SCHEMA_VERSION = "research_bundle.v1"
 SCOPES = {"ledger", "account-strategy", "quality", "strategy", "full"}
 
 
-def ai_cofunder_tool(
+def research_tool(
     payload: dict[str, Any],
     *,
     runtime_status_tool_fn: Callable[[dict[str, Any]], tuple[dict[str, Any], list[str], dict[str, Any]]],
@@ -55,7 +55,7 @@ def ai_cofunder_tool(
         diagnosis=diagnosis,
         healthcheck_snapshot=safe_healthcheck_snapshot,
     )
-    handoff_markdown = render_ai_cofunder_handoff(bundle)
+    handoff_markdown = render_research_handoff(bundle)
     outputs = _write_outputs(
         payload,
         base=base,
@@ -388,7 +388,7 @@ def _healthcheck_status(*, summary: dict[str, Any], warnings: list[str]) -> str:
     return "ok"
 
 
-def render_ai_cofunder_handoff(bundle: dict[str, Any]) -> str:
+def render_research_handoff(bundle: dict[str, Any]) -> str:
     manifest = _dict(bundle.get("manifest"))
     runtime_quality = _dict(bundle.get("runtime_quality"))
     ledger_quality = _dict(bundle.get("ledger_quality"))
@@ -404,7 +404,7 @@ def render_ai_cofunder_handoff(bundle: dict[str, Any]) -> str:
     ranking = _dict(strategy.get("ranking_evidence"))
     ranking_summary = _dict(ranking.get("summary"))
     lines = [
-        "## AI Cofunder Handoff",
+        "## Research Handoff",
         f"Scope: {manifest.get('scope')}",
         f"Version: {manifest.get('version')}",
         f"Git Commit: {manifest.get('git_commit')}",
@@ -553,21 +553,21 @@ def _write_outputs(
     if not _truthy(payload.get("write_outputs")):
         return {"written": False}
     now = (now_fn or (lambda: datetime.now(timezone.utc)))().astimezone(timezone.utc)
-    output_dir = _resolve_output_path(payload.get("ai_cofunder_output_dir") or payload.get("output_dir"), base=base, default=base / "output_shared" / "ai_cofunder")
-    current_dir = _resolve_output_path(payload.get("ai_cofunder_current_dir"), base=base, default=base / "output_shared" / "state" / "current")
+    output_dir = _resolve_output_path(payload.get("research_output_dir") or payload.get("output_dir"), base=base, default=base / "output_shared" / "research")
+    current_dir = _resolve_output_path(payload.get("research_current_dir"), base=base, default=base / "output_shared" / "state" / "current")
     output_dir.mkdir(parents=True, exist_ok=True)
     current_dir.mkdir(parents=True, exist_ok=True)
 
     config_key = str(_nested(bundle, "manifest", "config_key") or _nested(bundle, "manifest", "scope") or "runtime").lower()
     run_id = str(_nested(bundle, "runtime_quality", "summary", "latest_run_path") or now.strftime("%Y%m%dT%H%M%SZ")).rstrip("/").split("/")[-1]
-    stem = f"ai-cofunder-{scope}-{config_key}-{run_id}".replace("/", "_")
+    stem = f"research-{scope}-{config_key}-{run_id}".replace("/", "_")
     bundle_path = output_dir / f"{stem}.bundle.json"
     handoff_path = output_dir / f"{stem}.md"
-    current_path = current_dir / "ai_cofunder.current.json"
+    current_path = current_dir / "research.current.json"
     _write_json(bundle_path, bundle)
     handoff_path.write_text(handoff_markdown, encoding="utf-8")
     current_payload = {
-        "schema_version": "ai_cofunder_current.v1",
+        "schema_version": "research_current.v1",
         "scope": scope,
         "status": _nested(bundle, "runtime_quality", "status"),
         "bundle_path": _relative(bundle_path, base=base),
@@ -587,7 +587,7 @@ def _scope(value: Any) -> str:
     if scope not in SCOPES:
         raise AgentToolError(
             code="INPUT_ERROR",
-            message=f"unsupported ai-cofunder scope: {scope}",
+            message=f"unsupported research scope: {scope}",
             hint=f"Use one of: {', '.join(sorted(SCOPES))}.",
         )
     return scope
@@ -605,7 +605,7 @@ def _resolve_output_path(value: Any, *, base: Path, default: Path) -> Path:
     except ValueError as exc:
         raise AgentToolError(
             code="INPUT_ERROR",
-            message="ai-cofunder output directories must stay under the repo root",
+            message="research output directories must stay under the repo root",
             details={"path": _relative(path, base=base)},
         ) from exc
     return path

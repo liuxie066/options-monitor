@@ -522,7 +522,7 @@ Feishu 常见只用于这些场景：
 
 - [AGENTS.md](AGENTS.md)：给 agent 首先加载的短说明书，记录安全红线、入口层级和模块归属
 - [docs/AGENT_GETTING_STARTED.md](docs/AGENT_GETTING_STARTED.md)：Agent 接入的最短路径
-- [docs/AGENT_WIKI.md](docs/AGENT_WIKI.md)：给 agent 深入执行任务时看的手册，包含工具选择、AI Cofunder、排障 playbook 和验证矩阵
+- [docs/AGENT_WIKI.md](docs/AGENT_WIKI.md)：给 agent 深入执行任务时看的手册，包含工具选择、Research、排障 playbook 和验证矩阵
 
 安装 Agent 插件：
 
@@ -559,14 +559,29 @@ bash scripts/install_agent_plugin.sh
 只读查询会直接执行；写操作必须先返回预览并等待确认。链路带 sender allowlist、message_id 幂等和 SQLite audit。Assistant command facade 默认开启，例如 `/status`、`/positions sy`、`/income 2026-05`；Feishu WS 使用同一层 command facade，由 assistant config 的 `assistant.mode` 控制。LLM 默认关闭；显式把 `assistant.mode` 设为 `llm_router` 或 `agent_loop`，并配置 `assistant.llm.provider`、`model`、可选 `base_url` 和本机 API key env 后，只会把自然语言和同一对话的有限上下文翻译成 `om-llm-intent-v1` 只读 capability，再走同一条 router。`assistant capabilities` 可查看 LLM 能看到的项目能力清单：写入、确认、升级等能力会出现在清单里，但不会进入 LLM 可执行 enum。`feishu-ws` 可作为长驻 Feishu App long-connection client，通过飞书 SDK 长连接接收消息，并自动回复，不需要公网 HTTPS callback；reaction、reply、queue 行为配置在 assistant config 的 `inbound.feishu_ws` 下。接飞书、微信或 Hermes 前先看
 [docs/INBOUND_CONTROL.md](docs/INBOUND_CONTROL.md)。
 
-AI Cofunder 证据交接：
+Research 证据交接：
 
 ```bash
-./om ai-cofunder collect --config-key us --scope full --output both --no-write-outputs
-./om-agent run --tool ai_cofunder --input-json '{"config_key":"us","scope":"full","output":"both","write_outputs":false}'
+./om research collect --config-key us --scope full --output both --no-write-outputs
+./om-agent run --tool research --input-json '{"config_key":"us","scope":"full","output":"both","write_outputs":false}'
 ```
 
-`ai-cofunder` 是给 MacBook 上的 Codex 分析线上质量和策略问题的证据打包入口。线上侧只收集 redacted bundle / handoff，不调用在线 AI；run 列表和日志摘要与 `./om runs` / `./om logs` 同源，调度系统状态需要通过 `scheduler_evidence` 或 CLI 的 `--scheduler-evidence-json` 显式传入。
+`research` 是给 MacBook 上的 Codex 分析线上质量和策略问题的证据打包入口。线上侧只收集 redacted bundle / handoff，不调用在线 AI；run 列表和日志摘要与 `./om runs` / `./om logs` 同源，调度系统状态需要通过 `scheduler_evidence` 或 CLI 的 `--scheduler-evidence-json` 显式传入。
+
+Strategy Lab 本地实验：
+
+```bash
+./om strategy-lab replay --account sy \
+  --candidate-path output_shared/reports/sell_put_candidates.csv \
+  --reject-log-path output_shared/reports/sell_put_candidates_reject_log.csv \
+  --min-dte 20 --max-dte 35 --min-abs-delta 0.10 --max-abs-delta 0.35 --min-premium 4
+
+./om-agent run --tool strategy_lab --input-json '{"strategy_type":"sell_put","candidate_paths":["output_shared/reports/sell_put_candidates.csv"],"write_outputs":false}'
+```
+
+`strategy_lab` 只做确定性 replay 和报告，不改策略配置、不写交易/账本、不发送通知；本地输出文件需要显式 `write_outputs=true`、`confirm=true` 和写工具门禁。
+
+历史行情辅助必须先落成 frozen snapshot/cache，再作为 `historical_snapshot_paths` 传入 Strategy Lab；replay 过程中不直接调用 Futu API，避免回测结果随网络和数据源漂移。
 
 写工具门禁：
 

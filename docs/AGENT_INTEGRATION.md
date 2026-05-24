@@ -73,7 +73,7 @@ Use the launcher as a local command tool. Typical pattern:
 ./om-agent run --tool get_close_advice --input-json '{"config_key":"us"}'
 ./om-agent run --tool prepare_close_advice_inputs --input-json '{"config_key":"us"}'
 ./om-agent run --tool close_advice --input-json '{"config_key":"us"}'
-./om-agent run --tool ai_cofunder --input-json '{"config_key":"us","scope":"full","output":"both","write_outputs":false}'
+./om-agent run --tool research --input-json '{"config_key":"us","scope":"full","output":"both","write_outputs":false}'
 ```
 
 Sell Put 现金余量的标准 Agent 工具是 `query_cash_headroom`。它包装
@@ -102,7 +102,7 @@ Use the same launcher contract as Claude Code. For first-pass troubleshooting, p
 For MacBook-side Codex diagnosis of online quality or strategy direction, collect a redacted handoff instead of calling an online AI provider:
 
 ```bash
-./om-agent run --tool ai_cofunder --input-json '{"config_key":"us","scope":"full","output":"both","write_outputs":false}'
+./om-agent run --tool research --input-json '{"config_key":"us","scope":"full","output":"both","write_outputs":false}'
 ```
 
 ## Inbound Remote Messages

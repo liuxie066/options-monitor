@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from domain.domain.engine import CandidateScoreWeights, explain_candidate_rank, yield_enhancement_rank_key
-from src.application.ai_cofunder.redaction import redact_value
+from src.application.research.redaction import redact_value
 from src.application.runtime_logs_cli import collect_runtime_logs
 from src.application.runtime_runs_cli import collect_runtime_runs
 
@@ -58,7 +58,7 @@ def collect_evidence(
 
     scheduler_evidence = _normalize_scheduler_evidence(payload.get("scheduler_evidence"))
     evidence = {
-        "schema_version": "ai_cofunder_evidence.v1",
+        "schema_version": "research_evidence.v1",
         "collected_at_utc": now.isoformat().replace("+00:00", "Z"),
         "input": _safe_input_summary(payload),
         "deployment": _deployment_snapshot(base=base, config_path=config_path, cfg=cfg, mask_path=mask_path),
@@ -362,7 +362,7 @@ def _strategy_evidence(payload: dict[str, Any], *, source_paths: dict[str, Path 
     total_candidate_rows = sum(int(item.get("row_count") or 0) for item in candidate_reports if item.get("exists"))
     total_reject_rows = sum(int(item.get("row_count") or 0) for item in reject_logs if item.get("exists"))
     return {
-        "schema_version": "ai_cofunder_strategy_evidence.v1",
+        "schema_version": "research_strategy_evidence.v1",
         "candidate_reports": candidate_reports,
         "reject_logs": reject_logs,
         "filter_traces": filter_traces,
@@ -641,7 +641,7 @@ def _ranking_evidence(candidate_paths: list[Path], *, base: Path, cfg: dict[str,
                     cash_constraint_counts["cash_fields_missing"] += 1
 
     return {
-        "schema_version": "ai_cofunder_ranking_evidence.v1",
+        "schema_version": "research_ranking_evidence.v1",
         "top_rows_per_report": limit,
         "reports": reports,
         "summary": {
