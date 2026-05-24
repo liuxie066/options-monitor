@@ -571,9 +571,14 @@ Research 证据交接：
 Strategy Lab 本地实验：
 
 ```bash
+./om strategy-lab historical fetch --symbols NVDA,MSFT \
+  --start-date 2026-05-01 --end-date 2026-05-24 \
+  --timeframe 1d --confirm
+
 ./om strategy-lab replay --account sy \
   --candidate-path output_shared/reports/sell_put_candidates.csv \
   --reject-log-path output_shared/reports/sell_put_candidates_reject_log.csv \
+  --historical-snapshot-path output_shared/strategy_lab/historical_data/futu-<fingerprint>.json \
   --min-dte 20 --max-dte 35 --min-abs-delta 0.10 --max-abs-delta 0.35 --min-premium 4
 
 ./om-agent run --tool strategy_lab --input-json '{"strategy_type":"sell_put","candidate_paths":["output_shared/reports/sell_put_candidates.csv"],"write_outputs":false}'
@@ -581,7 +586,7 @@ Strategy Lab 本地实验：
 
 `strategy_lab` 只做确定性 replay 和报告，不改策略配置、不写交易/账本、不发送通知；本地输出文件需要显式 `write_outputs=true`、`confirm=true` 和写工具门禁。
 
-历史行情辅助必须先落成 frozen snapshot/cache，再作为 `historical_snapshot_paths` 传入 Strategy Lab；replay 过程中不直接调用 Futu API，避免回测结果随网络和数据源漂移。
+历史行情通过 `./om strategy-lab historical fetch` 单独从 OpenD/Futu 拉取并落成 frozen snapshot/cache，再作为 `historical_snapshot_paths` 传入 Strategy Lab；fetch 默认 dry-run，只有 `--confirm` 才会连接 OpenD 并写入 `output_shared/strategy_lab/historical_data/`。replay 过程中不直接调用 Futu API，避免回测结果随网络和数据源漂移。
 
 写工具门禁：
 

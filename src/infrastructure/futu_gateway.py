@@ -263,6 +263,24 @@ class FutuGateway:
             self._raise_mapped(exc, action="get_deal_list")
         raise AssertionError("unreachable")
 
+    def request_history_kline(self, **kwargs: Any) -> dict[str, Any]:
+        quote = self._quote_client()
+        try:
+            params = _normalize_history_kline_kwargs(kwargs)
+            result = quote.request_history_kline(**params)
+            if isinstance(result, tuple) and len(result) >= 2:
+                ret, data = result[0], result[1]
+                if ret != 0:
+                    raise RuntimeError(data)
+                return {
+                    "data": data,
+                    "page_req_key": result[2] if len(result) >= 3 else None,
+                }
+            return {"data": result, "page_req_key": None}
+        except Exception as exc:
+            self._raise_mapped(exc, action="request_history_kline")
+        raise AssertionError("unreachable")
+
 
 def build_futu_gateway(
     *,
@@ -278,6 +296,40 @@ def build_futu_gateway(
     backend = backend_cls(host=str(host), port=int(port))
     client = client_cls(backend, is_option_chain_cache_enabled=bool(is_option_chain_cache_enabled))
     return FutuGateway(client=client, backend=backend, host=str(host), port=int(port))
+
+
+def _normalize_history_kline_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    params = dict(kwargs)
+    params["ktype"] = _futu_enum_value("KLType", params.get("ktype"))
+    params["autype"] = _futu_enum_value("AuType", params.get("autype"))
+    fields = params.get("fields")
+    if isinstance(fields, (list, tuple)):
+        normalized_fields = [_futu_enum_value("KL_FIELD", item) for item in fields if item not in (None, "")]
+        if normalized_fields:
+            params["fields"] = normalized_fields
+        else:
+            params.pop("fields", None)
+    elif fields in (None, "", ()):
+        params.pop("fields", None)
+    return {key: value for key, value in params.items() if value is not None}
+
+
+def _futu_enum_value(namespace: str, value: Any) -> Any:
+    if value in (None, ""):
+        return value
+    try:
+        import futu
+
+        enum_ns = getattr(futu, namespace)
+        name = str(value).strip()
+        if hasattr(enum_ns, name):
+            return getattr(enum_ns, name)
+        upper = name.upper()
+        if hasattr(enum_ns, upper):
+            return getattr(enum_ns, upper)
+    except Exception:
+        pass
+    return value
 
 
 def build_ready_futu_gateway(

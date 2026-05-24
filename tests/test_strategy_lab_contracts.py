@@ -164,6 +164,152 @@ def test_strategy_lab_historical_cache_rejects_output_dir_outside_repo(tmp_path:
         HistoricalDataCache(base=tmp_path, cache_dir=tmp_path.parent / "outside-historical-cache")
 
 
+def test_strategy_lab_historical_fetch_dry_run_does_not_call_provider(tmp_path: Path) -> None:
+    from src.application.strategy_lab import fetch_historical_data_tool
+
+    class ExplodingProvider:
+        def __init__(self, **_kwargs) -> None:
+            raise AssertionError("dry-run must not build provider")
+
+    data, warnings, meta = fetch_historical_data_tool(
+        {
+            "provider": "futu",
+            "symbols": "nvda,0700.HK",
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-03",
+            "timeframe": "1d",
+        },
+        base=tmp_path,
+        provider_factory=ExplodingProvider,
+    )
+
+    assert data["schema_version"] == "strategy_lab_historical_fetch.v1"
+    assert data["dry_run"] is True
+    assert data["write_applied"] is False
+    assert data["request"]["symbols"] == ["NVDA", "0700.HK"]
+    assert data["output"]["snapshot_path"].startswith("output_shared/strategy_lab/historical_data/futu-")
+    assert "historical_fetch_dry_run_no_opend_call" in warnings
+    assert meta["base"] == f".../{tmp_path.name}"
+    assert not (tmp_path / "output_shared").exists()
+
+
+def test_strategy_lab_historical_fetch_writes_frozen_snapshot_with_provider(tmp_path: Path) -> None:
+    from src.application.strategy_lab import HistoricalBar, build_historical_data_snapshot, fetch_historical_data_tool
+
+    class FakeProvider:
+        def __init__(self, *, base, options) -> None:
+            self.base = base
+            self.options = options
+
+        def fetch(self, request):
+            assert request.symbols == ("NVDA",)
+            assert self.options.host == "127.0.0.9"
+            assert self.options.port == 11119
+            return build_historical_data_snapshot(
+                request=request,
+                source="futu",
+                generated_at="2026-05-24T08:00:00Z",
+                bars=[
+                    HistoricalBar(symbol="NVDA", timestamp="2026-05-01", open=900, high=910, low=890, close=905, volume=1000, source="futu"),
+                    HistoricalBar(symbol="NVDA", timestamp="2026-05-02", open=905, high=915, low=901, close=912, volume=1200, source="futu"),
+                ],
+            )
+
+    data, warnings, _meta = fetch_historical_data_tool(
+        {
+            "provider": "futu",
+            "symbols": "NVDA",
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-03",
+            "host": "127.0.0.9",
+            "port": 11119,
+            "confirm": True,
+        },
+        base=tmp_path,
+        provider_factory=FakeProvider,
+    )
+
+    assert warnings == []
+    assert data["dry_run"] is False
+    assert data["write_applied"] is True
+    assert data["snapshot"]["bar_count"] == 2
+    snapshot_path = tmp_path / data["output"]["snapshot_path"]
+    assert snapshot_path.exists()
+    payload = snapshot_path.read_text(encoding="utf-8")
+    assert '"schema_version": "strategy_lab_historical_data.v1"' in payload
+    assert '"source": "futu"' in payload
+
+
+def test_strategy_lab_futu_historical_provider_fetches_pages_and_maps_rows(tmp_path: Path) -> None:
+    from src.application.strategy_lab import FutuHistoricalFetchOptions, FutuHistoricalMarketDataProvider, HistoricalDataRequest
+
+    class FakeGateway:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+            self.closed = False
+
+        def request_history_kline(self, **kwargs):
+            self.calls.append(dict(kwargs))
+            if len(self.calls) == 1:
+                return {
+                    "data": [
+                        {
+                            "code": "US.NVDA",
+                            "time_key": "2026-05-01 00:00:00",
+                            "open": "900",
+                            "high": "910",
+                            "low": "890",
+                            "close": "905",
+                            "volume": "1000",
+                        }
+                    ],
+                    "page_req_key": "next-page",
+                }
+            return {
+                "data": [
+                    {
+                        "code": "US.NVDA",
+                        "time_key": "2026-05-02 00:00:00",
+                        "open": 905,
+                        "high": 915,
+                        "low": 901,
+                        "close": 912,
+                        "volume": 1200,
+                    }
+                ],
+                "page_req_key": None,
+            }
+
+        def close(self) -> None:
+            self.closed = True
+
+    gateway = FakeGateway()
+    provider = FutuHistoricalMarketDataProvider(
+        base=tmp_path,
+        options=FutuHistoricalFetchOptions(no_retry=True, max_pages=3),
+        gateway_factory=lambda **_kwargs: gateway,
+        retry_call=lambda _what, fn, **_kwargs: fn(),
+        rate_limited_call=lambda **kwargs: kwargs["call"](),
+    )
+    snapshot = provider.fetch(
+        HistoricalDataRequest(
+            symbols=("NVDA",),
+            start_date="2026-05-01",
+            end_date="2026-05-03",
+            adjusted=True,
+        )
+    )
+
+    assert snapshot.source == "futu"
+    assert snapshot.request.symbols == ("NVDA",)
+    assert [bar.close for bar in snapshot.bars] == [905.0, 912.0]
+    assert gateway.calls[0]["code"] == "US.NVDA"
+    assert gateway.calls[0]["ktype"] == "K_DAY"
+    assert gateway.calls[0]["autype"] == "QFQ"
+    assert gateway.calls[1]["page_req_key"] == "next-page"
+    assert gateway.closed is True
+
+
 def test_strategy_lab_replay_backtest_compares_sell_put_policies(tmp_path: Path) -> None:
     from src.application.strategy_lab import (
         StrategyExperiment,

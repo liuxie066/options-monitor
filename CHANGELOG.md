@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.139 - 2026-05-24
+
+### Added
+- Added `om strategy-lab historical fetch` to fetch OpenD/Futu historical K-line data into frozen Strategy Lab snapshots.
+- Added a Futu historical-data provider with paginated `request_history_kline` support and snapshot output under `output_shared/strategy_lab/historical_data/`.
+
+### Changed
+- Kept Strategy Lab replay isolated from live broker calls: historical data must be fetched into snapshots first and then passed through `historical_snapshot_paths`.
+- Documented the historical fetch workflow and kept fetch dry-run by default unless `--confirm` is provided.
+
 ## 1.2.138 - 2026-05-24
 
 ### Fixed
