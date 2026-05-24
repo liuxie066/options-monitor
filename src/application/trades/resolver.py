@@ -14,7 +14,7 @@ from src.application.ledger.api import (
     resolve_broker_trade_close_targets,
 )
 from src.application.trades.normalizer import NormalizedTradeDeal
-from src.application.trades.state import is_retryable_unresolved_deal, lookup_deal_state
+from src.application.trades.state import is_failed_deal, is_retryable_unresolved_deal, lookup_deal_state
 from src.application.trades.workflows import (
     apply_trade_close_with,
     apply_trade_open_with,
@@ -184,9 +184,13 @@ def resolve_trade_deal(
     state: dict[str, Any] | None,
     apply_changes: bool,
     persist_trade_event_fn=None,
+    retry_failed_deal: bool = False,
 ) -> IntakeResolution:
     persist_fn = persist_trade_event_fn or record_normalized_trade_event
-    if lookup_deal_state(state, deal.deal_id) is not None and not is_retryable_unresolved_deal(state, deal.deal_id):
+    can_retry_existing_deal = is_retryable_unresolved_deal(state, deal.deal_id) or (
+        retry_failed_deal and is_failed_deal(state, deal.deal_id)
+    )
+    if lookup_deal_state(state, deal.deal_id) is not None and not can_retry_existing_deal:
         return _failure(status="skipped", action=None, reason="duplicate_deal_id", deal=deal)
 
     if not deal.deal_id:

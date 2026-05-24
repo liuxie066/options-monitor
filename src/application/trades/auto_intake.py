@@ -24,6 +24,7 @@ from src.application.trades.state import (
     upsert_deal_state,
     write_trade_intake_state,
 )
+from src.application.trades.state_reconcile import reconcile_trade_intake_state
 from src.application.trades.push_listener import OpenDTradePushListener
 from src.application.trades.receipt import send_trade_intake_receipt
 from src.application.opend_fetch_config import opend_fetch_kwargs
@@ -48,6 +49,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--port", type=int, default=11111)
     ap.add_argument("--once", action="store_true", help="Validate config and exit")
     ap.add_argument("--deal-json", default=None, help="Replay a single normalized/raw deal payload from a JSON file")
+    ap.add_argument("--retry-failed", action="store_true", help="Allow --deal-json replay of a previously failed deal_id")
+    ap.add_argument("--reconcile-state", action="store_true", help="Reconcile historical failed/unresolved deal state from ledger/audit evidence")
+    ap.add_argument("--deal-id", action="append", default=None, help="Limit --reconcile-state to a specific deal_id; repeatable")
+    ap.add_argument("--apply", action="store_true", help="Apply --reconcile-state local state changes; dry-run by default")
+    ap.add_argument("--dry-run", action="store_true", help="Preview --reconcile-state without writing")
     return ap.parse_args(argv)
 
 
@@ -70,6 +76,7 @@ def _process_payload(
     config_path: Path | None = None,
     runtime_root: Path | None = None,
     on_result_fn: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
+    retry_failed_deal: bool = False,
 ) -> dict[str, Any]:
     opend_config = opend_fetch_kwargs(config) if isinstance(config, dict) else None
     normalize_fn = normalize_trade_deal
@@ -108,6 +115,7 @@ def _process_payload(
         normalize_trade_deal_fn=normalize_fn,
         resolve_trade_deal_fn=resolve_trade_deal,
         on_result_fn=on_result_fn,
+        retry_failed_deal=retry_failed_deal,
     )
 
 
@@ -155,6 +163,42 @@ def main(argv: list[str] | None = None) -> int:
         host=args.host,
         port=args.port,
     )
+    if args.retry_failed and not args.deal_json:
+        print("--retry-failed requires --deal-json replay")
+        return 2
+    if args.deal_id and not args.reconcile_state:
+        print("--deal-id is only supported with --reconcile-state")
+        return 2
+    if args.apply and not args.reconcile_state:
+        print("--apply is only supported with --reconcile-state; use --mode apply for trade-event writes")
+        return 2
+    if args.dry_run and not args.reconcile_state:
+        print("--dry-run is only supported with --reconcile-state; use --mode dry-run for trade intake")
+        return 2
+    if args.apply and args.dry_run:
+        print("--dry-run cannot be combined with --apply")
+        return 2
+    if args.reconcile_state and args.mode:
+        print("--reconcile-state uses --apply/--dry-run; do not use --mode")
+        return 2
+    if args.reconcile_state:
+        _data_config, repo = open_position_ledger_from_runtime_config(base=runtime_root, cfg=cfg, data_config=args.data_config)
+        result = reconcile_trade_intake_state(
+            state_path=state_path,
+            audit_path=audit_path,
+            repo=repo,
+            deal_ids=list(args.deal_id or []),
+            apply_changes=bool(args.apply),
+        )
+        result = attach_write_contract(
+            result,
+            dry_run=not bool(args.apply),
+            write_applied=bool(args.apply) and int(result.get("applied_count") or 0) > 0,
+            backup_path=result.get("backup_path"),
+            rollback_hint="restore the auto_trade_intake_state.json backup",
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
 
     if args.once and not args.deal_json:
         _log(
@@ -210,6 +254,7 @@ def main(argv: list[str] | None = None) -> int:
             config_path=cfg_path,
             runtime_root=runtime_root,
             on_result_fn=receipt_callback,
+            retry_failed_deal=bool(args.retry_failed),
         )
         if apply_changes:
             _write_listener_status(
