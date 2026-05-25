@@ -110,7 +110,7 @@ def run_sell_call_scan_and_summarize(
             symbol=symbol,
             status="not_applicable",
             rule="stock_context_missing",
-            message="sell call stock context missing",
+            message="covered call stock context missing",
         )
         return summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
 
@@ -127,7 +127,7 @@ def run_sell_call_scan_and_summarize(
             symbol=symbol,
             status="not_applicable",
             rule="stock_context_invalid",
-            message="sell call stock context invalid",
+            message="covered call stock context invalid",
         )
         return summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
 
@@ -137,7 +137,7 @@ def run_sell_call_scan_and_summarize(
             symbol=symbol,
             status="not_applicable",
             rule="stock_context_non_positive",
-            message="sell call shares or avg_cost non-positive",
+            message="covered call shares or avg_cost non-positive",
             metric_value=shares_total,
             threshold=1,
             config_values={"avg_cost": avg_cost},
@@ -164,7 +164,7 @@ def run_sell_call_scan_and_summarize(
             symbol=symbol,
             status="post_filtered",
             rule="share_coverage_calc_failed",
-            message="sell call share coverage calculation failed",
+            message="covered call share coverage calculation failed",
         )
         return summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
     shares_available_for_cover = max(0, int(shares_total) - int(locked))

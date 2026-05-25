@@ -17,6 +17,7 @@ OPTIMIZER_SWITCH_LABEL = "强烈建议平仓换仓"
 OPTIMIZER_CLOSE_LABEL = "建议平仓"
 OPTIMIZER_SWITCH_TAG = " 🔄"
 OPTIMIZER_CLOSE_TAG = " ⚠️"
+COVERED_CALL_LABEL = "Covered Call"
 
 
 def _highlight_optimizer_lines(text: str) -> str:
@@ -49,6 +50,10 @@ def count_optimizer_actions(text: str) -> tuple[int, int]:
         elif OPTIMIZER_CLOSE_LABEL in ln:
             close_n += 1
     return (switch_n, close_n)
+
+
+def _is_covered_call_line(text: str) -> bool:
+    return f" {COVERED_CALL_LABEL} " in text or " 卖Call " in text
 
 
 def _parse_cny(s: str) -> float | None:
@@ -85,11 +90,11 @@ def annotate_notification(acct: str, text: str) -> str:
             last_line1_idx = None
             continue
 
-        if hdr in ('Call', 'Call:'):
+        if hdr in ('Call', 'Call:', COVERED_CALL_LABEL, f'{COVERED_CALL_LABEL}:'):
             in_put, in_call = False, True
             if out and out[-1].strip() != '':
                 out.append('')
-            out.append('Call:')
+            out.append(f'{COVERED_CALL_LABEL}:')
             last_line1_idx = None
             continue
 
@@ -108,7 +113,7 @@ def annotate_notification(acct: str, text: str) -> str:
                 out.append('- ' + s)
             last_line1_idx = len(out) - 1
             continue
-        if in_call and ' 卖Call ' in s:
+        if in_call and _is_covered_call_line(s):
             if s.lstrip().startswith('- '):
                 out.append(s)
             else:
@@ -158,7 +163,7 @@ def build_account_message(
 
     kept = result.notification_text.strip().splitlines()
     put_n = sum(1 for ln in kept if ' 卖Put ' in ln)
-    call_n = sum(1 for ln in kept if ' 卖Call ' in ln)
+    call_n = sum(1 for ln in kept if _is_covered_call_line(ln))
     enhancement_n = sum(1 for ln in kept if ' 收益增强 ' in ln)
     switch_n, close_n = count_optimizer_actions(result.notification_text)
     acct = str(result.account).strip().lower()
@@ -170,7 +175,7 @@ def build_account_message(
     lines.append(f"北京时间 {now_bj}")
     lines.append('')
     lines.append(f"### 账户 {acct} · 本轮候选")
-    counts_line = f"- Put {put_n} / Call {call_n}"
+    counts_line = f"- Put {put_n} / Covered Call {call_n}"
     if enhancement_n > 0:
         counts_line += f" / Enhance {enhancement_n}"
     if switch_n > 0 or close_n > 0:
@@ -204,7 +209,7 @@ def build_account_message_compact(
 
     text = result.notification_text.strip()
     put_n = sum(1 for ln in text.splitlines() if ' 卖Put ' in ln)
-    call_n = sum(1 for ln in text.splitlines() if ' 卖Call ' in ln)
+    call_n = sum(1 for ln in text.splitlines() if _is_covered_call_line(ln))
     enhancement_n = sum(1 for ln in text.splitlines() if ' 收益增强 ' in ln)
     switch_n, close_n = count_optimizer_actions(text)
     acct = str(result.account).strip().lower()
@@ -216,7 +221,7 @@ def build_account_message_compact(
     lines.append(f"⏰ 北京时间 {now_bj}")
     lines.append('')
     lines.append("📋 本轮概览")
-    overview_parts = [f"Put {put_n}", f"Call {call_n}"]
+    overview_parts = [f"Put {put_n}", f"Covered Call {call_n}"]
     if enhancement_n > 0:
         overview_parts.append(f"增强 {enhancement_n}")
     lines.append(f"  {' · '.join(overview_parts)}")

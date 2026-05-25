@@ -23,7 +23,7 @@ from domain.domain.engine import (
 
 def render_one(row) -> str:
     strike = strike_text(row["strike"])
-    title = f"[Sell Call 候选] {row['symbol']} {row['expiration']} {strike}C"
+    title = f"[Covered Call 候选] {row['symbol']} {row['expiration']} {strike}C"
     body = [
         title,
         "",
@@ -60,7 +60,7 @@ def render_sell_call_alerts(
     layered: bool = False,
     base_dir: Path | None = None,
 ) -> str:
-    """渲染 Sell Call 候选提醒文本并写入文件。"""
+    """渲染 Covered Call 候选提醒文本并写入文件。"""
     base = (base_dir or Path(__file__).resolve().parents[2]).resolve()
 
     report_dir_path = Path(report_dir)
@@ -109,7 +109,7 @@ def render_sell_call_alerts(
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description='Render Sell Call alert text from candidate CSV')
+    parser = argparse.ArgumentParser(description='Render Covered Call alert text from candidate CSV')
     parser.add_argument('--input', default=None, help='Input CSV path (default: <report-dir>/sell_call_candidates.csv)')
     parser.add_argument('--report-dir', default='output_shared/reports', help='Report dir for default input/output (default: output_shared/reports)')
     parser.add_argument('--top', type=int, default=5)

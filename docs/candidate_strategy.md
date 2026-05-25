@@ -2,7 +2,7 @@
 
 这份文档只回答一件事：
 
-> 系统现在是怎样筛选、排序和输出 Sell Put / Sell Call 候选的。
+> 系统现在是怎样筛选、排序和输出 Sell Put / Covered Call 候选的。
 
 它不是历史设计稿，也不是未来架构草案；它描述的是**当前生产行为**。
 
@@ -13,12 +13,14 @@
 当前候选策略覆盖两类输出：
 
 - **Sell Put**
-- **Sell Call**
+- **Covered Call**
+
+术语说明：配置、CSV、trace 和代码模块里的内部 key 仍是 `sell_call`；这份文档用用户可见名称 **Covered Call** 描述同一能力。
 
 两类候选共享大体流程，但关注点不同：
 
 - **Sell Put**：现金担保能力、年化净收益率、单笔净收益、流动性
-- **Sell Call**：可覆盖股数、年化权利金收益、单笔净收益、流动性
+- **Covered Call**：可覆盖股数、年化权利金收益、单笔净收益、流动性
 
 ---
 
@@ -50,7 +52,7 @@
 
 ### C. 扫描脚本与后处理层
 负责：
-- Sell Put / Sell Call 的具体脚本调用
+- Sell Put / Covered Call 的具体脚本调用
 - 标签补充
 - 现金担保附加过滤
 - 事件风险标注
@@ -98,11 +100,11 @@
 - `min_strike <= strike <= max_strike`
 - put 必须满足基本 moneyness 约束
 
-### Sell Call
+### Covered Call
 主要硬约束包括：
 
 - `min_dte <= dte <= max_dte`
-- `min_strike <= strike <= max_strike`，其中 Sell Call 的有效 `min_strike` 不低于持仓 `avg_cost * min_strike_cost_multiplier`
+- `min_strike <= strike <= max_strike`，其中 Covered Call 的有效 `min_strike` 不低于持仓 `avg_cost * min_strike_cost_multiplier`
 - 必须有足够股票可覆盖 short call
 
 ### 说明
@@ -126,7 +128,7 @@
 当前主要收益门槛包括：
 
 - `min_annualized_net_return`（Put）
-- `min_annualized_net_premium_return`（Sell Call）
+- `min_annualized_net_premium_return`（Covered Call）
 - `min_net_income`
 
 ### 优先级
@@ -201,9 +203,9 @@
 
 ---
 
-## 5. Sell Call 的覆盖能力规则
+## 5. Covered Call 的覆盖能力规则
 
-Sell Call 会结合持仓 context 计算：
+Covered Call 会结合持仓 context 计算：
 
 - 总持股数
 - 已被其他 short call 锁定的股数
@@ -223,7 +225,7 @@ Sell Call 会结合持仓 context 计算：
 1. 年化净收益率
 2. 单笔净收益
 
-### Sell Call
+### Covered Call
 主要按：
 
 1. 年化权利金收益（净权利金 / spot 机会成本）
@@ -255,7 +257,7 @@ Sell Call 会结合持仓 context 计算：
 - `src/application/sell_put_cash.py`
 - `domain/domain/sell_put_config.py`
 
-### Sell Call 路径
+### Covered Call 路径
 - `src/application/scan_sell_call.py`
 - `src/application/sell_call_steps.py`
 - `domain/domain/sell_call_config.py`

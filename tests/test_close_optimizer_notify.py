@@ -162,7 +162,7 @@ def test_build_account_message_optimizer_only_no_other_candidates() -> None:
         cash_footer_lines=None,
     )
 
-    assert "Put 0 / Call 0 / 优化器 换仓1 平仓0" in message
+    assert "Put 0 / Covered Call 0 / 优化器 换仓1 平仓0" in message
     assert "强烈建议平仓换仓 🔄" in message
 
 

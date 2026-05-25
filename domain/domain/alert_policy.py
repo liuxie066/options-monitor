@@ -23,7 +23,7 @@ class SellPutAlertThresholds:
 
 @dataclass(frozen=True)
 class SellCallAlertThresholds:
-    """Sell Call 候选评级阈值。默认值与历史硬编码行为一致。"""
+    """Covered Call 候选评级阈值。默认值与历史硬编码行为一致。"""
 
     high_annual: float = 0.10
     high_total: float = 0.15

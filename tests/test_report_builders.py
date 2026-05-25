@@ -67,7 +67,7 @@ def test_build_symbols_digest_deduplicates_symbols_with_yield_enhancement_sectio
         text = (report_dir / "symbols_digest.txt").read_text(encoding="utf-8")
         assert text.count("## NVDA") == 1
         assert "### Sell Put" in text
-        assert "### Sell Call" in text
+        assert "### Covered Call" in text
         assert "### Yield Enhancement" in text
         assert "enhance alert" in text
         assert "### Rebound Combo" not in text

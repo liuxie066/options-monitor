@@ -10,8 +10,8 @@ def test_account_message_is_plain_text_for_weixin() -> None:
         "腾讯 卖Put 2026-04-29 460P\n"
         "担保 1张 余量 ¥-100\n"
         "\n"
-        "Call\n"
-        "英伟达 卖Call 2026-06-18 180C\n"
+        "Covered Call\n"
+        "英伟达 Covered Call 2026-06-18 180C\n"
         "覆盖 1张 cover 1\n"
     )
     message = build_account_message(
@@ -28,7 +28,7 @@ def test_account_message_is_plain_text_for_weixin() -> None:
 
     assert "# 📊 Options Monitor\n## 账户提醒（lx）" in message
     assert "北京时间 2026-04-08 22:31:00" in message
-    assert "### 账户 lx · 本轮候选\n- Put 1 / Call 1" in message
+    assert "### 账户 lx · 本轮候选\n- Put 1 / Covered Call 1" in message
     assert "LX 持有 ¥1,000 (CNY) | 可用 ¥200 (CNY)" in message
     assert "**" not in message
     assert "\n>" not in message
@@ -77,4 +77,4 @@ def test_account_message_counts_yield_enhancement_when_present() -> None:
         cash_footer_lines=[],
     )
 
-    assert "### 账户 lx · 本轮候选\n- Put 1 / Call 0 / Enhance 1" in message
+    assert "### 账户 lx · 本轮候选\n- Put 1 / Covered Call 0 / Enhance 1" in message

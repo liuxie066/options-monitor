@@ -3,7 +3,7 @@
 `options-monitor` 是一个本地运行的期权监控、筛选、报告和通知工具，主要服务四个用户功能：
 
 - `Sell Put`：扫描 Put 期权候选，结合现金、策略阈值和已有风险暴露，筛出适合人工复核的卖 Put 机会。
-- `Sell Call`：基于已有正股持仓扫描 Call 期权候选，辅助 covered call 收益管理。
+- `Covered Call`：基于已有正股持仓扫描 Call 期权候选，辅助 covered call 收益管理。
 - `Sell Put` 收益增强 `yield_enhancement`：在 Sell Put 候选基础上评估收益增强组合，寻找权利金、现金占用和 long call 成本之间更合适的组合。
 - `close_advice`：检查已有期权仓位，给出止盈、继续持有或需要关注的平仓参考。
 
@@ -29,7 +29,7 @@
 做什么：
 
 - 为 `Sell Put` 扫描和筛选候选。
-- 为 `Sell Call` 生成 covered call 候选。
+- 为 `Covered Call` 生成已有持仓的 covered call 候选。
 - 为 `yield_enhancement` 评估 Sell Put 收益增强组合。
 - 为 `close_advice` 生成已有仓位的平仓参考。
 
@@ -284,7 +284,7 @@ om run tick --config config.us.json --accounts lx sy
 它会把 trace 汇总到这几个函数维度：
 
 - `sell_put`
-- `sell_call`
+- `sell_call`（内部 key，对外显示为 Covered Call）
 - `close_advice`
 - `yield_enhancement`
 - `cash_reserve`
@@ -415,13 +415,15 @@ python3 -m src.application.option_intake --config /var/lib/options-monitor/confi
 
 除了链上候选过滤，最终还会叠加账户现金维度的 `cash_reserve` 后过滤。
 
-### Sell Call
+### Covered Call
 
-Sell Call 的关键区别是它依赖真实持仓上下文：
+Covered Call 的关键区别是它依赖真实持仓上下文：
 
 - `shares` / `avg_cost` 来自 holdings，不再建议手写在 symbol 配置里
 - 已被 short call 锁定的股票会从可卖数量里扣掉
 - `min_strike_cost_multiplier` 会抬高有效 strike 下限，避免推荐明显低于成本底线的 call
+
+注意：当前配置、runtime CSV 和 trace 里的内部策略 key 仍是 `sell_call`。这是兼容性标识；用户可见名称统一为 `Covered Call`。
 
 ### Yield Enhancement
 

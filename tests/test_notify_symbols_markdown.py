@@ -75,7 +75,7 @@ def test_notify_symbols_markdown_call_layout_ignores_changes_input() -> None:
     alerts = """# Symbols Alerts
 
 ## 高优先级
-- [英伟达](NVDA) | sell_call | 2026-06-18 180C | 年化 12.30% | 净收入 240.40 | DTE 44 | Strike 180 | 保守 | ccy USD | ask 2.500 | bid 2.300 | mid 2.400 | delta 0.16 | cover 2 | shares 200(-0) | 已通过准入，可作为 sell call 备选。
+- [英伟达](NVDA) | sell_call | 2026-06-18 180C | 年化 12.30% | 净收入 240.40 | DTE 44 | Strike 180 | 保守 | ccy USD | ask 2.500 | bid 2.300 | mid 2.400 | delta 0.16 | cover 2 | shares 200(-0) | 已通过准入，可作为 Covered Call 备选。
 """
     changes = """# Symbols Changes
 
@@ -83,7 +83,7 @@ def test_notify_symbols_markdown_call_layout_ignores_changes_input() -> None:
 """
     out = build_notification(changes, alerts, account_label="SY")
 
-    assert "### [sy] 英伟达 · 卖Call" in out
+    assert "### [sy] 英伟达 · Covered Call" in out
     assert "数量=2张(可覆盖)" in out
     assert "持仓: 总股数=200 | 已占用=0 | 可用=200 | 可覆盖=2张" in out
     assert "变化" not in out
@@ -96,7 +96,7 @@ def test_notify_symbols_markdown_call_layout_missing_fields_have_reasons() -> No
     alerts = """# Symbols Alerts
 
 ## 高优先级
-- NVDA | sell_call | 2026-06-18 180C | 年化 - | 净收入 240.40 | DTE 44 | Strike nan | 保守 | ccy USD | ask 2.500 | bid 2.300 | mid 2.400 | delta nan | cover nan | shares nan | 已通过准入，可作为 sell call 备选。
+- NVDA | sell_call | 2026-06-18 180C | 年化 - | 净收入 240.40 | DTE 44 | Strike nan | 保守 | ccy USD | ask 2.500 | bid 2.300 | mid 2.400 | delta nan | cover nan | shares nan | 已通过准入，可作为 Covered Call 备选。
 """
     out = build_notification("", alerts, account_label="SY")
 
@@ -421,7 +421,7 @@ def test_build_notification_keeps_per_strategy_capacity() -> None:
     ]
     call_line = (
         "- CALL1 | sell_call | 2026-06-19 180C | 年化 9.00% | 净收入 90.00 | "
-        "DTE 30 | Strike 180 | 保守 | ccy USD | mid 1.000 | cover 1 | shares 100(-0) | 已通过准入，可作为 sell call 备选。"
+        "DTE 30 | Strike 180 | 保守 | ccy USD | mid 1.000 | cover 1 | shares 100(-0) | 已通过准入，可作为 Covered Call 备选。"
     )
     alerts = "# Symbols Alerts\n\n## 高优先级\n" + "\n".join(put_lines + [call_line]) + "\n"
 
@@ -431,7 +431,7 @@ def test_build_notification_keeps_per_strategy_capacity() -> None:
     assert "PUT5" not in out
     assert "PUT6" not in out
     assert "CALL1" in out
-    assert out.count("· 卖Call") == 1
+    assert out.count("· Covered Call") == 1
 
 
 def test_build_notification_keeps_medium_strategy_when_high_exists() -> None:
@@ -443,7 +443,7 @@ def test_build_notification_keeps_medium_strategy_when_high_exists() -> None:
     )
     medium_call = (
         "- MSFT | sell_call | 2026-06-19 430C | 年化 6.50% | 净收入 80.00 | "
-        "DTE 30 | Strike 430 | 保守 | ccy USD | mid 0.800 | cover 1 | shares 100(-0) | 已通过准入，可作为 sell call 备选。"
+        "DTE 30 | Strike 430 | 保守 | ccy USD | mid 0.800 | cover 1 | shares 100(-0) | 已通过准入，可作为 Covered Call 备选。"
     )
     alerts = (
         "# Symbols Alerts\n\n"

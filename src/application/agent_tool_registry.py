@@ -188,7 +188,7 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
         input_schema={
             "symbol": "required canonical symbol, for example NVDA or 0700.HK",
             "account": "optional account label",
-            "function": "optional sell_put|sell_call|close_advice|yield_enhancement|cash_reserve|share_coverage",
+            "function": "optional sell_put|sell_call (Covered Call internal key)|close_advice|yield_enhancement|cash_reserve|share_coverage",
             "run_id": "optional output_runs run id; use latest externally when desired",
             "run_dir": "optional explicit output_runs/<run_id> directory",
             "report_dir": "optional report dir containing candidate_filter_trace.jsonl",

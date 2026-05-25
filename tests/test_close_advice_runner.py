@@ -2022,4 +2022,4 @@ def test_close_advice_text_can_drive_account_message_without_opening_candidates(
 
     assert "账户提醒（lx）" in msg
     assert "平仓建议" in msg
-    assert "Put 0 / Call 0" in msg
+    assert "Put 0 / Covered Call 0" in msg

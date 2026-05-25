@@ -59,7 +59,7 @@ def build_symbols_digest(symbols: list[str], report_dir: Path):
             lines.append('无候选。')
         lines.append('')
 
-        lines.append('### Sell Call')
+        lines.append('### Covered Call')
         if cc_path.exists() and cc_path.stat().st_size > 0:
             lines.append(cc_path.read_text(encoding='utf-8').strip())
         else:
