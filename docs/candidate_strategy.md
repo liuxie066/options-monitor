@@ -15,7 +15,7 @@
 - **Sell Put**
 - **Covered Call**
 
-术语说明：配置、CSV、trace 和代码模块里的内部 key 仍是 `sell_call`；这份文档用用户可见名称 **Covered Call** 描述同一能力。
+术语说明：`config.yaml` authoring 使用 `covered_call`；生成后的 runtime JSON、CSV、trace 和代码模块里的内部 key 仍是 `sell_call`。这份文档用用户可见名称 **Covered Call** 描述同一能力。
 
 两类候选共享大体流程，但关注点不同：
 
@@ -116,7 +116,7 @@
   - 抓取层会先为 put / call 分别规划 expiration 与 strike 窗口，再尽量合并请求
 - put / call 现在按同一套“边界模式”规划窗口，只是方向相反：
   - `sell_put` 的近端边界是 `max_strike`；若只给 `max_strike`，抓取层向下扩 `20%`
-  - `sell_call` 的近端边界是 `min_strike`；若只给 `min_strike`，抓取层向上扩 `20%`
+  - Covered Call 的近端边界是 `min_strike`；若只给 `min_strike`，抓取层向上扩 `20%`
 - `min_strike=0` 这种 sentinel 语义已移除；未设置边界时请直接省略该字段
 - call 未配置任何 strike 边界时，抓取层会退回到默认 spot 窗口 `[spot*1.03, spot*1.20]`
 - 抓取层允许加 buffer 防漏抓，但 buffer 不改变扫描硬约束语义

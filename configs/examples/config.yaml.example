@@ -18,6 +18,10 @@ markets:
         sell_put:
           dte: [20, 45]
           strike: [55, 85]
+        covered_call:
+          enabled: true
+          dte: [20, 60]
+          strike: [90, 120]
         yield_enhancement: true
 
   hk:

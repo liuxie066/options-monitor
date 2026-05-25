@@ -8,6 +8,7 @@ from typing import Any
 
 import yaml
 
+from domain.domain.strategy_vocab import STRATEGY_COVERED_CALL
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.config_primitives import (
     config_key_parts as _key_parts,
@@ -51,6 +52,8 @@ ASSISTANT_AUTHORING_KEYS = {"assistant", "inbound"}
 ROOT_KEYS = {"accounts", "features", "markets", *PASSTHROUGH_KEYS, *ASSISTANT_AUTHORING_KEYS}
 MARKET_KEYS = {"accounts", "features", "overrides", "symbols", *PASSTHROUGH_KEYS}
 WRITE_GATE_KEYS = {"write_gates", "write_permissions", "writes", "feishu_write", "feishu_writes"}
+COVERED_CALL_AUTHORING_KEY = "covered_call"
+SELL_CALL_LEGACY_AUTHORING_KEY = STRATEGY_COVERED_CALL
 
 
 def default_yaml_config_path(*, repo_root: Path) -> Path:
@@ -251,6 +254,41 @@ def _normalize_strategy(raw: Any, *, path: str, allow_ranges: bool = True) -> di
     return out
 
 
+def _canonical_strategy_authoring_key(raw_key: Any) -> str:
+    key = str(raw_key or "").strip()
+    if key == COVERED_CALL_AUTHORING_KEY:
+        return SELL_CALL_LEGACY_AUTHORING_KEY
+    return key
+
+
+def _runtime_key_parts_for_yaml_authoring(parts: list[str]) -> list[str]:
+    return [_canonical_strategy_authoring_key(part) for part in parts]
+
+
+def _normalize_strategy_authoring_container(
+    raw: dict[str, Any],
+    *,
+    path: str,
+    normalize_strategy_values: bool,
+    allow_ranges: bool = True,
+) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for raw_key, raw_value in raw.items():
+        key = str(raw_key or "").strip()
+        canonical_key = _canonical_strategy_authoring_key(key)
+        if canonical_key == SELL_CALL_LEGACY_AUTHORING_KEY and canonical_key in out:
+            raise AgentToolError(
+                code="CONFIG_ERROR",
+                message=f"{path} cannot define both {COVERED_CALL_AUTHORING_KEY} and {SELL_CALL_LEGACY_AUTHORING_KEY}",
+                hint="Use covered_call in config.yaml; sell_call is kept as the generated runtime/internal key.",
+            )
+        if normalize_strategy_values and canonical_key in {"sell_put", SELL_CALL_LEGACY_AUTHORING_KEY}:
+            out[canonical_key] = _normalize_strategy(raw_value, path=f"{path}.{key}", allow_ranges=allow_ranges)
+        else:
+            out[canonical_key] = deepcopy(raw_value)
+    return out
+
+
 def _normalize_symbol_override(raw: Any, *, path: str) -> dict[str, Any]:
     if raw is None:
         return {}
@@ -259,10 +297,17 @@ def _normalize_symbol_override(raw: Any, *, path: str) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for raw_key, raw_value in raw.items():
         key = str(raw_key or "").strip()
+        canonical_key = _canonical_strategy_authoring_key(key)
         if key == "symbol":
             raise AgentToolError(code="CONFIG_ERROR", message=f"{path}.symbol is derived from the overrides key")
-        if key in {"sell_put", "sell_call"}:
-            out[key] = _normalize_strategy(raw_value, path=f"{path}.{key}", allow_ranges=True)
+        if canonical_key == SELL_CALL_LEGACY_AUTHORING_KEY and canonical_key in out:
+            raise AgentToolError(
+                code="CONFIG_ERROR",
+                message=f"{path} cannot define both {COVERED_CALL_AUTHORING_KEY} and {SELL_CALL_LEGACY_AUTHORING_KEY}",
+                hint="Use covered_call in config.yaml; sell_call is kept as the generated runtime/internal key.",
+            )
+        if canonical_key in {"sell_put", SELL_CALL_LEGACY_AUTHORING_KEY}:
+            out[canonical_key] = _normalize_strategy(raw_value, path=f"{path}.{key}", allow_ranges=True)
         elif key == "yield_enhancement":
             out[key] = _normalize_strategy(raw_value, path=f"{path}.{key}", allow_ranges=False)
         else:
@@ -298,8 +343,72 @@ def _normalize_features(raw: Any, *, path: str) -> dict[str, Any]:
     return out
 
 
-def _copy_passthrough(data: dict[str, Any]) -> dict[str, Any]:
-    return {key: deepcopy(data[key]) for key in PASSTHROUGH_KEYS if key in data}
+def _normalize_templates_authoring_keys(raw: Any, *, path: str) -> Any:
+    if not isinstance(raw, dict):
+        return deepcopy(raw)
+    out: dict[str, Any] = {}
+    for raw_profile, raw_profile_cfg in raw.items():
+        profile = str(raw_profile or "").strip()
+        if isinstance(raw_profile_cfg, dict):
+            out[raw_profile] = _normalize_strategy_authoring_container(
+                raw_profile_cfg,
+                path=f"{path}.{profile}",
+                normalize_strategy_values=True,
+                allow_ranges=True,
+            )
+        else:
+            out[raw_profile] = deepcopy(raw_profile_cfg)
+    return out
+
+
+def _normalize_passthrough_authoring_value(*, key: str, value: Any, path: str) -> Any:
+    if key == "templates":
+        return _normalize_templates_authoring_keys(value, path=path)
+    if key == "symbol_defaults":
+        if not isinstance(value, dict):
+            return deepcopy(value)
+        return _normalize_strategy_authoring_container(
+            value,
+            path=path,
+            normalize_strategy_values=True,
+            allow_ranges=True,
+        )
+    if key == "alert_policy":
+        if not isinstance(value, dict):
+            return deepcopy(value)
+        return _normalize_strategy_authoring_container(
+            value,
+            path=path,
+            normalize_strategy_values=False,
+        )
+    return deepcopy(value)
+
+
+def runtime_strategy_keys_to_yaml_authoring(raw: Any) -> Any:
+    if isinstance(raw, dict):
+        out: dict[Any, Any] = {}
+        for raw_key, raw_value in raw.items():
+            key = str(raw_key or "").strip()
+            yaml_key: Any = COVERED_CALL_AUTHORING_KEY if key == SELL_CALL_LEGACY_AUTHORING_KEY else raw_key
+            if yaml_key in out:
+                raise AgentToolError(
+                    code="CONFIG_ERROR",
+                    message=f"cannot convert both {COVERED_CALL_AUTHORING_KEY} and {SELL_CALL_LEGACY_AUTHORING_KEY} to YAML authoring keys",
+                    hint="Keep only covered_call in config.yaml authoring data.",
+                )
+            out[yaml_key] = runtime_strategy_keys_to_yaml_authoring(raw_value)
+        return out
+    if isinstance(raw, list):
+        return [runtime_strategy_keys_to_yaml_authoring(item) for item in raw]
+    return deepcopy(raw)
+
+
+def _copy_passthrough(data: dict[str, Any], *, path: str) -> dict[str, Any]:
+    return {
+        key: _normalize_passthrough_authoring_value(key=key, value=data[key], path=f"{path}.{key}")
+        for key in PASSTHROUGH_KEYS
+        if key in data
+    }
 
 
 def yaml_to_market_user_config(raw_cfg: dict[str, Any], *, market: str) -> dict[str, Any]:
@@ -357,8 +466,8 @@ def yaml_to_market_user_config(raw_cfg: dict[str, Any], *, market: str) -> dict[
         item = _deep_merge(item, overrides.get(symbol, {}))
         runtime_symbols.append(item)
 
-    out = _copy_passthrough(raw_cfg)
-    out = _deep_merge(out, _copy_passthrough(market_cfg))
+    out = _copy_passthrough(raw_cfg, path="config.yaml")
+    out = _deep_merge(out, _copy_passthrough(market_cfg, path=f"markets.{normalized_market}"))
     out = _deep_merge(out, _normalize_features(raw_cfg.get("features"), path="features"))
     out = _deep_merge(out, _normalize_features(market_cfg.get("features"), path=f"markets.{normalized_market}.features"))
     out["accounts"] = accounts
@@ -717,13 +826,21 @@ def explain_yaml_config_key(
 ) -> dict[str, Any]:
     normalized_market = _normalize_market(market)
     parts = _key_parts(key)
+    runtime_parts = _runtime_key_parts_for_yaml_authoring(parts)
     cfg, meta = resolve_yaml_runtime_config(
         repo_root=repo_root,
         market=normalized_market,
         config_path=config_path,
         system_config_path=system_config_path,
     )
-    exists, value = _path_get(cfg, parts)
+    exists, value = _path_get(cfg, runtime_parts)
+    runtime_path = ".".join(runtime_parts)
+    notes = [
+        "config.yaml stores user overrides only; defaults are merged before runtime validation.",
+        "Write permissions are not explained here because they live in options-monitor.env.",
+    ]
+    if runtime_path != str(key):
+        notes.append("covered_call in config.yaml maps to sell_call in generated runtime config.")
     return {
         "ok": True,
         "source_format": "yaml",
@@ -732,7 +849,7 @@ def explain_yaml_config_key(
         "exists": bool(exists),
         "value": value if exists else None,
         "source": "resolved_yaml" if exists else None,
-        "runtime_path": str(key),
+        "runtime_path": runtime_path,
         "trace": [
             {
                 "source": "config_yaml",
@@ -745,10 +862,7 @@ def explain_yaml_config_key(
                 "sha256": meta["system_config_sha256"],
             },
         ],
-        "notes": [
-            "config.yaml stores user overrides only; defaults are merged before runtime validation.",
-            "Write permissions are not explained here because they live in options-monitor.env.",
-        ],
+        "notes": notes,
         **meta,
     }
 
@@ -764,6 +878,7 @@ __all__ = [
     "load_yaml_config_file",
     "resolve_yaml_assistant_config",
     "resolve_yaml_runtime_config",
+    "runtime_strategy_keys_to_yaml_authoring",
     "validate_yaml_runtime_config",
     "yaml_to_market_user_config",
 ]

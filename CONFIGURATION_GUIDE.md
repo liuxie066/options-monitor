@@ -314,11 +314,12 @@ markets:
 ### 4.2 templates：通用底线（复用）
 - `templates.put_base.sell_put.min_annualized_net_return`：全局 put 最低年化（例如 0.10）
 - `templates.*.*.min_net_income`：全局最低单笔净收益，统一按 CNY 配置；运行时会按标的币种换算为 USD/HKD 后传给扫描器。
-- `templates.call_base.sell_call.min_strike_cost_multiplier`：sell_call 的成本价 strike 下限倍数；模板默认 `1.02`，表示有效 `min_strike` 至少为 `avg_cost * 1.02`。
+- YAML authoring 里 Covered Call 使用 `covered_call`；生成后的 runtime JSON、CSV 和 trace 仍保留内部 key `sell_call`。
+- `templates.call_base.covered_call.min_strike_cost_multiplier`：Covered Call 的成本价 strike 下限倍数；模板默认 `1.02`，表示有效 `min_strike` 至少为 `avg_cost * 1.02`。
 - `sell_put.min_annualized_net_return` 统一解析优先级：
   `symbol.sell_put.min_annualized_net_return` > `templates.<name>.sell_put.min_annualized_net_return` > 代码默认 `DEFAULT_MIN_ANNUALIZED_NET_RETURN(0.07)`。
 - 全局流动性/价差硬过滤仅允许 3 个键：`min_open_interest`、`min_volume`、`max_spread_ratio`
-- `templates.call_base.sell_call.*`：sell_call 的通用底线
+- `templates.call_base.covered_call.*`：Covered Call 的通用底线
 
 ### 4.3 symbols[]：每个标的的个性化区间
 你通常只需要改：
@@ -326,15 +327,15 @@ markets:
   - put / call 现在统一按“边界模式”规划抓取窗口，只是方向相反。
   - put 的近端边界是 `max_strike`；若只配置了 `max_strike`，抓取层会自动向下扩 `20%` 作为抓取下界。
   - `min_strike=0` 已废弃；若不想设置下界，直接省略 `min_strike`。
-- sell_call（enabled 时）：`min_strike`（以及 dte 范围）
-  - `avg_cost/shares` 已移除：sell_call 仅从 holdings 自动读取。
+- covered_call（enabled 时）：`min_strike`（以及 dte 范围）
+  - `avg_cost/shares` 已移除：Covered Call 仅从 holdings 自动读取。
   - `min_strike_cost_multiplier` 会用自动读取的 `avg_cost` 做硬过滤；例如 `1.02` 表示有效 `min_strike` 不低于 `avg_cost * 1.02`。
-  - 若 holdings 取不到（该账户缺 holdings / 读取失败），则该账户的 sell_call 会被跳过。
-  - 抓取层现在会先为 sell_put / sell_call 分别规划 required_data 窗口，再按相同 expiration 尽量合并到底层 OpenD 请求。
-  - sell_call 的近端边界是 `min_strike`；若只配置了 `min_strike`，抓取层会自动向上扩 `20%` 作为抓取上界。
-  - 若 sell_call 未配置任何 strike 边界，抓取层会退回到基于 `spot` 的默认窗口 `[spot*1.03, spot*1.20]`。
+  - 若 holdings 取不到（该账户缺 holdings / 读取失败），则该账户的 Covered Call 会被跳过。
+  - 抓取层现在会先为 sell_put / Covered Call 分别规划 required_data 窗口，再按相同 expiration 尽量合并到底层 OpenD 请求。
+  - Covered Call 的近端边界是 `min_strike`；若只配置了 `min_strike`，抓取层会自动向上扩 `20%` 作为抓取上界。
+  - 若 Covered Call 未配置任何 strike 边界，抓取层会退回到基于 `spot` 的默认窗口 `[spot*1.03, spot*1.20]`。
   - 旧的按 OTM% 定义 call 抓取窗口的配置已移除，避免与绝对价边界模式重复定义同一抓取窗口。
-  - sell_call 抓取窗口允许小幅 buffer，仅用于避免边界漏抓；扫描阶段仍严格使用原始 `min_strike/max_strike`。
+  - Covered Call 抓取窗口允许小幅 buffer，仅用于避免边界漏抓；扫描阶段仍严格使用原始 `min_strike/max_strike`。
 - `use`: 选择使用哪些模板（例如 `["put_base","call_base"]`）
 - `fetch.source`: 行情源，当前 symbol required-data 运行时仅支持 `futu`（富途数据源，经本机 OpenD 网关 + Futu API）；旧值 `opend` 仍兼容。
 - `yahoo` / `yfinance` 不作为 symbol required-data 的受支持运行时来源；它们只保留给独立的事件风险数据抓取等非 OpenD fallback 场景。
@@ -554,29 +555,24 @@ markets:
   - `high_annual`：年化净收益≥该值且 `high_spread_max` 同时满足，归为「优先」（默认 0.20）
   - `high_spread_max`：买卖价差比≤该值，配合 `high_annual` 触发「优先」（默认 0.20）
   - `medium_annual`：年化净收益≥该值，归为「可考虑」（默认 0.12）
-- `sell_call`：Sell Call 候选评级阈值（可选；缺省即下表默认值）
+- `covered_call`：Covered Call 候选评级阈值（可选；缺省即下表默认值）
   - `high_annual`：年化权利金回报≥该值且 `high_total` 同时满足，归为「优先」（默认 0.10）
   - `high_total`：行权情形下总收益≥该值，配合 `high_annual` 触发「优先」（默认 0.15）
   - `medium_annual`：年化权利金回报≥该值，归为「可考虑」（默认 0.06）
 
-不写 `sell_put` / `sell_call` 时使用上述默认值，与历史硬编码行为一致。完整示例：
+不写 `sell_put` / `covered_call` 时使用上述默认值，与历史硬编码行为一致。完整示例：
 
-```json
-{
-  "alert_policy": {
-    "change_annual_threshold": 0.02,
-    "sell_put": {
-      "high_annual": 0.20,
-      "high_spread_max": 0.20,
-      "medium_annual": 0.12
-    },
-    "sell_call": {
-      "high_annual": 0.10,
-      "high_total": 0.15,
-      "medium_annual": 0.06
-    }
-  }
-}
+```yaml
+alert_policy:
+  change_annual_threshold: 0.02
+  sell_put:
+    high_annual: 0.20
+    high_spread_max: 0.20
+    medium_annual: 0.12
+  covered_call:
+    high_annual: 0.10
+    high_total: 0.15
+    medium_annual: 0.06
 ```
 
 ### 4.9 close_advice：平仓建议
