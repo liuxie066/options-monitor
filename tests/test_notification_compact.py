@@ -121,7 +121,7 @@ def test_build_notification_compact_keeps_medium_strategy_with_total_limit() -> 
     ]
     medium_call = (
         "CALL1 | sell_call | 2026-06-19 180C | 年化 6.50% | 净收入 80.00 | "
-        "DTE 30 | Strike 180 | 保守 | ccy USD | mid 0.800 | cover 1 | shares 100(-0) | 已通过准入，可作为 sell call 备选。"
+        "DTE 30 | Strike 180 | 保守 | ccy USD | mid 0.800 | cover 1 | shares 100(-0) | 已通过准入，可作为 Covered Call 备选。"
     )
     alerts_text = (
         "## 高优先级\n"
@@ -137,8 +137,8 @@ def test_build_notification_compact_keeps_medium_strategy_with_total_limit() -> 
     assert "PUT5" not in out
     assert "PUT6" not in out
     assert "CALL1" in out
-    assert out.count("卖Call") == 1
-    assert out.index("### Put") < out.index("### Call")
+    assert out.count("Covered Call") >= 1
+    assert out.index("### Put") < out.index("### Covered Call")
 
 
 def test_render_markdown_compact_close_advice() -> None:
@@ -244,7 +244,7 @@ def test_build_account_message_compact() -> None:
 
     assert "⏰ 北京时间 2026-05-12 22:31:00" in message
     assert "📋 本轮概览" in message
-    assert "Put 1 · Call 0" in message
+    assert "Put 1 · Covered Call 0" in message
     assert "──────────────" in message
     assert "💰 资金概览" in message
     assert "  LX 持有 ¥1,000 (CNY) | 可用 ¥200 (CNY)" in message

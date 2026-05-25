@@ -18,7 +18,7 @@ def _add_repo_to_syspath() -> Path:
 def _extract_title_strikes(text: str) -> list[float]:
     strikes: list[float] = []
     for line in text.splitlines():
-        if not line.startswith("[Sell Call 候选]"):
+        if not line.startswith("[Covered Call 候选]"):
             continue
         m = re.search(r" ([0-9]+(?:\.[0-9]+)?)C$", line.strip())
         if m:

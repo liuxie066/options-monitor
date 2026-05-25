@@ -99,7 +99,7 @@ def test_render_alerts_domain_and_cli() -> None:
     call_result = render_sell_call_alerts(input_path=str(call_in), output_path=str(call_out), symbol='AAPL')
 
     assert '[Sell Put 候选]' in put_result
-    assert '[Sell Call 候选]' in call_result
+    assert '[Covered Call 候选]' in call_result
     assert put_out.exists()
     assert call_out.exists()
 
