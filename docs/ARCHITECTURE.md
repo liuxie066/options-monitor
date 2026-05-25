@@ -138,6 +138,12 @@ The canonical candidate decisions live in `domain.domain.engine.candidate_engine
 Application scanners adapt files, pandas rows, context, and report output around
 that domain engine. Avoid adding parallel ranking implementations in adapters.
 
+Strategy terminology is centralized in `domain.domain.strategy_vocab`.
+Application and interface code should use it to translate between stable
+internal ids such as `sell_call` and user-facing names such as `Covered Call`.
+Do not scatter display names, aliases, or section labels through notification,
+report, or Agent manifest code.
+
 ## Option Positions Flow
 
 The durable position model is:

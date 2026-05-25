@@ -21,6 +21,12 @@ from domain.domain.alert_rules import (
     SELL_PUT_NOTIFICATION_LOW,
 )
 from domain.domain.alert_policy import DEFAULT_ALERT_POLICY, load_alert_policy
+from domain.domain.strategy_vocab import (
+    STRATEGY_COVERED_CALL,
+    STRATEGY_SELL_PUT,
+    STRATEGY_YIELD_ENHANCEMENT,
+    canonical_strategy_id,
+)
 from src.application.report_formatting import num, pct, strike_text
 
 YIELD_ENHANCEMENT_NOTIFICATION_HIGH = '已按组合收益筛出推荐 Call，可作为该 Sell Put 的收益增强方案。'
@@ -90,9 +96,9 @@ DEFAULT_POLICY = DEFAULT_ALERT_POLICY.to_mapping()
 POLICY = DEFAULT_POLICY.copy()
 
 _ALERT_STRATEGY_ORDER = {
-    "sell_put": 0,
-    "sell_call": 1,
-    "yield_enhancement": 2,
+    STRATEGY_SELL_PUT: 0,
+    STRATEGY_COVERED_CALL: 1,
+    STRATEGY_YIELD_ENHANCEMENT: 2,
 }
 
 
@@ -383,14 +389,15 @@ def _build_yield_enhancement_extra_parts(row: pd.Series) -> list[str]:
 def top_pick_line(row: pd.Series) -> str:
     extra = ''
     try:
-        if row.get('strategy') == 'sell_call':
+        strategy = canonical_strategy_id(str(row.get('strategy') or ''))
+        if strategy == STRATEGY_COVERED_CALL:
             parts = _build_sell_call_extra_parts(row)
             extra = " | " + " | ".join(parts)
-        elif row.get('strategy') == 'sell_put':
+        elif strategy == STRATEGY_SELL_PUT:
             parts = _build_sell_put_extra_parts(row)
             if parts:
                 extra = " | " + " | ".join(parts)
-        elif row.get('strategy') == 'yield_enhancement':
+        elif strategy == STRATEGY_YIELD_ENHANCEMENT:
             parts = _build_yield_enhancement_extra_parts(row)
             if parts:
                 extra = " | " + " | ".join(parts)
@@ -413,7 +420,8 @@ def classify_alert(row: pd.Series) -> tuple[str | None, str]:
     strategy = row.get('strategy', '')
     annual = float(row.get('annualized_return', 0) or 0)
 
-    if strategy == 'sell_put':
+    strategy = canonical_strategy_id(strategy)
+    if strategy == STRATEGY_SELL_PUT:
         # Defensive guard for standalone summary->alert generation paths.
         # The main pipeline should already filter cash-insufficient candidates
         # upstream, but this public alert entrypoint can also consume replayed or
@@ -471,7 +479,7 @@ def classify_alert(row: pd.Series) -> tuple[str | None, str]:
             return 'high', SELL_PUT_NOTIFICATION_HIGH
         return 'low', SELL_PUT_NOTIFICATION_LOW
 
-    if strategy == 'sell_call':
+    if strategy == STRATEGY_COVERED_CALL:
         # account-aware gating: if no covered capacity, do not promote to high/medium
         try:
             cover_avail = int(row.get('cover_avail') or 0)
@@ -484,7 +492,7 @@ def classify_alert(row: pd.Series) -> tuple[str | None, str]:
             return 'high', SELL_CALL_NOTIFICATION_HIGH
         return 'low', SELL_CALL_NOTIFICATION_LOW
 
-    if strategy == 'yield_enhancement':
+    if strategy == STRATEGY_YIELD_ENHANCEMENT:
         if annual > 0:
             return 'high', YIELD_ENHANCEMENT_NOTIFICATION_HIGH
         return 'low', '当前收益增强推荐未通过优先级阈值，仅供观察。'
@@ -503,7 +511,7 @@ def _numeric_sort_desc(value: object) -> float:
 
 
 def _alert_row_sort_key(row: pd.Series) -> tuple[object, ...]:
-    strategy = str(row.get('strategy') or '').strip()
+    strategy = canonical_strategy_id(str(row.get('strategy') or ''))
     symbol = str(row.get('symbol') or '').strip().upper()
     contract = str(row.get('top_contract') or '').strip()
     return (
@@ -689,13 +697,14 @@ def _fill_capacity_fields_from_note(current: pd.DataFrame) -> pd.DataFrame:
         except Exception:
             return 0
 
-    mask = current.get('strategy').astype(str) == 'sell_call'
+    strategies = current.get('strategy').astype(str).map(canonical_strategy_id)
+    mask = strategies == STRATEGY_COVERED_CALL
     if mask.any():
         current.loc[mask, 'cover_avail'] = current.loc[mask, 'note'].apply(lambda x: _parse_int_after(x, 'cover_avail'))
         current.loc[mask, 'shares_total'] = current.loc[mask, 'note'].apply(lambda x: _parse_int_after(x, 'shares_total'))
         current.loc[mask, 'shares_locked'] = current.loc[mask, 'note'].apply(lambda x: _parse_int_after(x, 'shares_locked'))
 
-    mask2 = current.get('strategy').astype(str) == 'sell_put'
+    mask2 = strategies == STRATEGY_SELL_PUT
     if mask2.any() and 'cash_secured_used_usd' not in current.columns:
         def _parse_float_after(s: str, key: str) -> float:
             try:

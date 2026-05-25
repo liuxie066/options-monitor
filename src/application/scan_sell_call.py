@@ -24,6 +24,7 @@ from domain.domain.sell_call_config import (
     validate_min_annualized_net_premium_return,
     validate_min_strike_cost_multiplier,
 )
+from domain.domain.strategy_vocab import STRATEGY_COVERED_CALL, strategy_display_name
 from domain.domain.risk_capacity import compute_sell_call_share_capacity
 from src.application.candidate_scanning import (
     CandidateScanConfig,
@@ -77,7 +78,8 @@ from domain.domain.fee_calc import calc_futu_option_fee
 from src.application.candidate_models import CandidateBaseValues, CandidateContractInput
 
 
-SHARES_MIN_ERROR = "shares 必须至少 100，Covered Call 才有意义。"
+COVERED_CALL_DISPLAY = strategy_display_name(STRATEGY_COVERED_CALL)
+SHARES_MIN_ERROR = f"shares 必须至少 100，{COVERED_CALL_DISPLAY} 才有意义。"
 
 
 def _normalize_contract_input(raw: CandidateContractInput | pd.Series) -> CandidateContractInput:
@@ -263,7 +265,7 @@ def _build_candidate_row_factory(
 
 
 def _print_summary(out: pd.DataFrame, out_path: Path, reject_out_path: Path) -> None:
-    print(f"[DONE] covered call scan -> {out_path}")
+    print(f"[DONE] {COVERED_CALL_DISPLAY.lower()} scan -> {out_path}")
     print(f"[DONE] reject log -> {reject_out_path}")
     print(f"[DONE] candidates: {len(out)}")
     if not out.empty:
@@ -377,7 +379,7 @@ def run_sell_call_scan(
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run Covered Call scan on required_data CSV files")
+    parser = argparse.ArgumentParser(description=f"Run {COVERED_CALL_DISPLAY} scan on required_data CSV files")
     parser.add_argument("--symbols", nargs="+", required=True)
     parser.add_argument("--avg-cost", type=float, required=True, help="Average holding cost per share")
     parser.add_argument("--shares", type=int, default=100)

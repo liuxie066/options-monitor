@@ -13,6 +13,7 @@ import pandas as pd
 from pandas.errors import EmptyDataError
 
 from domain.domain.alert_rules import render_sell_call_comment
+from domain.domain.strategy_vocab import STRATEGY_COVERED_CALL, strategy_display_name
 from src.infrastructure.io_utils import atomic_write_text
 from src.application.report_formatting import num, pct, strike_text
 from domain.domain.engine import (
@@ -21,9 +22,12 @@ from domain.domain.engine import (
 )
 
 
+COVERED_CALL_DISPLAY = strategy_display_name(STRATEGY_COVERED_CALL)
+
+
 def render_one(row) -> str:
     strike = strike_text(row["strike"])
-    title = f"[Covered Call 候选] {row['symbol']} {row['expiration']} {strike}C"
+    title = f"[{COVERED_CALL_DISPLAY} 候选] {row['symbol']} {row['expiration']} {strike}C"
     body = [
         title,
         "",
@@ -109,7 +113,7 @@ def render_sell_call_alerts(
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description='Render Covered Call alert text from candidate CSV')
+    parser = argparse.ArgumentParser(description=f'Render {COVERED_CALL_DISPLAY} alert text from candidate CSV')
     parser.add_argument('--input', default=None, help='Input CSV path (default: <report-dir>/sell_call_candidates.csv)')
     parser.add_argument('--report-dir', default='output_shared/reports', help='Report dir for default input/output (default: output_shared/reports)')
     parser.add_argument('--top', type=int, default=5)
