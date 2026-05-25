@@ -77,7 +77,7 @@ from domain.domain.fee_calc import calc_futu_option_fee
 from src.application.candidate_models import CandidateBaseValues, CandidateContractInput
 
 
-SHARES_MIN_ERROR = "shares 必须至少 100，sell call 才有意义。"
+SHARES_MIN_ERROR = "shares 必须至少 100，Covered Call 才有意义。"
 
 
 def _normalize_contract_input(raw: CandidateContractInput | pd.Series) -> CandidateContractInput:
@@ -263,7 +263,7 @@ def _build_candidate_row_factory(
 
 
 def _print_summary(out: pd.DataFrame, out_path: Path, reject_out_path: Path) -> None:
-    print(f"[DONE] sell call scan -> {out_path}")
+    print(f"[DONE] covered call scan -> {out_path}")
     print(f"[DONE] reject log -> {reject_out_path}")
     print(f"[DONE] candidates: {len(out)}")
     if not out.empty:
@@ -308,7 +308,7 @@ def run_sell_call_scan(
     reject_log_output: Path | None = None,
     quiet: bool = False,
 ) -> pd.DataFrame:
-    """执行卖出看涨期权扫描并写出候选 CSV。"""
+    """执行 Covered Call 扫描并写出候选 CSV。"""
     if shares < 100:
         raise ValueError(SHARES_MIN_ERROR)
 
@@ -377,7 +377,7 @@ def run_sell_call_scan(
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run Sell Call scan on required_data CSV files")
+    parser = argparse.ArgumentParser(description="Run Covered Call scan on required_data CSV files")
     parser.add_argument("--symbols", nargs="+", required=True)
     parser.add_argument("--avg-cost", type=float, required=True, help="Average holding cost per share")
     parser.add_argument("--shares", type=int, default=100)

@@ -135,7 +135,7 @@ Recommended Codex prompt:
 
 ```text
 你现在作为 OM research analyst。请基于下面的 Research Handoff 分析线上质量问题，
-重点看持仓/交易一致性、多账户对 sell put / sell call / YE 的影响，
+重点看持仓/交易一致性、多账户对 sell put / covered call / YE 的影响，
 输出：问题判断、证据、优先级、本地修复建议和需要补充的证据。
 ```
 

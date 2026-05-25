@@ -14,7 +14,7 @@ SELL_PUT_NOTIFICATION_MEDIUM = "已通过准入，可作为今日观察候选。
 SELL_PUT_NOTIFICATION_LOW = "已通过准入，但优先级一般。"
 
 SELL_CALL_NOTIFICATION_HIGH = "通过准入后，权利金回报与行权空间比较平衡。"
-SELL_CALL_NOTIFICATION_MEDIUM = "已通过准入，可作为 sell call 备选。"
+SELL_CALL_NOTIFICATION_MEDIUM = "已通过准入，可作为 Covered Call 备选。"
 SELL_CALL_NOTIFICATION_LOW = "已通过准入，但优先级一般。"
 
 
@@ -94,5 +94,5 @@ def render_sell_call_comment(
     if annual >= cfg.high_annual and total >= cfg.high_total:
         return "权利金收益和被行权后的总收益都比较平衡，可优先看。"
     if annual >= cfg.medium_annual:
-        return "收益尚可，适合作为 sell call 备选。"
+        return "收益尚可，适合作为 Covered Call 备选。"
     return "可作为备选观察。"

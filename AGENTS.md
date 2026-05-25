@@ -15,7 +15,7 @@
 
 | Property | Value |
 |---|---|
-| Purpose | Sell Put / Sell Call / Yield Enhancement scanning, filtering, reporting, and notification |
+| Purpose | Sell Put / Covered Call / Yield Enhancement scanning, filtering, reporting, and notification |
 | Stack | Python 3, pandas, SQLite, OpenD/Futu API, Feishu webhooks |
 | Accounts | Lowercase labels such as `lx`, `sy`; read from top-level `accounts` in runtime config |
 | Canonical Configs | `config.yaml` is the human authoring source; `config.us.json` / `config.hk.json` are generated runtime snapshots |

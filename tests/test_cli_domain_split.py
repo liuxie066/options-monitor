@@ -261,7 +261,7 @@ def test_render_sell_call_domain_and_cli() -> None:
         ).to_csv(csv_path, index=False)
 
         text = render_sell_call_alerts(input_path=csv_path, output_path=out_path, top=1, layered=True, base_dir=BASE)
-        assert '[Sell Call 候选]' in text
+        assert '[Covered Call 候选]' in text
         assert out_path.exists()
 
         subprocess.run(
@@ -282,4 +282,4 @@ def test_render_sell_call_domain_and_cli() -> None:
             text=True,
             check=True,
         )
-        assert '[Sell Call 候选]' in out_path.read_text(encoding='utf-8')
+        assert '[Covered Call 候选]' in out_path.read_text(encoding='utf-8')

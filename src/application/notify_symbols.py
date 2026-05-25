@@ -4,7 +4,7 @@
 This is the same logic as the previous notify_watchlist.py, renamed for clarity.
 
 NOTE (template ownership):
-- This file is the *single source of truth* for notification layout (Put/Call sections, blank lines, bullet lists).
+- This file is the *single source of truth* for notification layout (Put/Covered Call sections, blank lines, bullet lists).
 - For multi-account per-account notifications, src.application.multi_account_tick must treat account notification text as opaque
   and must NOT reformat individual candidates.
 """
@@ -494,7 +494,7 @@ def _build_notification_block_compact(
 def _action_emoji(action_label: str, risk_line: str = '') -> str:
     if '收益增强' in action_label:
         return '💎'
-    if '卖Call' in action_label:
+    if 'Covered Call' in action_label or '卖Call' in action_label:
         if '不可覆盖' in risk_line or 'cover=0' in risk_line:
             return '🟡'
         return '🟢'
@@ -610,7 +610,7 @@ def _format_alert_line(line: str, *, account_label: str = '当前账户') -> str
         return _build_notification_block(
             account_label=account_label,
             symbol_name=parsed.symbol_name,
-            action_label='卖Call',
+            action_label='Covered Call',
             contract=parsed.contract,
             income_line=f"- 收益: 权利金={parsed.premium} | {parsed.annual_show} | {parsed.income_show}",
             contract_line=f"- 合约: 行权价={parsed.strike_show} | 数量={qty} | DTE={parsed.dte_show}",
@@ -727,7 +727,7 @@ def _format_alert_line_compact(line: str, *, account_label: str = '当前账户'
         shares_total, shares_locked, shares_available = _parse_shares_summary(shares)
         return _build_notification_block_compact(
             symbol_name=parsed.symbol_name,
-            action_label='卖Call',
+            action_label='Covered Call',
             contract=parsed.contract,
             income_line=f"- 收益: 权利金={parsed.premium} | {parsed.annual_show} | {parsed.income_show}",
             contract_line=f"- 合约: 行权价={parsed.strike_show} | 数量={qty} | DTE={parsed.dte_show}",
@@ -921,7 +921,7 @@ def build_notification(
         if groups['sell_put']:
             emit_fn('### Put' if use_compact else 'Put', groups['sell_put'])
         if groups['sell_call']:
-            emit_fn('### Call' if use_compact else 'Call', groups['sell_call'])
+            emit_fn('### Covered Call' if use_compact else 'Covered Call', groups['sell_call'])
         if groups['yield_enhancement']:
             emit_fn('### Enhancement' if use_compact else 'Enhancement', groups['yield_enhancement'])
         if groups['other']:
