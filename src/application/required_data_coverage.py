@@ -6,6 +6,7 @@ from typing import Any
 
 import pandas as pd
 
+from src.application.opend_normalize import normalize_opend_option_type
 from src.application.required_data_planning import RequiredDataFetchPlanBundle
 
 
@@ -15,7 +16,7 @@ def build_required_data_coverage(rows: list[dict[str, Any]]) -> dict[str, dict[s
         side_rows = [
             row
             for row in rows
-            if isinstance(row, dict) and _normalize_option_type(row.get("option_type")) == option_type
+            if isinstance(row, dict) and normalize_opend_option_type(row.get("option_type")) == option_type
         ]
         strikes = [
             float(row.get("strike"))
@@ -186,25 +187,14 @@ def _read_required_data_csv(parsed: Path) -> pd.DataFrame:
 def _filter_option_type(df: pd.DataFrame, option_type: str) -> pd.DataFrame:
     if "option_type" not in df.columns:
         return pd.DataFrame()
-    normalized = df["option_type"].apply(_normalize_option_type)
+    normalized = df["option_type"].apply(normalize_opend_option_type)
     return df[normalized == str(option_type)].copy()
-
-
-def _normalize_option_type(value: Any) -> str:
-    raw = str(value or "").strip().lower()
-    if raw in {"put", "call"}:
-        return raw
-    if "put" in raw:
-        return "put"
-    if "call" in raw:
-        return "call"
-    return raw
 
 
 def _parse_option_types(value: str) -> tuple[str, ...]:
     out: list[str] = []
     for item in str(value or "").split(","):
-        option_type = _normalize_option_type(item)
+        option_type = normalize_opend_option_type(item)
         if option_type in {"put", "call"} and option_type not in out:
             out.append(option_type)
     return tuple(out)

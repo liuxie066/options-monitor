@@ -58,10 +58,13 @@ from src.application.service_deploy import (
 )
 from src.application.service_drift import service_drift
 from src.application.service_upgrade import service_rollback, service_upgrade, service_upgrade_check
-from src.application.strategy_replay import analyze_strategy_replay, read_strategy_replay_file
 from src.application.tick_cron import run_tick_cron
 from src.application.tool_execution import execute_tool
-from src.application.runtime_config_freshness import RuntimeConfigFreshnessError, ensure_runtime_config_freshness
+from src.application.runtime_config_freshness import (
+    RuntimeConfigFreshnessError,
+    ensure_runtime_config_freshness,
+    infer_runtime_config_market,
+)
 from src.application.runtime_logs_cli import collect_runtime_logs, format_runtime_logs
 from src.application.runtime_runs_cli import collect_runtime_runs, format_runtime_runs
 from src.application.runtime_status_cli import format_runtime_status_summary, runtime_status_payload_from_args
@@ -97,6 +100,7 @@ RUNTIME_CONFIG_SET_DEPRECATION_WARNING = (
     "`om config set` edits generated runtime JSON; for durable config changes edit "
     "`config.yaml` and rebuild with `om config build --source yaml`."
 )
+_LEGACY_CONFIG_SOURCE = "legacy"
 
 
 def _dumps(payload: dict[str, Any]) -> str:
@@ -111,6 +115,29 @@ def _with_warning(payload: dict[str, Any], warning: str) -> dict[str, Any]:
         warnings.append(warning)
     out["warnings"] = warnings
     return out
+
+
+def _normalize_config_source(
+    args: argparse.Namespace,
+    *,
+    allowed: tuple[str, ...],
+    allow_legacy_compat: bool = False,
+) -> str:
+    source = str(getattr(args, "source", "") or "").strip().lower()
+    if source in allowed:
+        return source
+    if allow_legacy_compat and source == _LEGACY_CONFIG_SOURCE:
+        return source
+    raise AgentToolError(
+        code="INPUT_ERROR",
+        message=f"--source must be one of: {', '.join(allowed)}",
+        details={
+            "source": source or None,
+            "allowed": list(allowed),
+            "legacy_compatibility": bool(allow_legacy_compat),
+        },
+        hint="Use `om config migrate-yaml` for old JSON configs, then use `om config build --source yaml`.",
+    )
 
 
 def _assistant_settings_for_cli(
@@ -146,9 +173,9 @@ def _reject_legacy_config_flags_without_legacy_source(args: argparse.Namespace) 
     if legacy_flags:
         raise AgentToolError(
             code="INPUT_ERROR",
-            message="legacy JSON config flags require --source legacy",
+            message="legacy JSON config flags are deprecated and require --source legacy compatibility mode",
             details={"flags": legacy_flags},
-            hint="Use --source legacy for old configs, or migrate with `om config migrate-yaml` and use config.yaml.",
+            hint="Use `om config migrate-yaml` for old configs, then use config.yaml.",
         )
 
 
@@ -198,7 +225,7 @@ def _add_assistant_commands(parser: argparse.ArgumentParser) -> None:
     assistant_handle.add_argument("--channel", default="local")
     assistant_handle.add_argument("--message-id", default=None)
     assistant_handle.add_argument("--conversation-id", default=None)
-    assistant_handle.add_argument("--config-key", default="us", choices=("us", "hk"))
+    assistant_handle.add_argument("--config-key", default=None, choices=("us", "hk"))
     assistant_handle.add_argument("--config-path", default=None)
     assistant_handle.add_argument("--assistant-config", default=None)
     assistant_handle.add_argument("--audit-db", default=None)
@@ -244,13 +271,12 @@ def _add_assistant_commands(parser: argparse.ArgumentParser) -> None:
     assistant_upgrade_worker.add_argument("--format", choices=("json", "text"), default="json")
 
 
-def _add_strategy_evidence_diagnostic_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--strategy-report-dir", default=None, help="directory containing strategy diagnostic evidence files")
-    parser.add_argument("--strategy-candidate-path", action="append", dest="strategy_candidate_paths", default=None)
-    parser.add_argument("--strategy-reject-log-path", action="append", dest="strategy_reject_log_paths", default=None)
-    parser.add_argument("--strategy-trace-path", action="append", dest="strategy_trace_paths", default=None)
-    parser.add_argument("--strategy-outcome-path", action="append", dest="strategy_outcome_paths", default=None)
-    parser.add_argument("--strategy-evidence-min-sample", type=int, default=None)
+def _add_candidate_evidence_diagnostic_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--candidate-report-dir", default=None, help="directory containing candidate diagnostic evidence files")
+    parser.add_argument("--candidate-path", action="append", dest="candidate_paths", default=None)
+    parser.add_argument("--candidate-reject-log-path", action="append", dest="candidate_reject_log_paths", default=None)
+    parser.add_argument("--candidate-trace-path", action="append", dest="candidate_trace_paths", default=None)
+    parser.add_argument("--candidate-evidence-min-sample", type=int, default=None)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -268,7 +294,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     health.add_argument("--env-file", default=None)
     health.add_argument("--no-local-env-file", action="store_true")
     health.add_argument("--include-service-status", action="store_true")
-    _add_strategy_evidence_diagnostic_args(health)
+    _add_candidate_evidence_diagnostic_args(health)
 
     doctor = sub.add_parser("doctor", help="diagnose runtime readiness and common operator issues")
     doctor.add_argument("--config-key", default=None, choices=("us", "hk"))
@@ -281,7 +307,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     doctor.add_argument("--env-file", default=None)
     doctor.add_argument("--no-local-env-file", action="store_true")
     doctor.add_argument("--include-service-status", action="store_true")
-    _add_strategy_evidence_diagnostic_args(doctor)
+    _add_candidate_evidence_diagnostic_args(doctor)
 
     support = sub.add_parser("support", help="collect redacted support diagnostics")
     support_sub = support.add_subparsers(dest="support_command", required=True)
@@ -305,7 +331,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     feishu_input.add_argument("--input-json", default=None)
     feishu_input.add_argument("--input-file", default=None)
     feishu_input.add_argument("--stdin", action="store_true")
-    inbound_feishu.add_argument("--config-key", default="us", choices=("us", "hk"))
+    inbound_feishu.add_argument("--config-key", default=None, choices=("us", "hk"))
     inbound_feishu.add_argument("--config-path", default=None)
     inbound_feishu.add_argument("--assistant-config", default=None)
     inbound_feishu.add_argument("--audit-db", default=None)
@@ -313,7 +339,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     inbound_feishu.add_argument("--no-local-env-file", action="store_true")
     inbound_feishu.add_argument("--format", choices=("json", "text"), default="json")
     inbound_ws = inbound_sub.add_parser("feishu-ws", help="serve the Feishu App long-connection inbound client")
-    inbound_ws.add_argument("--config-key", default="us", choices=("us", "hk"))
+    inbound_ws.add_argument("--config-key", default=None, choices=("us", "hk"))
     inbound_ws.add_argument("--config-path", default=None)
     inbound_ws.add_argument("--assistant-config", default=None)
     inbound_ws.add_argument("--audit-db", default=None)
@@ -366,7 +392,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     research = sub.add_parser("research", help="collect Research evidence for MacBook Codex")
     research_sub = research.add_subparsers(dest="research_command", required=True)
     research_collect = research_sub.add_parser("collect", help="collect redacted evidence bundle")
-    research_collect.add_argument("--scope", default="full", choices=("ledger", "account-strategy", "quality", "strategy", "full"))
+    research_collect.add_argument("--scope", default="full", choices=("ledger", "candidate", "quality", "full"))
     research_collect.add_argument("--config-key", default=None, choices=("us", "hk"))
     research_collect.add_argument("--config-path", default=None)
     research_collect.add_argument("--accounts", nargs="*", default=None)
@@ -387,8 +413,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     research_collect.add_argument("--scheduler-evidence-file", default=None)
     research_collect.add_argument("--candidate-path", action="append", dest="candidate_paths", default=None)
     research_collect.add_argument("--trace-path", action="append", dest="trace_paths", default=None)
-    research_collect.add_argument("--strategy-replay-path", action="append", dest="strategy_replay_paths", default=None)
-    research_collect.add_argument("--strategy-report-dir", default=None)
+    research_collect.add_argument("--candidate-report-dir", default=None)
     research_collect.add_argument("--ranking-limit", type=int, default=None, help="top candidate rows per report included in ranking evidence")
     research_collect.add_argument("--include-healthcheck", action="store_true")
     research_collect.add_argument("--data-config", default=None)
@@ -461,13 +486,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     init_config.add_argument("--dry-run", action="store_true", help="preview starter YAML without writing files")
     init_config.add_argument("--force", action="store_true")
     validate = config_sub.add_parser("validate", help="validate runtime config")
-    validate.add_argument("--source", default="runtime", choices=("runtime", "yaml"))
+    validate.add_argument("--source", default="runtime", metavar="{runtime,yaml}", help="validation source; defaults to generated runtime JSON")
     validate.add_argument("--config-yaml", default=None)
     validate.add_argument("--config-key", default=None, choices=("us", "hk"))
     validate.add_argument("--config-path", default=None)
     validate.add_argument("--market", default=None, choices=("us", "hk"))
-    build = config_sub.add_parser("build", help="build canonical runtime config from config.yaml or legacy JSON")
-    build.add_argument("--source", default="yaml", choices=("yaml", "legacy"), help="authoring source; defaults to yaml, legacy JSON is deprecated")
+    build = config_sub.add_parser("build", help="build canonical runtime config from config.yaml")
+    build.add_argument("--source", default="yaml", metavar="{yaml}", help="authoring source; defaults to yaml")
     build.add_argument("--config-yaml", default=None)
     build.add_argument("--market", required=True, choices=("us", "hk"))
     build.add_argument("--system-config", default=None)
@@ -482,8 +507,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     build_assistant.add_argument("--system-config", default=None)
     build_assistant.add_argument("--output", default=None)
     build_assistant.add_argument("--dry-run", action="store_true")
-    explain = config_sub.add_parser("explain", help="explain a layered config key")
-    explain.add_argument("--source", default="yaml", choices=("yaml", "legacy"), help="authoring source; defaults to yaml, legacy JSON is deprecated")
+    explain = config_sub.add_parser("explain", help="explain a config.yaml key")
+    explain.add_argument("--source", default="yaml", metavar="{yaml}", help="authoring source; defaults to yaml")
     explain.add_argument("--config-yaml", default=None)
     explain.add_argument("--market", required=True, choices=("us", "hk"))
     explain.add_argument("--key", required=True)
@@ -554,14 +579,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     sell_put_cash.add_argument("--no-exchange-rates", action="store_true")
     sell_put_cash.add_argument("--out-dir", default=None)
 
-    strategy_replay = sub.add_parser("strategy-replay", help="offline strategy replay analysis")
-    strategy_replay_sub = strategy_replay.add_subparsers(dest="strategy_replay_command", required=True)
-    strategy_replay_analyze = strategy_replay_sub.add_parser("analyze", help="analyze replay rows for parameter learning")
-    strategy_replay_analyze.add_argument("--replay-path", action="append", required=True, help="CSV/JSON/JSONL replay file; can be repeated")
-    strategy_replay_analyze.add_argument("--min-sample", type=int, default=5)
-    strategy_replay_analyze.add_argument("--win-return-threshold", type=float, default=0.0)
-    strategy_replay_analyze.add_argument("--bad-drawdown-threshold", type=float, default=-0.15)
-
     service = sub.add_parser("service", help="render and inspect platform service definitions")
     service_sub = service.add_subparsers(dest="service_command", required=True)
     service_render = service_sub.add_parser("render", help="render systemd or launchd service files")
@@ -579,7 +596,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     service_render.add_argument("--timeout", dest="timeout_seconds", type=int, default=600)
     service_render.add_argument("--include-auto-upgrade", action="store_true", help="render an opt-in daily auto-upgrade service/timer")
     service_render.add_argument("--include-feishu-ws", action="store_true", help="render the long-running Feishu long-connection inbound service")
-    service_render.add_argument("--feishu-ws-config-key", default="us", choices=("us", "hk"))
+    service_render.add_argument("--feishu-ws-config-key", default=None, choices=("us", "hk"))
     service_render.add_argument("--output-dir", default=None, help="write rendered files under this directory")
     service_render.add_argument("--no-content", action="store_true", help="omit file contents from JSON output")
     service_preflight_cmd = service_sub.add_parser("preflight", help="check Linux runtime root before installing/running services")
@@ -798,29 +815,41 @@ def _validate_runtime_config(
     config_key: str | None = None,
     config_path: str | None = None,
     market: str | None = None,
+    allow_legacy_source: bool = False,
 ) -> dict[str, Any]:
-    path, cfg = load_runtime_config(config_key=config_key, config_path=config_path)
+    path, cfg = load_runtime_config(
+        config_key=config_key,
+        config_path=config_path,
+        expected_market=market,
+        allow_legacy_source=allow_legacy_source,
+    )
     validate_config(dict(cfg))
+    inferred_market = infer_runtime_config_market(
+        explicit_market=market,
+        config_key=config_key,
+        config_path=path,
+        config=cfg,
+    )
     freshness = None
     schedule_contract = None
-    if market:
+    if inferred_market:
         try:
             schedule_contract = ensure_runtime_schedule_matches_market(
                 cfg,
                 config_path=path,
-                market_config=market,
+                market_config=inferred_market,
             )
         except SystemExit as exc:
             raise AgentToolError(
                 code="CONFIG_ERROR",
                 message=str(exc),
-                details={"config_path": str(path), "market": str(market)},
+                details={"config_path": str(path), "market": str(inferred_market)},
             ) from exc
         try:
             freshness = ensure_runtime_config_freshness(
                 cfg,
                 repo_root=repo_base(),
-                market=market,
+                market=inferred_market,
                 runtime_config_path=path,
             )
         except RuntimeConfigFreshnessError as exc:
@@ -833,7 +862,13 @@ def _validate_runtime_config(
         "ok": True,
         "config_path": str(path),
         "config_key": str(config_key or "").strip().lower() or None,
-        "market": str(market or "").strip().lower() or None,
+        "market": inferred_market,
+        "source_format": (
+            (cfg.get("_generated") or {}).get("source_format")
+            if isinstance(cfg.get("_generated"), dict)
+            else None
+        ),
+        "legacy_source_allowed": bool(allow_legacy_source),
         "schedule_contract": schedule_contract,
         "freshness": freshness,
     }
@@ -899,12 +934,11 @@ def main(argv: list[str] | None = None) -> int:
                     profile_path=args.profile_path,
                     include_service_status=bool(args.include_service_status),
                     env_file=args.env_file,
-                    strategy_report_dir=args.strategy_report_dir,
-                    strategy_candidate_paths=args.strategy_candidate_paths,
-                    strategy_reject_log_paths=args.strategy_reject_log_paths,
-                    strategy_trace_paths=args.strategy_trace_paths,
-                    strategy_outcome_paths=args.strategy_outcome_paths,
-                    strategy_evidence_min_sample=args.strategy_evidence_min_sample,
+                    candidate_report_dir=args.candidate_report_dir,
+                    candidate_paths=args.candidate_paths,
+                    candidate_reject_log_paths=args.candidate_reject_log_paths,
+                    candidate_trace_paths=args.candidate_trace_paths,
+                    candidate_evidence_min_sample=args.candidate_evidence_min_sample,
                 )
             )
 
@@ -919,12 +953,11 @@ def main(argv: list[str] | None = None) -> int:
                 profile_path=args.profile_path,
                 include_service_status=bool(args.include_service_status),
                 env_file=args.env_file,
-                strategy_report_dir=args.strategy_report_dir,
-                strategy_candidate_paths=args.strategy_candidate_paths,
-                strategy_reject_log_paths=args.strategy_reject_log_paths,
-                strategy_trace_paths=args.strategy_trace_paths,
-                strategy_outcome_paths=args.strategy_outcome_paths,
-                strategy_evidence_min_sample=args.strategy_evidence_min_sample,
+                candidate_report_dir=args.candidate_report_dir,
+                candidate_paths=args.candidate_paths,
+                candidate_reject_log_paths=args.candidate_reject_log_paths,
+                candidate_trace_paths=args.candidate_trace_paths,
+                candidate_evidence_min_sample=args.candidate_evidence_min_sample,
             )
             return _print(build_response(
                 tool_name="doctor",
@@ -1160,8 +1193,7 @@ def main(argv: list[str] | None = None) -> int:
                 "output": args.output,
                 "candidate_paths": args.candidate_paths,
                 "trace_paths": args.trace_paths,
-                "strategy_replay_paths": args.strategy_replay_paths,
-                "strategy_report_dir": args.strategy_report_dir,
+                "candidate_report_dir": args.candidate_report_dir,
                 "ranking_limit": args.ranking_limit,
                 "include_healthcheck": bool(args.include_healthcheck),
                 "data_config": args.data_config,
@@ -1239,7 +1271,8 @@ def main(argv: list[str] | None = None) -> int:
             )))
 
         if args.command == "config" and args.config_command == "validate":
-            if args.source == "yaml":
+            source = _normalize_config_source(args, allowed=("runtime", "yaml"), allow_legacy_compat=True)
+            if source == "yaml":
                 _reject_runtime_validate_flags_for_yaml_source(args)
                 if not args.market:
                     raise AgentToolError(code="INPUT_ERROR", message="--market is required when --source yaml")
@@ -1249,10 +1282,19 @@ def main(argv: list[str] | None = None) -> int:
                     config_path=args.config_yaml,
                 ))
             _reject_yaml_validate_flags_for_runtime_source(args)
-            return _print(_validate_runtime_config(config_key=args.config_key, config_path=args.config_path, market=args.market))
+            payload = _validate_runtime_config(
+                config_key=args.config_key,
+                config_path=args.config_path,
+                market=args.market,
+                allow_legacy_source=source == _LEGACY_CONFIG_SOURCE,
+            )
+            if source == _LEGACY_CONFIG_SOURCE:
+                payload = _with_warning(payload, LEGACY_CONFIG_AUTHORING_DEPRECATION_WARNING)
+            return _print(payload)
 
         if args.command == "config" and args.config_command == "build":
-            if args.source == "yaml":
+            source = _normalize_config_source(args, allowed=("yaml",), allow_legacy_compat=True)
+            if source == "yaml":
                 _reject_legacy_config_flags_without_legacy_source(args)
                 return _print(build_yaml_runtime_config_file(
                     repo_root=repo_base(),
@@ -1283,7 +1325,8 @@ def main(argv: list[str] | None = None) -> int:
             ))
 
         if args.command == "config" and args.config_command == "explain":
-            if args.source == "yaml":
+            source = _normalize_config_source(args, allowed=("yaml",), allow_legacy_compat=True)
+            if source == "yaml":
                 _reject_legacy_config_flags_without_legacy_source(args)
                 return _print(explain_yaml_config_key(
                     repo_root=repo_base(),
@@ -1432,25 +1475,6 @@ def main(argv: list[str] | None = None) -> int:
                 out_dir=args.out_dir or str((runtime_root / "output_shared" / "state").resolve()),
             )
             return 0
-
-        if args.command == "strategy-replay" and args.strategy_replay_command == "analyze":
-            rows: list[dict[str, Any]] = []
-            for replay_path in args.replay_path:
-                try:
-                    rows.extend(read_strategy_replay_file(Path(replay_path)))
-                except Exception as exc:
-                    raise AgentToolError(
-                        code="INPUT_ERROR",
-                        message=f"failed to read strategy replay file: {Path(replay_path).name}",
-                        details={"error": f"{type(exc).__name__}: {exc}"},
-                    ) from exc
-            data = analyze_strategy_replay(
-                rows,
-                min_sample=args.min_sample,
-                win_return_threshold=args.win_return_threshold,
-                bad_drawdown_threshold=args.bad_drawdown_threshold,
-            )
-            return _print(build_response(tool_name="strategy-replay.analyze", ok=True, data=data))
 
         if args.command == "service" and args.service_command == "render":
             config_paths = {

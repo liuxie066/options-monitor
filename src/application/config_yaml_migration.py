@@ -8,10 +8,11 @@ from json import JSONDecodeError
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.config_defaults import DEFAULT_CONFIG_REF, default_config
+from src.application.config_primitives import MARKETS, deep_merge_config as _deep_merge
+from src.application.config_primitives import dump_yaml as _dump_yaml
+from src.application.config_primitives import resolve_config_path as _resolve_path
 from src.application.config_validator import validate_config
 from src.application.config_yaml import (
     MARKET_KEYS,
@@ -24,7 +25,6 @@ from src.application.config_yaml import (
 )
 from src.infrastructure.io_utils import atomic_write_text
 from src.application.layered_config import (
-    MARKETS,
     build_layered_runtime_config_from_user_config,
     default_common_user_config_path,
     default_user_config_path,
@@ -35,20 +35,6 @@ from src.application.write_contract import attach_write_contract
 
 SKIP_ROOT_KEYS = {"account_settings", "accounts", "defaults", "markets", "symbols"}
 SKIP_MARKET_KEYS = {"account_settings", "accounts", "symbols"}
-
-
-class _IndentedYamlDumper(yaml.SafeDumper):
-    def increase_indent(self, flow: bool = False, indentless: bool = False) -> Any:
-        return super().increase_indent(flow, False)
-
-
-def _resolve_path(raw: str | Path | None, *, default: Path) -> Path:
-    if raw is None or not str(raw).strip():
-        return default.resolve()
-    path = Path(raw).expanduser()
-    if not path.is_absolute():
-        path = path.resolve()
-    return path
 
 
 def _read_json_object(path: Path, *, label: str, required: bool = True) -> dict[str, Any] | None:
@@ -73,15 +59,6 @@ def _read_json_object(path: Path, *, label: str, required: bool = True) -> dict[
     return payload
 
 
-def _deep_merge(base: Any, override: Any) -> Any:
-    if isinstance(base, dict) and isinstance(override, dict):
-        out = deepcopy(base)
-        for key, value in override.items():
-            out[key] = _deep_merge(out[key], value) if key in out else deepcopy(value)
-        return out
-    return deepcopy(override)
-
-
 def _normalize_account_labels(raw: Any, *, path: str) -> list[str] | None:
     if raw is None:
         return None
@@ -103,19 +80,6 @@ def _normalize_account_labels(raw: Any, *, path: str) -> list[str] | None:
     if not out:
         raise AgentToolError(code="CONFIG_ERROR", message=f"{path} must include at least one account")
     return out
-
-
-def _dump_yaml(payload: dict[str, Any]) -> str:
-    text = yaml.dump(
-        payload,
-        Dumper=_IndentedYamlDumper,
-        allow_unicode=True,
-        default_flow_style=False,
-        sort_keys=False,
-        indent=2,
-        width=100,
-    )
-    return text.rstrip() + "\n"
 
 
 def _account_setting_to_yaml(raw: dict[str, Any]) -> dict[str, Any]:

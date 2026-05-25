@@ -27,6 +27,7 @@ from src.application.ledger.repository import (
     _load_data_config,
     with_sqlite_repo_transaction,
 )
+from src.application.ledger.sqlite_row_codec import position_lot_row_to_record
 from src.application.ledger.store_resolution import resolve_ledger_store
 from src.infrastructure.feishu_bitable import safe_float
 
@@ -276,23 +277,6 @@ def _legacy_sqlite_counts(path: Path) -> dict[str, int] | None:
         }
 
 
-def _legacy_position_lot_row(row: sqlite3.Row) -> dict[str, Any]:
-    fields = json.loads(str(row["fields_json"]) or "{}")
-    if not isinstance(fields, dict):
-        fields = {}
-    if fields.get("expiration") in (None, "") and row["expiration"] not in (None, ""):
-        fields["expiration"] = int(row["expiration"])
-    if fields.get("strike") is None and row["strike"] is not None:
-        fields["strike"] = float(row["strike"])
-    if fields.get("multiplier") is None and row["multiplier"] is not None:
-        raw_multiplier = float(row["multiplier"])
-        fields["multiplier"] = int(raw_multiplier) if raw_multiplier.is_integer() else raw_multiplier
-    return {
-        "record_id": str(row["record_id"]),
-        "fields": fields,
-    }
-
-
 def _list_legacy_trade_events(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     if not _legacy_table_exists(conn, "trade_events"):
         return []
@@ -344,7 +328,7 @@ def _list_legacy_position_lots(conn: sqlite3.Connection) -> list[dict[str, Any]]
         ORDER BY updated_at_ms DESC, record_id DESC
         """
     ).fetchall()
-    return [_legacy_position_lot_row(row) for row in rows]
+    return [position_lot_row_to_record(row) for row in rows]
 
 
 def _list_legacy_option_positions(conn: sqlite3.Connection) -> list[dict[str, Any]]:

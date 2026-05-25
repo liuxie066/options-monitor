@@ -16,8 +16,19 @@ if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
 
-def _minimal_cfg() -> dict[str, Any]:
+def _minimal_cfg(*, market: str = "us") -> dict[str, Any]:
     return {
+        "_generated": {
+            "schema_version": "1.0",
+            "generator": "options-monitor",
+            "source_format": "yaml",
+            "market": market,
+        },
+        "_resolved": {
+            "source_format": "yaml",
+            "market": market,
+            "runtime_schema": "config-json-v1",
+        },
         "accounts": ["user1"],
         "portfolio": {
             "broker": "富途",
@@ -53,8 +64,8 @@ def _minimal_cfg() -> dict[str, Any]:
     }
 
 
-def _public_cfg_with_futu(data_config_ref: str) -> dict[str, Any]:
-    cfg = _minimal_cfg()
+def _public_cfg_with_futu(data_config_ref: str, *, market: str = "us") -> dict[str, Any]:
+    cfg = _minimal_cfg(market=market)
     cfg["account_settings"] = {
         "user1": {
             "type": "futu",
@@ -81,16 +92,16 @@ def _public_cfg_with_futu(data_config_ref: str) -> dict[str, Any]:
     return cfg
 
 
-def _public_cfg_with_futu_auto_source(data_config_ref: str) -> dict[str, Any]:
-    cfg = _public_cfg_with_futu(data_config_ref)
+def _public_cfg_with_futu_auto_source(data_config_ref: str, *, market: str = "us") -> dict[str, Any]:
+    cfg = _public_cfg_with_futu(data_config_ref, market=market)
     cfg["account_settings"]["user1"]["holdings_account"] = "lx"
     cfg["portfolio"]["source"] = "auto"
     cfg["portfolio"]["source_by_account"]["user1"] = "auto"
     return cfg
 
 
-def _public_cfg_with_external_holdings(data_config_ref: str) -> dict[str, Any]:
-    cfg = _public_cfg_with_futu(data_config_ref)
+def _public_cfg_with_external_holdings(data_config_ref: str, *, market: str = "us") -> dict[str, Any]:
+    cfg = _public_cfg_with_futu(data_config_ref, market=market)
     cfg["accounts"] = ["user1", "ext1"]
     cfg["account_settings"]["ext1"] = {
         "type": "external_holdings",
@@ -157,15 +168,13 @@ def test_healthcheck_works_with_explicit_config_path(monkeypatch, tmp_path: Path
     assert any("starter account label 'user1'" in item for item in out["warnings"])
 
 
-def test_healthcheck_reports_strategy_evidence_diagnostic(monkeypatch, tmp_path: Path) -> None:
+def test_healthcheck_reports_candidate_evidence_diagnostic(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
     import src.application.agent_tool_handlers as tools
 
     cfg_path = _write_healthcheck_config(tmp_path)
     candidate_path = tmp_path / "sell_put_candidates.csv"
     candidate_path.write_text("symbol,dte\nNVDA,30\nMSFT,31\n", encoding="utf-8")
-    outcome_path = tmp_path / "strategy_replay.csv"
-    outcome_path.write_text("symbol,actual_return\nNVDA,0.02\nMSFT,0.01\n", encoding="utf-8")
     trace_path = tmp_path / "candidate_filter_trace.jsonl"
     trace_path.write_text('{"symbol":"NVDA","result":"accepted"}\n', encoding="utf-8")
 
@@ -183,19 +192,17 @@ def test_healthcheck_reports_strategy_evidence_diagnostic(monkeypatch, tmp_path:
         "healthcheck",
         {
             "config_path": str(cfg_path),
-            "strategy_candidate_paths": [str(candidate_path)],
-            "strategy_outcome_paths": [str(outcome_path)],
-            "strategy_trace_paths": [str(trace_path)],
-            "strategy_evidence_min_sample": 2,
+            "candidate_paths": [str(candidate_path)],
+            "candidate_trace_paths": [str(trace_path)],
+            "candidate_evidence_min_sample": 2,
         },
     )
 
     assert out["ok"] is True
-    check = next(item for item in out["data"]["checks"] if item["name"] == "strategy_evidence")
+    check = next(item for item in out["data"]["checks"] if item["name"] == "candidate_evidence")
     assert check["status"] == "ok"
     assert check["value"]["evaluable"] is True
     assert check["value"]["row_counts"]["candidates"] == 2
-    assert check["value"]["row_counts"]["outcomes"] == 2
     assert check["value"]["row_counts"]["traces"] == 1
 
 
@@ -670,7 +677,7 @@ def test_get_portfolio_context_rejects_stale_external_holdings_cache_for_wrong_a
         ),
         encoding="utf-8",
     )
-    cfg = _public_cfg_with_futu("portfolio.runtime.json")
+    cfg = _public_cfg_with_futu("portfolio.runtime.json", market="hk")
     cfg["accounts"] = ["lx", "sy"]
     cfg["account_settings"]["lx"] = {"type": "futu"}
     cfg["account_settings"]["sy"] = {"type": "external_holdings", "holdings_account": "sy"}
@@ -1632,6 +1639,47 @@ def test_runtime_status_auto_loads_runtime_service_profile_paths(tmp_path: Path)
     assert data["service_profile"]["loaded"] is True
     assert "No last_run.json found under output_shared/state or output_shared/state." not in warnings
     assert "No symbols_notification.txt found under output_shared/reports or output_accounts/<account>/reports." not in warnings
+
+
+def test_runtime_status_service_profile_does_not_default_to_us_when_market_is_ambiguous(tmp_path: Path) -> None:
+    from src.application.agent_tool_runtime_status import runtime_status_tool
+
+    profile_path = tmp_path / "service.profile.json"
+    profile_path.write_text(
+        json.dumps(
+            {
+                "service_provider": "systemd",
+                "config_paths": {
+                    "us": str(tmp_path / "config.us.json"),
+                    "hk": str(tmp_path / "config.hk.json"),
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    calls: list[dict[str, Any]] = []
+
+    def _load_runtime_config(**kwargs):
+        calls.append(kwargs)
+        raise RuntimeError("stop after config-scope capture")
+
+    try:
+        runtime_status_tool(
+            {"profile_path": str(profile_path)},
+            load_runtime_config=_load_runtime_config,
+            normalize_accounts=lambda value, fallback=(): list(value or fallback),
+            accounts_from_config=lambda loaded: list(loaded.get("accounts") or []),
+            read_json_object_or_empty=lambda path: json.loads(path.read_text(encoding="utf-8")) if path.exists() else {},
+            repo_base=lambda: tmp_path,
+            mask_path=lambda path: str(path),
+        )
+    except RuntimeError as exc:
+        assert str(exc) == "stop after config-scope capture"
+    else:
+        raise AssertionError("expected load_runtime_config sentinel")
+
+    assert calls == [{"config_key": None, "config_path": None}]
 
 
 def test_runtime_status_marks_remediated_upgrade_failure(monkeypatch, tmp_path: Path) -> None:
@@ -2894,32 +2942,6 @@ def test_candidate_rank_explain_reads_existing_candidate_csv(tmp_path: Path) -> 
     assert out["meta"]["source_files"][0]["path"].endswith("sell_put_candidates_labeled.csv")
 
 
-def test_strategy_replay_analyze_reads_existing_replay_csv(tmp_path: Path) -> None:
-    from src.application.tool_execution import execute_tool as run_tool
-
-    replay_path = tmp_path / "strategy_replay.csv"
-    pd.DataFrame(
-        [
-            {"symbol": "NVDA", "dte": 20, "delta": -0.18, "predicted_return": 0.04, "actual_return": 0.05, "max_drawdown": -0.04, "accepted": True},
-            {"symbol": "NVDA", "dte": 24, "delta": -0.19, "predicted_return": 0.03, "actual_return": 0.04, "max_drawdown": -0.05, "accepted": True},
-            {"symbol": "AAPL", "dte": 12, "delta": -0.14, "predicted_return": 0.02, "actual_return": -0.03, "max_drawdown": -0.20, "filter_reason": "max_spread_ratio", "accepted": False},
-            {"symbol": "AAPL", "dte": 13, "delta": -0.16, "predicted_return": 0.02, "actual_return": -0.02, "max_drawdown": -0.18, "filter_reason": "max_spread_ratio", "accepted": False},
-        ]
-    ).to_csv(replay_path, index=False)
-
-    out = run_tool(
-        "strategy_replay_analyze",
-        {"replay_path": str(replay_path), "min_sample": 2, "bad_drawdown_threshold": -0.15},
-    )
-
-    assert out["ok"] is True
-    assert out["data"]["summary"]["row_count"] == 4
-    assert out["data"]["dte_effectiveness"]["best_ranges"][0]["range"] == "15-30"
-    assert out["data"]["filter_value"][0]["filter"] == "max_spread_ratio"
-    assert out["data"]["filter_value"][0]["status"] == "valuable"
-    assert out["meta"]["source_files"][0]["path"].endswith("strategy_replay.csv")
-
-
 def test_manage_symbols_list_and_dry_run_add(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
@@ -3011,7 +3033,7 @@ def test_manage_symbols_add_calibrates_symbol_before_write(monkeypatch, tmp_path
     from src.application.tool_execution import execute_tool as run_tool
 
     cfg_path = tmp_path / "config.hk.json"
-    cfg = _minimal_cfg()
+    cfg = _minimal_cfg(market="hk")
     cfg["symbols"] = [{"symbol": "NVDA"}]
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
     monkeypatch.setenv("OM_AGENT_ENABLE_WRITE_TOOLS", "true")

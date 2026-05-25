@@ -81,6 +81,25 @@ def normalize_accounts(values: list[str] | tuple[str, ...] | None) -> list[str]:
     return out or list(DEFAULT_ACCOUNTS)
 
 
+def _resolve_feishu_ws_config_key(
+    value: str | None,
+    *,
+    markets: list[str],
+    include_feishu_ws: bool,
+) -> str | None:
+    if not include_feishu_ws:
+        return None
+    key = str(value or "").strip().lower()
+    if key:
+        if key not in {"us", "hk"}:
+            raise ValueError("feishu_ws_config_key must be us or hk")
+        return key
+    market_values = [market for market in markets if market in {"us", "hk"}]
+    if len(market_values) == 1:
+        return market_values[0]
+    raise ValueError("feishu_ws_config_key is required when rendering Feishu WS for multiple markets")
+
+
 def default_runtime_root(target: ServiceTarget, *, home: Path | None = None) -> Path:
     return default_runtime_root_for_service_target(target, home=home)
 
@@ -358,7 +377,7 @@ def render_service_bundle(
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
     include_auto_upgrade: bool = False,
     include_feishu_ws: bool = False,
-    feishu_ws_config_key: str = "us",
+    feishu_ws_config_key: str | None = None,
     include_content: bool = True,
 ) -> dict[str, Any]:
     target_key = normalize_target(target)
@@ -404,9 +423,11 @@ def render_service_bundle(
     runtime_data_config = runtime / "portfolio.runtime.json"
     inbound_audit_db = runtime / "output_shared" / "state" / "inbound_control.sqlite3"
     assistant_config_path = runtime / "resolved" / "config.assistant.json" if config_yaml_path is not None else None
-    feishu_ws_config_key_value = str(feishu_ws_config_key or "us").strip().lower() or "us"
-    if feishu_ws_config_key_value not in {"us", "hk"}:
-        raise ValueError("feishu_ws_config_key must be us or hk")
+    feishu_ws_config_key_value = _resolve_feishu_ws_config_key(
+        feishu_ws_config_key,
+        markets=market_values,
+        include_feishu_ws=include_feishu_ws,
+    )
 
     files: list[RenderedServiceFile] = []
     service_names: list[str] = []
@@ -651,6 +672,7 @@ def render_service_bundle(
             )
 
         if include_feishu_ws:
+            assert feishu_ws_config_key_value is not None
             ws_service = "options-monitor-feishu-ws.service"
             ws_args = [
                 om,
@@ -863,6 +885,7 @@ def render_service_bundle(
             )
 
         if include_feishu_ws:
+            assert feishu_ws_config_key_value is not None
             ws_label = "com.options-monitor.feishu-ws"
             ws_args = [
                 om,
@@ -1079,7 +1102,11 @@ def _check_runtime_config(path: Path, *, market: str) -> dict[str, Any]:
             "name": f"runtime_config_{market}",
             "status": "error",
             "message": "runtime config is missing generation metadata",
-            "value": {"path": str(path), "repair": f"./om config build --source legacy --market {market} --output {shlex.quote(str(path))}"},
+            "value": {
+                "path": str(path),
+                "repair": f"./om config build --source yaml --market {market} --output {shlex.quote(str(path))}",
+                "migration": "./om config migrate-yaml --output config.yaml --apply",
+            },
         }
     return {"name": f"runtime_config_{market}", "status": "ok", "message": "runtime config metadata exists", "value": str(path)}
 

@@ -11,6 +11,11 @@ from domain.domain.trade_contract_identity import (
     normalize_position_effect,
     normalize_trade_side,
 )
+from src.application.trades.field_normalization import (
+    normalize_optional_float,
+    normalize_optional_int,
+    normalize_optional_text,
+)
 
 
 @dataclass(frozen=True)
@@ -37,29 +42,6 @@ class TradeIntent:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
-
-
-def _norm_str(value: Any) -> str | None:
-    text = str(value or "").strip()
-    return text or None
-
-
-def _norm_int(value: Any) -> int | None:
-    try:
-        if value in (None, ""):
-            return None
-        return int(float(value))
-    except Exception:
-        return None
-
-
-def _norm_float(value: Any) -> float | None:
-    try:
-        if value in (None, ""):
-            return None
-        return float(value)
-    except Exception:
-        return None
 
 
 def _canonical_symbol(value: Any) -> str | None:
@@ -163,20 +145,20 @@ def trade_intent_from_manual_parse(
         source_type="manual_text",
         source_event_id=None,
         broker=str(broker or "").strip() or "富途",
-        account=_norm_str(fields.get("account")),
+        account=normalize_optional_text(fields.get("account")),
         symbol=_canonical_symbol(fields.get("symbol")),
         option_type=_normalized_option_type(fields.get("option_type")),
-        strike=_norm_float(fields.get("strike")),
+        strike=normalize_optional_float(fields.get("strike")),
         expiration_ymd=normalize_contract_expiration(fields.get("exp")),
         trade_side=trade_side,
         position_effect=position_effect,
         target_position_side=target_position_side,
-        contracts=_norm_int(fields.get("contracts")),
-        price=_norm_float(fields.get("premium_per_share")),
+        contracts=normalize_optional_int(fields.get("contracts")),
+        price=normalize_optional_float(fields.get("premium_per_share")),
         currency=_normalized_currency(fields.get("currency")),
-        multiplier=_norm_int(fields.get("multiplier")),
-        trade_time_ms=_norm_int(fields.get("fill_time_ms")),
-        record_id=_norm_str(record_id),
+        multiplier=normalize_optional_int(fields.get("multiplier")),
+        trade_time_ms=normalize_optional_int(fields.get("fill_time_ms")),
+        record_id=normalize_optional_text(record_id),
         raw_payload={"raw": parsed.get("raw"), "parsed": fields},
         diagnostics=diagnostics,
     )
@@ -187,12 +169,12 @@ def trade_intent_from_normalized_deal(deal: Any) -> TradeIntent:
     position_effect = normalize_position_effect(getattr(deal, "position_effect", None))
     return TradeIntent(
         source_type="futu_api",
-        source_event_id=_norm_str(getattr(deal, "deal_id", None)),
+        source_event_id=normalize_optional_text(getattr(deal, "deal_id", None)),
         broker=str(getattr(deal, "broker", None) or "富途"),
-        account=_norm_str(getattr(deal, "internal_account", None)),
+        account=normalize_optional_text(getattr(deal, "internal_account", None)),
         symbol=_canonical_symbol(getattr(deal, "symbol", None)),
         option_type=_normalized_option_type(getattr(deal, "option_type", None)),
-        strike=_norm_float(getattr(deal, "strike", None)),
+        strike=normalize_optional_float(getattr(deal, "strike", None)),
         expiration_ymd=normalize_contract_expiration(getattr(deal, "expiration_ymd", None)),
         trade_side=trade_side,
         position_effect=position_effect,
@@ -201,11 +183,11 @@ def trade_intent_from_normalized_deal(deal: Any) -> TradeIntent:
             position_effect=position_effect,
             parsed_side=None,
         ),
-        contracts=_norm_int(getattr(deal, "contracts", None)),
-        price=_norm_float(getattr(deal, "price", None)),
+        contracts=normalize_optional_int(getattr(deal, "contracts", None)),
+        price=normalize_optional_float(getattr(deal, "price", None)),
         currency=_normalized_currency(getattr(deal, "currency", None)),
-        multiplier=_norm_int(getattr(deal, "multiplier", None)),
-        trade_time_ms=_norm_int(getattr(deal, "trade_time_ms", None)),
+        multiplier=normalize_optional_int(getattr(deal, "multiplier", None)),
+        trade_time_ms=normalize_optional_int(getattr(deal, "trade_time_ms", None)),
         raw_payload=dict(getattr(deal, "raw_payload", {}) or {}),
         diagnostics=dict(getattr(deal, "normalization_diagnostics", {}) or {}),
     )

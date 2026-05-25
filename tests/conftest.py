@@ -13,13 +13,13 @@ BASE = Path(__file__).resolve().parents[1]
 
 @pytest.fixture
 def example_config_path(tmp_path: Path) -> Path:
-    from src.application.layered_config import build_layered_runtime_config_file
+    from src.application.config_yaml import build_yaml_runtime_config_file
 
     cfg_path = (tmp_path / "config.us.json").resolve()
-    build_layered_runtime_config_file(
+    build_yaml_runtime_config_file(
         repo_root=BASE,
         market="us",
-        user_config_path=BASE / "configs" / "examples" / "user.example.us.json",
+        config_path=BASE / "configs" / "examples" / "config.yaml.example",
         output_config_path=cfg_path,
     )
     return cfg_path

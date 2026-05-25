@@ -32,7 +32,7 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "version_update" in tool_names
     assert "candidate_rank_explain" in tool_names
     assert "candidate_filter_explain" in tool_names
-    assert "strategy_replay_analyze" in tool_names
+    assert "strategy_replay_analyze" not in tool_names
     assert "doctor" not in tool_names
     assert "research" in tool_names
     assert "strategy_lab" not in tool_names
@@ -102,11 +102,6 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert candidate_filter_explain["risk_level"] == "read_only"
     assert candidate_filter_explain["requires_confirm"] is False
     assert "symbol" in candidate_filter_explain["input_schema"]
-    strategy_replay = next(item for item in spec["tools"] if item["name"] == "strategy_replay_analyze")
-    assert strategy_replay["risk_level"] == "read_only"
-    assert strategy_replay["requires_confirm"] is False
-    assert strategy_replay["safe_default_input"]["min_sample"] == 5
-    assert "strategy_replay_diagnostic" in strategy_replay["capabilities"]
     research = next(item for item in spec["tools"] if item["name"] == "research")
     assert research["read_only"] is False
     assert research["risk_level"] == "local_write"
@@ -120,7 +115,8 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "scope" in research["input_schema"]
     assert "include_healthcheck" in research["input_schema"]
     assert "data_config" in research["input_schema"]
-    assert "strategy_replay_paths" in research["input_schema"]
+    assert "candidate_report_dir" in research["input_schema"]
+    assert "strategy_replay_paths" not in research["input_schema"]
     assert "ai_config" not in research["input_schema"]
     assert "healthcheck_snapshot" in research["capabilities"]
 
@@ -173,6 +169,9 @@ def test_removed_strategy_tools_return_unknown_tool(monkeypatch) -> None:
     assert out["error"]["code"] == "INPUT_ERROR"
     assert "unknown tool" in out["error"]["message"]
     out = run_tool("strategy_current", {})
+    assert out["ok"] is False
+    assert out["error"]["code"] == "INPUT_ERROR"
+    out = run_tool("strategy_replay_analyze", {"rows": []})
     assert out["ok"] is False
     assert out["error"]["code"] == "INPUT_ERROR"
 
@@ -230,7 +229,7 @@ def test_agent_cli_spec_prints_json_manifest() -> None:
     assert not any(str(x.get("name")) == "doctor" for x in payload.get("tools", []))
     assert any(str(x.get("name")) == "research" for x in payload.get("tools", []))
     assert any(str(x.get("name")) == "candidate_filter_explain" for x in payload.get("tools", []))
-    assert any(str(x.get("name")) == "strategy_replay_analyze" for x in payload.get("tools", []))
+    assert not any(str(x.get("name")) == "strategy_replay_analyze" for x in payload.get("tools", []))
     assert "init_command" not in payload["launcher"]
     assert payload["launcher"]["add_account_command"][0:2] == ["./om-agent", "add-account"]
     assert payload["launcher"]["edit_account_command"][0:2] == ["./om-agent", "edit-account"]

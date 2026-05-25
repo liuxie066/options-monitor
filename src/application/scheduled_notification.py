@@ -16,7 +16,10 @@ from domain.domain.engine import (
     decide_notification_delivery,
     resolve_multi_tick_engine_entrypoint,
 )
-from src.application.notification_delivery_adapter import build_notification_idempotency_key
+from src.application.notification_delivery_adapter import (
+    build_notification_idempotency_key,
+    normalize_notification_delivery_result,
+)
 
 
 @dataclass(frozen=True)
@@ -562,7 +565,7 @@ def send_account_message_with_retry(
                 message=message,
                 idempotency_key=idempotency_key,
             )
-            send_tool_dto = _normalize_delivery_output(normalize_notify_output=normalize_fn, send=send)
+            send_tool_dto = normalize_notification_delivery_result(send, normalize_fn=normalize_fn)
             raw_message_id = send_tool_dto.get("message_id")
             message_id = None if raw_message_id is None or str(raw_message_id).strip() == "" else str(raw_message_id)
             ok = _confirmed_from_send_tool(send_tool_dto, message_id)
@@ -723,17 +726,6 @@ def send_account_message_with_retry(
         "ambiguous_send": bool(final.get("ambiguous_send")),
         "duplicate_risk": bool(final.get("duplicate_risk")),
     }
-
-
-def _normalize_delivery_output(*, normalize_notify_output: Callable[..., dict[str, Any]], send: Any) -> dict[str, Any]:
-    try:
-        return normalize_notify_output(send_result=(getattr(send, 'raw', send)))
-    except TypeError:
-        return normalize_notify_output(
-            returncode=int(getattr(send, 'returncode', 0) or 0),
-            stdout=str(getattr(send, 'stdout', '') or ''),
-            stderr=str(getattr(send, 'stderr', '') or ''),
-        )
 
 
 def execute_per_account_delivery(

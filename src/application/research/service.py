@@ -13,8 +13,8 @@ from src.application.settings.effective import parse_env_file
 
 
 SCHEMA_VERSION = "research.v1"
-BUNDLE_SCHEMA_VERSION = "research_bundle.v1"
-SCOPES = {"ledger", "account-strategy", "quality", "strategy", "full"}
+BUNDLE_SCHEMA_VERSION = "research_bundle.v2"
+SCOPES = {"ledger", "candidate", "quality", "full"}
 
 
 def research_tool(
@@ -78,7 +78,7 @@ def research_tool(
             "category": str(diagnosis.get("category") or "insufficient_evidence"),
             "finding_count": diagnosis.get("summary", {}).get("finding_count"),
             "ledger_status": _nested(bundle, "ledger_quality", "status"),
-            "account_strategy_status": _nested(bundle, "account_strategy_matrix", "status"),
+            "account_candidate_status": _nested(bundle, "account_candidate_matrix", "status"),
             "healthcheck_status": _nested(bundle, "healthcheck_snapshot", "status"),
         },
     }
@@ -117,10 +117,10 @@ def _build_bundle(
             "redacted": True,
         },
         "ledger_quality": _ledger_quality(runtime) if scope in {"ledger", "full"} else {"status": "skipped", "reason": f"scope={scope}"},
-        "account_strategy_matrix": _account_strategy_matrix(evidence) if scope in {"account-strategy", "strategy", "full"} else {"status": "skipped", "reason": f"scope={scope}"},
+        "account_candidate_matrix": _account_candidate_matrix(evidence) if scope in {"candidate", "full"} else {"status": "skipped", "reason": f"scope={scope}"},
         "runtime_quality": _runtime_quality(runtime=runtime, diagnosis=diagnosis) if scope in {"quality", "full"} else {"status": "skipped", "reason": f"scope={scope}"},
         "healthcheck_snapshot": healthcheck_snapshot,
-        "strategy_evidence": evidence.get("strategy_evidence") if scope in {"account-strategy", "strategy", "full"} else {"status": "skipped", "reason": f"scope={scope}"},
+        "candidate_evidence": evidence.get("candidate_evidence") if scope in {"candidate", "full"} else {"status": "skipped", "reason": f"scope={scope}"},
         "runtime_runs": evidence.get("runtime_runs") if scope in {"quality", "full"} else {"status": "skipped", "reason": f"scope={scope}"},
         "runtime_logs": evidence.get("runtime_logs") if scope in {"quality", "full"} else {"status": "skipped", "reason": f"scope={scope}"},
         "scheduler_evidence": evidence.get("scheduler_evidence"),
@@ -180,7 +180,7 @@ def _projection_verify_quality(runtime: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _account_strategy_matrix(evidence: dict[str, Any]) -> dict[str, Any]:
+def _account_candidate_matrix(evidence: dict[str, Any]) -> dict[str, Any]:
     runtime = _dict(evidence.get("runtime_status"))
     tick_metrics = _dict(_nested(runtime, "latest_run", "state", "tick_metrics", "json"))
     raw_accounts = tick_metrics.get("accounts")
@@ -197,32 +197,32 @@ def _account_strategy_matrix(evidence: dict[str, Any]) -> dict[str, Any]:
             "ran_scan": item.get("ran_scan"),
             "should_notify": item.get("should_notify"),
             "reason": item.get("reason"),
-            "strategy_note": "Use candidate/filter trace evidence to distinguish market candidates from account-level filtering.",
+            "candidate_note": "Use candidate/filter trace evidence to distinguish market candidates from account-level filtering.",
         }
-    strategy = _dict(evidence.get("strategy_evidence"))
-    strategy_accounts = _strategy_account_summaries(strategy)
-    for account, summary in strategy_accounts.items():
-        accounts.setdefault(account, {"strategy_note": "Inferred from strategy evidence paths or rows."})
-        accounts[account]["strategy_evidence"] = summary
+    candidate = _dict(evidence.get("candidate_evidence"))
+    candidate_accounts = _candidate_account_summaries(candidate)
+    for account, summary in candidate_accounts.items():
+        accounts.setdefault(account, {"candidate_note": "Inferred from candidate evidence paths or rows."})
+        accounts[account]["candidate_evidence"] = summary
     return {
         "status": "ok" if accounts else "warn",
         "accounts": accounts,
-        "strategy_summary": strategy.get("summary") or {},
-        "known_gap": "Per-account before/after strategy filter counts are not fully normalized yet.",
+        "candidate_summary": candidate.get("summary") or {},
+        "known_gap": "Per-account before/after candidate filter counts are not fully normalized yet.",
     }
 
 
-def _strategy_account_summaries(strategy: dict[str, Any]) -> dict[str, Any]:
+def _candidate_account_summaries(candidate: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, dict[str, Any]] = {}
-    for report in _list_of_dicts(strategy.get("candidate_reports")):
+    for report in _list_of_dicts(candidate.get("candidate_reports")):
         for account, count in _dict(report.get("account_counts")).items():
             item = out.setdefault(str(account).lower(), {"candidate_rows": 0, "reject_log_rows": 0, "trace_rows": 0, "trace_status_counts": {}})
             item["candidate_rows"] = _as_int(item.get("candidate_rows")) + _as_int(count)
-    for report in _list_of_dicts(strategy.get("reject_logs")):
+    for report in _list_of_dicts(candidate.get("reject_logs")):
         for account, count in _dict(report.get("account_counts")).items():
             item = out.setdefault(str(account).lower(), {"candidate_rows": 0, "reject_log_rows": 0, "trace_rows": 0, "trace_status_counts": {}})
             item["reject_log_rows"] = _as_int(item.get("reject_log_rows")) + _as_int(count)
-    for trace in _list_of_dicts(strategy.get("filter_traces")):
+    for trace in _list_of_dicts(candidate.get("filter_traces")):
         for account, count in _dict(trace.get("account_counts")).items():
             item = out.setdefault(str(account).lower(), {"candidate_rows": 0, "reject_log_rows": 0, "trace_rows": 0, "trace_status_counts": {}})
             item["trace_rows"] = _as_int(item.get("trace_rows")) + _as_int(count)
@@ -392,16 +392,16 @@ def render_research_handoff(bundle: dict[str, Any]) -> str:
     manifest = _dict(bundle.get("manifest"))
     runtime_quality = _dict(bundle.get("runtime_quality"))
     ledger_quality = _dict(bundle.get("ledger_quality"))
-    account_strategy = _dict(bundle.get("account_strategy_matrix"))
+    account_candidate = _dict(bundle.get("account_candidate_matrix"))
     healthcheck = _dict(bundle.get("healthcheck_snapshot"))
     runtime_runs = _dict(bundle.get("runtime_runs"))
     runtime_logs = _dict(bundle.get("runtime_logs"))
     runtime_runs_summary = _dict(runtime_runs.get("summary"))
     runtime_logs_summary = _dict(runtime_logs.get("summary"))
     selected_run = _dict(runtime_runs.get("selected_run"))
-    strategy = _dict(bundle.get("strategy_evidence"))
-    strategy_summary = _dict(strategy.get("summary"))
-    ranking = _dict(strategy.get("ranking_evidence"))
+    candidate = _dict(bundle.get("candidate_evidence"))
+    candidate_summary = _dict(candidate.get("summary"))
+    ranking = _dict(candidate.get("ranking_evidence"))
     ranking_summary = _dict(ranking.get("summary"))
     lines = [
         "## Research Handoff",
@@ -424,15 +424,15 @@ def render_research_handoff(bundle: dict[str, Any]) -> str:
         f"errors={_nested(ledger_quality, 'projection_verify', 'projection_error_count')}",
         f"- gap: {ledger_quality.get('known_gap')}",
         "",
-        "## Account Strategy Matrix",
-        f"- status: {account_strategy.get('status')}",
-        f"- accounts: {', '.join(sorted(_dict(account_strategy.get('accounts')).keys())) or '<none>'}",
-        f"- candidate_rows: {strategy_summary.get('candidate_row_count')}",
-        f"- reject_log_rows: {strategy_summary.get('reject_log_row_count')}",
-        f"- filter_trace_files: {strategy_summary.get('filter_trace_file_count')}",
+        "## Account Candidate Matrix",
+        f"- status: {account_candidate.get('status')}",
+        f"- accounts: {', '.join(sorted(_dict(account_candidate.get('accounts')).keys())) or '<none>'}",
+        f"- candidate_rows: {candidate_summary.get('candidate_row_count')}",
+        f"- reject_log_rows: {candidate_summary.get('reject_log_row_count')}",
+        f"- filter_trace_files: {candidate_summary.get('filter_trace_file_count')}",
         f"- ranking_reports: {ranking_summary.get('report_count')}",
         f"- ranking_top_rows: {ranking_summary.get('top_row_count')}",
-        f"- gap: {account_strategy.get('known_gap')}",
+        f"- gap: {account_candidate.get('known_gap')}",
         "",
         *_render_ranking_evidence_lines(ranking),
         "## Runtime Quality",
@@ -456,9 +456,9 @@ def render_research_handoff(bundle: dict[str, Any]) -> str:
         "",
         "## Codex Next Questions",
         "1. Is the ledger trustworthy enough to make sell_call and YE decisions?",
-        "2. Did any account-level cash, holding, or cost-basis rule suppress a strategy unexpectedly?",
-        "3. Is an observed strategy gap caused by expected account constraints or state contamination?",
-        "4. Which local replay or focused test should verify the next change?",
+        "2. Did any account-level cash, holding, or cost-basis rule suppress a candidate unexpectedly?",
+        "3. Is an observed candidate gap caused by expected account constraints or state contamination?",
+        "4. Which focused local test should verify the next change?",
         "",
         "## Privacy",
         "This bundle is redacted before handoff. Do not treat missing raw logs as proof that no online error occurred.",

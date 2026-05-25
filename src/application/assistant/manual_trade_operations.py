@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 from dataclasses import asdict, is_dataclass
 from typing import Any, cast
@@ -10,10 +8,11 @@ from src.application.agent_tool_config import load_runtime_config, repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_response, mask_path
 from src.application.assistant.contracts import AssistantIntent, AssistantRequest
 from src.application.assistant.manual_trade_parser import build_manual_trade_draft
+from src.application.assistant.operation_lifecycle import build_cancelled_operation_response, resolve_pending_operation_or_raise
 from src.application.assistant.operation_policy import enforce_trade_write_allowed
-from src.application.assistant.operation_signature import verify_operation_signature
+from src.application.assistant.operation_signature import hash_operation_payload, verify_operation_signature
 from src.application.assistant.operation_store import InboundOperationStore, operation_is_expired
-from src.application.assistant.operation_status_text import cannot_repeat_message
+from src.application.assistant.operation_status_text import cannot_repeat_message, operation_candidate_hint, operation_candidate_summary_lines
 from src.application.ledger.api import open_position_ledger_from_runtime_config
 from src.application.positions.workflows import (
     ManualCloseMatchError,
@@ -244,14 +243,14 @@ def _cancel_operation(*, operation_id: str | None, request: AssistantRequest, st
         allow_expired=True,
         action="取消",
     )
-    result = {"operation_id": operation_id, "status": "cancelled"}
-    store.mark_cancelled(operation_id, result=result)
     text = f"交易记录已取消，未写入账本。\ncommand_id: {operation_id}"
-    return build_response(
+    return build_cancelled_operation_response(
         tool_name="inbound.manual_trade",
-        ok=True,
-        data={"operation_id": operation_id, **operation_resolution, "operation_type": operation.get("operation_type"), "status": "cancelled", "result": result, "response_text": text},
-        meta={"audit_db": mask_path(store.path)},
+        operation_id=operation_id,
+        operation=operation,
+        operation_resolution=operation_resolution,
+        store=store,
+        response_text=text,
     )
 
 
@@ -301,48 +300,22 @@ def _resolve_manual_trade_operation(
     allow_expired: bool,
     action: str,
 ) -> tuple[str, dict[str, Any], dict[str, Any]]:
-    resolution = store.resolve_pending_operation(
-        channel=request.channel,
-        sender_id=request.sender_id,
+    return resolve_pending_operation_or_raise(
+        operation_id=operation_id,
+        request=request,
+        store=store,
         operation_types=MANUAL_TRADE_OPERATION_TYPES,
-        conversation_id=request.conversation_id,
-        explicit_operation_id=operation_id,
         allow_expired=allow_expired,
+        action=action,
+        subject="交易记录",
+        expired_message="这条交易记录确认已过期，未写入账本。",
+        expired_hint="请重新发送记录交易命令生成新的预览。",
+        none_hint="请先发送记录交易命令生成预览。",
+        wrong_family_message="这不是交易记录操作，不能用确认记录/取消记录处理。",
+        not_found_message="找不到待确认的交易记录。",
+        not_found_hint="请检查 operation_id，或重新发送记录交易命令。",
+        candidate_hint=_manual_trade_candidate_hint,
     )
-    details = _operation_resolution_details(resolution)
-    status = str(resolution.get("status") or "")
-    resolved_operation_id = str(resolution.get("operation_id") or operation_id or "").strip()
-    operation_raw = resolution.get("operation")
-    operation = cast(dict[str, Any], operation_raw) if isinstance(operation_raw, dict) else {}
-    if status == "resolved" and resolved_operation_id and operation:
-        return resolved_operation_id, operation, details
-    if status == "expired":
-        result = {"operation_id": resolved_operation_id, "status": "expired"}
-        if resolved_operation_id:
-            store.mark_expired(resolved_operation_id, result=result)
-        raise AgentToolError(code="NEEDS_CLARIFICATION", message="这条交易记录确认已过期，未写入账本。", hint="请重新发送记录交易命令生成新的预览。", details={**result, **details})
-    if status == "ambiguous":
-        hint = (
-            _candidate_hint("确认记录" if action == "确认" else "取消记录", details.get("candidate_operations"))
-            if action in {"确认", "取消"}
-            else _update_candidate_hint(details.get("candidate_operations"))
-        )
-        raise AgentToolError(
-            code="NEEDS_CLARIFICATION",
-            message=f"有多条待{action}的交易记录，请带 operation_id。",
-            hint=hint,
-            details=details,
-        )
-    if status == "none":
-        raise AgentToolError(code="NEEDS_CLARIFICATION", message=f"没有可{action}的交易记录。", hint="请先发送记录交易命令生成预览。", details=details)
-    if status == "forbidden":
-        raise AgentToolError(code="PERMISSION_DENIED", message=f"只能由创建该预览的同一 sender/对话 {action}。", details=details)
-    if status == "wrong_family":
-        raise AgentToolError(code="INPUT_ERROR", message="这不是交易记录操作，不能用确认记录/取消记录处理。", details=details)
-    if status == "invalid_status":
-        current_status = str(operation.get("status") or "-")
-        raise AgentToolError(code="INPUT_ERROR", message=cannot_repeat_message("交易记录", action, current_status), details=details)
-    raise AgentToolError(code="INPUT_ERROR", message="找不到待确认的交易记录。", hint="请检查 operation_id，或重新发送记录交易命令。", details=details)
 
 
 def _normalize_manual_trade_patch(operation_type: str, updates: dict[str, Any]) -> dict[str, Any]:
@@ -405,45 +378,21 @@ def _apply_manual_trade_patch(payload: dict[str, Any], patch: dict[str, Any]) ->
     return out
 
 
-def _operation_resolution_details(resolution: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "operation_resolution": resolution.get("operation_resolution"),
-        "resolved_operation_id": resolution.get("operation_id"),
-        "candidate_operations": resolution.get("candidate_operations") or [],
-    }
-
-
 def _candidate_hint(prefix: str, candidates: Any) -> str:
-    rows = candidates if isinstance(candidates, list) else []
-    candidate_lines = _candidate_summary_lines(rows, prefix=prefix)
-    if not candidate_lines:
-        return f"请回复：{prefix} <operation_id>"
-    return "\n候选交易：\n" + "\n".join(candidate_lines)
+    return operation_candidate_hint(prefix, candidates, heading="候选交易")
+
+
+def _manual_trade_candidate_hint(action: str, candidates: Any) -> str:
+    if action in {"确认", "取消"}:
+        return _candidate_hint("确认记录" if action == "确认" else "取消记录", candidates)
+    return _update_candidate_hint(candidates)
 
 
 def _update_candidate_hint(candidates: Any) -> str:
-    rows = candidates if isinstance(candidates, list) else []
-    candidate_lines = _candidate_summary_lines(rows, prefix="")
+    candidate_lines = operation_candidate_summary_lines(candidates, prefix="")
     if not candidate_lines:
         return "请在修改内容后带 operation_id，例如：premium 改成 2.35 <operation_id>"
     return "请在修改内容后带 operation_id，例如：premium 改成 2.35 <operation_id>\n候选交易：\n" + "\n".join(candidate_lines)
-
-
-def _candidate_summary_lines(rows: list[Any], *, prefix: str) -> list[str]:
-    lines: list[str] = []
-    for idx, item_raw in enumerate(rows[:5], start=1):
-        if not isinstance(item_raw, dict):
-            continue
-        operation_id = str(item_raw.get("operation_id") or "").strip()
-        if not operation_id:
-            continue
-        summary = str(item_raw.get("summary") or item_raw.get("operation_type") or "-").strip()
-        command = f"{prefix} {operation_id}".strip()
-        if command:
-            lines.append(f"{idx}. {operation_id} | {summary} | 回复：{command}")
-        else:
-            lines.append(f"{idx}. {operation_id} | {summary}")
-    return lines
 
 
 def _format_patch_summary(patch: dict[str, Any]) -> str:
@@ -459,7 +408,8 @@ def _manual_trade_raw_text(intent: AssistantIntent, request: AssistantRequest) -
 
 
 def _load_runtime_config_for_request(request: AssistantRequest) -> tuple[Any, dict[str, Any]]:
-    return load_runtime_config(config_key=request.config_key or "us", config_path=request.config_path)
+    _require_runtime_config_scope(request)
+    return load_runtime_config(config_key=request.config_key, config_path=request.config_path)
 
 
 def _accounts_from_runtime_config(cfg: dict[str, Any]) -> list[str]:
@@ -544,8 +494,20 @@ def _apply_operation(payload: dict[str, Any]) -> dict[str, Any]:
 def _open_repo_for_payload(payload: dict[str, Any]) -> tuple[Any, Any]:
     raw_config = payload.get("config")
     config = cast(dict[str, Any], raw_config) if isinstance(raw_config, dict) else {}
-    config_path, cfg = load_runtime_config(config_key=str(config.get("config_key") or "us"), config_path=config.get("config_path"))
+    config_key = str(config.get("config_key") or "").strip().lower() or None
+    config_path, cfg = load_runtime_config(config_key=config_key, config_path=config.get("config_path"))
     return open_position_ledger_from_runtime_config(base=repo_base(), cfg=cfg, config_path=config_path)
+
+
+def _require_runtime_config_scope(request: AssistantRequest) -> None:
+    if request.config_path or request.config_key:
+        return
+    raise AgentToolError(
+        code="NEEDS_CLARIFICATION",
+        message="记录交易前需要先指定市场。",
+        hint="请明确美股或港股，或通过 --config-key us/hk、--config-path、assistant.default_market_scope 配置默认市场。",
+        details={"required": "config_key_or_config_path"},
+    )
 
 
 def _manual_open_args(args: dict[str, Any]) -> dict[str, Any]:
@@ -587,11 +549,6 @@ def _manual_close_args(args: dict[str, Any]) -> dict[str, Any]:
         "close_reason": str(args.get("close_reason") or "manual_buy_to_close"),
         "as_of_ms": _optional_positive_int(args.get("as_of_ms"), "as_of_ms"),
     }
-
-
-def hash_operation_payload(payload: dict[str, Any]) -> str:
-    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def render_manual_trade_response(

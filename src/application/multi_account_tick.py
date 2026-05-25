@@ -67,7 +67,12 @@ from src.application.tick_run_context import (
 from src.application.tick_run_workspace import prepare_tick_run_workspace
 from src.application.runtime_trigger_context import build_trigger_context
 from src.application.runtime_paths import resolve_runtime_root
-from src.application.runtime_config_freshness import RuntimeConfigFreshnessError, ensure_runtime_config_freshness
+from src.application.runtime_config_freshness import (
+    RuntimeConfigFreshnessError,
+    RuntimeConfigIdentityError,
+    ensure_runtime_config_freshness,
+    ensure_runtime_config_identity,
+)
 from src.application.tick_scheduler_context import (
     TickSchedulerRequest,
     build_tick_scheduler_context,
@@ -147,10 +152,19 @@ def main(argv: list[str] | None = None) -> int:
         require_sibling_external=True,
     )
     base_cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
+    requested_market = str(getattr(args, 'market_config', 'auto') or 'auto').strip().lower()
+    try:
+        ensure_runtime_config_identity(
+            base_cfg,
+            explicit_market=requested_market if requested_market in {'us', 'hk'} else None,
+            runtime_config_path=cfg_path,
+        )
+    except RuntimeConfigIdentityError as exc:
+        raise SystemExit(str(exc)) from exc
     schedule_contract_info = ensure_runtime_schedule_matches_market(
         base_cfg,
         config_path=cfg_path,
-        market_config=str(getattr(args, 'market_config', 'auto') or 'auto'),
+        market_config=requested_market,
     )
     allow_stale_config = bool(getattr(args, 'allow_stale_config', False))
     freshness_info: dict[str, Any] | None = None

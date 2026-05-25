@@ -127,7 +127,7 @@ cd "$REPO"
   --output-dir /tmp/options-monitor-service
 ```
 
-启用 `--include-auto-upgrade` 时，渲染器会保留 `--repo-root` 传入的 symlink 字面路径，并默认把 tick / trade-intake / Feishu WS / maintenance config 指到 runtime root 下的 `config.us.json` / `config.hk.json`。这样 release 切换只移动代码，不绑定 release 目录内的生产配置。使用 YAML authoring 时，同时传 `--config-yaml "$RUNTIME/config.yaml"`；profile 会记录 YAML source，`update apply` 会用 `config build --source yaml` 重建 runtime config，并用 `config build-assistant --source yaml` 重建 `$RUNTIME/resolved/config.assistant.json`。legacy profile 仍会走 `configs/user*.json` overlay 恢复。
+启用 `--include-auto-upgrade` 时，渲染器会保留 `--repo-root` 传入的 symlink 字面路径，并默认把 tick / trade-intake / Feishu WS / maintenance config 指到 runtime root 下的 `config.us.json` / `config.hk.json`。这样 release 切换只移动代码，不绑定 release 目录内的生产配置。使用 YAML authoring 时，同时传 `--config-yaml "$RUNTIME/config.yaml"`；profile 会记录 YAML source，`update apply` 会用 `config build --source yaml` 重建 runtime config，并用 `config build-assistant --source yaml` 重建 `$RUNTIME/resolved/config.assistant.json`。旧 legacy profile 只作为升级恢复通道，恢复后应迁移到 `config.yaml`。
 
 升级切换 release 后还会做一次 service drift reconcile：以当前 release 的 `service render` 结果为期望状态，对比 `$RUNTIME/service.profile.json` 和 systemd unit 文件。缺失 unit 会被写入 `/etc/systemd/system/`，缺失 timer 会执行 `systemctl enable --now`。随后升级流程会用 reconcile 后的 profile 重启长期运行的 trade-intake / Feishu WS，并执行服务 active/enabled 检查；Feishu WS 还会运行 `./om inbound feishu-ws --check`，避免长驻进程继续使用旧 release、旧 config 或不可用 env。
 

@@ -7,9 +7,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from src.application.config_primitives import file_sha256 as _file_sha256
+from src.application.config_primitives import path_for_metadata as _path_for_metadata
+
 
 GENERATED_KEY = "_generated"
 GENERATED_SCHEMA_VERSION = "1.0"
+RUNTIME_MARKETS = {"us", "hk"}
+RUNTIME_CONFIG_MARKET_BY_NAME = {
+    "config.us.json": "us",
+    "config.hk.json": "hk",
+}
 
 
 class RuntimeConfigFreshnessError(Exception):
@@ -20,25 +28,214 @@ class RuntimeConfigFreshnessError(Exception):
         super().__init__(format_runtime_config_freshness_error(result))
 
 
-def _file_sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as fh:
-        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
+class RuntimeConfigIdentityError(Exception):
+    """Raised when a runtime config does not match the requested runtime identity."""
+
+    def __init__(self, result: dict[str, Any]):
+        self.result = result
+        super().__init__(format_runtime_config_identity_error(result))
+
+
+def _normalize_runtime_market(raw: Any) -> str | None:
+    text = str(raw or "").strip().lower()
+    return text if text in RUNTIME_MARKETS else None
+
+
+def market_from_runtime_config_path(path: str | Path | None) -> str | None:
+    if path is None:
+        return None
+    return RUNTIME_CONFIG_MARKET_BY_NAME.get(Path(path).name)
+
+
+def _metadata_market(payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    return _normalize_runtime_market(payload.get("market"))
+
+
+def infer_runtime_config_market(
+    *,
+    explicit_market: str | None = None,
+    config_key: str | None = None,
+    config_path: str | Path | None = None,
+    config: dict[str, Any] | None = None,
+) -> str | None:
+    """Infer the intended market without silently defaulting to US."""
+    explicit = _normalize_runtime_market(explicit_market)
+    if explicit:
+        return explicit
+    keyed = _normalize_runtime_market(config_key)
+    if keyed:
+        return keyed
+    path_market = market_from_runtime_config_path(config_path)
+    if path_market:
+        return path_market
+    if isinstance(config, dict):
+        generated_market = _metadata_market(config.get(GENERATED_KEY))
+        resolved_market = _metadata_market(config.get("_resolved"))
+        return generated_market or resolved_market
+    return None
+
+
+def _identity_rebuild_command(
+    *,
+    expected_market: str | None,
+    runtime_config_path: str | Path | None,
+    generated: dict[str, Any] | None,
+) -> str | None:
+    market = expected_market
+    if not market and isinstance(generated, dict):
+        market = _normalize_runtime_market(generated.get("market"))
+    if not market:
+        market = market_from_runtime_config_path(runtime_config_path)
+    if not market:
+        return None
+    return build_rebuild_command(
+        market=market,
+        runtime_config_path=runtime_config_path,
+        generated=generated,
+    )
+
+
+def check_runtime_config_identity(
+    config: dict[str, Any],
+    *,
+    explicit_market: str | None = None,
+    config_key: str | None = None,
+    runtime_config_path: str | Path | None = None,
+    required_source_format: str | None = "yaml",
+    allow_legacy_source: bool = False,
+    require_generated: bool = True,
+) -> dict[str, Any]:
+    expected_market = infer_runtime_config_market(
+        explicit_market=explicit_market,
+        config_key=config_key,
+        config_path=runtime_config_path,
+        config=config,
+    )
+    generated = config.get(GENERATED_KEY) if isinstance(config, dict) else None
+    generated_dict = generated if isinstance(generated, dict) else None
+    rebuild_command = _identity_rebuild_command(
+        expected_market=expected_market,
+        runtime_config_path=runtime_config_path,
+        generated=generated_dict,
+    )
+    errors: list[dict[str, Any]] = []
+
+    path_market = market_from_runtime_config_path(runtime_config_path)
+    if expected_market and path_market and path_market != expected_market:
+        errors.append(
+            {
+                "code": "path_market_mismatch",
+                "message": "runtime config filename does not match requested market",
+                "expected": expected_market,
+                "actual": path_market,
+            }
+        )
+
+    if not expected_market:
+        errors.append(
+            {
+                "code": "market_not_inferred",
+                "message": "runtime config market could not be inferred",
+            }
+        )
+
+    if not isinstance(generated, dict):
+        if require_generated:
+            errors.append(
+                {
+                    "code": "missing_generated_metadata",
+                    "message": "runtime config is missing generation metadata",
+                }
+            )
+        return {
+            "ok": not errors,
+            "market": expected_market,
+            "runtime_config_path": str(runtime_config_path) if runtime_config_path is not None else None,
+            "required_source_format": required_source_format,
+            "allow_legacy_source": bool(allow_legacy_source),
+            "rebuild_command": rebuild_command,
+            "errors": errors,
+        }
+
+    generated_market = _metadata_market(generated)
+    if not generated_market:
+        errors.append(
+            {
+                "code": "generated_market_missing",
+                "message": "runtime config generation metadata is missing market",
+            }
+        )
+    elif expected_market and generated_market != expected_market:
+        errors.append(
+            {
+                "code": "market_mismatch",
+                "message": "runtime config was generated for another market",
+                "expected": expected_market,
+                "actual": generated_market,
+            }
+        )
+
+    resolved = config.get("_resolved") if isinstance(config, dict) else None
+    if isinstance(resolved, dict) and "market" in resolved:
+        resolved_market = _metadata_market(resolved)
+        if not resolved_market:
+            errors.append(
+                {
+                    "code": "resolved_market_invalid",
+                    "message": "runtime config resolved metadata has an invalid market",
+                }
+            )
+        elif expected_market and resolved_market != expected_market:
+            errors.append(
+                {
+                    "code": "resolved_market_mismatch",
+                    "message": "runtime config resolved metadata does not match requested market",
+                    "expected": expected_market,
+                    "actual": resolved_market,
+                }
+            )
+
+    required_format = str(required_source_format or "").strip().lower() or None
+    source_format = str(generated.get("source_format") or "").strip().lower()
+    if required_format:
+        if not source_format:
+            if not allow_legacy_source:
+                errors.append(
+                    {
+                        "code": "source_format_missing",
+                        "message": "runtime config generation metadata is missing source_format",
+                        "expected": required_format,
+                    }
+                )
+        elif source_format != required_format:
+            if not (allow_legacy_source and source_format == "legacy"):
+                errors.append(
+                    {
+                        "code": "source_format_mismatch",
+                        "message": "runtime config was generated from an unsupported source format",
+                        "expected": required_format,
+                        "actual": source_format,
+                    }
+                )
+
+    return {
+        "ok": not errors,
+        "market": expected_market,
+        "runtime_config_path": str(runtime_config_path) if runtime_config_path is not None else None,
+        "generated": generated,
+        "source_format": source_format or None,
+        "required_source_format": required_format,
+        "allow_legacy_source": bool(allow_legacy_source),
+        "rebuild_command": rebuild_command,
+        "errors": errors,
+    }
 
 
 def _payload_sha256(payload: Any) -> str:
     body = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(body).hexdigest()
-
-
-def _path_for_metadata(path: Path, *, repo_root: Path) -> str:
-    resolved = path.resolve()
-    try:
-        return resolved.relative_to(repo_root.resolve()).as_posix()
-    except ValueError:
-        return str(resolved)
 
 
 def _resolve_metadata_path(raw: Any, *, repo_root: Path) -> Path | None:
@@ -62,32 +259,7 @@ def build_rebuild_command(
     if isinstance(custom_command, str) and custom_command.strip():
         return custom_command.strip()
 
-    command = ["./om", "config", "build", "--source", "legacy", "--market", str(market)]
-    sources = generated.get("sources") if isinstance(generated, dict) else []
-    if isinstance(sources, list):
-        source_by_role = {
-            str(item.get("role") or ""): item
-            for item in sources
-            if isinstance(item, dict)
-        }
-        system = source_by_role.get("system") or {}
-        if system.get("path"):
-            command.extend(["--system-config", str(system["path"])])
-
-        common = source_by_role.get("common_user") or {}
-        if common.get("loaded") and common.get("path"):
-            command.extend(["--common-user-config", str(common["path"])])
-        elif common.get("enabled") and common.get("path") and repo_root is not None:
-            common_path = _resolve_metadata_path(common.get("path"), repo_root=repo_root)
-            if common_path is not None and common_path.exists():
-                command.extend(["--common-user-config", str(common["path"])])
-        elif common and common.get("enabled") is False:
-            command.append("--no-common-user-config")
-
-        user = source_by_role.get("market_user") or {}
-        if user.get("path"):
-            command.extend(["--user-config", str(user["path"])])
-
+    command = ["./om", "config", "build", "--source", "yaml", "--market", str(market)]
     if runtime_config_path is not None:
         command.extend(["--output", str(runtime_config_path)])
     return " ".join(shlex.quote(part) for part in command)
@@ -133,6 +305,7 @@ def build_generated_metadata(
     return {
         "schema_version": GENERATED_SCHEMA_VERSION,
         "generator": "options-monitor",
+        "source_format": "legacy",
         "version": version,
         "market": str(market),
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -165,6 +338,7 @@ def build_inline_generated_metadata(
     generated: dict[str, Any] = {
         "schema_version": GENERATED_SCHEMA_VERSION,
         "generator": "options-monitor",
+        "source_format": "legacy",
         "version": version,
         "market": str(market),
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -220,6 +394,7 @@ def check_runtime_config_freshness(
             "ok": False,
             "market": str(market),
             "runtime_config_path": str(runtime_config_path) if runtime_config_path is not None else None,
+            "source_format": None,
             "rebuild_command": rebuild_command,
             "errors": [
                 {
@@ -230,6 +405,7 @@ def check_runtime_config_freshness(
         }
 
     generated_market = str(generated.get("market") or "").strip().lower()
+    source_format = str(generated.get("source_format") or "").strip().lower() or None
     expected_market = str(market or "").strip().lower()
     if generated_market != expected_market:
         errors.append(
@@ -326,6 +502,7 @@ def check_runtime_config_freshness(
         "market": expected_market,
         "runtime_config_path": str(runtime_config_path) if runtime_config_path is not None else None,
         "generated": generated,
+        "source_format": source_format,
         "rebuild_command": rebuild_command,
         "errors": errors,
     }
@@ -350,7 +527,59 @@ def format_runtime_config_freshness_error(result: dict[str, Any]) -> str:
             lines.append(f"changed_source: {first['role']} {first.get('path') or ''}".rstrip())
     if result.get("rebuild_command"):
         lines.append(f"rebuild: {result['rebuild_command']}")
+    if str(result.get("source_format") or "").strip().lower() == "legacy":
+        lines.append("migrate: ./om config migrate-yaml --output config.yaml --apply")
     return "\n".join(lines)
+
+
+def format_runtime_config_identity_error(result: dict[str, Any]) -> str:
+    errors = result.get("errors") if isinstance(result.get("errors"), list) else []
+    first = errors[0] if errors and isinstance(errors[0], dict) else {}
+    lines = ["[CONFIG_ERROR] runtime config identity is invalid"]
+    if first.get("code") == "missing_generated_metadata":
+        lines[0] = "[CONFIG_ERROR] runtime config is missing generation metadata"
+    elif first.get("code") in {"market_mismatch", "path_market_mismatch", "resolved_market_mismatch"}:
+        lines[0] = "[CONFIG_ERROR] runtime config market does not match requested market"
+    elif first.get("code") in {"source_format_missing", "source_format_mismatch"}:
+        lines[0] = "[CONFIG_ERROR] runtime config was not generated from config.yaml"
+
+    if result.get("market"):
+        lines.append(f"market: {result['market']}")
+    if result.get("runtime_config_path"):
+        lines.append(f"runtime_config: {result['runtime_config_path']}")
+    if first:
+        lines.append(f"reason: {first.get('message') or first.get('code')}")
+        if first.get("expected") is not None:
+            lines.append(f"expected: {first['expected']}")
+        if first.get("actual") is not None:
+            lines.append(f"actual: {first['actual'] or '<missing>'}")
+    if result.get("rebuild_command"):
+        lines.append(f"rebuild: {result['rebuild_command']}")
+    return "\n".join(lines)
+
+
+def ensure_runtime_config_identity(
+    config: dict[str, Any],
+    *,
+    explicit_market: str | None = None,
+    config_key: str | None = None,
+    runtime_config_path: str | Path | None = None,
+    required_source_format: str | None = "yaml",
+    allow_legacy_source: bool = False,
+    require_generated: bool = True,
+) -> dict[str, Any]:
+    result = check_runtime_config_identity(
+        config,
+        explicit_market=explicit_market,
+        config_key=config_key,
+        runtime_config_path=runtime_config_path,
+        required_source_format=required_source_format,
+        allow_legacy_source=allow_legacy_source,
+        require_generated=require_generated,
+    )
+    if not result.get("ok"):
+        raise RuntimeConfigIdentityError(result)
+    return result
 
 
 def ensure_runtime_config_freshness(
@@ -373,11 +602,19 @@ def ensure_runtime_config_freshness(
 
 __all__ = [
     "GENERATED_KEY",
+    "RUNTIME_CONFIG_MARKET_BY_NAME",
+    "RUNTIME_MARKETS",
     "RuntimeConfigFreshnessError",
+    "RuntimeConfigIdentityError",
     "build_generated_metadata",
     "build_inline_generated_metadata",
     "build_rebuild_command",
+    "check_runtime_config_identity",
     "check_runtime_config_freshness",
+    "ensure_runtime_config_identity",
     "ensure_runtime_config_freshness",
     "format_runtime_config_freshness_error",
+    "format_runtime_config_identity_error",
+    "infer_runtime_config_market",
+    "market_from_runtime_config_path",
 ]

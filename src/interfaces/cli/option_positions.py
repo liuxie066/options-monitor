@@ -20,7 +20,6 @@ from src.application.ledger.api import (
     format_position_cash_secured,
     format_position_money,
     inspect_ledger_stores,
-    ledger_store_write_guard,
     ledger_store_payload,
     list_position_rows,
     migrate_legacy_sqlite_to_repo,
@@ -42,7 +41,11 @@ from src.application.positions.workflows import (
 from src.application.positions.inspection import build_lot_event_history, inspect_projection_state
 from src.application.trade_time_format import add_trade_time_beijing
 from src.application.trades.review import replay_trade_events
-from src.application.write_contract import attach_write_contract, write_control
+from src.application.write_contract import attach_write_contract
+from src.interfaces.cli.ledger_write_safety import add_write_flags as _add_local_write_flags
+from src.interfaces.cli.ledger_write_safety import guard_ledger_write as _guard_write
+from src.interfaces.cli.ledger_write_safety import resolve_cli_write_control as _resolve_write_control
+from src.interfaces.cli.ledger_write_safety import runtime_root_arg as _runtime_root_arg
 
 
 def _resolve_path_under(path: str | Path, *, base: Path) -> Path:
@@ -121,40 +124,6 @@ def _print_store_inspect_text(payload: dict[str, object]) -> None:
             print(f"- {warning}")
 
 
-def _runtime_root_arg(args: argparse.Namespace) -> str | None:
-    return str(getattr(args, "runtime_root", "") or "").strip() or None
-
-
-def _add_local_write_flags(parser: argparse.ArgumentParser, *, high_risk: bool) -> None:
-    parser.add_argument("--dry-run", action="store_true", help="preview only; this is the default")
-    parser.add_argument("--apply", action="store_true", help="allow local state writes")
-    if high_risk:
-        parser.add_argument("--confirm", action="store_true", help="confirm high-risk trade-event writes")
-        parser.add_argument("--yes", action="store_true", help="non-interactive confirmation; emits an audit_id")
-
-
-def _resolve_write_control(args: argparse.Namespace, *, command_name: str, high_risk: bool) -> dict[str, bool]:
-    has_dry_run = bool(getattr(args, "dry_run", False))
-    has_write_flag = any(
-        bool(getattr(args, name, False))
-        for name in ("apply", "confirm", "yes")
-    )
-    if has_dry_run and has_write_flag:
-        message = "--dry-run cannot be combined with --apply"
-        if high_risk:
-            message += ", --confirm, or --yes"
-        raise SystemExit(message)
-    control = write_control(
-        apply=bool(getattr(args, "apply", False)),
-        confirm=bool(getattr(args, "confirm", False)),
-        yes=bool(getattr(args, "yes", False)),
-        high_risk=high_risk,
-    )
-    if control["confirmation_required"]:
-        raise SystemExit(f"{command_name} writes trade_events; use --confirm or --yes to apply")
-    return control
-
-
 def _json_or_text_format(args: argparse.Namespace) -> str:
     return str(getattr(args, "format", "") or "text")
 
@@ -163,36 +132,6 @@ def resolve_option_positions_repo(**kwargs: Any) -> tuple[Path, Any]:
     """Compatibility wrapper kept for tests and older call sites."""
 
     return open_position_ledger_from_runtime_config(**kwargs)
-
-
-def _print_guard_failure(guard: dict[str, object], *, as_json: bool) -> None:
-    payload = {"ok": False, "error": "ledger_store_guard_failed", "ledger_store_guard": guard}
-    if as_json:
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
-        return
-    raw_errors = guard.get("errors")
-    errors = raw_errors if isinstance(raw_errors, list) else []
-    for error in errors:
-        print(f"[LEDGER_FAIL] {error}")
-    raw_active = guard.get("active")
-    active = cast(dict[str, object], raw_active) if isinstance(raw_active, dict) else {}
-    print(
-        f"[LEDGER] sqlite={active.get('sqlite_path') or '-'} "
-        f"runtime_root={active.get('runtime_root') or '-'} "
-        f"source={active.get('runtime_root_source') or '-'}"
-    )
-    raw_remediation = guard.get("remediation")
-    remediation = raw_remediation if isinstance(raw_remediation, list) else []
-    for item in remediation:
-        print(f"[REMEDIATION] {item}")
-
-
-def _guard_write(*, data_config: Path, args: argparse.Namespace, as_json: bool) -> dict[str, object] | None:
-    guard = ledger_store_write_guard(data_config, runtime_root=_runtime_root_arg(args))
-    if bool(guard.get("ok")):
-        return guard
-    _print_guard_failure(guard, as_json=as_json)
-    return None
 
 
 def main(argv: list[str] | None = None) -> int:

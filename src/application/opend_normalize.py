@@ -12,6 +12,7 @@ We keep normalization logic in a single place so both dev/prod stay consistent.
 """
 
 import math
+from typing import Any
 
 
 def normalize_iv(iv: float | None) -> float | None:
@@ -42,3 +43,14 @@ def normalize_iv(iv: float | None) -> float | None:
         return v
     except Exception:
         return None
+
+
+def normalize_opend_option_type(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if raw in {"put", "call"}:
+        return raw
+    if "put" in raw:
+        return "put"
+    if "call" in raw:
+        return "call"
+    return raw

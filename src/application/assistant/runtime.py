@@ -88,6 +88,7 @@ def handle_assistant_message(
     generate_reply_fn: GenerateReplyFn | None = None,
 ) -> dict[str, Any]:
     runtime_settings = settings or AssistantSettings()
+    request = _request_with_default_market_scope(request, runtime_settings)
     store = audit_store or InboundAuditStore(request.audit_db)
     if not runtime_settings.enabled:
         response = handle_assistant_request(
@@ -202,6 +203,24 @@ def handle_assistant_message(
     response = _with_assistant_meta(response, route=route, settings=runtime_settings, llm_trace=llm_trace)
     _update_audit_response(store=store, response=response)
     return response
+
+
+def _request_with_default_market_scope(request: AssistantRequest, settings: AssistantSettings) -> AssistantRequest:
+    if request.config_path or request.config_key:
+        return request
+    scope = str(settings.default_market_scope or "").strip().lower()
+    if scope not in {"us", "hk"}:
+        return request
+    return AssistantRequest(
+        text=request.text,
+        sender_id=request.sender_id,
+        channel=request.channel,
+        message_id=request.message_id,
+        conversation_id=request.conversation_id,
+        config_key=scope,
+        config_path=request.config_path,
+        audit_db=request.audit_db,
+    )
 
 
 def _looks_like_command(text: str) -> bool:

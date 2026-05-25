@@ -2,17 +2,22 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
+from src.application.assistant.llm_common import (
+    CreateStructuredResponseFn,
+    llm_api_key_value,
+    missing_llm_config,
+    provider_create_response_fn,
+    strip_json_code_fence,
+)
 from src.application.assistant.settings import LlmTranslatorSettings
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.settings import build_effective_env
 from src.infrastructure.openai_chat_completions import (
     OpenAIChatCompletionsError,
-    create_json_chat_completion,
     extract_chat_completion_text,
 )
-from src.infrastructure.openai_responses import OpenAIResponsesError, create_structured_response, extract_response_text
+from src.infrastructure.openai_responses import OpenAIResponsesError, extract_response_text
 
 
 @dataclass(frozen=True)
@@ -21,8 +26,6 @@ class LlmReplyResult:
     trace: dict[str, Any]
     error: AgentToolError | None = None
 
-
-CreateStructuredResponseFn = Callable[..., dict[str, Any]]
 
 _GENERAL_REPLY_SCHEMA = {
     "type": "object",
@@ -62,7 +65,7 @@ def generate_general_reply(
             trace=_trace(settings, attempted=False, reason="disabled"),
         )
 
-    missing = _missing_config(settings)
+    missing = missing_llm_config(settings)
     if missing:
         return LlmReplyResult(
             response_text=None,
@@ -88,7 +91,7 @@ def generate_general_reply(
             ),
         )
 
-    api_key = _api_key_value(settings, environ=environ)
+    api_key = llm_api_key_value(settings, environ=environ)
     if not api_key:
         return LlmReplyResult(
             response_text=None,
@@ -102,7 +105,7 @@ def generate_general_reply(
         )
 
     try:
-        response = (create_response_fn or _provider_create_response_fn(provider))(
+        response = (create_response_fn or provider_create_response_fn(provider))(
             api_key=api_key,
             base_url=settings.base_url,
             model=settings.model,
@@ -150,12 +153,6 @@ def generate_general_reply(
     )
 
 
-def _provider_create_response_fn(provider: str) -> CreateStructuredResponseFn:
-    if str(provider or "").strip().lower() == "deepseek":
-        return create_json_chat_completion
-    return create_structured_response
-
-
 def _provider_input_text(
     text: str,
     *,
@@ -183,41 +180,13 @@ def _parse_provider_reply(response: dict[str, Any]) -> str | None:
     if not text:
         return None
     try:
-        parsed = json.loads(_strip_json_code_fence(text))
+        parsed = json.loads(strip_json_code_fence(text))
     except Exception:
         return None
     if not isinstance(parsed, dict):
         return None
     reply = str(parsed.get("reply") or "").strip()
     return reply or None
-
-
-def _strip_json_code_fence(text: str) -> str:
-    value = str(text or "").strip()
-    if value.startswith("```"):
-        lines = value.splitlines()
-        if lines and lines[0].strip().startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        value = "\n".join(lines).strip()
-    return value
-
-
-def _missing_config(settings: LlmTranslatorSettings) -> list[str]:
-    missing: list[str] = []
-    if not str(settings.provider or "").strip():
-        missing.append("provider")
-    if not str(settings.model or "").strip():
-        missing.append("model")
-    if not str(settings.api_key_env or "").strip():
-        missing.append("api_key_env")
-    return missing
-
-
-def _api_key_value(settings: LlmTranslatorSettings, *, environ: dict[str, str] | None) -> str:
-    env = build_effective_env(environ=environ).values
-    return str(env.get(settings.api_key_env) or "").strip()
 
 
 def _trace(

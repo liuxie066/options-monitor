@@ -9,6 +9,7 @@ from typing import Any, Protocol, Sequence, cast
 from domain.domain.ledger.position_fields import effective_expiration, now_ms
 from src.application.ledger.event_codec import encode_trade_event_for_storage, trade_event_application_payload
 from src.application.ledger.position_records import PositionLotRecord
+from src.application.ledger.sqlite_row_codec import position_lot_row_to_record
 from src.application.ledger.store_resolution import resolve_ledger_store
 from src.infrastructure.feishu_bitable import parse_note_kv, safe_float
 
@@ -77,23 +78,6 @@ def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, de
     cols = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
     if column not in cols:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
-
-
-def _row_to_position_lot(row: sqlite3.Row) -> dict[str, Any]:
-    fields = json.loads(str(row["fields_json"]) or "{}")
-    if not isinstance(fields, dict):
-        fields = {}
-    if fields.get("expiration") in (None, "") and row["expiration"] not in (None, ""):
-        fields["expiration"] = int(row["expiration"])
-    if fields.get("strike") is None and row["strike"] is not None:
-        fields["strike"] = float(row["strike"])
-    if fields.get("multiplier") is None and row["multiplier"] is not None:
-        raw_multiplier = float(row["multiplier"])
-        fields["multiplier"] = int(raw_multiplier) if raw_multiplier.is_integer() else raw_multiplier
-    return {
-        "record_id": str(row["record_id"]),
-        "fields": fields,
-    }
 
 
 class SQLiteOptionPositionsRepository:
@@ -320,7 +304,7 @@ class SQLiteOptionPositionsRepository:
                 ORDER BY updated_at_ms DESC, record_id DESC
                 """
             ).fetchall()
-        return [_row_to_position_lot(row) for row in rows]
+        return [position_lot_row_to_record(row) for row in rows]
 
     def get_position_lot_fields(self, record_id: str) -> dict[str, Any]:
         with self._connect() as conn:
@@ -334,7 +318,7 @@ class SQLiteOptionPositionsRepository:
             ).fetchone()
         if row is None:
             raise ValueError(f"position lot not found: {record_id}")
-        return _row_to_position_lot(row)["fields"]
+        return position_lot_row_to_record(row)["fields"]
 
     def list_records(self, *, page_size: int = 500) -> list[dict[str, Any]]:
         return self.list_position_lots()

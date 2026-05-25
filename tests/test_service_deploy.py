@@ -1922,10 +1922,10 @@ def test_service_upgrade_migrates_user_configs_and_rebuilds_runtime_configs_befo
     assert common_overlay["inbound"]["feishu_ws"]["ack_reaction"] == "SMILE"
     assert out["runtime_config_prepare"]["preserved_hotfixes"][0]["path"] == "inbound.feishu_ws.ack_reaction"
     assert ["./om", "config", "build", "--source", "legacy", "--market", "hk", "--output", str(hk_runtime)] in calls
-    assert ["./om", "config", "validate", "--config-path", str(hk_runtime), "--market", "hk"] in calls
+    assert ["./om", "config", "validate", "--source", "legacy", "--config-path", str(hk_runtime), "--market", "hk"] in calls
     assert ["./om", "config", "build", "--source", "legacy", "--market", "us", "--output", str(us_runtime)] in calls
     restart_index = calls.index(["systemctl", "restart", "options-monitor-trade-intake.service"])
-    validate_index = calls.index(["./om", "config", "validate", "--config-path", str(us_runtime), "--market", "us"])
+    validate_index = calls.index(["./om", "config", "validate", "--source", "legacy", "--config-path", str(us_runtime), "--market", "us"])
     assert validate_index < restart_index
     assert out["runtime_config_prepare"]["status"] == "prepared"
 
@@ -2063,7 +2063,7 @@ def test_service_upgrade_recovers_user_configs_from_older_complete_release(monke
     for name in ("user.common.json", "user.hk.json", "user.us.json"):
         assert json.loads((target / "configs" / name).read_text(encoding="utf-8"))["source"] == "0.9.0"
     assert any(
-        call["command"] == ["./om", "config", "validate", "--config-path", str(hk_runtime), "--market", "hk"]
+            call["command"] == ["./om", "config", "validate", "--source", "legacy", "--config-path", str(hk_runtime), "--market", "hk"]
         and call["cwd"] == str(current)
         for call in calls
     )
@@ -2613,6 +2613,12 @@ def test_runtime_status_loads_service_profile_paths(monkeypatch, tmp_path: Path)
     cfg_path.write_text(
         json.dumps(
             {
+                "_generated": {
+                    "schema_version": "1.0",
+                    "generator": "options-monitor",
+                    "source_format": "yaml",
+                    "market": "us",
+                },
                 "accounts": ["lx"],
                 "portfolio": {"data_config": str(data_config)},
                 "notifications": {"provider": "openclaw", "target": "route"},
@@ -2662,6 +2668,12 @@ def test_runtime_status_warns_when_required_service_timer_is_missing(monkeypatch
     cfg_path.write_text(
         json.dumps(
             {
+                "_generated": {
+                    "schema_version": "1.0",
+                    "generator": "options-monitor",
+                    "source_format": "yaml",
+                    "market": "us",
+                },
                 "accounts": ["lx"],
                 "portfolio": {"data_config": str(data_config)},
                 "notifications": {"provider": "openclaw", "target": "route"},

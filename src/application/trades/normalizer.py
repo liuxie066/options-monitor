@@ -21,6 +21,11 @@ from domain.domain.trade_account_identity import (
 )
 from domain.domain.symbol_identity import OPTION_CODE_RE, normalize_symbol_candidate, pick_first_normalized_symbol
 from src.application.symbol_aliases import symbol_aliases_from_config
+from src.application.trades.field_normalization import (
+    normalize_optional_float,
+    normalize_optional_int,
+    normalize_optional_text,
+)
 
 
 def _pick(src: dict[str, Any], *keys: str) -> Any:
@@ -52,29 +57,6 @@ def _parse_futu_option_code(code: Any) -> dict[str, Any]:
         "strike": strike_value,
         "currency": ("HKD" if match.group("market") == "HK" else "USD" if match.group("market") == "US" else None),
     }
-
-
-def _norm_str(value: Any) -> str | None:
-    s = str(value or "").strip()
-    return s or None
-
-
-def _norm_int(value: Any) -> int | None:
-    try:
-        if value in (None, ""):
-            return None
-        return int(float(value))
-    except Exception:
-        return None
-
-
-def _norm_float(value: Any) -> float | None:
-    try:
-        if value in (None, ""):
-            return None
-        return float(value)
-    except Exception:
-        return None
 
 
 def _normalize_side(value: Any) -> str | None:
@@ -233,7 +215,7 @@ def normalize_trade_deal(
         _pick(src, "position_effect", "position_side", "offset_type", "open_close", "trd_side", "trade_side", "side")
     )
     base = Path(repo_base).resolve() if repo_base is not None else Path(__file__).resolve().parents[3]
-    multiplier = _norm_int(_pick(src, "multiplier", "contract_multiplier", "lot_size"))
+    multiplier = normalize_optional_int(_pick(src, "multiplier", "contract_multiplier", "lot_size"))
     multiplier, multiplier_source, multiplier_diagnostics = resolve_multiplier_with_source_and_diagnostics(
         repo_base=base,
         symbol=symbol,
@@ -247,7 +229,7 @@ def normalize_trade_deal(
         config=config,
     )
 
-    strike = _norm_float(_pick(src, "strike", "strike_price"))
+    strike = normalize_optional_float(_pick(src, "strike", "strike_price"))
     if strike is None and option_code_info.get("strike") is not None:
         strike = float(option_code_info["strike"])
     expiration_ymd = _normalize_expiration(_pick(src, "expiration", "expiration_ymd", "expiry", "expiry_date"))
@@ -258,14 +240,14 @@ def normalize_trade_deal(
         broker="富途",
         futu_account_id=futu_account_id,
         internal_account=resolve_internal_account(futu_account_id, futu_account_mapping),
-        deal_id=_norm_str(_pick(src, "deal_id", "dealID", "id")),
-        order_id=_norm_str(_pick(src, "order_id", "orderID")),
+        deal_id=normalize_optional_text(_pick(src, "deal_id", "dealID", "id")),
+        order_id=normalize_optional_text(_pick(src, "order_id", "orderID")),
         symbol=symbol,
         option_type=option_type,
         side=_normalize_side(_pick(src, "side", "trd_side", "trade_side")),
         position_effect=position_effect,
-        contracts=_norm_int(_pick(src, "contracts", "qty", "quantity", "dealt_qty")),
-        price=_norm_float(_pick(src, "price", "dealt_avg_price", "dealt_price", "avg_price")),
+        contracts=normalize_optional_int(_pick(src, "contracts", "qty", "quantity", "dealt_qty")),
+        price=normalize_optional_float(_pick(src, "price", "dealt_avg_price", "dealt_price", "avg_price")),
         strike=strike,
         multiplier=multiplier,
         multiplier_source=multiplier_source,

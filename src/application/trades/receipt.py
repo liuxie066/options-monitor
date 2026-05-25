@@ -7,7 +7,10 @@ from typing import Any, Callable, cast
 from domain.domain.multi_tick import resolve_notification_route_from_config
 from src.application.notification_delivery_route import resolve_notification_delivery_route
 from src.application.trade_time_format import format_trade_time_beijing
-from src.application.notification_delivery_adapter import select_notification_delivery_adapter
+from src.application.notification_delivery_adapter import (
+    normalize_notification_delivery_result,
+    select_notification_delivery_adapter,
+)
 
 
 def send_trade_intake_receipt(
@@ -74,7 +77,7 @@ def send_trade_intake_receipt(
             message=message,
             notifications=route.get("notifications") or {},
         )
-        normalized = _normalize_delivery(send_result, normalize_fn=resolved_normalize_fn)
+        normalized = normalize_notification_delivery_result(send_result, normalize_fn=resolved_normalize_fn)
     except subprocess.TimeoutExpired as exc:
         normalized = {
             "ok": False,
@@ -213,19 +216,6 @@ def build_trade_intake_receipt_message(
     lines.append(f"原因：{reason}")
     lines.append(f"deal_id：{deal_id}")
     return "\n".join(lines)
-
-
-def _normalize_delivery(send_result: Any, *, normalize_fn: Callable[..., dict[str, Any]]) -> dict[str, Any]:
-    if isinstance(send_result, dict) and ("delivery_confirmed" in send_result or "command_ok" in send_result):
-        return dict(send_result)
-    try:
-        return normalize_fn(send_result=getattr(send_result, "raw", send_result))
-    except TypeError:
-        return normalize_fn(
-            returncode=int(getattr(send_result, "returncode", 0) or 0),
-            stdout=str(getattr(send_result, "stdout", "") or ""),
-            stderr=str(getattr(send_result, "stderr", "") or ""),
-        )
 
 
 def _receipt_needs_retry(state: dict[str, Any] | None, deal_id: str | None) -> bool:

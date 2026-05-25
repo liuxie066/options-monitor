@@ -173,6 +173,12 @@ def test_main_uses_env_runtime_root_for_stateful_tick_flows(monkeypatch, tmp_pat
     cfg.write_text(
         json.dumps(
             {
+                "_generated": {
+                    "schema_version": "1.0",
+                    "generator": "options-monitor",
+                    "source_format": "yaml",
+                    "market": "us",
+                },
                 "accounts": ["lx"],
                 "symbols": [],
                 "schedule": {"enabled": True},

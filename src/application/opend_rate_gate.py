@@ -5,9 +5,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator
 import json
-import os
 import threading
 import time
+
+from src.infrastructure.io_utils import atomic_write_json
 
 try:
     import fcntl
@@ -187,7 +188,7 @@ class OpenDRateGate:
         }
         if blocked_until is not None and float(blocked_until) > self._wall_clock():
             payload["blocked_until"] = float(blocked_until)
-        _atomic_write_json(self._state_path, payload)
+        atomic_write_json(self._state_path, payload, default=str)
 
 
 @contextmanager
@@ -206,14 +207,6 @@ def _external_file_lock(state_path: Path) -> Iterator[None]:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
         finally:
             fh.close()
-
-
-def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
 
 
 def _as_float(value: Any, default: float) -> float:

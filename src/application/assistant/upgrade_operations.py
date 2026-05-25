@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import shutil
@@ -12,10 +11,11 @@ from typing import Any, Callable
 from src.application.agent_tool_config import repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response, mask_path
 from src.application.assistant.contracts import AssistantIntent, AssistantRequest
+from src.application.assistant.operation_lifecycle import build_cancelled_operation_response, resolve_pending_operation_or_raise
 from src.application.assistant.operation_policy import enforce_upgrade_write_allowed
-from src.application.assistant.operation_signature import verify_operation_signature
+from src.application.assistant.operation_signature import hash_operation_payload, verify_operation_signature
 from src.application.assistant.operation_store import InboundOperationStore, operation_is_expired
-from src.application.assistant.operation_status_text import cannot_repeat_message, user_facing_operation_status
+from src.application.assistant.operation_status_text import cannot_repeat_message, operation_candidate_hint, user_facing_operation_status
 from src.application.service_upgrade import compare_versions, default_releases_root, default_upgrade_cache_root, service_upgrade, service_upgrade_check
 from src.application.settings import build_effective_env
 from src.application.secret_resolver import resolve_feishu_bot_config
@@ -176,21 +176,14 @@ def _cancel_operation(*, operation_id: str | None, request: AssistantRequest, st
         allow_expired=True,
         action="取消",
     )
-    result = {"operation_id": operation_id, "status": "cancelled"}
-    store.mark_cancelled(operation_id, result=result)
     text = f"升级操作已取消，未执行升级。\ncommand_id: {operation_id}"
-    return build_response(
+    return build_cancelled_operation_response(
         tool_name="inbound.upgrade",
-        ok=True,
-        data={
-            "operation_id": operation_id,
-            **operation_resolution,
-            "operation_type": operation.get("operation_type"),
-            "status": "cancelled",
-            "result": result,
-            "response_text": text,
-        },
-        meta={"audit_db": mask_path(store.path)},
+        operation_id=operation_id,
+        operation=operation,
+        operation_resolution=operation_resolution,
+        store=store,
+        response_text=text,
     )
 
 
@@ -202,67 +195,30 @@ def _resolve_upgrade_operation(
     allow_expired: bool,
     action: str,
 ) -> tuple[str, dict[str, Any], dict[str, Any]]:
-    resolution = store.resolve_pending_operation(
-        channel=request.channel,
-        sender_id=request.sender_id,
+    return resolve_pending_operation_or_raise(
+        operation_id=operation_id,
+        request=request,
+        store=store,
         operation_types=UPGRADE_OPERATION_TYPES,
-        conversation_id=request.conversation_id,
-        explicit_operation_id=operation_id,
         allow_expired=allow_expired,
+        action=action,
+        subject="升级操作",
+        expired_message="这条升级确认已过期，未执行升级。",
+        expired_hint="请重新发送：立即升级",
+        none_hint="请先发送：立即升级",
+        wrong_family_message="这不是升级操作，不能用确认升级/取消升级处理。",
+        not_found_message="找不到待确认的升级操作。",
+        not_found_hint="请检查 operation_id，或重新发送：立即升级",
+        candidate_hint=_upgrade_candidate_hint,
     )
-    details = _operation_resolution_details(resolution)
-    status = str(resolution.get("status") or "")
-    resolved_operation_id = str(resolution.get("operation_id") or operation_id or "").strip()
-    operation_raw = resolution.get("operation")
-    operation = operation_raw if isinstance(operation_raw, dict) else {}
-    if status == "resolved" and resolved_operation_id and operation:
-        return resolved_operation_id, operation, details
-    if status == "expired":
-        result = {"operation_id": resolved_operation_id, "status": "expired"}
-        if resolved_operation_id:
-            store.mark_expired(resolved_operation_id, result=result)
-        raise AgentToolError(code="NEEDS_CLARIFICATION", message="这条升级确认已过期，未执行升级。", hint="请重新发送：立即升级", details={**result, **details})
-    if status == "ambiguous":
-        raise AgentToolError(
-            code="NEEDS_CLARIFICATION",
-            message=f"有多条待{action}的升级操作，请带 operation_id。",
-            hint=_candidate_hint("确认升级" if action == "确认" else "取消升级", details.get("candidate_operations")),
-            details=details,
-        )
-    if status == "none":
-        raise AgentToolError(code="NEEDS_CLARIFICATION", message=f"没有可{action}的升级操作。", hint="请先发送：立即升级", details=details)
-    if status == "forbidden":
-        raise AgentToolError(code="PERMISSION_DENIED", message=f"只能由创建该预览的同一 sender/对话 {action}。", details=details)
-    if status == "wrong_family":
-        raise AgentToolError(code="INPUT_ERROR", message="这不是升级操作，不能用确认升级/取消升级处理。", details=details)
-    if status == "invalid_status":
-        current_status = str(operation.get("status") or "-")
-        raise AgentToolError(code="INPUT_ERROR", message=cannot_repeat_message("升级操作", action, current_status), details=details)
-    raise AgentToolError(code="INPUT_ERROR", message="找不到待确认的升级操作。", hint="请检查 operation_id，或重新发送：立即升级", details=details)
-
-
-def _operation_resolution_details(resolution: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "operation_resolution": resolution.get("operation_resolution"),
-        "resolved_operation_id": resolution.get("operation_id"),
-        "candidate_operations": resolution.get("candidate_operations") or [],
-    }
 
 
 def _candidate_hint(prefix: str, candidates: Any) -> str:
-    rows = candidates if isinstance(candidates, list) else []
-    lines: list[str] = []
-    for idx, item_raw in enumerate(rows[:5], start=1):
-        if not isinstance(item_raw, dict):
-            continue
-        operation_id = str(item_raw.get("operation_id") or "").strip()
-        if not operation_id:
-            continue
-        summary = str(item_raw.get("summary") or item_raw.get("operation_type") or "-").strip()
-        lines.append(f"{idx}. {operation_id} | {summary} | 回复：{prefix} {operation_id}")
-    if not lines:
-        return f"请回复：{prefix} <operation_id>"
-    return "\n候选升级：\n" + "\n".join(lines)
+    return operation_candidate_hint(prefix, candidates, heading="候选升级")
+
+
+def _upgrade_candidate_hint(action: str, candidates: Any) -> str:
+    return _candidate_hint("确认升级" if action == "确认" else "取消升级", candidates)
 
 
 def _build_operation_payload(operation_type: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -747,11 +703,6 @@ def render_upgrade_response(
             ]
         )
     return f"升级操作进度：{user_facing_operation_status(status)}\ncommand_id: {operation_id}"
-
-
-def hash_operation_payload(payload: dict[str, Any]) -> str:
-    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def _optional_text(value: Any) -> str | None:

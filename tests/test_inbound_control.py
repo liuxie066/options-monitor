@@ -39,6 +39,17 @@ def _write_symbols_runtime_config(tmp_path: Path) -> Path:
 
 def _runtime_cfg(data_config_ref: str) -> dict:
     return {
+        "_generated": {
+            "schema_version": "1.0",
+            "generator": "options-monitor",
+            "source_format": "yaml",
+            "market": "us",
+        },
+        "_resolved": {
+            "source_format": "yaml",
+            "market": "us",
+            "runtime_schema": "config-json-v1",
+        },
         "accounts": ["sy"],
         "portfolio": {
             "broker": "富途",
@@ -147,6 +158,31 @@ def test_inbound_policy_allows_sender_and_rejects_non_pure_read_tool() -> None:
 
     assert exc.value.code == "PERMISSION_DENIED"
     assert "inbound.manual_trade" not in PURE_READ_TOOLS
+
+
+def test_inbound_read_tool_requires_config_scope(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict]] = []
+
+    def _execute_tool(tool_name: str, payload: dict) -> dict:
+        calls.append((tool_name, payload))
+        return build_response(tool_name=tool_name, ok=True, data={"status": "ok"})
+
+    out = handle_assistant_request(
+        AssistantRequest(
+            text="状态",
+            sender_id="local",
+            channel="local",
+            message_id="msg_missing_config_scope",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute_tool,
+        allowed_senders="local:local",
+    )
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "NEEDS_CLARIFICATION"
+    assert out["error"]["details"] == {"intent_name": "runtime_status", "required": "config_key_or_config_path"}
+    assert calls == []
 
 
 def test_command_catalog_read_tool_names_match_inbound_policy() -> None:
@@ -1222,6 +1258,7 @@ def test_inbound_handle_executes_read_only_tool_and_replays_duplicate_message(tm
         sender_id="ou_1",
         channel="feishu",
         message_id="msg_1",
+        config_key="us",
         audit_db=str(audit_db),
     )
 
@@ -1262,6 +1299,7 @@ def test_inbound_handle_omits_account_filter_when_account_not_provided(tmp_path:
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_income",
+            config_key="us",
             audit_db=str(audit_db),
         ),
         execute_tool_fn=_execute_tool,
@@ -1273,6 +1311,7 @@ def test_inbound_handle_omits_account_filter_when_account_not_provided(tmp_path:
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_positions",
+            config_key="us",
             audit_db=str(audit_db),
         ),
         execute_tool_fn=_execute_tool,
@@ -1299,6 +1338,7 @@ def test_inbound_handle_without_message_id_generates_fresh_command_id(tmp_path: 
         text="状态",
         sender_id="local",
         channel="local",
+        config_key="us",
         audit_db=str(audit_db),
     )
 
@@ -1795,6 +1835,7 @@ def test_inbound_audit_keeps_monthly_income_diagnostics(tmp_path: Path) -> None:
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_diag",
+            config_key="us",
             audit_db=str(audit_db),
         ),
         execute_tool_fn=_execute_tool,
@@ -1818,12 +1859,12 @@ def test_inbound_duplicate_message_from_other_sender_is_denied_and_marked(tmp_pa
         return build_response(tool_name=tool_name, ok=True, data={"summary": []})
 
     first = handle_assistant_request(
-        AssistantRequest(text="收益 sy", sender_id="ou_1", channel="feishu", message_id="msg_1", audit_db=str(audit_db)),
+        AssistantRequest(text="收益 sy", sender_id="ou_1", channel="feishu", message_id="msg_1", config_key="us", audit_db=str(audit_db)),
         execute_tool_fn=_execute_tool,
         allowed_senders="feishu:ou_1,feishu:ou_2",
     )
     second = handle_assistant_request(
-        AssistantRequest(text="收益 sy", sender_id="ou_2", channel="feishu", message_id="msg_1", audit_db=str(audit_db)),
+        AssistantRequest(text="收益 sy", sender_id="ou_2", channel="feishu", message_id="msg_1", config_key="us", audit_db=str(audit_db)),
         execute_tool_fn=_execute_tool,
         allowed_senders="feishu:ou_1,feishu:ou_2",
     )
@@ -1901,12 +1942,12 @@ def test_feishu_payload_adapter_extracts_text_message_and_calls_inbound(tmp_path
         channel="feishu",
         message_id="om_1",
         conversation_id="feishu:oc_1:ou_1",
-        config_key="us",
         audit_db=str(tmp_path / "audit.sqlite3"),
     )
 
     out = handle_feishu_payload(
         payload,
+        config_key="us",
         audit_db=str(tmp_path / "audit.sqlite3"),
         execute_tool_fn=_execute_tool,
         allowed_senders="feishu:ou_1",
@@ -2084,6 +2125,8 @@ def test_assistant_cli_handle_wires_request(monkeypatch, capsys, tmp_path: Path)
             "msg_1",
             "--conversation-id",
             "feishu:oc_1:ou_1",
+            "--config-key",
+            "us",
             "--audit-db",
             str(tmp_path / "audit.sqlite3"),
         ]
@@ -2348,6 +2391,8 @@ def test_inbound_cli_feishu_wires_payload(monkeypatch, capsys, tmp_path: Path) -
             "feishu",
             "--input-file",
             str(payload_path),
+            "--config-key",
+            "us",
             "--audit-db",
             str(tmp_path / "audit.sqlite3"),
         ]
@@ -2392,6 +2437,8 @@ def test_inbound_cli_feishu_ws_check_reports_redacted_config(capsys, monkeypatch
         [
             "inbound",
             "feishu-ws",
+            "--config-key",
+            "us",
             "--check",
         ]
     )

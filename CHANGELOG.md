@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Removed
+- Removed the obsolete strategy replay analysis surface (`om strategy-replay analyze`, agent `strategy_replay_analyze`, and `scripts/tools/compare_strategy_replay.py`) after Strategy Analysis was retired for redesign.
+
+### Changed
+- Renamed scan-quality evidence diagnostics from strategy evidence to candidate evidence across `healthcheck`, `doctor`, and `research`.
+
 ## 1.2.142 - 2026-05-24
 
 ### Added

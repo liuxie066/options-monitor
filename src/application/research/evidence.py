@@ -54,7 +54,7 @@ def collect_evidence(
         kind="all",
         lines=tail_limit,
     )
-    strategy_evidence = _strategy_evidence(payload, source_paths=source_paths, base=base, tail_limit=tail_limit, cfg=cfg)
+    candidate_evidence = _candidate_evidence(payload, source_paths=source_paths, base=base, tail_limit=tail_limit, cfg=cfg)
 
     scheduler_evidence = _normalize_scheduler_evidence(payload.get("scheduler_evidence"))
     evidence = {
@@ -68,7 +68,7 @@ def collect_evidence(
         "runtime_runs": runtime_runs,
         "runtime_logs": runtime_logs,
         "audit_tails": audit_tails,
-        "strategy_evidence": strategy_evidence,
+        "candidate_evidence": candidate_evidence,
         "source_refs": source_refs,
     }
     warnings = list(runtime_warnings)
@@ -137,8 +137,7 @@ def _safe_input_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "max_notification_chars",
         "candidate_paths",
         "trace_paths",
-        "strategy_replay_paths",
-        "strategy_report_dir",
+        "candidate_report_dir",
         "profile_path",
         "output",
         "scope",
@@ -254,7 +253,7 @@ def _actual_source_paths(payload: dict[str, Any], *, runtime_data: dict[str, Any
     profile_paths = _profile_source_paths(payload, base=base)
     runtime_root = _resolve_under_base(profile_paths.get("runtime_root"), base=base, default=base)
     report_dir = _resolve_under_base(
-        payload.get("strategy_report_dir") or payload.get("report_dir") or profile_paths.get("report_dir") or paths.get("report_dir"),
+        payload.get("candidate_report_dir") or payload.get("report_dir") or profile_paths.get("report_dir") or paths.get("report_dir"),
         base=base,
         default=runtime_root / "output_shared" / "reports",
     )
@@ -335,38 +334,33 @@ def _audit_tails(source_paths: dict[str, Path | None], *, base: Path, tail_limit
     return out
 
 
-def _strategy_evidence(payload: dict[str, Any], *, source_paths: dict[str, Path | None], base: Path, tail_limit: int, cfg: dict[str, Any]) -> dict[str, Any]:
+def _candidate_evidence(payload: dict[str, Any], *, source_paths: dict[str, Path | None], base: Path, tail_limit: int, cfg: dict[str, Any]) -> dict[str, Any]:
     candidate_paths = _explicit_paths(payload.get("candidate_paths") or payload.get("candidate_path"), base=base)
     trace_paths = _explicit_paths(payload.get("trace_paths") or payload.get("trace_path"), base=base)
-    replay_paths = _explicit_paths(payload.get("strategy_replay_paths") or payload.get("strategy_replay_path") or payload.get("replay_path"), base=base)
     reject_log_paths: list[Path] = []
-    for directory in _strategy_dirs(source_paths, base=base):
+    for directory in _candidate_dirs(source_paths, base=base):
         found_candidates, found_reject_logs = _candidate_and_reject_log_paths(directory)
         candidate_paths.extend(found_candidates)
         reject_log_paths.extend(found_reject_logs)
         trace_paths.append(directory / "candidate_filter_trace.jsonl")
-        replay_paths.extend(_glob_many(directory, ("strategy_replay.csv", "strategy_replay.json", "strategy_replay.jsonl")))
 
     explicit_reject_logs = [path for path in candidate_paths if _is_reject_log_path(path)]
     reject_log_paths.extend(explicit_reject_logs)
     candidate_paths = _unique_paths([path for path in candidate_paths if _is_candidate_report_path(path)])[:30]
     reject_log_paths = _unique_paths(reject_log_paths)[:30]
     trace_paths = _unique_paths(trace_paths)[:20]
-    replay_paths = _unique_paths(replay_paths)[:20]
     candidate_reports = [_candidate_csv_summary(path, base=base) for path in candidate_paths]
     reject_logs = [_reject_log_summary(path, base=base) for path in reject_log_paths]
     filter_traces = [_trace_summary(path, base=base, limit=tail_limit) for path in trace_paths]
-    replay_reports = [_replay_summary(path, base=base, limit=tail_limit) for path in replay_paths]
     ranking_limit = _as_int(payload.get("ranking_limit"), default=5, low=1, high=20)
     ranking_evidence = _ranking_evidence(candidate_paths, base=base, cfg=cfg, limit=ranking_limit)
     total_candidate_rows = sum(int(item.get("row_count") or 0) for item in candidate_reports if item.get("exists"))
     total_reject_rows = sum(int(item.get("row_count") or 0) for item in reject_logs if item.get("exists"))
     return {
-        "schema_version": "research_strategy_evidence.v1",
+        "schema_version": "research_candidate_evidence.v1",
         "candidate_reports": candidate_reports,
         "reject_logs": reject_logs,
         "filter_traces": filter_traces,
-        "strategy_replay": replay_reports,
         "ranking_evidence": ranking_evidence,
         "summary": {
             "candidate_file_count": sum(1 for item in candidate_reports if item.get("exists")),
@@ -374,7 +368,6 @@ def _strategy_evidence(payload: dict[str, Any], *, source_paths: dict[str, Path 
             "reject_log_file_count": sum(1 for item in reject_logs if item.get("exists")),
             "reject_log_row_count": total_reject_rows,
             "filter_trace_file_count": sum(1 for item in filter_traces if item.get("exists")),
-            "strategy_replay_file_count": sum(1 for item in replay_reports if item.get("exists")),
             "ranking_report_count": _nested(_dict_or_empty(ranking_evidence), "summary", "report_count"),
             "ranking_top_row_count": _nested(_dict_or_empty(ranking_evidence), "summary", "top_row_count"),
             "evidence_level": "candidate_and_trace" if total_candidate_rows and any(item.get("exists") for item in filter_traces) else ("candidate_only" if total_candidate_rows else "limited"),
@@ -382,7 +375,7 @@ def _strategy_evidence(payload: dict[str, Any], *, source_paths: dict[str, Path 
     }
 
 
-def _strategy_dirs(source_paths: dict[str, Path | None], *, base: Path) -> list[Path]:
+def _candidate_dirs(source_paths: dict[str, Path | None], *, base: Path) -> list[Path]:
     dirs: list[Path] = []
     for key in ("report_dir", "latest_run_dir", "latest_scanned_run_dir"):
         path = source_paths.get(key)
@@ -594,26 +587,6 @@ def _trace_summary(path: Path, *, base: Path, limit: int) -> dict[str, Any]:
     out["rule_counts"] = dict(rule_counts.most_common(30))
     out["symbol_counts"] = dict(symbol_counts.most_common(30))
     out["tail_rows"] = rows[-limit:] if limit > 0 else []
-    return out
-
-
-def _replay_summary(path: Path, *, base: Path, limit: int) -> dict[str, Any]:
-    suffix = path.suffix.lower()
-    if suffix == ".csv":
-        return _candidate_csv_summary(path, base=base)
-    if suffix == ".jsonl":
-        return _jsonl_tail(path, base=base, limit=limit)
-    out: dict[str, Any] = {"path": _safe_rel(path, base=base), "exists": path.exists()}
-    if not path.exists() or not path.is_file():
-        return out
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        out["read_error"] = f"{type(exc).__name__}: {exc}"
-        return out
-    rows = payload if isinstance(payload, list) else _nested(payload if isinstance(payload, dict) else {}, "rows")
-    out["row_count"] = len(rows) if isinstance(rows, list) else None
-    out["sample_rows"] = rows[:5] if isinstance(rows, list) else []
     return out
 
 

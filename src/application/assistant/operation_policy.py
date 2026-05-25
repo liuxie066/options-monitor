@@ -41,14 +41,14 @@ def enforce_trade_write_allowed(
     sender_id: str,
     policy: InboundOperationPolicy | None = None,
 ) -> InboundOperationPolicy:
-    effective = _enforce_base_write_allowed(channel=channel, sender_id=sender_id, policy=policy)
-    if not effective.trade_write_enabled:
-        raise AgentToolError(
-            code="PERMISSION_DENIED",
-            message="inbound trade recording is disabled",
-            hint="Set OM_INBOUND_TRADE_WRITE_ENABLED=1 for manual trade recording.",
-        )
-    return effective
+    return _enforce_write_allowed(
+        channel=channel,
+        sender_id=sender_id,
+        policy=policy,
+        enabled_field="trade_write_enabled",
+        message="inbound trade recording is disabled",
+        hint="Set OM_INBOUND_TRADE_WRITE_ENABLED=1 for manual trade recording.",
+    )
 
 
 def enforce_symbol_write_allowed(
@@ -57,14 +57,14 @@ def enforce_symbol_write_allowed(
     sender_id: str,
     policy: InboundOperationPolicy | None = None,
 ) -> InboundOperationPolicy:
-    effective = _enforce_base_write_allowed(channel=channel, sender_id=sender_id, policy=policy)
-    if not effective.symbol_write_enabled:
-        raise AgentToolError(
-            code="PERMISSION_DENIED",
-            message="inbound monitored symbol writes are disabled",
-            hint="Set OM_INBOUND_SYMBOL_WRITE_ENABLED=1 for monitored symbol config writes.",
-        )
-    return effective
+    return _enforce_write_allowed(
+        channel=channel,
+        sender_id=sender_id,
+        policy=policy,
+        enabled_field="symbol_write_enabled",
+        message="inbound monitored symbol writes are disabled",
+        hint="Set OM_INBOUND_SYMBOL_WRITE_ENABLED=1 for monitored symbol config writes.",
+    )
 
 
 def enforce_upgrade_write_allowed(
@@ -73,12 +73,31 @@ def enforce_upgrade_write_allowed(
     sender_id: str,
     policy: InboundOperationPolicy | None = None,
 ) -> InboundOperationPolicy:
+    return _enforce_write_allowed(
+        channel=channel,
+        sender_id=sender_id,
+        policy=policy,
+        enabled_field="upgrade_write_enabled",
+        message="inbound immediate upgrade is disabled",
+        hint="Set OM_INBOUND_UPGRADE_WRITE_ENABLED=1 for inbound upgrade operations.",
+    )
+
+
+def _enforce_write_allowed(
+    *,
+    channel: str,
+    sender_id: str,
+    policy: InboundOperationPolicy | None,
+    enabled_field: str,
+    message: str,
+    hint: str,
+) -> InboundOperationPolicy:
     effective = _enforce_base_write_allowed(channel=channel, sender_id=sender_id, policy=policy)
-    if not effective.upgrade_write_enabled:
+    if not bool(getattr(effective, enabled_field)):
         raise AgentToolError(
             code="PERMISSION_DENIED",
-            message="inbound immediate upgrade is disabled",
-            hint="Set OM_INBOUND_UPGRADE_WRITE_ENABLED=1 for inbound upgrade operations.",
+            message=message,
+            hint=hint,
         )
     return effective
 

@@ -688,13 +688,22 @@ def _post_upgrade_service_health(
 def _feishu_ws_config_key(profile: dict[str, Any]) -> str:
     feishu_ws = profile.get("feishu_ws")
     raw = feishu_ws.get("config_key") if isinstance(feishu_ws, dict) else None
-    key = str(raw or "us").strip().lower()
-    return key if key in {"us", "hk"} else "us"
+    key = str(raw or "").strip().lower()
+    if key in {"us", "hk"}:
+        return key
+    config_paths = profile.get("config_paths")
+    if isinstance(config_paths, dict):
+        markets = [str(item).strip().lower() for item in config_paths if str(item).strip().lower() in {"us", "hk"}]
+        if len(markets) == 1:
+            return markets[0]
+    return ""
 
 
 def _feishu_ws_check_command(*, profile: dict[str, Any], repo_root: Path) -> list[str]:
     key = _feishu_ws_config_key(profile)
-    command = [str(repo_root / "om"), "inbound", "feishu-ws", "--check", "--config-key", key]
+    command = [str(repo_root / "om"), "inbound", "feishu-ws", "--check"]
+    if key:
+        command.extend(["--config-key", key])
     config_paths = profile.get("config_paths")
     if isinstance(config_paths, dict):
         config_path = str(config_paths.get(key) or "").strip()
@@ -1108,7 +1117,9 @@ def _rebuild_and_validate_runtime_configs(
         source = str(item.get("source") or "legacy").strip().lower()
         config_yaml = str(item.get("config_yaml") or "").strip()
         build_command = ["./om", "config", "build", "--source", "legacy", "--market", market, "--output", config_path]
+        validate_command = ["./om", "config", "validate", "--source", "legacy", "--config-path", config_path, "--market", market]
         manual_rebuild = f"manual_rebuild: cd {cwd} && ./om config build --source legacy --market {market} --output {config_path}"
+        manual_validate = f"manual_validate: cd {cwd} && ./om config validate --source legacy --config-path {config_path} --market {market}"
         if source == "yaml":
             if not config_yaml:
                 raise RuntimeConfigPrepareError(
@@ -1128,10 +1139,12 @@ def _rebuild_and_validate_runtime_configs(
                 "--output",
                 config_path,
             ]
+            validate_command = ["./om", "config", "validate", "--config-path", config_path, "--market", market]
             manual_rebuild = (
                 f"manual_rebuild: cd {cwd} && ./om config build --source yaml "
                 f"--market {market} --config-yaml {config_yaml} --output {config_path}"
             )
+            manual_validate = f"manual_validate: cd {cwd} && ./om config validate --config-path {config_path} --market {market}"
         try:
             _run_required(
                 build_command,
@@ -1141,7 +1154,7 @@ def _rebuild_and_validate_runtime_configs(
                 timeout=120,
             )
             _run_required(
-                ["./om", "config", "validate", "--config-path", config_path, "--market", market],
+                validate_command,
                 cwd=cwd,
                 run_cmd=run_cmd,
                 operations=operations,
@@ -1152,7 +1165,7 @@ def _rebuild_and_validate_runtime_configs(
                 f"failed to {phase} rebuild/validate runtime config for {market}: {config_path}",
                 remediation=[
                     manual_rebuild,
-                    f"manual_validate: cd {cwd} && ./om config validate --config-path {config_path} --market {market}",
+                    manual_validate,
                     f"inspect_last_operation: {exc}",
                 ],
             ) from exc

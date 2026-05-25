@@ -45,7 +45,7 @@ $EDITOR config.yaml
 
 YAML 使用空格缩进，不要用 tab；示例采用 2 个空格。港股代码这类可能被 YAML 误判的值建议加引号，例如 `"0700.HK"`。
 `config init` 默认生成 `config.yaml`，并构建 `config.us.json` / `config.hk.json`。已有文件时会拒绝覆盖；确认要重建 starter 时再加 `--force`。
-`config build` / `config explain` 默认读取 YAML；旧 JSON authoring 需要显式 `--source legacy`。
+`config build` / `config explain` 读取 YAML；旧 JSON authoring 需要先迁移到 `config.yaml`。
 
 先校验 YAML 合并代码默认值后的结果：
 

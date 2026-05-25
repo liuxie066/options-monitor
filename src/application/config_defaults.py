@@ -119,7 +119,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "assistant": {
             "mode": "deterministic",
             "context_window_messages": 8,
-            "default_market_scope": "us",
             "llm": {
                 "provider": "",
                 "base_url": "",

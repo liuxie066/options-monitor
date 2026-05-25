@@ -67,7 +67,6 @@ Use the launcher as a local command tool. Typical pattern:
 ./om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","account":"lx"}'
 ./om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","account":"sy"}'
 ./om-agent run --tool candidate_rank_explain --input-json '{"mode":"put","top_n":5}'
-./om-agent run --tool strategy_replay_analyze --input-json '{"replay_path":"output_shared/reports/strategy_replay.csv","min_sample":5}'
 ./om-agent run --tool monthly_income_report --input-json '{"config_key":"us","account":"lx","month":"2026-04"}'
 ./om-agent run --tool option_positions_read --input-json '{"config_key":"us","action":"list","account":"lx","status":"open"}'
 ./om-agent run --tool get_close_advice --input-json '{"config_key":"us"}'
@@ -99,7 +98,7 @@ Use the same launcher contract as Claude Code. For first-pass troubleshooting, p
 ./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
 ```
 
-For MacBook-side Codex diagnosis of online quality or strategy direction, collect a redacted handoff instead of calling an online AI provider:
+For MacBook-side Codex diagnosis of online quality or candidate-scan behavior, collect a redacted handoff instead of calling an online AI provider:
 
 ```bash
 ./om-agent run --tool research --input-json '{"config_key":"us","scope":"full","output":"both","write_outputs":false}'

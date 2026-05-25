@@ -6,6 +6,14 @@ from pathlib import Path
 from typing import Any
 
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.runtime_cli_format import as_dict as _dict
+from src.application.runtime_cli_format import as_list as _list
+from src.application.runtime_cli_format import csv_value as _csv
+from src.application.runtime_cli_format import display_path as _display_path
+from src.application.runtime_cli_format import display_value as _value
+from src.application.runtime_cli_format import resolve_runtime_cli_path as _resolve_path
+from src.application.runtime_cli_format import selected_run_dir as _selected_run_dir
+from src.application.runtime_cli_format import yes_no as _yes_no
 
 
 SCHEMA_VERSION = "runtime_runs.v1"
@@ -159,26 +167,6 @@ def _load_profile(profile_path: str | Path, *, base: Path) -> dict[str, Any]:
     return payload
 
 
-def _resolve_path(value: str | Path, *, base: Path) -> Path:
-    path = Path(value).expanduser()
-    if not path.is_absolute():
-        path = (base / path).resolve()
-    return path.resolve()
-
-
-def _selected_run_dir(*, root: Path, base: Path, run_id: str | None, run_dir: str | Path | None) -> Path | None:
-    raw_run_dir = str(run_dir or "").strip()
-    if raw_run_dir:
-        return _resolve_path(raw_run_dir, base=base)
-    raw_run_id = str(run_id or "").strip()
-    if not raw_run_id:
-        return None
-    candidate = Path(raw_run_id)
-    if candidate.is_absolute() or candidate.name != raw_run_id:
-        return None
-    return (root / raw_run_id).resolve()
-
-
 def _run_dirs(root: Path) -> list[Path]:
     if not root.exists() or not root.is_dir():
         return []
@@ -322,14 +310,6 @@ def _mtime_utc(path: Path) -> str:
     return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()
 
 
-def _display_path(path: Path, *, base: Path) -> str:
-    resolved = path.resolve()
-    try:
-        return resolved.relative_to(base.resolve()).as_posix()
-    except ValueError:
-        return str(resolved)
-
-
 def _nested(data: dict[str, Any], *keys: str) -> Any:
     cur: Any = data
     for key in keys:
@@ -337,33 +317,3 @@ def _nested(data: dict[str, Any], *keys: str) -> Any:
             return None
         cur = cur.get(key)
     return cur
-
-
-def _dict(value: Any) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
-
-
-def _list(value: Any) -> list[Any]:
-    return value if isinstance(value, list) else []
-
-
-def _csv(value: Any) -> str:
-    if isinstance(value, list):
-        return ", ".join(str(item) for item in value) or "-"
-    if value is None:
-        return "-"
-    return str(value)
-
-
-def _value(value: Any) -> str:
-    if value is None or value == "":
-        return "-"
-    return str(value)
-
-
-def _yes_no(value: Any) -> str:
-    if value is True:
-        return "yes"
-    if value is False:
-        return "no"
-    return "-"

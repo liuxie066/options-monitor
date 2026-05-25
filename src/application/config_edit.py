@@ -10,7 +10,10 @@ from typing import Any
 
 from src.application.agent_tool_config import resolve_runtime_config_path
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.config_primitives import config_key_parts as _key_parts
+from src.application.config_primitives import config_path_get as _path_get
 from src.application.config_validator import validate_config
+from src.application.runtime_config_freshness import RuntimeConfigIdentityError, ensure_runtime_config_identity
 from src.application.runtime_config_paths import write_json_atomic
 from src.application.write_contract import attach_write_contract
 
@@ -44,31 +47,6 @@ def _read_json_object(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise AgentToolError(code="CONFIG_ERROR", message=f"runtime config must be a JSON object: {path}")
     return payload
-
-
-def _key_parts(key: str) -> list[str]:
-    parts = [part.strip() for part in str(key or "").split(".")]
-    if not parts or any(not part for part in parts):
-        raise AgentToolError(code="INPUT_ERROR", message="config key must be a non-empty dot path")
-    return parts
-
-
-def _path_get(data: Any, parts: list[str]) -> tuple[bool, Any]:
-    current = data
-    for part in parts:
-        if isinstance(current, dict):
-            if part not in current:
-                return False, None
-            current = current[part]
-            continue
-        if isinstance(current, list) and part.isdigit():
-            index = int(part)
-            if index < 0 or index >= len(current):
-                return False, None
-            current = current[index]
-            continue
-        return False, None
-    return True, current
 
 
 def _path_set(data: Any, parts: list[str], value: Any) -> None:
@@ -128,6 +106,30 @@ def _validate_runtime_config_payload(cfg: dict[str, Any]) -> None:
         ) from exc
 
 
+def _ensure_runtime_config_identity(
+    cfg: dict[str, Any],
+    *,
+    config_key: str | None,
+    path: Path,
+) -> None:
+    try:
+        ensure_runtime_config_identity(
+            cfg,
+            config_key=config_key,
+            runtime_config_path=path,
+        )
+    except RuntimeConfigIdentityError as exc:
+        raise AgentToolError(
+            code="CONFIG_ERROR",
+            message=str(exc),
+            hint=(
+                "Use `om config migrate-yaml` for old JSON configs, then rebuild with "
+                "`om config build --source yaml --market <market>`."
+            ),
+            details=exc.result,
+        ) from exc
+
+
 def get_runtime_config_value(
     *,
     config_key: str | None = None,
@@ -136,6 +138,7 @@ def get_runtime_config_value(
 ) -> dict[str, Any]:
     path = resolve_runtime_config_path(config_key=config_key, config_path=config_path)
     cfg = _read_json_object(path)
+    _ensure_runtime_config_identity(cfg, config_key=config_key, path=path)
     parts = _key_parts(key)
     exists, current = _path_get(cfg, parts)
     if not exists:
@@ -165,6 +168,7 @@ def set_runtime_config_value(
 ) -> dict[str, Any]:
     path = resolve_runtime_config_path(config_key=config_key, config_path=config_path)
     cfg = _read_json_object(path)
+    _ensure_runtime_config_identity(cfg, config_key=config_key, path=path)
     parts = _key_parts(key)
     new_value = _decode_set_value(value=value, json_value=json_value)
 

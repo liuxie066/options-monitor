@@ -10,7 +10,7 @@ DEFAULT_LLM_TIMEOUT_SECONDS = 20
 DEFAULT_LLM_MAX_OUTPUT_TOKENS = 512
 DEFAULT_CONTEXT_WINDOW_MESSAGES = 8
 DEFAULT_ASSISTANT_MODE = "deterministic"
-DEFAULT_MARKET_SCOPE = "us"
+DEFAULT_MARKET_SCOPE = ""
 ASSISTANT_MODES = frozenset({"disabled", "deterministic", "llm_router", "agent_loop"})
 LLM_MODES = frozenset({"llm_router", "agent_loop"})
 
