@@ -82,7 +82,6 @@ om-agent run --tool runtime_status --env-file /etc/options-monitor/options-monit
 | `scheduler_status` | `om scheduler` 的只读判定部分 |
 | `scan_opportunities` | `om scan` / `om scan-pipeline` |
 | `candidate_rank_explain` | Agent-only read existing candidate CSV ranking explanations |
-| `strategy_replay_analyze` | `om strategy-replay analyze` |
 | `preview_notification` | `om notify preview` |
 | `runtime_status` | `om status` or raw assistant/runtime artifact summary |
 | `runtime_runs` | `om runs` |
@@ -147,7 +146,7 @@ om config validate --config-path config.hk.json --market hk
 om config validate --config-path config.us.json --market us
 ```
 
-`tick-cron` 也会在真实 tick 前检查 runtime config 的 `_generated` 指纹；当 `config.yaml` 更新后未重新 `config build --source yaml`，会以 `[CONFIG_ERROR]` 失败并打印重建命令。旧安装的 legacy 分层 user config 仍可兼容检查，但该 authoring 路径已 deprecated。`--allow-stale-config` 只用于临时应急。
+`tick-cron` 也会在真实 tick 前检查 runtime config 的 `_generated` 指纹；当 `config.yaml` 更新后未重新 `config build --source yaml`，会以 `[CONFIG_ERROR]` 失败并打印 YAML 重建命令。旧 JSON 配置需要先用 `config migrate-yaml` 迁移；`--allow-stale-config` 只用于临时应急。
 
 ### Setup 入口关系
 
@@ -169,7 +168,7 @@ om config build --source yaml --market us --output config.us.json
 ```
 
 `config init` 默认写 `config.yaml` 并生成 `config.us.json` / `config.hk.json`；`--dry-run` 只预览 YAML，`--force` 才覆盖已有 starter/runtime 文件。
-`config build` / `config explain` 默认读取 YAML；legacy JSON 只在显式 `--source legacy` 时使用。
+`config build` / `config explain` 读取 YAML。旧 JSON 不再作为正常 authoring 路径；需要先迁移到 `config.yaml`。
 
 已有 legacy `configs/user.*.json` 时先迁移：
 
@@ -275,7 +274,7 @@ systemd 的 US/HK tick timer 使用 market timezone 的 `OnCalendar` 在 10 分�
 - 校验 runtime config
 - 检查账户路径
 - 检查 OpenD / SQLite / 通知前置条件
-- 可选检查策略证据文件是否具备后续实验所需的候选、trace/reject 和 outcome/replay 样本
+- 可选检查候选证据文件是否具备诊断所需的候选、trace/reject 样本
 
 示例：
 
@@ -283,10 +282,9 @@ systemd 的 US/HK tick timer 使用 market timezone 的 `OnCalendar` 在 10 分�
 om doctor --config-key us
 om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
 om doctor --config-key us \
-  --strategy-candidate-path output_shared/reports/sell_put_candidates.csv \
-  --strategy-trace-path output_shared/reports/candidate_filter_trace.jsonl \
-  --strategy-outcome-path output_shared/reports/strategy_replay.csv \
-  --strategy-evidence-min-sample 5
+  --candidate-path output_shared/reports/sell_put_candidates.csv \
+  --candidate-trace-path output_shared/reports/candidate_filter_trace.jsonl \
+  --candidate-evidence-min-sample 5
 ```
 
 ### Support Bundle
@@ -405,27 +403,6 @@ om-agent run --tool candidate_rank_explain --input-json '{"mode":"put","score_we
 - 该工具只读本地 CSV，不重新扫描、不发通知、不写 Feishu、不写报告。
 - 默认先找 `output_shared/reports`，再找 `output_shared/agent_tools/reports`；也可传 `report_dir`、`output_dir` 或 `candidate_path`。
 - `score_weights` 只影响本次解释输出，不修改配置，也不改变生产排序默认值。
-
----
-
-## 5.5.2 `strategy_replay_analyze`
-
-用途：
-- 读取离线策略复盘 CSV / JSON / JSONL
-- 回答哪些 DTE、Delta 区间更有效，哪些标的收益高但回撤差，哪些过滤条件最有价值
-- 输出 `dry_run_config_suggestions`，但不修改生产配置
-
-示例：
-
-```bash
-om-agent run --tool strategy_replay_analyze --input-json '{"replay_path":"output_shared/reports/strategy_replay.csv","min_sample":5}'
-om strategy-replay analyze --replay-path output_shared/reports/strategy_replay.csv --min-sample 5
-```
-
-注意：
-- 该工具只分析已存在的复盘记录，不重新扫描、不发通知、不写 Feishu。
-- 复盘记录应覆盖通过和被拒绝候选，否则过滤条件价值会缺少 shadow outcome 依据。
-- 该工具是历史诊断入口；字段输入以 `replay_path` 中的 CSV/JSON/JSONL 为准。
 
 ---
 
@@ -679,9 +656,8 @@ om-agent run --tool research --input-json '{
 
 Scope：
 - `ledger`：交易入账、持仓维护和账本质量
-- `account-strategy`：多账户策略影响、候选和 filter trace
+- `candidate`：多账户候选、排名样本和 filter trace
 - `quality`：runtime freshness、最新 run、调度证据和可选 healthcheck
-- `strategy`：候选 CSV、filter trace、strategy replay
 - `full`：默认全量证据
 
 写报告需要三层条件：

@@ -235,7 +235,7 @@ def test_config_init_writes_starter_yaml_and_runtime_configs(tmp_path: Path) -> 
     assert payload["accounts"]["lx"]["futu_account_id"] == "12345678"
     assert payload["assistant"]["mode"] == "deterministic"
     assert payload["assistant"]["context_window_messages"] == 8
-    assert payload["assistant"]["default_market_scope"] == "us"
+    assert "default_market_scope" not in payload["assistant"]
     assert payload["assistant"]["llm"]["base_url"] == ""
     assert payload["assistant"]["llm"]["api_key_env"] == "OM_LLM_API_KEY"
     assert payload["assistant"]["llm"]["timeout_seconds"] == 20
@@ -251,7 +251,7 @@ def test_config_init_writes_starter_yaml_and_runtime_configs(tmp_path: Path) -> 
     assert hk_cfg[GENERATED_KEY]["market"] == "hk"
     assert assistant_cfg["assistant"]["mode"] == "deterministic"
     assert assistant_cfg["assistant"]["context_window_messages"] == 8
-    assert assistant_cfg["assistant"]["default_market_scope"] == "us"
+    assert "default_market_scope" not in assistant_cfg["assistant"]
     assert assistant_cfg["assistant"]["llm"]["base_url"] == ""
     assert assistant_cfg["assistant"]["llm"]["api_key_env"] == "OM_LLM_API_KEY"
     assert assistant_cfg["assistant"]["llm"]["timeout_seconds"] == 20

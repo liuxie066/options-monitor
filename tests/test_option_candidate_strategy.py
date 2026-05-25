@@ -284,7 +284,6 @@ def test_strategy_production_scripts_import_engine_directly() -> None:
     engine_scripts = {
         repo / "src" / "application" / "render_sell_put_alerts.py",
         repo / "src" / "application" / "render_sell_call_alerts.py",
-        repo / "scripts" / "tools" / "compare_strategy_replay.py",
     }
 
     for path in production_scripts | engine_scripts:

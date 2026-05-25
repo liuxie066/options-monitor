@@ -6,13 +6,14 @@ import importlib
 from pathlib import Path
 from typing import Any, Callable, Literal
 import json
-import os
 import threading
 import time
 
 import pandas as pd
 
 from .expiration_normalization import normalize_expiration_ymd
+from src.application.opend_normalize import normalize_opend_option_type
+from src.infrastructure.io_utils import atomic_write_json
 
 
 FreshnessPolicy = Literal["cache_first", "refresh_missing", "force_refresh"]
@@ -273,7 +274,7 @@ def save_option_chain_shard(
 ) -> None:
     if not rows:
         return
-    _atomic_write_json(
+    atomic_write_json(
         Path(path),
         {
             "asof_date": asof_date,
@@ -282,6 +283,7 @@ def save_option_chain_shard(
             "status": "ok",
             "rows": rows,
         },
+        default=str,
     )
 
 
@@ -295,7 +297,7 @@ def save_option_chain_diagnostic(
     error_code: str,
     message: str,
 ) -> None:
-    _atomic_write_json(
+    atomic_write_json(
         Path(path),
         {
             "asof_date": asof_date,
@@ -305,6 +307,7 @@ def save_option_chain_diagnostic(
             "error_code": error_code,
             "error": message,
         },
+        default=str,
     )
 
 
@@ -627,7 +630,7 @@ def _cache_expiration_key(expiration: str | None) -> str:
 
 def _single_option_type(option_types: str | None) -> str | None:
     values = {
-        _normalize_option_type(value)
+        normalize_opend_option_type(value)
         for value in str(option_types or "").split(",")
         if str(value or "").strip()
     }
@@ -639,17 +642,6 @@ def _single_option_type(option_types: str | None) -> str | None:
     return None
 
 
-def _normalize_option_type(value: Any) -> str:
-    raw = str(value or "").strip().lower()
-    if raw in {"put", "call"}:
-        return raw
-    if "put" in raw:
-        return "put"
-    if "call" in raw:
-        return "call"
-    return raw
-
-
 def _option_type_cache_scope(option_types: str | None) -> str | None:
     single = _single_option_type(option_types)
     if single == "PUT":
@@ -657,11 +649,3 @@ def _option_type_cache_scope(option_types: str | None) -> str | None:
     if single == "CALL":
         return "call"
     return None
-
-
-def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
-    os.replace(tmp, path)

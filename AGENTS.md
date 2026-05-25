@@ -91,7 +91,7 @@ Research evidence handoff for MacBook Codex:
 | Task | Primary owner | Guardrail |
 |---|---|---|
 | Candidate filter/rank logic | `domain/domain/engine/candidate_engine.py` | Do not add parallel ranking in application scan adapters |
-| Candidate trace / replay analysis | `src/application/agent_tool_candidate_filter.py`, `src/application/agent_tool_strategy_replay.py` | Keep analysis read-only unless explicitly designing a write path |
+| Candidate trace / ranking diagnostics | `src/application/agent_tool_candidate_filter.py`, `src/application/agent_tool_candidate_rank.py` | Keep analysis read-only unless explicitly designing a write path |
 | Notification text | `src/application/notify_symbols.py`, `src/application/multi_tick/notify_format.py` | Keep Markdown-friendly Chinese text; no card-like plain text |
 | Close-advice policy | `domain/domain/close_advice.py` | Runner assembles I/O; scoring policy stays in domain |
 | Option-position projection | `domain/domain/ledger/projection.py` | `trade_events -> projection -> position_lots` is canonical |
@@ -127,7 +127,6 @@ scripts/              -> thin operational wrappers only
 # Candidate explanations
 ./om-agent run --tool candidate_filter_explain --input-json '{"run_id":"<run-id>","account":"lx","symbol":"NVDA"}'
 ./om-agent run --tool candidate_rank_explain --input-json '{"mode":"put","top_n":5}'
-./om-agent run --tool strategy_replay_analyze --input-json '{"replay_path":"output_shared/reports/strategy_replay.csv","min_sample":5}'
 
 # Cash and positions
 ./om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","account":"lx"}'

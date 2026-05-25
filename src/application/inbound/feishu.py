@@ -12,7 +12,7 @@ from src.application.assistant.router import ExecuteToolFn
 def handle_feishu_payload(
     payload: dict[str, Any],
     *,
-    config_key: str | None = "us",
+    config_key: str | None = None,
     config_path: str | None = None,
     audit_db: str | None = None,
     execute_tool_fn: ExecuteToolFn | None = None,
@@ -96,7 +96,7 @@ def _assistant_settings(
 def feishu_payload_to_inbound_request(
     payload: dict[str, Any],
     *,
-    config_key: str | None = "us",
+    config_key: str | None = None,
     config_path: str | None = None,
     audit_db: str | None = None,
 ) -> AssistantRequest:

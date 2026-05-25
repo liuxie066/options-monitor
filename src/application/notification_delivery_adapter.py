@@ -186,6 +186,23 @@ def normalize_feishu_app_send_output(*, send_result: dict[str, Any]) -> dict[str
     )
 
 
+def normalize_notification_delivery_result(
+    send_result: Any,
+    *,
+    normalize_fn: Callable[..., dict[str, Any]],
+) -> dict[str, Any]:
+    if isinstance(send_result, dict) and ("delivery_confirmed" in send_result or "command_ok" in send_result):
+        return dict(send_result)
+    try:
+        return normalize_fn(send_result=getattr(send_result, "raw", send_result))
+    except TypeError:
+        return normalize_fn(
+            returncode=int(getattr(send_result, "returncode", 0) or 0),
+            stdout=str(getattr(send_result, "stdout", "") or ""),
+            stderr=str(getattr(send_result, "stderr", "") or ""),
+        )
+
+
 def send_feishu_app_message_process(
     *,
     base: Path,

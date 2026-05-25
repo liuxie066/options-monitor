@@ -55,6 +55,7 @@ def test_feishu_ws_delegates_to_inbound_and_replies(tmp_path: Path) -> None:
     out = handle_feishu_ws_event(
         _message_payload(),
         settings=FeishuWsSettings(
+            config_key="us",
             allowed_senders="feishu:ou_1",
             app_id="app_1",
             app_secret="secret_1",
@@ -122,6 +123,7 @@ def test_feishu_ws_reaction_failure_does_not_fail_inbound_or_reply(tmp_path: Pat
     out = handle_feishu_ws_event(
         _message_payload(text="状态"),
         settings=FeishuWsSettings(
+            config_key="us",
             allowed_senders="feishu:ou_1",
             app_id="app_1",
             app_secret="secret_1",
@@ -331,13 +333,24 @@ def test_feishu_ws_settings_enables_command_runtime_by_default(tmp_path: Path) -
 
 
 def test_feishu_ws_check_reports_missing_sdk() -> None:
-    settings = FeishuWsSettings(allowed_senders="feishu:ou_1", app_id="app_1", app_secret="secret_1")
+    settings = FeishuWsSettings(config_key="us", allowed_senders="feishu:ou_1", app_id="app_1", app_secret="secret_1")
 
     out = check_feishu_ws_settings(settings, sdk_available_fn=lambda: False)
 
     assert out["ok"] is False
     assert out["error"]["code"] == "CONFIG_ERROR"
     assert out["data"]["settings"]["sdk_available"] is False
+
+
+def test_feishu_ws_check_requires_config_scope() -> None:
+    settings = FeishuWsSettings(allowed_senders="feishu:ou_1", app_id="app_1", app_secret="secret_1")
+
+    out = check_feishu_ws_settings(settings, sdk_available_fn=lambda: True)
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "CONFIG_ERROR"
+    assert "runtime config scope" in out["error"]["message"]
+    assert out["data"]["settings"]["config_key"] is None
 
 
 def test_feishu_ws_serve_uses_background_worker(tmp_path: Path) -> None:
@@ -358,6 +371,7 @@ def test_feishu_ws_serve_uses_background_worker(tmp_path: Path) -> None:
 
     serve_feishu_ws(
         FeishuWsSettings(
+            config_key="us",
             allowed_senders="feishu:ou_1",
             app_id="app_1",
             app_secret="secret_1",

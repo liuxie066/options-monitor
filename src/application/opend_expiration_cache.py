@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any
 
 from src.application.expiration_normalization import normalize_expiration_ymd
+from src.infrastructure.io_utils import atomic_write_json
 
 
 def option_expiration_cache_root(base_dir: Path) -> Path:
@@ -45,7 +45,7 @@ def save_option_expiration_cache(
     normalized = _normalize_expirations(expirations)
     if not normalized:
         return
-    _atomic_write_json(
+    atomic_write_json(
         Path(path),
         {
             "asof_date": str(asof_date),
@@ -53,6 +53,7 @@ def save_option_expiration_cache(
             "status": "ok",
             "expirations": normalized,
         },
+        default=str,
     )
 
 
@@ -69,11 +70,3 @@ def _normalize_expirations(values: list[Any]) -> list[str]:
 def _safe_asof_date(value: str) -> str:
     raw = str(value or "").strip()
     return raw[:10] if raw else "unknown"
-
-
-def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
-    os.replace(tmp, path)

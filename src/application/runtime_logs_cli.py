@@ -5,6 +5,13 @@ from pathlib import Path
 from typing import Any
 
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.runtime_cli_format import as_dict as _dict
+from src.application.runtime_cli_format import as_list as _list
+from src.application.runtime_cli_format import display_path as _display_path
+from src.application.runtime_cli_format import display_value as _value
+from src.application.runtime_cli_format import resolve_runtime_cli_path as _resolve_path
+from src.application.runtime_cli_format import selected_run_dir as _selected_run_dir
+from src.application.runtime_cli_format import yes_no as _yes_no
 from src.application.runtime_runs_cli import resolve_runtime_runs_root
 
 
@@ -131,19 +138,6 @@ def _load_profile(profile_path: str | Path | None, *, base: Path) -> dict[str, A
     return payload
 
 
-def _selected_run_dir(*, root: Path, base: Path, run_id: str | None, run_dir: str | Path | None) -> Path | None:
-    raw_run_dir = str(run_dir or "").strip()
-    if raw_run_dir:
-        return _resolve_path(raw_run_dir, base=base)
-    raw_run_id = str(run_id or "").strip()
-    if not raw_run_id:
-        return None
-    candidate = Path(raw_run_id)
-    if candidate.is_absolute() or candidate.name != raw_run_id:
-        return None
-    return (root / raw_run_id).resolve()
-
-
 def _latest_run_dir(root: Path) -> Path | None:
     if not root.exists() or not root.is_dir():
         return None
@@ -208,40 +202,3 @@ def _run_payload(run_dir: Path | None, *, base: Path) -> dict[str, Any] | None:
         "path_display": _display_path(run_dir, base=base),
         "exists": run_dir.exists() and run_dir.is_dir(),
     }
-
-
-def _resolve_path(value: str | Path, *, base: Path) -> Path:
-    path = Path(value).expanduser()
-    if not path.is_absolute():
-        path = (base / path).resolve()
-    return path.resolve()
-
-
-def _display_path(path: Path, *, base: Path) -> str:
-    resolved = path.resolve()
-    try:
-        return resolved.relative_to(base.resolve()).as_posix()
-    except ValueError:
-        return str(resolved)
-
-
-def _dict(value: Any) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
-
-
-def _list(value: Any) -> list[Any]:
-    return value if isinstance(value, list) else []
-
-
-def _value(value: Any) -> str:
-    if value is None or value == "":
-        return "-"
-    return str(value)
-
-
-def _yes_no(value: Any) -> str:
-    if value is True:
-        return "yes"
-    if value is False:
-        return "no"
-    return "-"

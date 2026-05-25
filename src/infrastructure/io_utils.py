@@ -17,7 +17,7 @@ import uuid
 from pathlib import Path
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
-from typing import Any
+from typing import Any, Callable
 
 import pandas as pd
 from pandas.errors import EmptyDataError
@@ -124,8 +124,20 @@ def atomic_write_text(path: str | Path, content: str, *, encoding: str = 'utf-8'
         raise
 
 
-def atomic_write_json(path: str | Path, obj: Any, *, encoding: str = 'utf-8', indent: int = 2) -> None:
-    atomic_write_text(path, json.dumps(obj, ensure_ascii=False, indent=indent) + '\n', encoding=encoding)
+def atomic_write_json(
+    path: str | Path,
+    obj: Any,
+    *,
+    encoding: str = 'utf-8',
+    indent: int = 2,
+    default: Callable[[Any], Any] | None = None,
+    sort_keys: bool = False,
+) -> None:
+    atomic_write_text(
+        path,
+        json.dumps(obj, ensure_ascii=False, indent=indent, default=default, sort_keys=sort_keys) + '\n',
+        encoding=encoding,
+    )
 
 
 def safe_read_csv(path: Path) -> pd.DataFrame:

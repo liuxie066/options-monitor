@@ -30,7 +30,6 @@ from src.infrastructure.io_utils import safe_read_csv
 from src.application.agent_tool_healthcheck import run_healthcheck_tool
 from src.application.agent_tool_candidate_rank import candidate_rank_explain_tool
 from src.application.agent_tool_candidate_filter import candidate_filter_explain_tool
-from src.application.agent_tool_strategy_replay import strategy_replay_analyze_tool
 from src.application.research import research_tool
 from src.application.agent_tool_notifications import preview_notification_tool
 from src.application.agent_tool_openclaw import openclaw_readiness_tool
@@ -297,14 +296,6 @@ def _candidate_filter_explain_tool(payload: dict[str, Any]) -> tuple[dict[str, A
     )
 
 
-def _strategy_replay_analyze_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    return strategy_replay_analyze_tool(
-        payload,
-        repo_base=repo_base,
-        mask_path=mask_path,
-    )
-
-
 def _prepare_close_advice_inputs_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     return prepare_close_advice_inputs_tool(
         payload,
@@ -448,7 +439,6 @@ TOOL_HANDLERS = {
     "scan_opportunities": _scan_opportunities_tool,
     "candidate_rank_explain": _candidate_rank_explain_tool,
     "candidate_filter_explain": _candidate_filter_explain_tool,
-    "strategy_replay_analyze": _strategy_replay_analyze_tool,
     "prepare_close_advice_inputs": _prepare_close_advice_inputs_tool,
     "close_advice": _close_advice_tool,
     "get_close_advice": _get_close_advice_tool,

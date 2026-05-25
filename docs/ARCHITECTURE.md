@@ -208,8 +208,8 @@ Market runtime configs are generated snapshots:
 Runtime execution consumes those JSON snapshots rather than editing
 `config.yaml` directly. First-run setup uses `src.application.config_yaml_init`
 to create a starter YAML file and build market snapshots. Legacy JSON overlays
-under `configs/` are compatibility inputs for explicit `--source legacy` flows,
-not the preferred authoring path.
+under `configs/` are migration/upgrade-recovery inputs only, not a normal
+authoring path.
 
 Shared config section helpers such as symbol/watchlist and templates live in
 `src.application.config_sections`; both loading and validation depend on that

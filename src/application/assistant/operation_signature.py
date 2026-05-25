@@ -28,6 +28,11 @@ def require_operation_hmac_key() -> str:
     return key
 
 
+def hash_operation_payload(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 def sign_operation_fields(*, operation: dict[str, Any], key: str | None = None) -> dict[str, str]:
     effective_key = key if key is not None else operation_hmac_key()
     if not effective_key:
@@ -80,6 +85,7 @@ def _signature_message(operation: dict[str, Any]) -> str:
 __all__ = [
     "OPERATION_HMAC_KEY_ENV",
     "OPERATION_SIGNATURE_VERSION",
+    "hash_operation_payload",
     "operation_hmac_key",
     "require_operation_hmac_key",
     "sign_operation_fields",

@@ -24,6 +24,15 @@ from src.application.tool_execution import execute_tool
 ExecuteToolFn = Callable[[str, dict[str, Any]], dict[str, Any]]
 ParseIntentFn = Callable[[str, Callable[[], date] | None], AssistantIntent]
 _COMMAND_SPECS_BY_INTENT = spec_by_intent()
+CONFIG_SCOPED_INTENTS = frozenset(
+    {
+        "runtime_status",
+        "healthcheck",
+        "config_validate",
+        "option_positions_open",
+        "monthly_income_report",
+    }
+)
 
 
 def handle_assistant_request(
@@ -333,6 +342,7 @@ def _parse_intent(
 
 
 def _tool_call_from_intent(intent: AssistantIntent, *, request: AssistantRequest) -> AssistantToolCall:
+    _require_config_scope(intent=intent, request=request)
     base = _base_payload(request)
     if intent.name == "runtime_status":
         return AssistantToolCall(tool_name=_catalog_tool_name(intent.name), payload=base)
@@ -373,6 +383,19 @@ def _tool_call_from_intent(intent: AssistantIntent, *, request: AssistantRequest
     raise AgentToolError(
         code="INPUT_ERROR",
         message=f"unsupported inbound intent: {intent.name}",
+    )
+
+
+def _require_config_scope(*, intent: AssistantIntent, request: AssistantRequest) -> None:
+    if intent.name not in CONFIG_SCOPED_INTENTS:
+        return
+    if request.config_path or request.config_key:
+        return
+    raise AgentToolError(
+        code="NEEDS_CLARIFICATION",
+        message="需要先指定要查看的市场。",
+        hint="请明确说美股或港股，或通过 --config-key us/hk、--config-path、assistant.default_market_scope 配置默认市场。",
+        details={"intent_name": intent.name, "required": "config_key_or_config_path"},
     )
 
 

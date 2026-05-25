@@ -5,7 +5,11 @@ from pathlib import Path
 
 from src.application.config_validator import validate_config
 from src.application.layered_config import build_layered_runtime_config, explain_layered_runtime_config_key
-from src.application.runtime_config_freshness import GENERATED_KEY, check_runtime_config_freshness
+from src.application.runtime_config_freshness import (
+    GENERATED_KEY,
+    check_runtime_config_freshness,
+    format_runtime_config_freshness_error,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -71,6 +75,7 @@ def test_layered_config_builds_minimal_us_user_config(tmp_path: Path) -> None:
     assert cfg.get("notifications", {}).get("channel") is None
     assert cfg["notifications"]["opend_alert_cooldown_sec"] == 600
     assert cfg[GENERATED_KEY]["market"] == "us"
+    assert cfg[GENERATED_KEY]["source_format"] == "legacy"
     assert [item["role"] for item in cfg[GENERATED_KEY]["sources"]] == ["system", "common_user", "market_user"]
 
     validate_config(json.loads(json.dumps(cfg)))
@@ -417,7 +422,10 @@ def test_runtime_config_freshness_detects_market_user_config_change(tmp_path: Pa
     assert stale["ok"] is False
     assert stale["errors"][0]["code"] == "source_changed"
     assert stale["errors"][0]["role"] == "market_user"
-    assert "--user-config" in stale["rebuild_command"]
+    assert stale["source_format"] == "legacy"
+    assert "--source yaml" in stale["rebuild_command"]
+    assert "--user-config" not in stale["rebuild_command"]
+    assert "config migrate-yaml" in format_runtime_config_freshness_error(stale)
 
 
 def test_runtime_config_freshness_detects_auto_common_user_config_appearing(tmp_path: Path) -> None:
@@ -452,8 +460,10 @@ def test_runtime_config_freshness_detects_auto_common_user_config_appearing(tmp_
     assert stale["ok"] is False
     assert stale["errors"][0]["code"] == "optional_source_appeared"
     assert stale["errors"][0]["role"] == "common_user"
-    assert "--common-user-config" in stale["rebuild_command"]
-    assert "configs/user.common.json" in stale["rebuild_command"]
+    assert stale["source_format"] == "legacy"
+    assert "--source yaml" in stale["rebuild_command"]
+    assert "--common-user-config" not in stale["rebuild_command"]
+    assert "config migrate-yaml" in format_runtime_config_freshness_error(stale)
 
 
 def test_init_runtime_config_includes_inline_generation_metadata(tmp_path: Path) -> None:
@@ -661,6 +671,8 @@ def test_config_validate_market_rejects_stale_runtime_config(tmp_path: Path, cap
     validate_rc = main([
         "config",
         "validate",
+        "--source",
+        "legacy",
         "--config-path",
         str(output_path),
         "--market",
@@ -713,6 +725,8 @@ def test_config_validate_market_wraps_schedule_contract_error_as_json(tmp_path: 
     validate_rc = main([
         "config",
         "validate",
+        "--source",
+        "legacy",
         "--config-path",
         str(output_path),
         "--market",
