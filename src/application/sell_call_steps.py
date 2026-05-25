@@ -34,6 +34,10 @@ from domain.domain.sell_call_config import (
     resolve_effective_sell_call_min_strike,
     resolve_min_annualized_net_premium_return_from_sell_call_cfg,
 )
+from domain.domain.strategy_vocab import STRATEGY_COVERED_CALL, strategy_display_name
+
+
+COVERED_CALL_TRACE_LABEL = strategy_display_name(STRATEGY_COVERED_CALL).lower()
 
 
 def _append_share_coverage_trace(
@@ -110,7 +114,7 @@ def run_sell_call_scan_and_summarize(
             symbol=symbol,
             status="not_applicable",
             rule="stock_context_missing",
-            message="covered call stock context missing",
+            message=f"{COVERED_CALL_TRACE_LABEL} stock context missing",
         )
         return summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
 
@@ -127,7 +131,7 @@ def run_sell_call_scan_and_summarize(
             symbol=symbol,
             status="not_applicable",
             rule="stock_context_invalid",
-            message="covered call stock context invalid",
+            message=f"{COVERED_CALL_TRACE_LABEL} stock context invalid",
         )
         return summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
 
@@ -137,7 +141,7 @@ def run_sell_call_scan_and_summarize(
             symbol=symbol,
             status="not_applicable",
             rule="stock_context_non_positive",
-            message="covered call shares or avg_cost non-positive",
+            message=f"{COVERED_CALL_TRACE_LABEL} shares or avg_cost non-positive",
             metric_value=shares_total,
             threshold=1,
             config_values={"avg_cost": avg_cost},
@@ -164,7 +168,7 @@ def run_sell_call_scan_and_summarize(
             symbol=symbol,
             status="post_filtered",
             rule="share_coverage_calc_failed",
-            message="covered call share coverage calculation failed",
+            message=f"{COVERED_CALL_TRACE_LABEL} share coverage calculation failed",
         )
         return summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
     shares_available_for_cover = max(0, int(shares_total) - int(locked))

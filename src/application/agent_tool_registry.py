@@ -4,6 +4,13 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
+from domain.domain.strategy_vocab import (
+    STRATEGY_CLOSE_ADVICE,
+    STRATEGY_COVERED_CALL,
+    STRATEGY_SELL_PUT,
+    STRATEGY_YIELD_ENHANCEMENT,
+    strategy_key_help,
+)
 from src.application.agent_tool_config import write_tools_enabled as _write_tools_enabled_from_config
 
 
@@ -188,7 +195,18 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
         input_schema={
             "symbol": "required canonical symbol, for example NVDA or 0700.HK",
             "account": "optional account label",
-            "function": "optional sell_put|sell_call (Covered Call internal key)|close_advice|yield_enhancement|cash_reserve|share_coverage",
+            "function": (
+                "optional "
+                + strategy_key_help(
+                    (
+                        STRATEGY_SELL_PUT,
+                        STRATEGY_COVERED_CALL,
+                        STRATEGY_CLOSE_ADVICE,
+                        STRATEGY_YIELD_ENHANCEMENT,
+                    )
+                )
+                + "|cash_reserve|share_coverage"
+            ),
             "run_id": "optional output_runs run id; use latest externally when desired",
             "run_dir": "optional explicit output_runs/<run_id> directory",
             "report_dir": "optional report dir containing candidate_filter_trace.jsonl",
