@@ -4,11 +4,10 @@ import shlex
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.config_primitives import MARKETS, dump_yaml as _dump_yaml
+from src.application.config_primitives import resolve_config_path as _resolve_path
 from src.application.config_yaml import build_yaml_assistant_config_file, build_yaml_runtime_config_file, validate_yaml_runtime_config
-from src.application.layered_config import MARKETS
 from src.application.write_contract import attach_write_contract
 from src.infrastructure.io_utils import atomic_write_text
 
@@ -16,20 +15,6 @@ from src.infrastructure.io_utils import atomic_write_text
 DEFAULT_US_SYMBOLS = ("NVDA", "FUTU", "GOOGL")
 DEFAULT_HK_SYMBOLS = ("0700.HK", "9992.HK")
 DEFAULT_FUTU_ACCOUNT_ID = "REPLACE_WITH_FUTU_ACCOUNT_ID"
-
-
-class _IndentedYamlDumper(yaml.SafeDumper):
-    def increase_indent(self, flow: bool = False, indentless: bool = False) -> Any:
-        return super().increase_indent(flow, False)
-
-
-def _resolve_path(raw: str | Path | None, *, default: Path) -> Path:
-    if raw is None or not str(raw).strip():
-        return default.resolve()
-    path = Path(raw).expanduser()
-    if not path.is_absolute():
-        path = path.resolve()
-    return path
 
 
 def _normalize_markets(raw: list[str] | tuple[str, ...] | None) -> list[str]:
@@ -75,19 +60,6 @@ def _normalize_symbols(raw: list[str] | tuple[str, ...] | None, *, defaults: tup
         seen.add(symbol)
         deduped.append(symbol)
     return deduped
-
-
-def _dump_yaml(payload: dict[str, Any]) -> str:
-    text = yaml.dump(
-        payload,
-        Dumper=_IndentedYamlDumper,
-        allow_unicode=True,
-        default_flow_style=False,
-        sort_keys=False,
-        indent=2,
-        width=100,
-    )
-    return text.rstrip() + "\n"
 
 
 def _starter_yaml_payload(
@@ -139,7 +111,6 @@ def _starter_yaml_payload(
         "assistant": {
             "mode": "deterministic",
             "context_window_messages": 8,
-            "default_market_scope": "us",
             "llm": {
                 "provider": "",
                 "base_url": "",

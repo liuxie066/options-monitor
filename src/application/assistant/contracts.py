@@ -11,7 +11,7 @@ class AssistantRequest:
     channel: str = "local"
     message_id: str | None = None
     conversation_id: str | None = None
-    config_key: str | None = "us"
+    config_key: str | None = None
     config_path: str | None = None
     audit_db: str | None = None
 

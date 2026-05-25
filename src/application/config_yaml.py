@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import shlex
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -10,6 +9,15 @@ from typing import Any
 import yaml
 
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.config_primitives import (
+    config_key_parts as _key_parts,
+    config_path_get as _path_get,
+    deep_merge_config as _deep_merge,
+    file_sha256 as _file_sha256,
+    normalize_config_market as _normalize_market,
+    path_for_metadata as _path_for_metadata,
+    resolve_config_path as _resolve_path,
+)
 from src.application.config_validator import validate_assistant_config, validate_config
 from src.application.config_defaults import (
     DEFAULT_CONFIG_REF,
@@ -17,7 +25,6 @@ from src.application.config_defaults import (
     default_config_sha256,
 )
 from src.application.layered_config import (
-    MARKETS,
     build_layered_runtime_config_from_user_config,
     default_system_config_path,
 )
@@ -60,75 +67,9 @@ def default_yaml_assistant_config_path(*, repo_root: Path, runtime_root: str | P
     return (runtime.runtime_root / "resolved" / "config.assistant.json").resolve()
 
 
-def _normalize_market(value: str) -> str:
-    market = str(value or "").strip().lower()
-    if market not in MARKETS:
-        raise AgentToolError(code="INPUT_ERROR", message="market must be us or hk")
-    return market
-
-
-def _resolve_path(raw: str | Path | None, *, default: Path) -> Path:
-    if raw is None or not str(raw).strip():
-        return default.resolve()
-    path = Path(raw).expanduser()
-    if not path.is_absolute():
-        path = path.resolve()
-    return path
-
-
-def _deep_merge(base: Any, override: Any) -> Any:
-    if isinstance(base, dict) and isinstance(override, dict):
-        out = deepcopy(base)
-        for key, value in override.items():
-            out[key] = _deep_merge(out[key], value) if key in out else deepcopy(value)
-        return out
-    return deepcopy(override)
-
-
 def _system_defaults(system_cfg: dict[str, Any]) -> dict[str, Any]:
     defaults = system_cfg.get("defaults")
     return deepcopy(defaults) if isinstance(defaults, dict) else deepcopy(system_cfg)
-
-
-def _file_sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as fh:
-        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def _path_for_metadata(path: Path, *, repo_root: Path) -> str:
-    resolved = path.resolve()
-    try:
-        return resolved.relative_to(repo_root.resolve()).as_posix()
-    except ValueError:
-        return str(resolved)
-
-
-def _key_parts(key: str) -> list[str]:
-    parts = [part.strip() for part in str(key or "").split(".")]
-    if not parts or any(not part for part in parts):
-        raise AgentToolError(code="INPUT_ERROR", message="config key must be a non-empty dot path")
-    return parts
-
-
-def _path_get(data: Any, parts: list[str]) -> tuple[bool, Any]:
-    current = data
-    for part in parts:
-        if isinstance(current, dict):
-            if part not in current:
-                return False, None
-            current = current[part]
-            continue
-        if isinstance(current, list) and part.isdigit():
-            index = int(part)
-            if index < 0 or index >= len(current):
-                return False, None
-            current = current[index]
-            continue
-        return False, None
-    return True, current
 
 
 def load_yaml_config_file(path: str | Path) -> dict[str, Any]:
@@ -614,7 +555,6 @@ def _assistant_config_from_runtime_defaults(cfg: dict[str, Any]) -> dict[str, An
     return {
         "mode": "deterministic",
         "context_window_messages": 8,
-        "default_market_scope": "us",
         "llm": {
             "provider": "",
             "base_url": "",

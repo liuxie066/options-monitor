@@ -55,9 +55,7 @@ Use the lowest-risk tool that can answer the question.
 | Did cron/tick decide to skip? | `scheduler_status`, `scheduler_decision.json` | Separates scheduler rules from cron execution |
 | Why did a symbol disappear? | `candidate_filter_explain` | Uses trace evidence instead of guessing from final CSV |
 | Why is candidate ranking odd? | `candidate_rank_explain` | Explains existing candidate CSV ranking |
-| What strategy parameters look weak? | `strategy_replay_analyze` | Diagnostic replay analysis, no config mutation |
-| Is replay evidence complete enough for later strategy evaluation? | `healthcheck` / `doctor` with `strategy_evidence` inputs | Diagnostic row-count/readiness check, not a strategy recommendation |
-| How should replay rows be analyzed offline? | `strategy_replay_analyze` | Diagnostic evidence analysis, not a product strategy recommendation |
+| Is candidate evidence complete enough for scan diagnosis? | `healthcheck` / `doctor` with `candidate_evidence` inputs | Diagnostic row-count/readiness check, not a strategy recommendation |
 | Is Sell Put cash constrained? | `query_cash_headroom` | Account-aware cash and collateral view |
 | Is ledger projection trustworthy? | `option_positions_read action=inspect`, Research `ledger` scope | Reads canonical event/projection state |
 | Does close advice have inputs? | `prepare_close_advice_inputs`, then `close_advice` or `get_close_advice` | Keeps refresh and recommendation explicit |
@@ -109,9 +107,8 @@ Equivalent agent tool:
 | Scope | Purpose |
 |---|---|
 | `ledger` | Trade intake, position maintenance, and ledger quality evidence |
-| `account-strategy` | Per-account strategy effects, candidate evidence, and filter traces |
+| `candidate` | Per-account candidate evidence, ranking samples, and filter traces |
 | `quality` | Runtime freshness, latest run status, scheduler evidence, optional healthcheck |
-| `strategy` | Candidate CSV, filter trace, and strategy replay evidence |
 | `full` | Combined default |
 
 Research keeps candidate CSVs separate from `*_candidates_reject_log.csv` files. Reject logs remain available as rejection evidence, but they must not inflate candidate row counts.
@@ -176,12 +173,11 @@ def evaluate_candidate_risk_filter(payload: dict[str, Any], constraints: dict[st
 def rank_candidate_rows(rows: list[dict[str, Any]], *, mode: StrategyMode | str) -> list[dict[str, Any]]: ...
 ```
 
-### Strategy Diagnostics
+### Candidate Diagnostics
 
 - Candidate ranking explanation: `src/application/agent_tool_candidate_rank.py`
 - Filter trace explanation: `src/application/agent_tool_candidate_filter.py`
-- Replay analysis: `src/application/agent_tool_strategy_replay.py`
-- Replay evidence readiness: `healthcheck` / `doctor` `strategy_evidence` check
+- Candidate evidence readiness: `healthcheck` / `doctor` `candidate_evidence` check
 - Docs: `docs/candidate_strategy.md`
 
 For "why did this symbol/account not get a candidate", start from `candidate_filter_explain` and trace artifacts, not from final candidate CSV alone.
@@ -293,7 +289,7 @@ Notification text should remain Markdown-friendly and operationally direct. Do n
 - Examples: `configs/examples/config.yaml.example`, `configs/examples/user.example.us.json`, `configs/examples/user.example.hk.json`
 - Full config docs: `CONFIGS.md`, `CONFIGURATION_GUIDE.md`
 
-`config.yaml` is the preferred human authoring surface. `config.us.json` and `config.hk.json` are generated runtime snapshots consumed by tick/agent tools. Legacy JSON user overlays are compatibility inputs only; use them explicitly with `--source legacy`.
+`config.yaml` is the human authoring surface. `config.us.json` and `config.hk.json` are generated runtime snapshots consumed by tick/agent tools. Legacy JSON user overlays are migration/upgrade-recovery inputs only; normal operator flows should use `config migrate-yaml`, then `config build --source yaml`.
 
 Do not weaken production config validation to make local tests pass. Fix the config path, test fixture, or validation contract instead.
 
@@ -340,7 +336,7 @@ scripts/              -> operational wrappers only; delegate to src/ or domain/
 1. Confirm accounts are lowercase and present in runtime config.
 2. Read `scheduler_status` per account.
 3. Inspect `tick_metrics` through `runtime_status`.
-4. Use `research` `account-strategy` or `full` scope for candidate/filter trace evidence.
+4. Use `research` `candidate` or `full` scope for candidate/filter trace evidence.
 5. Separate expected account constraints from state contamination.
 
 ### Ledger Or Trade Intake Looks Wrong

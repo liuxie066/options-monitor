@@ -9,7 +9,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from src.application.runtime_config_freshness import RuntimeConfigFreshnessError, ensure_runtime_config_freshness
+from src.application.runtime_config_freshness import (
+    RuntimeConfigFreshnessError,
+    RuntimeConfigIdentityError,
+    ensure_runtime_config_freshness,
+    ensure_runtime_config_identity,
+)
 
 
 @dataclass(frozen=True)
@@ -162,12 +167,19 @@ def _preflight_runtime_config(
         raise SystemExit(f"[CONFIG_ERROR] runtime config must be a JSON object: {config_path}")
     repo_root = Path(__file__).resolve().parents[2]
     try:
+        ensure_runtime_config_identity(
+            raw,
+            explicit_market=plan.market,
+            runtime_config_path=config_path,
+        )
         return ensure_runtime_config_freshness(
             raw,
             repo_root=repo_root,
             market=plan.market,
             runtime_config_path=config_path,
         )
+    except RuntimeConfigIdentityError as exc:
+        raise SystemExit(str(exc)) from exc
     except RuntimeConfigFreshnessError as exc:
         raise SystemExit(str(exc)) from exc
 

@@ -8,13 +8,18 @@ from typing import Any
 
 from src.application.account_config import ACCOUNT_TYPE_EXTERNAL_HOLDINGS, ACCOUNT_TYPE_FUTU, ACCOUNT_TYPES, normalize_accounts
 from src.application.config_loader import normalize_portfolio_broker_config, set_watchlist_config
-from src.application.config_validator import validate_config
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.config_primitives import (
+    MARKETS,
+    config_key_parts as _key_parts,
+    config_path_get as _path_get,
+    deep_merge_config as _deep_merge,
+    normalize_config_market as _normalize_market,
+    resolve_config_path as _resolve_path,
+)
+from src.application.config_validator import validate_config
 from src.application.runtime_config_paths import write_json_atomic
 from src.application.runtime_config_freshness import GENERATED_KEY, build_generated_metadata
-
-
-MARKETS = ("us", "hk")
 
 
 def default_system_config_path(*, repo_root: Path) -> Path:
@@ -31,22 +36,6 @@ def default_common_user_config_path(*, repo_root: Path) -> Path:
 
 def default_output_config_path(*, repo_root: Path, market: str) -> Path:
     return (repo_root / f"config.{market}.json").resolve()
-
-
-def _normalize_market(value: str) -> str:
-    market = str(value or "").strip().lower()
-    if market not in MARKETS:
-        raise AgentToolError(code="INPUT_ERROR", message="market must be us or hk")
-    return market
-
-
-def _resolve_path(raw: str | Path | None, *, default: Path) -> Path:
-    if raw is None or not str(raw).strip():
-        return default.resolve()
-    path = Path(raw).expanduser()
-    if not path.is_absolute():
-        path = path.resolve()
-    return path
 
 
 def _read_json_object(path: Path, *, label: str, hint: str | None = None) -> dict[str, Any]:
@@ -79,43 +68,6 @@ def _read_json_object(path: Path, *, label: str, hint: str | None = None) -> dic
     if not isinstance(payload, dict):
         raise AgentToolError(code="CONFIG_ERROR", message=f"{label} must be a JSON object: {path}")
     return payload
-
-
-def _deep_merge(base: Any, override: Any) -> Any:
-    if isinstance(base, dict) and isinstance(override, dict):
-        out = deepcopy(base)
-        for key, value in override.items():
-            if key in out:
-                out[key] = _deep_merge(out[key], value)
-            else:
-                out[key] = deepcopy(value)
-        return out
-    return deepcopy(override)
-
-
-def _key_parts(key: str) -> list[str]:
-    parts = [part.strip() for part in str(key or "").split(".")]
-    if not parts or any(not part for part in parts):
-        raise AgentToolError(code="INPUT_ERROR", message="config key must be a non-empty dot path")
-    return parts
-
-
-def _path_get(data: Any, parts: list[str]) -> tuple[bool, Any]:
-    current = data
-    for part in parts:
-        if isinstance(current, dict):
-            if part not in current:
-                return False, None
-            current = current[part]
-            continue
-        if isinstance(current, list) and part.isdigit():
-            index = int(part)
-            if index < 0 or index >= len(current):
-                return False, None
-            current = current[index]
-            continue
-        return False, None
-    return True, current
 
 
 def _path_join(prefix: str, parts: list[str]) -> str:

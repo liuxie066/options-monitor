@@ -2,6 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from src.application.runtime_cli_format import as_dict as _dict
+from src.application.runtime_cli_format import as_list as _list
+from src.application.runtime_cli_format import csv_value as _csv
+from src.application.runtime_cli_format import display_value as _value
+from src.application.runtime_cli_format import yes_no as _yes_no
+
 
 PAYLOAD_KEYS = (
     "config_key",
@@ -289,36 +295,6 @@ def _error_line(error: dict[str, Any]) -> str:
     if code and message:
         return f"error: {code} {message}"
     return f"error: {_value(message or code or error)}"
-
-
-def _dict(value: Any) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
-
-
-def _list(value: Any) -> list[Any]:
-    return value if isinstance(value, list) else []
-
-
-def _csv(value: Any) -> str:
-    if isinstance(value, list):
-        return ", ".join(str(item) for item in value) or "-"
-    if value is None:
-        return "-"
-    return str(value)
-
-
-def _value(value: Any) -> str:
-    if value is None or value == "":
-        return "-"
-    return str(value)
-
-
-def _yes_no(value: Any) -> str:
-    if value is True:
-        return "yes"
-    if value is False:
-        return "no"
-    return "-"
 
 
 def _as_int(value: Any) -> int:

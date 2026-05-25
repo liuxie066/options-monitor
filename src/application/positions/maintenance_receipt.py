@@ -11,7 +11,10 @@ from zoneinfo import ZoneInfo
 from domain.domain.multi_tick import resolve_notification_route_from_config
 from domain.storage.json_io import atomic_write_json, read_json
 from domain.storage.repositories import state_repo
-from src.application.notification_delivery_adapter import select_notification_delivery_adapter
+from src.application.notification_delivery_adapter import (
+    normalize_notification_delivery_result,
+    select_notification_delivery_adapter,
+)
 from src.application.notification_delivery_route import resolve_notification_delivery_route
 
 _AUTO_CLOSE_RECEIPT_STATE_NAME = "auto_close_receipts.json"
@@ -113,7 +116,7 @@ def send_auto_close_receipt(
             message=message,
             notifications=route.get("notifications") or {},
         )
-        normalized = _normalize_delivery(send_result, normalize_fn=resolved_normalize_fn)
+        normalized = normalize_notification_delivery_result(send_result, normalize_fn=resolved_normalize_fn)
     except subprocess.TimeoutExpired as exc:
         normalized = {
             "ok": False,
@@ -544,19 +547,6 @@ def _attach_receipt_identity(
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def _normalize_delivery(send_result: Any, *, normalize_fn: Callable[..., dict[str, Any]]) -> dict[str, Any]:
-    if isinstance(send_result, dict) and ("delivery_confirmed" in send_result or "command_ok" in send_result):
-        return dict(send_result)
-    try:
-        return normalize_fn(send_result=getattr(send_result, "raw", send_result))
-    except TypeError:
-        return normalize_fn(
-            returncode=int(getattr(send_result, "returncode", 0) or 0),
-            stdout=str(getattr(send_result, "stdout", "") or ""),
-            stderr=str(getattr(send_result, "stderr", "") or ""),
-        )
 
 
 def _bool_from_config(src: dict[str, Any], key: str, *, default: bool) -> bool:

@@ -39,12 +39,11 @@ def test_top_level_doctor_wraps_healthcheck(monkeypatch, capsys) -> None:
         "profile_path": None,
         "env_file": None,
         "include_service_status": False,
-        "strategy_report_dir": None,
-        "strategy_candidate_paths": None,
-        "strategy_reject_log_paths": None,
-        "strategy_trace_paths": None,
-        "strategy_outcome_paths": None,
-        "strategy_evidence_min_sample": None,
+        "candidate_report_dir": None,
+        "candidate_paths": None,
+        "candidate_reject_log_paths": None,
+        "candidate_trace_paths": None,
+        "candidate_evidence_min_sample": None,
     }]
 
 
@@ -85,12 +84,11 @@ def test_top_level_healthcheck_passes_inbound_diagnostics_args(monkeypatch, caps
         "profile_path": "service.profile.json",
         "env_file": None,
         "include_service_status": True,
-        "strategy_report_dir": None,
-        "strategy_candidate_paths": None,
-        "strategy_reject_log_paths": None,
-        "strategy_trace_paths": None,
-        "strategy_outcome_paths": None,
-        "strategy_evidence_min_sample": None,
+        "candidate_report_dir": None,
+        "candidate_paths": None,
+        "candidate_reject_log_paths": None,
+        "candidate_trace_paths": None,
+        "candidate_evidence_min_sample": None,
     }]
 
 
@@ -127,12 +125,11 @@ def test_top_level_healthcheck_forwards_env_file(monkeypatch, capsys, tmp_path: 
         "profile_path": None,
         "env_file": str(env_file),
         "include_service_status": False,
-        "strategy_report_dir": None,
-        "strategy_candidate_paths": None,
-        "strategy_reject_log_paths": None,
-        "strategy_trace_paths": None,
-        "strategy_outcome_paths": None,
-        "strategy_evidence_min_sample": None,
+        "candidate_report_dir": None,
+        "candidate_paths": None,
+        "candidate_reject_log_paths": None,
+        "candidate_trace_paths": None,
+        "candidate_evidence_min_sample": None,
     }]
     assert bootstrap_calls == [{
         "repo_root": cli.repo_base(),
@@ -141,7 +138,7 @@ def test_top_level_healthcheck_forwards_env_file(monkeypatch, capsys, tmp_path: 
     }]
 
 
-def test_top_level_doctor_forwards_strategy_evidence_diagnostics(monkeypatch, capsys) -> None:
+def test_top_level_doctor_forwards_candidate_evidence_diagnostics(monkeypatch, capsys) -> None:
     import src.interfaces.cli.main as cli
 
     calls: list[dict] = []
@@ -157,17 +154,15 @@ def test_top_level_doctor_forwards_strategy_evidence_diagnostics(monkeypatch, ca
             "doctor",
             "--config-key",
             "us",
-            "--strategy-report-dir",
+            "--candidate-report-dir",
             "output_shared/reports",
-            "--strategy-candidate-path",
+            "--candidate-path",
             "candidate.csv",
-            "--strategy-reject-log-path",
+            "--candidate-reject-log-path",
             "reject.csv",
-            "--strategy-trace-path",
+            "--candidate-trace-path",
             "trace.jsonl",
-            "--strategy-outcome-path",
-            "outcome.csv",
-            "--strategy-evidence-min-sample",
+            "--candidate-evidence-min-sample",
             "10",
         ]
     )
@@ -175,12 +170,11 @@ def test_top_level_doctor_forwards_strategy_evidence_diagnostics(monkeypatch, ca
 
     assert rc == 0
     assert payload["tool_name"] == "doctor"
-    assert calls[0]["strategy_report_dir"] == "output_shared/reports"
-    assert calls[0]["strategy_candidate_paths"] == ["candidate.csv"]
-    assert calls[0]["strategy_reject_log_paths"] == ["reject.csv"]
-    assert calls[0]["strategy_trace_paths"] == ["trace.jsonl"]
-    assert calls[0]["strategy_outcome_paths"] == ["outcome.csv"]
-    assert calls[0]["strategy_evidence_min_sample"] == 10
+    assert calls[0]["candidate_report_dir"] == "output_shared/reports"
+    assert calls[0]["candidate_paths"] == ["candidate.csv"]
+    assert calls[0]["candidate_reject_log_paths"] == ["reject.csv"]
+    assert calls[0]["candidate_trace_paths"] == ["trace.jsonl"]
+    assert calls[0]["candidate_evidence_min_sample"] == 10
 
 
 def test_support_bundle_command_forwards_diagnostic_args(monkeypatch, capsys) -> None:
@@ -929,7 +923,7 @@ def test_config_validate_defaults_to_runtime_source(monkeypatch, capsys) -> None
 
     assert rc == 0
     assert payload["ok"] is True
-    assert calls == [{"config_key": None, "config_path": "config.us.json", "market": "us"}]
+    assert calls == [{"config_key": None, "config_path": "config.us.json", "market": "us", "allow_legacy_source": False}]
 
 
 def test_setup_init_emits_deprecation_warning(monkeypatch, capsys) -> None:
@@ -1064,6 +1058,12 @@ def test_config_get_and_set_preview_then_apply(capsys, tmp_path: Path) -> None:
     import src.interfaces.cli.main as cli
 
     cfg = {
+        "_generated": {
+            "schema_version": "1.0",
+            "generator": "options-monitor",
+            "source_format": "yaml",
+            "market": "us",
+        },
         "symbols": [
             {
                 "symbol": "NVDA",

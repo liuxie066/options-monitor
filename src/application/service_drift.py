@@ -264,7 +264,6 @@ def _profile_with_discovered_managed_services(profile: dict[str, Any], *, ctx: d
         feishu_ws = out.get("feishu_ws")
         next_feishu_ws = dict(feishu_ws) if isinstance(feishu_ws, dict) else {}
         next_feishu_ws.setdefault("enabled", True)
-        next_feishu_ws.setdefault("config_key", "us")
         out["feishu_ws"] = next_feishu_ws
     return out
 
@@ -292,12 +291,16 @@ def _expected_bundle_from_profile(
         or "options-monitor-feishu-ws.service" in services
         or "com.options-monitor.feishu-ws" in services
     )
+    market_values = _profile_markets(profile)
+    feishu_ws_config_key = str(feishu_ws.get("config_key") or "").strip() or None
+    if include_feishu_ws and feishu_ws_config_key is None and len([market for market in market_values if market in {"us", "hk"}]) != 1:
+        include_feishu_ws = False
     return render_service_bundle(
         target=provider,
         repo_root=repo_root,
         runtime_root=runtime_root,
         accounts=_profile_accounts(profile),
-        markets=_profile_markets(profile),
+        markets=market_values,
         config_paths={str(key): str(value) for key, value in config_paths.items() if str(value or "").strip()},
         config_yaml=_profile_config_yaml(profile),
         env_file=profile.get("env_file"),
@@ -306,7 +309,7 @@ def _expected_bundle_from_profile(
         use_default_deploy_user=False,
         include_auto_upgrade=include_auto_upgrade,
         include_feishu_ws=include_feishu_ws,
-        feishu_ws_config_key=str(feishu_ws.get("config_key") or "us"),
+        feishu_ws_config_key=feishu_ws_config_key,
         include_content=True,
     )
 

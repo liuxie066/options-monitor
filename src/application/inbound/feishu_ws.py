@@ -37,7 +37,7 @@ LOG = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class FeishuWsSettings:
-    config_key: str | None = "us"
+    config_key: str | None = None
     config_path: str | None = None
     assistant_config_path: str | None = None
     audit_db: str | None = None
@@ -52,9 +52,16 @@ class FeishuWsSettings:
     assistant_mode: str = "deterministic"
     assistant_enabled: bool = True
     assistant_context_window_messages: int = DEFAULT_CONTEXT_WINDOW_MESSAGES
+    assistant_default_market_scope: str = ""
     assistant_llm: LlmTranslatorSettings = field(default_factory=LlmTranslatorSettings)
 
     def validate_for_serve(self) -> None:
+        if not (self.config_path or self.config_key):
+            raise AgentToolError(
+                code="CONFIG_ERROR",
+                message="missing inbound runtime config scope for Feishu WebSocket",
+                hint="Pass --config-key us/hk, --config-path, or set assistant.default_market_scope explicitly.",
+            )
         if not self.allowed_senders:
             raise AgentToolError(
                 code="CONFIG_ERROR",
@@ -85,6 +92,7 @@ class FeishuWsSettings:
             "assistant_mode": self.assistant_mode,
             "assistant_enabled": bool(self.assistant_enabled),
             "assistant_context_window_messages": int(self.assistant_context_window_messages),
+            "assistant_default_market_scope": self.assistant_default_market_scope,
             "assistant_llm": self.assistant_llm.public_payload(),
         }
         if sdk_available is not None:
@@ -94,7 +102,7 @@ class FeishuWsSettings:
 
 def build_feishu_ws_settings(
     *,
-    config_key: str | None = "us",
+    config_key: str | None = None,
     config_path: str | None = None,
     assistant_config_path: str | None = None,
     audit_db: str | None = None,
@@ -110,8 +118,13 @@ def build_feishu_ws_settings(
     assistant_cfg = _load_assistant_behavior_config(config_path=assistant_config_path)
     behavior_cfg = _dict(_dict(assistant_cfg.get("inbound")).get("feishu_ws"))
     assistant_settings = AssistantSettings.from_runtime_config(assistant_cfg)
+    default_config_key = (
+        assistant_settings.default_market_scope
+        if assistant_settings.default_market_scope in {"us", "hk"}
+        else None
+    )
     return FeishuWsSettings(
-        config_key=str(config_key or "").strip().lower() or None,
+        config_key=str(config_key or default_config_key or "").strip().lower() or None,
         config_path=_first_text(config_path),
         assistant_config_path=_first_text(assistant_config_path),
         audit_db=_first_text(audit_db, env.get("OM_INBOUND_AUDIT_DB")),
@@ -134,6 +147,7 @@ def build_feishu_ws_settings(
         assistant_mode=assistant_settings.mode,
         assistant_enabled=assistant_settings.enabled,
         assistant_context_window_messages=assistant_settings.context_window_messages,
+        assistant_default_market_scope=assistant_settings.default_market_scope,
         assistant_llm=assistant_settings.llm,
     )
 
@@ -187,6 +201,7 @@ def handle_feishu_ws_event(
             mode=settings.assistant_mode,
             enabled=settings.assistant_enabled,
             context_window_messages=settings.assistant_context_window_messages,
+            default_market_scope=settings.assistant_default_market_scope,
             llm=settings.assistant_llm,
         ),
         assistant_config_path=settings.assistant_config_path,

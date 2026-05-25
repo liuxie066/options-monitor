@@ -58,12 +58,11 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
             "audit_db": "optional inbound audit SQLite path for Feishu inbound diagnostics",
             "profile_path": "optional service.profile.json path for Feishu WS service diagnostics",
             "include_service_status": "optional bool; run local service status checks from profile_path",
-            "strategy_report_dir": "optional directory containing candidate/reject/trace/outcome evidence for diagnostic readiness checks",
-            "strategy_candidate_paths": "optional list of candidate evidence files",
-            "strategy_reject_log_paths": "optional list of reject-log evidence files",
-            "strategy_trace_paths": "optional list of candidate-filter trace files",
-            "strategy_outcome_paths": "optional list of outcome/replay evidence files",
-            "strategy_evidence_min_sample": "optional int; default 5; minimum candidate/outcome rows for lab-grade evaluation readiness",
+            "candidate_report_dir": "optional directory containing candidate/reject/trace evidence for diagnostic readiness checks",
+            "candidate_paths": "optional list of candidate evidence files",
+            "candidate_reject_log_paths": "optional list of reject-log evidence files",
+            "candidate_trace_paths": "optional list of candidate-filter trace files",
+            "candidate_evidence_min_sample": "optional int; default 5; minimum candidate rows for readiness checks",
         },
         risk_level="read_only",
         safe_default_input={"config_key": "us"},
@@ -201,30 +200,6 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
         examples=(
             {"input": {"run_id": "20260514T100000Z", "account": "lx", "symbol": "NVDA"}},
             {"input": {"trace_path": "output_shared/reports/candidate_filter_trace.jsonl", "symbol": "NVDA"}},
-        ),
-    ),
-    AgentToolDefinition(
-        name="strategy_replay_analyze",
-        read_only=True,
-        description=(
-            "Diagnose offline replay evidence for DTE, Delta, symbol drawdown, and filter-value signals. "
-            "This is a read-only diagnostic surface, not the strategy analysis product entry."
-        ),
-        requires=("strategy_replay_rows",),
-        capabilities=("strategy_replay_diagnostic", "parameter_signal_diagnostic", "read_only"),
-        input_schema={
-            "replay_path": "optional CSV/JSON/JSONL path with candidate replay rows",
-            "replay_paths": "optional list of CSV/JSON/JSONL replay paths",
-            "rows": "optional inline list[object] replay rows",
-            "min_sample": "optional int; default 5; guards learning confidence",
-            "win_return_threshold": "optional decimal return threshold; default 0.0",
-            "bad_drawdown_threshold": "optional decimal drawdown threshold; default -0.15",
-        },
-        risk_level="read_only",
-        safe_default_input={"min_sample": 5},
-        examples=(
-            {"input": {"replay_path": "output_shared/reports/strategy_replay.csv", "min_sample": 5}},
-            {"input": {"rows": [{"symbol": "NVDA", "dte": 30, "delta": -0.2, "actual_return": 0.03}], "min_sample": 1}},
         ),
     ),
     AgentToolDefinition(
@@ -536,13 +511,13 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
         read_only=False,
         description=(
             "Research evidence collector: build a redacted bundle for MacBook Codex to diagnose "
-            "ledger quality, multi-account strategy effects, and runtime quality."
+            "ledger quality, candidate-scan evidence, and runtime quality."
         ),
         requires=("runtime_config", "runtime_artifacts"),
         capabilities=(
             "research_bundle",
             "ledger_quality",
-            "account_strategy_matrix",
+            "account_candidate_matrix",
             "runtime_triage",
             "runtime_runs",
             "runtime_logs",
@@ -551,7 +526,7 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
         ),
         side_effects=("writes_local_research_reports",),
         input_schema={
-            "scope": "optional ledger|account-strategy|quality|strategy|full; defaults full",
+            "scope": "optional ledger|candidate|quality|full; defaults full",
             "config_key": "us|hk",
             "config_path": "optional explicit config path",
             "accounts": "optional list[str]",
@@ -565,7 +540,7 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
             "confirm": "required true when write_outputs=true",
             "research_output_dir": "optional output directory; defaults to output_shared/research",
             "research_current_dir": "optional current-state directory; defaults to output_shared/state/current",
-            "report_dir": "optional report dir forwarded to runtime_status and strategy evidence",
+            "report_dir": "optional report dir forwarded to runtime_status and candidate evidence",
             "state_dir": "optional legacy state dir forwarded to runtime_status",
             "shared_state_dir": "optional shared state dir forwarded to runtime_status",
             "accounts_root": "optional accounts output root forwarded to runtime_status",
@@ -573,10 +548,9 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
             "run_id": "optional output_runs run id forwarded to runtime_status",
             "run_dir": "optional explicit run dir forwarded to runtime_status",
             "runs_limit": "optional number of recent runs included in runtime evidence; default 10, max 50",
-            "candidate_paths": "optional candidate CSV path or list of paths for strategy evidence",
-            "trace_paths": "optional candidate_filter_trace.jsonl path or list of paths for strategy evidence",
-            "strategy_replay_paths": "optional strategy replay path or list of paths for strategy evidence",
-            "strategy_report_dir": "optional report dir containing candidate, trace, and replay artifacts",
+            "candidate_paths": "optional candidate CSV path or list of paths for candidate evidence",
+            "trace_paths": "optional candidate_filter_trace.jsonl path or list of paths for candidate evidence",
+            "candidate_report_dir": "optional report dir containing candidate and trace artifacts",
             "tail_limit": "optional JSONL tail row limit; default 20, max 200",
             "ranking_limit": "optional top candidate rows per report included in ranking evidence; default 5, max 20",
         },
@@ -586,7 +560,7 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
         examples=(
             {"input": {"scope": "full", "config_key": "us"}},
             {"input": {"scope": "ledger", "config_key": "us"}},
-            {"input": {"scope": "account-strategy", "config_key": "us"}},
+            {"input": {"scope": "candidate", "config_key": "us"}},
         ),
     ),
 )

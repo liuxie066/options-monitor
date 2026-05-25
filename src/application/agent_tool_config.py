@@ -6,6 +6,7 @@ from typing import Any
 
 from src.application.config_loader import normalize_portfolio_broker_config
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.runtime_config_freshness import RuntimeConfigIdentityError, ensure_runtime_config_identity
 from src.application.runtime_config_paths import absolutize_portfolio_data_config
 from src.application.settings import build_effective_env
 
@@ -44,6 +45,9 @@ def load_runtime_config(
     *,
     config_key: str | None = None,
     config_path: str | Path | None = None,
+    expected_market: str | None = None,
+    allow_legacy_source: bool = False,
+    require_generated: bool = True,
 ) -> tuple[Path, dict[str, Any]]:
     path = resolve_runtime_config_path(config_key=config_key, config_path=config_path)
     if not path.exists():
@@ -68,6 +72,25 @@ def load_runtime_config(
         )
     cfg = absolutize_portfolio_data_config(raw, config_path=path)
     cfg = normalize_portfolio_broker_config(cfg)
+    try:
+        ensure_runtime_config_identity(
+            cfg,
+            explicit_market=expected_market,
+            config_key=config_key,
+            runtime_config_path=path,
+            allow_legacy_source=allow_legacy_source,
+            require_generated=require_generated,
+        )
+    except RuntimeConfigIdentityError as exc:
+        raise AgentToolError(
+            code="CONFIG_ERROR",
+            message=str(exc),
+            hint=(
+                "Use `om config migrate-yaml` for old JSON configs, then rebuild with "
+                "`om config build --source yaml --market <market>`."
+            ),
+            details=exc.result,
+        ) from exc
     cfg["config_source_path"] = str(path)
     return path, cfg
 

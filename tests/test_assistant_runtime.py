@@ -210,6 +210,7 @@ def test_assistant_runtime_executes_slash_command_through_inbound_router(tmp_pat
             text="/status",
             sender_id="local",
             message_id="msg_status",
+            config_key="us",
             audit_db=str(tmp_path / "inbound.sqlite3"),
         ),
         execute_tool_fn=_execute,
@@ -254,6 +255,7 @@ def test_assistant_runtime_does_not_overwrite_original_audit_on_duplicate_replay
         text="/status",
         sender_id="local",
         message_id="msg_duplicate_audit",
+        config_key="us",
         audit_db=str(audit_db),
     )
 
@@ -280,6 +282,7 @@ def test_assistant_runtime_keeps_deterministic_fallback(tmp_path: Path) -> None:
             text="状态",
             sender_id="local",
             message_id="msg_status_cn",
+            config_key="us",
             audit_db=str(tmp_path / "inbound.sqlite3"),
         ),
         execute_tool_fn=_execute,
@@ -290,6 +293,29 @@ def test_assistant_runtime_keeps_deterministic_fallback(tmp_path: Path) -> None:
     assert out["data"]["intent"]["parser"] == "deterministic"
     assert out["meta"]["assistant"]["route"] == "deterministic"
     assert out["meta"]["assistant"]["llm"]["reason"] == "not_needed"
+
+
+def test_assistant_runtime_requires_config_scope_for_runtime_status(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(tool_name=tool_name, ok=True, data={"summary": {"ok": True}})
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="状态",
+            sender_id="local",
+            message_id="msg_status_missing_config",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+    )
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "NEEDS_CLARIFICATION"
+    assert out["error"]["details"] == {"intent_name": "runtime_status", "required": "config_key_or_config_path"}
+    assert calls == []
 
 
 def test_agent_loop_mode_does_not_mark_deterministic_command_as_loop_tool_use(tmp_path: Path) -> None:
@@ -304,6 +330,7 @@ def test_agent_loop_mode_does_not_mark_deterministic_command_as_loop_tool_use(tm
             text="/status",
             sender_id="local",
             message_id="msg_agent_loop_command",
+            config_key="us",
             audit_db=str(tmp_path / "inbound.sqlite3"),
         ),
         execute_tool_fn=_execute,
@@ -644,6 +671,7 @@ def test_assistant_runtime_routes_valid_llm_translation_through_inbound_router(t
             text="帮我看看这个月赚了多少",
             sender_id="local",
             message_id="msg_llm_route",
+            config_key="us",
             audit_db=str(tmp_path / "inbound.sqlite3"),
         ),
         execute_tool_fn=_execute,
@@ -723,6 +751,7 @@ def test_assistant_runtime_routes_core_read_only_llm_intents(tmp_path: Path) -> 
                 text=text,
                 sender_id="local",
                 message_id=f"msg_llm_quality_{index}",
+                config_key="us",
                 audit_db=str(tmp_path / "inbound.sqlite3"),
             ),
             execute_tool_fn=_execute,
@@ -753,6 +782,7 @@ def test_assistant_runtime_builds_context_from_same_conversation(tmp_path: Path)
             channel="feishu",
             conversation_id="feishu:chat_a:ou_1",
             message_id="msg_context_first",
+            config_key="us",
             audit_db=str(audit_db),
         ),
         execute_tool_fn=_execute,
@@ -790,6 +820,7 @@ def test_assistant_runtime_builds_context_from_same_conversation(tmp_path: Path)
             channel="feishu",
             conversation_id="feishu:chat_a:ou_1",
             message_id="msg_context_second",
+            config_key="us",
             audit_db=str(audit_db),
         ),
         execute_tool_fn=_execute,
@@ -925,6 +956,7 @@ def test_assistant_runtime_agent_loop_is_bounded_read_only_router(tmp_path: Path
             text="帮我看一下状态",
             sender_id="local",
             message_id="msg_agent_loop",
+            config_key="us",
             audit_db=str(tmp_path / "inbound.sqlite3"),
         ),
         execute_tool_fn=_execute,

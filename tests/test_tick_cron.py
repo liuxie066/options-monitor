@@ -156,7 +156,7 @@ def test_run_tick_cron_preflight_rejects_config_missing_generation_metadata(tmp_
     assert rc == 1
     assert captured.out == ""
     assert "[CONFIG_ERROR] runtime config is missing generation metadata" in captured.err
-    assert "rebuild: ./om config build --source legacy --market hk" in captured.err
+    assert "rebuild: ./om config build --source yaml --market hk" in captured.err
 
 
 def test_run_tick_cron_allow_stale_config_forwards_emergency_override(tmp_path) -> None:

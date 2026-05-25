@@ -275,7 +275,7 @@ def test_research_keeps_unrecovered_upgrade_failure_as_runtime_failed(tmp_path: 
     assert data["bundle"]["runtime_quality"]["findings"][0]["code"] == "SERVICE_UPGRADE_FAILED"
 
 
-def test_research_collects_strategy_evidence_for_handoff(tmp_path: Path) -> None:
+def test_research_collects_candidate_evidence_for_handoff(tmp_path: Path) -> None:
     from src.application.research.service import research_tool
 
     report_dir = tmp_path / "reports"
@@ -315,7 +315,7 @@ def test_research_collects_strategy_evidence_for_handoff(tmp_path: Path) -> None
     data, _warnings, _meta = research_tool(
         {
             "config_path": str(tmp_path / "config.us.json"),
-            "strategy_report_dir": str(report_dir),
+            "candidate_report_dir": str(report_dir),
             "write_outputs": False,
             "scheduler_evidence": {
                 "provider": "openclaw",
@@ -329,11 +329,11 @@ def test_research_collects_strategy_evidence_for_handoff(tmp_path: Path) -> None
         **_tool_kwargs(tmp_path),
     )
 
-    summary = data["bundle"]["strategy_evidence"]["summary"]
-    reject_logs = data["bundle"]["strategy_evidence"]["reject_logs"]
-    ranking = data["bundle"]["strategy_evidence"]["ranking_evidence"]
+    summary = data["bundle"]["candidate_evidence"]["summary"]
+    reject_logs = data["bundle"]["candidate_evidence"]["reject_logs"]
+    ranking = data["bundle"]["candidate_evidence"]["ranking_evidence"]
     ranking_row = ranking["reports"][0]["top_rows"][0]
-    account_strategy = data["bundle"]["account_strategy_matrix"]["accounts"]["lx"]["strategy_evidence"]
+    account_candidate = data["bundle"]["account_candidate_matrix"]["accounts"]["lx"]["candidate_evidence"]
     assert data["status"] == "ok"
     assert summary["candidate_row_count"] == 1
     assert summary["candidate_file_count"] == 1
@@ -347,17 +347,17 @@ def test_research_collects_strategy_evidence_for_handoff(tmp_path: Path) -> None
     assert ranking_row["metrics"]["otm_pct"] == 0.066667
     assert ranking_row["cash_constraint"]["cash_headroom_ratio"] == 2.0
     assert ranking_row["rank_explanation"]["score_inputs"]["spread_ratio"] == 0.12
-    assert account_strategy["candidate_rows"] == 1
-    assert account_strategy["reject_log_rows"] == 1
-    assert account_strategy["trace_rows"] == 1
-    assert account_strategy["trace_status_counts"] == {"rejected": 1}
+    assert account_candidate["candidate_rows"] == 1
+    assert account_candidate["reject_log_rows"] == 1
+    assert account_candidate["trace_rows"] == 1
+    assert account_candidate["trace_status_counts"] == {"rejected": 1}
     assert "candidate_rows: 1" in data["handoff_markdown"]
     assert "reject_log_rows: 1" in data["handoff_markdown"]
     assert "## Ranking Evidence" in data["handoff_markdown"]
     assert "cash_headroom=2" in data["handoff_markdown"]
 
 
-def test_research_collects_strategy_evidence_from_profile_runtime_root(tmp_path: Path) -> None:
+def test_research_collects_candidate_evidence_from_profile_runtime_root(tmp_path: Path) -> None:
     from src.application.research.service import research_tool
 
     runtime_root = tmp_path.parent / f"{tmp_path.name}-runtime"
@@ -428,15 +428,15 @@ def test_research_collects_strategy_evidence_from_profile_runtime_root(tmp_path:
         **_tool_kwargs(tmp_path),
     )
 
-    summary = data["bundle"]["strategy_evidence"]["summary"]
-    account_strategy = data["bundle"]["account_strategy_matrix"]["accounts"]["lx"]["strategy_evidence"]
+    summary = data["bundle"]["candidate_evidence"]["summary"]
+    account_candidate = data["bundle"]["account_candidate_matrix"]["accounts"]["lx"]["candidate_evidence"]
     assert summary["candidate_row_count"] == 1
     assert summary["reject_log_row_count"] == 1
     assert summary["filter_trace_file_count"] == 1
     assert summary["ranking_report_count"] == 1
-    assert account_strategy["candidate_rows"] == 1
-    assert account_strategy["reject_log_rows"] == 1
-    assert account_strategy["trace_rows"] == 1
+    assert account_candidate["candidate_rows"] == 1
+    assert account_candidate["reject_log_rows"] == 1
+    assert account_candidate["trace_rows"] == 1
 
 
 def test_research_builds_redacted_bundle_and_handoff(tmp_path: Path) -> None:
@@ -473,9 +473,9 @@ def test_research_builds_redacted_bundle_and_handoff(tmp_path: Path) -> None:
     bundle_json = json.dumps(bundle, ensure_ascii=False)
     assert warnings == []
     assert data["schema_version"] == "research.v1"
-    assert bundle["schema_version"] == "research_bundle.v1"
+    assert bundle["schema_version"] == "research_bundle.v2"
     assert bundle["ledger_quality"]["status"] == "ok"
-    assert sorted(bundle["account_strategy_matrix"]["accounts"]) == ["lx", "sy"]
+    assert sorted(bundle["account_candidate_matrix"]["accounts"]) == ["lx", "sy"]
     assert bundle["healthcheck_snapshot"] == {
         "status": "skipped",
         "included": False,
@@ -765,6 +765,7 @@ def test_research_agent_tool_runs_with_local_runtime_artifacts(tmp_path: Path) -
     cfg_path.write_text(
         json.dumps(
             {
+                "_generated": {"market": "us", "source_format": "yaml"},
                 "accounts": ["lx"],
                 "symbols": [],
                 "notifications": {

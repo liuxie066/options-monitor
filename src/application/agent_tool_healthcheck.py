@@ -34,7 +34,7 @@ def _read_countable_json_rows(value: Any) -> list[Any]:
         return value
     if not isinstance(value, dict):
         return []
-    for key in ("rows", "records", "items", "data", "candidates", "replay_rows", "outcomes"):
+    for key in ("rows", "records", "items", "data", "candidates"):
         rows = value.get(key)
         if isinstance(rows, list):
             return rows
@@ -56,7 +56,7 @@ def _count_evidence_rows(path: Path) -> int:
         return sum(1 for line in fh if line.strip())
 
 
-def _strategy_evidence_paths(payload: dict[str, Any], *, keys: tuple[str, ...], report_dir: Path | None, patterns: tuple[str, ...]) -> list[Path]:
+def _candidate_evidence_paths(payload: dict[str, Any], *, keys: tuple[str, ...], report_dir: Path | None, patterns: tuple[str, ...]) -> list[Path]:
     paths: list[Path] = []
     seen: set[str] = set()
     for key in keys:
@@ -79,69 +79,48 @@ def _strategy_evidence_paths(payload: dict[str, Any], *, keys: tuple[str, ...], 
     return paths
 
 
-def _strategy_evidence_check(payload: dict[str, Any], *, mask_path: Callable[[Any], str]) -> tuple[dict[str, Any] | None, list[str]]:
+def _candidate_evidence_check(payload: dict[str, Any], *, mask_path: Callable[[Any], str]) -> tuple[dict[str, Any] | None, list[str]]:
     relevant_keys = {
-        "strategy_report_dir",
-        "strategy_candidate_path",
-        "strategy_candidate_paths",
+        "candidate_report_dir",
         "candidate_path",
         "candidate_paths",
-        "strategy_reject_log_path",
-        "strategy_reject_log_paths",
+        "candidate_reject_log_path",
+        "candidate_reject_log_paths",
         "reject_log_path",
         "reject_log_paths",
-        "strategy_trace_path",
-        "strategy_trace_paths",
+        "candidate_trace_path",
+        "candidate_trace_paths",
         "trace_path",
         "trace_paths",
-        "strategy_replay_path",
-        "strategy_replay_paths",
-        "strategy_outcome_path",
-        "strategy_outcome_paths",
-        "outcome_path",
-        "outcome_paths",
     }
     if not any(payload.get(key) for key in relevant_keys):
         return None, []
 
-    report_dir_value = str(payload.get("strategy_report_dir") or "").strip()
+    report_dir_value = str(payload.get("candidate_report_dir") or "").strip()
     report_dir = Path(report_dir_value) if report_dir_value else None
     warnings: list[str] = []
     groups = {
-        "candidates": _strategy_evidence_paths(
+        "candidates": _candidate_evidence_paths(
             payload,
-            keys=("strategy_candidate_path", "strategy_candidate_paths", "candidate_path", "candidate_paths"),
+            keys=("candidate_path", "candidate_paths"),
             report_dir=report_dir,
             patterns=("*candidates*.csv", "*candidates*.json", "*candidates*.jsonl"),
         ),
-        "reject_logs": _strategy_evidence_paths(
+        "reject_logs": _candidate_evidence_paths(
             payload,
-            keys=("strategy_reject_log_path", "strategy_reject_log_paths", "reject_log_path", "reject_log_paths"),
+            keys=("candidate_reject_log_path", "candidate_reject_log_paths", "reject_log_path", "reject_log_paths"),
             report_dir=report_dir,
             patterns=("*reject*.csv", "*reject*.json", "*reject*.jsonl"),
         ),
-        "traces": _strategy_evidence_paths(
+        "traces": _candidate_evidence_paths(
             payload,
-            keys=("strategy_trace_path", "strategy_trace_paths", "trace_path", "trace_paths"),
+            keys=("candidate_trace_path", "candidate_trace_paths", "trace_path", "trace_paths"),
             report_dir=report_dir,
             patterns=("*candidate_filter_trace*.json", "*candidate_filter_trace*.jsonl"),
         ),
-        "outcomes": _strategy_evidence_paths(
-            payload,
-            keys=(
-                "strategy_replay_path",
-                "strategy_replay_paths",
-                "strategy_outcome_path",
-                "strategy_outcome_paths",
-                "outcome_path",
-                "outcome_paths",
-            ),
-            report_dir=report_dir,
-            patterns=("strategy_replay.csv", "strategy_replay.json", "strategy_replay.jsonl", "*outcome*.csv", "*outcome*.json", "*outcome*.jsonl"),
-        ),
     }
     try:
-        min_sample = int(payload.get("strategy_evidence_min_sample") or payload.get("min_sample") or 5)
+        min_sample = int(payload.get("candidate_evidence_min_sample") or payload.get("min_sample") or 5)
     except Exception:
         min_sample = 5
     min_sample = max(1, min_sample)
@@ -171,29 +150,26 @@ def _strategy_evidence_check(payload: dict[str, Any], *, mask_path: Callable[[An
             files[group].append(entry)
 
     candidate_rows = totals["candidates"]
-    outcome_rows = totals["outcomes"]
     trace_rows = totals["traces"]
     reject_rows = totals["reject_logs"]
-    evaluable = candidate_rows >= min_sample and outcome_rows >= min_sample
+    evaluable = candidate_rows >= min_sample and (trace_rows > 0 or reject_rows > 0)
     readiness_notes: list[str] = []
     if candidate_rows < min_sample:
         readiness_notes.append(f"candidate_rows_below_min_sample:{candidate_rows}/{min_sample}")
-    if outcome_rows < min_sample:
-        readiness_notes.append(f"outcome_rows_below_min_sample:{outcome_rows}/{min_sample}")
     if trace_rows == 0 and reject_rows == 0:
         readiness_notes.append("missing_filter_or_reject_evidence")
     if problems:
         readiness_notes.extend(problems)
 
     if readiness_notes:
-        warnings.append("Strategy evidence is not ready for lab-grade evaluation: " + "; ".join(readiness_notes))
+        warnings.append("Candidate evidence is not ready for scan-quality diagnostics: " + "; ".join(readiness_notes))
     return (
         {
-            "name": "strategy_evidence",
+            "name": "candidate_evidence",
             "status": ("ok" if evaluable and not problems else "warn"),
             "message": (
-                f"strategy evidence rows candidates={candidate_rows} "
-                f"reject_logs={reject_rows} traces={trace_rows} outcomes={outcome_rows}"
+                f"candidate evidence rows candidates={candidate_rows} "
+                f"reject_logs={reject_rows} traces={trace_rows}"
             ),
             "value": {
                 "evaluable": evaluable,
@@ -411,10 +387,10 @@ def run_healthcheck_tool(
             }
         )
 
-    strategy_evidence_check, strategy_evidence_warnings = _strategy_evidence_check(payload, mask_path=mask_path)
-    if strategy_evidence_check is not None:
-        checks.append(strategy_evidence_check)
-        warnings.extend(strategy_evidence_warnings)
+    candidate_evidence_check, candidate_evidence_warnings = _candidate_evidence_check(payload, mask_path=mask_path)
+    if candidate_evidence_check is not None:
+        checks.append(candidate_evidence_check)
+        warnings.extend(candidate_evidence_warnings)
 
     mapping_errors: list[str] = []
     mapping_preview: dict[str, dict[str, Any]] = {}

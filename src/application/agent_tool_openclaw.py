@@ -223,9 +223,7 @@ def _command_input(payload: dict[str, Any]) -> dict[str, Any]:
         out["config_key"] = str(payload.get("config_key")).strip()
     elif payload.get("config_path"):
         out["config_path"] = str(payload.get("config_path"))
-    if out:
-        return out
-    return {"config_key": "us"}
+    return out
 
 
 def _tick_command(payload: dict[str, Any]) -> list[str]:
@@ -233,8 +231,9 @@ def _tick_command(payload: dict[str, Any]) -> list[str]:
     if payload.get("config_path"):
         command.extend(["--config", str(payload.get("config_path"))])
     else:
-        config_key = str(payload.get("config_key") or "us").strip().lower()
-        command.extend(["--config", f"config.{config_key}.json"])
+        config_key = str(payload.get("config_key") or "").strip().lower()
+        config_ref = f"config.{config_key}.json" if config_key in {"us", "hk"} else "<runtime-config>"
+        command.extend(["--config", config_ref])
     accounts = payload.get("accounts")
     account_values = [str(item).strip() for item in accounts if str(item).strip()] if isinstance(accounts, list) else []
     if account_values:

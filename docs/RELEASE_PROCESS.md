@@ -25,12 +25,8 @@ python3 -m pytest tests/test_config_yaml.py tests/test_layered_config.py
 ./om config validate --source yaml --market hk --config-yaml configs/examples/config.yaml.example
 ./om config build --source yaml --market us --config-yaml configs/examples/config.yaml.example --dry-run
 ./om config build --source yaml --market hk --config-yaml configs/examples/config.yaml.example --dry-run
-./om config build --source legacy --market us --user-config configs/examples/user.example.us.json --dry-run
-./om config build --source legacy --market hk --user-config configs/examples/user.example.hk.json --dry-run
 ./om-agent spec
 ```
-
-最后两条 legacy build 只用于兼容回归；新安装和生产服务 authoring 应走 `config.yaml`。
 
 同时确认：
 
@@ -100,7 +96,7 @@ python3 -m pytest tests/test_config_yaml.py tests/test_layered_config.py
 
 默认不自动跨 major；需要跨 major 时显式传 `--allow-major`。
 
-升级会根据 `/var/lib/options-monitor/service.profile.json` 里的 `markets` / `config_paths` 重建 runtime config。legacy profile 会先恢复用户 overlay，再逐个执行新 release 的 legacy `./om config build` 和 `./om config validate`；overlay 来源按顺序包括 runtime config metadata 记录的 source path、`/var/lib/options-monitor/configs/`、当前 release、以及 `releases/` 下最近一个包含完整 `configs/user*.json` 的旧 release。YAML authoring profile 会记录 `config_authoring.source=yaml` 和 `config_authoring.config_yaml`，升级时直接执行 `./om config build --source yaml --config-yaml <path>` 重建对应 market 的 runtime config，不再要求 legacy overlay。切换 symlink 前缺失来源或 rebuild/validate 失败时会 fail fast，并在 `upgrade_status.json` 写入 remediation。切换 symlink 后会再用 current symlink 重建/校验一次，保证 tick 看到的 runtime config freshness 与当前代码一致。
+升级会根据 `/var/lib/options-monitor/service.profile.json` 里的 `markets` / `config_paths` 重建 runtime config。YAML authoring profile 会记录 `config_authoring.source=yaml` 和 `config_authoring.config_yaml`，升级时直接执行 `./om config build --source yaml --config-yaml <path>` 重建对应 market 的 runtime config，不再要求 legacy overlay。旧安装的 legacy profile 仍有升级恢复通道：先恢复用户 overlay，再走目标 release 的兼容 legacy build/validate，并在后续人工维护中迁移到 `config.yaml`。切换 symlink 前缺失来源或 rebuild/validate 失败时会 fail fast，并在 `upgrade_status.json` 写入 remediation。切换 symlink 后会再用 current symlink 重建/校验一次，保证 tick 看到的 runtime config freshness 与当前代码一致。
 
 切换 symlink 后会执行 service drift reconcile：当前 release 的 `render_service_bundle()` 是期望状态，旧 profile 只提供账号、市场、env file、deploy user、Feishu WS、auto-upgrade 等部署意图。reconcile 会写入缺失的 systemd unit/profile、`daemon-reload`，并启用缺失 timer。升级流程随后会用 reconcile 后的 profile 重启长期 service，并检查 `is-active` / `is-enabled`；Feishu WS 还会额外执行 `./om inbound feishu-ws --check`。`./om service drift --runtime-root /var/lib/options-monitor` 是同一逻辑的只读检查，`--confirm` 才会应用修复。
 
