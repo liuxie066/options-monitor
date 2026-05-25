@@ -47,6 +47,10 @@ class CandidateContractInput:
     open_interest: float | None
     volume: float | None
     implied_volatility: float | None
+    realized_volatility_20: float | None
+    realized_volatility_60: float | None
+    realized_volatility_120: float | None
+    realized_volatility_estimate: float | None
     delta: float | None
     multiplier: float | None
 
@@ -69,6 +73,10 @@ class CandidateContractInput:
             open_interest=_as_float(row.get("open_interest")),
             volume=_as_float(row.get("volume")),
             implied_volatility=_as_float(row.get("implied_volatility")),
+            realized_volatility_20=_as_float(row.get("realized_volatility_20")),
+            realized_volatility_60=_as_float(row.get("realized_volatility_60")),
+            realized_volatility_120=_as_float(row.get("realized_volatility_120")),
+            realized_volatility_estimate=_as_float(row.get("realized_volatility_estimate")),
             delta=_as_float(row.get("delta")),
             multiplier=_as_float(row.get("multiplier")),
         )
@@ -90,6 +98,10 @@ class CandidateContractInput:
             "open_interest": self.open_interest,
             "volume": self.volume,
             "implied_volatility": self.implied_volatility,
+            "realized_volatility_20": self.realized_volatility_20,
+            "realized_volatility_60": self.realized_volatility_60,
+            "realized_volatility_120": self.realized_volatility_120,
+            "realized_volatility_estimate": self.realized_volatility_estimate,
             "delta": self.delta,
             "multiplier": self.multiplier,
         }

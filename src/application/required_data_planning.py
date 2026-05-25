@@ -72,6 +72,7 @@ class RequiredDataFetchSpec:
     min_dte: int | None
     max_dte: int | None
     side_strike_windows: dict[str, dict[str, float | None]]
+    include_realized_volatility: bool = False
     side_plans: list[OptionSideFetchPlan] = field(default_factory=list)
     planning_reason: str = ""
 
@@ -86,6 +87,7 @@ class RequiredDataFetchSpec:
             "min_dte": self.min_dte,
             "max_dte": self.max_dte,
             "side_strike_windows": {k: dict(v) for k, v in self.side_strike_windows.items()},
+            "include_realized_volatility": bool(self.include_realized_volatility),
             "side_plans": [plan.to_debug_dict() for plan in self.side_plans],
             "planning_reason": self.planning_reason,
         }
@@ -459,6 +461,7 @@ def _merge_side_plans(
     host: str,
     port: int,
     side_plans: list[OptionSideFetchPlan],
+    include_realized_volatility: bool = False,
 ) -> list[RequiredDataFetchSpec]:
     groups: dict[tuple[str, ...], list[OptionSideFetchPlan]] = {}
     for plan in side_plans:
@@ -485,11 +488,16 @@ def _merge_side_plans(
                 min_dte=min((plan.min_dte for plan in plans if plan.min_dte is not None), default=None),
                 max_dte=max((plan.max_dte for plan in plans if plan.max_dte is not None), default=None),
                 side_strike_windows=side_strike_windows,
+                include_realized_volatility=bool(include_realized_volatility),
                 side_plans=list(plans),
                 planning_reason=("shared expirations -> merged request" if len(plans) > 1 else "single-side request"),
             )
         )
     return merged
+
+
+def _wants_sell_put_short_vol(sell_put_cfg: dict[str, Any]) -> bool:
+    return str(sell_put_cfg.get("strategy") or "").strip().lower() == "short_vol"
 
 
 def build_required_data_fetch_plan(
@@ -581,5 +589,6 @@ def build_required_data_fetch_plan(
             host=fetch_host,
             port=fetch_port,
             side_plans=side_plans,
+            include_realized_volatility=bool(want_put and _wants_sell_put_short_vol(sell_put_cfg)),
         ),
     )

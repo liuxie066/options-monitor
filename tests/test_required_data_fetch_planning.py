@@ -36,6 +36,31 @@ def test_sell_call_min_strike_builds_configured_bounds_plan(monkeypatch, tmp_pat
     assert call_plan.strike_window.max_strike > 505.0
     assert round(call_plan.strike_window.base_max_strike or 0.0, 2) == 606.00
     assert "near/far bounds" in call_plan.planning_reason
+    assert plan.merged_specs[0].include_realized_volatility is False
+
+
+def test_sell_put_short_vol_fetch_plan_requires_realized_volatility(monkeypatch, tmp_path: Path) -> None:
+    import src.application.required_data_planning as mod
+
+    monkeypatch.setattr(mod, "list_option_expirations", lambda *args, **kwargs: ["2026-05-29"])
+    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: 470.0)
+
+    plan = mod.build_required_data_fetch_plan(
+        base=tmp_path,
+        required_data_dir=tmp_path,
+        symbol="0700.HK",
+        limit_expirations=1,
+        want_put=True,
+        want_call=False,
+        sell_put_cfg={"enabled": True, "strategy": "short_vol"},
+        sell_call_cfg={"enabled": False},
+        fetch_host="127.0.0.1",
+        fetch_port=11111,
+    )
+
+    assert len(plan.merged_specs) == 1
+    assert plan.merged_specs[0].option_types == ("put",)
+    assert plan.merged_specs[0].include_realized_volatility is True
 
 
 def test_fetch_plan_forwards_opend_discovery_rate_limits(monkeypatch, tmp_path: Path) -> None:

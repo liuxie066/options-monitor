@@ -3,17 +3,33 @@
     "templates": {
       "put_base": {
         "sell_put": {
+          "strategy": "short_vol",
           "min_otm_pct": 0.05,
           "min_annualized_net_return": 0.1,
           "min_net_income": 300.0,
           "min_open_interest": 50,
           "min_volume": 10,
           "max_spread_ratio": 0.3,
+          "short_vol": {
+            "min_iv_rv_ratio": 1.15,
+            "min_iv_minus_rv": 0.05,
+            "min_abs_delta": 0.15,
+            "max_abs_delta": 0.3,
+            "target_abs_delta": 0.2
+          },
+          "concentration": {
+            "max_single_trade_nav_pct": 0.08,
+            "max_symbol_nav_pct": 0.2,
+            "max_total_short_put_nav_pct": 0.5
+          },
           "score_weights": {
-            "annualized_return": 1.0,
+            "annualized_return": 0.4,
             "net_income": 0.000001,
-            "liquidity": 0.02,
-            "risk_distance": 0.03
+            "liquidity": 0.1,
+            "risk_distance": 0.1,
+            "vol_edge": 0.5,
+            "delta_target": 0.2,
+            "concentration": 0.2
           }
         }
       },

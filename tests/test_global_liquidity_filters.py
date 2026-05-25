@@ -124,6 +124,9 @@ def test_validate_config_accepts_candidate_score_weights() -> None:
                         'net_income': 0.000001,
                         'liquidity': 0.02,
                         'risk_distance': 0.03,
+                        'vol_edge': 0.5,
+                        'delta_target': 0.2,
+                        'concentration': 0.2,
                     },
                 }
             },
@@ -154,6 +157,87 @@ def test_validate_config_accepts_candidate_score_weights() -> None:
     }
 
     validate_config(cfg)
+
+
+def test_validate_config_accepts_sell_put_short_vol_strategy_config() -> None:
+    _add_repo_to_syspath()
+    from src.application.config_validator import validate_config
+
+    cfg = {
+        'templates': {
+            'put_base': {
+                'sell_put': {
+                    'strategy': 'short_vol',
+                    'short_vol': {
+                        'min_iv_rv_ratio': 1.15,
+                        'min_iv_minus_rv': 0.05,
+                        'min_abs_delta': 0.15,
+                        'max_abs_delta': 0.30,
+                        'target_abs_delta': 0.20,
+                    },
+                    'concentration': {
+                        'max_single_trade_nav_pct': 0.08,
+                        'max_symbol_nav_pct': 0.20,
+                        'max_total_short_put_nav_pct': 0.50,
+                    },
+                }
+            },
+        },
+        'symbols': [
+            {
+                'symbol': 'AAPL',
+                'use': ['put_base'],
+                'sell_put': {
+                    'enabled': True,
+                    'min_dte': 7,
+                    'max_dte': 45,
+                    'min_strike': 10,
+                    'max_strike': 200,
+                    'strategy': 'short_vol',
+                    'short_vol': {'target_abs_delta': 0.22},
+                },
+                'sell_call': {'enabled': False},
+            }
+        ],
+    }
+
+    validate_config(cfg)
+
+
+def test_validate_config_rejects_invalid_sell_put_short_vol_strategy_config() -> None:
+    _add_repo_to_syspath()
+    from src.application.config_validator import validate_config
+
+    cfg = {
+        'templates': {
+            'put_base': {
+                'sell_put': {
+                    'strategy': 'short_vol',
+                    'short_vol': {'min_abs_delta': 0.35, 'max_abs_delta': 0.30},
+                }
+            },
+        },
+        'symbols': [
+            {
+                'symbol': 'AAPL',
+                'use': ['put_base'],
+                'sell_put': {
+                    'enabled': True,
+                    'min_dte': 7,
+                    'max_dte': 45,
+                    'min_strike': 10,
+                    'max_strike': 200,
+                },
+                'sell_call': {'enabled': False},
+            }
+        ],
+    }
+
+    try:
+        validate_config(cfg)
+        raise AssertionError('expected config validation failure')
+    except SystemExit as e:
+        assert 'templates.put_base.sell_put.short_vol.min_abs_delta > templates.put_base.sell_put.short_vol.max_abs_delta' in str(e)
 
 
 def test_validate_config_rejects_invalid_candidate_score_weights() -> None:

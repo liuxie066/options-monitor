@@ -37,6 +37,7 @@ class RequiredDataFetchRequest:
     expiration_max_wait_sec: float = 30.0
     expiration_window_sec: float = 30.0
     expiration_max_calls: int = 60
+    include_realized_volatility: bool = False
 
 
 def execute_required_data_opend(*, base: Path, request: RequiredDataFetchRequest) -> dict[str, object]:
@@ -72,6 +73,7 @@ def execute_required_data_opend(*, base: Path, request: RequiredDataFetchRequest
             expiration_max_wait_sec=float(request.expiration_max_wait_sec),
             expiration_window_sec=float(request.expiration_window_sec),
             expiration_max_calls=int(request.expiration_max_calls),
+            include_realized_volatility=bool(request.include_realized_volatility),
         )
     )
 
@@ -111,6 +113,7 @@ def build_fetch_request_from_spec(
         chain_cache=bool(chain_cache),
         chain_cache_force_refresh=bool(chain_cache_force_refresh),
         freshness_policy=("force_refresh" if chain_cache_force_refresh else "cache_first"),
+        include_realized_volatility=bool(spec.include_realized_volatility),
         **kwargs,
     )
 

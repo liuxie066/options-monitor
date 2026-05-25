@@ -97,6 +97,55 @@ def test_build_pipeline_context_resolves_portfolio_source_by_account() -> None:
         pc.load_exchange_rates = old_load_exchange_rates  # type: ignore[assignment]
 
 
+def test_build_pipeline_context_attaches_global_short_vol_risk_context() -> None:
+    import src.application.pipeline_context as pc
+
+    old_load_portfolio_context = pc.load_portfolio_context
+    old_load_option_positions_context = pc.load_option_positions_context
+    old_load_global_holdings = pc.load_global_holdings_risk_context
+    old_load_global_options = pc.load_global_option_positions_risk_context
+    old_load_exchange_rates = pc.load_exchange_rates
+    try:
+        pc.load_portfolio_context = lambda **_kwargs: {"cash_by_currency": {"USD": 1000.0}}  # type: ignore[assignment]
+        pc.load_option_positions_context = lambda **_kwargs: ({"cash_secured_total_cny": 0.0}, False)  # type: ignore[assignment]
+        pc.load_global_holdings_risk_context = lambda **_kwargs: {"cash_by_currency": {"CNY": 1_000_000.0}}  # type: ignore[assignment]
+        pc.load_global_option_positions_risk_context = lambda **_kwargs: {"cash_secured_total_cny": 0.0}  # type: ignore[assignment]
+        pc.load_exchange_rates = lambda **_kwargs: (0.14, None)  # type: ignore[assignment]
+
+        with TemporaryDirectory() as td:
+            root = Path(td).resolve()
+            portfolio_ctx, option_ctx, usd_per_cny_exchange_rate, _ = pc.build_pipeline_context(
+                py="python",
+                base=root,
+                cfg={
+                    "portfolio": {"data_config": "x.json", "broker": "富途", "account": "lx"},
+                    "templates": {"put_base": {"sell_put": {"strategy": "short_vol"}}},
+                    "symbols": [{"symbol": "NVDA", "use": ["put_base"]}],
+                },
+                report_dir=(root / "reports").resolve(),
+                portfolio_timeout_sec=1,
+                runtime={},
+                is_scheduled=True,
+                state_dir=(root / "state").resolve(),
+                shared_state_dir=(root / "shared").resolve(),
+                log=lambda _msg: None,
+                no_context=False,
+                want_scan=True,
+            )
+
+        assert portfolio_ctx is not None
+        assert portfolio_ctx["_global_portfolio_ctx"]["cash_by_currency"]["CNY"] == 1_000_000.0
+        assert portfolio_ctx["_global_option_ctx"]["cash_secured_total_cny"] == 0.0
+        assert option_ctx == {"cash_secured_total_cny": 0.0}
+        assert usd_per_cny_exchange_rate == 0.14
+    finally:
+        pc.load_portfolio_context = old_load_portfolio_context  # type: ignore[assignment]
+        pc.load_option_positions_context = old_load_option_positions_context  # type: ignore[assignment]
+        pc.load_global_holdings_risk_context = old_load_global_holdings  # type: ignore[assignment]
+        pc.load_global_option_positions_risk_context = old_load_global_options  # type: ignore[assignment]
+        pc.load_exchange_rates = old_load_exchange_rates  # type: ignore[assignment]
+
+
 def test_shared_context_reuses_fetch_calls_across_accounts() -> None:
     import src.application.pipeline_context as pc
     import src.application.portfolio_context_service as pcs

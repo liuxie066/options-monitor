@@ -64,6 +64,8 @@ def required_data_csv_covers_fetch_plan(*, parsed: Path, fetch_plan: RequiredDat
     df = _read_required_data_csv(parsed)
     if df.empty:
         return False
+    if any(bool(spec.include_realized_volatility) for spec in fetch_plan.merged_specs) and not _has_realized_volatility(df):
+        return False
     for side_plan in fetch_plan.side_plans:
         side_df = _filter_option_type(df, side_plan.option_type)
         if side_df.empty:
@@ -110,6 +112,7 @@ def required_data_csv_covers_strategy_bounds(
     min_strike: float | None = None,
     max_strike: float | None = None,
     side_strike_windows: dict[str, dict[str, float | None]] | None = None,
+    require_realized_volatility: bool = False,
 ) -> bool:
     df = _read_required_data_csv(parsed)
     return required_data_frame_covers_strategy_bounds(
@@ -120,6 +123,7 @@ def required_data_csv_covers_strategy_bounds(
         min_strike=min_strike,
         max_strike=max_strike,
         side_strike_windows=side_strike_windows,
+        require_realized_volatility=require_realized_volatility,
     )
 
 
@@ -132,8 +136,11 @@ def required_data_frame_covers_strategy_bounds(
     min_strike: float | None = None,
     max_strike: float | None = None,
     side_strike_windows: dict[str, dict[str, float | None]] | None = None,
+    require_realized_volatility: bool = False,
 ) -> bool:
     if df.empty:
+        return False
+    if require_realized_volatility and not _has_realized_volatility(df):
         return False
     wanted_types = _parse_option_types(option_types)
     if not wanted_types:
@@ -172,6 +179,13 @@ def required_data_frame_covers_strategy_bounds(
         ):
             return False
     return True
+
+
+def _has_realized_volatility(df: pd.DataFrame) -> bool:
+    if "realized_volatility_estimate" not in df.columns:
+        return False
+    values = pd.to_numeric(df["realized_volatility_estimate"], errors="coerce")
+    return not values.dropna().empty
 
 
 def _read_required_data_csv(parsed: Path) -> pd.DataFrame:
