@@ -403,21 +403,27 @@ python3 -m src.application.option_intake --config /var/lib/options-monitor/confi
 
 ### Sell Put
 
-核心关注点通常是：
+默认策略已经从“年化收益优先”切到 short-vol 视角。Sell Put 不再被当成“折价买股”，而是先确认是否有足够的波动率边际和组合容量：
 
 - `min_dte` / `max_dte`
 - `min_strike` / `max_strike`
+- `short_vol.min_iv_rv_ratio`
+- `short_vol.min_iv_minus_rv`
+- `short_vol.min_abs_delta` / `short_vol.max_abs_delta`
+- `concentration.max_single_trade_nav_pct`
+- `concentration.max_symbol_nav_pct`
+- `concentration.max_total_short_put_nav_pct`
 - `min_annualized_net_return`
 - `min_net_income`
 - `min_open_interest`
 - `min_volume`
 - `max_spread_ratio`
 
-除了链上候选过滤，最终还会叠加账户现金维度的 `cash_reserve` 后过滤。
+除了链上候选过滤，最终还会叠加账户现金维度的 `cash_reserve` 后过滤，以及基于全局 holdings / option positions 的组合集中度后过滤。缺少 IV、RV、Delta、NAV、FX、strike 或 multiplier 等关键风险输入时，short-vol 策略会 fail closed。
 
 ### Covered Call
 
-Covered Call 的关键区别是它依赖真实持仓上下文：
+Covered Call 依赖真实持仓上下文。它在风险结构上和 Sell Put 同属 short vol / short gamma，只是现金、持仓和行权方向不同：
 
 - `shares` / `avg_cost` 来自 holdings，不再建议手写在 symbol 配置里
 - 已被 short call 锁定的股票会从可卖数量里扣掉

@@ -36,6 +36,9 @@ SCORE_WEIGHT_FIELDS = (
     'net_income',
     'liquidity',
     'risk_distance',
+    'vol_edge',
+    'delta_target',
+    'concentration',
 )
 YIELD_ENHANCEMENT_LIQUIDITY_FIELDS = LIQUIDITY_ALLOWED_GLOBAL_FIELDS + (
     'max_combo_spread_ratio',
@@ -284,6 +287,33 @@ def _validate_score_weights(cfg: dict, path: str) -> None:
         )
     for key in SCORE_WEIGHT_FIELDS:
         _validate_optional_non_negative_number(raw, key, f'{path}.score_weights')
+
+
+def _validate_sell_put_short_vol_config(cfg: dict, path: str) -> None:
+    if 'strategy' in cfg and cfg.get('strategy') is not None:
+        strategy = str(cfg.get('strategy') or '').strip().lower()
+        if strategy not in {'return_first', 'short_vol'}:
+            die(f'{path}.strategy must be one of: return_first, short_vol')
+    short_vol = cfg.get('short_vol')
+    if short_vol is not None:
+        if not isinstance(short_vol, dict):
+            die(f'{path}.short_vol must be an object')
+        for key in ('min_iv_rv_ratio', 'min_iv_minus_rv', 'min_abs_delta', 'max_abs_delta', 'target_abs_delta'):
+            _validate_optional_non_negative_number(short_vol, key, f'{path}.short_vol')
+        min_abs = short_vol.get('min_abs_delta')
+        max_abs = short_vol.get('max_abs_delta')
+        if min_abs is not None and max_abs is not None:
+            try:
+                if float(min_abs) > float(max_abs):
+                    die(f'{path}.short_vol.min_abs_delta > {path}.short_vol.max_abs_delta')
+            except Exception:
+                die(f'{path}.short_vol.min_abs_delta/max_abs_delta must be numbers')
+    concentration = cfg.get('concentration')
+    if concentration is not None:
+        if not isinstance(concentration, dict):
+            die(f'{path}.concentration must be an object')
+        for key in ('max_single_trade_nav_pct', 'max_symbol_nav_pct', 'max_total_short_put_nav_pct'):
+            _validate_optional_unit_interval_number(concentration, key, f'{path}.concentration')
 
 
 def _validate_optional_non_negative_number_list(cfg: dict, key: str, path: str):
@@ -781,6 +811,10 @@ def validate_config(cfg: dict):
                             f"{', '.join(unsupported_fetch_keys)}; use min_strike/max_strike only"
                         )
                 if side == 'sell_put':
+                    _validate_sell_put_short_vol_config(
+                        side_cfg,
+                        f'templates.{profile_name}.{side}',
+                    )
                     _validate_optional_unit_interval_number(
                         side_cfg,
                         'min_otm_pct',
@@ -831,6 +865,7 @@ def validate_config(cfg: dict):
         if sp and not isinstance(sp, dict):
             die(f"{sym}.sell_put must be an object")
         _validate_score_weights(sp, f'{sym}.sell_put')
+        _validate_sell_put_short_vol_config(sp, f'{sym}.sell_put')
         _validate_optional_unit_interval_number(sp, 'min_otm_pct', f'{sym}.sell_put')
         bad_keys = [k for k in SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS if k in sp]
         if bad_keys:

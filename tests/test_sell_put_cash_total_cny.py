@@ -173,6 +173,14 @@ def test_render_sell_put_alerts_shows_total_cny_when_base_cny_missing(tmp_path: 
                 "annualized_net_return_on_cash_basis": 0.1977,
                 "otm_pct": 0.1,
                 "risk_label": "中性",
+                "implied_volatility": 0.36,
+                "realized_volatility_estimate": 0.24,
+                "iv_rv_ratio": 1.5,
+                "iv_minus_rv": 0.12,
+                "abs_delta": 0.2,
+                "single_trade_concentration": 0.07,
+                "symbol_concentration_after": 0.17,
+                "total_short_put_concentration_after": 0.25,
                 "spread_ratio": 0.1,
                 "open_interest": 100,
                 "volume": 50,
@@ -194,6 +202,9 @@ def test_render_sell_put_alerts_shows_total_cny_when_base_cny_missing(tmp_path: 
     assert "总现金折算(CNY): ¥531,694" in text
     assert "总可用折算(扣占用, CNY): ¥11,666" in text
     assert "余量(总折算估算, CNY): ¥-27,614" in text
+    assert "波动率: IV=36.00% | RV估计=24.00% | IV/RV=1.50 | IV-RV=12.00%" in text
+    assert "Delta: abs=0.20" in text
+    assert "集中度: 单笔=7.00% | 标的后=17.00% | Short Put总后=25.00%" in text
     assert "判断: 所需担保现金约 ¥39,280，但当前总可用折算约 ¥11,666" in text
 
 

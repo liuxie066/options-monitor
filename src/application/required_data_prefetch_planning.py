@@ -230,6 +230,9 @@ def strategy_prefetch_kwargs(symbol_cfg: dict[str, Any], *, enabled: bool) -> di
     want_direct_call = bool(cc.get("enabled", False))
     want_yield_call = bool(want_put and ye.get("enabled", False))
     want_call = bool(want_direct_call or want_yield_call)
+    include_realized_volatility = bool(
+        want_put and str(sp.get("strategy") or "").strip().lower() == "short_vol"
+    )
 
     option_types: list[str] = []
     min_dtes: list[int] = []
@@ -277,6 +280,7 @@ def strategy_prefetch_kwargs(symbol_cfg: dict[str, Any], *, enabled: bool) -> di
         min_dtes=min_dtes,
         max_dtes=max_dtes,
         side_strike_windows=side_strike_windows,
+        include_realized_volatility=include_realized_volatility,
     )
 
 
@@ -285,8 +289,10 @@ def _merge_strategy_prefetch_kwargs(items: list[dict[str, Any]]) -> dict[str, An
     min_dtes: list[int] = []
     max_dtes: list[int] = []
     side_strike_windows: dict[str, dict[str, float | None]] = {}
+    include_realized_volatility = False
 
     for item in items:
+        include_realized_volatility = include_realized_volatility or bool(item.get("include_realized_volatility"))
         for option_type in _parse_option_types(item.get("option_types")):
             if option_type not in option_types:
                 option_types.append(option_type)
@@ -316,6 +322,7 @@ def _merge_strategy_prefetch_kwargs(items: list[dict[str, Any]]) -> dict[str, An
         min_dtes=min_dtes,
         max_dtes=max_dtes,
         side_strike_windows=side_strike_windows,
+        include_realized_volatility=include_realized_volatility,
     )
 
 
@@ -325,6 +332,7 @@ def _strategy_payload(
     min_dtes: list[int],
     max_dtes: list[int],
     side_strike_windows: dict[str, dict[str, float | None]],
+    include_realized_volatility: bool = False,
 ) -> dict[str, Any]:
     all_mins = [
         value
@@ -343,6 +351,7 @@ def _strategy_payload(
         "min_strike": min(all_mins) if all_mins else None,
         "max_strike": max(all_maxs) if all_maxs else None,
         "side_strike_windows": side_strike_windows,
+        "include_realized_volatility": bool(include_realized_volatility),
     }
 
 

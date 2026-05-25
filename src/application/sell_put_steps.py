@@ -33,6 +33,7 @@ from src.application.sell_put_call_helper import (
     select_best_yield_enhancement_pairs,
 )
 from src.application.sell_put_cash import enrich_sell_put_candidates_with_cash
+from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_short_vol
 from src.application.candidate_filter_trace import (
     append_candidate_filter_trace_rows,
     build_candidate_filter_trace_row,
@@ -297,6 +298,15 @@ def run_sell_put_scan_and_summarize(
             df_sp_lab = _enrich_and_filter_sell_put_cash(
                 df_labeled=df_sp_lab,
                 symbol=symbol,
+                portfolio_ctx=portfolio_ctx,
+                exchange_rate_converter=exchange_rate_converter,
+                out_path=symbol_sp_labeled,
+            )
+        if not df_sp_lab.empty:
+            df_sp_lab = enrich_and_filter_sell_put_short_vol(
+                df_labeled=df_sp_lab,
+                symbol=symbol,
+                sell_put_cfg=sp,
                 portfolio_ctx=portfolio_ctx,
                 exchange_rate_converter=exchange_rate_converter,
                 out_path=symbol_sp_labeled,

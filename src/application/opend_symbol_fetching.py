@@ -43,6 +43,7 @@ from src.application.opend_fetch_config import OpenDFetchLimits
 from src.application.opend_market_snapshot_fetching import fetch_option_snapshots, get_spot_opend
 from src.application.opend_symbol_chain_fetching import fetch_symbol_option_chain
 from src.application.option_chain_fetching import classify_option_chain_error
+from src.application.short_vol_metrics import RealizedVolatilitySnapshot, fetch_realized_volatility_snapshot
 
 
 def to_float(v):
@@ -145,6 +146,7 @@ class FetchSymbolRequest:
     snapshot_batch_size: int | None = None
     snapshot_fallback_max_codes: int = 100
     snapshot_fallback_batch_size: int = 20
+    include_realized_volatility: bool = False
 
     @property
     def effective_base_dir(self) -> Path:
@@ -165,7 +167,7 @@ class FetchSymbolRequest:
         )
 
 
-def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = '127.0.0.1', port: int = 11111, spot_override: float | None = None, *, base_dir: Path | None = None, option_types: str = 'put,call', min_strike: float | None = None, max_strike: float | None = None, side_strike_windows: dict[str, dict[str, float | None]] | None = None, min_dte: int | None = None, max_dte: int | None = None, explicit_expirations: list[str] | None = None, retry_max_attempts: int = 4, retry_time_budget_sec: float = 8.0, retry_base_delay_sec: float = 0.8, retry_max_delay_sec: float = 6.0, no_retry: bool = False, chain_cache: bool = False, chain_cache_force_refresh: bool = False, freshness_policy: str = 'cache_first', max_wait_sec: float = 90.0, option_chain_window_sec: float = 30.0, option_chain_max_calls: int = 10, snapshot_max_wait_sec: float = 30.0, snapshot_window_sec: float = 30.0, snapshot_max_calls: int = 60, expiration_max_wait_sec: float = 30.0, expiration_window_sec: float = 30.0, expiration_max_calls: int = 60, gateway: Any = None, snapshot_batch_size: int | None = None, snapshot_fallback_max_codes: int = 100, snapshot_fallback_batch_size: int = 20) -> dict[str, Any]:
+def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = '127.0.0.1', port: int = 11111, spot_override: float | None = None, *, base_dir: Path | None = None, option_types: str = 'put,call', min_strike: float | None = None, max_strike: float | None = None, side_strike_windows: dict[str, dict[str, float | None]] | None = None, min_dte: int | None = None, max_dte: int | None = None, explicit_expirations: list[str] | None = None, retry_max_attempts: int = 4, retry_time_budget_sec: float = 8.0, retry_base_delay_sec: float = 0.8, retry_max_delay_sec: float = 6.0, no_retry: bool = False, chain_cache: bool = False, chain_cache_force_refresh: bool = False, freshness_policy: str = 'cache_first', max_wait_sec: float = 90.0, option_chain_window_sec: float = 30.0, option_chain_max_calls: int = 10, snapshot_max_wait_sec: float = 30.0, snapshot_window_sec: float = 30.0, snapshot_max_calls: int = 60, expiration_max_wait_sec: float = 30.0, expiration_window_sec: float = 30.0, expiration_max_calls: int = 60, gateway: Any = None, snapshot_batch_size: int | None = None, snapshot_fallback_max_codes: int = 100, snapshot_fallback_batch_size: int = 20, include_realized_volatility: bool = False) -> dict[str, Any]:
     return fetch_symbol_request(
         FetchSymbolRequest(
             symbol=symbol,
@@ -202,6 +204,7 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
             snapshot_batch_size=snapshot_batch_size,
             snapshot_fallback_max_codes=snapshot_fallback_max_codes,
             snapshot_fallback_batch_size=snapshot_fallback_batch_size,
+            include_realized_volatility=bool(include_realized_volatility),
         )
     )
 
@@ -288,6 +291,14 @@ def fetch_symbol_request(
 
         # Trading-date anchor for DTE / cache freshness.
         today = get_trading_date(u.market)
+        if request.include_realized_volatility:
+            rv_snapshot = fetch_realized_volatility_snapshot(
+                gateway,
+                underlier_code=u.code,
+                trading_day=today,
+            )
+        else:
+            rv_snapshot = RealizedVolatilitySnapshot(status="skipped", reason="not_requested")
 
         chain_bundle = fetch_symbol_option_chain(
             gateway=gateway,
@@ -516,6 +527,7 @@ def fetch_symbol_request(
                 'volume': vol,
                 'open_interest': oi,
                 'implied_volatility': iv,
+                **rv_snapshot.to_row_fields(),
                 'in_the_money': None,
                 'currency': u.currency,
                 'otm_pct': None,
@@ -591,6 +603,7 @@ def fetch_symbol_request(
                 'snapshot_fallback_failed': int(snapshot_fallback_failed),
                 'snapshot_errors': snapshot_errors,
                 'spot_errors': spot_errors,
+                'realized_volatility': rv_snapshot.to_meta(),
                 'side_strike_windows': side_strike_windows or {},
             },
         }

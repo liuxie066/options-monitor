@@ -55,6 +55,7 @@ def main() -> None:
     ap.add_argument("--expiration-max-wait-sec", type=float, default=30.0, help="Max seconds to wait for shared option-expiration rate-limit budget")
     ap.add_argument("--expiration-window-sec", type=float, default=30.0, help="Shared option-expiration rate-limit window seconds")
     ap.add_argument("--expiration-max-calls", type=int, default=60, help="Shared option-expiration max calls per window")
+    ap.add_argument("--include-realized-volatility", action="store_true", help="Fetch underlier daily K-line and attach RV fields")
     ap.add_argument("--output-root", default=None, help="Output root containing raw/ and parsed/ (default: output_shared/required_data)")
     args = ap.parse_args()
 
@@ -110,6 +111,7 @@ def main() -> None:
                 expiration_max_wait_sec=float(args.expiration_max_wait_sec),
                 expiration_window_sec=float(args.expiration_window_sec),
                 expiration_max_calls=int(args.expiration_max_calls),
+                include_realized_volatility=bool(args.include_realized_volatility),
             )
         )
         raw_path, csv_path = save_outputs(base, sym, payload, output_root=output_root)

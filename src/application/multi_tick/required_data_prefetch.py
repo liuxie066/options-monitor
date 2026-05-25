@@ -163,6 +163,7 @@ def _fetch_one_inprocess(
             expiration_max_wait_sec=float(opend_fetch_cfg['option_expiration']['max_wait_sec']),
             expiration_window_sec=float(opend_fetch_cfg['option_expiration']['window_sec']),
             expiration_max_calls=int(opend_fetch_cfg['option_expiration']['max_calls']),
+            include_realized_volatility=bool(strategy_kwargs.get("include_realized_volatility")),
         )
         _gateway_pool.mark_success()
         save_outputs(base, symbol, payload0, output_root=shared_required)
@@ -331,6 +332,7 @@ def _prefetch_required_data_unlocked(
                 min_strike=strategy_kwargs.get("min_strike"),
                 max_strike=strategy_kwargs.get("max_strike"),
                 side_strike_windows=strategy_kwargs.get("side_strike_windows"),
+                require_realized_volatility=bool(strategy_kwargs.get("include_realized_volatility")),
             )
         except Exception:
             return True
@@ -406,6 +408,8 @@ def _prefetch_required_data_unlocked(
             cmd.extend(['--min-strike', str(strategy_kwargs["min_strike"])])
         if strategy_kwargs.get("max_strike") is not None:
             cmd.extend(['--max-strike', str(strategy_kwargs["max_strike"])])
+        if strategy_kwargs.get("include_realized_volatility"):
+            cmd.append('--include-realized-volatility')
 
         payload = exec_service.execute(
             ToolExecutionIntent(

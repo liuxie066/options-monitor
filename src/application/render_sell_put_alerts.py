@@ -21,6 +21,44 @@ from domain.domain.engine import (
 )
 
 
+def _to_float(value):
+    try:
+        return float(value) if value is not None and not pd.isna(value) else None
+    except Exception:
+        return None
+
+
+def _short_vol_lines(row) -> list[str]:
+    iv = _to_float(row.get("implied_volatility"))
+    rv = _to_float(row.get("realized_volatility_estimate"))
+    ratio = _to_float(row.get("iv_rv_ratio"))
+    spread = _to_float(row.get("iv_minus_rv"))
+    abs_delta = _to_float(row.get("abs_delta"))
+    single = _to_float(row.get("single_trade_concentration"))
+    symbol_after = _to_float(row.get("symbol_concentration_after"))
+    total_after = _to_float(row.get("total_short_put_concentration_after"))
+
+    lines: list[str] = []
+    if any(value is not None for value in (iv, rv, ratio, spread)):
+        lines.append(
+            "波动率: "
+            f"IV={('-' if iv is None else pct(iv))} | "
+            f"RV估计={('-' if rv is None else pct(rv))} | "
+            f"IV/RV={('-' if ratio is None else num(ratio, 2))} | "
+            f"IV-RV={('-' if spread is None else pct(spread))}"
+        )
+    if abs_delta is not None:
+        lines.append(f"Delta: abs={num(abs_delta, 2)}")
+    if any(value is not None for value in (single, symbol_after, total_after)):
+        lines.append(
+            "集中度: "
+            f"单笔={('-' if single is None else pct(single))} | "
+            f"标的后={('-' if symbol_after is None else pct(symbol_after))} | "
+            f"Short Put总后={('-' if total_after is None else pct(total_after))}"
+        )
+    return lines
+
+
 def _render_judgment(row) -> str:
     def _to_float(value):
         try:
@@ -262,6 +300,7 @@ def render_one(row) -> str:
         f"净年化: {pct(row['annualized_net_return_on_cash_basis'])}",
         f"OTM: {pct(row['otm_pct'])}",
         f"风险标签: {row.get('risk_label', '-')}",
+        *_short_vol_lines(row),
         *_linked_call_lines(row),
         "",
         f"OI / Volume: {int(row.get('open_interest', 0) or 0)} / {int(row.get('volume', 0) or 0)}",

@@ -19,7 +19,7 @@
 
 两类候选共享大体流程，但关注点不同：
 
-- **Sell Put**：现金担保能力、年化净收益率、单笔净收益、流动性
+- **Sell Put**：IV/RV 波动率边际、Delta 暴露、现金担保能力、组合集中度、年化净收益率、单笔净收益、流动性
 - **Covered Call**：可覆盖股数、年化权利金收益、单笔净收益、流动性
 
 ---
@@ -86,6 +86,8 @@
 - `volume`
 - `multiplier`
 - `currency`
+- `implied_volatility`
+- `realized_volatility_estimate`
 
 缺少关键字段的合约会被拒绝。
 
@@ -99,6 +101,7 @@
 - `min_dte <= dte <= max_dte`
 - `min_strike <= strike <= max_strike`
 - put 必须满足基本 moneyness 约束
+- 当 `sell_put.strategy=short_vol` 时，必须有可评估的 IV、RV、Delta、现金需求和组合风险输入
 
 ### Covered Call
 主要硬约束包括：
@@ -203,7 +206,23 @@
 
 ---
 
-## 5. Covered Call 的覆盖能力规则
+## 5. Sell Put 的 short-vol 风险规则
+
+默认 Sell Put profile 是 `short_vol`。这意味着系统会把 Sell Put 视为 short vol + short gamma，而不是“折价买股”。
+
+当前规则分三组：
+
+- 波动率边际：`IV/RV >= min_iv_rv_ratio` 且 `IV - RV >= min_iv_minus_rv`
+- Delta 区间：`min_abs_delta <= abs(delta) <= max_abs_delta`，排序上更偏好接近 `target_abs_delta`
+- 集中度：按 assignment notional 计算，即 `strike * multiplier * contracts * FX`
+
+组合集中度使用全局 holdings 作为 NAV 和正股暴露来源，不使用单一 Futu 账户总资产作为全局 NAV。已有 short put 占用来自 option-position projection。
+
+缺少 holdings/NAV、FX、RV、IV、Delta、strike 或 multiplier 时，short-vol 后过滤会 fail closed，并写入 candidate filter trace。
+
+---
+
+## 6. Covered Call 的覆盖能力规则
 
 Covered Call 会结合持仓 context 计算：
 
@@ -215,15 +234,19 @@ Covered Call 会结合持仓 context 计算：
 
 ---
 
-## 6. 排序规则
+## 7. 排序规则
 
 排序与过滤分离。
 
 ### Sell Put
-主要按：
+`return_first` profile 仍可用于收益优先排序。默认 `short_vol` profile 会综合：
 
-1. 年化净收益率
-2. 单笔净收益
+1. IV/RV 波动率边际
+2. Delta 是否接近目标区间
+3. 组合集中度占用
+4. 年化净收益率
+5. 单笔净收益
+6. 流动性与风险距离
 
 ### Covered Call
 主要按：
@@ -243,7 +266,7 @@ Covered Call 会结合持仓 context 计算：
 
 ---
 
-## 7. 当前真实代码入口
+## 8. 当前真实代码入口
 
 如果你要从代码追当前行为，优先看：
 
@@ -255,6 +278,8 @@ Covered Call 会结合持仓 context 计算：
 - `src/application/scan_sell_put.py`
 - `src/application/sell_put_steps.py`
 - `src/application/sell_put_cash.py`
+- `src/application/sell_put_strategy_risk.py`
+- `src/application/short_vol_metrics.py`
 - `domain/domain/sell_put_config.py`
 
 ### Covered Call 路径
@@ -269,7 +294,7 @@ Covered Call 会结合持仓 context 计算：
 
 ---
 
-## 8. 这份文档不再声明的内容
+## 9. 这份文档不再声明的内容
 
 为了避免再次过时，这份文档不再写死：
 
@@ -285,10 +310,10 @@ Covered Call 会结合持仓 context 计算：
 
 ---
 
-## 9. 一句话总结
+## 10. 一句话总结
 
 当前候选策略是：
 
-> **候选引擎负责核心筛选语义，扫描脚本和后处理继续承担一部分现金、风险、报表和兼容逻辑。**
+> **候选引擎负责核心排序语义，Sell Put 后处理负责现金担保、short-vol 风险和组合集中度，Covered Call 后处理负责持仓覆盖能力。**
 
 如果以后继续重构，目标应该是让实现更集中，但在那之前，这份文档以**当前行为**为准。
