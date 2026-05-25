@@ -334,12 +334,14 @@ Agent：
 
 ### Symbols
 
+`symbols` CLI operates on an explicit generated runtime snapshot. Normal config authoring should still happen in `config.yaml`, followed by `om config build --source yaml`.
+
 ```bash
-./om symbols list
-./om symbols add TCOM --put --dry-run
-./om symbols add TCOM --put --apply
-./om symbols edit TCOM --set sell_put.max_strike=45 --apply
-./om symbols rm TCOM --apply
+./om symbols --config config.us.json list
+./om symbols --config config.us.json add TCOM --put --dry-run
+./om symbols --config config.us.json add TCOM --put --apply
+./om symbols --config config.us.json edit TCOM --set sell_put.max_strike=45 --apply
+./om symbols --config config.us.json rm TCOM --apply
 ```
 
 Agent 只读列出：

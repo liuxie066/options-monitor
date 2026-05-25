@@ -110,7 +110,7 @@ def _is_trading_day_guard_for_market(cfg: dict[str, Any], market: str) -> tuple[
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description='Multi-account tick with per-account notifications')
-    ap.add_argument('--config', default='config.us.json')
+    ap.add_argument('--config', required=True)
     ap.add_argument('--accounts', nargs='+', default=None)
     ap.add_argument('--default-account', default=None)
     ap.add_argument('--market-config', default='auto', choices=['auto', 'hk', 'us', 'all'], help='Select symbols by market at config-load time (auto=by session).')
