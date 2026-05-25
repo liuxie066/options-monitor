@@ -56,10 +56,8 @@ Use the lowest-risk tool that can answer the question.
 | Why did a symbol disappear? | `candidate_filter_explain` | Uses trace evidence instead of guessing from final CSV |
 | Why is candidate ranking odd? | `candidate_rank_explain` | Explains existing candidate CSV ranking |
 | What strategy parameters look weak? | `strategy_replay_analyze` | Diagnostic replay analysis, no config mutation |
-| What is the Strategy Lab product target? | `docs/STRATEGY_LAB_PRD.md`, `docs/STRATEGY_LAB_SYSTEM_DESIGN.md` | Strategy Lab is dataset-based strategy evaluation, not single-run replay |
-| How do I run Strategy Lab now? | `om strategy-lab dataset collect`, `om strategy-lab experiment`, `om strategy-lab current`; agent tools `strategy_lab_dataset_collect`, `strategy_lab_experiment`, `strategy_lab_current` | Default dry-run; confirmed writes only Strategy Lab outputs |
-| Is replay evidence complete enough for later lab evaluation? | `healthcheck` / `doctor` with `strategy_evidence` inputs | Diagnostic row-count/readiness check, not Strategy Lab recommendation |
-| How should replay rows be analyzed offline? | `strategy_replay_analyze` | Diagnostic evidence analysis, not Strategy Lab product path |
+| Is replay evidence complete enough for later strategy evaluation? | `healthcheck` / `doctor` with `strategy_evidence` inputs | Diagnostic row-count/readiness check, not a strategy recommendation |
+| How should replay rows be analyzed offline? | `strategy_replay_analyze` | Diagnostic evidence analysis, not a product strategy recommendation |
 | Is Sell Put cash constrained? | `query_cash_headroom` | Account-aware cash and collateral view |
 | Is ledger projection trustworthy? | `option_positions_read action=inspect`, Research `ledger` scope | Reads canonical event/projection state |
 | Does close advice have inputs? | `prepare_close_advice_inputs`, then `close_advice` or `get_close_advice` | Keeps refresh and recommendation explicit |
@@ -373,7 +371,6 @@ Use supported `gh release view --json` fields such as `tagName`, `name`, `url`, 
 |---|---|
 | Agent manifest/handler | `python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py` |
 | Research | `python3 -m pytest tests/test_research.py` |
-| Strategy Lab | `python3 -m pytest tests/test_strategy_lab_contracts.py` |
 | Candidate filter/rank | Candidate engine tests, candidate tool tests, focused trace/replay tests |
 | Tick orchestration | `python3 -m pytest tests/test_multi_tick_*.py tests/test_unified_tick_entrypoint.py` |
 | Notifications | `python3 -m pytest tests/test_notify_symbols_markdown.py tests/test_multi_tick_notify_format.py` |

@@ -83,9 +83,6 @@ om-agent run --tool runtime_status --env-file /etc/options-monitor/options-monit
 | `scan_opportunities` | `om scan` / `om scan-pipeline` |
 | `candidate_rank_explain` | Agent-only read existing candidate CSV ranking explanations |
 | `strategy_replay_analyze` | `om strategy-replay analyze` |
-| `strategy_lab_dataset_collect` | `om strategy-lab dataset collect` |
-| `strategy_lab_experiment` | `om strategy-lab experiment` |
-| `strategy_lab_current` | `om strategy-lab current` |
 | `preview_notification` | `om notify preview` |
 | `runtime_status` | `om status` or raw assistant/runtime artifact summary |
 | `runtime_runs` | `om runs` |
@@ -428,7 +425,7 @@ om strategy-replay analyze --replay-path output_shared/reports/strategy_replay.c
 注意：
 - 该工具只分析已存在的复盘记录，不重新扫描、不发通知、不写 Feishu。
 - 复盘记录应覆盖通过和被拒绝候选，否则过滤条件价值会缺少 shadow outcome 依据。
-- 该工具是历史诊断入口，不属于 Strategy Lab 产品主路径；字段输入以 `replay_path` 中的 CSV/JSON/JSONL 为准。
+- 该工具是历史诊断入口；字段输入以 `replay_path` 中的 CSV/JSON/JSONL 为准。
 
 ---
 
@@ -703,96 +700,6 @@ output_shared/state/current/research.current.json
 - 它是证据打包工具，不是线上 AI 推理功能。
 - `scheduler_evidence` 来自线上调度系统；尽量提供 `last_run_id` 和 `last_triggered_at`，否则本地 runtime 文件不能完整证明线上 cron 是否按时触发。
 - `include_healthcheck=true` 只在 `quality` / `full` scope 下有意义。
-
----
-
-## 5.18 Strategy Lab
-
-用途：
-- 从 runtime root 采集候选、拒绝、trace、outcome 和账本样本，冻结成可复现 dataset。
-- 在同一个 dataset 上比较 baseline 和 candidate，输出 `not_evaluable` / `reject` / `watch` / `shadow` 建议。
-- 查看最新实验 current pointer。
-
-边界：
-- 默认 dry-run。
-- `--confirm` 只写 Strategy Lab 自己的 dataset/result/report/current pointer。
-- 不写 `trade_events`、`position_lots`、生产配置、通知、Feishu 或 broker。
-- 样本不足时返回 `not_evaluable`，不输出伪策略结论。
-
-CLI：
-
-```bash
-om strategy-lab dataset collect \
-  --config-key us \
-  --account sy \
-  --strategy-type sell_put
-
-om strategy-lab dataset collect \
-  --config-key us \
-  --account sy \
-  --strategy-type sell_put \
-  --confirm
-
-om strategy-lab experiment \
-  --dataset-id <dataset_id>
-
-om strategy-lab experiment \
-  --dataset-id <dataset_id> \
-  --candidate-grid-path candidate-grid.json \
-  --confirm
-
-om strategy-lab current
-```
-
-Agent tools：
-
-```bash
-om-agent run --tool strategy_lab_dataset_collect --input-json '{"config_key":"us","account":"sy","strategy_type":"sell_put","dry_run":true}'
-om-agent run --tool strategy_lab_experiment --input-json '{"dataset_id":"<dataset_id>","dry_run":true}'
-om-agent run --tool strategy_lab_current --input-json '{}'
-```
-
-Agent 写模式需要全局门禁和确认：
-
-```bash
-OM_AGENT_ENABLE_WRITE_TOOLS=true om-agent run --tool strategy_lab_experiment --input-json '{"dataset_id":"<dataset_id>","confirm":true}'
-```
-
-写入位置：
-
-```text
-output_shared/strategy_lab/datasets/<dataset_id>.json
-output_shared/strategy_lab/experiments/<experiment_id>.json
-output_shared/strategy_lab/reports/<experiment_id>.md
-output_shared/state/current/strategy_lab.current.json
-```
-
----
-
-## 5.19 Strategy Lab historical data
-
-用途：
-- 将 OpenD/Futu 历史 K 线保存为 frozen snapshot。
-- 作为 dataset-based Strategy Lab 的可选数据输入之一。
-- 默认 dry-run；只有显式 `--confirm` 才连接 OpenD 并写入本地 snapshot。
-
-边界：
-- `om strategy-lab historical fetch` 只负责采集历史行情 snapshot，不运行 replay，不输出策略参数推荐。
-- Strategy Lab 的产品入口是 `dataset collect`、`experiment`、`current`，见 [STRATEGY_LAB_PRD.md](STRATEGY_LAB_PRD.md) 和 [STRATEGY_LAB_SYSTEM_DESIGN.md](STRATEGY_LAB_SYSTEM_DESIGN.md)。
-
-```bash
-om strategy-lab historical fetch \
-  --symbols NVDA,MSFT \
-  --start-date 2026-05-01 \
-  --end-date 2026-05-24 \
-  --timeframe 1d \
-  --confirm
-```
-
-说明：
-- 默认 dry-run，只输出将要请求和写入的位置，不连接 OpenD。
-- `--confirm` 后通过 OpenD/Futu 拉取历史 K 线，并写入 `output_shared/strategy_lab/historical_data/futu-<fingerprint>.json`。
-- replay 证据完整性检查归入 `om doctor` / `om healthcheck` 的 `strategy_evidence` 诊断项；策略实验和推荐不在 doctor 中完成。
 
 ---
 
