@@ -19,7 +19,6 @@ APPLICATION_SUBPACKAGES = {
     "positions",
     "settings",
     "setup",
-    "strategy_lab",
     "trades",
 }
 DOMAIN_SUBPACKAGES = {"engine", "ledger"}
