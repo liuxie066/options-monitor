@@ -2,11 +2,15 @@
 
 ## Unreleased
 
+## 1.2.143 - 2026-05-25
+
 ### Removed
 - Removed the obsolete strategy replay analysis surface (`om strategy-replay analyze`, agent `strategy_replay_analyze`, and `scripts/tools/compare_strategy_replay.py`) after Strategy Analysis was retired for redesign.
 
 ### Changed
 - Renamed scan-quality evidence diagnostics from strategy evidence to candidate evidence across `healthcheck`, `doctor`, and `research`.
+- Renamed the user-facing Sell Call terminology to Covered Call while preserving the stable internal `sell_call` key for runtime snapshots, traces, and historical files.
+- Centralized strategy vocabulary in `domain.domain.strategy_vocab` so notifications, reports, scanner text, and agent manifests share one internal-key-to-display-name mapping.
 
 ## 1.2.142 - 2026-05-24
 
