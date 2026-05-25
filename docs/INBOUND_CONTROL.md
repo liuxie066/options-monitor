@@ -88,10 +88,11 @@ For long-running Feishu WS, `config.assistant.json` controls the facade:
 assistant:
   mode: deterministic
   context_window_messages: 8
-  default_market_scope: us
 ```
 
 This still does not enable LLM. Unknown slash commands return clarification; non-slash messages continue through the deterministic inbound parser. Supported modes are `disabled`, `deterministic`, `llm_router`, and `agent_loop`.
+
+By default, `default_market_scope` is intentionally unset. Feishu WS should receive an explicit `--config-key us|hk` or `--config-path` when it is bound to one market. Only set `assistant.default_market_scope: us|hk|all` when that default is an explicit product decision for the assistant.
 
 LLM translation is disabled by default:
 
@@ -99,7 +100,6 @@ LLM translation is disabled by default:
 assistant:
   mode: deterministic
   context_window_messages: 8
-  default_market_scope: us
   llm:
     provider: ""
     base_url: ""
@@ -129,7 +129,6 @@ OM_LLM_API_KEY='sk-...'
 assistant:
   mode: llm_router
   context_window_messages: 8
-  default_market_scope: us
   llm:
     provider: openai
     base_url: ""
@@ -150,7 +149,6 @@ DEEPSEEK_API_KEY='sk-...'
 assistant:
   mode: llm_router
   context_window_messages: 8
-  default_market_scope: us
   llm:
     provider: deepseek
     base_url: "https://api.deepseek.com"

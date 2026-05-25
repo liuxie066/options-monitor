@@ -37,7 +37,7 @@ from src.infrastructure.io_utils import atomic_write_json, utc_now
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Auto trade intake via OpenD deal push")
-    ap.add_argument("--config", default="config.us.json")
+    ap.add_argument("--config", required=True)
     ap.add_argument("--data-config", default=None)
     ap.add_argument("--mode", choices=["dry-run", "apply"], default=None)
     ap.add_argument("--confirm", action="store_true", help="confirm high-risk trade-event writes and receipts")

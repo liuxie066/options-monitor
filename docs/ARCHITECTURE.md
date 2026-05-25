@@ -67,7 +67,7 @@ actions remain behind preview/confirm gates.
 The live scan/notification flow has one public chain:
 
 ```text
-./om run tick
+./om run tick --config <runtime-config.json>
 -> src.interfaces.cli.main
 -> src.application.multi_account_tick.run_tick
 -> src.application.multi_account_tick.main

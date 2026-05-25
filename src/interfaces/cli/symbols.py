@@ -103,7 +103,7 @@ def cmd_edit(cfg: dict, symbol: str, sets: list[str]):
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Manage options-monitor monitored symbols config")
-    ap.add_argument("--config", default="config.us.json")
+    ap.add_argument("--config", required=True)
     sub = ap.add_subparsers(dest="cmd", required=True)
     p_list = sub.add_parser("list")
     p_list.add_argument("--format", choices=["text", "json"], default="text")

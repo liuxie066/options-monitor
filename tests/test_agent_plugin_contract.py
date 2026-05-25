@@ -108,7 +108,6 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert research["requires_confirm"] is True
     assert research["safe_default_input"] == {
         "scope": "full",
-        "config_key": "us",
         "output": "handoff",
         "write_outputs": False,
     }
@@ -133,6 +132,20 @@ def test_agent_registry_manifest_and_handlers_stay_in_sync() -> None:
     assert manifest_names == registry_names
     assert sorted(TOOL_HANDLERS) == sorted(registry_names)
     assert '"user1"' not in json.dumps([x.get("examples") for x in spec.get("tools", [])], ensure_ascii=False)
+
+
+def test_agent_manifest_safe_defaults_do_not_select_market_config() -> None:
+    from src.application.tool_execution import build_tool_manifest as build_spec
+
+    spec = build_spec()
+
+    for tool in spec.get("tools", []):
+        schema = tool.get("input_schema") if isinstance(tool, dict) else {}
+        safe_default = tool.get("safe_default_input") if isinstance(tool, dict) else {}
+        if isinstance(schema, dict) and "config_key" in schema:
+            assert isinstance(safe_default, dict)
+            assert "config_key" not in safe_default
+            assert "config_path" not in safe_default
 
 
 def test_agent_run_unknown_tool_returns_structured_error() -> None:

@@ -227,6 +227,8 @@ Default OpenClaw safety posture:
 - 默认写工具可用性
 - 每个工具的 `risk_level` / `requires_confirm` / `requires_env` / `safe_default_input`
 
+`safe_default_input` 不会替 agent 选择 `config_key` 或 `config_path`。凡是需要 runtime config 的工具，调用方必须显式传 `config_key: us|hk` 或 `config_path`。
+
 如果你打开了：
 
 ```bash
