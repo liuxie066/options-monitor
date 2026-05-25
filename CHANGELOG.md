@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.144 - 2026-05-26
+
+### Changed
+- Added `covered_call` as the preferred `config.yaml` authoring key for Covered Call settings while preserving the generated runtime/internal `sell_call` key for snapshots, traces, CSV files, and existing code paths.
+- Updated YAML config migration, starter examples, config explain, and operator docs so user-facing configuration uses Covered Call terminology consistently.
+
 ## 1.2.143 - 2026-05-25
 
 ### Removed

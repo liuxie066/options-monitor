@@ -284,7 +284,7 @@ om run tick --config config.us.json --accounts lx sy
 它会把 trace 汇总到这几个函数维度：
 
 - `sell_put`
-- `sell_call`（内部 key，对外显示为 Covered Call）
+- `sell_call`（trace/runtime 内部 key；`config.yaml` authoring 使用 `covered_call`，对外显示为 Covered Call）
 - `close_advice`
 - `yield_enhancement`
 - `cash_reserve`
@@ -423,7 +423,7 @@ Covered Call 的关键区别是它依赖真实持仓上下文：
 - 已被 short call 锁定的股票会从可卖数量里扣掉
 - `min_strike_cost_multiplier` 会抬高有效 strike 下限，避免推荐明显低于成本底线的 call
 
-注意：当前配置、runtime CSV 和 trace 里的内部策略 key 仍是 `sell_call`。这是兼容性标识；用户可见名称统一为 `Covered Call`。
+注意：`config.yaml` 里使用 `covered_call`；生成后的 runtime JSON、CSV 和 trace 里的内部策略 key 仍是 `sell_call`。这是兼容性标识；用户可见名称统一为 `Covered Call`。
 
 ### Yield Enhancement
 
@@ -432,7 +432,7 @@ Covered Call 的关键区别是它依赖真实持仓上下文：
 要点：
 
 - 依赖 `sell_put.enabled=true`
-- 即使 `sell_call.enabled=false`，启用收益增强后也可能拉取 call 侧期权链
+- 即使 `covered_call.enabled=false`（runtime 内部为 `sell_call.enabled=false`），启用收益增强后也可能拉取 call 侧期权链
 - 重点看 `min_combo_net_credit`、`max_call_cost_to_put_credit`、`scenario_weights`、`min_scenario_score`
 
 ### Close Advice
