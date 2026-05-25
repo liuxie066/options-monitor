@@ -9,6 +9,12 @@ import json
 from src.application.agent_tool_contracts import AgentToolError
 from domain.domain.close_advice import TIER_PRIORITY
 from domain.domain.ledger.position_fields import normalize_account
+from domain.domain.strategy_vocab import (
+    STRATEGY_COVERED_CALL,
+    STRATEGY_SELL_PUT,
+    STRATEGY_YIELD_ENHANCEMENT,
+    canonical_strategy_id,
+)
 from domain.domain.trade_contract_identity import (
     contract_key,
     normalize_contract_expiration,
@@ -192,14 +198,15 @@ def _build_coverage_summary(symbol_rows: list[dict[str, Any]]) -> dict[str, Any]
 
 
 def scan_summary_rows(summary_rows: list[dict[str, Any]], *, as_float: Callable[[Any], float | None]) -> dict[str, Any]:
-    strategy_counts = {"sell_put": 0, "sell_call": 0, "yield_enhancement": 0}
+    strategy_counts = {STRATEGY_SELL_PUT: 0, STRATEGY_COVERED_CALL: 0, STRATEGY_YIELD_ENHANCEMENT: 0}
     account_counts: dict[str, int] = {}
     symbol_counts: dict[str, int] = {}
     candidates: list[dict[str, Any]] = []
     for row in summary_rows:
         if not isinstance(row, dict):
             continue
-        strategy = str(row.get("side") or row.get("strategy") or row.get("option_strategy") or "").strip().lower()
+        raw_strategy = str(row.get("side") or row.get("strategy") or row.get("option_strategy") or "").strip()
+        strategy = canonical_strategy_id(raw_strategy) if raw_strategy else ""
         if strategy in strategy_counts:
             strategy_counts[strategy] += 1
         account = normalize_account(row.get("account") or row.get("account_label"))

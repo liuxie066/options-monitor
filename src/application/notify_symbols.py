@@ -23,6 +23,15 @@ if str(repo_base) not in sys.path:
     sys.path.insert(0, str(repo_base))
 
 from domain.domain import build_no_candidate_notification_text
+from domain.domain.strategy_vocab import (
+    STRATEGY_COVERED_CALL,
+    STRATEGY_OTHER,
+    STRATEGY_SELL_PUT,
+    STRATEGY_YIELD_ENHANCEMENT,
+    canonical_strategy_id,
+    strategy_action_label,
+    strategy_section_label,
+)
 from src.infrastructure.exchange_rates import load_exchange_rate_info
 from domain.domain.alert_rules import (
     SELL_CALL_NOTIFICATION_MEDIUM,
@@ -218,7 +227,7 @@ def _parse_alert_line(raw_line: str) -> ParsedAlertLine | None:
         return None
 
     symbol_name, _symbol_code = _symbol_parts(parts[0])
-    strategy = parts[1]
+    strategy = canonical_strategy_id(parts[1])
     contract = parts[2]
     _expiration, strike_from_contract = _parse_contract(contract)
 
@@ -548,7 +557,7 @@ def _format_alert_line(line: str, *, account_label: str = '当前账户') -> str
     if parsed is None:
         return line
 
-    if parsed.strategy == 'sell_put':
+    if parsed.strategy == STRATEGY_SELL_PUT:
         cash_req_cny = parsed.extras.get('cash_req_cny', '')
         cash_req_usd = parsed.extras.get('cash_req', '')
         cash_used_sym_cny = parsed.extras.get('cash_used_sym_cny', '')
@@ -586,7 +595,7 @@ def _format_alert_line(line: str, *, account_label: str = '当前账户') -> str
         return _build_notification_block(
             account_label=account_label,
             symbol_name=parsed.symbol_name,
-            action_label='卖Put',
+            action_label=strategy_action_label(STRATEGY_SELL_PUT),
             contract=parsed.contract,
             income_line=f"- 收益: 权利金={parsed.premium} | {parsed.annual_show} | {parsed.income_show}",
             contract_line=f"- 合约: 行权价={parsed.strike_show} | 数量=1张(默认) | DTE={parsed.dte_show}",
@@ -597,7 +606,7 @@ def _format_alert_line(line: str, *, account_label: str = '当前账户') -> str
             suggestion=parsed.suggestion,
         )
 
-    if parsed.strategy == 'sell_call':
+    if parsed.strategy == STRATEGY_COVERED_CALL:
         cover = parsed.extras.get('cover', '')
         shares = parsed.extras.get('shares', '')
         delta = parsed.extras.get('delta', '')
@@ -610,7 +619,7 @@ def _format_alert_line(line: str, *, account_label: str = '当前账户') -> str
         return _build_notification_block(
             account_label=account_label,
             symbol_name=parsed.symbol_name,
-            action_label='Covered Call',
+            action_label=strategy_action_label(STRATEGY_COVERED_CALL),
             contract=parsed.contract,
             income_line=f"- 收益: 权利金={parsed.premium} | {parsed.annual_show} | {parsed.income_show}",
             contract_line=f"- 合约: 行权价={parsed.strike_show} | 数量={qty} | DTE={parsed.dte_show}",
@@ -625,7 +634,7 @@ def _format_alert_line(line: str, *, account_label: str = '当前账户') -> str
             suggestion=parsed.suggestion,
         )
 
-    if parsed.strategy == 'yield_enhancement':
+    if parsed.strategy == STRATEGY_YIELD_ENHANCEMENT:
         put_bid = parsed.extras.get('put_bid', '') or parsed.extras.get('bid', '')
         put_strike = parsed.extras.get('put_strike', '')
         call_strike = parsed.extras.get('call_strike', '')
@@ -644,7 +653,7 @@ def _format_alert_line(line: str, *, account_label: str = '当前账户') -> str
         return _build_notification_block(
             account_label=account_label,
             symbol_name=parsed.symbol_name,
-            action_label='收益增强',
+            action_label=strategy_action_label(STRATEGY_YIELD_ENHANCEMENT),
             contract=parsed.contract,
             income_line=(
                 f"- 收益: 组合净权利金={_present_or_missing(net_credit, reason='告警未提供net_credit')} | "
@@ -679,7 +688,7 @@ def _format_alert_line_compact(line: str, *, account_label: str = '当前账户'
     if parsed is None:
         return line
 
-    if parsed.strategy == 'sell_put':
+    if parsed.strategy == STRATEGY_SELL_PUT:
         cash_req_cny = parsed.extras.get('cash_req_cny', '')
         cash_req_usd = parsed.extras.get('cash_req', '')
         delta = parsed.extras.get('delta', '')
@@ -704,7 +713,7 @@ def _format_alert_line_compact(line: str, *, account_label: str = '当前账户'
             )
         return _build_notification_block_compact(
             symbol_name=parsed.symbol_name,
-            action_label='卖Put',
+            action_label=strategy_action_label(STRATEGY_SELL_PUT),
             contract=parsed.contract,
             income_line=f"- 收益: 权利金={parsed.premium} | {parsed.annual_show} | {parsed.income_show}",
             contract_line=f"- 合约: 行权价={parsed.strike_show} | 数量=1张(默认) | DTE={parsed.dte_show}",
@@ -715,7 +724,7 @@ def _format_alert_line_compact(line: str, *, account_label: str = '当前账户'
             suggestion=parsed.suggestion,
         )
 
-    if parsed.strategy == 'sell_call':
+    if parsed.strategy == STRATEGY_COVERED_CALL:
         cover = parsed.extras.get('cover', '')
         shares = parsed.extras.get('shares', '')
         delta = parsed.extras.get('delta', '')
@@ -727,7 +736,7 @@ def _format_alert_line_compact(line: str, *, account_label: str = '当前账户'
         shares_total, shares_locked, shares_available = _parse_shares_summary(shares)
         return _build_notification_block_compact(
             symbol_name=parsed.symbol_name,
-            action_label='Covered Call',
+            action_label=strategy_action_label(STRATEGY_COVERED_CALL),
             contract=parsed.contract,
             income_line=f"- 收益: 权利金={parsed.premium} | {parsed.annual_show} | {parsed.income_show}",
             contract_line=f"- 合约: 行权价={parsed.strike_show} | 数量={qty} | DTE={parsed.dte_show}",
@@ -742,7 +751,7 @@ def _format_alert_line_compact(line: str, *, account_label: str = '当前账户'
             suggestion=parsed.suggestion,
         )
 
-    if parsed.strategy == 'yield_enhancement':
+    if parsed.strategy == STRATEGY_YIELD_ENHANCEMENT:
         put_bid = parsed.extras.get('put_bid', '') or parsed.extras.get('bid', '')
         put_strike = parsed.extras.get('put_strike', '')
         call_strike = parsed.extras.get('call_strike', '')
@@ -760,7 +769,7 @@ def _format_alert_line_compact(line: str, *, account_label: str = '当前账户'
         enh_suggestion = _yield_enhancement_suggestion(put_bid, call_ask)
         return _build_notification_block_compact(
             symbol_name=parsed.symbol_name,
-            action_label='收益增强',
+            action_label=strategy_action_label(STRATEGY_YIELD_ENHANCEMENT),
             contract=parsed.contract,
             income_line=(
                 f"- 收益: 组合净权利金={_present_compact(net_credit)} | "
@@ -790,22 +799,23 @@ def _format_alert_line_compact(line: str, *, account_label: str = '当前账户'
 
 
 def _group_by_strategy(raw_lines: list[str]) -> dict[str, list[str]]:
-    g = {'sell_put': [], 'sell_call': [], 'yield_enhancement': [], 'other': []}
+    g = _empty_strategy_groups()
     for ln in raw_lines:
-        s = ln
-        if '| sell_put |' in s:
-            g['sell_put'].append(ln)
-        elif '| sell_call |' in s:
-            g['sell_call'].append(ln)
-        elif '| yield_enhancement |' in s:
-            g['yield_enhancement'].append(ln)
-        else:
-            g['other'].append(ln)
+        parsed = _parse_alert_line(ln)
+        strategy = parsed.strategy if parsed else STRATEGY_OTHER
+        if strategy not in g:
+            strategy = STRATEGY_OTHER
+        g[strategy].append(ln)
     return g
 
 
 def _empty_strategy_groups() -> dict[str, list[str]]:
-    return {'sell_put': [], 'sell_call': [], 'yield_enhancement': [], 'other': []}
+    return {
+        STRATEGY_SELL_PUT: [],
+        STRATEGY_COVERED_CALL: [],
+        STRATEGY_YIELD_ENHANCEMENT: [],
+        STRATEGY_OTHER: [],
+    }
 
 
 def _select_notification_groups(
@@ -816,7 +826,7 @@ def _select_notification_groups(
     total_limit: int = 5,
 ) -> dict[str, list[str]]:
     limit = max(1, int(total_limit or 1))
-    strategy_order = ('sell_put', 'sell_call', 'yield_enhancement', 'other')
+    strategy_order = (STRATEGY_SELL_PUT, STRATEGY_COVERED_CALL, STRATEGY_YIELD_ENHANCEMENT, STRATEGY_OTHER)
     priority_groups = [
         _group_by_strategy(section_lines)
         for section_lines in (high_lines, medium_lines, low_lines)
@@ -918,14 +928,21 @@ def build_notification(
 
         emit_fn = emit_compact if use_compact else emit_plain
 
-        if groups['sell_put']:
-            emit_fn('### Put' if use_compact else 'Put', groups['sell_put'])
-        if groups['sell_call']:
-            emit_fn('### Covered Call' if use_compact else 'Covered Call', groups['sell_call'])
-        if groups['yield_enhancement']:
-            emit_fn('### Enhancement' if use_compact else 'Enhancement', groups['yield_enhancement'])
-        if groups['other']:
-            emit_fn('### Other' if use_compact else 'Other', groups['other'])
+        if groups[STRATEGY_SELL_PUT]:
+            put_label = strategy_section_label(STRATEGY_SELL_PUT)
+            emit_fn(f'### {put_label}' if use_compact else put_label, groups[STRATEGY_SELL_PUT])
+        if groups[STRATEGY_COVERED_CALL]:
+            call_label = strategy_section_label(STRATEGY_COVERED_CALL)
+            emit_fn(f'### {call_label}' if use_compact else call_label, groups[STRATEGY_COVERED_CALL])
+        if groups[STRATEGY_YIELD_ENHANCEMENT]:
+            enhancement_label = strategy_section_label(STRATEGY_YIELD_ENHANCEMENT)
+            emit_fn(
+                f'### {enhancement_label}' if use_compact else enhancement_label,
+                groups[STRATEGY_YIELD_ENHANCEMENT],
+            )
+        if groups[STRATEGY_OTHER]:
+            other_label = strategy_section_label(STRATEGY_OTHER)
+            emit_fn(f'### {other_label}' if use_compact else other_label, groups[STRATEGY_OTHER])
 
     if not any(groups.values()):
         return build_no_candidate_notification_text(account_label=account_label)
