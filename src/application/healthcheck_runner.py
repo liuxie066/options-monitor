@@ -70,7 +70,7 @@ def _resolve_accounts(opt_cfg: dict[str, Any], requested: list[str] | None) -> l
 
 def run_healthcheck_runner(
     *,
-    config: str | Path = "config.us.json",
+    config: str | Path,
     accounts: list[str] | None = None,
     base: str | Path | None = None,
     cron_path: str | Path | None = None,
@@ -252,7 +252,7 @@ def format_healthcheck_report(result: dict[str, Any]) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="options-monitor healthcheck")
-    parser.add_argument("--config", default="config.us.json")
+    parser.add_argument("--config", required=True)
     parser.add_argument("--accounts", nargs="*", default=None)
     parser.add_argument("--json", action="store_true", help="print structured JSON instead of the human report")
     args = parser.parse_args(argv)

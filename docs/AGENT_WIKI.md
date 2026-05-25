@@ -196,7 +196,7 @@ For "why did this symbol/account not get a candidate", start from `candidate_fil
 Tick flow:
 
 ```text
-./om run tick
+./om run tick --config <runtime-config.json>
 -> src.application.multi_account_tick.run_tick
    -> tick_guard_flow
    -> tick_scheduler_context

@@ -65,7 +65,7 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
             "candidate_evidence_min_sample": "optional int; default 5; minimum candidate rows for readiness checks",
         },
         risk_level="read_only",
-        safe_default_input={"config_key": "us"},
+        safe_default_input={},
         examples=({"input": {"config_key": "us"}},),
     ),
     AgentToolDefinition(
@@ -115,7 +115,7 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
             "allow_empty_symbols": "optional bool for first-time config scaffolds",
         },
         risk_level="read_only",
-        safe_default_input={"config_key": "us"},
+        safe_default_input={},
         examples=({"input": {"config_key": "us"}},),
     ),
     AgentToolDefinition(
@@ -134,7 +134,7 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
             "force": "optional bool to preview force-mode scheduler decision",
         },
         risk_level="read_only",
-        safe_default_input={"config_key": "us"},
+        safe_default_input={},
         examples=({"input": {"config_key": "us", "account": "lx"}},),
     ),
     AgentToolDefinition(
@@ -153,7 +153,7 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
             "no_context": "optional bool",
         },
         risk_level="local_write",
-        safe_default_input={"config_key": "us", "top_n": 5},
+        safe_default_input={"top_n": 5},
         examples=({"input": {"config_key": "us", "top_n": 5}},),
     ),
     AgentToolDefinition(
@@ -219,7 +219,7 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
             "no_exchange_rates": "optional bool",
         },
         risk_level="local_write",
-        safe_default_input={"config_key": "us"},
+        safe_default_input={},
         examples=(
             {"input": {"config_key": "us", "account": "lx"}},
             {"input": {"config_key": "us", "account": "sy"}},
@@ -244,7 +244,7 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
             "include_rows": "optional bool; include cashflow, realized, open-basis, and premium detail rows",
         },
         risk_level="read_only",
-        safe_default_input={"config_key": "us"},
+        safe_default_input={},
         examples=({"input": {"config_key": "us", "account": "lx", "month": "2026-04"}},),
     ),
     AgentToolDefinition(
@@ -270,7 +270,7 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
             "exp": "events/inspect YYYY-MM-DD selector",
         },
         risk_level="read_only",
-        safe_default_input={"config_key": "us", "action": "list"},
+        safe_default_input={"action": "list"},
         examples=(
             {"input": {"config_key": "us", "action": "list", "account": "lx", "status": "open"}},
             {"input": {"config_key": "us", "action": "history", "record_id": "rec_xxx"}},
@@ -293,7 +293,7 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
             "timeout_sec": "optional int",
         },
         risk_level="local_write",
-        safe_default_input={"config_key": "us"},
+        safe_default_input={},
         examples=({"input": {"config_key": "us", "account": "lx"}},),
     ),
     AgentToolDefinition(
@@ -314,7 +314,7 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
             "timeout_sec": "optional int",
         },
         risk_level="local_write",
-        safe_default_input={"config_key": "us"},
+        safe_default_input={},
         examples=({"input": {"config_key": "us"}},),
     ),
     AgentToolDefinition(
@@ -332,7 +332,7 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
             "required_data_root": "optional explicit required_data root",
         },
         risk_level="local_write",
-        safe_default_input={"config_key": "us"},
+        safe_default_input={},
         examples=({"input": {"config_key": "us"}},),
     ),
     AgentToolDefinition(
@@ -353,7 +353,7 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
             "timeout_sec": "optional int",
         },
         risk_level="local_write",
-        safe_default_input={"config_key": "us"},
+        safe_default_input={},
         examples=({"input": {"config_key": "us"}},),
     ),
     AgentToolDefinition(
@@ -375,7 +375,7 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
         risk_level="local_write",
         requires_confirm=True,
         requires_env=("OM_AGENT_ENABLE_WRITE_TOOLS=true for non-dry-run writes",),
-        safe_default_input={"config_key": "us", "action": "list"},
+        safe_default_input={"action": "list"},
         examples=(
             {"input": {"config_key": "us", "action": "list"}},
             {"input": {"config_key": "us", "action": "add", "symbol": "NVDA", "dry_run": True}},
@@ -433,7 +433,7 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
             "timeoutSeconds": "optional outer runner timeout in seconds",
         },
         risk_level="read_only",
-        safe_default_input={"config_key": "us"},
+        safe_default_input={},
         examples=({"input": {"config_key": "us", "max_notification_chars": 2000}},),
     ),
     AgentToolDefinition(
@@ -503,7 +503,7 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
             "timeoutSeconds": "optional outer runner timeout in seconds, forwarded to runtime_status",
         },
         risk_level="read_only",
-        safe_default_input={"config_key": "us"},
+        safe_default_input={},
         examples=({"input": {"config_key": "us", "timeout_sec": 20}},),
     ),
     AgentToolDefinition(
@@ -556,7 +556,7 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
         },
         risk_level="local_write",
         requires_confirm=True,
-        safe_default_input={"scope": "full", "config_key": "us", "output": "handoff", "write_outputs": False},
+        safe_default_input={"scope": "full", "output": "handoff", "write_outputs": False},
         examples=(
             {"input": {"scope": "full", "config_key": "us"}},
             {"input": {"scope": "ledger", "config_key": "us"}},

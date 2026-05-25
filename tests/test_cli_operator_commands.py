@@ -926,6 +926,22 @@ def test_config_validate_defaults_to_runtime_source(monkeypatch, capsys) -> None
     assert calls == [{"config_key": None, "config_path": "config.us.json", "market": "us", "allow_legacy_source": False}]
 
 
+@pytest.mark.parametrize("argv", [["config", "build", "--help"], ["config", "explain", "--help"]])
+def test_config_authoring_help_hides_legacy_flags(argv: list[str], capsys) -> None:
+    import src.interfaces.cli.main as cli
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(argv)
+
+    out = capsys.readouterr().out
+    assert exc.value.code == 0
+    assert "--source {yaml}" in out
+    assert "--source legacy" not in out
+    assert "--common-user-config" not in out
+    assert "--no-common-user-config" not in out
+    assert "--user-config" not in out
+
+
 def test_setup_init_emits_deprecation_warning(monkeypatch, capsys) -> None:
     import src.interfaces.cli.main as cli
 
