@@ -71,7 +71,15 @@ def resolve_candidate_score_weights(raw: CandidateScoreWeights | dict[str, Any] 
         raise ValueError("score_weights must be an object")
 
     defaults = CandidateScoreWeights()
-    allowed = {"annualized_return", "net_income", "liquidity", "risk_distance"}
+    allowed = {
+        "annualized_return",
+        "net_income",
+        "liquidity",
+        "risk_distance",
+        "vol_edge",
+        "delta_target",
+        "concentration",
+    }
     unsupported = [str(key) for key in raw.keys() if key not in allowed]
     if unsupported:
         raise ValueError(f"score_weights has unsupported keys: {', '.join(unsupported)}")
@@ -91,6 +99,9 @@ def resolve_candidate_score_weights(raw: CandidateScoreWeights | dict[str, Any] 
         net_income=_weight("net_income", defaults.net_income),
         liquidity=_weight("liquidity", defaults.liquidity),
         risk_distance=_weight("risk_distance", defaults.risk_distance),
+        vol_edge=_weight("vol_edge", defaults.vol_edge),
+        delta_target=_weight("delta_target", defaults.delta_target),
+        concentration=_weight("concentration", defaults.concentration),
     )
 
 

@@ -130,6 +130,9 @@ class CandidateScoreWeights:
     net_income: float = 1e-6
     liquidity: float = 0.0
     risk_distance: float = 0.0
+    vol_edge: float = 0.0
+    delta_target: float = 0.0
+    concentration: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -224,6 +227,9 @@ def compute_candidate_strategy_score(
     delta: float | None = None,
     otm_pct: float | None = None,
     dte: float | None = None,
+    vol_edge_score: float | None = None,
+    delta_target_score: float | None = None,
+    concentration_score: float | None = None,
     weights: CandidateScoreWeights | None = None,
 ) -> CandidateStrategyScore:
     mode_norm = normalize_strategy_mode(mode)
@@ -244,6 +250,9 @@ def compute_candidate_strategy_score(
             dte=_coerce_float(dte),
         )
         * float(score_weights.risk_distance),
+        "vol_edge": (_coerce_float(vol_edge_score) or 0.0) * float(score_weights.vol_edge),
+        "delta_target": (_coerce_float(delta_target_score) or 0.0) * float(score_weights.delta_target),
+        "concentration": (_coerce_float(concentration_score) or 0.0) * float(score_weights.concentration),
     }
     warnings: list[str] = []
     spread_value = _coerce_float(spread_ratio)
@@ -277,6 +286,11 @@ def _candidate_score_inputs(src: dict[str, Any], *, mode: StrategyMode) -> dict[
         "delta": _first_float(src, "delta"),
         "otm_pct": otm_pct,
         "dte": _first_float(src, "dte"),
+        "vol_edge_score": _first_float(src, "vol_edge_score"),
+        "iv_rv_ratio": _first_float(src, "iv_rv_ratio"),
+        "iv_minus_rv": _first_float(src, "iv_minus_rv"),
+        "delta_target_score": _first_float(src, "delta_target_score"),
+        "concentration_score": _first_float(src, "concentration_score"),
     }
 
 
@@ -285,6 +299,9 @@ _SCORE_COMPONENT_LABELS: dict[str, str] = {
     "net_income": "净收入",
     "liquidity": "流动性",
     "risk_distance": "风险距离",
+    "vol_edge": "波动率优势",
+    "delta_target": "Delta目标",
+    "concentration": "集中度",
 }
 
 _SCORE_WARNING_LABELS: dict[str, str] = {
@@ -313,6 +330,12 @@ def _rank_reason(primary_drivers: list[str], warnings: list[str]) -> str:
             parts.append("流动性评分有正向贡献")
         elif driver == "risk_distance":
             parts.append("价外/Delta/DTE 风险距离有正向贡献")
+        elif driver == "vol_edge":
+            parts.append("IV/RV 波动率优势贡献领先")
+        elif driver == "delta_target":
+            parts.append("Delta 更接近目标区间")
+        elif driver == "concentration":
+            parts.append("组合集中度占用较低")
     if not parts:
         parts.append("候选通过准入，排序分数主要由默认收益项决定")
     if warnings:
@@ -941,6 +964,9 @@ def build_candidate_rank_key(
             delta=score_inputs["delta"],
             otm_pct=score_inputs["otm_pct"],
             dte=score_inputs["dte"],
+            vol_edge_score=score_inputs["vol_edge_score"],
+            delta_target_score=score_inputs["delta_target_score"],
+            concentration_score=score_inputs["concentration_score"],
             weights=score_weights,
         )
         out: dict[str, Any] = {
@@ -966,6 +992,9 @@ def build_candidate_rank_key(
         delta=score_inputs["delta"],
         otm_pct=score_inputs["otm_pct"],
         dte=score_inputs["dte"],
+        vol_edge_score=score_inputs["vol_edge_score"],
+        delta_target_score=score_inputs["delta_target_score"],
+        concentration_score=score_inputs["concentration_score"],
         weights=score_weights,
     )
     out = {

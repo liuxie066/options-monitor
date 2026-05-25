@@ -221,6 +221,21 @@ def test_strategy_prefetch_kwargs_uses_strategy_dte_and_strike_bounds() -> None:
     assert out["side_strike_windows"]["put"]["max_strike"] == 450
     assert out["side_strike_windows"]["call"]["min_strike"] == 550
     assert out["side_strike_windows"]["call"]["max_strike"] > 660
+    assert out["include_realized_volatility"] is False
+
+
+def test_strategy_prefetch_kwargs_requires_rv_for_sell_put_short_vol() -> None:
+    out = mod._strategy_prefetch_kwargs(
+        {
+            "symbol": "NVDA",
+            "sell_put": {"enabled": True, "strategy": "short_vol"},
+            "sell_call": {"enabled": False},
+        },
+        enabled=True,
+    )
+
+    assert out["option_types"] == "put"
+    assert out["include_realized_volatility"] is True
 
 
 def test_inprocess_prefetch_passes_strategy_bounds_to_fetch_symbol(tmp_path: Path, monkeypatch) -> None:
@@ -267,6 +282,7 @@ def test_inprocess_prefetch_passes_strategy_bounds_to_fetch_symbol(tmp_path: Pat
     assert captured["min_dte"] == 20
     assert captured["max_dte"] == 60
     assert captured["side_strike_windows"] == {"put": {"min_strike": 360.0, "max_strike": 450.0}}
+    assert captured["include_realized_volatility"] is False
 
 
 def test_prefetch_dedupes_same_run_symbol_and_merges_strategy_bounds(tmp_path: Path, monkeypatch) -> None:

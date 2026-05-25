@@ -27,7 +27,11 @@ from src.application.ledger.api import (
     list_position_lot_snapshots,
     open_position_ledger,
 )
-from src.application.portfolio_context_service import load_account_portfolio_context, with_context_source
+from src.application.portfolio_context_service import (
+    load_account_portfolio_context,
+    load_holdings_portfolio_shared_context,
+    with_context_source,
+)
 from domain.services import adapt_holdings_context, adapt_option_positions_context
 from src.application.positions.context_builder import slice_shared_context_for_account as slice_shared_option_context_for_account
 from domain.storage.repositories import state_repo
@@ -175,6 +179,106 @@ def _load_option_position_exchange_rates(*, base: Path, state_dir: Path, log) ->
         log(f"[WARN] option position exchange rates not available: {exc}")
         return None
 
+
+def _wants_sell_put_short_vol_risk_context(cfg: dict | None) -> bool:
+    if not isinstance(cfg, dict):
+        return False
+
+    def _is_short_vol(node: object) -> bool:
+        return isinstance(node, dict) and str(node.get("strategy") or "").strip().lower() == "short_vol"
+
+    templates = cfg.get("templates")
+    if isinstance(templates, dict):
+        for profile in templates.values():
+            if isinstance(profile, dict) and _is_short_vol(profile.get("sell_put")):
+                return True
+    for item in cfg.get("symbols") or []:
+        if isinstance(item, dict) and _is_short_vol(item.get("sell_put")):
+            return True
+    return False
+
+
+def load_global_holdings_risk_context(
+    *,
+    base: Path,
+    data_config: str,
+    ttl_sec: int,
+    shared_state_dir: Path | None,
+    state_dir: Path,
+    log,
+) -> dict | None:
+    """Best-effort all-broker holdings context for portfolio risk limits."""
+
+    try:
+        shared_root = (shared_state_dir or state_dir).resolve()
+        shared_root.mkdir(parents=True, exist_ok=True)
+        path = (shared_root / "portfolio_context.global.json").resolve()
+        if ttl_sec > 0 and is_fresh(path, ttl_sec):
+            cached = load_cached_json(path)
+            if isinstance(cached, dict):
+                cached = with_context_source(cached, "global_cache")
+                log("[CTX] portfolio_context source=global_cache account=all broker=all")
+                return cached
+
+        shared_ctx = load_holdings_portfolio_shared_context(
+            data_config_path=Path(data_config),
+            broker=None,
+        )
+        all_accounts = shared_ctx.get("all_accounts") if isinstance(shared_ctx, dict) else None
+        if not isinstance(all_accounts, dict):
+            raise ValueError("global holdings context missing all_accounts")
+        out = dict(all_accounts)
+        out["portfolio_source_name"] = "holdings_global"
+        out = with_context_source(out, "global_refresh")
+        path.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+        log("[CTX] portfolio_context source=global_refresh account=all broker=all")
+        snap = adapt_holdings_context(out)
+        _persist_source_snapshot(base, snap)
+        return out
+    except Exception as exc:
+        log(f"[WARN] global holdings risk context not available: {exc}")
+        return None
+
+
+def load_global_option_positions_risk_context(
+    *,
+    base: Path,
+    data_config: str,
+    ttl_sec: int,
+    shared_state_dir: Path | None,
+    state_dir: Path,
+    log,
+) -> dict | None:
+    """Best-effort all-broker option-position context for short-put exposure."""
+
+    try:
+        shared_root = (shared_state_dir or state_dir).resolve()
+        shared_root.mkdir(parents=True, exist_ok=True)
+        path = (shared_root / "option_positions_context.global.json").resolve()
+        if ttl_sec > 0 and is_fresh(path, ttl_sec):
+            cached = load_cached_json(path)
+            if isinstance(cached, dict):
+                cached = with_context_source(cached, "global_cache")
+                log("[CTX] option_positions_context source=global_cache account=all broker=all")
+                return cached
+
+        _repo, records = _load_option_position_records(data_config)
+        rates = _load_option_position_exchange_rates(base=base, state_dir=state_dir, log=log)
+        shared_ctx = build_shared_option_positions_context(records, broker="", rates=rates)
+        all_accounts = shared_ctx.get("all_accounts") if isinstance(shared_ctx, dict) else None
+        if not isinstance(all_accounts, dict):
+            raise ValueError("global option positions context missing all_accounts")
+        out = dict(all_accounts)
+        out = with_context_source(out, "global_refresh")
+        path.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+        log("[CTX] option_positions_context source=global_refresh account=all broker=all")
+        snap = adapt_option_positions_context(out)
+        _persist_source_snapshot(base, snap)
+        return out
+    except Exception as exc:
+        log(f"[WARN] global option positions risk context not available: {exc}")
+        return None
+
 def load_exchange_rates(*, base: Path, state_dir: Path, log, shared_state_dir: Path | None = None) -> tuple[float | None, float | None]:
     """Best-effort exchange-rate loader.
 
@@ -265,6 +369,29 @@ def build_pipeline_context(
         shared_state_dir=shared_state_dir,
         log=log,
     )
+
+    if portfolio_ctx is not None and _wants_sell_put_short_vol_risk_context(cfg):
+        portfolio_ctx = dict(portfolio_ctx)
+        global_portfolio_ctx = load_global_holdings_risk_context(
+            base=base,
+            data_config=str(data_config),
+            ttl_sec=ttl_port_ctx,
+            shared_state_dir=shared_state_dir,
+            state_dir=state_dir,
+            log=log,
+        )
+        if global_portfolio_ctx is not None:
+            portfolio_ctx["_global_portfolio_ctx"] = global_portfolio_ctx
+        global_option_ctx = load_global_option_positions_risk_context(
+            base=base,
+            data_config=str(data_config),
+            ttl_sec=ttl_opt_ctx,
+            shared_state_dir=shared_state_dir,
+            state_dir=state_dir,
+            log=log,
+        )
+        if global_option_ctx is not None:
+            portfolio_ctx["_global_option_ctx"] = global_option_ctx
 
     usd_per_cny_exchange_rate, cny_per_hkd_exchange_rate = load_exchange_rates(
         base=base,

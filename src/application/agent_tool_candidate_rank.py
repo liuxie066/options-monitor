@@ -39,6 +39,9 @@ def _score_weights_from_payload(payload: dict[str, Any]) -> CandidateScoreWeight
         net_income=_as_float(raw.get("net_income", 1e-6), field="score_weights.net_income"),
         liquidity=_as_float(raw.get("liquidity", 0.0), field="score_weights.liquidity"),
         risk_distance=_as_float(raw.get("risk_distance", 0.0), field="score_weights.risk_distance"),
+        vol_edge=_as_float(raw.get("vol_edge", 0.0), field="score_weights.vol_edge"),
+        delta_target=_as_float(raw.get("delta_target", 0.0), field="score_weights.delta_target"),
+        concentration=_as_float(raw.get("concentration", 0.0), field="score_weights.concentration"),
     )
 
 
@@ -49,6 +52,9 @@ def _weight_payload(weights: CandidateScoreWeights | None) -> dict[str, float]:
         "net_income": float(actual.net_income),
         "liquidity": float(actual.liquidity),
         "risk_distance": float(actual.risk_distance),
+        "vol_edge": float(actual.vol_edge),
+        "delta_target": float(actual.delta_target),
+        "concentration": float(actual.concentration),
     }
 
 
@@ -207,7 +213,15 @@ def _baseline_changes(
     baseline = rank_candidate_rows(
         rows,
         mode=mode,
-        score_weights=CandidateScoreWeights(annualized_return=1.0, net_income=0.0, liquidity=0.0, risk_distance=0.0),
+        score_weights=CandidateScoreWeights(
+            annualized_return=1.0,
+            net_income=0.0,
+            liquidity=0.0,
+            risk_distance=0.0,
+            vol_edge=0.0,
+            delta_target=0.0,
+            concentration=0.0,
+        ),
     )
     old_rank = {str(row.get("_rank_explain_row_id")): idx for idx, row in enumerate(baseline, start=1)}
     changes: list[dict[str, Any]] = []

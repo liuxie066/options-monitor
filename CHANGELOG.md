@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 1.2.145 - 2026-05-26
+
+### Added
+- Added Sell Put `short_vol` strategy screening with IV/RV edge gates, Delta target-band checks, and portfolio concentration caps.
+- Added realized-volatility snapshots from OpenD/Futu historical daily K-line data, including RV20/RV60/RV120 and a weighted RV estimate in candidate outputs.
+- Added short-vol ranking dimensions for volatility edge, Delta target quality, and concentration usage.
+
+### Changed
+- Changed the default Sell Put strategy to `short_vol`, making missing IV/RV/Delta/NAV/concentration evidence fail closed instead of ranking by yield alone.
+- Expanded Sell Put reports, summaries, and alerts with IV/RV, Delta, and concentration diagnostics.
+
 ## 1.2.144 - 2026-05-26
 
 ### Changed
