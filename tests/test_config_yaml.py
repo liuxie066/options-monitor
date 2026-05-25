@@ -12,6 +12,7 @@ from src.application.config_validator import validate_config
 from src.application.config_yaml import (
     RESOLVED_KEY,
     build_yaml_assistant_config_file,
+    explain_yaml_config_key,
     resolve_yaml_assistant_config,
     resolve_yaml_runtime_config,
 )
@@ -64,6 +65,10 @@ markets:
         sell_put:
           dte: [20, 45]
           strike: [55, 85]
+        covered_call:
+          enabled: true
+          dte: [20, 60]
+          strike: [90, 120]
         yield_enhancement: true
 
   hk:
@@ -114,6 +119,12 @@ def test_yaml_config_resolves_user_overrides_and_defaults(tmp_path: Path) -> Non
     assert futu["sell_put"]["max_dte"] == 45
     assert futu["sell_put"]["min_strike"] == 55
     assert futu["sell_put"]["max_strike"] == 85
+    assert "covered_call" not in futu
+    assert futu["sell_call"]["enabled"] is True
+    assert futu["sell_call"]["min_dte"] == 20
+    assert futu["sell_call"]["max_dte"] == 60
+    assert futu["sell_call"]["min_strike"] == 90
+    assert futu["sell_call"]["max_strike"] == 120
     assert futu["yield_enhancement"]["enabled"] is True
     assert cfg[GENERATED_KEY]["source_format"] == "yaml"
     assert cfg[GENERATED_KEY]["sources"][0]["inline"] is True
@@ -122,6 +133,108 @@ def test_yaml_config_resolves_user_overrides_and_defaults(tmp_path: Path) -> Non
     assert cfg[RESOLVED_KEY]["default_source"] == DEFAULT_CONFIG_REF
 
     validate_config(json.loads(json.dumps(cfg)))
+
+
+def test_yaml_config_accepts_legacy_sell_call_authoring_key(tmp_path: Path) -> None:
+    config_path = _write_yaml(
+        tmp_path / "config.yaml",
+        """\
+accounts:
+  lx:
+    type: futu
+markets:
+  us:
+    accounts: [lx]
+    symbols: [NVDA]
+    overrides:
+      NVDA:
+        sell_call:
+          enabled: true
+          dte: [20, 45]
+          strike: [150, 180]
+""",
+    )
+
+    cfg, _meta = resolve_yaml_runtime_config(repo_root=REPO_ROOT, market="us", config_path=config_path)
+
+    assert cfg["symbols"][0]["sell_call"]["enabled"] is True
+    assert cfg["symbols"][0]["sell_call"]["min_dte"] == 20
+    assert cfg["symbols"][0]["sell_call"]["max_strike"] == 180
+    validate_config(json.loads(json.dumps(cfg)))
+
+
+def test_yaml_config_rejects_covered_call_and_sell_call_conflict(tmp_path: Path) -> None:
+    config_path = _write_yaml(
+        tmp_path / "config.yaml",
+        """\
+accounts:
+  lx:
+    type: futu
+markets:
+  us:
+    accounts: [lx]
+    symbols: [NVDA]
+    overrides:
+      NVDA:
+        covered_call:
+          enabled: false
+        sell_call:
+          enabled: false
+""",
+    )
+
+    with pytest.raises(AgentToolError, match="cannot define both covered_call and sell_call"):
+        resolve_yaml_runtime_config(repo_root=REPO_ROOT, market="us", config_path=config_path)
+
+
+def test_yaml_config_explain_maps_covered_call_authoring_key(tmp_path: Path) -> None:
+    config_path = _write_yaml(tmp_path / "config.yaml", _minimal_yaml())
+
+    out = explain_yaml_config_key(
+        repo_root=REPO_ROOT,
+        market="us",
+        key="symbols.1.covered_call.min_dte",
+        config_path=config_path,
+    )
+
+    assert out["exists"] is True
+    assert out["value"] == 20
+    assert out["runtime_path"] == "symbols.1.sell_call.min_dte"
+    assert any("covered_call" in item and "sell_call" in item for item in out["notes"])
+
+
+def test_yaml_config_maps_covered_call_passthrough_authoring_keys(tmp_path: Path) -> None:
+    config_path = _write_yaml(
+        tmp_path / "config.yaml",
+        """\
+accounts:
+  lx:
+    type: futu
+templates:
+  call_base:
+    covered_call:
+      min_strike_cost_multiplier: 1.05
+symbol_defaults:
+  covered_call:
+    enabled: false
+alert_policy:
+  covered_call:
+    medium_annual: 0.07
+markets:
+  us:
+    accounts: [lx]
+    symbols: [NVDA]
+""",
+    )
+
+    cfg, _meta = resolve_yaml_runtime_config(repo_root=REPO_ROOT, market="us", config_path=config_path)
+
+    assert "covered_call" not in cfg["templates"]["call_base"]
+    assert cfg["templates"]["call_base"]["sell_call"]["min_strike_cost_multiplier"] == 1.05
+    assert "covered_call" not in cfg["symbols"][0]
+    assert cfg["symbols"][0]["sell_call"]["enabled"] is False
+    assert "covered_call" not in cfg["alert_policy"]
+    assert cfg["alert_policy"]["sell_call"]["medium_annual"] == 0.07
 
 
 def test_yaml_assistant_config_merges_system_defaults(tmp_path: Path) -> None:
@@ -470,6 +583,8 @@ def test_config_migrate_yaml_preview_generates_valid_yaml(tmp_path: Path) -> Non
                     },
                 },
                 "inbound": {"feishu_ws": {"ack_reaction": "THUMBSUP"}},
+                "alert_policy": {"sell_call": {"medium_annual": 0.07}},
+                "templates": {"call_base": {"sell_call": {"min_strike_cost_multiplier": 1.05}}},
             },
             ensure_ascii=False,
         ),
@@ -481,7 +596,11 @@ def test_config_migrate_yaml_preview_generates_valid_yaml(tmp_path: Path) -> Non
             {
                 "symbols": [
                     {"symbol": "NVDA", "sell_put": {"max_strike": 150.0}},
-                    {"symbol": "PDD", "yield_enhancement": {"enabled": True}},
+                    {
+                        "symbol": "PDD",
+                        "sell_call": {"enabled": True, "min_dte": 20, "max_dte": 45, "min_strike": 120},
+                        "yield_enhancement": {"enabled": True},
+                    },
                 ]
             },
             ensure_ascii=False,
@@ -524,7 +643,13 @@ def test_config_migrate_yaml_preview_generates_valid_yaml(tmp_path: Path) -> Non
         "api_key_env": "DEEPSEEK_API_KEY",
     }
     assert payload["markets"]["us"]["symbols"] == ["NVDA", "PDD"]
+    assert "sell_call" not in payload["markets"]["us"]["overrides"]["PDD"]
+    assert payload["markets"]["us"]["overrides"]["PDD"]["covered_call"]["min_strike"] == 120
     assert payload["markets"]["us"]["overrides"]["PDD"]["yield_enhancement"] is True
+    assert "sell_call" not in payload["alert_policy"]
+    assert payload["alert_policy"]["covered_call"]["medium_annual"] == 0.07
+    assert "sell_call" not in payload["templates"]["call_base"]
+    assert payload["templates"]["call_base"]["covered_call"]["min_strike_cost_multiplier"] == 1.05
     assert any("configs/user.common.json.agent migrated to assistant" in item for item in out["warnings"])
 
     migrated_path = tmp_path / "generated.yaml"

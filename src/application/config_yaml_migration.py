@@ -20,6 +20,7 @@ from src.application.config_yaml import (
     ROOT_KEYS,
     WRITE_GATE_KEYS,
     build_yaml_runtime_config_file,
+    runtime_strategy_keys_to_yaml_authoring,
     validate_yaml_runtime_config,
     yaml_to_market_user_config,
 )
@@ -121,7 +122,11 @@ def _copy_supported_fields(
             warnings.append(f"{path}.{key} omitted: write policy belongs to env gates or command-level apply/confirm")
             continue
         if key in allowed and key in PASSTHROUGH_KEYS:
-            out[key] = deepcopy(value)
+            out[key] = (
+                runtime_strategy_keys_to_yaml_authoring(value)
+                if key in {"alert_policy", "symbol_defaults", "templates"}
+                else deepcopy(value)
+            )
             continue
         if key in allowed:
             out[key] = deepcopy(value)
@@ -213,7 +218,7 @@ def _symbol_item_to_yaml(raw: Any, *, path: str) -> tuple[str, dict[str, Any]]:
             item[key] = _compact_strategy(item[key])
     if "yield_enhancement" in item:
         item["yield_enhancement"] = _compact_boolean_enabled(item["yield_enhancement"])
-    return symbol, item
+    return symbol, runtime_strategy_keys_to_yaml_authoring(item)
 
 
 def _market_payload_from_user_config(
