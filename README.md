@@ -545,26 +545,6 @@ Research 证据交接：
 
 `research` 是给 MacBook 上的 Codex 分析线上质量和策略问题的证据打包入口。线上侧只收集 redacted bundle / handoff，不调用在线 AI；run 列表和日志摘要与 `./om runs` / `./om logs` 同源，调度系统状态需要通过 `scheduler_evidence` 或 CLI 的 `--scheduler-evidence-json` 显式传入。
 
-Strategy Lab 的产品目标不是单次 replay，而是基于冻结历史样本评估当前策略和候选策略，并输出是否值得调整策略的证据化建议。当前入口：
-
-```bash
-./om strategy-lab dataset collect --config-key us --account sy --strategy-type sell_put
-./om strategy-lab dataset collect --config-key us --account sy --strategy-type sell_put --confirm
-./om strategy-lab experiment --dataset-id <dataset_id>
-./om strategy-lab experiment --dataset-id <dataset_id> --confirm
-./om strategy-lab current
-```
-
-Agent 入口：
-
-```bash
-./om-agent run --tool strategy_lab_dataset_collect --input-json '{"config_key":"us","account":"sy","strategy_type":"sell_put","dry_run":true}'
-./om-agent run --tool strategy_lab_experiment --input-json '{"dataset_id":"<dataset_id>","dry_run":true}'
-./om-agent run --tool strategy_lab_current --input-json '{}'
-```
-
-默认 dry-run；`--confirm` 只写 Strategy Lab 自己的 dataset/result/report/current pointer，不写交易、持仓、生产配置、通知或 broker。产品和系统设计见 [docs/STRATEGY_LAB_PRD.md](docs/STRATEGY_LAB_PRD.md) 与 [docs/STRATEGY_LAB_SYSTEM_DESIGN.md](docs/STRATEGY_LAB_SYSTEM_DESIGN.md)。
-
 写工具门禁：
 
 ```bash

@@ -31,11 +31,6 @@ from src.application.agent_tool_healthcheck import run_healthcheck_tool
 from src.application.agent_tool_candidate_rank import candidate_rank_explain_tool
 from src.application.agent_tool_candidate_filter import candidate_filter_explain_tool
 from src.application.agent_tool_strategy_replay import strategy_replay_analyze_tool
-from src.application.strategy_lab.service import (
-    strategy_lab_current_tool,
-    strategy_lab_dataset_collect_tool,
-    strategy_lab_experiment_tool,
-)
 from src.application.research import research_tool
 from src.application.agent_tool_notifications import preview_notification_tool
 from src.application.agent_tool_openclaw import openclaw_readiness_tool
@@ -310,18 +305,6 @@ def _strategy_replay_analyze_tool(payload: dict[str, Any]) -> tuple[dict[str, An
     )
 
 
-def _strategy_lab_dataset_collect_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    return strategy_lab_dataset_collect_tool(payload, base=repo_base())
-
-
-def _strategy_lab_experiment_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    return strategy_lab_experiment_tool(payload, base=repo_base())
-
-
-def _strategy_lab_current_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    return strategy_lab_current_tool(payload, base=repo_base())
-
-
 def _prepare_close_advice_inputs_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     return prepare_close_advice_inputs_tool(
         payload,
@@ -466,9 +449,6 @@ TOOL_HANDLERS = {
     "candidate_rank_explain": _candidate_rank_explain_tool,
     "candidate_filter_explain": _candidate_filter_explain_tool,
     "strategy_replay_analyze": _strategy_replay_analyze_tool,
-    "strategy_lab_dataset_collect": _strategy_lab_dataset_collect_tool,
-    "strategy_lab_experiment": _strategy_lab_experiment_tool,
-    "strategy_lab_current": _strategy_lab_current_tool,
     "prepare_close_advice_inputs": _prepare_close_advice_inputs_tool,
     "close_advice": _close_advice_tool,
     "get_close_advice": _get_close_advice_tool,

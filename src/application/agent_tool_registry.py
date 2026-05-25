@@ -208,7 +208,7 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
         read_only=True,
         description=(
             "Diagnose offline replay evidence for DTE, Delta, symbol drawdown, and filter-value signals. "
-            "This is a read-only diagnostic surface, not the Strategy Lab product entry."
+            "This is a read-only diagnostic surface, not the strategy analysis product entry."
         ),
         requires=("strategy_replay_rows",),
         capabilities=("strategy_replay_diagnostic", "parameter_signal_diagnostic", "read_only"),
@@ -226,91 +226,6 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
             {"input": {"replay_path": "output_shared/reports/strategy_replay.csv", "min_sample": 5}},
             {"input": {"rows": [{"symbol": "NVDA", "dte": 30, "delta": -0.2, "actual_return": 0.03}], "min_sample": 1}},
         ),
-    ),
-    AgentToolDefinition(
-        name="strategy_lab_dataset_collect",
-        read_only=False,
-        description=(
-            "Collect and freeze Strategy Lab evidence into a dataset. Defaults to dry-run and only writes local "
-            "Strategy Lab dataset files when confirm=true."
-        ),
-        requires=("local_candidate_evidence", "option_position_ledger"),
-        capabilities=("strategy_lab", "dataset_collect", "local_write"),
-        side_effects=("writes_strategy_lab_dataset",),
-        input_schema={
-            "config_key": "optional us|hk market hint",
-            "market": "optional explicit market hint",
-            "runtime_root": "optional runtime root; defaults to resolved OM runtime root",
-            "account": "optional account label; omitted means all accounts",
-            "strategy_type": "sell_put|sell_call|yield_enhancement|close_advice; defaults to sell_put",
-            "start_date": "optional YYYY-MM-DD sample window start",
-            "end_date": "optional YYYY-MM-DD sample window end",
-            "candidate_path": "optional candidate evidence file; candidate_paths also supported",
-            "reject_log_path": "optional reject evidence file; reject_log_paths also supported",
-            "trace_path": "optional candidate trace file; trace_paths also supported",
-            "outcome_path": "optional outcome/replay evidence file; outcome_paths also supported",
-            "sqlite_path": "optional ledger SQLite path for explicit diagnostics",
-            "sample_limit": "optional int sample rows retained per source",
-            "dry_run": "optional bool; true previews without writing",
-            "confirm": "required true to write dataset",
-            "yes": "optional non-interactive confirmation alias",
-        },
-        risk_level="local_write",
-        requires_confirm=True,
-        safe_default_input={"strategy_type": "sell_put", "dry_run": True},
-        examples=(
-            {"input": {"strategy_type": "sell_put", "account": "sy", "dry_run": True}},
-            {"input": {"strategy_type": "sell_put", "account": "sy", "confirm": True}},
-        ),
-    ),
-    AgentToolDefinition(
-        name="strategy_lab_experiment",
-        read_only=False,
-        description=(
-            "Run a Strategy Lab experiment from a frozen dataset or freshly collected evidence, then produce a "
-            "recommendation and report. Defaults to dry-run and only writes local Strategy Lab outputs when confirm=true."
-        ),
-        requires=("strategy_lab_dataset",),
-        capabilities=("strategy_lab", "experiment", "recommendation", "local_write"),
-        side_effects=("writes_strategy_lab_experiment", "writes_strategy_lab_current_pointer"),
-        input_schema={
-            "dataset_id": "optional frozen dataset id; omitted collects a temporary dataset first",
-            "runtime_root": "optional runtime root; defaults to resolved OM runtime root",
-            "config_key": "optional us|hk market hint",
-            "account": "optional account label; omitted means all accounts",
-            "strategy_type": "sell_put|sell_call|yield_enhancement|close_advice; defaults from dataset or sell_put",
-            "start_date": "optional YYYY-MM-DD sample window start",
-            "end_date": "optional YYYY-MM-DD sample window end",
-            "candidate_params": "optional candidate policy params object",
-            "candidate_grid_path": "optional JSON candidate grid path; MVP evaluates the first candidate policy",
-            "baseline_params": "optional baseline policy params object",
-            "min_candidate_sample": "optional int; default 5",
-            "min_outcome_sample": "optional int; default 5",
-            "min_trace_or_reject_sample": "optional int; default 1",
-            "dry_run": "optional bool; true previews without writing",
-            "confirm": "required true to write experiment/report/current pointer",
-            "yes": "optional non-interactive confirmation alias",
-        },
-        risk_level="local_write",
-        requires_confirm=True,
-        safe_default_input={"strategy_type": "sell_put", "dry_run": True},
-        examples=(
-            {"input": {"dataset_id": "us_sy_sell_put_20260501_20260531_abc123", "dry_run": True}},
-            {"input": {"dataset_id": "us_sy_sell_put_20260501_20260531_abc123", "confirm": True}},
-        ),
-    ),
-    AgentToolDefinition(
-        name="strategy_lab_current",
-        read_only=True,
-        description="Read the current Strategy Lab experiment pointer and recommendation summary without running experiments.",
-        requires=("strategy_lab_outputs",),
-        capabilities=("strategy_lab", "current", "read_only"),
-        input_schema={
-            "runtime_root": "optional runtime root; defaults to resolved OM runtime root",
-        },
-        risk_level="read_only",
-        safe_default_input={},
-        examples=({"input": {}},),
     ),
     AgentToolDefinition(
         name="query_cash_headroom",
