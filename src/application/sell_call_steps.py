@@ -21,6 +21,10 @@ from domain.domain.candidate_defaults import (
 from src.infrastructure.exchange_rates import CurrencyConverter
 from domain.domain.symbol_identity import canonical_symbol, symbol_currency
 from src.infrastructure.io_utils import safe_read_csv
+from src.application.covered_call_strategy_risk import (
+    enrich_and_filter_covered_call_short_vol,
+    resolve_covered_call_short_vol_config,
+)
 from src.application.render_sell_call_alerts import render_sell_call_alerts
 from src.application.report_summaries import summarize_sell_call
 from src.application.scan_sell_call import run_sell_call_scan
@@ -96,6 +100,7 @@ def run_sell_call_scan_and_summarize(
     is_scheduled: bool,
     stock: dict[str, Any] | None,
     exchange_rate_converter: CurrencyConverter,
+    portfolio_ctx: dict[str, Any] | None = None,
     locked_shares_by_symbol: dict[str, int] | None = None,
     locked_shares_unavailable_by_symbol: dict[str, str] | None = None,
     global_sell_call_liquidity: dict[str, Any] | None = None,
@@ -173,7 +178,8 @@ def run_sell_call_scan_and_summarize(
         return summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
     shares_available_for_cover = max(0, int(shares_total) - int(locked))
 
-    min_annualized = resolve_min_annualized_net_premium_return_from_sell_call_cfg(
+    strategy_cfg = resolve_covered_call_short_vol_config(cc)
+    min_annualized = 0.0 if strategy_cfg.enabled else resolve_min_annualized_net_premium_return_from_sell_call_cfg(
         sell_call_cfg=cc,
         source_prefix=f'{symbol}.sell_call',
     )
@@ -186,7 +192,9 @@ def run_sell_call_scan_and_summarize(
     global_min_net_income = float((global_sell_call_liquidity or {}).get('min_net_income', 0.0) or 0.0)
     min_net_income_cny = float(cc.get('min_net_income', global_min_net_income) or 0.0)
     min_net_income_native = 0.0
-    if min_net_income_cny > 0:
+    if strategy_cfg.enabled:
+        min_net_income_native = 0.0
+    elif min_net_income_cny > 0:
         native_ccy = symbol_currency(symbol)
         if not native_ccy:
             return summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
@@ -226,6 +234,15 @@ def run_sell_call_scan_and_summarize(
     )
 
     df_cc = safe_read_csv(symbol_cc)
+    if not df_cc.empty:
+        df_cc = enrich_and_filter_covered_call_short_vol(
+            df_labeled=df_cc,
+            symbol=symbol,
+            sell_call_cfg=cc,
+            portfolio_ctx=portfolio_ctx,
+            exchange_rate_converter=exchange_rate_converter,
+            out_path=symbol_cc,
+        )
     if not is_scheduled:
         render_sell_call_alerts(
             input_path=report_dir / f'{symbol_lower}_sell_call_candidates.csv',

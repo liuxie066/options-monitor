@@ -231,7 +231,8 @@ def strategy_prefetch_kwargs(symbol_cfg: dict[str, Any], *, enabled: bool) -> di
     want_yield_call = bool(want_put and ye.get("enabled", False))
     want_call = bool(want_direct_call or want_yield_call)
     include_realized_volatility = bool(
-        want_put and str(sp.get("strategy") or "").strip().lower() == "short_vol"
+        (want_put and _wants_short_vol(sp))
+        or (want_direct_call and _wants_short_vol(cc))
     )
 
     option_types: list[str] = []
@@ -282,6 +283,10 @@ def strategy_prefetch_kwargs(symbol_cfg: dict[str, Any], *, enabled: bool) -> di
         side_strike_windows=side_strike_windows,
         include_realized_volatility=include_realized_volatility,
     )
+
+
+def _wants_short_vol(cfg: dict[str, Any]) -> bool:
+    return str(cfg.get("strategy") or "").strip().lower() == "short_vol"
 
 
 def _merge_strategy_prefetch_kwargs(items: list[dict[str, Any]]) -> dict[str, Any]:

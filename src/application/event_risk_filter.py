@@ -65,16 +65,15 @@ def fetch_symbol_events_yfinance(symbol: str) -> list[dict]:
 
     try:
         edf = ticker.get_earnings_dates(limit=8)
-        source_ok_count += 1
         if isinstance(edf, pd.DataFrame) and not edf.empty:
             for idx in edf.index:
                 _add("earnings", idx)
+        source_ok_count += 1
     except Exception as exc:
         source_errors.append(f"earnings_dates:{type(exc).__name__}:{exc}")
 
     try:
         cal = ticker.calendar
-        source_ok_count += 1
         if isinstance(cal, pd.DataFrame) and not cal.empty:
             for key in ("Earnings Date", "Ex-Dividend Date"):
                 if key not in cal.index:
@@ -85,12 +84,12 @@ def fetch_symbol_events_yfinance(symbol: str) -> list[dict]:
                         _add("earnings" if key == "Earnings Date" else "ex_dividend", v)
                 else:
                     _add("earnings" if key == "Earnings Date" else "ex_dividend", row)
+        source_ok_count += 1
     except Exception as exc:
         source_errors.append(f"calendar:{type(exc).__name__}:{exc}")
 
     try:
         div = ticker.get_dividends()
-        source_ok_count += 1
         if isinstance(div, pd.Series) and not div.empty:
             cutoff = datetime.now(timezone.utc).date() - timedelta(days=180)
             for idx in div.index:
@@ -99,6 +98,7 @@ def fetch_symbol_events_yfinance(symbol: str) -> list[dict]:
                     continue
                 if ds >= cutoff.isoformat():
                     _add("ex_dividend", ds)
+        source_ok_count += 1
     except Exception as exc:
         source_errors.append(f"dividends:{type(exc).__name__}:{exc}")
 

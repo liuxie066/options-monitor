@@ -133,6 +133,7 @@ class CandidateScoreWeights:
     vol_edge: float = 0.0
     delta_target: float = 0.0
     concentration: float = 0.0
+    path_risk: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -216,6 +217,31 @@ def _risk_distance_quality(
     return _score_average(parts)
 
 
+def _path_risk_quality(src: dict[str, Any], *, mode: StrategyMode) -> float | None:
+    explicit = _first_float(src, "path_risk_score")
+    if explicit is not None:
+        return _bounded(explicit)
+
+    nav_pct_cap = 0.03
+    if mode == "call":
+        opportunity_cost = _first_float(src, "call_gap_up_opportunity_cost_nav_pct")
+        if opportunity_cost is None:
+            return None
+        return _bounded(1.0 - (max(float(opportunity_cost), 0.0) / nav_pct_cap))
+
+    losses = [
+        value
+        for value in (
+            _first_float(src, "put_stress_down_loss_nav_pct"),
+            _first_float(src, "put_gap_down_loss_nav_pct"),
+        )
+        if value is not None
+    ]
+    if not losses:
+        return None
+    return _bounded(1.0 - (max(float(value) for value in losses) / nav_pct_cap))
+
+
 def compute_candidate_strategy_score(
     *,
     mode: StrategyMode | str,
@@ -230,6 +256,7 @@ def compute_candidate_strategy_score(
     vol_edge_score: float | None = None,
     delta_target_score: float | None = None,
     concentration_score: float | None = None,
+    path_risk_score: float | None = None,
     weights: CandidateScoreWeights | None = None,
 ) -> CandidateStrategyScore:
     mode_norm = normalize_strategy_mode(mode)
@@ -253,6 +280,7 @@ def compute_candidate_strategy_score(
         "vol_edge": (_coerce_float(vol_edge_score) or 0.0) * float(score_weights.vol_edge),
         "delta_target": (_coerce_float(delta_target_score) or 0.0) * float(score_weights.delta_target),
         "concentration": (_coerce_float(concentration_score) or 0.0) * float(score_weights.concentration),
+        "path_risk": (_coerce_float(path_risk_score) or 0.0) * float(score_weights.path_risk),
     }
     warnings: list[str] = []
     spread_value = _coerce_float(spread_ratio)
@@ -291,6 +319,7 @@ def _candidate_score_inputs(src: dict[str, Any], *, mode: StrategyMode) -> dict[
         "iv_minus_rv": _first_float(src, "iv_minus_rv"),
         "delta_target_score": _first_float(src, "delta_target_score"),
         "concentration_score": _first_float(src, "concentration_score"),
+        "path_risk_score": _path_risk_quality(src, mode=mode),
     }
 
 
@@ -302,6 +331,7 @@ _SCORE_COMPONENT_LABELS: dict[str, str] = {
     "vol_edge": "波动率优势",
     "delta_target": "Delta目标",
     "concentration": "集中度",
+    "path_risk": "路径风险",
 }
 
 _SCORE_WARNING_LABELS: dict[str, str] = {
@@ -336,6 +366,8 @@ def _rank_reason(primary_drivers: list[str], warnings: list[str]) -> str:
             parts.append("Delta 更接近目标区间")
         elif driver == "concentration":
             parts.append("组合集中度占用较低")
+        elif driver == "path_risk":
+            parts.append("压力/跳空路径风险较低")
     if not parts:
         parts.append("候选通过准入，排序分数主要由默认收益项决定")
     if warnings:
@@ -967,6 +999,7 @@ def build_candidate_rank_key(
             vol_edge_score=score_inputs["vol_edge_score"],
             delta_target_score=score_inputs["delta_target_score"],
             concentration_score=score_inputs["concentration_score"],
+            path_risk_score=score_inputs["path_risk_score"],
             weights=score_weights,
         )
         out: dict[str, Any] = {
@@ -995,6 +1028,7 @@ def build_candidate_rank_key(
         vol_edge_score=score_inputs["vol_edge_score"],
         delta_target_score=score_inputs["delta_target_score"],
         concentration_score=score_inputs["concentration_score"],
+        path_risk_score=score_inputs["path_risk_score"],
         weights=score_weights,
     )
     out = {

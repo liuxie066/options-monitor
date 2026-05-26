@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 1.2.147 - 2026-05-26
+
+### Added
+- Added a shared short-vol assessment for Sell Put and Covered Call covering IV/RV edge, Delta band, event risk, path stress, and portfolio concentration.
+- Added Covered Call gap-up right-tail opportunity cost fields, hard NAV/premium stress budgets, candidate trace rejection rules, and alert output.
+- Added required-data planning for short-vol scanner inputs including realized volatility, event risk, portfolio holdings, and option-position concentration context.
+
+### Changed
+- Changed the default Covered Call profile to `short_vol` so it follows the same short-vol / short-gamma risk framing as Sell Put.
+- Changed `short_vol` scanning so annualized return and net income are ranking inputs rather than first-stage hard filters.
+- Expanded candidate ranking and diagnostics with volatility edge, Delta target quality, concentration, and path-risk scoring dimensions.
+
 ## 1.2.146 - 2026-05-26
 
 ### Fixed

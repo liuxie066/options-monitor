@@ -79,6 +79,7 @@ def resolve_candidate_score_weights(raw: CandidateScoreWeights | dict[str, Any] 
         "vol_edge",
         "delta_target",
         "concentration",
+        "path_risk",
     }
     unsupported = [str(key) for key in raw.keys() if key not in allowed]
     if unsupported:
@@ -102,6 +103,7 @@ def resolve_candidate_score_weights(raw: CandidateScoreWeights | dict[str, Any] 
         vol_edge=_weight("vol_edge", defaults.vol_edge),
         delta_target=_weight("delta_target", defaults.delta_target),
         concentration=_weight("concentration", defaults.concentration),
+        path_risk=_weight("path_risk", defaults.path_risk),
     )
 
 

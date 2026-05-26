@@ -496,8 +496,8 @@ def _merge_side_plans(
     return merged
 
 
-def _wants_sell_put_short_vol(sell_put_cfg: dict[str, Any]) -> bool:
-    return str(sell_put_cfg.get("strategy") or "").strip().lower() == "short_vol"
+def _wants_short_vol(cfg: dict[str, Any]) -> bool:
+    return str(cfg.get("strategy") or "").strip().lower() == "short_vol"
 
 
 def build_required_data_fetch_plan(
@@ -589,6 +589,9 @@ def build_required_data_fetch_plan(
             host=fetch_host,
             port=fetch_port,
             side_plans=side_plans,
-            include_realized_volatility=bool(want_put and _wants_sell_put_short_vol(sell_put_cfg)),
+            include_realized_volatility=bool(
+                (want_put and _wants_short_vol(sell_put_cfg))
+                or (want_call and _wants_short_vol(sell_call_cfg))
+            ),
         ),
     )

@@ -127,6 +127,7 @@ def test_validate_config_accepts_candidate_score_weights() -> None:
                         'vol_edge': 0.5,
                         'delta_target': 0.2,
                         'concentration': 0.2,
+                        'path_risk': 0.2,
                     },
                 }
             },
@@ -174,6 +175,8 @@ def test_validate_config_accepts_sell_put_short_vol_strategy_config() -> None:
                         'min_abs_delta': 0.15,
                         'max_abs_delta': 0.30,
                         'target_abs_delta': 0.20,
+                        'max_call_gap_up_opportunity_cost_nav_pct': 0.02,
+                        'max_call_gap_up_opportunity_cost_to_premium': 3.0,
                     },
                     'concentration': {
                         'max_single_trade_nav_pct': 0.08,
@@ -202,6 +205,46 @@ def test_validate_config_accepts_sell_put_short_vol_strategy_config() -> None:
     }
 
     validate_config(cfg)
+
+
+def test_validate_config_rejects_short_vol_fail_closed_with_disabled_event_risk() -> None:
+    _add_repo_to_syspath()
+    from src.application.config_validator import validate_config
+
+    cfg = {
+        'templates': {
+            'put_base': {
+                'sell_put': {
+                    'strategy': 'short_vol',
+                    'event_risk': {'enabled': False},
+                    'short_vol': {'event_source_fail_closed': True},
+                }
+            },
+        },
+        'symbols': [
+            {
+                'symbol': 'AAPL',
+                'use': ['put_base'],
+                'sell_put': {
+                    'enabled': True,
+                    'min_dte': 7,
+                    'max_dte': 45,
+                    'min_strike': 10,
+                    'max_strike': 200,
+                },
+                'sell_call': {'enabled': False},
+            }
+        ],
+    }
+
+    try:
+        validate_config(cfg)
+        raise AssertionError('expected config validation failure')
+    except SystemExit as e:
+        msg = str(e)
+        assert '[CONFIG_ERROR]' in msg
+        assert 'templates.put_base.sell_put.event_risk.enabled=false conflicts with' in msg
+        assert 'templates.put_base.sell_put.short_vol.event_source_fail_closed=true' in msg
 
 
 def test_validate_config_rejects_invalid_sell_put_short_vol_strategy_config() -> None:
@@ -238,6 +281,78 @@ def test_validate_config_rejects_invalid_sell_put_short_vol_strategy_config() ->
         raise AssertionError('expected config validation failure')
     except SystemExit as e:
         assert 'templates.put_base.sell_put.short_vol.min_abs_delta > templates.put_base.sell_put.short_vol.max_abs_delta' in str(e)
+
+
+def test_validate_config_rejects_invalid_call_gap_up_nav_budget() -> None:
+    _add_repo_to_syspath()
+    from src.application.config_validator import validate_config
+
+    cfg = {
+        'templates': {
+            'call_base': {
+                'sell_call': {
+                    'strategy': 'short_vol',
+                    'short_vol': {'max_call_gap_up_opportunity_cost_nav_pct': 1.2},
+                }
+            },
+        },
+        'symbols': [
+            {
+                'symbol': 'AAPL',
+                'use': ['call_base'],
+                'sell_put': {'enabled': False},
+                'sell_call': {
+                    'enabled': True,
+                    'min_dte': 7,
+                    'max_dte': 45,
+                    'min_strike': 10,
+                    'max_strike': 200,
+                },
+            }
+        ],
+    }
+
+    try:
+        validate_config(cfg)
+        raise AssertionError('expected config validation failure')
+    except SystemExit as e:
+        assert 'templates.call_base.sell_call.short_vol.max_call_gap_up_opportunity_cost_nav_pct' in str(e)
+
+
+def test_validate_config_rejects_invalid_call_gap_up_premium_budget() -> None:
+    _add_repo_to_syspath()
+    from src.application.config_validator import validate_config
+
+    cfg = {
+        'templates': {
+            'call_base': {
+                'sell_call': {
+                    'strategy': 'short_vol',
+                    'short_vol': {'max_call_gap_up_opportunity_cost_to_premium': -0.1},
+                }
+            },
+        },
+        'symbols': [
+            {
+                'symbol': 'AAPL',
+                'use': ['call_base'],
+                'sell_put': {'enabled': False},
+                'sell_call': {
+                    'enabled': True,
+                    'min_dte': 7,
+                    'max_dte': 45,
+                    'min_strike': 10,
+                    'max_strike': 200,
+                },
+            }
+        ],
+    }
+
+    try:
+        validate_config(cfg)
+        raise AssertionError('expected config validation failure')
+    except SystemExit as e:
+        assert 'templates.call_base.sell_call.short_vol.max_call_gap_up_opportunity_cost_to_premium' in str(e)
 
 
 def test_validate_config_rejects_invalid_candidate_score_weights() -> None:
@@ -1299,6 +1414,60 @@ def test_sell_put_steps_fallback_to_global_min_net_income() -> None:
     assert kwargs['min_net_income'] == 14.000000000000002
 
 
+def test_sell_put_short_vol_scan_bypasses_return_income_floor() -> None:
+    base = _add_repo_to_syspath()
+    import src.application.sell_put_steps as steps
+    import pandas as pd
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    calls: list[dict] = []
+    orig_run_sell_put_scan = steps.run_sell_put_scan
+    orig_add_labels = steps.add_sell_put_labels
+
+    def _fake_run_sell_put_scan(**kwargs):
+        calls.append(kwargs)
+        Path(kwargs["output"]).parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame().to_csv(kwargs["output"], index=False)
+
+    steps.run_sell_put_scan = _fake_run_sell_put_scan
+    steps.add_sell_put_labels = lambda *args, **kwargs: None
+    try:
+        out = steps.run_sell_put_scan_and_summarize(
+            py='python',
+            base=base,
+            sym='AAPL',
+            symbol='AAPL',
+            symbol_lower='aapl',
+            symbol_cfg={'symbol': 'AAPL', 'sell_put': {}},
+            sp={
+                'enabled': True,
+                'strategy': 'short_vol',
+                'min_dte': 7,
+                'max_dte': 45,
+                'min_annualized_net_return': 0.25,
+                'min_net_income': 500,
+            },
+            top_n=3,
+            required_data_dir=base / 'output',
+            report_dir=base / 'output' / 'reports',
+            timeout_sec=10,
+            is_scheduled=True,
+            exchange_rate_converter=CurrencyConverter(ExchangeRates()),
+            portfolio_ctx=None,
+            global_sell_put_liquidity={'min_net_income': 100},
+        )
+    finally:
+        steps.run_sell_put_scan = orig_run_sell_put_scan
+        steps.add_sell_put_labels = orig_add_labels
+
+    assert len(out) == 1
+    assert out[0]['strategy'] == 'sell_put'
+    assert calls
+    kwargs = calls[0]
+    assert kwargs['min_annualized_net_return'] == 0.0
+    assert kwargs['min_net_income'] == 0.0
+
+
 def test_sell_call_steps_fallback_to_global_min_net_income() -> None:
     base = _add_repo_to_syspath()
     import src.application.sell_call_steps as steps
@@ -1339,6 +1508,54 @@ def test_sell_call_steps_fallback_to_global_min_net_income() -> None:
     assert calls
     kwargs = calls[0]
     assert kwargs['min_net_income'] == 14.000000000000002
+
+
+def test_sell_call_short_vol_scan_bypasses_return_income_floor() -> None:
+    base = _add_repo_to_syspath()
+    import src.application.sell_call_steps as steps
+    import pandas as pd
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    calls: list[dict] = []
+    orig_run_sell_call_scan = steps.run_sell_call_scan
+
+    def _fake_run_sell_call_scan(**kwargs):
+        calls.append(kwargs)
+        Path(kwargs["output"]).parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame().to_csv(kwargs["output"], index=False)
+
+    steps.run_sell_call_scan = _fake_run_sell_call_scan
+    try:
+        out = steps.run_sell_call_scan_and_summarize(
+            py='python',
+            base=base,
+            symbol='AAPL',
+            symbol_lower='aapl',
+            symbol_cfg={'symbol': 'AAPL'},
+            cc={
+                'enabled': True,
+                'strategy': 'short_vol',
+                'min_annualized_net_premium_return': 0.25,
+                'min_net_income': 500,
+            },
+            top_n=3,
+            required_data_dir=base / 'output',
+            report_dir=base / 'output' / 'reports',
+            timeout_sec=10,
+            is_scheduled=True,
+            stock={'shares': 200, 'avg_cost': 100.0},
+            exchange_rate_converter=CurrencyConverter(ExchangeRates()),
+            locked_shares_by_symbol={'AAPL': 0},
+            global_sell_call_liquidity={'min_net_income': 100},
+        )
+    finally:
+        steps.run_sell_call_scan = orig_run_sell_call_scan
+
+    assert out['strategy'] == 'sell_call'
+    assert calls
+    kwargs = calls[0]
+    assert kwargs['min_annualized_net_return'] == 0.0
+    assert kwargs['min_net_income'] == 0.0
 
 
 def test_sell_put_reject_stage_is_strategy_gate() -> None:

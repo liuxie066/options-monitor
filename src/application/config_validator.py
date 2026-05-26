@@ -39,6 +39,7 @@ SCORE_WEIGHT_FIELDS = (
     'vol_edge',
     'delta_target',
     'concentration',
+    'path_risk',
 )
 YIELD_ENHANCEMENT_LIQUIDITY_FIELDS = LIQUIDITY_ALLOWED_GLOBAL_FIELDS + (
     'max_combo_spread_ratio',
@@ -178,6 +179,13 @@ def _validate_optional_unit_interval_number(cfg: dict, key: str, path: str):
         die(f'{path}.{key} must be a number')
 
 
+def _validate_optional_bool(cfg: dict, key: str, path: str):
+    if key not in cfg or cfg.get(key) is None:
+        return
+    if not isinstance(cfg.get(key), bool):
+        die(f'{path}.{key} must be a boolean')
+
+
 def _validate_llm_config(llm_cfg: dict, *, path: str, enabled: bool, required_reason: str) -> None:
     for key in ('provider', 'base_url', 'model', 'api_key_env'):
         if key in llm_cfg and llm_cfg.get(key) is not None and not isinstance(llm_cfg.get(key), str):
@@ -289,17 +297,39 @@ def _validate_score_weights(cfg: dict, path: str) -> None:
         _validate_optional_non_negative_number(raw, key, f'{path}.score_weights')
 
 
-def _validate_sell_put_short_vol_config(cfg: dict, path: str) -> None:
+def _validate_short_vol_strategy_config(cfg: dict, path: str) -> None:
+    strategy = None
     if 'strategy' in cfg and cfg.get('strategy') is not None:
         strategy = str(cfg.get('strategy') or '').strip().lower()
         if strategy not in {'return_first', 'short_vol'}:
             die(f'{path}.strategy must be one of: return_first, short_vol')
+    event_risk = cfg.get('event_risk')
+    if event_risk is not None:
+        if not isinstance(event_risk, dict):
+            die(f'{path}.event_risk must be an object')
+        _validate_optional_bool(event_risk, 'enabled', f'{path}.event_risk')
     short_vol = cfg.get('short_vol')
     if short_vol is not None:
         if not isinstance(short_vol, dict):
             die(f'{path}.short_vol must be an object')
         for key in ('min_iv_rv_ratio', 'min_iv_minus_rv', 'min_abs_delta', 'max_abs_delta', 'target_abs_delta'):
             _validate_optional_non_negative_number(short_vol, key, f'{path}.short_vol')
+        for key in ('reject_event_risk', 'event_source_fail_closed', 'enable_stress_check'):
+            _validate_optional_bool(short_vol, key, f'{path}.short_vol')
+        _validate_optional_non_negative_number(short_vol, 'stress_down_sigma_multiple', f'{path}.short_vol')
+        for key in (
+            'max_put_sigma_stress_loss_nav_pct',
+            'gap_down_pct',
+            'max_put_gap_down_loss_nav_pct',
+            'call_gap_up_pct',
+            'max_call_gap_up_opportunity_cost_nav_pct',
+        ):
+            _validate_optional_unit_interval_number(short_vol, key, f'{path}.short_vol')
+        _validate_optional_non_negative_number(
+            short_vol,
+            'max_call_gap_up_opportunity_cost_to_premium',
+            f'{path}.short_vol',
+        )
         min_abs = short_vol.get('min_abs_delta')
         max_abs = short_vol.get('max_abs_delta')
         if min_abs is not None and max_abs is not None:
@@ -308,6 +338,15 @@ def _validate_sell_put_short_vol_config(cfg: dict, path: str) -> None:
                     die(f'{path}.short_vol.min_abs_delta > {path}.short_vol.max_abs_delta')
             except Exception:
                 die(f'{path}.short_vol.min_abs_delta/max_abs_delta must be numbers')
+    if strategy == 'short_vol' and isinstance(event_risk, dict) and event_risk.get('enabled') is False:
+        fail_closed = True
+        if isinstance(short_vol, dict) and short_vol.get('event_source_fail_closed') is not None:
+            fail_closed = bool(short_vol.get('event_source_fail_closed'))
+        if fail_closed:
+            die(
+                f'{path}.event_risk.enabled=false conflicts with '
+                f'{path}.short_vol.event_source_fail_closed=true'
+            )
     concentration = cfg.get('concentration')
     if concentration is not None:
         if not isinstance(concentration, dict):
@@ -810,11 +849,11 @@ def validate_config(cfg: dict):
                             f"templates.{profile_name}.{side} has removed legacy fetch planning keys: "
                             f"{', '.join(unsupported_fetch_keys)}; use min_strike/max_strike only"
                         )
+                _validate_short_vol_strategy_config(
+                    side_cfg,
+                    f'templates.{profile_name}.{side}',
+                )
                 if side == 'sell_put':
-                    _validate_sell_put_short_vol_config(
-                        side_cfg,
-                        f'templates.{profile_name}.{side}',
-                    )
                     _validate_optional_unit_interval_number(
                         side_cfg,
                         'min_otm_pct',
@@ -865,7 +904,7 @@ def validate_config(cfg: dict):
         if sp and not isinstance(sp, dict):
             die(f"{sym}.sell_put must be an object")
         _validate_score_weights(sp, f'{sym}.sell_put')
-        _validate_sell_put_short_vol_config(sp, f'{sym}.sell_put')
+        _validate_short_vol_strategy_config(sp, f'{sym}.sell_put')
         _validate_optional_unit_interval_number(sp, 'min_otm_pct', f'{sym}.sell_put')
         bad_keys = [k for k in SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS if k in sp]
         if bad_keys:
@@ -904,6 +943,7 @@ def validate_config(cfg: dict):
         if sc and not isinstance(sc, dict):
             die(f"{sym}.sell_call must be an object")
         _validate_score_weights(sc, f'{sym}.sell_call')
+        _validate_short_vol_strategy_config(sc, f'{sym}.sell_call')
         bad_keys = [k for k in SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS if k in sc]
         if bad_keys:
             die(f"{sym}.sell_call has forbidden symbol-level strategy filter keys: {', '.join(bad_keys)}")

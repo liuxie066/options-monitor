@@ -238,6 +238,20 @@ def test_strategy_prefetch_kwargs_requires_rv_for_sell_put_short_vol() -> None:
     assert out["include_realized_volatility"] is True
 
 
+def test_strategy_prefetch_kwargs_requires_rv_for_covered_call_short_vol() -> None:
+    out = mod._strategy_prefetch_kwargs(
+        {
+            "symbol": "NVDA",
+            "sell_put": {"enabled": False},
+            "sell_call": {"enabled": True, "strategy": "short_vol"},
+        },
+        enabled=True,
+    )
+
+    assert out["option_types"] == "call"
+    assert out["include_realized_volatility"] is True
+
+
 def test_inprocess_prefetch_passes_strategy_bounds_to_fetch_symbol(tmp_path: Path, monkeypatch) -> None:
     watchlist = [
         {

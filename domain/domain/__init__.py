@@ -99,6 +99,7 @@ _MODULE_EXPORTS = {
     'sell_put_risk_bands',
     'sell_call_config',
     'sell_put_config',
+    'short_vol_assessment',
     'config_contract',
     'intermediate_objects',
     'engine',

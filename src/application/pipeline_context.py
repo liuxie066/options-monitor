@@ -180,7 +180,7 @@ def _load_option_position_exchange_rates(*, base: Path, state_dir: Path, log) ->
         return None
 
 
-def _wants_sell_put_short_vol_risk_context(cfg: dict | None) -> bool:
+def _wants_short_vol_risk_context(cfg: dict | None) -> bool:
     if not isinstance(cfg, dict):
         return False
 
@@ -190,10 +190,14 @@ def _wants_sell_put_short_vol_risk_context(cfg: dict | None) -> bool:
     templates = cfg.get("templates")
     if isinstance(templates, dict):
         for profile in templates.values():
-            if isinstance(profile, dict) and _is_short_vol(profile.get("sell_put")):
+            if isinstance(profile, dict) and (
+                _is_short_vol(profile.get("sell_put")) or _is_short_vol(profile.get("sell_call"))
+            ):
                 return True
     for item in cfg.get("symbols") or []:
-        if isinstance(item, dict) and _is_short_vol(item.get("sell_put")):
+        if isinstance(item, dict) and (
+            _is_short_vol(item.get("sell_put")) or _is_short_vol(item.get("sell_call"))
+        ):
             return True
     return False
 
@@ -370,7 +374,7 @@ def build_pipeline_context(
         log=log,
     )
 
-    if portfolio_ctx is not None and _wants_sell_put_short_vol_risk_context(cfg):
+    if portfolio_ctx is not None and _wants_short_vol_risk_context(cfg):
         portfolio_ctx = dict(portfolio_ctx)
         global_portfolio_ctx = load_global_holdings_risk_context(
             base=base,
