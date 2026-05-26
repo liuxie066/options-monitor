@@ -15,6 +15,10 @@ DEFAULT_EVENT_RISK_CFG = {
 }
 
 
+class EventSourceError(RuntimeError):
+    pass
+
+
 def normalize_event_risk_cfg(cfg: dict | None) -> dict:
     out = dict(DEFAULT_EVENT_RISK_CFG)
     if isinstance(cfg, dict):
@@ -46,6 +50,8 @@ def fetch_symbol_events_yfinance(symbol: str) -> list[dict]:
     ticker = yf.Ticker(symbol)
     events: list[dict] = []
     seen: set[tuple[str, str]] = set()
+    source_ok_count = 0
+    source_errors: list[str] = []
 
     def _add(event_type: str, raw_value) -> None:
         ds = _to_date_str(raw_value)
@@ -59,14 +65,16 @@ def fetch_symbol_events_yfinance(symbol: str) -> list[dict]:
 
     try:
         edf = ticker.get_earnings_dates(limit=8)
+        source_ok_count += 1
         if isinstance(edf, pd.DataFrame) and not edf.empty:
             for idx in edf.index:
                 _add("earnings", idx)
-    except Exception:
-        pass
+    except Exception as exc:
+        source_errors.append(f"earnings_dates:{type(exc).__name__}:{exc}")
 
     try:
         cal = ticker.calendar
+        source_ok_count += 1
         if isinstance(cal, pd.DataFrame) and not cal.empty:
             for key in ("Earnings Date", "Ex-Dividend Date"):
                 if key not in cal.index:
@@ -77,11 +85,12 @@ def fetch_symbol_events_yfinance(symbol: str) -> list[dict]:
                         _add("earnings" if key == "Earnings Date" else "ex_dividend", v)
                 else:
                     _add("earnings" if key == "Earnings Date" else "ex_dividend", row)
-    except Exception:
-        pass
+    except Exception as exc:
+        source_errors.append(f"calendar:{type(exc).__name__}:{exc}")
 
     try:
         div = ticker.get_dividends()
+        source_ok_count += 1
         if isinstance(div, pd.Series) and not div.empty:
             cutoff = datetime.now(timezone.utc).date() - timedelta(days=180)
             for idx in div.index:
@@ -90,11 +99,21 @@ def fetch_symbol_events_yfinance(symbol: str) -> list[dict]:
                     continue
                 if ds >= cutoff.isoformat():
                     _add("ex_dividend", ds)
-    except Exception:
-        pass
+    except Exception as exc:
+        source_errors.append(f"dividends:{type(exc).__name__}:{exc}")
+
+    if source_ok_count == 0 and source_errors:
+        raise EventSourceError("; ".join(source_errors))
 
     events.sort(key=lambda x: (x.get("date") or "", x.get("type") or ""))
     return events
+
+
+@dataclass(frozen=True)
+class EventFetchResult:
+    events: list[dict]
+    source_status: str
+    source_error: str = ""
 
 
 @dataclass
@@ -118,13 +137,26 @@ class EventCache:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    def get_events(
+    @staticmethod
+    def _clean_events(events) -> list[dict]:
+        if not isinstance(events, list):
+            return []
+        return [x for x in events if isinstance(x, dict)]
+
+    @staticmethod
+    def _error_text(exc: Exception) -> str:
+        msg = str(exc).strip()
+        if len(msg) > 500:
+            msg = msg[:500] + "..."
+        return f"{type(exc).__name__}: {msg}" if msg else type(exc).__name__
+
+    def get_events_result(
         self,
         symbol: str,
         *,
         fetcher: Callable[[str], list[dict]],
         now: datetime | None = None,
-    ) -> list[dict]:
+    ) -> EventFetchResult:
         now_dt = now or datetime.now(timezone.utc)
         data = self._load()
         symbols = data.get("symbols")
@@ -139,24 +171,50 @@ class EventCache:
             if fetched_at:
                 try:
                     dt = datetime.fromisoformat(str(entry.get("fetched_at")))
-                    if (now_dt - dt).total_seconds() <= self.ttl_seconds:
+                    if (now_dt - dt).total_seconds() <= self.ttl_seconds and entry.get("source_status") == "ok":
                         events = entry.get("events")
                         if isinstance(events, list):
-                            return [x for x in events if isinstance(x, dict)]
+                            return EventFetchResult(events=self._clean_events(events), source_status="ok")
                 except Exception:
                     pass
 
-        events: list[dict] = []
         try:
-            events = fetcher(key)
-        except Exception:
-            events = []
+            events = self._clean_events(fetcher(key))
+        except Exception as exc:
+            source_error = self._error_text(exc)
+            stale_events = self._clean_events(entry.get("events")) if entry else []
+            updated = dict(entry or {})
+            if not stale_events:
+                updated.pop("events", None)
+                updated.pop("fetched_at", None)
+            updated.update(
+                {
+                    "source_status": "error",
+                    "last_error_at": now_dt.isoformat(),
+                    "last_error_type": type(exc).__name__,
+                    "last_error": source_error,
+                }
+            )
+            symbols[key] = updated
+            self._save(data)
+            return EventFetchResult(events=stale_events, source_status="error", source_error=source_error)
+
         symbols[key] = {
             "fetched_at": now_dt.isoformat(),
+            "source_status": "ok",
             "events": events,
         }
         self._save(data)
-        return events
+        return EventFetchResult(events=events, source_status="ok")
+
+    def get_events(
+        self,
+        symbol: str,
+        *,
+        fetcher: Callable[[str], list[dict]],
+        now: datetime | None = None,
+    ) -> list[dict]:
+        return self.get_events_result(symbol, fetcher=fetcher, now=now).events
 
 
 def annotate_candidates_with_event_risk(
@@ -171,6 +229,8 @@ def annotate_candidates_with_event_risk(
         ("event_flag", False),
         ("event_types", ""),
         ("event_dates", ""),
+        ("event_source_status", ""),
+        ("event_source_error", ""),
         ("reject_stage_candidate", ""),
     ):
         if col not in out.columns:
@@ -182,28 +242,35 @@ def annotate_candidates_with_event_risk(
 
     cache = EventCache((base_dir / "output_shared" / "state" / "event_cache.json").resolve(), ttl_seconds=86400)
     fetcher = event_fetcher or fetch_symbol_events_yfinance
-    symbol_events: dict[str, list[dict]] = {}
+    symbol_results: dict[str, EventFetchResult] = {}
 
     symbols = sorted({str(s).upper() for s in out.get("symbol", pd.Series(dtype=str)).dropna().tolist() if str(s).strip()})
     for sym in symbols:
-        symbol_events[sym] = cache.get_events(sym, fetcher=fetcher)
+        symbol_results[sym] = cache.get_events_result(sym, fetcher=fetcher)
 
     flagged = []
     types_list = []
     dates_list = []
+    source_status_list = []
+    source_error_list = []
     reject_stage = []
     for _, row in out.iterrows():
         sym = str(row.get("symbol") or "").upper()
         expiration = _to_date_str(row.get("expiration"))
+        result = symbol_results.get(sym) or EventFetchResult(events=[], source_status="", source_error="")
+        source_status = result.source_status
+        source_error = result.source_error
         if not sym or not expiration:
             flagged.append(False)
             types_list.append("")
             dates_list.append("")
+            source_status_list.append(source_status)
+            source_error_list.append(source_error)
             reject_stage.append(str(row.get("reject_stage_candidate") or ""))
             continue
 
         exp_date = datetime.fromisoformat(expiration).date()
-        events = symbol_events.get(sym) or []
+        events = result.events
         hits = []
         for ev in events:
             d = _to_date_str(ev.get("date"))
@@ -218,15 +285,21 @@ def annotate_candidates_with_event_risk(
             flagged.append(True)
             types_list.append(",".join(sorted({t for _, t in hits})))
             dates_list.append(",".join([d for d, _ in hits]))
+            source_status_list.append(source_status)
+            source_error_list.append(source_error)
             reject_stage.append("EVENT_WARN" if cfg.get("mode") == "warn" else str(row.get("reject_stage_candidate") or ""))
         else:
             flagged.append(False)
             types_list.append("")
             dates_list.append("")
+            source_status_list.append(source_status)
+            source_error_list.append(source_error)
             reject_stage.append(str(row.get("reject_stage_candidate") or ""))
 
     out["event_flag"] = flagged
     out["event_types"] = types_list
     out["event_dates"] = dates_list
+    out["event_source_status"] = source_status_list
+    out["event_source_error"] = source_error_list
     out["reject_stage_candidate"] = reject_stage
     return out

@@ -139,6 +139,40 @@ def test_notify_symbols_markdown_put_chain_uses_upstream_fields_when_available()
     assert "告警未提供iv" not in out
 
 
+def test_notify_symbols_markdown_put_chain_shows_event_risk() -> None:
+    from domain.domain import normalize_processor_row
+    from src.application.alert_engine import build_alert_text
+    from src.application.notify_symbols import build_notification
+
+    summary_row = normalize_processor_row(
+        {
+            "symbol": "AAPL",
+            "strategy": "sell_put",
+            "candidate_count": 1,
+            "top_contract": "2026-06-19 180P",
+            "annualized_return": 0.18,
+            "net_income": 210.0,
+            "dte": 24,
+            "strike": 180.0,
+            "risk_label": "中性",
+            "delta": -0.22,
+            "iv": 0.38,
+            "cash_required_usd": 18000.0,
+            "mid": 2.1,
+            "option_ccy": "USD",
+            "event_flag": True,
+            "event_types": "earnings",
+            "event_dates": "2026-06-10",
+        }
+    )
+
+    alerts = build_alert_text(pd.DataFrame([summary_row]))
+    out = build_notification("", alerts, account_label="SY")
+
+    assert "event earnings@2026-06-10" in alerts
+    assert "- 事件: earnings@2026-06-10" in out
+
+
 def test_notify_symbols_markdown_put_chain_shows_same_symbol_usage_from_summary_fields() -> None:
     out = _render_via_alert_engine(
         {
