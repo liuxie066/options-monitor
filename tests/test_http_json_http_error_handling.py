@@ -83,8 +83,8 @@ def test_http_json_socket_timeout_raises_transient_error() -> None:
 
 
 if __name__ == "__main__":
-    test_http_json_404_non_json_body_returns_error_dict()
-    test_http_json_500_json_body_merges_fields()
-    test_http_json_urlerror_returns_structured_error()
-    test_http_json_socket_timeout_returns_structured_error()
+    test_http_json_404_non_json_body_raises_permanent_error()
+    test_http_json_500_json_body_raises_transient_error()
+    test_http_json_urlerror_raises_transient_error()
+    test_http_json_socket_timeout_raises_transient_error()
     print("OK (4 tests)")

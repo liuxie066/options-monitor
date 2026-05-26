@@ -246,7 +246,7 @@ def main() -> None:
     test_source_snapshot_validates_and_normalizes()
     test_normalize_processor_rows_requires_list_contract()
     test_three_source_adapters_produce_unified_dto()
-    test_opend_adapter_marks_fallback_and_unified_error_code()
+    test_opend_adapter_labels_non_futu_upstream_and_unifies_error_code()
     test_opend_adapter_rejects_non_tool_execution_schema()
     print("OK (canonical-schema-adapters)")
 

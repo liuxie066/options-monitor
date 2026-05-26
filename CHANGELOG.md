@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.2.150 - 2026-05-26
+
+### Added
+- Added a low-noise Ruff lint entrypoint via `make lint` and the guardrails CI workflow, limited to syntax errors and undefined names.
+
+### Fixed
+- Fixed undefined helper references in assistant manual-trade update parsing and stale standalone test runner function names that the new lint gate now catches.
+
 ## 1.2.149 - 2026-05-26
 
 ### Fixed

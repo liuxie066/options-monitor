@@ -424,6 +424,29 @@ def _parse_float_token(text: str) -> float:
     return float(match.group(0))
 
 
+def _parse_date(text: str) -> str | None:
+    match = _DATE_RE.search(text)
+    return f"{match.group(1)}-{match.group(2)}-{match.group(3)}" if match else None
+
+
+def _parse_option_type(text: str) -> str | None:
+    lower = text.lower()
+    if "put" in lower or "看跌" in text or "沽" in text:
+        return "put"
+    if "call" in lower or "看涨" in text or "购" in text:
+        return "call"
+    return None
+
+
+def _parse_position_side(text: str) -> str | None:
+    lower = text.lower()
+    if "short" in lower or "sell" in lower or "卖出" in text:
+        return "short"
+    if "long" in lower or "buy" in lower or "买入" in text:
+        return "long"
+    return None
+
+
 def _parse_symbol_add(text: str) -> dict[str, object]:
     labeled = _extract_labeled_values(text)
     symbol = str(labeled.get("symbol") or _extract_monitor_symbol(text) or "").strip()

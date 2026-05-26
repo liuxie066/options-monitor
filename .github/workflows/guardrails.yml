@@ -22,7 +22,11 @@ jobs:
         run: |
           python -m venv .venv
           ./.venv/bin/pip install --upgrade pip
-          ./.venv/bin/pip install -r requirements.txt -c constraints.txt
+          ./.venv/bin/pip install -r requirements/dev.txt -c constraints/dev.txt
+
+      - name: Lint
+        run: |
+          ./.venv/bin/python -m ruff check .
 
       - name: Guardrails checks
         run: |
