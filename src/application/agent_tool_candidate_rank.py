@@ -42,6 +42,7 @@ def _score_weights_from_payload(payload: dict[str, Any]) -> CandidateScoreWeight
         vol_edge=_as_float(raw.get("vol_edge", 0.0), field="score_weights.vol_edge"),
         delta_target=_as_float(raw.get("delta_target", 0.0), field="score_weights.delta_target"),
         concentration=_as_float(raw.get("concentration", 0.0), field="score_weights.concentration"),
+        path_risk=_as_float(raw.get("path_risk", 0.0), field="score_weights.path_risk"),
     )
 
 
@@ -55,6 +56,7 @@ def _weight_payload(weights: CandidateScoreWeights | None) -> dict[str, float]:
         "vol_edge": float(actual.vol_edge),
         "delta_target": float(actual.delta_target),
         "concentration": float(actual.concentration),
+        "path_risk": float(actual.path_risk),
     }
 
 

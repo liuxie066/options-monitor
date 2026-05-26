@@ -410,16 +410,19 @@ python3 -m src.application.option_intake --config /var/lib/options-monitor/confi
 - `short_vol.min_iv_rv_ratio`
 - `short_vol.min_iv_minus_rv`
 - `short_vol.min_abs_delta` / `short_vol.max_abs_delta`
+- `short_vol.reject_event_risk` / `short_vol.event_source_fail_closed`
+- `short_vol.max_put_sigma_stress_loss_nav_pct`
+- `short_vol.max_put_gap_down_loss_nav_pct`
 - `concentration.max_single_trade_nav_pct`
 - `concentration.max_symbol_nav_pct`
 - `concentration.max_total_short_put_nav_pct`
-- `min_annualized_net_return`
-- `min_net_income`
 - `min_open_interest`
 - `min_volume`
 - `max_spread_ratio`
 
-除了链上候选过滤，最终还会叠加账户现金维度的 `cash_reserve` 后过滤，以及基于全局 holdings / option positions 的组合集中度后过滤。缺少 IV、RV、Delta、NAV、FX、strike 或 multiplier 等关键风险输入时，short-vol 策略会 fail closed。
+在 `short_vol` profile 下，收益率和单笔净收入参与排序，不再作为扫描入口的第一道硬过滤。
+
+除了链上候选过滤，最终还会叠加账户现金维度的 `cash_reserve` 后过滤，以及基于全局 holdings / option positions 的组合集中度后过滤。事件源不可用、expiry 前存在财报等事件、缺少 IV、RV、Delta、NAV、FX、strike、spot 或 multiplier 等关键风险输入时，short-vol 策略会 fail closed。Sell Put 还会检查 2σ 下跌和默认 10% gap-down 压力亏损占 NAV 的比例。
 
 ### Covered Call
 
@@ -428,6 +431,8 @@ Covered Call 依赖真实持仓上下文。它在风险结构上和 Sell Put 同
 - `shares` / `avg_cost` 来自 holdings，不再建议手写在 symbol 配置里
 - 已被 short call 锁定的股票会从可卖数量里扣掉
 - `min_strike_cost_multiplier` 会抬高有效 strike 下限，避免推荐明显低于成本底线的 call
+- 默认同样走 `short_vol` profile，会检查 IV/RV、IV-RV、delta band、事件风险和组合集中度，并输出短 gamma/vega、covered notional 与 gap-up 右尾机会成本字段；右尾机会成本会通过 `path_risk` 进入排序
+- gap-up 右尾机会成本同时是硬预算：默认要求机会成本不超过 NAV 的 2%，且不超过本次 premium 的 3 倍
 
 注意：`config.yaml` 里使用 `covered_call`；生成后的 runtime JSON、CSV 和 trace 里的内部策略 key 仍是 `sell_call`。这是兼容性标识；用户可见名称统一为 `Covered Call`。
 

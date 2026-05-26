@@ -101,7 +101,7 @@
 - `min_dte <= dte <= max_dte`
 - `min_strike <= strike <= max_strike`
 - put 必须满足基本 moneyness 约束
-- 当 `sell_put.strategy=short_vol` 时，必须有可评估的 IV、RV、Delta、现金需求和组合风险输入
+- 当 `sell_put.strategy=short_vol` 时，必须有可评估的 IV、RV、Delta、事件风险、现金需求、压力测试和组合风险输入
 
 ### Covered Call
 主要硬约束包括：
@@ -128,7 +128,9 @@
 
 ## 3.3 收益门槛
 
-当前主要收益门槛包括：
+收益门槛只属于 `return_first` profile 的硬过滤。`short_vol` profile 不在扫描入口先用收益率或净收入踢掉合约；它先保留满足 DTE、strike、流动性和覆盖能力的可交易候选，再用 IV/RV、Delta、事件风险、路径压力、组合集中度和收益一起评估。
+
+`return_first` 可使用的收益门槛包括：
 
 - `min_annualized_net_return`（Put）
 - `min_annualized_net_premium_return`（Covered Call）
@@ -142,11 +144,12 @@
 3. 代码默认值
 
 ### 当前默认值注意
-文档不再写死具体默认数值，因为默认值可能在脚本配置中调整。
+默认 profile 是 `short_vol`，默认配置不再暴露收益门槛作为核心参数。收益率和单笔净收入仍参与排序，但不是第一道准入门槛。
 如果你要看当前默认值，请直接看：
 
 - `domain/domain/sell_put_config.py`
-- `domain/domain/sell_call_config.py`
+- `src/application/config_defaults.py`
+- `configs/system.json`
 
 ---
 
@@ -167,16 +170,17 @@
 
 ## 3.5 事件风险
 
-当前事件风险不是一个统一的 Engine 内硬拒绝阶段。
+事件风险已经成为 `short_vol` profile 的正式风险输入。
 
 更准确地说：
 
 - 候选先扫描出来
 - 再由 `src/application/event_risk_filter.py` 做标注 / 风险附加信息处理
+- 最后由 `domain/domain/short_vol_assessment.py` 按 `reject_event_risk` 和 `event_source_fail_closed` 决定是否通过
 
 也就是说：
 
-> 事件风险当前更接近后处理标注，而不是单一的前置硬过滤总入口。
+> 事件数据的获取仍在 application 层；事件风险是否允许进入推荐结果，则由 short-vol 评估契约统一判断。
 
 ---
 
@@ -206,25 +210,27 @@
 
 ---
 
-## 5. Sell Put 的 short-vol 风险规则
+## 5. Short-vol 风险规则
 
-默认 Sell Put profile 是 `short_vol`。这意味着系统会把 Sell Put 视为 short vol + short gamma，而不是“折价买股”。
+默认 Sell Put 与 Covered Call profile 都是 `short_vol`。这意味着系统会把二者视为同一类 short vol + short gamma 风险家族，而不是“折价买股”或“持股收租”。
 
-当前规则分三组：
+当前共享评估由 `domain/domain/short_vol_assessment.py` 负责，规则分五组：
 
 - 波动率边际：`IV/RV >= min_iv_rv_ratio` 且 `IV - RV >= min_iv_minus_rv`
 - Delta 区间：`min_abs_delta <= abs(delta) <= max_abs_delta`，排序上更偏好接近 `target_abs_delta`
-- 集中度：按 assignment notional 计算，即 `strike * multiplier * contracts * FX`
+- 事件风险：默认拒绝 expiry 前有财报等事件的候选；事件源不可用时 fail closed
+- 路径压力：Sell Put 默认检查 2σ 下跌和 10% gap-down 情景下的压力亏损占 NAV 比例；Covered Call 默认检查 gap-up 右尾机会成本占 NAV 和相对 premium 的比例
+- 集中度：Sell Put 按 assignment notional 计算；Covered Call 按 covered underlying notional 和现有正股集中度计算
 
-组合集中度使用全局 holdings 作为 NAV 和正股暴露来源，不使用单一 Futu 账户总资产作为全局 NAV。已有 short put 占用来自 option-position projection。
+组合集中度使用全局 holdings 作为 NAV 和正股暴露来源，不使用单一 Futu 账户总资产作为全局 NAV。已有 short put 占用来自 option-position projection。只要 Sell Put 或 Covered Call 任一侧启用 `short_vol`，pipeline 都会加载这份全局风险上下文。
 
-缺少 holdings/NAV、FX、RV、IV、Delta、strike 或 multiplier 时，short-vol 后过滤会 fail closed，并写入 candidate filter trace。
+Sell Put 和 Covered Call 都会对 IV/RV、Delta、事件源、组合集中度和路径压力 fail closed。`max_total_short_put_nav_pct` 只适用于 Sell Put；Covered Call 使用 `max_single_trade_nav_pct` 和 `max_symbol_nav_pct` 控制单张 covered notional 与标的现有正股集中度。Sell Put 额外使用 `max_put_sigma_stress_loss_nav_pct` 和 `max_put_gap_down_loss_nav_pct` 控制下跌路径风险。Covered Call 使用 `max_call_gap_up_opportunity_cost_nav_pct` 和 `max_call_gap_up_opportunity_cost_to_premium` 控制 gap-up 右尾机会成本；通过硬预算的候选仍会把该字段交给 `path_risk` 参与排序。缺少 RV、IV、Delta、事件源或必要组合风险输入时，short-vol 后过滤会写入 candidate filter trace。
 
 ---
 
 ## 6. Covered Call 的覆盖能力规则
 
-Covered Call 会结合持仓 context 计算：
+Covered Call 仍会先结合持仓 context 计算覆盖能力：
 
 - 总持股数
 - 已被其他 short call 锁定的股数
@@ -243,18 +249,24 @@ Covered Call 会结合持仓 context 计算：
 
 1. IV/RV 波动率边际
 2. Delta 是否接近目标区间
-3. 组合集中度占用
-4. 年化净收益率
-5. 单笔净收益
-6. 流动性与风险距离
+3. 事件风险与路径压力是否可承受
+4. 组合集中度占用
+5. 年化净收益率
+6. 单笔净收益
+7. 流动性与风险距离
 
 ### Covered Call
-主要按：
+默认 `short_vol` profile 会综合：
 
-1. 年化权利金收益（净权利金 / spot 机会成本）
-2. 单笔净收益
+1. IV/RV 波动率边际
+2. Delta 是否接近目标区间
+3. 事件风险与 gap-up 右尾机会成本
+4. Covered underlying notional / 组合集中度字段
+5. 年化净权利金收益率
+6. 单笔净收益
+7. 流动性与风险距离
 
-最终 CSV、summary 和 alerts 使用的是当前生产实现里的简单稳定排序，不再把旧文档里的理想化阶段图当成唯一真相。
+最终 CSV、summary 和 alerts 使用的是当前生产实现里的统一排序核心，不再把旧文档里的理想化阶段图当成唯一真相。
 
 需要解释“为什么这个候选排在前面”时，用同一套排序核心：
 
@@ -314,6 +326,6 @@ Covered Call 会结合持仓 context 计算：
 
 当前候选策略是：
 
-> **候选引擎负责核心排序语义，Sell Put 后处理负责现金担保、short-vol 风险和组合集中度，Covered Call 后处理负责持仓覆盖能力。**
+> **候选引擎负责基础扫描和初次排序，Sell Put 与 Covered Call 后处理共同使用 ShortVolRiskAssessment 做 short-vol 风险评估和二次排序；Covered Call 额外保留持仓覆盖能力规则。**
 
 如果以后继续重构，目标应该是让实现更集中，但在那之前，这份文档以**当前行为**为准。

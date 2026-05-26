@@ -33,7 +33,7 @@ from src.application.sell_put_call_helper import (
     select_best_yield_enhancement_pairs,
 )
 from src.application.sell_put_cash import enrich_sell_put_candidates_with_cash
-from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_short_vol
+from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_short_vol, resolve_sell_put_short_vol_config
 from src.application.candidate_filter_trace import (
     append_candidate_filter_trace_rows,
     build_candidate_filter_trace_row,
@@ -243,7 +243,8 @@ def run_sell_put_scan_and_summarize(
     yield_enhancement_separate = wants_yield_enhancement_separate(yield_enhancement_cfg)
     yield_sp = dict(yield_enhancement_sell_put_cfg or sp)
 
-    resolved_min_annualized_net_return = validate_min_annualized_net_return(
+    strategy_cfg = resolve_sell_put_short_vol_config(sp)
+    resolved_min_annualized_net_return = 0.0 if strategy_cfg.enabled else validate_min_annualized_net_return(
         sp.get('min_annualized_net_return'),
         source=f'{symbol}.sell_put.min_annualized_net_return',
     )
@@ -257,7 +258,9 @@ def run_sell_put_scan_and_summarize(
 
     min_net_income_native = 0.0
     sell_put_scan_allowed = True
-    if min_net_income_cny > 0:
+    if strategy_cfg.enabled:
+        min_net_income_native = 0.0
+    elif min_net_income_cny > 0:
         native_ccy = symbol_currency(symbol)
         if not native_ccy:
             log.warning("sell_put_steps: currency unresolved for %s; fail closed", symbol)

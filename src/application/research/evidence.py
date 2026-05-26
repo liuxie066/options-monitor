@@ -826,6 +826,7 @@ def _candidate_score_weights(raw: dict[str, Any]) -> CandidateScoreWeights:
         vol_edge=_float_setting(raw, "vol_edge", defaults.vol_edge),
         delta_target=_float_setting(raw, "delta_target", defaults.delta_target),
         concentration=_float_setting(raw, "concentration", defaults.concentration),
+        path_risk=_float_setting(raw, "path_risk", defaults.path_risk),
     )
 
 
@@ -843,6 +844,7 @@ def _score_weights_payload(weights: CandidateScoreWeights) -> dict[str, float]:
         "vol_edge": float(weights.vol_edge),
         "delta_target": float(weights.delta_target),
         "concentration": float(weights.concentration),
+        "path_risk": float(weights.path_risk),
     }
 
 

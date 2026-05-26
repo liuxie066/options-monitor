@@ -63,6 +63,30 @@ def test_sell_put_short_vol_fetch_plan_requires_realized_volatility(monkeypatch,
     assert plan.merged_specs[0].include_realized_volatility is True
 
 
+def test_sell_call_short_vol_fetch_plan_requires_realized_volatility(monkeypatch, tmp_path: Path) -> None:
+    import src.application.required_data_planning as mod
+
+    monkeypatch.setattr(mod, "list_option_expirations", lambda *args, **kwargs: ["2026-05-29"])
+    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: 470.0)
+
+    plan = mod.build_required_data_fetch_plan(
+        base=tmp_path,
+        required_data_dir=tmp_path,
+        symbol="0700.HK",
+        limit_expirations=1,
+        want_put=False,
+        want_call=True,
+        sell_put_cfg={"enabled": False},
+        sell_call_cfg={"enabled": True, "strategy": "short_vol", "min_dte": 10, "max_dte": 60},
+        fetch_host="127.0.0.1",
+        fetch_port=11111,
+    )
+
+    assert len(plan.merged_specs) == 1
+    assert plan.merged_specs[0].option_types == ("call",)
+    assert plan.merged_specs[0].include_realized_volatility is True
+
+
 def test_fetch_plan_forwards_opend_discovery_rate_limits(monkeypatch, tmp_path: Path) -> None:
     import src.application.required_data_planning as mod
 
