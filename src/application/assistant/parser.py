@@ -447,10 +447,19 @@ def _parse_symbol_add(text: str) -> dict[str, object]:
 
 def _parse_symbol_edit(text: str) -> dict[str, object]:
     labeled = _extract_labeled_values(text)
+    sets = _extract_symbol_set_values(text)
+    natural_sets = _extract_symbol_strategy_set_values(text)
+    if natural_sets:
+        for key in _symbol_strategy_shadow_keys(text):
+            sets.pop(key, None)
+        sets.update(natural_sets)
     args: dict[str, object] = {
         "symbol": labeled.get("symbol") or _extract_monitor_symbol(text),
-        "set": _extract_symbol_set_values(text),
+        "set": sets,
     }
+    ensure_use = _extract_symbol_ensure_use(text, sets)
+    if ensure_use:
+        args["ensure_use"] = ensure_use
     return {key: value for key, value in args.items() if value not in (None, "")}
 
 
@@ -524,6 +533,14 @@ def _extract_symbol(text: str) -> str | None:
         "multiplier",
         "close",
         "record_id",
+        "covered",
+        "covered_call",
+        "sell_call",
+        "sell_put",
+        "min",
+        "max",
+        "setting",
+        "settings",
         "lx",
         "sy",
     }
@@ -541,8 +558,9 @@ def _extract_symbol(text: str) -> str | None:
 
 
 def _extract_monitor_symbol(text: str) -> str | None:
-    cleaned = re.sub(r"^(查看|增加|新增|修改|删除|移除)?监控标的", "", text.strip(), flags=re.IGNORECASE).strip()
+    cleaned = re.sub(r"^(查看|增加|新增|修改|配置|设置|删除|移除)?(?:监控)?标的", "", text.strip(), flags=re.IGNORECASE).strip()
     cleaned = re.sub(r"^(symbols?|symbol)\s+(list|add|edit|remove|rm)\s*", "", cleaned, flags=re.IGNORECASE).strip()
+    cleaned = re.sub(r"^[\s,，:：。]*为?", "", cleaned).strip()
     return _extract_symbol(cleaned)
 
 
@@ -552,8 +570,82 @@ def _extract_symbol_set_values(text: str) -> dict[str, object]:
         key = match.group(1).strip()
         if key in {"symbol", "account", "record_id"}:
             continue
+        if key.startswith("covered_call."):
+            key = f"sell_call.{key.removeprefix('covered_call.')}"
         out[key] = _parse_scalar(match.group(2))
     return out
+
+
+def _extract_symbol_strategy_set_values(text: str) -> dict[str, object]:
+    out: dict[str, object] = {}
+    sell_call_context = _mentions_sell_call_context(text)
+    sell_put_context = _mentions_sell_put_context(text)
+    if _mentions_sell_call_enable_context(text):
+        out["sell_call.enabled"] = not _mentions_disabled_context(text)
+    for bound, aliases in (
+        ("min_strike", ("min[_\\s-]*strike", "最低行权价", "最小行权价")),
+        ("max_strike", ("max[_\\s-]*strike", "最高行权价", "最大行权价")),
+    ):
+        value = _extract_first_strategy_number(text, aliases)
+        if value is None:
+            continue
+        if sell_call_context:
+            out[f"sell_call.{bound}"] = value
+        elif sell_put_context:
+            out[f"sell_put.{bound}"] = value
+    return out
+
+
+def _extract_first_strategy_number(text: str, aliases: tuple[str, ...]) -> float | None:
+    for alias in aliases:
+        match = re.search(
+            rf"(?:{alias})\s*(?:=|:|：|设为|设置为|改为|改成|调整为|调整成|to)?\s*(-?\d+(?:\.\d+)?)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            return float(match.group(1))
+    return None
+
+
+def _symbol_strategy_shadow_keys(text: str) -> set[str]:
+    keys: set[str] = set()
+    if re.search(r"min[_\s-]*strike\s*(?:=|:|：)", text, flags=re.IGNORECASE):
+        keys.update({"strike", "min_strike"})
+    if re.search(r"max[_\s-]*strike\s*(?:=|:|：)", text, flags=re.IGNORECASE):
+        keys.update({"strike", "max_strike"})
+    return keys
+
+
+def _extract_symbol_ensure_use(text: str, sets: dict[str, object]) -> list[str]:
+    if _mentions_disabled_context(text) and sets.get("sell_call.enabled") is False:
+        return []
+    if _mentions_sell_call_context(text) or any(str(key).startswith("sell_call.") for key in sets):
+        return ["call_base"]
+    return []
+
+
+def _mentions_sell_call_context(text: str) -> bool:
+    lower = text.lower()
+    compact = _compact(text).lower()
+    return any(token in lower for token in ("covered call", "covered_call", "sell call", "sell_call")) or "备兑" in text or "coveredcall" in compact
+
+
+def _mentions_sell_call_enable_context(text: str) -> bool:
+    lower = text.lower()
+    compact = _compact(text).lower()
+    return any(token in lower for token in ("covered call", "covered_call", "sell call")) or "备兑" in text or "coveredcall" in compact
+
+
+def _mentions_sell_put_context(text: str) -> bool:
+    lower = text.lower()
+    return "sell put" in lower or "sell_put" in lower or "现金担保" in text or "卖沽" in text
+
+
+def _mentions_disabled_context(text: str) -> bool:
+    lower = text.lower()
+    compact = _compact(text)
+    return any(token in lower for token in ("false", "off", "disable", "disabled")) or any(token in compact for token in ("关闭", "禁用", "停用"))
 
 
 def _parse_int_value(values: dict[str, str], keys: tuple[str, ...]) -> int | None:
@@ -626,7 +718,14 @@ def _looks_like_symbol_add(compact: str, lower: str) -> bool:
 
 
 def _looks_like_symbol_edit(compact: str, lower: str) -> bool:
-    return compact.startswith("修改监控标的") or lower.startswith("symbol edit ") or lower.startswith("symbols edit ")
+    return (
+        compact.startswith("修改监控标的")
+        or compact.startswith("配置监控标的")
+        or compact.startswith("配置标的")
+        or compact.startswith("设置监控标的")
+        or lower.startswith("symbol edit ")
+        or lower.startswith("symbols edit ")
+    )
 
 
 def _looks_like_symbol_remove(compact: str, lower: str) -> bool:
