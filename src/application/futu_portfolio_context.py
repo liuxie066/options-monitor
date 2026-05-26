@@ -17,6 +17,27 @@ _LONG_POSITION_SIDE = "LONG"
 _NON_STOCK_SEC_TYPES = {"DRVT", "FUTURE", "IDX", "NONE", "N/A"}
 # Futu option code shape e.g. US.AAPL250117C00175000 — used as fallback when sec_type is absent.
 _OPTION_CODE_PATTERN = re.compile(r"\d{6}[CP]\d{6,}")
+_FUTU_CASH_FIELDS_BY_CCY = {
+    "HKD": ("hk_cash",),
+    "USD": ("us_cash",),
+    "CNY": ("cn_cash",),
+    "JPY": ("jp_cash",),
+    "SGD": ("sg_cash",),
+    "AUD": ("au_cash",),
+    "CAD": ("ca_cash",),
+    "MYR": ("my_cash",),
+}
+_FUTU_NET_CASH_POWER_FIELDS_BY_CCY = {
+    "HKD": ("hkd_net_cash_power",),
+    "USD": ("usd_net_cash_power",),
+    "CNY": ("cnh_net_cash_power",),
+    "JPY": ("jpy_net_cash_power",),
+    "SGD": ("sgd_net_cash_power",),
+    "AUD": ("aud_net_cash_power",),
+    "CAD": ("cad_net_cash_power",),
+    "MYR": ("myr_net_cash_power",),
+}
+_FUTU_FUND_ASSET_FIELDS = ("fund_assets", "mmf_assets", "money_fund_assets")
 
 
 def _resolve_trd_env(value: Any) -> str:
@@ -142,6 +163,68 @@ def _normalize_currency(value: Any, *, fallback: str = "CNY") -> str:
 
 def _normalize_symbol(value: Any) -> str | None:
     return canonical_symbol(value)
+
+
+def _add_cash_component(
+    cash_by_currency: dict[str, float],
+    components_by_currency: dict[str, dict[str, float]],
+    *,
+    currency: str,
+    source: str,
+    value: float | None,
+) -> bool:
+    if value is None:
+        return False
+    ccy = _normalize_currency(currency, fallback="")
+    if not ccy:
+        return False
+    amount = float(value)
+    if amount:
+        cash_by_currency[ccy] = cash_by_currency.get(ccy, 0.0) + amount
+    components = components_by_currency.setdefault(ccy, {})
+    components[source] = components.get(source, 0.0) + amount
+    return True
+
+
+def _extract_cash_components(
+    row: Mapping[str, Any],
+    *,
+    base_currency: str,
+) -> tuple[list[tuple[str, str, float]], str]:
+    """Return cash-like components from a Futu accinfo row.
+
+    OpenD still exposes legacy aggregate ``cash``, but that value is ambiguous
+    for multi-currency accounts. Only explicit currency cash/fund fields are
+    accepted here.
+    """
+    row_currency = _normalize_currency(
+        _pick(row, "currency", "cash_currency", "currency_code", "ccy"),
+        fallback=base_currency,
+    )
+    components: list[tuple[str, str, float]] = []
+
+    fund_value = _to_float(_pick(row, *_FUTU_FUND_ASSET_FIELDS))
+    if fund_value is not None:
+        components.append((row_currency, "fund_assets", fund_value))
+
+    for currency, fields in _FUTU_CASH_FIELDS_BY_CCY.items():
+        value = _to_float(_pick(row, *fields))
+        if value is not None:
+            components.append((currency, fields[0], value))
+
+    if components:
+        return components, "futu_cash_like_assets"
+    return [], "empty"
+
+
+def _extract_net_cash_power(row: Mapping[str, Any]) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for currency, fields in _FUTU_NET_CASH_POWER_FIELDS_BY_CCY.items():
+        value = _to_float(_pick(row, *fields))
+        if value is None:
+            continue
+        out[_normalize_currency(currency, fallback=currency)] = float(value)
+    return out
 
 
 def infer_futu_portfolio_settings(cfg: Mapping[str, Any] | Any, *, account: str | None = None) -> dict[str, Any]:
@@ -279,26 +362,27 @@ def build_futu_portfolio_context(
     base_currency: str = "CNY",
 ) -> dict[str, Any]:
     cash_by_currency: dict[str, float] = {}
+    cash_components_by_currency: dict[str, dict[str, float]] = {}
+    cash_power_by_currency: dict[str, float] = {}
+    cash_source_kinds: set[str] = set()
     stocks_by_symbol: dict[str, dict[str, Any]] = {}
 
     base_ccy = _normalize_currency(base_currency, fallback="CNY")
     for row in _dedup_balance_rows(balance_rows):
-        ccy = _normalize_currency(
-            _pick(row, "currency", "cash_currency", "currency_code", "ccy"),
-            fallback=base_ccy,
-        )
-        cash_v = _to_float(_pick(row, "cash"))
-        fund_v = _to_float(_pick(row, "fund_assets", "mmf_assets", "money_fund_assets"))
-        total = 0.0
-        has_value = False
-        if cash_v is not None:
-            total += float(cash_v)
-            has_value = True
-        if fund_v is not None:
-            total += float(fund_v)
-            has_value = True
-        if has_value:
-            cash_by_currency[ccy] = cash_by_currency.get(ccy, 0.0) + total
+        components, source_kind = _extract_cash_components(row, base_currency=base_ccy)
+        if source_kind != "empty":
+            cash_source_kinds.add(source_kind)
+        for currency, source, amount in components:
+            _add_cash_component(
+                cash_by_currency,
+                cash_components_by_currency,
+                currency=currency,
+                source=source,
+                value=amount,
+            )
+
+        for currency, amount in _extract_net_cash_power(row).items():
+            cash_power_by_currency[currency] = cash_power_by_currency.get(currency, 0.0) + amount
 
     for row in position_rows:
         if not _is_long_position(row):
@@ -349,6 +433,12 @@ def build_futu_portfolio_context(
         "as_of_utc": datetime.now(timezone.utc).isoformat(),
         "filters": {"broker": str(market), "account": account},
         "cash_by_currency": cash_by_currency,
+        "cash_components_by_currency": cash_components_by_currency,
+        "cash_source": (
+            "mixed" if len(cash_source_kinds) > 1 else next(iter(cash_source_kinds), "empty")
+        ),
+        "cash_power_by_currency": cash_power_by_currency,
+        "cash_power_source": "futu_net_cash_power",
         "stocks_by_symbol": stocks_by_symbol,
         "raw_selected_count": len(balance_rows) + len(position_rows),
         "portfolio_source_name": "futu",

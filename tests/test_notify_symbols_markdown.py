@@ -219,7 +219,7 @@ def test_notify_symbols_markdown_put_chain_uses_total_cny_cash_guard_for_alert_e
         }
     )
 
-    assert "备注: 所需担保现金约 ¥39,280，但当前总可用折算约 ¥11,666" in out
+    assert "备注: 所需担保现金约 ¥39,280，但当前现金类资产扣担保后余量约 ¥11,666" in out
 
 
 def test_notify_symbols_markdown_put_chain_uses_usd_cash_guard_for_alert_engine() -> None:
