@@ -192,6 +192,27 @@ def test_assistant_owns_command_catalog_and_interaction_contracts() -> None:
     assert "src.application.assistant.runtime import handle_assistant_message" in feishu_text
 
 
+def test_assistant_runtime_delegates_intent_arbitration() -> None:
+    runtime_text = (ROOT / "src" / "application" / "assistant" / "runtime.py").read_text(encoding="utf-8")
+    arbitrator_text = (ROOT / "src" / "application" / "assistant" / "intent_arbitrator.py").read_text(encoding="utf-8")
+
+    assert "IntentArbitrator(" in runtime_text
+    forbidden_runtime_tokens = (
+        "parse_assistant_command",
+        "parse_inbound_text",
+        "translate_inbound_intent",
+        "run_read_only_agent_loop",
+        "generate_general_reply",
+        "build_conversation_context",
+        "context_trace",
+    )
+    offenders = [token for token in forbidden_runtime_tokens if token in runtime_text]
+    assert offenders == []
+
+    for token in forbidden_runtime_tokens:
+        assert token in arbitrator_text
+
+
 def test_assistant_package_does_not_import_inbound_package() -> None:
     offenders: list[str] = []
     for path in sorted((ROOT / "src" / "application" / "assistant").glob("*.py")):
