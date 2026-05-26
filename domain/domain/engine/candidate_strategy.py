@@ -47,6 +47,7 @@ STRATEGY_PARAM_TABLE_V1: dict[StrategyMode, dict[str, dict[str, float | None]]] 
             "vol_edge": 0.0,
             "delta_target": 0.0,
             "concentration": 0.0,
+            "path_risk": 0.0,
         },
     },
     "call": {
@@ -63,6 +64,7 @@ STRATEGY_PARAM_TABLE_V1: dict[StrategyMode, dict[str, dict[str, float | None]]] 
             "vol_edge": 0.0,
             "delta_target": 0.0,
             "concentration": 0.0,
+            "path_risk": 0.0,
         },
     },
 }
@@ -81,6 +83,7 @@ class StrategyConfig:
     score_weight_vol_edge: float = 0.0
     score_weight_delta_target: float = 0.0
     score_weight_concentration: float = 0.0
+    score_weight_path_risk: float = 0.0
     param_table_version: str = "v1"
     layer_order: tuple[str, ...] = ("激进", "中性", "保守")
     layered_fill_limit: int = 5
@@ -94,6 +97,7 @@ class StrategyConfig:
             vol_edge=float(self.score_weight_vol_edge),
             delta_target=float(self.score_weight_delta_target),
             concentration=float(self.score_weight_concentration),
+            path_risk=float(self.score_weight_path_risk),
         )
 
 
@@ -113,6 +117,7 @@ def build_strategy_config(mode: StrategyMode, **kwargs) -> StrategyConfig:
         "score_weight_vol_edge": float(score.get("vol_edge", 0.0) or 0.0),
         "score_weight_delta_target": float(score.get("delta_target", 0.0) or 0.0),
         "score_weight_concentration": float(score.get("concentration", 0.0) or 0.0),
+        "score_weight_path_risk": float(score.get("path_risk", 0.0) or 0.0),
         "param_table_version": "v1",
     }
     defaults.update(kwargs)

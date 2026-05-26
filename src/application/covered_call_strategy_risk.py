@@ -5,10 +5,8 @@ from typing import Any
 
 import pandas as pd
 
-from domain.domain.short_vol_assessment import (
-    ShortVolAssessmentConfig,
-    assess_short_vol_candidate,
-)
+from domain.domain.short_vol_assessment import ShortVolAssessmentConfig, assess_short_vol_candidate
+from domain.domain.symbol_identity import symbol_currency
 from src.application.candidate_filter_trace import (
     append_candidate_filter_trace_rows,
     build_candidate_filter_trace_row,
@@ -16,7 +14,7 @@ from src.application.candidate_filter_trace import (
     infer_trace_scope_from_path,
 )
 from src.application.short_vol_risk_context import (
-    PortfolioRiskContext,
+    amount_to_cny,
     build_portfolio_risk_context,
     enrich_short_vol_contract_cny_fields,
 )
@@ -28,7 +26,7 @@ SHORT_VOL_STRATEGY = "short_vol"
 
 
 @dataclass(frozen=True)
-class SellPutShortVolConfig(ShortVolAssessmentConfig):
+class CoveredCallShortVolConfig(ShortVolAssessmentConfig):
     strategy: str = RETURN_FIRST_STRATEGY
 
     @property
@@ -36,7 +34,7 @@ class SellPutShortVolConfig(ShortVolAssessmentConfig):
         return self.strategy == SHORT_VOL_STRATEGY
 
 
-def resolve_sell_put_short_vol_config(raw: dict[str, Any] | None) -> SellPutShortVolConfig:
+def resolve_covered_call_short_vol_config(raw: dict[str, Any] | None) -> CoveredCallShortVolConfig:
     cfg = raw if isinstance(raw, dict) else {}
     strategy = str(cfg.get("strategy") or cfg.get("strategy_profile") or RETURN_FIRST_STRATEGY).strip().lower()
     if strategy in {"", "legacy", "yield_first", "return"}:
@@ -47,7 +45,7 @@ def resolve_sell_put_short_vol_config(raw: dict[str, Any] | None) -> SellPutShor
     short_vol = cfg.get("short_vol") if isinstance(cfg.get("short_vol"), dict) else {}
     concentration = cfg.get("concentration") if isinstance(cfg.get("concentration"), dict) else {}
 
-    return SellPutShortVolConfig(
+    return CoveredCallShortVolConfig(
         strategy=strategy,
         min_iv_rv_ratio=_float_setting(short_vol, "min_iv_rv_ratio", 1.15),
         min_iv_minus_rv=_float_setting(short_vol, "min_iv_minus_rv", 0.05),
@@ -78,11 +76,11 @@ def resolve_sell_put_short_vol_config(raw: dict[str, Any] | None) -> SellPutShor
     )
 
 
-def enrich_and_filter_sell_put_short_vol(
+def enrich_and_filter_covered_call_short_vol(
     *,
     df_labeled: pd.DataFrame,
     symbol: str,
-    sell_put_cfg: dict[str, Any],
+    sell_call_cfg: dict[str, Any],
     portfolio_ctx: dict[str, Any] | None,
     exchange_rate_converter: CurrencyConverter,
     out_path: Any,
@@ -90,7 +88,7 @@ def enrich_and_filter_sell_put_short_vol(
     if df_labeled is None or df_labeled.empty:
         return df_labeled
 
-    cfg = resolve_sell_put_short_vol_config(sell_put_cfg)
+    cfg = resolve_covered_call_short_vol_config(sell_call_cfg)
     if not cfg.enabled:
         return df_labeled
 
@@ -105,13 +103,17 @@ def enrich_and_filter_sell_put_short_vol(
 
     for idx, row in out.iterrows():
         row_payload = row.to_dict()
+        row_payload.setdefault(
+            "covered_notional_cny",
+            _covered_notional_cny(row_payload, exchange_rate_converter=exchange_rate_converter),
+        )
         row_payload.update(
             enrich_short_vol_contract_cny_fields(
                 row_payload,
                 exchange_rate_converter=exchange_rate_converter,
             )
         )
-        decision = evaluate_sell_put_short_vol_row(row_payload, cfg=cfg, risk_ctx=risk_ctx)
+        decision = assess_short_vol_candidate(row_payload, mode="call", cfg=cfg, risk_ctx=risk_ctx)
         for key, value in decision.get("fields", {}).items():
             out.loc[idx, key] = value
         if decision["accepted"]:
@@ -123,8 +125,8 @@ def enrich_and_filter_sell_put_short_vol(
                 run_id=scope.get("run_id"),
                 account=scope.get("account"),
                 symbol=row.get("symbol") or symbol,
-                function="sell_put",
-                mode="put",
+                function="sell_call",
+                mode="call",
                 status="post_filtered",
                 stage="post_filter",
                 rule=decision["rule"],
@@ -133,7 +135,7 @@ def enrich_and_filter_sell_put_short_vol(
                 contract_symbol=row.get("contract_symbol"),
                 expiration=row.get("expiration"),
                 strike=row.get("strike"),
-                message=decision.get("message") or "short-vol strategy risk filter",
+                message=decision.get("message") or "covered-call short-vol strategy risk filter",
                 evidence_path=getattr(out_path, "name", str(out_path)),
                 config_values={
                     "strategy": cfg.strategy,
@@ -148,9 +150,10 @@ def enrich_and_filter_sell_put_short_vol(
                     "event_source_fail_closed": cfg.event_source_fail_closed,
                     "enable_stress_check": cfg.enable_stress_check,
                     "stress_down_sigma_multiple": cfg.stress_down_sigma_multiple,
-                    "max_put_sigma_stress_loss_nav_pct": cfg.max_put_sigma_stress_loss_nav_pct,
                     "gap_down_pct": cfg.gap_down_pct,
-                    "max_put_gap_down_loss_nav_pct": cfg.max_put_gap_down_loss_nav_pct,
+                    "call_gap_up_pct": cfg.call_gap_up_pct,
+                    "max_call_gap_up_opportunity_cost_nav_pct": cfg.max_call_gap_up_opportunity_cost_nav_pct,
+                    "max_call_gap_up_opportunity_cost_to_premium": cfg.max_call_gap_up_opportunity_cost_to_premium,
                 },
             )
         )
@@ -158,35 +161,34 @@ def enrich_and_filter_sell_put_short_vol(
     filtered = out.loc[keep_mask].copy()
     if not filtered.empty:
         try:
-            from domain.domain.engine import CandidateScoreWeights, rank_candidate_rows
+            from domain.domain.engine import rank_candidate_rows
 
-            weights = _score_weights_from_sell_put_cfg(sell_put_cfg)
-            filtered = pd.DataFrame(rank_candidate_rows(filtered.to_dict("records"), mode="put", score_weights=weights))
+            weights = _score_weights_from_sell_call_cfg(sell_call_cfg)
+            filtered = pd.DataFrame(rank_candidate_rows(filtered.to_dict("records"), mode="call", score_weights=weights))
         except Exception:
             pass
     try:
         filtered.to_csv(out_path, index=False)
     except Exception as exc:
-        raise RuntimeError(f"failed to persist short-vol filtered sell-put candidates: {out_path}") from exc
+        raise RuntimeError(f"failed to persist short-vol filtered covered-call candidates: {out_path}") from exc
     append_candidate_filter_trace_rows(candidate_trace_path_for_output(out_path), reject_rows)
     return filtered
 
 
-def evaluate_sell_put_short_vol_row(
+def _covered_notional_cny(
     row: dict[str, Any],
     *,
-    cfg: SellPutShortVolConfig,
-    risk_ctx: PortfolioRiskContext,
-) -> dict[str, Any]:
-    return assess_short_vol_candidate(
-        row,
-        mode="put",
-        cfg=cfg,
-        risk_ctx=risk_ctx,
-    )
+    exchange_rate_converter: CurrencyConverter,
+) -> float | None:
+    spot = _float(row.get("spot"))
+    multiplier = _float(row.get("multiplier"))
+    if spot is None or multiplier is None or spot <= 0 or multiplier <= 0:
+        return None
+    ccy = row.get("currency") or symbol_currency(row.get("symbol"))
+    return amount_to_cny(spot * multiplier, ccy, exchange_rate_converter=exchange_rate_converter)
 
 
-def _score_weights_from_sell_put_cfg(raw: dict[str, Any]):
+def _score_weights_from_sell_call_cfg(raw: dict[str, Any]):
     from domain.domain.engine import CandidateScoreWeights
 
     weights = raw.get("score_weights") if isinstance(raw.get("score_weights"), dict) else {}
@@ -204,6 +206,26 @@ def _score_weights_from_sell_put_cfg(raw: dict[str, Any]):
         concentration=get("concentration", 0.20),
         path_risk=get("path_risk", 0.20),
     )
+
+
+def _float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    try:
+        parsed = float(value)
+    except Exception:
+        return None
+    try:
+        if parsed != parsed:
+            return None
+    except Exception:
+        pass
+    return parsed
 
 
 def _float_setting(raw: dict[str, Any], key: str, default: float) -> float:

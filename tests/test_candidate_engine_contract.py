@@ -431,6 +431,33 @@ def test_candidate_engine_rank_can_use_independent_liquidity_score() -> None:
     assert [r["contract_symbol"] for r in ranked] == ["LOWER_RETURN_LIQUID", "HIGH_RETURN_WIDE"]
 
 
+def test_candidate_engine_rank_can_use_path_risk_score_for_covered_call() -> None:
+    from domain.domain.engine import CandidateScoreWeights, build_candidate_rank_key, rank_candidate_rows
+
+    rows = [
+        {
+            "contract_symbol": "HIGH_RIGHT_TAIL_COST",
+            "annualized_net_premium_return": 0.12,
+            "net_income": 100,
+            "call_gap_up_opportunity_cost_nav_pct": 0.02,
+        },
+        {
+            "contract_symbol": "LOW_RIGHT_TAIL_COST",
+            "annualized_net_premium_return": 0.12,
+            "net_income": 100,
+            "call_gap_up_opportunity_cost_nav_pct": 0.0,
+        },
+    ]
+    weights = CandidateScoreWeights(annualized_return=0.0, net_income=0.0, path_risk=1.0)
+
+    ranked = rank_candidate_rows(rows, mode="call", score_weights=weights)
+    high = build_candidate_rank_key(rows[0], mode="call", score_weights=weights)
+    low = build_candidate_rank_key(rows[1], mode="call", score_weights=weights)
+
+    assert [r["contract_symbol"] for r in ranked] == ["LOW_RIGHT_TAIL_COST", "HIGH_RIGHT_TAIL_COST"]
+    assert low["score_components"]["path_risk"] > high["score_components"]["path_risk"]
+
+
 def test_candidate_engine_explains_rank_score_components() -> None:
     from domain.domain.engine import CandidateScoreWeights, build_candidate_rank_key, explain_candidate_rank
 

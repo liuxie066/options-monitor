@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import pandas as pd
@@ -140,3 +141,29 @@ def test_event_risk_legacy_empty_cache_without_status_is_refetched() -> None:
         entry = cache["symbols"]["AAPL"]
         assert entry["source_status"] == "ok"
         assert entry["events"] == [{"type": "earnings", "date": "2026-05-01"}]
+
+
+def test_yfinance_event_source_marks_all_source_failures_as_error(monkeypatch) -> None:
+    import pytest
+
+    _add_repo_to_syspath()
+    from src.application.event_risk_filter import EventSourceError, fetch_symbol_events_yfinance
+
+    class FailingTicker:
+        def __init__(self, _symbol: str) -> None:
+            pass
+
+        def get_earnings_dates(self, *, limit: int) -> pd.DataFrame:
+            raise RuntimeError("earnings unavailable")
+
+        @property
+        def calendar(self) -> pd.DataFrame:
+            raise RuntimeError("calendar unavailable")
+
+        def get_dividends(self) -> pd.Series:
+            raise RuntimeError("dividends unavailable")
+
+    monkeypatch.setitem(sys.modules, "yfinance", SimpleNamespace(Ticker=FailingTicker))
+
+    with pytest.raises(EventSourceError, match="earnings_dates:RuntimeError"):
+        fetch_symbol_events_yfinance("AAPL")

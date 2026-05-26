@@ -22,9 +22,12 @@ def _candidate(**overrides):
         "contract_symbol": "NVDA260619P00100000",
         "expiration": "2026-06-19",
         "strike": 100.0,
+        "spot": 110.0,
         "multiplier": 100.0,
         "currency": "USD",
         "cash_required_cny": 70_000.0,
+        "net_income_cny": 1_400.0,
+        "option_contract_point_value_cny": 700.0,
         "implied_volatility": 0.36,
         "realized_volatility_estimate": 0.24,
         "delta": -0.20,
@@ -35,6 +38,7 @@ def _candidate(**overrides):
         "volume": 20,
         "dte": 30,
         "otm_pct": 0.10,
+        "event_source_status": "ok",
     }
     row.update(overrides)
     return row
@@ -161,3 +165,98 @@ def test_enrich_and_filter_sell_put_short_vol_writes_reject_trace(tmp_path: Path
     assert filtered.empty
     trace = (out_path.parent / "candidate_filter_trace.jsonl").read_text(encoding="utf-8")
     assert "vol_edge_ratio_below_min" in trace
+
+
+def test_enrich_and_filter_sell_put_short_vol_rejects_event_risk(tmp_path: Path) -> None:
+    from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_short_vol
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    out_path = tmp_path / "output_runs" / "run-1" / "accounts" / "lx" / "nvda_sell_put_candidates_labeled.csv"
+    out_path.parent.mkdir(parents=True)
+    df = pd.DataFrame([_candidate(event_flag=True, event_types="earnings", event_dates="2026-06-01")])
+
+    filtered = enrich_and_filter_sell_put_short_vol(
+        df_labeled=df,
+        symbol="NVDA",
+        sell_put_cfg={"strategy": "short_vol"},
+        portfolio_ctx={
+            "_global_portfolio_ctx": {"cash_by_currency": {"CNY": 1_000_000.0}, "stocks_by_symbol": {}},
+            "_global_option_ctx": {"cash_secured_by_symbol_by_ccy": {}, "cash_secured_total_cny": 0.0},
+        },
+        exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
+        out_path=out_path,
+    )
+
+    assert filtered.empty
+    trace = (out_path.parent / "candidate_filter_trace.jsonl").read_text(encoding="utf-8")
+    assert "event_risk_within_expiry" in trace
+
+
+def test_enrich_and_filter_sell_put_short_vol_computes_cny_stress_inputs(tmp_path: Path) -> None:
+    from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_short_vol
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    out_path = tmp_path / "output_runs" / "run-1" / "accounts" / "lx" / "nvda_sell_put_candidates_labeled.csv"
+    out_path.parent.mkdir(parents=True)
+    df = pd.DataFrame(
+        [
+            _candidate(
+                spot=102.0,
+                net_income=20.0,
+                net_income_cny=None,
+                option_contract_point_value_cny=None,
+                implied_volatility=0.70,
+                realized_volatility_estimate=0.50,
+                dte=60,
+            )
+        ]
+    )
+
+    filtered = enrich_and_filter_sell_put_short_vol(
+        df_labeled=df,
+        symbol="NVDA",
+        sell_put_cfg={"strategy": "short_vol"},
+        portfolio_ctx={
+            "_global_portfolio_ctx": {"cash_by_currency": {"CNY": 1_000_000.0}, "stocks_by_symbol": {}},
+            "_global_option_ctx": {"cash_secured_by_symbol_by_ccy": {}, "cash_secured_total_cny": 0.0},
+        },
+        exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
+        out_path=out_path,
+    )
+
+    assert filtered.empty
+    persisted = pd.read_csv(out_path)
+    assert persisted.empty
+    trace = (out_path.parent / "candidate_filter_trace.jsonl").read_text(encoding="utf-8")
+    assert "put_sigma_stress_loss_exceeded" in trace
+
+
+def test_enrich_and_filter_sell_put_short_vol_raises_when_filtered_csv_cannot_be_written(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import pytest
+    from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_short_vol
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    out_path = tmp_path / "output_runs" / "run-1" / "accounts" / "lx" / "nvda_sell_put_candidates_labeled.csv"
+    out_path.parent.mkdir(parents=True)
+    df = pd.DataFrame([_candidate()])
+
+    def _boom(self, *args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(pd.DataFrame, "to_csv", _boom)
+
+    with pytest.raises(RuntimeError, match="failed to persist short-vol filtered sell-put candidates"):
+        enrich_and_filter_sell_put_short_vol(
+            df_labeled=df,
+            symbol="NVDA",
+            sell_put_cfg={"strategy": "short_vol"},
+            portfolio_ctx={
+                "_global_portfolio_ctx": {"cash_by_currency": {"CNY": 1_000_000.0}, "stocks_by_symbol": {}},
+                "_global_option_ctx": {"cash_secured_by_symbol_by_ccy": {}, "cash_secured_total_cny": 0.0},
+            },
+            exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
+            out_path=out_path,
+        )

@@ -56,6 +56,12 @@ SELL_CALL_EMPTY_OUTPUT_COLUMNS = [
     "open_interest",
     "volume",
     "implied_volatility",
+    "realized_volatility_20",
+    "realized_volatility_60",
+    "realized_volatility_120",
+    "realized_volatility_estimate",
+    "iv_rv_ratio",
+    "iv_minus_rv",
     "delta",
     "spread",
     "spread_ratio",
@@ -257,6 +263,24 @@ def _build_candidate_row_factory(
             "open_interest": base_values.open_interest,
             "volume": base_values.volume,
             "implied_volatility": contract.implied_volatility,
+            "realized_volatility_20": contract.realized_volatility_20,
+            "realized_volatility_60": contract.realized_volatility_60,
+            "realized_volatility_120": contract.realized_volatility_120,
+            "realized_volatility_estimate": contract.realized_volatility_estimate,
+            "iv_rv_ratio": (
+                round(contract.implied_volatility / contract.realized_volatility_estimate, 6)
+                if (
+                    contract.implied_volatility is not None
+                    and contract.realized_volatility_estimate is not None
+                    and contract.realized_volatility_estimate > 0
+                )
+                else None
+            ),
+            "iv_minus_rv": (
+                round(contract.implied_volatility - contract.realized_volatility_estimate, 6)
+                if contract.implied_volatility is not None and contract.realized_volatility_estimate is not None
+                else None
+            ),
             "delta": contract.delta,
             "spread": base_values.spread,
             "spread_ratio": base_values.spread_ratio,

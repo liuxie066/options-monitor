@@ -227,6 +227,7 @@ def run_symbol_monitoring(
                 timeout_sec=inputs.timeout_sec,
                 is_scheduled=bool(inputs.is_scheduled),
                 stock=stock,
+                portfolio_ctx=inputs.portfolio_ctx,
                 exchange_rate_converter=exchange_rate_converter,
                 locked_shares_by_symbol=option_ctx.get("locked_shares_by_symbol"),
                 locked_shares_unavailable_by_symbol=option_ctx.get("locked_shares_unavailable_by_symbol"),

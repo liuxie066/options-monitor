@@ -176,7 +176,7 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
             "output_dir": "optional output root; uses <output_dir>/reports",
             "candidate_path": "optional explicit candidate CSV path",
             "candidate_paths": "optional list of candidate CSV paths",
-            "score_weights": "optional object: annualized_return, net_income, liquidity, risk_distance, vol_edge, delta_target, concentration",
+            "score_weights": "optional object: annualized_return, net_income, liquidity, risk_distance, vol_edge, delta_target, concentration, path_risk",
             "compare_baseline": "optional bool; compare against return-then-income baseline",
         },
         risk_level="read_only",
