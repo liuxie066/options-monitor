@@ -15,7 +15,7 @@ def _write_snapshot(state_dir: Path, payload: dict) -> None:
     )
 
 
-def test_query_cash_footer_uses_base_cny_labels_when_present(tmp_path: Path) -> None:
+def test_query_cash_footer_prefers_total_cny_labels_when_present(tmp_path: Path) -> None:
     from src.application.multi_tick.cash_footer import query_cash_footer
 
     state_dir = tmp_path / 'output_accounts' / 'lx' / 'state'
@@ -32,7 +32,7 @@ def test_query_cash_footer_uses_base_cny_labels_when_present(tmp_path: Path) -> 
     out = query_cash_footer(tmp_path, market='富途', accounts=['lx'])
 
     assert out[0] == '**💰 现金 CNY**'
-    assert out[1] == '- **LX** CNY 持有 ¥1,000 (CNY) | CNY 可用 ¥200 (CNY)'
+    assert out[1] == '- **LX** 总现金折算 ¥5,000 (CNY) | 担保后可用 ¥3,000 (CNY)'
 
 
 def test_query_cash_footer_uses_total_labels_when_only_total_is_present(tmp_path: Path) -> None:
@@ -51,7 +51,26 @@ def test_query_cash_footer_uses_total_labels_when_only_total_is_present(tmp_path
 
     out = query_cash_footer(tmp_path, market='富途', accounts=['lx'])
 
-    assert out[1] == '- **LX** 现金类资产折算 ¥5,000 (CNY) | 扣担保后余量 ¥3,000 (CNY)'
+    assert out[1] == '- **LX** 总现金折算 ¥5,000 (CNY) | 担保后可用 ¥3,000 (CNY)'
+
+
+def test_query_cash_footer_falls_back_to_base_cny_when_total_missing(tmp_path: Path) -> None:
+    from src.application.multi_tick.cash_footer import query_cash_footer
+
+    state_dir = tmp_path / 'output_accounts' / 'lx' / 'state'
+    _write_snapshot(
+        state_dir,
+        {
+            'cash_available_cny': 1000.0,
+            'cash_free_cny': 200.0,
+            'cash_available_total_cny': None,
+            'cash_free_total_cny': None,
+        },
+    )
+
+    out = query_cash_footer(tmp_path, market='富途', accounts=['lx'])
+
+    assert out[1] == '- **LX** CNY现金 ¥1,000 (CNY) | 担保后可用 ¥200 (CNY)'
 
 
 def test_query_cash_footer_keeps_dash_when_all_cash_fields_missing(tmp_path: Path) -> None:
@@ -70,7 +89,7 @@ def test_query_cash_footer_keeps_dash_when_all_cash_fields_missing(tmp_path: Pat
 
     out = query_cash_footer(tmp_path, market='富途', accounts=['lx'])
 
-    assert out[1] == '- **LX** CNY 持有 - | CNY 可用 -'
+    assert out[1] == '- **LX** 总现金折算 - | 担保后可用 -'
 
 
 def test_query_cash_footer_surfaces_unavailable_cash_secured_reason(tmp_path: Path) -> None:
@@ -92,5 +111,5 @@ def test_query_cash_footer_surfaces_unavailable_cash_secured_reason(tmp_path: Pa
 
     assert (
         out[1]
-        == '- **LX** CNY 持有 ¥1,000 (CNY) | CNY 可用 - | 占用待确认 0700.HK:short_put_cash_secured_basis_missing'
+        == '- **LX** 总现金折算 ¥5,000 (CNY) | 担保后可用 - | 占用待确认 0700.HK:short_put_cash_secured_basis_missing'
     )
