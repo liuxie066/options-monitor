@@ -489,7 +489,7 @@ def classify_alert(row: pd.Series) -> tuple[str | None, str]:
         if cash_free_cny is not None and cash_req_cny is not None and cash_req_cny > cash_free_cny:
             return 'low', f'所需担保现金约 ¥{cash_req_cny:,.0f}，但当前 base(CNY) 现金余量约 ¥{cash_free_cny:,.0f}（扣占用后折算），可能无法再加仓。'
         if cash_free_cny is None and cash_free_total_cny is not None and cash_req_cny is not None and cash_req_cny > cash_free_total_cny:
-            return 'low', f'所需担保现金约 ¥{cash_req_cny:,.0f}，但当前总可用折算约 ¥{cash_free_total_cny:,.0f}（扣占用后折算），可能无法再加仓。'
+            return 'low', f'所需担保现金约 ¥{cash_req_cny:,.0f}，但当前现金类资产扣担保后余量约 ¥{cash_free_total_cny:,.0f}，可能无法再加仓。'
 
         try:
             v = row.get('cash_free_usd')

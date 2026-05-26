@@ -51,7 +51,7 @@ def test_query_cash_footer_uses_total_labels_when_only_total_is_present(tmp_path
 
     out = query_cash_footer(tmp_path, market='富途', accounts=['lx'])
 
-    assert out[1] == '- **LX** 总现金折算 ¥5,000 (CNY) | 总可用折算 ¥3,000 (CNY)'
+    assert out[1] == '- **LX** 现金类资产折算 ¥5,000 (CNY) | 扣担保后余量 ¥3,000 (CNY)'
 
 
 def test_query_cash_footer_keeps_dash_when_all_cash_fields_missing(tmp_path: Path) -> None:

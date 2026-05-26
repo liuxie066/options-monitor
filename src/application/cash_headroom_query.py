@@ -37,6 +37,40 @@ def money(v: float | None, currency: str = "USD") -> str:
     return f"{v:,.2f} {currency.upper()}"
 
 
+def _sum_by_currency_to_cny(
+    by_currency: dict,
+    *,
+    usdcny_exchange_rate: float | None,
+    cny_per_hkd_exchange_rate: float | None,
+) -> float | None:
+    total = 0.0
+    ok = True
+    for ccy, v in (by_currency or {}).items():
+        try:
+            fv = float(v)
+        except Exception:
+            continue
+        if not fv:
+            continue
+        c = str(ccy).strip().upper()
+        if c in ('CNY', 'RMB'):
+            total += fv
+        elif c == 'USD':
+            if not usdcny_exchange_rate:
+                ok = False
+                break
+            total += fv * float(usdcny_exchange_rate)
+        elif c == 'HKD':
+            if not cny_per_hkd_exchange_rate:
+                ok = False
+                break
+            total += fv * float(cny_per_hkd_exchange_rate)
+        else:
+            ok = False
+            break
+    return total if ok else None
+
+
 def _resolve_runtime_config_path(*, base: Path, config: str | Path | None) -> Path | None:
     if config is None or not str(config).strip():
         return None
@@ -163,6 +197,10 @@ def query_sell_put_cash(
     )
 
     cash_by_ccy = portfolio.get('cash_by_currency') or {}
+    cash_components_by_ccy = portfolio.get('cash_components_by_currency') or {}
+    cash_power_by_ccy = portfolio.get('cash_power_by_currency') or {}
+    cash_source = str(portfolio.get('cash_source') or '').strip() or None
+    cash_power_source = str(portfolio.get('cash_power_source') or '').strip() or None
     cash_avail_usd = cash_by_ccy.get('USD')
     try:
         cash_avail_usd = float(cash_avail_usd) if cash_avail_usd is not None else None
@@ -206,33 +244,19 @@ def query_sell_put_cash(
 
     cash_avail_total_cny = None
     if isinstance(cash_by_ccy, dict):
-        total = 0.0
-        ok = True
-        for ccy, v in cash_by_ccy.items():
-            try:
-                fv = float(v)
-            except Exception:
-                continue
-            if not fv:
-                continue
-            c = str(ccy).strip().upper()
-            if c in ('CNY', 'RMB'):
-                total += fv
-            elif c == 'USD':
-                if not usdcny_exchange_rate:
-                    ok = False
-                    break
-                total += fv * float(usdcny_exchange_rate)
-            elif c == 'HKD':
-                if not cny_per_hkd_exchange_rate:
-                    ok = False
-                    break
-                total += fv * float(cny_per_hkd_exchange_rate)
-            else:
-                ok = False
-                break
-        if ok:
-            cash_avail_total_cny = total
+        cash_avail_total_cny = _sum_by_currency_to_cny(
+            cash_by_ccy,
+            usdcny_exchange_rate=usdcny_exchange_rate,
+            cny_per_hkd_exchange_rate=cny_per_hkd_exchange_rate,
+        )
+
+    cash_power_total_cny = None
+    if isinstance(cash_power_by_ccy, dict) and cash_power_by_ccy:
+        cash_power_total_cny = _sum_by_currency_to_cny(
+            cash_power_by_ccy,
+            usdcny_exchange_rate=usdcny_exchange_rate,
+            cny_per_hkd_exchange_rate=cny_per_hkd_exchange_rate,
+        )
 
     cash_free_total_cny = None
     if cash_avail_total_cny is not None and cash_secured_total_cny is not None:
@@ -251,6 +275,11 @@ def query_sell_put_cash(
         'cash_free_cny': cash_free_cny,
         'cash_available_total_cny': cash_avail_total_cny,
         'cash_free_total_cny': cash_free_total_cny,
+        'cash_source': cash_source,
+        'cash_components_by_currency': cash_components_by_ccy,
+        'cash_power_by_currency': cash_power_by_ccy,
+        'cash_power_total_cny': cash_power_total_cny,
+        'cash_power_source': cash_power_source,
         'exchange_rates': {'USDCNY': usdcny_exchange_rate, 'HKDCNY': cny_per_hkd_exchange_rate},
         'cash_secured_total_by_ccy': (total_by_ccy_norm if cash_secured_reliable else {}),
         'cash_secured_known_total_by_ccy': total_by_ccy_norm,
@@ -277,8 +306,10 @@ def query_sell_put_cash(
     lines.append(f"- Sell Put 已占用担保现金（折算CNY）: {money(cash_secured_total_cny, 'CNY')}")
     lines.append(f"- 不在担保之内的剩余现金（base free, CNY）: {money(cash_free_cny, 'CNY')}")
 
-    lines.append(f"- 总现金（全币种折算CNY）: {money(payload.get('cash_available_total_cny'), 'CNY')}")
-    lines.append(f"- 总剩余现金（total free, 折算CNY）: {money(payload.get('cash_free_total_cny'), 'CNY')}")
+    lines.append(f"- 现金类资产（全币种折算CNY）: {money(payload.get('cash_available_total_cny'), 'CNY')}")
+    lines.append(f"- 扣担保后余量（cash-like free, 折算CNY）: {money(payload.get('cash_free_total_cny'), 'CNY')}")
+    if cash_power_by_ccy:
+        lines.append(f"- 券商现金购买力（折算CNY，仅诊断）: {money(payload.get('cash_power_total_cny'), 'CNY')}")
 
     if usdcny_exchange_rate or cny_per_hkd_exchange_rate:
         parts = []

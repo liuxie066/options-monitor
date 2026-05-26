@@ -16,6 +16,13 @@ def test_query_sell_put_cash_uses_futu_portfolio_context_when_runtime_config_all
     def fake_fetch_futu_portfolio_context(**_kwargs):  # type: ignore[no-untyped-def]
         return {
             "cash_by_currency": {"CNY": 130000.0, "USD": 1000.0},
+            "cash_components_by_currency": {
+                "CNY": {"cn_cash": 130000.0},
+                "USD": {"us_cash": 1000.0},
+            },
+            "cash_source": "futu_cash_like_assets",
+            "cash_power_by_currency": {"CNY": 150000.0},
+            "cash_power_source": "futu_net_cash_power",
             "stocks_by_symbol": {},
             "portfolio_source_name": "futu",
         }
@@ -60,6 +67,14 @@ def test_query_sell_put_cash_uses_futu_portfolio_context_when_runtime_config_all
     assert result["portfolio_source_name"] == "futu"
     assert result["cash_available_cny"] == 130000.0
     assert result["cash_free_cny"] == 58000.0
+    assert result["cash_source"] == "futu_cash_like_assets"
+    assert result["cash_components_by_currency"] == {
+        "CNY": {"cn_cash": 130000.0},
+        "USD": {"us_cash": 1000.0},
+    }
+    assert result["cash_power_by_currency"] == {"CNY": 150000.0}
+    assert result["cash_power_total_cny"] == 150000.0
+    assert result["cash_power_source"] == "futu_net_cash_power"
 
 
 def test_query_sell_put_cash_uses_account_scoped_portfolio_source_override() -> None:

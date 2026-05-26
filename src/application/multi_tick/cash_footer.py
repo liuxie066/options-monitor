@@ -38,9 +38,9 @@ def _format_cash_line(acct_u: str, payload: dict) -> str:
     total_available = payload.get('cash_available_total_cny')
     total_free = payload.get('cash_free_total_cny')
     if unavailable_reason and total_available is not None:
-        return f"- **{acct_u}** 总现金折算 {money_cny(total_available)} | 总可用折算 - | 占用待确认 {unavailable_reason}"
+        return f"- **{acct_u}** 现金类资产折算 {money_cny(total_available)} | 扣担保后余量 - | 占用待确认 {unavailable_reason}"
     if total_available is not None or total_free is not None:
-        return f"- **{acct_u}** 总现金折算 {money_cny(total_available)} | 总可用折算 {money_cny(total_free)}"
+        return f"- **{acct_u}** 现金类资产折算 {money_cny(total_available)} | 扣担保后余量 {money_cny(total_free)}"
 
     if unavailable_reason:
         return f"- **{acct_u}** CNY 持有 - | CNY 可用 - | 占用待确认 {unavailable_reason}"

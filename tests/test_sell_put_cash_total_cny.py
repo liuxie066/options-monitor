@@ -199,13 +199,13 @@ def test_render_sell_put_alerts_shows_total_cny_when_base_cny_missing(tmp_path: 
         layered=True,
     )
 
-    assert "总现金折算(CNY): ¥531,694" in text
-    assert "总可用折算(扣占用, CNY): ¥11,666" in text
+    assert "现金类资产折算(CNY): ¥531,694" in text
+    assert "扣担保后余量(现金类资产, CNY): ¥11,666" in text
     assert "余量(总折算估算, CNY): ¥-27,614" in text
     assert "波动率: IV=36.00% | RV估计=24.00% | IV/RV=1.50 | IV-RV=12.00%" in text
     assert "Delta: abs=0.20" in text
     assert "集中度: 单笔=7.00% | 标的后=17.00% | Short Put总后=25.00%" in text
-    assert "判断: 所需担保现金约 ¥39,280，但当前总可用折算约 ¥11,666" in text
+    assert "判断: 所需担保现金约 ¥39,280，但当前现金类资产扣担保后余量约 ¥11,666" in text
 
 
 def test_render_sell_put_alerts_shows_usd_cash_guard_when_cny_missing(tmp_path: Path) -> None:

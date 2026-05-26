@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.2.152 - 2026-05-26
+
+### Changed
+- Changed Futu/OpenD cash aggregation to use explicit currency cash fields and fund assets, ignoring the ambiguous legacy `cash` aggregate.
+- Added cash component/source diagnostics and separated broker cash buying power from cash-like asset totals.
+- Clarified cash notification and Sell Put alert wording so cash-like assets and post-guarantee headroom are not described as broker available cash.
+
 ## 1.2.151 - 2026-05-26
 
 ### Added
