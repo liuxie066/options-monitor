@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 1.2.151 - 2026-05-26
+
+### Added
+- Added assistant intent arbitration and decision metadata so command, deterministic, LLM, and agent-loop candidates can be compared and audited.
+- Added assistant NLU eval fixtures covering recent inbound inputs and Covered Call symbol configuration phrasing.
+
+### Changed
+- Moved assistant intent arbitration out of runtime into a dedicated IntentArbitrator control-plane component.
+- Kept runtime focused on request orchestration, router execution, agent-loop tool traces, and response metadata.
+
+### Fixed
+- Fixed natural-language Covered Call symbol configuration so inputs such as `tigr covered call min strike=6.5` route to symbol edit instead of manual trade update.
+
 ## 1.2.150 - 2026-05-26
 
 ### Added
