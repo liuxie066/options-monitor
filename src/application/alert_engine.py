@@ -156,6 +156,40 @@ def _append_option_quote_parts(parts: list[str], row: pd.Series, *, prepend: boo
         pass
 
 
+def _truthy_row_value(value) -> bool:
+    try:
+        if pd.isna(value):
+            return False
+    except Exception:
+        pass
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {'1', 'true', 'yes', 'y'}
+    return bool(value)
+
+
+def _clean_row_text(value) -> str:
+    try:
+        if pd.isna(value):
+            return ''
+    except Exception:
+        pass
+    return str(value or '').strip()
+
+
+def _event_summary_token(row: pd.Series) -> str:
+    if not _truthy_row_value(row.get('event_flag')):
+        return ''
+    event_types = _clean_row_text(row.get('event_types'))
+    event_dates = _clean_row_text(row.get('event_dates'))
+    if event_types and event_dates:
+        return f"{event_types}@{event_dates}"
+    return event_types or event_dates
+
+
 def _build_sell_call_extra_parts(row: pd.Series) -> list[str]:
     shares_total = int(row.get('shares_total') or 0)
     shares_locked = int(row.get('shares_locked') or 0)
@@ -253,6 +287,10 @@ def _build_sell_put_extra_parts(row: pd.Series) -> list[str]:
             pass
 
     _append_option_quote_parts(parts, row, prepend=True)
+
+    event_token = _event_summary_token(row)
+    if event_token:
+        parts.append(f"event {event_token}")
 
     linked_call_contract = str(row.get('linked_call_contract') or '').strip()
     if linked_call_contract:

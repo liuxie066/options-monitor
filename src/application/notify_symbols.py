@@ -484,10 +484,18 @@ def _build_notification_block_compact(
                 l4_parts.append(f"IV {iv_match.group(1)}")
             l4 = f"- {' · '.join(l4_parts)}"
     elif extra_detail_line:
+        l4_parts = []
+        event_match = re.search(r'事件[:=]\s*([^\n]+)', extra_detail_line)
+        if event_match:
+            event_text = event_match.group(1).strip()
+            if event_text:
+                l4_parts.append(f"事件 {event_text}")
         if '收益增强' in extra_detail_line:
             call_match = re.search(r'推荐Call=([^|]+)', extra_detail_line)
             if call_match:
-                l4 = f"- 💡 推荐Call={call_match.group(1).strip()}"
+                l4_parts.append(f"💡 推荐Call={call_match.group(1).strip()}")
+        if l4_parts:
+            l4 = f"- {' · '.join(l4_parts)}"
 
     out_lines = [l1]
     if l2:
@@ -564,6 +572,7 @@ def _format_alert_line(line: str, *, account_label: str = '当前账户') -> str
         cash_used_sym = parsed.extras.get('cash_used_sym', '')
         delta = parsed.extras.get('delta', '')
         iv = parsed.extras.get('iv', '') or parsed.extras.get('IV', '')
+        event = parsed.extras.get('event', '')
         linked_call = parsed.extras.get('linked_call', '')
         linked_call_count = parsed.extras.get('linked_call_count', '')
         linked_call_ask = parsed.extras.get('linked_call_ask', '')
@@ -580,6 +589,8 @@ def _format_alert_line(line: str, *, account_label: str = '当前账户') -> str
                 f"- 已持仓: 同标的Sell Put占用="
                 f"{_present_money_or_zero(used_symbol, reason='告警未提供cash_used_sym')}"
             )
+        if not _is_missing_value(event):
+            extra_detail_lines.append(f"- 事件: {event}")
         if not _is_missing_value(linked_call):
             count_part = ''
             if not _is_missing_value(linked_call_count):
@@ -693,6 +704,7 @@ def _format_alert_line_compact(line: str, *, account_label: str = '当前账户'
         cash_req_usd = parsed.extras.get('cash_req', '')
         delta = parsed.extras.get('delta', '')
         iv = parsed.extras.get('iv', '') or parsed.extras.get('IV', '')
+        event = parsed.extras.get('event', '')
         linked_call = parsed.extras.get('linked_call', '')
         linked_call_count = parsed.extras.get('linked_call_count', '')
         linked_call_delta = parsed.extras.get('linked_call_delta', '')
@@ -701,6 +713,8 @@ def _format_alert_line_compact(line: str, *, account_label: str = '当前账户'
         delta_show = _present_compact(delta)
         iv_show = _present_compact(iv)
         extra_detail_lines: list[str] = []
+        if not _is_missing_value(event):
+            extra_detail_lines.append(f"- 事件: {event}")
         if not _is_missing_value(linked_call):
             count_part = ''
             if not _is_missing_value(linked_call_count):

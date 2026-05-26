@@ -100,6 +100,35 @@ def test_candidate_engine_put_summary_keeps_same_symbol_usage_fields() -> None:
     assert summary["cash_secured_used_cny_symbol"] == 45000.0
 
 
+def test_candidate_engine_put_summary_keeps_event_risk_fields() -> None:
+    from src.application.report_summaries import summarize_sell_put
+
+    rows = [
+        {
+            "symbol": "AAPL",
+            "contract_symbol": "P_TOP",
+            "expiration": "2026-06-19",
+            "strike": 180.0,
+            "dte": 24,
+            "mid": 2.1,
+            "net_income": 210.0,
+            "annualized_net_return_on_cash_basis": 0.18,
+            "delta": -0.22,
+            "event_flag": True,
+            "event_types": "earnings",
+            "event_dates": "2026-06-10",
+            "reject_stage_candidate": "EVENT_WARN",
+        },
+    ]
+
+    summary = summarize_sell_put(pd.DataFrame(rows), "AAPL")
+
+    assert summary["event_flag"] is True
+    assert summary["event_types"] == "earnings"
+    assert summary["event_dates"] == "2026-06-10"
+    assert summary["reject_stage_candidate"] == "EVENT_WARN"
+
+
 def test_candidate_engine_call_summary_uses_simple_rank() -> None:
     from domain.domain.engine import rank_candidate_rows
     from src.application.report_summaries import summarize_sell_call

@@ -57,6 +57,17 @@ def test_format_alert_line_compact_sell_put() -> None:
     assert "###" not in out
 
 
+def test_format_alert_line_compact_sell_put_shows_event_risk() -> None:
+    from src.application.notify_symbols import _format_alert_line_compact
+
+    line = "腾讯 | sell_put | 2026-04-29 460 | 年化 12% | 净收入 2300 | DTE 29 | Strike 460 | mid 2.3 | ccy USD | cash_req_cny ¥46000 | delta 0.25 | event earnings@2026-04-20 | 风险 保守 | 通过准入"
+    out = _format_alert_line_compact(line, account_label="lx")
+
+    assert "🟢 卖Put 腾讯" in out
+    assert "事件 earnings@2026-04-20" in out
+    assert "---" not in out
+
+
 def test_fmt_date_compact_same_year() -> None:
     from src.application.notify_symbols import _fmt_date_compact
 
