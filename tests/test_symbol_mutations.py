@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from src.application.symbol_calibration import calibrate_symbol, require_calibrated_symbol
-from src.application.symbol_mutations import find_symbol_entry, normalize_symbol
+from src.application.symbol_mutations import add_symbol_entry, find_symbol_entry, normalize_symbol
 
 
 def test_symbol_calibration_accepts_common_user_inputs() -> None:
@@ -56,6 +56,14 @@ def test_symbols_cli_add_normalizes_accounts_as_labels() -> None:
 
     assert cfg["symbols"][0]["symbol"] == "NVDA"
     assert cfg["symbols"][0]["accounts"] == ["lx", "sy"]
+
+
+def test_add_symbol_entry_defaults_use_from_enabled_sides() -> None:
+    cfg = {"symbols": []}
+
+    add_symbol_entry(cfg, symbol="NVDA", sell_put_enabled=True, sell_call_enabled=True)
+
+    assert cfg["symbols"][0]["use"] == ["put_base", "call_base"]
 
 
 def test_symbols_cli_list_reads_config_path(tmp_path: Path, capsys) -> None:

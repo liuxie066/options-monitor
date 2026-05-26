@@ -70,7 +70,7 @@ def add_symbol_entry(
     cfg: dict[str, Any],
     *,
     symbol: str,
-    use: str | None = "put_base",
+    use: str | list[str] | tuple[str, ...] | None = None,
     limit_expirations: int = 8,
     sell_put_enabled: bool = False,
     sell_call_enabled: bool = False,
@@ -89,6 +89,11 @@ def add_symbol_entry(
         "sell_put": _strategy_defaults(enabled=bool(sell_put_enabled)),
         "sell_call": _strategy_defaults(enabled=bool(sell_call_enabled)),
     }
+    if use is None:
+        use = default_use_for_enabled_sides(
+            sell_put_enabled=bool(sell_put_enabled),
+            sell_call_enabled=bool(sell_call_enabled),
+        )
     if use is not None and str(use).strip():
         entry["use"] = use
     if accounts is not None:
@@ -117,6 +122,7 @@ def edit_symbol_entry(
     *,
     symbol: str,
     sets: dict[str, Any],
+    ensure_use: list[str] | tuple[str, ...] | None = None,
     error_factory: Callable[[str], Exception] = ValueError,
 ) -> SymbolMutationSummary:
     calibration = require_calibrated_symbol(symbol, config=cfg, error_factory=error_factory)
@@ -134,6 +140,11 @@ def edit_symbol_entry(
             raise error_factory("set path cannot be empty")
         set_path(entry, path, value, error_factory=error_factory)
         changed_paths.append(path)
+    changed_paths.extend(_ensure_enabled_strategy_defaults(entry, "sell_put"))
+    changed_paths.extend(_ensure_enabled_strategy_defaults(entry, "sell_call"))
+    if ensure_use:
+        if ensure_use_templates(entry, ensure_use, error_factory=error_factory):
+            changed_paths.append("use")
     ensure_symbols_list(cfg, error_factory=error_factory)[idx] = entry
     return SymbolMutationSummary("edit", str(symbol or "").strip(), canonical, calibration.public_payload(), str(existing.get("symbol") or canonical), changed_paths, dict(entry))
 
@@ -171,6 +182,44 @@ def set_path(
     cur[parts[-1]] = value
 
 
+def ensure_use_templates(
+    entry: dict[str, Any],
+    templates: list[str] | tuple[str, ...],
+    *,
+    error_factory: Callable[[str], Exception] = ValueError,
+) -> bool:
+    requested = [str(item).strip() for item in templates if str(item).strip()]
+    if not requested:
+        return False
+    current = entry.get("use")
+    current_items = _use_templates(current, error_factory=error_factory)
+    merged = list(current_items)
+    for item in requested:
+        if item not in merged:
+            merged.append(item)
+    if merged == current_items:
+        return False
+    if not current_items and len(merged) == 1:
+        entry["use"] = merged[0]
+    else:
+        entry["use"] = merged
+    return True
+
+
+def _use_templates(
+    value: Any,
+    *,
+    error_factory: Callable[[str], Exception] = ValueError,
+) -> list[str]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    if isinstance(value, (list, tuple)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    raise error_factory("symbol use must be a string or list")
+
+
 def _symbols_rows(cfg: dict[str, Any]) -> list[dict[str, Any]]:
     rows = cfg.get("symbols")
     return [item for item in rows if isinstance(item, dict)] if isinstance(rows, list) else []
@@ -180,3 +229,25 @@ def _strategy_defaults(*, enabled: bool) -> dict[str, Any]:
     if not enabled:
         return {"enabled": False}
     return {"enabled": True, "min_dte": 20, "max_dte": 45}
+
+
+def _ensure_enabled_strategy_defaults(entry: dict[str, Any], key: str) -> list[str]:
+    strategy = entry.get(key)
+    if not isinstance(strategy, dict) or strategy.get("enabled") is not True:
+        return []
+    changed: list[str] = []
+    for name, value in (("min_dte", 20), ("max_dte", 45)):
+        if strategy.get(name) is None:
+            strategy[name] = value
+            changed.append(f"{key}.{name}")
+    return changed
+
+
+def default_use_for_enabled_sides(*, sell_put_enabled: bool, sell_call_enabled: bool) -> str | list[str] | None:
+    if sell_put_enabled and sell_call_enabled:
+        return ["put_base", "call_base"]
+    if sell_call_enabled:
+        return "call_base"
+    if sell_put_enabled:
+        return "put_base"
+    return None

@@ -355,6 +355,54 @@ def _validate_short_vol_strategy_config(cfg: dict, path: str) -> None:
             _validate_optional_unit_interval_number(concentration, key, f'{path}.concentration')
 
 
+def _use_list(item: dict) -> list[str]:
+    raw = item.get('use')
+    if isinstance(raw, str):
+        text = raw.strip()
+        return [text] if text else []
+    if isinstance(raw, list):
+        return [str(value).strip() for value in raw if isinstance(value, str) and str(value).strip()]
+    return []
+
+
+def _template_side_has_strategy(templates: dict, template_name: str, side: str) -> bool:
+    template = templates.get(template_name)
+    if not isinstance(template, dict):
+        return False
+    side_cfg = template.get(side)
+    return isinstance(side_cfg, dict) and str(side_cfg.get('strategy') or '').strip() != ''
+
+
+def _used_template_has_side_strategy(templates: dict, use_list: list[str], side: str) -> bool:
+    return any(_template_side_has_strategy(templates, name, side) for name in use_list)
+
+
+def _validate_enabled_side_template_strategy(
+    *,
+    sym: str,
+    side: str,
+    side_cfg: dict,
+    item: dict,
+    templates: dict,
+) -> None:
+    if not side_cfg.get('enabled'):
+        return
+    if str(side_cfg.get('strategy') or '').strip():
+        return
+    expected_template = 'put_base' if side == 'sell_put' else 'call_base'
+    if not _template_side_has_strategy(templates, expected_template, side):
+        return
+    use_list = _use_list(item)
+    if _used_template_has_side_strategy(templates, use_list, side):
+        return
+    recommendation = 'use: ["put_base", "call_base"]'
+    die(
+        f"{sym}.{side} enabled but no {side}.strategy is inherited. "
+        f"Add {expected_template} to {sym}.use, for example {recommendation}, "
+        f"or set {sym}.{side}.strategy explicitly."
+    )
+
+
 def _validate_optional_non_negative_number_list(cfg: dict, key: str, path: str):
     if key not in cfg or cfg.get(key) is None:
         return
@@ -919,6 +967,13 @@ def validate_config(cfg: dict):
                 f'{sym}.yield_enhancement',
             )
         if sp.get('enabled'):
+            _validate_enabled_side_template_strategy(
+                sym=sym,
+                side='sell_put',
+                side_cfg=sp,
+                item=item,
+                templates=templates,
+            )
             for k in ('min_dte', 'max_dte'):
                 if k not in sp:
                     die(f"{sym}.sell_put enabled but missing {k}")
@@ -955,6 +1010,13 @@ def validate_config(cfg: dict):
             )
         _validate_optional_positive_number(sc, 'min_strike_cost_multiplier', f'{sym}.sell_call')
         if sc.get('enabled'):
+            _validate_enabled_side_template_strategy(
+                sym=sym,
+                side='sell_call',
+                side_cfg=sc,
+                item=item,
+                templates=templates,
+            )
             # NOTE:
             # - sell_call cost basis/shares come from account portfolio_context at runtime.
             # - portfolio_context may be backed by OpenD or holdings depending on account/runtime settings.

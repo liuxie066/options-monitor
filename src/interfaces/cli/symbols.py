@@ -73,7 +73,7 @@ def cmd_list(cfg: dict, fmt: str) -> None:
         )
 
 
-def cmd_add(cfg: dict, symbol: str, use: str, limit_exp: int, put: bool, call: bool, accounts: list[str] | None = None):
+def cmd_add(cfg: dict, symbol: str, use: str | None, limit_exp: int, put: bool, call: bool, accounts: list[str] | None = None):
     return add_symbol_entry(
         cfg,
         symbol=symbol,
@@ -109,7 +109,7 @@ def main(argv: list[str] | None = None) -> int:
     p_list.add_argument("--format", choices=["text", "json"], default="text")
     p_add = sub.add_parser("add")
     p_add.add_argument("symbol")
-    p_add.add_argument("--use", default="put_base")
+    p_add.add_argument("--use", default=None)
     p_add.add_argument("--limit-exp", type=int, default=8)
     p_add.add_argument("--put", action="store_true")
     p_add.add_argument("--call", action="store_true")

@@ -66,7 +66,8 @@ def _runtime_cfg(data_config_ref: str) -> dict:
                     "min_volume": 1,
                     "max_spread_ratio": 0.3,
                 }
-            }
+            },
+            "call_base": {"sell_call": {"strategy": "short_vol"}},
         },
         "symbols": [
             {
@@ -249,6 +250,13 @@ def test_inbound_parser_maps_manual_trade_and_symbol_operations() -> None:
     symbol_edit = parse_inbound_text("修改监控标的 HK.00700 sell_put.max_strike=480")
     assert symbol_edit.name == "symbol_edit"
     assert symbol_edit.arguments == {"symbol": "HK.00700", "set": {"sell_put.max_strike": 480}}
+    covered_call_edit = parse_inbound_text("配置标的，为tigr做covered call的设置，min strike=6.5")
+    assert covered_call_edit.name == "symbol_edit"
+    assert covered_call_edit.arguments == {
+        "symbol": "tigr",
+        "set": {"sell_call.enabled": True, "sell_call.min_strike": 6.5},
+        "ensure_use": ["call_base"],
+    }
     assert parse_inbound_text("删除监控标的 腾讯").arguments == {"symbol": "腾讯"}
     assert parse_inbound_text("确认监控 in_abc123").name == "symbol_confirm"
     assert parse_inbound_text("cancel monitor in_abc123").name == "symbol_cancel"
@@ -1193,6 +1201,18 @@ def test_inbound_symbol_add_edit_remove_preview_and_confirm(monkeypatch: pytest.
     )
     assert edit_confirm["ok"] is True
 
+    covered_call_preview = handle_assistant_request(
+        AssistantRequest(text="配置标的，为NVDA做covered call的设置，min strike=140", sender_id="ou_1", channel="feishu", message_id="msg_symbol_covered_call", config_path=str(cfg_path), audit_db=str(audit_db)),
+        allowed_senders="feishu:ou_1",
+    )
+    assert covered_call_preview["ok"] is True
+    covered_call_id = covered_call_preview["data"]["operation_id"]
+    covered_call_confirm = handle_assistant_request(
+        AssistantRequest(text=f"确认监控 {covered_call_id}", sender_id="ou_1", channel="feishu", message_id="msg_symbol_covered_call_confirm", config_path=str(cfg_path), audit_db=str(audit_db)),
+        allowed_senders="feishu:ou_1",
+    )
+    assert covered_call_confirm["ok"] is True
+
     remove_preview = handle_assistant_request(
         AssistantRequest(text="删除监控标的 腾讯", sender_id="ou_1", channel="feishu", message_id="msg_symbol_remove", config_path=str(cfg_path), audit_db=str(audit_db)),
         allowed_senders="feishu:ou_1",
@@ -1206,6 +1226,10 @@ def test_inbound_symbol_add_edit_remove_preview_and_confirm(monkeypatch: pytest.
 
     current = json.loads(cfg_path.read_text(encoding="utf-8"))
     assert [item["symbol"] for item in current["symbols"]] == ["NVDA"]
+    nvda = current["symbols"][0]
+    assert nvda["use"] == ["put_base", "call_base"]
+    assert nvda["sell_call"]["enabled"] is True
+    assert nvda["sell_call"]["min_strike"] == 140.0
 
 
 def test_inbound_write_operations_are_disabled_by_default(tmp_path: Path) -> None:
