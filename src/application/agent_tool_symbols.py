@@ -5,6 +5,7 @@ from typing import Any, Callable, cast
 
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.symbol_mutations import (
+    default_use_for_enabled_sides,
     ensure_symbols_list as _ensure_symbols_list,
     find_symbol_entry as _find_symbol_entry,
     require_calibrated_symbol,
@@ -134,6 +135,13 @@ def apply_symbol_mutation(cfg: dict[str, Any], payload: dict[str, Any], *, norma
             entry["broker"] = payload.get("broker")
         if payload.get("use") is not None:
             entry["use"] = payload.get("use")
+        else:
+            default_use = default_use_for_enabled_sides(
+                sell_put_enabled=sell_put_enabled,
+                sell_call_enabled=sell_call_enabled,
+            )
+            if default_use is not None:
+                entry["use"] = default_use
         if payload.get("accounts") is not None:
             entry["accounts"] = normalize_accounts(payload.get("accounts"), fallback=())
         symbols.append(entry)

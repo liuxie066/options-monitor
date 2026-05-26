@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.149 - 2026-05-26
+
+### Fixed
+- Added config validation to fail fast when enabled Sell Put or Covered Call entries do not inherit a strategy template or set an explicit strategy, preventing silent fallback from `short_vol` to `return_first`.
+- Updated symbol add/edit flows so Covered Call changes add `call_base` by default and inbound Covered Call edits can request the required template inheritance.
+
 ## 1.2.148 - 2026-05-26
 
 ### Added

@@ -245,7 +245,7 @@ def _apply_symbol_payload(cfg: dict[str, Any], payload: dict[str, Any]) -> dict[
         summary = add_symbol_entry(
             cfg,
             symbol=_required_text(args.get("symbol"), "symbol"),
-            use=str(args.get("use") or "put_base"),
+            use=str(args["use"]) if args.get("use") is not None else None,
             limit_expirations=int(args.get("limit_expirations") or 8),
             sell_put_enabled=bool(args.get("sell_put_enabled", False)),
             sell_call_enabled=bool(args.get("sell_call_enabled", False)),
@@ -260,7 +260,14 @@ def _apply_symbol_payload(cfg: dict[str, Any], payload: dict[str, Any]) -> dict[
             raise AgentToolError(code="NEEDS_CLARIFICATION", message="修改监控标的需要提供 field=value。")
         if any(str(key).strip() == "symbol" or str(key).strip().startswith("symbol.") for key in sets):
             raise AgentToolError(code="INPUT_ERROR", message="不能通过 edit 修改 symbol 本身；请删除后重新新增。")
-        return edit_symbol_entry(cfg, symbol=_required_text(args.get("symbol"), "symbol"), sets=sets, error_factory=_input_error).public_payload()
+        ensure_use = args.get("ensure_use") if isinstance(args.get("ensure_use"), list) else None
+        return edit_symbol_entry(
+            cfg,
+            symbol=_required_text(args.get("symbol"), "symbol"),
+            sets=sets,
+            ensure_use=ensure_use,
+            error_factory=_input_error,
+        ).public_payload()
     if operation_type == "symbol_remove":
         return remove_symbol_entry(cfg, symbol=_required_text(args.get("symbol"), "symbol"), error_factory=_input_error).public_payload()
     raise AgentToolError(code="INPUT_ERROR", message=f"unsupported symbol operation_type: {operation_type}")
