@@ -76,7 +76,7 @@ def _render_judgment(row) -> str:
     if cash_req_cny is not None and cash_free_cny is not None and cash_req_cny > cash_free_cny:
         return f"所需担保现金约 ¥{cash_req_cny:,.0f}，但当前 base(CNY) 现金余量约 ¥{cash_free_cny:,.0f}（扣占用后折算），可能无法再加仓。"
     if cash_req_cny is not None and cash_free_cny is None and cash_free_total_cny is not None and cash_req_cny > cash_free_total_cny:
-        return f"所需担保现金约 ¥{cash_req_cny:,.0f}，但当前总可用折算约 ¥{cash_free_total_cny:,.0f}（扣占用后折算），可能无法再加仓。"
+        return f"所需担保现金约 ¥{cash_req_cny:,.0f}，但当前现金类资产扣担保后余量约 ¥{cash_free_total_cny:,.0f}，可能无法再加仓。"
     if cash_req_usd is not None and cash_free_usd is not None and cash_req_usd > cash_free_usd:
         return f"所需担保现金约 ${cash_req_usd:,.0f}，但当前账户可用担保现金约 ${cash_free_usd:,.0f}（已扣占用），可能无法再加仓。"
     if cash_req_usd is not None and cash_free_cny is None and cash_free_total_cny is None and cash_free_usd is None and cash_free_usd_est is not None and cash_req_usd > cash_free_usd_est:
@@ -102,7 +102,7 @@ def _active_cash_view(row) -> tuple[str, str, float | None, float | None, float 
     if cash_req_cny is not None and cash_free_cny is not None:
         return ("CNY", "base(CNY) 现金余量", cash_req_cny, cash_free_cny, cash_free_cny - cash_req_cny)
     if cash_req_cny is not None and cash_free_total_cny is not None:
-        return ("CNY", "总可用折算(CNY)", cash_req_cny, cash_free_total_cny, cash_free_total_cny - cash_req_cny)
+        return ("CNY", "现金类资产扣担保后余量(CNY)", cash_req_cny, cash_free_total_cny, cash_free_total_cny - cash_req_cny)
     if cash_req_usd is not None and cash_free_usd is not None:
         return ("USD", "账户可用担保现金(USD)", cash_req_usd, cash_free_usd, cash_free_usd - cash_req_usd)
     if cash_req_usd is not None and cash_free_usd_est is not None:
@@ -289,8 +289,8 @@ def render_one(row) -> str:
         f"其中该标的占用(估算, CNY口径): {('-' if cash_used_symbol is None else '¥' + num(cash_used_symbol, 0))}",
         f"富途现金(base, CNY): {('-' if cash_avail_cny is None else '¥' + num(cash_avail_cny, 0))}",
         f"现金余量(base, 扣占用折算, CNY): {('-' if cash_free_cny is None else '¥' + num(cash_free_cny, 0))}",
-        f"总现金折算(CNY): {('-' if cash_avail_total_cny is None else '¥' + num(cash_avail_total_cny, 0))}",
-        f"总可用折算(扣占用, CNY): {('-' if cash_free_total_cny is None else '¥' + num(cash_free_total_cny, 0))}",
+        f"现金类资产折算(CNY): {('-' if cash_avail_total_cny is None else '¥' + num(cash_avail_total_cny, 0))}",
+        f"扣担保后余量(现金类资产, CNY): {('-' if cash_free_total_cny is None else '¥' + num(cash_free_total_cny, 0))}",
         f"{headroom_label}: {('-' if headroom is None else '¥' + num(headroom, 0))}",
         f"担保现金需求(生效口径, {active_ccy}): {('-' if active_req is None else active_symbol + num(active_req, 0))}",
         f"{active_free_label}: {('-' if active_free is None else active_symbol + num(active_free, 0))}",
