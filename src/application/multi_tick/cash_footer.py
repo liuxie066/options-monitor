@@ -28,23 +28,23 @@ def snapshot_fresh(payload: dict, max_age_sec: int) -> bool:
 
 def _format_cash_line(acct_u: str, payload: dict) -> str:
     unavailable_reason = str(payload.get('cash_secured_unavailable_reason') or '').strip()
-    base_available = payload.get('cash_available_cny')
-    base_free = payload.get('cash_free_cny')
-    if unavailable_reason and base_available is not None:
-        return f"- **{acct_u}** CNY 持有 {money_cny(base_available)} | CNY 可用 - | 占用待确认 {unavailable_reason}"
-    if base_available is not None or base_free is not None:
-        return f"- **{acct_u}** CNY 持有 {money_cny(base_available)} | CNY 可用 {money_cny(base_free)}"
-
     total_available = payload.get('cash_available_total_cny')
     total_free = payload.get('cash_free_total_cny')
     if unavailable_reason and total_available is not None:
-        return f"- **{acct_u}** 现金类资产折算 {money_cny(total_available)} | 扣担保后余量 - | 占用待确认 {unavailable_reason}"
+        return f"- **{acct_u}** 总现金折算 {money_cny(total_available)} | 担保后可用 - | 占用待确认 {unavailable_reason}"
     if total_available is not None or total_free is not None:
-        return f"- **{acct_u}** 现金类资产折算 {money_cny(total_available)} | 扣担保后余量 {money_cny(total_free)}"
+        return f"- **{acct_u}** 总现金折算 {money_cny(total_available)} | 担保后可用 {money_cny(total_free)}"
+
+    base_available = payload.get('cash_available_cny')
+    base_free = payload.get('cash_free_cny')
+    if unavailable_reason and base_available is not None:
+        return f"- **{acct_u}** CNY现金 {money_cny(base_available)} | 担保后可用 - | 占用待确认 {unavailable_reason}"
+    if base_available is not None or base_free is not None:
+        return f"- **{acct_u}** CNY现金 {money_cny(base_available)} | 担保后可用 {money_cny(base_free)}"
 
     if unavailable_reason:
-        return f"- **{acct_u}** CNY 持有 - | CNY 可用 - | 占用待确认 {unavailable_reason}"
-    return f"- **{acct_u}** CNY 持有 {money_cny(None)} | CNY 可用 {money_cny(None)}"
+        return f"- **{acct_u}** 总现金折算 - | 担保后可用 - | 占用待确认 {unavailable_reason}"
+    return f"- **{acct_u}** 总现金折算 {money_cny(None)} | 担保后可用 {money_cny(None)}"
 
 
 def query_cash_footer(

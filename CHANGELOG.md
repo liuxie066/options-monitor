@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.153 - 2026-05-27
+
+### Changed
+- Unified cash footer wording to prefer total CNY cash and post-guarantee headroom, avoiding account-specific "holding" versus "cash-like" labels caused by different data sources.
+
 ## 1.2.152 - 2026-05-26
 
 ### Changed
