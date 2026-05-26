@@ -302,7 +302,10 @@ def test_agent_internal_init_minimal_config() -> None:
         assert "market" not in cfg["portfolio"]
         assert cfg["symbols"][0]["broker"] == "US"
         assert "market" not in cfg["symbols"][0]
-        assert cfg["templates"]["put_base"]["sell_put"]["min_annualized_net_return"] == 0.1
+        sell_put_template = cfg["templates"]["put_base"]["sell_put"]
+        assert sell_put_template["strategy"] == "short_vol"
+        assert sell_put_template["short_vol"]["min_iv_rv_ratio"] == 1.15
+        assert "min_annualized_net_return" not in sell_put_template
         assert cfg["runtime"]["symbol_timeout_sec"] == 120
         assert cfg["close_advice"]["max_spread_ratio"] == 0.3
         assert cfg["alert_policy"]["change_annual_threshold"] == 0.02
