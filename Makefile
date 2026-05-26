@@ -9,6 +9,9 @@ test-all:
 smoke:
 	$(PYTHON) tests/run_smoke.py
 
+lint:
+	$(PYTHON) -m ruff check .
+
 agent-spec:
 	chmod +x ./om-agent
 	./om-agent spec
