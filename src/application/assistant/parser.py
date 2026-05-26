@@ -748,8 +748,18 @@ def _looks_like_symbol_edit(compact: str, lower: str) -> bool:
         or compact.startswith("设置监控标的")
         or lower.startswith("symbol edit ")
         or lower.startswith("symbols edit ")
+        or _looks_like_strategy_symbol_edit(lower)
     )
 
 
 def _looks_like_symbol_remove(compact: str, lower: str) -> bool:
     return compact.startswith("删除监控标的") or compact.startswith("移除监控标的") or lower.startswith("symbols rm ")
+
+
+def _looks_like_strategy_symbol_edit(text: str) -> bool:
+    if "record open" in text or "record close" in text or "记录开仓" in text or "记录平仓" in text:
+        return False
+    natural_sets = _extract_symbol_strategy_set_values(text)
+    if not natural_sets:
+        return False
+    return bool(_extract_monitor_symbol(text))

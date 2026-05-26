@@ -21,6 +21,7 @@ from src.application.assistant.commands import (
 )
 from src.application.assistant.command_parser import parse_assistant_command
 from src.application.assistant.conversation_context import build_conversation_context
+from src.application.assistant.intent_arbitration import ASSISTANT_DECISION_SCHEMA_VERSION, INTENT_ARBITRATION_SCHEMA_VERSION
 from src.application.assistant.llm_intent_schema import LLM_INTENT_SCHEMA_VERSION, llm_intent_json_schema, llm_intent_schema
 from src.application.assistant.llm_reply import LlmReplyResult, generate_general_reply
 from src.application.assistant.llm_translator import LlmTranslationResult, parse_llm_translation_payload, translate_inbound_intent
@@ -219,7 +220,15 @@ def test_assistant_runtime_executes_slash_command_through_inbound_router(tmp_pat
     assert out["ok"] is True
     assert calls == [("runtime_status", {"config_key": "us"})]
     assert out["data"]["intent"]["parser"] == "command"
-    assert out["meta"]["assistant"] == {
+    assistant_meta = out["meta"]["assistant"]
+    assert {
+        "enabled": assistant_meta["enabled"],
+        "mode": assistant_meta["mode"],
+        "route": assistant_meta["route"],
+        "llm": assistant_meta["llm"],
+        "context": assistant_meta["context"],
+        "langgraph": assistant_meta["langgraph"],
+    } == {
         "enabled": True,
         "mode": "deterministic",
         "route": "command",
@@ -238,11 +247,38 @@ def test_assistant_runtime_executes_slash_command_through_inbound_router(tmp_pat
         "context": {"provided": False},
         "langgraph": "disabled",
     }
+    assert assistant_meta["arbitration"]["decision"] == "command_selected"
+    assert assistant_meta["arbitration"]["selected_source"] == "command"
+    assert assistant_meta["arbitration"]["selected_intent"]["name"] == "runtime_status"
+    assert assistant_meta["decision"] == {
+        "schema_version": ASSISTANT_DECISION_SCHEMA_VERSION,
+        "route": "command",
+        "selected_source": "command",
+        "selected_intent_name": "runtime_status",
+        "selected_parser": "command",
+        "selected_confidence": 1.0,
+        "arbitration_decision": "command_selected",
+        "candidate_count": 3,
+        "llm": {"attempted": False, "reason": "command", "provider": "", "model": ""},
+        "execution_contract": {
+            "read_only": True,
+            "risk_level": "read_only",
+            "operation_action": None,
+            "operation_target": None,
+            "llm_allowed": True,
+            "direct_writes_allowed": False,
+            "llm_write_allowed": False,
+            "preview_confirm_required": False,
+            "canonical_renderer_required": True,
+        },
+    }
     rows = InboundAuditStore(tmp_path / "inbound.sqlite3").list_recent(limit=1)
     assert len(rows) == 1
     audited = json.loads(rows[0]["response_json"])
     assert audited["meta"]["assistant"]["route"] == "command"
     assert audited["meta"]["assistant"]["llm"]["reason"] == "command"
+    assert audited["meta"]["assistant"]["arbitration"] == assistant_meta["arbitration"]
+    assert audited["meta"]["assistant"]["decision"] == assistant_meta["decision"]
 
 
 def test_assistant_runtime_does_not_overwrite_original_audit_on_duplicate_replay(tmp_path: Path) -> None:
@@ -344,6 +380,67 @@ def test_agent_loop_mode_does_not_mark_deterministic_command_as_loop_tool_use(tm
     assert calls == [("runtime_status", {"config_key": "us"})]
     assert out["meta"]["assistant"]["route"] == "command"
     assert "agent_loop" not in out["meta"]["assistant"]["llm"]
+    arbitration = out["meta"]["assistant"]["arbitration"]
+    assert arbitration["schema_version"] == INTENT_ARBITRATION_SCHEMA_VERSION
+    assert arbitration["decision"] == "command_selected"
+    assert arbitration["selected_source"] == "command"
+    assert arbitration["selected_intent"]["name"] == "runtime_status"
+    assert arbitration["candidates"][0]["source"] == "command"
+    assert arbitration["candidates"][0]["status"] == "accepted"
+    assert arbitration["candidates"][-1] == {"source": "llm", "status": "skipped", "reason": "command_selected"}
+
+
+def test_assistant_runtime_records_deterministic_arbitration_in_audit(tmp_path: Path) -> None:
+    audit_db = tmp_path / "inbound.sqlite3"
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(tool_name=tool_name, ok=True, data={"summary": {"ok": True}})
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="状态",
+            sender_id="local",
+            message_id="msg_deterministic_arbitration",
+            config_key="us",
+            audit_db=str(audit_db),
+        ),
+        execute_tool_fn=_execute,
+    )
+
+    assert out["ok"] is True
+    assert calls == [("runtime_status", {"config_key": "us"})]
+    arbitration = out["meta"]["assistant"]["arbitration"]
+    assert arbitration["decision"] == "deterministic_selected"
+    assert arbitration["selected_source"] == "deterministic"
+    assert arbitration["selected_intent"]["name"] == "runtime_status"
+    assert arbitration["conflict"] is False
+    assert arbitration["candidates"] == [
+        {
+            "source": "deterministic",
+            "status": "accepted",
+            "intent": {"name": "runtime_status", "arguments": {}, "parser": "deterministic", "confidence": 1.0},
+            "intent_name": "runtime_status",
+            "parser": "deterministic",
+            "confidence": 1.0,
+        },
+        {"source": "llm", "status": "skipped", "reason": "deterministic_selected"},
+    ]
+
+    recent = InboundAuditStore(audit_db).list_recent(limit=1)
+    assert len(recent) == 1
+    audited_response = json.loads(str(recent[0]["response_json"]))
+    assert audited_response["meta"]["assistant"]["arbitration"] == arbitration
+    decision = out["meta"]["assistant"]["decision"]
+    assert decision["schema_version"] == ASSISTANT_DECISION_SCHEMA_VERSION
+    assert decision["route"] == "deterministic"
+    assert decision["selected_source"] == "deterministic"
+    assert decision["selected_intent_name"] == "runtime_status"
+    assert decision["arbitration_decision"] == "deterministic_selected"
+    assert decision["execution_contract"]["read_only"] is True
+    assert decision["execution_contract"]["direct_writes_allowed"] is False
+    assert audited_response["meta"]["assistant"]["decision"] == decision
 
 
 def test_assistant_runtime_answers_small_talk_without_tool_or_llm(tmp_path: Path) -> None:
@@ -690,6 +787,24 @@ def test_assistant_runtime_routes_valid_llm_translation_through_inbound_router(t
     assert out["data"]["intent"]["parser"] == "llm"
     assert out["meta"]["assistant"]["route"] == "llm"
     assert out["meta"]["assistant"]["llm"]["schema_version"] == LLM_INTENT_SCHEMA_VERSION
+    arbitration = out["meta"]["assistant"]["arbitration"]
+    assert arbitration["decision"] == "llm_selected"
+    assert arbitration["selected_source"] == "llm"
+    assert arbitration["selected_intent"]["name"] == "monthly_income_report"
+    assert arbitration["candidates"][0]["source"] == "deterministic"
+    assert arbitration["candidates"][0]["status"] == "rejected"
+    assert arbitration["candidates"][0]["error_code"] == "NEEDS_CLARIFICATION"
+    assert arbitration["candidates"][1]["source"] == "llm"
+    assert arbitration["candidates"][1]["status"] == "accepted"
+    assert arbitration["candidates"][1]["intent_name"] == "monthly_income_report"
+    decision = out["meta"]["assistant"]["decision"]
+    assert decision["route"] == "llm"
+    assert decision["selected_source"] == "llm"
+    assert decision["selected_intent_name"] == "monthly_income_report"
+    assert decision["arbitration_decision"] == "llm_selected"
+    assert decision["llm"] == {"attempted": True, "reason": "accepted", "provider": "openai", "model": "gpt-5.2"}
+    assert decision["execution_contract"]["read_only"] is True
+    assert decision["execution_contract"]["llm_allowed"] is True
     assert out["meta"]["assistant"]["context"] == {
         "provided": True,
         "window_messages": 8,
@@ -1163,6 +1278,23 @@ def test_assistant_runtime_rejects_llm_injected_write_intent_even_with_custom_tr
     assert out["error"]["code"] == "PERMISSION_DENIED"
     assert "write actions must use deterministic preview" in out["error"]["hint"]
     assert out["meta"]["assistant"]["route"] == "agent_loop"
+    arbitration = out["meta"]["assistant"]["arbitration"]
+    assert arbitration["decision"] == "llm_denied_by_policy"
+    assert arbitration["selected_source"] is None
+    assert arbitration["candidates"][0]["source"] == "deterministic"
+    assert arbitration["candidates"][0]["error_code"] == "NEEDS_CLARIFICATION"
+    assert arbitration["candidates"][1]["source"] == "agent_loop"
+    assert arbitration["candidates"][1]["status"] == "accepted"
+    assert arbitration["candidates"][1]["intent_name"] == "manual_trade_open"
+    assert arbitration["candidates"][2]["source"] == "policy"
+    assert arbitration["candidates"][2]["error_code"] == "PERMISSION_DENIED"
+    decision = out["meta"]["assistant"]["decision"]
+    assert decision["route"] == "agent_loop"
+    assert decision["selected_source"] is None
+    assert decision["selected_intent_name"] is None
+    assert decision["arbitration_decision"] == "llm_denied_by_policy"
+    assert decision["execution_contract"]["direct_writes_allowed"] is False
+    assert decision["execution_contract"]["llm_write_allowed"] is False
     assert calls == []
 
 
