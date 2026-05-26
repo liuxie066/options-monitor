@@ -62,6 +62,8 @@ SELL_PUT_EMPTY_OUTPUT_COLUMNS = [
     "event_flag",
     "event_types",
     "event_dates",
+    "event_source_status",
+    "event_source_error",
     "reject_stage_candidate",
 ]
 

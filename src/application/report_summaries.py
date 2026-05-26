@@ -34,6 +34,10 @@ COMMON_EMPTY_ROW = {
 }
 
 SELL_PUT_EMPTY_FIELDS = {
+    'event_flag': False,
+    'event_types': '',
+    'event_dates': '',
+    'reject_stage_candidate': '',
     'cash_secured_used_usd': 0.0,
     'cash_secured_used_usd_symbol': None,
     'cash_secured_used_cny': None,
@@ -141,6 +145,30 @@ def _safe_float(value: Any) -> float | None:
         return None
 
 
+def _safe_bool(value: Any) -> bool:
+    try:
+        if pd.isna(value):
+            return False
+    except Exception:
+        pass
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {'1', 'true', 'yes', 'y'}
+    return bool(value)
+
+
+def _safe_text(value: Any) -> str:
+    try:
+        if pd.isna(value):
+            return ''
+    except Exception:
+        pass
+    return str(value or '').strip()
+
+
 def _read_first_float(df: pd.DataFrame, column: str) -> float | None:
     try:
         if column not in df.columns or df.empty:
@@ -208,6 +236,10 @@ def _rank_top(df: pd.DataFrame, *, mode: str) -> pd.Series | None:
 
 def _sell_put_extras(df: pd.DataFrame, top: pd.Series) -> dict[str, Any]:
     return {
+        'event_flag': _safe_bool(top.get('event_flag')),
+        'event_types': _safe_text(top.get('event_types')),
+        'event_dates': _safe_text(top.get('event_dates')),
+        'reject_stage_candidate': _safe_text(top.get('reject_stage_candidate')),
         'cash_secured_used_usd': _read_first_float(df, 'cash_secured_used_usd'),
         'cash_secured_used_usd_symbol': _read_first_float(df, 'cash_secured_used_usd_symbol'),
         'cash_secured_used_cny': _read_first_float(df, 'cash_secured_used_cny'),

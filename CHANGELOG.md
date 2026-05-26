@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.146 - 2026-05-26
+
+### Fixed
+- Preserved Sell Put event-risk fields through summary normalization, alert rendering, and Feishu notification output so flagged events appear in user-facing scan notifications.
+- Stopped caching event-source failures as empty event lists; event fetch errors now persist source status/error metadata and legacy empty caches are refetched instead of hiding source outages.
+
 ## 1.2.145 - 2026-05-26
 
 ### Added
