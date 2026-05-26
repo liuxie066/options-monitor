@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 1.2.147 - 2026-05-26
+## 1.2.148 - 2026-05-26
 
 ### Added
 - Added a shared short-vol assessment for Sell Put and Covered Call covering IV/RV edge, Delta band, event risk, path stress, and portfolio concentration.
@@ -13,6 +13,9 @@
 - Changed the default Covered Call profile to `short_vol` so it follows the same short-vol / short-gamma risk framing as Sell Put.
 - Changed `short_vol` scanning so annualized return and net income are ranking inputs rather than first-stage hard filters.
 - Expanded candidate ranking and diagnostics with volatility edge, Delta target quality, concentration, and path-risk scoring dimensions.
+
+### Fixed
+- Updated release smoke validation to assert the new `short_vol` default template contract instead of removed return-first threshold fields.
 
 ## 1.2.146 - 2026-05-26
 
