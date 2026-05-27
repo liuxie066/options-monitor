@@ -4,10 +4,8 @@ import json
 import os
 import plistlib
 import shlex
-import shutil
 import subprocess
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from json import JSONDecodeError
 from pathlib import Path
 from typing import Any, Callable, Literal, cast
@@ -1117,13 +1115,10 @@ def service_preflight(
     env_file: str | Path | None = None,
     accounts: list[str] | tuple[str, ...] | None = None,
     config_paths: dict[str, str | Path] | None = None,
-    default_account: str | None = None,
 ) -> dict[str, Any]:
     runtime = Path(runtime_root).expanduser().resolve()
     account_values = normalize_accounts(accounts)
-    default_account_value = str(default_account or (account_values[0] if account_values else DEFAULT_ACCOUNTS[0])).strip()
     checks: list[dict[str, Any]] = []
-    commands: list[str] = []
 
     if env_file is not None and str(env_file).strip():
         checks.append(_check_env_file(Path(env_file).expanduser()))
@@ -1136,44 +1131,6 @@ def service_preflight(
     ):
         checks.append(_check_writable_dir(path, name=name))
 
-    output = runtime / "output"
-    repair_cmd = (
-        "./om service repair-output "
-        f"--runtime-root {shlex.quote(str(runtime))} "
-        f"--default-account {shlex.quote(default_account_value)} --confirm"
-    )
-    if output.is_symlink():
-        target = output.resolve()
-        status = "ok" if target.exists() else "warn"
-        checks.append(
-            {
-                "name": "output_symlink",
-                "status": status,
-                "message": "output is a symlink" if status == "ok" else "output symlink target is missing",
-                "value": {"path": str(output), "target": str(target)},
-            }
-        )
-    elif output.exists():
-        checks.append(
-            {
-                "name": "output_symlink",
-                "status": "error",
-                "message": "multi-account runtime requires output to be a symlink, but it is a real path",
-                "value": {"path": str(output), "repair": repair_cmd},
-            }
-        )
-        commands.append(repair_cmd)
-    else:
-        checks.append(
-            {
-                "name": "output_symlink",
-                "status": "warn",
-                "message": "output symlink is missing",
-                "value": {"path": str(output), "repair": repair_cmd},
-            }
-        )
-        commands.append(repair_cmd)
-
     for market, raw_path in sorted((config_paths or {}).items()):
         if raw_path is not None and str(raw_path).strip():
             checks.append(_check_runtime_config(Path(raw_path).expanduser(), market=str(market)))
@@ -1183,89 +1140,8 @@ def service_preflight(
         "runtime_root": str(runtime),
         "accounts": account_values,
         "checks": checks,
-        "repair_commands": commands,
+        "repair_commands": [],
         "summary": summary,
-    }
-
-
-def _copy_tree_contents(src: Path, dst: Path) -> None:
-    dst.mkdir(parents=True, exist_ok=True)
-    for item in src.iterdir():
-        target = dst / item.name
-        if item.is_dir() and not item.is_symlink():
-            shutil.copytree(item, target, symlinks=True)
-        else:
-            shutil.copy2(item, target, follow_symlinks=False)
-
-
-def repair_output_symlink(
-    *,
-    runtime_root: str | Path,
-    default_account: str,
-    confirm: bool = False,
-    now_fn: Callable[[], datetime] | None = None,
-) -> dict[str, Any]:
-    runtime = Path(runtime_root).expanduser().resolve()
-    account = str(default_account or "").strip()
-    if not account:
-        raise ValueError("default_account is required")
-    output = runtime / "output"
-    account_root = runtime / "output_accounts" / account
-    timestamp = (now_fn or (lambda: datetime.now(timezone.utc)))().strftime("%Y%m%d%H%M%S")
-    backup = runtime / f"output.backup.{timestamp}"
-    operations: list[str] = []
-
-    if output.is_symlink():
-        return {
-            "changed": False,
-            "confirmed": bool(confirm),
-            "runtime_root": str(runtime),
-            "output": str(output),
-            "target": str(output.resolve()),
-            "operations": ["output already symlink"],
-        }
-    if output.exists() and not output.is_dir():
-        raise ValueError(f"runtime output exists but is not a directory or symlink: {output}")
-
-    operations.extend(
-        [
-            f"mkdir -p {account_root}",
-            f"backup {output} -> {backup}" if output.exists() else "no existing output directory to back up",
-            f"link {output} -> {account_root}",
-        ]
-    )
-    if not confirm:
-        return {
-            "changed": False,
-            "confirmed": False,
-            "runtime_root": str(runtime),
-            "output": str(output),
-            "target": str(account_root),
-            "backup": str(backup) if output.exists() else None,
-            "operations": operations,
-        }
-
-    account_root.mkdir(parents=True, exist_ok=True)
-    if output.exists():
-        conflicts = [item.name for item in output.iterdir() if (account_root / item.name).exists()]
-        if conflicts:
-            raise ValueError(
-                "cannot migrate output because output_accounts/"
-                f"{account} already has conflicting entries: {', '.join(conflicts)}"
-            )
-        _copy_tree_contents(output, backup)
-        for item in output.iterdir():
-            shutil.move(str(item), str(account_root / item.name))
-        output.rmdir()
-    output.symlink_to(account_root, target_is_directory=True)
-    return {
-        "changed": True,
-        "confirmed": True,
-        "runtime_root": str(runtime),
-        "output": str(output),
-        "target": str(account_root),
-        "backup": str(backup) if backup.exists() else None,
-        "operations": operations,
     }
 
 
@@ -1348,7 +1224,6 @@ __all__ = [
     "normalize_accounts",
     "normalize_markets",
     "normalize_target",
-    "repair_output_symlink",
     "render_service_bundle",
     "service_preflight",
     "service_status_from_profile",

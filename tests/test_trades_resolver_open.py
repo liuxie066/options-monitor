@@ -18,6 +18,9 @@ class FakeRepo:
     def list_position_lots(self) -> list[dict]:
         return []
 
+    def list_trade_events(self) -> list[dict]:
+        return []
+
     def get_record_fields(self, record_id: str) -> dict:
         raise KeyError(record_id)
 

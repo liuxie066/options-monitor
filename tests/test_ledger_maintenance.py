@@ -4,19 +4,60 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.option_position_lots import EXPIRE_AUTO_CLOSE, parse_exp_to_ms
-import src.application.ledger.bootstrap as ledger_bootstrap
 import src.application.ledger.manual_trades as ledger_manual_trades
 from src.application.ledger.maintenance import auto_close_expired_positions, build_expired_close_decisions
 from src.application.ledger.position_records import PositionLotRecord
 import src.application.ledger.repository as ledger_repository
+import src.application.ledger.writer as ledger_writer
 
 
-def _migrate_seed_position_lots_explicitly(repo: ledger_repository.SQLiteOptionPositionsRepository) -> None:
-    result = ledger_bootstrap.migrate_legacy_sqlite_to_repo(repo, legacy_path=repo.db_path, apply=True)
-    assert result["ok"] is True
-    assert result["applied"] is True
-    assert result["source_table"] == "position_lots"
+def _seed_open_lot_event(
+    repo: ledger_repository.SQLiteOptionPositionsRepository,
+    *,
+    record_id: str,
+    account: str,
+    symbol: str,
+    option_type: str,
+    side: str,
+    contracts: int,
+    currency: str,
+    strike: float,
+    multiplier: float,
+    expiration_ymd: str,
+    premium: float = 1.0,
+    opened_at_ms: int = 1000,
+) -> None:
+    ledger_writer.persist_trade_event_object(
+        repo,
+        TradeEvent(
+            event_id=f"seed-{record_id}",
+            event_type="open",
+            event_time_ms=int(opened_at_ms),
+            contract_key=ContractKey.from_values(
+                broker="富途",
+                account=account,
+                underlying_symbol=symbol,
+                option_type=option_type,
+                position_side=side,
+                strike=float(strike),
+                expiration_ymd=expiration_ymd,
+            ),
+            contracts=int(contracts),
+            price=float(premium),
+            currency=currency,
+            source="test_seed_open_lot",
+            multiplier=float(multiplier),
+            lot_id=record_id,
+            raw_payload={"source_type": "test_seed"},
+        ),
+    )
+
+
+def _auto_close_payloads(*args, **kwargs):
+    payload = auto_close_expired_positions(*args, **kwargs).to_payload()
+    return payload["decisions"], payload["applied"], payload["errors"]
 
 
 def test_build_expired_close_decisions_marks_expired_position() -> None:
@@ -150,40 +191,31 @@ def test_build_expired_close_decisions_skips_already_closed_or_zero_open() -> No
 def test_auto_close_expired_positions_uses_effective_contracts_open_fallback(tmp_path: Path) -> None:
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    inserted = repo.replace_position_lots(
-        [
-            PositionLotRecord(
-                record_id="rec_nvda",
-                fields={
-                    "record_id": "rec_nvda",
-                    "position_id": "NVDA_20260417_100P_short",
-                    "status": "open",
-                    "contracts": 1,
-                    "contracts_open": None,
-                    "contracts_closed": 0,
-                    "broker": "富途",
-                    "account": "lx",
-                    "symbol": "NVDA",
-                    "option_type": "put",
-                    "side": "short",
-                    "currency": "USD",
-                    "strike": 100,
-                    "multiplier": 100,
-                    "expiration": parse_exp_to_ms("2026-04-17"),
-                    "note": "",
-                },
-            )
-        ]
+    _seed_open_lot_event(
+        repo,
+        record_id="rec_nvda",
+        account="lx",
+        symbol="NVDA",
+        option_type="put",
+        side="short",
+        contracts=1,
+        currency="USD",
+        strike=100,
+        multiplier=100,
+        expiration_ymd="2026-04-17",
     )
-    assert inserted == 1
-    _migrate_seed_position_lots_explicitly(repo)
+    lots = repo.list_position_lots()
+    assert len(lots) == 1
+    fields = dict(lots[0]["fields"])
+    fields["contracts_open"] = None
+    repo.replace_position_lots([PositionLotRecord(record_id="rec_nvda", fields=fields)])
 
     as_of_ms = parse_exp_to_ms("2026-04-20")
     assert as_of_ms is not None
 
     positions = [dict(item["fields"], record_id=item["record_id"]) for item in repo.list_position_lots()]
 
-    decisions, applied, errors = auto_close_expired_positions(
+    decisions, applied, errors = _auto_close_payloads(
         repo,
         positions,
         as_of_ms=as_of_ms,
@@ -263,7 +295,7 @@ def test_auto_close_expired_positions_skips_stale_open_input_when_current_lot_cl
     as_of_ms = parse_exp_to_ms("2026-05-03")
     assert as_of_ms is not None
 
-    decisions, applied, errors = auto_close_expired_positions(
+    decisions, applied, errors = _auto_close_payloads(
         repo,
         stale_positions,
         as_of_ms=as_of_ms,
@@ -330,7 +362,7 @@ def test_auto_close_expired_positions_skips_non_current_candidate_record_id(tmp_
     as_of_ms = parse_exp_to_ms("2026-05-31")
     assert as_of_ms is not None
 
-    decisions, applied, errors = auto_close_expired_positions(
+    decisions, applied, errors = _auto_close_payloads(
         repo,
         [compat_position],
         as_of_ms=as_of_ms,
@@ -352,83 +384,53 @@ def test_auto_close_expired_positions_skips_non_current_candidate_record_id(tmp_
 def test_auto_close_expired_positions_closes_same_expiry_without_crossing_later_expiry(tmp_path: Path) -> None:
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    may_exp = parse_exp_to_ms("2026-05-28")
-    jun_exp = parse_exp_to_ms("2026-06-29")
-    assert may_exp is not None
-    assert jun_exp is not None
-    repo.replace_position_lots(
-        [
-            PositionLotRecord(
-                record_id="lot_0700_call_510_20260528",
-                fields={
-                    "record_id": "lot_0700_call_510_20260528",
-                    "position_id": "0700.HK_20260528_510C_short",
-                    "status": "open",
-                    "contracts": 2,
-                    "contracts_open": 2,
-                    "contracts_closed": 0,
-                    "broker": "富途",
-                    "account": "sy",
-                    "symbol": "0700.HK",
-                    "option_type": "call",
-                    "side": "short",
-                    "currency": "HKD",
-                    "strike": 510,
-                    "multiplier": 100,
-                    "expiration": may_exp,
-                    "note": "",
-                },
-            ),
-            PositionLotRecord(
-                record_id="lot_0700_put_450_20260528",
-                fields={
-                    "record_id": "lot_0700_put_450_20260528",
-                    "position_id": "0700.HK_20260528_450P_short",
-                    "status": "open",
-                    "contracts": 6,
-                    "contracts_open": 6,
-                    "contracts_closed": 0,
-                    "broker": "富途",
-                    "account": "sy",
-                    "symbol": "0700.HK",
-                    "option_type": "put",
-                    "side": "short",
-                    "currency": "HKD",
-                    "strike": 450,
-                    "multiplier": 100,
-                    "expiration": may_exp,
-                    "note": "",
-                },
-            ),
-            PositionLotRecord(
-                record_id="lot_0700_put_450_20260629",
-                fields={
-                    "record_id": "lot_0700_put_450_20260629",
-                    "position_id": "0700.HK_20260629_450P_short",
-                    "status": "open",
-                    "contracts": 3,
-                    "contracts_open": 3,
-                    "contracts_closed": 0,
-                    "broker": "富途",
-                    "account": "sy",
-                    "symbol": "0700.HK",
-                    "option_type": "put",
-                    "side": "short",
-                    "currency": "HKD",
-                    "strike": 450,
-                    "multiplier": 100,
-                    "expiration": jun_exp,
-                    "note": "",
-                },
-            ),
-        ]
+    _seed_open_lot_event(
+        repo,
+        record_id="lot_0700_call_510_20260528",
+        account="sy",
+        symbol="0700.HK",
+        option_type="call",
+        side="short",
+        contracts=2,
+        currency="HKD",
+        strike=510,
+        multiplier=100,
+        expiration_ymd="2026-05-28",
+        opened_at_ms=1000,
     )
-    _migrate_seed_position_lots_explicitly(repo)
+    _seed_open_lot_event(
+        repo,
+        record_id="lot_0700_put_450_20260528",
+        account="sy",
+        symbol="0700.HK",
+        option_type="put",
+        side="short",
+        contracts=6,
+        currency="HKD",
+        strike=450,
+        multiplier=100,
+        expiration_ymd="2026-05-28",
+        opened_at_ms=2000,
+    )
+    _seed_open_lot_event(
+        repo,
+        record_id="lot_0700_put_450_20260629",
+        account="sy",
+        symbol="0700.HK",
+        option_type="put",
+        side="short",
+        contracts=3,
+        currency="HKD",
+        strike=450,
+        multiplier=100,
+        expiration_ymd="2026-06-29",
+        opened_at_ms=3000,
+    )
     as_of_ms = parse_exp_to_ms("2026-05-31")
     assert as_of_ms is not None
     positions = [dict(item["fields"], record_id=item["record_id"]) for item in repo.list_position_lots()]
 
-    decisions, applied, errors = auto_close_expired_positions(
+    decisions, applied, errors = _auto_close_payloads(
         repo,
         positions,
         as_of_ms=as_of_ms,
@@ -501,7 +503,7 @@ def test_auto_close_expired_positions_fail_closed_on_ledger_identity_mismatch(tm
     assert as_of_ms is not None
     positions = [dict(item["fields"], record_id=item["record_id"]) for item in repo.list_position_lots()]
 
-    decisions, applied, errors = auto_close_expired_positions(
+    decisions, applied, errors = _auto_close_payloads(
         repo,
         positions,
         as_of_ms=as_of_ms,
@@ -521,7 +523,9 @@ def test_auto_close_expired_positions_fail_closed_on_ledger_identity_mismatch(tm
     assert fields["contracts_open"] == 6
 
 
-def test_position_maintenance_requires_explicit_legacy_migration_before_closing_legacy_lot(tmp_path: Path) -> None:
+def test_position_maintenance_requires_active_ledger_repair_before_closing_position_lots_without_events(
+    tmp_path: Path,
+) -> None:
     from src.application.positions.maintenance import run_expired_position_maintenance_for_account
 
     runtime_root = tmp_path / "runtime"
@@ -571,8 +575,8 @@ def test_position_maintenance_requires_explicit_legacy_migration_before_closing_
 
     assert result["applied_closed"] == 0
     assert len(result["errors"]) == 1
-    assert "explicit legacy migration required before auto-close" in result["errors"][0]
-    assert "migrate-legacy --confirm" in result["errors"][0]
+    assert "active ledger repair required before auto-close" in result["errors"][0]
+    assert "repair the active ledger" in result["errors"][0]
     lots = ledger_repository.SQLiteOptionPositionsRepository(db_path).list_position_lots()
     assert len(lots) == 1
     assert lots[0]["fields"]["status"] == "open"

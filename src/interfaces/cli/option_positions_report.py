@@ -30,7 +30,8 @@ def print_monthly_income(report: dict[str, Any], *, include_rows: bool = False) 
     print("- net_cashflow_gross: 按交易发生月统计资金流")
     print("- realized_pnl_gross: 按平仓/到期月统计已实现收益")
     print("- open_basis_lifecycle_pnl_gross: 按开仓月回填整组生命周期收益")
-    print("- premium_received_gross / realized_gross: 兼容字段")
+    print("- premium_received_gross: short 开仓收到的权利金")
+    print("- realized_gross: 平仓/到期实现收益")
     filters = report.get("filters") or {}
     parts = []
     if filters.get("month"):

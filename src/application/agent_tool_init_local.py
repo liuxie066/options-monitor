@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import shlex
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -95,45 +94,6 @@ def _relative_or_absolute(*, base_dir: Path, target: Path) -> str:
         return str(target.relative_to(base_dir))
     except ValueError:
         return str(target)
-
-
-def _init_runtime_rebuild_command(
-    *,
-    market: str,
-    futu_acc_id: str,
-    account_label: str,
-    config_path: Path,
-    data_config_path: Path,
-    symbols: list[str],
-    holdings_account: str | None,
-    opend_host: str,
-    opend_port: int,
-) -> str:
-    command = [
-        "./om",
-        "setup",
-        "init",
-        "--market",
-        market,
-        "--futu-acc-id",
-        futu_acc_id,
-        "--account-label",
-        account_label,
-        "--config-path",
-        str(config_path),
-        "--data-config-path",
-        str(data_config_path),
-        "--opend-host",
-        opend_host,
-        "--opend-port",
-        str(opend_port),
-        "--force",
-    ]
-    for symbol in symbols:
-        command.extend(["--symbol", symbol])
-    if str(holdings_account or "").strip():
-        command.extend(["--holdings-account", str(holdings_account).strip()])
-    return " ".join(shlex.quote(part) for part in command)
 
 
 def init_local_config(
@@ -233,17 +193,6 @@ def init_local_config(
         system_config_path=(repo_root / "configs" / "system.json").resolve(),
         user_config=user_cfg,
         user_config_ref="init_local_config",
-        rebuild_command=_init_runtime_rebuild_command(
-            market=normalized_market,
-            futu_acc_id=normalized_acc_id,
-            account_label=normalized_account,
-            config_path=target_config_path,
-            data_config_path=target_data_config_path,
-            symbols=normalized_symbols,
-            holdings_account=holdings_account,
-            opend_host=opend_host_value,
-            opend_port=opend_port_value,
-        ),
     )
 
     _validate_runtime_config_or_raise(runtime_cfg)

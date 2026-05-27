@@ -21,7 +21,7 @@ from src.application.assistant.runtime import handle_assistant_message
 from src.application.config_validator import validate_config
 from src.application.account_management import add_account, edit_account, remove_account
 from src.application.close_advice_pipeline import run_close_advice
-from src.application.config_edit import get_runtime_config_value, set_runtime_config_value
+from src.application.config_edit import get_runtime_config_value
 from src.application.config_yaml import (
     build_yaml_assistant_config_file,
     build_yaml_runtime_config_file,
@@ -40,17 +40,14 @@ from src.application.inbound import (
     serve_feishu_ws,
 )
 from src.application.assistant.upgrade_operations import run_confirmed_upgrade_operation
-from src.application.layered_config import build_layered_runtime_config_file, explain_layered_runtime_config_key
 from src.application.multi_account_tick import run_tick
 from src.application.notification_pipeline import preview_notification
 from src.application.pipeline_runtime import main as run_scan_pipeline
 from src.application.runtime_paths import resolve_runtime_root
-from src.application.runtime_setup import init_runtime
 from src.application.scan_pipeline import run_scan
 from src.application.scan_scheduler import run_scheduler
 from src.application.service_deploy import (
     load_service_profile,
-    repair_output_symlink,
     render_service_bundle,
     service_preflight,
     service_status_from_profile,
@@ -83,50 +80,17 @@ from src.application.cash_headroom_query import query_sell_put_cash
 from src.application.write_contract import attach_write_contract
 
 
-LEGACY_CONFIG_AUTHORING_DEPRECATION_WARNING = (
-    "legacy JSON config authoring is deprecated; use `om config init` for new installs "
-    "or `om config migrate-yaml` for existing configs, then build runtime snapshots with "
-    "`om config build --source yaml`."
-)
-SETUP_INIT_DEPRECATION_WARNING = (
-    "`om setup init` is deprecated for config authoring; use "
-    "`om config init --output config.yaml --runtime-output-dir .`."
-)
-SERVICE_RENDER_LEGACY_AUTHORING_WARNING = (
-    "`om service render` without `--config-yaml` creates a legacy config profile; pass "
-    "`--config-yaml <path>` so `om update apply` can rebuild runtime config from YAML."
-)
-RUNTIME_CONFIG_SET_DEPRECATION_WARNING = (
-    "`om config set` edits generated runtime JSON; for durable config changes edit "
-    "`config.yaml` and rebuild with `om config build --source yaml`."
-)
-_LEGACY_CONFIG_SOURCE = "legacy"
-
-
 def _dumps(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
-
-
-def _with_warning(payload: dict[str, Any], warning: str) -> dict[str, Any]:
-    out = dict(payload)
-    raw_warnings = out.get("warnings")
-    warnings = [str(item) for item in raw_warnings if str(item).strip()] if isinstance(raw_warnings, list) else []
-    if warning not in warnings:
-        warnings.append(warning)
-    out["warnings"] = warnings
-    return out
 
 
 def _normalize_config_source(
     args: argparse.Namespace,
     *,
     allowed: tuple[str, ...],
-    allow_legacy_compat: bool = False,
 ) -> str:
     source = str(getattr(args, "source", "") or "").strip().lower()
     if source in allowed:
-        return source
-    if allow_legacy_compat and source == _LEGACY_CONFIG_SOURCE:
         return source
     raise AgentToolError(
         code="INPUT_ERROR",
@@ -134,7 +98,6 @@ def _normalize_config_source(
         details={
             "source": source or None,
             "allowed": list(allowed),
-            "legacy_compatibility": bool(allow_legacy_compat),
         },
         hint="Use `om config migrate-yaml` for old JSON configs, then use `om config build --source yaml`.",
     )
@@ -160,23 +123,6 @@ def _assistant_settings_for_cli(
             llm=configured.llm,
         )
     return AssistantSettings(enabled=True if force_enabled is None else bool(force_enabled))
-
-
-def _reject_legacy_config_flags_without_legacy_source(args: argparse.Namespace) -> None:
-    legacy_flags = []
-    if str(getattr(args, "common_user_config", "") or "").strip():
-        legacy_flags.append("--common-user-config")
-    if bool(getattr(args, "no_common_user_config", False)):
-        legacy_flags.append("--no-common-user-config")
-    if str(getattr(args, "user_config", "") or "").strip():
-        legacy_flags.append("--user-config")
-    if legacy_flags:
-        raise AgentToolError(
-            code="INPUT_ERROR",
-            message="legacy JSON config flags are deprecated and require --source legacy compatibility mode",
-            details={"flags": legacy_flags},
-            hint="Use `om config migrate-yaml` for old configs, then use config.yaml.",
-        )
 
 
 def _reject_runtime_validate_flags_for_yaml_source(args: argparse.Namespace) -> None:
@@ -496,9 +442,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     build.add_argument("--config-yaml", default=None)
     build.add_argument("--market", required=True, choices=("us", "hk"))
     build.add_argument("--system-config", default=None)
-    build.add_argument("--common-user-config", default=None, help=argparse.SUPPRESS)
-    build.add_argument("--no-common-user-config", action="store_true", help=argparse.SUPPRESS)
-    build.add_argument("--user-config", default=None, help=argparse.SUPPRESS)
     build.add_argument("--output", default=None)
     build.add_argument("--dry-run", action="store_true")
     build_assistant = config_sub.add_parser("build-assistant", help="build assistant config from config.yaml")
@@ -513,9 +456,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     explain.add_argument("--market", required=True, choices=("us", "hk"))
     explain.add_argument("--key", required=True)
     explain.add_argument("--system-config", default=None)
-    explain.add_argument("--common-user-config", default=None, help=argparse.SUPPRESS)
-    explain.add_argument("--no-common-user-config", action="store_true", help=argparse.SUPPRESS)
-    explain.add_argument("--user-config", default=None, help=argparse.SUPPRESS)
     migrate_yaml = config_sub.add_parser("migrate-yaml", help="preview migration from layered JSON user config to config.yaml")
     migrate_yaml.add_argument("--common-user-config", default=None)
     migrate_yaml.add_argument("--no-common-user-config", action="store_true")
@@ -530,17 +470,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     get_config.add_argument("--config-key", default=None, choices=("us", "hk"))
     get_config.add_argument("--config-path", default=None)
     get_config.add_argument("--key", required=True)
-    set_config = config_sub.add_parser("set", help="preview or write a runtime config value by dot path")
-    set_config.add_argument("--config-key", default=None, choices=("us", "hk"))
-    set_config.add_argument("--config-path", default=None)
-    set_config.add_argument("--key", required=True)
-    set_value = set_config.add_mutually_exclusive_group(required=True)
-    set_value.add_argument("--value", default=None, help="string value to write")
-    set_value.add_argument("--json-value", default=None, help="JSON value to write, for numbers, booleans, arrays, or objects")
-    set_config.add_argument("--apply", action="store_true", help="write the change; omitted means dry-run preview")
-    set_config.add_argument("--confirm", action="store_true", help="alias for --apply on local config writes")
-    set_config.add_argument("--yes", action="store_true", help="non-interactive alias for --apply; emits an audit_id")
-    set_config.add_argument("--no-backup", action="store_true", help="do not write a .bak timestamp copy before applying")
 
     settings = sub.add_parser("settings", help="inspect effective environment-backed settings")
     settings_sub = settings.add_subparsers(dest="settings_command", required=True)
@@ -589,7 +518,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     service_render.add_argument("--markets", nargs="+", choices=("us", "hk"), default=None)
     service_render.add_argument("--config-us", default=None)
     service_render.add_argument("--config-hk", default=None)
-    service_render.add_argument("--config-yaml", default=None, help="YAML authoring source recorded in service.profile.json for update rebuilds")
+    service_render.add_argument("--config-yaml", required=True, help="YAML authoring source recorded in service.profile.json for update rebuilds")
     service_render.add_argument("--env-file", default=None, help="service env-file path for local secrets/env values")
     service_render.add_argument("--deploy-user", default=None, help="systemd User= identity; also accepted from OM_DEPLOY_USER/DEPLOY_USER")
     service_render.add_argument("--deploy-home", default=None, help="systemd HOME environment; defaults to /home/<deploy-user>")
@@ -602,15 +531,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     service_preflight_cmd = service_sub.add_parser("preflight", help="check Linux runtime root before installing/running services")
     service_preflight_cmd.add_argument("--runtime-root", default="/var/lib/options-monitor")
     service_preflight_cmd.add_argument("--accounts", nargs="+", default=None)
-    service_preflight_cmd.add_argument("--default-account", default=None)
     service_preflight_cmd.add_argument("--config-us", default=None)
     service_preflight_cmd.add_argument("--config-hk", default=None)
     service_preflight_cmd.add_argument("--env-file", default=None)
-    service_repair_output = service_sub.add_parser("repair-output", help="migrate a real runtime output directory to output_accounts and create the output symlink")
-    service_repair_output.add_argument("--runtime-root", default="/var/lib/options-monitor")
-    service_repair_output.add_argument("--default-account", required=True)
-    service_repair_output.add_argument("--confirm", action="store_true", help="apply the migration; without this the command is a dry run")
-    service_repair_output.add_argument("--yes", action="store_true", help="non-interactive confirmation; emits an audit_id")
     service_status = service_sub.add_parser("status", help="summarize a rendered service profile")
     service_status.add_argument("--profile-path", required=True)
     service_status.add_argument("--include-service-status", action="store_true")
@@ -687,8 +610,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     setup_check.add_argument("--market", action="append", choices=("us", "hk", "all"), default=None)
     setup_check.add_argument("--env-file", default=None)
     setup_check.add_argument("--no-local-env-file", action="store_true")
-    setup_init = setup_sub.add_parser("init", help="deprecated: generate starter runtime config")
-    _add_setup_init_args(setup_init, required=True)
 
     run = sub.add_parser("run", help="run long-lived workflows")
     run_sub = run.add_subparsers(dest="run_command", required=True)
@@ -737,19 +658,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     trade_intake.add_argument("--dry-run", action="store_true")
 
     return parser.parse_args(argv)
-
-
-def _add_setup_init_args(parser: argparse.ArgumentParser, *, required: bool) -> None:
-    parser.add_argument("--market", required=required, choices=("us", "hk"))
-    parser.add_argument("--futu-acc-id", required=required)
-    parser.add_argument("--account-label", "--account", dest="account_label", default="user1")
-    parser.add_argument("--config-path", default=None)
-    parser.add_argument("--data-config-path", default=None)
-    parser.add_argument("--symbol", action="append", dest="symbols", default=None)
-    parser.add_argument("--holdings-account", default=None)
-    parser.add_argument("--opend-host", default="127.0.0.1")
-    parser.add_argument("--opend-port", type=int, default=11111)
-    parser.add_argument("--force", action="store_true")
 
 
 def _print(payload: dict[str, Any]) -> int:
@@ -815,13 +723,11 @@ def _validate_runtime_config(
     config_key: str | None = None,
     config_path: str | None = None,
     market: str | None = None,
-    allow_legacy_source: bool = False,
 ) -> dict[str, Any]:
     path, cfg = load_runtime_config(
         config_key=config_key,
         config_path=config_path,
         expected_market=market,
-        allow_legacy_source=allow_legacy_source,
     )
     validate_config(dict(cfg))
     inferred_market = infer_runtime_config_market(
@@ -868,7 +774,6 @@ def _validate_runtime_config(
             if isinstance(cfg.get("_generated"), dict)
             else None
         ),
-        "legacy_source_allowed": bool(allow_legacy_source),
         "schedule_contract": schedule_contract,
         "freshness": freshness,
     }
@@ -1271,7 +1176,7 @@ def main(argv: list[str] | None = None) -> int:
             )))
 
         if args.command == "config" and args.config_command == "validate":
-            source = _normalize_config_source(args, allowed=("runtime", "yaml"), allow_legacy_compat=True)
+            source = _normalize_config_source(args, allowed=("runtime", "yaml"))
             if source == "yaml":
                 _reject_runtime_validate_flags_for_yaml_source(args)
                 if not args.market:
@@ -1286,34 +1191,19 @@ def main(argv: list[str] | None = None) -> int:
                 config_key=args.config_key,
                 config_path=args.config_path,
                 market=args.market,
-                allow_legacy_source=source == _LEGACY_CONFIG_SOURCE,
             )
-            if source == _LEGACY_CONFIG_SOURCE:
-                payload = _with_warning(payload, LEGACY_CONFIG_AUTHORING_DEPRECATION_WARNING)
             return _print(payload)
 
         if args.command == "config" and args.config_command == "build":
-            source = _normalize_config_source(args, allowed=("yaml",), allow_legacy_compat=True)
-            if source == "yaml":
-                _reject_legacy_config_flags_without_legacy_source(args)
-                return _print(build_yaml_runtime_config_file(
-                    repo_root=repo_base(),
-                    market=args.market,
-                    config_path=args.config_yaml,
-                    system_config_path=args.system_config,
-                    output_config_path=args.output,
-                    dry_run=bool(args.dry_run),
-                ))
-            return _print(_with_warning(build_layered_runtime_config_file(
+            _normalize_config_source(args, allowed=("yaml",))
+            return _print(build_yaml_runtime_config_file(
                 repo_root=repo_base(),
                 market=args.market,
+                config_path=args.config_yaml,
                 system_config_path=args.system_config,
-                common_user_config_path=args.common_user_config,
-                include_common_user_config=not bool(args.no_common_user_config),
-                user_config_path=args.user_config,
                 output_config_path=args.output,
                 dry_run=bool(args.dry_run),
-            ), LEGACY_CONFIG_AUTHORING_DEPRECATION_WARNING))
+            ))
 
         if args.command == "config" and args.config_command == "build-assistant":
             return _print(build_yaml_assistant_config_file(
@@ -1325,25 +1215,14 @@ def main(argv: list[str] | None = None) -> int:
             ))
 
         if args.command == "config" and args.config_command == "explain":
-            source = _normalize_config_source(args, allowed=("yaml",), allow_legacy_compat=True)
-            if source == "yaml":
-                _reject_legacy_config_flags_without_legacy_source(args)
-                return _print(explain_yaml_config_key(
-                    repo_root=repo_base(),
-                    market=args.market,
-                    key=args.key,
-                    config_path=args.config_yaml,
-                    system_config_path=args.system_config,
-                ))
-            return _print(_with_warning(explain_layered_runtime_config_key(
+            _normalize_config_source(args, allowed=("yaml",))
+            return _print(explain_yaml_config_key(
                 repo_root=repo_base(),
                 market=args.market,
                 key=args.key,
+                config_path=args.config_yaml,
                 system_config_path=args.system_config,
-                common_user_config_path=args.common_user_config,
-                include_common_user_config=not bool(args.no_common_user_config),
-                user_config_path=args.user_config,
-            ), LEGACY_CONFIG_AUTHORING_DEPRECATION_WARNING))
+            ))
 
         if args.command == "config" and args.config_command == "migrate-yaml":
             return _print(preview_config_yaml_migration(
@@ -1384,23 +1263,6 @@ def main(argv: list[str] | None = None) -> int:
                     config_path=args.config_path,
                     key=args.key,
                 ),
-            ))
-
-        if args.command == "config" and args.config_command == "set":
-            return _print(build_response(
-                tool_name="config.set",
-                ok=True,
-                data=set_runtime_config_value(
-                    config_key=args.config_key,
-                    config_path=args.config_path,
-                    key=args.key,
-                    value=args.value,
-                    json_value=args.json_value,
-                    apply=bool(args.apply),
-                    confirm=_confirmed(args),
-                    backup=not bool(args.no_backup),
-                ),
-                warnings=[RUNTIME_CONFIG_SET_DEPRECATION_WARNING],
             ))
 
         if args.command == "settings" and args.settings_command == "inspect":
@@ -1508,8 +1370,7 @@ def main(argv: list[str] | None = None) -> int:
                     for item in bundle.get("files", []):
                         if isinstance(item, dict):
                             item.pop("content", None)
-            warnings = [] if args.config_yaml else [SERVICE_RENDER_LEGACY_AUTHORING_WARNING]
-            return _print(build_response(tool_name="service.render", ok=True, data=bundle, warnings=warnings))
+            return _print(build_response(tool_name="service.render", ok=True, data=bundle))
 
         if args.command == "service" and args.service_command == "preflight":
             config_paths = {
@@ -1524,19 +1385,9 @@ def main(argv: list[str] | None = None) -> int:
                 runtime_root=args.runtime_root,
                 env_file=args.env_file,
                 accounts=args.accounts,
-                default_account=args.default_account,
                 config_paths=config_paths,
             )
             return _print(build_response(tool_name="service.preflight", ok=bool(data["summary"]["ok"]), data=data))
-
-        if args.command == "service" and args.service_command == "repair-output":
-            data = repair_output_symlink(
-                runtime_root=args.runtime_root,
-                default_account=args.default_account,
-                confirm=_confirmed(args),
-            )
-            data = _service_write_contract(data, confirmed=_confirmed(args), rollback_hint="restore the previous output directory/symlink layout from filesystem backup")
-            return _print(build_response(tool_name="service.repair_output", ok=True, data=data))
 
         if args.command == "service" and args.service_command == "status":
             profile = load_service_profile(args.profile_path)
@@ -1625,20 +1476,6 @@ def main(argv: list[str] | None = None) -> int:
                 ok=bool(data.get("summary", {}).get("ok", True)),
                 data=data,
             ))
-
-        if args.command == "setup" and args.setup_command == "init":
-            return _print(build_response(tool_name="setup.init", ok=True, data=init_runtime(
-                market=args.market,
-                futu_acc_id=args.futu_acc_id,
-                account_label=args.account_label,
-                config_path=args.config_path,
-                data_config_path=args.data_config_path,
-                symbols=args.symbols,
-                holdings_account=args.holdings_account,
-                opend_host=args.opend_host,
-                opend_port=args.opend_port,
-                force=bool(args.force),
-            ), warnings=[SETUP_INIT_DEPRECATION_WARNING]))
 
         if args.command == "multiplier-cache" and args.multiplier_cache_command == "seed":
             from src.application.multiplier_cache import seed_multiplier_cache

@@ -677,7 +677,7 @@ def test_write_service_bundle_writes_relative_files(tmp_path: Path) -> None:
     assert (tmp_path / "rendered" / "systemd" / "options-monitor-tick-us.service").exists()
 
 
-def test_service_preflight_reports_runtime_output_dir_and_config_metadata(tmp_path: Path) -> None:
+def test_service_preflight_reports_runtime_dirs_and_config_metadata(tmp_path: Path) -> None:
     from src.application.service_deploy import service_preflight
 
     runtime = tmp_path / "runtime"
@@ -696,8 +696,8 @@ def test_service_preflight_reports_runtime_output_dir_and_config_metadata(tmp_pa
     checks = {item["name"]: item for item in out["checks"]}
 
     assert out["summary"]["ok"] is False
-    assert checks["output_symlink"]["status"] == "error"
-    assert "repair-output" in checks["output_symlink"]["value"]["repair"]
+    assert set(checks) == {"runtime_root", "locks", "output_accounts", "output_shared", "runtime_config_us"}
+    assert out["repair_commands"] == []
     assert checks["runtime_config_us"]["status"] == "error"
     assert "generation metadata" in checks["runtime_config_us"]["message"]
 
@@ -709,7 +709,6 @@ def test_service_preflight_reports_json_line_and_column(tmp_path: Path) -> None:
     (runtime / "locks").mkdir(parents=True)
     (runtime / "output_accounts").mkdir()
     (runtime / "output_shared").mkdir()
-    (runtime / "output").symlink_to(runtime / "output_accounts" / "lx", target_is_directory=True)
     cfg = tmp_path / "config.us.json"
     cfg.write_text('{"accounts":["lx",],\n}', encoding="utf-8")
 
@@ -719,34 +718,6 @@ def test_service_preflight_reports_json_line_and_column(tmp_path: Path) -> None:
     assert check["status"] == "error"
     assert check["value"]["line"] == 1
     assert check["value"]["column"] > 0
-
-
-def test_repair_output_symlink_backs_up_and_migrates_real_output(tmp_path: Path) -> None:
-    from datetime import datetime, timezone
-
-    from src.application.service_deploy import repair_output_symlink
-
-    runtime = tmp_path / "runtime"
-    output = runtime / "output"
-    (output / "reports").mkdir(parents=True)
-    (output / "reports" / "symbols_notification.txt").write_text("hello", encoding="utf-8")
-
-    dry = repair_output_symlink(runtime_root=runtime, default_account="lx")
-    assert dry["changed"] is False
-    assert output.is_dir()
-
-    out = repair_output_symlink(
-        runtime_root=runtime,
-        default_account="lx",
-        confirm=True,
-        now_fn=lambda: datetime(2026, 5, 19, tzinfo=timezone.utc),
-    )
-
-    assert out["changed"] is True
-    assert output.is_symlink()
-    assert output.resolve() == (runtime / "output_accounts" / "lx").resolve()
-    assert (runtime / "output_accounts" / "lx" / "reports" / "symbols_notification.txt").read_text(encoding="utf-8") == "hello"
-    assert (runtime / "output.backup.20260519000000" / "reports" / "symbols_notification.txt").exists()
 
 
 def test_service_status_from_profile_checks_provider_with_injected_runner() -> None:
@@ -1816,7 +1787,7 @@ def test_service_upgrade_restart_no_profile_is_noop(tmp_path: Path) -> None:
     assert calls == []
 
 
-def test_service_upgrade_migrates_user_configs_and_rebuilds_runtime_configs_before_switch(monkeypatch, tmp_path: Path) -> None:
+def test_service_upgrade_requires_yaml_authoring_source_before_switch(monkeypatch, tmp_path: Path) -> None:
     from src.application.service_upgrade import service_upgrade
 
     monkeypatch.setenv("OM_SYSTEMD_UNIT_ROOT", str(tmp_path / "systemd"))
@@ -1912,22 +1883,16 @@ def test_service_upgrade_migrates_user_configs_and_rebuilds_runtime_configs_befo
         run_cmd=_run_cmd,
     )
 
-    target = releases / "1.0.1"
-    assert out["status"] == "upgraded"
-    assert current.resolve() == target.resolve()
-    assert (target / "configs" / "user.common.json").exists()
-    assert (target / "configs" / "user.hk.json").exists()
-    assert (target / "configs" / "user.us.json").exists()
-    common_overlay = json.loads((target / "configs" / "user.common.json").read_text(encoding="utf-8"))
-    assert common_overlay["inbound"]["feishu_ws"]["ack_reaction"] == "SMILE"
-    assert out["runtime_config_prepare"]["preserved_hotfixes"][0]["path"] == "inbound.feishu_ws.ack_reaction"
-    assert ["./om", "config", "build", "--source", "legacy", "--market", "hk", "--output", str(hk_runtime)] in calls
-    assert ["./om", "config", "validate", "--source", "legacy", "--config-path", str(hk_runtime), "--market", "hk"] in calls
-    assert ["./om", "config", "build", "--source", "legacy", "--market", "us", "--output", str(us_runtime)] in calls
-    restart_index = calls.index(["systemctl", "restart", "options-monitor-trade-intake.service"])
-    validate_index = calls.index(["./om", "config", "validate", "--source", "legacy", "--config-path", str(us_runtime), "--market", "us"])
-    assert validate_index < restart_index
-    assert out["runtime_config_prepare"]["status"] == "prepared"
+    assert out["status"] == "failed"
+    assert out["changed"] is False
+    assert out["symlink_switched"] is False
+    assert current.resolve() == v100.resolve()
+    assert out["remediation"] == [
+        "rerender_service_profile: ./om service render ... --config-yaml <path>",
+        "migrate_legacy_json_once: ./om config migrate-yaml --apply --output config.yaml",
+    ]
+    assert not any(command[:6] == ["./om", "config", "build", "--source", "legacy", "--market"] for command in calls)
+    assert ["systemctl", "restart", "options-monitor-trade-intake.service"] not in calls
 
 
 def test_service_upgrade_missing_user_config_fails_before_switch_with_remediation(tmp_path: Path) -> None:
@@ -1994,12 +1959,12 @@ def test_service_upgrade_missing_user_config_fails_before_switch_with_remediatio
     assert out["changed"] is False
     assert out["symlink_switched"] is False
     assert current.resolve() == v100.resolve()
-    assert out["remediation"][0].startswith("restore_user_overlays: copy ")
+    assert out["remediation"][0] == "rerender_service_profile: ./om service render ... --config-yaml <path>"
     assert not any(command[:6] == ["./om", "config", "build", "--source", "legacy", "--market"] for command in calls)
     assert ["systemctl", "restart", "options-monitor-trade-intake.service"] not in calls
 
 
-def test_service_upgrade_recovers_user_configs_from_older_complete_release(monkeypatch, tmp_path: Path) -> None:
+def test_service_upgrade_does_not_recover_legacy_user_configs_from_older_release(monkeypatch, tmp_path: Path) -> None:
     from src.application.service_upgrade import service_upgrade
 
     monkeypatch.setenv("OM_SYSTEMD_UNIT_ROOT", str(tmp_path / "systemd"))
@@ -2057,20 +2022,17 @@ def test_service_upgrade_recovers_user_configs_from_older_complete_release(monke
         run_cmd=_run_cmd,
     )
 
-    target = releases / "1.0.1"
-    assert out["status"] == "upgraded"
-    assert current.resolve() == target.resolve()
-    for name in ("user.common.json", "user.hk.json", "user.us.json"):
-        assert json.loads((target / "configs" / name).read_text(encoding="utf-8"))["source"] == "0.9.0"
-    assert any(
-            call["command"] == ["./om", "config", "validate", "--source", "legacy", "--config-path", str(hk_runtime), "--market", "hk"]
-        and call["cwd"] == str(current)
+    assert out["status"] == "failed"
+    assert out["changed"] is False
+    assert out["symlink_switched"] is False
+    assert current.resolve() == v100.resolve()
+    assert not any(
+        call["command"][:6] == ["./om", "config", "build", "--source", "legacy", "--market"]
         for call in calls
     )
-    assert out["post_switch_runtime_config_validate"][0]["phase"] == "post_switch"
 
 
-def test_service_upgrade_uses_runtime_overlay_dir_before_older_release(tmp_path: Path) -> None:
+def test_service_upgrade_ignores_runtime_legacy_overlay_dir(tmp_path: Path) -> None:
     from src.application.service_upgrade import service_upgrade
 
     install = tmp_path / "opt" / "options-monitor"
@@ -2129,13 +2091,13 @@ def test_service_upgrade_uses_runtime_overlay_dir_before_older_release(tmp_path:
         run_cmd=_run_cmd,
     )
 
-    target = releases / "1.0.1"
-    assert out["status"] == "upgraded"
-    for name in ("user.common.json", "user.hk.json"):
-        assert json.loads((target / "configs" / name).read_text(encoding="utf-8"))["source"] == "runtime"
+    assert out["status"] == "failed"
+    assert out["changed"] is False
+    assert out["symlink_switched"] is False
+    assert current.resolve() == v100.resolve()
 
 
-def test_service_upgrade_uses_runtime_config_metadata_overlay_source(tmp_path: Path) -> None:
+def test_service_upgrade_ignores_runtime_config_legacy_metadata_overlay_source(tmp_path: Path) -> None:
     from src.application.service_upgrade import service_upgrade
 
     install = tmp_path / "opt" / "options-monitor"
@@ -2205,10 +2167,10 @@ def test_service_upgrade_uses_runtime_config_metadata_overlay_source(tmp_path: P
         run_cmd=_run_cmd,
     )
 
-    target = releases / "1.0.1"
-    assert out["status"] == "upgraded"
-    for name in ("user.common.json", "user.hk.json"):
-        assert json.loads((target / "configs" / name).read_text(encoding="utf-8"))["source"] == "metadata"
+    assert out["status"] == "failed"
+    assert out["changed"] is False
+    assert out["symlink_switched"] is False
+    assert current.resolve() == v100.resolve()
 
 
 def test_service_upgrade_rebuild_failure_fails_before_switch_with_remediation(tmp_path: Path) -> None:
@@ -2224,6 +2186,8 @@ def test_service_upgrade_rebuild_failure_fails_before_switch_with_remediation(tm
     current.symlink_to(v100, target_is_directory=True)
     runtime = tmp_path / "runtime"
     runtime.mkdir()
+    config_yaml = runtime / "config.yaml"
+    config_yaml.write_text("accounts: {}\nmarkets: {}\n", encoding="utf-8")
     hk_runtime = runtime / "config.hk.json"
     (runtime / "service.profile.json").write_text(
         json.dumps(
@@ -2231,6 +2195,11 @@ def test_service_upgrade_rebuild_failure_fails_before_switch_with_remediation(tm
                 "service_provider": "systemd",
                 "markets": ["hk"],
                 "config_paths": {"hk": str(hk_runtime)},
+                "config_authoring": {
+                    "source": "yaml",
+                    "config_yaml": str(config_yaml),
+                    "markets": ["hk"],
+                },
                 "services": [{"name": "options-monitor-trade-intake.service"}],
             }
         ),
@@ -2252,7 +2221,7 @@ def test_service_upgrade_rebuild_failure_fails_before_switch_with_remediation(tm
         if command[:3] == ["python3", "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
             return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
-        if command[:6] == ["./om", "config", "build", "--source", "legacy", "--market"]:
+        if command[:7] == ["./om", "config", "build", "--source", "yaml", "--market", "hk"]:
             return subprocess.CompletedProcess(command, 1, stdout="", stderr="build failed")
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
@@ -2509,6 +2478,8 @@ def test_service_upgrade_cleanup_after_success_deletes_older_releases(tmp_path: 
     (downloads / "old.tar.gz").write_text("cache", encoding="utf-8")
     runtime = tmp_path / "runtime"
     runtime.mkdir()
+    config_yaml = runtime / "config.yaml"
+    config_yaml.write_text("accounts: {}\nmarkets: {}\n", encoding="utf-8")
     hk_runtime = runtime / "config.hk.json"
     (runtime / "service.profile.json").write_text(
         json.dumps(
@@ -2516,6 +2487,11 @@ def test_service_upgrade_cleanup_after_success_deletes_older_releases(tmp_path: 
                 "service_provider": "systemd",
                 "markets": ["hk"],
                 "config_paths": {"hk": str(hk_runtime)},
+                "config_authoring": {
+                    "source": "yaml",
+                    "config_yaml": str(config_yaml),
+                    "markets": ["hk"],
+                },
                 "services": [],
             }
         ),
@@ -2535,7 +2511,7 @@ def test_service_upgrade_cleanup_after_success_deletes_older_releases(tmp_path: 
         if command[:3] == ["python3", "-m", "venv"]:
             _create_fake_venv_python_at(Path(command[-1]))
             return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
-        if command[:6] == ["./om", "config", "build", "--source", "legacy", "--market"]:
+        if command[:7] == ["./om", "config", "build", "--source", "yaml", "--market", "hk"]:
             Path(command[-1]).write_text('{"ok": true}\n', encoding="utf-8")
             return subprocess.CompletedProcess(command, 0, stdout="built\n", stderr="")
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
@@ -2760,6 +2736,8 @@ def test_cli_service_render_no_content_still_writes_files(capsys, tmp_path: Path
         str(tmp_path / "runtime"),
         "--markets",
         "us",
+        "--config-yaml",
+        str(tmp_path / "runtime" / "config.yaml"),
         "--output-dir",
         str(output_dir),
         "--no-content",

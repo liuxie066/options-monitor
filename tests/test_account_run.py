@@ -32,11 +32,8 @@ def _make_request(
     cfg_path.write_text("{}", encoding="utf-8")
     run_dir = base / "output_runs" / "run-1"
     run_dir.mkdir(parents=True)
-    shared_required = base / "output"
-    shared_required.mkdir()
-    out_link = base / "output"
-    legacy_tmp = base / ".tmp-links"
-    legacy_tmp.mkdir()
+    shared_required = base / "output_shared" / "required_data"
+    shared_required.mkdir(parents=True)
     accounts_root = run_dir / "accounts"
     accounts_root.mkdir(parents=True)
     return AccountRunRequest(
@@ -58,8 +55,6 @@ def _make_request(
         run_id="run-1",
         run_dir=run_dir,
         shared_required=shared_required,
-        out_link=out_link,
-        legacy_output_tmp_dir=legacy_tmp,
         accounts_root=accounts_root,
         prefetch_done=prefetch_done,
         force_mode=force_mode,
@@ -84,7 +79,6 @@ def _install_common_patches(monkeypatch, request: Any) -> dict[str, Any]:
         audit_events.append(payload)
 
     monkeypatch.setattr(mod, "ensure_account_output_dir", lambda path: path.mkdir(parents=True, exist_ok=True))
-    monkeypatch.setattr(mod, "update_legacy_output_link", lambda *args, **kwargs: True)
     monkeypatch.setattr(mod, "resolve_watchlist_config", lambda cfg: list(cfg.get("symbols") or []))
     monkeypatch.setattr(mod, "set_watchlist_config", lambda cfg, syms: cfg.__setitem__("symbols", list(syms)))
     monkeypatch.setattr(mod, "utc_now", lambda: "2026-04-25T00:00:00Z")
@@ -153,38 +147,6 @@ def test_run_one_account_skips_pipeline_when_scan_gate_blocks(monkeypatch, tmp_p
     assert outcome.acct_metrics["reason"] == "scheduler_skip"
     assert not any(name == "expired_position_maintenance.json" for name, _ in env["state_writes"])
     assert any(name == "account_metrics.json" for name, _ in env["state_writes"])
-
-
-def test_run_one_account_can_skip_legacy_output_link_update(monkeypatch, tmp_path: Path) -> None:
-    from src.application.account_run import run_one_account
-
-    request = replace(_make_request(tmp_path), update_legacy_output=False)
-    env = _install_common_patches(monkeypatch, request)
-    runlog = _FakeRunlog()
-    legacy_calls: list[tuple[Any, ...]] = []
-
-    monkeypatch.setattr(env["mod"], "update_legacy_output_link", lambda *args, **kwargs: legacy_calls.append(args))
-    monkeypatch.setattr(
-        env["mod"],
-        "decide_account_scan_gate",
-        lambda **kwargs: {
-            "run_pipeline": False,
-            "ran_scan": False,
-            "meaningful": False,
-            "result_reason": "not due",
-        },
-    )
-
-    outcome = run_one_account(
-        request=request,
-        runlog=runlog,
-        audit_fn=env["audit_fn"],
-        fail_schema_validation=lambda **kwargs: (_ for _ in ()).throw(AssertionError("schema validation should not fail")),
-    )
-
-    assert outcome.ran_pipeline is False
-    assert legacy_calls == []
-    assert not any(name == "expired_position_maintenance.json" for name, _ in env["state_writes"])
 
 
 def test_run_one_account_prefetches_and_runs_pipeline_successfully(monkeypatch, tmp_path: Path) -> None:

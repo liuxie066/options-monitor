@@ -79,7 +79,7 @@ bash /tmp/options-monitor-install.sh --version v1.2.118 --prefix "$HOME/apps/opt
 - `config.yaml` 只保存用户 override，包括 accounts、markets、symbols 和非 secret 行为配置。
 - env-file 只保存 secrets、Feishu 凭证和写入开关。
 - `config build` 生成 market-specific runtime config，实际运行仍读取 JSON 快照。
-- `config build` / `config explain` 默认读取 YAML；legacy JSON 必须显式传 `--source legacy`。
+- `config build` / `config explain` 只读取 YAML；旧 layered JSON 只作为 `config migrate-yaml` 的一次性迁移输入。
 
 源码 checkout 或本地手动运行可以直接在 repo root 维护忽略文件 `config.yaml`：
 
@@ -121,19 +121,8 @@ om config migrate-yaml --output config.yaml
 om config migrate-yaml --output config.yaml --apply
 ```
 
-历史兼容入口 `om setup init` 仍保留，但已 deprecated。新安装不要再用它生成人工维护的
-runtime JSON；需要从旧 `configs/user.*.json` 迁移时使用 `om config migrate-yaml`。
-
-```bash
-om setup init --market us --account lx --futu-acc-id <futu-account-id>
-om setup init --market hk --account lx --futu-acc-id <futu-account-id>
-```
-
-这条路径只作为旧脚本兼容面存在，输出会带 deprecation warning。
-
 生成的 runtime config 会记录 `_generated` 指纹。`config.yaml` 更新后需要重新
-`config build --source yaml`；旧安装的 legacy 分层配置仍可兼容 rebuild，但该 authoring
-路径已 deprecated。`run tick` / `run tick-cron` 会在陈旧 runtime config 上提前失败并给出重建命令。
+`config build --source yaml`。`run tick` / `run tick-cron` 会在陈旧 runtime config 上提前失败并给出重建命令。
 
 完整首次运行流程见 [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md)。
 
@@ -163,15 +152,11 @@ om config explain --source yaml --market us --key option_positions.auto_close.en
 om config explain --source yaml --market us --key symbol_defaults.fetch.limit_expirations
 ```
 
-直接查看 runtime config 时，使用 `config get`。`config set` 仍保留为兼容/应急入口，但它修改的是生成后的 runtime JSON，不是 durable authoring source；持久配置变更应改 `config.yaml` 后重新 `config build --source yaml`。写入语义统一为：
+直接查看 runtime config 时，使用只读 `config get`；持久配置变更应改 `config.yaml` 后重新 `config build --source yaml`。写入语义统一为：
 默认只读或 dry-run；`--apply` 允许本地文件/状态写入；`--confirm` 允许交易事件、Feishu、服务变更这类高风险写入；`--yes` 用于非交互脚本，等价显式确认并在输出里带 `audit_id`。写命令的 JSON 输出都会带 `dry_run`、`write_applied`、`backup_path`、`audit_id`、`rollback_hint`。
-
-`config set` 属于本地 runtime snapshot 写入，默认只预览，`--apply` 后会先校验修改后的配置再写入：
 
 ```bash
 om config get --config-key us --key runtime.prefetch.max_workers
-om config set --config-key us --key runtime.prefetch.max_workers --json-value 4
-om config set --config-key us --key runtime.prefetch.max_workers --json-value 4 --apply
 ```
 
 ### 4. 第一轮真实运行
@@ -197,7 +182,6 @@ om run tick --config config.us.json --accounts lx sy
 <runtime_root>/output_runs/
 <runtime_root>/output_shared/
 <runtime_root>/output_accounts/
-<runtime_root>/output/
 ```
 
 期权持仓 SQLite 固定在：
@@ -463,9 +447,8 @@ Covered Call 依赖真实持仓上下文。它在风险结构上和 Sell Put 同
 
 - `config.yaml`
 
-兼容编辑源：
+一次性迁移输入：
 
-- `configs/system.json`
 - `configs/user.common.json`
 - `configs/user.us.json`
 - `configs/user.hk.json`
@@ -596,8 +579,7 @@ README 只记录公开入口和边界。生产 cron id、长驻服务启停和�
 `tick-cron` 在拿到锁后会先校验 runtime config 的生成指纹；如果
 `config.yaml` 更新后没有重新 build，
 任务会以 `[CONFIG_ERROR]` 失败并打印 `./om config build ... --output ...`。`--allow-stale-config`
-只作为临时应急绕过使用。旧安装的 legacy 分层 user config 仍可兼容检查，但该 authoring
-路径已 deprecated。
+只作为临时应急绕过使用。
 
 ## 副作用边界
 

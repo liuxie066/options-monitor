@@ -761,7 +761,7 @@ def test_top_level_setup_requires_current_subcommand(capsys) -> None:
     assert "setup" in capsys.readouterr().err
 
 
-def test_legacy_config_build_emits_deprecation_warning(capsys, tmp_path: Path) -> None:
+def test_config_build_rejects_legacy_source(capsys) -> None:
     import src.interfaces.cli.main as cli
 
     rc = cli.main([
@@ -771,19 +771,14 @@ def test_legacy_config_build_emits_deprecation_warning(capsys, tmp_path: Path) -
         "legacy",
         "--market",
         "us",
-        "--common-user-config",
-        "configs/examples/user.common.example.json",
-        "--user-config",
-        "configs/examples/user.example.us.json",
-        "--output",
-        str(tmp_path / "config.us.json"),
         "--dry-run",
     ])
     payload = _read_json_output(capsys)
 
-    assert rc == 0
-    assert payload["ok"] is True
-    assert cli.LEGACY_CONFIG_AUTHORING_DEPRECATION_WARNING in payload["warnings"]
+    assert rc == 2
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "INPUT_ERROR"
+    assert payload["error"]["details"]["allowed"] == ["yaml"]
 
 
 def test_config_build_defaults_to_yaml_source(capsys, tmp_path: Path) -> None:
@@ -826,24 +821,22 @@ markets:
     assert "warnings" not in payload
 
 
-def test_config_build_rejects_legacy_flags_without_legacy_source(capsys) -> None:
+def test_config_build_removes_legacy_json_flags(capsys) -> None:
     import src.interfaces.cli.main as cli
 
-    rc = cli.main([
-        "config",
-        "build",
-        "--market",
-        "us",
-        "--user-config",
-        "configs/examples/user.example.us.json",
-        "--dry-run",
-    ])
-    payload = _read_json_output(capsys)
+    with pytest.raises(SystemExit) as exc:
+        cli.main([
+            "config",
+            "build",
+            "--market",
+            "us",
+            "--user-config",
+            "configs/examples/user.example.us.json",
+            "--dry-run",
+        ])
 
-    assert rc == 2
-    assert payload["ok"] is False
-    assert payload["error"]["code"] == "INPUT_ERROR"
-    assert payload["error"]["details"]["flags"] == ["--user-config"]
+    assert exc.value.code == 2
+    assert "unrecognized arguments: --user-config" in capsys.readouterr().err
 
 
 def test_config_validate_rejects_runtime_flags_with_yaml_source(capsys, tmp_path: Path) -> None:
@@ -925,7 +918,7 @@ def test_config_validate_defaults_to_runtime_source(monkeypatch, capsys) -> None
 
     assert rc == 0
     assert payload["ok"] is True
-    assert calls == [{"config_key": None, "config_path": "config.us.json", "market": "us", "allow_legacy_source": False}]
+    assert calls == [{"config_key": None, "config_path": "config.us.json", "market": "us"}]
 
 
 @pytest.mark.parametrize("argv", [["config", "build", "--help"], ["config", "explain", "--help"]])
@@ -944,50 +937,39 @@ def test_config_authoring_help_hides_legacy_flags(argv: list[str], capsys) -> No
     assert "--user-config" not in out
 
 
-def test_setup_init_emits_deprecation_warning(monkeypatch, capsys) -> None:
+def test_setup_init_command_is_removed(capsys) -> None:
     import src.interfaces.cli.main as cli
 
-    calls: list[dict] = []
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["setup", "init", "--market", "us", "--futu-acc-id", "12345678"])
 
-    def _init_runtime(**kwargs):
-        calls.append(kwargs)
-        return {"ok": True, "config_path": "config.us.json"}
-
-    monkeypatch.setattr(cli, "init_runtime", _init_runtime)
-
-    rc = cli.main(["setup", "init", "--market", "us", "--futu-acc-id", "12345678"])
-    payload = _read_json_output(capsys)
-
-    assert rc == 0
-    assert payload["tool_name"] == "setup.init"
-    assert payload["warnings"] == [cli.SETUP_INIT_DEPRECATION_WARNING]
-    assert calls[0]["market"] == "us"
+    assert exc.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
 
 
-def test_service_render_warns_without_yaml_authoring_source(capsys, tmp_path: Path) -> None:
+def test_service_render_requires_yaml_authoring_source(capsys, tmp_path: Path) -> None:
     import src.interfaces.cli.main as cli
 
     repo = tmp_path / "repo"
     repo.mkdir()
     runtime = tmp_path / "runtime"
 
-    rc = cli.main([
-        "service",
-        "render",
-        "--target",
-        "systemd",
-        "--repo-root",
-        str(repo),
-        "--runtime-root",
-        str(runtime),
-        "--markets",
-        "us",
-    ])
-    payload = _read_json_output(capsys)
+    with pytest.raises(SystemExit) as exc:
+        cli.main([
+            "service",
+            "render",
+            "--target",
+            "systemd",
+            "--repo-root",
+            str(repo),
+            "--runtime-root",
+            str(runtime),
+            "--markets",
+            "us",
+        ])
 
-    assert rc == 0
-    assert payload["tool_name"] == "service.render"
-    assert payload["warnings"] == [cli.SERVICE_RENDER_LEGACY_AUTHORING_WARNING]
+    assert exc.value.code == 2
+    assert "the following arguments are required: --config-yaml" in capsys.readouterr().err
 
 
 def test_init_runtime_command_is_removed(capsys) -> None:
@@ -1072,7 +1054,7 @@ def test_service_upgrade_compat_commands_are_removed(capsys) -> None:
         assert "invalid choice" in capsys.readouterr().err
 
 
-def test_config_get_and_set_preview_then_apply(capsys, tmp_path: Path) -> None:
+def test_config_get_reads_runtime_snapshot(capsys, tmp_path: Path) -> None:
     import src.interfaces.cli.main as cli
 
     cfg = {
@@ -1110,37 +1092,14 @@ def test_config_get_and_set_preview_then_apply(capsys, tmp_path: Path) -> None:
     assert payload["tool_name"] == "config.get"
     assert payload["data"]["value"] == 2
 
-    assert cli.main([
-        "config",
-        "set",
-        "--config-path",
-        str(path),
-        "--key",
-        "runtime.prefetch.max_workers",
-        "--json-value",
-        "4",
-    ]) == 0
-    payload = _read_json_output(capsys)
-    assert payload["tool_name"] == "config.set"
-    assert payload["warnings"] == [cli.RUNTIME_CONFIG_SET_DEPRECATION_WARNING]
-    assert payload["data"]["dry_run"] is True
-    assert payload["data"]["applied"] is False
     assert json.loads(path.read_text(encoding="utf-8"))["runtime"]["prefetch"]["max_workers"] == 2
 
-    assert cli.main([
-        "config",
-        "set",
-        "--config-path",
-        str(path),
-        "--key",
-        "runtime.prefetch.max_workers",
-        "--json-value",
-        "4",
-        "--apply",
-        "--no-backup",
-    ]) == 0
-    payload = _read_json_output(capsys)
-    assert payload["warnings"] == [cli.RUNTIME_CONFIG_SET_DEPRECATION_WARNING]
-    assert payload["data"]["applied"] is True
-    assert payload["data"]["dry_run"] is False
-    assert json.loads(path.read_text(encoding="utf-8"))["runtime"]["prefetch"]["max_workers"] == 4
+
+def test_config_set_command_is_removed(capsys) -> None:
+    import src.interfaces.cli.main as cli
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["config", "set", "--config-path", "config.us.json", "--key", "runtime.prefetch.max_workers", "--json-value", "4"])
+
+    assert exc.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from src.application.config_validator import validate_config
 from src.application.layered_config import build_layered_runtime_config, explain_layered_runtime_config_key
 from src.application.runtime_config_freshness import (
@@ -488,7 +490,7 @@ def test_init_runtime_config_includes_inline_generation_metadata(tmp_path: Path)
 
     assert market_user["inline"] is True
     assert market_user["ref"] == "init_local_config"
-    assert generated["rebuild_command"].startswith("./om setup init --market us")
+    assert "rebuild_command" not in generated
     assert check_runtime_config_freshness(
         cfg,
         repo_root=REPO_ROOT,
@@ -497,7 +499,26 @@ def test_init_runtime_config_includes_inline_generation_metadata(tmp_path: Path)
     )["ok"] is True
 
 
-def test_config_build_cli_writes_output(tmp_path: Path, capsys) -> None:
+def test_config_build_cli_rejects_legacy_source(capsys) -> None:
+    from src.interfaces.cli.main import main
+
+    rc = main([
+        "config",
+        "build",
+        "--source",
+        "legacy",
+        "--market",
+        "us",
+    ])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 2
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "INPUT_ERROR"
+    assert payload["error"]["details"]["allowed"] == ["yaml"]
+
+
+def test_config_build_cli_removes_legacy_user_config_flag(tmp_path: Path, capsys) -> None:
     from src.interfaces.cli.main import main
 
     user_path = _write_json(
@@ -512,71 +533,23 @@ def test_config_build_cli_writes_output(tmp_path: Path, capsys) -> None:
             "symbols": [{"symbol": "NVDA", "sell_put": {"max_strike": 160}}],
         },
     )
-    output_path = tmp_path / "config.us.json"
 
-    rc = main([
-        "config",
-        "build",
-        "--source",
-        "legacy",
-        "--market",
-        "us",
-        "--user-config",
-        str(user_path),
-        "--output",
-        str(output_path),
-    ])
+    with pytest.raises(SystemExit) as exc:
+        main([
+            "config",
+            "build",
+            "--market",
+            "us",
+            "--user-config",
+            str(user_path),
+            "--dry-run",
+        ])
 
-    assert rc == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["ok"] is True
-    assert payload["write_applied"] is True
-    assert output_path.exists()
-    validate_config(json.loads(output_path.read_text(encoding="utf-8")))
-    cfg = json.loads(output_path.read_text(encoding="utf-8"))
-    assert cfg[GENERATED_KEY]["market"] == "us"
+    assert exc.value.code == 2
+    assert "unrecognized arguments: --user-config" in capsys.readouterr().err
 
 
-def test_config_build_cli_dry_run_does_not_write_output(tmp_path: Path, capsys) -> None:
-    from src.interfaces.cli.main import main
-
-    user_path = _write_json(
-        tmp_path / "user.us.json",
-        {
-            "account_settings": {
-                "lx": {
-                    "type": "futu",
-                    "futu": {"account_id": "REAL_12345678"},
-                }
-            },
-            "symbols": [{"symbol": "NVDA", "sell_put": {"max_strike": 160}}],
-        },
-    )
-    output_path = tmp_path / "config.us.json"
-
-    rc = main([
-        "config",
-        "build",
-        "--source",
-        "legacy",
-        "--market",
-        "us",
-        "--user-config",
-        str(user_path),
-        "--output",
-        str(output_path),
-        "--dry-run",
-    ])
-
-    assert rc == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["ok"] is True
-    assert payload["dry_run"] is True
-    assert payload["write_applied"] is False
-    assert not output_path.exists()
-
-
-def test_config_build_cli_accepts_explicit_common_user_config(tmp_path: Path, capsys) -> None:
+def test_config_build_cli_removes_common_user_config_flag(tmp_path: Path, capsys) -> None:
     from src.interfaces.cli.main import main
 
     common_path = _write_json(
@@ -597,84 +570,33 @@ def test_config_build_cli_accepts_explicit_common_user_config(tmp_path: Path, ca
             "symbols": [{"symbol": "NVDA", "sell_put": {"max_strike": 160}}],
         },
     )
-    output_path = tmp_path / "config.us.json"
 
-    rc = main([
-        "config",
-        "build",
-        "--source",
-        "legacy",
-        "--market",
-        "us",
-        "--common-user-config",
-        str(common_path),
-        "--user-config",
-        str(user_path),
-        "--output",
-        str(output_path),
-    ])
+    with pytest.raises(SystemExit) as exc:
+        main([
+            "config",
+            "build",
+            "--market",
+            "us",
+            "--common-user-config",
+            str(common_path),
+            "--user-config",
+            str(user_path),
+        ])
 
-    assert rc == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["ok"] is True
-    assert payload["common_user_config_loaded"] is True
-    cfg = json.loads(output_path.read_text(encoding="utf-8"))
-    assert cfg["watchdog"]["retry_enabled"] is False
-    assert cfg["accounts"] == ["lx"]
-    validate_config(json.loads(json.dumps(cfg)))
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "unrecognized arguments:" in err
+    assert "--common-user-config" in err
 
 
-def test_config_validate_market_rejects_stale_runtime_config(tmp_path: Path, capsys) -> None:
+def test_config_validate_cli_rejects_legacy_source(capsys) -> None:
     from src.interfaces.cli.main import main
-
-    user_path = _write_json(
-        tmp_path / "user.us.json",
-        {
-            "account_settings": {
-                "lx": {
-                    "type": "futu",
-                    "futu": {"account_id": "REAL_12345678"},
-                }
-            },
-            "symbols": [{"symbol": "NVDA", "sell_put": {"max_strike": 160}}],
-        },
-    )
-    output_path = tmp_path / "config.us.json"
-    build_rc = main([
-        "config",
-        "build",
-        "--source",
-        "legacy",
-        "--market",
-        "us",
-        "--user-config",
-        str(user_path),
-        "--output",
-        str(output_path),
-    ])
-    assert build_rc == 0
-    capsys.readouterr()
-
-    _write_json(
-        user_path,
-        {
-            "account_settings": {
-                "lx": {
-                    "type": "futu",
-                    "futu": {"account_id": "REAL_12345678"},
-                }
-            },
-            "symbols": [{"symbol": "NVDA", "sell_put": {"max_strike": 170}}],
-        },
-    )
 
     validate_rc = main([
         "config",
         "validate",
         "--source",
         "legacy",
-        "--config-path",
-        str(output_path),
         "--market",
         "us",
     ])
@@ -682,36 +604,42 @@ def test_config_validate_market_rejects_stale_runtime_config(tmp_path: Path, cap
 
     assert validate_rc == 2
     assert payload["ok"] is False
-    assert payload["error"]["code"] == "CONFIG_ERROR"
-    assert "runtime config is stale" in payload["error"]["message"]
-    assert payload["error"]["details"]["errors"][0]["role"] == "market_user"
+    assert payload["error"]["code"] == "INPUT_ERROR"
+    assert payload["error"]["details"]["allowed"] == ["runtime", "yaml"]
 
 
 def test_config_validate_market_wraps_schedule_contract_error_as_json(tmp_path: Path, capsys) -> None:
     from src.interfaces.cli.main import main
 
-    user_path = _write_json(
-        tmp_path / "user.hk.json",
-        {
-            "account_settings": {
-                "lx": {
-                    "type": "futu",
-                    "futu": {"account_id": "REAL_87654321"},
-                }
-            },
-            "symbols": [{"symbol": "0700.HK", "sell_put": {"max_strike": 420}}],
-        },
+    config_yaml = tmp_path / "config.yaml"
+    config_yaml.write_text(
+        """\
+accounts:
+  lx:
+    type: futu
+    futu_account_id: "REAL_87654321"
+markets:
+  hk:
+    accounts: [lx]
+    symbols:
+      - "0700.HK"
+    overrides:
+      "0700.HK":
+        sell_put:
+          max_strike: 420
+""",
+        encoding="utf-8",
     )
     output_path = tmp_path / "config.hk.json"
     build_rc = main([
         "config",
         "build",
         "--source",
-        "legacy",
+        "yaml",
         "--market",
         "hk",
-        "--user-config",
-        str(user_path),
+        "--config-yaml",
+        str(config_yaml),
         "--output",
         str(output_path),
     ])
@@ -725,8 +653,6 @@ def test_config_validate_market_wraps_schedule_contract_error_as_json(tmp_path: 
     validate_rc = main([
         "config",
         "validate",
-        "--source",
-        "legacy",
         "--config-path",
         str(output_path),
         "--market",
@@ -744,42 +670,42 @@ def test_config_validate_market_wraps_schedule_contract_error_as_json(tmp_path: 
 def test_config_explain_cli_outputs_source_trace(tmp_path: Path, capsys) -> None:
     from src.interfaces.cli.main import main
 
-    common_path = _write_json(
-        tmp_path / "user.common.json",
-        {
-            "option_positions": {"auto_close": {"enabled": False}},
-            "account_settings": {
-                "lx": {
-                    "type": "futu",
-                    "futu": {"account_id": "REAL_12345678"},
-                }
-            },
-        },
-    )
-    user_path = _write_json(
-        tmp_path / "user.us.json",
-        {
-            "symbols": [{"symbol": "NVDA", "sell_put": {"max_strike": 160}}],
-        },
+    config_yaml = tmp_path / "config.yaml"
+    config_yaml.write_text(
+        """\
+accounts:
+  lx:
+    type: futu
+    futu_account_id: "REAL_12345678"
+markets:
+  us:
+    accounts: [lx]
+    symbols:
+      - NVDA
+    overrides:
+      NVDA:
+        covered_call:
+          enabled: true
+          dte: [20, 60]
+          strike: [90, 120]
+""",
+        encoding="utf-8",
     )
 
     rc = main([
         "config",
         "explain",
         "--source",
-        "legacy",
+        "yaml",
         "--market",
         "us",
         "--key",
-        "option_positions.auto_close.enabled",
-        "--common-user-config",
-        str(common_path),
-        "--user-config",
-        str(user_path),
+        "symbols.0.covered_call.min_dte",
+        "--config-yaml",
+        str(config_yaml),
     ])
 
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["value"] is False
-    assert payload["source"] == "common_user_config"
-    assert [item["source"] for item in payload["trace"]] == ["system.defaults", "common_user_config"]
+    assert payload["value"] == 20
+    assert payload["runtime_path"] == "symbols.0.sell_call.min_dte"

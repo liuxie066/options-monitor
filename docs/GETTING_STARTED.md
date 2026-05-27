@@ -70,16 +70,6 @@ om config migrate-yaml --output config.yaml
 om config migrate-yaml --output config.yaml --apply
 ```
 
-历史兼容入口 `om setup init` 仍保留，但已 deprecated。新安装不要再用它生成人工维护的
-runtime JSON；需要从旧 `configs/user.*.json` 迁移时使用 `om config migrate-yaml`。
-
-```bash
-om setup init --market us --account lx --futu-acc-id <futu-account-id>
-om setup init --market hk --account lx --futu-acc-id <futu-account-id>
-```
-
-这条路径只作为旧脚本兼容面存在，输出会带 deprecation warning。
-
 如果是 installer 安装后的空目录首跑，也可以不进入 release 目录：
 
 ```bash

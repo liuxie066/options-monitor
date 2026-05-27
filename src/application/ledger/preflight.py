@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
-from domain.domain.ledger import ContractKey, TradeEvent, project_trade_events
+from domain.domain.ledger import ContractKey, ProjectionResult, TradeEvent, project_trade_events
 from domain.domain.ledger.position_fields import (
     EXPIRE_AUTO_CLOSE,
     OpenPositionCommand,
@@ -23,10 +23,6 @@ from domain.domain.ledger.position_fields import (
 )
 from src.application.ledger.errors import LedgerPreflightError
 from src.application.ledger.event_codec import import_stored_trade_events, stored_trade_event_to_ledger_event
-from src.application.ledger.migration import (
-    import_position_lot_snapshot,
-    shadow_replay_position_lot_snapshot,
-)
 from src.application.ledger.results import LedgerPreflightResult, ManualAdjustPreflightResult
 
 
@@ -305,6 +301,30 @@ def _preflight_trade_event_append(
     )
 
 
+def _current_trade_event_projection(
+    repo: Any,
+    *,
+    operation_label: str,
+    details: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[TradeEvent], ProjectionResult]:
+    source_events = _list_trade_events(repo)
+    imported_events, import_diagnostics = import_stored_trade_events(source_events)
+    projection = project_trade_events(imported_events)
+    import_errors = [item.to_dict() for item in import_diagnostics if item.severity == "error"]
+    projection_errors = [item.to_dict() for item in projection.diagnostics if item.severity == "error"]
+    if import_errors or projection_errors:
+        raise LedgerPreflightError(
+            "ledger_shadow_invalid",
+            f"{operation_label} ledger preflight found invalid current trade-event projection",
+            details={
+                **details,
+                "import_errors": import_errors,
+                "projection_errors": projection_errors,
+            },
+        )
+    return source_events, imported_events, projection
+
+
 def _voided_target_event_ids(events: list[dict[str, Any]]) -> set[str]:
     out: set[str] = set()
     for event in events:
@@ -342,23 +362,11 @@ def _preflight_open_event(
             details={"event_id": event.event_id, "contracts": int(event.contracts)},
         )
 
-    records = _list_position_lots(repo)
-    shadow = shadow_replay_position_lot_snapshot(records, source=source)
-    shadow_errors = _shadow_error_details(shadow)
-    if shadow_errors:
-        raise LedgerPreflightError(
-            "ledger_shadow_invalid",
-            f"{operation_label} ledger preflight found invalid current position projection",
-            details={"event_id": event.event_id, "errors": shadow_errors},
-        )
-
-    imported_events, import_diagnostics = import_position_lot_snapshot(records, source=source)
-    if any(item.severity == "error" for item in import_diagnostics):
-        raise LedgerPreflightError(
-            "ledger_shadow_invalid",
-            f"{operation_label} ledger preflight could not import current position snapshot",
-            details={"event_id": event.event_id, "errors": [item.to_dict() for item in import_diagnostics]},
-        )
+    source_events, imported_events, current_projection = _current_trade_event_projection(
+        repo,
+        operation_label=operation_label,
+        details={"event_id": event.event_id},
+    )
     open_projection = project_trade_events([*imported_events, event])
     open_errors = [item.to_dict() for item in open_projection.diagnostics if item.severity == "error"]
     if open_errors:
@@ -377,7 +385,7 @@ def _preflight_open_event(
         )
     matching_before = sum(
         int(lot.contracts_open)
-        for lot in shadow.projection.lots
+        for lot in current_projection.lots
         if lot.contract_key == event.contract_key and int(lot.contracts_open) > 0
     )
     matching_after = sum(
@@ -399,10 +407,10 @@ def _preflight_open_event(
         contracts_open_after=int(target_lot.contracts_open),
         position_contracts_open_after=int(matching_after),
         event_time_ms=int(event.event_time_ms),
-        source_record_count=shadow.source_record_count,
-        imported_event_count=shadow.imported_event_count,
-        projection_diagnostic_count=len(shadow.projection.diagnostics),
-        reconciliation_issue_count=len(shadow.reconciliation.issues) if shadow.reconciliation is not None else 0,
+        source_record_count=len(source_events),
+        imported_event_count=len(imported_events),
+        projection_diagnostic_count=len(current_projection.diagnostics),
+        reconciliation_issue_count=0,
     )
 
 
@@ -457,17 +465,13 @@ def _preflight_lot_close(
             details={"record_id": resolved_record_id, "contracts_open": current_open},
         )
 
-    records = _list_position_lots(repo)
-    shadow = shadow_replay_position_lot_snapshot(records, source=source)
-    shadow_errors = _shadow_error_details(shadow)
-    if shadow_errors:
-        raise LedgerPreflightError(
-            "ledger_shadow_invalid",
-            f"{operation_label} ledger preflight found invalid current position projection",
-            details={"record_id": resolved_record_id, "errors": shadow_errors},
-        )
+    source_events, imported_events, current_projection = _current_trade_event_projection(
+        repo,
+        operation_label=operation_label,
+        details={"record_id": resolved_record_id},
+    )
 
-    target_lots = [lot for lot in shadow.projection.lots if lot.lot_id == resolved_record_id and lot.contracts_open > 0]
+    target_lots = [lot for lot in current_projection.lots if lot.lot_id == resolved_record_id and lot.contracts_open > 0]
     if not target_lots:
         raise LedgerPreflightError(
             "target_lot_not_found",
@@ -503,13 +507,6 @@ def _preflight_lot_close(
             },
         )
 
-    imported_events, import_diagnostics = import_position_lot_snapshot(records, source=source)
-    if any(item.severity == "error" for item in import_diagnostics):
-        raise LedgerPreflightError(
-            "ledger_shadow_invalid",
-            f"{operation_label} ledger preflight could not import current position snapshot",
-            details={"record_id": resolved_record_id, "errors": [item.to_dict() for item in import_diagnostics]},
-        )
     event_time_ms = _preflight_event_time_ms(imported_events, as_of_ms=as_of_ms)
     close_event = TradeEvent(
         event_id=f"preflight:{source}:{resolved_record_id}:{event_time_ms}",
@@ -545,10 +542,10 @@ def _preflight_lot_close(
         contracts_to_close=int(contracts_to_close),
         contracts_open_after=after_open,
         event_time_ms=event_time_ms,
-        source_record_count=shadow.source_record_count,
-        imported_event_count=shadow.imported_event_count,
-        projection_diagnostic_count=len(shadow.projection.diagnostics),
-        reconciliation_issue_count=len(shadow.reconciliation.issues) if shadow.reconciliation is not None else 0,
+        source_record_count=len(source_events),
+        imported_event_count=len(imported_events),
+        projection_diagnostic_count=len(current_projection.diagnostics),
+        reconciliation_issue_count=0,
     )
 
 
@@ -588,17 +585,13 @@ def _preflight_lot_adjust(
             details={"record_id": resolved_record_id, "contracts_open": current_open},
         )
 
-    records = _list_position_lots(repo)
-    shadow = shadow_replay_position_lot_snapshot(records, source=source)
-    shadow_errors = _shadow_error_details(shadow)
-    if shadow_errors:
-        raise LedgerPreflightError(
-            "ledger_shadow_invalid",
-            f"{operation_label} ledger preflight found invalid current position projection",
-            details={"record_id": resolved_record_id, "errors": shadow_errors},
-        )
+    source_events, imported_events, current_projection = _current_trade_event_projection(
+        repo,
+        operation_label=operation_label,
+        details={"record_id": resolved_record_id},
+    )
 
-    target_lots = [lot for lot in shadow.projection.lots if lot.lot_id == resolved_record_id and lot.contracts_open > 0]
+    target_lots = [lot for lot in current_projection.lots if lot.lot_id == resolved_record_id and lot.contracts_open > 0]
     if not target_lots:
         raise LedgerPreflightError(
             "target_lot_not_found",
@@ -623,13 +616,6 @@ def _preflight_lot_adjust(
             },
         )
 
-    imported_events, import_diagnostics = import_position_lot_snapshot(records, source=source)
-    if any(item.severity == "error" for item in import_diagnostics):
-        raise LedgerPreflightError(
-            "ledger_shadow_invalid",
-            f"{operation_label} ledger preflight could not import current position snapshot",
-            details={"record_id": resolved_record_id, "errors": [item.to_dict() for item in import_diagnostics]},
-        )
     event_time_ms = _preflight_event_time_ms(imported_events, as_of_ms=as_of_ms)
     patch_contract = build_open_adjustment_patch_contract(
         current_fields,
@@ -683,10 +669,10 @@ def _preflight_lot_adjust(
             contracts_open_before=int(target_lot.contracts_open),
             contracts_open_after=effective_contracts_open(adjusted_fields),
             event_time_ms=event_time_ms,
-            source_record_count=shadow.source_record_count,
-            imported_event_count=shadow.imported_event_count,
-            projection_diagnostic_count=len(shadow.projection.diagnostics),
-            reconciliation_issue_count=len(shadow.reconciliation.issues) if shadow.reconciliation is not None else 0,
+            source_record_count=len(source_events),
+            imported_event_count=len(imported_events),
+            projection_diagnostic_count=len(current_projection.diagnostics),
+            reconciliation_issue_count=0,
             details={"adjusted_contract_key": adjusted_key.to_dict()},
         ),
     )
@@ -943,12 +929,3 @@ def _preflight_event_time_ms(events: list[TradeEvent], *, as_of_ms: int | None) 
     requested = int(as_of_ms or now_ms())
     latest_snapshot_time = max((int(event.event_time_ms or 0) for event in events), default=0)
     return max(requested, latest_snapshot_time + 1)
-
-
-def _shadow_error_details(shadow: Any) -> list[dict[str, Any]]:
-    errors: list[dict[str, Any]] = []
-    errors.extend(item.to_dict() for item in shadow.import_diagnostics if item.severity == "error")
-    errors.extend(item.to_dict() for item in shadow.projection.diagnostics if item.severity == "error")
-    if shadow.reconciliation is not None:
-        errors.extend(item.to_dict() for item in shadow.reconciliation.issues if item.severity == "error")
-    return errors

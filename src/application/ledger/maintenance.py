@@ -160,8 +160,8 @@ def _raise_if_legacy_position_lots_without_trade_events(repo: Any) -> None:
     if safe_int_count(count_trade_events()) > 0 or safe_int_count(count_position_lots()) <= 0:
         return
     raise ValueError(
-        "position_lots exist without trade_events; run explicit "
-            "option-positions store migrate-legacy --confirm before auto-close"
+        "position_lots exist without trade_events; rebuild from canonical trade_events "
+        "or repair the active ledger before auto-close"
     )
 
 
@@ -430,7 +430,7 @@ def auto_close_expired_positions(
             return ExpiredCloseRunResult(
                 decisions=decisions,
                 applied=applied,
-                errors=[f"explicit legacy migration required before auto-close: {exc}"],
+                errors=[f"active ledger repair required before auto-close: {exc}"],
             )
     for index in to_close_indexes:
         decision = decisions[index]
