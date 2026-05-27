@@ -10,11 +10,15 @@ from src.application.agent_tool_contracts import AgentToolError, build_response,
 from src.application.config_loader import resolve_watchlist_config, set_watchlist_config
 from src.application.config_validator import validate_config
 from src.application.assistant.contracts import AssistantIntent, AssistantRequest
-from src.application.assistant.operation_lifecycle import build_cancelled_operation_response, resolve_pending_operation_or_raise
+from src.application.assistant.operation_lifecycle import (
+    build_cancelled_operation_response,
+    build_previewed_operation_response,
+    confirm_previewed_operation_or_raise,
+    resolve_pending_operation_or_raise,
+)
 from src.application.assistant.operation_policy import enforce_symbol_write_allowed
-from src.application.assistant.operation_signature import hash_operation_payload, verify_operation_signature
-from src.application.assistant.operation_store import InboundOperationStore, operation_is_expired
-from src.application.assistant.operation_status_text import cannot_repeat_message, operation_candidate_hint
+from src.application.assistant.operation_store import InboundOperationStore
+from src.application.assistant.operation_status_text import operation_candidate_hint
 from src.application.runtime_config_paths import write_json_atomic
 from src.application.symbol_mutations import add_symbol_entry, edit_symbol_entry, remove_symbol_entry
 
@@ -23,10 +27,6 @@ LIST_INTENTS = frozenset({"symbol_list"})
 PREVIEW_INTENTS = frozenset({"symbol_add", "symbol_edit", "symbol_remove"})
 CONFIRM_INTENTS = frozenset({"symbol_confirm", "symbol_cancel"})
 SYMBOL_OPERATION_TYPES = PREVIEW_INTENTS
-
-
-def is_symbol_operation_intent(intent: AssistantIntent) -> bool:
-    return intent.name in LIST_INTENTS or intent.name in PREVIEW_INTENTS or intent.name in CONFIRM_INTENTS
 
 
 def handle_symbol_operation(
@@ -66,34 +66,21 @@ def _preview_and_save(
     ttl_seconds: int,
 ) -> dict[str, Any]:
     preview = _preview_operation(payload)
-    payload_hash = hash_operation_payload(payload)
-    operation = store.save_preview(
+    return build_previewed_operation_response(
+        tool_name="inbound.symbols",
         operation_id=command_id,
-        command_id=command_id,
-        channel=request.channel,
-        sender_id=request.sender_id,
-        conversation_id=request.conversation_id,
-        operation_type=str(payload["operation_type"]),
-        payload_hash=payload_hash,
+        request=request,
+        store=store,
         payload=payload,
         preview=preview,
         ttl_seconds=ttl_seconds,
-    )
-    text = render_symbol_response(status="previewed", operation_id=command_id, payload=payload, preview=preview, expires_at=str(operation.get("expires_at") or ""))
-    return build_response(
-        tool_name="inbound.symbols",
-        ok=True,
-        data={
-            "operation_id": command_id,
-            "operation_type": payload["operation_type"],
-            "status": "previewed",
-            "payload_hash": payload_hash,
-            "payload": payload,
-            "preview": preview,
-            "expires_at": operation.get("expires_at"),
-            "response_text": text,
-        },
-        meta={"audit_db": mask_path(store.path)},
+        response_text=lambda operation: render_symbol_response(
+            status="previewed",
+            operation_id=command_id,
+            payload=payload,
+            preview=preview,
+            expires_at=str(operation.get("expires_at") or ""),
+        ),
     )
 
 
@@ -105,31 +92,19 @@ def _confirm_operation(*, operation_id: str | None, request: AssistantRequest, s
         allow_expired=False,
         action="确认",
     )
-    if operation_is_expired(operation):
-        result = {"operation_id": operation_id, "status": "expired"}
-        store.mark_expired(operation_id, result=result)
-        raise AgentToolError(code="NEEDS_CLARIFICATION", message="这条监控标的变更确认已过期，未写入配置。", hint="请重新发送监控标的命令生成新的预览。", details={**result, **operation_resolution})
-    payload = dict(operation["payload"])
-    stored_hash = str(operation.get("payload_hash") or "")
-    current_hash = hash_operation_payload(payload)
-    if stored_hash != current_hash:
-        result = {"operation_id": operation_id, "status": "failed", "reason": "payload_hash_mismatch"}
-        store.mark_failed(operation_id, result=result)
-        raise AgentToolError(code="INTERNAL_ERROR", message="pending symbol operation payload hash mismatch; refusing to write config", details=result)
-    verify_operation_signature(operation)
-    if not store.mark_confirmed(operation_id):
-        current = store.get(operation_id) or {}
-        current_status = str(current.get("status") or "-")
-        raise AgentToolError(
-            code="INPUT_ERROR",
-            message=cannot_repeat_message("监控标的变更", "确认", current_status),
-            details={
-                "operation_id": operation_id,
-                "status": current_status,
-                "reason": "operation_not_previewed",
-                **operation_resolution,
-            },
-        )
+    confirmed = confirm_previewed_operation_or_raise(
+        operation_id=operation_id,
+        operation=operation,
+        operation_resolution=operation_resolution,
+        store=store,
+        subject="监控标的变更",
+        expired_message="这条监控标的变更确认已过期，未写入配置。",
+        expired_hint="请重新发送监控标的命令生成新的预览。",
+        hash_mismatch_message="pending symbol operation payload hash mismatch; refusing to write config",
+    )
+    operation_id = confirmed.operation_id
+    operation_resolution = confirmed.operation_resolution
+    payload = confirmed.payload
     try:
         preview = _preview_operation(payload)
         result = _apply_operation(payload)
@@ -145,7 +120,17 @@ def _confirm_operation(*, operation_id: str | None, request: AssistantRequest, s
     return build_response(
         tool_name="inbound.symbols",
         ok=True,
-        data={"operation_id": operation_id, **operation_resolution, "operation_type": payload["operation_type"], "status": "applied", "payload_hash": current_hash, "payload": payload, "preview": preview, "result": result, "response_text": text},
+        data={
+            "operation_id": operation_id,
+            **operation_resolution,
+            "operation_type": payload["operation_type"],
+            "status": "applied",
+            "payload_hash": confirmed.payload_hash,
+            "payload": payload,
+            "preview": preview,
+            "result": result,
+            "response_text": text,
+        },
         meta={"audit_db": mask_path(store.path)},
     )
 

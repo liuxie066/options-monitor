@@ -29,12 +29,27 @@ AgentCommandSpec = AssistantCommandSpec
 LLM_INTENT_SCHEMA_VERSION = "om-llm-intent-v1"
 
 ACCOUNT_VALUES = ("lx", "sy")
-POSITION_STATUS_VALUES = ("open", "all")
+POSITION_STATUS_VALUES = ("open", "close", "all")
 LOG_KIND_VALUES = ("all", "tool", "state")
 
 ARGUMENT_JSON_SCHEMA: dict[str, dict[str, Any]] = {
     "account": {"type": ["string", "null"], "enum": [*ACCOUNT_VALUES, None]},
     "status": {"type": ["string", "null"], "enum": [*POSITION_STATUS_VALUES, None]},
+    "symbol": {"type": ["string", "null"]},
+    "option_type": {"type": ["string", "null"], "enum": ["put", "call", None]},
+    "side": {"type": ["string", "null"], "enum": ["short", "long", None]},
+    "strike": {"type": ["number", "null"]},
+    "expiration": {
+        "type": ["object", "null"],
+        "additionalProperties": False,
+        "properties": {
+            "exact": {"type": ["string", "null"]},
+            "month": {"type": ["string", "null"]},
+            "before": {"type": ["string", "null"]},
+            "after": {"type": ["string", "null"]},
+            "within_days": {"type": ["integer", "null"]},
+        },
+    },
     "month": {"type": ["string", "null"]},
     "run_id": {"type": ["string", "null"]},
     "kind": {"type": ["string", "null"], "enum": [*LOG_KIND_VALUES, None]},
@@ -76,12 +91,12 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         summary="validate runtime config",
     ),
     AssistantCommandSpec(
-        intent_name="option_positions_open",
+        intent_name="position_query",
         tool_name="option_positions_read",
         commands=("/positions",),
         display_name="持仓",
-        arguments=("account", "status"),
-        examples=("持仓", "持仓 sy", "/positions [lx|sy|all]"),
+        arguments=("account", "status", "symbol", "option_type", "side", "strike", "expiration", "limit"),
+        examples=("持仓", "持仓 sy", "5月到期的持仓", "/positions [lx|sy|all]"),
         summary="list option positions",
     ),
     AssistantCommandSpec(

@@ -8,6 +8,7 @@ from typing import Callable
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.assistant.commands import commands_by_intent, operation_target_intents
 from src.application.assistant.contracts import AssistantIntent
+from src.application.assistant.semantic_frames import parse_position_query_text, position_query_intent_arguments
 
 
 _MONTH_RE = re.compile(r"^(20\d{2})[-/.](0[1-9]|1[0-2])$")
@@ -38,8 +39,8 @@ def parse_assistant_command(text: str, *, now_fn: Callable[[], date] | None = No
     if command in _COMMANDS["config_validate"]:
         _reject_extra(command, args)
         return _intent("config_validate")
-    if command in _COMMANDS["option_positions_open"]:
-        return _parse_positions(command, args)
+    if command in _COMMANDS["position_query"]:
+        return _parse_positions(command, args, today=today)
     if command in _COMMANDS["monthly_income_report"]:
         return _parse_income(command, args, today=today)
     if command in _COMMANDS["runtime_runs"]:
@@ -98,25 +99,10 @@ def _split_command(raw: str) -> list[str]:
     return parts
 
 
-def _parse_positions(command: str, args: list[str]) -> AssistantIntent:
-    account: str | None = None
-    status = "open"
-    for arg in args:
-        normalized = arg.lower()
-        if normalized in _ACCOUNTS:
-            if account is not None and account != normalized:
-                raise _bad_arg(command, arg, "只能指定一个账号：lx 或 sy。")
-            account = normalized
-        elif normalized in {"all", "全部"}:
-            status = "all"
-        elif normalized in {"open", "持仓", "open-only"}:
-            status = "open"
-        else:
-            raise _bad_arg(command, arg, "支持：/positions、/positions sy、/positions all。")
-    payload: dict[str, object] = {"status": status}
-    if account:
-        payload["account"] = account
-    return _intent("option_positions_open", payload)
+def _parse_positions(command: str, args: list[str], *, today: date) -> AssistantIntent:
+    raw = "持仓" if not args else f"持仓 {' '.join(args)}"
+    query = parse_position_query_text(raw, today=today)
+    return _intent("position_query", position_query_intent_arguments(query))
 
 
 def _parse_manual_trade_preview_command(

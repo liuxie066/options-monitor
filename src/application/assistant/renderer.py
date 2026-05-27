@@ -38,7 +38,7 @@ def render_inbound_text(*, intent: AssistantIntent | None, tool_result: dict[str
     data = cast(dict[str, Any], data_raw) if isinstance(data_raw, dict) else {}
     if name == "monthly_income_report":
         return _render_monthly_income(data)
-    if name == "option_positions_open":
+    if name == "position_query":
         return _render_positions(data)
     if name == "runtime_runs":
         return _render_runs(data)
@@ -334,13 +334,15 @@ def _render_positions(data: dict[str, Any]) -> str:
     if not isinstance(rows, list):
         return "持仓查询完成。"
     filters = _dict(data.get("filters"))
-    account = _value(filters.get("account"))
+    query = _dict(filters.get("query"))
+    account = _value(query.get("account") if query else filters.get("account"))
     account_label = "全部账户" if account == "-" else account
-    status = _value(filters.get("status") or "open")
+    status = _value(query.get("status") if query else filters.get("status") or "open")
+    scope = _position_scope_text(account_label=account_label, status=status, query=query, filters=filters)
     if not rows:
-        return f"{account_label} 当前没有 {status} 期权持仓。\n数据源：OM 本地 SQLite position_lots"
+        return f"{scope}：0 条。\n数据源：OM 本地 SQLite position_lots"
 
-    lines = [f"{account_label} 当前 {status} 期权持仓：{len(rows)} 条"]
+    lines = [f"{scope}：{len(rows)} 条"]
     for row_raw in rows:
         row = _dict(row_raw)
         lines.append(
@@ -357,6 +359,45 @@ def _render_positions(data: dict[str, Any]) -> str:
         lines.append("账本提示：" + _value(bootstrap.get("message") or bootstrap_status))
     lines.append("数据源：OM 本地 SQLite position_lots")
     return "\n".join(lines)
+
+
+def _position_scope_text(*, account_label: str, status: str, query: dict[str, Any], filters: dict[str, Any]) -> str:
+    parts = [account_label, status]
+    symbol = _value(query.get("symbol") if query else filters.get("symbol"))
+    option_type = _value(query.get("option_type") if query else filters.get("option_type"))
+    side = _value(query.get("side") if query else filters.get("side"))
+    strike = query.get("strike") if query else filters.get("strike")
+    expiration = _dict(query.get("expiration") if query else filters.get("expiration"))
+    if symbol != "-":
+        parts.append(symbol)
+    if side != "-":
+        parts.append(side)
+    if option_type != "-":
+        parts.append(option_type)
+    if strike is not None:
+        parts.append(f"strike {_num(strike)}")
+    expiration_text = _position_expiration_scope(expiration, filters=filters)
+    if expiration_text:
+        parts.append(expiration_text)
+    parts.append("期权持仓")
+    return " · ".join(parts)
+
+
+def _position_expiration_scope(expiration: dict[str, Any], *, filters: dict[str, Any]) -> str:
+    if expiration.get("exact"):
+        return f"{_value(expiration.get('exact'))} 到期"
+    if expiration.get("month"):
+        return f"{_value(expiration.get('month'))} 到期"
+    if expiration.get("before"):
+        return f"{_value(expiration.get('before'))} 前到期"
+    if expiration.get("after"):
+        return f"{_value(expiration.get('after'))} 后到期"
+    within_days = expiration.get("within_days")
+    if within_days is None:
+        within_days = filters.get("expiration_within_days")
+    if within_days is not None:
+        return f"{_num(within_days)} 天内到期"
+    return ""
 
 
 def _render_runs(data: dict[str, Any]) -> str:

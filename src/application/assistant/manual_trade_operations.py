@@ -8,11 +8,16 @@ from src.application.agent_tool_config import load_runtime_config, repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_response, mask_path
 from src.application.assistant.contracts import AssistantIntent, AssistantRequest
 from src.application.assistant.manual_trade_parser import build_manual_trade_draft
-from src.application.assistant.operation_lifecycle import build_cancelled_operation_response, resolve_pending_operation_or_raise
+from src.application.assistant.operation_lifecycle import (
+    build_cancelled_operation_response,
+    build_previewed_operation_response,
+    confirm_previewed_operation_or_raise,
+    resolve_pending_operation_or_raise,
+)
 from src.application.assistant.operation_policy import enforce_trade_write_allowed
-from src.application.assistant.operation_signature import hash_operation_payload, verify_operation_signature
-from src.application.assistant.operation_store import InboundOperationStore, operation_is_expired
-from src.application.assistant.operation_status_text import cannot_repeat_message, operation_candidate_hint, operation_candidate_summary_lines
+from src.application.assistant.operation_signature import hash_operation_payload
+from src.application.assistant.operation_store import InboundOperationStore
+from src.application.assistant.operation_status_text import operation_candidate_hint, operation_candidate_summary_lines
 from src.application.ledger.api import open_position_ledger_from_runtime_config
 from src.application.positions.workflows import (
     ManualCloseMatchError,
@@ -63,10 +68,6 @@ FIELD_LABELS = {
     "close_price": "平仓价",
     "close_reason": "平仓原因",
 }
-
-
-def is_manual_trade_operation_intent(intent: AssistantIntent) -> bool:
-    return intent.name in PREVIEW_INTENTS or intent.name in CONFIRM_INTENTS or intent.name in UPDATE_INTENTS
 
 
 def handle_manual_trade_operation(
@@ -143,34 +144,21 @@ def _preview_and_save(
     preview = _preview_operation(payload)
     payload = _payload_with_preview_locked_values(payload, preview)
     preview = _preview_operation(payload)
-    payload_hash = hash_operation_payload(payload)
-    operation = store.save_preview(
+    return build_previewed_operation_response(
+        tool_name="inbound.manual_trade",
         operation_id=command_id,
-        command_id=command_id,
-        channel=request.channel,
-        sender_id=request.sender_id,
-        conversation_id=request.conversation_id,
-        operation_type=str(payload["operation_type"]),
-        payload_hash=payload_hash,
+        request=request,
+        store=store,
         payload=payload,
         preview=preview,
         ttl_seconds=ttl_seconds,
-    )
-    text = render_manual_trade_response("previewed", command_id, payload, preview=preview, expires_at=str(operation.get("expires_at") or ""))
-    return build_response(
-        tool_name="inbound.manual_trade",
-        ok=True,
-        data={
-            "operation_id": command_id,
-            "operation_type": payload["operation_type"],
-            "status": "previewed",
-            "payload_hash": payload_hash,
-            "payload": payload,
-            "preview": preview,
-            "expires_at": operation.get("expires_at"),
-            "response_text": text,
-        },
-        meta={"audit_db": mask_path(store.path)},
+        response_text=lambda operation: render_manual_trade_response(
+            "previewed",
+            command_id,
+            payload,
+            preview=preview,
+            expires_at=str(operation.get("expires_at") or ""),
+        ),
     )
 
 
@@ -182,31 +170,19 @@ def _confirm_operation(*, operation_id: str | None, request: AssistantRequest, s
         allow_expired=False,
         action="确认",
     )
-    if operation_is_expired(operation):
-        result = {"operation_id": operation_id, "status": "expired"}
-        store.mark_expired(operation_id, result=result)
-        raise AgentToolError(code="NEEDS_CLARIFICATION", message="这条交易记录确认已过期，未写入账本。", hint="请重新发送记录交易命令生成新的预览。", details={**result, **operation_resolution})
-    payload = dict(operation["payload"])
-    stored_hash = str(operation.get("payload_hash") or "")
-    current_hash = hash_operation_payload(payload)
-    if stored_hash != current_hash:
-        result = {"operation_id": operation_id, "status": "failed", "reason": "payload_hash_mismatch"}
-        store.mark_failed(operation_id, result=result)
-        raise AgentToolError(code="INTERNAL_ERROR", message="pending operation payload hash mismatch; refusing to write ledger", details=result)
-    verify_operation_signature(operation)
-    if not store.mark_confirmed(operation_id):
-        current = store.get(operation_id) or {}
-        current_status = str(current.get("status") or "-")
-        raise AgentToolError(
-            code="INPUT_ERROR",
-            message=cannot_repeat_message("交易记录", "确认", current_status),
-            details={
-                "operation_id": operation_id,
-                "status": current_status,
-                "reason": "operation_not_previewed",
-                **operation_resolution,
-            },
-        )
+    confirmed = confirm_previewed_operation_or_raise(
+        operation_id=operation_id,
+        operation=operation,
+        operation_resolution=operation_resolution,
+        store=store,
+        subject="交易记录",
+        expired_message="这条交易记录确认已过期，未写入账本。",
+        expired_hint="请重新发送记录交易命令生成新的预览。",
+        hash_mismatch_message="pending operation payload hash mismatch; refusing to write ledger",
+    )
+    operation_id = confirmed.operation_id
+    operation_resolution = confirmed.operation_resolution
+    payload = confirmed.payload
     try:
         preview = _preview_operation(payload)
         result = _apply_operation(payload)
@@ -227,7 +203,7 @@ def _confirm_operation(*, operation_id: str | None, request: AssistantRequest, s
             **operation_resolution,
             "operation_type": payload["operation_type"],
             "status": "applied",
-            "payload_hash": current_hash,
+            "payload_hash": confirmed.payload_hash,
             "payload": payload,
             "preview": preview,
             "result": result,

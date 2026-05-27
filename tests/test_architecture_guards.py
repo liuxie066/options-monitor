@@ -213,6 +213,28 @@ def test_assistant_runtime_delegates_intent_arbitration() -> None:
         assert token in arbitrator_text
 
 
+def test_assistant_router_delegates_tool_planning() -> None:
+    router_text = (ROOT / "src" / "application" / "assistant" / "router.py").read_text(encoding="utf-8")
+    planner_text = (ROOT / "src" / "application" / "assistant" / "frame_planner.py").read_text(encoding="utf-8")
+    contracts_text = (ROOT / "src" / "application" / "assistant" / "contracts.py").read_text(encoding="utf-8")
+
+    assert "tool_plan_from_frame(" in router_text
+    assert "def _tool_call_from_intent" not in router_text
+    assert "is_manual_trade_operation_intent" not in router_text
+    assert "is_symbol_operation_intent" not in router_text
+    assert "is_upgrade_operation_intent" not in router_text
+    assert "def frame_from_intent(" in planner_text
+    assert "def tool_plan_from_frame(" in planner_text
+    assert "PLANNED_TOOL_INTENTS" in planner_text
+    assert "class AssistantFrame" in contracts_text
+    assert "class ToolPlan" in contracts_text
+    for module in ("manual_trade_operations.py", "symbol_operations.py", "upgrade_operations.py"):
+        module_text = (ROOT / "src" / "application" / "assistant" / module).read_text(encoding="utf-8")
+        assert "is_manual_trade_operation_intent" not in module_text
+        assert "is_symbol_operation_intent" not in module_text
+        assert "is_upgrade_operation_intent" not in module_text
+
+
 def test_assistant_package_does_not_import_inbound_package() -> None:
     offenders: list[str] = []
     for path in sorted((ROOT / "src" / "application" / "assistant").glob("*.py")):

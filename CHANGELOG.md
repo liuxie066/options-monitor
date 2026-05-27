@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 1.2.156 - 2026-05-27
+
+### Added
+- Added structured assistant frames and tool plans so inbound messages are audited with intent, payload, safety class, planned tool, and confirmation requirement before execution.
+- Added structured natural-language option-position queries with account, status, symbol, option type, side, strike, expiration, and limit filters.
+
+### Changed
+- Moved inbound tool planning out of the router into a single frame planner path, replacing the previous per-intent router mapping.
+- Consolidated shared preview-save and confirm-validation lifecycle logic across manual trade, symbol, and upgrade operations.
+
+### Fixed
+- Fixed natural-language position queries such as `5月到期的持仓` so exact help examples no longer bypass semantic parsing and drop the expiration filter.
+
 ## 1.2.155 - 2026-05-27
 
 ### Added

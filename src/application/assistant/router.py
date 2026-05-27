@@ -5,34 +5,21 @@ from datetime import date
 from typing import Any, Callable
 
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response, mask_path
-from src.application.assistant.commands import spec_by_intent
 from src.application.assistant.audit import InboundAuditStore, build_command_id, utc_now_iso
-from src.application.assistant.contracts import AssistantIntent, AssistantRequest, AssistantToolCall
-from src.application.assistant.manual_trade_operations import (
-    handle_manual_trade_operation,
-    is_manual_trade_operation_intent,
-)
+from src.application.assistant.contracts import AssistantFrame, AssistantIntent, AssistantRequest, AssistantToolCall, ToolPlan
+from src.application.assistant.frame_planner import frame_from_intent, tool_plan_from_frame
+from src.application.assistant.manual_trade_operations import handle_manual_trade_operation
 from src.application.assistant.operation_store import InboundOperationStore
 from src.application.assistant.parser import parse_inbound_text
 from src.application.assistant.policy import enforce_sender_allowed, enforce_tool_allowed
 from src.application.assistant.renderer import HELP_TEXT, SMALL_TALK_TEXT, render_inbound_text, render_pending_operations
-from src.application.assistant.symbol_operations import handle_symbol_operation, is_symbol_operation_intent
-from src.application.assistant.upgrade_operations import handle_upgrade_operation, is_upgrade_operation_intent
+from src.application.assistant.symbol_operations import handle_symbol_operation
+from src.application.assistant.upgrade_operations import handle_upgrade_operation
 from src.application.tool_execution import execute_tool
 
 
 ExecuteToolFn = Callable[[str, dict[str, Any]], dict[str, Any]]
 ParseIntentFn = Callable[[str, Callable[[], date] | None], AssistantIntent]
-_COMMAND_SPECS_BY_INTENT = spec_by_intent()
-CONFIG_SCOPED_INTENTS = frozenset(
-    {
-        "runtime_status",
-        "healthcheck",
-        "config_validate",
-        "option_positions_open",
-        "monthly_income_report",
-    }
-)
 
 
 def handle_assistant_request(
@@ -84,7 +71,9 @@ def handle_assistant_request(
 
     created_at = utc_now_iso()
     intent: AssistantIntent | None = None
+    frame: AssistantFrame | None = None
     call: AssistantToolCall | None = None
+    plan: ToolPlan | None = None
     response: dict[str, Any]
     decision = "unknown"
     error_code: str | None = None
@@ -96,6 +85,7 @@ def handle_assistant_request(
             allowed_senders=allowed_senders,
         )
         intent = _parse_intent(normalized_request.text, now_fn=now_fn, parse_intent_fn=parse_intent_fn)
+        frame = frame_from_intent(intent)
         if intent.name == "help":
             response = build_response(
                 tool_name="inbound.handle",
@@ -120,7 +110,9 @@ def handle_assistant_request(
                 command_id=command_id,
                 created_at=created_at,
                 intent=intent,
+                frame=frame,
                 call=None,
+                plan=None,
                 decision=decision,
                 response=response,
             )
@@ -150,21 +142,17 @@ def handle_assistant_request(
                 command_id=command_id,
                 created_at=created_at,
                 intent=intent,
+                frame=frame,
                 call=None,
+                plan=None,
                 decision=decision,
                 response=response,
             )
 
-        if intent.name == "pending_operations":
-            call = AssistantToolCall(
-                tool_name="inbound.pending",
-                payload={
-                    "scope": "current_conversation",
-                    "channel": normalized_request.channel,
-                    "sender_id": normalized_request.sender_id,
-                    "conversation_id": normalized_request.conversation_id,
-                },
-            )
+        plan = tool_plan_from_frame(frame, request=normalized_request)
+        call = plan.to_tool_call()
+
+        if call.tool_name == "inbound.pending":
             pending_operations = InboundOperationStore(store.path).list_pending_operations(
                 channel=normalized_request.channel,
                 sender_id=normalized_request.sender_id,
@@ -178,10 +166,12 @@ def handle_assistant_request(
                     "command_id": command_id,
                     "request": normalized_request.public_payload(),
                     "intent": intent.public_payload(),
+                    "semantic_frame": frame.public_payload(),
+                    "tool_plan": plan.public_payload(),
                     "tool_call": call.public_payload(),
                     "decision": {
                         "allowed": True,
-                        "reason": "pending_operations",
+                        "reason": plan.reason,
                         "sender": sender_decision.public_payload(),
                     },
                     "pending_count": len(pending_operations),
@@ -197,15 +187,17 @@ def handle_assistant_request(
                 command_id=command_id,
                 created_at=created_at,
                 intent=intent,
+                frame=frame,
                 call=call,
+                plan=plan,
                 decision=decision,
                 response=response,
             )
 
-        if is_manual_trade_operation_intent(intent):
-            call = AssistantToolCall(tool_name="inbound.manual_trade", payload=dict(intent.arguments))
+        planned_intent = _intent_from_plan(intent, plan)
+        if call.tool_name == "inbound.manual_trade":
             operation_result = handle_manual_trade_operation(
-                intent,
+                planned_intent,
                 normalized_request,
                 command_id=command_id,
                 store=InboundOperationStore(store.path),
@@ -214,9 +206,12 @@ def handle_assistant_request(
                 operation_result,
                 command_id=command_id,
                 request=normalized_request,
-                intent=intent,
+                intent=planned_intent,
+                frame=frame,
+                plan=plan,
+                call=call,
                 sender_decision=sender_decision.public_payload(),
-                reason="manual_trade_operation",
+                reason=plan.reason,
                 audit_db=store.path,
             )
             decision = "allowed"
@@ -226,15 +221,16 @@ def handle_assistant_request(
                 command_id=command_id,
                 created_at=created_at,
                 intent=intent,
+                frame=frame,
                 call=call,
+                plan=plan,
                 decision=decision,
                 response=response,
             )
 
-        if is_symbol_operation_intent(intent):
-            call = AssistantToolCall(tool_name="inbound.symbols", payload=dict(intent.arguments))
+        if call.tool_name == "inbound.symbols":
             operation_result = handle_symbol_operation(
-                intent,
+                planned_intent,
                 normalized_request,
                 command_id=command_id,
                 store=InboundOperationStore(store.path),
@@ -243,9 +239,12 @@ def handle_assistant_request(
                 operation_result,
                 command_id=command_id,
                 request=normalized_request,
-                intent=intent,
+                intent=planned_intent,
+                frame=frame,
+                plan=plan,
+                call=call,
                 sender_decision=sender_decision.public_payload(),
-                reason="symbol_operation",
+                reason=plan.reason,
                 audit_db=store.path,
             )
             decision = "allowed"
@@ -255,15 +254,16 @@ def handle_assistant_request(
                 command_id=command_id,
                 created_at=created_at,
                 intent=intent,
+                frame=frame,
                 call=call,
+                plan=plan,
                 decision=decision,
                 response=response,
             )
 
-        if is_upgrade_operation_intent(intent):
-            call = AssistantToolCall(tool_name="inbound.upgrade", payload=dict(intent.arguments))
+        if call.tool_name == "inbound.upgrade":
             operation_result = handle_upgrade_operation(
-                intent,
+                planned_intent,
                 normalized_request,
                 command_id=command_id,
                 store=InboundOperationStore(store.path),
@@ -272,9 +272,12 @@ def handle_assistant_request(
                 operation_result,
                 command_id=command_id,
                 request=normalized_request,
-                intent=intent,
+                intent=planned_intent,
+                frame=frame,
+                plan=plan,
+                call=call,
                 sender_decision=sender_decision.public_payload(),
-                reason="upgrade_operation",
+                reason=plan.reason,
                 audit_db=store.path,
             )
             decision = "allowed"
@@ -284,12 +287,13 @@ def handle_assistant_request(
                 command_id=command_id,
                 created_at=created_at,
                 intent=intent,
+                frame=frame,
                 call=call,
+                plan=plan,
                 decision=decision,
                 response=response,
             )
 
-        call = _tool_call_from_intent(intent, request=normalized_request)
         tool_decision = enforce_tool_allowed(call)
         tool_result = execute_tool_fn(call.tool_name, call.payload)
         response_text = render_inbound_text(intent=intent, tool_result=tool_result)
@@ -300,6 +304,8 @@ def handle_assistant_request(
                 "command_id": command_id,
                 "request": normalized_request.public_payload(),
                 "intent": intent.public_payload(),
+                "semantic_frame": frame.public_payload(),
+                "tool_plan": plan.public_payload(),
                 "tool_call": call.public_payload(),
                 "decision": {
                     **tool_decision,
@@ -323,7 +329,9 @@ def handle_assistant_request(
         command_id=command_id,
         created_at=created_at,
         intent=intent,
+        frame=frame,
         call=call,
+        plan=plan,
         decision=decision,
         response=response,
         error_code=error_code,
@@ -341,78 +349,13 @@ def _parse_intent(
     return parse_inbound_text(text, now_fn=now_fn)
 
 
-def _tool_call_from_intent(intent: AssistantIntent, *, request: AssistantRequest) -> AssistantToolCall:
-    _require_config_scope(intent=intent, request=request)
-    base = _base_payload(request)
-    if intent.name == "runtime_status":
-        return AssistantToolCall(tool_name=_catalog_tool_name(intent.name), payload=base)
-    if intent.name == "healthcheck":
-        return AssistantToolCall(tool_name=_catalog_tool_name(intent.name), payload=base)
-    if intent.name == "config_validate":
-        return AssistantToolCall(tool_name=_catalog_tool_name(intent.name), payload=base)
-    if intent.name == "option_positions_open":
-        payload = {
-            **base,
-            "action": "list",
-            "status": intent.arguments.get("status") or "open",
-        }
-        if intent.arguments.get("account"):
-            payload["account"] = intent.arguments["account"]
-        return AssistantToolCall(
-            tool_name=_catalog_tool_name(intent.name),
-            payload=payload,
-        )
-    if intent.name == "monthly_income_report":
-        payload = {**base}
-        if intent.arguments.get("account"):
-            payload["account"] = intent.arguments["account"]
-        if intent.arguments.get("month"):
-            payload["month"] = intent.arguments["month"]
-        return AssistantToolCall(tool_name=_catalog_tool_name(intent.name), payload=payload)
-    if intent.name == "runtime_runs":
-        return AssistantToolCall(tool_name=_catalog_tool_name(intent.name), payload={"limit": int(intent.arguments.get("limit") or 10)})
-    if intent.name == "runtime_logs":
-        return AssistantToolCall(
-            tool_name=_catalog_tool_name(intent.name),
-            payload={
-                "run_id": intent.arguments["run_id"],
-                "kind": intent.arguments.get("kind") or "all",
-                "lines": int(intent.arguments.get("lines") or 50),
-            },
-        )
-    raise AgentToolError(
-        code="INPUT_ERROR",
-        message=f"unsupported inbound intent: {intent.name}",
+def _intent_from_plan(intent: AssistantIntent, plan: ToolPlan) -> AssistantIntent:
+    return AssistantIntent(
+        name=intent.name,
+        arguments=dict(plan.payload),
+        parser=intent.parser,
+        confidence=intent.confidence,
     )
-
-
-def _require_config_scope(*, intent: AssistantIntent, request: AssistantRequest) -> None:
-    if intent.name not in CONFIG_SCOPED_INTENTS:
-        return
-    if request.config_path or request.config_key:
-        return
-    raise AgentToolError(
-        code="NEEDS_CLARIFICATION",
-        message="需要先指定要查看的市场。",
-        hint="请明确说美股或港股，或通过 --config-key us/hk、--config-path、assistant.default_market_scope 配置默认市场。",
-        details={"intent_name": intent.name, "required": "config_key_or_config_path"},
-    )
-
-
-def _catalog_tool_name(intent_name: str) -> str:
-    spec = _COMMAND_SPECS_BY_INTENT.get(intent_name)
-    if spec is None or not spec.tool_name:
-        raise AgentToolError(code="INPUT_ERROR", message=f"unsupported inbound intent: {intent_name}")
-    return spec.tool_name
-
-
-def _base_payload(request: AssistantRequest) -> dict[str, Any]:
-    payload: dict[str, Any] = {}
-    if request.config_path:
-        payload["config_path"] = request.config_path
-    elif request.config_key:
-        payload["config_key"] = request.config_key
-    return payload
 
 
 def _operation_response(
@@ -421,6 +364,9 @@ def _operation_response(
     command_id: str,
     request: AssistantRequest,
     intent: AssistantIntent,
+    frame: AssistantFrame,
+    plan: ToolPlan,
+    call: AssistantToolCall,
     sender_decision: dict[str, Any],
     reason: str,
     audit_db: Any,
@@ -431,6 +377,9 @@ def _operation_response(
             "command_id": command_id,
             "request": request.public_payload(),
             "intent": intent.public_payload(),
+            "semantic_frame": frame.public_payload(),
+            "tool_plan": plan.public_payload(),
+            "tool_call": call.public_payload(),
             "decision": {
                 "allowed": True,
                 "reason": reason,
@@ -458,7 +407,9 @@ def _record_and_return(
     command_id: str,
     created_at: str,
     intent: AssistantIntent | None,
+    frame: AssistantFrame | None,
     call: AssistantToolCall | None,
+    plan: ToolPlan | None,
     decision: str,
     response: dict[str, Any],
     error_code: str | None = None,
@@ -475,6 +426,8 @@ def _record_and_return(
             "intent_name": intent.name if intent else None,
             "tool_name": call.tool_name if call else None,
             "tool_payload": call.payload if call else None,
+            "semantic_frame": frame.public_payload() if frame else None,
+            "tool_plan": plan.public_payload() if plan else None,
             "decision": decision,
             "result_ok": bool(response.get("ok", False)),
             "error_code": error_code or _response_error_code(response),

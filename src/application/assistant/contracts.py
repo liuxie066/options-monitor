@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
+
+
+ASSISTANT_FRAME_SCHEMA_VERSION = "om-assistant-frame-v1"
+TOOL_PLAN_SCHEMA_VERSION = "om-tool-plan-v1"
+AssistantSafetyClass = Literal["read", "write_preview", "write_apply", "admin_preview", "local"]
 
 
 @dataclass(frozen=True)
@@ -43,6 +48,25 @@ class AssistantIntent:
 
 
 @dataclass(frozen=True)
+class AssistantFrame:
+    intent: str
+    payload: dict[str, Any]
+    safety_class: AssistantSafetyClass
+    parser: str = "deterministic"
+    confidence: float = 1.0
+
+    def public_payload(self) -> dict[str, Any]:
+        return {
+            "schema_version": ASSISTANT_FRAME_SCHEMA_VERSION,
+            "intent": self.intent,
+            "payload": dict(self.payload),
+            "safety_class": self.safety_class,
+            "parser": self.parser,
+            "confidence": self.confidence,
+        }
+
+
+@dataclass(frozen=True)
 class AssistantToolCall:
     tool_name: str
     payload: dict[str, Any]
@@ -54,8 +78,39 @@ class AssistantToolCall:
         }
 
 
+@dataclass(frozen=True)
+class ToolPlan:
+    tool_name: str
+    payload: dict[str, Any]
+    safety_class: AssistantSafetyClass
+    read_only: bool = True
+    requires_confirmation: bool = False
+    reason: str = ""
+    source_intent: str | None = None
+
+    def to_tool_call(self) -> AssistantToolCall:
+        return AssistantToolCall(tool_name=self.tool_name, payload=dict(self.payload))
+
+    def public_payload(self) -> dict[str, Any]:
+        return {
+            "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+            "tool_name": self.tool_name,
+            "payload": dict(self.payload),
+            "safety_class": self.safety_class,
+            "read_only": bool(self.read_only),
+            "requires_confirmation": bool(self.requires_confirmation),
+            "reason": self.reason,
+            "source_intent": self.source_intent,
+        }
+
+
 __all__ = [
+    "ASSISTANT_FRAME_SCHEMA_VERSION",
+    "TOOL_PLAN_SCHEMA_VERSION",
+    "AssistantFrame",
     "AssistantIntent",
     "AssistantRequest",
+    "AssistantSafetyClass",
     "AssistantToolCall",
+    "ToolPlan",
 ]
