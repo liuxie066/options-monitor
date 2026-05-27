@@ -450,6 +450,8 @@ def _validate_optional_dte_window(cfg: dict, path: str):
 def _validate_yield_enhancement_cfg(cfg: dict, path: str):
     if not isinstance(cfg, dict):
         die(f'{path} must be an object')
+    if 'strategy' in cfg or 'strategy_profile' in cfg:
+        die(f'{path}.strategy is not supported; yield_enhancement uses sell_put.strategy')
     bad_keys = [k for k in REMOVED_STRATEGY_FILTER_FIELDS if k in cfg]
     if bad_keys:
         die(f"{path} has unsupported strategy filter keys: {', '.join(bad_keys)}")
@@ -741,6 +743,8 @@ def validate_config(cfg: dict):
     if close_advice and not isinstance(close_advice, dict):
         die('close_advice must be an object')
     if isinstance(close_advice, dict):
+        if 'strategy' in close_advice or 'strategy_profile' in close_advice:
+            die('close_advice.strategy is not supported; close_advice uses sell_put/sell_call strategy')
         quote_source = str(close_advice.get('quote_source') or '').strip().lower()
         if quote_source and quote_source not in {'auto', 'required_data'}:
             die('close_advice.quote_source must be auto or required_data')

@@ -754,7 +754,11 @@ def _manual_open_ledger_inputs(command: OpenPositionCommand) -> tuple[OpenPositi
         source="cli_manual_open",
         multiplier=float(effective_multiplier(fields) or 100),
         lot_id=f"lot_{event_id}",
-        raw_payload={"source": "om option-positions", "mode": "manual_open"},
+        raw_payload={
+            "source": "om option-positions",
+            "mode": "manual_open",
+            "strategy_snapshot": dict(resolved_command.strategy_snapshot) if isinstance(resolved_command.strategy_snapshot, dict) else None,
+        },
     )
     return resolved_command, fields, event
 
@@ -816,7 +820,15 @@ def _open_command_from_trade_deal(deal: Any) -> OpenPositionCommand:
             f"trade_time_ms={getattr(deal, 'trade_time_ms', '') or ''}"
         ).strip(),
         opened_at_ms=getattr(deal, "trade_time_ms", None),
+        strategy_snapshot=_strategy_snapshot_from_raw_payload(getattr(deal, "raw_payload", None)),
     )
+
+
+def _strategy_snapshot_from_raw_payload(raw_payload: Any) -> dict[str, Any] | None:
+    if not isinstance(raw_payload, dict):
+        return None
+    snapshot = raw_payload.get("strategy_snapshot")
+    return dict(snapshot) if isinstance(snapshot, dict) else None
 
 
 def _duplicate_open_preflight(*, event: TradeEvent, result: dict[str, Any]) -> LedgerPreflightResult:

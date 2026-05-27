@@ -200,6 +200,7 @@ def execute_manual_open(
     note: str | None,
     dry_run: bool,
     opened_at_ms: int | None = None,
+    strategy_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     command = OpenPositionCommand(
         broker=broker,
@@ -216,6 +217,7 @@ def execute_manual_open(
         underlying_share_locked=underlying_share_locked,
         note=note,
         opened_at_ms=opened_at_ms,
+        strategy_snapshot=(dict(strategy_snapshot) if isinstance(strategy_snapshot, dict) else None),
     )
     if dry_run:
         return {"mode": "dry_run", **preview_manual_position_open(repo, command).to_payload()}
