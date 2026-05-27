@@ -314,7 +314,7 @@ def main():
         print(f"[DONE] option positions context -> {out_path}")
         print(f"broker={broker} account={args.account or '-'} selected={ctx['raw_selected_count']}")
 
-        # Backward/forward compatible stats
+        # Keep summary stats best-effort because old records may miss optional fields.
         cash_secured_syms = 0
         try:
             m = ctx.get('cash_secured_by_symbol_by_ccy') or {}

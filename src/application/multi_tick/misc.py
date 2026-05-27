@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, time
@@ -33,36 +32,6 @@ def maybe_parse_dt(value: str | None) -> datetime | None:
     if not value:
         return None
     return datetime.fromisoformat(value)
-
-
-def atomic_symlink(path: Path, target: Path, *, tmp_dir: Path | None = None):
-    tmp_root = tmp_dir or path.parent
-    tmp_root.mkdir(parents=True, exist_ok=True)
-    tmp = tmp_root / f'{path.name}.tmp'
-    if tmp.exists() or tmp.is_symlink():
-        try:
-            tmp.unlink(missing_ok=True)
-        except IsADirectoryError:
-            import shutil
-            shutil.rmtree(tmp, ignore_errors=True)
-    tmp.symlink_to(target, target_is_directory=True)
-    if path.exists() and not path.is_symlink():
-        import shutil
-        shutil.rmtree(path, ignore_errors=True)
-    os.replace(tmp, path)
-
-
-def update_legacy_output_link(path: Path, target: Path, *, tmp_dir: Path) -> bool:
-    if path.exists() and not path.is_symlink():
-        if os.access(path.parent, os.W_OK):
-            raise RuntimeError(f"./output must be a symlink for multi-account mode: {path}")
-        log(f'skip legacy output link update on read-only repo root: {path}')
-        return False
-    if not os.access(path.parent, os.W_OK):
-        log(f'skip legacy output link update on read-only repo root: {path}')
-        return False
-    atomic_symlink(path, target, tmp_dir=tmp_dir)
-    return True
 
 
 def ensure_account_output_dir(d: Path):

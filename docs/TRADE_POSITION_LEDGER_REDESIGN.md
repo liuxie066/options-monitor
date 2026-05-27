@@ -432,7 +432,7 @@ persisted position_lots
 - 保持 v2 文件、导出和 runtime import 不回归的结构性测试。
 - 保持 facade、close target resolver、agent report 不 fallback 到 legacy compat records。
 - 默认 runtime code 直接依赖 `src.application.ledger.read_model`；旧 `option_positions_facade` 已删除并由结构性测试防回归。
-- legacy SQLite `trade_events` / `position_lots` / `option_positions` table 只能通过显式 `om option-positions store migrate-legacy` 迁移入口读取，默认 repo load 不做 bootstrap。
+- legacy SQLite `trade_events` / `position_lots` / `option_positions` table 不再有运行时迁移入口；旧库需要离线修复为 canonical `trade_events` 后再进入 active ledger，默认 repo load 不做 bootstrap。
 - 文档更新：`OPTION_POSITIONS_MIGRATION.md` 和 `OPTION_POSITIONS_REPAIR.md` 改为 legacy-only。
 - CLI 命令给出迁移后的新入口。
 

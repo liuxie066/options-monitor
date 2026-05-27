@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any, Callable
 
 from src.application.config_loader import resolve_data_config_path
 from domain.domain.ledger.position_fields import (
@@ -158,8 +158,7 @@ def _refresh_position_projection_before_auto_close(repo: Any) -> dict[str, Any] 
     if not callable(count_trade_events):
         return None
     try:
-        count_trade_events_fn = cast(Callable[[], Any], count_trade_events)
-        trade_event_count = int(count_trade_events_fn())
+        trade_event_count = int(count_trade_events())
     except Exception:
         return None
     if trade_event_count <= 0:
@@ -188,15 +187,13 @@ def _payload(item: Any) -> dict[str, Any]:
 
 
 def _expired_close_run_payloads(value: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
-    to_legacy_tuple = getattr(value, "to_legacy_tuple", None)
-    if callable(to_legacy_tuple):
-        decisions, applied, errors = cast(tuple[list[Any], list[Any], list[Any]], to_legacy_tuple())
-        return (
-            [_payload(item) for item in decisions],
-            [_payload(item) for item in applied],
-            [str(item) for item in errors],
-        )
-    decisions, applied, errors = cast(tuple[list[Any], list[Any], list[Any]], value)
+    to_payload = getattr(value, "to_payload", None)
+    payload = to_payload() if callable(to_payload) else value
+    if not isinstance(payload, dict):
+        raise TypeError("expired close run result must provide a payload dict")
+    decisions = payload.get("decisions")
+    applied = payload.get("applied")
+    errors = payload.get("errors")
     return (
         [_payload(item) for item in list(decisions or [])],
         [_payload(item) for item in list(applied or [])],

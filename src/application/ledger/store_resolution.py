@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -27,7 +26,6 @@ class LedgerStoreResolution:
     trade_event_count: int | None
     position_lot_count: int | None
     warnings: tuple[str, ...] = ()
-    legacy_sqlite_path: Path | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -40,7 +38,6 @@ class LedgerStoreResolution:
             "db_size_bytes": self.db_size_bytes,
             "trade_event_count": self.trade_event_count,
             "position_lot_count": self.position_lot_count,
-            "legacy_sqlite_path": str(self.legacy_sqlite_path) if self.legacy_sqlite_path is not None else None,
             "warnings": list(self.warnings),
         }
 
@@ -59,32 +56,6 @@ class _RepoWithDbPath(Protocol):
 class _RepoWithCounts(Protocol):
     def count_trade_events(self) -> object: ...
     def count_position_lots(self) -> object: ...
-
-
-def _read_json_object(path: Path) -> dict[str, object]:
-    try:
-        payload = cast(object, json.loads(path.read_text(encoding="utf-8")))
-    except Exception:
-        return {}
-    if not isinstance(payload, dict):
-        return {}
-    payload_map = cast(dict[object, object], payload)
-    return {str(key): value for key, value in payload_map.items()}
-
-
-def _configured_legacy_sqlite_path(cfg: dict[str, object]) -> Path | None:
-    option_positions = cfg.get("option_positions")
-    if not isinstance(option_positions, dict):
-        return None
-    option_positions_map = cast(dict[object, object], option_positions)
-    option_positions_cfg = {str(key): value for key, value in option_positions_map.items()}
-    raw = str(option_positions_cfg.get("sqlite_path") or "").strip()
-    if not raw:
-        return None
-    path = Path(raw).expanduser()
-    if path.is_absolute():
-        return path.resolve()
-    return (REPO_BASE / path).resolve()
 
 
 def _count_table(conn: sqlite3.Connection, table: str) -> int | None:
@@ -157,25 +128,14 @@ def resolve_ledger_store(
     data_config_path = Path(data_config).expanduser()
     if not data_config_path.is_absolute():
         data_config_path = data_config_path.resolve()
-    cfg = _read_json_object(data_config_path)
-    legacy_sqlite_path = _configured_legacy_sqlite_path(cfg)
     runtime_root_path, runtime_root_source = _resolve_runtime_root(
         data_config_path=data_config_path,
         runtime_root=runtime_root,
         config_path=config_path,
     )
 
-    warnings: list[str] = []
     sqlite_path = (runtime_root_path / LEDGER_DB_RELATIVE_PATH).resolve()
     sqlite_path_source = "runtime_root"
-
-    if legacy_sqlite_path is not None:
-        warnings.append(
-            (
-                "option_positions.sqlite_path ignored; ledger DB is fixed under "
-                "<runtime_root>/output_shared/state/option_positions.sqlite3"
-            )
-        )
 
     db_exists = sqlite_path.exists()
     db_size_bytes = sqlite_path.stat().st_size if db_exists else None
@@ -190,8 +150,7 @@ def resolve_ledger_store(
         db_size_bytes=db_size_bytes,
         trade_event_count=trade_event_count,
         position_lot_count=position_lot_count,
-        warnings=tuple(warnings),
-        legacy_sqlite_path=legacy_sqlite_path,
+        warnings=(),
     )
 
 
@@ -264,8 +223,6 @@ def inspect_ledger_stores(
             roles.append(role)
 
     add_candidate("active", resolution.sqlite_path)
-    if resolution.legacy_sqlite_path is not None:
-        add_candidate("legacy_configured_sqlite_path", resolution.legacy_sqlite_path)
     repo_default = REPO_BASE / LEDGER_DB_RELATIVE_PATH
     systemd_default = SYSTEMD_DEFAULT_RUNTIME_ROOT / LEDGER_DB_RELATIVE_PATH
     active_resolved = resolution.sqlite_path.resolve()
@@ -306,11 +263,6 @@ def inspect_ledger_stores(
         warnings.append("multiple ledger sqlite candidates contain rows; old and active stores may be diverged")
     if not active_has_rows and other_populated:
         warnings.append("active ledger sqlite has no rows while another candidate is populated")
-    for item in other_populated:
-        roles = item.get("roles")
-        if isinstance(roles, list) and "legacy_configured_sqlite_path" in roles:
-            warnings.append("deprecated option_positions.sqlite_path contains rows but is ignored")
-
     return {
         "schema_kind": "option_positions_store_inspect_v1",
         "active": resolution.to_dict(),

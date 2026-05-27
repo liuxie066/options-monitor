@@ -1,137 +1,23 @@
 from __future__ import annotations
 
 import calendar
-from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from src.infrastructure.feishu_bitable import parse_note_kv, safe_float
+from src.infrastructure.feishu_bitable import safe_float
 from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
-from src.application.multiplier_cache import resolve_multiplier
 from domain.domain.ledger.position_fields import (
     BUY_TO_CLOSE,
     EXPIRE_AUTO_CLOSE,
-    effective_contracts_closed,
-    effective_contracts,
     effective_multiplier,
     normalize_account,
     normalize_broker,
-    normalize_close_type,
     normalize_currency,
     normalize_option_type,
-    normalize_side,
     normalize_status,
     norm_symbol,
 )
-
-
-@dataclass(frozen=True)
-class IncomeRow:
-    record_id: str
-    month: str
-    account: str
-    broker: str
-    symbol: str
-    currency: str
-    position_side: str
-    contracts_closed: int
-    premium: float
-    close_price: float
-    multiplier: int
-    realized_gross: float
-    close_type: str
-    closed_at: int
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "record_id": self.record_id,
-            "month": self.month,
-            "account": self.account,
-            "broker": self.broker,
-            "symbol": self.symbol,
-            "currency": self.currency,
-            "position_side": self.position_side,
-            "contracts_closed": self.contracts_closed,
-            "premium": self.premium,
-            "close_price": self.close_price,
-            "multiplier": self.multiplier,
-            "realized_gross": self.realized_gross,
-            "close_type": self.close_type,
-            "closed_at": self.closed_at,
-        }
-
-
-@dataclass(frozen=True)
-class OpenCashflowRow:
-    record_id: str
-    month: str
-    account: str
-    broker: str
-    symbol: str
-    option_type: str
-    currency: str
-    position_side: str
-    trade_action: str
-    contracts: int
-    price: float
-    multiplier: int
-    cash_in_gross: float
-    cash_out_gross: float
-    net_cashflow_gross: float
-    opened_at: int
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "record_id": self.record_id,
-            "event_id": self.record_id,
-            "event_at": self.opened_at,
-            "month": self.month,
-            "account": self.account,
-            "broker": self.broker,
-            "symbol": self.symbol,
-            "option_type": self.option_type,
-            "position_side": self.position_side,
-            "trade_action": self.trade_action,
-            "currency": self.currency,
-            "contracts": self.contracts,
-            "price": self.price,
-            "multiplier": self.multiplier,
-            "cash_in_gross": self.cash_in_gross,
-            "cash_out_gross": self.cash_out_gross,
-            "net_cashflow_gross": self.net_cashflow_gross,
-        }
-
-
-@dataclass(frozen=True)
-class PremiumIncomeRow:
-    record_id: str
-    month: str
-    account: str
-    broker: str
-    symbol: str
-    currency: str
-    contracts: int
-    premium: float
-    multiplier: int
-    premium_received_gross: float
-    opened_at: int
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "record_id": self.record_id,
-            "month": self.month,
-            "account": self.account,
-            "broker": self.broker,
-            "symbol": self.symbol,
-            "currency": self.currency,
-            "contracts": self.contracts,
-            "premium": self.premium,
-            "multiplier": self.multiplier,
-            "premium_received_gross": self.premium_received_gross,
-            "opened_at": self.opened_at,
-        }
 
 
 def parse_event_at_ms(value: Any) -> int | None:
@@ -151,31 +37,8 @@ def parse_event_at_ms(value: Any) -> int | None:
         return None
 
 
-def parse_closed_at_ms(value: Any) -> int | None:
-    return parse_event_at_ms(value)
-
-
 def month_from_ms(ms: int) -> str:
     return datetime.fromtimestamp(int(ms) / 1000, tz=timezone.utc).strftime("%Y-%m")
-
-
-def _read_premium(fields: dict[str, Any]) -> float | None:
-    premium = safe_float(fields.get("premium"))
-    if premium is not None:
-        return premium
-    return safe_float(parse_note_kv(fields.get("note") or "", "premium_per_share"))
-
-
-def _read_multiplier(fields: dict[str, Any]) -> int | None:
-    multiplier = effective_multiplier(fields)
-    if multiplier is not None and int(multiplier) > 0:
-        return int(multiplier)
-    resolved = resolve_multiplier(
-        repo_base=Path(__file__).resolve().parents[3],
-        symbol=norm_symbol(fields.get("symbol") or ""),
-        allow_opend_refresh=False,
-    )
-    return int(resolved) if resolved else None
 
 
 def _build_exchange_rate_converter(rates: dict[str, Any] | None) -> CurrencyConverter:
@@ -864,180 +727,6 @@ def _event_detail_sort_key(row: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
-def build_income_row(record: dict[str, Any]) -> tuple[IncomeRow | None, str | None]:
-    record_id = str(record.get("record_id") or record.get("id") or "").strip()
-    fields = record.get("fields") or record
-    if not isinstance(fields, dict):
-        return None, f"{record_id or '(no record_id)'}: fields is not an object"
-
-    status = normalize_status(fields.get("status"))
-    if status != "close":
-        return None, None
-
-    closed_at = parse_closed_at_ms(fields.get("closed_at"))
-    if closed_at is None:
-        return None, f"{record_id or '(no record_id)'}: missing closed_at"
-
-    contracts_closed = effective_contracts_closed(fields)
-    if contracts_closed <= 0:
-        return None, f"{record_id or '(no record_id)'}: contracts_closed <= 0"
-
-    premium = _read_premium(fields)
-    if premium is None:
-        return None, f"{record_id or '(no record_id)'}: missing premium"
-
-    multiplier = _read_multiplier(fields)
-    if multiplier is None:
-        return None, f"{record_id or '(no record_id)'}: missing multiplier"
-
-    close_type = normalize_close_type(fields.get("close_type")) if fields.get("close_type") else ""
-    close_price = safe_float(fields.get("close_price"))
-    if close_price is None:
-        if close_type == EXPIRE_AUTO_CLOSE:
-            close_price = 0.0
-        else:
-            return None, f"{record_id or '(no record_id)'}: missing close_price"
-
-    currency = normalize_currency(fields.get("currency")) or "USD"
-    account = normalize_account(fields.get("account")) or "-"
-    broker = normalize_broker(fields.get("broker")) or "-"
-    symbol = norm_symbol(fields.get("symbol") or "-")
-    side = normalize_side(fields.get("side"))
-    position_side = "long" if side == "long" else "short"
-    if position_side == "long":
-        realized_gross = (float(close_price) - float(premium)) * int(multiplier) * int(contracts_closed)
-    else:
-        realized_gross = (float(premium) - float(close_price)) * int(multiplier) * int(contracts_closed)
-
-    return (
-        IncomeRow(
-            record_id=record_id,
-            month=month_from_ms(closed_at),
-            account=account,
-            broker=broker,
-            symbol=symbol,
-            currency=currency,
-            position_side=position_side,
-            contracts_closed=int(contracts_closed),
-            premium=float(premium),
-            close_price=float(close_price),
-            multiplier=int(multiplier),
-            realized_gross=round(float(realized_gross), 6),
-            close_type=close_type or BUY_TO_CLOSE,
-            closed_at=int(closed_at),
-        ),
-        None,
-    )
-
-
-def build_premium_income_row(record: dict[str, Any]) -> tuple[PremiumIncomeRow | None, str | None]:
-    record_id = str(record.get("record_id") or record.get("id") or "").strip()
-    fields = record.get("fields") or record
-    if not isinstance(fields, dict):
-        return None, f"{record_id or '(no record_id)'}: fields is not an object"
-
-    side = normalize_side(fields.get("side"))
-    if side != "short":
-        return None, None
-
-    opened_at = parse_event_at_ms(fields.get("opened_at"))
-    if opened_at is None:
-        return None, f"{record_id or '(no record_id)'}: missing opened_at"
-
-    contracts = effective_contracts(fields)
-    if contracts <= 0:
-        return None, f"{record_id or '(no record_id)'}: contracts <= 0"
-
-    premium = _read_premium(fields)
-    if premium is None:
-        return None, f"{record_id or '(no record_id)'}: missing premium"
-
-    multiplier = _read_multiplier(fields)
-    if multiplier is None:
-        return None, f"{record_id or '(no record_id)'}: missing multiplier"
-
-    currency = normalize_currency(fields.get("currency")) or "USD"
-    account = normalize_account(fields.get("account")) or "-"
-    broker = normalize_broker(fields.get("broker")) or "-"
-    symbol = norm_symbol(fields.get("symbol") or "-")
-    premium_received_gross = float(premium) * int(multiplier) * int(contracts)
-
-    return (
-        PremiumIncomeRow(
-            record_id=record_id,
-            month=month_from_ms(opened_at),
-            account=account,
-            broker=broker,
-            symbol=symbol,
-            currency=currency,
-            contracts=int(contracts),
-            premium=float(premium),
-            multiplier=int(multiplier),
-            premium_received_gross=round(float(premium_received_gross), 6),
-            opened_at=int(opened_at),
-        ),
-        None,
-    )
-
-
-def build_open_cashflow_row(record: dict[str, Any]) -> tuple[OpenCashflowRow | None, str | None]:
-    record_id = str(record.get("record_id") or record.get("id") or "").strip()
-    fields = record.get("fields") or record
-    if not isinstance(fields, dict):
-        return None, f"{record_id or '(no record_id)'}: fields is not an object"
-
-    side = normalize_side(fields.get("side"))
-    if side not in {"short", "long"}:
-        return None, None
-
-    opened_at = parse_event_at_ms(fields.get("opened_at"))
-    if opened_at is None:
-        return None, f"{record_id or '(no record_id)'}: missing opened_at"
-
-    contracts = effective_contracts(fields)
-    if contracts <= 0:
-        return None, f"{record_id or '(no record_id)'}: contracts <= 0"
-
-    premium = _read_premium(fields)
-    if premium is None:
-        return None, f"{record_id or '(no record_id)'}: missing premium"
-
-    multiplier = _read_multiplier(fields)
-    if multiplier is None:
-        return None, f"{record_id or '(no record_id)'}: missing multiplier"
-
-    amount = _amount(premium, multiplier, contracts)
-    currency = normalize_currency(fields.get("currency")) or "USD"
-    account = normalize_account(fields.get("account")) or "-"
-    broker = normalize_broker(fields.get("broker")) or "-"
-    symbol = norm_symbol(fields.get("symbol") or "-")
-    option_type = normalize_option_type(fields.get("option_type")) or "-"
-    cash_in = amount if side == "short" else 0.0
-    cash_out = amount if side == "long" else 0.0
-
-    return (
-        OpenCashflowRow(
-            record_id=record_id,
-            month=month_from_ms(opened_at),
-            account=account,
-            broker=broker,
-            symbol=symbol,
-            option_type=option_type,
-            currency=currency,
-            position_side=side,
-            trade_action="sell_open" if side == "short" else "buy_open",
-            contracts=int(contracts),
-            price=float(premium),
-            multiplier=int(multiplier),
-            cash_in_gross=cash_in,
-            cash_out_gross=cash_out,
-            net_cashflow_gross=_round_money(cash_in - cash_out),
-            opened_at=int(opened_at),
-        ),
-        None,
-    )
-
-
 def _passes_report_filter(event: dict[str, Any], account_norm: str | None, broker_norm: str | None) -> bool:
     if account_norm and normalize_account(event.get("account")) != account_norm:
         return False
@@ -1187,88 +876,6 @@ def _build_open_basis_rows(open_lots: list[dict[str, Any]]) -> list[dict[str, An
     )
 
 
-def _legacy_close_cashflow_row(row: IncomeRow) -> dict[str, Any]:
-    close_amount = _amount(row.close_price, row.multiplier, row.contracts_closed)
-    cash_in = close_amount if row.position_side == "long" else 0.0
-    cash_out = close_amount if row.position_side == "short" else 0.0
-    return {
-        "record_id": row.record_id,
-        "event_id": row.record_id,
-        "event_at": row.closed_at,
-        "month": row.month,
-        "account": row.account,
-        "broker": row.broker,
-        "symbol": row.symbol,
-        "option_type": "-",
-        "position_side": row.position_side,
-        "trade_action": "buy_close" if row.position_side == "short" else "sell_close",
-        "currency": row.currency,
-        "contracts": row.contracts_closed,
-        "price": row.close_price,
-        "multiplier": row.multiplier,
-        "cash_in_gross": cash_in,
-        "cash_out_gross": cash_out,
-        "net_cashflow_gross": _round_money(cash_in - cash_out),
-    }
-
-
-def _build_legacy_open_basis_rows(
-    open_cashflow_rows: list[OpenCashflowRow],
-    close_rows: list[IncomeRow],
-) -> list[dict[str, Any]]:
-    close_by_record_id = {row.record_id: row for row in close_rows}
-    out: list[dict[str, Any]] = []
-    for open_row in open_cashflow_rows:
-        close_row = close_by_record_id.get(open_row.record_id)
-        close_amount = (
-            _amount(close_row.close_price, close_row.multiplier, close_row.contracts_closed)
-            if close_row is not None
-            else 0.0
-        )
-        is_short = open_row.position_side == "short"
-        sell_open_premium = open_row.cash_in_gross if is_short else 0.0
-        sell_close_cost_actual = close_amount if is_short else 0.0
-        enhancement_call_buy_cost = open_row.cash_out_gross if not is_short else 0.0
-        enhancement_call_sell_proceeds_actual = close_amount if not is_short else 0.0
-        out.append(
-            {
-                "month": open_row.month,
-                "account": open_row.account,
-                "broker": open_row.broker,
-                "symbol": open_row.symbol,
-                "currency": open_row.currency,
-                "strategy": "",
-                "strategy_group_id": "",
-                "sell_open_premium": sell_open_premium,
-                "sell_close_cost_actual": sell_close_cost_actual,
-                "enhancement_call_buy_cost": enhancement_call_buy_cost,
-                "enhancement_call_sell_proceeds_actual": enhancement_call_sell_proceeds_actual,
-                "open_basis_lifecycle_pnl_gross": _round_money(
-                    sell_open_premium
-                    - sell_close_cost_actual
-                    - enhancement_call_buy_cost
-                    + enhancement_call_sell_proceeds_actual
-                ),
-                "open_contracts": open_row.contracts,
-                "remaining_contracts": max(
-                    0,
-                    open_row.contracts - (close_row.contracts_closed if close_row is not None else 0),
-                ),
-                "is_final": bool(close_row is not None and close_row.contracts_closed >= open_row.contracts),
-                "open_event_ids": [open_row.record_id],
-            }
-        )
-    return sorted(
-        out,
-        key=lambda x: (
-            str(x.get("month")),
-            str(x.get("account")),
-            str(x.get("symbol")),
-            str(x.get("open_event_ids")),
-        ),
-    )
-
-
 def _build_monthly_income_report_from_events(
     trade_events: list[dict[str, Any]],
     *,
@@ -1320,48 +927,6 @@ def _build_monthly_income_report_from_events(
         event_id = str(event.get("event_id") or "").strip()
 
         if effect == "open":
-            cash_in = amount if position_side == "short" else 0.0
-            cash_out = amount if position_side == "long" else 0.0
-            cashflow_row = {
-                "event_id": event_id,
-                "event_at": int(_event_ts(event) or 0),
-                "month": event_month,
-                "account": account,
-                "broker": broker,
-                "symbol": symbol,
-                "option_type": option_type,
-                "position_side": position_side,
-                "trade_action": "sell_open" if position_side == "short" else "buy_open",
-                "currency": currency,
-                "contracts": contracts,
-                "price": price,
-                "multiplier": multiplier,
-                "cash_in_gross": cash_in,
-                "cash_out_gross": cash_out,
-                "net_cashflow_gross": _round_money(cash_in - cash_out),
-                "strategy": strategy,
-                "leg_role": leg_role,
-                "strategy_group_id": strategy_group_id,
-            }
-            cashflow_rows.append(cashflow_row)
-            if position_side == "short":
-                premium_rows.append(
-                    {
-                        "record_id": event_id,
-                        "event_id": event_id,
-                        "event_at": int(_event_ts(event) or 0),
-                        "month": event_month,
-                        "account": account,
-                        "broker": broker,
-                        "symbol": symbol,
-                        "currency": currency,
-                        "contracts": contracts,
-                        "premium": price,
-                        "multiplier": multiplier,
-                        "premium_received_gross": amount,
-                        "opened_at": int(_event_ts(event) or 0),
-                    }
-                )
             open_lots.append(
                 {
                     "record_id": event_id,
@@ -1479,6 +1044,62 @@ def _build_monthly_income_report_from_events(
         if remaining_to_close > 0:
             warnings.append(
                 f"{event_id or '(no event_id)'}: close contracts exceed matching open lots by {remaining_to_close}"
+            )
+
+    for lot in open_lots:
+        open_month = str(lot.get("open_month") or "").strip()
+        if not open_month:
+            continue
+        position_side = str(lot.get("position_side") or "").strip().lower()
+        contracts = int(lot.get("contracts") or 0)
+        multiplier = int(float(lot.get("multiplier") or 0))
+        price = float(lot.get("price") or 0.0)
+        if position_side not in {"short", "long"} or contracts <= 0 or multiplier <= 0:
+            continue
+        amount = _amount(price, multiplier, contracts)
+        cash_in = amount if position_side == "short" else 0.0
+        cash_out = amount if position_side == "long" else 0.0
+        event_id = str(lot.get("open_event_id") or lot.get("record_id") or "").strip()
+        cashflow_rows.append(
+            {
+                "event_id": event_id,
+                "event_at": int(lot.get("opened_at") or 0),
+                "month": open_month,
+                "account": lot.get("account"),
+                "broker": lot.get("broker"),
+                "symbol": lot.get("symbol"),
+                "option_type": lot.get("option_type"),
+                "position_side": position_side,
+                "trade_action": "sell_open" if position_side == "short" else "buy_open",
+                "currency": lot.get("currency"),
+                "contracts": contracts,
+                "price": price,
+                "multiplier": multiplier,
+                "cash_in_gross": cash_in,
+                "cash_out_gross": cash_out,
+                "net_cashflow_gross": _round_money(cash_in - cash_out),
+                "strategy": lot.get("strategy"),
+                "leg_role": lot.get("leg_role"),
+                "strategy_group_id": lot.get("strategy_group_id"),
+            }
+        )
+        if position_side == "short":
+            premium_rows.append(
+                {
+                    "record_id": event_id,
+                    "event_id": event_id,
+                    "event_at": int(lot.get("opened_at") or 0),
+                    "month": open_month,
+                    "account": lot.get("account"),
+                    "broker": lot.get("broker"),
+                    "symbol": lot.get("symbol"),
+                    "currency": lot.get("currency"),
+                    "contracts": contracts,
+                    "premium": price,
+                    "multiplier": multiplier,
+                    "premium_received_gross": amount,
+                    "opened_at": int(lot.get("opened_at") or 0),
+                }
             )
 
     open_basis_rows = _build_open_basis_rows(open_lots)
@@ -1640,211 +1261,18 @@ def build_monthly_income_report(
     account_norm = normalize_account(account) if account else None
     broker_norm = normalize_broker(broker) if broker else None
     converter = _build_exchange_rate_converter(rates)
-    if trade_events:
-        report = _build_monthly_income_report_from_events(
-            trade_events,
-            records=records,
-            account_norm=account_norm,
-            broker_norm=broker_norm,
-            month=month,
-            converter=converter,
-            now_fn=now_fn,
-        )
-        report["filters"] = {
-            "account": account_norm,
-            "broker": broker_norm,
-            "month": month,
-        }
-        return report
-
-    all_rows: list[IncomeRow] = []
-    rows: list[IncomeRow] = []
-    all_open_cashflow_rows: list[OpenCashflowRow] = []
-    premium_rows: list[PremiumIncomeRow] = []
-    open_cashflow_rows: list[OpenCashflowRow] = []
-    warnings: list[str] = []
-
-    for rec in records:
-        fields = rec.get("fields") or rec
-        if not isinstance(fields, dict):
-            continue
-        if account_norm and normalize_account(fields.get("account")) != account_norm:
-            continue
-        if broker_norm and normalize_broker(fields.get("broker")) != broker_norm:
-            continue
-
-        row, warning = build_income_row(rec)
-        if warning:
-            warnings.append(warning)
-        if row is not None:
-            all_rows.append(row)
-            if not month or row.month == month:
-                rows.append(row)
-
-        open_cashflow_row, open_cashflow_warning = build_open_cashflow_row(rec)
-        if open_cashflow_warning:
-            warnings.append(open_cashflow_warning)
-        if open_cashflow_row is not None:
-            all_open_cashflow_rows.append(open_cashflow_row)
-            if not month or open_cashflow_row.month == month:
-                open_cashflow_rows.append(open_cashflow_row)
-            if open_cashflow_row.position_side == "short" and (not month or open_cashflow_row.month == month):
-                premium_rows.append(
-                    PremiumIncomeRow(
-                        record_id=open_cashflow_row.record_id,
-                        month=open_cashflow_row.month,
-                        account=open_cashflow_row.account,
-                        broker=open_cashflow_row.broker,
-                        symbol=open_cashflow_row.symbol,
-                        currency=open_cashflow_row.currency,
-                        contracts=open_cashflow_row.contracts,
-                        premium=open_cashflow_row.price,
-                        multiplier=open_cashflow_row.multiplier,
-                        premium_received_gross=open_cashflow_row.cash_in_gross,
-                        opened_at=open_cashflow_row.opened_at,
-                    )
-                )
-
-    legacy_open_basis_rows = _build_legacy_open_basis_rows(
-        [row for row in all_open_cashflow_rows if not month or row.month == month],
-        all_rows,
-    )
-    close_cashflow_rows = [_legacy_close_cashflow_row(row) for row in rows]
-
-    summary: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        bucket = _summary_bucket(summary, row.month, row.account, row.currency)
-        _add_money(bucket, "realized_gross", row.realized_gross, converter=converter, currency=row.currency)
-        _add_money(bucket, "realized_pnl_gross", row.realized_gross, converter=converter, currency=row.currency)
-        close_cashflow_row = _legacy_close_cashflow_row(row)
-        _add_money(
-            bucket,
-            "cash_in_gross",
-            close_cashflow_row["cash_in_gross"],
-            converter=converter,
-            currency=row.currency,
-        )
-        _add_money(
-            bucket,
-            "cash_out_gross",
-            close_cashflow_row["cash_out_gross"],
-            converter=converter,
-            currency=row.currency,
-        )
-        _add_money(
-            bucket,
-            "net_cashflow_gross",
-            close_cashflow_row["net_cashflow_gross"],
-            converter=converter,
-            currency=row.currency,
-        )
-        if row.position_side == "short":
-            bucket["realized_short_pnl_gross"] = _round_money(bucket["realized_short_pnl_gross"] + row.realized_gross)
-            _add_money(
-                bucket,
-                "close_cost_gross",
-                close_cashflow_row["cash_out_gross"],
-                converter=converter,
-                currency=row.currency,
-            )
-        else:
-            bucket["realized_long_pnl_gross"] = _round_money(bucket["realized_long_pnl_gross"] + row.realized_gross)
-            _add_money(
-                bucket,
-                "close_proceeds_gross",
-                close_cashflow_row["cash_in_gross"],
-                converter=converter,
-                currency=row.currency,
-            )
-        bucket["closed_contracts"] = int(bucket["closed_contracts"]) + row.contracts_closed
-        bucket["positions"] = int(bucket["positions"]) + 1
-
-    for row in open_cashflow_rows:
-        bucket = _summary_bucket(summary, row.month, row.account, row.currency)
-        _add_money(bucket, "cash_in_gross", row.cash_in_gross, converter=converter, currency=row.currency)
-        _add_money(bucket, "cash_out_gross", row.cash_out_gross, converter=converter, currency=row.currency)
-        _add_money(bucket, "net_cashflow_gross", row.net_cashflow_gross, converter=converter, currency=row.currency)
-        if row.position_side == "short":
-            _add_money(bucket, "premium_received_gross", row.cash_in_gross, converter=converter, currency=row.currency)
-            _add_money(
-                bucket,
-                "short_open_premium_gross",
-                row.cash_in_gross,
-                converter=converter,
-                currency=row.currency,
-            )
-            bucket["premium_contracts"] = int(bucket["premium_contracts"]) + row.contracts
-            bucket["premium_positions"] = int(bucket["premium_positions"]) + 1
-        else:
-            _add_money(bucket, "long_open_cost_gross", row.cash_out_gross, converter=converter, currency=row.currency)
-
-    for row in legacy_open_basis_rows:
-        bucket = _summary_bucket(summary, row["month"], row["account"], row["currency"])
-        _add_money(
-            bucket,
-            "open_basis_lifecycle_pnl_gross",
-            float(row["open_basis_lifecycle_pnl_gross"]),
-            converter=converter,
-            currency=row["currency"],
-        )
-
-    summary_rows = _finalize_summary_rows(summary)
-    cash_secured_by_account = _current_cash_secured_by_account_from_records(
-        records,
+    report = _build_monthly_income_report_from_events(
+        trade_events if isinstance(trade_events, list) else [],
+        records=records,
         account_norm=account_norm,
         broker_norm=broker_norm,
-    )
-    return_summary = _build_return_summary(
-        summary_rows,
-        cash_secured_by_account=cash_secured_by_account,
+        month=month,
         converter=converter,
-        warnings=warnings,
         now_fn=now_fn,
     )
-
-    return {
-        "summary": summary_rows,
-        "return_summary": return_summary,
-        "diagnostics": _build_monthly_income_diagnostics(
-            account_norm=account_norm,
-            broker_norm=broker_norm,
-            month=month,
-            records=records,
-            trade_events=None,
-            summary_rows=summary_rows,
-            return_summary=return_summary,
-            realized_rows=[row.as_dict() for row in rows],
-            premium_rows=[row.as_dict() for row in premium_rows],
-            cash_secured_by_account=cash_secured_by_account,
-            warnings=warnings,
-            calculation_method="position_lots_legacy",
-        ),
-        "rows": [
-            r.as_dict()
-            for r in sorted(rows, key=lambda x: (x.month, x.account, x.currency, x.symbol, x.record_id))
-        ],
-        "premium_rows": [
-            r.as_dict()
-            for r in sorted(
-                premium_rows,
-                key=lambda x: (x.month, x.account, x.currency, x.symbol, x.record_id),
-            )
-        ],
-        "cashflow_rows": sorted(
-            [r.as_dict() for r in open_cashflow_rows] + close_cashflow_rows,
-            key=_event_detail_sort_key,
-        ),
-        "realized_rows": [
-            r.as_dict()
-            for r in sorted(rows, key=lambda x: (x.month, x.account, x.currency, x.symbol, x.record_id))
-        ],
-        "open_basis_rows": legacy_open_basis_rows,
-        "enhancement_rows": [],
-        "warnings": warnings,
-        "calculation_method": "position_lots_legacy",
-        "filters": {
-            "account": account_norm,
-            "broker": broker_norm,
-            "month": month,
-        },
+    report["filters"] = {
+        "account": account_norm,
+        "broker": broker_norm,
+        "month": month,
     }
+    return report

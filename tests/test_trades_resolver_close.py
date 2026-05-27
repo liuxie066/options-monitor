@@ -4,6 +4,7 @@ import src.application.ledger.manual_trades as ledger_manual_trades
 import src.application.ledger.repository as ledger_repository
 
 from domain.domain.ledger import ContractKey, TradeEvent
+from domain.domain.ledger.position_fields import effective_expiration_ymd
 from src.application.ledger.writer import persist_trade_event_object
 from src.application.trades.normalizer import NormalizedTradeDeal
 from src.application.trades.resolver import (
@@ -24,6 +25,9 @@ class FakeRepo:
 
     def list_position_lots(self) -> list[dict]:
         return list(self.records)
+
+    def list_trade_events(self) -> list[dict]:
+        return [_open_event_from_record(item) for item in self.records]
 
     def get_record_fields(self, record_id: str) -> dict:
         for item in self.records:
@@ -51,10 +55,37 @@ def _record(record_id: str, opened_at: int, contracts_open: int) -> dict:
             "contracts_open": contracts_open,
             "contracts_closed": 0,
             "strike": 480.0,
+            "currency": "HKD",
+            "multiplier": 100,
             "expiration": 1777420800000,
             "opened_at": opened_at,
         },
     }
+
+
+def _open_event_from_record(record: dict) -> dict:
+    fields = dict(record["fields"])
+    return TradeEvent(
+        event_id=f"seed-{record['record_id']}",
+        event_type="open",
+        event_time_ms=int(fields.get("opened_at") or 1),
+        contract_key=ContractKey.from_values(
+            broker=fields.get("broker"),
+            account=fields.get("account"),
+            underlying_symbol=fields.get("symbol"),
+            option_type=fields.get("option_type"),
+            position_side=fields.get("side"),
+            strike=fields.get("strike"),
+            expiration_ymd=effective_expiration_ymd(fields),
+        ),
+        contracts=int(fields.get("contracts") or fields.get("contracts_open") or 0),
+        price=1.0,
+        currency=str(fields.get("currency") or "HKD"),
+        source="test_seed_open_lot",
+        multiplier=float(fields.get("multiplier") or 100),
+        lot_id=str(record["record_id"]),
+        raw_payload={"source_type": "test_seed"},
+    ).to_dict()
 
 
 def _record_with_expiration(record_id: str, opened_at: int, contracts_open: int, expiration: int) -> dict:

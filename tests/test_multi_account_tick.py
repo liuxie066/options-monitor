@@ -122,8 +122,6 @@ def test_account_worker_count_is_bounded_by_runtime_config() -> None:
     assert mod._resolve_account_run_max_workers({"runtime": {}}, 3) == 1
     assert mod._resolve_account_run_max_workers({"runtime": {"multi_account_max_workers": 2}}, 5) == 2
     assert mod._resolve_account_run_max_workers({"runtime": {"multi_account_max_workers": 0}}, 5) == 1
-    assert mod._should_update_account_legacy_output(1) is True
-    assert mod._should_update_account_legacy_output(2) is False
 
 
 def test_default_account_must_be_active_account() -> None:

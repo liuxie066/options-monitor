@@ -499,19 +499,12 @@ class ExpiredCloseRunResult:
         object.__setattr__(self, "applied", list(self.applied))
         object.__setattr__(self, "errors", [str(item) for item in self.errors])
 
-    def to_legacy_tuple(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
-        return (
-            [item.to_payload() for item in self.decisions],
-            [item.to_payload() for item in self.applied],
-            list(self.errors),
-        )
-
     def to_payload(self) -> dict[str, Any]:
-        decisions, applied, errors = self.to_legacy_tuple()
-        return {"decisions": decisions, "applied": applied, "errors": errors}
-
-    def __iter__(self) -> Any:
-        return iter(self.to_legacy_tuple())
+        return {
+            "decisions": [item.to_payload() for item in self.decisions],
+            "applied": [item.to_payload() for item in self.applied],
+            "errors": list(self.errors),
+        }
 
 
 @dataclass(frozen=True)
