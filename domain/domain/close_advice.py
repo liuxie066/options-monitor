@@ -4,6 +4,11 @@ from dataclasses import dataclass
 import math
 from typing import Any
 
+from domain.domain.short_vol_assessment import (
+    ShortVolAssessmentConfig,
+    ShortVolPortfolioContext,
+    short_vol_assessment_fields,
+)
 
 CLOSE_ADVICE_DEFAULTS = {
     "max_spread_ratio": 0.3,
@@ -19,6 +24,7 @@ TIER_LABELS = {
     "medium": "建议平仓",
     "weak": "可观察平仓",
     "optional": "低价买回可选",
+    "not_evaluable": "无法评估",
     "none": "不提醒",
 }
 
@@ -338,6 +344,143 @@ def evaluate_close_advice(inp: CloseAdviceInput, config: CloseAdviceConfig | Non
         remaining_annualized_return=remaining_annualized,
         spread_ratio=spread,
     )
+
+
+def evaluate_short_vol_close_advice(
+    inp: CloseAdviceInput,
+    *,
+    short_vol_config: ShortVolAssessmentConfig,
+    close_config: CloseAdviceConfig | None = None,
+    quote_row: dict[str, Any] | None = None,
+    mode: str | None = None,
+) -> dict[str, Any]:
+    """Evaluate close advice for positions opened under a short-volatility thesis.
+
+    The existing close advice model is a return-capture model.  This wrapper keeps
+    the same quote-quality and profitability gates, then overlays the short-vol
+    thesis checks that decide whether the original reason to stay short still
+    holds: IV/RV edge, event risk, delta band, and path-stress observability.
+    """
+
+    row = evaluate_close_advice(inp, close_config)
+    mode_norm = "call" if str(mode or inp.option_type or "").strip().lower() == "call" else "put"
+    risk_input = _short_vol_close_risk_input(inp, quote_row)
+    risk_fields = short_vol_assessment_fields(
+        risk_input,
+        mode=mode_norm,  # type: ignore[arg-type]
+        cfg=short_vol_config,
+        risk_ctx=ShortVolPortfolioContext(
+            nav_cny=None,
+            stock_value_cny_by_symbol={},
+            short_put_assignment_cny_by_symbol={},
+            short_put_assignment_total_cny=0.0,
+            unavailable_reasons=(),
+        ),
+    )
+    row.update(risk_fields)
+    row["path_stress_status"] = "ok" if risk_fields.get("path_stress_evaluable") is True else "not_evaluable"
+
+    if str(row.get("tier") or "").strip().lower() == "none" and row.get("data_quality_flags"):
+        row["short_vol_thesis_status"] = "not_evaluable"
+        return row
+
+    missing = []
+    if risk_fields.get("realized_volatility_estimate") is None:
+        missing.append("rv")
+    if risk_fields.get("implied_volatility") is None:
+        missing.append("iv")
+    if risk_fields.get("abs_delta") is None:
+        missing.append("delta")
+    if missing:
+        return _short_vol_not_evaluable(
+            row,
+            reason=f"缺少 short-vol 平仓评估数据: {', '.join(missing)}",
+            flag="short_vol_risk_data_missing",
+        )
+
+    event_status = str(risk_fields.get("event_source_status") or "").strip().lower()
+    if short_vol_config.event_source_fail_closed and event_status != "ok":
+        return _short_vol_not_evaluable(
+            row,
+            reason="事件风险数据源不可用，无法确认 short-vol 持仓是否仍可继续持有",
+            flag="event_source_unavailable",
+        )
+
+    if short_vol_config.reject_event_risk and risk_fields.get("event_risk_flag") is True:
+        return _short_vol_override(
+            row,
+            tier="strong",
+            reason="到期前存在事件风险，short-vol 持仓的尾部风险上升，优先考虑平仓",
+            status="event_risk",
+        )
+
+    ratio = safe_float(risk_fields.get("iv_rv_ratio"))
+    spread = safe_float(risk_fields.get("iv_minus_rv"))
+    ratio_bad = ratio is None or ratio < short_vol_config.min_iv_rv_ratio
+    spread_bad = spread is None or spread < short_vol_config.min_iv_minus_rv
+    if ratio_bad and spread_bad:
+        return _short_vol_override(
+            row,
+            tier="strong",
+            reason="IV/RV edge 已不满足 short-vol 要求，继续持有缺少波动率补偿",
+            status="vol_edge_lost",
+        )
+    if ratio_bad or spread_bad:
+        return _short_vol_override(
+            row,
+            tier="medium",
+            reason="IV/RV edge 已低于 short-vol 目标，建议评估买回或换仓",
+            status="vol_edge_weakened",
+        )
+
+    abs_delta = safe_float(risk_fields.get("abs_delta"))
+    if abs_delta is not None and abs_delta > short_vol_config.max_abs_delta:
+        return _short_vol_override(
+            row,
+            tier="medium",
+            reason="delta 已高于 short-vol 目标区间，路径风险上升，建议评估平仓",
+            status="delta_risk_high",
+        )
+
+    row["short_vol_thesis_status"] = "valid"
+    row["short_vol_reason"] = "IV/RV edge、事件风险和 delta 区间仍支持 short-vol 持仓"
+    return row
+
+
+def _short_vol_close_risk_input(inp: CloseAdviceInput, quote_row: dict[str, Any] | None) -> dict[str, Any]:
+    row = dict(quote_row or {})
+    row.setdefault("symbol", inp.symbol)
+    row.setdefault("option_type", inp.option_type)
+    row.setdefault("expiration", inp.expiration)
+    row.setdefault("strike", inp.strike)
+    row.setdefault("dte", inp.dte)
+    row.setdefault("spot", inp.spot)
+    row.setdefault("delta", inp.delta)
+    row.setdefault("currency", inp.currency)
+    row.setdefault("multiplier", inp.multiplier)
+    row.setdefault("premium_cny", None)
+    return row
+
+
+def _short_vol_not_evaluable(row: dict[str, Any], *, reason: str, flag: str) -> dict[str, Any]:
+    out = dict(row)
+    out["tier"] = "not_evaluable"
+    out["tier_label"] = TIER_LABELS["not_evaluable"]
+    out["reason"] = reason
+    out["short_vol_thesis_status"] = "not_evaluable"
+    flags = [x for x in str(out.get("data_quality_flags") or "").split(";") if x]
+    flags.append(flag)
+    out["data_quality_flags"] = ";".join(dict.fromkeys(flags))
+    return out
+
+
+def _short_vol_override(row: dict[str, Any], *, tier: str, reason: str, status: str) -> dict[str, Any]:
+    out = dict(row)
+    out["tier"] = tier
+    out["tier_label"] = TIER_LABELS.get(tier, tier)
+    out["reason"] = reason
+    out["short_vol_thesis_status"] = status
+    return out
 
 
 def _result(

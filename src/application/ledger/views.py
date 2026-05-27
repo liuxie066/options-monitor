@@ -147,6 +147,11 @@ class RiskPositionView:
             "close_type": self.close_type,
             "close_reason": self.close_reason,
             "note": self.note,
+            "strategy_snapshot": (
+                dict(self.fields["strategy_snapshot"])
+                if isinstance(self.fields.get("strategy_snapshot"), dict)
+                else None
+            ),
         }
 
 

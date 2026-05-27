@@ -25,6 +25,8 @@ from domain.domain.candidate_defaults import (
 from domain.domain.fee_calc import calc_futu_option_fee
 from domain.domain.sell_put_risk_bands import classify_sell_put_risk
 from src.application.candidate_models import CandidateContractInput
+from src.application.sell_put_strategy_risk import resolve_sell_put_short_vol_config
+from src.application.strategy_policy import risk_model_for_profile
 from src.application.yield_enhancement_config import apply_yield_enhancement_defaults
 
 
@@ -362,8 +364,23 @@ def _empty_pairs_df() -> pd.DataFrame:
             "upside_lift_to_put_credit",
             "premium_funding_score",
             "funding_score_components",
+            "put_strategy_profile",
+            "put_strategy_source",
+            "put_risk_model",
         ]
     )
+
+
+def _sell_put_strategy_fields(sell_put_cfg: dict[str, Any] | None) -> dict[str, Any]:
+    cfg = resolve_sell_put_short_vol_config(sell_put_cfg)
+    source = "current_config" if isinstance(sell_put_cfg, dict) and (
+        "strategy" in sell_put_cfg or "strategy_profile" in sell_put_cfg
+    ) else "template_default"
+    return {
+        "put_strategy_profile": cfg.strategy,
+        "put_strategy_source": source,
+        "put_risk_model": risk_model_for_profile(cfg.strategy),
+    }
 
 
 def _load_required_data_calls(*, input_root: Path, symbol: str) -> pd.DataFrame:
@@ -404,6 +421,7 @@ def find_sell_put_yield_enhancement_pairs(
     call_cfg = dict(cfg.get("call") or {})
     liquidity_cfg = _merged_dict(global_yield_enhancement_liquidity, cfg)
     liquidity = resolve_candidate_liquidity(liquidity_cfg, defaults=DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_LIQUIDITY)
+    put_strategy_fields = _sell_put_strategy_fields(sell_put_cfg)
     window = resolve_candidate_window(
         sell_put_cfg if sell_put_cfg is not None else cfg,
         defaults=DEFAULT_SELL_PUT_WINDOW if sell_put_cfg is not None else DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_WINDOW,
@@ -510,6 +528,7 @@ def find_sell_put_yield_enhancement_pairs(
             combo_spread = _safe_float(candidate["combo_spread_ratio"])
             if max_combo_spread_ratio is not None and combo_spread is not None and combo_spread > float(max_combo_spread_ratio):
                 continue
+            candidate.update(put_strategy_fields)
             pair_rows.append(candidate)
 
     ranked_pairs = rank_yield_enhancement_rows(pair_rows)

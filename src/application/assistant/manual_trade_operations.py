@@ -19,6 +19,7 @@ from src.application.positions.workflows import (
     execute_manual_close,
     execute_manual_open,
 )
+from src.application.strategy_policy import resolve_position_strategy
 
 
 PREVIEW_INTENTS = frozenset({"manual_trade_open", "manual_trade_close"})
@@ -93,6 +94,7 @@ def handle_manual_trade_operation(
             _manual_open_args(draft["arguments"]),
             request=request,
             config_path=config_path,
+            runtime_config=cfg,
             diagnostics=draft["diagnostics"],
         )
         return _preview_and_save(payload, request=request, command_id=command_id, store=store, ttl_seconds=policy.confirm_ttl_seconds)
@@ -427,12 +429,19 @@ def _build_operation_payload(
     *,
     request: AssistantRequest,
     config_path: Any | None = None,
+    runtime_config: dict[str, Any] | None = None,
     diagnostics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    operation_args = dict(arguments)
+    if operation_type == "manual_open":
+        operation_args.setdefault(
+            "strategy_snapshot",
+            resolve_position_strategy(position=operation_args, config=runtime_config).to_fields(),
+        )
     payload = {
         "schema_version": "1.0",
         "operation_type": operation_type,
-        "arguments": dict(arguments),
+        "arguments": operation_args,
         "config": {"config_key": request.config_key, "config_path": str(config_path) if config_path else request.config_path},
     }
     if diagnostics:

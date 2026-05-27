@@ -545,6 +545,47 @@ def test_validate_config_rejects_invalid_close_advice_config() -> None:
         assert 'close_advice.quote_source' in msg
 
 
+def test_validate_config_rejects_close_advice_strategy_mode() -> None:
+    _add_repo_to_syspath()
+    from src.application.config_validator import validate_config
+
+    cfg = {
+        'close_advice': {'enabled': True, 'strategy': 'short_vol'},
+        'symbols': [{'symbol': 'AAPL', 'sell_put': {'enabled': False}, 'sell_call': {'enabled': False}}],
+    }
+
+    try:
+        validate_config(cfg)
+        raise AssertionError('expected config validation failure')
+    except SystemExit as e:
+        msg = str(e)
+        assert '[CONFIG_ERROR]' in msg
+        assert 'close_advice.strategy is not supported' in msg
+
+
+def test_validate_config_rejects_yield_enhancement_strategy_mode() -> None:
+    _add_repo_to_syspath()
+    from src.application.config_validator import validate_config
+
+    cfg = {
+        'symbols': [
+            {
+                'symbol': 'AAPL',
+                'sell_put': {'enabled': True},
+                'yield_enhancement': {'enabled': True, 'strategy': 'short_vol'},
+            }
+        ],
+    }
+
+    try:
+        validate_config(cfg)
+        raise AssertionError('expected config validation failure')
+    except SystemExit as e:
+        msg = str(e)
+        assert '[CONFIG_ERROR]' in msg
+        assert 'yield_enhancement uses sell_put.strategy' in msg
+
+
 def test_validate_config_rejects_decimal_close_advice_max_items_per_account() -> None:
     _add_repo_to_syspath()
     from src.application.config_validator import validate_config
@@ -1005,6 +1046,98 @@ def test_sell_put_steps_yield_enhancement_put_universe_is_not_cash_filtered(
     assert enrich_calls[0].name == "aapl_sell_put_candidates_labeled.csv"
     assert len(captured_pairs_input["df"]) == 1
     assert "cash_required_cny" not in captured_pairs_input["df"].columns
+
+
+def test_sell_put_steps_yield_enhancement_put_universe_uses_short_vol_gate(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    base = _add_repo_to_syspath()
+    import src.application.sell_put_steps as steps
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    report_dir = tmp_path / "reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    captured_pairs_input: dict[str, pd.DataFrame] = {}
+    short_vol_gate_paths: list[str] = []
+
+    candidate = {
+        "symbol": "AAPL",
+        "expiration": "2026-06-19",
+        "dte": 35,
+        "contract_symbol": "AAPL260619P00180000",
+        "multiplier": 100,
+        "currency": "USD",
+        "strike": 180.0,
+        "spot": 200.0,
+        "bid": 2.4,
+        "ask": 2.6,
+        "mid": 2.5,
+        "net_income": 250.0,
+        "annualized_net_return_on_cash_basis": 0.14,
+        "otm_pct": 0.1,
+        "risk_label": "中性",
+        "open_interest": 100,
+        "volume": 20,
+        "implied_volatility": 0.18,
+        "realized_volatility_estimate": 0.20,
+        "delta": -0.2,
+    }
+
+    def _fake_run_sell_put_scan(**kwargs):
+        Path(kwargs["output"]).parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame([candidate]).to_csv(kwargs["output"], index=False)
+
+    def _fake_add_sell_put_labels(_base, _input, output):
+        Path(output).parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame([candidate]).to_csv(output, index=False)
+
+    def _fake_short_vol_gate(**kwargs):
+        out_path = Path(kwargs["out_path"])
+        short_vol_gate_paths.append(out_path.name)
+        if "yield_enhancement_put_universe" in out_path.name:
+            empty = kwargs["df_labeled"].iloc[0:0].copy()
+            empty.to_csv(out_path, index=False)
+            return empty
+        df = kwargs["df_labeled"].copy()
+        df.to_csv(out_path, index=False)
+        return df
+
+    def _fake_find_pairs(**kwargs):
+        captured_pairs_input["df"] = kwargs["df_candidates"].copy()
+        return pd.DataFrame()
+
+    monkeypatch.setattr(steps, "run_sell_put_scan", _fake_run_sell_put_scan)
+    monkeypatch.setattr(steps, "add_sell_put_labels", _fake_add_sell_put_labels)
+    monkeypatch.setattr(steps, "enrich_and_filter_sell_put_short_vol", _fake_short_vol_gate)
+    monkeypatch.setattr(steps, "find_sell_put_yield_enhancement_pairs", _fake_find_pairs)
+
+    steps.run_sell_put_scan_and_summarize(
+        py="python",
+        base=base,
+        sym="AAPL",
+        symbol="AAPL",
+        symbol_lower="aapl",
+        symbol_cfg={"symbol": "AAPL", "yield_enhancement": {"enabled": True}},
+        sp={
+            "enabled": True,
+            "strategy": "short_vol",
+            "min_dte": 7,
+            "max_dte": 45,
+            "min_strike": 1,
+            "max_strike": 200,
+        },
+        top_n=3,
+        required_data_dir=tmp_path / "required_data",
+        report_dir=report_dir,
+        timeout_sec=10,
+        is_scheduled=True,
+        exchange_rate_converter=CurrencyConverter(ExchangeRates()),
+        portfolio_ctx={"cash_by_currency": {"CNY": 100000}},
+    )
+
+    assert "aapl_yield_enhancement_put_universe_labeled.csv" in short_vol_gate_paths
+    assert captured_pairs_input["df"].empty
 
 
 def test_sell_put_steps_filter_uses_total_cny_when_base_cny_missing(tmp_path: Path) -> None:

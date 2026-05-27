@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 1.2.154 - 2026-05-27
+
+### Added
+- Added a canonical strategy policy resolver so close advice, yield enhancement, and position workflows resolve strategy state from the same Sell Put / Covered Call configuration path.
+- Added strategy snapshots for newly opened option lots and preserved them through manual trade intake, ledger preflight, publishing, projection fields, and position views.
+
+### Changed
+- Changed close advice and yield enhancement to follow the active Sell Put / Covered Call strategy profile instead of maintaining independent strategy modes.
+- Regenerated dependency graph documentation after the strategy policy boundary change.
+
+### Fixed
+- Added config validation to reject independent `close_advice.strategy` and `yield_enhancement.strategy` settings, keeping strategy switching tied to the scanner strategy configuration.
+
 ## 1.2.153 - 2026-05-27
 
 ### Changed

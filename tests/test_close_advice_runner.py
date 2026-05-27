@@ -178,6 +178,151 @@ def test_run_close_advice_enables_optimizer_by_default(
     assert "optimizer_reason" in csv_text
 
 
+def test_run_close_advice_uses_short_vol_strategy_from_sell_put_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _freeze_close_advice_business_today(monkeypatch)
+    context = {
+        "open_positions_min": [
+            {
+                "account": "lx",
+                "symbol": "NVDA",
+                "option_type": "put",
+                "side": "short",
+                "status": "open",
+                "contracts_open": 1,
+                "currency": "USD",
+                "strike": 100,
+                "multiplier": 100,
+                "premium": 1.0,
+                "expiration": "2026-06-15",
+            }
+        ]
+    }
+    ctx_path = tmp_path / "option_positions_context.json"
+    ctx_path.write_text(json.dumps(context, ensure_ascii=False), encoding="utf-8")
+
+    required_root = tmp_path / "required_data"
+    parsed = required_root / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "NVDA",
+                "option_type": "put",
+                "expiration": "2026-06-15",
+                "strike": 100,
+                "mid": 0.20,
+                "bid": 0.19,
+                "ask": 0.21,
+                "dte": 60,
+                "multiplier": 100,
+                "spot": 120,
+                "currency": "USD",
+                "delta": -0.20,
+                "implied_volatility": 0.20,
+                "realized_volatility_estimate": 0.20,
+                "event_source_status": "ok",
+            }
+        ]
+    ).to_csv(parsed / "NVDA_required_data.csv", index=False)
+
+    out_dir = tmp_path / "reports"
+    run_close_advice(
+        config={
+            "close_advice": {"enabled": True, "notify_levels": ["strong", "medium"]},
+            "symbols": [
+                {
+                    "symbol": "NVDA",
+                    "sell_put": {
+                        "strategy": "short_vol",
+                        "short_vol": {"min_iv_rv_ratio": 1.15, "min_iv_minus_rv": 0.05},
+                    },
+                }
+            ],
+        },
+        context_path=ctx_path,
+        required_data_root=required_root,
+        output_dir=out_dir,
+        base_dir=Path.cwd(),
+    )
+
+    rows = pd.read_csv(out_dir / "close_advice.csv").to_dict("records")
+    assert rows[0]["strategy_family"] == "sell_put"
+    assert rows[0]["strategy_profile"] == "short_vol"
+    assert rows[0]["risk_model"] == "short_vol"
+    assert rows[0]["short_vol_thesis_status"] == "vol_edge_lost"
+    assert rows[0]["tier"] == "strong"
+    assert "IV/RV edge" in rows[0]["reason"]
+
+
+def test_run_close_advice_prefers_position_strategy_snapshot_over_current_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _freeze_close_advice_business_today(monkeypatch)
+    context = {
+        "open_positions_min": [
+            {
+                "account": "lx",
+                "symbol": "NVDA",
+                "option_type": "put",
+                "side": "short",
+                "status": "open",
+                "contracts_open": 1,
+                "currency": "USD",
+                "strike": 100,
+                "multiplier": 100,
+                "premium": 1.0,
+                "expiration": "2026-06-15",
+                "strategy_snapshot": {"strategy_family": "sell_put", "strategy_profile": "return_first"},
+            }
+        ]
+    }
+    ctx_path = tmp_path / "option_positions_context.json"
+    ctx_path.write_text(json.dumps(context, ensure_ascii=False), encoding="utf-8")
+
+    required_root = tmp_path / "required_data"
+    parsed = required_root / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "NVDA",
+                "option_type": "put",
+                "expiration": "2026-06-15",
+                "strike": 100,
+                "mid": 0.20,
+                "bid": 0.19,
+                "ask": 0.21,
+                "dte": 60,
+                "multiplier": 100,
+                "spot": 120,
+                "currency": "USD",
+            }
+        ]
+    ).to_csv(parsed / "NVDA_required_data.csv", index=False)
+
+    out_dir = tmp_path / "reports"
+    run_close_advice(
+        config={
+            "close_advice": {"enabled": True, "notify_levels": ["strong", "medium"]},
+            "symbols": [{"symbol": "NVDA", "sell_put": {"strategy": "short_vol"}}],
+        },
+        context_path=ctx_path,
+        required_data_root=required_root,
+        output_dir=out_dir,
+        base_dir=Path.cwd(),
+    )
+
+    rows = pd.read_csv(out_dir / "close_advice.csv").to_dict("records")
+    assert rows[0]["strategy_source"] == "position_snapshot"
+    assert rows[0]["strategy_profile"] == "return_first"
+    assert rows[0]["risk_model"] == "return_first_legacy"
+    assert rows[0]["tier"] == "strong"
+
+
 def test_run_close_advice_prefers_context_expiration_ymd_field(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
