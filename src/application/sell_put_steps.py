@@ -343,6 +343,15 @@ def run_sell_put_scan_and_summarize(
         )
         add_sell_put_labels(base, symbol_yield_put_universe, symbol_yield_put_universe_labeled)
         df_yield_put_universe = safe_read_csv(symbol_yield_put_universe_labeled)
+        if not df_yield_put_universe.empty:
+            df_yield_put_universe = enrich_and_filter_sell_put_short_vol(
+                df_labeled=df_yield_put_universe,
+                symbol=symbol,
+                sell_put_cfg=yield_sp,
+                portfolio_ctx=portfolio_ctx,
+                exchange_rate_converter=exchange_rate_converter,
+                out_path=symbol_yield_put_universe_labeled,
+            )
 
     raw_yield_pairs_df = find_sell_put_yield_enhancement_pairs(
         df_candidates=df_yield_put_universe,

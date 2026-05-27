@@ -258,6 +258,7 @@ def persist_manual_open_event(repo: Any, command: OpenPositionCommand) -> Ledger
             "mode": "manual_open",
             "side": normalized_side,
             "multiplier_source": "payload" if command.multiplier is not None else None,
+            "strategy_snapshot": dict(command.strategy_snapshot) if isinstance(command.strategy_snapshot, dict) else None,
         },
     )
     return persist_trade_event_object(repo, event)

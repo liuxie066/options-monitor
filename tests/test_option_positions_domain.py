@@ -140,6 +140,37 @@ def test_build_position_lot_fields_returns_typed_open_contract() -> None:
     assert fields.to_dict() == build_open_fields(command)
 
 
+def test_build_open_fields_preserves_strategy_snapshot() -> None:
+    fields = build_open_fields(
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="NVDA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100,
+            multiplier=100,
+            expiration_ymd="2026-04-17",
+            premium_per_share=1.0,
+            strategy_snapshot={
+                "strategy_family": "sell_put",
+                "strategy_profile": "short_vol",
+                "strategy_source": "current_config",
+                "risk_model": "short_vol",
+            },
+        )
+    )
+
+    assert fields["strategy_snapshot"] == {
+        "strategy_family": "sell_put",
+        "strategy_profile": "short_vol",
+        "strategy_source": "current_config",
+        "risk_model": "short_vol",
+    }
+
+
 def test_build_open_fields_canonicalizes_alias_symbol() -> None:
     fields = build_open_fields(
         OpenPositionCommand(

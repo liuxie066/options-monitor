@@ -116,6 +116,7 @@ def _base_fields_for_lot(
                 premium_per_share=float(lot.premium_open),
                 note=note,
                 opened_at_ms=int(lot.opened_at_ms),
+                strategy_snapshot=_strategy_snapshot_from_payload(raw_payload),
             )
         ).to_dict()
     fields["source_event_id"] = lot.open_event_id
@@ -227,6 +228,11 @@ def _last_action_at(lot: PositionLot, *, ledger_by_event_id: dict[str, TradeEven
 def _event_payload(event: dict[str, Any]) -> dict[str, Any]:
     payload = event.get("raw_payload") or {}
     return dict(payload) if isinstance(payload, dict) else {}
+
+
+def _strategy_snapshot_from_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
+    snapshot = payload.get("strategy_snapshot")
+    return dict(snapshot) if isinstance(snapshot, dict) else None
 
 
 def _compact_number(value: Any) -> int | float:

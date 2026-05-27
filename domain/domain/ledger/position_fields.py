@@ -255,6 +255,7 @@ class OpenPositionCommand:
     underlying_share_locked: int | None = None
     note: str | None = None
     opened_at_ms: int | None = None
+    strategy_snapshot: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -279,6 +280,7 @@ class PositionLotFields:
     multiplier: int | float | None = None
     underlying_share_locked: int | None = None
     cash_secured_amount: float | None = None
+    strategy_snapshot: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -307,6 +309,8 @@ class PositionLotFields:
             payload["underlying_share_locked"] = self.underlying_share_locked
         if self.cash_secured_amount is not None:
             payload["cash_secured_amount"] = self.cash_secured_amount
+        if self.strategy_snapshot is not None:
+            payload["strategy_snapshot"] = dict(self.strategy_snapshot)
         return payload
 
 
@@ -459,6 +463,7 @@ def build_position_lot_fields(cmd: OpenPositionCommand) -> PositionLotFields:
         multiplier=normalized_multiplier,
         underlying_share_locked=(int(underlying_locked) if underlying_locked is not None else None),
         cash_secured_amount=(float(cash_secured) if cash_secured is not None else None),
+        strategy_snapshot=(dict(cmd.strategy_snapshot) if isinstance(cmd.strategy_snapshot, dict) else None),
     )
 
 

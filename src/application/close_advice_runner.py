@@ -16,6 +16,7 @@ from domain.domain.close_advice import (
     CloseOptimizerConfig,
     evaluate_close_advice,
     evaluate_close_optimizer,
+    evaluate_short_vol_close_advice,
     OPTIMIZER_TIER_LABELS,
     OPTIMIZER_TIER_PRIORITY,
     safe_float,
@@ -49,6 +50,15 @@ from src.application.candidate_filter_trace import (
     candidate_trace_path_for_output,
     infer_trace_scope_from_path,
 )
+from src.application.covered_call_strategy_risk import resolve_covered_call_short_vol_config
+from src.application.sell_put_strategy_risk import resolve_sell_put_short_vol_config
+from src.application.strategy_policy import (
+    SELL_CALL_FAMILY,
+    SELL_PUT_FAMILY,
+    SHORT_VOL_PROFILE,
+    resolve_position_strategy,
+    strategy_side_config_for_resolution,
+)
 
 
 OUTPUT_COLUMNS = [
@@ -74,6 +84,37 @@ OUTPUT_COLUMNS = [
     "tier",
     "tier_label",
     "reason",
+    "strategy_family",
+    "strategy_profile",
+    "strategy_source",
+    "strategy_config_path",
+    "risk_model",
+    "short_vol_thesis_status",
+    "short_vol_reason",
+    "short_vol_mode",
+    "short_gamma_profile",
+    "short_vega_profile",
+    "implied_volatility",
+    "realized_volatility_estimate",
+    "iv_rv_ratio",
+    "iv_minus_rv",
+    "abs_delta",
+    "equity_delta_equivalent",
+    "delta_target_score",
+    "vol_edge_score",
+    "event_risk_flag",
+    "event_risk_types",
+    "event_risk_dates",
+    "event_source_status",
+    "event_source_error",
+    "path_stress_status",
+    "path_stress_evaluable",
+    "path_stress_unavailable_reason",
+    "stress_sigma_move_pct",
+    "put_stress_down_loss_nav_pct",
+    "put_gap_down_loss_nav_pct",
+    "call_gap_up_opportunity_cost_nav_pct",
+    "call_gap_up_opportunity_cost_to_premium",
     "data_quality_flags",
     "optimizer_tier",
     "optimizer_reason",
@@ -909,6 +950,47 @@ def _position_to_input(pos: dict[str, Any], quote: dict[str, Any] | None) -> tup
     )
 
 
+def _evaluate_position_close_advice(
+    *,
+    inp: CloseAdviceInput,
+    pos: dict[str, Any],
+    quote: dict[str, Any] | None,
+    config: dict[str, Any],
+    close_cfg: CloseAdviceConfig,
+) -> dict[str, Any]:
+    resolution = resolve_position_strategy(position=pos, config=config)
+    if resolution.strategy_profile == SHORT_VOL_PROFILE:
+        side_cfg = strategy_side_config_for_resolution(
+            resolution=resolution,
+            position=pos,
+            config=config,
+        )
+        if resolution.strategy_family == SELL_PUT_FAMILY:
+            short_vol_cfg = resolve_sell_put_short_vol_config(side_cfg)
+            row = evaluate_short_vol_close_advice(
+                inp,
+                short_vol_config=short_vol_cfg,
+                close_config=close_cfg,
+                quote_row=quote,
+                mode="put",
+            )
+        elif resolution.strategy_family == SELL_CALL_FAMILY:
+            short_vol_cfg = resolve_covered_call_short_vol_config(side_cfg)
+            row = evaluate_short_vol_close_advice(
+                inp,
+                short_vol_config=short_vol_cfg,
+                close_config=close_cfg,
+                quote_row=quote,
+                mode="call",
+            )
+        else:
+            row = evaluate_close_advice(inp, close_cfg)
+    else:
+        row = evaluate_close_advice(inp, close_cfg)
+    row.update(resolution.to_fields())
+    return row
+
+
 def _apply_buy_to_close_fee(row: dict[str, Any]) -> dict[str, Any]:
     mid = safe_float(row.get("close_mid"))
     contracts = safe_int(row.get("contracts_open")) or 1
@@ -1483,7 +1565,13 @@ def run_close_advice(
         key = _quote_key(pos0.get("symbol"), pos0.get("option_type"), exp, pos0.get("strike"), base_dir=Path(base_dir))
         quote = quotes.get(key)
         inp, quote_flags = _position_to_input(pos0, quote)
-        row = evaluate_close_advice(inp, cfg)
+        row = _evaluate_position_close_advice(
+            inp=inp,
+            pos=pos0,
+            quote=quote,
+            config=config,
+            close_cfg=cfg,
+        )
         row = _with_extra_flags(row, quote_flags)
         row = _with_extra_flags(row, _quote_observability_flags(key, quote, issue_reasons))
         issue_reason = str(issue_reasons.get(key) or "").strip()
@@ -1530,6 +1618,8 @@ def run_close_advice(
         )
         for row in rows:
             if str(row.get("evaluation_status") or "").strip().lower() != "priced":
+                continue
+            if str(row.get("risk_model") or "").strip().lower() == SHORT_VOL_PROFILE:
                 continue
             inp = CloseAdviceInput(
                 account=str(row.get("account") or ""),

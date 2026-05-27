@@ -82,3 +82,40 @@ def test_publisher_applies_adjust_patch_to_legacy_position_lot_fields() -> None:
     assert fields["last_action_at"] == 3000
     assert fields["position_id"] == "NVDA_20260717_105P_short"
     assert fields["cash_secured_amount"] == 21000.0
+
+
+def test_publisher_preserves_open_strategy_snapshot() -> None:
+    projection = project_stored_trade_events_to_position_lots(
+        [
+            TradeEvent(
+                event_id="open-nvda",
+                event_type="open",
+                event_time_ms=1000,
+                contract_key=_key(strike=100.0, expiration_ymd="2026-06-19"),
+                contracts=1,
+                price=2.5,
+                currency="USD",
+                source="cli_manual_open",
+                multiplier=100,
+                lot_id="lot_open-nvda",
+                raw_payload={
+                    "source": "test",
+                    "source_type": "manual_trade_event",
+                    "strategy_snapshot": {
+                        "strategy_family": "sell_put",
+                        "strategy_profile": "short_vol",
+                        "strategy_source": "current_config",
+                        "risk_model": "short_vol",
+                    },
+                },
+            ),
+        ]
+    )
+
+    assert projection.diagnostics == []
+    assert projection.lots[0].fields["strategy_snapshot"] == {
+        "strategy_family": "sell_put",
+        "strategy_profile": "short_vol",
+        "strategy_source": "current_config",
+        "risk_model": "short_vol",
+    }
