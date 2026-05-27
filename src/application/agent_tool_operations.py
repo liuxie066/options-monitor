@@ -41,6 +41,10 @@ def _optional_text(value: Any) -> str | None:
     return text or None
 
 
+def _dict(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
 def _resolve_local_path(value: Any, *, base: Path, default: Path) -> Path:
     if value in (None, ""):
         return default.resolve()
@@ -311,13 +315,29 @@ def option_positions_read_tool(
 
     data: dict[str, Any]
     if action == "list":
+        query = _dict(payload.get("query"))
+        expiration_query = _dict(query.get("expiration"))
         broker = normalize_broker(payload.get("broker") or portfolio_cfg.get("broker") or "富途")
-        account = _optional_text(payload.get("account"))
-        status = str(payload.get("status") or "open").strip().lower()
+        account = _optional_text(query.get("account") if "account" in query else payload.get("account"))
+        status = str(query.get("status") if "status" in query else payload.get("status") or "open").strip().lower()
+        if status == "closed":
+            status = "close"
         if status not in {"open", "close", "all"}:
             raise AgentToolError(code="INPUT_ERROR", message="status must be one of: open, close, all")
-        limit = _as_int(payload.get("limit"), default=50)
-        expiration_within_days = _optional_int(payload.get("exp_within_days") or payload.get("expiration_within_days"))
+        limit = _as_int(query.get("limit") if "limit" in query else payload.get("limit"), default=50)
+        expiration_within_days = _optional_int(
+            expiration_query.get("within_days")
+            or payload.get("exp_within_days")
+            or payload.get("expiration_within_days")
+        )
+        symbol = _optional_text(query.get("symbol") if "symbol" in query else payload.get("symbol"))
+        option_type = _optional_text(query.get("option_type") if "option_type" in query else payload.get("option_type"))
+        side = _optional_text(query.get("side") if "side" in query else payload.get("side"))
+        strike = _optional_float(query.get("strike") if "strike" in query else payload.get("strike"))
+        expiration_exact = _optional_text(expiration_query.get("exact") or payload.get("expiration_exact"))
+        expiration_month = _optional_text(expiration_query.get("month") or payload.get("expiration_month"))
+        expiration_before = _optional_text(expiration_query.get("before") or payload.get("expiration_before"))
+        expiration_after = _optional_text(expiration_query.get("after") or payload.get("expiration_after"))
         rows = list_position_rows(
             repo,
             broker=broker,
@@ -325,14 +345,39 @@ def option_positions_read_tool(
             status=status,
             limit=limit,
             expiration_within_days=expiration_within_days,
+            symbol=symbol,
+            option_type=option_type,
+            side=side,
+            strike=strike,
+            expiration_exact=expiration_exact,
+            expiration_month=expiration_month,
+            expiration_before=expiration_before,
+            expiration_after=expiration_after,
         )
+        effective_query = {
+            "account": normalize_account(account) if account else None,
+            "status": status,
+            "symbol": symbol,
+            "option_type": option_type,
+            "side": side,
+            "strike": strike,
+            "expiration": {
+                "exact": expiration_exact,
+                "month": expiration_month,
+                "before": expiration_before,
+                "after": expiration_after,
+                "within_days": expiration_within_days,
+            },
+            "limit": limit,
+        }
         data = {
             "action": action,
             "rows": rows,
             "row_count": len(rows),
             "filters": {
                 "broker": broker,
-                "account": normalize_account(account) if account else None,
+                "query": effective_query,
+                "account": effective_query["account"],
                 "status": status,
                 "limit": limit,
                 "expiration_within_days": expiration_within_days,

@@ -7,7 +7,6 @@ from src.application.assistant.commands import (
     ACCOUNT_VALUES,
     LLM_INTENT_SCHEMA_VERSION,
     LOG_KIND_VALUES,
-    POSITION_STATUS_VALUES,
     llm_capability_manifest,
     llm_argument_schema_properties,
     llm_argument_schema_required_keys,
@@ -17,10 +16,10 @@ from src.application.assistant.commands import (
 from src.application.assistant.settings import LlmTranslatorSettings
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.assistant.contracts import AssistantIntent
+from src.application.assistant.semantic_frames import PositionQuery
 
 
 _ACCOUNT_VALUES = frozenset(ACCOUNT_VALUES)
-_POSITION_STATUS_VALUES = frozenset(POSITION_STATUS_VALUES)
 _LOG_KIND_VALUES = frozenset(LOG_KIND_VALUES)
 _MONTH_RE = re.compile(r"^20\d{2}-(0[1-9]|1[0-2])$")
 
@@ -150,16 +149,8 @@ def _reject_extra_arguments(intent_name: str, arguments: dict[str, Any]) -> None
 def _normalize_arguments(intent_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     if intent_name in {"help", "runtime_status", "healthcheck", "config_validate", "symbol_list", "pending_operations"}:
         return {}
-    if intent_name == "option_positions_open":
-        out: dict[str, Any] = {}
-        account = _optional_account(arguments.get("account"))
-        status = str(arguments.get("status") or "open").strip().lower()
-        if status not in _POSITION_STATUS_VALUES:
-            raise AgentToolError(code="INPUT_ERROR", message="LLM option position status must be open or all")
-        if account:
-            out["account"] = account
-        out["status"] = status
-        return out
+    if intent_name == "position_query":
+        return PositionQuery.from_payload(arguments).to_payload()
     if intent_name == "monthly_income_report":
         out = {}
         account = _optional_account(arguments.get("account"))

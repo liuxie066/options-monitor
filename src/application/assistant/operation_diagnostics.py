@@ -133,6 +133,8 @@ def _audit_row_summary(row: dict[str, Any]) -> dict[str, Any]:
         "intent_name": row.get("intent_name"),
         "tool_name": row.get("tool_name"),
         "tool_payload": _loads(row.get("tool_payload_json")),
+        "semantic_frame": _loads(row.get("semantic_frame_json")),
+        "tool_plan": _loads(row.get("tool_plan_json")),
         "decision": row.get("decision"),
         "result_ok": bool(row.get("result_ok")),
         "error_code": row.get("error_code") or error.get("code"),

@@ -23,6 +23,7 @@ from domain.domain.ledger.position_fields import (
     normalize_status,
     parse_exp_to_ms,
 )
+from domain.domain.symbol_identity import canonical_symbol
 from src.application.config_loader import resolve_data_config_path
 from src.application.settings import build_effective_env
 from src.application.positions.reporting import build_monthly_income_report
@@ -235,11 +236,26 @@ def list_position_rows(
     status: str = "open",
     limit: int = 50,
     expiration_within_days: int | None = None,
+    symbol: str | None = None,
+    option_type: str | None = None,
+    side: str | None = None,
+    strike: float | None = None,
+    expiration_exact: str | None = None,
+    expiration_month: str | None = None,
+    expiration_before: str | None = None,
+    expiration_after: str | None = None,
     as_of_ms: int | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     normalized_broker = normalize_broker(broker)
     normalized_account = normalize_account(account) if account else None
+    normalized_symbol = canonical_symbol(symbol) if symbol else None
+    normalized_option_type = normalize_option_type(option_type) if option_type else None
+    normalized_side = normalize_side(side) if side else None
+    normalized_strike = float(strike) if strike is not None else None
+    exact_expiration = _parse_filter_date(expiration_exact)
+    before_expiration = _parse_filter_date(expiration_before)
+    after_expiration = _parse_filter_date(expiration_after)
     resolved_as_of_date = (
         datetime.fromtimestamp(int(as_of_ms) / 1000, tz=EXPIRATION_DATE_TZ).date()
         if as_of_ms is not None
@@ -251,8 +267,32 @@ def list_position_rows(
             continue
         if normalized_account and view.get("account") != normalized_account:
             continue
+        if normalized_symbol and canonical_symbol(view.get("symbol")) != normalized_symbol:
+            continue
+        if normalized_option_type and view.get("option_type") != normalized_option_type:
+            continue
+        if normalized_side and view.get("side") != normalized_side:
+            continue
+        if normalized_strike is not None:
+            raw_strike = view.get("strike")
+            if raw_strike is None:
+                continue
+            try:
+                if float(raw_strike) != normalized_strike:
+                    continue
+            except Exception:
+                continue
         normalized_status = view.get("status")
         if status != "all" and normalized_status != status:
+            continue
+        expiration_ymd = _parse_filter_date(view.get("expiration_ymd") or view.get("expiration"))
+        if exact_expiration is not None and expiration_ymd != exact_expiration:
+            continue
+        if expiration_month and not str(view.get("expiration_ymd") or view.get("expiration") or "").startswith(expiration_month):
+            continue
+        if before_expiration is not None and (expiration_ymd is None or expiration_ymd > before_expiration):
+            continue
+        if after_expiration is not None and (expiration_ymd is None or expiration_ymd < after_expiration):
             continue
         days_to_expiration = view.get("days_to_expiration")
         if expiration_within_days is not None:
@@ -284,6 +324,16 @@ def list_position_rows(
             }
         )
     return rows[: max(limit, 1)]
+
+
+def _parse_filter_date(value: Any) -> date | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        return None
 
 
 def build_position_monthly_income_report(
