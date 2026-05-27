@@ -9,7 +9,12 @@ import pytest
 
 from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.assistant.commands import command_specs
-from src.application.assistant.contracts import AssistantRequest, AssistantToolCall
+from src.application.assistant.contracts import (
+    ASSISTANT_FRAME_SCHEMA_VERSION,
+    TOOL_PLAN_SCHEMA_VERSION,
+    AssistantRequest,
+    AssistantToolCall,
+)
 from src.application.inbound.feishu import feishu_payload_to_inbound_request, handle_feishu_payload
 from src.application.assistant.parser import parse_inbound_text
 from src.application.assistant.policy import PURE_READ_TOOLS, check_sender_allowed, enforce_tool_allowed
@@ -115,12 +120,28 @@ def test_inbound_parser_maps_core_read_only_commands() -> None:
     assert parse_inbound_text("pending").name == "pending_operations"
 
     positions = parse_inbound_text("持仓 sy")
-    assert positions.name == "option_positions_open"
-    assert positions.arguments == {"account": "sy", "status": "open"}
+    assert positions.name == "position_query"
+    assert positions.arguments == {"account": "sy", "status": "open", "limit": 50}
 
     all_positions = parse_inbound_text("持仓")
-    assert all_positions.name == "option_positions_open"
-    assert all_positions.arguments == {"status": "open"}
+    assert all_positions.name == "position_query"
+    assert all_positions.arguments == {"status": "open", "limit": 50}
+
+    may_positions = parse_inbound_text("sy 5月到期的持仓", now_fn=lambda: date(2026, 5, 19))
+    assert may_positions.name == "position_query"
+    assert may_positions.arguments == {
+        "account": "sy",
+        "status": "open",
+        "expiration": {"month": "2026-05"},
+        "limit": 50,
+    }
+    may_positions_without_account = parse_inbound_text("5月到期的持仓", now_fn=lambda: date(2026, 5, 19))
+    assert may_positions_without_account.name == "position_query"
+    assert may_positions_without_account.arguments == {
+        "status": "open",
+        "expiration": {"month": "2026-05"},
+        "limit": 50,
+    }
 
     income = parse_inbound_text("收益 sy 本月", now_fn=lambda: date(2026, 5, 19))
     assert income.name == "monthly_income_report"
@@ -312,6 +333,10 @@ def test_inbound_manual_trade_preview_and_confirm_open(monkeypatch: pytest.Monke
     assert "未写入账本" in preview["data"]["response_text"]
     assert preview["data"]["payload"]["diagnostics"]["raw_symbol"] == "NVDA"
     assert preview["data"]["payload"]["diagnostics"]["multiplier_source"] == "payload"
+    assert preview["data"]["tool_plan"]["tool_name"] == "inbound.manual_trade"
+    assert preview["data"]["tool_plan"]["safety_class"] == "write_preview"
+    assert preview["data"]["tool_plan"]["requires_confirmation"] is True
+    assert preview["data"]["tool_plan"]["source_intent"] == "manual_trade_open"
 
     operation_id = preview["data"]["operation_id"]
     confirmed = handle_assistant_request(
@@ -331,8 +356,29 @@ def test_inbound_manual_trade_preview_and_confirm_open(monkeypatch: pytest.Monke
     assert confirmed["data"]["operation_resolution"] == "latest_pending"
     assert confirmed["data"]["resolved_operation_id"] == operation_id
     assert "交易已写入 OM 本地账本：开仓" in confirmed["data"]["response_text"]
+    assert confirmed["data"]["tool_plan"]["tool_name"] == "inbound.manual_trade"
+    assert confirmed["data"]["tool_plan"]["safety_class"] == "write_apply"
+    assert confirmed["data"]["tool_plan"]["requires_confirmation"] is False
+    assert confirmed["data"]["tool_plan"]["source_intent"] == "manual_trade_confirm"
     repo = ledger_repository.SQLiteOptionPositionsRepository(sqlite_path)
     assert len(repo.list_trade_events()) == 1
+    with sqlite3.connect(audit_db) as conn:
+        rows = conn.execute(
+            """
+            SELECT message_id, tool_plan_json
+            FROM inbound_command_audit
+            WHERE message_id IN ('msg_open_preview', 'msg_open_confirm')
+            ORDER BY id
+            """
+        ).fetchall()
+    audit_plans = {row[0]: json.loads(row[1]) for row in rows}
+    assert audit_plans["msg_open_preview"]["reason"] == "write_preview_operation"
+    assert audit_plans["msg_open_preview"]["payload"]["account"] == "sy"
+    assert audit_plans["msg_open_confirm"]["reason"] == "confirmed_write_operation"
+    assert audit_plans["msg_open_confirm"]["payload"] == {
+        "operation_id": None,
+        "operation_resolution": "latest_pending",
+    }
 
 
 def test_inbound_manual_trade_confirm_rejects_signature_mismatch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -519,6 +565,9 @@ def test_inbound_pending_operations_lists_current_conversation(monkeypatch: pyte
     trade_id = trade_preview["data"]["operation_id"]
     assert pending["ok"] is True
     assert pending["data"]["tool_call"]["tool_name"] == "inbound.pending"
+    assert pending["data"]["tool_plan"]["tool_name"] == "inbound.pending"
+    assert pending["data"]["tool_plan"]["read_only"] is True
+    assert pending["data"]["tool_plan"]["payload"]["conversation_id"] == "feishu:chat_a:ou_1"
     assert pending["data"]["pending_count"] == 1
     assert pending["data"]["pending_operations"][0]["operation_id"] == trade_id
     assert "当前待确认：1 条" in pending["data"]["response_text"]
@@ -627,6 +676,9 @@ def test_inbound_upgrade_preview_and_confirm(monkeypatch: pytest.MonkeyPatch, tm
     assert preview["data"]["response_text"].startswith("升级预览：立即升级")
     assert "未执行升级" in preview["data"]["response_text"]
     assert preview["data"]["payload"]["arguments"] == {"target_version": "1.2.111", "release_tag": "v1.2.111"}
+    assert preview["data"]["tool_plan"]["tool_name"] == "inbound.upgrade"
+    assert preview["data"]["tool_plan"]["safety_class"] == "admin_preview"
+    assert preview["data"]["tool_plan"]["requires_confirmation"] is True
     assert calls[-1]["check"] is True
 
     operation_id = preview["data"]["operation_id"]
@@ -646,6 +698,9 @@ def test_inbound_upgrade_preview_and_confirm(monkeypatch: pytest.MonkeyPatch, tm
     assert confirmed["data"]["operation_id"] == operation_id
     assert confirmed["data"]["operation_resolution"] == "latest_pending"
     assert "已收到升级确认" in confirmed["data"]["response_text"]
+    assert confirmed["data"]["tool_plan"]["tool_name"] == "inbound.upgrade"
+    assert confirmed["data"]["tool_plan"]["safety_class"] == "write_apply"
+    assert confirmed["data"]["tool_plan"]["requires_confirmation"] is False
     assert all("confirm" not in call for call in calls if "check" not in call)
 
     worker = upgrade_operations.run_confirmed_upgrade_operation(
@@ -1301,12 +1356,33 @@ def test_inbound_handle_executes_read_only_tool_and_replays_duplicate_message(tm
     with sqlite3.connect(audit_db) as conn:
         row = conn.execute(
             """
-            SELECT intent_name, tool_name, decision, result_ok, duplicate_count, last_duplicate_sender_id, conversation_id
+            SELECT intent_name, tool_name, decision, result_ok, duplicate_count, last_duplicate_sender_id, conversation_id,
+                   semantic_frame_json, tool_plan_json
             FROM inbound_command_audit
             """
         ).fetchone()
 
-    assert row == ("monthly_income_report", "monthly_income_report", "allowed", 1, 1, "ou_1", "feishu:ou_1")
+    assert row[:7] == ("monthly_income_report", "monthly_income_report", "allowed", 1, 1, "ou_1", "feishu:ou_1")
+    semantic_frame = json.loads(row[7])
+    tool_plan = json.loads(row[8])
+    assert semantic_frame == {
+        "schema_version": ASSISTANT_FRAME_SCHEMA_VERSION,
+        "intent": "monthly_income_report",
+        "payload": {"account": "sy", "month": "2026-05"},
+        "safety_class": "read",
+        "parser": "deterministic",
+        "confidence": 1.0,
+    }
+    assert tool_plan == {
+        "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+        "tool_name": "monthly_income_report",
+        "payload": {"config_key": "us", "account": "sy", "month": "2026-05"},
+        "safety_class": "read",
+        "read_only": True,
+        "requires_confirmation": False,
+        "reason": "read_only_intent",
+        "source_intent": "monthly_income_report",
+    }
 
 
 def test_inbound_handle_omits_account_filter_when_account_not_provided(tmp_path: Path) -> None:
@@ -1346,8 +1422,38 @@ def test_inbound_handle_omits_account_filter_when_account_not_provided(tmp_path:
     assert positions["ok"] is True
     assert calls == [
         ("monthly_income_report", {"config_key": "us", "month": "2026-05"}),
-        ("option_positions_read", {"config_key": "us", "action": "list", "status": "open"}),
+        ("option_positions_read", {"config_key": "us", "action": "list", "query": {"status": "open", "limit": 50}}),
     ]
+    with sqlite3.connect(audit_db) as conn:
+        row = conn.execute(
+            """
+            SELECT semantic_frame_json, tool_plan_json, tool_payload_json
+            FROM inbound_command_audit
+            WHERE message_id = 'msg_positions'
+            """
+        ).fetchone()
+    semantic_frame = json.loads(row[0])
+    tool_plan = json.loads(row[1])
+    tool_payload = json.loads(row[2])
+    assert semantic_frame == {
+        "schema_version": ASSISTANT_FRAME_SCHEMA_VERSION,
+        "intent": "position_query",
+        "payload": {"query": {"status": "open", "limit": 50}},
+        "safety_class": "read",
+        "parser": "deterministic",
+        "confidence": 1.0,
+    }
+    assert tool_plan == {
+        "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+        "tool_name": "option_positions_read",
+        "payload": {"config_key": "us", "action": "list", "query": {"status": "open", "limit": 50}},
+        "safety_class": "read",
+        "read_only": True,
+        "requires_confirmation": False,
+        "reason": "read_only_intent",
+        "source_intent": "position_query",
+    }
+    assert tool_payload == {"config_key": "us", "action": "list", "query": {"status": "open", "limit": 50}}
 
 
 def test_inbound_handle_without_message_id_generates_fresh_command_id(tmp_path: Path) -> None:
@@ -1596,7 +1702,7 @@ def test_inbound_renderer_summarizes_position_rows() -> None:
         ),
     )
 
-    assert "sy 当前 open 期权持仓：2 条" in text
+    assert "sy · open · 期权持仓：2 条" in text
     assert "0700.HK short call 510 exp 2026-05-28 open 2" in text
     assert "数据源：OM 本地 SQLite position_lots" in text
 
@@ -1608,7 +1714,7 @@ def test_inbound_renderer_summarizes_position_rows() -> None:
             data={"rows": [], "filters": {"account": None, "status": "open"}},
         ),
     )
-    assert all_accounts.startswith("全部账户 当前没有 open 期权持仓。")
+    assert all_accounts.startswith("全部账户 · open · 期权持仓：0 条。")
 
 
 def test_inbound_renderer_does_not_cap_position_rows() -> None:
@@ -1634,7 +1740,7 @@ def test_inbound_renderer_does_not_cap_position_rows() -> None:
         ),
     )
 
-    assert "sy 当前 open 期权持仓：12 条" in text
+    assert "sy · open · 期权持仓：12 条" in text
     assert "SYM1 short put 401 exp 2026-06-29 open 1" in text
     assert "SYM12 short put 412 exp 2026-06-29 open 12" in text
     assert "未展示" not in text
@@ -1651,7 +1757,7 @@ def test_inbound_renderer_explains_empty_positions() -> None:
         ),
     )
 
-    assert text.startswith("lx 当前没有 open 期权持仓。")
+    assert text.startswith("lx · open · 期权持仓：0 条。")
 
 
 def test_inbound_renderer_summarizes_runtime_status() -> None:

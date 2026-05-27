@@ -98,6 +98,14 @@ def list_position_rows(
     status: str = "open",
     limit: int = 50,
     expiration_within_days: int | None = None,
+    symbol: str | None = None,
+    option_type: str | None = None,
+    side: str | None = None,
+    strike: float | None = None,
+    expiration_exact: str | None = None,
+    expiration_month: str | None = None,
+    expiration_before: str | None = None,
+    expiration_after: str | None = None,
     as_of_ms: int | None = None,
 ) -> list[dict[str, Any]]:
     from src.application.ledger.read_model import list_position_rows as _impl
@@ -109,6 +117,14 @@ def list_position_rows(
         status=status,
         limit=limit,
         expiration_within_days=expiration_within_days,
+        symbol=symbol,
+        option_type=option_type,
+        side=side,
+        strike=strike,
+        expiration_exact=expiration_exact,
+        expiration_month=expiration_month,
+        expiration_before=expiration_before,
+        expiration_after=expiration_after,
         as_of_ms=as_of_ms,
     )
 

@@ -35,13 +35,13 @@ from src.infrastructure.openai_responses import OpenAIResponsesError, create_str
 def test_assistant_command_parser_maps_read_commands() -> None:
     positions = parse_assistant_command("/positions sy")
     assert positions is not None
-    assert positions.name == "option_positions_open"
-    assert positions.arguments == {"account": "sy", "status": "open"}
+    assert positions.name == "position_query"
+    assert positions.arguments == {"account": "sy", "status": "open", "limit": 50}
     assert positions.parser == "command"
 
     all_positions = parse_assistant_command("/positions all")
     assert all_positions is not None
-    assert all_positions.arguments == {"status": "all"}
+    assert all_positions.arguments == {"status": "all", "limit": 50}
 
     income = parse_assistant_command("/income sy 上月", now_fn=lambda: date(2026, 1, 3))
     assert income is not None
@@ -175,7 +175,7 @@ def test_assistant_deterministic_parser_supports_productized_read_aliases() -> N
     assert parse_inbound_text("自检").name == "healthcheck"
     assert parse_inbound_text("配置是否正常").name == "config_validate"
     assert parse_inbound_text("config").name == "config_validate"
-    assert parse_inbound_text("positions").arguments == {"status": "open"}
+    assert parse_inbound_text("positions").arguments == {"status": "open", "limit": 50}
     assert parse_inbound_text("income").arguments == {}
     assert parse_inbound_text("runs").arguments == {"limit": 10}
     assert parse_inbound_text("最近任务").name == "runtime_runs"
@@ -835,8 +835,8 @@ def test_assistant_runtime_routes_core_read_only_llm_intents(tmp_path: Path) -> 
         ("系统现在正常吗", AssistantIntent(name="runtime_status", arguments={}, parser="llm", confidence=0.92), ("runtime_status", {"config_key": "us"})),
         (
             "我现在有哪些 sy 仓位",
-            AssistantIntent(name="option_positions_open", arguments={"account": "sy", "status": "open"}, parser="llm", confidence=0.92),
-            ("option_positions_read", {"config_key": "us", "action": "list", "status": "open", "account": "sy"}),
+            AssistantIntent(name="position_query", arguments={"account": "sy", "status": "open"}, parser="llm", confidence=0.92),
+            ("option_positions_read", {"config_key": "us", "action": "list", "query": {"account": "sy", "status": "open", "limit": 50}}),
         ),
         (
             "这个月赚了多少",
@@ -1463,6 +1463,11 @@ def test_llm_intent_schema_documents_allowed_surface() -> None:
     assert set(json_schema["properties"]["arguments"]["required"]) == {
         "account",
         "status",
+        "symbol",
+        "option_type",
+        "side",
+        "strike",
+        "expiration",
         "month",
         "run_id",
         "kind",
@@ -1480,15 +1485,16 @@ def test_llm_translator_calls_openai_provider_and_parses_structured_response() -
             "output_text": json.dumps(
                 {
                     "schema_version": LLM_INTENT_SCHEMA_VERSION,
-                    "intent": "option_positions_open",
+                    "intent": "position_query",
                     "arguments": {
                         "account": "sy",
                         "status": "open",
-                        "month": None,
-                        "run_id": None,
-                        "kind": None,
+                        "symbol": None,
+                        "option_type": None,
+                        "side": None,
+                        "strike": None,
+                        "expiration": None,
                         "limit": None,
-                        "lines": None,
                     },
                     "confidence": 0.93,
                 }
@@ -1511,8 +1517,8 @@ def test_llm_translator_calls_openai_provider_and_parses_structured_response() -
 
     assert result.error is None
     assert result.intent is not None
-    assert result.intent.name == "option_positions_open"
-    assert result.intent.arguments == {"account": "sy", "status": "open"}
+    assert result.intent.name == "position_query"
+    assert result.intent.arguments == {"account": "sy", "status": "open", "limit": 50}
     assert result.trace["reason"] == "accepted"
     assert result.trace["provider"] == "openai"
     assert result.trace["base_url"] == "https://llm.example/v1"
@@ -1544,15 +1550,16 @@ def test_llm_translator_calls_deepseek_provider_and_parses_chat_response() -> No
                         "content": json.dumps(
                             {
                                 "schema_version": LLM_INTENT_SCHEMA_VERSION,
-                                "intent": "option_positions_open",
+                                "intent": "position_query",
                                 "arguments": {
                                     "account": "sy",
                                     "status": "open",
-                                    "month": None,
-                                    "run_id": None,
-                                    "kind": None,
+                                    "symbol": None,
+                                    "option_type": None,
+                                    "side": None,
+                                    "strike": None,
+                                    "expiration": None,
                                     "limit": None,
-                                    "lines": None,
                                 },
                                 "confidence": 0.93,
                             }
@@ -1579,8 +1586,8 @@ def test_llm_translator_calls_deepseek_provider_and_parses_chat_response() -> No
 
     assert result.error is None
     assert result.intent is not None
-    assert result.intent.name == "option_positions_open"
-    assert result.intent.arguments == {"account": "sy", "status": "open"}
+    assert result.intent.name == "position_query"
+    assert result.intent.arguments == {"account": "sy", "status": "open", "limit": 50}
     assert result.trace["reason"] == "accepted"
     assert result.trace["provider"] == "deepseek"
     assert result.trace["base_url"] == "https://api.deepseek.com"

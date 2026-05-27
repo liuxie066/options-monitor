@@ -1,15 +1,27 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from src.application.agent_tool_contracts import AgentToolError, build_response, mask_path
 from src.application.assistant.contracts import AssistantRequest
+from src.application.assistant.operation_signature import hash_operation_payload, verify_operation_signature
 from src.application.assistant.operation_status_text import cannot_repeat_message
-from src.application.assistant.operation_store import InboundOperationStore
+from src.application.assistant.operation_store import InboundOperationStore, operation_is_expired
 
 
 CandidateHintFn = Callable[[str, Any], str]
+PreviewResponseTextFn = Callable[[dict[str, Any]], str]
+
+
+@dataclass(frozen=True)
+class ConfirmedOperation:
+    operation_id: str
+    operation: dict[str, Any]
+    operation_resolution: dict[str, Any]
+    payload: dict[str, Any]
+    payload_hash: str
 
 
 def resolve_pending_operation_or_raise(
@@ -109,6 +121,102 @@ def build_cancelled_operation_response(
             "response_text": response_text,
         },
         meta={"audit_db": mask_path(store.path)},
+    )
+
+
+def build_previewed_operation_response(
+    *,
+    tool_name: str,
+    operation_id: str,
+    request: AssistantRequest,
+    store: InboundOperationStore,
+    payload: dict[str, Any],
+    preview: dict[str, Any],
+    ttl_seconds: int,
+    response_text: PreviewResponseTextFn,
+) -> dict[str, Any]:
+    payload_hash = hash_operation_payload(payload)
+    operation = store.save_preview(
+        operation_id=operation_id,
+        command_id=operation_id,
+        channel=request.channel,
+        sender_id=request.sender_id,
+        conversation_id=request.conversation_id,
+        operation_type=str(payload["operation_type"]),
+        payload_hash=payload_hash,
+        payload=payload,
+        preview=preview,
+        ttl_seconds=ttl_seconds,
+    )
+    return build_response(
+        tool_name=tool_name,
+        ok=True,
+        data={
+            "operation_id": operation_id,
+            "operation_type": payload["operation_type"],
+            "status": "previewed",
+            "payload_hash": payload_hash,
+            "payload": payload,
+            "preview": preview,
+            "expires_at": operation.get("expires_at"),
+            "response_text": response_text(operation),
+        },
+        meta={"audit_db": mask_path(store.path)},
+    )
+
+
+def confirm_previewed_operation_or_raise(
+    *,
+    operation_id: str,
+    operation: dict[str, Any],
+    operation_resolution: dict[str, Any],
+    store: InboundOperationStore,
+    subject: str,
+    expired_message: str,
+    expired_hint: str,
+    hash_mismatch_message: str,
+    confirmed_result: dict[str, Any] | None = None,
+) -> ConfirmedOperation:
+    if operation_is_expired(operation):
+        result = {"operation_id": operation_id, "status": "expired"}
+        store.mark_expired(operation_id, result=result)
+        raise AgentToolError(
+            code="NEEDS_CLARIFICATION",
+            message=expired_message,
+            hint=expired_hint,
+            details={**result, **operation_resolution},
+        )
+    payload = dict(operation["payload"])
+    stored_hash = str(operation.get("payload_hash") or "")
+    current_hash = hash_operation_payload(payload)
+    if stored_hash != current_hash:
+        result = {"operation_id": operation_id, "status": "failed", "reason": "payload_hash_mismatch"}
+        store.mark_failed(operation_id, result=result)
+        raise AgentToolError(
+            code="INTERNAL_ERROR",
+            message=hash_mismatch_message,
+            details=result,
+        )
+    verify_operation_signature(operation)
+    if not store.mark_confirmed(operation_id, result=confirmed_result):
+        current = store.get(operation_id) or {}
+        current_status = str(current.get("status") or "-")
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message=cannot_repeat_message(subject, "确认", current_status),
+            details={
+                "operation_id": operation_id,
+                "status": current_status,
+                "reason": "operation_not_previewed",
+                **operation_resolution,
+            },
+        )
+    return ConfirmedOperation(
+        operation_id=operation_id,
+        operation=operation,
+        operation_resolution=operation_resolution,
+        payload=payload,
+        payload_hash=current_hash,
     )
 
 

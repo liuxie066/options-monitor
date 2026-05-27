@@ -7,6 +7,7 @@ from typing import Callable
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.assistant.commands import command_specs, operation_specs
 from src.application.assistant.contracts import AssistantIntent
+from src.application.assistant.semantic_frames import parse_position_query_text, position_query_intent_arguments
 
 
 _ACCOUNT_RE = re.compile(r"(?<![a-z0-9_])(lx|sy)(?![a-z0-9_])", re.IGNORECASE)
@@ -116,12 +117,8 @@ def parse_inbound_text(text: str, *, now_fn: Callable[[], date] | None = None) -
         return AssistantIntent(name="config_validate", arguments={})
 
     if _looks_like_positions(compact, lower):
-        account = _extract_account(raw)
-        status = "all" if ("全部" in compact or "all" in lower) else "open"
-        args = {"status": status}
-        if account:
-            args["account"] = account
-        return AssistantIntent(name="option_positions_open", arguments=args)
+        query = parse_position_query_text(raw, today=today)
+        return AssistantIntent(name="position_query", arguments=position_query_intent_arguments(query))
 
     if _looks_like_income(compact, lower):
         account = _extract_account(raw)
@@ -161,8 +158,8 @@ def _parse_catalog_read_alias(compact: str, lower: str) -> AssistantIntent | Non
     intent_name = _read_only_exact_aliases().get(compact) or _read_only_exact_aliases().get(lower)
     if not intent_name:
         return None
-    if intent_name == "option_positions_open":
-        return AssistantIntent(name=intent_name, arguments={"status": "open"})
+    if intent_name == "position_query":
+        return AssistantIntent(name=intent_name, arguments={"status": "open", "limit": 50})
     if intent_name == "runtime_runs":
         return AssistantIntent(name=intent_name, arguments={"limit": 10})
     return AssistantIntent(name=intent_name, arguments={})
@@ -177,7 +174,7 @@ def _read_only_exact_aliases() -> dict[str, str]:
     for spec in command_specs():
         if not spec.read_only or spec.intent_name == "runtime_logs":
             continue
-        values = [spec.display_name, *spec.examples, *(command.lstrip("/") for command in spec.commands)]
+        values = [spec.display_name, *(command.lstrip("/") for command in spec.commands)]
         for raw in values:
             value = str(raw or "").strip()
             if not value or value.startswith("/") or any(marker in value for marker in ("<", "[", "]")):

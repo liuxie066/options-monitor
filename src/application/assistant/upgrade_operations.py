@@ -11,10 +11,15 @@ from typing import Any, Callable
 from src.application.agent_tool_config import repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response, mask_path
 from src.application.assistant.contracts import AssistantIntent, AssistantRequest
-from src.application.assistant.operation_lifecycle import build_cancelled_operation_response, resolve_pending_operation_or_raise
+from src.application.assistant.operation_lifecycle import (
+    build_cancelled_operation_response,
+    build_previewed_operation_response,
+    confirm_previewed_operation_or_raise,
+    resolve_pending_operation_or_raise,
+)
 from src.application.assistant.operation_policy import enforce_upgrade_write_allowed
 from src.application.assistant.operation_signature import hash_operation_payload, verify_operation_signature
-from src.application.assistant.operation_store import InboundOperationStore, operation_is_expired
+from src.application.assistant.operation_store import InboundOperationStore
 from src.application.assistant.operation_status_text import cannot_repeat_message, operation_candidate_hint, user_facing_operation_status
 from src.application.service_upgrade import compare_versions, default_releases_root, default_upgrade_cache_root, service_upgrade, service_upgrade_check
 from src.application.settings import build_effective_env
@@ -29,10 +34,6 @@ UpgradeWorkerLauncher = Callable[[str, Path], dict[str, Any]]
 ReplyFn = Callable[..., dict[str, Any]]
 UPGRADE_WORKER_LAUNCHER: UpgradeWorkerLauncher | None = None
 _DEFAULT_RUNTIME_ROOT = Path("/var/lib/options-monitor")
-
-
-def is_upgrade_operation_intent(intent: AssistantIntent) -> bool:
-    return intent.name in PREVIEW_INTENTS or intent.name in CONFIRM_INTENTS
 
 
 def handle_upgrade_operation(
@@ -64,40 +65,21 @@ def _preview_and_save(
     _attach_receipt_target(payload, request)
     preview = _preview_operation(payload)
     _freeze_preview_target(payload, preview)
-    payload_hash = hash_operation_payload(payload)
-    operation = store.save_preview(
+    return build_previewed_operation_response(
+        tool_name="inbound.upgrade",
         operation_id=command_id,
-        command_id=command_id,
-        channel=request.channel,
-        sender_id=request.sender_id,
-        conversation_id=request.conversation_id,
-        operation_type=str(payload["operation_type"]),
-        payload_hash=payload_hash,
+        request=request,
+        store=store,
         payload=payload,
         preview=preview,
         ttl_seconds=ttl_seconds,
-    )
-    text = render_upgrade_response(
-        status="previewed",
-        operation_id=command_id,
-        payload=payload,
-        preview=preview,
-        expires_at=str(operation.get("expires_at") or ""),
-    )
-    return build_response(
-        tool_name="inbound.upgrade",
-        ok=True,
-        data={
-            "operation_id": command_id,
-            "operation_type": payload["operation_type"],
-            "status": "previewed",
-            "payload_hash": payload_hash,
-            "payload": payload,
-            "preview": preview,
-            "expires_at": operation.get("expires_at"),
-            "response_text": text,
-        },
-        meta={"audit_db": mask_path(store.path)},
+        response_text=lambda operation: render_upgrade_response(
+            status="previewed",
+            operation_id=command_id,
+            payload=payload,
+            preview=preview,
+            expires_at=str(operation.get("expires_at") or ""),
+        ),
     )
 
 
@@ -109,37 +91,26 @@ def _confirm_operation(*, operation_id: str | None, request: AssistantRequest, s
         allow_expired=False,
         action="确认",
     )
-    if operation_is_expired(operation):
-        result = {"operation_id": operation_id, "status": "expired"}
-        store.mark_expired(operation_id, result=result)
-        raise AgentToolError(code="NEEDS_CLARIFICATION", message="这条升级确认已过期，未执行升级。", hint="请重新发送：立即升级", details={**result, **operation_resolution})
-    payload = dict(operation["payload"])
-    stored_hash = str(operation.get("payload_hash") or "")
-    current_hash = hash_operation_payload(payload)
-    if stored_hash != current_hash:
-        result = {"operation_id": operation_id, "status": "failed", "reason": "payload_hash_mismatch"}
-        store.mark_failed(operation_id, result=result)
-        raise AgentToolError(code="INTERNAL_ERROR", message="pending upgrade operation payload hash mismatch; refusing to upgrade", details=result)
-    verify_operation_signature(operation)
     queued = {
         "operation_id": operation_id,
         "status": "confirmed",
         "task_status": "queued",
         "receipt_target": _receipt_target_from_request(request),
     }
-    if not store.mark_confirmed(operation_id, result=queued):
-        current = store.get(operation_id) or {}
-        current_status = str(current.get("status") or "-")
-        raise AgentToolError(
-            code="INPUT_ERROR",
-            message=cannot_repeat_message("升级操作", "确认", current_status),
-            details={
-                "operation_id": operation_id,
-                "status": current_status,
-                "reason": "operation_not_previewed",
-                **operation_resolution,
-            },
-        )
+    confirmed = confirm_previewed_operation_or_raise(
+        operation_id=operation_id,
+        operation=operation,
+        operation_resolution=operation_resolution,
+        store=store,
+        subject="升级操作",
+        expired_message="这条升级确认已过期，未执行升级。",
+        expired_hint="请重新发送：立即升级",
+        hash_mismatch_message="pending upgrade operation payload hash mismatch; refusing to upgrade",
+        confirmed_result=queued,
+    )
+    operation_id = confirmed.operation_id
+    operation_resolution = confirmed.operation_resolution
+    payload = confirmed.payload
     try:
         launch = _launch_upgrade_worker(operation_id=operation_id, audit_db=store.path)
     except AgentToolError as exc:
@@ -158,7 +129,7 @@ def _confirm_operation(*, operation_id: str | None, request: AssistantRequest, s
             **operation_resolution,
             "operation_type": payload["operation_type"],
             "status": "confirmed",
-            "payload_hash": current_hash,
+            "payload_hash": confirmed.payload_hash,
             "payload": payload,
             "preview": operation.get("preview"),
             "result": launch,
