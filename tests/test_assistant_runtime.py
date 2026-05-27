@@ -57,6 +57,23 @@ def test_assistant_command_parser_maps_read_commands() -> None:
     assert logs.arguments == {"run_id": "20260515T182459Z-474761", "kind": "all", "lines": 50}
 
 
+def test_assistant_command_parser_maps_manual_trade_preview_commands() -> None:
+    open_cmd = parse_assistant_command(
+        "/record-open lx NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100"
+    )
+    assert open_cmd is not None
+    assert open_cmd.name == "manual_trade_open"
+    assert open_cmd.arguments == {
+        "raw_text": "记录开仓 lx NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100"
+    }
+    assert open_cmd.parser == "command"
+
+    close_cmd = parse_assistant_command("/record-close record_id=rec_abc123 1张 close 0.8")
+    assert close_cmd is not None
+    assert close_cmd.name == "manual_trade_close"
+    assert close_cmd.arguments == {"raw_text": "记录平仓 record_id=rec_abc123 1张 close 0.8"}
+
+
 def test_assistant_command_catalog_drives_llm_allowed_surface() -> None:
     llm_executable = {
         spec.intent_name
