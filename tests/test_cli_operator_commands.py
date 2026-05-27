@@ -299,6 +299,8 @@ def test_assistant_commands_command_renders_catalog(capsys) -> None:
 
     assert rc == 0
     assert "/status" in text
+    assert "/record-open" in text
+    assert "/record-close" in text
     assert "/confirm trade|symbol|upgrade" in text
 
 

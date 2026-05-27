@@ -52,6 +52,22 @@ def parse_assistant_command(text: str, *, now_fn: Callable[[], date] | None = No
     if command in _COMMANDS["pending_operations"]:
         _reject_extra(command, args)
         return _intent("pending_operations")
+    if command in _COMMANDS["manual_trade_open"]:
+        return _parse_manual_trade_preview_command(
+            command,
+            args,
+            intent_name="manual_trade_open",
+            action_prefix="记录开仓",
+            hint="支持：/record-open lx NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100。",
+        )
+    if command in _COMMANDS["manual_trade_close"]:
+        return _parse_manual_trade_preview_command(
+            command,
+            args,
+            intent_name="manual_trade_close",
+            action_prefix="记录平仓",
+            hint="支持：/record-close record_id=<record_id> 1张 close 0.8。",
+        )
     if command in _COMMANDS["manual_trade_confirm"]:
         return _parse_operation_command(command, args, target_map=_CONFIRM_TARGETS, action_label="确认")
     if command in _COMMANDS["manual_trade_cancel"]:
@@ -101,6 +117,20 @@ def _parse_positions(command: str, args: list[str]) -> AssistantIntent:
     if account:
         payload["account"] = account
     return _intent("option_positions_open", payload)
+
+
+def _parse_manual_trade_preview_command(
+    command: str,
+    args: list[str],
+    *,
+    intent_name: str,
+    action_prefix: str,
+    hint: str,
+) -> AssistantIntent:
+    if not args:
+        raise _bad_arg(command, "", hint)
+    raw_text = f"{action_prefix} {' '.join(args)}"
+    return _intent(intent_name, {"raw_text": raw_text})
 
 
 def _parse_income(command: str, args: list[str], *, today: date) -> AssistantIntent:

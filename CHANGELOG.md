@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.2.155 - 2026-05-27
+
+### Added
+- Added deterministic `/record-open` and `/record-close` assistant commands for manual trade write-preview intake.
+
+### Changed
+- Documented that manual trade slash commands reuse the existing preview/confirm safety path and remain outside the LLM-executable intent set.
+
 ## 1.2.154 - 2026-05-27
 
 ### Added
