@@ -73,6 +73,8 @@ Read commands use the pure-read whitelist. Admin write operations are separate a
 | `/logs <run_id>` | runtime logs |
 | `/symbols` | monitored symbols |
 | `/pending` | pending preview operations |
+| `/record-open ...` | preview a manual opening trade record |
+| `/record-close ...` | preview a manual closing trade record |
 | `/confirm trade|symbol|upgrade [operation_id]` | confirm a pending write preview |
 | `/cancel trade|symbol|upgrade [operation_id]` | cancel a pending write preview |
 
@@ -110,7 +112,7 @@ assistant:
     max_output_tokens: 512
 ```
 
-When enabled, LLM translation only runs after command and deterministic parsing fail. It must return an `om-llm-intent-v1` JSON intent into the same Assistant execution router; it must not execute tools or rewrite canonical OM responses. The current intent schema is read-only and only allows help/status/health/config/positions/income/runs/logs/symbols/pending operations.
+When enabled, LLM translation only runs after command and deterministic parsing fail. It must return an `om-llm-intent-v1` JSON intent into the same Assistant execution router; it must not execute tools or rewrite canonical OM responses. The LLM executable intent schema is read-only and only allows help/status/health/config/positions/income/runs/logs/symbols/pending operations. Write-preview slash commands such as `/record-open` and `/record-close` are deterministic command-facade entries, not LLM-executable intents.
 
 The command surface authority is `src/application/assistant/commands.py`. Slash command metadata, the read-only LLM intent surface, and inbound help text should use that catalog instead of maintaining separate command lists.
 
