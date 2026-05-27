@@ -9,11 +9,7 @@ from domain.domain.option_position_lots import BUY_TO_CLOSE, EXPIRE_AUTO_CLOSE, 
 import src.application.ledger.interventions as ledger_interventions
 import src.application.ledger.manual_trades as ledger_manual_trades
 import src.application.ledger.repository as ledger_repository
-from src.application.positions.reporting import (
-    build_income_row,
-    build_monthly_income_report,
-    build_premium_income_row,
-)
+from src.application.positions.reporting import build_monthly_income_report
 
 
 def _ms(date: str) -> int:
@@ -24,139 +20,6 @@ def _ms(date: str) -> int:
 
 def _assert_contains(row: dict[str, Any], expected: dict[str, Any]) -> None:
     assert {key: row.get(key) for key in expected} == expected
-
-
-def test_build_income_row_for_buy_to_close() -> None:
-    row, warning = build_income_row(
-        {
-            "record_id": "rec_1",
-            "fields": {
-                "broker": "富途证券（香港）",
-                "account": "LX",
-                "symbol": "0700.HK",
-                "status": "close",
-                "contracts": 2,
-                "contracts_closed": 2,
-                "currency": "港币",
-                "premium": 3.93,
-                "close_price": 1.2,
-                "close_type": BUY_TO_CLOSE,
-                "closed_at": _ms("2026-04-20"),
-                "note": "multiplier=100",
-            },
-        }
-    )
-
-    assert warning is None
-    assert row is not None
-    assert row.month == "2026-04"
-    assert row.account == "lx"
-    assert row.broker == "富途"
-    assert row.currency == "HKD"
-    assert row.realized_gross == 546.0
-
-
-def test_build_income_row_for_expire_auto_close_uses_zero_close_price() -> None:
-    row, warning = build_income_row(
-        {
-            "record_id": "rec_2",
-            "fields": {
-                "broker": "富途",
-                "account": "sy",
-                "symbol": "NVDA",
-                "status": "close",
-                "contracts": 1,
-                "contracts_closed": 1,
-                "currency": "USD",
-                "premium": 2.5,
-                "multiplier": 100,
-                "close_type": EXPIRE_AUTO_CLOSE,
-                "closed_at": _ms("2026-05-01"),
-            },
-        }
-    )
-
-    assert warning is None
-    assert row is not None
-    assert row.month == "2026-05"
-    assert row.close_price == 0.0
-    assert row.multiplier == 100
-    assert row.realized_gross == 250.0
-
-
-def test_build_income_row_does_not_use_market_fallback_for_broker_label() -> None:
-    row, warning = build_income_row(
-        {
-            "record_id": "rec_market_only",
-            "fields": {
-                "market": "富途证券（香港）",
-                "account": "lx",
-                "symbol": "NVDA",
-                "status": "close",
-                "contracts": 1,
-                "contracts_closed": 1,
-                "currency": "USD",
-                "premium": 2.5,
-                "multiplier": 100,
-                "close_price": 1.0,
-                "close_type": BUY_TO_CLOSE,
-                "closed_at": _ms("2026-05-01"),
-            },
-        }
-    )
-
-    assert warning is None
-    assert row is not None
-    assert row.broker == "-"
-
-
-def test_build_income_row_warns_when_buy_close_missing_close_price() -> None:
-    row, warning = build_income_row(
-        {
-            "record_id": "rec_3",
-            "fields": {
-                "broker": "富途",
-                "account": "lx",
-                "symbol": "NVDA",
-                "status": "close",
-                "contracts": 1,
-                "contracts_closed": 1,
-                "currency": "USD",
-                "premium": 2.5,
-                "multiplier": 100,
-                "close_type": BUY_TO_CLOSE,
-                "closed_at": _ms("2026-05-01"),
-            },
-        }
-    )
-
-    assert row is None
-    assert warning == "rec_3: missing close_price"
-
-
-def test_build_premium_income_row_for_short_position_uses_opened_at_month() -> None:
-    row, warning = build_premium_income_row(
-        {
-            "record_id": "rec_4",
-            "fields": {
-                "broker": "富途",
-                "account": "lx",
-                "symbol": "NVDA",
-                "side": "short",
-                "contracts": 2,
-                "currency": "USD",
-                "premium": 2.5,
-                "multiplier": 100,
-                "opened_at": _ms("2026-04-03"),
-            },
-        }
-    )
-
-    assert warning is None
-    assert row is not None
-    assert row.month == "2026-04"
-    assert row.currency == "USD"
-    assert row.premium_received_gross == 500.0
 
 
 def test_build_monthly_income_report_groups_by_month_account_currency() -> None:
@@ -206,6 +69,39 @@ def test_build_monthly_income_report_groups_by_month_account_currency() -> None:
         broker="富途",
         month="2026-04",
         rates={"rates": {"USDCNY": 7.2, "HKDCNY": 0.92}},
+        trade_events=[
+            _trade_event(
+                "open-hk",
+                side="sell",
+                position_effect="open",
+                price=3.93,
+                trade_date="2026-04-02",
+                symbol="0700.HK",
+                currency="HKD",
+                contracts=2,
+                strike=510,
+            ),
+            _trade_event(
+                "close-hk",
+                side="buy",
+                position_effect="close",
+                price=1.2,
+                trade_date="2026-04-20",
+                symbol="0700.HK",
+                currency="HKD",
+                contracts=2,
+                strike=510,
+            ),
+            _trade_event("open-us", side="sell", position_effect="open", price=2.5, trade_date="2026-04-15"),
+            _trade_event(
+                "expire-us",
+                side="buy",
+                position_effect="close",
+                price=0.0,
+                trade_date="2026-05-01",
+                raw_payload={"close_type": EXPIRE_AUTO_CLOSE},
+            ),
+        ],
     )
 
     assert report["warnings"] == []
@@ -275,7 +171,16 @@ def test_build_monthly_income_report_leaves_cny_fields_empty_without_rates() -> 
         },
     ]
 
-    report = build_monthly_income_report(records, account="lx", broker="富途", month="2026-04")
+    report = build_monthly_income_report(
+        records,
+        account="lx",
+        broker="富途",
+        month="2026-04",
+        trade_events=[
+            _trade_event("open-short", side="sell", position_effect="open", price=2.5, trade_date="2026-04-02"),
+            _trade_event("close-short", side="buy", position_effect="close", price=1.0, trade_date="2026-04-20"),
+        ],
+    )
 
     assert len(report["summary"]) == 1
     _assert_contains(
@@ -361,6 +266,26 @@ def test_monthly_income_return_summary_uses_account_cash_secured_and_long_call_c
         month="2026-05",
         rates={"rates": {"USDCNY": 7.2, "HKDCNY": 0.92}},
         now_fn=lambda: date(2026, 5, 19),
+        trade_events=[
+            _trade_event(
+                "open-hk-put",
+                side="sell",
+                position_effect="open",
+                price=2.0,
+                trade_date="2026-05-02",
+                symbol="0700.HK",
+                currency="HKD",
+            ),
+            _trade_event("open-us-put", side="sell", position_effect="open", price=3.0, trade_date="2026-05-03"),
+            _trade_event(
+                "open-long-call",
+                side="buy",
+                position_effect="open",
+                option_type="call",
+                price=1.0,
+                trade_date="2026-05-03",
+            ),
+        ],
     )
 
     assert report["warnings"] == []
@@ -423,6 +348,19 @@ def test_monthly_income_return_summary_outputs_each_account_when_account_filter_
         month="2026-05",
         rates={"rates": {"USDCNY": 7.2, "HKDCNY": 0.92}},
         now_fn=lambda: date(2026, 5, 19),
+        trade_events=[
+            _trade_event("open-lx", side="sell", position_effect="open", price=2.0, trade_date="2026-05-03"),
+            _trade_event(
+                "open-sy",
+                side="sell",
+                position_effect="open",
+                price=3.0,
+                trade_date="2026-05-04",
+                account="sy",
+                symbol="0700.HK",
+                currency="HKD",
+            ),
+        ],
     )
 
     assert [(row["account"], row["cash_secured_cny"]) for row in report["return_summary"]] == [
@@ -452,7 +390,15 @@ def test_monthly_income_return_summary_warns_when_exchange_rate_missing() -> Non
         },
     ]
 
-    report = build_monthly_income_report(records, account="lx", broker="富途", month="2026-05")
+    report = build_monthly_income_report(
+        records,
+        account="lx",
+        broker="富途",
+        month="2026-05",
+        trade_events=[
+            _trade_event("open-lx", side="sell", position_effect="open", price=2.0, trade_date="2026-05-03"),
+        ],
+    )
 
     row = report["return_summary"][0]
     assert row["cash_secured_cny"] is None
@@ -488,6 +434,9 @@ def test_monthly_income_diagnostics_marks_calculable_summary_ok() -> None:
         broker="富途",
         month="2026-05",
         rates={"rates": {"USDCNY": 7.2}},
+        trade_events=[
+            _trade_event("open-lx", side="sell", position_effect="open", price=2.0, trade_date="2026-05-03"),
+        ],
     )
 
     diag = report["diagnostics"][0]
@@ -561,13 +510,28 @@ def test_monthly_income_diagnostics_exposes_missing_cash_secured_and_conversion(
         }
     ]
 
-    report = build_monthly_income_report(records, account="sy", broker="富途", month="2026-05")
+    report = build_monthly_income_report(
+        records,
+        account="sy",
+        broker="富途",
+        month="2026-05",
+        trade_events=[
+            _trade_event(
+                "open-sy",
+                side="sell",
+                position_effect="open",
+                price=2.0,
+                trade_date="2026-05-03",
+                account="sy",
+            ),
+        ],
+    )
 
     diag = report["diagnostics"][0]
     assert diag["status"] == "incomplete"
     assert diag["matched_lots_count"] == 1
     assert diag["premium_rows_count"] == 1
-    assert "cash_secured" in diag["missing_fields"]
+    assert "cash_secured" not in diag["missing_fields"]
     assert "currency_conversion" in diag["missing_fields"]
 
 
@@ -609,7 +573,24 @@ def test_monthly_income_diagnostics_distinguishes_cash_secured_conversion_missin
         },
     ]
 
-    report = build_monthly_income_report(records, account="lx", broker="富途", month="2026-05")
+    report = build_monthly_income_report(
+        records,
+        account="lx",
+        broker="富途",
+        month="2026-05",
+        trade_events=[
+            _trade_event(
+                "open-hk",
+                side="sell",
+                position_effect="open",
+                price=237.35,
+                trade_date="2026-05-03",
+                symbol="9992.HK",
+                currency="HKD",
+            ),
+            _trade_event("open-us", side="sell", position_effect="open", price=24.0, trade_date="2026-05-03"),
+        ],
+    )
 
     row = report["return_summary"][0]
     assert row["cash_secured_by_ccy"] == {"HKD": 377500.0, "USD": 29745.0}
@@ -635,6 +616,30 @@ def test_read_model_monthly_income_report_uses_canonical_lot_records() -> None:
     import src.application.ledger.read_model as read_model
 
     class _Repo:
+        def list_trade_events(self) -> list[dict[str, Any]]:
+            return [
+                _trade_event(
+                    "open-hk",
+                    side="sell",
+                    position_effect="open",
+                    price=3.93,
+                    trade_date="2026-04-02",
+                    symbol="0700.HK",
+                    currency="HKD",
+                    contracts=2,
+                ),
+                _trade_event(
+                    "close-hk",
+                    side="buy",
+                    position_effect="close",
+                    price=1.2,
+                    trade_date="2026-04-20",
+                    symbol="0700.HK",
+                    currency="HKD",
+                    contracts=2,
+                ),
+            ]
+
         def list_position_lots(self) -> list[dict[str, Any]]:
             return [
                 {
@@ -746,6 +751,7 @@ def test_monthly_income_report_excludes_voided_open_event_projection(tmp_path) -
         account="lx",
         broker="富途",
         month="2026-04",
+        trade_events=repo.list_trade_events(),
     )
 
     assert report["rows"] == []
@@ -797,6 +803,7 @@ def test_monthly_income_report_excludes_voided_close_event_but_keeps_open_premiu
         account="lx",
         broker="富途",
         month="2026-04",
+        trade_events=repo.list_trade_events(),
     )
 
     assert report["rows"] == []
@@ -859,12 +866,14 @@ def test_monthly_income_report_uses_adjusted_premium_and_opened_at(tmp_path) -> 
         account="lx",
         broker="富途",
         month="2026-04",
+        trade_events=repo.list_trade_events(),
     )
     may_report = build_monthly_income_report(
         repo.list_records(page_size=500),
         account="lx",
         broker="富途",
         month="2026-05",
+        trade_events=repo.list_trade_events(),
     )
 
     assert april_report["premium_rows"] == []
@@ -889,31 +898,28 @@ def test_monthly_income_report_uses_adjusted_premium_and_opened_at(tmp_path) -> 
     )
 
 
-def test_monthly_income_report_legacy_long_call_cashflow_and_realized_are_separate() -> None:
-    records = [
-        {
-            "record_id": "rec_long_call",
-            "fields": {
-                "broker": "富途",
-                "account": "lx",
-                "symbol": "NVDA",
-                "option_type": "call",
-                "side": "long",
-                "status": "close",
-                "contracts": 1,
-                "contracts_closed": 1,
-                "currency": "USD",
-                "premium": 1.2,
-                "close_price": 2.0,
-                "multiplier": 100,
-                "opened_at": _ms("2026-04-03"),
-                "closed_at": _ms("2026-05-01"),
-            },
-        }
+def test_monthly_income_report_event_long_call_cashflow_and_realized_are_separate() -> None:
+    events = [
+        _trade_event(
+            "open-long-call",
+            side="buy",
+            position_effect="open",
+            option_type="call",
+            price=1.2,
+            trade_date="2026-04-03",
+        ),
+        _trade_event(
+            "close-long-call",
+            side="sell",
+            position_effect="close",
+            option_type="call",
+            price=2.0,
+            trade_date="2026-05-01",
+        ),
     ]
 
-    april = build_monthly_income_report(records, account="lx", broker="富途", month="2026-04")
-    may = build_monthly_income_report(records, account="lx", broker="富途", month="2026-05")
+    april = build_monthly_income_report([], account="lx", broker="富途", month="2026-04", trade_events=events)
+    may = build_monthly_income_report([], account="lx", broker="富途", month="2026-05", trade_events=events)
 
     _assert_contains(
         april["summary"][0],
@@ -946,6 +952,10 @@ def _trade_event(
     position_effect: str,
     price: float,
     trade_date: str,
+    account: str = "lx",
+    broker: str = "富途",
+    symbol: str = "NVDA",
+    currency: str = "USD",
     option_type: str = "put",
     contracts: int = 1,
     multiplier: int = 100,
@@ -957,9 +967,9 @@ def _trade_event(
         "event_id": event_id,
         "source_type": "manual_trade_event",
         "source_name": "test",
-        "broker": "富途",
-        "account": "lx",
-        "symbol": "NVDA",
+        "broker": broker,
+        "account": account,
+        "symbol": symbol,
         "option_type": option_type,
         "side": side,
         "position_effect": position_effect,
@@ -968,7 +978,7 @@ def _trade_event(
         "strike": strike,
         "multiplier": multiplier,
         "expiration_ymd": expiration_ymd,
-        "currency": "USD",
+        "currency": currency,
         "trade_time_ms": _ms(trade_date),
         "order_id": None,
         "multiplier_source": "payload",

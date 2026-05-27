@@ -4,7 +4,6 @@ import hashlib
 import json
 import sqlite3
 import sys
-from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -19,15 +18,12 @@ from domain.domain.ledger.position_fields import (
     now_ms,
 )
 from domain.domain.trade_contract_identity import canonical_contract_symbol
-from src.application.ledger.event_codec import stored_trade_event_to_ledger_event
-from src.application.ledger.migration import legacy_trade_event_to_ledger_event
 from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
 from src.application.ledger.repository import (
     SQLiteOptionPositionsRepository,
     _load_data_config,
     with_sqlite_repo_transaction,
 )
-from src.application.ledger.sqlite_row_codec import position_lot_row_to_record
 from src.application.ledger.store_resolution import resolve_ledger_store
 from src.infrastructure.feishu_bitable import safe_float
 
@@ -243,251 +239,6 @@ def materialize_bootstrap_events(repo: SQLiteOptionPositionsRepository, events: 
     return int(with_sqlite_repo_transaction(repo, _run))
 
 
-def _legacy_sqlite_connect(path: Path) -> sqlite3.Connection:
-    uri = f"{path.resolve().as_uri()}?mode=ro"
-    conn = sqlite3.connect(uri, uri=True)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=5000")
-    return conn
-
-
-def _legacy_table_exists(conn: sqlite3.Connection, name: str) -> bool:
-    row = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",
-        (str(name),),
-    ).fetchone()
-    return row is not None
-
-
-def _legacy_table_count(conn: sqlite3.Connection, name: str) -> int:
-    if not _legacy_table_exists(conn, name):
-        return 0
-    row = conn.execute(f"SELECT COUNT(*) AS cnt FROM {name}").fetchone()
-    return int((row["cnt"] if row is not None else 0) or 0)
-
-
-def _legacy_sqlite_counts(path: Path) -> dict[str, int] | None:
-    if not path.exists():
-        return None
-    with closing(_legacy_sqlite_connect(path)) as conn:
-        return {
-            "trade_events": _legacy_table_count(conn, "trade_events"),
-            "position_lots": _legacy_table_count(conn, "position_lots"),
-            "option_positions": _legacy_table_count(conn, "option_positions"),
-        }
-
-
-def _list_legacy_trade_events(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    if not _legacy_table_exists(conn, "trade_events"):
-        return []
-    rows = conn.execute(
-        """
-        SELECT event_json
-        FROM trade_events
-        ORDER BY trade_time_ms ASC, event_id ASC
-        """
-    ).fetchall()
-    events: list[dict[str, Any]] = []
-    for row in rows:
-        item = json.loads(str(row["event_json"]) or "{}")
-        if isinstance(item, dict):
-            events.append(item)
-    return events
-
-
-def _canonicalize_migrated_trade_events(events: list[dict[str, Any]]) -> list[TradeEvent]:
-    canonical: list[TradeEvent] = []
-    error_codes: list[str] = []
-    for item in events:
-        event, diagnostics = stored_trade_event_to_ledger_event(item)
-        errors = [diag for diag in diagnostics if getattr(diag, "severity", "") == "error"]
-        if event is not None and not errors:
-            canonical.append(event)
-            continue
-
-        legacy_event, legacy_diagnostics = legacy_trade_event_to_ledger_event(item)
-        legacy_errors = [diag for diag in legacy_diagnostics if getattr(diag, "severity", "") == "error"]
-        if legacy_event is not None and not legacy_errors:
-            canonical.append(legacy_event)
-            continue
-
-        error_codes.extend(str(getattr(diag, "code", "") or "unknown") for diag in [*errors, *legacy_errors])
-    if error_codes:
-        joined = ", ".join(error_codes[:8])
-        raise ValueError(f"legacy trade_events migration failed canonicalization: {joined}")
-    return canonical
-
-
-def _list_legacy_position_lots(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    if not _legacy_table_exists(conn, "position_lots"):
-        return []
-    rows = conn.execute(
-        """
-        SELECT record_id, fields_json, expiration, strike, multiplier
-        FROM position_lots
-        ORDER BY updated_at_ms DESC, record_id DESC
-        """
-    ).fetchall()
-    return [position_lot_row_to_record(row) for row in rows]
-
-
-def _list_legacy_option_positions(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    if not _legacy_table_exists(conn, "option_positions"):
-        return []
-    rows = conn.execute(
-        """
-        SELECT record_id, fields_json
-        FROM option_positions
-        ORDER BY updated_at_ms DESC, record_id DESC
-        """
-    ).fetchall()
-    records: list[dict[str, Any]] = []
-    for row in rows:
-        fields = json.loads(str(row["fields_json"]) or "{}")
-        records.append(
-            {
-                "record_id": str(row["record_id"]),
-                "fields": fields if isinstance(fields, dict) else {},
-            }
-        )
-    return records
-
-
-def _legacy_source_table(counts: dict[str, int] | None) -> str | None:
-    if not counts:
-        return None
-    if int(counts.get("trade_events") or 0) > 0:
-        return "trade_events"
-    if int(counts.get("position_lots") or 0) > 0:
-        return "position_lots"
-    if int(counts.get("option_positions") or 0) > 0:
-        return "option_positions"
-    return None
-
-
-def inspect_legacy_sqlite_migration(legacy_path: str | Path | None) -> dict[str, Any]:
-    path_text = str(legacy_path or "").strip()
-    if not path_text:
-        return {
-            "ok": False,
-            "legacy_sqlite_path": None,
-            "exists": False,
-            "counts": None,
-            "source_table": None,
-            "message": "legacy SQLite path is required",
-        }
-    path = Path(path_text).expanduser().resolve()
-    try:
-        counts = _legacy_sqlite_counts(path)
-    except Exception as exc:
-        return {
-            "ok": False,
-            "legacy_sqlite_path": str(path),
-            "exists": path.exists(),
-            "counts": None,
-            "source_table": None,
-            "message": f"failed to inspect legacy SQLite: {exc}",
-        }
-    if counts is None:
-        return {
-            "ok": False,
-            "legacy_sqlite_path": str(path),
-            "exists": False,
-            "counts": None,
-            "source_table": None,
-            "message": "legacy SQLite database not found",
-        }
-    source_table = _legacy_source_table(counts)
-    return {
-        "ok": source_table is not None,
-        "legacy_sqlite_path": str(path),
-        "exists": True,
-        "counts": counts,
-        "source_table": source_table,
-        "message": "legacy SQLite has migratable rows" if source_table else "legacy SQLite database has no bootstrap rows",
-    }
-
-
-def migrate_legacy_sqlite_to_repo(
-    repo: SQLiteOptionPositionsRepository,
-    *,
-    legacy_path: str | Path | None,
-    apply: bool = False,
-) -> dict[str, Any]:
-    inspection = inspect_legacy_sqlite_migration(legacy_path)
-    payload: dict[str, Any] = {
-        **inspection,
-        "active_sqlite_path": str(repo.db_path),
-        "applied": False,
-        "migrated_count": 0,
-        "bootstrap_status": getattr(repo, "bootstrap_status", None),
-        "bootstrap_message": getattr(repo, "bootstrap_message", None),
-    }
-    if not bool(inspection.get("ok")):
-        return payload
-    if not apply:
-        payload["message"] = "dry run; pass --confirm or --yes to migrate legacy SQLite into active trade_events"
-        return payload
-
-    path = Path(str(inspection["legacy_sqlite_path"])).expanduser().resolve()
-    counts = inspection.get("counts") if isinstance(inspection.get("counts"), dict) else {}
-    source_table = str(inspection.get("source_table") or "")
-
-    try:
-        with closing(_legacy_sqlite_connect(path)) as conn:
-            if source_table == "trade_events":
-                count = materialize_bootstrap_events(repo, _canonicalize_migrated_trade_events(_list_legacy_trade_events(conn)))
-                repo.bootstrap_status = "migrated_legacy_trade_events"
-                repo.bootstrap_message = f"migrated {count} trade events from legacy SQLite trade_events"
-            elif source_table == "position_lots":
-                events = _bootstrap_trade_events(
-                    _list_legacy_position_lots(conn),
-                    source_name="legacy_position_lots",
-                )
-                count = materialize_bootstrap_events(repo, events)
-                repo.bootstrap_status = "migrated_legacy_position_lots"
-                repo.bootstrap_message = f"migrated {count} bootstrap events from legacy SQLite position_lots"
-            else:
-                events = _bootstrap_trade_events(
-                    _normalize_bootstrap_records(_list_legacy_option_positions(conn)),
-                    source_name="legacy_option_positions",
-                )
-                count = materialize_bootstrap_events(repo, events)
-                repo.bootstrap_status = "migrated_legacy_option_positions"
-                repo.bootstrap_message = f"migrated {count} trade events from legacy SQLite option_positions"
-    except Exception as exc:
-        repo.bootstrap_status = "degraded_legacy_sqlite_migration_failed"
-        repo.bootstrap_message = f"legacy SQLite migration failed: {exc}"
-        payload.update(
-            {
-                "ok": False,
-                "applied": False,
-                "migrated_count": 0,
-                "bootstrap_status": repo.bootstrap_status,
-                "bootstrap_message": repo.bootstrap_message,
-                "message": f"legacy SQLite migration failed: {exc}",
-            }
-        )
-        print(
-            f"[WARN] option_positions legacy SQLite migration skipped for {repo.db_path}: {exc}",
-            file=sys.stderr,
-        )
-        return payload
-
-    payload.update(
-        {
-            "ok": True,
-            "applied": True,
-            "migrated_count": count,
-            "counts": counts,
-            "bootstrap_status": repo.bootstrap_status,
-            "bootstrap_message": repo.bootstrap_message,
-            "message": repo.bootstrap_message,
-        }
-    )
-    return payload
-
-
 def apply_bootstrap_snapshot(
     repo: Any,
     *,
@@ -534,10 +285,10 @@ def load_option_positions_repo(
         return repo
 
     if repo.count_position_lots() > 0:
-        repo.bootstrap_status = "sqlite_only_legacy_position_lots_present"
+        repo.bootstrap_status = "sqlite_only_position_lots_without_trade_events"
         repo.bootstrap_message = (
-            "position_lots exist without trade_events; run explicit "
-            "option-positions store migrate-legacy before ledger writes"
+            "position_lots exist without trade_events; rebuild from canonical trade_events "
+            "or repair the active ledger before writes"
         )
         return repo
 

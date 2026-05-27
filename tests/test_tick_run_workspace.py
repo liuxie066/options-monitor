@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 
-def test_prepare_tick_run_workspace_creates_required_dirs_and_legacy_link(tmp_path) -> None:
+def test_prepare_tick_run_workspace_creates_required_dirs(tmp_path) -> None:
     from src.application.tick_run_workspace import prepare_tick_run_workspace
 
     workspace = prepare_tick_run_workspace(
@@ -15,8 +15,6 @@ def test_prepare_tick_run_workspace_creates_required_dirs_and_legacy_link(tmp_pa
     assert (workspace.accounts_root / "lx" / "parsed").is_dir()
     assert (workspace.accounts_root / "lx" / "reports").is_dir()
     assert (workspace.accounts_root / "lx" / "state").is_dir()
-    assert workspace.out_link.is_symlink()
-    assert workspace.out_link.resolve() == (workspace.accounts_root / "lx").resolve()
     assert workspace.run_dir.is_dir()
     assert (workspace.shared_required / "raw").is_dir()
     assert (workspace.shared_required / "parsed").is_dir()

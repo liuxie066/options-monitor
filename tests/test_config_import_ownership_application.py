@@ -282,11 +282,9 @@ def test_multiplier_cache_imports_application_owner_module() -> None:
         importlib.import_module("scripts.option_intake")
 
     owner_mod = importlib.import_module("src.application.multiplier_cache")
-    reporting_mod = importlib.import_module("src.application.positions.reporting")
     trade_normalizer_mod = importlib.import_module("src.application.trades.normalizer")
     parse_message_mod = importlib.import_module("src.application.parse_option_message")
 
-    assert reporting_mod.resolve_multiplier is owner_mod.resolve_multiplier
     assert trade_normalizer_mod.resolve_multiplier_with_source_and_diagnostics is owner_mod.resolve_multiplier_with_source_and_diagnostics
     assert parse_message_mod.resolve_multiplier_with_source is owner_mod.resolve_multiplier_with_source
 

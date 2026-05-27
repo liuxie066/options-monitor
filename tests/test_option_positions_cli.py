@@ -121,8 +121,8 @@ def test_option_positions_cli_rebuild_ignores_deprecated_sqlite_path(monkeypatch
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["ledger_store"]["sqlite_path"] == str((tmp_path / "output_shared" / "state" / "option_positions.sqlite3").resolve())
-    assert payload["ledger_store"]["legacy_sqlite_path"] == str((tmp_path / "option_positions.sqlite3").resolve())
-    assert any("ignored" in item for item in payload["ledger_store"]["warnings"])
+    assert "legacy_sqlite_path" not in payload["ledger_store"]
+    assert payload["ledger_store"]["warnings"] == []
 
 
 def test_option_positions_cli_store_inspect_reports_parallel_sqlite_candidates(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -162,12 +162,12 @@ def test_option_positions_cli_store_inspect_reports_parallel_sqlite_candidates(m
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["active"]["sqlite_path"] == str(active_db.resolve())
-    assert payload["active"]["legacy_sqlite_path"] == str(legacy_db.resolve())
-    assert payload["summary"]["multiple_populated"] is True
-    assert any("multiple ledger sqlite candidates contain rows" in item for item in payload["warnings"])
+    assert "legacy_sqlite_path" not in payload["active"]
+    assert payload["summary"]["multiple_populated"] is False
+    assert payload["warnings"] == []
     by_path = {item["path"]: item for item in payload["candidates"]}
     assert by_path[str(active_db.resolve())]["is_active"] is True
-    assert "legacy_configured_sqlite_path" in by_path[str(legacy_db.resolve())]["roles"]
+    assert str(legacy_db.resolve()) not in by_path
 
 
 def test_option_positions_cli_inspect_reports_projection_state(monkeypatch, tmp_path: Path, capsys) -> None:

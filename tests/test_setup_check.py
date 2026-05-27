@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from src.application.setup import run_setup_check
 
 
@@ -63,29 +65,20 @@ def test_cli_setup_check_outputs_json(monkeypatch, capsys) -> None:
     assert payload["data"]["markets"] == ["us"]
 
 
-def test_cli_setup_init_subcommand_delegates_to_runtime_init(monkeypatch, capsys, tmp_path: Path) -> None:
+def test_cli_setup_init_subcommand_is_removed(capsys) -> None:
     import src.interfaces.cli.main as cli
 
-    def _init_runtime(**kwargs):
-        return kwargs
+    with pytest.raises(SystemExit) as exc:
+        cli.main([
+            "setup",
+            "init",
+            "--market",
+            "us",
+            "--futu-acc-id",
+            "123456",
+            "--account",
+            "lx",
+        ])
 
-    monkeypatch.setattr(cli, "init_runtime", _init_runtime)
-
-    rc = cli.main([
-        "setup",
-        "init",
-        "--market",
-        "us",
-        "--futu-acc-id",
-        "123456",
-        "--account",
-        "lx",
-        "--config-path",
-        str(tmp_path / "config.us.json"),
-    ])
-    payload = json.loads(capsys.readouterr().out)
-
-    assert rc == 0
-    assert payload["tool_name"] == "setup.init"
-    assert payload["data"]["market"] == "us"
-    assert payload["data"]["account_label"] == "lx"
+    assert exc.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err

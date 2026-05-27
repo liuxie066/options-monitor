@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest  # pyright: ignore[reportMissingImports]
 
+from domain.domain.ledger import ContractKey, TradeEvent
 import src.application.ledger.bootstrap as bootstrap
 import src.application.ledger.bootstrap as ledger_bootstrap
 import src.application.ledger.interventions as ledger_interventions
@@ -70,8 +71,8 @@ def test_resolve_ledger_store_ignores_sqlite_path_for_standard_runtime_config(tm
     assert resolution.runtime_root_source == "data_config_parent"
     assert resolution.sqlite_path == (runtime_root / "output_shared" / "state" / "option_positions.sqlite3").resolve()
     assert resolution.sqlite_path_source == "runtime_root"
-    assert resolution.legacy_sqlite_path == legacy_db.resolve()
-    assert any("ignored" in item for item in resolution.warnings)
+    assert not hasattr(resolution, "legacy_sqlite_path")
+    assert resolution.warnings == ()
 
 
 def test_resolve_ledger_store_ignores_legacy_sqlite_path_for_nonstandard_test_config(tmp_path: Path) -> None:
@@ -87,8 +88,8 @@ def test_resolve_ledger_store_ignores_legacy_sqlite_path_for_nonstandard_test_co
     assert resolution.runtime_root == tmp_path.resolve()
     assert resolution.sqlite_path == (tmp_path / "output_shared" / "state" / "option_positions.sqlite3").resolve()
     assert resolution.sqlite_path_source == "runtime_root"
-    assert resolution.legacy_sqlite_path == legacy_db.resolve()
-    assert any("ignored" in item for item in resolution.warnings)
+    assert not hasattr(resolution, "legacy_sqlite_path")
+    assert resolution.warnings == ()
 
 
 def test_ledger_store_write_guard_fails_when_active_empty_but_systemd_default_populated(
@@ -422,23 +423,13 @@ def test_migrate_legacy_sqlite_imports_legacy_option_positions_explicitly(tmp_pa
         copy_legacy_to_standard=False,
     )
     loaded = ledger_bootstrap.load_option_positions_repo(data_config)
-    dry_run = ledger_bootstrap.migrate_legacy_sqlite_to_repo(loaded, legacy_path=db_path, apply=False)
-
-    assert dry_run["applied"] is False
-    assert dry_run["source_table"] == "option_positions"
-    assert loaded.count_trade_events() == 0
-
-    result = ledger_bootstrap.migrate_legacy_sqlite_to_repo(loaded, legacy_path=db_path, apply=True)
-
     rows = loaded.list_records(page_size=10)
-    assert len(rows) == 1
-    assert rows[0]["record_id"] == "legacy_1"
-    assert rows[0]["fields"]["broker"] == "富途"
+
+    assert not hasattr(ledger_bootstrap, "migrate_legacy_sqlite_to_repo")
+    assert rows == []
     assert loaded.db_path != db_path.resolve()
-    assert loaded.count_trade_events() == 1
-    assert loaded.bootstrap_status == "migrated_legacy_option_positions"
-    assert result["applied"] is True
-    assert result["migrated_count"] == 1
+    assert loaded.count_trade_events() == 0
+    assert loaded.bootstrap_status == "sqlite_only_no_feishu_bootstrap"
 
 
 def test_migrate_legacy_sqlite_prefers_legacy_trade_events_explicitly(tmp_path: Path) -> None:
@@ -530,16 +521,10 @@ def test_migrate_legacy_sqlite_prefers_legacy_trade_events_explicitly(tmp_path: 
 
     assert loaded.db_path != legacy_db.resolve()
     assert loaded.count_trade_events() == 0
-
-    result = ledger_bootstrap.migrate_legacy_sqlite_to_repo(loaded, legacy_path=legacy_db, apply=True)
-
-    assert loaded.count_trade_events() == 1
-    assert loaded.list_trade_events()[0]["event_id"] == "deal-open-legacy"
-    lots = loaded.list_position_lots()
-    assert len(lots) == 1
-    assert lots[0]["fields"]["symbol"] == "AAPL"
-    assert loaded.bootstrap_status == "migrated_legacy_trade_events"
-    assert result["source_table"] == "trade_events"
+    assert not hasattr(ledger_bootstrap, "migrate_legacy_sqlite_to_repo")
+    assert loaded.list_trade_events() == []
+    assert loaded.list_position_lots() == []
+    assert loaded.bootstrap_status == "sqlite_only_no_feishu_bootstrap"
 
 
 def test_migrate_legacy_sqlite_reports_missing_legacy_sqlite_explicitly(tmp_path: Path) -> None:
@@ -552,16 +537,13 @@ def test_migrate_legacy_sqlite_reports_missing_legacy_sqlite_explicitly(tmp_path
     )
 
     loaded = ledger_bootstrap.load_option_positions_repo(data_config)
-    result = ledger_bootstrap.migrate_legacy_sqlite_to_repo(loaded, legacy_path=legacy_db, apply=True)
 
+    assert not hasattr(ledger_bootstrap, "migrate_legacy_sqlite_to_repo")
     assert loaded.count_trade_events() == 0
     assert loaded.count_position_lots() == 0
-    assert result["ok"] is False
-    assert result["message"] == "legacy SQLite database not found"
-    assert result["legacy_sqlite_path"] == str(legacy_db.resolve())
 
 
-def test_load_option_positions_repo_does_not_migrate_existing_position_lots_by_default(tmp_path: Path) -> None:
+def test_load_option_positions_repo_reports_position_lots_without_trade_events(tmp_path: Path) -> None:
 
     db_path = tmp_path / "option_positions.sqlite3"
     repo = ledger_repository.SQLiteOptionPositionsRepository(db_path)
@@ -596,52 +578,44 @@ def test_load_option_positions_repo_does_not_migrate_existing_position_lots_by_d
     loaded = ledger_bootstrap.load_option_positions_repo(data_config)
 
     assert loaded.count_trade_events() == 0
-    assert loaded.bootstrap_status == "sqlite_only_legacy_position_lots_present"
-    assert "migrate-legacy" in str(loaded.bootstrap_message)
+    assert loaded.bootstrap_status == "sqlite_only_position_lots_without_trade_events"
+    assert "repair the active ledger" in str(loaded.bootstrap_message)
     rows = loaded.list_position_lots()
     assert len(rows) == 1
     assert rows[0]["record_id"] == "rec_bootstrap_1"
     assert rows[0]["fields"]["symbol"] == "TSLA"
 
 
-def test_bootstrap_seed_lot_survives_later_trade_event_projection(tmp_path: Path) -> None:
+def test_canonical_seed_lot_survives_later_trade_event_projection(tmp_path: Path) -> None:
     from src.application.trades.normalizer import NormalizedTradeDeal
 
     db_path = tmp_path / "output_shared" / "state" / "option_positions.sqlite3"
-    repo_seed = ledger_repository.SQLiteOptionPositionsRepository(db_path)
-    repo_seed.replace_position_lots(
-        [
-            PositionLotRecord(
-                record_id="rec_sy_seed",
-                fields={
-                    "account": "sy",
-                    "broker": "富途",
-                    "symbol": "AAPL",
-                    "option_type": "put",
-                    "side": "short",
-                    "status": "open",
-                    "contracts": 1,
-                    "contracts_open": 1,
-                    "contracts_closed": 0,
-                    "currency": "USD",
-                    "strike": 150.0,
-                    "expiration": 1781827200000,
-                    "opened_at": 1000,
-                    "last_action_at": 1000,
-                    "position_id": "AAPL_20260619_150P_short",
-                    "note": "exp=2026-06-19;premium_per_share=1.0",
-                    "premium": 1.0,
-                },
-            )
-        ]
-    )
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=db_path, with_feishu=False)
     repo = ledger_bootstrap.load_option_positions_repo(data_config)
-    migrate_result = ledger_bootstrap.migrate_legacy_sqlite_to_repo(repo, legacy_path=db_path, apply=True)
+    ledger_writer.persist_trade_event_object(
+        repo,
+        TradeEvent(
+            event_id="seed-rec-sy",
+            event_type="open",
+            event_time_ms=1000,
+            contract_key=ContractKey.from_values(
+                broker="富途",
+                account="sy",
+                underlying_symbol="AAPL",
+                option_type="put",
+                position_side="short",
+                strike=150.0,
+                expiration_ymd="2026-06-19",
+            ),
+            contracts=1,
+            price=1.0,
+            currency="USD",
+            source="test_seed_open_lot",
+            multiplier=100,
+            lot_id="rec_sy_seed",
+        ),
+    )
 
-    assert migrate_result["ok"] is True
-    assert migrate_result["applied"] is True
-    assert migrate_result["source_table"] == "position_lots"
     assert repo.count_trade_events() == 1
     open_deal = NormalizedTradeDeal(
         broker="富途",
@@ -747,7 +721,7 @@ def test_load_option_positions_repo_does_not_degrade_when_retired_feishu_bootstr
     assert "source of truth" in str(repo.bootstrap_message)
 
 
-def test_load_option_positions_repo_does_not_validate_legacy_position_lots_until_explicit_migration(tmp_path: Path) -> None:
+def test_load_option_positions_repo_does_not_validate_position_lots_without_trade_events(tmp_path: Path) -> None:
     import json
 
     db_path = tmp_path / "option_positions.sqlite3"
@@ -779,8 +753,8 @@ def test_load_option_positions_repo_does_not_validate_legacy_position_lots_until
     )
     loaded = ledger_bootstrap.load_option_positions_repo(data_config)
 
-    assert loaded.bootstrap_status == "sqlite_only_legacy_position_lots_present"
-    assert "migrate-legacy" in str(loaded.bootstrap_message)
+    assert loaded.bootstrap_status == "sqlite_only_position_lots_without_trade_events"
+    assert "repair the active ledger" in str(loaded.bootstrap_message)
     assert loaded.count_trade_events() == 0
     lots = loaded.list_position_lots()
     assert [row["record_id"] for row in lots] == ["lot_bad_option"]

@@ -104,7 +104,6 @@ def check_runtime_config_identity(
     config_key: str | None = None,
     runtime_config_path: str | Path | None = None,
     required_source_format: str | None = "yaml",
-    allow_legacy_source: bool = False,
     require_generated: bool = True,
 ) -> dict[str, Any]:
     expected_market = infer_runtime_config_market(
@@ -154,7 +153,6 @@ def check_runtime_config_identity(
             "market": expected_market,
             "runtime_config_path": str(runtime_config_path) if runtime_config_path is not None else None,
             "required_source_format": required_source_format,
-            "allow_legacy_source": bool(allow_legacy_source),
             "rebuild_command": rebuild_command,
             "errors": errors,
         }
@@ -201,24 +199,22 @@ def check_runtime_config_identity(
     source_format = str(generated.get("source_format") or "").strip().lower()
     if required_format:
         if not source_format:
-            if not allow_legacy_source:
-                errors.append(
-                    {
-                        "code": "source_format_missing",
-                        "message": "runtime config generation metadata is missing source_format",
-                        "expected": required_format,
-                    }
-                )
+            errors.append(
+                {
+                    "code": "source_format_missing",
+                    "message": "runtime config generation metadata is missing source_format",
+                    "expected": required_format,
+                }
+            )
         elif source_format != required_format:
-            if not (allow_legacy_source and source_format == "legacy"):
-                errors.append(
-                    {
-                        "code": "source_format_mismatch",
-                        "message": "runtime config was generated from an unsupported source format",
-                        "expected": required_format,
-                        "actual": source_format,
-                    }
-                )
+            errors.append(
+                {
+                    "code": "source_format_mismatch",
+                    "message": "runtime config was generated from an unsupported source format",
+                    "expected": required_format,
+                    "actual": source_format,
+                }
+            )
 
     return {
         "ok": not errors,
@@ -227,7 +223,6 @@ def check_runtime_config_identity(
         "generated": generated,
         "source_format": source_format or None,
         "required_source_format": required_format,
-        "allow_legacy_source": bool(allow_legacy_source),
         "rebuild_command": rebuild_command,
         "errors": errors,
     }
@@ -565,7 +560,6 @@ def ensure_runtime_config_identity(
     config_key: str | None = None,
     runtime_config_path: str | Path | None = None,
     required_source_format: str | None = "yaml",
-    allow_legacy_source: bool = False,
     require_generated: bool = True,
 ) -> dict[str, Any]:
     result = check_runtime_config_identity(
@@ -574,7 +568,6 @@ def ensure_runtime_config_identity(
         config_key=config_key,
         runtime_config_path=runtime_config_path,
         required_source_format=required_source_format,
-        allow_legacy_source=allow_legacy_source,
         require_generated=require_generated,
     )
     if not result.get("ok"):

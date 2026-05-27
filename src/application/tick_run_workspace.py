@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import re
 import shutil
 import time
@@ -10,16 +9,12 @@ from pathlib import Path
 from domain.storage.repositories import run_repo, state_repo
 from src.application.multi_tick.misc import (
     ensure_account_output_dir,
-    log,
-    update_legacy_output_link,
 )
 
 
 @dataclass(frozen=True)
 class TickRunWorkspace:
     accounts_root: Path
-    legacy_output_tmp_dir: Path
-    out_link: Path
     run_dir: Path
     shared_required: Path
 
@@ -34,16 +29,7 @@ def prepare_tick_run_workspace(
 
     accounts_root = (base / "output_accounts").resolve()
     accounts_root.mkdir(parents=True, exist_ok=True)
-    legacy_output_tmp_dir = (base / "output_shared" / "tmp" / "legacy_output_link").resolve()
-    legacy_output_tmp_dir.mkdir(parents=True, exist_ok=True)
-
-    out_link = base / "output"
-    _prepare_legacy_output_link(
-        out_link=out_link,
-        accounts_root=accounts_root,
-        default_account=default_account,
-        legacy_output_tmp_dir=legacy_output_tmp_dir,
-    )
+    ensure_account_output_dir(accounts_root / default_account)
 
     run_dir = run_repo.ensure_run_dir(base, run_id)
     required_dir = (run_dir / "required_data").resolve()
@@ -60,34 +46,9 @@ def prepare_tick_run_workspace(
 
     return TickRunWorkspace(
         accounts_root=accounts_root,
-        legacy_output_tmp_dir=legacy_output_tmp_dir,
-        out_link=out_link,
         run_dir=run_dir,
         shared_required=required_dir,
     )
-
-
-def _prepare_legacy_output_link(
-    *,
-    out_link: Path,
-    accounts_root: Path,
-    default_account: str,
-    legacy_output_tmp_dir: Path,
-) -> None:
-    if not out_link.exists() or out_link.is_symlink():
-        dst = accounts_root / default_account
-        ensure_account_output_dir(dst)
-        if (not out_link.exists()) or os.access(out_link.parent, os.W_OK):
-            try:
-                update_legacy_output_link(out_link, dst, tmp_dir=legacy_output_tmp_dir)
-            except RuntimeError as exc:
-                raise SystemExit(str(exc)) from exc
-        else:
-            log(f"skip legacy output link refresh on read-only repo root: {out_link}")
-    elif not out_link.is_symlink():
-        if os.access(out_link.parent, os.W_OK):
-            raise SystemExit(f"./output must be a symlink for multi-account mode: {out_link}")
-        log(f"skip legacy output link validation on read-only repo root: {out_link}")
 
 
 def _cleanup_old_run_dirs(base: Path) -> None:

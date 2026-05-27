@@ -46,7 +46,6 @@ def load_runtime_config(
     config_key: str | None = None,
     config_path: str | Path | None = None,
     expected_market: str | None = None,
-    allow_legacy_source: bool = False,
     require_generated: bool = True,
 ) -> tuple[Path, dict[str, Any]]:
     path = resolve_runtime_config_path(config_key=config_key, config_path=config_path)
@@ -78,7 +77,6 @@ def load_runtime_config(
             explicit_market=expected_market,
             config_key=config_key,
             runtime_config_path=path,
-            allow_legacy_source=allow_legacy_source,
             require_generated=require_generated,
         )
     except RuntimeConfigIdentityError as exc:

@@ -93,7 +93,7 @@ modules own the heavier subflows:
 - `src.application.tick_guard_flow`: project guard, load shedding, market-scoped
   config filtering, OpenD phone-verify gate, and watchdog admission.
 - `src.application.tick_run_workspace`: run directory, required-data workspace,
-  shared state pointer, and legacy `output` link preparation.
+  and shared state pointer.
 - `src.application.tick_scheduler_context`: trading-day guard, scheduler state
   path, scheduler decision, and scheduler snapshot writes.
 - `src.application.tick_account_execution`: account defaults, account worker

@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from domain.domain.ledger import ContractKey, TradeEvent
 import src.application.ledger.manual_trades as ledger_manual_trades
 import src.application.ledger.repository as ledger_repository
 
@@ -43,6 +44,32 @@ def _position_fields(
         "expiration": exp_ms,
         "source_event_id": "open-put-may",
     }
+
+
+def _open_event_from_fields(fields: dict[str, Any], *, event_id: str = "open-put-may") -> dict[str, Any]:
+    from domain.domain.ledger.position_fields import effective_expiration_ymd
+
+    return TradeEvent(
+        event_id=event_id,
+        event_type="open",
+        event_time_ms=1000,
+        contract_key=ContractKey.from_values(
+            broker=fields.get("broker"),
+            account=fields.get("account"),
+            underlying_symbol=fields.get("symbol"),
+            option_type=fields.get("option_type"),
+            position_side=fields.get("side"),
+            strike=fields.get("strike"),
+            expiration_ymd=effective_expiration_ymd(fields),
+        ),
+        contracts=int(fields.get("contracts") or fields.get("contracts_open") or 0),
+        price=1.0,
+        currency=str(fields.get("currency") or "HKD"),
+        source="test_seed_open_lot",
+        multiplier=float(fields.get("multiplier") or 100),
+        lot_id=str(fields.get("record_id") or ""),
+        raw_payload={"source_type": "test_seed"},
+    ).to_dict()
 
 
 def test_manual_open_ledger_service_projects_new_lot(tmp_path: Path) -> None:
@@ -188,6 +215,9 @@ def test_manual_close_ledger_preflight_rejects_target_identity_mismatch() -> Non
         def list_position_lots(self) -> list[dict[str, Any]]:
             return [{"record_id": "lot_put_may", "fields": dict(projected_fields)}]
 
+        def list_trade_events(self) -> list[dict[str, Any]]:
+            return [_open_event_from_fields(projected_fields)]
+
     with pytest.raises(LedgerPreflightError) as exc_info:
         preflight_manual_close(
             MismatchedRepo(),
@@ -219,6 +249,12 @@ def test_manual_close_ledger_preflight_rejects_duplicate_lot_snapshot() -> None:
                 {"record_id": "lot_put_may", "fields": dict(fields)},
             ]
 
+        def list_trade_events(self) -> list[dict[str, Any]]:
+            return [
+                _open_event_from_fields(fields, event_id="open-put-may"),
+                _open_event_from_fields(fields, event_id="open-put-may"),
+            ]
+
     with pytest.raises(LedgerPreflightError) as exc_info:
         preflight_manual_close(
             DuplicateRepo(),
@@ -227,8 +263,12 @@ def test_manual_close_ledger_preflight_rejects_duplicate_lot_snapshot() -> None:
             close_price=1.2,
             close_reason="manual_buy_to_close",
             as_of_ms=2000,
-        )
+    )
 
     assert exc_info.value.code == "ledger_shadow_invalid"
-    error_codes = {item["code"] for item in exc_info.value.details["errors"]}
+    error_items = [
+        *exc_info.value.details.get("import_errors", []),
+        *exc_info.value.details.get("projection_errors", []),
+    ]
+    error_codes = {item["code"] for item in error_items}
     assert "duplicate_event_id" in error_codes or "duplicate_lot_id" in error_codes

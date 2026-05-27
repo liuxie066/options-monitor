@@ -17,7 +17,6 @@
 <runtime_root>/output_runs/
 <runtime_root>/output_shared/
 <runtime_root>/output_accounts/
-<runtime_root>/output/
 <runtime_root>/logs/
 <runtime_root>/locks/
 ```
@@ -28,7 +27,7 @@
 <runtime_root>/output_shared/state/option_positions.sqlite3
 ```
 
-不要再用 `option_positions.sqlite_path` 作为 active DB 配置。该字段只作为旧库诊断/迁移线索。
+不要再用 `option_positions.sqlite_path` 作为 active DB 配置。运行时忽略该旧字段；如发现旧库，只能先离线修复为 canonical `trade_events`，再写入 active DB。
 
 ## 2. 安装依赖
 
@@ -163,15 +162,7 @@ liuxie ALL=(root) NOPASSWD: /usr/bin/systemctl restart options-monitor-feishu-ws
   --accounts lx sy
 ```
 
-preflight 会检查 env path 是文件还是目录、runtime root / locks / output_accounts / output_shared 权限、`output` 是否为 symlink，以及 runtime config 是否带 `_generated` 元数据。
-如果 `output` 已经是普通目录，先 dry-run，再确认迁移：
-
-```bash
-./om service repair-output --runtime-root "$RUNTIME" --default-account lx
-./om service repair-output --runtime-root "$RUNTIME" --default-account lx --confirm
-```
-
-修复会先备份真实目录，再把内容迁移到 `output_accounts/<default-account>`，最后创建 `output -> output_accounts/<default-account>` symlink。
+preflight 会检查 env path 是文件还是目录、runtime root / locks / output_accounts / output_shared 权限，以及 runtime config 是否带 `_generated` 元数据。
 
 安装：
 
@@ -214,7 +205,7 @@ sudo systemctl enable --now options-monitor-upgrade.timer
   --cleanup-pip-cache
 ```
 
-输出会列出当前 active release、保留 release、待删除旧 release、缓存目录和预计释放空间。默认至少保留 2 个 release（当前版本 + 最近一个回滚版本）；真正删除必须加 `--confirm`。清理边界固定为旧 release 和显式允许的缓存，不会删除 `$RUNTIME`、SQLite、`output` / `output_shared` / `output_runs`、locks、runtime config、用户 overlay config、当前 active release 或回滚 release。可选项包括 `--include-apt-cache`、`--journal-vacuum-size 64M`、`--cleanup-downloads`、`--cleanup-pip-cache`。
+输出会列出当前 active release、保留 release、待删除旧 release、缓存目录和预计释放空间。默认至少保留 2 个 release（当前版本 + 最近一个回滚版本）；真正删除必须加 `--confirm`。清理边界固定为旧 release 和显式允许的缓存，不会删除 `$RUNTIME`、SQLite、`output_shared` / `output_runs`、locks、runtime config、用户 overlay config、当前 active release 或回滚 release。可选项包括 `--include-apt-cache`、`--journal-vacuum-size 64M`、`--cleanup-downloads`、`--cleanup-pip-cache`。
 
 如果希望升级成功后自动清理旧 release：
 

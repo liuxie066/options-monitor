@@ -106,10 +106,6 @@ def test_load_runtime_config_rejects_legacy_source_by_default(tmp_path: Path) ->
 
     assert exc.value.details["errors"][0]["code"] == "source_format_mismatch"
 
-    loaded_path, legacy_cfg = load_runtime_config(config_path=path, allow_legacy_source=True)
-    assert loaded_path == path
-    assert legacy_cfg[GENERATED_KEY]["source_format"] == "legacy"
-
 
 def test_config_validate_infers_market_from_yaml_runtime_path(tmp_path: Path, capsys) -> None:
     from src.interfaces.cli.main import main
@@ -177,8 +173,7 @@ def test_config_validate_rejects_legacy_runtime_without_explicit_source(tmp_path
     rc = main(["config", "validate", "--source", "legacy", "--config-path", str(runtime_path)])
     payload = json.loads(capsys.readouterr().out)
 
-    assert rc == 0
-    assert payload["ok"] is True
-    assert payload["source_format"] == "legacy"
-    assert payload["legacy_source_allowed"] is True
-    assert "warnings" in payload
+    assert rc == 2
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "INPUT_ERROR"
+    assert payload["error"]["details"]["allowed"] == ["runtime", "yaml"]

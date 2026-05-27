@@ -35,10 +35,6 @@ def resolve_account_run_max_workers(cfg: Mapping[str, object], account_count: in
     return min(account_count, workers)
 
 
-def should_update_account_legacy_output(account_count: int) -> bool:
-    return int(account_count) == 1
-
-
 def resolve_default_account(default_account: str | None, accounts: list[str]) -> str:
     account_ids = [str(a).strip().lower() for a in (accounts or []) if str(a).strip()]
     if not account_ids:
@@ -115,8 +111,6 @@ class TickAccountExecutionRequest:
     run_id: str
     run_dir: Path
     shared_required: Path
-    out_link: Path
-    legacy_output_tmp_dir: Path
     accounts_root: Path
     prefetch_done: bool
     force_mode: bool
@@ -125,7 +119,6 @@ class TickAccountExecutionRequest:
     scan_decision_by_account: dict[str, dict[str, Any]]
     state_path: Path
     scheduler_schedule_key: str
-    update_legacy_output: bool
     runlog: Any
     audit_helper: Any
     repo_root: Path | None = None
@@ -164,14 +157,11 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                 run_id=request.run_id,
                 run_dir=request.run_dir,
                 shared_required=request.shared_required,
-                out_link=request.out_link,
-                legacy_output_tmp_dir=request.legacy_output_tmp_dir,
                 accounts_root=request.accounts_root,
                 prefetch_done=request.prefetch_done,
                 force_mode=request.force_mode,
                 allow_mutations=(not request.smoke),
                 allow_notifications=(not request.no_send),
-                update_legacy_output=request.update_legacy_output,
                 prefetch_lock=shared_prefetch_lock,
                 prefetch_state=shared_prefetch_state,
                 scan_decision_by_account=request.scan_decision_by_account,

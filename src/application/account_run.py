@@ -24,7 +24,6 @@ from src.application.multi_tick.misc import (
     AccountResult,
     _safe_runlog_data,
     ensure_account_output_dir,
-    update_legacy_output_link,
 )
 from src.application.multi_tick.required_data_prefetch import prefetch_required_data
 
@@ -47,14 +46,11 @@ class AccountRunRequest:
     run_id: str
     run_dir: Path
     shared_required: Path
-    out_link: Path
-    legacy_output_tmp_dir: Path
     accounts_root: Path
     prefetch_done: bool
     force_mode: bool = False
     allow_mutations: bool = True
     allow_notifications: bool = True
-    update_legacy_output: bool = True
     prefetch_lock: Any | None = None
     prefetch_state: dict[str, Any] | None = None
     scan_decision_by_account: dict[str, dict[str, Any]] | None = None
@@ -165,12 +161,6 @@ def run_one_account(
         "reason": "",
     }
     ensure_account_output_dir(acct_out)
-
-    if bool(request.update_legacy_output):
-        try:
-            update_legacy_output_link(request.out_link, acct_out, tmp_dir=request.legacy_output_tmp_dir)
-        except RuntimeError as exc:
-            raise SystemExit(str(exc))
 
     cfg = json.loads(json.dumps(request.base_cfg))
     cfg["config_source_path"] = str(request.cfg_path.resolve())

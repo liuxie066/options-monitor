@@ -54,7 +54,6 @@ from src.application.tick_account_execution import (
     resolve_default_account as _resolve_default_account,
     run_tick_account_execution,
     run_account_outcomes as _run_account_outcomes,
-    should_update_account_legacy_output as _should_update_account_legacy_output,
 )
 from src.application.tick_notification_flow import (
     TickNotificationRequest,
@@ -91,13 +90,7 @@ _CURRENT_RUN_ID: str | None = None
 
 
 def current_run_id() -> str | None:
-    """Public accessor for wrapper-level error logging compatibility."""
     return _CURRENT_RUN_ID
-
-
-def account_run_state_dir(run_dir: Path, account: str) -> Path:
-    """Legacy helper kept for compatibility with existing tests/callers."""
-    return (run_dir / 'accounts' / str(account).strip() / 'state').resolve()
 
 
 def _is_trading_day_guard_for_market(cfg: dict[str, Any], market: str) -> tuple[bool | None, str]:
@@ -332,8 +325,6 @@ def main(argv: list[str] | None = None) -> int:
         default_account=args.default_account,
     )
     accounts_root = workspace.accounts_root
-    legacy_output_tmp_dir = workspace.legacy_output_tmp_dir
-    out_link = workspace.out_link
     run_dir = workspace.run_dir
     prefetch_done = False
     shared_required = workspace.shared_required
@@ -390,7 +381,6 @@ def main(argv: list[str] | None = None) -> int:
     account_ids = [str(acct).strip() for acct in (args.accounts or []) if str(acct).strip()]
     account_count = len(account_ids)
     account_workers = _resolve_account_run_max_workers(base_cfg, account_count)
-    update_account_legacy_output = _should_update_account_legacy_output(account_count)
     account_execution = run_tick_account_execution(
         TickAccountExecutionRequest(
             account_ids=account_ids,
@@ -409,8 +399,6 @@ def main(argv: list[str] | None = None) -> int:
             run_id=run_id,
             run_dir=run_dir,
             shared_required=shared_required,
-            out_link=out_link,
-            legacy_output_tmp_dir=legacy_output_tmp_dir,
             accounts_root=accounts_root,
             prefetch_done=prefetch_done,
             force_mode=force_mode,
@@ -419,7 +407,6 @@ def main(argv: list[str] | None = None) -> int:
             scan_decision_by_account=scan_decision_by_account,
             state_path=state_path,
             scheduler_schedule_key=str(scheduler_schedule_key),
-            update_legacy_output=update_account_legacy_output,
             runlog=runlog,
             audit_helper=audit_helper,
         )
@@ -455,4 +442,4 @@ def run_tick(argv: list[str] | None = None) -> int:
     return int(multi_tick_main(list(argv or [])))
 
 
-__all__ = ['main', 'multi_tick_main', 'run_tick', 'current_run_id', 'account_run_state_dir', '_CURRENT_RUN_ID']
+__all__ = ['main', 'multi_tick_main', 'run_tick', 'current_run_id', '_CURRENT_RUN_ID']

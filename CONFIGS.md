@@ -10,7 +10,7 @@
 规则：
 - `config.us.json` / `config.hk.json` 是当前 runtime 的 canonical market configs。
 - `config.yaml` 是新的人工编辑入口；运行前用 `./om config build --source yaml --market us|hk` 生成 market-specific runtime snapshot。
-- 如果使用分层配置，`configs/system.json` + 可选 `configs/user.common.json` + `configs/user.<market>.json` 只是 authoring source；运行前用 `./om config build --market us|hk` 生成对应 canonical runtime config。
+- 旧 layered JSON 不再是 authoring source；`configs/user.common.json` / `configs/user.<market>.json` 只作为 `./om config migrate-yaml` 的一次性迁移输入。
 - 线上可以把这两份 canonical config 放在仓库外管理，例如 `/opt/options-monitor/configs/config.us.json` / `/opt/options-monitor/configs/config.hk.json`，并在运行入口显式传入绝对路径。
 - 仓内同名文件仍是受支持的 repo-local runtime config 形态，适合本地开发和默认本地运行。
 - 仓库跟踪 `configs/system.json` 与 `configs/examples/*.json` 模板；用户实际 runtime config / user config / common user config 不随版本发布。
@@ -69,53 +69,15 @@ cp configs/examples/config.yaml.example config.yaml
 ./om config migrate-yaml --output config.yaml --hk-accounts lx --apply
 ```
 
-## Layered JSON Configs（兼容编辑入口）
+## Legacy JSON Migration（一次性入口）
 
-可选的轻量分层入口：
-
-- `configs/system.json`：系统默认值，随版本发布维护，包含 runtime、templates、schedule、trade_intake、专用 `option_positions.auto_close`、intake aliases、symbol defaults 等通用默认。
-- `configs/user.common.json`：可选的本地全局用户覆盖文件，适合放两边市场都相同的 `watchdog`、`runtime`、`notifications`、`alert_policy`、`account_settings`、`portfolio.data_config`、`option_positions.auto_close.enabled` / `option_positions.auto_close.receipt.enabled`、`symbol_defaults` 等字段。该文件被 `.gitignore` 忽略，不随版本发布。
-- `configs/user.us.json` / `configs/user.hk.json`：本地市场用户覆盖文件，默认只维护 market-specific 的账号和 symbols；同字段会覆盖 `configs/user.common.json`。这两类文件被 `.gitignore` 忽略，不随版本发布。
-- `configs/examples/user.example.us.json` / `configs/examples/user.example.hk.json`：可复制的用户配置模板。
-
-首次使用时先复制模板：
+旧 layered JSON 入口已经退出正常 authoring / build / explain / service upgrade 主链路。保留的唯一入口是：
 
 ```bash
-cp configs/examples/user.common.example.json configs/user.common.json  # 可选
-cp configs/examples/user.example.us.json configs/user.us.json
-cp configs/examples/user.example.hk.json configs/user.hk.json
+./om config migrate-yaml --output config.yaml
 ```
 
-如果显式传 `--user-config`，默认不会自动读取 `configs/user.common.json`，避免测试、发布 dry-run 或临时文件被本机私有 common 覆盖污染；需要时同时传 `--common-user-config`。
-
-生成 canonical runtime config：
-
-```bash
-./om config build --market us
-./om config build --market hk
-```
-
-低风险预览：
-
-```bash
-./om config build --market us --dry-run
-./om config build --market us --user-config /tmp/user.us.json --common-user-config configs/user.common.json --dry-run
-```
-
-解释某个字段的最终值和覆盖来源：
-
-```bash
-./om config explain --market us --key option_positions.auto_close.enabled
-./om config explain --market us --key symbol_defaults.fetch.limit_expirations
-./om config explain --market us --key symbols.0.fetch.limit_expirations
-```
-
-生成后仍按 canonical config 校验与运行：
-
-```bash
-./om config validate --config-path config.us.json
-./om run tick --config config.us.json --accounts lx
-```
+迁移工具可读取 `configs/user.common.json`、`configs/user.us.json`、`configs/user.hk.json` 生成 `config.yaml` 预览；确认后显式加 `--apply`。迁移完成后，用 `config.yaml` 作为唯一人工编辑入口，并通过 `./om config build --source yaml --market us|hk` 生成 runtime JSON。
 
 ## 版本更新保护
 

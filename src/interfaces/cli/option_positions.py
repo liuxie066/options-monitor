@@ -22,7 +22,6 @@ from src.application.ledger.api import (
     inspect_ledger_stores,
     ledger_store_payload,
     list_position_rows,
-    migrate_legacy_sqlite_to_repo,
     open_position_ledger_from_runtime_config,
     record_trade_event_void,
     refresh_position_lot_projection,
@@ -210,20 +209,11 @@ def main(argv: list[str] | None = None) -> int:
 
     p_store = sub.add_parser('store', help='inspect option-position SQLite store resolution')
     store_sub = p_store.add_subparsers(dest='store_cmd', required=True)
-    p_store_inspect = store_sub.add_parser('inspect', help='diagnose active and legacy SQLite store candidates')
+    p_store_inspect = store_sub.add_parser('inspect', help='diagnose active SQLite store candidates')
     p_store_inspect.add_argument("--config", dest="store_config", default=None, help="runtime config path; resolves portfolio.data_config relative to the config file")
     p_store_inspect.add_argument("--data-config", dest="store_data_config", default=None, help="portfolio data config path override")
     p_store_inspect.add_argument("--runtime-root", default=None, help="override runtime root for standard ledger path resolution")
     p_store_inspect.add_argument("--format", default="json", choices=["json", "text"])
-    p_store_migrate = store_sub.add_parser('migrate-legacy', help='explicitly migrate a legacy SQLite store into active trade_events')
-    p_store_migrate.add_argument("--config", dest="store_config", default=None, help="runtime config path; resolves portfolio.data_config relative to the config file")
-    p_store_migrate.add_argument("--data-config", dest="store_data_config", default=None, help="portfolio data config path override")
-    p_store_migrate.add_argument("--runtime-root", default=None, help="override runtime root for standard ledger path resolution")
-    p_store_migrate.add_argument("--legacy-sqlite-path", default=None, help="legacy SQLite path override; defaults to deprecated option_positions.sqlite_path when present")
-    p_store_migrate.add_argument("--apply", action="store_true", help="apply migration; omitted means dry-run inspect")
-    p_store_migrate.add_argument("--confirm", action="store_true", help="confirm high-risk trade-event migration")
-    p_store_migrate.add_argument("--yes", action="store_true", help="non-interactive confirmation; emits an audit_id")
-    p_store_migrate.add_argument("--format", default="json", choices=["json", "text"])
 
     p_verify = sub.add_parser('verify-projection', help='verify position_lots by replaying trade_events')
     p_verify.add_argument('--runtime-root', default=None, help='runtime root for active ledger store')
@@ -259,7 +249,7 @@ def main(argv: list[str] | None = None) -> int:
             '- net_cashflow_gross: groups account cash movements by trade month.\n'
             '- realized_pnl_gross: groups closed option PnL by close month.\n'
             '- open_basis_lifecycle_pnl_gross: attributes lifecycle PnL back to open month.\n'
-            '- premium_received_gross/realized_gross are compatibility aliases.\n'
+            '- premium_received_gross: short open premium received; realized_gross: closed option realized PnL.\n'
             '- *_cny columns are best-effort exchange-rate conversions from rate_cache.json.'
         ),
         formatter_class=argparse.RawTextHelpFormatter,
@@ -289,61 +279,15 @@ def main(argv: list[str] | None = None) -> int:
     base = Path(__file__).resolve().parents[3]
     if args.cmd == 'store':
         data_config_path, config_path = _store_inspect_data_config(args, base=base)
-        if args.store_cmd == "inspect":
-            payload = inspect_ledger_stores(
-                data_config_path,
-                runtime_root=getattr(args, "runtime_root", None),
-                config_path=config_path,
-            )
-        else:
-            control = _resolve_write_control(
-                args,
-                command_name="option-positions store migrate-legacy",
-                high_risk=True,
-            )
-            should_apply = bool(control["write_requested"])
-            if should_apply:
-                guard = _guard_write(
-                    data_config=data_config_path,
-                    args=args,
-                    as_json=(str(getattr(args, "format", "") or "") == "json"),
-                )
-                if guard is None:
-                    return 2
-            _resolved_data_config, repo = open_position_ledger_from_runtime_config(
-                base=base,
-                cfg=None,
-                data_config=data_config_path,
-                config_path=config_path,
-                runtime_root=getattr(args, "runtime_root", None),
-            )
-            store = getattr(repo, "ledger_store", None)
-            legacy_path = getattr(args, "legacy_sqlite_path", None) or getattr(store, "legacy_sqlite_path", None)
-            payload = migrate_legacy_sqlite_to_repo(
-                repo,
-                legacy_path=legacy_path,
-                apply=should_apply,
-            )
-            payload = attach_write_contract(
-                payload,
-                dry_run=not should_apply,
-                write_applied=bool(should_apply and payload.get("applied")),
-                rollback_hint="void migrated bootstrap events or restore the active option_positions SQLite backup",
-            )
-            payload["ledger_store"] = ledger_store_payload(data_config_path, repo)
+        payload = inspect_ledger_stores(
+            data_config_path,
+            runtime_root=getattr(args, "runtime_root", None),
+            config_path=config_path,
+        )
         if args.format == "json":
             print(json.dumps(payload, ensure_ascii=False, indent=2))
         else:
-            if args.store_cmd == "inspect":
-                _print_store_inspect_text(payload)
-            else:
-                status = "APPLIED" if payload.get("applied") else "DRY_RUN"
-                print(
-                    f"[{status}] legacy={payload.get('legacy_sqlite_path')} "
-                    f"source={payload.get('source_table') or '-'} "
-                    f"migrated={payload.get('migrated_count') or 0} "
-                    f"message={payload.get('message') or '-'}"
-                )
+            _print_store_inspect_text(payload)
         return 0
 
     if args.cmd == 'auto-close-expired':

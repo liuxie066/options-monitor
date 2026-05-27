@@ -78,7 +78,7 @@ om-agent run --tool runtime_status --env-file /etc/options-monitor/options-monit
 | `version_check` | `om version` |
 | `version_update` | Agent-only local `VERSION` update helper |
 | `config_validate` | `om config validate` |
-| runtime config read / emergency write | `om config get` / `om config set` |
+| runtime config read | `om config get` |
 | `scheduler_status` | `om scheduler` 的只读判定部分 |
 | `scan_opportunities` | `om scan` / `om scan-pipeline` |
 | `candidate_rank_explain` | Agent-only read existing candidate CSV ranking explanations |
@@ -177,15 +177,6 @@ om config migrate-yaml --output config.yaml
 om config migrate-yaml --output config.yaml --apply
 ```
 
-历史兼容入口 `om setup init` 仍保留，但已 deprecated。新安装不要再用它生成人工维护的
-runtime JSON；需要从旧 `configs/user.*.json` 迁移时使用 `om config migrate-yaml`。
-
-```bash
-om setup init --market us --account lx --futu-acc-id <futu-account-id>
-```
-
-这条路径只作为旧脚本兼容面存在，输出会带 deprecation warning。
-
 写入命令的语义统一为：默认只读或 dry-run；`--apply` 允许本地文件/状态写入；`--confirm` 允许交易事件、Feishu、服务变更这类高风险写入；`--yes` 用于非交互脚本，等价显式确认并在输出里带 `audit_id`。结构化输出统一包含 `dry_run`、`write_applied`、`backup_path`、`audit_id`、`rollback_hint`。
 
 共享 multiplier cache 可以显式 seed，默认 dry-run，属于本地状态写入，写入使用 `--apply`：
@@ -242,7 +233,6 @@ om service render \
   --output-dir /tmp/options-monitor-service
 
 om service preflight --runtime-root /var/lib/options-monitor --env-file /etc/options-monitor/options-monitor.env --config-us config.us.json --config-hk config.hk.json --accounts lx sy
-om service repair-output --runtime-root /var/lib/options-monitor --default-account lx --confirm
 om settings doctor
 ```
 
@@ -254,7 +244,7 @@ om service drift --runtime-root /var/lib/options-monitor
 om-agent run --tool runtime_status --input-json '{"profile_path":"/var/lib/options-monitor/service.profile.json"}'
 ```
 
-`service render` 只生成 service/timer/plist/profile 文件和安装命令，不会自动安装或启动。systemd 的 `--env-file` 会写入 `EnvironmentFile=...`；launchd 的 `--env-file` 会写入 `EnvironmentVariables.OM_ENV_FILE=...`，两者都用于加载本机 Feishu 凭证环境变量。systemd unit 始终写入 `OM_RUNTIME_ROOT`；只有显式传 `--deploy-user` 或设置 `OM_DEPLOY_USER` / `DEPLOY_USER` 时，才会写入 `User=<deploy_user>` 和默认 `HOME=/home/<deploy_user>`。HOME 不在默认位置时用 `--deploy-home` 覆盖。启用 `--include-feishu-ws` 时会额外生成 `options-monitor-feishu-ws.service` / `com.options-monitor.feishu-ws.plist`，通过飞书长连接接收消息，不需要公网 HTTPS callback、反向代理或 tunnel，并会使用 runtime locks 目录下的 `feishu-ws.lock` 防止多实例抢同一个 App。传入 `--config-yaml` 后，Feishu WS service 会同时拿到 runtime config 的 `--config-path` 和 `$RUNTIME/resolved/config.assistant.json` 的 `--assistant-config`。启用 `--include-auto-upgrade` 时，`--repo-root` 会保留传入的 symlink 路径，默认 config path 会使用 runtime root 下的 `config.us.json` / `config.hk.json`，避免生产配置随 release 目录漂移。传入 `--config-yaml` 后，profile 会记录 YAML authoring source；后续 `update apply` 会用 `config build --source yaml --config-yaml <path>` 重建 runtime config，并用 `config build-assistant --source yaml --config-yaml <path>` 重建 assistant config，不再要求 legacy overlay。`service preflight` 是只读部署前检查；`service repair-output` 默认 dry-run，只有带 `--confirm` 或 `--yes` 才会迁移真实目录并创建 `output` symlink。
+`service render` 只生成 service/timer/plist/profile 文件和安装命令，不会自动安装或启动。systemd 的 `--env-file` 会写入 `EnvironmentFile=...`；launchd 的 `--env-file` 会写入 `EnvironmentVariables.OM_ENV_FILE=...`，两者都用于加载本机 Feishu 凭证环境变量。systemd unit 始终写入 `OM_RUNTIME_ROOT`；只有显式传 `--deploy-user` 或设置 `OM_DEPLOY_USER` / `DEPLOY_USER` 时，才会写入 `User=<deploy_user>` 和默认 `HOME=/home/<deploy_user>`。HOME 不在默认位置时用 `--deploy-home` 覆盖。启用 `--include-feishu-ws` 时会额外生成 `options-monitor-feishu-ws.service` / `com.options-monitor.feishu-ws.plist`，通过飞书长连接接收消息，不需要公网 HTTPS callback、反向代理或 tunnel，并会使用 runtime locks 目录下的 `feishu-ws.lock` 防止多实例抢同一个 App。传入 `--config-yaml` 后，Feishu WS service 会同时拿到 runtime config 的 `--config-path` 和 `$RUNTIME/resolved/config.assistant.json` 的 `--assistant-config`。启用 `--include-auto-upgrade` 时，`--repo-root` 会保留传入的 symlink 路径，默认 config path 会使用 runtime root 下的 `config.us.json` / `config.hk.json`，避免生产配置随 release 目录漂移。传入 `--config-yaml` 后，profile 会记录 YAML authoring source；后续 `update apply` 会用 `config build --source yaml --config-yaml <path>` 重建 runtime config，并用 `config build-assistant --source yaml --config-yaml <path>` 重建 assistant config，不再要求 legacy overlay。`service preflight` 是只读部署前检查。
 
 `service drift` 会用当前 release 的 `render_service_bundle()` 重新生成期望 service/timer，再和 `$RUNTIME/service.profile.json` 以及 systemd unit 文件对比。默认只读；带 `--confirm` 或 `--yes` 时只写入缺失 unit/profile、执行 `systemctl daemon-reload`，并 `enable --now` 缺失 timer，不会自动启用或重启新增长期 service。`runtime_status` 同样会暴露 service drift 摘要；缺失 `options-monitor-projection-verify.timer` 这类维护 timer 会作为 warning/error 返回。
 
@@ -445,8 +435,8 @@ om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","accoun
   `sell_open_premium - sell_close_cost_actual - enhancement_call_buy_cost + enhancement_call_sell_proceeds_actual`。
 - `yield_enhancement_realized_pnl_gross`：收益增强 call 腿按实现口径统计，
   只有带 `yield_enhancement` / `enhancement_call` 标记的 long call 平仓收益进入该字段。
-- `premium_received_gross` / `realized_gross`：兼容字段，分别对应 short 开仓权利金和已实现收益；
-  新消费方优先使用上面的明确口径字段。
+- `premium_received_gross`：short 开仓收到的权利金。
+- `realized_gross`：平仓/到期实现收益，和 `realized_pnl_gross` 同口径。
 - `return_summary`：按 `month + account` 输出账户级收益率摘要，不按币种拆行。
   分母为当前 open position lots 的 `cash_secured_amount` 折 CNY 后合计，
   字段包括 `cash_secured_by_ccy`、`cash_secured_cny`、`net_income_cny`、

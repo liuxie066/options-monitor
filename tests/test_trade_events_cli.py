@@ -245,8 +245,8 @@ def test_trade_events_replay_apply_ignores_deprecated_sqlite_path(monkeypatch, t
     out = json.loads(capsys.readouterr().out)
     assert out["mode"] == "applied"
     assert out["ledger_store"]["sqlite_path"] == str((tmp_path / "output_shared" / "state" / "option_positions.sqlite3").resolve())
-    assert out["ledger_store"]["legacy_sqlite_path"] == str((tmp_path / "option_positions.sqlite3").resolve())
-    assert any("ignored" in item for item in out["ledger_store"]["warnings"])
+    assert "legacy_sqlite_path" not in out["ledger_store"]
+    assert out["ledger_store"]["warnings"] == []
 
 
 def test_trade_events_replay_accepts_explicit_runtime_root(tmp_path: Path, capsys) -> None:

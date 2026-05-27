@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.2.157 - 2026-05-28
+
+### Changed
+- Removed legacy JSON authoring write paths so human-authored runtime config flows through `config.yaml` and generated runtime snapshots only.
+- Simplified option-position ledger handling around the canonical `trade_events -> projection -> position_lots` path, removing legacy SQLite migration and tuple result compatibility surfaces.
+- Removed legacy runtime `output` symlink repair paths and old monthly report row handling, keeping runtime artifacts under `output_runs`, `output_shared`, and `output_accounts`.
+
 ## 1.2.156 - 2026-05-27
 
 ### Added

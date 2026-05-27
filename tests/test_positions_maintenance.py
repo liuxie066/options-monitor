@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -122,7 +123,13 @@ def test_position_maintenance_refreshes_projection_before_apply(monkeypatch, tmp
 
     monkeypatch.setattr(mod, "refresh_position_lot_projection", _refresh)
     monkeypatch.setattr(mod, "_load_expiry_close_position_lots", _load_records)
-    monkeypatch.setattr(mod, "record_expired_position_closes", lambda *_args, **_kwargs: ([], [], []))
+    from src.application.ledger.api import ExpiredCloseRunResult
+
+    monkeypatch.setattr(
+        mod,
+        "record_expired_position_closes",
+        lambda *_args, **_kwargs: ExpiredCloseRunResult(decisions=[], applied=[], errors=[]),
+    )
 
     result = mod.run_expired_position_maintenance_for_account(
         base=tmp_path,
@@ -168,24 +175,26 @@ def test_position_maintenance_attaches_receipt_after_apply(monkeypatch, tmp_path
     monkeypatch.setattr(
         mod,
         "record_expired_position_closes",
-        lambda *_args, **_kwargs: (
-            [
-                {
-                    "record_id": "rec_1",
-                    "position_id": "pos_1",
-                    "should_close": True,
-                    "expiration_ymd": "2026-05-01",
-                }
-            ],
-            [
-                {
-                    "record_id": "rec_1",
-                    "position_id": "pos_1",
-                    "should_close": True,
-                    "expiration_ymd": "2026-05-01",
-                }
-            ],
-            [],
+        lambda *_args, **_kwargs: SimpleNamespace(
+            to_payload=lambda: {
+                "decisions": [
+                    {
+                        "record_id": "rec_1",
+                        "position_id": "pos_1",
+                        "should_close": True,
+                        "expiration_ymd": "2026-05-01",
+                    }
+                ],
+                "applied": [
+                    {
+                        "record_id": "rec_1",
+                        "position_id": "pos_1",
+                        "should_close": True,
+                        "expiration_ymd": "2026-05-01",
+                    }
+                ],
+                "errors": [],
+            }
         ),
     )
 
@@ -232,10 +241,12 @@ def test_position_maintenance_skips_receipt_in_no_send_mode(monkeypatch, tmp_pat
     monkeypatch.setattr(
         mod,
         "record_expired_position_closes",
-        lambda *_args, **_kwargs: (
-            [{"record_id": "rec_1", "position_id": "pos_1", "should_close": True}],
-            [{"record_id": "rec_1", "position_id": "pos_1", "should_close": True}],
-            [],
+        lambda *_args, **_kwargs: SimpleNamespace(
+            to_payload=lambda: {
+                "decisions": [{"record_id": "rec_1", "position_id": "pos_1", "should_close": True}],
+                "applied": [{"record_id": "rec_1", "position_id": "pos_1", "should_close": True}],
+                "errors": [],
+            }
         ),
     )
     monkeypatch.setattr(
