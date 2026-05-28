@@ -17,6 +17,7 @@ from src.application.positions.maintenance import (
     run_expired_position_maintenance_for_account,
 )
 from src.application.positions.maintenance_receipt import safe_send_auto_close_receipt
+from src.application.runtime_paths import resolve_runtime_root
 from src.application.write_contract import attach_write_contract, write_control
 from src.infrastructure.io_utils import utc_now
 from src.infrastructure.run_log import RunLogger
@@ -390,7 +391,8 @@ def main(argv: list[str] | None = None) -> int:
     if control["confirmation_required"]:
         raise SystemExit("auto-close-expired writes trade_events and may send receipts; use --confirm or --yes to apply")
 
-    base = Path(__file__).resolve().parents[3]
+    repo_root = Path(__file__).resolve().parents[3]
+    base = resolve_runtime_root(repo_root=repo_root).runtime_root
     config_path = Path(args.config) if args.config else None
     result = run_auto_close_expired(
         base=base,
@@ -402,7 +404,8 @@ def main(argv: list[str] | None = None) -> int:
         no_send=bool(args.no_send),
         as_of_ms=_parse_as_of_ms(args.as_of_utc),
     )
-    summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+    raw_summary = result.get("summary")
+    summary: dict[str, Any] = raw_summary if isinstance(raw_summary, dict) else {}
     result = attach_write_contract(
         result,
         dry_run=not bool(control["write_requested"]),
