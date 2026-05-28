@@ -5,6 +5,13 @@ from typing import Any, Callable
 
 from src.application.assistant.commands import llm_capability_manifest
 from src.application.assistant.config_loader import load_assistant_config
+from src.application.assistant.llm_common import (
+    is_supported_llm_provider,
+    normalize_llm_provider,
+    provider_api_kind,
+    provider_endpoint_url,
+    supported_llm_providers,
+)
 from src.application.assistant.llm_translator import CreateStructuredResponseFn, translate_inbound_intent
 from src.application.assistant.settings import AssistantSettings, LlmTranslatorSettings
 from src.application.settings import build_effective_env
@@ -85,9 +92,9 @@ def check_llm_translator(
         "llm": {
             **settings.public_payload(),
             "endpoint_url": _provider_endpoint_url(settings),
-            "responses_url": resolve_responses_url(settings.base_url) if _provider_name(settings) == "openai" else None,
+            "responses_url": resolve_responses_url(settings.base_url) if _provider_api_kind(settings) == "responses" else None,
             "chat_completions_url": resolve_chat_completions_url(settings.base_url)
-            if _provider_name(settings) == "deepseek"
+            if _provider_api_kind(settings) == "chat_completions"
             else None,
             "api_key_configured": bool(effective_env.get(settings.api_key_env)),
             "api_key_source": _source_value(effective_env.source_of(settings.api_key_env)),
@@ -152,9 +159,11 @@ def _config_checks(settings: LlmTranslatorSettings, *, effective_env: Any) -> li
         "value": {
             "base_url": settings.base_url,
             "endpoint_url": _provider_endpoint_url(settings),
-            "responses_url": resolve_responses_url(settings.base_url) if _provider_name(settings) == "openai" else None,
+            "responses_url": resolve_responses_url(settings.base_url)
+            if _provider_api_kind(settings) == "responses"
+            else None,
             "chat_completions_url": resolve_chat_completions_url(settings.base_url)
-            if _provider_name(settings) == "deepseek"
+            if _provider_api_kind(settings) == "chat_completions"
             else None,
         },
     })
@@ -184,11 +193,11 @@ def _provider_check(value: str, *, required: bool) -> dict[str, Any]:
             "status": "error",
             "message": "assistant.llm.provider is required when LLM is enabled",
         }
-    if text not in {"openai", "deepseek"}:
+    if not is_supported_llm_provider(text):
         return {
             "name": "provider",
             "status": "error",
-            "message": "assistant.llm.provider must be one of: openai, deepseek",
+            "message": f"assistant.llm.provider must be one of: {', '.join(supported_llm_providers())}",
             "value": text,
         }
     return {
@@ -228,20 +237,17 @@ def _required_text_check(name: str, value: str, *, expected: str | None = None, 
     }
 
 
-def _provider_name(settings: LlmTranslatorSettings) -> str:
-    return str(settings.provider or "").strip().lower() or "openai"
+def _provider_api_kind(settings: LlmTranslatorSettings) -> str:
+    provider = normalize_llm_provider(settings.provider) or "openai"
+    return provider_api_kind(provider)
 
 
 def _provider_endpoint_url(settings: LlmTranslatorSettings) -> str:
-    provider = _provider_name(settings)
-    if provider == "deepseek":
-        return resolve_chat_completions_url(settings.base_url)
-    return resolve_responses_url(settings.base_url)
+    return provider_endpoint_url(settings)
 
 
 def _base_url_message(settings: LlmTranslatorSettings) -> str:
-    provider = _provider_name(settings)
-    if provider == "deepseek":
+    if _provider_api_kind(settings) == "chat_completions":
         return "using default DeepSeek Chat Completions API" if not settings.base_url else "using configured Chat Completions API"
     return "using default OpenAI Responses API" if not settings.base_url else "using configured OpenAI Responses API"
 

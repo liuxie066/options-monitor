@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 1.2.158 - 2026-05-28
+
+### Added
+- Added an explicit semantic-frame schema version to assistant intent payloads so command, deterministic, and LLM routing share one auditable contract.
+- Added assistant NLU eval coverage for expected source and safety class, preventing intent-only tests from missing route or write-safety drift.
+- Added an architecture guard to keep inbound transport adapters from importing assistant parser, LLM, router, and arbitration internals.
+
+### Changed
+- Centralized assistant LLM provider selection, endpoint resolution, and unsupported-provider errors behind the shared LLM provider boundary.
+- Kept Feishu inbound transport on a thinner boundary by removing its dependency on assistant router typing.
+- Simplified the default small-talk response so user-visible capability wording stays catalog-driven.
+
 ## 1.2.157 - 2026-05-28
 
 ### Changed

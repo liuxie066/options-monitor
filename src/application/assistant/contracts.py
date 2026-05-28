@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 
 ASSISTANT_FRAME_SCHEMA_VERSION = "om-assistant-frame-v1"
+SEMANTIC_FRAME_SCHEMA_VERSION = "om-semantic-frame-v1"
 TOOL_PLAN_SCHEMA_VERSION = "om-tool-plan-v1"
 AssistantSafetyClass = Literal["read", "write_preview", "write_apply", "admin_preview", "local"]
 
@@ -40,6 +41,7 @@ class AssistantIntent:
 
     def public_payload(self) -> dict[str, Any]:
         return {
+            "schema_version": SEMANTIC_FRAME_SCHEMA_VERSION,
             "name": self.name,
             "arguments": dict(self.arguments),
             "parser": self.parser,
@@ -106,6 +108,7 @@ class ToolPlan:
 
 __all__ = [
     "ASSISTANT_FRAME_SCHEMA_VERSION",
+    "SEMANTIC_FRAME_SCHEMA_VERSION",
     "TOOL_PLAN_SCHEMA_VERSION",
     "AssistantFrame",
     "AssistantIntent",

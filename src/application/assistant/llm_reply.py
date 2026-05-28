@@ -6,10 +6,13 @@ from typing import Any
 
 from src.application.assistant.llm_common import (
     CreateStructuredResponseFn,
+    is_supported_llm_provider,
     llm_api_key_value,
     missing_llm_config,
+    normalize_llm_provider,
     provider_create_response_fn,
     strip_json_code_fence,
+    unsupported_llm_provider_error,
 )
 from src.application.assistant.settings import LlmTranslatorSettings
 from src.application.agent_tool_contracts import AgentToolError
@@ -78,17 +81,12 @@ def generate_general_reply(
             ),
         )
 
-    provider = str(settings.provider or "").strip().lower()
-    if provider not in {"openai", "deepseek"}:
+    provider = normalize_llm_provider(settings.provider)
+    if not is_supported_llm_provider(provider):
         return LlmReplyResult(
             response_text=None,
             trace=_trace(settings, attempted=False, reason="unsupported_provider"),
-            error=AgentToolError(
-                code="LLM_UNAVAILABLE",
-                message=f"unsupported LLM reply provider: {settings.provider}",
-                hint="Set assistant.llm.provider to openai or deepseek, or use assistant.mode=deterministic.",
-                details={"provider": settings.provider},
-            ),
+            error=unsupported_llm_provider_error(settings, component="reply"),
         )
 
     api_key = llm_api_key_value(settings, environ=environ)

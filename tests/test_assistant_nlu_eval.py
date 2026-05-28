@@ -9,6 +9,7 @@ import pytest
 
 from src.application.assistant.command_parser import parse_assistant_command
 from src.application.assistant.contracts import AssistantIntent
+from src.application.assistant.frame_planner import frame_from_intent
 from src.application.assistant.intent_arbitration import accepted_candidate, build_intent_arbitration, skipped_candidate
 from src.application.assistant.parser import parse_inbound_text
 
@@ -50,9 +51,14 @@ def _arbitrate_eval_case(intent: AssistantIntent) -> dict[str, Any]:
 def test_assistant_nlu_eval_cases(case: dict[str, Any]) -> None:
     intent = _parse(str(case["text"]))
     arbitration = _arbitrate_eval_case(intent)
+    expected_source = str(case["expected_source"])
+    expected_safety_class = str(case["expected_safety_class"])
 
     assert intent.name == case["expected_intent"]
+    assert ("command" if intent.parser == "command" else "deterministic") == expected_source
+    assert frame_from_intent(intent).safety_class == expected_safety_class
     assert arbitration["selected_intent"]["name"] == case["expected_intent"]
+    assert arbitration["selected_source"] == expected_source
     assert arbitration["candidates"][0]["intent_name"] == case["expected_intent"]
     if case.get("must_not_intent"):
         assert intent.name != case["must_not_intent"]
