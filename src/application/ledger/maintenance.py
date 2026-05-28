@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import uuid
+from dataclasses import replace
 from typing import Any
 
 from domain.domain.ledger import ContractKey, TradeEvent
@@ -245,6 +246,24 @@ def build_expired_close_decisions(
             continue
 
         should_close = int(exp_ms) <= cutoff_ms
+        manual_skip_reason = str(fields.get("_auto_close_skip_reason") or "").strip()
+        if should_close and manual_skip_reason:
+            decisions.append(
+                ExpiredCloseDecision(
+                    record_id=record_id,
+                    position_id=position_id,
+                    expiration_ms=int(exp_ms),
+                    raw_expiration_ms=raw_exp_ms,
+                    expiration_ymd=exp_ymd,
+                    effective_exp_source=exp_source,
+                    should_close=False,
+                    reason=str(fields.get("_auto_close_skip_message") or manual_skip_reason),
+                    skip_reason=manual_skip_reason,
+                    contracts_open=contracts_open,
+                    patch=None,
+                )
+            )
+            continue
         patch_contract = (
             build_expire_auto_close_patch_contract(
                 fields,
@@ -359,6 +378,122 @@ def _mark_auto_close_decision_skipped_already_closed(
     )
 
 
+def _same_float(left: Any, right: Any, *, tolerance: float = 1e-9) -> bool:
+    try:
+        return abs(float(left) - float(right)) <= tolerance
+    except Exception:
+        return False
+
+
+def _same_lifecycle_contract(fields: dict[str, Any], case: dict[str, Any]) -> bool:
+    if normalize_account(fields.get("account")) != normalize_account(case.get("account")):
+        return False
+    if _canonical_trade_symbol(fields.get("symbol")) != _canonical_trade_symbol(case.get("symbol")):
+        return False
+    if str(fields.get("option_type") or "").strip().lower() != str(case.get("option_type") or "").strip().lower():
+        return False
+    if str(fields.get("side") or "").strip().lower() != str(case.get("position_side") or "").strip().lower():
+        return False
+    if str(effective_expiration_ymd(fields) or "") != str(case.get("expiration_ymd") or ""):
+        return False
+    return _same_float(effective_strike(fields), case.get("strike"))
+
+
+def _stock_evidence_matches_lifecycle_lot(
+    fields: dict[str, Any],
+    evidence: dict[str, Any],
+    *,
+    contracts_to_close: int,
+) -> bool:
+    if str(evidence.get("evidence_type") or "") != "stock_settlement_leg":
+        return False
+    if normalize_account(fields.get("account")) != normalize_account(evidence.get("account")):
+        return False
+    if _canonical_trade_symbol(fields.get("symbol")) != _canonical_trade_symbol(evidence.get("symbol")):
+        return False
+    option_type = str(fields.get("option_type") or "").strip().lower()
+    position_side = str(fields.get("side") or "").strip().lower()
+    if position_side == "short":
+        expected_side = "buy" if option_type == "put" else "sell" if option_type == "call" else ""
+    elif position_side == "long":
+        expected_side = "buy" if option_type == "call" else "sell" if option_type == "put" else ""
+    else:
+        expected_side = ""
+    if str(evidence.get("side") or "").strip().lower() != expected_side:
+        return False
+    try:
+        expected_qty = int(contracts_to_close) * int(effective_multiplier(fields) or 100)
+        actual_qty = abs(int(evidence.get("stock_qty") or 0))
+    except Exception:
+        return False
+    if expected_qty <= 0 or actual_qty != expected_qty:
+        return False
+    try:
+        strike = float(effective_strike(fields))
+        price = float(evidence.get("stock_price"))
+    except Exception:
+        return False
+    tolerance = max(0.01, abs(strike) * 0.001)
+    return abs(price - strike) <= tolerance
+
+
+def _lifecycle_auto_close_blocker(
+    repo: Any,
+    *,
+    record_id: str,
+    fields: dict[str, Any],
+    contracts_to_close: int,
+) -> dict[str, Any] | None:
+    list_cases = getattr(repo, "list_trade_lifecycle_cases", None)
+    if callable(list_cases):
+        try:
+            for case in list_cases():
+                if not isinstance(case, dict):
+                    continue
+                status = str(case.get("status") or "").strip().lower()
+                if status not in {"pending", "waiting_settlement_evidence", "needs_review", "conflict"}:
+                    continue
+                if _same_lifecycle_contract(fields, case):
+                    return {
+                        "skip_reason": "lifecycle_assignment_pending",
+                        "reason": (
+                            "assignment/exercise lifecycle evidence is pending; "
+                            f"case_id={case.get('case_id') or '-'} status={status}"
+                        ),
+                        "case_id": case.get("case_id"),
+                        "status": status,
+                    }
+        except Exception:
+            return None
+
+    list_evidence = getattr(repo, "list_trade_lifecycle_evidence", None)
+    if callable(list_evidence):
+        try:
+            evidence_rows = list_evidence(
+                account=normalize_account(fields.get("account")),
+                symbol=_canonical_trade_symbol(fields.get("symbol")),
+            )
+            for evidence in evidence_rows:
+                if not isinstance(evidence, dict):
+                    continue
+                if _stock_evidence_matches_lifecycle_lot(
+                    fields,
+                    evidence,
+                    contracts_to_close=int(contracts_to_close),
+                ):
+                    return {
+                        "skip_reason": "lifecycle_stock_settlement_evidence_seen",
+                        "reason": (
+                            "stock settlement evidence may indicate assignment/exercise; "
+                            f"evidence_id={evidence.get('evidence_id') or '-'}"
+                        ),
+                        "evidence_id": evidence.get("evidence_id"),
+                    }
+        except Exception:
+            return None
+    return None
+
+
 def _ledger_preflight_error_payload(exc: Exception) -> dict[str, Any]:
     if isinstance(exc, LedgerPreflightError):
         return {
@@ -440,6 +575,22 @@ def auto_close_expired_positions(
             contracts_to_close = effective_contracts_open(fields)
             if contracts_to_close <= 0:
                 decisions[index] = _mark_auto_close_decision_skipped_already_closed(decision, fields)
+                continue
+            lifecycle_blocker = _lifecycle_auto_close_blocker(
+                repo,
+                record_id=record_id,
+                fields=fields,
+                contracts_to_close=contracts_to_close,
+            )
+            if lifecycle_blocker:
+                decisions[index] = replace(
+                    decision.with_skip(
+                        reason=str(lifecycle_blocker.get("reason") or "lifecycle evidence pending"),
+                        skip_reason=str(lifecycle_blocker.get("skip_reason") or "lifecycle_pending"),
+                        contracts_open=contracts_to_close,
+                    ),
+                    details={**decision.details, "lifecycle_blocker": dict(lifecycle_blocker)},
+                )
                 continue
             close_target_resolution = resolve_explicit_close_target(
                 repo,

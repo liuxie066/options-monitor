@@ -468,6 +468,111 @@ def test_auto_close_expired_positions_closes_same_expiry_without_crossing_later_
     assert lots_by_id["lot_0700_put_450_20260629"]["contracts_open"] == 3
 
 
+def test_auto_close_expired_positions_skips_when_lifecycle_assignment_pending(tmp_path: Path) -> None:
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    _seed_open_lot_event(
+        repo,
+        record_id="lot_tigr_put_6_20260522",
+        account="lx",
+        symbol="TIGR",
+        option_type="put",
+        side="short",
+        contracts=10,
+        currency="USD",
+        strike=6,
+        multiplier=100,
+        expiration_ymd="2026-05-22",
+        opened_at_ms=1000,
+    )
+    repo.upsert_trade_lifecycle_case(
+        {
+            "case_id": "lc_tigr_assignment",
+            "case_key": "富途|lx|TIGR|put|short|6|2026-05-22",
+            "account": "lx",
+            "symbol": "TIGR",
+            "option_type": "put",
+            "position_side": "short",
+            "strike": 6,
+            "expiration_ymd": "2026-05-22",
+            "contracts": 10,
+            "status": "waiting_settlement_evidence",
+            "decision_type": "needs_review",
+            "target_lot_ids": [],
+        }
+    )
+    as_of_ms = parse_exp_to_ms("2026-05-25")
+    assert as_of_ms is not None
+    positions = [dict(item["fields"], record_id=item["record_id"]) for item in repo.list_position_lots()]
+
+    decisions, applied, errors = _auto_close_payloads(
+        repo,
+        positions,
+        as_of_ms=as_of_ms,
+        grace_days=1,
+        max_close=5,
+    )
+
+    assert errors == []
+    assert applied == []
+    assert decisions[0]["should_close"] is False
+    assert decisions[0]["skip_reason"] == "lifecycle_assignment_pending"
+    assert decisions[0]["lifecycle_blocker"]["case_id"] == "lc_tigr_assignment"
+    assert [item for item in repo.list_trade_events() if item["event_type"] == "expire_close"] == []
+    assert repo.get_record_fields("lot_tigr_put_6_20260522")["status"] == "open"
+
+
+def test_auto_close_expired_positions_skips_when_exercise_stock_evidence_seen(tmp_path: Path) -> None:
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    _seed_open_lot_event(
+        repo,
+        record_id="lot_aapl_call_200_20260522",
+        account="lx",
+        symbol="AAPL",
+        option_type="call",
+        side="long",
+        contracts=2,
+        currency="USD",
+        strike=200,
+        multiplier=100,
+        expiration_ymd="2026-05-22",
+        opened_at_ms=1000,
+    )
+    repo.upsert_trade_lifecycle_evidence(
+        {
+            "evidence_id": "ev_aapl_exercise_stock",
+            "case_id": None,
+            "source_type": "futu_trade_push",
+            "source_event_id": "deal-aapl-stock",
+            "evidence_type": "stock_settlement_leg",
+            "account": "lx",
+            "symbol": "AAPL",
+            "side": "buy",
+            "stock_qty": 200,
+            "stock_price": 200,
+            "trade_time_ms": parse_exp_to_ms("2026-05-23"),
+            "raw": {"deal_id": "deal-aapl-stock"},
+        }
+    )
+    as_of_ms = parse_exp_to_ms("2026-05-25")
+    assert as_of_ms is not None
+    positions = [dict(item["fields"], record_id=item["record_id"]) for item in repo.list_position_lots()]
+
+    decisions, applied, errors = _auto_close_payloads(
+        repo,
+        positions,
+        as_of_ms=as_of_ms,
+        grace_days=1,
+        max_close=5,
+    )
+
+    assert errors == []
+    assert applied == []
+    assert decisions[0]["should_close"] is False
+    assert decisions[0]["skip_reason"] == "lifecycle_stock_settlement_evidence_seen"
+    assert [item for item in repo.list_trade_events() if item["event_type"] == "expire_close"] == []
+    assert repo.get_record_fields("lot_aapl_call_200_20260522")["status"] == "open"
+
+
 def test_auto_close_expired_positions_fail_closed_on_ledger_identity_mismatch(tmp_path: Path) -> None:
     from domain.domain.option_position_lots import OpenPositionCommand
 

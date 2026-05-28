@@ -182,7 +182,9 @@ def _close_fields(
     close_type = str(payload.get("close_type") or "").strip().lower()
     mode = str(payload.get("mode") or "").strip().lower()
     trade_side = normalize_trade_side(legacy_event.get("side"))
-    if close_type != EXPIRE_AUTO_CLOSE and mode != EXPIRE_AUTO_CLOSE:
+    if close_type in {"assignment", "exercise"}:
+        pass
+    elif close_type != EXPIRE_AUTO_CLOSE and mode != EXPIRE_AUTO_CLOSE:
         if trade_side == "buy":
             close_type = BUY_TO_CLOSE
         elif trade_side == "sell":

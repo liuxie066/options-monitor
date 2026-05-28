@@ -352,6 +352,21 @@ Agent 只读列出：
 ./om option-positions add --account lx --symbol 0700.HK --option-type put --side short --contracts 1 --currency HKD --strike 420 --multiplier 100 --exp 2026-04-29 --premium-per-share 1.2 --confirm
 ```
 
+普通买平、被指派、主动行权是不同账本语义，分别使用独立入口：
+
+```bash
+./om option-positions buy-close --account lx --symbol TIGR --option-type put --strike 6 --exp 2026-05-22 --contracts 10 --close-price 0.05 --dry-run
+./om option-positions assign --account lx --symbol TIGR --option-type put --strike 6 --exp 2026-05-22 --contracts 10 --stock-side buy --stock-qty 1000 --stock-price 6 --dry-run
+./om option-positions exercise --account lx --symbol AAPL --option-type call --strike 200 --exp 2026-05-22 --contracts 2 --stock-side buy --stock-qty 200 --stock-price 200 --dry-run
+```
+
+到期生命周期证据和冲突可直接检查：
+
+```bash
+./om option-positions lifecycle list --status waiting_settlement_evidence --include-evidence
+./om option-positions lifecycle inspect --case-id <case_id>
+```
+
 手工成交文本入账使用 runtime config 路径；确认写入前会打印目标 SQLite，发现 active/default store 已经漂移时会拒绝写入：
 
 ```bash
