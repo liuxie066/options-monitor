@@ -17,7 +17,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
                     "min_otm_pct": 0.05,
                     "min_open_interest": 50,
                     "min_volume": 10,
-                    "max_spread_ratio": 0.3,
+                    "max_spread_ratio": 0.4,
                     "short_vol": {
                         "min_iv_rv_ratio": 1.15,
                         "min_iv_minus_rv": 0.05,
@@ -54,7 +54,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
                     "strategy": "short_vol",
                     "min_open_interest": 50,
                     "min_volume": 10,
-                    "max_spread_ratio": 0.3,
+                    "max_spread_ratio": 0.4,
                     "min_strike_cost_multiplier": 1.02,
                     "short_vol": {
                         "min_iv_rv_ratio": 1.15,
