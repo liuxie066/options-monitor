@@ -796,3 +796,29 @@ def test_trade_event_projection_mainline_has_no_legacy_passthrough() -> None:
     assert "_encode_legacy_bootstrap_passthrough" not in codec_text
     assert "_bootstrap_passthrough_records" not in publisher_text
     assert "_resolve_legacy_close_targets" not in publisher_text
+
+
+def test_option_lifecycle_layer_does_not_mutate_position_lots_directly() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    checked = [
+        repo_root / "src" / "application" / "trades" / "lifecycle.py",
+        repo_root / "src" / "application" / "ledger" / "lifecycle.py",
+    ]
+    banned_fragments = (
+        ".update_record(",
+        ".replace_position_lots(",
+        "update_position_lot_fields(",
+        "replace_position_lots(",
+    )
+    offenders: list[str] = []
+    for path in checked:
+        text = path.read_text(encoding="utf-8")
+        for fragment in banned_fragments:
+            if fragment in text:
+                offenders.append(f"{path.relative_to(repo_root)}:{fragment}")
+
+    ledger_lifecycle_text = (repo_root / "src" / "application" / "ledger" / "lifecycle.py").read_text(
+        encoding="utf-8"
+    )
+    assert "persist_trade_event_object(repo, event)" in ledger_lifecycle_text
+    assert offenders == []

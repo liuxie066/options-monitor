@@ -12,7 +12,9 @@ from domain.domain.ledger.position_fields import (
     build_close_patch_contract,
     build_open_adjustment_patch_contract,
     build_position_lot_fields,
+    effective_multiplier,
 )
+from domain.domain.trade_contract_identity import normalize_trade_side
 from src.application.ledger.interventions import (
     build_manual_repair_preview,
     build_manual_void_preview,
@@ -84,6 +86,7 @@ from src.application.ledger.writer import (
     persist_trade_event,
     rebuild_position_lots_from_trade_events,
 )
+from src.application.ledger.lifecycle import persist_assignment_events, persist_exercise_events
 
 
 def supports_ledger_open_preflight(repo: Any) -> bool:
@@ -521,6 +524,523 @@ def resolve_manual_position_close_target(
         contracts_to_close=contracts_to_close,
     )
     return resolve_unique_close_target(repo, selector, source="manual_close")
+
+
+def _manual_assignment_target_resolution(
+    repo: Any,
+    *,
+    record_id: str | None,
+    broker: str,
+    account: str | None,
+    symbol: str | None,
+    option_type: str | None,
+    position_side: str | None,
+    strike: float | None,
+    expiration_ymd: str | None,
+    contracts_to_close: int,
+) -> CloseTargetResolution:
+    resolved_record_id = str(record_id or "").strip()
+    if resolved_record_id:
+        fields = _current_record_fields(repo, record_id=resolved_record_id)
+        return resolve_explicit_close_target(
+            repo,
+            record_id=resolved_record_id,
+            contracts_to_close=int(contracts_to_close),
+            source="manual_assignment",
+            fields=fields,
+        )
+    selector = LotCloseSelector.from_values(
+        broker=broker,
+        account=account,
+        symbol=symbol,
+        option_type=option_type,
+        position_side=position_side,
+        strike=strike,
+        expiration_ymd=expiration_ymd,
+        contracts_to_close=int(contracts_to_close),
+    )
+    return resolve_fifo_close_targets(repo, selector, source="manual_assignment")
+
+
+def _validate_lifecycle_stock_settlement(
+    repo: Any,
+    *,
+    resolution: CloseTargetResolution,
+    stock_side: str,
+    stock_qty: int,
+    stock_price: float,
+    lifecycle_type: str,
+) -> dict[str, Any]:
+    normalized_lifecycle_type = str(lifecycle_type or "").strip().lower()
+    if normalized_lifecycle_type not in {"assignment", "exercise"}:
+        raise ValueError("lifecycle stock settlement type must be assignment or exercise")
+    normalized_stock_side = normalize_trade_side(stock_side)
+    if normalized_stock_side not in {"buy", "sell"}:
+        raise ValueError(f"manual {normalized_lifecycle_type} stock side must be buy or sell")
+    expected_qty = 0
+    expected_stock_side = ""
+    strike: float | None = None
+    for match in resolution.matches:
+        fields = _current_record_fields(repo, record_id=match.record_id)
+        option_type = str(fields.get("option_type") or "").strip().lower()
+        position_side = str(fields.get("side") or "").strip().lower()
+        expected_position_side = "short" if normalized_lifecycle_type == "assignment" else "long"
+        if position_side != expected_position_side:
+            raise ValueError(f"manual {normalized_lifecycle_type} currently supports {expected_position_side} option lots only")
+        if normalized_lifecycle_type == "assignment":
+            expected = "buy" if option_type == "put" else "sell" if option_type == "call" else ""
+        else:
+            expected = "buy" if option_type == "call" else "sell" if option_type == "put" else ""
+        if not expected:
+            raise ValueError(f"manual {normalized_lifecycle_type} requires put/call option_type")
+        if expected_stock_side and expected_stock_side != expected:
+            raise ValueError(f"manual {normalized_lifecycle_type} target lots require one settlement stock side")
+        expected_stock_side = expected
+        multiplier = effective_multiplier(fields) or 100
+        expected_qty += int(match.contracts_to_close) * int(multiplier)
+        current_strike = float(fields.get("strike")) if fields.get("strike") is not None else None
+        if strike is None:
+            strike = current_strike
+        elif current_strike is not None and abs(float(strike) - float(current_strike)) > 1e-9:
+            raise ValueError(f"manual {normalized_lifecycle_type} target lots require one strike")
+    if normalized_stock_side != expected_stock_side:
+        raise ValueError(f"manual {normalized_lifecycle_type} stock side must be {expected_stock_side} for target lots")
+    if int(stock_qty) != int(expected_qty):
+        raise ValueError(f"manual {normalized_lifecycle_type} stock qty must equal settled shares: expected {expected_qty}")
+    if strike is not None:
+        tolerance = max(0.01, abs(float(strike)) * 0.001)
+        if abs(float(stock_price) - float(strike)) > tolerance:
+            raise ValueError(f"manual {normalized_lifecycle_type} stock price must be close to strike={strike}")
+    return {
+        "side": normalized_stock_side,
+        "shares": int(stock_qty),
+        "price": float(stock_price),
+        "expected_shares": int(expected_qty),
+        "expected_side": expected_stock_side,
+        "strike": strike,
+    }
+
+
+def _validate_assignment_stock_settlement(
+    repo: Any,
+    *,
+    resolution: CloseTargetResolution,
+    stock_side: str,
+    stock_qty: int,
+    stock_price: float,
+) -> dict[str, Any]:
+    return _validate_lifecycle_stock_settlement(
+        repo,
+        resolution=resolution,
+        stock_side=stock_side,
+        stock_qty=stock_qty,
+        stock_price=stock_price,
+        lifecycle_type="assignment",
+    )
+
+
+def _validate_exercise_stock_settlement(
+    repo: Any,
+    *,
+    resolution: CloseTargetResolution,
+    stock_side: str,
+    stock_qty: int,
+    stock_price: float,
+) -> dict[str, Any]:
+    return _validate_lifecycle_stock_settlement(
+        repo,
+        resolution=resolution,
+        stock_side=stock_side,
+        stock_qty=stock_qty,
+        stock_price=stock_price,
+        lifecycle_type="exercise",
+    )
+
+
+def preview_manual_assignment(
+    repo: Any,
+    *,
+    record_id: str | None,
+    broker: str = "富途",
+    account: str | None = None,
+    symbol: str | None = None,
+    option_type: str | None = None,
+    position_side: str | None = "short",
+    strike: float | None = None,
+    expiration_ymd: str | None = None,
+    contracts_to_close: int,
+    stock_side: str,
+    stock_qty: int,
+    stock_price: float,
+    as_of_ms: int | None = None,
+) -> dict[str, Any]:
+    resolution = _manual_assignment_target_resolution(
+        repo,
+        record_id=record_id,
+        broker=broker,
+        account=account,
+        symbol=symbol,
+        option_type=option_type,
+        position_side=position_side,
+        strike=strike,
+        expiration_ymd=expiration_ymd,
+        contracts_to_close=int(contracts_to_close),
+    )
+    stock_settlement = _validate_assignment_stock_settlement(
+        repo,
+        resolution=resolution,
+        stock_side=stock_side,
+        stock_qty=int(stock_qty),
+        stock_price=float(stock_price),
+    )
+    operations: list[dict[str, Any]] = []
+    for match in resolution.matches:
+        fields = _current_record_fields(repo, record_id=match.record_id)
+        ledger_preflight = preflight_broker_trade_close(
+            repo,
+            record_id=match.record_id,
+            fields=fields,
+            contracts_to_close=int(match.contracts_to_close),
+            close_price=0.0,
+            as_of_ms=as_of_ms,
+            event_type="assignment",
+        )
+        operations.append(
+            BrokerTradeOperation(
+                action="assignment",
+                record_id=match.record_id,
+                contracts_to_close=int(match.contracts_to_close),
+                matched_by=match.matched_by,
+                ledger_preflight=ledger_preflight,
+                close_target_resolution=resolution.to_dict(),
+                details={"stock_settlement": stock_settlement},
+            ).to_payload()
+        )
+    return {
+        "mode": "dry_run",
+        "event_type": "assignment",
+        "stock_settlement": stock_settlement,
+        "close_target_resolution": resolution.to_dict(),
+        "operations": operations,
+    }
+
+
+def record_manual_assignment(
+    repo: Any,
+    *,
+    record_id: str | None,
+    broker: str = "富途",
+    account: str | None = None,
+    symbol: str | None = None,
+    option_type: str | None = None,
+    position_side: str | None = "short",
+    strike: float | None = None,
+    expiration_ymd: str | None = None,
+    contracts_to_close: int,
+    stock_side: str,
+    stock_qty: int,
+    stock_price: float,
+    as_of_ms: int | None = None,
+) -> dict[str, Any]:
+    preview = preview_manual_assignment(
+        repo,
+        record_id=record_id,
+        broker=broker,
+        account=account,
+        symbol=symbol,
+        option_type=option_type,
+        position_side=position_side,
+        strike=strike,
+        expiration_ymd=expiration_ymd,
+        contracts_to_close=contracts_to_close,
+        stock_side=stock_side,
+        stock_qty=stock_qty,
+        stock_price=stock_price,
+        as_of_ms=as_of_ms,
+    )
+    resolution = _manual_assignment_target_resolution(
+        repo,
+        record_id=record_id,
+        broker=broker,
+        account=account,
+        symbol=symbol,
+        option_type=option_type,
+        position_side=position_side,
+        strike=strike,
+        expiration_ymd=expiration_ymd,
+        contracts_to_close=int(contracts_to_close),
+    )
+    writes = persist_assignment_events(
+        repo,
+        close_target_resolution=resolution,
+        contracts_to_close=int(contracts_to_close),
+        event_time_ms=as_of_ms,
+        case_id=None,
+        evidence_ids=[],
+        stock_settlement=preview["stock_settlement"],
+        source="manual_assignment",
+    )
+    operations = [write.operation.to_payload() for write in writes]
+    return {
+        **preview,
+        "mode": "applied",
+        "operations": operations,
+        "result": operations[0].get("result") if operations else {},
+    }
+
+
+def _manual_exercise_target_resolution(
+    repo: Any,
+    *,
+    record_id: str | None,
+    broker: str,
+    account: str | None,
+    symbol: str | None,
+    option_type: str | None,
+    position_side: str | None,
+    strike: float | None,
+    expiration_ymd: str | None,
+    contracts_to_close: int,
+) -> CloseTargetResolution:
+    resolved_record_id = str(record_id or "").strip()
+    if resolved_record_id:
+        fields = _current_record_fields(repo, record_id=resolved_record_id)
+        return resolve_explicit_close_target(
+            repo,
+            record_id=resolved_record_id,
+            contracts_to_close=int(contracts_to_close),
+            source="manual_exercise",
+            fields=fields,
+        )
+    selector = LotCloseSelector.from_values(
+        broker=broker,
+        account=account,
+        symbol=symbol,
+        option_type=option_type,
+        position_side=position_side,
+        strike=strike,
+        expiration_ymd=expiration_ymd,
+        contracts_to_close=int(contracts_to_close),
+    )
+    return resolve_fifo_close_targets(repo, selector, source="manual_exercise")
+
+
+def preview_manual_exercise(
+    repo: Any,
+    *,
+    record_id: str | None,
+    broker: str = "富途",
+    account: str | None = None,
+    symbol: str | None = None,
+    option_type: str | None = None,
+    position_side: str | None = "long",
+    strike: float | None = None,
+    expiration_ymd: str | None = None,
+    contracts_to_close: int,
+    stock_side: str,
+    stock_qty: int,
+    stock_price: float,
+    as_of_ms: int | None = None,
+) -> dict[str, Any]:
+    resolution = _manual_exercise_target_resolution(
+        repo,
+        record_id=record_id,
+        broker=broker,
+        account=account,
+        symbol=symbol,
+        option_type=option_type,
+        position_side=position_side,
+        strike=strike,
+        expiration_ymd=expiration_ymd,
+        contracts_to_close=int(contracts_to_close),
+    )
+    stock_settlement = _validate_exercise_stock_settlement(
+        repo,
+        resolution=resolution,
+        stock_side=stock_side,
+        stock_qty=int(stock_qty),
+        stock_price=float(stock_price),
+    )
+    operations: list[dict[str, Any]] = []
+    for match in resolution.matches:
+        fields = _current_record_fields(repo, record_id=match.record_id)
+        ledger_preflight = preflight_broker_trade_close(
+            repo,
+            record_id=match.record_id,
+            fields=fields,
+            contracts_to_close=int(match.contracts_to_close),
+            close_price=0.0,
+            as_of_ms=as_of_ms,
+            event_type="exercise",
+        )
+        operations.append(
+            BrokerTradeOperation(
+                action="exercise",
+                record_id=match.record_id,
+                contracts_to_close=int(match.contracts_to_close),
+                matched_by=match.matched_by,
+                ledger_preflight=ledger_preflight,
+                close_target_resolution=resolution.to_dict(),
+                details={"stock_settlement": stock_settlement},
+            ).to_payload()
+        )
+    return {
+        "mode": "dry_run",
+        "event_type": "exercise",
+        "stock_settlement": stock_settlement,
+        "close_target_resolution": resolution.to_dict(),
+        "operations": operations,
+    }
+
+
+def record_manual_exercise(
+    repo: Any,
+    *,
+    record_id: str | None,
+    broker: str = "富途",
+    account: str | None = None,
+    symbol: str | None = None,
+    option_type: str | None = None,
+    position_side: str | None = "long",
+    strike: float | None = None,
+    expiration_ymd: str | None = None,
+    contracts_to_close: int,
+    stock_side: str,
+    stock_qty: int,
+    stock_price: float,
+    as_of_ms: int | None = None,
+) -> dict[str, Any]:
+    preview = preview_manual_exercise(
+        repo,
+        record_id=record_id,
+        broker=broker,
+        account=account,
+        symbol=symbol,
+        option_type=option_type,
+        position_side=position_side,
+        strike=strike,
+        expiration_ymd=expiration_ymd,
+        contracts_to_close=contracts_to_close,
+        stock_side=stock_side,
+        stock_qty=stock_qty,
+        stock_price=stock_price,
+        as_of_ms=as_of_ms,
+    )
+    resolution = _manual_exercise_target_resolution(
+        repo,
+        record_id=record_id,
+        broker=broker,
+        account=account,
+        symbol=symbol,
+        option_type=option_type,
+        position_side=position_side,
+        strike=strike,
+        expiration_ymd=expiration_ymd,
+        contracts_to_close=int(contracts_to_close),
+    )
+    writes = persist_exercise_events(
+        repo,
+        close_target_resolution=resolution,
+        contracts_to_close=int(contracts_to_close),
+        event_time_ms=as_of_ms,
+        case_id=None,
+        evidence_ids=[],
+        stock_settlement=preview["stock_settlement"],
+        source="manual_exercise",
+    )
+    operations = [write.operation.to_payload() for write in writes]
+    return {
+        **preview,
+        "mode": "applied",
+        "operations": operations,
+        "result": operations[0].get("result") if operations else {},
+    }
+
+
+def record_lifecycle_assignment(
+    repo: Any,
+    *,
+    broker: str,
+    account: str | None,
+    symbol: str | None,
+    option_type: str | None,
+    position_side: str | None,
+    strike: float | None,
+    expiration_ymd: str | None,
+    contracts_to_close: int,
+    event_time_ms: int | None,
+    case_id: str | None,
+    evidence_ids: list[str] | tuple[str, ...] | None,
+    stock_settlement: dict[str, Any] | None,
+) -> dict[str, Any]:
+    selector = LotCloseSelector.from_values(
+        broker=broker,
+        account=account,
+        symbol=symbol,
+        option_type=option_type,
+        position_side=position_side,
+        strike=strike,
+        expiration_ymd=expiration_ymd,
+        contracts_to_close=int(contracts_to_close),
+    )
+    close_target_resolution = resolve_fifo_close_targets(repo, selector, source="lifecycle_assignment")
+    writes = persist_assignment_events(
+        repo,
+        close_target_resolution=close_target_resolution,
+        contracts_to_close=int(contracts_to_close),
+        event_time_ms=event_time_ms,
+        case_id=case_id,
+        evidence_ids=evidence_ids or [],
+        stock_settlement=dict(stock_settlement or {}),
+    )
+    return {
+        "close_target_resolution": close_target_resolution,
+        "operations": [write.operation for write in writes],
+        "writes": writes,
+    }
+
+
+def record_lifecycle_exercise(
+    repo: Any,
+    *,
+    broker: str,
+    account: str | None,
+    symbol: str | None,
+    option_type: str | None,
+    position_side: str | None,
+    strike: float | None,
+    expiration_ymd: str | None,
+    contracts_to_close: int,
+    event_time_ms: int | None,
+    case_id: str | None,
+    evidence_ids: list[str] | tuple[str, ...] | None,
+    stock_settlement: dict[str, Any] | None,
+) -> dict[str, Any]:
+    selector = LotCloseSelector.from_values(
+        broker=broker,
+        account=account,
+        symbol=symbol,
+        option_type=option_type,
+        position_side=position_side,
+        strike=strike,
+        expiration_ymd=expiration_ymd,
+        contracts_to_close=int(contracts_to_close),
+    )
+    close_target_resolution = resolve_fifo_close_targets(repo, selector, source="lifecycle_exercise")
+    writes = persist_exercise_events(
+        repo,
+        close_target_resolution=close_target_resolution,
+        contracts_to_close=int(contracts_to_close),
+        event_time_ms=event_time_ms,
+        case_id=case_id,
+        evidence_ids=evidence_ids or [],
+        stock_settlement=dict(stock_settlement or {}),
+    )
+    return {
+        "close_target_resolution": close_target_resolution,
+        "operations": [write.operation for write in writes],
+        "writes": writes,
+    }
 
 
 def preview_manual_position_close(
@@ -1013,6 +1533,8 @@ __all__ = [
     "plan_expired_position_closes",
     "preview_broker_trade_close",
     "preview_broker_trade_open",
+    "preview_manual_exercise",
+    "preview_manual_assignment",
     "preview_manual_position_adjust",
     "preview_manual_position_close",
     "preview_manual_position_open",
@@ -1021,6 +1543,10 @@ __all__ = [
     "record_broker_trade_close",
     "record_broker_trade_open",
     "record_expired_position_closes",
+    "record_lifecycle_assignment",
+    "record_lifecycle_exercise",
+    "record_manual_exercise",
+    "record_manual_assignment",
     "record_manual_position_adjust",
     "record_manual_position_close",
     "record_manual_position_open",

@@ -193,6 +193,47 @@ def trade_event_log(repo: Any) -> list[dict[str, Any]]:
     return events if isinstance(events, list) else []
 
 
+def list_trade_lifecycle_cases(
+    repo: Any,
+    *,
+    status: str | None = None,
+    account: str | None = None,
+    symbol: str | None = None,
+) -> list[dict[str, Any]]:
+    candidate = getattr(repo, "primary_repo", repo)
+    list_fn = getattr(candidate, "list_trade_lifecycle_cases", None)
+    if not callable(list_fn):
+        return []
+    rows = list_fn(status=status) if status else list_fn()
+    out: list[dict[str, Any]] = []
+    account_filter = str(account or "").strip().lower()
+    symbol_filter = str(symbol or "").strip().upper()
+    for row in list(rows or []):
+        if not isinstance(row, dict):
+            continue
+        if account_filter and str(row.get("account") or "").strip().lower() != account_filter:
+            continue
+        if symbol_filter and str(row.get("symbol") or "").strip().upper() != symbol_filter:
+            continue
+        out.append(dict(row))
+    return out
+
+
+def list_trade_lifecycle_evidence(
+    repo: Any,
+    *,
+    case_id: str | None = None,
+    account: str | None = None,
+    symbol: str | None = None,
+) -> list[dict[str, Any]]:
+    candidate = getattr(repo, "primary_repo", repo)
+    list_fn = getattr(candidate, "list_trade_lifecycle_evidence", None)
+    if not callable(list_fn):
+        return []
+    rows = list_fn(case_id=case_id, account=account, symbol=symbol)
+    return [dict(row) for row in list(rows or []) if isinstance(row, dict)]
+
+
 def project_trade_event_log(events: list[dict[str, Any]]) -> Any:
     return project_stored_trade_events_to_position_lots(events)
 
@@ -221,6 +262,8 @@ __all__ = [
     "list_position_lot_snapshots",
     "list_position_lot_sync_snapshots",
     "list_position_rows",
+    "list_trade_lifecycle_cases",
+    "list_trade_lifecycle_evidence",
     "normalize_position_lot_fields",
     "normalize_position_lot_snapshot",
     "open_position_ledger",

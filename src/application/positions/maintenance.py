@@ -100,6 +100,38 @@ def _open_positions_for_account(
     return out
 
 
+def _account_type(cfg: dict[str, Any], account: str | None) -> str:
+    if not account:
+        return ""
+    accounts = cfg.get("accounts") if isinstance(cfg, dict) else {}
+    if not isinstance(accounts, dict):
+        return ""
+    raw = accounts.get(str(account).strip().lower())
+    if not isinstance(raw, dict):
+        return ""
+    return str(raw.get("type") or "").strip().lower()
+
+
+def _mark_manual_expiry_review_required(
+    positions: list[dict[str, Any]],
+    *,
+    cfg: dict[str, Any],
+    account: str | None,
+) -> list[dict[str, Any]]:
+    account_type = _account_type(cfg, account)
+    if account_type != "external_holdings":
+        return positions
+    out: list[dict[str, Any]] = []
+    for item in positions:
+        row = dict(item)
+        row["_auto_close_skip_reason"] = "manual_expiry_review_required"
+        row["_auto_close_skip_message"] = (
+            "account uses external/manual holdings; expiry close requires manual assignment/expiry review"
+        )
+        out.append(row)
+    return out
+
+
 def _load_expiry_close_position_lots(repo: Any) -> list[dict[str, Any]]:
     return list_expiry_close_position_lots(repo)
 
@@ -107,9 +139,10 @@ def _load_expiry_close_position_lots(repo: Any) -> list[dict[str, Any]]:
 def format_auto_close_summary(result: dict[str, Any]) -> str:
     candidates = int(result.get("candidates_should_close") or 0)
     applied = int(result.get("applied_closed") or 0)
+    review_required = int(result.get("skipped_review_required") or 0)
     skipped_already_closed = int(result.get("skipped_already_closed") or 0)
     errors = list(result.get("errors") or [])
-    if candidates <= 0 and applied <= 0 and not errors:
+    if candidates <= 0 and applied <= 0 and review_required <= 0 and not errors:
         return ""
 
     lines = [
@@ -121,6 +154,8 @@ def format_auto_close_summary(result: dict[str, Any]) -> str:
         f"candidates_should_close: {candidates}",
         f"applied_closed: {applied}",
     ]
+    if review_required > 0:
+        lines.append(f"skipped_review_required: {review_required}")
     if skipped_already_closed > 0:
         lines.append(f"skipped_already_closed: {skipped_already_closed}")
     lines.append(f"ERRORS: {len(errors)}")
@@ -147,6 +182,16 @@ def format_auto_close_summary(result: dict[str, Any]) -> str:
             lines.append(
                 f"- {item.get('record_id')} | {item.get('position_id')} | "
                 f"exp={item.get('expiration_ymd') or item.get('expiration_ms')}"
+            )
+    if review_required:
+        lines.append("")
+        lines.append("Review required:")
+        for item in list(result.get("decision_items") or [])[:50]:
+            if not isinstance(item, dict) or not item.get("skip_reason"):
+                continue
+            lines.append(
+                f"- {item.get('record_id')} | {item.get('position_id')} | "
+                f"skip={item.get('skip_reason')} | exp={item.get('expiration_ymd') or item.get('expiration_ms')}"
             )
 
     return "\n".join(lines).strip()
@@ -238,6 +283,7 @@ def run_expired_position_maintenance_for_account(
         account=account,
         broker=effective_broker,
     )
+    positions = _mark_manual_expiry_review_required(positions, cfg=cfg, account=account)
     if dry_run:
         decisions = [
             _payload(item)
@@ -269,6 +315,17 @@ def run_expired_position_maintenance_for_account(
         for item in decisions
         if isinstance(item, dict) and item.get("skip_reason") == "already_closed_or_zero_open"
     ]
+    skipped_review_required = [
+        item
+        for item in decisions
+        if isinstance(item, dict)
+        and item.get("skip_reason")
+        in {
+            "manual_expiry_review_required",
+            "lifecycle_assignment_pending",
+            "lifecycle_stock_settlement_evidence_seen",
+        }
+    ]
     result: dict[str, Any] = {
         "mode": "dry_run" if dry_run else "applied",
         "account": normalize_account(account) if account else None,
@@ -278,8 +335,10 @@ def run_expired_position_maintenance_for_account(
         "max_close": int(auto_cfg["max_close"]),
         "positions_checked": len(positions),
         "decisions": len(decisions),
+        "decision_items": decisions,
         "candidates_should_close": len(to_close),
         "applied_closed": len(applied),
+        "skipped_review_required": len(skipped_review_required),
         "skipped_already_closed": len(skipped_already_closed),
         "errors": errors,
         "applied": applied,

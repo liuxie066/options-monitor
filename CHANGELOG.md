@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 1.2.160 - 2026-05-29
+
+### Added
+- Added option lifecycle case/evidence storage for assignment and exercise workflows.
+- Added manual `option-positions assign`, `option-positions exercise`, and lifecycle inspect/list CLI commands.
+- Added regression coverage for same-expiry lifecycle closes, stock-first/option-first assignment and exercise, and lifecycle auto-close blockers.
+
+### Changed
+- Separated normal close, expire-close, assignment, and exercise into distinct ledger semantics while preserving the canonical `trade_events -> projection -> position_lots` path.
+- Changed expired auto-close to skip pending lifecycle cases and matching stock settlement evidence, with external/manual accounts requiring review instead of automatic close.
+
+### Fixed
+- Fixed lifecycle close publishing so assignment and exercise close types are not rewritten as buy-to-close or sell-to-close.
+- Fixed stock settlement handling so ordinary stock trades keep skipping as non-option deals while late assignment evidence can still surface conflicts after expire-close.
+
 ## 1.2.159 - 2026-05-28
 
 ### Added

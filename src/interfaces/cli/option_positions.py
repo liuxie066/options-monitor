@@ -21,6 +21,8 @@ from src.application.ledger.api import (
     format_position_money,
     inspect_ledger_stores,
     ledger_store_payload,
+    list_trade_lifecycle_cases,
+    list_trade_lifecycle_evidence,
     list_position_rows,
     open_position_ledger_from_runtime_config,
     record_trade_event_void,
@@ -33,7 +35,9 @@ from src.application.positions.auto_close import main as run_option_positions_au
 from src.application.positions.workflows import (
     ManualCloseMatchError,
     execute_manual_adjust,
+    execute_manual_assignment,
     execute_manual_close,
+    execute_manual_exercise,
     execute_manual_open,
     format_manual_close_match_error,
 )
@@ -182,6 +186,40 @@ def main(argv: list[str] | None = None) -> int:
     p_buy_close.add_argument('--format', default='text', choices=['text', 'json'])
     _add_local_write_flags(p_buy_close, high_risk=True)
 
+    p_assign = sub.add_parser('assign', help='record an option assignment by record_id or strict selector')
+    p_assign.add_argument('--runtime-root', default=None, help='runtime root for active ledger store')
+    p_assign.add_argument('--record-id', default=None)
+    p_assign.add_argument('--broker', default='富途')
+    p_assign.add_argument('--account', default=None, help='required when --record-id is omitted')
+    p_assign.add_argument('--symbol', default=None, help='required when --record-id is omitted')
+    p_assign.add_argument('--option-type', default=None, choices=['put', 'call'], help='required when --record-id is omitted')
+    p_assign.add_argument('--side', default='short', choices=['short'], help='assignment currently targets short option lots')
+    p_assign.add_argument('--strike', type=float, default=None, help='required when --record-id is omitted')
+    p_assign.add_argument('--exp', default=None, help='YYYY-MM-DD; required when --record-id is omitted')
+    p_assign.add_argument('--contracts', type=int, required=True, help='assigned option contracts')
+    p_assign.add_argument('--stock-side', required=True, choices=['buy', 'sell'], help='stock settlement side; short put => buy, short call => sell')
+    p_assign.add_argument('--stock-qty', type=int, required=True, help='settled stock shares')
+    p_assign.add_argument('--stock-price', type=float, required=True, help='settlement stock price; should be close to strike')
+    p_assign.add_argument('--format', default='text', choices=['text', 'json'])
+    _add_local_write_flags(p_assign, high_risk=True)
+
+    p_exercise = sub.add_parser('exercise', help='record an option exercise by record_id or strict selector')
+    p_exercise.add_argument('--runtime-root', default=None, help='runtime root for active ledger store')
+    p_exercise.add_argument('--record-id', default=None)
+    p_exercise.add_argument('--broker', default='富途')
+    p_exercise.add_argument('--account', default=None, help='required when --record-id is omitted')
+    p_exercise.add_argument('--symbol', default=None, help='required when --record-id is omitted')
+    p_exercise.add_argument('--option-type', default=None, choices=['put', 'call'], help='required when --record-id is omitted')
+    p_exercise.add_argument('--side', default='long', choices=['long'], help='exercise currently targets long option lots')
+    p_exercise.add_argument('--strike', type=float, default=None, help='required when --record-id is omitted')
+    p_exercise.add_argument('--exp', default=None, help='YYYY-MM-DD; required when --record-id is omitted')
+    p_exercise.add_argument('--contracts', type=int, required=True, help='exercised option contracts')
+    p_exercise.add_argument('--stock-side', required=True, choices=['buy', 'sell'], help='stock settlement side; long call => buy, long put => sell')
+    p_exercise.add_argument('--stock-qty', type=int, required=True, help='settled stock shares')
+    p_exercise.add_argument('--stock-price', type=float, required=True, help='settlement stock price; should be close to strike')
+    p_exercise.add_argument('--format', default='text', choices=['text', 'json'])
+    _add_local_write_flags(p_exercise, high_risk=True)
+
     p_events = sub.add_parser('events', help='list canonical trade events')
     p_events.add_argument('--broker', default=None)
     p_events.add_argument('--account', default=None)
@@ -206,6 +244,18 @@ def main(argv: list[str] | None = None) -> int:
     p_inspect.add_argument('--strike', type=float, default=None)
     p_inspect.add_argument('--exp', default=None, help='YYYY-MM-DD')
     p_inspect.add_argument('--format', default='json', choices=['json'])
+
+    p_lifecycle = sub.add_parser('lifecycle', help='inspect option lifecycle cases and evidence')
+    lifecycle_sub = p_lifecycle.add_subparsers(dest='lifecycle_cmd', required=True)
+    p_lifecycle_list = lifecycle_sub.add_parser('list', help='list pending/reviewed assignment/expiry lifecycle cases')
+    p_lifecycle_list.add_argument('--status', default=None)
+    p_lifecycle_list.add_argument('--account', default=None)
+    p_lifecycle_list.add_argument('--symbol', default=None)
+    p_lifecycle_list.add_argument('--include-evidence', action='store_true')
+    p_lifecycle_list.add_argument('--format', default='json', choices=['json', 'text'])
+    p_lifecycle_inspect = lifecycle_sub.add_parser('inspect', help='inspect one lifecycle case with evidence')
+    p_lifecycle_inspect.add_argument('--case-id', required=True)
+    p_lifecycle_inspect.add_argument('--format', default='json', choices=['json', 'text'])
 
     p_store = sub.add_parser('store', help='inspect option-position SQLite store resolution')
     store_sub = p_store.add_subparsers(dest='store_cmd', required=True)
@@ -322,7 +372,7 @@ def main(argv: list[str] | None = None) -> int:
         return int(run_option_positions_auto_close(auto_close_argv))
 
     write_controls: dict[str, dict[str, bool]] = {}
-    if args.cmd in {"add", "buy-close", "void-event", "adjust-lot"}:
+    if args.cmd in {"add", "buy-close", "assign", "exercise", "void-event", "adjust-lot"}:
         write_controls[args.cmd] = _resolve_write_control(args, command_name=f"option-positions {args.cmd}", high_risk=True)
     elif args.cmd == "rebuild":
         write_controls[args.cmd] = _resolve_write_control(args, command_name="option-positions rebuild", high_risk=False)
@@ -471,6 +521,98 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[DONE] buy-closed {closed_record_id} contracts={int(args.contracts)} event_id={res.get('event_id')}")
         return 0
 
+    if args.cmd == 'assign':
+        control = write_controls["assign"]
+        dry_run = not bool(control["write_requested"])
+        try:
+            out = execute_manual_assignment(
+                repo,
+                record_id=args.record_id,
+                broker=args.broker,
+                account=args.account,
+                symbol=args.symbol,
+                option_type=args.option_type,
+                position_side=args.side,
+                strike=args.strike,
+                expiration_ymd=((args.exp or '').strip() or None),
+                contracts_to_close=int(args.contracts),
+                stock_side=args.stock_side,
+                stock_qty=int(args.stock_qty),
+                stock_price=float(args.stock_price),
+                dry_run=dry_run,
+            )
+        except ValueError as e:
+            raise SystemExit(str(e))
+        payload = attach_write_contract(
+            {"operation": "manual_assignment", **out, "ledger_store": ledger_store},
+            dry_run=dry_run,
+            write_applied=not dry_run,
+            rollback_hint="void the created assignment trade event(s) with option-positions void-event --confirm",
+        )
+        if _json_or_text_format(args) == "json":
+            print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+            return 0
+        if dry_run:
+            print("[DRY_RUN] assignment target:")
+            print(json.dumps(out.get("close_target_resolution") or {}, ensure_ascii=False, indent=2))
+            print("[DRY_RUN] stock settlement:")
+            print(json.dumps(out.get("stock_settlement") or {}, ensure_ascii=False, indent=2))
+            return 0
+        operations = out.get("operations") if isinstance(out.get("operations"), list) else []
+        event_ids = [
+            str((item.get("result") or {}).get("event_id"))
+            for item in operations
+            if isinstance(item, dict) and isinstance(item.get("result"), dict) and (item.get("result") or {}).get("event_id")
+        ]
+        print(f"[DONE] assignment contracts={int(args.contracts)} events={len(event_ids)} event_ids={','.join(event_ids)}")
+        return 0
+
+    if args.cmd == 'exercise':
+        control = write_controls["exercise"]
+        dry_run = not bool(control["write_requested"])
+        try:
+            out = execute_manual_exercise(
+                repo,
+                record_id=args.record_id,
+                broker=args.broker,
+                account=args.account,
+                symbol=args.symbol,
+                option_type=args.option_type,
+                position_side=args.side,
+                strike=args.strike,
+                expiration_ymd=((args.exp or '').strip() or None),
+                contracts_to_close=int(args.contracts),
+                stock_side=args.stock_side,
+                stock_qty=int(args.stock_qty),
+                stock_price=float(args.stock_price),
+                dry_run=dry_run,
+            )
+        except ValueError as e:
+            raise SystemExit(str(e))
+        payload = attach_write_contract(
+            {"operation": "manual_exercise", **out, "ledger_store": ledger_store},
+            dry_run=dry_run,
+            write_applied=not dry_run,
+            rollback_hint="void the created exercise trade event(s) with option-positions void-event --confirm",
+        )
+        if _json_or_text_format(args) == "json":
+            print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+            return 0
+        if dry_run:
+            print("[DRY_RUN] exercise target:")
+            print(json.dumps(out.get("close_target_resolution") or {}, ensure_ascii=False, indent=2))
+            print("[DRY_RUN] stock settlement:")
+            print(json.dumps(out.get("stock_settlement") or {}, ensure_ascii=False, indent=2))
+            return 0
+        operations = out.get("operations") if isinstance(out.get("operations"), list) else []
+        event_ids = [
+            str((item.get("result") or {}).get("event_id"))
+            for item in operations
+            if isinstance(item, dict) and isinstance(item.get("result"), dict) and (item.get("result") or {}).get("event_id")
+        ]
+        print(f"[DONE] exercise contracts={int(args.contracts)} events={len(event_ids)} event_ids={','.join(event_ids)}")
+        return 0
+
     if args.cmd == 'events':
         broker = normalize_broker(args.broker) if args.broker else None
         account = normalize_account(args.account) if args.account else None
@@ -601,6 +743,64 @@ def main(argv: list[str] | None = None) -> int:
         payload["ledger_store"] = ledger_store
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
+
+    if args.cmd == 'lifecycle':
+        if args.lifecycle_cmd == 'list':
+            rows = list_trade_lifecycle_cases(
+                repo,
+                status=args.status,
+                account=args.account,
+                symbol=args.symbol,
+            )
+            if args.include_evidence:
+                for row in rows:
+                    case_id = str(row.get("case_id") or "").strip()
+                    row["evidence"] = list_trade_lifecycle_evidence(repo, case_id=case_id) if case_id else []
+            payload = {"cases": rows, "count": len(rows), "ledger_store": ledger_store}
+            if args.format == 'json':
+                print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+                return 0
+            if not rows:
+                print("(no lifecycle cases)")
+                return 0
+            print("# trade_lifecycle_cases")
+            for row in rows:
+                print(
+                    f"- {row.get('case_id')} | {row.get('account')} | {row.get('symbol')} | "
+                    f"{row.get('position_side')} {row.get('option_type')} | "
+                    f"exp {row.get('expiration_ymd') or '-'} | strike {row.get('strike') if row.get('strike') is not None else '-'} | "
+                    f"status {row.get('status')} decision {row.get('decision_type') or '-'}"
+                )
+            return 0
+        if args.lifecycle_cmd == 'inspect':
+            case_id = str(args.case_id or '').strip()
+            rows = [row for row in list_trade_lifecycle_cases(repo) if str(row.get('case_id') or '').strip() == case_id]
+            if not rows:
+                raise SystemExit(f"lifecycle case not found: {case_id}")
+            row = dict(rows[0])
+            row["evidence"] = list_trade_lifecycle_evidence(repo, case_id=case_id)
+            payload = {"case": row, "ledger_store": ledger_store}
+            if args.format == 'json':
+                print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+                return 0
+            print("# trade_lifecycle_case")
+            print(
+                f"{row.get('case_id')} | {row.get('account')} | {row.get('symbol')} | "
+                f"{row.get('position_side')} {row.get('option_type')} | "
+                f"exp {row.get('expiration_ymd') or '-'} | strike {row.get('strike') if row.get('strike') is not None else '-'} | "
+                f"status {row.get('status')} decision {row.get('decision_type') or '-'}"
+            )
+            evidence_rows = row.get("evidence") if isinstance(row.get("evidence"), list) else []
+            if evidence_rows:
+                print("# evidence")
+                for evidence in evidence_rows:
+                    if not isinstance(evidence, dict):
+                        continue
+                    print(
+                        f"- {evidence.get('evidence_id')} | {evidence.get('evidence_type')} | "
+                        f"source={evidence.get('source_event_id') or '-'}"
+                    )
+            return 0
 
     if args.cmd == 'report':
         from src.interfaces.cli.option_positions_report import run_report

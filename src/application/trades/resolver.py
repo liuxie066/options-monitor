@@ -14,6 +14,7 @@ from src.application.ledger.api import (
     resolve_broker_trade_close_targets,
 )
 from src.application.trades.normalizer import NormalizedTradeDeal
+from src.application.trades.lifecycle import LifecycleTradeResolution, resolve_lifecycle_trade_deal
 from src.application.trades.state import is_failed_deal, is_retryable_unresolved_deal, lookup_deal_state
 from src.application.trades.workflows import (
     apply_trade_close_with,
@@ -67,6 +68,18 @@ def _failure(
         account=deal.internal_account,
         operations=list(operations or []),
         diagnostics=dict(diagnostics or {}),
+    )
+
+
+def _from_lifecycle_resolution(deal: NormalizedTradeDeal, result: LifecycleTradeResolution) -> IntakeResolution:
+    return IntakeResolution(
+        status=result.status,
+        action=result.action,
+        reason=result.reason,
+        deal_id=deal.deal_id,
+        account=deal.internal_account,
+        operations=list(result.operations),
+        diagnostics=dict(result.diagnostics),
     )
 
 
@@ -195,7 +208,7 @@ def resolve_trade_deal(
 
     if not deal.deal_id:
         return _failure(status="unresolved", action=None, reason="missing_required_fields:deal_id", deal=deal)
-    if deal.symbol and not deal.option_type:
+    if deal.symbol and not deal.option_type and not deal.internal_account:
         return _failure(status="skipped", action=None, reason="not_option_deal", deal=deal)
     if not deal.internal_account:
         diagnostics = _missing_account_mapping_diagnostics(deal)
@@ -208,8 +221,13 @@ def resolve_trade_deal(
             action=None,
             reason=reason,
             deal=deal,
-            diagnostics=diagnostics,
+                diagnostics=diagnostics,
         )
+    lifecycle_result = resolve_lifecycle_trade_deal(deal, repo=repo, apply_changes=apply_changes)
+    if lifecycle_result is not None and lifecycle_result.handled:
+        return _from_lifecycle_resolution(deal, lifecycle_result)
+    if deal.symbol and not deal.option_type:
+        return _failure(status="skipped", action=None, reason="not_option_deal", deal=deal)
     if not deal.symbol or not deal.option_type:
         return _failure(status="skipped", action=None, reason="not_option_deal", deal=deal)
     if deal.position_effect not in ("open", "close"):
