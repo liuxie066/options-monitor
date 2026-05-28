@@ -13,7 +13,6 @@ from src.application.assistant.config_loader import load_assistant_config
 from src.application.assistant.settings import DEFAULT_CONTEXT_WINDOW_MESSAGES, AssistantSettings, LlmTranslatorSettings
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response, mask_path
 from src.application.inbound.feishu import handle_feishu_payload
-from src.application.assistant.router import ExecuteToolFn
 from src.application.secret_resolver import (
     DEFAULT_FEISHU_BOT_APP_ID_ENV,
     DEFAULT_FEISHU_BOT_APP_SECRET_ENV,
@@ -31,6 +30,7 @@ ReplyFn = Callable[..., dict[str, Any]]
 ReactionFn = Callable[..., dict[str, Any]]
 StartClientFn = Callable[..., None]
 SdkAvailableFn = Callable[[], bool]
+ExecuteToolFn = Callable[[str, dict[str, Any]], dict[str, Any]]
 
 LOG = logging.getLogger(__name__)
 

@@ -23,13 +23,31 @@ from src.application.assistant.command_parser import parse_assistant_command
 from src.application.assistant.conversation_context import build_conversation_context
 from src.application.assistant.intent_arbitration import ASSISTANT_DECISION_SCHEMA_VERSION, INTENT_ARBITRATION_SCHEMA_VERSION
 from src.application.assistant.llm_intent_schema import LLM_INTENT_SCHEMA_VERSION, llm_intent_json_schema, llm_intent_schema
+from src.application.assistant.llm_common import provider_api_kind, provider_endpoint_url, supported_llm_providers
 from src.application.assistant.llm_reply import LlmReplyResult, generate_general_reply
 from src.application.assistant.llm_translator import LlmTranslationResult, parse_llm_translation_payload, translate_inbound_intent
 from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.assistant.audit import InboundAuditStore
-from src.application.assistant.contracts import AssistantIntent, AssistantRequest
+from src.application.assistant.contracts import SEMANTIC_FRAME_SCHEMA_VERSION, AssistantIntent, AssistantRequest
 from src.infrastructure.openai_chat_completions import create_json_chat_completion, extract_chat_completion_text
 from src.infrastructure.openai_responses import OpenAIResponsesError, create_structured_response, extract_response_text
+
+
+def test_assistant_intent_payload_is_semantic_frame_contract() -> None:
+    payload = AssistantIntent(
+        name="runtime_status",
+        arguments={},
+        parser="llm",
+        confidence=0.91,
+    ).public_payload()
+
+    assert payload == {
+        "schema_version": SEMANTIC_FRAME_SCHEMA_VERSION,
+        "name": "runtime_status",
+        "arguments": {},
+        "parser": "llm",
+        "confidence": 0.91,
+    }
 
 
 def test_assistant_command_parser_maps_read_commands() -> None:
@@ -443,7 +461,13 @@ def test_assistant_runtime_records_deterministic_arbitration_in_audit(tmp_path: 
         {
             "source": "deterministic",
             "status": "accepted",
-            "intent": {"name": "runtime_status", "arguments": {}, "parser": "deterministic", "confidence": 1.0},
+            "intent": {
+                "schema_version": SEMANTIC_FRAME_SCHEMA_VERSION,
+                "name": "runtime_status",
+                "arguments": {},
+                "parser": "deterministic",
+                "confidence": 1.0,
+            },
             "intent_name": "runtime_status",
             "parser": "deterministic",
             "confidence": 1.0,
@@ -1480,6 +1504,18 @@ def test_llm_intent_schema_documents_allowed_surface() -> None:
         "limit",
         "lines",
     }
+
+
+def test_llm_provider_selection_is_centralized() -> None:
+    assert supported_llm_providers() == ("openai", "deepseek")
+    assert provider_api_kind("openai") == "responses"
+    assert provider_api_kind("deepseek") == "chat_completions"
+    assert provider_endpoint_url(
+        LlmTranslatorSettings(enabled=True, provider="openai", base_url="https://llm.example/v1")
+    ) == "https://llm.example/v1/responses"
+    assert provider_endpoint_url(
+        LlmTranslatorSettings(enabled=True, provider="deepseek", base_url="https://api.deepseek.com")
+    ) == "https://api.deepseek.com/chat/completions"
 
 
 def test_llm_translator_calls_openai_provider_and_parses_structured_response() -> None:

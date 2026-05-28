@@ -280,6 +280,27 @@ def test_inbound_package_exposes_transport_only() -> None:
     assert "AssistantRequest" not in root_text
 
 
+def test_inbound_transport_does_not_import_assistant_control_plane_details() -> None:
+    forbidden = (
+        "src.application.assistant.agent_loop",
+        "src.application.assistant.command_parser",
+        "src.application.assistant.commands",
+        "src.application.assistant.frame_planner",
+        "src.application.assistant.intent_arbitrator",
+        "src.application.assistant.llm_reply",
+        "src.application.assistant.llm_translator",
+        "src.application.assistant.parser",
+        "src.application.assistant.router",
+    )
+    offenders: list[str] = []
+    for path in sorted((ROOT / "src" / "application" / "inbound").glob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        if any(item in text for item in forbidden):
+            offenders.append(str(path.relative_to(ROOT)))
+
+    assert offenders == []
+
+
 def test_config_section_helpers_have_neutral_owner() -> None:
     from src.application import config_loader, config_sections
 

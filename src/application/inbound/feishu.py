@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, cast
+from typing import Any, Callable, cast
 
 from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.assistant.contracts import AssistantRequest
-from src.application.assistant.router import ExecuteToolFn
+
+ExecuteToolFn = Callable[[str, dict[str, Any]], dict[str, Any]]
 
 
 def handle_feishu_payload(
