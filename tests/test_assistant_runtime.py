@@ -106,6 +106,10 @@ def test_assistant_command_catalog_drives_llm_allowed_surface() -> None:
     assert "Command：" in payload["help_text"]
     assert "只读查询" in payload["help_text"]
     assert "记录开仓：记录开仓" in payload["help_text"]
+    assert "收益 [账户] [YYYY-MM|本月|上月]" in payload["help_text"]
+    assert "立即升级到 v<version>" in payload["help_text"]
+    assert "收益 sy 2026-05" not in payload["help_text"]
+    assert "立即升级到 v1.2.111" not in payload["help_text"]
     assert "确认记录、确认监控、确认升级" in payload["help_text"]
     assert "写操作只会先返回预览" in payload["help_text"]
 
@@ -139,6 +143,8 @@ def test_assistant_capability_catalog_has_safe_llm_invariants() -> None:
         1 for item in capabilities if item["llm_executable"]
     )
     assert payload["capability_text"].startswith("Assistant capabilities")
+    assert "usage=" in payload["capability_text"]
+    assert "examples=" not in payload["capability_text"]
     assert confirm_targets["record"] == "manual_trade_confirm"
     assert confirm_targets["symbol"] == "symbol_confirm"
     assert confirm_targets["upgrade"] == "upgrade_confirm"

@@ -96,7 +96,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         commands=("/positions",),
         display_name="持仓",
         arguments=("account", "status", "symbol", "option_type", "side", "strike", "expiration", "limit"),
-        examples=("持仓", "持仓 sy", "5月到期的持仓", "/positions [lx|sy|all]"),
+        examples=("持仓", "持仓 [账户]", "持仓 [到期月份/到期日/标的/类型/方向]", "/positions [lx|sy|all]"),
         summary="list option positions",
     ),
     AssistantCommandSpec(
@@ -105,7 +105,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         commands=("/income",),
         display_name="收益",
         arguments=("account", "month"),
-        examples=("收益", "收益 sy", "收益 sy 2026-05", "/income [lx|sy] [YYYY-MM|本月|上月]"),
+        examples=("收益", "收益 [账户]", "收益 [账户] [YYYY-MM|本月|上月]", "/income [lx|sy] [YYYY-MM|本月|上月]"),
         summary="show monthly income report",
     ),
     AssistantCommandSpec(
@@ -184,7 +184,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         examples=(
             "记录开仓",
             "record open",
-            "/record-open lx NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
+            "/record-open [账户] <标的> <short|long> <put|call> strike <行权价> exp <YYYY-MM-DD> <张数>张 premium <权利金> multiplier <乘数>",
         ),
         summary="preview a manual opening trade record",
         operation_action="preview",
@@ -202,7 +202,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         examples=(
             "记录平仓",
             "record close",
-            "/record-close record_id=<record_id> 1张 close 0.8",
+            "/record-close record_id=<record_id> <张数>张 close <平仓价>",
         ),
         summary="preview a manual closing trade record",
         operation_action="preview",
@@ -217,7 +217,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         read_only=False,
         llm_allowed=False,
         risk_level="preview_write",
-        examples=("权利金改成 1.23", "合约数改成 2"),
+        examples=("<字段>改成<值> [operation_id]", "<field>=<value> [operation_id]"),
         summary="update a pending manual trade preview",
         operation_action="preview",
         operation_target="trade",
@@ -261,7 +261,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         read_only=False,
         llm_allowed=False,
         risk_level="preview_write",
-        examples=("增加监控标的 700 put",),
+        examples=("增加监控标的 <symbol> [put|call]",),
         summary="preview adding a monitored symbol",
         operation_action="preview",
         operation_target="symbol",
@@ -275,7 +275,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         read_only=False,
         llm_allowed=False,
         risk_level="preview_write",
-        examples=("修改监控标的 HK.00700 sell_put.max_strike=480",),
+        examples=("修改监控标的 <symbol> <field>=<value>",),
         summary="preview editing a monitored symbol",
         operation_action="preview",
         operation_target="symbol",
@@ -289,7 +289,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         read_only=False,
         llm_allowed=False,
         risk_level="preview_write",
-        examples=("删除监控标的 腾讯",),
+        examples=("删除监控标的 <symbol>",),
         summary="preview removing a monitored symbol",
         operation_action="preview",
         operation_target="symbol",
@@ -333,7 +333,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         read_only=False,
         llm_allowed=False,
         risk_level="preview_admin",
-        examples=("立即升级", "立即升级到 v1.2.111"),
+        examples=("立即升级", "立即升级到 v<version>"),
         summary="preview a software upgrade operation",
         operation_action="preview",
         operation_target="upgrade",
@@ -482,11 +482,11 @@ def llm_capability_prompt() -> str:
     for item in manifest["capabilities"]:
         executable = "true" if item["llm_executable"] else "false"
         commands = ", ".join(item["commands"]) if item["commands"] else "-"
-        examples = " | ".join(item["examples"]) if item["examples"] else "-"
+        usage = " | ".join(item["examples"]) if item["examples"] else "-"
         args = ", ".join(item["arguments"]) if item["arguments"] else "-"
         lines.append(
             f"- {item['capability_id']} ({item['display_name']}): {item['summary']}; risk={item['risk_level']}; "
-            f"llm_executable={executable}; commands={commands}; args={args}; examples={examples}"
+            f"llm_executable={executable}; commands={commands}; args={args}; usage={usage}"
         )
     return "\n".join(lines)
 
@@ -518,6 +518,7 @@ def _spec_payload(spec: AssistantCommandSpec) -> dict[str, Any]:
         "operation_action": spec.operation_action,
         "operation_target": spec.operation_target,
         "operation_target_aliases": list(spec.operation_target_aliases),
+        "usage_patterns": list(spec.examples),
     }
 
 
@@ -533,12 +534,12 @@ def _risk_level(spec: AssistantCommandSpec) -> str:
 
 def _capability_text_line(item: dict[str, Any]) -> str:
     commands = ", ".join(_unique(item.get("commands") or ())) or "-"
-    examples = " | ".join(_unique(item.get("examples") or ())[:3]) or "-"
+    usage = " | ".join(_unique(item.get("usage_patterns") or item.get("examples") or ())[:3]) or "-"
     arguments = ", ".join(_unique(item.get("arguments") or ())) or "-"
     executable = "true" if item.get("llm_executable") else "false"
     return (
         f"- {item.get('capability_id')} ({item.get('display_name')}): risk={item.get('risk_level')} "
-        f"llm_executable={executable} commands={commands} args={arguments} examples={examples}"
+        f"llm_executable={executable} commands={commands} args={arguments} usage={usage}"
     )
 
 

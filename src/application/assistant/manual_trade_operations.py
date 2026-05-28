@@ -316,7 +316,7 @@ def _normalize_manual_trade_patch(operation_type: str, updates: dict[str, Any]) 
     for key, value in raw_patch.items():
         patch[key] = _normalize_patch_value(key, value)
     if not patch:
-        raise AgentToolError(code="NEEDS_CLARIFICATION", message="没有识别出要修改的交易字段。", hint="例如：premium 改成 2.35，或 合约数改成 2。")
+        raise AgentToolError(code="NEEDS_CLARIFICATION", message="没有识别出要修改的交易字段。", hint="格式：<字段>改成<值>，或 <field>=<value> [operation_id]。")
     return patch
 
 
