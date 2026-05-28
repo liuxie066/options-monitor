@@ -153,6 +153,61 @@ class SQLiteOptionPositionsRepository:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_position_lots_expiration ON position_lots(expiration, record_id)"
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS trade_lifecycle_cases (
+                  case_id TEXT PRIMARY KEY,
+                  case_key TEXT NOT NULL UNIQUE,
+                  account TEXT NOT NULL,
+                  symbol TEXT NOT NULL,
+                  option_type TEXT,
+                  position_side TEXT,
+                  strike REAL,
+                  expiration_ymd TEXT,
+                  status TEXT NOT NULL,
+                  decision_type TEXT,
+                  target_lot_ids_json TEXT,
+                  pending_until_ms INTEGER,
+                  created_at_ms INTEGER NOT NULL,
+                  updated_at_ms INTEGER NOT NULL,
+                  raw_json TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_trade_lifecycle_cases_lookup
+                ON trade_lifecycle_cases(account, symbol, option_type, strike, expiration_ymd, status)
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS trade_lifecycle_evidence (
+                  evidence_id TEXT PRIMARY KEY,
+                  case_id TEXT,
+                  source_type TEXT NOT NULL,
+                  source_event_id TEXT,
+                  evidence_type TEXT NOT NULL,
+                  account TEXT,
+                  symbol TEXT,
+                  raw_json TEXT NOT NULL,
+                  created_at_ms INTEGER NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_trade_lifecycle_evidence_case
+                ON trade_lifecycle_evidence(case_id, created_at_ms, evidence_id)
+                """
+            )
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_lifecycle_evidence_source
+                ON trade_lifecycle_evidence(source_type, source_event_id, evidence_type)
+                WHERE source_event_id IS NOT NULL AND source_event_id != ''
+                """
+            )
             self._backfill_position_lot_contract_columns(conn)
             conn.commit()
 
@@ -325,6 +380,206 @@ class SQLiteOptionPositionsRepository:
 
     def get_record_fields(self, record_id: str) -> dict[str, Any]:
         return self.get_position_lot_fields(record_id)
+
+    def upsert_trade_lifecycle_case(
+        self,
+        case: dict[str, Any],
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> bool:
+        payload = dict(case or {})
+        case_id = str(payload.get("case_id") or "").strip()
+        case_key = str(payload.get("case_key") or "").strip()
+        if not case_id or not case_key:
+            raise ValueError("trade lifecycle case requires case_id and case_key")
+        ts = int(now_ms())
+        raw_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        with self._optional_conn(conn, commit=True) as active_conn:
+            existing = active_conn.execute(
+                "SELECT raw_json, created_at_ms FROM trade_lifecycle_cases WHERE case_id = ?",
+                (case_id,),
+            ).fetchone()
+            created_at_ms = int(existing["created_at_ms"]) if existing is not None else ts
+            changed = existing is None or str(existing["raw_json"] or "") != raw_json
+            active_conn.execute(
+                """
+                INSERT INTO trade_lifecycle_cases (
+                  case_id, case_key, account, symbol, option_type, position_side,
+                  strike, expiration_ymd, status, decision_type, target_lot_ids_json,
+                  pending_until_ms, created_at_ms, updated_at_ms, raw_json
+                ) VALUES (
+                  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
+                ON CONFLICT(case_id) DO UPDATE SET
+                  case_key = excluded.case_key,
+                  account = excluded.account,
+                  symbol = excluded.symbol,
+                  option_type = excluded.option_type,
+                  position_side = excluded.position_side,
+                  strike = excluded.strike,
+                  expiration_ymd = excluded.expiration_ymd,
+                  status = excluded.status,
+                  decision_type = excluded.decision_type,
+                  target_lot_ids_json = excluded.target_lot_ids_json,
+                  pending_until_ms = excluded.pending_until_ms,
+                  updated_at_ms = excluded.updated_at_ms,
+                  raw_json = excluded.raw_json
+                """,
+                (
+                    case_id,
+                    case_key,
+                    str(payload.get("account") or "").strip().lower(),
+                    str(payload.get("symbol") or "").strip().upper(),
+                    (str(payload.get("option_type") or "").strip().lower() or None),
+                    (str(payload.get("position_side") or "").strip().lower() or None),
+                    float(payload["strike"]) if payload.get("strike") is not None else None,
+                    (str(payload.get("expiration_ymd") or "").strip() or None),
+                    str(payload.get("status") or "pending").strip().lower(),
+                    (str(payload.get("decision_type") or "").strip().lower() or None),
+                    json.dumps(list(payload.get("target_lot_ids") or []), ensure_ascii=False, sort_keys=True),
+                    int(payload["pending_until_ms"]) if payload.get("pending_until_ms") is not None else None,
+                    created_at_ms,
+                    ts,
+                    raw_json,
+                ),
+            )
+        return changed
+
+    def get_trade_lifecycle_case(self, case_id: str, *, conn: sqlite3.Connection | None = None) -> dict[str, Any] | None:
+        with self._optional_conn(conn) as active_conn:
+            row = active_conn.execute(
+                "SELECT raw_json FROM trade_lifecycle_cases WHERE case_id = ?",
+                (str(case_id or "").strip(),),
+            ).fetchone()
+        if row is None:
+            return None
+        payload = json.loads(str(row["raw_json"]) or "{}")
+        return dict(payload) if isinstance(payload, dict) else None
+
+    def get_trade_lifecycle_case_by_key(
+        self,
+        case_key: str,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any] | None:
+        with self._optional_conn(conn) as active_conn:
+            row = active_conn.execute(
+                "SELECT raw_json FROM trade_lifecycle_cases WHERE case_key = ?",
+                (str(case_key or "").strip(),),
+            ).fetchone()
+        if row is None:
+            return None
+        payload = json.loads(str(row["raw_json"]) or "{}")
+        return dict(payload) if isinstance(payload, dict) else None
+
+    def list_trade_lifecycle_cases(
+        self,
+        *,
+        status: str | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        params: list[Any] = []
+        where = ""
+        if status:
+            where = "WHERE status = ?"
+            params.append(str(status).strip().lower())
+        with self._optional_conn(conn) as active_conn:
+            rows = active_conn.execute(
+                f"""
+                SELECT raw_json
+                FROM trade_lifecycle_cases
+                {where}
+                ORDER BY updated_at_ms DESC, case_id DESC
+                """,
+                params,
+            ).fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            payload = json.loads(str(row["raw_json"]) or "{}")
+            if isinstance(payload, dict):
+                out.append(dict(payload))
+        return out
+
+    def upsert_trade_lifecycle_evidence(
+        self,
+        evidence: dict[str, Any],
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> bool:
+        payload = dict(evidence or {})
+        evidence_id = str(payload.get("evidence_id") or "").strip()
+        if not evidence_id:
+            raise ValueError("trade lifecycle evidence requires evidence_id")
+        ts = int(now_ms())
+        raw_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        with self._optional_conn(conn, commit=True) as active_conn:
+            existing = active_conn.execute(
+                "SELECT raw_json FROM trade_lifecycle_evidence WHERE evidence_id = ?",
+                (evidence_id,),
+            ).fetchone()
+            if existing is not None:
+                if str(existing["raw_json"] or "") != raw_json:
+                    raise ValueError(f"trade lifecycle evidence conflict for evidence_id={evidence_id}")
+                return False
+            active_conn.execute(
+                """
+                INSERT INTO trade_lifecycle_evidence (
+                  evidence_id, case_id, source_type, source_event_id, evidence_type,
+                  account, symbol, raw_json, created_at_ms
+                ) VALUES (
+                  ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
+                """,
+                (
+                    evidence_id,
+                    (str(payload.get("case_id") or "").strip() or None),
+                    str(payload.get("source_type") or "").strip(),
+                    (str(payload.get("source_event_id") or "").strip() or None),
+                    str(payload.get("evidence_type") or "").strip(),
+                    (str(payload.get("account") or "").strip().lower() or None),
+                    (str(payload.get("symbol") or "").strip().upper() or None),
+                    raw_json,
+                    ts,
+                ),
+            )
+        return True
+
+    def list_trade_lifecycle_evidence(
+        self,
+        *,
+        case_id: str | None = None,
+        account: str | None = None,
+        symbol: str | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if case_id:
+            clauses.append("case_id = ?")
+            params.append(str(case_id).strip())
+        if account:
+            clauses.append("account = ?")
+            params.append(str(account).strip().lower())
+        if symbol:
+            clauses.append("symbol = ?")
+            params.append(str(symbol).strip().upper())
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._optional_conn(conn) as active_conn:
+            rows = active_conn.execute(
+                f"""
+                SELECT raw_json
+                FROM trade_lifecycle_evidence
+                {where}
+                ORDER BY created_at_ms ASC, evidence_id ASC
+                """,
+                params,
+            ).fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            payload = json.loads(str(row["raw_json"]) or "{}")
+            if isinstance(payload, dict):
+                out.append(dict(payload))
+        return out
 
 
 def with_sqlite_repo_transaction(repo: Any, fn: Any) -> Any:

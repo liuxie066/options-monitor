@@ -197,7 +197,7 @@ def test_resolve_trade_close_dry_run_builds_patches() -> None:
     assert result.operations[0]["patch"]["close_type"] == "buy_to_close"
 
 
-def test_resolve_trade_close_dry_run_allows_zero_price_on_expiration_date() -> None:
+def test_resolve_trade_close_dry_run_routes_zero_price_expiry_leg_to_lifecycle_pending() -> None:
     repo = FakeRepo([_record("rec1", 100, 3)])
 
     result = resolve_trade_deal(
@@ -213,9 +213,10 @@ def test_resolve_trade_close_dry_run_allows_zero_price_on_expiration_date() -> N
     )
 
     assert result.status == "dry_run"
-    assert result.operations[0]["patch"]["close_type"] == "expire_auto_close"
-    assert result.operations[0]["patch"]["close_reason"] == "broker_expiration_zero_price_close"
-    assert result.operations[0]["patch"]["close_price"] == 0.0
+    assert result.action == "lifecycle"
+    assert result.reason == "waiting_settlement_evidence"
+    assert result.operations[0]["action"] == "lifecycle_pending"
+    assert result.diagnostics["decision"]["decision_type"] == "needs_review"
 
 
 def test_resolve_trade_close_skips_failed_deal_by_default() -> None:
@@ -340,7 +341,7 @@ def test_resolve_trade_close_apply_persists_per_lot_target_events(tmp_path) -> N
     assert all(item["fields"]["contracts_open"] == 0 for item in lots)
 
 
-def test_resolve_trade_close_apply_persists_expiration_zero_price_close(tmp_path) -> None:
+def test_resolve_trade_close_apply_keeps_zero_price_option_leg_pending_without_stock_settlement(tmp_path) -> None:
     from domain.domain.option_position_lots import OpenPositionCommand
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
@@ -381,17 +382,467 @@ def test_resolve_trade_close_apply_persists_expiration_zero_price_close(tmp_path
         apply_changes=True,
     )
 
-    assert result.status == "applied"
-    assert result.operations[0]["ledger_preflight"]["event_type"] == "expire_close"
+    assert result.status == "unresolved"
+    assert result.action == "lifecycle"
+    assert result.reason == "waiting_settlement_evidence"
     close_events = [item for item in repo.list_trade_events() if item["position_effect"] == "close"]
-    assert len(close_events) == 1
-    assert close_events[0]["raw_payload"]["record_id"] == lot_id
-    assert close_events[0]["raw_payload"]["close_type"] == "expire_auto_close"
-    assert close_events[0]["raw_payload"]["broker_close_type"] == "expiration_zero_close"
+    assert close_events == []
+    cases = repo.list_trade_lifecycle_cases()
+    assert cases[0]["status"] == "waiting_settlement_evidence"
+    assert repo.get_record_fields(lot_id)["contracts_open"] == 10
+
+
+def test_resolve_trade_lifecycle_option_first_stock_settlement_records_assignment(tmp_path) -> None:
+    from domain.domain.option_position_lots import OpenPositionCommand
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="TIGR",
+            option_type="put",
+            side="short",
+            contracts=10,
+            currency="USD",
+            strike=6.0,
+            multiplier=100,
+            expiration_ymd="2026-05-22",
+            premium_per_share=0.2,
+            opened_at_ms=1779129617118,
+        ),
+    )
+    lot_id = repo.list_position_lots()[0]["record_id"]
+
+    option_result = resolve_trade_deal(
+        _deal(
+            deal_id="option-leg-1",
+            symbol="TIGR",
+            contracts=10,
+            price=0.0,
+            strike=6.0,
+            expiration_ymd="2026-05-22",
+            currency="USD",
+            trade_time_ms=1779468493916,
+            raw_payload={"deal_id": "option-leg-1", "code": "US.TIGR260522P6000"},
+        ),
+        repo=repo,
+        state={},
+        apply_changes=True,
+    )
+
+    assert option_result.status == "unresolved"
+
+    stock_result = resolve_trade_deal(
+        _deal(
+            deal_id="stock-leg-1",
+            order_id="stock-order-1",
+            symbol="TIGR",
+            option_type=None,
+            side="buy",
+            position_effect=None,
+            contracts=1000,
+            price=6.0,
+            strike=None,
+            multiplier=None,
+            expiration_ymd=None,
+            currency="USD",
+            trade_time_ms=1779468500000,
+            raw_payload={"deal_id": "stock-leg-1", "code": "US.TIGR"},
+        ),
+        repo=repo,
+        state={},
+        apply_changes=True,
+    )
+
+    assert stock_result.status == "applied"
+    assert stock_result.action == "assignment"
+    assert stock_result.operations[0]["ledger_preflight"]["event_type"] == "assignment"
+    assignment_events = [item for item in repo.list_trade_events() if item.get("event_type") == "assignment"]
+    assert len(assignment_events) == 1
+    assert assignment_events[0]["raw_payload"]["record_id"] == lot_id
+    assert assignment_events[0]["raw_payload"]["stock_settlement"]["shares"] == 1000
     assert repo.get_record_fields(lot_id)["contracts_open"] == 0
+    assert repo.get_record_fields(lot_id)["close_type"] == "assignment"
 
 
-def test_resolve_trade_close_retry_failed_persists_expiration_zero_price_close(tmp_path) -> None:
+def test_resolve_trade_lifecycle_duplicate_option_leg_after_assignment_is_idempotent(tmp_path) -> None:
+    from domain.domain.option_position_lots import OpenPositionCommand
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="TIGR",
+            option_type="put",
+            side="short",
+            contracts=10,
+            currency="USD",
+            strike=6.0,
+            multiplier=100,
+            expiration_ymd="2026-05-22",
+            premium_per_share=0.2,
+            opened_at_ms=1779129617118,
+        ),
+    )
+    option_deal = _deal(
+        deal_id="option-leg-dup",
+        symbol="TIGR",
+        contracts=10,
+        price=0.0,
+        strike=6.0,
+        expiration_ymd="2026-05-22",
+        currency="USD",
+        trade_time_ms=1779468493916,
+        raw_payload={"deal_id": "option-leg-dup", "code": "US.TIGR260522P6000"},
+    )
+
+    assert resolve_trade_deal(option_deal, repo=repo, state={}, apply_changes=True).status == "unresolved"
+    assert resolve_trade_deal(
+        _deal(
+            deal_id="stock-leg-dup",
+            symbol="TIGR",
+            option_type=None,
+            side="buy",
+            position_effect=None,
+            contracts=1000,
+            price=6.0,
+            strike=None,
+            multiplier=None,
+            expiration_ymd=None,
+            currency="USD",
+            trade_time_ms=1779468500000,
+            raw_payload={"deal_id": "stock-leg-dup", "code": "US.TIGR"},
+        ),
+        repo=repo,
+        state={},
+        apply_changes=True,
+    ).status == "applied"
+
+    duplicate = resolve_trade_deal(option_deal, repo=repo, state={}, apply_changes=True)
+
+    assert duplicate.status == "skipped"
+    assert duplicate.reason == "lifecycle_already_written"
+    assert duplicate.action == "assignment"
+    assert len([item for item in repo.list_trade_events() if item.get("event_type") == "assignment"]) == 1
+    cases = repo.list_trade_lifecycle_cases()
+    assert cases[0]["status"] == "ledger_written"
+
+
+def test_resolve_trade_lifecycle_long_call_exercise_records_exercise(tmp_path) -> None:
+    from domain.domain.option_position_lots import OpenPositionCommand
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="AAPL",
+            option_type="call",
+            side="long",
+            contracts=2,
+            currency="USD",
+            strike=200.0,
+            multiplier=100,
+            expiration_ymd="2026-05-22",
+            premium_per_share=1.5,
+            opened_at_ms=1779129617118,
+        ),
+    )
+    lot_id = repo.list_position_lots()[0]["record_id"]
+
+    option_result = resolve_trade_deal(
+        _deal(
+            deal_id="long-call-option-leg",
+            symbol="AAPL",
+            option_type="call",
+            side="sell",
+            position_effect="close",
+            contracts=2,
+            price=0.0,
+            strike=200.0,
+            expiration_ymd="2026-05-22",
+            currency="USD",
+            trade_time_ms=1779468493916,
+            raw_payload={"deal_id": "long-call-option-leg", "code": "US.AAPL260522C200000"},
+        ),
+        repo=repo,
+        state={},
+        apply_changes=True,
+    )
+    assert option_result.status == "unresolved"
+
+    stock_result = resolve_trade_deal(
+        _deal(
+            deal_id="long-call-stock-leg",
+            symbol="AAPL",
+            option_type=None,
+            side="buy",
+            position_effect=None,
+            contracts=200,
+            price=200.0,
+            strike=None,
+            multiplier=None,
+            expiration_ymd=None,
+            currency="USD",
+            trade_time_ms=1779468500000,
+            raw_payload={"deal_id": "long-call-stock-leg", "code": "US.AAPL"},
+        ),
+        repo=repo,
+        state={},
+        apply_changes=True,
+    )
+
+    assert stock_result.status == "applied"
+    assert stock_result.action == "exercise"
+    assert stock_result.operations[0]["ledger_preflight"]["event_type"] == "exercise"
+    exercise_events = [item for item in repo.list_trade_events() if item.get("event_type") == "exercise"]
+    assert len(exercise_events) == 1
+    assert exercise_events[0]["raw_payload"]["record_id"] == lot_id
+    assert exercise_events[0]["raw_payload"]["stock_settlement"]["shares"] == 200
+    assert repo.get_record_fields(lot_id)["contracts_open"] == 0
+    assert repo.get_record_fields(lot_id)["close_type"] == "exercise"
+
+
+def test_resolve_trade_lifecycle_stock_first_then_long_put_exercise_records_exercise(tmp_path) -> None:
+    from domain.domain.option_position_lots import OpenPositionCommand
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="AAPL",
+            option_type="put",
+            side="long",
+            contracts=1,
+            currency="USD",
+            strike=180.0,
+            multiplier=100,
+            expiration_ymd="2026-05-22",
+            premium_per_share=1.5,
+            opened_at_ms=1779129617118,
+        ),
+    )
+
+    stock_result = resolve_trade_deal(
+        _deal(
+            deal_id="long-put-stock-leg-first",
+            symbol="AAPL",
+            option_type=None,
+            side="sell",
+            position_effect=None,
+            contracts=100,
+            price=180.0,
+            strike=None,
+            multiplier=None,
+            expiration_ymd=None,
+            currency="USD",
+            trade_time_ms=1779468400000,
+            raw_payload={"deal_id": "long-put-stock-leg-first", "code": "US.AAPL"},
+        ),
+        repo=repo,
+        state={},
+        apply_changes=True,
+    )
+    assert stock_result.status == "unresolved"
+    assert stock_result.reason == "stock_settlement_waiting_option_leg"
+
+    option_result = resolve_trade_deal(
+        _deal(
+            deal_id="long-put-option-leg-after-stock",
+            symbol="AAPL",
+            option_type="put",
+            side="sell",
+            position_effect="close",
+            contracts=1,
+            price=0.0,
+            strike=180.0,
+            expiration_ymd="2026-05-22",
+            currency="USD",
+            trade_time_ms=1779468493916,
+            raw_payload={"deal_id": "long-put-option-leg-after-stock", "code": "US.AAPL260522P180000"},
+        ),
+        repo=repo,
+        state={},
+        apply_changes=True,
+    )
+
+    assert option_result.status == "applied"
+    assert option_result.action == "exercise"
+    assert len([item for item in repo.list_trade_events() if item.get("event_type") == "exercise"]) == 1
+
+
+def test_resolve_trade_lifecycle_stock_first_then_option_leg_records_assignment(tmp_path) -> None:
+    from domain.domain.option_position_lots import OpenPositionCommand
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="TIGR",
+            option_type="put",
+            side="short",
+            contracts=10,
+            currency="USD",
+            strike=6.0,
+            multiplier=100,
+            expiration_ymd="2026-05-22",
+            premium_per_share=0.2,
+            opened_at_ms=1779129617118,
+        ),
+    )
+
+    stock_result = resolve_trade_deal(
+        _deal(
+            deal_id="stock-leg-first",
+            symbol="TIGR",
+            option_type=None,
+            side="buy",
+            position_effect=None,
+            contracts=1000,
+            price=6.0,
+            strike=None,
+            multiplier=None,
+            expiration_ymd=None,
+            currency="USD",
+            trade_time_ms=1779468400000,
+            raw_payload={"deal_id": "stock-leg-first", "code": "US.TIGR"},
+        ),
+        repo=repo,
+        state={},
+        apply_changes=True,
+    )
+
+    assert stock_result.status == "unresolved"
+    assert stock_result.reason == "stock_settlement_waiting_option_leg"
+
+    option_result = resolve_trade_deal(
+        _deal(
+            deal_id="option-leg-after-stock",
+            symbol="TIGR",
+            contracts=10,
+            price=0.0,
+            strike=6.0,
+            expiration_ymd="2026-05-22",
+            currency="USD",
+            trade_time_ms=1779468493916,
+            raw_payload={"deal_id": "option-leg-after-stock", "code": "US.TIGR260522P6000"},
+        ),
+        repo=repo,
+        state={},
+        apply_changes=True,
+    )
+
+    assert option_result.status == "applied"
+    assert option_result.action == "assignment"
+    assignment_events = [item for item in repo.list_trade_events() if item.get("event_type") == "assignment"]
+    assert len(assignment_events) == 1
+
+
+def test_resolve_trade_lifecycle_late_assignment_after_expire_close_marks_conflict(tmp_path) -> None:
+    from domain.domain.option_position_lots import OpenPositionCommand
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="TIGR",
+            option_type="put",
+            side="short",
+            contracts=10,
+            currency="USD",
+            strike=6.0,
+            multiplier=100,
+            expiration_ymd="2026-05-22",
+            premium_per_share=0.2,
+            opened_at_ms=1779129617118,
+        ),
+    )
+    lot_id = repo.list_position_lots()[0]["record_id"]
+    persist_trade_event_object(
+        repo,
+        TradeEvent(
+            event_id="expire-close-before-assignment",
+            event_type="expire_close",
+            event_time_ms=1779468400000,
+            contract_key=ContractKey.from_values(
+                broker="富途",
+                account="lx",
+                underlying_symbol="TIGR",
+                option_type="put",
+                position_side="short",
+                strike=6.0,
+                expiration_ymd="2026-05-22",
+            ),
+            contracts=10,
+            price=0.0,
+            currency="USD",
+            source="test_expire_close",
+            multiplier=100,
+            target_lot_id=lot_id,
+            raw_payload={"record_id": lot_id, "target_lot_id": lot_id, "close_type": "expire_auto_close"},
+        ),
+    )
+    assert repo.get_record_fields(lot_id)["status"] == "close"
+
+    stock_result = resolve_trade_deal(
+        _deal(
+            deal_id="late-stock-leg",
+            symbol="TIGR",
+            option_type=None,
+            side="buy",
+            position_effect=None,
+            contracts=1000,
+            price=6.0,
+            strike=None,
+            multiplier=None,
+            expiration_ymd=None,
+            currency="USD",
+            trade_time_ms=1779468500000,
+            raw_payload={"deal_id": "late-stock-leg", "code": "US.TIGR"},
+        ),
+        repo=repo,
+        state={},
+        apply_changes=True,
+    )
+    assert stock_result.status == "unresolved"
+
+    option_result = resolve_trade_deal(
+        _deal(
+            deal_id="late-option-leg",
+            symbol="TIGR",
+            contracts=10,
+            price=0.0,
+            strike=6.0,
+            expiration_ymd="2026-05-22",
+            currency="USD",
+            trade_time_ms=1779468600000,
+            raw_payload={"deal_id": "late-option-leg", "code": "US.TIGR260522P6000"},
+        ),
+        repo=repo,
+        state={},
+        apply_changes=True,
+    )
+
+    assert option_result.status == "unresolved"
+    assert option_result.reason == "assignment_after_expire_close_conflict"
+    cases = repo.list_trade_lifecycle_cases()
+    assert cases[0]["status"] == "conflict"
+    assert option_result.diagnostics["conflict_event"]["event_id"] == "expire-close-before-assignment"
+    assert [item for item in repo.list_trade_events() if item.get("event_type") == "assignment"] == []
+
+
+def test_resolve_trade_close_retry_failed_keeps_zero_price_option_leg_pending(tmp_path) -> None:
     from domain.domain.option_position_lots import OpenPositionCommand
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
@@ -433,13 +884,11 @@ def test_resolve_trade_close_retry_failed_persists_expiration_zero_price_close(t
         retry_failed_deal=True,
     )
 
-    assert result.status == "applied"
-    assert result.operations[0]["ledger_preflight"]["event_type"] == "expire_close"
+    assert result.status == "unresolved"
+    assert result.reason == "waiting_settlement_evidence"
     close_events = [item for item in repo.list_trade_events() if item["position_effect"] == "close"]
-    assert len(close_events) == 1
-    assert close_events[0]["raw_payload"]["record_id"] == lot_id
-    assert close_events[0]["raw_payload"]["broker_close_type"] == "expiration_zero_close"
-    assert repo.get_record_fields(lot_id)["contracts_open"] == 0
+    assert close_events == []
+    assert repo.get_record_fields(lot_id)["contracts_open"] == 10
 
 
 def test_resolve_trade_close_rejects_missing_trade_time_before_write() -> None:

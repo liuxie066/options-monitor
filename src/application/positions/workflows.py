@@ -10,9 +10,13 @@ from domain.domain.ledger.position_fields import (
 )
 from src.application.ledger.api import (
     LotCloseResolutionError,
+    preview_manual_assignment,
+    preview_manual_exercise,
     preview_manual_position_adjust,
     preview_manual_position_close,
     preview_manual_position_open,
+    record_manual_assignment,
+    record_manual_exercise,
     record_manual_position_adjust,
     record_manual_position_close,
     record_manual_position_open,
@@ -339,6 +343,98 @@ def execute_manual_close(
             "contracts": int(contracts_to_close),
             "snapshot_lot_id": resolved_record_id,
         },
+    )
+
+
+def execute_manual_assignment(
+    repo: Any,
+    *,
+    record_id: str | None = None,
+    broker: str = "富途",
+    account: str | None = None,
+    symbol: str | None = None,
+    option_type: str | None = None,
+    position_side: str | None = "short",
+    strike: float | None = None,
+    expiration_ymd: str | None = None,
+    contracts_to_close: int,
+    stock_side: str,
+    stock_qty: int,
+    stock_price: float,
+    dry_run: bool,
+    as_of_ms: int | None = None,
+) -> dict[str, Any]:
+    kwargs = {
+        "record_id": record_id,
+        "broker": broker,
+        "account": account,
+        "symbol": symbol,
+        "option_type": option_type,
+        "position_side": position_side,
+        "strike": strike,
+        "expiration_ymd": expiration_ymd,
+        "contracts_to_close": int(contracts_to_close),
+        "stock_side": stock_side,
+        "stock_qty": int(stock_qty),
+        "stock_price": float(stock_price),
+        "as_of_ms": as_of_ms,
+    }
+    if dry_run:
+        return preview_manual_assignment(repo, **kwargs)
+    out = record_manual_assignment(repo, **kwargs)
+    result = out.get("result") if isinstance(out.get("result"), dict) else {}
+    return _apply_result_payload(
+        repo,
+        record_id=record_id or "",
+        result=result,
+        payload=out,
+        native_event=None,
+    )
+
+
+def execute_manual_exercise(
+    repo: Any,
+    *,
+    record_id: str | None = None,
+    broker: str = "富途",
+    account: str | None = None,
+    symbol: str | None = None,
+    option_type: str | None = None,
+    position_side: str | None = "long",
+    strike: float | None = None,
+    expiration_ymd: str | None = None,
+    contracts_to_close: int,
+    stock_side: str,
+    stock_qty: int,
+    stock_price: float,
+    dry_run: bool,
+    as_of_ms: int | None = None,
+) -> dict[str, Any]:
+    kwargs = {
+        "record_id": record_id,
+        "broker": broker,
+        "account": account,
+        "symbol": symbol,
+        "option_type": option_type,
+        "position_side": position_side,
+        "strike": strike,
+        "expiration_ymd": expiration_ymd,
+        "contracts_to_close": int(contracts_to_close),
+        "stock_side": stock_side,
+        "stock_qty": int(stock_qty),
+        "stock_price": float(stock_price),
+        "as_of_ms": as_of_ms,
+    }
+    if dry_run:
+        return preview_manual_exercise(repo, **kwargs)
+    out = record_manual_exercise(repo, **kwargs)
+    result = out.get("result") if isinstance(out.get("result"), dict) else {}
+    return _apply_result_payload(
+        repo,
+        record_id=record_id or "",
+        result=result,
+        payload=out,
+        native_event=None,
     )
 
 

@@ -185,6 +185,7 @@ def _summary(account_results: list[dict[str, Any]]) -> dict[str, int]:
         "positions_checked": 0,
         "candidates_should_close": 0,
         "applied_closed": 0,
+        "skipped_review_required": 0,
         "skipped_already_closed": 0,
         "errors": 0,
     }
@@ -194,6 +195,7 @@ def _summary(account_results: list[dict[str, Any]]) -> dict[str, int]:
         out["positions_checked"] += int(result.get("positions_checked") or 0)
         out["candidates_should_close"] += int(result.get("candidates_should_close") or 0)
         out["applied_closed"] += int(result.get("applied_closed") or 0)
+        out["skipped_review_required"] += int(result.get("skipped_review_required") or 0)
         out["skipped_already_closed"] += int(result.get("skipped_already_closed") or 0)
         out["errors"] += len(result.get("errors") or [])
     return out
@@ -359,6 +361,7 @@ def _print_text(result: dict[str, Any]) -> None:
         f"accounts={summary.get('accounts', 0)} "
         f"candidates={summary.get('candidates_should_close', 0)} "
         f"applied={summary.get('applied_closed', 0)} "
+        f"review_required={summary.get('skipped_review_required', 0)} "
         f"errors={summary.get('errors', 0)} "
         f"run_id={result.get('run_id')}"
     )

@@ -776,6 +776,330 @@ def test_option_positions_cli_buy_close_auto_match_lists_multiple_candidates(mon
         assert lot["record_id"] in message
 
 
+def test_option_positions_cli_assign_confirm_writes_assignment_event(monkeypatch, tmp_path: Path, capsys) -> None:
+    import src.interfaces.cli.option_positions as cli_mod
+    from domain.domain.option_position_lots import OpenPositionCommand
+
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo.data_config_path = data_config  # type: ignore[attr-defined]
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="TIGR",
+            option_type="put",
+            side="short",
+            contracts=10,
+            currency="USD",
+            strike=6.0,
+            multiplier=100,
+            expiration_ymd="2026-05-22",
+            premium_per_share=0.15,
+            opened_at_ms=1000,
+        ),
+    )
+
+    monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "om option-positions",
+            "--data-config",
+            str(data_config),
+            "assign",
+            "--account",
+            "lx",
+            "--symbol",
+            "TIGR",
+            "--option-type",
+            "put",
+            "--strike",
+            "6",
+            "--exp",
+            "2026-05-22",
+            "--contracts",
+            "10",
+            "--stock-side",
+            "buy",
+            "--stock-qty",
+            "1000",
+            "--stock-price",
+            "6",
+            "--confirm",
+            "--format",
+            "json",
+        ],
+    )
+
+    cli_mod.main()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["operation"] == "manual_assignment"
+    assert payload["mode"] == "applied"
+    assert payload["write_applied"] is True
+    events = [item for item in repo.list_trade_events() if item.get("event_type") == "assignment"]
+    assert len(events) == 1
+    assert events[0]["raw_payload"]["stock_settlement"]["shares"] == 1000
+    assert events[0]["raw_payload"]["stock_settlement"]["side"] == "buy"
+    assert events[0]["raw_payload"]["close_type"] == "assignment"
+
+
+def test_option_positions_cli_assign_rejects_wrong_stock_side(monkeypatch, tmp_path: Path) -> None:
+    import src.interfaces.cli.option_positions as cli_mod
+    from domain.domain.option_position_lots import OpenPositionCommand
+
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo.data_config_path = data_config  # type: ignore[attr-defined]
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="TIGR",
+            option_type="put",
+            side="short",
+            contracts=10,
+            currency="USD",
+            strike=6.0,
+            multiplier=100,
+            expiration_ymd="2026-05-22",
+            premium_per_share=0.15,
+            opened_at_ms=1000,
+        ),
+    )
+
+    monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "om option-positions",
+            "--data-config",
+            str(data_config),
+            "assign",
+            "--account",
+            "lx",
+            "--symbol",
+            "TIGR",
+            "--option-type",
+            "put",
+            "--strike",
+            "6",
+            "--exp",
+            "2026-05-22",
+            "--contracts",
+            "10",
+            "--stock-side",
+            "sell",
+            "--stock-qty",
+            "1000",
+            "--stock-price",
+            "6",
+            "--dry-run",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli_mod.main()
+
+    assert "manual assignment stock side must be buy" in str(exc_info.value)
+    assert [item for item in repo.list_trade_events() if item.get("event_type") == "assignment"] == []
+
+
+def test_option_positions_cli_exercise_confirm_writes_exercise_event(monkeypatch, tmp_path: Path, capsys) -> None:
+    import src.interfaces.cli.option_positions as cli_mod
+    from domain.domain.option_position_lots import OpenPositionCommand
+
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo.data_config_path = data_config  # type: ignore[attr-defined]
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="AAPL",
+            option_type="call",
+            side="long",
+            contracts=2,
+            currency="USD",
+            strike=200.0,
+            multiplier=100,
+            expiration_ymd="2026-05-22",
+            premium_per_share=1.5,
+            opened_at_ms=1000,
+        ),
+    )
+
+    monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "om option-positions",
+            "--data-config",
+            str(data_config),
+            "exercise",
+            "--account",
+            "lx",
+            "--symbol",
+            "AAPL",
+            "--option-type",
+            "call",
+            "--strike",
+            "200",
+            "--exp",
+            "2026-05-22",
+            "--contracts",
+            "2",
+            "--stock-side",
+            "buy",
+            "--stock-qty",
+            "200",
+            "--stock-price",
+            "200",
+            "--confirm",
+            "--format",
+            "json",
+        ],
+    )
+
+    cli_mod.main()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["operation"] == "manual_exercise"
+    assert payload["mode"] == "applied"
+    assert payload["write_applied"] is True
+    events = [item for item in repo.list_trade_events() if item.get("event_type") == "exercise"]
+    assert len(events) == 1
+    assert events[0]["raw_payload"]["stock_settlement"]["shares"] == 200
+    assert events[0]["raw_payload"]["stock_settlement"]["side"] == "buy"
+    assert events[0]["raw_payload"]["close_type"] == "exercise"
+
+
+def test_option_positions_cli_lifecycle_list_includes_evidence(monkeypatch, tmp_path: Path, capsys) -> None:
+    import src.interfaces.cli.option_positions as cli_mod
+
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo.data_config_path = data_config  # type: ignore[attr-defined]
+    repo.upsert_trade_lifecycle_case(
+        {
+            "case_id": "lc_tigr_assignment",
+            "case_key": "富途|lx|TIGR|put|short|6|2026-05-22",
+            "account": "lx",
+            "symbol": "TIGR",
+            "option_type": "put",
+            "position_side": "short",
+            "strike": 6,
+            "expiration_ymd": "2026-05-22",
+            "status": "waiting_settlement_evidence",
+            "decision_type": "needs_review",
+            "target_lot_ids": [],
+        }
+    )
+    repo.upsert_trade_lifecycle_evidence(
+        {
+            "evidence_id": "ev_option_close",
+            "case_id": "lc_tigr_assignment",
+            "source_type": "futu_trade_push",
+            "source_event_id": "deal-option-close",
+            "evidence_type": "option_zero_price_close",
+            "account": "lx",
+            "symbol": "TIGR",
+            "raw": {"deal_id": "deal-option-close"},
+        }
+    )
+
+    monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "om option-positions",
+            "--data-config",
+            str(data_config),
+            "lifecycle",
+            "list",
+            "--status",
+            "waiting_settlement_evidence",
+            "--include-evidence",
+            "--format",
+            "json",
+        ],
+    )
+
+    cli_mod.main()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["count"] == 1
+    assert payload["cases"][0]["case_id"] == "lc_tigr_assignment"
+    assert payload["cases"][0]["evidence"][0]["evidence_id"] == "ev_option_close"
+
+
+def test_option_positions_cli_lifecycle_inspect_shows_case_evidence(monkeypatch, tmp_path: Path, capsys) -> None:
+    import src.interfaces.cli.option_positions as cli_mod
+
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo.data_config_path = data_config  # type: ignore[attr-defined]
+    repo.upsert_trade_lifecycle_case(
+        {
+            "case_id": "lc_tigr_conflict",
+            "case_key": "富途|lx|TIGR|put|short|6|2026-05-22",
+            "account": "lx",
+            "symbol": "TIGR",
+            "option_type": "put",
+            "position_side": "short",
+            "strike": 6,
+            "expiration_ymd": "2026-05-22",
+            "status": "conflict",
+            "decision_type": "assignment",
+            "target_lot_ids": [],
+        }
+    )
+    repo.upsert_trade_lifecycle_evidence(
+        {
+            "evidence_id": "ev_stock_settlement",
+            "case_id": "lc_tigr_conflict",
+            "source_type": "futu_trade_push",
+            "source_event_id": "deal-stock",
+            "evidence_type": "stock_settlement_leg",
+            "account": "lx",
+            "symbol": "TIGR",
+            "raw": {"deal_id": "deal-stock"},
+        }
+    )
+
+    monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "om option-positions",
+            "--data-config",
+            str(data_config),
+            "lifecycle",
+            "inspect",
+            "--case-id",
+            "lc_tigr_conflict",
+            "--format",
+            "json",
+        ],
+    )
+
+    cli_mod.main()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["case"]["case_id"] == "lc_tigr_conflict"
+    assert payload["case"]["status"] == "conflict"
+    assert payload["case"]["evidence"][0]["evidence_id"] == "ev_stock_settlement"
+
+
 def test_option_positions_cli_void_event_reports_result(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
     from domain.domain.option_position_lots import OpenPositionCommand

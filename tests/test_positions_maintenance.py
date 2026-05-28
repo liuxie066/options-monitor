@@ -96,6 +96,61 @@ def test_position_maintenance_filters_account_and_broker_in_dry_run(monkeypatch,
     assert result["receipt"]["reason"] == "dry_run"
 
 
+def test_position_maintenance_external_account_requires_manual_expiry_review(monkeypatch, tmp_path: Path) -> None:
+    from domain.domain.option_position_lots import parse_exp_to_ms
+    from src.application.positions import maintenance as mod
+
+    data_config = tmp_path / "data.json"
+    data_config.write_text(json.dumps({"option_positions": {"sqlite_path": str(tmp_path / "pos.sqlite3")}}), encoding="utf-8")
+    report_dir = tmp_path / "reports"
+    fake_repo = object()
+    expiration = parse_exp_to_ms("2026-05-22")
+    assert expiration is not None
+
+    monkeypatch.setattr(mod, "resolve_data_config_path", lambda **_kwargs: data_config)
+    monkeypatch.setattr(mod, "open_position_ledger", lambda _path: fake_repo)
+    monkeypatch.setattr(
+        mod,
+        "_load_expiry_close_position_lots",
+        lambda _repo: [
+            {
+                "record_id": "lot_tigr",
+                "fields": {
+                    "broker": "富途",
+                    "account": "sy",
+                    "status": "open",
+                    "contracts": 10,
+                    "contracts_open": 10,
+                    "position_id": "pos_tigr",
+                    "expiration": expiration,
+                },
+            }
+        ],
+    )
+
+    result = mod.run_expired_position_maintenance_for_account(
+        base=tmp_path,
+        cfg={
+            "accounts": {"sy": {"type": "external_holdings"}},
+            "portfolio": {"data_config": str(data_config), "broker": "富途"},
+            "option_positions": {"auto_close": {"grace_days": 1}},
+        },
+        account="sy",
+        broker="富途",
+        report_dir=report_dir,
+        as_of_ms=parse_exp_to_ms("2026-05-25"),
+        dry_run=True,
+    )
+
+    assert result["mode"] == "dry_run"
+    assert result["candidates_should_close"] == 0
+    assert result["skipped_review_required"] == 1
+    assert result["decisions"] == 1
+    assert result["decision_items"][0]["skip_reason"] == "manual_expiry_review_required"
+    assert "manual assignment/expiry review" in result["decision_items"][0]["reason"]
+    assert "Review required:" in result["summary_text"]
+
+
 def test_position_maintenance_refreshes_projection_before_apply(monkeypatch, tmp_path: Path) -> None:
     from src.application.positions import maintenance as mod
 

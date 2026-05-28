@@ -59,6 +59,8 @@
 - 风控读取路径开始使用显式 read DTO：`PositionLotSnapshot` / `RiskPositionView`。`src/application/positions/context_builder.py` 内部消费 `RiskPositionView`，CLI / JSON 输出边界再转换为 dict。
 - repository/config、stored event codec、bootstrap、event write/projection publish、manual open/close/adjust、manual void/repair、auto-close maintenance、ledger preflight、close lot resolver、target identity guard 已分别迁到 `src/application/ledger/repository.py`、`event_codec.py`、`bootstrap.py`、`writer.py`、`manual_trades.py`、`interventions.py`、`maintenance.py`、`preflight.py`、`lot_resolver.py`、`targets.py`。
 - close target 解析已统一为 `CloseTargetResolution` 读写契约：manual close 使用唯一 strict match，broker close 使用严格 exact FIFO target set，auto-close 使用显式 current `record_id` target；解析结果会写入 preview / diagnostics / operation / raw_payload。
+- 到期生命周期已单独建模为 `trade_lifecycle_cases` / `trade_lifecycle_evidence`：Futu option zero-price leg 与 stock settlement leg 可以任意顺序到达；只有 evidence 判定完成后才写 canonical `assignment` / `exercise` trade_event。普通 `buy-close`、`expire_close`、`assignment`、`exercise` 使用独立语义入口，不能互相代替。
+- auto-close expired 在写 `expire_close` 前会检查 pending/conflict lifecycle case 和匹配 stock settlement evidence；`external_holdings` 账户默认跳过自动关闭并要求人工 assignment/expiry review。
 - lot record / field 语义已迁到 `domain/domain/ledger/position_fields.py`；旧 `domain/domain/option_position_lots.py` 仅作为兼容 re-export，ledger / positions / trades 核心路径不再从旧模块取写入字段模型。
 - open lot fields 与 open/close/adjust patch 已收敛到显式 `PositionLotFields` / `PositionLotPatch` contract；`src/application/ledger` 写路径内部使用 contract builder，旧 dict helper 只作为兼容输出边界保留。
 - projection 应用 adjust event 时会先用 `decode_position_lot_patch` 将 stored `raw_payload.patch` 解码成 `PositionLotPatch`；`PositionLot` 不再直接解释自由 patch dict。

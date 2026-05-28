@@ -439,7 +439,7 @@ def _preflight_lot_close(
         normalized_close_price = normalize_trade_price(
             close_price,
             "close_price",
-            allow_zero=(event_type == "expire_close"),
+            allow_zero=(event_type in {"expire_close", "assignment", "exercise"}),
         )
     except ValueError as exc:
         raise LedgerPreflightError(
