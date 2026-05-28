@@ -59,7 +59,7 @@ def parse_assistant_command(text: str, *, now_fn: Callable[[], date] | None = No
             args,
             intent_name="manual_trade_open",
             action_prefix="记录开仓",
-            hint="支持：/record-open lx NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100。",
+            hint="格式：/record-open [账户] <标的> <short|long> <put|call> strike <行权价> exp <YYYY-MM-DD> <张数>张 premium <权利金> multiplier <乘数>。",
         )
     if command in _COMMANDS["manual_trade_close"]:
         return _parse_manual_trade_preview_command(
@@ -67,7 +67,7 @@ def parse_assistant_command(text: str, *, now_fn: Callable[[], date] | None = No
             args,
             intent_name="manual_trade_close",
             action_prefix="记录平仓",
-            hint="支持：/record-close record_id=<record_id> 1张 close 0.8。",
+            hint="格式：/record-close record_id=<record_id> <张数>张 close <平仓价>。",
         )
     if command in _COMMANDS["manual_trade_confirm"]:
         return _parse_operation_command(command, args, target_map=_CONFIRM_TARGETS, action_label="确认")
