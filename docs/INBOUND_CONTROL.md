@@ -44,16 +44,17 @@ Feishu / WeChat / Hermes
 
 The first implementation is read-only and deterministic. It supports:
 
-| Message | Tool |
+| Pattern | Tool |
 |---|---|
 | `状态` | `runtime_status` |
 | `健康检查` | `healthcheck` |
 | `配置检查` | `config_validate` |
 | `持仓` | `option_positions_read` for all accounts, open positions |
-| `持仓 sy` | `option_positions_read` for one account |
+| `持仓 [账户]` | `option_positions_read` for one account |
+| `持仓 [到期月份/到期日/标的/类型/方向]` | `option_positions_read` with structured filters |
 | `收益` | `monthly_income_report` for all accounts/months |
-| `收益 sy` | `monthly_income_report` for one account |
-| `收益 sy 2026-05` | `monthly_income_report` with month filter |
+| `收益 [账户]` | `monthly_income_report` for one account |
+| `收益 [账户] [YYYY-MM|本月|上月]` | `monthly_income_report` with month filter |
 | `最近运行` | `runtime_runs` |
 | `日志 <run_id>` | `runtime_logs` |
 
@@ -251,7 +252,7 @@ Feishu message call:
 ```bash
 OM_FEISHU_BOT_ALLOWED_OPEN_IDS='ou_xxx' \
 ./om assistant handle \
-  --text '收益 sy 2026-05' \
+  --text '收益 <account> <YYYY-MM>' \
   --sender ou_xxx \
   --channel feishu \
   --message-id '${FEISHU_MESSAGE_ID}'
@@ -369,6 +370,6 @@ Supported write commands:
 | --- | --- | --- | --- |
 | `记录开仓 ...` / `记录平仓 ...` | `manual_trade_*` | `确认记录 [operation_id]` | `取消记录 [operation_id]` |
 | `增加/修改/删除监控标的 ...` | `symbol_*` | `确认监控 [operation_id]` | `取消监控 [operation_id]` |
-| `立即升级` / `立即升级到 v1.2.111` | `upgrade_now` | `确认升级 [operation_id]` | `取消升级 [operation_id]` |
+| `立即升级` / `立即升级到 v<version>` | `upgrade_now` | `确认升级 [operation_id]` | `取消升级 [operation_id]` |
 
 `立即升级` delegates to the same service upgrade path as `./om update apply --auto --confirm`. The preview does not switch releases. Confirmation only records the confirmation and starts an independent `assistant upgrade-worker`; the worker runs the upgrade, writes the final applied/failed result, and sends the final Feishu receipt after service restarts.
