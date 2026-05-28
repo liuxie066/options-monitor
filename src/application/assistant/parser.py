@@ -6,7 +6,7 @@ from typing import Callable
 
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.assistant.commands import command_specs, operation_specs
-from src.application.assistant.contracts import AssistantIntent
+from src.application.assistant.contracts import SemanticFrame
 from src.application.assistant.semantic_frames import parse_position_query_text, position_query_intent_arguments
 
 
@@ -60,7 +60,7 @@ _READ_ONLY_EXACT_ALIASES: dict[str, str] = {}
 _READ_ONLY_HINT = ""
 
 
-def parse_inbound_text(text: str, *, now_fn: Callable[[], date] | None = None) -> AssistantIntent:
+def parse_inbound_text(text: str, *, now_fn: Callable[[], date] | None = None) -> SemanticFrame:
     raw = str(text or "").strip()
     if not raw:
         raise AgentToolError(
@@ -68,13 +68,19 @@ def parse_inbound_text(text: str, *, now_fn: Callable[[], date] | None = None) -
             message="请输入要查询的内容。",
             hint=_read_only_hint(),
         )
+    if raw.startswith("/"):
+        from src.application.assistant.command_parser import parse_assistant_command
+
+        command_intent = parse_assistant_command(raw, now_fn=now_fn)
+        if command_intent is not None:
+            return command_intent
 
     compact = _compact(raw)
     lower = raw.lower().strip()
     today = now_fn() if now_fn is not None else date.today()
 
     if compact in {"你好", "您好", "hi", "hello", "嗨"}:
-        return AssistantIntent(name="small_talk", arguments={"kind": "hello"})
+        return SemanticFrame(name="small_talk", arguments={"kind": "hello"})
 
     catalog_intent = _parse_catalog_read_alias(compact, lower)
     if catalog_intent is not None:
@@ -94,31 +100,31 @@ def parse_inbound_text(text: str, *, now_fn: Callable[[], date] | None = None) -
         "功能",
         "菜单",
     }:
-        return AssistantIntent(name="help", arguments={})
+        return SemanticFrame(name="help", arguments={})
 
     if compact in {"待确认", "当前预览", "待确认记录", "pending", "pendingoperations"} or lower in {
         "pending",
         "pending operations",
         "current preview",
     }:
-        return AssistantIntent(name="pending_operations", arguments={})
+        return SemanticFrame(name="pending_operations", arguments={})
 
     operation_intent = _parse_operation_intent(raw, compact=compact, lower=lower)
     if operation_intent is not None:
         return operation_intent
 
     if compact in {"状态", "运行状态", "系统状态", "系统怎么样", "运行怎么样", "status"} or lower in {"status", "runtime status"}:
-        return AssistantIntent(name="runtime_status", arguments={})
+        return SemanticFrame(name="runtime_status", arguments={})
 
     if "健康检查" in compact or compact in {"健康", "检查", "自检", "诊断", "healthcheck", "doctor"} or lower in {"healthcheck", "doctor"}:
-        return AssistantIntent(name="healthcheck", arguments={})
+        return SemanticFrame(name="healthcheck", arguments={})
 
     if "配置检查" in compact or "配置校验" in compact or compact in {"配置是否正常", "检查配置"} or lower in {"config validate", "config_validate"}:
-        return AssistantIntent(name="config_validate", arguments={})
+        return SemanticFrame(name="config_validate", arguments={})
 
     if _looks_like_positions(compact, lower):
         query = parse_position_query_text(raw, today=today)
-        return AssistantIntent(name="position_query", arguments=position_query_intent_arguments(query))
+        return SemanticFrame(name="position_query", arguments=position_query_intent_arguments(query))
 
     if _looks_like_income(compact, lower):
         account = _extract_account(raw)
@@ -128,11 +134,11 @@ def parse_inbound_text(text: str, *, now_fn: Callable[[], date] | None = None) -
             args["account"] = account
         if month:
             args["month"] = month
-        return AssistantIntent(name="monthly_income_report", arguments=args)
+        return SemanticFrame(name="monthly_income_report", arguments=args)
 
     if _looks_like_runs(compact, lower):
         limit = _extract_limit(raw, default=10, maximum=50)
-        return AssistantIntent(name="runtime_runs", arguments={"limit": limit})
+        return SemanticFrame(name="runtime_runs", arguments={"limit": limit})
 
     if _looks_like_logs(compact, lower):
         run_id = _extract_run_id_for_logs(raw)
@@ -141,7 +147,7 @@ def parse_inbound_text(text: str, *, now_fn: Callable[[], date] | None = None) -
                 code="NEEDS_CLARIFICATION",
                 message="请指定 run_id，例如：日志 20260515T182459Z-474761。",
             )
-        return AssistantIntent(name="runtime_logs", arguments={"run_id": run_id, "kind": "all", "lines": 50})
+        return SemanticFrame(name="runtime_logs", arguments={"run_id": run_id, "kind": "all", "lines": 50})
 
     raise AgentToolError(
         code="NEEDS_CLARIFICATION",
@@ -154,15 +160,15 @@ def _compact(text: str) -> str:
     return re.sub(r"\s+", "", text.strip().lower())
 
 
-def _parse_catalog_read_alias(compact: str, lower: str) -> AssistantIntent | None:
+def _parse_catalog_read_alias(compact: str, lower: str) -> SemanticFrame | None:
     intent_name = _read_only_exact_aliases().get(compact) or _read_only_exact_aliases().get(lower)
     if not intent_name:
         return None
     if intent_name == "position_query":
-        return AssistantIntent(name=intent_name, arguments={"status": "open", "limit": 50})
+        return SemanticFrame(name=intent_name, arguments={"status": "open", "limit": 50})
     if intent_name == "runtime_runs":
-        return AssistantIntent(name=intent_name, arguments={"limit": 10})
-    return AssistantIntent(name=intent_name, arguments={})
+        return SemanticFrame(name=intent_name, arguments={"limit": 10})
+    return SemanticFrame(name=intent_name, arguments={})
 
 
 def _read_only_exact_aliases() -> dict[str, str]:
@@ -261,7 +267,7 @@ def _extract_run_id_for_logs(text: str) -> str | None:
     return None
 
 
-def _parse_operation_intent(text: str, *, compact: str, lower: str) -> AssistantIntent | None:
+def _parse_operation_intent(text: str, *, compact: str, lower: str) -> SemanticFrame | None:
     confirm_intent = _parse_catalog_operation_reference(text, compact=compact, lower=lower, action="confirm")
     if confirm_intent is not None:
         return confirm_intent
@@ -270,23 +276,23 @@ def _parse_operation_intent(text: str, *, compact: str, lower: str) -> Assistant
         return cancel_intent
 
     if _looks_like_symbol_list(compact, lower):
-        return AssistantIntent(name="symbol_list", arguments={})
+        return SemanticFrame(name="symbol_list", arguments={})
     if _looks_like_symbol_add(compact, lower):
-        return AssistantIntent(name="symbol_add", arguments=_parse_symbol_add(text))
+        return SemanticFrame(name="symbol_add", arguments=_parse_symbol_add(text))
     if _looks_like_symbol_edit(compact, lower):
-        return AssistantIntent(name="symbol_edit", arguments=_parse_symbol_edit(text))
+        return SemanticFrame(name="symbol_edit", arguments=_parse_symbol_edit(text))
     if _looks_like_symbol_remove(compact, lower):
-        return AssistantIntent(name="symbol_remove", arguments=_parse_symbol_remove(text))
+        return SemanticFrame(name="symbol_remove", arguments=_parse_symbol_remove(text))
 
     if _looks_like_upgrade_now(compact, lower):
-        return AssistantIntent(name="upgrade_now", arguments=_parse_upgrade_request(text))
+        return SemanticFrame(name="upgrade_now", arguments=_parse_upgrade_request(text))
     if _looks_like_manual_open(compact, lower):
-        return AssistantIntent(name="manual_trade_open", arguments=_parse_manual_trade_request(text))
+        return SemanticFrame(name="manual_trade_open", arguments=_parse_manual_trade_request(text))
     if _looks_like_manual_close(compact, lower):
-        return AssistantIntent(name="manual_trade_close", arguments=_parse_manual_trade_request(text))
+        return SemanticFrame(name="manual_trade_close", arguments=_parse_manual_trade_request(text))
     manual_update = _parse_manual_trade_update(text)
     if manual_update:
-        return AssistantIntent(name="manual_trade_update", arguments=manual_update)
+        return SemanticFrame(name="manual_trade_update", arguments=manual_update)
     return None
 
 
@@ -296,10 +302,10 @@ def _parse_catalog_operation_reference(
     compact: str,
     lower: str,
     action: str,
-) -> AssistantIntent | None:
+) -> SemanticFrame | None:
     for spec in operation_specs(action=action):
         if _matches_operation_reference(spec, compact=compact, lower=lower, action=action):
-            return AssistantIntent(name=spec.intent_name, arguments=_operation_reference_args(text))
+            return SemanticFrame(name=spec.intent_name, arguments=_operation_reference_args(text))
     return None
 
 

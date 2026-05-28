@@ -15,7 +15,7 @@ from src.application.assistant.commands import (
 )
 from src.application.assistant.settings import LlmTranslatorSettings
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.assistant.contracts import AssistantIntent
+from src.application.assistant.contracts import SemanticFrame
 from src.application.assistant.semantic_frames import PositionQuery
 
 
@@ -70,7 +70,7 @@ def inbound_intent_from_llm_payload(
     payload: dict[str, Any],
     *,
     settings: LlmTranslatorSettings,
-) -> AssistantIntent:
+) -> SemanticFrame:
     if not isinstance(payload, dict):
         raise AgentToolError(code="INPUT_ERROR", message="LLM intent payload must be a JSON object")
 
@@ -105,7 +105,7 @@ def inbound_intent_from_llm_payload(
     arguments = _dict(payload.get("arguments"))
     _reject_extra_arguments(intent_name, arguments)
     normalized = _normalize_arguments(intent_name, arguments)
-    return AssistantIntent(name=intent_name, arguments=normalized, parser="llm", confidence=confidence)
+    return SemanticFrame(name=intent_name, arguments=normalized, parser="llm", confidence=confidence)
 
 
 def _parse_confidence(raw: Any) -> float:

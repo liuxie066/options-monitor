@@ -6,7 +6,7 @@ from typing import Any, cast
 
 from src.application.agent_tool_config import load_runtime_config, repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_response, mask_path
-from src.application.assistant.contracts import AssistantIntent, AssistantRequest
+from src.application.assistant.contracts import AssistantRequest, SemanticFrame
 from src.application.assistant.manual_trade_parser import build_manual_trade_draft
 from src.application.assistant.operation_lifecycle import (
     build_cancelled_operation_response,
@@ -71,7 +71,7 @@ FIELD_LABELS = {
 
 
 def handle_manual_trade_operation(
-    intent: AssistantIntent,
+    intent: SemanticFrame,
     request: AssistantRequest,
     *,
     command_id: str,
@@ -381,7 +381,7 @@ def _format_patch_summary(patch: dict[str, Any]) -> str:
     return "已修改：" + "，".join(parts)
 
 
-def _manual_trade_raw_text(intent: AssistantIntent, request: AssistantRequest) -> str:
+def _manual_trade_raw_text(intent: SemanticFrame, request: AssistantRequest) -> str:
     return str(intent.arguments.get("raw_text") or request.text or "").strip()
 
 

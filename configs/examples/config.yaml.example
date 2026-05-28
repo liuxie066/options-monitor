@@ -33,14 +33,24 @@ markets:
 assistant:
   mode: deterministic
   context_window_messages: 8
-  llm:
-    provider: ""
-    base_url: ""
-    model: ""
-    api_key_env: OM_LLM_API_KEY
-    confidence_min: 0.75
-    timeout_seconds: 20
-    max_output_tokens: 512
+  active_model: deepseek-default
+  models:
+    deepseek-default:
+      provider: deepseek
+      base_url: "https://api.deepseek.com"
+      model: deepseek-chat
+      api_key_env: DEEPSEEK_API_KEY
+      confidence_min: 0.75
+      timeout_seconds: 20
+      max_output_tokens: 512
+    openai-default:
+      provider: openai
+      base_url: ""
+      model: gpt-5.2
+      api_key_env: OM_LLM_API_KEY
+      confidence_min: 0.75
+      timeout_seconds: 20
+      max_output_tokens: 512
 
 inbound:
   feishu_ws:

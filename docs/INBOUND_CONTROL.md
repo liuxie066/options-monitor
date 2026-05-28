@@ -103,14 +103,16 @@ LLM translation is disabled by default:
 assistant:
   mode: deterministic
   context_window_messages: 8
-  llm:
-    provider: ""
-    base_url: ""
-    model: ""
-    api_key_env: OM_LLM_API_KEY
-    confidence_min: 0.75
-    timeout_seconds: 20
-    max_output_tokens: 512
+  active_model: deepseek-default
+  models:
+    deepseek-default:
+      provider: deepseek
+      base_url: "https://api.deepseek.com"
+      model: deepseek-chat
+      api_key_env: DEEPSEEK_API_KEY
+      confidence_min: 0.75
+      timeout_seconds: 20
+      max_output_tokens: 512
 ```
 
 When enabled, LLM translation only runs after command and deterministic parsing fail. It must return an `om-llm-intent-v1` JSON intent into the same Assistant execution router; it must not execute tools or rewrite canonical OM responses. The LLM executable intent schema is read-only and only allows help/status/health/config/positions/income/runs/logs/symbols/pending operations. Write-preview slash commands such as `/record-open` and `/record-close` are deterministic command-facade entries, not LLM-executable intents.
@@ -130,7 +132,7 @@ Supported providers:
 - `openai`: uses OpenAI Responses API. Leave `base_url` empty for `https://api.openai.com/v1/responses`, or set a full Responses-compatible base URL.
 - `deepseek`: uses DeepSeek's OpenAI-compatible Chat Completions API. Leave `base_url` empty or set `https://api.deepseek.com`; OM calls `/chat/completions` and requests `response_format: {"type":"json_object"}`.
 
-To enable it, set the API key in the local env file or deployment env file, then set `assistant.mode` and `assistant.llm` in `config.assistant.json`:
+To enable it, set the API key in the local env file or deployment env file, then switch `assistant.mode` and choose `assistant.active_model` in `config.yaml`:
 
 ```bash
 OM_LLM_API_KEY='sk-...'
@@ -140,14 +142,16 @@ OM_LLM_API_KEY='sk-...'
 assistant:
   mode: llm_router
   context_window_messages: 8
-  llm:
-    provider: openai
-    base_url: ""
-    model: gpt-5.2
-    api_key_env: OM_LLM_API_KEY
-    confidence_min: 0.75
-    timeout_seconds: 20
-    max_output_tokens: 512
+  active_model: openai-default
+  models:
+    openai-default:
+      provider: openai
+      base_url: ""
+      model: gpt-5.2
+      api_key_env: OM_LLM_API_KEY
+      confidence_min: 0.75
+      timeout_seconds: 20
+      max_output_tokens: 512
 ```
 
 DeepSeek example:
@@ -160,17 +164,42 @@ DEEPSEEK_API_KEY='sk-...'
 assistant:
   mode: llm_router
   context_window_messages: 8
-  llm:
-    provider: deepseek
-    base_url: "https://api.deepseek.com"
-    model: deepseek-v4-flash
-    api_key_env: DEEPSEEK_API_KEY
-    confidence_min: 0.75
-    timeout_seconds: 20
-    max_output_tokens: 512
+  active_model: deepseek-default
+  models:
+    deepseek-default:
+      provider: deepseek
+      base_url: "https://api.deepseek.com"
+      model: deepseek-chat
+      api_key_env: DEEPSEEK_API_KEY
+      confidence_min: 0.75
+      timeout_seconds: 20
+      max_output_tokens: 512
 ```
 
-The API key stays in environment settings; assistant config only names which env var to read. When LLM translation runs, OM sends a bounded same-conversation context window to the translator: recent inbound audit rows plus current pending operation summaries. Sender and conversation identifiers are used locally to select the window, but are not sent to the provider. `assistant.context_window_messages` controls the recent-message window and is capped at 20; this context is only used for intent translation, not execution.
+Run `./om config build-assistant --source yaml` after editing `config.yaml`. The generated `config.assistant.json` contains only the resolved active `assistant.llm`; runtime/router/arbitrator do not see `assistant.models` or `assistant.active_model`.
+
+The API key stays in environment settings; assistant config only names which env var to read. Model management commands never accept API key values:
+
+```bash
+./om assistant model catalog
+./om assistant model list
+./om assistant model add deepseek-default --provider deepseek --model deepseek-chat --api-key-env DEEPSEEK_API_KEY --apply
+./om assistant model use deepseek-default --apply
+./om assistant model current
+./om assistant model check --active --live
+```
+
+The same model surface is available in chat through one slash command namespace:
+
+```text
+/model
+/model list
+/model use deepseek-default
+```
+
+`/model` and `/model list` are read-only. `/model use <name>` only creates a preview; it writes `config.yaml` and rebuilds `config.assistant.json` after `确认模型` or `/confirm model <operation_id>`.
+
+When LLM translation runs, OM sends a bounded same-conversation context window to the translator: recent inbound audit rows plus current pending operation summaries. Sender and conversation identifiers are used locally to select the window, but are not sent to the provider. `assistant.context_window_messages` controls the recent-message window and is capped at 20; this context is only used for intent translation, not execution.
 
 Check the translator control plane before enabling it in Feishu:
 
@@ -356,6 +385,7 @@ Inbound write actions are opt-in. Set `OM_INBOUND_OPERATIONS_ENABLED=1`, configu
 export OM_INBOUND_TRADE_WRITE_ENABLED=1
 export OM_INBOUND_SYMBOL_WRITE_ENABLED=1
 export OM_INBOUND_UPGRADE_WRITE_ENABLED=1
+export OM_INBOUND_MODEL_WRITE_ENABLED=1
 ```
 
 Write actions use:
@@ -371,5 +401,6 @@ Supported write commands:
 | `记录开仓 ...` / `记录平仓 ...` | `manual_trade_*` | `确认记录 [operation_id]` | `取消记录 [operation_id]` |
 | `增加/修改/删除监控标的 ...` | `symbol_*` | `确认监控 [operation_id]` | `取消监控 [operation_id]` |
 | `立即升级` / `立即升级到 v<version>` | `upgrade_now` | `确认升级 [operation_id]` | `取消升级 [operation_id]` |
+| `/model use <name>` | `model_use` | `确认模型 [operation_id]` | `取消模型 [operation_id]` |
 
 `立即升级` delegates to the same service upgrade path as `./om update apply --auto --confirm`. The preview does not switch releases. Confirmation only records the confirmation and starts an independent `assistant upgrade-worker`; the worker runs the upgrade, writes the final applied/failed result, and sends the final Feishu receipt after service restarts.

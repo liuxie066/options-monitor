@@ -9,7 +9,7 @@ from src.application.agent_tool_config import resolve_runtime_config_path
 from src.application.agent_tool_contracts import AgentToolError, build_response, mask_path
 from src.application.config_loader import resolve_watchlist_config, set_watchlist_config
 from src.application.config_validator import validate_config
-from src.application.assistant.contracts import AssistantIntent, AssistantRequest
+from src.application.assistant.contracts import AssistantRequest, SemanticFrame
 from src.application.assistant.operation_lifecycle import (
     build_cancelled_operation_response,
     build_previewed_operation_response,
@@ -30,7 +30,7 @@ SYMBOL_OPERATION_TYPES = PREVIEW_INTENTS
 
 
 def handle_symbol_operation(
-    intent: AssistantIntent,
+    intent: SemanticFrame,
     request: AssistantRequest,
     *,
     command_id: str,

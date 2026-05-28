@@ -6,9 +6,10 @@ from typing import Any, Callable
 
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response, mask_path
 from src.application.assistant.audit import InboundAuditStore, build_command_id, utc_now_iso
-from src.application.assistant.contracts import AssistantFrame, AssistantIntent, AssistantRequest, AssistantToolCall, ToolPlan
-from src.application.assistant.frame_planner import frame_from_intent, tool_plan_from_frame
+from src.application.assistant.contracts import AssistantFrame, AssistantRequest, AssistantToolCall, SemanticFrame, ToolPlan
+from src.application.assistant.frame_planner import frame_from_semantic_frame, tool_plan_from_frame
 from src.application.assistant.manual_trade_operations import handle_manual_trade_operation
+from src.application.assistant.model_operations import handle_model_operation
 from src.application.assistant.operation_store import InboundOperationStore
 from src.application.assistant.parser import parse_inbound_text
 from src.application.assistant.policy import enforce_sender_allowed, enforce_tool_allowed
@@ -19,7 +20,8 @@ from src.application.tool_execution import execute_tool
 
 
 ExecuteToolFn = Callable[[str, dict[str, Any]], dict[str, Any]]
-ParseIntentFn = Callable[[str, Callable[[], date] | None], AssistantIntent]
+ParseSemanticFrameFn = Callable[[str, Callable[[], date] | None], SemanticFrame]
+ParseIntentFn = ParseSemanticFrameFn
 
 
 def handle_assistant_request(
@@ -70,7 +72,7 @@ def handle_assistant_request(
         return _duplicate_response(existing)
 
     created_at = utc_now_iso()
-    intent: AssistantIntent | None = None
+    intent: SemanticFrame | None = None
     frame: AssistantFrame | None = None
     call: AssistantToolCall | None = None
     plan: ToolPlan | None = None
@@ -85,7 +87,7 @@ def handle_assistant_request(
             allowed_senders=allowed_senders,
         )
         intent = _parse_intent(normalized_request.text, now_fn=now_fn, parse_intent_fn=parse_intent_fn)
-        frame = frame_from_intent(intent)
+        frame = frame_from_semantic_frame(intent)
         if intent.name == "help":
             response = build_response(
                 tool_name="inbound.handle",
@@ -294,6 +296,39 @@ def handle_assistant_request(
                 response=response,
             )
 
+        if call.tool_name == "inbound.model":
+            operation_result = handle_model_operation(
+                planned_intent,
+                normalized_request,
+                command_id=command_id,
+                store=InboundOperationStore(store.path),
+            )
+            response = _operation_response(
+                operation_result,
+                command_id=command_id,
+                request=normalized_request,
+                intent=planned_intent,
+                frame=frame,
+                plan=plan,
+                call=call,
+                sender_decision=sender_decision.public_payload(),
+                reason=plan.reason,
+                audit_db=store.path,
+            )
+            decision = "allowed"
+            return _record_and_return(
+                store=store,
+                request=normalized_request,
+                command_id=command_id,
+                created_at=created_at,
+                intent=intent,
+                frame=frame,
+                call=call,
+                plan=plan,
+                decision=decision,
+                response=response,
+            )
+
         tool_decision = enforce_tool_allowed(call)
         tool_result = execute_tool_fn(call.tool_name, call.payload)
         response_text = render_inbound_text(intent=intent, tool_result=tool_result)
@@ -343,14 +378,14 @@ def _parse_intent(
     *,
     now_fn: Callable[[], date] | None,
     parse_intent_fn: ParseIntentFn | None,
-) -> AssistantIntent:
+) -> SemanticFrame:
     if parse_intent_fn is not None:
         return parse_intent_fn(text, now_fn)
     return parse_inbound_text(text, now_fn=now_fn)
 
 
-def _intent_from_plan(intent: AssistantIntent, plan: ToolPlan) -> AssistantIntent:
-    return AssistantIntent(
+def _intent_from_plan(intent: SemanticFrame, plan: ToolPlan) -> SemanticFrame:
+    return SemanticFrame(
         name=intent.name,
         arguments=dict(plan.payload),
         parser=intent.parser,
@@ -363,7 +398,7 @@ def _operation_response(
     *,
     command_id: str,
     request: AssistantRequest,
-    intent: AssistantIntent,
+    intent: SemanticFrame,
     frame: AssistantFrame,
     plan: ToolPlan,
     call: AssistantToolCall,
@@ -406,7 +441,7 @@ def _record_and_return(
     request: AssistantRequest,
     command_id: str,
     created_at: str,
-    intent: AssistantIntent | None,
+    intent: SemanticFrame | None,
     frame: AssistantFrame | None,
     call: AssistantToolCall | None,
     plan: ToolPlan | None,
@@ -511,4 +546,5 @@ def _normalize_request(request: AssistantRequest) -> AssistantRequest:
         config_key=str(request.config_key or "").strip().lower() or None,
         config_path=str(request.config_path).strip() if request.config_path is not None and str(request.config_path).strip() else None,
         audit_db=str(request.audit_db).strip() if request.audit_db is not None and str(request.audit_db).strip() else None,
+        assistant_config_path=str(request.assistant_config_path).strip() if request.assistant_config_path is not None and str(request.assistant_config_path).strip() else None,
     )

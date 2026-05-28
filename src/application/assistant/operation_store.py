@@ -506,6 +506,8 @@ def _operation_summary_text(operation_type: str, operation: dict[str, Any]) -> s
         return _symbol_operation_summary(operation_type, args, operation)
     if operation_type == "upgrade_now":
         return _upgrade_operation_summary(operation)
+    if operation_type == "model_use":
+        return _model_operation_summary(args, operation)
     return operation_type or "-"
 
 
@@ -579,6 +581,16 @@ def _upgrade_operation_summary(operation: dict[str, Any]) -> str:
     target = str(summary_map.get("target_version") or "-")
     status = str(summary_map.get("status") or "-")
     return f"{current} -> {target} status {status}"
+
+
+def _model_operation_summary(args: dict[str, Any], operation: dict[str, Any]) -> str:
+    preview = operation.get("preview")
+    preview_map = preview if isinstance(preview, dict) else {}
+    summary = preview_map.get("summary")
+    summary_map = summary if isinstance(summary, dict) else {}
+    source = str(summary_map.get("from") or "-")
+    target = str(summary_map.get("to") or args.get("model_profile") or "-")
+    return f"{source} -> {target}"
 
 
 def _json(value: Any) -> str:

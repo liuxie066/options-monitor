@@ -1,22 +1,19 @@
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import pandas as pd
+
+from src.application.events.annotator import annotate_candidates_with_event_snapshot
+from src.application.events.source_yfinance import EventSourceError, fetch_symbol_events_yfinance
+from src.application.events.store import EventStore
 
 
 DEFAULT_EVENT_RISK_CFG = {
     "enabled": True,
     "mode": "warn",
 }
-
-
-class EventSourceError(RuntimeError):
-    pass
 
 
 def normalize_event_risk_cfg(cfg: dict | None) -> dict:
@@ -29,277 +26,39 @@ def normalize_event_risk_cfg(cfg: dict | None) -> dict:
     return out
 
 
-def _to_date_str(value) -> str | None:
-    try:
-        ts = pd.to_datetime(value, errors="coerce")
-    except Exception:
-        return None
-    if pd.isna(ts):
-        return None
-    try:
-        if getattr(ts, "tzinfo", None) is not None:
-            ts = ts.tz_convert(None)
-    except Exception:
-        pass
-    return ts.date().isoformat()
-
-
-def fetch_symbol_events_yfinance(symbol: str) -> list[dict]:
-    import yfinance as yf
-
-    ticker = yf.Ticker(symbol)
-    events: list[dict] = []
-    seen: set[tuple[str, str]] = set()
-    source_ok_count = 0
-    source_errors: list[str] = []
-
-    def _add(event_type: str, raw_value) -> None:
-        ds = _to_date_str(raw_value)
-        if not ds:
-            return
-        key = (event_type, ds)
-        if key in seen:
-            return
-        seen.add(key)
-        events.append({"type": event_type, "date": ds})
-
-    try:
-        edf = ticker.get_earnings_dates(limit=8)
-        if isinstance(edf, pd.DataFrame) and not edf.empty:
-            for idx in edf.index:
-                _add("earnings", idx)
-        source_ok_count += 1
-    except Exception as exc:
-        source_errors.append(f"earnings_dates:{type(exc).__name__}:{exc}")
-
-    try:
-        cal = ticker.calendar
-        if isinstance(cal, pd.DataFrame) and not cal.empty:
-            for key in ("Earnings Date", "Ex-Dividend Date"):
-                if key not in cal.index:
-                    continue
-                row = cal.loc[key]
-                if isinstance(row, pd.Series):
-                    for v in row.tolist():
-                        _add("earnings" if key == "Earnings Date" else "ex_dividend", v)
-                else:
-                    _add("earnings" if key == "Earnings Date" else "ex_dividend", row)
-        source_ok_count += 1
-    except Exception as exc:
-        source_errors.append(f"calendar:{type(exc).__name__}:{exc}")
-
-    try:
-        div = ticker.get_dividends()
-        if isinstance(div, pd.Series) and not div.empty:
-            cutoff = datetime.now(timezone.utc).date() - timedelta(days=180)
-            for idx in div.index:
-                ds = _to_date_str(idx)
-                if not ds:
-                    continue
-                if ds >= cutoff.isoformat():
-                    _add("ex_dividend", ds)
-        source_ok_count += 1
-    except Exception as exc:
-        source_errors.append(f"dividends:{type(exc).__name__}:{exc}")
-
-    if source_ok_count == 0 and source_errors:
-        raise EventSourceError("; ".join(source_errors))
-
-    events.sort(key=lambda x: (x.get("date") or "", x.get("type") or ""))
-    return events
-
-
-@dataclass(frozen=True)
-class EventFetchResult:
-    events: list[dict]
-    source_status: str
-    source_error: str = ""
-
-
-@dataclass
-class EventCache:
-    path: Path
-    ttl_seconds: int = 86400
-
-    def _load(self) -> dict:
-        if not self.path.exists():
-            return {"symbols": {}}
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                data.setdefault("symbols", {})
-                return data
-        except Exception:
-            pass
-        return {"symbols": {}}
-
-    def _save(self, data: dict) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    @staticmethod
-    def _clean_events(events) -> list[dict]:
-        if not isinstance(events, list):
-            return []
-        return [x for x in events if isinstance(x, dict)]
-
-    @staticmethod
-    def _error_text(exc: Exception) -> str:
-        msg = str(exc).strip()
-        if len(msg) > 500:
-            msg = msg[:500] + "..."
-        return f"{type(exc).__name__}: {msg}" if msg else type(exc).__name__
-
-    def get_events_result(
-        self,
-        symbol: str,
-        *,
-        fetcher: Callable[[str], list[dict]],
-        now: datetime | None = None,
-    ) -> EventFetchResult:
-        now_dt = now or datetime.now(timezone.utc)
-        data = self._load()
-        symbols = data.get("symbols")
-        if not isinstance(symbols, dict):
-            symbols = {}
-            data["symbols"] = symbols
-        key = str(symbol or "").upper()
-        entry = symbols.get(key) if isinstance(symbols.get(key), dict) else None
-
-        if entry:
-            fetched_at = _to_date_str(entry.get("fetched_at"))
-            if fetched_at:
-                try:
-                    dt = datetime.fromisoformat(str(entry.get("fetched_at")))
-                    if (now_dt - dt).total_seconds() <= self.ttl_seconds and entry.get("source_status") == "ok":
-                        events = entry.get("events")
-                        if isinstance(events, list):
-                            return EventFetchResult(events=self._clean_events(events), source_status="ok")
-                except Exception:
-                    pass
-
-        try:
-            events = self._clean_events(fetcher(key))
-        except Exception as exc:
-            source_error = self._error_text(exc)
-            stale_events = self._clean_events(entry.get("events")) if entry else []
-            updated = dict(entry or {})
-            if not stale_events:
-                updated.pop("events", None)
-                updated.pop("fetched_at", None)
-            updated.update(
-                {
-                    "source_status": "error",
-                    "last_error_at": now_dt.isoformat(),
-                    "last_error_type": type(exc).__name__,
-                    "last_error": source_error,
-                }
-            )
-            symbols[key] = updated
-            self._save(data)
-            return EventFetchResult(events=stale_events, source_status="error", source_error=source_error)
-
-        symbols[key] = {
-            "fetched_at": now_dt.isoformat(),
-            "source_status": "ok",
-            "events": events,
-        }
-        self._save(data)
-        return EventFetchResult(events=events, source_status="ok")
-
-    def get_events(
-        self,
-        symbol: str,
-        *,
-        fetcher: Callable[[str], list[dict]],
-        now: datetime | None = None,
-    ) -> list[dict]:
-        return self.get_events_result(symbol, fetcher=fetcher, now=now).events
-
-
 def annotate_candidates_with_event_risk(
     df: pd.DataFrame,
     *,
     base_dir: Path,
     event_risk_cfg: dict | None = None,
-    event_fetcher: Callable[[str], list[dict]] | None = None,
+    event_fetcher: Callable[[str], list[dict[str, Any]]] | None = None,
 ) -> pd.DataFrame:
-    out = df.copy()
-    for col, default in (
-        ("event_flag", False),
-        ("event_types", ""),
-        ("event_dates", ""),
-        ("event_source_status", ""),
-        ("event_source_error", ""),
-        ("reject_stage_candidate", ""),
-    ):
-        if col not in out.columns:
-            out[col] = default
-
     cfg = normalize_event_risk_cfg(event_risk_cfg)
-    if not cfg.get("enabled"):
-        return out
+    snapshot = cfg.get("snapshot") if isinstance(cfg.get("snapshot"), dict) else None
+    snapshot_path_raw = cfg.get("snapshot_path")
+    snapshot_path = Path(snapshot_path_raw).resolve() if snapshot_path_raw else None
+    if snapshot is not None or snapshot_path is not None or event_fetcher is None:
+        return annotate_candidates_with_event_snapshot(
+            df,
+            snapshot=snapshot,
+            snapshot_path=snapshot_path,
+            event_risk_cfg=cfg,
+        )
 
-    cache = EventCache((base_dir / "output_shared" / "state" / "event_cache.json").resolve(), ttl_seconds=86400)
-    fetcher = event_fetcher or fetch_symbol_events_yfinance
-    symbol_results: dict[str, EventFetchResult] = {}
-
-    symbols = sorted({str(s).upper() for s in out.get("symbol", pd.Series(dtype=str)).dropna().tolist() if str(s).strip()})
-    for sym in symbols:
-        symbol_results[sym] = cache.get_events_result(sym, fetcher=fetcher)
-
-    flagged = []
-    types_list = []
-    dates_list = []
-    source_status_list = []
-    source_error_list = []
-    reject_stage = []
-    for _, row in out.iterrows():
-        sym = str(row.get("symbol") or "").upper()
-        expiration = _to_date_str(row.get("expiration"))
-        result = symbol_results.get(sym) or EventFetchResult(events=[], source_status="", source_error="")
-        source_status = result.source_status
-        source_error = result.source_error
-        if not sym or not expiration:
-            flagged.append(False)
-            types_list.append("")
-            dates_list.append("")
-            source_status_list.append(source_status)
-            source_error_list.append(source_error)
-            reject_stage.append(str(row.get("reject_stage_candidate") or ""))
-            continue
-
-        exp_date = datetime.fromisoformat(expiration).date()
-        events = result.events
-        hits = []
-        for ev in events:
-            d = _to_date_str(ev.get("date"))
-            t = str(ev.get("type") or "").strip()
-            if not d or not t:
-                continue
-            if datetime.fromisoformat(d).date() <= exp_date:
-                hits.append((d, t))
-        hits = sorted(set(hits))
-
-        if hits:
-            flagged.append(True)
-            types_list.append(",".join(sorted({t for _, t in hits})))
-            dates_list.append(",".join([d for d, _ in hits]))
-            source_status_list.append(source_status)
-            source_error_list.append(source_error)
-            reject_stage.append("EVENT_WARN" if cfg.get("mode") == "warn" else str(row.get("reject_stage_candidate") or ""))
-        else:
-            flagged.append(False)
-            types_list.append("")
-            dates_list.append("")
-            source_status_list.append(source_status)
-            source_error_list.append(source_error)
-            reject_stage.append(str(row.get("reject_stage_candidate") or ""))
-
-    out["event_flag"] = flagged
-    out["event_types"] = types_list
-    out["event_dates"] = dates_list
-    out["event_source_status"] = source_status_list
-    out["event_source_error"] = source_error_list
-    out["reject_stage_candidate"] = reject_stage
-    return out
+    # Explicit fetcher mode is kept for focused unit tests and manual diagnostics.
+    # Production scan entry points should pass a run-level snapshot instead.
+    symbols = sorted({str(s).strip().upper() for s in df.get("symbol", pd.Series(dtype=str)).dropna().tolist() if str(s).strip()})
+    store = EventStore((Path(base_dir) / "output_shared" / "state" / "event_store.json").resolve())
+    snapshot_payload = {
+        "schema_version": 1,
+        "provider": "yfinance",
+        "symbols": {
+            symbol: store.resolve(symbol, fetcher=event_fetcher).to_snapshot_item()
+            for symbol in symbols
+        },
+    }
+    return annotate_candidates_with_event_snapshot(
+        df,
+        snapshot=snapshot_payload,
+        event_risk_cfg=cfg,
+    )

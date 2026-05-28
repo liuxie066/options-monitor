@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 from src.application.agent_tool_config import repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response, mask_path
-from src.application.assistant.contracts import AssistantIntent, AssistantRequest
+from src.application.assistant.contracts import AssistantRequest, SemanticFrame
 from src.application.assistant.operation_lifecycle import (
     build_cancelled_operation_response,
     build_previewed_operation_response,
@@ -37,7 +37,7 @@ _DEFAULT_RUNTIME_ROOT = Path("/var/lib/options-monitor")
 
 
 def handle_upgrade_operation(
-    intent: AssistantIntent,
+    intent: SemanticFrame,
     request: AssistantRequest,
     *,
     command_id: str,

@@ -271,6 +271,115 @@ def test_assistant_llm_check_command_forwards_diagnostic_args(monkeypatch, capsy
     }]
 
 
+def test_assistant_model_catalog_command_renders_provider_catalog(capsys) -> None:
+    import src.interfaces.cli.main as cli
+
+    rc = cli.main(["assistant", "model", "catalog"])
+    payload = _read_json_output(capsys)
+
+    assert rc == 0
+    assert payload["tool_name"] == "assistant.model.catalog"
+    providers = {item["provider"]: item for item in payload["data"]["providers"]}
+    assert providers["deepseek"]["api_kind"] == "chat_completions"
+    assert providers["deepseek"]["default_api_key_env"] == "DEEPSEEK_API_KEY"
+    assert providers["openai"]["api_kind"] == "responses"
+
+
+def test_assistant_model_add_dry_run_does_not_write_config(tmp_path: Path, capsys) -> None:
+    import src.interfaces.cli.main as cli
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """\
+accounts:
+  lx:
+    type: external_holdings
+markets:
+  us:
+    accounts: [lx]
+    symbols: [NVDA]
+assistant:
+  mode: deterministic
+""",
+        encoding="utf-8",
+    )
+    before = config_path.read_text(encoding="utf-8")
+
+    rc = cli.main([
+        "assistant",
+        "model",
+        "add",
+        "deepseek-default",
+        "--config-yaml",
+        str(config_path),
+        "--provider",
+        "deepseek",
+        "--model",
+        "deepseek-chat",
+    ])
+    payload = _read_json_output(capsys)
+
+    assert rc == 0
+    assert payload["tool_name"] == "assistant.model.add"
+    data = payload["data"]
+    assert data["dry_run"] is True
+    assert data["write_applied"] is False
+    assert data["profile"]["api_key_env"] == "DEEPSEEK_API_KEY"
+    assert config_path.read_text(encoding="utf-8") == before
+
+
+def test_assistant_model_use_apply_switches_active_model_and_writes_backup(tmp_path: Path, capsys) -> None:
+    import src.interfaces.cli.main as cli
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """\
+accounts:
+  lx:
+    type: external_holdings
+markets:
+  us:
+    accounts: [lx]
+    symbols: [NVDA]
+assistant:
+  mode: llm_router
+  active_model: openai-default
+  models:
+    openai-default:
+      provider: openai
+      model: gpt-5.2
+      api_key_env: OM_LLM_API_KEY
+    deepseek-default:
+      provider: deepseek
+      model: deepseek-chat
+      api_key_env: DEEPSEEK_API_KEY
+""",
+        encoding="utf-8",
+    )
+
+    rc = cli.main([
+        "assistant",
+        "model",
+        "use",
+        "deepseek-default",
+        "--config-yaml",
+        str(config_path),
+        "--apply",
+    ])
+    payload = _read_json_output(capsys)
+
+    assert rc == 0
+    assert payload["tool_name"] == "assistant.model.use"
+    data = payload["data"]
+    assert data["dry_run"] is False
+    assert data["write_applied"] is True
+    assert data["backup_path"]
+    assert Path(data["backup_path"]).exists()
+    updated = config_path.read_text(encoding="utf-8")
+    assert "active_model: deepseek-default" in updated
+    assert "rebuild_hint" in data
+
+
 def test_no_local_env_file_flag_prevents_process_env_bootstrap() -> None:
     import src.interfaces.cli.main as cli
 
@@ -301,7 +410,7 @@ def test_assistant_commands_command_renders_catalog(capsys) -> None:
     assert "/status" in text
     assert "/record-open" in text
     assert "/record-close" in text
-    assert "/confirm trade|symbol|upgrade" in text
+    assert "/confirm trade|symbol|upgrade|model" in text
 
 
 def test_assistant_capabilities_command_renders_capability_catalog(capsys) -> None:

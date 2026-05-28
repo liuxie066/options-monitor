@@ -9,7 +9,7 @@ from src.application.assistant.agent_loop import run_read_only_agent_loop
 from src.application.assistant.audit import InboundAuditStore
 from src.application.assistant.command_parser import parse_assistant_command
 from src.application.assistant.commands import spec_by_intent
-from src.application.assistant.contracts import AssistantIntent, AssistantRequest
+from src.application.assistant.contracts import AssistantRequest, SemanticFrame
 from src.application.assistant.conversation_context import build_conversation_context, context_trace
 from src.application.assistant.intent_arbitration import (
     IntentArbitration,
@@ -100,7 +100,7 @@ class IntentArbitrator:
         self.llm_trace = skipped_llm_trace(settings.llm, reason="command" if self.route == "command" else "not_needed")
         self.arbitration: IntentArbitration | None = None
 
-    def parse(self, text: str, parser_now_fn: Callable[[], date] | None) -> AssistantIntent:
+    def parse(self, text: str, parser_now_fn: Callable[[], date] | None) -> SemanticFrame:
         try:
             command_intent = parse_assistant_command(text, now_fn=parser_now_fn)
         except AgentToolError as err:
@@ -142,7 +142,7 @@ class IntentArbitrator:
         except AgentToolError as err:
             return self._handle_deterministic_error(text, err)
 
-    def _handle_deterministic_error(self, text: str, err: AgentToolError) -> AssistantIntent:
+    def _handle_deterministic_error(self, text: str, err: AgentToolError) -> SemanticFrame:
         deterministic_candidate = error_candidate("deterministic", err)
         if err.code != "NEEDS_CLARIFICATION":
             self.arbitration = build_intent_arbitration(
@@ -216,7 +216,7 @@ class IntentArbitrator:
         self.llm_trace = dict(llm_result.trace)
         return llm_result
 
-    def _handle_llm_intent(self, intent: AssistantIntent, deterministic_candidate: Any) -> AssistantIntent:
+    def _handle_llm_intent(self, intent: SemanticFrame, deterministic_candidate: Any) -> SemanticFrame:
         self.route = "agent_loop" if self._settings.mode == "agent_loop" else "llm"
         llm_candidate = accepted_candidate(self.route, intent)
         try:
@@ -247,7 +247,7 @@ class IntentArbitrator:
         llm_error: AgentToolError,
         deterministic_candidate: Any,
         conversation_context: dict[str, Any] | None,
-    ) -> AssistantIntent:
+    ) -> SemanticFrame:
         llm_source = "agent_loop" if self._settings.mode == "agent_loop" else "llm"
         llm_error_candidate = error_candidate(llm_source, llm_error, reason=str(self.llm_trace.get("reason") or ""))
         reply_result = self._maybe_generate_general_reply(
@@ -258,7 +258,7 @@ class IntentArbitrator:
         if reply_result.response_text:
             self.route = "llm_reply"
             self.llm_trace = dict(reply_result.trace)
-            reply_intent = AssistantIntent(
+            reply_intent = SemanticFrame(
                 name="small_talk",
                 arguments={
                     "kind": "llm_reply",
@@ -336,7 +336,7 @@ def general_reply_allowed(text: str, *, translate_error: AgentToolError) -> bool
     return True
 
 
-def ensure_llm_intent_allowed(intent: AssistantIntent) -> None:
+def ensure_llm_intent_allowed(intent: SemanticFrame) -> None:
     spec = _COMMAND_SPECS_BY_INTENT.get(intent.name)
     if spec is None or not spec.read_only or not spec.llm_allowed:
         raise AgentToolError(

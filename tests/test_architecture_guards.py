@@ -223,7 +223,8 @@ def test_assistant_router_delegates_tool_planning() -> None:
     assert "is_manual_trade_operation_intent" not in router_text
     assert "is_symbol_operation_intent" not in router_text
     assert "is_upgrade_operation_intent" not in router_text
-    assert "def frame_from_intent(" in planner_text
+    assert "def frame_from_semantic_frame(" in planner_text
+    assert "frame_from_intent = frame_from_semantic_frame" in planner_text
     assert "def tool_plan_from_frame(" in planner_text
     assert "PLANNED_TOOL_INTENTS" in planner_text
     assert "class AssistantFrame" in contracts_text
@@ -233,6 +234,98 @@ def test_assistant_router_delegates_tool_planning() -> None:
         assert "is_manual_trade_operation_intent" not in module_text
         assert "is_symbol_operation_intent" not in module_text
         assert "is_upgrade_operation_intent" not in module_text
+
+
+def test_assistant_semantic_frame_is_canonical_contract_name() -> None:
+    from src.application.assistant.contracts import AssistantIntent, SemanticFrame
+
+    assert AssistantIntent is SemanticFrame
+
+    offenders: list[str] = []
+    allowed = {"contracts.py", "__init__.py"}
+    for path in sorted((ROOT / "src" / "application" / "assistant").glob("*.py")):
+        if path.name in allowed:
+            continue
+        text = path.read_text(encoding="utf-8")
+        if "AssistantIntent" in text:
+            offenders.append(str(path.relative_to(ROOT)))
+
+    assert offenders == []
+
+
+def test_semantic_frame_producers_do_not_plan_or_execute_tools() -> None:
+    forbidden = (
+        "AssistantToolCall",
+        "ToolPlan",
+        "frame_from_intent",
+        "frame_from_semantic_frame",
+        "tool_plan_from_frame",
+        "execute_tool",
+        "enforce_tool_allowed",
+        "handle_manual_trade_operation",
+        "handle_symbol_operation",
+        "handle_upgrade_operation",
+        "tool_name=",
+    )
+    checked = [
+        ROOT / "src" / "application" / "assistant" / "command_parser.py",
+        ROOT / "src" / "application" / "assistant" / "parser.py",
+        ROOT / "src" / "application" / "assistant" / "llm_intent_schema.py",
+        ROOT / "src" / "application" / "assistant" / "llm_translator.py",
+    ]
+    offenders: dict[str, list[str]] = {}
+    for path in checked:
+        text = path.read_text(encoding="utf-8")
+        hits = [token for token in forbidden if token in text]
+        if hits:
+            offenders[str(path.relative_to(ROOT))] = hits
+
+    assert offenders == {}
+
+
+def test_tool_plan_construction_is_planner_owned() -> None:
+    tool_plan_offenders: list[str] = []
+    tool_call_offenders: list[str] = []
+    for path in sorted((ROOT / "src" / "application" / "assistant").glob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        if "ToolPlan(" in text and path.name != "frame_planner.py":
+            tool_plan_offenders.append(str(path.relative_to(ROOT)))
+        if "AssistantToolCall(" in text and path.name not in {"contracts.py", "runtime.py"}:
+            tool_call_offenders.append(str(path.relative_to(ROOT)))
+
+    assert tool_plan_offenders == []
+    assert tool_call_offenders == []
+
+
+def test_runtime_router_and_arbitrator_do_not_know_model_profiles() -> None:
+    forbidden = (
+        "active_model",
+        "models",
+        "LlmModelProfile",
+        "llm_model_profiles",
+    )
+    checked = [
+        ROOT / "src" / "application" / "assistant" / "runtime.py",
+        ROOT / "src" / "application" / "assistant" / "router.py",
+        ROOT / "src" / "application" / "assistant" / "intent_arbitrator.py",
+        ROOT / "src" / "application" / "assistant" / "frame_planner.py",
+    ]
+    offenders: dict[str, list[str]] = {}
+    for path in checked:
+        text = path.read_text(encoding="utf-8")
+        hits = [token for token in forbidden if token in text]
+        if hits:
+            offenders[str(path.relative_to(ROOT))] = hits
+
+    assert offenders == {}
+
+
+def test_assistant_model_cli_does_not_accept_secret_values() -> None:
+    text = (ROOT / "src" / "interfaces" / "cli" / "main.py").read_text(encoding="utf-8")
+
+    assert '"--api-key"' not in text
+    assert "'--api-key'" not in text
+    assert '"--api-key-env"' in text
 
 
 def test_assistant_package_does_not_import_inbound_package() -> None:

@@ -74,6 +74,15 @@ def test_assistant_command_parser_maps_read_commands() -> None:
     assert logs is not None
     assert logs.arguments == {"run_id": "20260515T182459Z-474761", "kind": "all", "lines": 50}
 
+    models = parse_assistant_command("/model")
+    assert models is not None
+    assert models.name == "model_list"
+
+    model_switch = parse_assistant_command("/model use deepseek-default")
+    assert model_switch is not None
+    assert model_switch.name == "model_use"
+    assert model_switch.arguments == {"model_profile": "deepseek-default"}
+
 
 def test_assistant_command_parser_maps_manual_trade_preview_commands() -> None:
     open_cmd = parse_assistant_command(
@@ -238,6 +247,10 @@ def test_assistant_command_parser_maps_typed_confirm_commands() -> None:
     cancel_upgrade = parse_assistant_command("/cancel upgrade in_abc123")
     assert cancel_upgrade is not None
     assert cancel_upgrade.name == "upgrade_cancel"
+
+    confirm_model = parse_assistant_command("/confirm model in_abc123")
+    assert confirm_model is not None
+    assert confirm_model.name == "model_confirm"
 
 
 def test_assistant_runtime_executes_slash_command_through_inbound_router(tmp_path: Path) -> None:

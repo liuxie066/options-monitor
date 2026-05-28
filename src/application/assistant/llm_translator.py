@@ -18,7 +18,7 @@ from src.application.assistant.llm_common import (
 )
 from src.application.assistant.settings import LlmTranslatorSettings
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.assistant.contracts import AssistantIntent
+from src.application.assistant.contracts import SemanticFrame
 from src.infrastructure.openai_chat_completions import (
     OpenAIChatCompletionsError,
     extract_chat_completion_text,
@@ -28,7 +28,7 @@ from src.infrastructure.openai_responses import OpenAIResponsesError, extract_re
 
 @dataclass(frozen=True)
 class LlmTranslationResult:
-    intent: AssistantIntent | None
+    intent: SemanticFrame | None
     trace: dict[str, Any]
     error: AgentToolError | None = None
 

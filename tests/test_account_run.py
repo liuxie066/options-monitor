@@ -68,6 +68,7 @@ def _install_common_patches(monkeypatch, request: Any) -> dict[str, Any]:
 
     audit_events: list[dict[str, Any]] = []
     state_writes: list[tuple[str, dict[str, Any]]] = []
+    event_prefetch_calls: list[dict[str, Any]] = []
 
     acct_report_dir = request.accounts_root / request.acct / "reports"
     acct_state_dir = request.accounts_root / request.acct / "state"
@@ -100,12 +101,27 @@ def _install_common_patches(monkeypatch, request: Any) -> dict[str, Any]:
 
     monkeypatch.setattr(mod.state_repo, "write_account_state_json_text", _write_account_state_json_text)
     monkeypatch.setattr(mod.state_repo, "write_account_run_state", lambda base, run_id, acct, name, payload: state_writes.append((name, dict(payload))))
+    monkeypatch.setattr(mod.state_repo, "write_shared_state", lambda base, name, payload: state_writes.append((name, dict(payload))))
     monkeypatch.setattr(mod.state_repo, "append_run_audit_jsonl", lambda *args, **kwargs: None)
+
+    def _prefetch_event_data(**kwargs):
+        event_prefetch_calls.append(dict(kwargs))
+        return {
+            "summary": {
+                "errors": 0,
+                "unique_symbols_total": 1,
+                "fetch_attempts": 0,
+            },
+            "symbols": {},
+        }
+
+    monkeypatch.setattr(mod, "prefetch_event_data", _prefetch_event_data)
 
     return {
         "mod": mod,
         "audit_fn": _audit,
         "audit_events": audit_events,
+        "event_prefetch_calls": event_prefetch_calls,
         "state_writes": state_writes,
         "acct_report_dir": acct_report_dir,
         "acct_state_dir": acct_state_dir,
