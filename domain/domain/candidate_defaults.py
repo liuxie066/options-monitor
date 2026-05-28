@@ -14,7 +14,7 @@ class CandidateWindowDefaults:
 class CandidateLiquidityDefaults:
     min_open_interest: float = 300.0
     min_volume: float = 10.0
-    max_spread_ratio: float = 0.30
+    max_spread_ratio: float = 0.40
 
 
 DEFAULT_EVENT_RISK_CONFIG = {
