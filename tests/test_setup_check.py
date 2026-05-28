@@ -42,6 +42,26 @@ def test_setup_check_warns_when_uv_forced_but_missing(monkeypatch, tmp_path: Pat
     assert "Install uv" in checks["upgrade.uv"]["hint"]
 
 
+def test_setup_check_reports_yfinance_as_runtime_dependency(monkeypatch, tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "om").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    (tmp_path / "VERSION").write_text("9.9.9\n", encoding="utf-8")
+
+    def _find_spec(name: str):
+        if name == "yfinance":
+            return None
+        return object()
+
+    monkeypatch.setattr("src.application.setup.check.importlib.util.find_spec", _find_spec)
+
+    out = run_setup_check(repo_root=tmp_path, markets=["us"], include_local_env_file=False)
+    checks = {item["name"]: item for item in out["checks"]}
+
+    assert checks["install.dependencies"]["status"] == "error"
+    assert checks["install.dependencies"]["value"]["missing"] == ["yfinance"]
+    assert checks["install.dependencies"]["value"]["checked"] == ["pandas", "futu", "yfinance"]
+
+
 def test_cli_setup_check_outputs_json(monkeypatch, capsys) -> None:
     import src.interfaces.cli.main as cli
 

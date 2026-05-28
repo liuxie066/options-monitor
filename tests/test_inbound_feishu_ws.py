@@ -79,6 +79,8 @@ def test_feishu_ws_delegates_to_inbound_and_replies(tmp_path: Path) -> None:
 
 def test_feishu_ws_can_route_through_assistant(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
+    assistant_config_path = tmp_path / "config.assistant.json"
+    assistant_config_path.write_text(json.dumps({"assistant": {"mode": "deterministic"}}), encoding="utf-8")
 
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         calls.append((tool_name, payload))
@@ -88,7 +90,7 @@ def test_feishu_ws_can_route_through_assistant(tmp_path: Path) -> None:
         _message_payload(text="/status"),
         settings=FeishuWsSettings(
             config_path=str(tmp_path / "config.us.json"),
-            assistant_config_path=str(tmp_path / "config.assistant.json"),
+            assistant_config_path=str(assistant_config_path),
             allowed_senders="feishu:ou_1",
             app_id="app_1",
             app_secret="secret_1",

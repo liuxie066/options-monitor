@@ -14,7 +14,7 @@ from src.application.assistant.settings import AssistantSettings
 from src.application.assistant.tool_policy import DEFAULT_TOOL_POLICY
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.assistant.commands import spec_by_intent
-from src.application.assistant.contracts import AssistantIntent, AssistantRequest, AssistantToolCall
+from src.application.assistant.contracts import AssistantRequest, AssistantToolCall, SemanticFrame
 from src.application.assistant.audit import InboundAuditStore
 from src.application.assistant.router import ExecuteToolFn, handle_assistant_request
 from src.application.tool_execution import execute_tool
@@ -109,6 +109,7 @@ def _request_with_default_market_scope(request: AssistantRequest, settings: Assi
         config_key=scope,
         config_path=request.config_path,
         audit_db=request.audit_db,
+        assistant_config_path=request.assistant_config_path,
     )
 
 
@@ -239,7 +240,7 @@ def _with_assistant_meta(
     return {**response, "meta": meta}
 
 
-def _intent_metadata(intent: AssistantIntent | None) -> dict[str, Any]:
+def _intent_metadata(intent: SemanticFrame | None) -> dict[str, Any]:
     if intent is None:
         return {}
     spec = _COMMAND_SPECS_BY_INTENT.get(intent.name)

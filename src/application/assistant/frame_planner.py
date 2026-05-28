@@ -6,9 +6,9 @@ from src.application.agent_tool_contracts import AgentToolError
 from src.application.assistant.commands import spec_by_intent
 from src.application.assistant.contracts import (
     AssistantFrame,
-    AssistantIntent,
     AssistantRequest,
     AssistantSafetyClass,
+    SemanticFrame,
     ToolPlan,
 )
 from src.application.assistant.semantic_frames import PositionQuery
@@ -37,14 +37,17 @@ READ_TOOL_INTENTS = frozenset(
 )
 
 
-def frame_from_intent(intent: AssistantIntent) -> AssistantFrame:
+def frame_from_semantic_frame(semantic_frame: SemanticFrame) -> AssistantFrame:
     return AssistantFrame(
-        intent=intent.name,
-        payload=_frame_payload(intent),
-        safety_class=_safety_class(intent.name),
-        parser=intent.parser,
-        confidence=float(intent.confidence),
+        intent=semantic_frame.name,
+        payload=_frame_payload(semantic_frame),
+        safety_class=_safety_class(semantic_frame.name),
+        parser=semantic_frame.parser,
+        confidence=float(semantic_frame.confidence),
     )
+
+
+frame_from_intent = frame_from_semantic_frame
 
 
 def tool_plan_from_frame(frame: AssistantFrame, *, request: AssistantRequest) -> ToolPlan:
@@ -74,10 +77,10 @@ def tool_plan_from_frame(frame: AssistantFrame, *, request: AssistantRequest) ->
     )
 
 
-def _frame_payload(intent: AssistantIntent) -> dict[str, Any]:
-    if intent.name == "position_query":
-        return {"query": PositionQuery.from_payload(intent.arguments).to_payload()}
-    return dict(intent.arguments)
+def _frame_payload(semantic_frame: SemanticFrame) -> dict[str, Any]:
+    if semantic_frame.name == "position_query":
+        return {"query": PositionQuery.from_payload(semantic_frame.arguments).to_payload()}
+    return dict(semantic_frame.arguments)
 
 
 def _safety_class(intent_name: str) -> AssistantSafetyClass:
@@ -136,7 +139,7 @@ def _tool_payload_from_frame(frame: AssistantFrame, *, request: AssistantRequest
             "sender_id": request.sender_id,
             "conversation_id": request.conversation_id,
         }
-    if tool_name in {"inbound.manual_trade", "inbound.symbols", "inbound.upgrade"}:
+    if tool_name in {"inbound.manual_trade", "inbound.symbols", "inbound.upgrade", "inbound.model"}:
         return dict(frame.payload)
     raise AgentToolError(
         code="INPUT_ERROR",
@@ -188,5 +191,6 @@ __all__ = [
     "PLANNED_TOOL_INTENTS",
     "READ_TOOL_INTENTS",
     "frame_from_intent",
+    "frame_from_semantic_frame",
     "tool_plan_from_frame",
 ]

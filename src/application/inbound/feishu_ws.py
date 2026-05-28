@@ -197,13 +197,6 @@ def handle_feishu_ws_event(
         config_key=settings.config_key,
         config_path=settings.config_path,
         audit_db=settings.audit_db,
-        assistant_settings=AssistantSettings(
-            mode=settings.assistant_mode,
-            enabled=settings.assistant_enabled,
-            context_window_messages=settings.assistant_context_window_messages,
-            default_market_scope=settings.assistant_default_market_scope,
-            llm=settings.assistant_llm,
-        ),
         assistant_config_path=settings.assistant_config_path,
         **inbound_kwargs,
     )

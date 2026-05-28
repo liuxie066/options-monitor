@@ -38,6 +38,7 @@ def handle_feishu_payload(
         config_key=config_key,
         config_path=config_path,
         audit_db=audit_db,
+        assistant_config_path=assistant_config_path,
     )
     kwargs: dict[str, Any] = {"allowed_senders": allowed_senders}
     if execute_tool_fn is not None:
@@ -100,6 +101,7 @@ def feishu_payload_to_inbound_request(
     config_key: str | None = None,
     config_path: str | None = None,
     audit_db: str | None = None,
+    assistant_config_path: str | None = None,
 ) -> AssistantRequest:
     event = _dict(payload.get("event"))
     message = _dict(event.get("message"))
@@ -143,6 +145,7 @@ def feishu_payload_to_inbound_request(
         config_key=config_key,
         config_path=config_path,
         audit_db=audit_db,
+        assistant_config_path=assistant_config_path,
     )
 
 

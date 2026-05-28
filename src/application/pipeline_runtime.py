@@ -148,6 +148,11 @@ def main(argv: list[str] | None = None) -> int:
         log=log,
         state_dir=state_dir,
     )
+    if shared_context_dir is not None:
+        runtime_cfg = cfg.get("runtime") if isinstance(cfg.get("runtime"), dict) else {}
+        runtime_cfg = dict(runtime_cfg)
+        runtime_cfg["event_snapshot_path"] = str((shared_context_dir / "event_snapshot.json").resolve())
+        cfg["runtime"] = runtime_cfg
 
     py = sys.executable
 

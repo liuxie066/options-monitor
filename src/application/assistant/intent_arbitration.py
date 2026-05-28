@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload
-from src.application.assistant.contracts import AssistantIntent
+from src.application.assistant.contracts import SemanticFrame
 
 
 INTENT_ARBITRATION_SCHEMA_VERSION = "om-intent-arbitration-v1"
@@ -15,7 +15,7 @@ ASSISTANT_DECISION_SCHEMA_VERSION = "om-assistant-decision-v1"
 class IntentCandidate:
     source: str
     status: str
-    intent: AssistantIntent | None = None
+    intent: SemanticFrame | None = None
     reason: str | None = None
     error: AgentToolError | None = None
 
@@ -41,7 +41,7 @@ class IntentCandidate:
 class IntentArbitration:
     decision: str
     selected_source: str | None
-    selected_intent: AssistantIntent | None
+    selected_intent: SemanticFrame | None
     candidates: tuple[IntentCandidate, ...]
 
     def public_payload(self) -> dict[str, Any]:
@@ -85,7 +85,7 @@ class AssistantDecision:
         }
 
 
-def accepted_candidate(source: str, intent: AssistantIntent) -> IntentCandidate:
+def accepted_candidate(source: str, intent: SemanticFrame) -> IntentCandidate:
     return IntentCandidate(source=source, status="accepted", intent=intent)
 
 
@@ -101,7 +101,7 @@ def build_intent_arbitration(
     *,
     decision: str,
     selected_source: str | None,
-    selected_intent: AssistantIntent | None,
+    selected_intent: SemanticFrame | None,
     candidates: list[IntentCandidate] | tuple[IntentCandidate, ...],
 ) -> IntentArbitration:
     return IntentArbitration(

@@ -66,6 +66,18 @@ def _extract_event_risk_cfg(side_cfg: dict) -> dict:
     return out
 
 
+def _apply_event_snapshot_path(item: dict, snapshot_path: str | None) -> dict:
+    if not snapshot_path:
+        return item
+    out = dict(item)
+    for key in ("_global_sell_put_event_risk", "_global_sell_call_event_risk"):
+        raw = out.get(key)
+        event_cfg = dict(raw) if isinstance(raw, dict) else {"enabled": True, "mode": "warn"}
+        event_cfg["snapshot_path"] = snapshot_path
+        out[key] = event_cfg
+    return out
+
+
 def _parse_symbols_whitelist(symbols_arg: str | None) -> set[str] | None:
     if not symbols_arg:
         return None
@@ -179,6 +191,7 @@ def run_watchlist_pipeline(
     sym_whitelist = _parse_symbols_whitelist(symbols_arg)
 
     runtime = cfg.get('runtime', {}) or {}
+    event_snapshot_path = str(runtime.get("event_snapshot_path") or "").strip()
     profiles = resolve_templates_config(cfg)
 
     portfolio_ctx, option_ctx, usd_per_cny_exchange_rate, cny_per_hkd_exchange_rate = build_pipeline_context_fn(
@@ -247,6 +260,7 @@ def run_watchlist_pipeline(
                 profiles=profiles,
                 apply_profiles_fn=apply_profiles_fn,
             )
+            item = _apply_event_snapshot_path(item, event_snapshot_path)
             item_portfolio_ctx = dict(portfolio_ctx) if isinstance(portfolio_ctx, dict) else None
 
             if not want_scan:

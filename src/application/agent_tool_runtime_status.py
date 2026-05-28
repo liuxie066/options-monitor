@@ -1027,6 +1027,24 @@ def _latest_run_prefetch_summary(latest_run_payload: dict[str, Any] | None) -> d
     return summary
 
 
+def _latest_run_event_prefetch_summary(latest_run_payload: dict[str, Any] | None) -> dict[str, Any]:
+    state = latest_run_payload.get("state") if isinstance(latest_run_payload, dict) else {}
+    state_payload: dict[str, Any] = state if isinstance(state, dict) else {}
+    info_raw = state_payload.get("event_snapshot")
+    info: dict[str, Any] = info_raw if isinstance(info_raw, dict) else {}
+    out: dict[str, Any] = {
+        "available": bool(info.get("exists")),
+        "exists": bool(info.get("exists")),
+        "path": info.get("path"),
+    }
+    payload_raw = info.get("json")
+    payload: dict[str, Any] = payload_raw if isinstance(payload_raw, dict) else {}
+    summary_raw = payload.get("summary")
+    summary: dict[str, Any] = summary_raw if isinstance(summary_raw, dict) else {}
+    out.update(summary)
+    return out
+
+
 def _json_payload(file_info: Any) -> dict[str, Any]:
     if not isinstance(file_info, dict):
         return {}
@@ -1182,6 +1200,11 @@ def _run_payload(
             ),
             "tick_metrics": _json_file_info(
                 run_dir / "state" / "tick_metrics.json",
+                base=base,
+                read_json_object_or_empty=read_json_object_or_empty,
+            ),
+            "event_snapshot": _json_file_info(
+                run_dir / "state" / "event_snapshot.json",
                 base=base,
                 read_json_object_or_empty=read_json_object_or_empty,
             ),
@@ -1721,6 +1744,7 @@ def runtime_status_tool(
         )
 
     prefetch_summary = _latest_run_prefetch_summary(latest_run_payload)
+    event_prefetch_summary = _latest_run_event_prefetch_summary(latest_run_payload)
     latest_scanned_run_payload, latest_scanned_run_selection = _latest_scanned_run_payload(
         runs_root=runs_root,
         accounts=accounts,
@@ -1730,6 +1754,7 @@ def runtime_status_tool(
         desired_market=desired_market,
     )
     latest_scanned_prefetch_summary = _latest_run_prefetch_summary(latest_scanned_run_payload)
+    latest_scanned_event_prefetch_summary = _latest_run_event_prefetch_summary(latest_scanned_run_payload)
 
     warnings: list[str] = []
     if latest_run_selection.get("requested") and not latest_run_selection.get("found"):
@@ -1852,6 +1877,8 @@ def runtime_status_tool(
         "latest_scanned_run": latest_scanned_run_payload,
         "required_data_prefetch": prefetch_summary,
         "latest_scanned_run_required_data_prefetch": latest_scanned_prefetch_summary,
+        "event_prefetch": event_prefetch_summary,
+        "latest_scanned_run_event_prefetch": latest_scanned_event_prefetch_summary,
         "trigger_context": trigger_context,
         "notification_diagnosis": notification_diagnosis,
         "environment": environment,
@@ -1877,6 +1904,10 @@ def runtime_status_tool(
     data["summary"]["prefetch_bottleneck"] = prefetch_summary.get("primary_bottleneck")
     data["summary"]["latest_scanned_run_prefetch_available"] = latest_scanned_prefetch_summary.get("available")
     data["summary"]["latest_scanned_run_prefetch_bottleneck"] = latest_scanned_prefetch_summary.get("primary_bottleneck")
+    data["summary"]["event_prefetch_available"] = event_prefetch_summary.get("available")
+    data["summary"]["event_prefetch_errors"] = event_prefetch_summary.get("errors")
+    data["summary"]["latest_scanned_run_event_prefetch_available"] = latest_scanned_event_prefetch_summary.get("available")
+    data["summary"]["latest_scanned_run_event_prefetch_errors"] = latest_scanned_event_prefetch_summary.get("errors")
     data["summary"]["ledger_status"] = ledger_context_summary.get("status")
     data["summary"]["ledger_fail_closed"] = bool(ledger_context_summary.get("fail_closed"))
     data["summary"]["ledger_sqlite_path"] = ledger_store.get("sqlite_path")

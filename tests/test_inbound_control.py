@@ -113,6 +113,58 @@ def _enable_inbound_upgrade_write(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OM_INBOUND_OPERATION_HMAC_KEY", "test-operation-hmac-key")
 
 
+def _enable_inbound_model_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OM_INBOUND_OPERATIONS_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_MODEL_WRITE_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_ADMIN_OPEN_IDS", "feishu:ou_1")
+    monkeypatch.setenv("OM_INBOUND_OPERATION_HMAC_KEY", "test-operation-hmac-key")
+
+
+def _write_assistant_model_config(tmp_path: Path) -> tuple[Path, Path]:
+    config_yaml = tmp_path / "config.yaml"
+    assistant_config = tmp_path / "config.assistant.json"
+    config_yaml.write_text(
+        """
+assistant:
+  mode: llm_router
+  active_model: openai-default
+  models:
+    openai-default:
+      provider: openai
+      model: gpt-5.2
+      api_key_env: OM_LLM_API_KEY
+    deepseek-default:
+      provider: deepseek
+      model: deepseek-chat
+      api_key_env: DEEPSEEK_API_KEY
+""".lstrip(),
+        encoding="utf-8",
+    )
+    assistant_config.write_text(
+        json.dumps(
+            {
+                "assistant": {
+                    "mode": "llm_router",
+                    "llm": {
+                        "provider": "openai",
+                        "base_url": "https://api.openai.com/v1",
+                        "model": "gpt-5.2",
+                        "api_key_env": "OM_LLM_API_KEY",
+                    },
+                },
+                "_resolved": {
+                    "source_format": "yaml",
+                    "config_yaml_path": str(config_yaml),
+                    "runtime_schema": "assistant-config-json-v1",
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    return config_yaml, assistant_config
+
+
 def test_inbound_parser_maps_core_read_only_commands() -> None:
     assert parse_inbound_text("状态").name == "runtime_status"
     assert parse_inbound_text("健康检查").name == "healthcheck"
@@ -167,6 +219,78 @@ def test_inbound_parser_requires_clarification_for_unknown_command() -> None:
     assert "没有识别" in exc.value.message
 
 
+def test_inbound_model_command_lists_configured_profiles(tmp_path: Path) -> None:
+    _config_yaml, assistant_config = _write_assistant_model_config(tmp_path)
+
+    out = handle_assistant_request(
+        AssistantRequest(
+            text="/model",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_model_list",
+            conversation_id="feishu:oc_1:ou_1",
+            audit_db=str(tmp_path / "audit.sqlite3"),
+            assistant_config_path=str(assistant_config),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert out["ok"] is True
+    assert out["data"]["intent"]["name"] == "model_list"
+    assert out["data"]["tool_call"]["tool_name"] == "inbound.model"
+    assert out["data"]["summary"]["active_model"] == "openai-default"
+    assert {item["name"] for item in out["data"]["models"]} == {"openai-default", "deepseek-default"}
+    assert "当前模型：openai-default" in out["data"]["response_text"]
+
+
+def test_inbound_model_use_requires_preview_and_confirm(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config_yaml, assistant_config = _write_assistant_model_config(tmp_path)
+    _enable_inbound_model_write(monkeypatch)
+
+    preview = handle_assistant_request(
+        AssistantRequest(
+            text="/model use deepseek-default",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_model_use",
+            conversation_id="feishu:oc_1:ou_1",
+            audit_db=str(tmp_path / "audit.sqlite3"),
+            assistant_config_path=str(assistant_config),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert preview["ok"] is True
+    assert preview["data"]["status"] == "previewed"
+    assert preview["data"]["operation_type"] == "model_use"
+    assert "active_model: openai-default" in config_yaml.read_text(encoding="utf-8")
+    assert "模型切换预览" in preview["data"]["response_text"]
+
+    confirm = handle_assistant_request(
+        AssistantRequest(
+            text="确认模型",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_model_confirm",
+            conversation_id="feishu:oc_1:ou_1",
+            audit_db=str(tmp_path / "audit.sqlite3"),
+            assistant_config_path=str(assistant_config),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert confirm["ok"] is True
+    assert confirm["data"]["status"] == "applied"
+    assert confirm["data"]["result"]["active_model"] == "deepseek-default"
+    assert "active_model: deepseek-default" in config_yaml.read_text(encoding="utf-8")
+    generated = json.loads(assistant_config.read_text(encoding="utf-8"))
+    assert generated["assistant"]["llm"]["provider"] == "deepseek"
+    assert generated["assistant"]["llm"]["model"] == "deepseek-chat"
+
+
 def test_inbound_policy_allows_sender_and_rejects_non_pure_read_tool() -> None:
     allowed = check_sender_allowed(channel="feishu", sender_id="ou_1", allowed_senders="feishu:ou_1")
     assert allowed.allowed is True
@@ -208,7 +332,7 @@ def test_inbound_read_tool_requires_config_scope(tmp_path: Path) -> None:
 
 
 def test_command_catalog_read_tool_names_match_inbound_policy() -> None:
-    special_inbound_tools = {"inbound.pending", "inbound.symbols"}
+    special_inbound_tools = {"inbound.pending", "inbound.symbols", "inbound.model"}
     for spec in command_specs():
         if not spec.read_only or not spec.tool_name:
             continue
