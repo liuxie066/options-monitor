@@ -8,10 +8,13 @@ from src.application.assistant.commands import llm_capability_prompt
 from src.application.assistant.llm_intent_schema import inbound_intent_from_llm_payload, llm_intent_json_schema, llm_intent_schema
 from src.application.assistant.llm_common import (
     CreateStructuredResponseFn,
+    is_supported_llm_provider,
     llm_api_key_value,
     missing_llm_config,
+    normalize_llm_provider,
     provider_create_response_fn,
     strip_json_code_fence,
+    unsupported_llm_provider_error,
 )
 from src.application.assistant.settings import LlmTranslatorSettings
 from src.application.agent_tool_contracts import AgentToolError
@@ -112,17 +115,12 @@ def translate_inbound_intent(
             ),
         )
 
-    provider = str(settings.provider or "").strip().lower()
-    if provider not in {"openai", "deepseek"}:
+    provider = normalize_llm_provider(settings.provider)
+    if not is_supported_llm_provider(provider):
         return LlmTranslationResult(
             intent=None,
             trace=_trace(settings, attempted=False, reason="unsupported_provider"),
-            error=AgentToolError(
-                code="LLM_UNAVAILABLE",
-                message=f"unsupported LLM translator provider: {settings.provider}",
-                hint="Set assistant.llm.provider to openai or deepseek, or use assistant.mode=deterministic.",
-                details={"provider": settings.provider},
-            ),
+            error=unsupported_llm_provider_error(settings, component="translator"),
         )
 
     api_key = llm_api_key_value(settings, environ=environ)

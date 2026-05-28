@@ -2,19 +2,57 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from src.application.agent_tool_contracts import AgentToolError
 from src.application.assistant.settings import LlmTranslatorSettings
 from src.application.settings import build_effective_env
 from src.infrastructure.openai_chat_completions import create_json_chat_completion
+from src.infrastructure.openai_chat_completions import resolve_chat_completions_url
 from src.infrastructure.openai_responses import create_structured_response
+from src.infrastructure.openai_responses import resolve_responses_url
 
 
 CreateStructuredResponseFn = Callable[..., dict[str, Any]]
+SUPPORTED_LLM_PROVIDERS = ("openai", "deepseek")
+
+
+def normalize_llm_provider(provider: str) -> str:
+    return str(provider or "").strip().lower()
+
+
+def supported_llm_providers() -> tuple[str, ...]:
+    return SUPPORTED_LLM_PROVIDERS
+
+
+def is_supported_llm_provider(provider: str) -> bool:
+    return normalize_llm_provider(provider) in SUPPORTED_LLM_PROVIDERS
+
+
+def unsupported_llm_provider_error(settings: LlmTranslatorSettings, *, component: str) -> AgentToolError:
+    providers = ", ".join(SUPPORTED_LLM_PROVIDERS)
+    return AgentToolError(
+        code="LLM_UNAVAILABLE",
+        message=f"unsupported LLM {component} provider: {settings.provider}",
+        hint=f"Set assistant.llm.provider to one of: {providers}, or use assistant.mode=deterministic.",
+        details={"provider": settings.provider, "supported_providers": list(SUPPORTED_LLM_PROVIDERS)},
+    )
 
 
 def provider_create_response_fn(provider: str) -> CreateStructuredResponseFn:
-    if str(provider or "").strip().lower() == "deepseek":
+    if normalize_llm_provider(provider) == "deepseek":
         return create_json_chat_completion
     return create_structured_response
+
+
+def provider_api_kind(provider: str) -> str:
+    return "chat_completions" if normalize_llm_provider(provider) == "deepseek" else "responses"
+
+
+def provider_endpoint_url(settings: LlmTranslatorSettings) -> str:
+    return (
+        resolve_chat_completions_url(settings.base_url)
+        if provider_api_kind(settings.provider) == "chat_completions"
+        else resolve_responses_url(settings.base_url)
+    )
 
 
 def strip_json_code_fence(text: str) -> str:
