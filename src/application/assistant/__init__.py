@@ -11,7 +11,7 @@ from src.application.assistant.commands import (
     operation_specs,
     operation_target_intents,
 )
-from src.application.assistant.contracts import AssistantIntent, AssistantRequest, AssistantToolCall
+from src.application.assistant.contracts import AssistantIntent, AssistantRequest, AssistantToolCall, SemanticFrame
 from src.application.assistant.intent_arbitration import AssistantDecision, IntentArbitration, IntentCandidate
 from src.application.assistant.intent_arbitrator import IntentArbitrator
 from src.application.assistant.settings import AssistantSettings, LlmTranslatorSettings
@@ -27,6 +27,7 @@ __all__ = [
     "AssistantRequest",
     "AssistantSettings",
     "AssistantToolCall",
+    "SemanticFrame",
     "LlmTranslatorSettings",
     "capability_catalog_text",
     "capability_catalog_payload",

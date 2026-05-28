@@ -26,6 +26,7 @@ from src.application.multi_tick.misc import (
     ensure_account_output_dir,
 )
 from src.application.multi_tick.required_data_prefetch import prefetch_required_data
+from src.application.events.prefetch import prefetch_event_data
 
 from domain.storage.repositories import run_repo, state_repo
 
@@ -308,6 +309,21 @@ def run_one_account(
             if bool(request.force_mode):
                 state["force_done"] = True
 
+    def _shared_event_prefetch_done() -> bool:
+        state = request.prefetch_state
+        if not isinstance(state, dict):
+            return False
+        if bool(request.force_mode):
+            return bool(state.get("event_force_done"))
+        return bool(state.get("event_done"))
+
+    def _mark_shared_event_prefetch_done(done: bool) -> None:
+        state = request.prefetch_state
+        if done and isinstance(state, dict):
+            state["event_done"] = True
+            if bool(request.force_mode):
+                state["event_force_done"] = True
+
     def _run_required_data_prefetch() -> bool:
         runlog.safe_event(
             "fetch_chain_cache",
@@ -370,16 +386,82 @@ def run_one_account(
         _mark_shared_prefetch_done(done)
         return done
 
+    def _run_event_prefetch() -> bool:
+        run_state_dir = run_repo.get_run_state_dir(request.base, request.run_id)
+        runlog.safe_event(
+            "event_prefetch",
+            "start",
+            data=_safe_runlog_data({"account": acct, "symbols_count": len(resolve_watchlist_config(cfg))}),
+        )
+        try:
+            event_stats = prefetch_event_data(
+                base=request.base,
+                cfg=cfg,
+                snapshot_path=(run_state_dir / "event_snapshot.json").resolve(),
+                force_refresh=bool(request.force_mode),
+            )
+            summary = event_stats.get("summary") if isinstance(event_stats.get("summary"), dict) else {}
+            audit_fn(
+                "tool_call",
+                "event_prefetch",
+                run_id=request.run_id,
+                account=acct,
+                status=("ok" if int(summary.get("errors") or 0) == 0 else "error"),
+                tool_name="event_prefetch",
+                extra={"summary": summary},
+            )
+            try:
+                state_repo.write_shared_state(request.base, "event_prefetch_summary.json", event_stats)
+                state_repo.append_run_audit_jsonl(
+                    request.base,
+                    request.run_id,
+                    "tool_execution_audit.jsonl",
+                    {
+                        "tool_name": "event_prefetch",
+                        "ok": int(summary.get("errors") or 0) == 0,
+                        "summary": summary,
+                    },
+                )
+            except Exception as exc:
+                _record_account_run_degraded(
+                    runlog=runlog,
+                    audit_fn=audit_fn,
+                    run_id=request.run_id,
+                    account=acct,
+                    action="write_event_prefetch_summary",
+                    exc=exc,
+                )
+            runlog.safe_event("event_prefetch", "ok", data=_safe_runlog_data(summary))
+            _mark_shared_event_prefetch_done(True)
+            return True
+        except Exception as exc:
+            _record_account_run_degraded(
+                runlog=runlog,
+                audit_fn=audit_fn,
+                run_id=request.run_id,
+                account=acct,
+                action="event_prefetch",
+                exc=exc,
+            )
+            return False
+
     prefetch_done = bool(request.prefetch_done or _shared_prefetch_done())
-    should_prefetch = not prefetch_done
+    event_prefetch_done = bool(_shared_event_prefetch_done())
+    should_prefetch = (not prefetch_done) or (not event_prefetch_done)
     if should_prefetch:
         if request.prefetch_lock is None:
-            prefetch_done = _run_required_data_prefetch()
+            if not prefetch_done:
+                prefetch_done = _run_required_data_prefetch()
+            if not event_prefetch_done:
+                event_prefetch_done = _run_event_prefetch()
         else:
             with request.prefetch_lock:
                 prefetch_done = bool(request.prefetch_done or _shared_prefetch_done())
+                event_prefetch_done = bool(_shared_event_prefetch_done())
                 if not prefetch_done:
                     prefetch_done = _run_required_data_prefetch()
+                if not event_prefetch_done:
+                    event_prefetch_done = _run_event_prefetch()
 
     acct_report_dir.mkdir(parents=True, exist_ok=True)
 

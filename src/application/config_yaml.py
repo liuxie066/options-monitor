@@ -10,6 +10,7 @@ import yaml
 
 from domain.domain.strategy_vocab import STRATEGY_COVERED_CALL
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.assistant.llm_model_profiles import resolve_authoring_assistant_config
 from src.application.config_primitives import (
     config_key_parts as _key_parts,
     config_path_get as _path_get,
@@ -697,6 +698,7 @@ def resolve_yaml_assistant_config(
         if not isinstance(raw_assistant, dict):
             raise AgentToolError(code="CONFIG_ERROR", message="assistant must be an object")
         assistant_cfg = _deep_merge(assistant_cfg, raw_assistant)
+    assistant_cfg, assistant_model_meta = resolve_authoring_assistant_config(assistant_cfg)
 
     inbound_cfg = deepcopy(system_cfg.get("inbound") if isinstance(system_cfg.get("inbound"), dict) else {})
     raw_inbound = raw_cfg.get("inbound")
@@ -740,6 +742,7 @@ def resolve_yaml_assistant_config(
             "default_source": _path_for_metadata(system_path, repo_root=repo_root) if system_path is not None else system_ref,
             "default_sha256": system_sha256,
             "runtime_schema": "assistant-config-json-v1",
+            "assistant_models": assistant_model_meta,
         },
     }
     meta = {

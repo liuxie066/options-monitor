@@ -321,6 +321,102 @@ markets:
     assert f"--system-config {system_path}" in generated[GENERATED_KEY]["rebuild_command"]
 
 
+def test_yaml_assistant_config_resolves_active_model_profile(tmp_path: Path) -> None:
+    config_path = _write_yaml(
+        tmp_path / "config.yaml",
+        """\
+accounts:
+  lx:
+    type: external_holdings
+    holdings_account: lx
+markets:
+  us:
+    accounts: [lx]
+    symbols: [FUTU]
+assistant:
+  mode: llm_router
+  active_model: deepseek-default
+  models:
+    deepseek-default:
+      provider: deepseek
+      model: deepseek-chat
+      api_key_env: DEEPSEEK_API_KEY
+    openai-default:
+      provider: openai
+      model: gpt-5.2
+      api_key_env: OM_LLM_API_KEY
+""",
+    )
+
+    cfg, _meta = resolve_yaml_assistant_config(repo_root=REPO_ROOT, config_path=config_path)
+
+    assistant = cfg["assistant"]
+    assert "models" not in assistant
+    assert "active_model" not in assistant
+    assert assistant["llm"]["provider"] == "deepseek"
+    assert assistant["llm"]["base_url"] == "https://api.deepseek.com"
+    assert assistant["llm"]["model"] == "deepseek-chat"
+    assert assistant["llm"]["api_key_env"] == "DEEPSEEK_API_KEY"
+    resolved = cfg[RESOLVED_KEY]["assistant_models"]
+    assert resolved["active_model"] == "deepseek-default"
+    assert resolved["profile_count"] == 2
+    assert resolved["resolved_profile"]["provider"] == "deepseek"
+
+
+def test_yaml_assistant_config_rejects_unknown_active_model_profile(tmp_path: Path) -> None:
+    config_path = _write_yaml(
+        tmp_path / "config.yaml",
+        """\
+accounts:
+  lx:
+    type: external_holdings
+    holdings_account: lx
+markets:
+  us:
+    accounts: [lx]
+    symbols: [FUTU]
+assistant:
+  mode: llm_router
+  active_model: missing
+  models:
+    deepseek-default:
+      provider: deepseek
+      model: deepseek-chat
+      api_key_env: DEEPSEEK_API_KEY
+""",
+    )
+
+    with pytest.raises(AgentToolError, match="unknown model profile"):
+        resolve_yaml_assistant_config(repo_root=REPO_ROOT, config_path=config_path)
+
+
+def test_yaml_assistant_model_profiles_reject_inline_api_key(tmp_path: Path) -> None:
+    config_path = _write_yaml(
+        tmp_path / "config.yaml",
+        """\
+accounts:
+  lx:
+    type: external_holdings
+    holdings_account: lx
+markets:
+  us:
+    accounts: [lx]
+    symbols: [FUTU]
+assistant:
+  mode: llm_router
+  active_model: unsafe
+  models:
+    unsafe:
+      provider: deepseek
+      model: deepseek-chat
+      api_key: sk-secret
+""",
+    )
+
+    with pytest.raises(AgentToolError, match="must not store secret values"):
+        resolve_yaml_assistant_config(repo_root=REPO_ROOT, config_path=config_path)
+
+
 def test_default_config_matches_legacy_system_json() -> None:
     system_json = json.loads((REPO_ROOT / "configs" / "system.json").read_text(encoding="utf-8"))
 
@@ -349,10 +445,10 @@ def test_config_init_writes_starter_yaml_and_runtime_configs(tmp_path: Path) -> 
     assert payload["assistant"]["mode"] == "deterministic"
     assert payload["assistant"]["context_window_messages"] == 8
     assert "default_market_scope" not in payload["assistant"]
-    assert payload["assistant"]["llm"]["base_url"] == ""
-    assert payload["assistant"]["llm"]["api_key_env"] == "OM_LLM_API_KEY"
-    assert payload["assistant"]["llm"]["timeout_seconds"] == 20
-    assert payload["assistant"]["llm"]["max_output_tokens"] == 512
+    assert payload["assistant"]["active_model"] == "deepseek-default"
+    assert payload["assistant"]["models"]["deepseek-default"]["model"] == "deepseek-chat"
+    assert payload["assistant"]["models"]["deepseek-default"]["api_key_env"] == "DEEPSEEK_API_KEY"
+    assert payload["assistant"]["models"]["openai-default"]["api_key_env"] == "OM_LLM_API_KEY"
     assert payload["markets"]["us"]["accounts"] == ["lx", "sy"]
     assert payload["markets"]["hk"]["symbols"] == ["0700.HK", "9992.HK"]
     us_cfg = json.loads((runtime_dir / "config.us.json").read_text(encoding="utf-8"))
@@ -365,8 +461,10 @@ def test_config_init_writes_starter_yaml_and_runtime_configs(tmp_path: Path) -> 
     assert assistant_cfg["assistant"]["mode"] == "deterministic"
     assert assistant_cfg["assistant"]["context_window_messages"] == 8
     assert "default_market_scope" not in assistant_cfg["assistant"]
-    assert assistant_cfg["assistant"]["llm"]["base_url"] == ""
-    assert assistant_cfg["assistant"]["llm"]["api_key_env"] == "OM_LLM_API_KEY"
+    assert "active_model" not in assistant_cfg["assistant"]
+    assert "models" not in assistant_cfg["assistant"]
+    assert assistant_cfg["assistant"]["llm"]["base_url"] == "https://api.deepseek.com"
+    assert assistant_cfg["assistant"]["llm"]["api_key_env"] == "DEEPSEEK_API_KEY"
     assert assistant_cfg["assistant"]["llm"]["timeout_seconds"] == 20
     assert assistant_cfg["assistant"]["llm"]["max_output_tokens"] == 512
     assert assistant_cfg["inbound"]["feishu_ws"]["ack_reaction"] == "THUMBSUP"

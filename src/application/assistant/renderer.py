@@ -3,14 +3,14 @@ from __future__ import annotations
 from typing import Any, cast
 
 from src.application.assistant.commands import command_help_text
-from src.application.assistant.contracts import AssistantIntent
+from src.application.assistant.contracts import SemanticFrame
 
 
 HELP_TEXT = command_help_text()
 SMALL_TALK_TEXT = "你好。我可以处理 /help 中列出的 OM 能力。发送“你能做什么”或 /help 查看完整菜单。"
 
 
-def render_inbound_text(*, intent: AssistantIntent | None, tool_result: dict[str, Any] | None, error: dict[str, Any] | None = None) -> str:
+def render_inbound_text(*, intent: SemanticFrame | None, tool_result: dict[str, Any] | None, error: dict[str, Any] | None = None) -> str:
     if error:
         message = str(error.get("message") or "").strip()
         hint = str(error.get("hint") or "").strip()
@@ -80,6 +80,8 @@ def _pending_operation_commands(operation_type: str) -> tuple[str, str]:
         return "确认监控", "取消监控"
     if operation_type.startswith("upgrade_"):
         return "确认升级", "取消升级"
+    if operation_type.startswith("model_"):
+        return "确认模型", "取消模型"
     return "确认记录", "取消记录"
 
 
@@ -91,6 +93,7 @@ def _pending_operation_label(operation_type: str) -> str:
         "symbol_edit": "监控修改",
         "symbol_remove": "监控删除",
         "upgrade_now": "立即升级",
+        "model_use": "模型切换",
     }.get(operation_type, operation_type or "待确认操作")
 
 

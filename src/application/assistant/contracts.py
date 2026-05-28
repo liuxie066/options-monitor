@@ -20,6 +20,7 @@ class AssistantRequest:
     config_key: str | None = None
     config_path: str | None = None
     audit_db: str | None = None
+    assistant_config_path: str | None = None
 
     def public_payload(self) -> dict[str, Any]:
         return {
@@ -33,7 +34,14 @@ class AssistantRequest:
 
 
 @dataclass(frozen=True)
-class AssistantIntent:
+class SemanticFrame:
+    """Canonical semantic output from command, deterministic parser, or LLM.
+
+    A semantic frame describes what the user wants in assistant vocabulary. It
+    intentionally carries no tool name and no executable payload. Tool planning
+    belongs to src.application.assistant.frame_planner.
+    """
+
     name: str
     arguments: dict[str, Any]
     parser: str = "deterministic"
@@ -47,6 +55,9 @@ class AssistantIntent:
             "parser": self.parser,
             "confidence": self.confidence,
         }
+
+
+AssistantIntent = SemanticFrame
 
 
 @dataclass(frozen=True)
@@ -115,5 +126,6 @@ __all__ = [
     "AssistantRequest",
     "AssistantSafetyClass",
     "AssistantToolCall",
+    "SemanticFrame",
     "ToolPlan",
 ]

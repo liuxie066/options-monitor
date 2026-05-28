@@ -63,7 +63,7 @@
 - `src/application/scan_sell_call.py`
 - `src/application/sell_put_steps.py`
 - `src/application/sell_call_steps.py`
-- `src/application/event_risk_filter.py`
+- `src/application/events/`
 
 ---
 
@@ -174,13 +174,20 @@
 
 更准确地说：
 
-- 候选先扫描出来
-- 再由 `src/application/event_risk_filter.py` 做标注 / 风险附加信息处理
+- tick run 先由 `src/application/events/prefetch.py` 按 symbol 去重准备事件数据
+- 事件成功、失败、限流冷却和 stale fallback 由 `src/application/events/store.py` 管理
+- candidate scan 只读本轮 `event_snapshot.json`，再由 `src/application/events/annotator.py` 做标注
 - 最后由 `domain/domain/short_vol_assessment.py` 按 `reject_event_risk` 和 `event_source_fail_closed` 决定是否通过
 
 也就是说：
 
-> 事件数据的获取仍在 application 层；事件风险是否允许进入推荐结果，则由 short-vol 评估契约统一判断。
+> 事件数据的获取是 run 级 source-data 准备，不是 candidate scan 的副作用；事件风险是否允许进入推荐结果，则由 short-vol 评估契约统一判断。
+
+验收边界：
+- 同一 tick 内同一 symbol 跨账户、Sell Put、Covered Call、Yield Enhancement 只能有一次事件源获取
+- `ok + events=[]` 表示可信无事件；`error` / `stale` 不能伪装成无事件
+- `event_source_fail_closed=true` 时，`error` / `stale` 默认不能进入 short-vol 推荐
+- `runtime_status` 暴露最近一轮 `event_prefetch` 摘要，包括 fetch、cache、stale、rate limit 和 error 计数
 
 ---
 
@@ -300,7 +307,7 @@ Covered Call 仍会先结合持仓 context 计算覆盖能力：
 - `domain/domain/sell_call_config.py`
 
 ### 风险 / 报表 / 汇总
-- `src/application/event_risk_filter.py`
+- `src/application/events/`
 - `src/application/report_summaries.py`
 - `src/application/alert_engine.py`
 

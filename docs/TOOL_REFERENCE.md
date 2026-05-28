@@ -110,9 +110,13 @@ om inbound feishu --input-file feishu_event.json --format text
 om inbound feishu-ws --check
 om assistant capabilities
 om assistant llm-check
+om assistant model catalog
+om assistant model list
+om assistant model current
+om assistant model check --active
 ```
 
-它不是 `om-agent` manifest 里的工具，也不是 shell bridge。`inbound feishu` 只解析 Feishu 事件 payload，然后进入同一条 sender allowlist、message_id 幂等、SQLite audit 和工具白名单路径。Assistant command facade 默认开启；assistant config 可选择启用 LLM intent translation，但 LLM 只能从 `assistant capabilities` 暴露的只读可执行 capability 中产出结构化 intent，不能执行工具或改写事实输出。`inbound feishu-ws` 是长驻 Feishu App long-connection client：通过飞书 SDK 长连接接收消息、进入 assistant control，并使用同一个 Bot 自动回复；Assistant 由 `assistant.mode` 控制，reaction、reply、queue 行为配置在 assistant config 的 `inbound.feishu_ws` 下。完整边界见 [INBOUND_CONTROL.md](INBOUND_CONTROL.md)。
+它不是 `om-agent` manifest 里的工具，也不是 shell bridge。`inbound feishu` 只解析 Feishu 事件 payload，然后进入同一条 sender allowlist、message_id 幂等、SQLite audit 和工具白名单路径。Assistant command facade 默认开启；assistant config 可选择启用 LLM intent translation，但 LLM 只能从 `assistant capabilities` 暴露的只读可执行 capability 中产出结构化 intent，不能执行工具或改写事实输出。`assistant model` 只管理 `config.yaml` 里的 LLM model profile；聊天里对应 `/model`、`/model list`、`/model use <name>`，其中切换模型必须先 preview，再 `确认模型` 或 `/confirm model <operation_id>`。生成后的运行时 assistant config 仍然只包含一个 resolved `assistant.llm`。`inbound feishu-ws` 是长驻 Feishu App long-connection client：通过飞书 SDK 长连接接收消息、进入 assistant control，并使用同一个 Bot 自动回复；Assistant 由 `assistant.mode` 控制，reaction、reply、queue 行为配置在 assistant config 的 `inbound.feishu_ws` 下。完整边界见 [INBOUND_CONTROL.md](INBOUND_CONTROL.md)。
 
 ### Tick 入口关系
 

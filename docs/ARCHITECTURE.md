@@ -62,6 +62,30 @@ LLM providers are optional. They may translate a message into a structured
 read-only Assistant intent, but deterministic OM tools own facts and write
 actions remain behind preview/confirm gates.
 
+Model selection is a control-plane concern. `config.yaml` may define multiple
+`assistant.models` profiles and an `assistant.active_model`, but
+`config build-assistant` resolves that into one flat `assistant.llm` in
+`config.assistant.json`. Runtime, router, arbitrator, planner, and tool
+execution must not depend on model profiles or choose models per message.
+
+Assistant uses one internal contract ladder:
+
+```text
+command / deterministic parser / LLM translator
+-> SemanticFrame (om-semantic-frame-v1; no tool name, no executable payload)
+-> frame_planner.frame_from_semantic_frame
+-> AssistantFrame
+-> frame_planner.tool_plan_from_frame
+-> ToolPlan
+-> AssistantToolCall
+```
+
+`AssistantIntent` remains a compatibility alias for `SemanticFrame`; new
+Assistant code should use `SemanticFrame`. The command parser, deterministic
+parser, and LLM translator must only emit semantic frames. Tool-name selection,
+config-scoped payload construction, safety class validation, and conversion to
+`ToolPlan` are owned by `src.application.assistant.frame_planner`.
+
 ## Runtime Tick Flow
 
 The live scan/notification flow has one public chain:
@@ -109,6 +133,7 @@ Account execution is per account:
 account_run.run_one_account
 -> expired position maintenance
 -> required_data prefetch
+-> event prefetch / event_snapshot.json
 -> pipeline_runtime / pipeline_watchlist / pipeline_symbol
 -> optional close advice
 -> account metrics and account notification text
@@ -137,6 +162,20 @@ The canonical candidate decisions live in `domain.domain.engine.candidate_engine
 
 Application scanners adapt files, pandas rows, context, and report output around
 that domain engine. Avoid adding parallel ranking implementations in adapters.
+
+Event-risk data is prepared at run scope, not inside candidate scanning:
+
+```text
+src.application.events.prefetch
+-> src.application.events.store
+-> output_runs/<run_id>/state/event_snapshot.json
+-> src.application.events.annotator
+-> domain.domain.short_vol_assessment
+```
+
+The candidate scan path must only read the run snapshot. It must not call the
+external event source directly; source failures remain explicit as `error` or
+`stale`, and short-vol fail-closed policy is enforced in the domain assessment.
 
 Strategy terminology is centralized in `domain.domain.strategy_vocab`.
 Application and interface code should use it to translate between stable

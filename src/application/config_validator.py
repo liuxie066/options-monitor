@@ -15,6 +15,7 @@ from domain.domain import (
 from domain.domain.fetch_source import normalize_fetch_source
 from src.application.account_config import ACCOUNT_TYPES, account_settings_from_config, accounts_from_config
 from src.application.config_sections import resolve_templates_config, resolve_watchlist_config, set_watchlist_config
+from src.application.assistant.llm_provider_registry import supported_llm_providers
 from src.application.trades.account_mapping import resolve_trade_intake_config
 from src.application.positions.maintenance_receipt import resolve_auto_close_receipt_config
 from src.application.opend_fetch_config import OPEND_RATE_LIMIT_ENDPOINT_KEYS
@@ -206,8 +207,9 @@ def _validate_llm_config(llm_cfg: dict, *, path: str, enabled: bool, required_re
         if int(llm_cfg.get('max_output_tokens')) > 4096:
             die(f'{path}.max_output_tokens must be <= 4096')
     llm_provider = str(llm_cfg.get('provider') or '').strip()
-    if llm_provider and llm_provider not in {'openai', 'deepseek'}:
-        die(f'{path}.provider must be one of: openai, deepseek')
+    supported_providers = supported_llm_providers()
+    if llm_provider and llm_provider not in supported_providers:
+        die(f"{path}.provider must be one of: {', '.join(supported_providers)}")
     if enabled:
         if not llm_provider:
             die(f'{path}.provider is required when {required_reason}')
@@ -252,6 +254,8 @@ def _validate_assistant_config(cfg: dict) -> None:
     if 'default_market_scope' in assistant and assistant.get('default_market_scope') is not None:
         if str(assistant.get('default_market_scope') or '').strip().lower() not in {'us', 'hk', 'all'}:
             die('assistant.default_market_scope must be one of: us, hk, all')
+    if 'models' in assistant or 'active_model' in assistant:
+        die('assistant.models and assistant.active_model belong in config.yaml; build config.assistant.json first')
     llm = assistant.get('llm') or {}
     if not isinstance(llm, dict):
         die('assistant.llm must be an object')

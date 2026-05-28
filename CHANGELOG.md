@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 1.2.159 - 2026-05-28
+
+### Added
+- Added assistant model profiles with OpenAI and DeepSeek provider catalog support.
+- Added `om assistant model` commands to catalog, list, inspect, add, switch, and check assistant model profiles.
+- Added `/model` chat commands for listing models and previewing model switches through the existing confirm/apply operation flow.
+- Added event prefetch snapshots backed by the runtime event source path so scanner runs can reuse event-risk evidence.
+
+### Changed
+- Changed Feishu inbound processing to reload assistant configuration per message so model switches take effect without restarting the long-lived gateway.
+- Changed runtime status to report event prefetch state alongside the existing run, ledger, and service summaries.
+- Changed assistant routing contracts to use the semantic-frame naming consistently across command, deterministic, and LLM paths.
+
 ## 1.2.158 - 2026-05-28
 
 ### Added
