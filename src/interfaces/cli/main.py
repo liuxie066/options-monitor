@@ -739,8 +739,8 @@ def _assistant_model_text(data: dict[str, Any], *, command: str) -> str:
             return "No assistant model profiles configured."
         return "\n".join(
             f"{'*' if item.get('active') else ' '} {item.get('name')} "
-            f"{item.get('provider')}/{item.get('model')} key={item.get('api_key_env')} "
-            f"configured={item.get('api_key_configured')}"
+            f"{item.get('provider')}/{item.get('model')} "
+            f"credential_configured={bool(item.get('api_key_configured'))}"
             for item in rows
         )
     if command == "current":
