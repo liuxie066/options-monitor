@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 from src.application.agent_tool_config import repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response, mask_path
-from src.application.assistant.contracts import AssistantRequest, SemanticFrame
+from src.application.assistant.contracts import AssistantRequest, PerceptionResult
 from src.application.assistant.operation_lifecycle import (
     build_cancelled_operation_response,
     build_previewed_operation_response,
@@ -37,21 +37,21 @@ _DEFAULT_RUNTIME_ROOT = Path("/var/lib/options-monitor")
 
 
 def handle_upgrade_operation(
-    intent: SemanticFrame,
+    intent: PerceptionResult,
     request: AssistantRequest,
     *,
     command_id: str,
     store: InboundOperationStore,
 ) -> dict[str, Any]:
     policy = enforce_upgrade_write_allowed(channel=request.channel, sender_id=request.sender_id)
-    if intent.name in PREVIEW_INTENTS:
-        payload = _build_operation_payload(intent.name, dict(intent.arguments))
+    if intent.intent_name in PREVIEW_INTENTS:
+        payload = _build_operation_payload(intent.intent_name, dict(intent.arguments))
         return _preview_and_save(payload, request=request, command_id=command_id, store=store, ttl_seconds=policy.confirm_ttl_seconds)
-    if intent.name == "upgrade_confirm":
+    if intent.intent_name == "upgrade_confirm":
         return _confirm_operation(operation_id=_optional_text(intent.arguments.get("operation_id")), request=request, store=store)
-    if intent.name == "upgrade_cancel":
+    if intent.intent_name == "upgrade_cancel":
         return _cancel_operation(operation_id=_optional_text(intent.arguments.get("operation_id")), request=request, store=store)
-    raise AgentToolError(code="INPUT_ERROR", message=f"unsupported upgrade operation intent: {intent.name}")
+    raise AgentToolError(code="INPUT_ERROR", message=f"unsupported upgrade operation intent: {intent.intent_name}")
 
 
 def _preview_and_save(

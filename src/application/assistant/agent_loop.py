@@ -138,7 +138,7 @@ def _planned_steps_from_translation(translation: LlmTranslationResult) -> tuple[
             index=1,
             phase="plan_tool",
             status="planned",
-            intent_name=translation.intent.name,
+            intent_name=translation.intent.intent_name,
             arguments=dict(translation.intent.arguments),
         ),
     )

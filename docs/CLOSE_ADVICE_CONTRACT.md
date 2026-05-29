@@ -28,6 +28,7 @@ not_evaluable   pricing or thesis data is insufficient
 ```text
 PositionLot + Quote + StrategySnapshot
 -> StrategyResolver
+-> SourceDataReadiness
 -> PricingQuality
 -> ThesisEvaluator
 -> LegAdapter
@@ -44,6 +45,24 @@ PositionLot + Quote + StrategySnapshot
 | `src.application.strategy_policy` | Strategy resolution from lot metadata and symbol config | Exit decisions |
 | `src.application.close_advice_runner` | Loading positions/quotes, pairing combo legs, CSV/text rendering | Inventing strategy thesis |
 | Renderer | Human labels for already-decided actions | Changing exit decisions |
+
+## Source Data Readiness
+
+The runner prepares data according to the resolved strategy. The domain layer
+receives already-assembled inputs and never fetches market data or event data.
+
+| Resolved strategy | Required source data |
+|---|---|
+| `return_first` short put/call | Usable quote price, premium, contracts, multiplier, DTE |
+| `short_vol` short put/call | Usable quote price plus IV, delta, realized volatility estimate, and event source status |
+| Yield-enhancement short put | Same as its resolved sell-put profile |
+| Yield-enhancement long call | Usable quote price plus long-call cost/value inputs; RV and event source are not required |
+
+If a short-vol quote row exists but lacks IV, delta, or realized volatility, the
+runner treats the source data as incomplete and refreshes the contract through
+OpenD with `include_realized_volatility=true` when the symbol uses a Futu source.
+Event fields are merged from the run-level event snapshot; they are not a
+required_data CSV cache contract.
 
 ## Strategy Source
 
@@ -103,4 +122,6 @@ When a paired call or its cost basis cannot be resolved, the system exposes
 | Combo cost | Missing paired call cost is explicit and never treated as zero. |
 | Combo action | `close_both_optional` requires a paired call with computable combo economics. |
 | Pricing quality | Wide spreads and missing core pricing fields produce `not_evaluable`, including YE long-call legs. |
+| Short-vol source data | Missing RV/IV/delta is explicit; RV refresh uses OpenD only for short-vol lots. |
+| Event source data | Short-vol event source is read from the run-level event snapshot and fails closed when required by strategy config. |
 | Renderer | User-facing text shows the action and exit nature. |

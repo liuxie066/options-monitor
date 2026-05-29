@@ -4,17 +4,17 @@ from datetime import date
 from typing import Any, Callable
 
 from src.application.assistant.agent_loop import build_tool_observation
-from src.application.assistant.intent_arbitration import (
-    IntentArbitration,
+from src.application.assistant.perception_trace import (
+    PerceptionTrace,
     build_assistant_decision,
 )
-from src.application.assistant.intent_arbitrator import GenerateReplyFn, IntentArbitrator, TranslateIntentFn
+from src.application.assistant.perception import GenerateReplyFn, PerceptionEngine, TranslateIntentFn
 from src.application.assistant.llm_translator import skipped_llm_trace
 from src.application.assistant.settings import AssistantSettings
 from src.application.assistant.tool_policy import DEFAULT_TOOL_POLICY
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.assistant.commands import spec_by_intent
-from src.application.assistant.contracts import AssistantRequest, AssistantToolCall, SemanticFrame
+from src.application.assistant.contracts import AssistantRequest, PerceptionResult, ToolCall
 from src.application.assistant.audit import InboundAuditStore
 from src.application.assistant.router import ExecuteToolFn, handle_assistant_request
 from src.application.tool_execution import execute_tool
@@ -55,7 +55,7 @@ def handle_assistant_message(
 
     agent_loop_tool_events: list[dict[str, Any]] = []
     agent_loop_observations: list[dict[str, Any]] = []
-    arbitrator = IntentArbitrator(
+    perception_engine = PerceptionEngine(
         request=request,
         audit_store=store,
         settings=runtime_settings,
@@ -69,7 +69,7 @@ def handle_assistant_message(
             execute_tool_fn=execute_tool_fn,
             tool_events=agent_loop_tool_events,
             observations=agent_loop_observations,
-            should_trace=lambda: arbitrator.route == "agent_loop",
+            should_trace=lambda: perception_engine.route == "agent_loop",
         )
 
     response = handle_assistant_request(
@@ -78,17 +78,17 @@ def handle_assistant_message(
         execute_tool_fn=router_execute_tool_fn,
         allowed_senders=allowed_senders,
         now_fn=now_fn,
-        parse_intent_fn=arbitrator.parse,
+        parse_perception_fn=perception_engine.perceive,
     )
-    llm_trace = arbitrator.llm_trace
+    llm_trace = perception_engine.llm_trace
     if agent_loop_tool_events:
         llm_trace = _merge_agent_loop_tool_events(llm_trace, agent_loop_tool_events, agent_loop_observations)
     response = _with_assistant_meta(
         response,
-        route=arbitrator.route,
+        route=perception_engine.route,
         settings=runtime_settings,
         llm_trace=llm_trace,
-        arbitration=arbitrator.arbitration,
+        perception_trace=perception_engine.trace,
     )
     _update_audit_response(store=store, response=response)
     return response
@@ -123,7 +123,7 @@ def _agent_loop_execute_tool_fn(
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         if not should_trace():
             return execute_tool_fn(tool_name, dict(payload or {}))
-        call = AssistantToolCall(tool_name=tool_name, payload=dict(payload or {}))
+        call = ToolCall(tool_name=tool_name, payload=dict(payload or {}))
         try:
             decision = DEFAULT_TOOL_POLICY.authorize_read_tool(call, source="agent_loop")
         except AgentToolError as err:
@@ -214,7 +214,7 @@ def _with_assistant_meta(
     route: str,
     settings: AssistantSettings,
     llm_trace: dict[str, Any],
-    arbitration: IntentArbitration | None = None,
+    perception_trace: PerceptionTrace | None = None,
 ) -> dict[str, Any]:
     meta_raw = response.get("meta")
     meta = dict(meta_raw) if isinstance(meta_raw, dict) else {}
@@ -228,22 +228,22 @@ def _with_assistant_meta(
         "context": dict(context_meta) if isinstance(context_meta, dict) else {"provided": False},
         "langgraph": "optional" if settings.mode == "agent_loop" else "disabled",
     }
-    if arbitration is not None:
-        assistant_meta["arbitration"] = arbitration.public_payload()
+    if perception_trace is not None:
+        assistant_meta["perception_trace"] = perception_trace.public_payload()
     assistant_meta["decision"] = build_assistant_decision(
         route=route,
-        arbitration=arbitration,
+        perception_trace=perception_trace,
         llm_trace=llm_meta,
-        intent_metadata=_intent_metadata(arbitration.selected_intent if arbitration else None),
+        intent_metadata=_intent_metadata(perception_trace.selected_perception if perception_trace else None),
     ).public_payload()
     meta["assistant"] = assistant_meta
     return {**response, "meta": meta}
 
 
-def _intent_metadata(intent: SemanticFrame | None) -> dict[str, Any]:
-    if intent is None:
+def _intent_metadata(perception: PerceptionResult | None) -> dict[str, Any]:
+    if perception is None:
         return {}
-    spec = _COMMAND_SPECS_BY_INTENT.get(intent.name)
+    spec = _COMMAND_SPECS_BY_INTENT.get(perception.intent_name)
     if spec is None:
         return {}
     return {
@@ -252,4 +252,5 @@ def _intent_metadata(intent: SemanticFrame | None) -> dict[str, Any]:
         "operation_action": spec.operation_action,
         "operation_target": spec.operation_target,
         "llm_allowed": bool(spec.llm_allowed),
+        "supported": bool(spec.supported),
     }

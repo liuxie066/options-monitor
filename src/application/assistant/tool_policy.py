@@ -5,7 +5,7 @@ from typing import Any
 
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.agent_tool_registry import get_tool_definition
-from src.application.assistant.contracts import AssistantToolCall
+from src.application.assistant.contracts import ToolCall
 from src.application.tool_allowlist import PURE_READ_TOOLS
 
 
@@ -31,7 +31,7 @@ class ToolPolicyEngine:
     def __init__(self, *, read_only_tools: set[str] | frozenset[str] | None = None) -> None:
         self._read_only_tools = frozenset(read_only_tools or PURE_READ_TOOLS)
 
-    def authorize_read_tool(self, call: AssistantToolCall, *, source: str) -> ToolPolicyDecision:
+    def authorize_read_tool(self, call: ToolCall, *, source: str) -> ToolPolicyDecision:
         name = str(call.tool_name or "").strip()
         definition = get_tool_definition(name)
         if definition is None:

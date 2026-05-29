@@ -6,7 +6,7 @@ from typing import Any
 
 from src.application.agent_tool_config import repo_base, resolve_runtime_config_path
 from src.application.agent_tool_contracts import AgentToolError, build_response, mask_path
-from src.application.assistant.contracts import AssistantRequest, SemanticFrame
+from src.application.assistant.contracts import AssistantRequest, PerceptionResult
 from src.application.assistant.llm_model_profiles import (
     configured_model_profiles_payload,
     current_model_payload,
@@ -39,17 +39,17 @@ MODEL_OPERATION_TYPES = PREVIEW_INTENTS
 
 
 def handle_model_operation(
-    intent: SemanticFrame,
+    intent: PerceptionResult,
     request: AssistantRequest,
     *,
     command_id: str,
     store: InboundOperationStore,
 ) -> dict[str, Any]:
-    if intent.name in LIST_INTENTS:
+    if intent.intent_name in LIST_INTENTS:
         return _list_models(request)
     policy = enforce_model_write_allowed(channel=request.channel, sender_id=request.sender_id)
-    if intent.name in PREVIEW_INTENTS:
-        payload = _build_model_payload(intent.name, dict(intent.arguments), request=request)
+    if intent.intent_name in PREVIEW_INTENTS:
+        payload = _build_model_payload(intent.intent_name, dict(intent.arguments), request=request)
         return _preview_and_save(
             payload,
             request=request,
@@ -57,11 +57,11 @@ def handle_model_operation(
             store=store,
             ttl_seconds=policy.confirm_ttl_seconds,
         )
-    if intent.name == "model_confirm":
+    if intent.intent_name == "model_confirm":
         return _confirm_operation(operation_id=_optional_text(intent.arguments.get("operation_id")), request=request, store=store)
-    if intent.name == "model_cancel":
+    if intent.intent_name == "model_cancel":
         return _cancel_operation(operation_id=_optional_text(intent.arguments.get("operation_id")), request=request, store=store)
-    raise AgentToolError(code="INPUT_ERROR", message=f"unsupported assistant model operation intent: {intent.name}")
+    raise AgentToolError(code="INPUT_ERROR", message=f"unsupported assistant model operation intent: {intent.intent_name}")
 
 
 def _list_models(request: AssistantRequest) -> dict[str, Any]:

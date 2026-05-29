@@ -9,25 +9,24 @@ from src.application.assistant.agent_loop import run_read_only_agent_loop
 from src.application.assistant.audit import InboundAuditStore
 from src.application.assistant.command_parser import parse_assistant_command
 from src.application.assistant.commands import spec_by_intent
-from src.application.assistant.contracts import AssistantRequest, SemanticFrame
+from src.application.assistant.contracts import AssistantRequest, PerceptionResult
 from src.application.assistant.conversation_context import build_conversation_context, context_trace
-from src.application.assistant.intent_arbitration import (
-    IntentArbitration,
-    accepted_candidate,
-    build_intent_arbitration,
-    error_candidate,
-    skipped_candidate,
-)
 from src.application.assistant.llm_reply import LlmReplyResult, generate_general_reply
 from src.application.assistant.llm_translator import LlmTranslationResult, skipped_llm_trace, translate_inbound_intent
 from src.application.assistant.parser import parse_inbound_text
+from src.application.assistant.perception_trace import (
+    PerceptionTrace,
+    accepted_candidate,
+    build_perception_trace,
+    error_candidate,
+    skipped_candidate,
+)
 from src.application.assistant.settings import AssistantSettings
 
 TranslateIntentFn = Callable[[str, AssistantSettings, dict[str, Any] | None], LlmTranslationResult]
 GenerateReplyFn = Callable[[str, AssistantSettings, dict[str, Any] | None], LlmReplyResult]
 
 _COMMAND_SPECS_BY_INTENT = spec_by_intent()
-_OPERATION_ID_RE = re.compile(r"\bin_[A-Za-z0-9_.:-]+\b")
 _BUSINESS_OR_WRITE_TOKENS = (
     "确认",
     "取消",
@@ -78,10 +77,13 @@ _BUSINESS_OR_WRITE_TOKENS = (
     "add",
     "premium",
     "strike",
+    "止盈",
+    "止损",
+    "分析",
 )
 
 
-class IntentArbitrator:
+class PerceptionEngine:
     def __init__(
         self,
         *,
@@ -98,16 +100,16 @@ class IntentArbitrator:
         self._generate_reply_fn = generate_reply_fn
         self.route = "command" if looks_like_command(request.text) else "deterministic"
         self.llm_trace = skipped_llm_trace(settings.llm, reason="command" if self.route == "command" else "not_needed")
-        self.arbitration: IntentArbitration | None = None
+        self.trace: PerceptionTrace | None = None
 
-    def parse(self, text: str, parser_now_fn: Callable[[], date] | None) -> SemanticFrame:
+    def perceive(self, text: str, parser_now_fn: Callable[[], date] | None) -> PerceptionResult:
         try:
-            command_intent = parse_assistant_command(text, now_fn=parser_now_fn)
+            command_perception = parse_assistant_command(text, now_fn=parser_now_fn)
         except AgentToolError as err:
-            self.arbitration = build_intent_arbitration(
+            self.trace = build_perception_trace(
                 decision="command_error",
                 selected_source=None,
-                selected_intent=None,
+                selected_perception=None,
                 candidates=[
                     error_candidate("command", err),
                     skipped_candidate("deterministic", "command_error"),
@@ -115,40 +117,40 @@ class IntentArbitrator:
                 ],
             )
             raise
-        if command_intent is not None:
-            self.arbitration = build_intent_arbitration(
+        if command_perception is not None:
+            self.trace = build_perception_trace(
                 decision="command_selected",
                 selected_source="command",
-                selected_intent=command_intent,
+                selected_perception=command_perception,
                 candidates=[
-                    accepted_candidate("command", command_intent),
+                    accepted_candidate("command", command_perception),
                     skipped_candidate("deterministic", "command_selected"),
                     skipped_candidate("llm", "command_selected"),
                 ],
             )
-            return command_intent
+            return command_perception
         try:
-            deterministic_intent = parse_inbound_text(text, now_fn=parser_now_fn)
-            self.arbitration = build_intent_arbitration(
+            deterministic_perception = parse_inbound_text(text, now_fn=parser_now_fn)
+            self.trace = build_perception_trace(
                 decision="deterministic_selected",
                 selected_source="deterministic",
-                selected_intent=deterministic_intent,
+                selected_perception=deterministic_perception,
                 candidates=[
-                    accepted_candidate("deterministic", deterministic_intent),
+                    accepted_candidate("deterministic", deterministic_perception),
                     skipped_candidate("llm", "deterministic_selected"),
                 ],
             )
-            return deterministic_intent
+            return deterministic_perception
         except AgentToolError as err:
             return self._handle_deterministic_error(text, err)
 
-    def _handle_deterministic_error(self, text: str, err: AgentToolError) -> SemanticFrame:
+    def _handle_deterministic_error(self, text: str, err: AgentToolError) -> PerceptionResult:
         deterministic_candidate = error_candidate("deterministic", err)
         if err.code != "NEEDS_CLARIFICATION":
-            self.arbitration = build_intent_arbitration(
+            self.trace = build_perception_trace(
                 decision="deterministic_error",
                 selected_source=None,
-                selected_intent=None,
+                selected_perception=None,
                 candidates=[
                     deterministic_candidate,
                     skipped_candidate("llm", "deterministic_error"),
@@ -156,10 +158,10 @@ class IntentArbitrator:
             )
             raise err
         if looks_like_command(text):
-            self.arbitration = build_intent_arbitration(
+            self.trace = build_perception_trace(
                 decision="command_error",
                 selected_source=None,
-                selected_intent=None,
+                selected_perception=None,
                 candidates=[
                     skipped_candidate("command", "command_prefix"),
                     deterministic_candidate,
@@ -172,13 +174,13 @@ class IntentArbitrator:
         if "context" not in self.llm_trace:
             self.llm_trace["context"] = context_trace(conversation_context)
         if llm_result.intent is not None:
-            return self._handle_llm_intent(llm_result.intent, deterministic_candidate)
+            return self._handle_llm_perception(llm_result.intent, deterministic_candidate)
         if llm_result.error is not None:
             return self._handle_llm_error(text, llm_result.error, deterministic_candidate, conversation_context)
-        self.arbitration = build_intent_arbitration(
+        self.trace = build_perception_trace(
             decision="needs_clarification",
             selected_source=None,
-            selected_intent=None,
+            selected_perception=None,
             candidates=[
                 deterministic_candidate,
                 skipped_candidate(
@@ -216,16 +218,16 @@ class IntentArbitrator:
         self.llm_trace = dict(llm_result.trace)
         return llm_result
 
-    def _handle_llm_intent(self, intent: SemanticFrame, deterministic_candidate: Any) -> SemanticFrame:
+    def _handle_llm_perception(self, perception: PerceptionResult, deterministic_candidate: Any) -> PerceptionResult:
         self.route = "agent_loop" if self._settings.mode == "agent_loop" else "llm"
-        llm_candidate = accepted_candidate(self.route, intent)
+        llm_candidate = accepted_candidate(self.route, perception)
         try:
-            ensure_llm_intent_allowed(intent)
+            ensure_llm_perception_allowed(perception)
         except AgentToolError as policy_err:
-            self.arbitration = build_intent_arbitration(
+            self.trace = build_perception_trace(
                 decision="llm_denied_by_policy",
                 selected_source=None,
-                selected_intent=None,
+                selected_perception=None,
                 candidates=[
                     deterministic_candidate,
                     llm_candidate,
@@ -233,13 +235,13 @@ class IntentArbitrator:
                 ],
             )
             raise
-        self.arbitration = build_intent_arbitration(
+        self.trace = build_perception_trace(
             decision=f"{self.route}_selected",
             selected_source=self.route,
-            selected_intent=intent,
+            selected_perception=perception,
             candidates=[deterministic_candidate, llm_candidate],
         )
-        return intent
+        return perception
 
     def _handle_llm_error(
         self,
@@ -247,7 +249,7 @@ class IntentArbitrator:
         llm_error: AgentToolError,
         deterministic_candidate: Any,
         conversation_context: dict[str, Any] | None,
-    ) -> SemanticFrame:
+    ) -> PerceptionResult:
         llm_source = "agent_loop" if self._settings.mode == "agent_loop" else "llm"
         llm_error_candidate = error_candidate(llm_source, llm_error, reason=str(self.llm_trace.get("reason") or ""))
         reply_result = self._maybe_generate_general_reply(
@@ -258,30 +260,30 @@ class IntentArbitrator:
         if reply_result.response_text:
             self.route = "llm_reply"
             self.llm_trace = dict(reply_result.trace)
-            reply_intent = SemanticFrame(
-                name="small_talk",
+            reply_perception = PerceptionResult(
+                intent_name="small_talk",
                 arguments={
                     "kind": "llm_reply",
                     "response_text": reply_result.response_text,
                 },
-                parser="llm_reply",
+                source="llm_reply",
                 confidence=1.0,
             )
-            self.arbitration = build_intent_arbitration(
+            self.trace = build_perception_trace(
                 decision="llm_reply_selected",
                 selected_source="llm_reply",
-                selected_intent=reply_intent,
+                selected_perception=reply_perception,
                 candidates=[
                     deterministic_candidate,
                     llm_error_candidate,
-                    accepted_candidate("llm_reply", reply_intent),
+                    accepted_candidate("llm_reply", reply_perception),
                 ],
             )
-            return reply_intent
-        self.arbitration = build_intent_arbitration(
+            return reply_perception
+        self.trace = build_perception_trace(
             decision="llm_error",
             selected_source=None,
-            selected_intent=None,
+            selected_perception=None,
             candidates=[deterministic_candidate, llm_error_candidate],
         )
         raise llm_error
@@ -325,33 +327,30 @@ def looks_like_command(text: str) -> bool:
 
 
 def general_reply_allowed(text: str, *, translate_error: AgentToolError) -> bool:
-    if translate_error.code != "NEEDS_CLARIFICATION":
+    if translate_error.code in {"PERMISSION_DENIED", "INPUT_ERROR"}:
         return False
-    raw = str(text or "").strip()
-    if not raw or looks_like_command(raw) or _OPERATION_ID_RE.search(raw):
+    compact = str(text or "").strip().lower()
+    if not compact:
         return False
-    compact = re.sub(r"\s+", "", raw).lower()
-    if any(token in compact for token in _BUSINESS_OR_WRITE_TOKENS):
-        return False
-    return True
+    return not any(token in compact for token in _BUSINESS_OR_WRITE_TOKENS)
 
 
-def ensure_llm_intent_allowed(intent: SemanticFrame) -> None:
-    spec = _COMMAND_SPECS_BY_INTENT.get(intent.name)
-    if spec is None or not spec.read_only or not spec.llm_allowed:
+def ensure_llm_perception_allowed(perception: PerceptionResult) -> None:
+    spec = _COMMAND_SPECS_BY_INTENT.get(perception.intent_name)
+    if spec is None or not spec.llm_allowed or not spec.read_only:
         raise AgentToolError(
             code="PERMISSION_DENIED",
-            message=f"LLM is not allowed to route intent: {intent.name}",
-            hint="LLM routing is restricted to read-only command intents; write actions must use deterministic preview and confirm flows.",
-            details={"intent_name": intent.name},
+            message=f"LLM is not allowed to route intent: {perception.intent_name}",
+            hint="LLM translator is restricted to recognizable read-only capabilities; write/admin operations require deterministic preview/confirm commands.",
+            details={"intent_name": perception.intent_name},
         )
 
 
 __all__ = [
     "GenerateReplyFn",
-    "IntentArbitrator",
+    "PerceptionEngine",
     "TranslateIntentFn",
-    "ensure_llm_intent_allowed",
+    "ensure_llm_perception_allowed",
     "general_reply_allowed",
     "looks_like_command",
 ]

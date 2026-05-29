@@ -5,23 +5,25 @@ from datetime import date
 from typing import Any, Callable
 
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response, mask_path
+from src.application.assistant.action import ExecuteToolFn, perform_action
 from src.application.assistant.audit import InboundAuditStore, build_command_id, utc_now_iso
-from src.application.assistant.contracts import AssistantFrame, AssistantRequest, AssistantToolCall, SemanticFrame, ToolPlan
-from src.application.assistant.frame_planner import frame_from_semantic_frame, tool_plan_from_frame
-from src.application.assistant.manual_trade_operations import handle_manual_trade_operation
-from src.application.assistant.model_operations import handle_model_operation
+from src.application.assistant.contracts import (
+    ActionResult,
+    AssistantRequest,
+    ObservationResponse,
+    PerceptionResult,
+    ReasoningResolution,
+)
+from src.application.assistant.observation import build_observation
 from src.application.assistant.operation_store import InboundOperationStore
 from src.application.assistant.parser import parse_inbound_text
-from src.application.assistant.policy import enforce_sender_allowed, enforce_tool_allowed
-from src.application.assistant.renderer import HELP_TEXT, SMALL_TALK_TEXT, render_inbound_text, render_pending_operations
-from src.application.assistant.symbol_operations import handle_symbol_operation
-from src.application.assistant.upgrade_operations import handle_upgrade_operation
+from src.application.assistant.policy import enforce_sender_allowed
+from src.application.assistant.reasoning import resolve_reasoning
+from src.application.assistant.renderer import render_inbound_text
 from src.application.tool_execution import execute_tool
 
 
-ExecuteToolFn = Callable[[str, dict[str, Any]], dict[str, Any]]
-ParseSemanticFrameFn = Callable[[str, Callable[[], date] | None], SemanticFrame]
-ParseIntentFn = ParseSemanticFrameFn
+ParsePerceptionFn = Callable[[str, Callable[[], date] | None], PerceptionResult]
 
 
 def handle_assistant_request(
@@ -31,7 +33,7 @@ def handle_assistant_request(
     execute_tool_fn: ExecuteToolFn = execute_tool,
     allowed_senders: str | None = None,
     now_fn: Callable[[], date] | None = None,
-    parse_intent_fn: ParseIntentFn | None = None,
+    parse_perception_fn: ParsePerceptionFn | None = None,
 ) -> dict[str, Any]:
     normalized_request = _normalize_request(request)
     store = audit_store or InboundAuditStore(normalized_request.audit_db)
@@ -72,10 +74,10 @@ def handle_assistant_request(
         return _duplicate_response(existing)
 
     created_at = utc_now_iso()
-    intent: SemanticFrame | None = None
-    frame: AssistantFrame | None = None
-    call: AssistantToolCall | None = None
-    plan: ToolPlan | None = None
+    perception: PerceptionResult | None = None
+    resolution: ReasoningResolution | None = None
+    action: ActionResult | None = None
+    observation: ObservationResponse | None = None
     response: dict[str, Any]
     decision = "unknown"
     error_code: str | None = None
@@ -86,273 +88,28 @@ def handle_assistant_request(
             sender_id=normalized_request.sender_id,
             allowed_senders=allowed_senders,
         )
-        intent = _parse_intent(normalized_request.text, now_fn=now_fn, parse_intent_fn=parse_intent_fn)
-        frame = frame_from_semantic_frame(intent)
-        if intent.name == "help":
-            response = build_response(
-                tool_name="inbound.handle",
-                ok=True,
-                data={
-                    "command_id": command_id,
-                    "request": normalized_request.public_payload(),
-                    "intent": intent.public_payload(),
-                    "decision": {
-                        "allowed": True,
-                        "reason": "help",
-                        "sender": sender_decision.public_payload(),
-                    },
-                    "response_text": HELP_TEXT,
-                },
-                meta={"audit_db": mask_path(store.path)},
-            )
-            decision = "allowed"
-            return _record_and_return(
-                store=store,
-                request=normalized_request,
-                command_id=command_id,
-                created_at=created_at,
-                intent=intent,
-                frame=frame,
-                call=None,
-                plan=None,
-                decision=decision,
-                response=response,
-            )
-
-        if intent.name == "small_talk":
-            response_text = str(intent.arguments.get("response_text") or SMALL_TALK_TEXT).strip() or SMALL_TALK_TEXT
-            response = build_response(
-                tool_name="inbound.handle",
-                ok=True,
-                data={
-                    "command_id": command_id,
-                    "request": normalized_request.public_payload(),
-                    "intent": intent.public_payload(),
-                    "decision": {
-                        "allowed": True,
-                        "reason": "small_talk",
-                        "sender": sender_decision.public_payload(),
-                    },
-                    "response_text": response_text,
-                },
-                meta={"audit_db": mask_path(store.path)},
-            )
-            decision = "allowed"
-            return _record_and_return(
-                store=store,
-                request=normalized_request,
-                command_id=command_id,
-                created_at=created_at,
-                intent=intent,
-                frame=frame,
-                call=None,
-                plan=None,
-                decision=decision,
-                response=response,
-            )
-
-        plan = tool_plan_from_frame(frame, request=normalized_request)
-        call = plan.to_tool_call()
-
-        if call.tool_name == "inbound.pending":
-            pending_operations = InboundOperationStore(store.path).list_pending_operations(
-                channel=normalized_request.channel,
-                sender_id=normalized_request.sender_id,
-                conversation_id=normalized_request.conversation_id,
-            )
-            response_text = render_pending_operations(pending_operations)
-            response = build_response(
-                tool_name="inbound.handle",
-                ok=True,
-                data={
-                    "command_id": command_id,
-                    "request": normalized_request.public_payload(),
-                    "intent": intent.public_payload(),
-                    "semantic_frame": frame.public_payload(),
-                    "tool_plan": plan.public_payload(),
-                    "tool_call": call.public_payload(),
-                    "decision": {
-                        "allowed": True,
-                        "reason": plan.reason,
-                        "sender": sender_decision.public_payload(),
-                    },
-                    "pending_count": len(pending_operations),
-                    "pending_operations": pending_operations,
-                    "response_text": response_text,
-                },
-                meta={"audit_db": mask_path(store.path)},
-            )
-            decision = "allowed"
-            return _record_and_return(
-                store=store,
-                request=normalized_request,
-                command_id=command_id,
-                created_at=created_at,
-                intent=intent,
-                frame=frame,
-                call=call,
-                plan=plan,
-                decision=decision,
-                response=response,
-            )
-
-        planned_intent = _intent_from_plan(intent, plan)
-        if call.tool_name == "inbound.manual_trade":
-            operation_result = handle_manual_trade_operation(
-                planned_intent,
-                normalized_request,
-                command_id=command_id,
-                store=InboundOperationStore(store.path),
-            )
-            response = _operation_response(
-                operation_result,
-                command_id=command_id,
-                request=normalized_request,
-                intent=planned_intent,
-                frame=frame,
-                plan=plan,
-                call=call,
-                sender_decision=sender_decision.public_payload(),
-                reason=plan.reason,
-                audit_db=store.path,
-            )
-            decision = "allowed"
-            return _record_and_return(
-                store=store,
-                request=normalized_request,
-                command_id=command_id,
-                created_at=created_at,
-                intent=intent,
-                frame=frame,
-                call=call,
-                plan=plan,
-                decision=decision,
-                response=response,
-            )
-
-        if call.tool_name == "inbound.symbols":
-            operation_result = handle_symbol_operation(
-                planned_intent,
-                normalized_request,
-                command_id=command_id,
-                store=InboundOperationStore(store.path),
-            )
-            response = _operation_response(
-                operation_result,
-                command_id=command_id,
-                request=normalized_request,
-                intent=planned_intent,
-                frame=frame,
-                plan=plan,
-                call=call,
-                sender_decision=sender_decision.public_payload(),
-                reason=plan.reason,
-                audit_db=store.path,
-            )
-            decision = "allowed"
-            return _record_and_return(
-                store=store,
-                request=normalized_request,
-                command_id=command_id,
-                created_at=created_at,
-                intent=intent,
-                frame=frame,
-                call=call,
-                plan=plan,
-                decision=decision,
-                response=response,
-            )
-
-        if call.tool_name == "inbound.upgrade":
-            operation_result = handle_upgrade_operation(
-                planned_intent,
-                normalized_request,
-                command_id=command_id,
-                store=InboundOperationStore(store.path),
-            )
-            response = _operation_response(
-                operation_result,
-                command_id=command_id,
-                request=normalized_request,
-                intent=planned_intent,
-                frame=frame,
-                plan=plan,
-                call=call,
-                sender_decision=sender_decision.public_payload(),
-                reason=plan.reason,
-                audit_db=store.path,
-            )
-            decision = "allowed"
-            return _record_and_return(
-                store=store,
-                request=normalized_request,
-                command_id=command_id,
-                created_at=created_at,
-                intent=intent,
-                frame=frame,
-                call=call,
-                plan=plan,
-                decision=decision,
-                response=response,
-            )
-
-        if call.tool_name == "inbound.model":
-            operation_result = handle_model_operation(
-                planned_intent,
-                normalized_request,
-                command_id=command_id,
-                store=InboundOperationStore(store.path),
-            )
-            response = _operation_response(
-                operation_result,
-                command_id=command_id,
-                request=normalized_request,
-                intent=planned_intent,
-                frame=frame,
-                plan=plan,
-                call=call,
-                sender_decision=sender_decision.public_payload(),
-                reason=plan.reason,
-                audit_db=store.path,
-            )
-            decision = "allowed"
-            return _record_and_return(
-                store=store,
-                request=normalized_request,
-                command_id=command_id,
-                created_at=created_at,
-                intent=intent,
-                frame=frame,
-                call=call,
-                plan=plan,
-                decision=decision,
-                response=response,
-            )
-
-        tool_decision = enforce_tool_allowed(call)
-        tool_result = execute_tool_fn(call.tool_name, call.payload)
-        response_text = render_inbound_text(intent=intent, tool_result=tool_result)
-        response = build_response(
-            tool_name="inbound.handle",
-            ok=bool(tool_result.get("ok", False)),
-            data={
-                "command_id": command_id,
-                "request": normalized_request.public_payload(),
-                "intent": intent.public_payload(),
-                "semantic_frame": frame.public_payload(),
-                "tool_plan": plan.public_payload(),
-                "tool_call": call.public_payload(),
-                "decision": {
-                    **tool_decision,
-                    "sender": sender_decision.public_payload(),
-                },
-                "tool_result": tool_result,
-                "response_text": response_text,
-            },
-            error=tool_result.get("error") if not bool(tool_result.get("ok", False)) else None,
-            meta={"audit_db": mask_path(store.path)},
+        perception = _parse_perception(normalized_request.text, now_fn=now_fn, parse_perception_fn=parse_perception_fn)
+        resolution = resolve_reasoning(perception, request=normalized_request)
+        action = perform_action(
+            perception=perception,
+            resolution=resolution,
+            request=normalized_request,
+            command_id=command_id,
+            operation_store=InboundOperationStore(store.path),
+            execute_tool_fn=execute_tool_fn,
         )
-        decision = "allowed"
+        observation = build_observation(perception=perception, resolution=resolution, action=action)
+        response = _success_response(
+            command_id=command_id,
+            request=normalized_request,
+            perception=perception,
+            resolution=resolution,
+            action=action,
+            observation=observation,
+            sender_decision=sender_decision.public_payload(),
+            audit_db=store.path,
+        )
+        decision = _decision_for_resolution(resolution, action)
     except AgentToolError as err:
         error_code = err.code
         response = _error_response(command_id=command_id, request=normalized_request, err=err, audit_db=store.path)
@@ -363,74 +120,73 @@ def handle_assistant_request(
         request=normalized_request,
         command_id=command_id,
         created_at=created_at,
-        intent=intent,
-        frame=frame,
-        call=call,
-        plan=plan,
+        perception=perception,
+        resolution=resolution,
+        action=action,
+        observation=observation,
         decision=decision,
         response=response,
         error_code=error_code,
     )
 
 
-def _parse_intent(
+def _parse_perception(
     text: str,
     *,
     now_fn: Callable[[], date] | None,
-    parse_intent_fn: ParseIntentFn | None,
-) -> SemanticFrame:
-    if parse_intent_fn is not None:
-        return parse_intent_fn(text, now_fn)
+    parse_perception_fn: ParsePerceptionFn | None,
+) -> PerceptionResult:
+    if parse_perception_fn is not None:
+        return parse_perception_fn(text, now_fn)
     return parse_inbound_text(text, now_fn=now_fn)
 
 
-def _intent_from_plan(intent: SemanticFrame, plan: ToolPlan) -> SemanticFrame:
-    return SemanticFrame(
-        name=intent.name,
-        arguments=dict(plan.payload),
-        parser=intent.parser,
-        confidence=intent.confidence,
-    )
-
-
-def _operation_response(
-    operation_result: dict[str, Any],
+def _success_response(
     *,
     command_id: str,
     request: AssistantRequest,
-    intent: SemanticFrame,
-    frame: AssistantFrame,
-    plan: ToolPlan,
-    call: AssistantToolCall,
+    perception: PerceptionResult,
+    resolution: ReasoningResolution,
+    action: ActionResult,
+    observation: ObservationResponse,
     sender_decision: dict[str, Any],
-    reason: str,
     audit_db: Any,
 ) -> dict[str, Any]:
-    data = dict(operation_result.get("data") or {})
-    data.update(
-        {
-            "command_id": command_id,
-            "request": request.public_payload(),
-            "intent": intent.public_payload(),
-            "semantic_frame": frame.public_payload(),
-            "tool_plan": plan.public_payload(),
-            "tool_call": call.public_payload(),
-            "decision": {
-                "allowed": True,
-                "reason": reason,
-                "sender": sender_decision,
-            },
-            "response_text": str(data.get("response_text") or ""),
-        }
-    )
-    meta = dict(operation_result.get("meta") or {})
+    result = dict(action.result or {})
+    operation_data = dict(result.get("data") or {}) if action.action_kind == "operation" else {}
+    meta = dict(result.get("meta") or {}) if action.action_kind == "operation" else {}
     meta["audit_db"] = mask_path(audit_db)
+    data: dict[str, Any] = {
+        "command_id": command_id,
+        "request": request.public_payload(),
+        "perception": perception.public_payload(),
+        "reasoning": resolution.public_payload(),
+        "action": action.public_payload(),
+        "observation": observation.public_payload(),
+        "decision": {
+            "allowed": True,
+            "reason": resolution.reason,
+            "sender": sender_decision,
+        },
+        "response_text": observation.response_text,
+    }
+    if operation_data:
+        data.update(operation_data)
+        data["response_text"] = observation.response_text
+    if action.action_kind == "pending" and isinstance(action.result, dict):
+        data.update(action.result)
+    if action.action_kind == "tool":
+        data["tool_call"] = resolution.tool_call.public_payload() if resolution.tool_call else None
+        data["tool_result"] = action.result or {}
+        tool_decision = result.get("_tool_decision")
+        if isinstance(tool_decision, dict):
+            data["decision"] = {**tool_decision, "sender": sender_decision}
     return build_response(
-        tool_name=str(operation_result.get("tool_name") or "inbound.handle"),
-        ok=bool(operation_result.get("ok", False)),
+        tool_name=str(result.get("tool_name") or action.tool_name or "inbound.handle"),
+        ok=bool(observation.ok),
         data=data,
-        error=operation_result.get("error") if not bool(operation_result.get("ok", False)) else None,
-        warnings=operation_result.get("warnings"),
+        error=action.error if not bool(observation.ok) else None,
+        warnings=result.get("warnings") if action.action_kind == "operation" else None,
         meta=meta,
     )
 
@@ -441,14 +197,15 @@ def _record_and_return(
     request: AssistantRequest,
     command_id: str,
     created_at: str,
-    intent: SemanticFrame | None,
-    frame: AssistantFrame | None,
-    call: AssistantToolCall | None,
-    plan: ToolPlan | None,
+    perception: PerceptionResult | None,
+    resolution: ReasoningResolution | None,
+    action: ActionResult | None,
+    observation: ObservationResponse | None,
     decision: str,
     response: dict[str, Any],
     error_code: str | None = None,
 ) -> dict[str, Any]:
+    call = resolution.tool_call if resolution else None
     store.record_result(
         {
             "command_id": command_id,
@@ -457,12 +214,14 @@ def _record_and_return(
             "conversation_id": request.conversation_id,
             "message_id": request.message_id,
             "raw_text": request.text,
-            "parser": intent.parser if intent else None,
-            "intent_name": intent.name if intent else None,
+            "parser": perception.source if perception else None,
+            "intent_name": perception.intent_name if perception else None,
             "tool_name": call.tool_name if call else None,
             "tool_payload": call.payload if call else None,
-            "semantic_frame": frame.public_payload() if frame else None,
-            "tool_plan": plan.public_payload() if plan else None,
+            "perception": perception.public_payload() if perception else None,
+            "reasoning": resolution.public_payload() if resolution else None,
+            "action": action.public_payload() if action else None,
+            "observation": observation.public_payload() if observation else None,
             "decision": decision,
             "result_ok": bool(response.get("ok", False)),
             "error_code": error_code or _response_error_code(response),
@@ -525,6 +284,16 @@ def _response_error_code(response: dict[str, Any]) -> str | None:
     return None
 
 
+def _decision_for_resolution(resolution: ReasoningResolution, action: ActionResult) -> str:
+    if resolution.status == "unsupported":
+        return "unsupported"
+    if resolution.status == "preview_required":
+        return "preview"
+    if not action.ok:
+        return "failed"
+    return "allowed"
+
+
 def _decision_for_error(err: AgentToolError) -> str:
     if err.code == "PERMISSION_DENIED":
         return "denied"
@@ -548,3 +317,6 @@ def _normalize_request(request: AssistantRequest) -> AssistantRequest:
         audit_db=str(request.audit_db).strip() if request.audit_db is not None and str(request.audit_db).strip() else None,
         assistant_config_path=str(request.assistant_config_path).strip() if request.assistant_config_path is not None and str(request.assistant_config_path).strip() else None,
     )
+
+
+__all__ = ["ExecuteToolFn", "ParsePerceptionFn", "handle_assistant_request"]
