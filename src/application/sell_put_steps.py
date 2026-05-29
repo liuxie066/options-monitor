@@ -43,6 +43,8 @@ from src.application.candidate_filter_trace import (
 from domain.domain.sell_put_config import validate_min_annualized_net_return
 from domain.domain.risk_capacity import compute_sell_put_cash_capacity
 from src.application.yield_enhancement_config import (
+    YIELD_ENHANCEMENT_VOL_CONVEXITY_MODE,
+    derive_yield_enhancement_policy,
     resolve_yield_enhancement_cfg,
     wants_yield_enhancement_inline,
     wants_yield_enhancement_separate,
@@ -239,9 +241,10 @@ def run_sell_put_scan_and_summarize(
     symbol_yield_enhancement = (report_dir / f'{symbol_lower}_yield_enhancement_candidates.csv').resolve()
     yield_enhancement_alerts = (report_dir / f'{symbol_lower}_yield_enhancement_alerts.txt').resolve()
     yield_enhancement_cfg = resolve_yield_enhancement_cfg(symbol_cfg)
+    yield_sp = dict(yield_enhancement_sell_put_cfg or sp)
+    yield_enhancement_policy = derive_yield_enhancement_policy(yield_enhancement_cfg, yield_sp)
     yield_enhancement_inline = wants_yield_enhancement_inline(yield_enhancement_cfg)
     yield_enhancement_separate = wants_yield_enhancement_separate(yield_enhancement_cfg)
-    yield_sp = dict(yield_enhancement_sell_put_cfg or sp)
 
     strategy_cfg = resolve_sell_put_short_vol_config(sp)
     resolved_min_annualized_net_return = 0.0 if strategy_cfg.enabled else validate_min_annualized_net_return(
@@ -323,7 +326,7 @@ def run_sell_put_scan_and_summarize(
             log.warning("sell_put_steps: failed to write fail-closed sell-put CSV for %s: %s", symbol, exc)
 
     df_yield_put_universe = df_sp_lab
-    if bool(yield_enhancement_cfg.get("enabled", False)):
+    if bool(yield_enhancement_policy.enabled):
         run_sell_put_scan(
             symbols=[sym],
             input_root=required_data_dir,
@@ -343,7 +346,10 @@ def run_sell_put_scan_and_summarize(
         )
         add_sell_put_labels(base, symbol_yield_put_universe, symbol_yield_put_universe_labeled)
         df_yield_put_universe = safe_read_csv(symbol_yield_put_universe_labeled)
-        if not df_yield_put_universe.empty:
+        if (
+            yield_enhancement_policy.mode == YIELD_ENHANCEMENT_VOL_CONVEXITY_MODE
+            and not df_yield_put_universe.empty
+        ):
             df_yield_put_universe = enrich_and_filter_sell_put_short_vol(
                 df_labeled=df_yield_put_universe,
                 symbol=symbol,
@@ -363,7 +369,7 @@ def run_sell_put_scan_and_summarize(
         output_path=None,
     )
     recommended_yield_pairs_df = select_best_yield_enhancement_pairs(raw_yield_pairs_df)
-    if bool(yield_enhancement_cfg.get("enabled", False)):
+    if bool(yield_enhancement_policy.enabled):
         scope = infer_trace_scope_from_path(symbol_yield_enhancement)
         if df_yield_put_universe.empty:
             yield_rule = "yield_enhancement_put_universe_empty"
@@ -385,7 +391,7 @@ def run_sell_put_scan_and_summarize(
                     account=scope.get("account"),
                     symbol=symbol,
                     function="yield_enhancement",
-                    mode="enhancement",
+                    mode=yield_enhancement_policy.mode,
                     status=yield_status,
                     stage="post_filter",
                     rule=yield_rule,

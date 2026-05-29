@@ -29,10 +29,11 @@
 
 ## 业务规则
 - [candidate_strategy.md](candidate_strategy.md)：候选筛选与排序规则
+- [CLOSE_ADVICE_CONTRACT.md](CLOSE_ADVICE_CONTRACT.md)：平仓建议 exit-state、收益增强组合和渲染契约
 
 ## 安全与约束
 - [GUARDRAILS.md](GUARDRAILS.md)：guardrails 与安全门禁
 
 ## 架构
 - [ARCHITECTURE.md](ARCHITECTURE.md)：系统分层、入口点、运行时流程（面向人类开发者）
-- [TRADE_POSITION_LEDGER_REDESIGN.md](TRADE_POSITION_LEDGER_REDESIGN.md)：交易与持仓账本重构设计、迁移阶段、风控验收标准
+- [TRADE_POSITION_LEDGER_REDESIGN.md](TRADE_POSITION_LEDGER_REDESIGN.md)：交易与持仓账本架构、风控边界和验收标准

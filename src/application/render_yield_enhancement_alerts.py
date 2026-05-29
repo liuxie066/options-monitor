@@ -57,6 +57,12 @@ def render_one(row: pd.Series) -> str:
     scenario_score = _safe_float(row.get("scenario_score"))
     annualized_scenario_score = _safe_float(row.get("annualized_scenario_score"))
     call_cost_to_put_credit = _safe_float(row.get("call_cost_to_put_credit"))
+    net_credit_retention = _safe_float(row.get("net_credit_retention"))
+    mode = str(row.get("yield_enhancement_mode") or "").strip()
+    derived = str(row.get("derived_from_sell_put_strategy") or "").strip()
+    mode_line = None
+    if mode:
+        mode_line = f"策略模式: {mode}" + (f" | derived_from={derived}" if derived else "")
     upside_lift = _safe_float(row.get("upside_lift"))
     upside_lift_to_call_cost = _safe_float(row.get("upside_lift_to_call_cost"))
     upside_lift_to_put_credit = _safe_float(row.get("upside_lift_to_put_credit"))
@@ -69,8 +75,9 @@ def render_one(row: pd.Series) -> str:
             f"[收益增强推荐] {symbol} {expiration} {put_strike}P + {call_strike}C",
             "",
             f"DTE: {int(dte) if dte is not None else '-'}",
+            *([mode_line] if mode_line else []),
             f"净权利金({option_ccy}): {num(row.get('net_credit'))}",
-            f"资金覆盖: Call成本/Put权利金={('-' if call_cost_to_put_credit is None else pct(call_cost_to_put_credit))}",
+            f"资金覆盖: Call成本/Put权利金={('-' if call_cost_to_put_credit is None else pct(call_cost_to_put_credit))} | 净权利金保留={('-' if net_credit_retention is None else pct(net_credit_retention))}",
             f"上行弹性: 潜在收益={('-' if upside_lift is None else num(upside_lift))} | 成本倍数={('-' if upside_lift_to_call_cost is None else f'{upside_lift_to_call_cost:.2f}x')} | 权利金倍数={('-' if upside_lift_to_put_credit is None else f'{upside_lift_to_put_credit:.2f}x')}",
             f"场景评分: {('-' if scenario_score is None else pct(scenario_score))}",
             f"场景年化: {('-' if annualized_scenario_score is None else pct(annualized_scenario_score))}",
