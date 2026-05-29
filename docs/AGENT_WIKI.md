@@ -268,10 +268,14 @@ Core domain functions:
 
 ```python
 def evaluate_close_advice(inp: CloseAdviceInput, cfg: CloseAdviceConfig) -> dict[str, Any]: ...
-def evaluate_close_optimizer(inp: CloseAdviceInput, cfg: CloseAdviceConfig) -> dict[str, Any]: ...
+def evaluate_short_vol_close_advice(inp: CloseAdviceInput, ...) -> dict[str, Any]: ...
+def evaluate_long_call_convexity_advice(inp: CloseAdviceInput, ...) -> dict[str, Any]: ...
+def evaluate_close_optimizer(inp: CloseAdviceInput, cfg: CloseOptimizerConfig) -> dict[str, Any]: ...
 ```
 
-Keep new scoring or optimizer policy in the domain layer. The runner should stay focused on inputs, local artifacts, and output formatting.
+Keep scoring, thesis checks, and exit-state policy in the domain layer. The
+runner stays focused on loading local artifacts, pairing yield-enhancement legs,
+preserving `not_evaluable` rows, and formatting CSV/text output.
 
 ### Notifications
 

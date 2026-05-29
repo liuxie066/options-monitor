@@ -27,7 +27,7 @@ from domain.domain.sell_put_risk_bands import classify_sell_put_risk
 from src.application.candidate_models import CandidateContractInput
 from src.application.sell_put_strategy_risk import resolve_sell_put_short_vol_config
 from src.application.strategy_policy import risk_model_for_profile
-from src.application.yield_enhancement_config import apply_yield_enhancement_defaults
+from src.application.yield_enhancement_config import derive_yield_enhancement_policy
 
 
 def _safe_float(value: Any) -> float | None:
@@ -53,13 +53,6 @@ def _merged_dict(*items: dict[str, Any] | None) -> dict[str, Any]:
         if isinstance(item, dict):
             out.update(item)
     return out
-
-
-def _cfg_field_explicit(raw_cfg: dict[str, Any], field: str) -> bool:
-    explicit_fields = raw_cfg.get("_explicit_fields")
-    if isinstance(explicit_fields, (list, tuple, set)):
-        return field in {str(item) for item in explicit_fields}
-    return field in raw_cfg
 
 
 def _format_contract(expiration: str, strike: float, option_suffix: str) -> str:
@@ -215,12 +208,16 @@ def _funding_decision_row_fields(decision: YieldEnhancementFundingDecision) -> d
         f"{name}={value:.6f}"
         for name, value in sorted(decision.score_components.items())
     )
+    net_credit_retention = None
+    if decision.put_net_credit > 0:
+        net_credit_retention = decision.combo_net_credit / decision.put_net_credit
     return {
         "funding_accepted": bool(decision.accepted),
         "funding_reject_reasons": "|".join(decision.reject_reasons),
         "put_net_credit": decision.put_net_credit,
         "call_total_cost": decision.call_total_cost,
         "combo_net_credit": decision.combo_net_credit,
+        "net_credit_retention": round(float(net_credit_retention), 6) if net_credit_retention is not None else None,
         "call_cost_to_put_credit": decision.call_cost_ratio,
         "upside_scenario_price": decision.upside_scenario_price,
         "upside_lift": decision.upside_lift,
@@ -356,6 +353,7 @@ def _empty_pairs_df() -> pd.DataFrame:
             "put_net_credit",
             "call_total_cost",
             "combo_net_credit",
+            "net_credit_retention",
             "call_cost_to_put_credit",
             "upside_scenario_price",
             "upside_lift",
@@ -364,6 +362,8 @@ def _empty_pairs_df() -> pd.DataFrame:
             "upside_lift_to_put_credit",
             "premium_funding_score",
             "funding_score_components",
+            "yield_enhancement_mode",
+            "derived_from_sell_put_strategy",
             "put_strategy_profile",
             "put_strategy_source",
             "put_risk_model",
@@ -381,6 +381,37 @@ def _sell_put_strategy_fields(sell_put_cfg: dict[str, Any] | None) -> dict[str, 
         "put_strategy_source": source,
         "put_risk_model": risk_model_for_profile(cfg.strategy),
     }
+
+
+def _put_risk_fields(row: pd.Series) -> dict[str, Any]:
+    fields = (
+        "short_vol_thesis_status",
+        "short_vol_reason",
+        "short_vol_mode",
+        "short_gamma_profile",
+        "short_vega_profile",
+        "implied_volatility",
+        "realized_volatility_estimate",
+        "iv_rv_ratio",
+        "iv_minus_rv",
+        "abs_delta",
+        "equity_delta_equivalent",
+        "delta_target_score",
+        "vol_edge_score",
+        "event_risk_flag",
+        "event_risk_types",
+        "event_risk_dates",
+        "event_source_status",
+        "event_source_error",
+        "path_stress_status",
+        "path_stress_evaluable",
+        "path_stress_unavailable_reason",
+        "stress_sigma_move_pct",
+        "put_stress_down_loss_nav_pct",
+        "put_gap_down_loss_nav_pct",
+        "data_quality_flags",
+    )
+    return {key: row.get(key) for key in fields if key in row}
 
 
 def _load_required_data_calls(*, input_root: Path, symbol: str) -> pd.DataFrame:
@@ -406,10 +437,10 @@ def find_sell_put_yield_enhancement_pairs(
     output_path: Path | None = None,
 ) -> pd.DataFrame:
     df = df_candidates.copy()
-    raw_cfg = dict(yield_enhancement_cfg or {})
-    cfg = apply_yield_enhancement_defaults(yield_enhancement_cfg)
-    cfg["_max_call_cost_to_put_credit_explicit"] = _cfg_field_explicit(raw_cfg, "max_call_cost_to_put_credit")
-    if df.empty or not cfg.get("enabled"):
+    policy = derive_yield_enhancement_policy(yield_enhancement_cfg, sell_put_cfg)
+    cfg = policy.to_config()
+    cfg["_max_call_cost_to_put_credit_explicit"] = "max_call_cost_to_put_credit" in set(policy.explicit_fields)
+    if df.empty or not policy.enabled:
         pairs_df = _empty_pairs_df()
         if output_path is not None:
             try:
@@ -447,6 +478,9 @@ def find_sell_put_yield_enhancement_pairs(
     if max_debit_native is None:
         max_debit_native = _safe_float(cfg.get("max_debit"))
     max_combo_spread_ratio = _safe_float(cfg.get("max_combo_spread_ratio", 0.50))
+    min_net_credit_retention = _safe_float(cfg.get("min_net_credit_retention"))
+    if funding_mode == "max_debit" and "min_net_credit_retention" not in set(policy.explicit_fields):
+        min_net_credit_retention = None
     min_combo_notional_floor = 1.0
 
     raw_calls = _load_required_data_calls(input_root=Path(input_root), symbol=symbol)
@@ -528,7 +562,14 @@ def find_sell_put_yield_enhancement_pairs(
             combo_spread = _safe_float(candidate["combo_spread_ratio"])
             if max_combo_spread_ratio is not None and combo_spread is not None and combo_spread > float(max_combo_spread_ratio):
                 continue
+            net_credit_retention = _safe_float(candidate.get("net_credit_retention"))
+            if min_net_credit_retention is not None and (
+                net_credit_retention is None or net_credit_retention < float(min_net_credit_retention)
+            ):
+                continue
             candidate.update(put_strategy_fields)
+            candidate.update(policy.to_fields())
+            candidate.update(_put_risk_fields(raw))
             pair_rows.append(candidate)
 
     ranked_pairs = rank_yield_enhancement_rows(pair_rows)

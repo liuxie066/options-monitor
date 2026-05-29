@@ -323,6 +323,378 @@ def test_run_close_advice_prefers_position_strategy_snapshot_over_current_config
     assert rows[0]["tier"] == "strong"
 
 
+def test_run_close_advice_uses_yield_enhancement_put_exit_action(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _freeze_close_advice_business_today(monkeypatch)
+    context = {
+        "open_positions_min": [
+            {
+                "account": "lx",
+                "symbol": "NVDA",
+                "option_type": "put",
+                "side": "short",
+                "status": "open",
+                "contracts_open": 1,
+                "currency": "USD",
+                "strike": 100,
+                "multiplier": 100,
+                "premium": 1.6,
+                "expiration": "2026-05-15",
+                "strategy": "yield_enhancement",
+                "leg_role": "sell_put",
+                "strategy_group_id": "ye_nvda_1",
+                "yield_enhancement_mode": "income_upside_enhancement",
+                "strategy_snapshot": {"strategy_family": "sell_put", "strategy_profile": "return_first"},
+            }
+        ]
+    }
+    ctx_path = tmp_path / "option_positions_context.json"
+    ctx_path.write_text(json.dumps(context, ensure_ascii=False), encoding="utf-8")
+
+    required_root = tmp_path / "required_data"
+    parsed = required_root / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "NVDA",
+                "option_type": "put",
+                "expiration": "2026-05-15",
+                "strike": 100,
+                "mid": 0.22,
+                "bid": 0.21,
+                "ask": 0.23,
+                "dte": 29,
+                "multiplier": 100,
+                "spot": 120,
+                "currency": "USD",
+            }
+        ]
+    ).to_csv(parsed / "NVDA_required_data.csv", index=False)
+
+    out_dir = tmp_path / "reports"
+    run_close_advice(
+        config={"close_advice": {"enabled": True, "notify_levels": ["strong", "medium"]}},
+        context_path=ctx_path,
+        required_data_root=required_root,
+        output_dir=out_dir,
+        base_dir=Path.cwd(),
+    )
+
+    rows = pd.read_csv(out_dir / "close_advice.csv").to_dict("records")
+    assert rows[0]["close_action"] == "close_put_keep_call"
+    assert pd.isna(rows[0].get("optional_combo_action")) or rows[0]["optional_combo_action"] == ""
+    assert rows[0]["paired_leg_status"] == "missing"
+    assert rows[0]["combo_cost_basis_status"] == "missing_paired_call"
+    assert rows[0]["strategy_exit_mode"] == "yield_enhancement_put_leg"
+    assert rows[0]["yield_enhancement_mode"] == "income_upside_enhancement"
+    text = (out_dir / "close_advice.txt").read_text(encoding="utf-8")
+    assert "买回 Put，保留收益增强 Call" in text
+
+
+def test_run_close_advice_holds_yield_enhancement_put_when_threshold_not_met(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _freeze_close_advice_business_today(monkeypatch)
+    context = {
+        "open_positions_min": [
+            {
+                "account": "lx",
+                "symbol": "NVDA",
+                "option_type": "put",
+                "side": "short",
+                "status": "open",
+                "contracts_open": 1,
+                "currency": "USD",
+                "strike": 100,
+                "multiplier": 100,
+                "premium": 1.6,
+                "expiration": "2026-05-15",
+                "strategy": "yield_enhancement",
+                "leg_role": "sell_put",
+                "strategy_group_id": "ye_nvda_1",
+            }
+        ]
+    }
+    ctx_path = tmp_path / "option_positions_context.json"
+    ctx_path.write_text(json.dumps(context, ensure_ascii=False), encoding="utf-8")
+
+    required_root = tmp_path / "required_data"
+    parsed = required_root / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "NVDA",
+                "option_type": "put",
+                "expiration": "2026-05-15",
+                "strike": 100,
+                "mid": 1.40,
+                "bid": 1.39,
+                "ask": 1.41,
+                "dte": 29,
+                "multiplier": 100,
+                "spot": 120,
+                "currency": "USD",
+            }
+        ]
+    ).to_csv(parsed / "NVDA_required_data.csv", index=False)
+
+    out_dir = tmp_path / "reports"
+    run_close_advice(
+        config={"close_advice": {"enabled": True, "notify_levels": ["strong", "medium"]}},
+        context_path=ctx_path,
+        required_data_root=required_root,
+        output_dir=out_dir,
+        base_dir=Path.cwd(),
+    )
+
+    rows = pd.read_csv(out_dir / "close_advice.csv").to_dict("records")
+    assert rows[0]["tier"] == "none"
+    assert rows[0]["close_action"] == "hold_put_keep_call"
+    assert rows[0]["strategy_exit_mode"] == "yield_enhancement_put_leg"
+
+
+def test_run_close_advice_uses_yield_enhancement_long_call_exit_action(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _freeze_close_advice_business_today(monkeypatch)
+    context = {
+        "open_positions_min": [
+            {
+                "account": "lx",
+                "symbol": "NVDA",
+                "option_type": "call",
+                "side": "long",
+                "status": "open",
+                "contracts_open": 1,
+                "currency": "USD",
+                "strike": 140,
+                "multiplier": 100,
+                "premium": 1.0,
+                "expiration": "2026-05-15",
+                "strategy": "yield_enhancement",
+                "leg_role": "enhancement_call",
+                "strategy_group_id": "ye_nvda_1",
+                "yield_enhancement_mode": "vol_convexity_enhancement",
+            }
+        ]
+    }
+    ctx_path = tmp_path / "option_positions_context.json"
+    ctx_path.write_text(json.dumps(context, ensure_ascii=False), encoding="utf-8")
+
+    required_root = tmp_path / "required_data"
+    parsed = required_root / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "NVDA",
+                "option_type": "call",
+                "expiration": "2026-05-15",
+                "strike": 140,
+                "mid": 2.20,
+                "bid": 2.10,
+                "ask": 2.30,
+                "dte": 29,
+                "multiplier": 100,
+                "spot": 130,
+                "currency": "USD",
+                "delta": 0.25,
+            }
+        ]
+    ).to_csv(parsed / "NVDA_required_data.csv", index=False)
+
+    out_dir = tmp_path / "reports"
+    run_close_advice(
+        config={"close_advice": {"enabled": True, "notify_levels": ["strong", "medium"]}},
+        context_path=ctx_path,
+        required_data_root=required_root,
+        output_dir=out_dir,
+        base_dir=Path.cwd(),
+    )
+
+    rows = pd.read_csv(out_dir / "close_advice.csv").to_dict("records")
+    assert rows[0]["exit_state"] == "take_profit"
+    assert rows[0]["close_action"] == "sell_call_take_profit"
+    assert rows[0]["strategy_exit_mode"] == "yield_enhancement_long_call_leg"
+    text = (out_dir / "close_advice.txt").read_text(encoding="utf-8")
+    assert "卖出收益增强 Call 止盈" in text
+
+
+def test_run_close_advice_reports_yield_enhancement_combo_economics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _freeze_close_advice_business_today(monkeypatch)
+    monkeypatch.setattr("src.application.close_advice_runner.calc_futu_option_fee", lambda *args, **kwargs: 0.0)
+    context = {
+        "open_positions_min": [
+            {
+                "account": "lx",
+                "symbol": "NVDA",
+                "option_type": "put",
+                "side": "short",
+                "status": "open",
+                "contracts_open": 1,
+                "currency": "USD",
+                "strike": 100,
+                "multiplier": 100,
+                "premium": 1.6,
+                "expiration": "2026-05-15",
+                "strategy": "yield_enhancement",
+                "leg_role": "sell_put",
+                "strategy_group_id": "ye_nvda_1",
+                "yield_enhancement_mode": "income_upside_enhancement",
+            },
+            {
+                "account": "lx",
+                "symbol": "NVDA",
+                "option_type": "call",
+                "side": "long",
+                "status": "open",
+                "contracts_open": 1,
+                "currency": "USD",
+                "strike": 140,
+                "multiplier": 100,
+                "premium": 0.3,
+                "expiration": "2026-05-15",
+                "strategy": "yield_enhancement",
+                "leg_role": "enhancement_call",
+                "strategy_group_id": "ye_nvda_1",
+                "yield_enhancement_mode": "income_upside_enhancement",
+            },
+        ]
+    }
+    ctx_path = tmp_path / "option_positions_context.json"
+    ctx_path.write_text(json.dumps(context, ensure_ascii=False), encoding="utf-8")
+
+    required_root = tmp_path / "required_data"
+    parsed = required_root / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "NVDA",
+                "option_type": "put",
+                "expiration": "2026-05-15",
+                "strike": 100,
+                "mid": 0.20,
+                "bid": 0.19,
+                "ask": 0.21,
+                "dte": 29,
+                "multiplier": 100,
+                "spot": 120,
+                "currency": "USD",
+            },
+            {
+                "symbol": "NVDA",
+                "option_type": "call",
+                "expiration": "2026-05-15",
+                "strike": 140,
+                "mid": 0.50,
+                "bid": 0.49,
+                "ask": 0.51,
+                "dte": 29,
+                "multiplier": 100,
+                "spot": 120,
+                "currency": "USD",
+                "delta": 0.10,
+            },
+        ]
+    ).to_csv(parsed / "NVDA_required_data.csv", index=False)
+
+    out_dir = tmp_path / "reports"
+    run_close_advice(
+        config={"close_advice": {"enabled": True, "notify_levels": ["strong", "medium"]}},
+        context_path=ctx_path,
+        required_data_root=required_root,
+        output_dir=out_dir,
+        base_dir=Path.cwd(),
+    )
+
+    rows = pd.read_csv(out_dir / "close_advice.csv").to_dict("records")
+    put_row = next(row for row in rows if row["option_type"] == "put")
+    assert put_row["combo_cost_basis_status"] == "ok"
+    assert put_row["put_leg_realized_if_close"] == pytest.approx(140.0)
+    assert put_row["combo_call_cost"] == pytest.approx(30.0)
+    assert put_row["combo_call_value_if_close"] == pytest.approx(50.0)
+    assert put_row["combo_net_locked_if_close_put_keep_call"] == pytest.approx(110.0)
+    assert put_row["combo_net_if_close_both"] == pytest.approx(160.0)
+    assert put_row["optional_combo_action"] == "close_both_optional"
+
+
+def test_run_close_advice_preserves_domain_not_evaluable_status(tmp_path: Path) -> None:
+    expiration = (datetime.now(timezone.utc).date() + timedelta(days=30)).isoformat()
+    ctx_path = tmp_path / "option_positions_context.json"
+    ctx_path.write_text(
+        json.dumps(
+            {
+                "open_positions_min": [
+                    {
+                        "account": "lx",
+                        "symbol": "NVDA",
+                        "option_type": "put",
+                        "side": "short",
+                        "contracts_open": 1,
+                        "currency": "USD",
+                        "strike": 100,
+                        "multiplier": 100,
+                        "premium": "",
+                        "expiration": expiration,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    required_root = tmp_path / "required_data"
+    parsed = required_root / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "NVDA",
+                "option_type": "put",
+                "expiration": expiration,
+                "strike": 100,
+                "mid": 0.10,
+                "bid": 0.09,
+                "ask": 0.11,
+                "dte": 30,
+                "multiplier": 100,
+                "spot": 120,
+                "currency": "USD",
+            }
+        ]
+    ).to_csv(parsed / "NVDA_required_data.csv", index=False)
+
+    out_dir = tmp_path / "reports"
+    result = run_close_advice(
+        config={"close_advice": {"enabled": True, "quote_source": "required_data", "notify_levels": ["strong"]}},
+        context_path=ctx_path,
+        required_data_root=required_root,
+        output_dir=out_dir,
+        base_dir=Path.cwd(),
+    )
+
+    df = pd.read_csv(out_dir / "close_advice.csv")
+    row = df.iloc[0]
+    text = (out_dir / "close_advice.txt").read_text(encoding="utf-8")
+    assert result["notify_rows"] == 0
+    assert result["evaluation_gap_rows"] == 1
+    assert row["evaluation_status"] == "not_evaluable"
+    assert row["quote_status"] == "not_evaluable"
+    assert row["tier"] == "not_evaluable"
+    assert "missing_premium" in row["data_quality_flags"]
+    assert "待补数据" in text
+    assert "无法评估" in text
+
+
 def test_run_close_advice_prefers_context_expiration_ymd_field(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -925,6 +1297,9 @@ def test_run_close_advice_reports_missing_expiration_coverage_without_opend_fetc
 
 
 def test_run_close_advice_fetches_missing_position_coverage_before_pricing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    put_expiration = (datetime.now(timezone.utc).date() + timedelta(days=30)).isoformat()
+    call_expiration = (datetime.now(timezone.utc).date() + timedelta(days=62)).isoformat()
+    near_miss_expiration = (datetime.now(timezone.utc).date() + timedelta(days=45)).isoformat()
     ctx_path = tmp_path / "option_positions_context.json"
     ctx_path.write_text(
         json.dumps(
@@ -940,7 +1315,8 @@ def test_run_close_advice_fetches_missing_position_coverage_before_pricing(tmp_p
                         "strike": 135,
                         "multiplier": 100,
                         "premium": 0.88,
-                        "expiration": "2026-04-29",
+                        "expiration": put_expiration,
+                        "strategy_snapshot": {"strategy_family": "sell_put", "strategy_profile": "return_first"},
                     },
                     {
                         "account": "sy",
@@ -952,7 +1328,8 @@ def test_run_close_advice_fetches_missing_position_coverage_before_pricing(tmp_p
                         "strike": 200,
                         "multiplier": 100,
                         "premium": 1.50,
-                        "expiration": "2026-06-29",
+                        "expiration": call_expiration,
+                        "strategy_snapshot": {"strategy_family": "sell_call", "strategy_profile": "return_first"},
                     },
                 ]
             }
@@ -967,11 +1344,11 @@ def test_run_close_advice_fetches_missing_position_coverage_before_pricing(tmp_p
             {
                 "symbol": "9992.HK",
                 "option_type": "put",
-                "expiration": "2026-05-28",
+                "expiration": near_miss_expiration,
                 "strike": 135,
                 "mid": 0.04,
-                "bid": 0.03,
-                "ask": 0.05,
+                "bid": 0.035,
+                "ask": 0.045,
                 "dte": 30,
                 "multiplier": 100,
                 "spot": 150,
@@ -985,7 +1362,7 @@ def test_run_close_advice_fetches_missing_position_coverage_before_pricing(tmp_p
     def fake_fetch_symbol(symbol: str, **kwargs: object) -> dict[str, object]:
         calls.append({"symbol": symbol, **kwargs})
         assert symbol == "9992.HK"
-        assert kwargs["explicit_expirations"] == ["2026-04-29", "2026-06-29"]
+        assert kwargs["explicit_expirations"] == [put_expiration, call_expiration]
         assert kwargs["chain_cache_force_refresh"] is False
         assert kwargs["freshness_policy"] == "refresh_missing"
         assert kwargs["option_chain_max_calls"] == 3
@@ -1002,12 +1379,12 @@ def test_run_close_advice_fetches_missing_position_coverage_before_pricing(tmp_p
                 {
                     "symbol": "9992.HK",
                     "option_type": "put",
-                    "expiration": "2026-04-29",
+                    "expiration": put_expiration,
                     "strike": 135,
                     "mid": 0.04,
-                    "bid": 0.03,
-                    "ask": 0.05,
-                    "dte": 1,
+                    "bid": 0.035,
+                    "ask": 0.045,
+                    "dte": 30,
                     "multiplier": 100,
                     "spot": 140,
                     "currency": "HKD",
@@ -1015,7 +1392,7 @@ def test_run_close_advice_fetches_missing_position_coverage_before_pricing(tmp_p
                 {
                     "symbol": "9992.HK",
                     "option_type": "call",
-                    "expiration": "2026-06-29",
+                    "expiration": call_expiration,
                     "strike": 200,
                     "mid": 1.50,
                     "bid": 1.34,
@@ -1055,8 +1432,8 @@ def test_run_close_advice_fetches_missing_position_coverage_before_pricing(tmp_p
     assert result["evaluation_gap_rows"] == 0
     assert result["coverage_summary"]["coverage_fetch_attempted_symbols"] == 1
     assert "required_data_missing_expiration" not in csv_text
-    assert "2026-04-29" in refreshed_text
-    assert "2026-06-29" in refreshed_text
+    assert put_expiration in refreshed_text
+    assert call_expiration in refreshed_text
 
 
 def test_run_close_advice_reports_expiration_near_miss_in_quote_issue_samples(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
