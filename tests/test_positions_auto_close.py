@@ -198,6 +198,112 @@ def test_auto_close_expired_main_writes_runtime_outputs_outside_release(monkeypa
     assert not (release / "output_shared").exists()
 
 
+def test_auto_close_expired_main_accepts_explicit_runtime_root(monkeypatch, tmp_path: Path) -> None:
+    from src.application.positions import auto_close as mod
+
+    release = tmp_path / "releases" / "1.2.158"
+    runtime = tmp_path / "runtime"
+    cfg_path = runtime / "config.hk.json"
+    runtime.mkdir(parents=True)
+    cfg_path.write_text("{}", encoding="utf-8")
+    calls: list[dict[str, Any]] = []
+
+    monkeypatch.delenv("OM_RUNTIME_ROOT", raising=False)
+    monkeypatch.setattr(mod, "__file__", str(release / "src" / "application" / "positions" / "auto_close.py"))
+    monkeypatch.setattr(
+        mod,
+        "load_config",
+        lambda **_kwargs: {
+            "accounts": ["lx"],
+            "portfolio": {"data_config": "portfolio.runtime.json", "broker": "富途"},
+            "option_positions": {"auto_close": {"enabled": True}},
+        },
+    )
+
+    def _run_maintenance(**kwargs):
+        calls.append(dict(kwargs))
+        return {
+            "mode": "applied",
+            "account": kwargs["account"],
+            "broker": "富途",
+            "positions_checked": 0,
+            "candidates_should_close": 0,
+            "applied_closed": 0,
+            "skipped_already_closed": 0,
+            "errors": [],
+            "applied": [],
+            "summary_text": "",
+        }
+
+    monkeypatch.setattr(mod, "run_expired_position_maintenance_for_account", _run_maintenance)
+    monkeypatch.setattr(
+        mod,
+        "safe_send_auto_close_receipt",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("--no-send must not send receipt")),
+    )
+
+    rc = mod.main([
+        "--config",
+        str(cfg_path),
+        "--accounts",
+        "lx",
+        "--apply",
+        "--yes",
+        "--no-send",
+        "--quiet",
+        "--runtime-root",
+        str(runtime),
+    ])
+
+    assert rc == 0
+    assert calls and calls[0]["base"] == runtime.resolve()
+    assert (runtime / "audit" / "run_logs").is_dir()
+    assert (runtime / "output_runs").is_dir()
+    assert (runtime / "output_shared" / "state" / "auto_close_expired.json").exists()
+    assert not (release / "audit").exists()
+    assert not (release / "output_runs").exists()
+    assert not (release / "output_shared").exists()
+
+
+def test_auto_close_expired_main_returns_failed_for_missing_data_config(monkeypatch, tmp_path: Path) -> None:
+    from src.application.positions import auto_close as mod
+
+    runtime = tmp_path / "runtime"
+    cfg_path = runtime / "config.hk.json"
+    runtime.mkdir(parents=True)
+    cfg_path.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime))
+    monkeypatch.setattr(
+        mod,
+        "load_config",
+        lambda **_kwargs: {
+            "accounts": ["lx"],
+            "portfolio": {"data_config": "missing.runtime.json", "broker": "富途"},
+            "option_positions": {"auto_close": {"enabled": True}},
+        },
+    )
+
+    rc = mod.main([
+        "--config",
+        str(cfg_path),
+        "--accounts",
+        "lx",
+        "--apply",
+        "--yes",
+        "--no-send",
+        "--quiet",
+    ])
+
+    payload = json.loads((runtime / "output_shared" / "state" / "auto_close_expired.json").read_text(encoding="utf-8"))
+    assert rc == 1
+    assert payload["status"] == "failed"
+    account_result = payload["account_results"][0]["result"]
+    assert account_result["mode"] == "error"
+    assert account_result["reason"] == "missing_data_config"
+    assert account_result["errors"]
+
+
 def test_option_positions_cli_dispatches_auto_close_expired(monkeypatch) -> None:
     from src.interfaces.cli import option_positions as cli
 
@@ -227,6 +333,78 @@ def test_option_positions_cli_dispatches_auto_close_expired(monkeypatch) -> None
         "--apply",
         "--yes",
         "--no-send",
+        "--format",
+        "json",
+        "--quiet",
+    ]]
+
+
+def test_option_positions_cli_passes_auto_close_runtime_root(monkeypatch, tmp_path: Path) -> None:
+    from src.interfaces.cli import option_positions as cli
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(cli, "run_option_positions_auto_close", lambda argv: calls.append(list(argv)) or 0)
+
+    runtime = tmp_path / "runtime"
+    rc = cli.main([
+        "--runtime-root",
+        str(runtime),
+        "auto-close-expired",
+        "--config",
+        "config.hk.json",
+        "--accounts",
+        "lx",
+        "--apply",
+        "--yes",
+        "--quiet",
+    ])
+
+    assert rc == 0
+    assert calls == [[
+        "--config",
+        "config.hk.json",
+        "--runtime-root",
+        str(runtime),
+        "--accounts",
+        "lx",
+        "--apply",
+        "--yes",
+        "--format",
+        "json",
+        "--quiet",
+    ]]
+
+
+def test_option_positions_cli_passes_auto_close_subcommand_runtime_root(monkeypatch, tmp_path: Path) -> None:
+    from src.interfaces.cli import option_positions as cli
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(cli, "run_option_positions_auto_close", lambda argv: calls.append(list(argv)) or 0)
+
+    runtime = tmp_path / "runtime"
+    rc = cli.main([
+        "auto-close-expired",
+        "--config",
+        "config.hk.json",
+        "--runtime-root",
+        str(runtime),
+        "--accounts",
+        "lx",
+        "--apply",
+        "--yes",
+        "--quiet",
+    ])
+
+    assert rc == 0
+    assert calls == [[
+        "--config",
+        "config.hk.json",
+        "--runtime-root",
+        str(runtime),
+        "--accounts",
+        "lx",
+        "--apply",
+        "--yes",
         "--format",
         "json",
         "--quiet",

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.161 - 2026-05-29
+
+### Added
+- Added regression coverage for expired auto-close runs launched from release directories with runtime-root-backed state.
+- Added regression coverage for explicit `--runtime-root` propagation through the `option-positions auto-close-expired` facade.
+
+### Fixed
+- Fixed expired auto-close runtime resolution so audit logs, run outputs, shared state, and default `portfolio.runtime.json` resolution stay under the configured runtime root instead of the release directory.
+- Fixed missing auto-close data config handling so scheduled jobs fail explicitly instead of reporting a successful skipped run.
+
 ## 1.2.160 - 2026-05-29
 
 ### Added

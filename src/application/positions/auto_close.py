@@ -381,6 +381,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-send", action="store_true", help="do not send auto-close receipt notifications")
     parser.add_argument("--format", choices=["json", "text"], default="json")
     parser.add_argument("--quiet", action="store_true", help="suppress stdout")
+    parser.add_argument("--runtime-root", default=None, help="runtime root for state, audit, output, and active ledger store")
     args = parser.parse_args(argv)
 
     if args.dry_run and any(bool(getattr(args, name, False)) for name in ("apply", "confirm", "yes")):
@@ -395,7 +396,7 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("auto-close-expired writes trade_events and may send receipts; use --confirm or --yes to apply")
 
     repo_root = Path(__file__).resolve().parents[3]
-    base = resolve_runtime_root(repo_root=repo_root).runtime_root
+    base = resolve_runtime_root(repo_root=repo_root, runtime_root=args.runtime_root).runtime_root
     config_path = Path(args.config) if args.config else None
     result = run_auto_close_expired(
         base=base,
