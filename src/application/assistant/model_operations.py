@@ -305,7 +305,7 @@ def render_model_response(
                 configured = "yes" if row.get("api_key_configured") else "no"
                 lines.append(
                     f"{mark} {row.get('name') or '-'} | {row.get('provider') or '-'}/{row.get('model') or '-'} "
-                    f"| key={row.get('api_key_env') or '-'} configured={configured}"
+                    f"| credential_configured={configured}"
                 )
         hint = current.get("hint") if isinstance(current, dict) else None
         if hint:
