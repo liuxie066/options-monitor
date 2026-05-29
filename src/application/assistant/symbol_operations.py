@@ -9,7 +9,7 @@ from src.application.agent_tool_config import resolve_runtime_config_path
 from src.application.agent_tool_contracts import AgentToolError, build_response, mask_path
 from src.application.config_loader import resolve_watchlist_config, set_watchlist_config
 from src.application.config_validator import validate_config
-from src.application.assistant.contracts import AssistantRequest, SemanticFrame
+from src.application.assistant.contracts import AssistantRequest, PerceptionResult
 from src.application.assistant.operation_lifecycle import (
     build_cancelled_operation_response,
     build_previewed_operation_response,
@@ -30,24 +30,24 @@ SYMBOL_OPERATION_TYPES = PREVIEW_INTENTS
 
 
 def handle_symbol_operation(
-    intent: SemanticFrame,
+    intent: PerceptionResult,
     request: AssistantRequest,
     *,
     command_id: str,
     store: InboundOperationStore,
 ) -> dict[str, Any]:
-    if intent.name == "symbol_list":
+    if intent.intent_name == "symbol_list":
         return _list_symbols(request)
     policy = enforce_symbol_write_allowed(channel=request.channel, sender_id=request.sender_id)
-    if intent.name in PREVIEW_INTENTS:
+    if intent.intent_name in PREVIEW_INTENTS:
         config_path, _cfg = _load_config(request)
-        payload = _build_operation_payload(intent.name, dict(intent.arguments), request=request, config_path=config_path)
+        payload = _build_operation_payload(intent.intent_name, dict(intent.arguments), request=request, config_path=config_path)
         return _preview_and_save(payload, request=request, command_id=command_id, store=store, ttl_seconds=policy.confirm_ttl_seconds)
-    if intent.name == "symbol_confirm":
+    if intent.intent_name == "symbol_confirm":
         return _confirm_operation(operation_id=_optional_text(intent.arguments.get("operation_id")), request=request, store=store)
-    if intent.name == "symbol_cancel":
+    if intent.intent_name == "symbol_cancel":
         return _cancel_operation(operation_id=_optional_text(intent.arguments.get("operation_id")), request=request, store=store)
-    raise AgentToolError(code="INPUT_ERROR", message=f"unsupported symbol operation intent: {intent.name}")
+    raise AgentToolError(code="INPUT_ERROR", message=f"unsupported symbol operation intent: {intent.intent_name}")
 
 
 def _list_symbols(request: AssistantRequest) -> dict[str, Any]:

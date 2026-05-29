@@ -132,8 +132,10 @@ class InboundAuditStore:
                     intent_name,
                     tool_name,
                     tool_payload_json,
-                    semantic_frame_json,
-                    tool_plan_json,
+                    perception_json,
+                    reasoning_json,
+                    action_json,
+                    observation_json,
                     decision,
                     result_ok,
                     error_code,
@@ -141,7 +143,7 @@ class InboundAuditStore:
                     created_at,
                     finished_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(record.get("command_id") or ""),
@@ -154,8 +156,10 @@ class InboundAuditStore:
                     _optional_str(record.get("intent_name")),
                     _optional_str(record.get("tool_name")),
                     _json(record.get("tool_payload")),
-                    _json(record.get("semantic_frame")),
-                    _json(record.get("tool_plan")),
+                    _json(record.get("perception")),
+                    _json(record.get("reasoning")),
+                    _json(record.get("action")),
+                    _json(record.get("observation")),
                     str(record.get("decision") or ""),
                     1 if bool(record.get("result_ok")) else 0,
                     _optional_str(record.get("error_code")),
@@ -218,8 +222,10 @@ class InboundAuditStore:
                         intent_name TEXT,
                         tool_name TEXT,
                         tool_payload_json TEXT,
-                        semantic_frame_json TEXT,
-                        tool_plan_json TEXT,
+                        perception_json TEXT,
+                        reasoning_json TEXT,
+                        action_json TEXT,
+                        observation_json TEXT,
                         decision TEXT NOT NULL,
                         result_ok INTEGER NOT NULL DEFAULT 0,
                         error_code TEXT,
@@ -243,8 +249,10 @@ class InboundAuditStore:
                 _ensure_column(conn, "last_duplicate_sender_id", "TEXT")
                 _ensure_column(conn, "last_duplicate_decision", "TEXT")
                 _ensure_column(conn, "conversation_id", "TEXT")
-                _ensure_column(conn, "semantic_frame_json", "TEXT")
-                _ensure_column(conn, "tool_plan_json", "TEXT")
+                _ensure_column(conn, "perception_json", "TEXT")
+                _ensure_column(conn, "reasoning_json", "TEXT")
+                _ensure_column(conn, "action_json", "TEXT")
+                _ensure_column(conn, "observation_json", "TEXT")
         except sqlite3.Error as exc:
             raise inbound_sqlite_error(self.path, exc) from exc
 

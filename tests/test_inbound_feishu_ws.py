@@ -104,7 +104,8 @@ def test_feishu_ws_can_route_through_assistant(tmp_path: Path) -> None:
     inbound_result = out["data"]["inbound"]["data"]["inbound_result"]
     assert out["ok"] is True
     assert calls == [("runtime_status", {"config_path": str(tmp_path / "config.us.json")})]
-    assert inbound_result["data"]["intent"]["parser"] == "command"
+    assert inbound_result["data"]["perception"]["source"] == "command"
+    assert inbound_result["data"]["perception"]["intent_name"] == "runtime_status"
     assert inbound_result["meta"]["assistant"]["route"] == "command"
     assert inbound_result["meta"]["assistant"]["llm"]["enabled"] is False
 

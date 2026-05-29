@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.assistant.contracts import AssistantToolCall
+from src.application.assistant.contracts import ToolCall
 from src.application.settings import build_effective_env
 from src.application.tool_allowlist import PURE_READ_TOOLS
 
@@ -62,7 +62,7 @@ def enforce_sender_allowed(*, channel: str, sender_id: str, allowed_senders: str
     return decision
 
 
-def enforce_tool_allowed(call: AssistantToolCall) -> dict[str, Any]:
+def enforce_tool_allowed(call: ToolCall) -> dict[str, Any]:
     from src.application.assistant.tool_policy import DEFAULT_TOOL_POLICY
 
     return DEFAULT_TOOL_POLICY.authorize_read_tool(call, source="inbound").public_payload()

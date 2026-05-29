@@ -2,12 +2,9 @@ from __future__ import annotations
 
 from datetime import date
 
-import pytest
-
-from src.application.agent_tool_contracts import AgentToolError
 from src.application.assistant.parser import parse_inbound_text
-from src.application.assistant.contracts import AssistantFrame, AssistantRequest
-from src.application.assistant.frame_planner import frame_from_intent, tool_plan_from_frame
+from src.application.assistant.contracts import AssistantRequest, PerceptionResult
+from src.application.assistant.reasoning import resolve_reasoning
 from src.application.ledger.read_model import list_position_rows
 
 
@@ -65,7 +62,7 @@ class _Repo:
 def test_position_query_parser_preserves_expiration_month_constraint() -> None:
     intent = parse_inbound_text("sy 5月到期的持仓", now_fn=lambda: date(2026, 5, 19))
 
-    assert intent.name == "position_query"
+    assert intent.intent_name == "position_query"
     assert intent.arguments == {
         "account": "sy",
         "status": "open",
@@ -77,7 +74,7 @@ def test_position_query_parser_preserves_expiration_month_constraint() -> None:
 def test_position_query_parser_preserves_month_without_account() -> None:
     intent = parse_inbound_text("5月到期的持仓", now_fn=lambda: date(2026, 5, 19))
 
-    assert intent.name == "position_query"
+    assert intent.intent_name == "position_query"
     assert intent.arguments == {
         "status": "open",
         "expiration": {"month": "2026-05"},
@@ -85,25 +82,24 @@ def test_position_query_parser_preserves_month_without_account() -> None:
     }
 
 
-def test_position_query_frame_planner_preserves_query_constraints() -> None:
-    intent = parse_inbound_text("0700 5月 call 持仓", now_fn=lambda: date(2026, 5, 19))
-    frame = frame_from_intent(intent)
-    plan = tool_plan_from_frame(
-        frame,
+def test_position_query_reasoning_preserves_query_constraints() -> None:
+    perception = parse_inbound_text("0700 5月 call 持仓", now_fn=lambda: date(2026, 5, 19))
+    resolution = resolve_reasoning(
+        perception,
         request=AssistantRequest(text="0700 5月 call 持仓", sender_id="local", config_key="hk"),
     )
 
-    assert frame.public_payload()["payload"] == {
-        "query": {
-            "status": "open",
-            "symbol": "0700.HK",
-            "option_type": "call",
-            "expiration": {"month": "2026-05"},
-            "limit": 50,
-        }
+    assert perception.public_payload()["arguments"] == {
+        "status": "open",
+        "symbol": "0700.HK",
+        "option_type": "call",
+        "expiration": {"month": "2026-05"},
+        "limit": 50,
     }
-    assert plan.tool_name == "option_positions_read"
-    assert plan.payload == {
+    assert resolution.status == "supported"
+    assert resolution.tool_call is not None
+    assert resolution.tool_call.tool_name == "option_positions_read"
+    assert resolution.tool_call.payload == {
         "config_key": "hk",
         "action": "list",
         "query": {
@@ -116,21 +112,29 @@ def test_position_query_frame_planner_preserves_query_constraints() -> None:
     }
 
 
-def test_frame_planner_rejects_safety_class_mismatch() -> None:
-    frame = AssistantFrame(
-        intent="runtime_status",
-        payload={},
-        safety_class="write_preview",
+def test_reasoning_keeps_unsupported_exit_analysis_out_of_tool_execution() -> None:
+    resolution = resolve_reasoning(
+        PerceptionResult(intent_name="position_exit_analysis", arguments={"option_type": "call", "side": "long"}),
+        request=AssistantRequest(text="分析 long call", sender_id="local", config_key="us"),
     )
 
-    with pytest.raises(AgentToolError) as exc:
-        tool_plan_from_frame(frame, request=AssistantRequest(text="状态", sender_id="local", config_key="us"))
+    assert resolution.status == "unsupported"
+    assert resolution.tool_call is None
+    assert "不能降级" in str(resolution.message)
 
-    assert exc.value.code == "PERMISSION_DENIED"
-    assert exc.value.details == {
-        "safety_class": "write_preview",
-        "expected_safety_class": "read",
-    }
+
+def test_parser_does_not_downgrade_exit_analysis_to_position_query() -> None:
+    perception = parse_inbound_text("泡泡玛特 long call 的持仓应该止盈吗", now_fn=lambda: date(2026, 5, 29))
+    resolution = resolve_reasoning(
+        perception,
+        request=AssistantRequest(text="泡泡玛特 long call 的持仓应该止盈吗", sender_id="local", config_key="hk"),
+    )
+
+    assert perception.intent_name == "position_exit_analysis"
+    assert perception.arguments["option_type"] == "call"
+    assert perception.arguments["side"] == "long"
+    assert resolution.status == "unsupported"
+    assert resolution.tool_call is None
 
 
 def test_position_query_parser_keeps_symbol_type_and_month_constraints() -> None:

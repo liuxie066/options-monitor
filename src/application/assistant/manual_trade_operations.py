@@ -6,7 +6,7 @@ from typing import Any, cast
 
 from src.application.agent_tool_config import load_runtime_config, repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_response, mask_path
-from src.application.assistant.contracts import AssistantRequest, SemanticFrame
+from src.application.assistant.contracts import AssistantRequest, PerceptionResult
 from src.application.assistant.manual_trade_parser import build_manual_trade_draft
 from src.application.assistant.operation_lifecycle import (
     build_cancelled_operation_response,
@@ -71,14 +71,14 @@ FIELD_LABELS = {
 
 
 def handle_manual_trade_operation(
-    intent: SemanticFrame,
+    intent: PerceptionResult,
     request: AssistantRequest,
     *,
     command_id: str,
     store: InboundOperationStore,
 ) -> dict[str, Any]:
     policy = enforce_trade_write_allowed(channel=request.channel, sender_id=request.sender_id)
-    if intent.name == "manual_trade_open":
+    if intent.intent_name == "manual_trade_open":
         config_path, cfg = _load_runtime_config_for_request(request)
         draft = build_manual_trade_draft(
             "manual_open",
@@ -99,7 +99,7 @@ def handle_manual_trade_operation(
             diagnostics=draft["diagnostics"],
         )
         return _preview_and_save(payload, request=request, command_id=command_id, store=store, ttl_seconds=policy.confirm_ttl_seconds)
-    if intent.name == "manual_trade_close":
+    if intent.intent_name == "manual_trade_close":
         config_path, cfg = _load_runtime_config_for_request(request)
         draft = build_manual_trade_draft(
             "manual_close",
@@ -119,18 +119,18 @@ def handle_manual_trade_operation(
             diagnostics=draft["diagnostics"],
         )
         return _preview_and_save(payload, request=request, command_id=command_id, store=store, ttl_seconds=policy.confirm_ttl_seconds)
-    if intent.name == "manual_trade_confirm":
+    if intent.intent_name == "manual_trade_confirm":
         return _confirm_operation(operation_id=_optional_text(intent.arguments.get("operation_id")), request=request, store=store)
-    if intent.name == "manual_trade_cancel":
+    if intent.intent_name == "manual_trade_cancel":
         return _cancel_operation(operation_id=_optional_text(intent.arguments.get("operation_id")), request=request, store=store)
-    if intent.name == "manual_trade_update":
+    if intent.intent_name == "manual_trade_update":
         return _update_operation(
             operation_id=_optional_text(intent.arguments.get("operation_id")),
             updates=dict(intent.arguments.get("updates") or {}),
             request=request,
             store=store,
         )
-    raise AgentToolError(code="INPUT_ERROR", message=f"unsupported manual trade operation intent: {intent.name}")
+    raise AgentToolError(code="INPUT_ERROR", message=f"unsupported manual trade operation intent: {intent.intent_name}")
 
 
 def _preview_and_save(
@@ -381,7 +381,7 @@ def _format_patch_summary(patch: dict[str, Any]) -> str:
     return "已修改：" + "，".join(parts)
 
 
-def _manual_trade_raw_text(intent: SemanticFrame, request: AssistantRequest) -> str:
+def _manual_trade_raw_text(intent: PerceptionResult, request: AssistantRequest) -> str:
     return str(intent.arguments.get("raw_text") or request.text or "").strip()
 
 

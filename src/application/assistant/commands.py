@@ -14,6 +14,7 @@ class AssistantCommandSpec:
     read_only: bool = True
     llm_allowed: bool = True
     llm_visible: bool = True
+    supported: bool = True
     risk_level: str | None = None
     examples: tuple[str, ...] = ()
     summary: str = ""
@@ -99,6 +100,19 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         arguments=("account", "status", "symbol", "option_type", "side", "strike", "expiration", "limit"),
         examples=("持仓", "持仓 [账户]", "持仓 [到期月份/到期日/标的/类型/方向]", "/positions [lx|sy|all]"),
         summary="list option positions",
+    ),
+    AssistantCommandSpec(
+        intent_name="position_exit_analysis",
+        tool_name=None,
+        commands=(),
+        display_name="平仓/止盈分析",
+        arguments=("account", "symbol", "option_type", "side", "strike", "expiration", "limit"),
+        read_only=True,
+        llm_allowed=True,
+        supported=False,
+        risk_level="unsupported",
+        examples=("分析 long call 是不是应该平仓", "泡泡玛特 long call 的持仓应该止盈吗"),
+        summary="recognize option exit or take-profit analysis requests that are not implemented yet",
     ),
     AssistantCommandSpec(
         intent_name="monthly_income_report",
@@ -413,6 +427,7 @@ def command_catalog_payload() -> dict[str, Any]:
             "read_only_count": sum(1 for item in specs if item["read_only"]),
             "llm_allowed_count": sum(1 for item in specs if item["llm_executable"]),
             "llm_executable_count": sum(1 for item in specs if item["llm_executable"]),
+            "llm_recognizable_count": sum(1 for item in specs if item["llm_recognizable"]),
             "write_command_count": sum(1 for item in specs if not item["read_only"]),
             "write_capability_count": sum(1 for item in specs if not item["read_only"]),
         },
@@ -433,7 +448,8 @@ def capability_catalog_text(payload: dict[str, Any] | None = None) -> str:
     catalog = payload if payload is not None else command_catalog_payload()
     capabilities = list(catalog.get("capabilities") or [])
     executable = [item for item in capabilities if item.get("llm_executable")]
-    non_executable = [item for item in capabilities if not item.get("llm_executable")]
+    recognizable = [item for item in capabilities if item.get("llm_recognizable") and not item.get("llm_executable")]
+    non_executable = [item for item in capabilities if not item.get("llm_recognizable")]
 
     lines = [
         "Assistant capabilities",
@@ -443,14 +459,19 @@ def capability_catalog_text(payload: dict[str, Any] | None = None) -> str:
     lines.extend(_capability_text_line(item) for item in executable)
     lines.extend([
         "",
-        "Known capabilities not executable by LLM:",
+        "LLM recognizable but not executable capabilities:",
+    ])
+    lines.extend(_capability_text_line(item) for item in recognizable)
+    lines.extend([
+        "",
+        "Known capabilities not recognizable by LLM:",
     ])
     lines.extend(_capability_text_line(item) for item in non_executable)
     lines.extend([
         "",
         (
-            "Rule: LLM may choose only llm_executable=true capabilities. Writes, confirms, "
-            "and admin operations stay behind deterministic preview/confirm handling."
+            "Rule: LLM may identify llm_recognizable=true capabilities. The deterministic "
+            "reasoning layer decides whether a recognized capability is executable."
         ),
     ])
     return "\n".join(lines)
@@ -488,14 +509,18 @@ def llm_executable_specs() -> tuple[AssistantCommandSpec, ...]:
     return tuple(spec for spec in COMMAND_SPECS if _is_llm_executable_spec(spec))
 
 
+def llm_recognizable_specs() -> tuple[AssistantCommandSpec, ...]:
+    return tuple(spec for spec in COMMAND_SPECS if _is_llm_recognizable_spec(spec))
+
+
 def llm_allowed_specs() -> tuple[AssistantCommandSpec, ...]:
-    return llm_executable_specs()
+    return llm_recognizable_specs()
 
 
 def llm_executable_arguments() -> dict[str, frozenset[str]]:
     return {
         spec.intent_name: frozenset(spec.arguments)
-        for spec in llm_executable_specs()
+        for spec in llm_recognizable_specs()
     }
 
 
@@ -507,8 +532,12 @@ def llm_executable_intent_names() -> list[str]:
     return sorted(spec.intent_name for spec in llm_executable_specs())
 
 
+def llm_recognizable_intent_names() -> list[str]:
+    return sorted(spec.intent_name for spec in llm_recognizable_specs())
+
+
 def llm_intent_names() -> list[str]:
-    return llm_executable_intent_names()
+    return llm_recognizable_intent_names()
 
 
 def llm_capability_manifest() -> dict[str, Any]:
@@ -520,8 +549,9 @@ def llm_capability_manifest() -> dict[str, Any]:
     return {
         "schema_version": LLM_INTENT_SCHEMA_VERSION,
         "intent_field_semantics": "The JSON `intent` field is the OM capability_id.",
-        "routing_rule": "Choose only capabilities where llm_executable is true. For write, confirm, admin, or unknown requests, return low confidence.",
+        "routing_rule": "Choose only capabilities where llm_recognizable is true. The reasoning layer will reject recognized but unsupported capabilities without downgrading them.",
         "llm_executable_intents": llm_executable_intent_names(),
+        "llm_recognizable_intents": llm_recognizable_intent_names(),
         "capabilities": capabilities,
     }
 
@@ -530,28 +560,30 @@ def llm_capability_prompt() -> str:
     manifest = llm_capability_manifest()
     lines = [
         "Available OM capabilities:",
-        "The JSON `intent` field must be one executable capability_id from this manifest.",
-        "Capabilities with llm_executable=false are known project abilities but must not be routed by LLM.",
+        "The JSON `intent` field must be one llm_recognizable capability_id from this manifest.",
+        "Capabilities with llm_recognizable=true and llm_executable=false may be identified, but they will not be executed.",
+        "Capabilities with llm_recognizable=false must not be routed by LLM.",
     ]
     for item in manifest["capabilities"]:
         executable = "true" if item["llm_executable"] else "false"
+        recognizable = "true" if item["llm_recognizable"] else "false"
         commands = ", ".join(item["commands"]) if item["commands"] else "-"
         usage = " | ".join(item["examples"]) if item["examples"] else "-"
         args = ", ".join(item["arguments"]) if item["arguments"] else "-"
         lines.append(
             f"- {item['capability_id']} ({item['display_name']}): {item['summary']}; risk={item['risk_level']}; "
-            f"llm_executable={executable}; commands={commands}; args={args}; usage={usage}"
+            f"llm_recognizable={recognizable}; llm_executable={executable}; commands={commands}; args={args}; usage={usage}"
         )
     return "\n".join(lines)
 
 
 def llm_argument_schema_properties() -> dict[str, dict[str, Any]]:
-    names = sorted({arg for spec in llm_executable_specs() for arg in spec.arguments})
+    names = sorted({arg for spec in llm_recognizable_specs() for arg in spec.arguments})
     return {name: dict(ARGUMENT_JSON_SCHEMA[name]) for name in names}
 
 
 def llm_argument_schema_required_keys() -> list[str]:
-    return sorted({arg for spec in llm_executable_specs() for arg in spec.arguments})
+    return sorted({arg for spec in llm_recognizable_specs() for arg in spec.arguments})
 
 
 def _spec_payload(spec: AssistantCommandSpec) -> dict[str, Any]:
@@ -565,6 +597,8 @@ def _spec_payload(spec: AssistantCommandSpec) -> dict[str, Any]:
         "read_only": bool(spec.read_only),
         "llm_allowed": bool(spec.llm_allowed),
         "llm_visible": bool(spec.llm_visible),
+        "supported": bool(spec.supported),
+        "llm_recognizable": _is_llm_recognizable_spec(spec),
         "llm_executable": _is_llm_executable_spec(spec),
         "risk_level": _risk_level(spec),
         "examples": list(spec.examples),
@@ -577,6 +611,10 @@ def _spec_payload(spec: AssistantCommandSpec) -> dict[str, Any]:
 
 
 def _is_llm_executable_spec(spec: AssistantCommandSpec) -> bool:
+    return bool(spec.read_only and spec.llm_allowed and spec.supported and spec.tool_name is not None)
+
+
+def _is_llm_recognizable_spec(spec: AssistantCommandSpec) -> bool:
     return bool(spec.read_only and spec.llm_allowed)
 
 

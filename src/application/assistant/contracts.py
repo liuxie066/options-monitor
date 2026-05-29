@@ -4,10 +4,15 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 
-ASSISTANT_FRAME_SCHEMA_VERSION = "om-assistant-frame-v1"
-SEMANTIC_FRAME_SCHEMA_VERSION = "om-semantic-frame-v1"
-TOOL_PLAN_SCHEMA_VERSION = "om-tool-plan-v1"
+MESSAGE_SCHEMA_VERSION = "om-message-v1"
+PERCEPTION_RESULT_SCHEMA_VERSION = "om-perception-result-v1"
+REASONING_RESOLUTION_SCHEMA_VERSION = "om-reasoning-resolution-v1"
+ACTION_RESULT_SCHEMA_VERSION = "om-action-result-v1"
+OBSERVATION_RESPONSE_SCHEMA_VERSION = "om-observation-response-v1"
+
 AssistantSafetyClass = Literal["read", "write_preview", "write_apply", "admin_preview", "local"]
+ReasoningStatus = Literal["supported", "preview_required", "unsupported", "clarify", "denied", "failed"]
+ActionKind = Literal["tool", "operation", "pending", "local_response", "none"]
 
 
 @dataclass(frozen=True)
@@ -24,6 +29,7 @@ class AssistantRequest:
 
     def public_payload(self) -> dict[str, Any]:
         return {
+            "schema_version": MESSAGE_SCHEMA_VERSION,
             "channel": self.channel,
             "sender_id": self.sender_id,
             "message_id": self.message_id,
@@ -34,53 +40,33 @@ class AssistantRequest:
 
 
 @dataclass(frozen=True)
-class SemanticFrame:
-    """Canonical semantic output from command, deterministic parser, or LLM.
+class PerceptionResult:
+    """Canonical perception output from command, deterministic parser, or LLM.
 
-    A semantic frame describes what the user wants in assistant vocabulary. It
-    intentionally carries no tool name and no executable payload. Tool planning
-    belongs to src.application.assistant.frame_planner.
+    Perception only describes what the user appears to want. It must not choose
+    tools, downgrade unsupported requests to nearby capabilities, or apply write
+    policy. Those decisions belong to the reasoning layer.
     """
 
-    name: str
+    intent_name: str
     arguments: dict[str, Any]
-    parser: str = "deterministic"
+    source: str = "deterministic"
     confidence: float = 1.0
+    evidence: dict[str, Any] | None = None
 
     def public_payload(self) -> dict[str, Any]:
         return {
-            "schema_version": SEMANTIC_FRAME_SCHEMA_VERSION,
-            "name": self.name,
+            "schema_version": PERCEPTION_RESULT_SCHEMA_VERSION,
+            "intent_name": self.intent_name,
             "arguments": dict(self.arguments),
-            "parser": self.parser,
+            "source": self.source,
             "confidence": self.confidence,
-        }
-
-
-AssistantIntent = SemanticFrame
-
-
-@dataclass(frozen=True)
-class AssistantFrame:
-    intent: str
-    payload: dict[str, Any]
-    safety_class: AssistantSafetyClass
-    parser: str = "deterministic"
-    confidence: float = 1.0
-
-    def public_payload(self) -> dict[str, Any]:
-        return {
-            "schema_version": ASSISTANT_FRAME_SCHEMA_VERSION,
-            "intent": self.intent,
-            "payload": dict(self.payload),
-            "safety_class": self.safety_class,
-            "parser": self.parser,
-            "confidence": self.confidence,
+            "evidence": dict(self.evidence or {}),
         }
 
 
 @dataclass(frozen=True)
-class AssistantToolCall:
+class ToolCall:
     tool_name: str
     payload: dict[str, Any]
 
@@ -92,40 +78,89 @@ class AssistantToolCall:
 
 
 @dataclass(frozen=True)
-class ToolPlan:
-    tool_name: str
-    payload: dict[str, Any]
+class ReasoningResolution:
+    status: ReasoningStatus
+    intent_name: str | None
+    arguments: dict[str, Any]
     safety_class: AssistantSafetyClass
+    action_kind: ActionKind = "none"
+    tool_call: ToolCall | None = None
     read_only: bool = True
     requires_confirmation: bool = False
     reason: str = ""
-    source_intent: str | None = None
-
-    def to_tool_call(self) -> AssistantToolCall:
-        return AssistantToolCall(tool_name=self.tool_name, payload=dict(self.payload))
+    message: str | None = None
 
     def public_payload(self) -> dict[str, Any]:
         return {
-            "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-            "tool_name": self.tool_name,
-            "payload": dict(self.payload),
+            "schema_version": REASONING_RESOLUTION_SCHEMA_VERSION,
+            "status": self.status,
+            "intent_name": self.intent_name,
+            "arguments": dict(self.arguments),
             "safety_class": self.safety_class,
+            "action_kind": self.action_kind,
+            "tool_call": self.tool_call.public_payload() if self.tool_call else None,
             "read_only": bool(self.read_only),
             "requires_confirmation": bool(self.requires_confirmation),
             "reason": self.reason,
-            "source_intent": self.source_intent,
+            "message": self.message,
+        }
+
+
+@dataclass(frozen=True)
+class ActionResult:
+    executed: bool
+    ok: bool
+    action_kind: ActionKind
+    tool_name: str = ""
+    payload: dict[str, Any] | None = None
+    result: dict[str, Any] | None = None
+    error: dict[str, Any] | None = None
+    response_text: str | None = None
+
+    def public_payload(self) -> dict[str, Any]:
+        return {
+            "schema_version": ACTION_RESULT_SCHEMA_VERSION,
+            "executed": bool(self.executed),
+            "ok": bool(self.ok),
+            "action_kind": self.action_kind,
+            "tool_name": self.tool_name,
+            "payload": dict(self.payload or {}),
+            "result": dict(self.result or {}),
+            "error": dict(self.error or {}),
+            "response_text": self.response_text,
+        }
+
+
+@dataclass(frozen=True)
+class ObservationResponse:
+    response_text: str
+    ok: bool
+    status: str
+    error_code: str | None = None
+
+    def public_payload(self) -> dict[str, Any]:
+        return {
+            "schema_version": OBSERVATION_RESPONSE_SCHEMA_VERSION,
+            "response_text": self.response_text,
+            "ok": bool(self.ok),
+            "status": self.status,
+            "error_code": self.error_code,
         }
 
 
 __all__ = [
-    "ASSISTANT_FRAME_SCHEMA_VERSION",
-    "SEMANTIC_FRAME_SCHEMA_VERSION",
-    "TOOL_PLAN_SCHEMA_VERSION",
-    "AssistantFrame",
-    "AssistantIntent",
+    "ACTION_RESULT_SCHEMA_VERSION",
+    "MESSAGE_SCHEMA_VERSION",
+    "OBSERVATION_RESPONSE_SCHEMA_VERSION",
+    "PERCEPTION_RESULT_SCHEMA_VERSION",
+    "REASONING_RESOLUTION_SCHEMA_VERSION",
+    "ActionKind",
+    "ActionResult",
     "AssistantRequest",
     "AssistantSafetyClass",
-    "AssistantToolCall",
-    "SemanticFrame",
-    "ToolPlan",
+    "ObservationResponse",
+    "PerceptionResult",
+    "ReasoningResolution",
+    "ReasoningStatus",
+    "ToolCall",
 ]

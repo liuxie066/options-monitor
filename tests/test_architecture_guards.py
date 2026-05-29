@@ -132,16 +132,19 @@ def test_assistant_config_rejects_business_runtime_shape() -> None:
 def test_llm_intent_surface_is_read_only_only() -> None:
     from src.application.assistant.llm_intent_schema import llm_intent_json_schema, llm_intent_schema
     from src.application.agent_tool_registry import get_tool_definition
-    from src.application.assistant.commands import llm_executable_specs
+    from src.application.assistant.commands import llm_executable_specs, llm_recognizable_specs
     from src.application.tool_allowlist import PURE_READ_TOOLS
 
     schema = llm_intent_schema()
     json_schema = llm_intent_json_schema()
     allowed_names = {spec.intent_name for spec in llm_executable_specs()}
+    recognizable_names = {spec.intent_name for spec in llm_recognizable_specs()}
 
     assert schema["write_intents_allowed"] is False
-    assert set(json_schema["properties"]["intent"]["enum"]) == allowed_names
-    assert not any(name.endswith(("_confirm", "_cancel")) for name in allowed_names)
+    assert set(json_schema["properties"]["intent"]["enum"]) == recognizable_names
+    assert allowed_names <= recognizable_names
+    assert "position_exit_analysis" in recognizable_names - allowed_names
+    assert not any(name.endswith(("_confirm", "_cancel")) for name in recognizable_names)
 
     pure_read_router_tools = {"inbound.pending", "inbound.symbols"}
     for spec in llm_executable_specs():
@@ -192,11 +195,11 @@ def test_assistant_owns_command_catalog_and_interaction_contracts() -> None:
     assert "src.application.assistant.runtime import handle_assistant_message" in feishu_text
 
 
-def test_assistant_runtime_delegates_intent_arbitration() -> None:
+def test_assistant_runtime_delegates_perception() -> None:
     runtime_text = (ROOT / "src" / "application" / "assistant" / "runtime.py").read_text(encoding="utf-8")
-    arbitrator_text = (ROOT / "src" / "application" / "assistant" / "intent_arbitrator.py").read_text(encoding="utf-8")
+    perception_text = (ROOT / "src" / "application" / "assistant" / "perception.py").read_text(encoding="utf-8")
 
-    assert "IntentArbitrator(" in runtime_text
+    assert "PerceptionEngine(" in runtime_text
     forbidden_runtime_tokens = (
         "parse_assistant_command",
         "parse_inbound_text",
@@ -210,25 +213,30 @@ def test_assistant_runtime_delegates_intent_arbitration() -> None:
     assert offenders == []
 
     for token in forbidden_runtime_tokens:
-        assert token in arbitrator_text
+        assert token in perception_text
 
 
-def test_assistant_router_delegates_tool_planning() -> None:
+def test_assistant_router_uses_perception_reasoning_action_observation_chain() -> None:
     router_text = (ROOT / "src" / "application" / "assistant" / "router.py").read_text(encoding="utf-8")
-    planner_text = (ROOT / "src" / "application" / "assistant" / "frame_planner.py").read_text(encoding="utf-8")
+    reasoning_text = (ROOT / "src" / "application" / "assistant" / "reasoning.py").read_text(encoding="utf-8")
     contracts_text = (ROOT / "src" / "application" / "assistant" / "contracts.py").read_text(encoding="utf-8")
 
-    assert "tool_plan_from_frame(" in router_text
+    assert "resolve_reasoning(" in router_text
+    assert "perform_action(" in router_text
+    assert "build_observation(" in router_text
+    assert "frame_planner" not in router_text
     assert "def _tool_call_from_intent" not in router_text
     assert "is_manual_trade_operation_intent" not in router_text
     assert "is_symbol_operation_intent" not in router_text
     assert "is_upgrade_operation_intent" not in router_text
-    assert "def frame_from_semantic_frame(" in planner_text
-    assert "frame_from_intent = frame_from_semantic_frame" in planner_text
-    assert "def tool_plan_from_frame(" in planner_text
-    assert "PLANNED_TOOL_INTENTS" in planner_text
-    assert "class AssistantFrame" in contracts_text
-    assert "class ToolPlan" in contracts_text
+    assert "def resolve_reasoning(" in reasoning_text
+    assert "ReasoningResolution(" in reasoning_text
+    assert "class PerceptionResult" in contracts_text
+    assert "class ReasoningResolution" in contracts_text
+    assert "class ActionResult" in contracts_text
+    assert "class ObservationResponse" in contracts_text
+    assert "class AssistantFrame" not in contracts_text
+    assert "class ToolPlan" not in contracts_text
     for module in ("manual_trade_operations.py", "symbol_operations.py", "upgrade_operations.py"):
         module_text = (ROOT / "src" / "application" / "assistant" / module).read_text(encoding="utf-8")
         assert "is_manual_trade_operation_intent" not in module_text
@@ -236,10 +244,10 @@ def test_assistant_router_delegates_tool_planning() -> None:
         assert "is_upgrade_operation_intent" not in module_text
 
 
-def test_assistant_semantic_frame_is_canonical_contract_name() -> None:
-    from src.application.assistant.contracts import AssistantIntent, SemanticFrame
+def test_assistant_perception_result_is_canonical_contract_name() -> None:
+    from src.application.assistant.contracts import PerceptionResult
 
-    assert AssistantIntent is SemanticFrame
+    assert PerceptionResult.__name__ == "PerceptionResult"
 
     offenders: list[str] = []
     allowed = {"contracts.py", "__init__.py"}
@@ -247,16 +255,16 @@ def test_assistant_semantic_frame_is_canonical_contract_name() -> None:
         if path.name in allowed:
             continue
         text = path.read_text(encoding="utf-8")
-        if "AssistantIntent" in text:
+        if "AssistantIntent" in text or "SemanticFrame" in text:
             offenders.append(str(path.relative_to(ROOT)))
 
     assert offenders == []
 
 
-def test_semantic_frame_producers_do_not_plan_or_execute_tools() -> None:
+def test_perception_producers_do_not_plan_or_execute_tools() -> None:
     forbidden = (
-        "AssistantToolCall",
-        "ToolPlan",
+        "ToolCall",
+        "ReasoningResolution",
         "frame_from_intent",
         "frame_from_semantic_frame",
         "tool_plan_from_frame",
@@ -283,18 +291,19 @@ def test_semantic_frame_producers_do_not_plan_or_execute_tools() -> None:
     assert offenders == {}
 
 
-def test_tool_plan_construction_is_planner_owned() -> None:
-    tool_plan_offenders: list[str] = []
-    tool_call_offenders: list[str] = []
+def test_legacy_assistant_frame_and_tool_plan_are_removed() -> None:
+    assert not (ROOT / "src" / "application" / "assistant" / "frame_planner.py").exists()
+    assert not (ROOT / "src" / "application" / "assistant" / "intent_arbitrator.py").exists()
+    assert not (ROOT / "src" / "application" / "assistant" / "intent_arbitration.py").exists()
+    assert not (ROOT / "src" / "application" / "assistant" / "semantic_frames.py").exists()
+
+    legacy_offenders: list[str] = []
     for path in sorted((ROOT / "src" / "application" / "assistant").glob("*.py")):
         text = path.read_text(encoding="utf-8")
-        if "ToolPlan(" in text and path.name != "frame_planner.py":
-            tool_plan_offenders.append(str(path.relative_to(ROOT)))
-        if "AssistantToolCall(" in text and path.name not in {"contracts.py", "runtime.py"}:
-            tool_call_offenders.append(str(path.relative_to(ROOT)))
+        if any(token in text for token in ("AssistantFrame", "ToolPlan", "SemanticFrame", "AssistantIntent")):
+            legacy_offenders.append(str(path.relative_to(ROOT)))
 
-    assert tool_plan_offenders == []
-    assert tool_call_offenders == []
+    assert legacy_offenders == []
 
 
 def test_runtime_router_and_arbitrator_do_not_know_model_profiles() -> None:
@@ -307,8 +316,8 @@ def test_runtime_router_and_arbitrator_do_not_know_model_profiles() -> None:
     checked = [
         ROOT / "src" / "application" / "assistant" / "runtime.py",
         ROOT / "src" / "application" / "assistant" / "router.py",
-        ROOT / "src" / "application" / "assistant" / "intent_arbitrator.py",
-        ROOT / "src" / "application" / "assistant" / "frame_planner.py",
+        ROOT / "src" / "application" / "assistant" / "perception.py",
+        ROOT / "src" / "application" / "assistant" / "reasoning.py",
     ]
     offenders: dict[str, list[str]] = {}
     for path in checked:
@@ -380,6 +389,8 @@ def test_inbound_transport_does_not_import_assistant_control_plane_details() -> 
         "src.application.assistant.commands",
         "src.application.assistant.frame_planner",
         "src.application.assistant.intent_arbitrator",
+        "src.application.assistant.perception",
+        "src.application.assistant.reasoning",
         "src.application.assistant.llm_reply",
         "src.application.assistant.llm_translator",
         "src.application.assistant.parser",
