@@ -323,6 +323,11 @@ def main(argv: list[str] | None = None) -> int:
     p_auto_close.add_argument("--no-send", action="store_true", help="do not send auto-close receipt notifications")
     p_auto_close.add_argument("--format", choices=["json", "text"], default="json")
     p_auto_close.add_argument("--quiet", action="store_true", help="suppress stdout")
+    p_auto_close.add_argument(
+        "--runtime-root",
+        default=argparse.SUPPRESS,
+        help="runtime root for state, audit, output, and active ledger store",
+    )
 
     args = ap.parse_args(argv)
 
@@ -348,6 +353,8 @@ def main(argv: list[str] | None = None) -> int:
             auto_close_argv.extend(["--data-config", str(args.auto_close_data_config)])
         elif args.data_config:
             auto_close_argv.extend(["--data-config", str(args.data_config)])
+        if args.runtime_root:
+            auto_close_argv.extend(["--runtime-root", str(args.runtime_root)])
         if args.accounts:
             auto_close_argv.append("--accounts")
             auto_close_argv.extend(str(item) for item in args.accounts)
