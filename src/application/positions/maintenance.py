@@ -267,12 +267,47 @@ def run_expired_position_maintenance_for_account(
     )
     data_config_ref = portfolio_cfg.get("data_config") if isinstance(portfolio_cfg, dict) else None
     data_config = resolve_data_config_path(base=base, data_config=data_config_ref)
+    ts = int(as_of_ms if as_of_ms is not None else datetime.now(timezone.utc).timestamp() * 1000)
     if not data_config.exists():
-        return {"mode": "skipped", "reason": "missing_data_config", "data_config": str(data_config)}
+        result: dict[str, Any] = {
+            "mode": "error",
+            "reason": "missing_data_config",
+            "account": normalize_account(account) if account else None,
+            "broker": normalize_broker(effective_broker) if effective_broker else None,
+            "as_of_utc": datetime.fromtimestamp(ts / 1000, tz=timezone.utc).isoformat(),
+            "grace_days": int(auto_cfg["grace_days"]),
+            "max_close": int(auto_cfg["max_close"]),
+            "positions_checked": 0,
+            "decisions": 0,
+            "decision_items": [],
+            "candidates_should_close": 0,
+            "applied_closed": 0,
+            "skipped_review_required": 0,
+            "skipped_already_closed": 0,
+            "errors": [f"missing_data_config: {data_config}"],
+            "applied": [],
+            "data_config": str(data_config),
+        }
+        result["summary_text"] = _write_auto_close_summary(report_dir, result)
+        if send_receipt:
+            result["receipt"] = safe_send_auto_close_receipt(
+                base=base,
+                config=cfg,
+                dry_run=dry_run,
+                result=result,
+            )
+        else:
+            result["receipt"] = {
+                "enabled": bool(auto_cfg["receipt"].get("enabled", True)),
+                "status": "skipped",
+                "reason": "skipped_no_send",
+                "delivery_confirmed": False,
+                "message_id": None,
+            }
+        return result
 
     repo = open_position_ledger(data_config)
     ledger_store = ledger_store_payload(data_config, repo)
-    ts = int(as_of_ms if as_of_ms is not None else datetime.now(timezone.utc).timestamp() * 1000)
     projection_refresh = (
         None
         if dry_run

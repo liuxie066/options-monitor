@@ -360,3 +360,31 @@ def test_position_maintenance_rejects_invalid_auto_close_config(tmp_path: Path) 
             account="lx",
             report_dir=tmp_path / "reports",
         )
+
+
+def test_position_maintenance_missing_data_config_is_failed_not_skipped(tmp_path: Path) -> None:
+    from src.application.positions import maintenance as mod
+
+    missing = tmp_path / "missing" / "portfolio.runtime.json"
+    report_dir = tmp_path / "reports"
+
+    result = mod.run_expired_position_maintenance_for_account(
+        base=tmp_path,
+        cfg={
+            "portfolio": {"data_config": str(missing), "broker": "富途"},
+            "option_positions": {"auto_close": {"enabled": True}},
+        },
+        account="lx",
+        report_dir=report_dir,
+        dry_run=False,
+        send_receipt=False,
+    )
+
+    assert result["mode"] == "error"
+    assert result["reason"] == "missing_data_config"
+    assert result["positions_checked"] == 0
+    assert result["applied_closed"] == 0
+    assert result["errors"] == [f"missing_data_config: {missing}"]
+    assert "ERRORS: 1" in result["summary_text"]
+    assert (report_dir / "auto_close_summary.txt").exists()
+    assert result["receipt"]["status"] == "skipped"
