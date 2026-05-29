@@ -11,24 +11,23 @@ from src.application.assistant.commands import (
     operation_specs,
     operation_target_intents,
 )
-from src.application.assistant.contracts import AssistantIntent, AssistantRequest, AssistantToolCall, SemanticFrame
-from src.application.assistant.intent_arbitration import AssistantDecision, IntentArbitration, IntentCandidate
-from src.application.assistant.intent_arbitrator import IntentArbitrator
+from src.application.assistant.contracts import AssistantRequest, PerceptionResult, ToolCall
+from src.application.assistant.perception import PerceptionEngine
+from src.application.assistant.perception_trace import AssistantDecision, PerceptionCandidate, PerceptionTrace
 from src.application.assistant.settings import AssistantSettings, LlmTranslatorSettings
 
 __all__ = [
-    "AssistantIntent",
     "AssistantCapabilitySpec",
     "AssistantCommandSpec",
     "AssistantDecision",
-    "IntentArbitrator",
-    "IntentArbitration",
-    "IntentCandidate",
     "AssistantRequest",
     "AssistantSettings",
-    "AssistantToolCall",
-    "SemanticFrame",
     "LlmTranslatorSettings",
+    "PerceptionCandidate",
+    "PerceptionEngine",
+    "PerceptionResult",
+    "PerceptionTrace",
+    "ToolCall",
     "capability_catalog_text",
     "capability_catalog_payload",
     "capability_specs",

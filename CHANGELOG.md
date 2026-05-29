@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 1.2.163 - 2026-05-29
+
+### Added
+- Added explicit assistant perception, reasoning, action, and observation contracts so command, deterministic, and LLM inputs flow through one auditable assistant lifecycle.
+- Added Close Advice source-data readiness coverage for short-vol positions, including RV/IV/delta refresh behavior and event snapshot availability.
+
+### Changed
+- Replaced the old assistant frame/tool-plan planner path with the perception -> reasoning -> action -> observation chain, with reasoning owning tool selection, safety class, and confirmation requirements.
+- Updated assistant architecture and inbound-control docs to describe the current contract names, audit fields, and capability catalog behavior.
+
+### Fixed
+- Fixed short-vol Close Advice preparation so incomplete required-data quote rows trigger realized-volatility refresh through OpenD instead of surfacing stale missing-RV gaps.
+- Fixed short-vol Close Advice event-risk handling so run-level event snapshots are merged before evaluation and missing event sources fail closed with readable diagnostics.
+
 ## 1.2.162 - 2026-05-29
 
 ### Added

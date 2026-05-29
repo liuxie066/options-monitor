@@ -119,13 +119,12 @@ When enabled, LLM translation only runs after command and deterministic parsing 
 
 The command surface authority is `src/application/assistant/commands.py`. Slash command metadata, the read-only LLM intent surface, and inbound help text should use that catalog instead of maintaining separate command lists.
 
-After an inbound message is parsed, the execution router records an `AssistantFrame`
-before any tool execution. Every tool-backed intent is then converted through the
-single `ToolPlan` planner path before the router dispatches it. Pure-read tools
-still pass the read allowlist before execution. Write, confirm, and admin
-operations use their existing preview/confirm handlers, but the audited
-`ToolPlan` records the planned tool, payload, safety class, and confirmation
-requirement before those handlers run.
+After an inbound message is parsed, the execution router follows one chain:
+`PerceptionResult -> ReasoningResolution -> ActionResult -> ObservationResponse`.
+Pure-read tools still pass the read allowlist before execution. Write, confirm,
+and admin operations use their existing preview/confirm handlers, but the audited
+`ReasoningResolution` records the selected action, payload, safety class, and
+confirmation requirement before those handlers run.
 
 Supported providers:
 
@@ -260,8 +259,10 @@ The audit table records:
 - `intent_name`
 - `tool_name`
 - `tool_payload_json`
-- `semantic_frame_json`
-- `tool_plan_json`
+- `perception_json`
+- `reasoning_json`
+- `action_json`
+- `observation_json`
 - `decision`
 - `result_ok`
 - `error_code`

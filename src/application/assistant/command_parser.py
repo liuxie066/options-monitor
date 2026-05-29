@@ -7,8 +7,8 @@ from typing import Callable
 
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.assistant.commands import commands_by_intent, operation_target_intents
-from src.application.assistant.contracts import SemanticFrame
-from src.application.assistant.semantic_frames import parse_position_query_text, position_query_intent_arguments
+from src.application.assistant.contracts import PerceptionResult
+from src.application.assistant.position_query import parse_position_query_text, position_query_intent_arguments
 
 
 _MONTH_RE = re.compile(r"^(20\d{2})[-/.](0[1-9]|1[0-2])$")
@@ -19,7 +19,7 @@ _CONFIRM_TARGETS = operation_target_intents("confirm")
 _CANCEL_TARGETS = operation_target_intents("cancel")
 
 
-def parse_assistant_command(text: str, *, now_fn: Callable[[], date] | None = None) -> SemanticFrame | None:
+def parse_assistant_command(text: str, *, now_fn: Callable[[], date] | None = None) -> PerceptionResult | None:
     raw = str(text or "").strip()
     if not raw.startswith("/"):
         return None
@@ -87,8 +87,8 @@ def parse_assistant_command(text: str, *, now_fn: Callable[[], date] | None = No
 parse_agent_command = parse_assistant_command
 
 
-def _intent(name: str, arguments: dict[str, object] | None = None) -> SemanticFrame:
-    return SemanticFrame(name=name, arguments=dict(arguments or {}), parser="command", confidence=1.0)
+def _intent(name: str, arguments: dict[str, object] | None = None) -> PerceptionResult:
+    return PerceptionResult(intent_name=name, arguments=dict(arguments or {}), source="command", confidence=1.0)
 
 
 def _split_command(raw: str) -> list[str]:
@@ -101,7 +101,7 @@ def _split_command(raw: str) -> list[str]:
     return parts
 
 
-def _parse_positions(command: str, args: list[str], *, today: date) -> SemanticFrame:
+def _parse_positions(command: str, args: list[str], *, today: date) -> PerceptionResult:
     raw = "持仓" if not args else f"持仓 {' '.join(args)}"
     query = parse_position_query_text(raw, today=today)
     return _intent("position_query", position_query_intent_arguments(query))
@@ -114,14 +114,14 @@ def _parse_manual_trade_preview_command(
     intent_name: str,
     action_prefix: str,
     hint: str,
-) -> SemanticFrame:
+) -> PerceptionResult:
     if not args:
         raise _bad_arg(command, "", hint)
     raw_text = f"{action_prefix} {' '.join(args)}"
     return _intent(intent_name, {"raw_text": raw_text})
 
 
-def _parse_income(command: str, args: list[str], *, today: date) -> SemanticFrame:
+def _parse_income(command: str, args: list[str], *, today: date) -> PerceptionResult:
     account: str | None = None
     month: str | None = None
     for arg in args:
@@ -148,7 +148,7 @@ def _parse_income(command: str, args: list[str], *, today: date) -> SemanticFram
     return _intent("monthly_income_report", payload)
 
 
-def _parse_runs(command: str, args: list[str]) -> SemanticFrame:
+def _parse_runs(command: str, args: list[str]) -> PerceptionResult:
     if not args:
         return _intent("runtime_runs", {"limit": 10})
     if len(args) != 1:
@@ -160,13 +160,13 @@ def _parse_runs(command: str, args: list[str]) -> SemanticFrame:
     return _intent("runtime_runs", {"limit": max(1, min(limit, 50))})
 
 
-def _parse_logs(command: str, args: list[str]) -> SemanticFrame:
+def _parse_logs(command: str, args: list[str]) -> PerceptionResult:
     if len(args) != 1:
         raise _bad_arg(command, " ".join(args), "支持：/logs <run_id>。")
     return _intent("runtime_logs", {"run_id": args[0], "kind": "all", "lines": 50})
 
 
-def _parse_model_command(command: str, args: list[str]) -> SemanticFrame:
+def _parse_model_command(command: str, args: list[str]) -> PerceptionResult:
     if not args:
         return _intent("model_list")
     action = args[0].lower()
@@ -187,7 +187,7 @@ def _parse_operation_command(
     *,
     target_map: dict[str, str],
     action_label: str,
-) -> SemanticFrame:
+) -> PerceptionResult:
     if not args:
         raise AgentToolError(
             code="NEEDS_CLARIFICATION",

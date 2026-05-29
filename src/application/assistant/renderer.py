@@ -3,14 +3,14 @@ from __future__ import annotations
 from typing import Any, cast
 
 from src.application.assistant.commands import command_help_text
-from src.application.assistant.contracts import SemanticFrame
+from src.application.assistant.contracts import PerceptionResult
 
 
 HELP_TEXT = command_help_text()
 SMALL_TALK_TEXT = "你好。我可以处理 /help 中列出的 OM 能力。发送“你能做什么”或 /help 查看完整菜单。"
 
 
-def render_inbound_text(*, intent: SemanticFrame | None, tool_result: dict[str, Any] | None, error: dict[str, Any] | None = None) -> str:
+def render_inbound_text(*, intent: PerceptionResult | None, tool_result: dict[str, Any] | None, error: dict[str, Any] | None = None) -> str:
     if error:
         message = str(error.get("message") or "").strip()
         hint = str(error.get("hint") or "").strip()
@@ -19,9 +19,9 @@ def render_inbound_text(*, intent: SemanticFrame | None, tool_result: dict[str, 
         if "\n" in hint:
             return f"{message}\n{hint}".strip()
         return f"{message} {hint}".strip()
-    if intent and intent.name == "help":
+    if intent and intent.intent_name == "help":
         return HELP_TEXT
-    if intent and intent.name == "small_talk":
+    if intent and intent.intent_name == "small_talk":
         return str(intent.arguments.get("response_text") or SMALL_TALK_TEXT).strip() or SMALL_TALK_TEXT
     if not tool_result:
         return "没有执行结果。"
@@ -33,7 +33,7 @@ def render_inbound_text(*, intent: SemanticFrame | None, tool_result: dict[str, 
         if "\n" in hint:
             return f"{message}\n{hint}".strip()
         return f"{message}{(' ' + hint) if hint else ''}".strip()
-    name = intent.name if intent else str(tool_result.get("tool_name") or "")
+    name = intent.intent_name if intent else str(tool_result.get("tool_name") or "")
     data_raw = tool_result.get("data")
     data = cast(dict[str, Any], data_raw) if isinstance(data_raw, dict) else {}
     if name == "monthly_income_report":

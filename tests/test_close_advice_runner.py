@@ -257,6 +257,420 @@ def test_run_close_advice_uses_short_vol_strategy_from_sell_put_config(
     assert "IV/RV edge" in rows[0]["reason"]
 
 
+def test_run_close_advice_refreshes_short_vol_quote_missing_rv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _freeze_close_advice_business_today(monkeypatch)
+    context = {
+        "open_positions_min": [
+            {
+                "account": "lx",
+                "symbol": "NVDA",
+                "option_type": "put",
+                "side": "short",
+                "status": "open",
+                "contracts_open": 1,
+                "currency": "USD",
+                "strike": 100,
+                "multiplier": 100,
+                "premium": 1.0,
+                "expiration": "2026-06-15",
+            }
+        ]
+    }
+    ctx_path = tmp_path / "option_positions_context.json"
+    ctx_path.write_text(json.dumps(context, ensure_ascii=False), encoding="utf-8")
+
+    required_root = tmp_path / "required_data"
+    parsed = required_root / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "NVDA",
+                "option_type": "put",
+                "expiration": "2026-06-15",
+                "strike": 100,
+                "mid": 0.20,
+                "bid": 0.19,
+                "ask": 0.21,
+                "dte": 60,
+                "multiplier": 100,
+                "spot": 120,
+                "currency": "USD",
+                "delta": -0.20,
+                "implied_volatility": 0.30,
+                "event_source_status": "ok",
+            }
+        ]
+    ).to_csv(parsed / "NVDA_required_data.csv", index=False)
+
+    calls: list[dict[str, object]] = []
+
+    def fake_fetch_symbol(symbol: str, **kwargs: object) -> dict[str, object]:
+        calls.append({"symbol": symbol, **kwargs})
+        assert kwargs["include_realized_volatility"] is True
+        assert kwargs["explicit_expirations"] == ["2026-06-15"]
+        return {
+            "rows": [
+                {
+                    "symbol": "NVDA",
+                    "option_type": "put",
+                    "expiration": "2026-06-15",
+                    "strike": 100,
+                    "mid": 0.20,
+                    "bid": 0.19,
+                    "ask": 0.21,
+                    "dte": 60,
+                    "multiplier": 100,
+                    "spot": 120,
+                    "currency": "USD",
+                    "delta": -0.20,
+                    "implied_volatility": 0.30,
+                    "realized_volatility_estimate": 0.20,
+                    "event_source_status": "ok",
+                }
+            ]
+        }
+
+    monkeypatch.setattr("src.application.opend_symbol_fetching.fetch_symbol", fake_fetch_symbol)
+
+    out_dir = tmp_path / "reports"
+    result = run_close_advice(
+        config={
+            "close_advice": {"enabled": True, "notify_levels": ["strong", "medium"]},
+            "symbols": [
+                {
+                    "symbol": "NVDA",
+                    "fetch": {"source": "futu"},
+                    "sell_put": {
+                        "strategy": "short_vol",
+                        "short_vol": {"event_source_fail_closed": False},
+                    },
+                }
+            ],
+        },
+        context_path=ctx_path,
+        required_data_root=required_root,
+        output_dir=out_dir,
+        base_dir=Path.cwd(),
+    )
+
+    rows = pd.read_csv(out_dir / "close_advice.csv").to_dict("records")
+    assert calls and calls[0]["symbol"] == "NVDA"
+    assert result["evaluation_gap_rows"] == 0
+    assert rows[0]["realized_volatility_estimate"] == pytest.approx(0.20)
+    assert "short_vol_risk_data_missing" not in str(rows[0]["data_quality_flags"])
+
+
+def test_run_close_advice_does_not_require_rv_for_return_first_position(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _freeze_close_advice_business_today(monkeypatch)
+    context = {
+        "open_positions_min": [
+            {
+                "account": "lx",
+                "symbol": "NVDA",
+                "option_type": "put",
+                "side": "short",
+                "status": "open",
+                "contracts_open": 1,
+                "currency": "USD",
+                "strike": 100,
+                "multiplier": 100,
+                "premium": 1.0,
+                "expiration": "2026-06-15",
+                "strategy_snapshot": {"strategy_family": "sell_put", "strategy_profile": "return_first"},
+            }
+        ]
+    }
+    ctx_path = tmp_path / "option_positions_context.json"
+    ctx_path.write_text(json.dumps(context, ensure_ascii=False), encoding="utf-8")
+
+    required_root = tmp_path / "required_data"
+    parsed = required_root / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "NVDA",
+                "option_type": "put",
+                "expiration": "2026-06-15",
+                "strike": 100,
+                "mid": 0.20,
+                "bid": 0.19,
+                "ask": 0.21,
+                "dte": 60,
+                "multiplier": 100,
+                "spot": 120,
+                "currency": "USD",
+                "delta": -0.20,
+                "implied_volatility": 0.30,
+            }
+        ]
+    ).to_csv(parsed / "NVDA_required_data.csv", index=False)
+
+    def fail_fetch_symbol(symbol: str, **kwargs: object) -> dict[str, object]:
+        raise AssertionError(f"unexpected short-vol RV fetch for {symbol}: {kwargs}")
+
+    monkeypatch.setattr("src.application.opend_symbol_fetching.fetch_symbol", fail_fetch_symbol)
+
+    out_dir = tmp_path / "reports"
+    result = run_close_advice(
+        config={
+            "close_advice": {"enabled": True, "notify_levels": ["strong", "medium"]},
+            "symbols": [{"symbol": "NVDA", "fetch": {"source": "futu"}, "sell_put": {"strategy": "short_vol"}}],
+        },
+        context_path=ctx_path,
+        required_data_root=required_root,
+        output_dir=out_dir,
+        base_dir=Path.cwd(),
+    )
+
+    rows = pd.read_csv(out_dir / "close_advice.csv").to_dict("records")
+    assert result["evaluation_gap_rows"] == 0
+    assert rows[0]["strategy_profile"] == "return_first"
+    assert rows[0]["tier"] == "strong"
+
+
+def test_run_close_advice_merges_event_snapshot_for_short_vol_position(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _freeze_close_advice_business_today(monkeypatch)
+    out_dir = tmp_path / "output_runs" / "run1" / "accounts" / "lx"
+    snapshot_path = tmp_path / "output_runs" / "run1" / "state" / "event_snapshot.json"
+    snapshot_path.parent.mkdir(parents=True)
+    snapshot_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "provider": "yfinance",
+                "symbols": {
+                    "PDD": {
+                        "symbol": "PDD",
+                        "events": [],
+                        "source_status": "ok",
+                        "source_error": "",
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    context = {
+        "open_positions_min": [
+            {
+                "account": "lx",
+                "symbol": "PDD",
+                "option_type": "put",
+                "side": "short",
+                "status": "open",
+                "contracts_open": 1,
+                "currency": "USD",
+                "strike": 85,
+                "multiplier": 100,
+                "premium": 1.0,
+                "expiration": "2026-06-18",
+            }
+        ]
+    }
+    ctx_path = tmp_path / "option_positions_context.json"
+    ctx_path.write_text(json.dumps(context, ensure_ascii=False), encoding="utf-8")
+
+    required_root = tmp_path / "required_data"
+    parsed = required_root / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "PDD",
+                "option_type": "put",
+                "expiration": "2026-06-18",
+                "strike": 85,
+                "mid": 0.20,
+                "bid": 0.19,
+                "ask": 0.21,
+                "dte": 63,
+                "multiplier": 100,
+                "spot": 110,
+                "currency": "USD",
+                "delta": -0.20,
+                "implied_volatility": 0.30,
+                "realized_volatility_estimate": 0.20,
+            }
+        ]
+    ).to_csv(parsed / "PDD_required_data.csv", index=False)
+
+    result = run_close_advice(
+        config={
+            "close_advice": {"enabled": True, "notify_levels": ["strong", "medium"]},
+            "symbols": [{"symbol": "PDD", "sell_put": {"strategy": "short_vol"}}],
+        },
+        context_path=ctx_path,
+        required_data_root=required_root,
+        output_dir=out_dir,
+        base_dir=Path.cwd(),
+    )
+
+    rows = pd.read_csv(out_dir / "close_advice.csv").to_dict("records")
+    assert result["evaluation_gap_rows"] == 0
+    assert rows[0]["event_source_status"] == "ok"
+    assert rows[0]["event_risk_flag"] is False or rows[0]["event_risk_flag"] == "False"
+    assert "event_source_unavailable" not in str(rows[0]["data_quality_flags"])
+
+
+def test_run_close_advice_reports_missing_event_snapshot_for_short_vol_position(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _freeze_close_advice_business_today(monkeypatch)
+    context = {
+        "open_positions_min": [
+            {
+                "account": "lx",
+                "symbol": "PDD",
+                "option_type": "put",
+                "side": "short",
+                "status": "open",
+                "contracts_open": 1,
+                "currency": "USD",
+                "strike": 85,
+                "multiplier": 100,
+                "premium": 1.0,
+                "expiration": "2026-06-18",
+            }
+        ]
+    }
+    ctx_path = tmp_path / "option_positions_context.json"
+    ctx_path.write_text(json.dumps(context, ensure_ascii=False), encoding="utf-8")
+
+    required_root = tmp_path / "required_data"
+    parsed = required_root / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "PDD",
+                "option_type": "put",
+                "expiration": "2026-06-18",
+                "strike": 85,
+                "mid": 0.20,
+                "bid": 0.19,
+                "ask": 0.21,
+                "dte": 63,
+                "multiplier": 100,
+                "spot": 110,
+                "currency": "USD",
+                "delta": -0.20,
+                "implied_volatility": 0.30,
+                "realized_volatility_estimate": 0.20,
+            }
+        ]
+    ).to_csv(parsed / "PDD_required_data.csv", index=False)
+
+    out_dir = tmp_path / "reports"
+    result = run_close_advice(
+        config={
+            "close_advice": {"enabled": True, "notify_levels": ["strong", "medium"]},
+            "symbols": [{"symbol": "PDD", "sell_put": {"strategy": "short_vol"}}],
+        },
+        context_path=ctx_path,
+        required_data_root=required_root,
+        output_dir=out_dir,
+        base_dir=tmp_path,
+    )
+
+    rows = pd.read_csv(out_dir / "close_advice.csv").to_dict("records")
+    text = (out_dir / "close_advice.txt").read_text(encoding="utf-8")
+    assert result["evaluation_gap_rows"] == 1
+    assert rows[0]["tier"] == "not_evaluable"
+    assert rows[0]["event_source_status"] == "error"
+    assert rows[0]["event_source_error"] == "event snapshot missing for symbol"
+    assert "event snapshot missing for symbol" in text
+
+
+def test_run_close_advice_fails_closed_when_event_snapshot_missing_symbol(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _freeze_close_advice_business_today(monkeypatch)
+    snapshot_path = tmp_path / "state" / "event_snapshot.json"
+    snapshot_path.parent.mkdir(parents=True)
+    snapshot_path.write_text(
+        json.dumps({"schema_version": 1, "provider": "yfinance", "symbols": {}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    context = {
+        "open_positions_min": [
+            {
+                "account": "lx",
+                "symbol": "PDD",
+                "option_type": "put",
+                "side": "short",
+                "status": "open",
+                "contracts_open": 1,
+                "currency": "USD",
+                "strike": 85,
+                "multiplier": 100,
+                "premium": 1.0,
+                "expiration": "2026-06-18",
+            }
+        ]
+    }
+    ctx_path = tmp_path / "option_positions_context.json"
+    ctx_path.write_text(json.dumps(context, ensure_ascii=False), encoding="utf-8")
+
+    required_root = tmp_path / "required_data"
+    parsed = required_root / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "PDD",
+                "option_type": "put",
+                "expiration": "2026-06-18",
+                "strike": 85,
+                "mid": 0.20,
+                "bid": 0.19,
+                "ask": 0.21,
+                "dte": 63,
+                "multiplier": 100,
+                "spot": 110,
+                "currency": "USD",
+                "delta": -0.20,
+                "implied_volatility": 0.30,
+                "realized_volatility_estimate": 0.20,
+            }
+        ]
+    ).to_csv(parsed / "PDD_required_data.csv", index=False)
+
+    out_dir = tmp_path / "reports"
+    result = run_close_advice(
+        config={
+            "runtime": {"event_snapshot_path": str(snapshot_path)},
+            "close_advice": {"enabled": True, "notify_levels": ["strong", "medium"]},
+            "symbols": [{"symbol": "PDD", "sell_put": {"strategy": "short_vol"}}],
+        },
+        context_path=ctx_path,
+        required_data_root=required_root,
+        output_dir=out_dir,
+        base_dir=Path.cwd(),
+    )
+
+    rows = pd.read_csv(out_dir / "close_advice.csv").to_dict("records")
+    text = (out_dir / "close_advice.txt").read_text(encoding="utf-8")
+    assert result["evaluation_gap_rows"] == 1
+    assert rows[0]["tier"] == "not_evaluable"
+    assert rows[0]["event_source_status"] == "error"
+    assert "event_source_unavailable" in str(rows[0]["data_quality_flags"])
+    assert "event snapshot missing for symbol" in text
+
+
 def test_run_close_advice_prefers_position_strategy_snapshot_over_current_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1504,6 +1918,7 @@ def test_run_close_advice_reports_expiration_near_miss_in_quote_issue_samples(tm
 
 
 def test_run_close_advice_fee_can_block_gross_strong_signal(tmp_path: Path) -> None:
+    expiration = (expiration_business_today() + timedelta(days=40)).isoformat()
     ctx_path = tmp_path / "option_positions_context.json"
     ctx_path.write_text(
         json.dumps(
@@ -1519,7 +1934,7 @@ def test_run_close_advice_fee_can_block_gross_strong_signal(tmp_path: Path) -> N
                         "strike": 100,
                         "multiplier": 100,
                         "premium": 0.02,
-                        "expiration": "2026-05-30",
+                        "expiration": expiration,
                     }
                 ]
             }
@@ -1534,7 +1949,7 @@ def test_run_close_advice_fee_can_block_gross_strong_signal(tmp_path: Path) -> N
             {
                 "symbol": "AAPL",
                 "option_type": "put",
-                "expiration": "2026-05-30",
+                "expiration": expiration,
                 "strike": 100,
                 "mid": 0.001,
                 "bid": 0.001,
@@ -1564,6 +1979,7 @@ def test_run_close_advice_fee_can_block_gross_strong_signal(tmp_path: Path) -> N
 
 
 def test_run_close_advice_renders_small_money_with_decimals(tmp_path: Path) -> None:
+    expiration = (expiration_business_today() + timedelta(days=40)).isoformat()
     ctx_path = tmp_path / "option_positions_context.json"
     ctx_path.write_text(
         json.dumps(
@@ -1579,7 +1995,7 @@ def test_run_close_advice_renders_small_money_with_decimals(tmp_path: Path) -> N
                         "strike": 100,
                         "multiplier": 100,
                         "premium": 0.05,
-                        "expiration": "2026-05-30",
+                        "expiration": expiration,
                     }
                 ]
             }
@@ -1594,7 +2010,7 @@ def test_run_close_advice_renders_small_money_with_decimals(tmp_path: Path) -> N
             {
                 "symbol": "AAPL",
                 "option_type": "put",
-                "expiration": "2026-05-30",
+                "expiration": expiration,
                 "strike": 100,
                 "mid": 0.001,
                 "bid": 0.001,

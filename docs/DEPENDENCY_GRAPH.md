@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 550 (`src`: 287, `domain`: 51, `scripts`: 6, `tests`: 206)
-- Internal import edges: 2826 total, 1284 production/script edges excluding tests
+- Python files scanned: 552 (`src`: 289, `domain`: 51, `scripts`: 6, `tests`: 206)
+- Internal import edges: 2838 total, 1296 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -44,11 +44,11 @@ flowchart LR
   scripts -->|1| infrastructure
   scripts -->|2| storage
   storage -->|1| domain
-  tests -->|997| application
+  tests -->|996| application
   tests -->|264| domain
   tests -->|2| domain_services
   tests -->|98| infrastructure
-  tests -->|137| interfaces
+  tests -->|138| interfaces
   tests -->|8| scripts
   tests -->|18| storage
 ```
@@ -75,9 +75,9 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 997 |
+| tests | application | 996 |
 | tests | domain | 264 |
-| tests | interfaces | 137 |
+| tests | interfaces | 138 |
 | tests | infrastructure | 98 |
 | tests | storage | 18 |
 | tests | scripts | 8 |
@@ -175,15 +175,15 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 
 | module | incoming imports |
 |---|---|
-| src.application.agent_tool_contracts | 53 |
+| src.application.agent_tool_contracts | 55 |
 | domain.domain.ledger.position_fields | 40 |
 | src.infrastructure.io_utils | 37 |
 | domain.domain.symbol_identity | 28 |
 | src.application.config_loader | 24 |
 | src.application.settings | 23 |
+| src.application.assistant.contracts | 23 |
 | src.application.ledger.api | 22 |
 | domain.domain.engine | 21 |
-| src.application.assistant.contracts | 21 |
 | src.application.runtime_cli_format | 20 |
 | src.application.account_config | 18 |
 | domain.domain.trade_contract_identity | 18 |
@@ -198,7 +198,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.interfaces.cli.main | 49 |
 | src.application.agent_tool_handlers | 35 |
 | src.application.multi_account_tick | 26 |
-| src.application.close_advice_runner | 21 |
+| src.application.close_advice_runner | 22 |
 | src.application.ledger.queries | 20 |
 | src.application.pipeline_runtime | 20 |
 | src.application.multi_tick.required_data_prefetch | 18 |
@@ -209,7 +209,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.application.trades.auto_intake | 15 |
 | src.application.account_run | 14 |
 | src.interfaces.cli.option_positions | 14 |
-| src.application.assistant.router | 13 |
+| src.application.pipeline_context | 13 |
 
 ## Reading
 

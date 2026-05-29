@@ -65,26 +65,25 @@ actions remain behind preview/confirm gates.
 Model selection is a control-plane concern. `config.yaml` may define multiple
 `assistant.models` profiles and an `assistant.active_model`, but
 `config build-assistant` resolves that into one flat `assistant.llm` in
-`config.assistant.json`. Runtime, router, arbitrator, planner, and tool
-execution must not depend on model profiles or choose models per message.
+`config.assistant.json`. Runtime, router, perception, reasoning, action, and
+tool execution must not depend on model profiles or choose models per message.
 
 Assistant uses one internal contract ladder:
 
 ```text
 command / deterministic parser / LLM translator
--> SemanticFrame (om-semantic-frame-v1; no tool name, no executable payload)
--> frame_planner.frame_from_semantic_frame
--> AssistantFrame
--> frame_planner.tool_plan_from_frame
--> ToolPlan
--> AssistantToolCall
+-> PerceptionResult (om-perception-result-v1; what the user appears to want)
+-> ReasoningResolution (om-reasoning-resolution-v1; support, safety, and action choice)
+-> ActionResult (om-action-result-v1; executed tool/operation/local response result)
+-> ObservationResponse (om-observation-response-v1; user-facing reply)
 ```
 
-`AssistantIntent` remains a compatibility alias for `SemanticFrame`; new
-Assistant code should use `SemanticFrame`. The command parser, deterministic
-parser, and LLM translator must only emit semantic frames. Tool-name selection,
-config-scoped payload construction, safety class validation, and conversion to
-`ToolPlan` are owned by `src.application.assistant.frame_planner`.
+The command parser, deterministic parser, and LLM translator must only emit
+`PerceptionResult`. Tool-name selection, config-scoped payload construction,
+capability support, safety class validation, and confirmation requirements are
+owned by `src.application.assistant.reasoning`. Execution is owned by
+`src.application.assistant.action`, and response shaping is owned by
+`src.application.assistant.observation`.
 
 ## Runtime Tick Flow
 

@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypedDict
 
+import pandas as pd
+
 from domain.domain.expiration_dates import expiration_business_today
 from domain.domain.fetch_source import is_futu_fetch_source
 from domain.domain.close_advice import (
@@ -59,6 +61,7 @@ from src.application.candidate_filter_trace import (
     candidate_trace_path_for_output,
     infer_trace_scope_from_path,
 )
+from src.application.events.annotator import annotate_candidates_with_event_snapshot, load_event_snapshot
 from src.application.covered_call_strategy_risk import resolve_covered_call_short_vol_config
 from src.application.sell_put_strategy_risk import resolve_sell_put_short_vol_config
 from src.application.strategy_policy import (
@@ -173,6 +176,13 @@ QUOTE_ISSUE_FLAGS = {
     "invalid_spread",
 }
 ACTIONABLE_CLOSE_TIERS = {"strong", "medium", "weak", "optional", "optimizer_close", "optimizer_switch"}
+EVENT_SOURCE_COLUMNS = (
+    "event_flag",
+    "event_types",
+    "event_dates",
+    "event_source_status",
+    "event_source_error",
+)
 
 
 class _PositionFetchSpec(TypedDict):
@@ -181,6 +191,7 @@ class _PositionFetchSpec(TypedDict):
     requested_expirations: set[str]
     option_types: set[str]
     strikes: list[float]
+    short_vol_keys: set[tuple[str, str, str, str]]
 
 
 class _OpenDFetchKwargs(TypedDict):
@@ -361,6 +372,43 @@ def _quote_has_usable_price(quote: dict[str, Any] | None) -> bool:
     return True
 
 
+_SHORT_VOL_RV_FIELDS = (
+    "realized_volatility_estimate",
+    "rv_estimate",
+    "rv_est",
+    "rv_60",
+    "realized_volatility_60",
+)
+
+
+def _quote_has_numeric_field(quote: dict[str, Any] | None, *keys: str) -> bool:
+    if not isinstance(quote, dict):
+        return False
+    return any(_quote_number(quote.get(key)) is not None for key in keys)
+
+
+def _short_vol_source_missing_fields(quote: dict[str, Any] | None) -> list[str]:
+    if not isinstance(quote, dict):
+        return ["quote"]
+    missing: list[str] = []
+    if not _quote_has_numeric_field(quote, "implied_volatility"):
+        missing.append("iv")
+    if not _quote_has_numeric_field(quote, *_SHORT_VOL_RV_FIELDS):
+        missing.append("rv")
+    if not _quote_has_numeric_field(quote, "delta"):
+        missing.append("delta")
+    return missing
+
+
+def _position_requires_short_vol_source_data(pos: dict[str, Any], config: dict[str, Any] | None) -> bool:
+    if not isinstance(pos, dict) or _is_yield_enhancement_long_call_position(pos):
+        return False
+    try:
+        return resolve_position_strategy(position=pos, config=config).strategy_profile == SHORT_VOL_PROFILE
+    except Exception:
+        return False
+
+
 def _fetch_payload_error_reason(payload: dict[str, Any] | None, *, prefix: str) -> str | None:
     if not isinstance(payload, dict):
         return None
@@ -390,6 +438,7 @@ def _build_position_fetch_specs(
     positions: list[dict[str, Any]],
     *,
     base_dir: Path,
+    config: dict[str, Any] | None = None,
 ) -> dict[str, _PositionFetchSpec]:
     specs: dict[str, _PositionFetchSpec] = {}
     for pos in positions:
@@ -407,12 +456,15 @@ def _build_position_fetch_specs(
                 "requested_expirations": set[str](),
                 "option_types": set[str](),
                 "strikes": list[float](),
+                "short_vol_keys": set[tuple[str, str, str, str]](),
             }
             specs[sym] = new_item
             item = new_item
         item["requested_keys"].add(key)
         item["requested_expirations"].add(key[2])
         item["option_types"].add(key[1])
+        if _position_requires_short_vol_source_data(pos, config):
+            item["short_vol_keys"].add(key)
         strike_num = safe_float(pos.get("strike"))
         if strike_num is not None:
             item["strikes"].append(strike_num)
@@ -465,7 +517,7 @@ def _ensure_required_data_coverage_for_positions(
     gateway: Any = None,
 ) -> tuple[dict[tuple[str, str, str, str], str], dict[tuple[str, str, str, str], dict[str, Any]], dict[str, Any]]:
     symbol_cfgs = _symbol_config_by_symbol(config)
-    specs = _build_position_fetch_specs(positions, base_dir=base_dir)
+    specs = _build_position_fetch_specs(positions, base_dir=base_dir, config=config)
     fetch_reasons: dict[tuple[str, str, str, str], str] = {}
     fetch_details: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     summary = {"attempted_symbols": 0, "fetched_symbols": 0, "errors": 0}
@@ -476,6 +528,7 @@ def _ensure_required_data_coverage_for_positions(
         return fetch_reasons, fetch_details, summary
 
     current_covered, current_expirations = load_required_data_coverage(required_data_root, symbols=set(specs), base_dir=base_dir)
+    current_quotes = load_required_data_quotes(required_data_root, symbols=set(specs), base_dir=base_dir)
     current_contract_expiration_index = _build_contract_expiration_index(current_covered)
 
     try:
@@ -491,8 +544,17 @@ def _ensure_required_data_coverage_for_positions(
         for symbol, spec in specs.items():
             requested_keys = set(spec["requested_keys"])
             requested_expirations = sorted(spec["requested_expirations"])
+            short_vol_keys = set(spec["short_vol_keys"])
             missing_keys = [key for key in requested_keys if key not in current_covered]
-            if not missing_keys:
+            incomplete_short_vol_keys = [
+                key
+                for key in requested_keys
+                if key in current_covered
+                and key in short_vol_keys
+                and _short_vol_source_missing_fields(current_quotes.get(key))
+            ]
+            refresh_keys = list(dict.fromkeys([*missing_keys, *incomplete_short_vol_keys]))
+            if not refresh_keys:
                 continue
             summary["attempted_symbols"] += 1
             symbol_cfg = symbol_cfgs.get(symbol) or {}
@@ -554,6 +616,7 @@ def _ensure_required_data_coverage_for_positions(
                     chain_cache_force_refresh=False,
                     freshness_policy="refresh_missing",
                     gateway=shared_gw,
+                    include_realized_volatility=bool(short_vol_keys.intersection(refresh_keys)),
                     **_typed_opend_fetch_kwargs(config),
                 )
             except Exception as exc:
@@ -613,6 +676,7 @@ def _ensure_required_data_coverage_for_positions(
             save_outputs(base_dir, symbol, payload, output_root=required_data_root)
             summary["fetched_symbols"] += 1
             current_covered, current_expirations = load_required_data_coverage(required_data_root, symbols=set(specs), base_dir=base_dir)
+            current_quotes = load_required_data_quotes(required_data_root, symbols=set(specs), base_dir=base_dir)
             if payload_reason:
                 still_missing = [key for key in requested_keys if key not in current_covered]
                 if still_missing:
@@ -652,14 +716,28 @@ def _fetch_missing_quotes_via_opend(
 
     symbol_cfgs = _symbol_config_by_symbol(config)
     missing_by_symbol: dict[str, list[dict[str, Any]]] = {}
+    price_refresh_keys: set[tuple[str, str, str, str]] = set()
+    short_vol_refresh_keys: set[tuple[str, str, str, str]] = set()
     attempted_reasons: dict[tuple[str, str, str, str], str] = {}
     attempted_details: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     for pos in positions:
         if not isinstance(pos, dict):
             continue
         key = _quote_key(pos.get("symbol"), pos.get("option_type"), _position_expiration(pos), pos.get("strike"), base_dir=base_dir)
-        if all(key) and key in covered_keys and not _quote_has_usable_price(quotes.get(key)):
+        if not all(key) or key not in covered_keys:
+            continue
+        quote = quotes.get(key)
+        needs_price_refresh = not _quote_has_usable_price(quote)
+        needs_short_vol_refresh = (
+            _position_requires_short_vol_source_data(pos, config)
+            and bool(_short_vol_source_missing_fields(quote))
+        )
+        if needs_price_refresh or needs_short_vol_refresh:
             missing_by_symbol.setdefault(key[0], []).append(pos)
+            if needs_price_refresh:
+                price_refresh_keys.add(key)
+            if needs_short_vol_refresh:
+                short_vol_refresh_keys.add(key)
 
     if not missing_by_symbol:
         return {}, {}
@@ -696,20 +774,20 @@ def _fetch_missing_quotes_via_opend(
                 )
         if not is_futu_fetch_source(fetch_cfg.get("source")):
             for key in missing_keys:
-                if all(key):
+                if all(key) and key in price_refresh_keys:
                     attempted_reasons[key] = "opend_fetch_skipped_non_futu_source"
             continue
         expirations = sorted({key[2] for key in missing_keys if len(key) >= 3 and key[2]})
         if not expirations:
             for key in missing_keys:
-                if all(key):
+                if all(key) and key in price_refresh_keys:
                     attempted_reasons[key] = "opend_fetch_skipped_missing_expiration"
             continue
         strikes = [safe_float(p.get("strike")) for p in missing_positions]
         strikes = [s for s in strikes if s is not None]
         if not strikes:
             for key in missing_keys:
-                if all(key):
+                if all(key) and key in price_refresh_keys:
                     attempted_reasons[key] = "opend_fetch_skipped_invalid_strike"
             continue
         option_types = sorted({_norm_option_type(p.get("option_type")) for p in missing_positions if p.get("option_type")})
@@ -726,6 +804,7 @@ def _fetch_missing_quotes_via_opend(
                 explicit_expirations=expirations,
                 chain_cache=True,
                 freshness_policy="refresh_missing",
+                include_realized_volatility=bool(short_vol_refresh_keys.intersection(set(missing_keys))),
                 **_typed_opend_fetch_kwargs(config),
             )
         except Exception as exc:
@@ -735,7 +814,7 @@ def _fetch_missing_quotes_via_opend(
             elif "retry budget" in str(exc or "").lower():
                 detail = "opend_fetch_error_retry_budget"
             for key in missing_keys:
-                if all(key):
+                if all(key) and key in price_refresh_keys:
                     attempted_reasons[key] = detail
             continue
         payload_reason = _fetch_payload_error_reason(payload, prefix="opend_fetch_error")
@@ -746,7 +825,8 @@ def _fetch_missing_quotes_via_opend(
                 continue
             if _quote_has_usable_price(quotes.get(key)):
                 continue
-            attempted_reasons[key] = payload_reason or "opend_fetch_no_usable_quote"
+            if key in price_refresh_keys:
+                attempted_reasons[key] = payload_reason or "opend_fetch_no_usable_quote"
     return attempted_reasons, attempted_details
 
 
@@ -1085,6 +1165,96 @@ def _position_strategy_metadata(pos: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _resolve_event_snapshot_path(
+    *,
+    config: dict[str, Any],
+    base_dir: Path,
+    output_dir: Path,
+) -> Path | None:
+    runtime = config.get("runtime") if isinstance(config, dict) and isinstance(config.get("runtime"), dict) else {}
+    raw = str(runtime.get("event_snapshot_path") or "").strip()
+    if raw:
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            path = (Path(base_dir) / path).resolve()
+        return path
+
+    search_roots = [Path(output_dir).resolve(), *Path(output_dir).resolve().parents]
+    for root in search_roots:
+        for candidate in (root / "state" / "event_snapshot.json", root / "event_snapshot.json"):
+            if candidate.exists():
+                return candidate.resolve()
+
+    shared_candidate = (Path(base_dir) / "output_shared" / "state" / "event_snapshot.json").resolve()
+    if shared_candidate.exists():
+        return shared_candidate
+    return None
+
+
+def _event_risk_cfg_for_position(
+    *,
+    pos: dict[str, Any],
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    default = {"enabled": True, "mode": "warn"}
+    try:
+        resolution = resolve_position_strategy(position=pos, config=config)
+        side_cfg = strategy_side_config_for_resolution(
+            resolution=resolution,
+            position=pos,
+            config=config,
+        )
+    except Exception:
+        side_cfg = {}
+    raw = side_cfg.get("event_risk") if isinstance(side_cfg, dict) else None
+    if not isinstance(raw, dict):
+        return default
+    out = dict(default)
+    out.update(raw)
+    out["enabled"] = bool(out.get("enabled", True))
+    out["mode"] = str(out.get("mode") or "warn").strip().lower() or "warn"
+    return out
+
+
+def _merge_event_snapshot_for_short_vol_positions(
+    *,
+    config: dict[str, Any],
+    positions: list[dict[str, Any]],
+    quotes: dict[tuple[str, str, str, str], dict[str, Any]],
+    base_dir: Path,
+    output_dir: Path,
+) -> None:
+    snapshot_path = _resolve_event_snapshot_path(config=config, base_dir=base_dir, output_dir=output_dir)
+    snapshot = load_event_snapshot(snapshot_path)
+    for pos in positions:
+        if not isinstance(pos, dict) or not _position_requires_short_vol_source_data(pos, config):
+            continue
+        key = _quote_key(pos.get("symbol"), pos.get("option_type"), _position_expiration(pos), pos.get("strike"), base_dir=base_dir)
+        if not all(key):
+            continue
+        if key not in quotes:
+            continue
+        quote = dict(quotes.get(key) or {})
+        if snapshot_path is None and str(quote.get("event_source_status") or "").strip():
+            quotes[key] = quote
+            continue
+        quote.setdefault("symbol", key[0])
+        quote.setdefault("option_type", key[1])
+        quote.setdefault("expiration", key[2])
+        quote.setdefault("strike", key[3])
+        annotated = annotate_candidates_with_event_snapshot(
+            pd.DataFrame([quote]),
+            snapshot=snapshot,
+            event_risk_cfg=_event_risk_cfg_for_position(pos=pos, config=config),
+        )
+        if annotated.empty:
+            continue
+        event_row = annotated.iloc[0].to_dict()
+        for col in EVENT_SOURCE_COLUMNS:
+            quote[col] = event_row.get(col)
+        quotes[key] = quote
+
+
 def _is_yield_enhancement_short_put(row: dict[str, Any]) -> bool:
     if str(row.get("option_type") or "").strip().lower() != "put":
         return False
@@ -1373,7 +1543,15 @@ def _gap_reason_label(row: dict[str, Any]) -> str:
         "mid_fallback_last_price": "只有最近成交价，缺少可用 bid/ask",
         "spread_too_wide": "价差过宽",
         "invalid_spread": "价差无效",
+        "short_vol_risk_data_missing": "缺少 short-vol 风险数据",
+        "event_source_unavailable": "事件风险数据源不可用",
     }
+    if "short_vol_risk_data_missing" in flags:
+        return str(row.get("reason") or mapping["short_vol_risk_data_missing"]).strip()
+    if "event_source_unavailable" in flags:
+        err = str(row.get("event_source_error") or "").strip()
+        base = str(row.get("reason") or mapping["event_source_unavailable"]).strip()
+        return f"{base}: {err}" if err else base
     for flag in ("required_data_fetch_error_rate_limit", "opend_fetch_error_rate_limit"):
         if flag in flags:
             return mapping[flag]
@@ -1846,6 +2024,13 @@ def run_close_advice(
         quotes=quotes,
         covered_keys=covered_keys,
         base_dir=Path(base_dir),
+    )
+    _merge_event_snapshot_for_short_vol_positions(
+        config=config,
+        positions=positions,
+        quotes=quotes,
+        base_dir=Path(base_dir),
+        output_dir=output_dir,
     )
     issue_reasons = {**coverage_reasons, **coverage_fetch_reasons, **attempted_fetch_reasons}
     issue_details = {**coverage_details, **coverage_fetch_details, **attempted_fetch_details}

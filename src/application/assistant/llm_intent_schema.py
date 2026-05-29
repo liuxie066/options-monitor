@@ -12,11 +12,12 @@ from src.application.assistant.commands import (
     llm_argument_schema_required_keys,
     llm_executable_arguments,
     llm_executable_intent_names,
+    llm_recognizable_intent_names,
 )
 from src.application.assistant.settings import LlmTranslatorSettings
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.assistant.contracts import SemanticFrame
-from src.application.assistant.semantic_frames import PositionQuery
+from src.application.assistant.contracts import PerceptionResult
+from src.application.assistant.position_query import PositionQuery
 
 
 _ACCOUNT_VALUES = frozenset(ACCOUNT_VALUES)
@@ -30,7 +31,7 @@ def llm_intent_schema() -> dict[str, Any]:
     return {
         "schema_version": LLM_INTENT_SCHEMA_VERSION,
         "shape": {
-            "intent": llm_executable_intent_names(),
+            "intent": llm_recognizable_intent_names(),
             "arguments": "object",
             "confidence": "number 0..1",
         },
@@ -53,7 +54,7 @@ def llm_intent_json_schema() -> dict[str, Any]:
         "additionalProperties": False,
         "properties": {
             "schema_version": {"type": "string", "enum": [LLM_INTENT_SCHEMA_VERSION]},
-            "intent": {"type": "string", "enum": llm_executable_intent_names()},
+            "intent": {"type": "string", "enum": llm_recognizable_intent_names()},
             "arguments": {
                 "type": "object",
                 "additionalProperties": False,
@@ -70,7 +71,7 @@ def inbound_intent_from_llm_payload(
     payload: dict[str, Any],
     *,
     settings: LlmTranslatorSettings,
-) -> SemanticFrame:
+) -> PerceptionResult:
     if not isinstance(payload, dict):
         raise AgentToolError(code="INPUT_ERROR", message="LLM intent payload must be a JSON object")
 
@@ -89,23 +90,23 @@ def inbound_intent_from_llm_payload(
         raise AgentToolError(
             code="PERMISSION_DENIED",
             message=f"LLM intent is not allowed: {intent_name}",
-            hint="LLM translator is currently restricted to read-only intents.",
-            details={"allowed_intents": llm_executable_intent_names()},
+            hint="LLM translator is currently restricted to recognizable read-only intents.",
+            details={"allowed_intents": llm_recognizable_intent_names()},
         )
 
     confidence = _parse_confidence(payload.get("confidence"))
     if confidence < float(settings.confidence_min):
         raise AgentToolError(
             code="NEEDS_CLARIFICATION",
-            message="LLM intent confidence is too low.",
-            hint="Please use a supported command or provide a clearer request.",
+            message="我还不能确定你要做什么。",
+            hint="请换一种更明确的说法，或发送“你能做什么”查看当前支持的能力。",
             details={"confidence": confidence, "confidence_min": float(settings.confidence_min)},
         )
 
     arguments = _dict(payload.get("arguments"))
     _reject_extra_arguments(intent_name, arguments)
     normalized = _normalize_arguments(intent_name, arguments)
-    return SemanticFrame(name=intent_name, arguments=normalized, parser="llm", confidence=confidence)
+    return PerceptionResult(intent_name=intent_name, arguments=normalized, source="llm", confidence=confidence)
 
 
 def _parse_confidence(raw: Any) -> float:
@@ -149,7 +150,7 @@ def _reject_extra_arguments(intent_name: str, arguments: dict[str, Any]) -> None
 def _normalize_arguments(intent_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     if intent_name in {"help", "runtime_status", "healthcheck", "config_validate", "symbol_list", "pending_operations"}:
         return {}
-    if intent_name == "position_query":
+    if intent_name in {"position_query", "position_exit_analysis"}:
         return PositionQuery.from_payload(arguments).to_payload()
     if intent_name == "monthly_income_report":
         out = {}

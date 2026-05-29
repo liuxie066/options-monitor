@@ -21,41 +21,42 @@ from src.application.assistant.commands import (
 )
 from src.application.assistant.command_parser import parse_assistant_command
 from src.application.assistant.conversation_context import build_conversation_context
-from src.application.assistant.intent_arbitration import ASSISTANT_DECISION_SCHEMA_VERSION, INTENT_ARBITRATION_SCHEMA_VERSION
+from src.application.assistant.perception_trace import ASSISTANT_DECISION_SCHEMA_VERSION, PERCEPTION_TRACE_SCHEMA_VERSION
 from src.application.assistant.llm_intent_schema import LLM_INTENT_SCHEMA_VERSION, llm_intent_json_schema, llm_intent_schema
 from src.application.assistant.llm_common import provider_api_kind, provider_endpoint_url, supported_llm_providers
 from src.application.assistant.llm_reply import LlmReplyResult, generate_general_reply
 from src.application.assistant.llm_translator import LlmTranslationResult, parse_llm_translation_payload, translate_inbound_intent
 from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.assistant.audit import InboundAuditStore
-from src.application.assistant.contracts import SEMANTIC_FRAME_SCHEMA_VERSION, AssistantIntent, AssistantRequest
+from src.application.assistant.contracts import PERCEPTION_RESULT_SCHEMA_VERSION, AssistantRequest, PerceptionResult
 from src.infrastructure.openai_chat_completions import create_json_chat_completion, extract_chat_completion_text
 from src.infrastructure.openai_responses import OpenAIResponsesError, create_structured_response, extract_response_text
 
 
-def test_assistant_intent_payload_is_semantic_frame_contract() -> None:
-    payload = AssistantIntent(
-        name="runtime_status",
+def test_assistant_perception_payload_contract() -> None:
+    payload = PerceptionResult(
+        intent_name="runtime_status",
         arguments={},
-        parser="llm",
+        source="llm",
         confidence=0.91,
     ).public_payload()
 
     assert payload == {
-        "schema_version": SEMANTIC_FRAME_SCHEMA_VERSION,
-        "name": "runtime_status",
+        "schema_version": PERCEPTION_RESULT_SCHEMA_VERSION,
+        "intent_name": "runtime_status",
         "arguments": {},
-        "parser": "llm",
+        "source": "llm",
         "confidence": 0.91,
+        "evidence": {},
     }
 
 
 def test_assistant_command_parser_maps_read_commands() -> None:
     positions = parse_assistant_command("/positions sy")
     assert positions is not None
-    assert positions.name == "position_query"
+    assert positions.intent_name == "position_query"
     assert positions.arguments == {"account": "sy", "status": "open", "limit": 50}
-    assert positions.parser == "command"
+    assert positions.source == "command"
 
     all_positions = parse_assistant_command("/positions all")
     assert all_positions is not None
@@ -63,7 +64,7 @@ def test_assistant_command_parser_maps_read_commands() -> None:
 
     income = parse_assistant_command("/income sy 上月", now_fn=lambda: date(2026, 1, 3))
     assert income is not None
-    assert income.name == "monthly_income_report"
+    assert income.intent_name == "monthly_income_report"
     assert income.arguments == {"account": "sy", "month": "2025-12"}
 
     runs = parse_assistant_command("/runs 20")
@@ -76,11 +77,11 @@ def test_assistant_command_parser_maps_read_commands() -> None:
 
     models = parse_assistant_command("/model")
     assert models is not None
-    assert models.name == "model_list"
+    assert models.intent_name == "model_list"
 
     model_switch = parse_assistant_command("/model use deepseek-default")
     assert model_switch is not None
-    assert model_switch.name == "model_use"
+    assert model_switch.intent_name == "model_use"
     assert model_switch.arguments == {"model_profile": "deepseek-default"}
 
 
@@ -89,31 +90,38 @@ def test_assistant_command_parser_maps_manual_trade_preview_commands() -> None:
         "/record-open lx NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100"
     )
     assert open_cmd is not None
-    assert open_cmd.name == "manual_trade_open"
+    assert open_cmd.intent_name == "manual_trade_open"
     assert open_cmd.arguments == {
         "raw_text": "记录开仓 lx NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100"
     }
-    assert open_cmd.parser == "command"
+    assert open_cmd.source == "command"
 
     close_cmd = parse_assistant_command("/record-close record_id=rec_abc123 1张 close 0.8")
     assert close_cmd is not None
-    assert close_cmd.name == "manual_trade_close"
+    assert close_cmd.intent_name == "manual_trade_close"
     assert close_cmd.arguments == {"raw_text": "记录平仓 record_id=rec_abc123 1张 close 0.8"}
 
 
 def test_assistant_command_catalog_drives_llm_allowed_surface() -> None:
-    llm_executable = {
+    llm_recognizable = {
         spec.intent_name
         for spec in command_specs()
         if spec.read_only and spec.llm_allowed
     }
-    llm_denied = {spec.intent_name for spec in command_specs()} - llm_executable
+    llm_executable = {
+        spec.intent_name
+        for spec in command_specs()
+        if spec.read_only and spec.llm_allowed and spec.supported and spec.tool_name is not None
+    }
+    llm_denied = {spec.intent_name for spec in command_specs()} - llm_recognizable
     schema = llm_intent_schema()
     payload = command_catalog_payload()
     capabilities = {item["capability_id"]: item for item in payload["capabilities"]}
 
-    assert set(schema["shape"]["intent"]) == llm_executable
+    assert set(schema["shape"]["intent"]) == llm_recognizable
     assert "runtime_status" in llm_executable
+    assert "position_exit_analysis" in llm_recognizable
+    assert "position_exit_analysis" not in llm_executable
     assert "manual_trade_open" in llm_denied
     assert "symbol_add" in llm_denied
     assert "upgrade_now" in llm_denied
@@ -122,6 +130,9 @@ def test_assistant_command_catalog_drives_llm_allowed_surface() -> None:
     assert payload["summary"]["command_count"] == len(command_specs())
     assert payload["summary"]["capability_count"] == len(command_specs())
     assert capabilities["runtime_status"]["display_name"] == "状态"
+    assert capabilities["position_exit_analysis"]["supported"] is False
+    assert capabilities["position_exit_analysis"]["llm_recognizable"] is True
+    assert capabilities["position_exit_analysis"]["llm_executable"] is False
     assert capabilities["manual_trade_open"]["risk_level"] == "preview_write"
     assert capabilities["manual_trade_open"]["llm_executable"] is False
     assert capabilities["symbol_add"]["risk_level"] == "preview_write"
@@ -189,32 +200,40 @@ def test_assistant_capability_catalog_has_safe_llm_invariants() -> None:
         assert item["risk_level"]
         assert item["summary"]
         assert item["commands"] or item["examples"]
-        if item["llm_allowed"]:
+        if item["llm_allowed"] and item["read_only"]:
+            assert item["llm_recognizable"] is True
+        if item["llm_allowed"] and item["supported"] and item["tool_name"] is not None:
             assert item["read_only"] is True
             assert item["llm_executable"] is True
         if item["llm_executable"]:
             assert item["read_only"] is True
             assert item["llm_allowed"] is True
+            assert item["supported"] is True
             assert item["risk_level"] == "read_only"
         else:
-            assert item["read_only"] is False or item["llm_allowed"] is False
+            assert (
+                item["read_only"] is False
+                or item["llm_allowed"] is False
+                or item["supported"] is False
+                or item["tool_name"] is None
+            )
 
 
 def test_assistant_deterministic_parser_supports_productized_read_aliases() -> None:
     from src.application.assistant.parser import parse_inbound_text
 
-    assert parse_inbound_text("我能做什么").name == "help"
-    assert parse_inbound_text("有哪些功能").name == "help"
-    assert parse_inbound_text("自检").name == "healthcheck"
-    assert parse_inbound_text("配置是否正常").name == "config_validate"
-    assert parse_inbound_text("config").name == "config_validate"
+    assert parse_inbound_text("我能做什么").intent_name == "help"
+    assert parse_inbound_text("有哪些功能").intent_name == "help"
+    assert parse_inbound_text("自检").intent_name == "healthcheck"
+    assert parse_inbound_text("配置是否正常").intent_name == "config_validate"
+    assert parse_inbound_text("config").intent_name == "config_validate"
     assert parse_inbound_text("positions").arguments == {"status": "open", "limit": 50}
     assert parse_inbound_text("income").arguments == {}
     assert parse_inbound_text("runs").arguments == {"limit": 10}
-    assert parse_inbound_text("最近任务").name == "runtime_runs"
-    assert parse_inbound_text("symbols").name == "symbol_list"
-    assert parse_inbound_text("监控标的有哪些").name == "symbol_list"
-    assert parse_inbound_text("pending").name == "pending_operations"
+    assert parse_inbound_text("最近任务").intent_name == "runtime_runs"
+    assert parse_inbound_text("symbols").intent_name == "symbol_list"
+    assert parse_inbound_text("监控标的有哪些").intent_name == "symbol_list"
+    assert parse_inbound_text("pending").intent_name == "pending_operations"
 
     try:
         parse_inbound_text("查一下")
@@ -228,29 +247,29 @@ def test_assistant_deterministic_parser_supports_productized_read_aliases() -> N
 def test_assistant_command_parser_maps_typed_confirm_commands() -> None:
     confirm = parse_assistant_command("/confirm trade in_abc123")
     assert confirm is not None
-    assert confirm.name == "manual_trade_confirm"
+    assert confirm.intent_name == "manual_trade_confirm"
     assert confirm.arguments == {"operation_id": "in_abc123", "operation_resolution": "explicit"}
 
     confirm_record = parse_assistant_command("/confirm record in_abc123")
     assert confirm_record is not None
-    assert confirm_record.name == "manual_trade_confirm"
+    assert confirm_record.intent_name == "manual_trade_confirm"
 
     latest_symbol = parse_assistant_command("/confirm symbol")
     assert latest_symbol is not None
-    assert latest_symbol.name == "symbol_confirm"
+    assert latest_symbol.intent_name == "symbol_confirm"
     assert latest_symbol.arguments == {"operation_id": None, "operation_resolution": "latest_pending"}
 
     cancel_monitor = parse_assistant_command("/cancel monitor")
     assert cancel_monitor is not None
-    assert cancel_monitor.name == "symbol_cancel"
+    assert cancel_monitor.intent_name == "symbol_cancel"
 
     cancel_upgrade = parse_assistant_command("/cancel upgrade in_abc123")
     assert cancel_upgrade is not None
-    assert cancel_upgrade.name == "upgrade_cancel"
+    assert cancel_upgrade.intent_name == "upgrade_cancel"
 
     confirm_model = parse_assistant_command("/confirm model in_abc123")
     assert confirm_model is not None
-    assert confirm_model.name == "model_confirm"
+    assert confirm_model.intent_name == "model_confirm"
 
 
 def test_assistant_runtime_executes_slash_command_through_inbound_router(tmp_path: Path) -> None:
@@ -273,7 +292,7 @@ def test_assistant_runtime_executes_slash_command_through_inbound_router(tmp_pat
 
     assert out["ok"] is True
     assert calls == [("runtime_status", {"config_key": "us"})]
-    assert out["data"]["intent"]["parser"] == "command"
+    assert out["data"]["perception"]["source"] == "command"
     assistant_meta = out["meta"]["assistant"]
     assert {
         "enabled": assistant_meta["enabled"],
@@ -301,17 +320,17 @@ def test_assistant_runtime_executes_slash_command_through_inbound_router(tmp_pat
         "context": {"provided": False},
         "langgraph": "disabled",
     }
-    assert assistant_meta["arbitration"]["decision"] == "command_selected"
-    assert assistant_meta["arbitration"]["selected_source"] == "command"
-    assert assistant_meta["arbitration"]["selected_intent"]["name"] == "runtime_status"
+    assert assistant_meta["perception_trace"]["decision"] == "command_selected"
+    assert assistant_meta["perception_trace"]["selected_source"] == "command"
+    assert assistant_meta["perception_trace"]["selected_perception"]["intent_name"] == "runtime_status"
     assert assistant_meta["decision"] == {
         "schema_version": ASSISTANT_DECISION_SCHEMA_VERSION,
         "route": "command",
         "selected_source": "command",
         "selected_intent_name": "runtime_status",
-        "selected_parser": "command",
+        "selected_perception_source": "command",
         "selected_confidence": 1.0,
-        "arbitration_decision": "command_selected",
+        "perception_decision": "command_selected",
         "candidate_count": 3,
         "llm": {"attempted": False, "reason": "command", "provider": "", "model": ""},
         "execution_contract": {
@@ -320,6 +339,7 @@ def test_assistant_runtime_executes_slash_command_through_inbound_router(tmp_pat
             "operation_action": None,
             "operation_target": None,
             "llm_allowed": True,
+            "supported": True,
             "direct_writes_allowed": False,
             "llm_write_allowed": False,
             "preview_confirm_required": False,
@@ -331,7 +351,7 @@ def test_assistant_runtime_executes_slash_command_through_inbound_router(tmp_pat
     audited = json.loads(rows[0]["response_json"])
     assert audited["meta"]["assistant"]["route"] == "command"
     assert audited["meta"]["assistant"]["llm"]["reason"] == "command"
-    assert audited["meta"]["assistant"]["arbitration"] == assistant_meta["arbitration"]
+    assert audited["meta"]["assistant"]["perception_trace"] == assistant_meta["perception_trace"]
     assert audited["meta"]["assistant"]["decision"] == assistant_meta["decision"]
 
 
@@ -380,7 +400,7 @@ def test_assistant_runtime_keeps_deterministic_fallback(tmp_path: Path) -> None:
 
     assert out["ok"] is True
     assert calls == [("runtime_status", {"config_key": "us"})]
-    assert out["data"]["intent"]["parser"] == "deterministic"
+    assert out["data"]["perception"]["source"] == "deterministic"
     assert out["meta"]["assistant"]["route"] == "deterministic"
     assert out["meta"]["assistant"]["llm"]["reason"] == "not_needed"
 
@@ -434,17 +454,17 @@ def test_agent_loop_mode_does_not_mark_deterministic_command_as_loop_tool_use(tm
     assert calls == [("runtime_status", {"config_key": "us"})]
     assert out["meta"]["assistant"]["route"] == "command"
     assert "agent_loop" not in out["meta"]["assistant"]["llm"]
-    arbitration = out["meta"]["assistant"]["arbitration"]
-    assert arbitration["schema_version"] == INTENT_ARBITRATION_SCHEMA_VERSION
-    assert arbitration["decision"] == "command_selected"
-    assert arbitration["selected_source"] == "command"
-    assert arbitration["selected_intent"]["name"] == "runtime_status"
-    assert arbitration["candidates"][0]["source"] == "command"
-    assert arbitration["candidates"][0]["status"] == "accepted"
-    assert arbitration["candidates"][-1] == {"source": "llm", "status": "skipped", "reason": "command_selected"}
+    perception_trace = out["meta"]["assistant"]["perception_trace"]
+    assert perception_trace["schema_version"] == PERCEPTION_TRACE_SCHEMA_VERSION
+    assert perception_trace["decision"] == "command_selected"
+    assert perception_trace["selected_source"] == "command"
+    assert perception_trace["selected_perception"]["intent_name"] == "runtime_status"
+    assert perception_trace["candidates"][0]["source"] == "command"
+    assert perception_trace["candidates"][0]["status"] == "accepted"
+    assert perception_trace["candidates"][-1] == {"source": "llm", "status": "skipped", "reason": "command_selected"}
 
 
-def test_assistant_runtime_records_deterministic_arbitration_in_audit(tmp_path: Path) -> None:
+def test_assistant_runtime_records_deterministic_perception_trace_in_audit(tmp_path: Path) -> None:
     audit_db = tmp_path / "inbound.sqlite3"
     calls: list[tuple[str, dict[str, Any]]] = []
 
@@ -456,7 +476,7 @@ def test_assistant_runtime_records_deterministic_arbitration_in_audit(tmp_path: 
         AssistantRequest(
             text="状态",
             sender_id="local",
-            message_id="msg_deterministic_arbitration",
+            message_id="msg_deterministic_perception_trace",
             config_key="us",
             audit_db=str(audit_db),
         ),
@@ -465,24 +485,25 @@ def test_assistant_runtime_records_deterministic_arbitration_in_audit(tmp_path: 
 
     assert out["ok"] is True
     assert calls == [("runtime_status", {"config_key": "us"})]
-    arbitration = out["meta"]["assistant"]["arbitration"]
-    assert arbitration["decision"] == "deterministic_selected"
-    assert arbitration["selected_source"] == "deterministic"
-    assert arbitration["selected_intent"]["name"] == "runtime_status"
-    assert arbitration["conflict"] is False
-    assert arbitration["candidates"] == [
+    perception_trace = out["meta"]["assistant"]["perception_trace"]
+    assert perception_trace["decision"] == "deterministic_selected"
+    assert perception_trace["selected_source"] == "deterministic"
+    assert perception_trace["selected_perception"]["intent_name"] == "runtime_status"
+    assert perception_trace["conflict"] is False
+    assert perception_trace["candidates"] == [
         {
             "source": "deterministic",
             "status": "accepted",
-            "intent": {
-                "schema_version": SEMANTIC_FRAME_SCHEMA_VERSION,
-                "name": "runtime_status",
+            "perception": {
+                "schema_version": PERCEPTION_RESULT_SCHEMA_VERSION,
+                "intent_name": "runtime_status",
                 "arguments": {},
-                "parser": "deterministic",
+                "source": "deterministic",
                 "confidence": 1.0,
+                "evidence": {},
             },
             "intent_name": "runtime_status",
-            "parser": "deterministic",
+            "perception_source": "deterministic",
             "confidence": 1.0,
         },
         {"source": "llm", "status": "skipped", "reason": "deterministic_selected"},
@@ -491,13 +512,13 @@ def test_assistant_runtime_records_deterministic_arbitration_in_audit(tmp_path: 
     recent = InboundAuditStore(audit_db).list_recent(limit=1)
     assert len(recent) == 1
     audited_response = json.loads(str(recent[0]["response_json"]))
-    assert audited_response["meta"]["assistant"]["arbitration"] == arbitration
+    assert audited_response["meta"]["assistant"]["perception_trace"] == perception_trace
     decision = out["meta"]["assistant"]["decision"]
     assert decision["schema_version"] == ASSISTANT_DECISION_SCHEMA_VERSION
     assert decision["route"] == "deterministic"
     assert decision["selected_source"] == "deterministic"
     assert decision["selected_intent_name"] == "runtime_status"
-    assert decision["arbitration_decision"] == "deterministic_selected"
+    assert decision["perception_decision"] == "deterministic_selected"
     assert decision["execution_contract"]["read_only"] is True
     assert decision["execution_contract"]["direct_writes_allowed"] is False
     assert audited_response["meta"]["assistant"]["decision"] == decision
@@ -526,7 +547,7 @@ def test_assistant_runtime_answers_small_talk_without_tool_or_llm(tmp_path: Path
 
     assert out["ok"] is True
     assert calls == []
-    assert out["data"]["intent"]["name"] == "small_talk"
+    assert out["data"]["perception"]["intent_name"] == "small_talk"
     assert out["meta"]["assistant"]["route"] == "deterministic"
     assert out["meta"]["assistant"]["llm"]["reason"] == "not_needed"
 
@@ -681,8 +702,8 @@ def test_assistant_runtime_uses_llm_reply_for_non_business_text_after_low_confid
 
     assert out["ok"] is True
     assert calls == []
-    assert out["data"]["intent"]["name"] == "small_talk"
-    assert out["data"]["intent"]["parser"] == "llm_reply"
+    assert out["data"]["perception"]["intent_name"] == "small_talk"
+    assert out["data"]["perception"]["source"] == "llm_reply"
     assert out["data"]["response_text"] == "我是 OM 的交易系统助手，当前启用了 DeepSeek 作为自然语言路由和普通回复能力。"
     assert out["meta"]["assistant"]["route"] == "llm_reply"
     assert out["meta"]["assistant"]["llm"]["reason"] == "general_reply"
@@ -802,10 +823,10 @@ def test_assistant_runtime_routes_valid_llm_translation_through_inbound_router(t
             "conversation_id": "local:local",
         }
         return LlmTranslationResult(
-            intent=AssistantIntent(
-                name="monthly_income_report",
+            intent=PerceptionResult(
+                intent_name="monthly_income_report",
                 arguments={"month": "2026-05"},
-                parser="llm",
+                source="llm",
                 confidence=0.92,
             ),
             trace={
@@ -844,24 +865,24 @@ def test_assistant_runtime_routes_valid_llm_translation_through_inbound_router(t
 
     assert out["ok"] is True
     assert calls == [("monthly_income_report", {"config_key": "us", "month": "2026-05"})]
-    assert out["data"]["intent"]["parser"] == "llm"
+    assert out["data"]["perception"]["source"] == "llm"
     assert out["meta"]["assistant"]["route"] == "llm"
     assert out["meta"]["assistant"]["llm"]["schema_version"] == LLM_INTENT_SCHEMA_VERSION
-    arbitration = out["meta"]["assistant"]["arbitration"]
-    assert arbitration["decision"] == "llm_selected"
-    assert arbitration["selected_source"] == "llm"
-    assert arbitration["selected_intent"]["name"] == "monthly_income_report"
-    assert arbitration["candidates"][0]["source"] == "deterministic"
-    assert arbitration["candidates"][0]["status"] == "rejected"
-    assert arbitration["candidates"][0]["error_code"] == "NEEDS_CLARIFICATION"
-    assert arbitration["candidates"][1]["source"] == "llm"
-    assert arbitration["candidates"][1]["status"] == "accepted"
-    assert arbitration["candidates"][1]["intent_name"] == "monthly_income_report"
+    perception_trace = out["meta"]["assistant"]["perception_trace"]
+    assert perception_trace["decision"] == "llm_selected"
+    assert perception_trace["selected_source"] == "llm"
+    assert perception_trace["selected_perception"]["intent_name"] == "monthly_income_report"
+    assert perception_trace["candidates"][0]["source"] == "deterministic"
+    assert perception_trace["candidates"][0]["status"] == "rejected"
+    assert perception_trace["candidates"][0]["error_code"] == "NEEDS_CLARIFICATION"
+    assert perception_trace["candidates"][1]["source"] == "llm"
+    assert perception_trace["candidates"][1]["status"] == "accepted"
+    assert perception_trace["candidates"][1]["intent_name"] == "monthly_income_report"
     decision = out["meta"]["assistant"]["decision"]
     assert decision["route"] == "llm"
     assert decision["selected_source"] == "llm"
     assert decision["selected_intent_name"] == "monthly_income_report"
-    assert decision["arbitration_decision"] == "llm_selected"
+    assert decision["perception_decision"] == "llm_selected"
     assert decision["llm"] == {"attempted": True, "reason": "accepted", "provider": "openai", "model": "gpt-5.2"}
     assert decision["execution_contract"]["read_only"] is True
     assert decision["execution_contract"]["llm_allowed"] is True
@@ -875,20 +896,20 @@ def test_assistant_runtime_routes_valid_llm_translation_through_inbound_router(t
 
 def test_assistant_runtime_routes_core_read_only_llm_intents(tmp_path: Path) -> None:
     cases = [
-        ("系统现在正常吗", AssistantIntent(name="runtime_status", arguments={}, parser="llm", confidence=0.92), ("runtime_status", {"config_key": "us"})),
+        ("系统现在正常吗", PerceptionResult(intent_name="runtime_status", arguments={}, source="llm", confidence=0.92), ("runtime_status", {"config_key": "us"})),
         (
             "我现在有哪些 sy 仓位",
-            AssistantIntent(name="position_query", arguments={"account": "sy", "status": "open"}, parser="llm", confidence=0.92),
+            PerceptionResult(intent_name="position_query", arguments={"account": "sy", "status": "open"}, source="llm", confidence=0.92),
             ("option_positions_read", {"config_key": "us", "action": "list", "query": {"account": "sy", "status": "open", "limit": 50}}),
         ),
         (
             "这个月赚了多少",
-            AssistantIntent(name="monthly_income_report", arguments={"month": "2026-05"}, parser="llm", confidence=0.92),
+            PerceptionResult(intent_name="monthly_income_report", arguments={"month": "2026-05"}, source="llm", confidence=0.92),
             ("monthly_income_report", {"config_key": "us", "month": "2026-05"}),
         ),
-        ("帮我看系统有没有红灯", AssistantIntent(name="healthcheck", arguments={}, parser="llm", confidence=0.92), ("healthcheck", {"config_key": "us"})),
-        ("看看设置是否靠谱", AssistantIntent(name="config_validate", arguments={}, parser="llm", confidence=0.92), ("config_validate", {"config_key": "us"})),
-        ("过去跑过几次", AssistantIntent(name="runtime_runs", arguments={"limit": 3}, parser="llm", confidence=0.92), ("runtime_runs", {"limit": 3})),
+        ("帮我看系统有没有红灯", PerceptionResult(intent_name="healthcheck", arguments={}, source="llm", confidence=0.92), ("healthcheck", {"config_key": "us"})),
+        ("看看设置是否靠谱", PerceptionResult(intent_name="config_validate", arguments={}, source="llm", confidence=0.92), ("config_validate", {"config_key": "us"})),
+        ("过去跑过几次", PerceptionResult(intent_name="runtime_runs", arguments={"limit": 3}, source="llm", confidence=0.92), ("runtime_runs", {"limit": 3})),
     ]
 
     calls: list[tuple[str, dict[str, Any]]] = []
@@ -973,7 +994,7 @@ def test_assistant_runtime_builds_context_from_same_conversation(tmp_path: Path)
         nonlocal captured_context
         captured_context = conversation_context
         return LlmTranslationResult(
-            intent=AssistantIntent(name="runtime_status", arguments={}, parser="llm", confidence=0.91),
+            intent=PerceptionResult(intent_name="runtime_status", arguments={}, source="llm", confidence=0.91),
             trace={
                 "enabled": True,
                 "attempted": True,
@@ -1111,7 +1132,7 @@ def test_assistant_runtime_agent_loop_is_bounded_read_only_router(tmp_path: Path
         assert settings.mode == "agent_loop"
         assert conversation_context is not None
         return LlmTranslationResult(
-            intent=AssistantIntent(name="runtime_status", arguments={}, parser="llm", confidence=0.92),
+            intent=PerceptionResult(intent_name="runtime_status", arguments={}, source="llm", confidence=0.92),
             trace={
                 "enabled": True,
                 "attempted": True,
@@ -1299,10 +1320,10 @@ def test_assistant_runtime_rejects_llm_injected_write_intent_even_with_custom_tr
         _conversation_context: dict[str, Any] | None,
     ) -> LlmTranslationResult:
         return LlmTranslationResult(
-            intent=AssistantIntent(
-                name="manual_trade_open",
+            intent=PerceptionResult(
+                intent_name="manual_trade_open",
                 arguments={"raw_text": "记录开仓 sy NVDA put"},
-                parser="llm",
+                source="llm",
                 confidence=0.99,
             ),
             trace={
@@ -1336,23 +1357,23 @@ def test_assistant_runtime_rejects_llm_injected_write_intent_even_with_custom_tr
 
     assert out["ok"] is False
     assert out["error"]["code"] == "PERMISSION_DENIED"
-    assert "write actions must use deterministic preview" in out["error"]["hint"]
+    assert "deterministic preview/confirm commands" in out["error"]["hint"]
     assert out["meta"]["assistant"]["route"] == "agent_loop"
-    arbitration = out["meta"]["assistant"]["arbitration"]
-    assert arbitration["decision"] == "llm_denied_by_policy"
-    assert arbitration["selected_source"] is None
-    assert arbitration["candidates"][0]["source"] == "deterministic"
-    assert arbitration["candidates"][0]["error_code"] == "NEEDS_CLARIFICATION"
-    assert arbitration["candidates"][1]["source"] == "agent_loop"
-    assert arbitration["candidates"][1]["status"] == "accepted"
-    assert arbitration["candidates"][1]["intent_name"] == "manual_trade_open"
-    assert arbitration["candidates"][2]["source"] == "policy"
-    assert arbitration["candidates"][2]["error_code"] == "PERMISSION_DENIED"
+    perception_trace = out["meta"]["assistant"]["perception_trace"]
+    assert perception_trace["decision"] == "llm_denied_by_policy"
+    assert perception_trace["selected_source"] is None
+    assert perception_trace["candidates"][0]["source"] == "deterministic"
+    assert perception_trace["candidates"][0]["error_code"] == "NEEDS_CLARIFICATION"
+    assert perception_trace["candidates"][1]["source"] == "agent_loop"
+    assert perception_trace["candidates"][1]["status"] == "accepted"
+    assert perception_trace["candidates"][1]["intent_name"] == "manual_trade_open"
+    assert perception_trace["candidates"][2]["source"] == "policy"
+    assert perception_trace["candidates"][2]["error_code"] == "PERMISSION_DENIED"
     decision = out["meta"]["assistant"]["decision"]
     assert decision["route"] == "agent_loop"
     assert decision["selected_source"] is None
     assert decision["selected_intent_name"] is None
-    assert decision["arbitration_decision"] == "llm_denied_by_policy"
+    assert decision["perception_decision"] == "llm_denied_by_policy"
     assert decision["execution_contract"]["direct_writes_allowed"] is False
     assert decision["execution_contract"]["llm_write_allowed"] is False
     assert calls == []
@@ -1371,9 +1392,9 @@ def test_llm_intent_schema_accepts_strict_read_only_payload() -> None:
 
     assert result.error is None
     assert result.intent is not None
-    assert result.intent.name == "monthly_income_report"
+    assert result.intent.intent_name == "monthly_income_report"
     assert result.intent.arguments == {"account": "sy", "month": "2026-05"}
-    assert result.intent.parser == "llm"
+    assert result.intent.source == "llm"
     assert result.trace["reason"] == "accepted"
     assert result.trace["schema_version"] == LLM_INTENT_SCHEMA_VERSION
 
@@ -1399,7 +1420,7 @@ def test_llm_intent_schema_ignores_null_argument_slots_from_provider() -> None:
 
     assert result.error is None
     assert result.intent is not None
-    assert result.intent.name == "runtime_status"
+    assert result.intent.intent_name == "runtime_status"
     assert result.intent.arguments == {}
 
 
@@ -1572,7 +1593,7 @@ def test_llm_translator_calls_openai_provider_and_parses_structured_response() -
 
     assert result.error is None
     assert result.intent is not None
-    assert result.intent.name == "position_query"
+    assert result.intent.intent_name == "position_query"
     assert result.intent.arguments == {"account": "sy", "status": "open", "limit": 50}
     assert result.trace["reason"] == "accepted"
     assert result.trace["provider"] == "openai"
@@ -1641,7 +1662,7 @@ def test_llm_translator_calls_deepseek_provider_and_parses_chat_response() -> No
 
     assert result.error is None
     assert result.intent is not None
-    assert result.intent.name == "position_query"
+    assert result.intent.intent_name == "position_query"
     assert result.intent.arguments == {"account": "sy", "status": "open", "limit": 50}
     assert result.trace["reason"] == "accepted"
     assert result.trace["provider"] == "deepseek"

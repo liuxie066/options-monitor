@@ -10,10 +10,10 @@ import pytest
 from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.assistant.commands import command_specs
 from src.application.assistant.contracts import (
-    ASSISTANT_FRAME_SCHEMA_VERSION,
-    TOOL_PLAN_SCHEMA_VERSION,
     AssistantRequest,
-    AssistantToolCall,
+    PERCEPTION_RESULT_SCHEMA_VERSION,
+    REASONING_RESOLUTION_SCHEMA_VERSION,
+    ToolCall,
 )
 from src.application.inbound.feishu import feishu_payload_to_inbound_request, handle_feishu_payload
 from src.application.assistant.parser import parse_inbound_text
@@ -166,21 +166,21 @@ assistant:
 
 
 def test_inbound_parser_maps_core_read_only_commands() -> None:
-    assert parse_inbound_text("状态").name == "runtime_status"
-    assert parse_inbound_text("健康检查").name == "healthcheck"
-    assert parse_inbound_text("待确认").name == "pending_operations"
-    assert parse_inbound_text("pending").name == "pending_operations"
+    assert parse_inbound_text("状态").intent_name == "runtime_status"
+    assert parse_inbound_text("健康检查").intent_name == "healthcheck"
+    assert parse_inbound_text("待确认").intent_name == "pending_operations"
+    assert parse_inbound_text("pending").intent_name == "pending_operations"
 
     positions = parse_inbound_text("持仓 sy")
-    assert positions.name == "position_query"
+    assert positions.intent_name == "position_query"
     assert positions.arguments == {"account": "sy", "status": "open", "limit": 50}
 
     all_positions = parse_inbound_text("持仓")
-    assert all_positions.name == "position_query"
+    assert all_positions.intent_name == "position_query"
     assert all_positions.arguments == {"status": "open", "limit": 50}
 
     may_positions = parse_inbound_text("sy 5月到期的持仓", now_fn=lambda: date(2026, 5, 19))
-    assert may_positions.name == "position_query"
+    assert may_positions.intent_name == "position_query"
     assert may_positions.arguments == {
         "account": "sy",
         "status": "open",
@@ -188,7 +188,7 @@ def test_inbound_parser_maps_core_read_only_commands() -> None:
         "limit": 50,
     }
     may_positions_without_account = parse_inbound_text("5月到期的持仓", now_fn=lambda: date(2026, 5, 19))
-    assert may_positions_without_account.name == "position_query"
+    assert may_positions_without_account.intent_name == "position_query"
     assert may_positions_without_account.arguments == {
         "status": "open",
         "expiration": {"month": "2026-05"},
@@ -196,18 +196,18 @@ def test_inbound_parser_maps_core_read_only_commands() -> None:
     }
 
     income = parse_inbound_text("收益 sy 本月", now_fn=lambda: date(2026, 5, 19))
-    assert income.name == "monthly_income_report"
+    assert income.intent_name == "monthly_income_report"
     assert income.arguments == {"account": "sy", "month": "2026-05"}
 
     all_income = parse_inbound_text("收益 本月", now_fn=lambda: date(2026, 5, 19))
-    assert all_income.name == "monthly_income_report"
+    assert all_income.intent_name == "monthly_income_report"
     assert all_income.arguments == {"month": "2026-05"}
 
     last_month = parse_inbound_text("收益 lx 上月", now_fn=lambda: date(2026, 1, 3))
     assert last_month.arguments == {"account": "lx", "month": "2025-12"}
 
     logs = parse_inbound_text("日志 20260515T182459Z-474761")
-    assert logs.name == "runtime_logs"
+    assert logs.intent_name == "runtime_logs"
     assert logs.arguments["run_id"] == "20260515T182459Z-474761"
 
 
@@ -236,8 +236,8 @@ def test_inbound_model_command_lists_configured_profiles(tmp_path: Path) -> None
     )
 
     assert out["ok"] is True
-    assert out["data"]["intent"]["name"] == "model_list"
-    assert out["data"]["tool_call"]["tool_name"] == "inbound.model"
+    assert out["data"]["perception"]["intent_name"] == "model_list"
+    assert out["data"]["reasoning"]["tool_call"]["tool_name"] == "inbound.model"
     assert out["data"]["summary"]["active_model"] == "openai-default"
     assert {item["name"] for item in out["data"]["models"]} == {"openai-default", "deepseek-default"}
     assert "当前模型：openai-default" in out["data"]["response_text"]
@@ -300,7 +300,7 @@ def test_inbound_policy_allows_sender_and_rejects_non_pure_read_tool() -> None:
     assert denied.reason == "sender_not_allowed"
 
     with pytest.raises(AgentToolError) as exc:
-        enforce_tool_allowed(AssistantToolCall(tool_name="scan_opportunities", payload={"config_key": "us"}))
+        enforce_tool_allowed(ToolCall(tool_name="scan_opportunities", payload={"config_key": "us"}))
 
     assert exc.value.code == "PERMISSION_DENIED"
     assert "inbound.manual_trade" not in PURE_READ_TOOLS
@@ -341,14 +341,14 @@ def test_command_catalog_read_tool_names_match_inbound_policy() -> None:
 
 def test_inbound_parser_maps_manual_trade_and_symbol_operations() -> None:
     open_intent = parse_inbound_text("记录开仓 sy 0700.HK short put strike 450 exp 2026-05-28 6张 premium 2.35 multiplier 100")
-    assert open_intent.name == "manual_trade_open"
+    assert open_intent.intent_name == "manual_trade_open"
     assert open_intent.arguments == {
         "raw_text": "记录开仓 sy 0700.HK short put strike 450 exp 2026-05-28 6张 premium 2.35 multiplier 100",
         "account": "sy",
     }
 
     close_intent = parse_inbound_text("记录平仓 sy 0700.HK short put strike 450 exp 2026-05-28 2张 close 1.2")
-    assert close_intent.name == "manual_trade_close"
+    assert close_intent.intent_name == "manual_trade_close"
     assert close_intent.arguments == {
         "raw_text": "记录平仓 sy 0700.HK short put strike 450 exp 2026-05-28 2张 close 1.2",
         "account": "sy",
@@ -359,7 +359,7 @@ def test_inbound_parser_maps_manual_trade_and_symbol_operations() -> None:
         "operation_resolution": "explicit",
     }
     english_confirm = parse_inbound_text("confirm trade in_abc123")
-    assert english_confirm.name == "manual_trade_confirm"
+    assert english_confirm.intent_name == "manual_trade_confirm"
     assert english_confirm.arguments == {
         "operation_id": "in_abc123",
         "operation_resolution": "explicit",
@@ -368,10 +368,10 @@ def test_inbound_parser_maps_manual_trade_and_symbol_operations() -> None:
         "operation_id": None,
         "operation_resolution": "latest_pending",
     }
-    assert parse_inbound_text("取消记录 in_abc123").name == "manual_trade_cancel"
-    assert parse_inbound_text("取消交易 in_abc123").name == "manual_trade_cancel"
+    assert parse_inbound_text("取消记录 in_abc123").intent_name == "manual_trade_cancel"
+    assert parse_inbound_text("取消交易 in_abc123").intent_name == "manual_trade_cancel"
     trade_update = parse_inbound_text("premium 改成 2.75")
-    assert trade_update.name == "manual_trade_update"
+    assert trade_update.intent_name == "manual_trade_update"
     assert trade_update.arguments == {
         "operation_id": None,
         "operation_resolution": "latest_pending",
@@ -388,28 +388,28 @@ def test_inbound_parser_maps_manual_trade_and_symbol_operations() -> None:
     assert decimal_contracts.value.code == "INPUT_ERROR"
     assert "整数参数不能写小数" in decimal_contracts.value.message
 
-    assert parse_inbound_text("查看监控标的").name == "symbol_list"
+    assert parse_inbound_text("查看监控标的").intent_name == "symbol_list"
     symbol_add = parse_inbound_text("增加监控标的 700 put")
-    assert symbol_add.name == "symbol_add"
+    assert symbol_add.intent_name == "symbol_add"
     assert symbol_add.arguments == {"symbol": "700", "sell_put_enabled": True, "sell_call_enabled": False}
     symbol_edit = parse_inbound_text("修改监控标的 HK.00700 sell_put.max_strike=480")
-    assert symbol_edit.name == "symbol_edit"
+    assert symbol_edit.intent_name == "symbol_edit"
     assert symbol_edit.arguments == {"symbol": "HK.00700", "set": {"sell_put.max_strike": 480}}
     covered_call_edit = parse_inbound_text("配置标的，为tigr做covered call的设置，min strike=6.5")
-    assert covered_call_edit.name == "symbol_edit"
+    assert covered_call_edit.intent_name == "symbol_edit"
     assert covered_call_edit.arguments == {
         "symbol": "tigr",
         "set": {"sell_call.enabled": True, "sell_call.min_strike": 6.5},
         "ensure_use": ["call_base"],
     }
     assert parse_inbound_text("删除监控标的 腾讯").arguments == {"symbol": "腾讯"}
-    assert parse_inbound_text("确认监控 in_abc123").name == "symbol_confirm"
-    assert parse_inbound_text("cancel monitor in_abc123").name == "symbol_cancel"
+    assert parse_inbound_text("确认监控 in_abc123").intent_name == "symbol_confirm"
+    assert parse_inbound_text("cancel monitor in_abc123").intent_name == "symbol_cancel"
     upgrade = parse_inbound_text("立即升级到 v1.2.111")
-    assert upgrade.name == "upgrade_now"
+    assert upgrade.intent_name == "upgrade_now"
     assert upgrade.arguments == {"target_version": "1.2.111"}
-    assert parse_inbound_text("确认升级 in_abc123").name == "upgrade_confirm"
-    assert parse_inbound_text("取消升级").name == "upgrade_cancel"
+    assert parse_inbound_text("确认升级 in_abc123").intent_name == "upgrade_confirm"
+    assert parse_inbound_text("取消升级").intent_name == "upgrade_cancel"
 
 
 def test_inbound_request_reports_unwritable_audit_db(tmp_path: Path) -> None:
@@ -457,10 +457,10 @@ def test_inbound_manual_trade_preview_and_confirm_open(monkeypatch: pytest.Monke
     assert "未写入账本" in preview["data"]["response_text"]
     assert preview["data"]["payload"]["diagnostics"]["raw_symbol"] == "NVDA"
     assert preview["data"]["payload"]["diagnostics"]["multiplier_source"] == "payload"
-    assert preview["data"]["tool_plan"]["tool_name"] == "inbound.manual_trade"
-    assert preview["data"]["tool_plan"]["safety_class"] == "write_preview"
-    assert preview["data"]["tool_plan"]["requires_confirmation"] is True
-    assert preview["data"]["tool_plan"]["source_intent"] == "manual_trade_open"
+    assert preview["data"]["reasoning"]["tool_call"]["tool_name"] == "inbound.manual_trade"
+    assert preview["data"]["reasoning"]["safety_class"] == "write_preview"
+    assert preview["data"]["reasoning"]["requires_confirmation"] is True
+    assert preview["data"]["reasoning"]["intent_name"] == "manual_trade_open"
 
     operation_id = preview["data"]["operation_id"]
     confirmed = handle_assistant_request(
@@ -480,16 +480,16 @@ def test_inbound_manual_trade_preview_and_confirm_open(monkeypatch: pytest.Monke
     assert confirmed["data"]["operation_resolution"] == "latest_pending"
     assert confirmed["data"]["resolved_operation_id"] == operation_id
     assert "交易已写入 OM 本地账本：开仓" in confirmed["data"]["response_text"]
-    assert confirmed["data"]["tool_plan"]["tool_name"] == "inbound.manual_trade"
-    assert confirmed["data"]["tool_plan"]["safety_class"] == "write_apply"
-    assert confirmed["data"]["tool_plan"]["requires_confirmation"] is False
-    assert confirmed["data"]["tool_plan"]["source_intent"] == "manual_trade_confirm"
+    assert confirmed["data"]["reasoning"]["tool_call"]["tool_name"] == "inbound.manual_trade"
+    assert confirmed["data"]["reasoning"]["safety_class"] == "write_apply"
+    assert confirmed["data"]["reasoning"]["requires_confirmation"] is False
+    assert confirmed["data"]["reasoning"]["intent_name"] == "manual_trade_confirm"
     repo = ledger_repository.SQLiteOptionPositionsRepository(sqlite_path)
     assert len(repo.list_trade_events()) == 1
     with sqlite3.connect(audit_db) as conn:
         rows = conn.execute(
             """
-            SELECT message_id, tool_plan_json
+            SELECT message_id, reasoning_json
             FROM inbound_command_audit
             WHERE message_id IN ('msg_open_preview', 'msg_open_confirm')
             ORDER BY id
@@ -497,9 +497,9 @@ def test_inbound_manual_trade_preview_and_confirm_open(monkeypatch: pytest.Monke
         ).fetchall()
     audit_plans = {row[0]: json.loads(row[1]) for row in rows}
     assert audit_plans["msg_open_preview"]["reason"] == "write_preview_operation"
-    assert audit_plans["msg_open_preview"]["payload"]["account"] == "sy"
+    assert audit_plans["msg_open_preview"]["arguments"]["account"] == "sy"
     assert audit_plans["msg_open_confirm"]["reason"] == "confirmed_write_operation"
-    assert audit_plans["msg_open_confirm"]["payload"] == {
+    assert audit_plans["msg_open_confirm"]["arguments"] == {
         "operation_id": None,
         "operation_resolution": "latest_pending",
     }
@@ -688,10 +688,9 @@ def test_inbound_pending_operations_lists_current_conversation(monkeypatch: pyte
 
     trade_id = trade_preview["data"]["operation_id"]
     assert pending["ok"] is True
-    assert pending["data"]["tool_call"]["tool_name"] == "inbound.pending"
-    assert pending["data"]["tool_plan"]["tool_name"] == "inbound.pending"
-    assert pending["data"]["tool_plan"]["read_only"] is True
-    assert pending["data"]["tool_plan"]["payload"]["conversation_id"] == "feishu:chat_a:ou_1"
+    assert pending["data"]["reasoning"]["tool_call"]["tool_name"] == "inbound.pending"
+    assert pending["data"]["reasoning"]["read_only"] is True
+    assert pending["data"]["reasoning"]["tool_call"]["payload"]["conversation_id"] == "feishu:chat_a:ou_1"
     assert pending["data"]["pending_count"] == 1
     assert pending["data"]["pending_operations"][0]["operation_id"] == trade_id
     assert "当前待确认：1 条" in pending["data"]["response_text"]
@@ -800,9 +799,9 @@ def test_inbound_upgrade_preview_and_confirm(monkeypatch: pytest.MonkeyPatch, tm
     assert preview["data"]["response_text"].startswith("升级预览：立即升级")
     assert "未执行升级" in preview["data"]["response_text"]
     assert preview["data"]["payload"]["arguments"] == {"target_version": "1.2.111", "release_tag": "v1.2.111"}
-    assert preview["data"]["tool_plan"]["tool_name"] == "inbound.upgrade"
-    assert preview["data"]["tool_plan"]["safety_class"] == "admin_preview"
-    assert preview["data"]["tool_plan"]["requires_confirmation"] is True
+    assert preview["data"]["reasoning"]["tool_call"]["tool_name"] == "inbound.upgrade"
+    assert preview["data"]["reasoning"]["safety_class"] == "admin_preview"
+    assert preview["data"]["reasoning"]["requires_confirmation"] is True
     assert calls[-1]["check"] is True
 
     operation_id = preview["data"]["operation_id"]
@@ -822,9 +821,9 @@ def test_inbound_upgrade_preview_and_confirm(monkeypatch: pytest.MonkeyPatch, tm
     assert confirmed["data"]["operation_id"] == operation_id
     assert confirmed["data"]["operation_resolution"] == "latest_pending"
     assert "已收到升级确认" in confirmed["data"]["response_text"]
-    assert confirmed["data"]["tool_plan"]["tool_name"] == "inbound.upgrade"
-    assert confirmed["data"]["tool_plan"]["safety_class"] == "write_apply"
-    assert confirmed["data"]["tool_plan"]["requires_confirmation"] is False
+    assert confirmed["data"]["reasoning"]["tool_call"]["tool_name"] == "inbound.upgrade"
+    assert confirmed["data"]["reasoning"]["safety_class"] == "write_apply"
+    assert confirmed["data"]["reasoning"]["requires_confirmation"] is False
     assert all("confirm" not in call for call in calls if "check" not in call)
 
     worker = upgrade_operations.run_confirmed_upgrade_operation(
@@ -1481,31 +1480,37 @@ def test_inbound_handle_executes_read_only_tool_and_replays_duplicate_message(tm
         row = conn.execute(
             """
             SELECT intent_name, tool_name, decision, result_ok, duplicate_count, last_duplicate_sender_id, conversation_id,
-                   semantic_frame_json, tool_plan_json
+                   perception_json, reasoning_json
             FROM inbound_command_audit
             """
         ).fetchone()
 
     assert row[:7] == ("monthly_income_report", "monthly_income_report", "allowed", 1, 1, "ou_1", "feishu:ou_1")
-    semantic_frame = json.loads(row[7])
-    tool_plan = json.loads(row[8])
-    assert semantic_frame == {
-        "schema_version": ASSISTANT_FRAME_SCHEMA_VERSION,
-        "intent": "monthly_income_report",
-        "payload": {"account": "sy", "month": "2026-05"},
-        "safety_class": "read",
-        "parser": "deterministic",
+    perception = json.loads(row[7])
+    reasoning = json.loads(row[8])
+    assert perception == {
+        "schema_version": PERCEPTION_RESULT_SCHEMA_VERSION,
+        "intent_name": "monthly_income_report",
+        "arguments": {"account": "sy", "month": "2026-05"},
+        "source": "deterministic",
         "confidence": 1.0,
+        "evidence": {},
     }
-    assert tool_plan == {
-        "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-        "tool_name": "monthly_income_report",
-        "payload": {"config_key": "us", "account": "sy", "month": "2026-05"},
+    assert reasoning == {
+        "schema_version": REASONING_RESOLUTION_SCHEMA_VERSION,
+        "status": "supported",
+        "intent_name": "monthly_income_report",
+        "arguments": {"account": "sy", "month": "2026-05"},
         "safety_class": "read",
+        "action_kind": "tool",
+        "tool_call": {
+            "tool_name": "monthly_income_report",
+            "payload": {"config_key": "us", "account": "sy", "month": "2026-05"},
+        },
         "read_only": True,
         "requires_confirmation": False,
-        "reason": "read_only_intent",
-        "source_intent": "monthly_income_report",
+        "reason": "read_only_capability",
+        "message": None,
     }
 
 
@@ -1551,31 +1556,37 @@ def test_inbound_handle_omits_account_filter_when_account_not_provided(tmp_path:
     with sqlite3.connect(audit_db) as conn:
         row = conn.execute(
             """
-            SELECT semantic_frame_json, tool_plan_json, tool_payload_json
+            SELECT perception_json, reasoning_json, tool_payload_json
             FROM inbound_command_audit
             WHERE message_id = 'msg_positions'
             """
         ).fetchone()
-    semantic_frame = json.loads(row[0])
-    tool_plan = json.loads(row[1])
+    perception = json.loads(row[0])
+    reasoning = json.loads(row[1])
     tool_payload = json.loads(row[2])
-    assert semantic_frame == {
-        "schema_version": ASSISTANT_FRAME_SCHEMA_VERSION,
-        "intent": "position_query",
-        "payload": {"query": {"status": "open", "limit": 50}},
-        "safety_class": "read",
-        "parser": "deterministic",
+    assert perception == {
+        "schema_version": PERCEPTION_RESULT_SCHEMA_VERSION,
+        "intent_name": "position_query",
+        "arguments": {"status": "open", "limit": 50},
+        "source": "deterministic",
         "confidence": 1.0,
+        "evidence": {},
     }
-    assert tool_plan == {
-        "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-        "tool_name": "option_positions_read",
-        "payload": {"config_key": "us", "action": "list", "query": {"status": "open", "limit": 50}},
+    assert reasoning == {
+        "schema_version": REASONING_RESOLUTION_SCHEMA_VERSION,
+        "status": "supported",
+        "intent_name": "position_query",
+        "arguments": {"status": "open", "limit": 50},
         "safety_class": "read",
+        "action_kind": "tool",
+        "tool_call": {
+            "tool_name": "option_positions_read",
+            "payload": {"config_key": "us", "action": "list", "query": {"status": "open", "limit": 50}},
+        },
         "read_only": True,
         "requires_confirmation": False,
-        "reason": "read_only_intent",
-        "source_intent": "position_query",
+        "reason": "read_only_capability",
+        "message": None,
     }
     assert tool_payload == {"config_key": "us", "action": "list", "query": {"status": "open", "limit": 50}}
 
@@ -1618,6 +1629,30 @@ def test_inbound_handle_without_message_id_generates_fresh_command_id(tmp_path: 
     assert rows[1][1] is None
     assert rows[0][2] == 0
     assert rows[1][2] == 0
+
+
+def test_inbound_audit_schema_uses_perception_reasoning_action_observation(tmp_path: Path) -> None:
+    audit_db = tmp_path / "inbound.sqlite3"
+
+    out = handle_assistant_request(
+        AssistantRequest(
+            text="状态",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_audit_schema",
+            config_key="us",
+            audit_db=str(audit_db),
+        ),
+        execute_tool_fn=lambda tool_name, payload: build_response(tool_name=tool_name, ok=True, data={"status": "ok"}),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert out["ok"] is True
+    with sqlite3.connect(audit_db) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(inbound_command_audit)").fetchall()}
+    assert {"perception_json", "reasoning_json", "action_json", "observation_json"} <= columns
+    assert "semantic_frame_json" not in columns
+    assert "tool_plan_json" not in columns
 
 
 def test_inbound_monthly_income_renderer_prefers_return_summary() -> None:

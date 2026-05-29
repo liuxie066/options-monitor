@@ -224,4 +224,4 @@ def test_llm_check_live_probe_uses_read_only_structured_translation(tmp_path: Pa
     assert calls[0]["api_key"] == "sk-test"
     checks = {item["name"]: item for item in out["checks"]}
     assert checks["live_probe"]["status"] == "ok"
-    assert checks["live_probe"]["value"]["intent"]["name"] == "runtime_status"
+    assert checks["live_probe"]["value"]["intent"]["intent_name"] == "runtime_status"

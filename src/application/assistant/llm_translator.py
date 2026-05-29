@@ -18,7 +18,7 @@ from src.application.assistant.llm_common import (
 )
 from src.application.assistant.settings import LlmTranslatorSettings
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.assistant.contracts import SemanticFrame
+from src.application.assistant.contracts import PerceptionResult
 from src.infrastructure.openai_chat_completions import (
     OpenAIChatCompletionsError,
     extract_chat_completion_text,
@@ -28,28 +28,29 @@ from src.infrastructure.openai_responses import OpenAIResponsesError, extract_re
 
 @dataclass(frozen=True)
 class LlmTranslationResult:
-    intent: SemanticFrame | None
+    intent: PerceptionResult | None
     trace: dict[str, Any]
     error: AgentToolError | None = None
 
 
 _TRANSLATOR_INSTRUCTIONS = """\
-You translate one user message for options-monitor into one read-only intent.
+You translate one user message for options-monitor into one recognized intent.
 Return only the requested JSON schema.
 
 Rules:
 - Never execute tools or claim an action was done.
-- Only choose the read-only intents present in the schema.
+- Only choose the read-only or explicitly recognizable intents present in the schema.
 - The input may be plain text or a JSON object with `message` and bounded, redacted `context`; translate the current `message`.
 - Context is a hint only. The current message wins whenever it explicitly names an account, month, run id, or status.
 - Do not translate write/admin actions such as recording trades, changing monitored symbols, upgrades, or confirmations.
 - Use null for unknown optional arguments.
-- For unclear or unsupported messages, return a low confidence value below 0.5.
+- For unclear or unknown messages, return a low confidence value below 0.5.
 - Use account only when the user explicitly mentions lx or sy.
 - Use month only when the user explicitly mentions a YYYY-MM month.
 - The JSON `intent` field is an OM capability_id.
-- You can only choose capabilities marked llm_executable=true in the manifest below.
-- If the user asks for a known but non-executable capability, such as writing trades, confirming operations, editing monitored symbols, or upgrading software, return confidence below 0.5.
+- You can only choose capabilities marked llm_recognizable=true in the manifest below.
+- If the user asks for a known but non-executable read-only analysis capability, choose that capability instead of downgrading to a nearby executable query.
+- If the user asks for write, confirm, admin, or mutation operations, return confidence below 0.5.
 
 Example JSON output:
 {
