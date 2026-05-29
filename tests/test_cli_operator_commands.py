@@ -285,6 +285,41 @@ def test_assistant_model_catalog_command_renders_provider_catalog(capsys) -> Non
     assert providers["openai"]["api_kind"] == "responses"
 
 
+def test_assistant_model_list_text_does_not_print_credential_env_name(tmp_path: Path, capsys) -> None:
+    import src.interfaces.cli.main as cli
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """\
+accounts:
+  lx:
+    type: external_holdings
+markets:
+  us:
+    accounts: [lx]
+    symbols: [NVDA]
+assistant:
+  mode: llm_router
+  active_model: openai-default
+  models:
+    openai-default:
+      provider: openai
+      model: gpt-5.2
+      api_key_env: OM_LLM_API_KEY
+""",
+        encoding="utf-8",
+    )
+
+    rc = cli.main(["assistant", "model", "list", "--config-yaml", str(config_path), "--format", "text"])
+    text = capsys.readouterr().out
+
+    assert rc == 0
+    assert "openai-default" in text
+    assert "credential_configured=False" in text
+    assert "OM_LLM_API_KEY" not in text
+    assert "api_key_env" not in text
+
+
 def test_assistant_model_add_dry_run_does_not_write_config(tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.main as cli
 
