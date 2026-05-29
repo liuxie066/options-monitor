@@ -15,6 +15,31 @@ def test_yield_enhancement_defaults_match_system_template() -> None:
         assert template == yield_enhancement_defaults_for_market(market)
 
 
+def test_yield_enhancement_policy_is_derived_from_sell_put_strategy() -> None:
+    from src.application.yield_enhancement_config import derive_yield_enhancement_policy, resolve_yield_enhancement_cfg
+
+    income = derive_yield_enhancement_policy({"enabled": True}, {"strategy": "return_first"})
+    assert income.mode == "income_upside_enhancement"
+    assert income.derived_from_sell_put_strategy == "return_first"
+    assert income.config["max_call_cost_to_put_credit"] == 0.20
+    assert income.config["min_net_credit_retention"] == 0.75
+    assert income.config["call"]["min_delta"] == 0.05
+    assert income.config["call"]["max_delta"] == 0.20
+
+    convexity = derive_yield_enhancement_policy({"enabled": True}, {"strategy": "short_vol"})
+    assert convexity.mode == "vol_convexity_enhancement"
+    assert convexity.derived_from_sell_put_strategy == "short_vol"
+    assert convexity.config["max_call_cost_to_put_credit"] == 0.35
+    assert convexity.config["call"]["min_delta"] == 0.15
+    assert convexity.config["call"]["max_delta"] == 0.30
+
+    partial = resolve_yield_enhancement_cfg({"yield_enhancement": {"enabled": True, "call": {"min_delta": 0.18}}})
+    partial_policy = derive_yield_enhancement_policy(partial, {"strategy": "short_vol"})
+    assert partial_policy.config["call"]["min_delta"] == 0.18
+    assert partial_policy.config["call"]["max_delta"] == 0.30
+    assert partial_policy.config["call"]["max_otm_pct"] == 0.12
+
+
 def _write_single_call(
     input_root: Path,
     *,
@@ -166,6 +191,8 @@ def test_enrich_sell_put_candidates_with_linked_calls_selects_best_call(tmp_path
                 "min_delta": 0.10,
                 "max_delta": 0.45,
             },
+            "max_call_cost_to_put_credit": 0.60,
+            "min_net_credit_retention": 0.0,
             "min_scenario_score": 0.02,
             "min_open_interest": 100,
             "min_volume": 5,
@@ -181,14 +208,14 @@ def test_enrich_sell_put_candidates_with_linked_calls_selects_best_call(tmp_path
     )
 
     assert len(selected) == 1
-    assert selected.iloc[0]["call_contract_symbol"] == "NVDA_C110"
+    assert selected.iloc[0]["call_contract_symbol"] == "NVDA_C112"
     assert int(selected.iloc[0]["call_candidate_count"]) == 2
 
     row = out.iloc[0]
-    assert row["linked_call_contract"] == "2026-06-19 110C"
-    assert row["linked_call_contract_symbol"] == "NVDA_C110"
-    assert round(float(row["linked_call_scenario_score"]), 4) > 0.04
-    assert round(float(row["linked_call_expected_move"]), 1) == 14.2
+    assert row["linked_call_contract"] == "2026-06-19 112C"
+    assert row["linked_call_contract_symbol"] == "NVDA_C112"
+    assert round(float(row["linked_call_scenario_score"]), 4) > 0.03
+    assert round(float(row["linked_call_expected_move"]), 1) == 14.1
     assert int(row["linked_call_count"]) == 2
 
     persisted_pairs = pd.read_csv(tmp_path / "sell_put_linked_calls.csv")
@@ -388,6 +415,63 @@ def test_yield_enhancement_accepts_premium_funded_call_with_clear_upside(tmp_pat
     assert float(row["upside_lift_to_call_cost"]) >= 1.5
     assert float(row["upside_lift_to_put_credit"]) >= 0.5
     assert float(row["premium_funding_score"]) > 0
+    assert row["yield_enhancement_mode"] == "income_upside_enhancement"
+    assert row["derived_from_sell_put_strategy"] == "return_first"
+    assert float(row["net_credit_retention"]) >= 0.75
+
+
+def test_yield_enhancement_short_vol_policy_allows_wider_call_funding(tmp_path: Path) -> None:
+    from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
+
+    _write_single_call(
+        tmp_path,
+        dte=44,
+        contract_symbol="NVDA_C112",
+        strike=112.0,
+        bid=0.95,
+        ask=1.0,
+        implied_volatility=0.80,
+        delta=0.20,
+    )
+
+    pairs = find_sell_put_yield_enhancement_pairs(
+        df_candidates=_single_put_df(dte=44, implied_volatility=0.80),
+        symbol="NVDA",
+        input_root=tmp_path,
+        yield_enhancement_cfg={"enabled": True, "min_open_interest": 100, "min_volume": 5},
+        sell_put_cfg={"enabled": True, "strategy": "short_vol", "min_dte": 20, "max_dte": 60},
+    )
+
+    assert len(pairs) == 1
+    row = pairs.iloc[0]
+    assert row["yield_enhancement_mode"] == "vol_convexity_enhancement"
+    assert row["derived_from_sell_put_strategy"] == "short_vol"
+    assert float(row["call_cost_to_put_credit"]) <= 0.35
+
+
+def test_yield_enhancement_return_first_policy_rejects_expensive_call(tmp_path: Path) -> None:
+    from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
+
+    _write_single_call(
+        tmp_path,
+        dte=44,
+        contract_symbol="NVDA_C112",
+        strike=112.0,
+        bid=0.95,
+        ask=1.0,
+        implied_volatility=0.80,
+        delta=0.15,
+    )
+
+    pairs = find_sell_put_yield_enhancement_pairs(
+        df_candidates=_single_put_df(dte=44, implied_volatility=0.80),
+        symbol="NVDA",
+        input_root=tmp_path,
+        yield_enhancement_cfg={"enabled": True, "min_open_interest": 100, "min_volume": 5},
+        sell_put_cfg={"enabled": True, "strategy": "return_first", "min_dte": 20, "max_dte": 60},
+    )
+
+    assert pairs.empty
 
 
 def test_yield_enhancement_pair_filter_inherits_sell_put_dte(tmp_path: Path) -> None:
@@ -435,6 +519,7 @@ def test_yield_enhancement_max_debit_does_not_apply_default_cost_ratio(tmp_path:
                 "min_open_interest": 100,
                 "min_volume": 5,
                 "min_scenario_score": 0.0,
+                "call": {"min_delta": 0.10, "max_delta": 0.45, "min_otm_pct": 0.03, "max_otm_pct": 0.40},
             }
         }
     )
@@ -479,6 +564,7 @@ def test_yield_enhancement_max_debit_respects_explicit_cost_ratio(tmp_path: Path
                 "min_open_interest": 100,
                 "min_volume": 5,
                 "min_scenario_score": 0.0,
+                "call": {"min_delta": 0.10, "max_delta": 0.45, "min_otm_pct": 0.03, "max_otm_pct": 0.40},
             }
         }
     )

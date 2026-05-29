@@ -191,17 +191,14 @@ The durable position model is:
 trade_events -> projection -> position_lots
 ```
 
-Domain projection logic lives in `domain.domain.ledger.projection`; the old
-`domain.domain.option_position_ledger` projection module is retired.
-Stored trade events are encoded at `src.application.ledger.event_codec`, so new
-writes use the canonical ledger event schema while old rows are decoded only at
-the storage/migration boundary.
+Domain projection logic lives in `domain.domain.ledger.projection`.
+Stored trade events are encoded at `src.application.ledger.event_codec`; runtime
+writes use the canonical ledger event schema.
 Lot record field construction and open/close patch helpers live under
-`domain.domain.ledger.position_fields`; the old
-`domain.domain.option_position_lots` module is only a compatibility re-export.
+`domain.domain.ledger.position_fields`.
 Application services own SQLite loading, local bootstrap, repair, CLI facades,
-and reports. Feishu `option_positions` is retired: it is not a
-bootstrap input, sync target, strategy input, or steady-state source of truth.
+and reports. Feishu `option_positions` is not a bootstrap input, sync target,
+strategy input, or steady-state source of truth.
 `src.application.ledger.api` is the public application boundary for all
 non-ledger runtime code. `src.application.positions`, `src.application.trades`,
 agent tools, CLI modules, web UI modules, pipeline context, and cash-headroom
@@ -235,9 +232,14 @@ receipts, and event review/replay flows. Both route writes through
 
 Close advice keeps deterministic policy in `domain.domain.close_advice`.
 `src.application.close_advice_runner` assembles option-position inputs, required
-data quotes, quality flags, fees, rows, and output files around that domain
-logic. Future optimizer work should keep new scoring policy in domain and keep
-runner modules focused on input/output orchestration.
+data quotes, quality flags, fees, yield-enhancement leg pairing, rows, and
+output files around that domain logic.
+Domain policy owns return capture, short-vol risk exits, long-call convexity
+exits, and the exit-state contract. The runner preserves domain decisions,
+including `not_evaluable` rows, and maps them to CSV/text actions such as
+`close_put_keep_call`, `hold_call_as_convexity`, and `close_both_optional`.
+The close-advice exit-state contract and scenario matrix are documented in
+`docs/CLOSE_ADVICE_CONTRACT.md`.
 
 ## Config And Runtime State
 

@@ -36,6 +36,45 @@ TIER_PRIORITY = {
     "none": 9,
 }
 
+EXIT_STATE_NOT_EVALUABLE = "not_evaluable"
+EXIT_STATE_HOLD = "hold"
+EXIT_STATE_PROFIT_CAPTURE = "profit_capture"
+EXIT_STATE_RISK_EXIT = "risk_exit"
+EXIT_STATE_TAKE_PROFIT = "take_profit"
+EXIT_STATE_SALVAGE = "salvage"
+EXIT_STATE_LET_EXPIRE = "let_expire"
+
+EXIT_REASON_TYPE_NOT_EVALUABLE = "not_evaluable"
+EXIT_REASON_TYPE_HOLD = "hold"
+EXIT_REASON_TYPE_PROFIT_CAPTURE = "profit_capture"
+EXIT_REASON_TYPE_RISK_EXIT = "risk_exit"
+EXIT_REASON_TYPE_TAKE_PROFIT = "take_profit"
+EXIT_REASON_TYPE_SALVAGE = "salvage"
+EXIT_REASON_TYPE_THESIS_EXPIRED = "thesis_expired"
+
+PRICING_BLOCKING_FLAGS = {
+    "missing_premium",
+    "invalid_premium",
+    "missing_mid",
+    "invalid_mid",
+    "missing_dte",
+    "invalid_dte",
+    "missing_multiplier",
+    "invalid_multiplier",
+    "missing_contracts_open",
+    "invalid_contracts_open",
+    "invalid_spread",
+    "spread_too_wide",
+}
+
+LONG_CALL_CONVEXITY_DEFAULTS = {
+    "max_spread_ratio": CLOSE_ADVICE_DEFAULTS["max_spread_ratio"],
+    "take_profit_value_ratio": 2.0,
+    "salvage_dte_max": 7,
+    "salvage_abs_delta_max": 0.10,
+    "salvage_min_mid": 0.05,
+}
+
 
 def safe_float(value: Any) -> float | None:
     try:
@@ -80,6 +119,51 @@ class CloseAdviceConfig:
             ),
             medium_remaining_annualized_max=(
                 medium_max if medium_max is not None else DEFAULT_MEDIUM_REMAINING_ANNUALIZED_MAX
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class LongCallConvexityConfig:
+    max_spread_ratio: float | None = LONG_CALL_CONVEXITY_DEFAULTS["max_spread_ratio"]
+    take_profit_value_ratio: float = LONG_CALL_CONVEXITY_DEFAULTS["take_profit_value_ratio"]
+    salvage_dte_max: int = LONG_CALL_CONVEXITY_DEFAULTS["salvage_dte_max"]
+    salvage_abs_delta_max: float = LONG_CALL_CONVEXITY_DEFAULTS["salvage_abs_delta_max"]
+    salvage_min_mid: float = LONG_CALL_CONVEXITY_DEFAULTS["salvage_min_mid"]
+
+    @classmethod
+    def from_mapping(cls, raw: dict[str, Any] | None) -> "LongCallConvexityConfig":
+        src = raw or {}
+        max_spread = safe_float(src.get("max_spread_ratio"))
+        take_profit = safe_float(src.get("take_profit_value_ratio"))
+        salvage_dte = safe_int(src.get("salvage_dte_max"))
+        salvage_delta = safe_float(src.get("salvage_abs_delta_max"))
+        salvage_mid = safe_float(src.get("salvage_min_mid"))
+        return cls(
+            max_spread_ratio=(
+                max_spread
+                if max_spread is not None and max_spread >= 0
+                else LONG_CALL_CONVEXITY_DEFAULTS["max_spread_ratio"]
+            ),
+            take_profit_value_ratio=(
+                take_profit
+                if take_profit is not None and take_profit > 0
+                else LONG_CALL_CONVEXITY_DEFAULTS["take_profit_value_ratio"]
+            ),
+            salvage_dte_max=(
+                salvage_dte
+                if salvage_dte is not None and salvage_dte >= 0
+                else LONG_CALL_CONVEXITY_DEFAULTS["salvage_dte_max"]
+            ),
+            salvage_abs_delta_max=(
+                salvage_delta
+                if salvage_delta is not None and salvage_delta >= 0
+                else LONG_CALL_CONVEXITY_DEFAULTS["salvage_abs_delta_max"]
+            ),
+            salvage_min_mid=(
+                salvage_mid
+                if salvage_mid is not None and salvage_mid >= 0
+                else LONG_CALL_CONVEXITY_DEFAULTS["salvage_min_mid"]
             ),
         )
 
@@ -245,7 +329,14 @@ def evaluate_close_advice(inp: CloseAdviceInput, config: CloseAdviceConfig | Non
     side = str(inp.side or "").strip().lower()
     if side != "short" or option_type not in {"put", "call"}:
         flags.append("unsupported_position")
-        return _result(inp, tier="none", reason="首版仅支持 open short put/call", flags=flags)
+        return _result(
+            inp,
+            tier="not_evaluable",
+            reason="收益捕获平仓仅支持 open short put/call",
+            flags=flags,
+            exit_state=EXIT_STATE_NOT_EVALUABLE,
+            exit_reason_type=EXIT_REASON_TYPE_NOT_EVALUABLE,
+        )
 
     premium = safe_float(inp.premium)
     mid = safe_float(inp.close_mid)
@@ -280,27 +371,17 @@ def evaluate_close_advice(inp: CloseAdviceInput, config: CloseAdviceConfig | Non
     if cfg.max_spread_ratio is not None and spread is not None and spread > cfg.max_spread_ratio:
         flags.append("spread_too_wide")
 
-    blocking = [
-        f
-        for f in flags
-        if f
-        in {
-            "missing_premium",
-            "invalid_premium",
-            "missing_mid",
-            "invalid_mid",
-            "missing_dte",
-            "invalid_dte",
-            "missing_multiplier",
-            "invalid_multiplier",
-            "missing_contracts_open",
-            "invalid_contracts_open",
-            "invalid_spread",
-            "spread_too_wide",
-        }
-    ]
+    blocking = [f for f in flags if f in PRICING_BLOCKING_FLAGS]
     if blocking:
-        return _result(inp, tier="none", reason="数据不足或报价质量不足，暂不提醒", flags=flags, spread_ratio=spread)
+        return _result(
+            inp,
+            tier="not_evaluable",
+            reason="数据不足或报价质量不足，暂不提醒",
+            flags=flags,
+            spread_ratio=spread,
+            exit_state=EXIT_STATE_NOT_EVALUABLE,
+            exit_reason_type=EXIT_REASON_TYPE_NOT_EVALUABLE,
+        )
 
     assert premium is not None and mid is not None and dte is not None
     assert multiplier is not None and contracts_open is not None
@@ -322,6 +403,8 @@ def evaluate_close_advice(inp: CloseAdviceInput, config: CloseAdviceConfig | Non
             realized_if_close=realized_if_close,
             remaining_annualized_return=remaining_annualized,
             spread_ratio=spread,
+            exit_state=EXIT_STATE_HOLD,
+            exit_reason_type=EXIT_REASON_TYPE_HOLD,
         )
 
     if remaining_annualized is None:
@@ -333,6 +416,8 @@ def evaluate_close_advice(inp: CloseAdviceInput, config: CloseAdviceConfig | Non
         remaining_annualized_return=remaining_annualized,
         config=cfg,
     )
+    exit_state = EXIT_STATE_PROFIT_CAPTURE if tier != "none" else EXIT_STATE_HOLD
+    exit_reason_type = EXIT_REASON_TYPE_PROFIT_CAPTURE if tier != "none" else EXIT_REASON_TYPE_HOLD
     return _result(
         inp,
         tier=tier,
@@ -343,7 +428,127 @@ def evaluate_close_advice(inp: CloseAdviceInput, config: CloseAdviceConfig | Non
         realized_if_close=realized_if_close,
         remaining_annualized_return=remaining_annualized,
         spread_ratio=spread,
+        exit_state=exit_state,
+        exit_reason_type=exit_reason_type,
     )
+
+
+def evaluate_long_call_convexity_advice(
+    inp: CloseAdviceInput,
+    config: LongCallConvexityConfig | None = None,
+) -> dict[str, Any]:
+    cfg = config or LongCallConvexityConfig()
+    flags: list[str] = []
+
+    option_type = str(inp.option_type or "").strip().lower()
+    side = str(inp.side or "").strip().lower()
+    if side != "long" or option_type != "call":
+        flags.append("unsupported_position")
+        return _result(
+            inp,
+            tier="not_evaluable",
+            reason="long-call convexity 评估仅支持 open long call",
+            flags=flags,
+            exit_state=EXIT_STATE_NOT_EVALUABLE,
+            exit_reason_type=EXIT_REASON_TYPE_NOT_EVALUABLE,
+        )
+
+    premium = safe_float(inp.premium)
+    mid = safe_float(inp.close_mid)
+    dte = safe_int(inp.dte)
+    multiplier = safe_float(inp.multiplier)
+    contracts_open = safe_int(inp.contracts_open)
+
+    if premium is None:
+        flags.append("missing_premium")
+    elif premium <= 0:
+        flags.append("invalid_premium")
+    if mid is None:
+        flags.append("missing_mid")
+    elif mid <= 0:
+        flags.append("invalid_mid")
+    if dte is None:
+        flags.append("missing_dte")
+    elif dte < 0:
+        flags.append("invalid_dte")
+    if multiplier is None:
+        flags.append("missing_multiplier")
+    elif multiplier <= 0:
+        flags.append("invalid_multiplier")
+    if contracts_open is None:
+        flags.append("missing_contracts_open")
+    elif contracts_open <= 0:
+        flags.append("invalid_contracts_open")
+
+    spread = _spread_ratio(inp.bid, inp.ask, mid)
+    if inp.bid is not None and inp.ask is not None and inp.ask < inp.bid:
+        flags.append("invalid_spread")
+    if cfg.max_spread_ratio is not None and spread is not None and spread > cfg.max_spread_ratio:
+        flags.append("spread_too_wide")
+
+    blocking = [f for f in flags if f in PRICING_BLOCKING_FLAGS]
+    if blocking:
+        return _result(
+            inp,
+            tier="not_evaluable",
+            reason="long call 数据不足或报价质量不足，暂不提醒",
+            flags=flags,
+            spread_ratio=spread,
+            exit_state=EXIT_STATE_NOT_EVALUABLE,
+            exit_reason_type=EXIT_REASON_TYPE_NOT_EVALUABLE,
+        )
+
+    assert premium is not None and mid is not None and dte is not None
+    assert multiplier is not None and contracts_open is not None
+
+    value_ratio = mid / premium
+    current_value = mid * multiplier * contracts_open
+    cost_basis = premium * multiplier * contracts_open
+    realized_if_close = current_value - cost_basis
+    abs_delta = safe_float(inp.delta)
+    if abs_delta is not None:
+        abs_delta = abs(abs_delta)
+
+    if value_ratio >= cfg.take_profit_value_ratio:
+        tier = "medium"
+        reason = "long call 已显著升值，优先考虑兑现右尾收益"
+        exit_state = EXIT_STATE_TAKE_PROFIT
+        exit_reason_type = EXIT_REASON_TYPE_TAKE_PROFIT
+    elif dte <= cfg.salvage_dte_max and (
+        abs_delta is None or abs_delta <= cfg.salvage_abs_delta_max
+    ):
+        if mid >= cfg.salvage_min_mid:
+            tier = "optional"
+            reason = "long call 临近到期且右尾 thesis 转弱，仍有可回收残值"
+            exit_state = EXIT_STATE_SALVAGE
+            exit_reason_type = EXIT_REASON_TYPE_SALVAGE
+        else:
+            tier = "none"
+            reason = "long call 残值过低，卖出意义不大，可允许归零"
+            exit_state = EXIT_STATE_LET_EXPIRE
+            exit_reason_type = EXIT_REASON_TYPE_THESIS_EXPIRED
+    else:
+        tier = "none"
+        reason = "long call 仍保留右尾 convexity，可继续持有"
+        exit_state = EXIT_STATE_HOLD
+        exit_reason_type = EXIT_REASON_TYPE_HOLD
+
+    row = _result(
+        inp,
+        tier=tier,
+        reason=reason,
+        flags=flags,
+        remaining_premium=current_value,
+        realized_if_close=realized_if_close,
+        spread_ratio=spread,
+        exit_state=exit_state,
+        exit_reason_type=exit_reason_type,
+    )
+    row["long_call_value_ratio"] = value_ratio
+    row["long_call_cost_basis"] = cost_basis
+    row["long_call_current_value"] = current_value
+    row["abs_delta"] = abs_delta
+    return row
 
 
 def evaluate_short_vol_close_advice(
@@ -380,8 +585,11 @@ def evaluate_short_vol_close_advice(
     row.update(risk_fields)
     row["path_stress_status"] = "ok" if risk_fields.get("path_stress_evaluable") is True else "not_evaluable"
 
-    if str(row.get("tier") or "").strip().lower() == "none" and row.get("data_quality_flags"):
+    flags = {x for x in str(row.get("data_quality_flags") or "").split(";") if x}
+    if str(row.get("tier") or "").strip().lower() == "not_evaluable" or (flags & PRICING_BLOCKING_FLAGS):
         row["short_vol_thesis_status"] = "not_evaluable"
+        row["exit_state"] = EXIT_STATE_NOT_EVALUABLE
+        row["exit_reason_type"] = EXIT_REASON_TYPE_NOT_EVALUABLE
         return row
 
     missing = []
@@ -468,6 +676,8 @@ def _short_vol_not_evaluable(row: dict[str, Any], *, reason: str, flag: str) -> 
     out["tier_label"] = TIER_LABELS["not_evaluable"]
     out["reason"] = reason
     out["short_vol_thesis_status"] = "not_evaluable"
+    out["exit_state"] = EXIT_STATE_NOT_EVALUABLE
+    out["exit_reason_type"] = EXIT_REASON_TYPE_NOT_EVALUABLE
     flags = [x for x in str(out.get("data_quality_flags") or "").split(";") if x]
     flags.append(flag)
     out["data_quality_flags"] = ";".join(dict.fromkeys(flags))
@@ -480,6 +690,8 @@ def _short_vol_override(row: dict[str, Any], *, tier: str, reason: str, status: 
     out["tier_label"] = TIER_LABELS.get(tier, tier)
     out["reason"] = reason
     out["short_vol_thesis_status"] = status
+    out["exit_state"] = EXIT_STATE_RISK_EXIT
+    out["exit_reason_type"] = EXIT_REASON_TYPE_RISK_EXIT
     return out
 
 
@@ -494,7 +706,14 @@ def _result(
     realized_if_close: float | None = None,
     remaining_annualized_return: float | None = None,
     spread_ratio: float | None = None,
+    exit_state: str | None = None,
+    exit_reason_type: str | None = None,
 ) -> dict[str, Any]:
+    resolved_exit_state, resolved_exit_reason_type = _resolve_exit_contract(
+        tier=tier,
+        exit_state=exit_state,
+        exit_reason_type=exit_reason_type,
+    )
     return {
         "account": str(inp.account or "").strip().lower(),
         "symbol": str(inp.symbol or "").strip().upper(),
@@ -516,10 +735,28 @@ def _result(
         "tier": tier,
         "tier_label": TIER_LABELS.get(tier, tier),
         "reason": reason,
+        "exit_state": resolved_exit_state,
+        "exit_reason_type": resolved_exit_reason_type,
         "data_quality_flags": ";".join(flags),
         "currency": (str(inp.currency or "").strip().upper() or None),
         "spot": safe_float(inp.spot),
     }
+
+
+def _resolve_exit_contract(
+    *,
+    tier: str,
+    exit_state: str | None,
+    exit_reason_type: str | None,
+) -> tuple[str, str]:
+    if exit_state:
+        return exit_state, exit_reason_type or exit_state
+    tier_norm = str(tier or "").strip().lower()
+    if tier_norm == "not_evaluable":
+        return EXIT_STATE_NOT_EVALUABLE, exit_reason_type or EXIT_REASON_TYPE_NOT_EVALUABLE
+    if tier_norm and tier_norm != "none":
+        return EXIT_STATE_PROFIT_CAPTURE, exit_reason_type or EXIT_REASON_TYPE_PROFIT_CAPTURE
+    return EXIT_STATE_HOLD, exit_reason_type or EXIT_REASON_TYPE_HOLD
 
 
 CLOSE_OPTIMIZER_DEFAULTS = {

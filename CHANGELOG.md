@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 1.2.162 - 2026-05-29
+
+### Added
+- Added a Close Advice contract document and regression matrix for direct Sell Put, Covered Call, Yield Enhancement short-put, and Yield Enhancement long-call exit semantics.
+- Added regression coverage for yield-enhancement combo close gating, not-evaluable quote handling, and long-call convexity spread checks.
+
+### Changed
+- Updated README and tool documentation to describe the current Sell Put, Covered Call, Yield Enhancement, and Close Advice behavior without historical migration notes.
+- Changed Close Advice output so Yield Enhancement short-put exits use strategy-specific semantics and optional combo-close advice only appears when paired-call economics are complete.
+
+### Fixed
+- Fixed Close Advice quote handling so domain `not_evaluable` results are preserved instead of being marked as priced.
+- Fixed long-call convexity advice to reject wide bid/ask spreads as not evaluable.
+
 ## 1.2.161 - 2026-05-29
 
 ### Added

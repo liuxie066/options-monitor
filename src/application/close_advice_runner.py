@@ -14,7 +14,16 @@ from domain.domain.close_advice import (
     CloseAdviceConfig,
     CloseAdviceInput,
     CloseOptimizerConfig,
+    LongCallConvexityConfig,
+    EXIT_STATE_HOLD,
+    EXIT_STATE_LET_EXPIRE,
+    EXIT_STATE_NOT_EVALUABLE,
+    EXIT_STATE_PROFIT_CAPTURE,
+    EXIT_STATE_RISK_EXIT,
+    EXIT_STATE_SALVAGE,
+    EXIT_STATE_TAKE_PROFIT,
     evaluate_close_advice,
+    evaluate_long_call_convexity_advice,
     evaluate_close_optimizer,
     evaluate_short_vol_close_advice,
     OPTIMIZER_TIER_LABELS,
@@ -78,12 +87,34 @@ OUTPUT_COLUMNS = [
     "remaining_premium",
     "realized_if_close",
     "buy_to_close_fee",
+    "sell_to_close_fee",
+    "close_fee",
+    "put_leg_realized_if_close",
+    "combo_call_cost",
+    "combo_call_value_if_close",
+    "combo_net_locked_if_close_put_keep_call",
+    "combo_net_if_close_both",
+    "combo_cost_basis_status",
+    "paired_leg_status",
+    "long_call_value_ratio",
+    "long_call_cost_basis",
+    "long_call_current_value",
     "remaining_annualized_return",
     "evaluation_status",
     "quote_status",
     "tier",
     "tier_label",
     "reason",
+    "exit_state",
+    "exit_reason_type",
+    "close_action",
+    "optional_combo_action",
+    "strategy_exit_mode",
+    "strategy",
+    "leg_role",
+    "strategy_group_id",
+    "yield_enhancement_mode",
+    "position_side",
     "strategy_family",
     "strategy_profile",
     "strategy_source",
@@ -141,6 +172,7 @@ QUOTE_ISSUE_FLAGS = {
     "spread_too_wide",
     "invalid_spread",
 }
+ACTIONABLE_CLOSE_TIERS = {"strong", "medium", "weak", "optional", "optimizer_close", "optimizer_switch"}
 
 
 class _PositionFetchSpec(TypedDict):
@@ -958,6 +990,35 @@ def _evaluate_position_close_advice(
     config: dict[str, Any],
     close_cfg: CloseAdviceConfig,
 ) -> dict[str, Any]:
+    if _is_yield_enhancement_long_call_position(pos):
+        strategy_snapshot = pos.get("strategy_snapshot") if isinstance(pos.get("strategy_snapshot"), dict) else {}
+        long_call_cfg_raw = (
+            ((config.get("close_advice") or {}).get("long_call") if isinstance(config.get("close_advice"), dict) else None)
+            if isinstance(config, dict)
+            else None
+        )
+        row = evaluate_long_call_convexity_advice(
+            inp,
+            LongCallConvexityConfig.from_mapping(
+                long_call_cfg_raw if isinstance(long_call_cfg_raw, dict) else None
+            ),
+        )
+        row.update(
+            {
+                "strategy_family": "yield_enhancement",
+                "strategy_profile": str(
+                    pos.get("yield_enhancement_mode")
+                    or strategy_snapshot.get("yield_enhancement_mode")
+                    or ""
+                ).strip(),
+                "strategy_source": "position_snapshot",
+                "strategy_config_path": None,
+                "risk_model": "long_call_convexity",
+            }
+        )
+        row.update(_position_strategy_metadata(pos))
+        return row
+
     resolution = resolve_position_strategy(position=pos, config=config)
     if resolution.strategy_profile == SHORT_VOL_PROFILE:
         side_cfg = strategy_side_config_for_resolution(
@@ -988,6 +1049,125 @@ def _evaluate_position_close_advice(
     else:
         row = evaluate_close_advice(inp, close_cfg)
     row.update(resolution.to_fields())
+    row.update(_position_strategy_metadata(pos))
+    return row
+
+
+def _is_yield_enhancement_long_call_position(pos: dict[str, Any]) -> bool:
+    option_type = str(pos.get("option_type") or "").strip().lower()
+    side = str(pos.get("side") or "").strip().lower()
+    if option_type != "call" or side != "long":
+        return False
+    strategy_snapshot = pos.get("strategy_snapshot") if isinstance(pos.get("strategy_snapshot"), dict) else {}
+    strategy = str(pos.get("strategy") or strategy_snapshot.get("strategy") or "").strip().lower()
+    leg_role = str(pos.get("leg_role") or strategy_snapshot.get("leg_role") or "").strip().lower()
+    if strategy == "yield_enhancement":
+        return True
+    if leg_role in {"enhancement_call", "long_call", "upside_call", "convexity_call"}:
+        return True
+    if str(pos.get("yield_enhancement_mode") or strategy_snapshot.get("yield_enhancement_mode") or "").strip():
+        return True
+    return False
+
+
+def _position_strategy_metadata(pos: dict[str, Any]) -> dict[str, Any]:
+    strategy_snapshot = pos.get("strategy_snapshot") if isinstance(pos.get("strategy_snapshot"), dict) else {}
+    return {
+        "strategy": str(pos.get("strategy") or strategy_snapshot.get("strategy") or "").strip(),
+        "leg_role": str(pos.get("leg_role") or strategy_snapshot.get("leg_role") or "").strip(),
+        "strategy_group_id": str(pos.get("strategy_group_id") or strategy_snapshot.get("strategy_group_id") or "").strip(),
+        "yield_enhancement_mode": str(
+            pos.get("yield_enhancement_mode")
+            or strategy_snapshot.get("yield_enhancement_mode")
+            or ""
+        ).strip(),
+        "position_side": str(pos.get("side") or "").strip().lower(),
+    }
+
+
+def _is_yield_enhancement_short_put(row: dict[str, Any]) -> bool:
+    if str(row.get("option_type") or "").strip().lower() != "put":
+        return False
+    if str(row.get("position_side") or "").strip().lower() not in {"", "short"}:
+        return False
+    strategy = str(row.get("strategy") or "").strip().lower()
+    leg_role = str(row.get("leg_role") or "").strip().lower()
+    if strategy == "yield_enhancement":
+        return True
+    if str(row.get("yield_enhancement_mode") or "").strip():
+        return True
+    if str(row.get("strategy_group_id") or "").strip():
+        return True
+    return leg_role == "sell_put"
+
+
+def _is_yield_enhancement_long_call(row: dict[str, Any]) -> bool:
+    if str(row.get("option_type") or "").strip().lower() != "call":
+        return False
+    if str(row.get("position_side") or "").strip().lower() != "long":
+        return False
+    strategy = str(row.get("strategy") or "").strip().lower()
+    leg_role = str(row.get("leg_role") or "").strip().lower()
+    if strategy == "yield_enhancement":
+        return True
+    if leg_role in {"enhancement_call", "long_call", "upside_call", "convexity_call"}:
+        return True
+    if str(row.get("yield_enhancement_mode") or "").strip():
+        return True
+    return False
+
+
+def _is_actionable_close(row: dict[str, Any]) -> bool:
+    exit_state = str(row.get("exit_state") or "").strip().lower()
+    if exit_state in {EXIT_STATE_PROFIT_CAPTURE, EXIT_STATE_RISK_EXIT}:
+        return True
+    return str(row.get("tier") or "").strip().lower() in ACTIONABLE_CLOSE_TIERS
+
+
+def _has_complete_yield_enhancement_combo_close(row: dict[str, Any]) -> bool:
+    status = str(row.get("combo_cost_basis_status") or "").strip().lower()
+    paired = str(row.get("paired_leg_status") or "").strip().lower()
+    return (
+        paired == "paired"
+        and status == "ok"
+        and safe_float(row.get("combo_net_if_close_both")) is not None
+    )
+
+
+def _apply_close_action_semantics(row: dict[str, Any]) -> dict[str, Any]:
+    tier = str(row.get("tier") or "").strip().lower()
+    exit_state = str(row.get("exit_state") or "").strip().lower()
+    if _is_yield_enhancement_short_put(row):
+        row["strategy_exit_mode"] = "yield_enhancement_put_leg"
+        if exit_state == EXIT_STATE_NOT_EVALUABLE or tier == "not_evaluable":
+            row["close_action"] = "not_evaluable"
+            return row
+        if _is_actionable_close(row):
+            row["close_action"] = "close_put_keep_call"
+            if _has_complete_yield_enhancement_combo_close(row):
+                row["optional_combo_action"] = "close_both_optional"
+        else:
+            row["close_action"] = "hold_put_keep_call"
+        return row
+    if _is_yield_enhancement_long_call(row):
+        row["strategy_exit_mode"] = "yield_enhancement_long_call_leg"
+        if exit_state == EXIT_STATE_NOT_EVALUABLE or tier == "not_evaluable":
+            row["close_action"] = "not_evaluable"
+        elif exit_state == EXIT_STATE_TAKE_PROFIT:
+            row["close_action"] = "sell_call_take_profit"
+        elif exit_state == EXIT_STATE_SALVAGE:
+            row["close_action"] = "sell_call_salvage"
+        elif exit_state == EXIT_STATE_LET_EXPIRE:
+            row["close_action"] = "hold_to_expiry_or_expire"
+        elif str(row.get("yield_enhancement_mode") or "").strip().lower() == "vol_convexity_enhancement":
+            row["close_action"] = "hold_call_as_convexity"
+        else:
+            row["close_action"] = "hold_call"
+        return row
+    if exit_state == EXIT_STATE_NOT_EVALUABLE or tier == "not_evaluable":
+        row["close_action"] = "not_evaluable"
+        return row
+    row["close_action"] = "close" if _is_actionable_close(row) else "hold"
     return row
 
 
@@ -999,24 +1179,33 @@ def _apply_buy_to_close_fee(row: dict[str, Any]) -> dict[str, Any]:
     multiplier = safe_int(row.get("multiplier"))
     if multiplier is None or multiplier <= 0:
         return _with_extra_flags(row, ["fee_calc_unavailable"])
+    is_long_close = str(row.get("position_side") or "").strip().lower() == "long"
     try:
         fee = calc_futu_option_fee(
             row.get("currency"),
             mid,
             contracts=contracts,
             multiplier=multiplier,
-            is_sell=False,
+            is_sell=is_long_close,
         )
     except Exception:
         return _with_extra_flags(row, ["fee_calc_unavailable"])
     realized = safe_float(row.get("realized_if_close"))
     if realized is not None:
         row["realized_if_close"] = realized - float(fee)
-    row["buy_to_close_fee"] = float(fee)
+    row["close_fee"] = float(fee)
+    if is_long_close:
+        row["sell_to_close_fee"] = float(fee)
+    else:
+        row["buy_to_close_fee"] = float(fee)
     return row
 
 
 def _apply_fee_profitability_gate(row: dict[str, Any]) -> dict[str, Any]:
+    if str(row.get("exit_reason_type") or "").strip().lower() == EXIT_STATE_RISK_EXIT:
+        return row
+    if str(row.get("position_side") or "").strip().lower() == "long":
+        return row
     realized = safe_float(row.get("realized_if_close"))
     if realized is None:
         return row
@@ -1028,7 +1217,72 @@ def _apply_fee_profitability_gate(row: dict[str, Any]) -> dict[str, Any]:
     row["tier"] = "none"
     row["tier_label"] = "不提醒"
     row["reason"] = "扣除平仓手续费后已无正收益，不建议作为收益型买回提醒"
+    row["exit_state"] = EXIT_STATE_HOLD
+    row["exit_reason_type"] = EXIT_STATE_HOLD
     return row
+
+
+def _strategy_group_id(row: dict[str, Any]) -> str:
+    return str(row.get("strategy_group_id") or "").strip()
+
+
+def _gross_leg_value(row: dict[str, Any], price_key: str) -> float | None:
+    price = safe_float(row.get(price_key))
+    multiplier = safe_float(row.get("multiplier"))
+    contracts = safe_int(row.get("contracts_open"))
+    if price is None or multiplier is None or contracts is None:
+        return None
+    if multiplier <= 0 or contracts <= 0:
+        return None
+    return price * multiplier * contracts
+
+
+def _apply_yield_enhancement_combo_economics(rows: list[dict[str, Any]]) -> None:
+    calls_by_group: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        group_id = _strategy_group_id(row)
+        if not group_id or not _is_yield_enhancement_long_call(row):
+            continue
+        calls_by_group.setdefault(group_id, row)
+
+    for row in rows:
+        if not _is_yield_enhancement_short_put(row):
+            continue
+        row["put_leg_realized_if_close"] = safe_float(row.get("realized_if_close"))
+        group_id = _strategy_group_id(row)
+        if not group_id:
+            row["combo_cost_basis_status"] = "missing_strategy_group_id"
+            row["paired_leg_status"] = "missing"
+            continue
+        call = calls_by_group.get(group_id)
+        if call is None:
+            row["combo_cost_basis_status"] = "missing_paired_call"
+            row["paired_leg_status"] = "missing"
+            continue
+
+        row["paired_leg_status"] = "paired"
+        call_cost = _gross_leg_value(call, "premium")
+        call_value = _gross_leg_value(call, "close_mid")
+        call_fee = safe_float(call.get("sell_to_close_fee")) or safe_float(call.get("close_fee")) or 0.0
+        put_realized = safe_float(row.get("put_leg_realized_if_close"))
+        row["combo_call_cost"] = call_cost
+        row["combo_call_value_if_close"] = (
+            call_value - call_fee if call_value is not None else None
+        )
+
+        if call_cost is None:
+            row["combo_cost_basis_status"] = "missing_call_cost"
+            continue
+        if put_realized is None:
+            row["combo_cost_basis_status"] = "missing_put_realized"
+            continue
+
+        row["combo_net_locked_if_close_put_keep_call"] = put_realized - call_cost
+        if call_value is None:
+            row["combo_cost_basis_status"] = "missing_call_quote"
+            continue
+        row["combo_net_if_close_both"] = put_realized - call_cost + call_value - call_fee
+        row["combo_cost_basis_status"] = "ok"
 
 
 def _with_extra_flags(row: dict[str, Any], flags: list[str]) -> dict[str, Any]:
@@ -1150,6 +1404,30 @@ def _optimizer_detail_lines(row: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _close_action_label(row: dict[str, Any]) -> str:
+    action = str(row.get("close_action") or "").strip().lower()
+    mapping = {
+        "close_put_keep_call": "买回 Put，保留收益增强 Call",
+        "hold_put_keep_call": "继续持有 Put，保留收益增强 Call",
+        "sell_call_take_profit": "卖出收益增强 Call 止盈",
+        "hold_call": "继续持有收益增强 Call",
+        "hold_call_as_convexity": "继续持有收益增强 Call 凸性腿",
+        "sell_call_salvage": "卖出收益增强 Call 回收残值",
+        "hold_to_expiry_or_expire": "保留至到期或允许归零",
+        "close_both_optional": "可选组合止盈",
+        "close": "平仓",
+        "hold": "持有观察",
+        "not_evaluable": "无法评估",
+    }
+    label = mapping.get(action)
+    if not label:
+        return str(row.get("tier_label") or "-")
+    optional = str(row.get("optional_combo_action") or "").strip().lower()
+    if action == "close_put_keep_call" and optional == "close_both_optional":
+        return f"{label}；组合止盈可选"
+    return label
+
+
 def render_markdown(rows: list[dict[str, Any]], *, notify_levels: set[str], max_items: int) -> str:
     selected = _selected_notify_rows(rows, notify_levels=notify_levels, max_items=max_items)
     gap_rows = _selected_evaluation_gap_rows(rows, max_items=max_items)
@@ -1181,7 +1459,7 @@ def render_markdown(rows: list[dict[str, Any]], *, notify_levels: set[str], max_
                 currency = row.get("currency")
                 lines.extend(
                     [
-                        f"- {row.get('symbol')} {opt} {exp} {strike}{suffix} · {row.get('tier_label')}",
+                        f"- {row.get('symbol')} {opt} {exp} {strike}{suffix} · {_close_action_label(row)} · {row.get('tier_label')}",
                         (
                             f"- 已锁定: {_pct(row.get('capture_ratio'))} | "
                             f"剩余DTE={row.get('dte') if row.get('dte') is not None else '-'} | "
@@ -1240,6 +1518,23 @@ def _tier_verb_compact(tier: str) -> str:
         "none": "观察",
     }
     return verb_map.get(str(tier).strip().lower(), "评估")
+
+
+def _close_action_verb_compact(row: dict[str, Any], fallback: str) -> str:
+    action = str(row.get("close_action") or "").strip().lower()
+    mapping = {
+        "close_put_keep_call": "买回Put留Call",
+        "hold_put_keep_call": "持有Put留Call",
+        "sell_call_take_profit": "卖Call止盈",
+        "hold_call": "持有Call",
+        "hold_call_as_convexity": "持有凸性Call",
+        "sell_call_salvage": "卖Call残值",
+        "hold_to_expiry_or_expire": "允许Call归零",
+        "close": fallback,
+        "hold": fallback,
+        "not_evaluable": fallback,
+    }
+    return mapping.get(action, fallback)
 
 
 def _fmt_date_compact_ca(exp: str) -> str:
@@ -1349,7 +1644,7 @@ def render_markdown_compact(
                 currency = row.get("currency")
                 tier = str(row.get("tier") or "").strip().lower()
                 emoji = _tier_emoji_compact(tier)
-                verb = _tier_verb_compact(tier)
+                verb = _close_action_verb_compact(row, _tier_verb_compact(tier))
                 l1 = f"{emoji} {verb} {row.get('symbol')} {opt} {strike}{suffix} {_fmt_date_compact_ca(exp)}"
                 capture = _pct_compact(row.get("capture_ratio"))
                 dte = row.get("dte")
@@ -1596,6 +1891,12 @@ def run_close_advice(
                 quote_status="quote_unusable",
                 reason="持仓对应合约只有最近成交价，缺少可用 bid/ask，暂无法评估平仓建议",
             )
+        elif (
+            str(row.get("exit_state") or "").strip().lower() == EXIT_STATE_NOT_EVALUABLE
+            or str(row.get("tier") or "").strip().lower() == "not_evaluable"
+        ):
+            row["evaluation_status"] = "not_evaluable"
+            row["quote_status"] = "not_evaluable"
         else:
             row["evaluation_status"] = "priced"
             row["quote_status"] = "priced"
@@ -1653,6 +1954,11 @@ def run_close_advice(
                 row["reason"] = str(
                     opt_result.get("optimizer_reason") or row.get("reason")
                 )
+
+    _apply_yield_enhancement_combo_economics(rows)
+
+    for row in rows:
+        _apply_close_action_semantics(row)
 
     rows = sort_advice_rows(rows)
     notify_levels = advice_cfg.get("notify_levels") or ["strong", "medium"]

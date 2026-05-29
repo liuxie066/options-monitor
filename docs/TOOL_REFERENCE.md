@@ -127,9 +127,8 @@ om run tick --config config.us.json --accounts lx
 om run tick --config config.us.json --accounts lx sy
 ```
 
-这是一条统一链路，单账户只是传一个账户的特例。旧脚本
-`scripts/send_if_needed.py` 和 `scripts/send_if_needed_multi.py` 已移除。人工执行可直接调用
-`om run tick`；生产 cron 建议使用带锁和 timeout 诊断的包装入口：
+这是一条统一链路，单账户只是传一个账户的特例。人工执行可直接调用
+`om run tick`；生产 cron 使用带锁和 timeout 诊断的包装入口：
 
 ```bash
 om run tick-cron --market hk --accounts lx sy --timeout 600
@@ -150,7 +149,7 @@ om config validate --config-path config.hk.json --market hk
 om config validate --config-path config.us.json --market us
 ```
 
-`tick-cron` 也会在真实 tick 前检查 runtime config 的 `_generated` 指纹；当 `config.yaml` 更新后未重新 `config build --source yaml`，会以 `[CONFIG_ERROR]` 失败并打印 YAML 重建命令。旧 JSON 配置需要先用 `config migrate-yaml` 迁移；`--allow-stale-config` 只用于临时应急。
+`tick-cron` 也会在真实 tick 前检查 runtime config 的 `_generated` 指纹；当 `config.yaml` 更新后未重新 `config build --source yaml`，会以 `[CONFIG_ERROR]` 失败并打印 YAML 重建命令。`--allow-stale-config` 只用于临时应急。
 
 ### Setup 入口关系
 
@@ -172,14 +171,7 @@ om config build --source yaml --market us --output config.us.json
 ```
 
 `config init` 默认写 `config.yaml` 并生成 `config.us.json` / `config.hk.json`；`--dry-run` 只预览 YAML，`--force` 才覆盖已有 starter/runtime 文件。
-`config build` / `config explain` 读取 YAML。旧 JSON 不再作为正常 authoring 路径；需要先迁移到 `config.yaml`。
-
-已有 legacy `configs/user.*.json` 时先迁移：
-
-```bash
-om config migrate-yaml --output config.yaml
-om config migrate-yaml --output config.yaml --apply
-```
+`config build` / `config explain` 读取 YAML authoring config。
 
 写入命令的语义统一为：默认只读或 dry-run；`--apply` 允许本地文件/状态写入；`--confirm` 允许交易事件、Feishu、服务变更这类高风险写入；`--yes` 用于非交互脚本，等价显式确认并在输出里带 `audit_id`。结构化输出统一包含 `dry_run`、`write_applied`、`backup_path`、`audit_id`、`rollback_hint`。
 
@@ -192,12 +184,11 @@ om multiplier-cache seed --runtime-root /var/lib/options-monitor --symbol 0883.H
 
 manual trade / trade-intake 会优先使用 runtime root 或 runtime config 路径推导出的
 `output_shared/state/multiplier_cache.json`，cache miss 时再按场景实时向 OpenD 刷新；
-不再依赖 `config.us.json` / `config.hk.json` 里的 market config 兜底。
 `trade-intake --mode apply` 会写交易事件并可能发送回执，必须同时带 `--confirm` 或非交互用的 `--yes`。
 重放已进入 `failed_deal_ids` 的单笔成交时，需要使用显式修复入口：
 `om run trade-intake --config config.us.json --mode apply --confirm --deal-json <payload.json> --retry-failed`。
 该入口只允许配合 `--deal-json` 使用，不会放开已成功处理成交的重复写入。
-如果账本已经通过手工 repair/expire_close 订正，但 trade-intake state 仍残留旧
+如果账本已经通过手工 repair/expire_close 订正，但 trade-intake state 仍残留
 `failed_deal_ids` / `unresolved_deal_ids`，先 dry-run 对账，再显式应用本地 state 修复：
 
 ```bash
@@ -248,7 +239,7 @@ om service drift --runtime-root /var/lib/options-monitor
 om-agent run --tool runtime_status --input-json '{"profile_path":"/var/lib/options-monitor/service.profile.json"}'
 ```
 
-`service render` 只生成 service/timer/plist/profile 文件和安装命令，不会自动安装或启动。systemd 的 `--env-file` 会写入 `EnvironmentFile=...`；launchd 的 `--env-file` 会写入 `EnvironmentVariables.OM_ENV_FILE=...`，两者都用于加载本机 Feishu 凭证环境变量。systemd unit 始终写入 `OM_RUNTIME_ROOT`；只有显式传 `--deploy-user` 或设置 `OM_DEPLOY_USER` / `DEPLOY_USER` 时，才会写入 `User=<deploy_user>` 和默认 `HOME=/home/<deploy_user>`。HOME 不在默认位置时用 `--deploy-home` 覆盖。启用 `--include-feishu-ws` 时会额外生成 `options-monitor-feishu-ws.service` / `com.options-monitor.feishu-ws.plist`，通过飞书长连接接收消息，不需要公网 HTTPS callback、反向代理或 tunnel，并会使用 runtime locks 目录下的 `feishu-ws.lock` 防止多实例抢同一个 App。传入 `--config-yaml` 后，Feishu WS service 会同时拿到 runtime config 的 `--config-path` 和 `$RUNTIME/resolved/config.assistant.json` 的 `--assistant-config`。启用 `--include-auto-upgrade` 时，`--repo-root` 会保留传入的 symlink 路径，默认 config path 会使用 runtime root 下的 `config.us.json` / `config.hk.json`，避免生产配置随 release 目录漂移。传入 `--config-yaml` 后，profile 会记录 YAML authoring source；后续 `update apply` 会用 `config build --source yaml --config-yaml <path>` 重建 runtime config，并用 `config build-assistant --source yaml --config-yaml <path>` 重建 assistant config，不再要求 legacy overlay。`service preflight` 是只读部署前检查。
+`service render` 只生成 service/timer/plist/profile 文件和安装命令，不会自动安装或启动。systemd 的 `--env-file` 会写入 `EnvironmentFile=...`；launchd 的 `--env-file` 会写入 `EnvironmentVariables.OM_ENV_FILE=...`，两者都用于加载本机 Feishu 凭证环境变量。systemd unit 始终写入 `OM_RUNTIME_ROOT`；只有显式传 `--deploy-user` 或设置 `OM_DEPLOY_USER` / `DEPLOY_USER` 时，才会写入 `User=<deploy_user>` 和默认 `HOME=/home/<deploy_user>`。HOME 不在默认位置时用 `--deploy-home` 覆盖。启用 `--include-feishu-ws` 时会额外生成 `options-monitor-feishu-ws.service` / `com.options-monitor.feishu-ws.plist`，通过飞书长连接接收消息，不需要公网 HTTPS callback、反向代理或 tunnel，并会使用 runtime locks 目录下的 `feishu-ws.lock` 防止多实例抢同一个 App。传入 `--config-yaml` 后，Feishu WS service 会同时拿到 runtime config 的 `--config-path` 和 `$RUNTIME/resolved/config.assistant.json` 的 `--assistant-config`。启用 `--include-auto-upgrade` 时，`--repo-root` 会保留传入的 symlink 路径，默认 config path 会使用 runtime root 下的 `config.us.json` / `config.hk.json`，避免生产配置随 release 目录漂移。传入 `--config-yaml` 后，profile 会记录 YAML authoring source；后续 `update apply` 会用 `config build --source yaml --config-yaml <path>` 重建 runtime config，并用 `config build-assistant --source yaml --config-yaml <path>` 重建 assistant config。`service preflight` 是只读部署前检查。
 
 `service drift` 会用当前 release 的 `render_service_bundle()` 重新生成期望 service/timer，再和 `$RUNTIME/service.profile.json` 以及 systemd unit 文件对比。默认只读；带 `--confirm` 或 `--yes` 时只写入缺失 unit/profile、执行 `systemctl daemon-reload`，并 `enable --now` 缺失 timer，不会自动启用或重启新增长期 service。`runtime_status` 同样会暴露 service drift 摘要；缺失 `options-monitor-projection-verify.timer` 这类维护 timer 会作为 warning/error 返回。
 
@@ -417,7 +408,7 @@ om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","accoun
 
 注意：
 - Agent payload 使用 `broker` 表示券商口径；未传时读取 runtime config 的 `portfolio.broker`
-- Agent 工具输入不再公开 `market` 别名；新调用统一使用 `broker`
+- Agent 工具输入统一使用 `broker`
 - 该工具不会发送通知或写 Feishu；它会把查询产物写到本地 agent 输出目录
 
 ---
@@ -506,7 +497,10 @@ om-agent run --tool get_portfolio_context --input-json '{"config_key":"us","acco
 ## 5.11 `close_advice`
 
 用途：
-- 基于本地 context 和 quotes 构建平仓建议
+- 基于本地 position lots、required data、quotes 和 lot 策略快照构建平仓建议
+- 输出 deterministic exit state：`profit_capture`、`risk_exit`、`take_profit`、`salvage`、`let_expire`、`hold`、`not_evaluable`
+- 收益增强腿会输出专用动作：`close_put_keep_call`、`hold_put_keep_call`、`sell_call_take_profit`、`hold_call_as_convexity` 等
+- `not_evaluable` 行会进入待补数据链路，不会被当成已定价建议
 
 示例：
 
@@ -520,6 +514,7 @@ om-agent run --tool close_advice --input-json '{"config_key":"us"}'
 
 用途：
 - 一次性执行 close advice 推荐路径
+- 推荐给 Agent 使用；内部会准备输入并运行 `close_advice`
 
 示例：
 
@@ -690,10 +685,10 @@ om version
 ### 工具输入
 - `broker`
 
-### 历史数据字段
+### 数据表字段
 - `market`
 
-Agent 工具输入统一使用 `broker`。`market` 只可能出现在历史数据表或迁移说明里，不作为新的工具 payload 字段。
+Agent 工具输入统一使用 `broker`。数据表里的 `market` 字段不作为工具 payload 字段。
 
 ---
 

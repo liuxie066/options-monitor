@@ -1,0 +1,106 @@
+# Close Advice Contract
+
+Close advice is an exit-decision system. It does not open positions, roll
+contracts, tune strategy parameters, or change ledger state.
+
+## Goal
+
+For each open option lot, close advice answers:
+
+1. Can this lot be priced reliably?
+2. Does the original opening thesis still hold?
+3. If not, what exit action improves the position or combo risk/reward?
+
+Every actionable row must expose the exit nature explicitly:
+
+```text
+profit_capture  lock in a profitable short-premium exit
+risk_exit       reduce short-vol / short-gamma risk after the thesis weakens
+take_profit     realize a long-call convexity gain
+salvage         recover residual long-call value
+let_expire      residual long-call value is too small to sell
+hold            original thesis still holds or exit is not worthwhile
+not_evaluable   pricing or thesis data is insufficient
+```
+
+## Architecture
+
+```text
+PositionLot + Quote + StrategySnapshot
+-> StrategyResolver
+-> PricingQuality
+-> ThesisEvaluator
+-> LegAdapter
+-> ComboEconomics
+-> ActionMapper
+-> Renderer / CSV / Trace
+```
+
+## Ownership
+
+| Component | Owns | Must not own |
+|---|---|---|
+| `domain.domain.close_advice` | Deterministic thesis evaluation and exit-state contract | Runtime file I/O, current config lookup, notification text |
+| `src.application.strategy_policy` | Strategy resolution from lot metadata and symbol config | Exit decisions |
+| `src.application.close_advice_runner` | Loading positions/quotes, pairing combo legs, CSV/text rendering | Inventing strategy thesis |
+| Renderer | Human labels for already-decided actions | Changing exit decisions |
+
+## Strategy Source
+
+Strategy resolution is deterministic:
+
+1. Position lot strategy snapshot / lot metadata.
+2. Current symbol config only when the lot has no strategy metadata.
+3. Template defaults only as a final fallback.
+
+`close_advice.strategy` is not a supported control. `yield_enhancement` derives
+from `sell_put.strategy`; it does not define an independent strategy.
+
+## Scenario Matrix
+
+| Scenario | Thesis evaluator | Domain exit states | Default action |
+|---|---|---|---|
+| Sell Put / `return_first` | Return capture | `profit_capture`, `hold`, `not_evaluable` | `close` / `hold` |
+| Sell Put / `short_vol` | Short-vol thesis | `profit_capture`, `risk_exit`, `hold`, `not_evaluable` | `close` / `hold` |
+| Covered Call / `return_first` | Return capture | `profit_capture`, `hold`, `not_evaluable` | `close` / `hold` |
+| Covered Call / `short_vol` | Short-vol thesis | `profit_capture`, `risk_exit`, `hold`, `not_evaluable` | `close` / `hold` |
+| YE short put / `income_upside_enhancement` | Return capture + YE adapter | `profit_capture`, `hold`, `not_evaluable` | `close_put_keep_call` / `hold_put_keep_call` |
+| YE short put / `vol_convexity_enhancement` | Short-vol thesis + YE adapter | `profit_capture`, `risk_exit`, `hold`, `not_evaluable` | `close_put_keep_call` / `hold_put_keep_call` |
+| YE long call / `income_upside_enhancement` | Long-call convexity | `take_profit`, `hold`, `salvage`, `let_expire`, `not_evaluable` | `sell_call_take_profit` / `hold_call` / `sell_call_salvage` / `hold_to_expiry_or_expire` |
+| YE long call / `vol_convexity_enhancement` | Long-call convexity | `take_profit`, `hold`, `salvage`, `let_expire`, `not_evaluable` | `sell_call_take_profit` / `hold_call_as_convexity` / `sell_call_salvage` / `hold_to_expiry_or_expire` |
+
+## Combo Economics
+
+Yield-enhancement rows must keep put-leg decisions separate from combo reporting.
+The short-put buyback decision is based on the put leg thesis. Combo reporting
+then deducts the long-call cost.
+
+```text
+put_leg_realized_if_close
+= put_premium_received - put_buyback_cost - put_close_fee
+
+combo_net_locked_if_close_put_keep_call
+= put_premium_received - call_premium_paid - put_buyback_cost - fees
+
+combo_net_if_close_both
+= put_premium_received - call_premium_paid - put_buyback_cost + call_sell_value - fees
+```
+
+When a paired call or its cost basis cannot be resolved, the system exposes
+`combo_cost_basis_status` instead of assuming zero cost. The optional
+`close_both_optional` action is only emitted when the paired call exists and
+`combo_net_if_close_both` is computable.
+
+## Acceptance Matrix
+
+| Area | Acceptance standard |
+|---|---|
+| Strategy priority | Lot strategy metadata has priority over current symbol config. |
+| Return-first exit | Actionable exits require positive fee-adjusted profit. |
+| Short-vol risk exit | IV/RV edge loss or event/path risk can produce `risk_exit` even when the short leg is not currently profitable. |
+| YE short put | Action is `close_put_keep_call` / `hold_put_keep_call`, never plain `close`. |
+| YE long call | Action is based on convexity state, not short-premium capture rules. |
+| Combo cost | Missing paired call cost is explicit and never treated as zero. |
+| Combo action | `close_both_optional` requires a paired call with computable combo economics. |
+| Pricing quality | Wide spreads and missing core pricing fields produce `not_evaluable`, including YE long-call legs. |
+| Renderer | User-facing text shows the action and exit nature. |

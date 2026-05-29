@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import math
 
-from domain.domain.close_advice import CloseAdviceConfig, CloseAdviceInput, evaluate_close_advice
+from domain.domain.close_advice import (
+    CloseAdviceConfig,
+    CloseAdviceInput,
+    EXIT_STATE_HOLD,
+    EXIT_STATE_NOT_EVALUABLE,
+    evaluate_close_advice,
+)
 
 
 def _inp(*, premium: float = 1.0, mid: float = 0.1, dte: int = 10, option_type: str = "put") -> CloseAdviceInput:
@@ -72,11 +78,14 @@ def test_close_advice_metrics_for_put_and_call() -> None:
 
 
 def test_close_advice_data_quality_blocks_notifications() -> None:
-    assert evaluate_close_advice(_inp(premium=0.0), CloseAdviceConfig())["tier"] == "none"
-    assert "invalid_premium" in evaluate_close_advice(_inp(premium=0.0), CloseAdviceConfig())["data_quality_flags"]
+    invalid_premium = evaluate_close_advice(_inp(premium=0.0), CloseAdviceConfig())
+    assert invalid_premium["tier"] == "not_evaluable"
+    assert invalid_premium["exit_state"] == EXIT_STATE_NOT_EVALUABLE
+    assert "invalid_premium" in invalid_premium["data_quality_flags"]
 
     no_quote = evaluate_close_advice(_inp(mid=0.0), CloseAdviceConfig())
-    assert no_quote["tier"] == "none"
+    assert no_quote["tier"] == "not_evaluable"
+    assert no_quote["exit_state"] == EXIT_STATE_NOT_EVALUABLE
     assert "invalid_mid" in no_quote["data_quality_flags"]
 
     wide = evaluate_close_advice(
@@ -98,7 +107,8 @@ def test_close_advice_data_quality_blocks_notifications() -> None:
         ),
         CloseAdviceConfig(max_spread_ratio=0.3),
     )
-    assert wide["tier"] == "none"
+    assert wide["tier"] == "not_evaluable"
+    assert wide["exit_state"] == EXIT_STATE_NOT_EVALUABLE
     assert "spread_too_wide" in wide["data_quality_flags"]
 
     unsupported = evaluate_close_advice(
@@ -117,17 +127,20 @@ def test_close_advice_data_quality_blocks_notifications() -> None:
             currency="USD",
         )
     )
-    assert unsupported["tier"] == "none"
+    assert unsupported["tier"] == "not_evaluable"
+    assert unsupported["exit_state"] == EXIT_STATE_NOT_EVALUABLE
     assert "unsupported_position" in unsupported["data_quality_flags"]
 
 
 def test_close_advice_mid_above_premium_is_not_profit_advice() -> None:
     row = evaluate_close_advice(_inp(premium=1.0, mid=1.1, dte=30), CloseAdviceConfig())
     assert row["tier"] == "none"
+    assert row["exit_state"] == EXIT_STATE_HOLD
     assert "not_profitable_to_close" in row["data_quality_flags"]
 
 
 def test_close_advice_nan_quote_is_treated_as_missing_data() -> None:
     row = evaluate_close_advice(_inp(mid=math.nan), CloseAdviceConfig())
-    assert row["tier"] == "none"
+    assert row["tier"] == "not_evaluable"
+    assert row["exit_state"] == EXIT_STATE_NOT_EVALUABLE
     assert "missing_mid" in row["data_quality_flags"]

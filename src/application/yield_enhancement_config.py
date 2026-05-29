@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import Any
 
 
 YIELD_ENHANCEMENT_OUTPUT_MODES: set[str] = {"inline", "separate", "both"}
 YIELD_ENHANCEMENT_OBJECTIVES: set[str] = {"premium_funded_long_call"}
 YIELD_ENHANCEMENT_FUNDING_MODES: set[str] = {"credit_or_even", "max_debit"}
+YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE = "income_upside_enhancement"
+YIELD_ENHANCEMENT_VOL_CONVEXITY_MODE = "vol_convexity_enhancement"
 YIELD_ENHANCEMENT_LEGACY_OPTIMIZER_FIELDS: tuple[str, ...] = (
     "optimizer_enabled",
     "max_downside_worsen_pct",
@@ -45,6 +48,61 @@ YIELD_ENHANCEMENT_MARKET_DEFAULT_OVERRIDES: dict[str, dict[str, Any]] = {
         "min_volume": 0,
     },
 }
+YIELD_ENHANCEMENT_DERIVED_POLICY_DEFAULTS: dict[str, dict[str, Any]] = {
+    YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE: {
+        "funding_mode": "credit_or_even",
+        "min_combo_net_credit": 0.0,
+        "max_call_cost_to_put_credit": 0.20,
+        "min_net_credit_retention": 0.75,
+        "min_upside_lift_to_call_cost": 1.5,
+        "min_upside_lift_to_put_credit": 0.5,
+        "min_put_otm_pct": 0.05,
+        "call": {
+            "min_otm_pct": 0.08,
+            "max_otm_pct": 0.20,
+            "min_delta": 0.05,
+            "max_delta": 0.20,
+        },
+    },
+    YIELD_ENHANCEMENT_VOL_CONVEXITY_MODE: {
+        "funding_mode": "credit_or_even",
+        "min_combo_net_credit": 0.0,
+        "max_call_cost_to_put_credit": 0.35,
+        "min_net_credit_retention": None,
+        "min_upside_lift_to_call_cost": 1.2,
+        "min_upside_lift_to_put_credit": 0.25,
+        "min_put_otm_pct": 0.05,
+        "call": {
+            "min_otm_pct": 0.05,
+            "max_otm_pct": 0.12,
+            "min_delta": 0.15,
+            "max_delta": 0.30,
+        },
+    },
+}
+
+
+@dataclass(frozen=True)
+class YieldEnhancementPolicy:
+    enabled: bool
+    mode: str
+    derived_from_sell_put_strategy: str
+    config: dict[str, Any]
+    explicit_fields: tuple[str, ...]
+
+    def to_config(self) -> dict[str, Any]:
+        cfg = deepcopy(self.config)
+        cfg["enabled"] = bool(self.enabled)
+        cfg["yield_enhancement_mode"] = self.mode
+        cfg["derived_from_sell_put_strategy"] = self.derived_from_sell_put_strategy
+        cfg["_explicit_fields"] = tuple(self.explicit_fields)
+        return cfg
+
+    def to_fields(self) -> dict[str, Any]:
+        return {
+            "yield_enhancement_mode": self.mode,
+            "derived_from_sell_put_strategy": self.derived_from_sell_put_strategy,
+        }
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -61,6 +119,48 @@ def _deep_merge_dict(base: dict[str, Any], override: dict[str, Any]) -> dict[str
     return out
 
 
+def _explicit_fields(cfg: dict[str, Any]) -> tuple[str, ...]:
+    raw = cfg.get("_explicit_fields")
+    if isinstance(raw, (list, tuple, set)):
+        return tuple(str(key) for key in raw if str(key).strip())
+    return tuple(str(key) for key in cfg.keys() if not str(key).startswith("_"))
+
+
+def _explicit_overrides(cfg: dict[str, Any], explicit_fields: tuple[str, ...]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key in explicit_fields:
+        if key in {"strategy", "strategy_profile"} or key.startswith("_"):
+            continue
+        if key in cfg:
+            if key == "call" and isinstance(cfg.get("call"), dict):
+                nested = cfg.get("_explicit_call_fields")
+                if isinstance(nested, (list, tuple, set)):
+                    call_cfg = _as_dict(cfg.get("call"))
+                    out["call"] = {
+                        str(child): deepcopy(call_cfg[str(child)])
+                        for child in nested
+                        if str(child) in call_cfg
+                    }
+                    continue
+            out[key] = deepcopy(cfg[key])
+    return out
+
+
+def _normalize_sell_put_strategy(sell_put_cfg: dict[str, Any] | None) -> str:
+    cfg = _as_dict(sell_put_cfg)
+    profile = str(cfg.get("strategy") or cfg.get("strategy_profile") or "").strip().lower()
+    if profile == "short_vol":
+        return "short_vol"
+    return "return_first"
+
+
+def yield_enhancement_mode_for_sell_put_strategy(strategy: Any) -> str:
+    profile = str(strategy or "").strip().lower()
+    if profile == "short_vol":
+        return YIELD_ENHANCEMENT_VOL_CONVEXITY_MODE
+    return YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE
+
+
 def yield_enhancement_defaults_for_market(market: str | None = None) -> dict[str, Any]:
     market_key = str(market or "").strip().lower()
     defaults = deepcopy(YIELD_ENHANCEMENT_DEFAULTS)
@@ -73,6 +173,36 @@ def yield_enhancement_defaults_for_market(market: str | None = None) -> dict[str
 def apply_yield_enhancement_defaults(cfg: dict[str, Any] | None, *, market: str | None = None) -> dict[str, Any]:
     defaults = yield_enhancement_defaults_for_market(market)
     return _deep_merge_dict(defaults, _as_dict(cfg))
+
+
+def derive_yield_enhancement_policy(
+    yield_enhancement_cfg: dict[str, Any] | None,
+    sell_put_cfg: dict[str, Any] | None,
+    *,
+    market: str | None = None,
+) -> YieldEnhancementPolicy:
+    raw_cfg = _as_dict(yield_enhancement_cfg)
+    explicit_fields = _explicit_fields(raw_cfg)
+    enabled = bool(raw_cfg.get("enabled", False))
+    sell_put_strategy = _normalize_sell_put_strategy(sell_put_cfg)
+    mode = yield_enhancement_mode_for_sell_put_strategy(sell_put_strategy)
+
+    base = yield_enhancement_defaults_for_market(market)
+    derived_defaults = YIELD_ENHANCEMENT_DERIVED_POLICY_DEFAULTS.get(mode) or {}
+    cfg = _deep_merge_dict(base, derived_defaults)
+    cfg = _deep_merge_dict(cfg, _explicit_overrides(raw_cfg, explicit_fields))
+    cfg["enabled"] = enabled
+    cfg["yield_enhancement_mode"] = mode
+    cfg["derived_from_sell_put_strategy"] = sell_put_strategy
+    output_mode = str(cfg.get("output_mode") or "").strip().lower()
+    cfg["output_mode"] = output_mode if output_mode in YIELD_ENHANCEMENT_OUTPUT_MODES else "separate"
+    return YieldEnhancementPolicy(
+        enabled=enabled,
+        mode=mode,
+        derived_from_sell_put_strategy=sell_put_strategy,
+        config=cfg,
+        explicit_fields=explicit_fields,
+    )
 
 
 def resolve_yield_enhancement_cfg(symbol_cfg: dict[str, Any] | None) -> dict[str, Any]:
@@ -88,8 +218,20 @@ def resolve_yield_enhancement_cfg(symbol_cfg: dict[str, Any] | None) -> dict[str
         explicit_fields = tuple(str(key) for key in existing_explicit_fields)
     else:
         explicit_fields = tuple(str(key) for key in top_level.keys() if not str(key).startswith("_"))
+    existing_call_explicit_fields = top_level.get("_explicit_call_fields")
+    if isinstance(existing_call_explicit_fields, (list, tuple, set)):
+        explicit_call_fields = tuple(str(key) for key in existing_call_explicit_fields)
+    else:
+        raw_call_cfg = top_level.get("call")
+        explicit_call_fields = (
+            tuple(str(key) for key in raw_call_cfg.keys() if not str(key).startswith("_"))
+            if isinstance(raw_call_cfg, dict)
+            else tuple()
+        )
     top_level = apply_yield_enhancement_defaults(top_level)
     top_level["_explicit_fields"] = explicit_fields
+    if explicit_call_fields:
+        top_level["_explicit_call_fields"] = explicit_call_fields
     output_mode = str(top_level.get("output_mode") or "").strip().lower()
     if not output_mode:
         output_mode = "separate"

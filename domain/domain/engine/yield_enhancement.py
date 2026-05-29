@@ -320,6 +320,33 @@ def yield_enhancement_rank_key(row: dict[str, Any]) -> tuple[float, ...]:
         return float(default if value is None else value)
 
     funding_accepted = str(row.get("funding_accepted") or "").strip().lower() in {"1", "true", "yes"}
+    mode = str(row.get("yield_enhancement_mode") or "").strip().lower()
+    if mode == "income_upside_enhancement":
+        return (
+            -1.0 if funding_accepted else 0.0,
+            -f("net_credit_retention"),
+            f("call_cost_to_put_credit", default=999.0),
+            -f("upside_lift_to_call_cost"),
+            -f("upside_lift_to_put_credit"),
+            f("combo_spread_ratio", default=999.0),
+            -f("combo_net_credit"),
+            -f("scenario_score"),
+            -min(f("put_open_interest"), f("call_open_interest")),
+            -f("call_delta"),
+        )
+    if mode == "vol_convexity_enhancement":
+        return (
+            -1.0 if funding_accepted else 0.0,
+            -f("vol_edge_score"),
+            -f("delta_target_score"),
+            -f("net_credit_retention"),
+            f("call_cost_to_put_credit", default=999.0),
+            -f("upside_lift_to_call_cost"),
+            -f("scenario_score"),
+            f("combo_spread_ratio", default=999.0),
+            -min(f("put_open_interest"), f("call_open_interest")),
+            -f("call_delta"),
+        )
     return (
         -1.0 if funding_accepted else 0.0,
         -f("premium_funding_score"),

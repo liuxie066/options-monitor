@@ -2,10 +2,10 @@
 
 `options-monitor` 是一个本地运行的期权监控、筛选、报告和通知工具，主要服务四个用户功能：
 
-- `Sell Put`：扫描 Put 期权候选，结合现金、策略阈值和已有风险暴露，筛出适合人工复核的卖 Put 机会。
-- `Covered Call`：基于已有正股持仓扫描 Call 期权候选，辅助 covered call 收益管理。
-- `Sell Put` 收益增强 `yield_enhancement`：在 Sell Put 候选基础上评估收益增强组合，寻找权利金、现金占用和 long call 成本之间更合适的组合。
-- `close_advice`：检查已有期权仓位，给出止盈、继续持有或需要关注的平仓参考。
+- `Sell Put`：用 short-vol 视角扫描 Put 候选，结合 IV/RV、Delta、事件、路径压力、现金和组合集中度，筛出适合人工复核的卖 Put 机会。
+- `Covered Call`：基于已有正股持仓扫描 Call 候选，检查覆盖能力、short-vol 风险和 gap-up 右尾机会成本。
+- `Sell Put` 收益增强 `yield_enhancement`：在 Sell Put 候选基础上配对同到期 long call，评估 put 权利金是否足以支持上行 convexity。
+- `close_advice`：检查已有期权 lot，按开仓策略语义给出止盈、风险退出、继续持有或无法评估的平仓参考。
 
 它不是自动交易系统，也不会替你下单。它的职责是把行情、持仓、现金、期权仓位、策略阈值和通知串起来，给出便于人工复核的结果。
 
@@ -79,7 +79,7 @@ bash /tmp/options-monitor-install.sh --version v1.2.118 --prefix "$HOME/apps/opt
 - `config.yaml` 只保存用户 override，包括 accounts、markets、symbols 和非 secret 行为配置。
 - env-file 只保存 secrets、Feishu 凭证和写入开关。
 - `config build` 生成 market-specific runtime config，实际运行仍读取 JSON 快照。
-- `config build` / `config explain` 只读取 YAML；旧 layered JSON 只作为 `config migrate-yaml` 的一次性迁移输入。
+- `config build` / `config explain` 读取 YAML authoring config。
 
 源码 checkout 或本地手动运行可以直接在 repo root 维护忽略文件 `config.yaml`：
 
@@ -112,13 +112,6 @@ om service render \
   --config-yaml /var/lib/options-monitor/config.yaml \
   --config-us /var/lib/options-monitor/config.us.json \
   --config-hk /var/lib/options-monitor/config.hk.json
-```
-
-已有 `configs/user.*.json` 的旧安装可以先 dry-run 迁移：
-
-```bash
-om config migrate-yaml --output config.yaml
-om config migrate-yaml --output config.yaml --apply
 ```
 
 生成的 runtime config 会记录 `_generated` 指纹。`config.yaml` 更新后需要重新
@@ -229,7 +222,7 @@ om run tick --config config.us.json --accounts lx sy
 ./om run tick --config config.us.json --accounts lx sy
 ```
 
-单账户只是传一个账户的特例；多账户直接把多个账户标签传给 `--accounts`。旧的 `scripts/send_if_needed.py` 和 `scripts/send_if_needed_multi.py` 已移除。
+单账户只是传一个账户的特例；多账户直接把多个账户标签传给 `--accounts`。
 
 只做扫描时：
 
@@ -402,7 +395,7 @@ python3 -m src.application.option_intake --config /var/lib/options-monitor/confi
 
 ### Sell Put
 
-默认策略已经从“年化收益优先”切到 short-vol 视角。Sell Put 不再被当成“折价买股”，而是先确认是否有足够的波动率边际和组合容量：
+Sell Put 默认使用 `short_vol` profile。系统把 short put 视为 long equity delta + short gamma + short vega 的组合，先确认波动率边际、路径风险和组合容量，再把收益指标纳入排序：
 
 - `min_dte` / `max_dte`
 - `min_strike` / `max_strike`
@@ -419,35 +412,46 @@ python3 -m src.application.option_intake --config /var/lib/options-monitor/confi
 - `min_volume`
 - `max_spread_ratio`
 
-在 `short_vol` profile 下，收益率和单笔净收入参与排序，不再作为扫描入口的第一道硬过滤。
+在 `short_vol` profile 下，收益率和单笔净收入参与排序；风险输入缺失或不可评估时 fail closed。
 
-除了链上候选过滤，最终还会叠加账户现金维度的 `cash_reserve` 后过滤，以及基于全局 holdings / option positions 的组合集中度后过滤。事件源不可用、expiry 前存在财报等事件、缺少 IV、RV、Delta、NAV、FX、strike、spot 或 multiplier 等关键风险输入时，short-vol 策略会 fail closed。Sell Put 还会检查 2σ 下跌和默认 10% gap-down 压力亏损占 NAV 的比例。
+候选过滤之后会叠加账户现金维度的 `cash_reserve` 后过滤，以及基于全局 holdings / option positions 的组合集中度后过滤。事件源不可用、expiry 前存在财报等事件、缺少 IV、RV、Delta、NAV、FX、strike、spot 或 multiplier 等关键风险输入时，short-vol 策略会 fail closed。Sell Put 会检查 2σ 下跌和默认 10% gap-down 压力亏损占 NAV 的比例。
 
 ### Covered Call
 
 Covered Call 依赖真实持仓上下文。它在风险结构上和 Sell Put 同属 short vol / short gamma，只是现金、持仓和行权方向不同：
 
-- `shares` / `avg_cost` 来自 holdings，不再建议手写在 symbol 配置里
+- `shares` / `avg_cost` 来自 holdings
 - 已被 short call 锁定的股票会从可卖数量里扣掉
 - `min_strike_cost_multiplier` 会抬高有效 strike 下限，避免推荐明显低于成本底线的 call
 - 默认同样走 `short_vol` profile，会检查 IV/RV、IV-RV、delta band、事件风险和组合集中度，并输出短 gamma/vega、covered notional 与 gap-up 右尾机会成本字段；右尾机会成本会通过 `path_risk` 进入排序
 - gap-up 右尾机会成本同时是硬预算：默认要求机会成本不超过 NAV 的 2%，且不超过本次 premium 的 3 倍
 
-注意：`config.yaml` 里使用 `covered_call`；生成后的 runtime JSON、CSV 和 trace 里的内部策略 key 仍是 `sell_call`。这是兼容性标识；用户可见名称统一为 `Covered Call`。
+`config.yaml` 里使用 `covered_call`；runtime JSON、CSV 和 trace 的内部策略 key 是 `sell_call`。用户可见名称统一为 `Covered Call`。
 
 ### Yield Enhancement
 
-`yield_enhancement` 是顶层 symbol 维度配置，不再挂在 `sell_put` 下面。它的目标是基于 Sell Put 候选，寻找“short put 权利金足够覆盖 long call 成本”的增强组合。
+`yield_enhancement` 是 symbol 维度配置。它基于已通过 Sell Put 筛选的 put 候选，配对同 symbol、同到期、同乘数、put strike < call strike 的 long call，寻找“short put 权利金足够支持 long call 成本”的组合。
 
 要点：
 
 - 依赖 `sell_put.enabled=true`
-- 即使 `covered_call.enabled=false`（runtime 内部为 `sell_call.enabled=false`），启用收益增强后也可能拉取 call 侧期权链
-- 重点看 `min_combo_net_credit`、`max_call_cost_to_put_credit`、`scenario_weights`、`min_scenario_score`
+- 模式由 `sell_put.strategy` 派生：`return_first` 使用 `income_upside_enhancement`，`short_vol` 使用 `vol_convexity_enhancement`
+- 启用收益增强后会为 long call 侧规划 required data，即使没有启用 Covered Call 扫描
+- 核心约束包括 `funding_mode`、`min_combo_net_credit`、`max_call_cost_to_put_credit`、`min_net_credit_retention`、`max_combo_spread_ratio`、`scenario_weights` 和 `min_scenario_score`
+- 排序由 `yield_enhancement_rank_key` 处理：`income_upside_enhancement` 更看重净 credit 留存和 call 成本纪律；`vol_convexity_enhancement` 会额外看 short-vol 边际和 delta target
 
 ### Close Advice
 
-`close_advice` 基于本地 `option_positions`、required data 和报价生成建议，属于 advisory-only 逻辑，不应被当成自动平仓器。
+`close_advice` 基于本地 `position_lots`、required data、报价和 lot 上的策略快照生成建议，属于 advisory-only 逻辑，不会自动平仓。
+
+当前支持的退出语义：
+
+- 普通 Sell Put / Covered Call：`close`、`hold`、`not_evaluable`
+- Short-vol lot：IV/RV edge 丢失、事件风险或路径风险可以触发 `risk_exit`
+- 收益增强 short put 腿：`close_put_keep_call` 或 `hold_put_keep_call`
+- 收益增强 long call 腿：`sell_call_take_profit`、`hold_call`、`hold_call_as_convexity`、`sell_call_salvage`、`hold_to_expiry_or_expire`
+
+收益增强组合会额外输出 `put_leg_realized_if_close`、`combo_call_cost`、`combo_call_value_if_close`、`combo_net_locked_if_close_put_keep_call`、`combo_net_if_close_both` 和 `combo_cost_basis_status`。只有配对 call 存在、成本和报价可计算时，put 腿才会显示 `close_both_optional`。
 
 ## 配置心智模型
 
@@ -462,16 +466,10 @@ Covered Call 依赖真实持仓上下文。它在风险结构上和 Sell Put 同
 
 - `config.yaml`
 
-一次性迁移输入：
-
-- `configs/user.common.json`
-- `configs/user.us.json`
-- `configs/user.hk.json`
-
 持仓和本地仓位相关数据配置：
 
 - 默认不需要单独配置文件；SQLite 固定在 `<runtime_root>/output_shared/state/option_positions.sqlite3`
-- `portfolio.runtime.json` 默认不需要；只在 external_holdings 需要声明 Feishu 表引用 env 名或执行 legacy 迁移时使用
+- `portfolio.runtime.json` 默认不需要；只在 external_holdings 需要声明 Feishu 表引用 env 名时使用
 
 原则上：
 
@@ -638,7 +636,7 @@ README 只记录公开入口和边界。生产 cron id、长驻服务启停和�
 
 ## 文档导航
 
-- [CONFIGS.md](CONFIGS.md)：canonical config、分层配置和迁移规则
+- [CONFIGS.md](CONFIGS.md)：canonical config、配置来源和构建规则
 - [CONFIGURATION_GUIDE.md](CONFIGURATION_GUIDE.md)：字段说明、数据来源和配置边界
 - [RUNBOOK.md](RUNBOOK.md)：运维巡检、定时任务、应急操作
 - [docs/INSTALL.md](docs/INSTALL.md)：安装方式、release 目录布局和 installer 安全契约
@@ -649,7 +647,6 @@ README 只记录公开入口和边界。生产 cron id、长驻服务启停和�
 - [docs/INBOUND_CONTROL.md](docs/INBOUND_CONTROL.md)：飞书、微信、Hermes 等远程消息入口的安全控制层
 - [docs/TOOL_REFERENCE.md](docs/TOOL_REFERENCE.md)：`om-agent` 工具说明
 - [docs/candidate_strategy.md](docs/candidate_strategy.md)：候选生成和策略边界
-- [docs/OPTION_POSITIONS_MIGRATION.md](docs/OPTION_POSITIONS_MIGRATION.md)：option positions 迁移
 - [docs/OPTION_POSITIONS_REPAIR.md](docs/OPTION_POSITIONS_REPAIR.md)：option positions 修复
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)：主要模块边界
 - [tests/README.md](tests/README.md)：测试分层和运行方式
