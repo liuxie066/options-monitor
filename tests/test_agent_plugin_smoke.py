@@ -1641,6 +1641,64 @@ def test_runtime_status_auto_loads_runtime_service_profile_paths(tmp_path: Path)
     assert "No symbols_notification.txt found under output_shared/reports or output_accounts/<account>/reports." not in warnings
 
 
+def test_runtime_status_does_not_expect_scan_notification_for_auto_close_run(tmp_path: Path) -> None:
+    from src.application.agent_tool_runtime_status import runtime_status_tool
+
+    release_root = tmp_path / "release"
+    runtime_root = tmp_path / "runtime"
+    release_root.mkdir()
+    runtime_root.mkdir()
+
+    cfg_path = runtime_root / "config.hk.json"
+    cfg = {
+        "accounts": ["user1"],
+        "portfolio": {"broker": "富途"},
+    }
+    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+
+    shared_state_dir = runtime_root / "output_shared" / "state"
+    shared_state_dir.mkdir(parents=True)
+    run_dir = runtime_root / "output_runs" / "20260529T213013Z-db952f"
+    account_state = run_dir / "accounts" / "user1" / "state"
+    account_state.mkdir(parents=True)
+    (shared_state_dir / "last_run.json").write_text(json.dumps({"status": "ok"}), encoding="utf-8")
+    (shared_state_dir / "last_run_dir.txt").write_text(str(run_dir), encoding="utf-8")
+    (account_state / "expired_position_maintenance.json").write_text(
+        json.dumps(
+            {
+                "mode": "error",
+                "reason": "missing_data_config",
+                "applied_closed": 0,
+                "errors": ["missing_data_config: /var/lib/options-monitor/portfolio.runtime.json"],
+                "receipt": {"status": "sent"},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    data, warnings, _meta = runtime_status_tool(
+        {
+            "config_path": str(cfg_path),
+            "state_dir": str(shared_state_dir),
+            "shared_state_dir": str(shared_state_dir),
+            "report_dir": str(runtime_root / "output_shared" / "reports"),
+            "accounts_root": str(runtime_root / "output_accounts"),
+            "runs_root": str(runtime_root / "output_runs"),
+        },
+        load_runtime_config=lambda **_kwargs: (cfg_path, cfg),
+        normalize_accounts=lambda value, fallback=(): list(value or fallback),
+        accounts_from_config=lambda loaded: list(loaded.get("accounts") or []),
+        read_json_object_or_empty=lambda path: json.loads(path.read_text(encoding="utf-8")) if path.exists() else {},
+        repo_base=lambda: release_root,
+        mask_path=lambda path: str(path),
+    )
+
+    assert "No symbols_notification.txt found for latest scanned run or legacy report paths." not in warnings
+    assert "Auto-close user1 failed: missing_data_config." in warnings
+    assert data["summary"]["warning_codes"] == ["AUTO_CLOSE_FAILED"]
+
+
 def test_runtime_status_service_profile_does_not_default_to_us_when_market_is_ambiguous(tmp_path: Path) -> None:
     from src.application.agent_tool_runtime_status import runtime_status_tool
 
