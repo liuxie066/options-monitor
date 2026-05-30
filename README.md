@@ -451,6 +451,8 @@ Covered Call 依赖真实持仓上下文。它在风险结构上和 Sell Put 同
 - 收益增强 short put 腿：`close_put_keep_call` 或 `hold_put_keep_call`
 - 收益增强 long call 腿：`sell_call_take_profit`、`hold_call`、`hold_call_as_convexity`、`sell_call_salvage`、`hold_to_expiry_or_expire`
 
+`strategy_exit_mode` 是平仓动作映射的状态机入口：普通 short option 使用 `standard_short_option`，收益增强 put 腿使用 `yield_enhancement_put_leg`，收益增强 long call 腿使用 `yield_enhancement_long_call_leg`。渲染层只展示已决策的动作，不改变平仓判断。
+
 收益增强组合会额外输出 `put_leg_realized_if_close`、`combo_call_cost`、`combo_call_value_if_close`、`combo_net_locked_if_close_put_keep_call`、`combo_net_if_close_both` 和 `combo_cost_basis_status`。只有配对 call 存在、成本和报价可计算时，put 腿才会显示 `close_both_optional`。
 
 ## 配置心智模型

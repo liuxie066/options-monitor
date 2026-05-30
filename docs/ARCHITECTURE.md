@@ -235,8 +235,9 @@ data quotes, quality flags, fees, yield-enhancement leg pairing, rows, and
 output files around that domain logic.
 Domain policy owns return capture, short-vol risk exits, long-call convexity
 exits, and the exit-state contract. The runner preserves domain decisions,
-including `not_evaluable` rows, and maps them to CSV/text actions such as
-`close_put_keep_call`, `hold_call_as_convexity`, and `close_both_optional`.
+including `not_evaluable` rows, and maps them through the close-action policy
+registry to CSV/text actions such as `close_put_keep_call`,
+`hold_call_as_convexity`, and `close_both_optional`.
 The close-advice exit-state contract and scenario matrix are documented in
 `docs/CLOSE_ADVICE_CONTRACT.md`.
 

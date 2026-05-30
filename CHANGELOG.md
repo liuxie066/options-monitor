@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.170 - 2026-05-30
+
+### Added
+- Added a Close Advice action-policy scenario matrix covering Sell Put, Covered Call, Yield Enhancement short-put, and Yield Enhancement long-call exit actions.
+
+### Changed
+- Refactored Close Advice action mapping into explicit `strategy_exit_mode` policies so domain exit states, strategy-specific close actions, and shared rendering stay separated.
+- Updated Close Advice architecture docs and README guidance to describe the current action-policy boundary.
+
 ## 1.2.169 - 2026-05-30
 
 ### Added

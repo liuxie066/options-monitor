@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import csv
 from collections import OrderedDict
+from dataclasses import dataclass
 import json
 import math
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, Callable, TypedDict
 
 import pandas as pd
 
@@ -188,6 +189,9 @@ EVENT_SOURCE_COLUMNS = (
     "event_source_status",
     "event_source_error",
 )
+CLOSE_ACTION_MODE_STANDARD_SHORT_OPTION = "standard_short_option"
+CLOSE_ACTION_MODE_YIELD_ENHANCEMENT_PUT_LEG = "yield_enhancement_put_leg"
+CLOSE_ACTION_MODE_YIELD_ENHANCEMENT_LONG_CALL_LEG = "yield_enhancement_long_call_leg"
 
 
 class _PositionFetchSpec(TypedDict):
@@ -209,6 +213,12 @@ class _OpenDFetchKwargs(TypedDict):
     expiration_max_wait_sec: float
     expiration_window_sec: float
     expiration_max_calls: int
+
+
+@dataclass(frozen=True)
+class _CloseActionPolicy:
+    exit_mode: str
+    apply: Callable[[dict[str, Any]], dict[str, Any]]
 
 
 def _norm_symbol(value: Any, *, base_dir: Path | None = None) -> str:
@@ -1281,41 +1291,77 @@ def _has_complete_yield_enhancement_combo_close(row: dict[str, Any]) -> bool:
     )
 
 
-def _apply_close_action_semantics(row: dict[str, Any]) -> dict[str, Any]:
+def _apply_yield_enhancement_put_action(row: dict[str, Any]) -> dict[str, Any]:
     tier = str(row.get("tier") or "").strip().lower()
     exit_state = str(row.get("exit_state") or "").strip().lower()
-    if _is_yield_enhancement_short_put(row):
-        row["strategy_exit_mode"] = "yield_enhancement_put_leg"
-        if exit_state == EXIT_STATE_NOT_EVALUABLE or tier == "not_evaluable":
-            row["close_action"] = "not_evaluable"
-            return row
-        if _is_actionable_close(row):
-            row["close_action"] = "close_put_keep_call"
-            if _has_complete_yield_enhancement_combo_close(row):
-                row["optional_combo_action"] = "close_both_optional"
-        else:
-            row["close_action"] = "hold_put_keep_call"
+    if exit_state == EXIT_STATE_NOT_EVALUABLE or tier == "not_evaluable":
+        row["close_action"] = "not_evaluable"
         return row
-    if _is_yield_enhancement_long_call(row):
-        row["strategy_exit_mode"] = "yield_enhancement_long_call_leg"
-        if exit_state == EXIT_STATE_NOT_EVALUABLE or tier == "not_evaluable":
-            row["close_action"] = "not_evaluable"
-        elif exit_state == EXIT_STATE_TAKE_PROFIT:
-            row["close_action"] = "sell_call_take_profit"
-        elif exit_state == EXIT_STATE_SALVAGE:
-            row["close_action"] = "sell_call_salvage"
-        elif exit_state == EXIT_STATE_LET_EXPIRE:
-            row["close_action"] = "hold_to_expiry_or_expire"
-        elif yield_enhancement_mode_uses_short_vol(row.get("yield_enhancement_mode")):
-            row["close_action"] = "hold_call_as_convexity"
-        else:
-            row["close_action"] = "hold_call"
-        return row
+    if _is_actionable_close(row):
+        row["close_action"] = "close_put_keep_call"
+        if _has_complete_yield_enhancement_combo_close(row):
+            row["optional_combo_action"] = "close_both_optional"
+    else:
+        row["close_action"] = "hold_put_keep_call"
+    return row
+
+
+def _apply_yield_enhancement_long_call_action(row: dict[str, Any]) -> dict[str, Any]:
+    tier = str(row.get("tier") or "").strip().lower()
+    exit_state = str(row.get("exit_state") or "").strip().lower()
+    if exit_state == EXIT_STATE_NOT_EVALUABLE or tier == "not_evaluable":
+        row["close_action"] = "not_evaluable"
+    elif exit_state == EXIT_STATE_TAKE_PROFIT:
+        row["close_action"] = "sell_call_take_profit"
+    elif exit_state == EXIT_STATE_SALVAGE:
+        row["close_action"] = "sell_call_salvage"
+    elif exit_state == EXIT_STATE_LET_EXPIRE:
+        row["close_action"] = "hold_to_expiry_or_expire"
+    elif yield_enhancement_mode_uses_short_vol(row.get("yield_enhancement_mode")):
+        row["close_action"] = "hold_call_as_convexity"
+    else:
+        row["close_action"] = "hold_call"
+    return row
+
+
+def _apply_standard_short_option_action(row: dict[str, Any]) -> dict[str, Any]:
+    tier = str(row.get("tier") or "").strip().lower()
+    exit_state = str(row.get("exit_state") or "").strip().lower()
     if exit_state == EXIT_STATE_NOT_EVALUABLE or tier == "not_evaluable":
         row["close_action"] = "not_evaluable"
         return row
     row["close_action"] = "close" if _is_actionable_close(row) else "hold"
     return row
+
+
+_CLOSE_ACTION_POLICY_REGISTRY: dict[str, _CloseActionPolicy] = {
+    CLOSE_ACTION_MODE_YIELD_ENHANCEMENT_PUT_LEG: _CloseActionPolicy(
+        exit_mode=CLOSE_ACTION_MODE_YIELD_ENHANCEMENT_PUT_LEG,
+        apply=_apply_yield_enhancement_put_action,
+    ),
+    CLOSE_ACTION_MODE_YIELD_ENHANCEMENT_LONG_CALL_LEG: _CloseActionPolicy(
+        exit_mode=CLOSE_ACTION_MODE_YIELD_ENHANCEMENT_LONG_CALL_LEG,
+        apply=_apply_yield_enhancement_long_call_action,
+    ),
+    CLOSE_ACTION_MODE_STANDARD_SHORT_OPTION: _CloseActionPolicy(
+        exit_mode=CLOSE_ACTION_MODE_STANDARD_SHORT_OPTION,
+        apply=_apply_standard_short_option_action,
+    ),
+}
+
+
+def _resolve_close_action_policy(row: dict[str, Any]) -> _CloseActionPolicy:
+    if _is_yield_enhancement_short_put(row):
+        return _CLOSE_ACTION_POLICY_REGISTRY[CLOSE_ACTION_MODE_YIELD_ENHANCEMENT_PUT_LEG]
+    if _is_yield_enhancement_long_call(row):
+        return _CLOSE_ACTION_POLICY_REGISTRY[CLOSE_ACTION_MODE_YIELD_ENHANCEMENT_LONG_CALL_LEG]
+    return _CLOSE_ACTION_POLICY_REGISTRY[CLOSE_ACTION_MODE_STANDARD_SHORT_OPTION]
+
+
+def _apply_close_action_semantics(row: dict[str, Any]) -> dict[str, Any]:
+    policy = _resolve_close_action_policy(row)
+    row["strategy_exit_mode"] = policy.exit_mode
+    return policy.apply(row)
 
 
 def _apply_buy_to_close_fee(row: dict[str, Any]) -> dict[str, Any]:
