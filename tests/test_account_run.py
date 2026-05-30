@@ -319,6 +319,73 @@ def test_run_one_account_uses_account_scan_decision_over_global_skip(monkeypatch
     assert outcome.result.notification_text == "account due"
 
 
+def test_run_one_account_appends_candidate_reject_summary_for_no_candidate_run(monkeypatch, tmp_path: Path) -> None:
+    from src.application.account_run import run_one_account
+    from src.application.candidate_filter_trace import append_candidate_filter_trace_rows, build_candidate_filter_trace_row
+
+    request = _make_request(tmp_path, prefetch_done=True)
+    env = _install_common_patches(monkeypatch, request)
+    runlog = _FakeRunlog()
+
+    monkeypatch.setattr(
+        env["mod"],
+        "decide_account_scan_gate",
+        lambda **kwargs: {
+            "run_pipeline": True,
+            "ran_scan": True,
+            "meaningful": True,
+            "result_reason": "run",
+        },
+    )
+
+    def _run_pipeline_script(**kwargs):
+        report_dir = kwargs["report_dir"]
+        report_dir.mkdir(parents=True, exist_ok=True)
+        (report_dir / "symbols_notification.txt").write_text("📋 本轮扫描完成，暂无符合条件的候选。\n", encoding="utf-8")
+        append_candidate_filter_trace_rows(
+            report_dir / "candidate_filter_trace.jsonl",
+            [
+                build_candidate_filter_trace_row(
+                    run_id="run-1",
+                    account="lx",
+                    symbol="PDD",
+                    function="sell_put",
+                    mode="put",
+                    status="post_filtered",
+                    stage="post_filter",
+                    rule="volatility_estimate_missing",
+                ),
+                build_candidate_filter_trace_row(
+                    run_id="run-1",
+                    account="lx",
+                    symbol="FUTU",
+                    function="sell_call",
+                    mode="call",
+                    status="rejected",
+                    stage="stage3_risk_filter",
+                    rule="risk_spread",
+                ),
+            ],
+        )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(env["mod"], "run_pipeline_script", _run_pipeline_script)
+    monkeypatch.setattr(env["mod"], "normalize_pipeline_subprocess_output", lambda **kwargs: {"returncode": kwargs["returncode"], "adapter": "pipeline"})
+    monkeypatch.setattr(env["mod"], "decide_pipeline_execution_result", lambda **kwargs: {"ok": True, "ran_scan": True, "meaningful": True, "reason": "ok"})
+
+    outcome = run_one_account(
+        request=request,
+        runlog=runlog,
+        audit_fn=env["audit_fn"],
+        fail_schema_validation=lambda **kwargs: (_ for _ in ()).throw(AssertionError("schema validation should not fail")),
+    )
+
+    assert "### 拒绝摘要" in outcome.result.notification_text
+    assert "拒绝/后过滤 2 条" in outcome.result.notification_text
+    assert "数据缺失 1：RV 缺失 1；样例 PDD" in outcome.result.notification_text
+    assert "流动性不足 1：价差不合格 1；样例 FUTU" in outcome.result.notification_text
+
+
 def test_run_one_account_passes_force_mode_to_prefetch(monkeypatch, tmp_path: Path) -> None:
     from src.application.account_run import run_one_account
 
