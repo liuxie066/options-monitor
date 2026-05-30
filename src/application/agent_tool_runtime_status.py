@@ -1475,6 +1475,8 @@ def _dict(value: Any) -> dict[str, Any]:
 def _latest_run_expects_static_notification(latest_run_payload: dict[str, Any] | None) -> bool:
     if latest_run_payload is None:
         return True
+    if not _run_payload_has_scan(latest_run_payload):
+        return False
     tick_metrics = _json_payload(_nested(latest_run_payload, "state", "tick_metrics"))
     scheduler = _dict(tick_metrics.get("scheduler_decision"))
     if scheduler.get("should_run_scan") is False:
@@ -1486,6 +1488,45 @@ def _latest_run_expects_static_notification(latest_run_payload: dict[str, Any] |
     if tick_metrics.get("no_send") is True:
         return False
     return True
+
+
+def _run_payload_account_notification_exists(run_payload: dict[str, Any] | None) -> bool:
+    if not isinstance(run_payload, dict):
+        return False
+    accounts = _dict(run_payload.get("accounts"))
+    for item in accounts.values():
+        payload = _dict(item)
+        notification = _dict(payload.get("notification"))
+        if notification.get("exists"):
+            return True
+    return False
+
+
+def _latest_run_auto_close_failures(latest_run_payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(latest_run_payload, dict):
+        return []
+    accounts = _dict(latest_run_payload.get("accounts"))
+    failures: list[dict[str, Any]] = []
+    for account, item in accounts.items():
+        payload = _dict(item)
+        maintenance = _json_payload(payload.get("expired_position_maintenance"))
+        if not maintenance:
+            continue
+        raw_errors = maintenance.get("errors")
+        errors = [str(err) for err in raw_errors if str(err).strip()] if isinstance(raw_errors, list) else []
+        mode = str(maintenance.get("mode") or "").strip().lower()
+        status = str(maintenance.get("status") or "").strip().lower()
+        reason = str(maintenance.get("reason") or "").strip()
+        if mode not in {"error", "failed"} and status != "failed" and not errors:
+            continue
+        failures.append(
+            {
+                "account": str(account),
+                "reason": reason or (errors[0] if errors else mode or status or "unknown"),
+                "errors": errors,
+            }
+        )
+    return failures
 
 
 def _run_dirs_newest_first(runs_root: Path) -> list[Path]:
@@ -1757,6 +1798,7 @@ def runtime_status_tool(
     latest_scanned_event_prefetch_summary = _latest_run_event_prefetch_summary(latest_scanned_run_payload)
 
     warnings: list[str] = []
+    warning_codes: list[str] = []
     if latest_run_selection.get("requested") and not latest_run_selection.get("found"):
         source = latest_run_selection.get("source")
         value = latest_run_selection.get("value")
@@ -1767,8 +1809,14 @@ def runtime_status_tool(
         _latest_run_expects_static_notification(latest_run_payload)
         and not notification.get("exists")
         and not any(item["notification"].get("exists") for item in account_status.values())
+        and not _run_payload_account_notification_exists(latest_run_payload)
     ):
-        warnings.append("No symbols_notification.txt found under output_shared/reports or output_accounts/<account>/reports.")
+        warnings.append("No symbols_notification.txt found for latest scanned run or legacy report paths.")
+    auto_close_failures = _latest_run_auto_close_failures(latest_run_payload)
+    if auto_close_failures:
+        for item in auto_close_failures:
+            warnings.append(f"Auto-close {item['account']} failed: {item['reason']}.")
+        warning_codes.append("AUTO_CLOSE_FAILED")
     if str(trigger_context.get("delivery_mode") or "").lower() == "none":
         warnings.append("Outer delivery.mode is none; the task runner will not announce run output.")
     ledger_context_summary = _ledger_context_summary(option_positions_context)
@@ -1786,7 +1834,6 @@ def runtime_status_tool(
         runtime_root=ledger_runtime_root,
         payload=payload,
     )
-    warning_codes: list[str] = []
     if upgrade_evaluation.get("status") == "remediated":
         warnings.append("Service upgrade previously failed but current release and restart services look remediated.")
         warning_codes.append("SERVICE_UPGRADE_REMEDIATED")

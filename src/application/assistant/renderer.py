@@ -609,6 +609,21 @@ def _runtime_auto_close_lines(data: dict[str, Any]) -> list[str]:
         info = _dict(payload)
         receipt = _dict(info.get("auto_close_receipt"))
         maintenance = _json_file_payload(_dict(info.get("expired_position_maintenance")))
+        errors = maintenance.get("errors")
+        has_errors = isinstance(errors, list) and bool(errors)
+        mode = str(maintenance.get("mode") or "").strip().lower()
+        if mode in {"error", "failed"} or has_errors:
+            applied = maintenance.get("applied_closed")
+            reason = maintenance.get("reason") or (errors[0] if has_errors else None)
+            parts = ["failed"]
+            if receipt.get("status"):
+                parts.append(f"receipt={_value(receipt.get('status'))}")
+            if applied is not None:
+                parts.append(f"closed={applied}")
+            if reason:
+                parts.append(f"reason={_value(reason)}")
+            out.append(f"auto-close {account}：" + "，".join(parts))
+            continue
         status = receipt.get("status") or maintenance.get("mode")
         if status:
             applied = maintenance.get("applied_closed")
