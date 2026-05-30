@@ -43,7 +43,7 @@ PositionLot + Quote + StrategySnapshot
 |---|---|---|
 | `domain.domain.close_advice` | Deterministic thesis evaluation and exit-state contract | Runtime file I/O, current config lookup, notification text |
 | `src.application.strategy_policy` | Strategy resolution from lot metadata and symbol config | Exit decisions |
-| `src.application.close_advice_runner` | Loading positions/quotes, pairing combo legs, CSV/text rendering | Inventing strategy thesis |
+| `src.application.close_advice_runner` | Loading positions/quotes, pairing combo legs, action-policy mapping, CSV/text rendering | Inventing strategy thesis |
 | Renderer | Human labels for already-decided actions | Changing exit decisions |
 
 ## Source Data Readiness
@@ -77,16 +77,20 @@ from `sell_put.strategy`; it does not define an independent strategy.
 
 ## Scenario Matrix
 
-| Scenario | Thesis evaluator | Domain exit states | Default action |
-|---|---|---|---|
-| Sell Put / `return_first` | Return capture | `profit_capture`, `hold`, `not_evaluable` | `close` / `hold` |
-| Sell Put / `short_vol` | Short-vol thesis | `profit_capture`, `risk_exit`, `hold`, `not_evaluable` | `close` / `hold` |
-| Covered Call / `return_first` | Return capture | `profit_capture`, `hold`, `not_evaluable` | `close` / `hold` |
-| Covered Call / `short_vol` | Short-vol thesis | `profit_capture`, `risk_exit`, `hold`, `not_evaluable` | `close` / `hold` |
-| YE short put / `income_upside_enhancement` | Return capture + YE adapter | `profit_capture`, `hold`, `not_evaluable` | `close_put_keep_call` / `hold_put_keep_call` |
-| YE short put / `vol_convexity_enhancement` | Short-vol thesis + YE adapter | `profit_capture`, `risk_exit`, `hold`, `not_evaluable` | `close_put_keep_call` / `hold_put_keep_call` |
-| YE long call / `income_upside_enhancement` | Long-call convexity | `take_profit`, `hold`, `salvage`, `let_expire`, `not_evaluable` | `sell_call_take_profit` / `hold_call` / `sell_call_salvage` / `hold_to_expiry_or_expire` |
-| YE long call / `vol_convexity_enhancement` | Long-call convexity | `take_profit`, `hold`, `salvage`, `let_expire`, `not_evaluable` | `sell_call_take_profit` / `hold_call_as_convexity` / `sell_call_salvage` / `hold_to_expiry_or_expire` |
+| Scenario | Thesis evaluator | Domain exit states | Action policy | Default action |
+|---|---|---|---|---|
+| Sell Put / `return_first` | Return capture | `profit_capture`, `hold`, `not_evaluable` | `standard_short_option` | `close` / `hold` |
+| Sell Put / `short_vol` | Short-vol thesis | `profit_capture`, `risk_exit`, `hold`, `not_evaluable` | `standard_short_option` | `close` / `hold` |
+| Covered Call / `return_first` | Return capture | `profit_capture`, `hold`, `not_evaluable` | `standard_short_option` | `close` / `hold` |
+| Covered Call / `short_vol` | Short-vol thesis | `profit_capture`, `risk_exit`, `hold`, `not_evaluable` | `standard_short_option` | `close` / `hold` |
+| YE short put / `income_upside_enhancement` | Return capture + YE adapter | `profit_capture`, `hold`, `not_evaluable` | `yield_enhancement_put_leg` | `close_put_keep_call` / `hold_put_keep_call` |
+| YE short put / `vol_convexity_enhancement` | Short-vol thesis + YE adapter | `profit_capture`, `risk_exit`, `hold`, `not_evaluable` | `yield_enhancement_put_leg` | `close_put_keep_call` / `hold_put_keep_call` |
+| YE long call / `income_upside_enhancement` | Long-call convexity | `take_profit`, `hold`, `salvage`, `let_expire`, `not_evaluable` | `yield_enhancement_long_call_leg` | `sell_call_take_profit` / `hold_call` / `sell_call_salvage` / `hold_to_expiry_or_expire` |
+| YE long call / `vol_convexity_enhancement` | Long-call convexity | `take_profit`, `hold`, `salvage`, `let_expire`, `not_evaluable` | `yield_enhancement_long_call_leg` | `sell_call_take_profit` / `hold_call_as_convexity` / `sell_call_salvage` / `hold_to_expiry_or_expire` |
+
+The action policy is resolved by a small registry in the runner. It maps an
+already-evaluated `exit_state` to a user-facing `close_action`; it must not
+change the thesis evaluation result.
 
 ## Combo Economics
 
