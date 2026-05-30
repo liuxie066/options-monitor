@@ -149,6 +149,36 @@ def test_validate_config_rejects_invalid_yield_enhancement_funding_ratio() -> No
         assert "NVDA.yield_enhancement.min_upside_lift_to_call_cost" in str(exc)
 
 
+def test_validate_config_rejects_invalid_yield_enhancement_net_credit_annualized() -> None:
+    from src.application.config_validator import validate_config
+
+    cfg = {
+        "templates": {},
+        "symbols": [
+            {
+                "symbol": "NVDA",
+                "sell_put": {
+                    "enabled": True,
+                    "strategy": "short_vol",
+                    "min_dte": 20,
+                    "max_dte": 60,
+                },
+                "yield_enhancement": {
+                    "enabled": True,
+                    "min_net_credit_annualized": -0.01,
+                },
+                "sell_call": {"enabled": False},
+            }
+        ],
+    }
+
+    try:
+        validate_config(cfg)
+        raise AssertionError("expected config validation failure")
+    except SystemExit as exc:
+        assert "NVDA.yield_enhancement.min_net_credit_annualized" in str(exc)
+
+
 def test_validate_config_rejects_invalid_template_yield_enhancement_call_bounds() -> None:
     from src.application.config_validator import validate_config
 

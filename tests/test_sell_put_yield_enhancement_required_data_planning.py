@@ -24,7 +24,7 @@ def test_sell_put_yield_enhancement_fetches_put_and_call_without_sell_call(monke
         limit_expirations=2,
         want_put=True,
         want_call=False,
-        sell_put_cfg={"enabled": True, "min_dte": 20, "max_dte": 60, "min_strike": 90, "max_strike": 96},
+        sell_put_cfg={"enabled": True, "strategy": "return_first", "min_dte": 20, "max_dte": 60, "min_strike": 90, "max_strike": 96},
         sell_call_cfg={},
         yield_enhancement_cfg={
             "enabled": True,
@@ -40,6 +40,7 @@ def test_sell_put_yield_enhancement_fetches_put_and_call_without_sell_call(monke
     assert len(plan.merged_specs) == 1
     merged_spec = plan.merged_specs[0]
     assert tuple(merged_spec.option_types) == ("put", "call")
+    assert merged_spec.include_realized_volatility is False
     put_spec = merged_spec
     call_spec = merged_spec
     assert put_spec.explicit_expirations == ["2026-06-19"]
@@ -70,7 +71,7 @@ def test_sell_put_yield_enhancement_minimal_config_derives_call_fetch_window(mon
         limit_expirations=1,
         want_put=True,
         want_call=False,
-        sell_put_cfg={"enabled": True, "min_dte": 20, "max_dte": 60, "min_strike": 90, "max_strike": 96},
+        sell_put_cfg={"enabled": True, "strategy": "return_first", "min_dte": 20, "max_dte": 60, "min_strike": 90, "max_strike": 96},
         sell_call_cfg={},
         yield_enhancement_cfg={"enabled": True},
         fetch_host="127.0.0.1",
@@ -105,7 +106,7 @@ def test_sell_put_yield_enhancement_merges_with_existing_sell_call_bounds(monkey
         limit_expirations=1,
         want_put=True,
         want_call=True,
-        sell_put_cfg={"enabled": True, "min_dte": 20, "max_dte": 60, "min_strike": 92, "max_strike": 96},
+        sell_put_cfg={"enabled": True, "strategy": "short_vol", "min_dte": 20, "max_dte": 60, "min_strike": 92, "max_strike": 96},
         sell_call_cfg={"enabled": True, "min_dte": 30, "max_dte": 45, "min_strike": 104, "max_strike": 118},
         yield_enhancement_cfg={
             "enabled": True,

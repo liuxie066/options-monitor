@@ -12,7 +12,16 @@ from domain.domain.candidate_defaults import (
 )
 from src.application.opend_market_snapshot_fetching import get_underlier_spot
 from src.application.opend_symbol_chain_fetching import list_option_expirations
-from src.application.yield_enhancement_config import YIELD_ENHANCEMENT_DEFAULTS
+from src.application.yield_enhancement_config import (
+    YIELD_ENHANCEMENT_DEFAULTS,
+    derive_yield_enhancement_policy,
+)
+from src.application.strategy_policy import (
+    SELL_CALL_FAMILY,
+    SELL_PUT_FAMILY,
+    assert_strategy_config_resolved,
+    strategy_semantics_for_side_config,
+)
 
 
 OptionSide = Literal["put", "call"]
@@ -496,10 +505,6 @@ def _merge_side_plans(
     return merged
 
 
-def _wants_short_vol(cfg: dict[str, Any]) -> bool:
-    return str(cfg.get("strategy") or "").strip().lower() == "short_vol"
-
-
 def build_required_data_fetch_plan(
     *,
     base: Path,
@@ -511,6 +516,7 @@ def build_required_data_fetch_plan(
     sell_put_cfg: dict | None = None,
     sell_call_cfg: dict | None = None,
     yield_enhancement_cfg: dict | None = None,
+    symbol_cfg: dict[str, Any] | None = None,
     fetch_host: str = "127.0.0.1",
     fetch_port: int = 11111,
     snapshot_max_wait_sec: float = 30.0,
@@ -520,9 +526,12 @@ def build_required_data_fetch_plan(
     expiration_window_sec: float = 30.0,
     expiration_max_calls: int = 60,
 ) -> RequiredDataFetchPlanBundle:
+    assert_strategy_config_resolved(symbol_cfg)
     sell_put_cfg = dict(sell_put_cfg or {})
     sell_call_cfg = dict(sell_call_cfg or {})
     resolved_yield_enhancement_cfg = dict(yield_enhancement_cfg or {})
+    sell_put_semantics = strategy_semantics_for_side_config(family=SELL_PUT_FAMILY, side_cfg=sell_put_cfg)
+    sell_call_semantics = strategy_semantics_for_side_config(family=SELL_CALL_FAMILY, side_cfg=sell_call_cfg)
     spot_reference = _resolve_spot_reference(
         symbol=symbol,
         host=fetch_host,
@@ -567,7 +576,8 @@ def build_required_data_fetch_plan(
                 spot_reference=spot_reference,
             )
         )
-    if want_put and bool(resolved_yield_enhancement_cfg.get("enabled", False)):
+    yield_enhancement_policy = derive_yield_enhancement_policy(resolved_yield_enhancement_cfg, sell_put_cfg)
+    if want_put and bool(yield_enhancement_policy.enabled):
         side_plans.append(
             _resolve_sell_put_yield_enhancement_call_plan(
                 symbol=symbol,
@@ -590,8 +600,9 @@ def build_required_data_fetch_plan(
             port=fetch_port,
             side_plans=side_plans,
             include_realized_volatility=bool(
-                (want_put and _wants_short_vol(sell_put_cfg))
-                or (want_call and _wants_short_vol(sell_call_cfg))
+                (want_put and sell_put_semantics.scan_requires_rv)
+                or (want_call and sell_call_semantics.scan_requires_rv)
+                or (want_put and yield_enhancement_policy.enabled and yield_enhancement_policy.requires_realized_volatility)
             ),
         ),
     )

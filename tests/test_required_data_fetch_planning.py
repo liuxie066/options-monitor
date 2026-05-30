@@ -63,6 +63,35 @@ def test_sell_put_short_vol_fetch_plan_requires_realized_volatility(monkeypatch,
     assert plan.merged_specs[0].include_realized_volatility is True
 
 
+def test_fetch_plan_rejects_unexpanded_template_strategy_config(monkeypatch, tmp_path: Path) -> None:
+    import src.application.required_data_planning as mod
+
+    monkeypatch.setattr(mod, "list_option_expirations", lambda *args, **kwargs: ["2026-05-29"])
+    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: 470.0)
+
+    try:
+        mod.build_required_data_fetch_plan(
+            base=tmp_path,
+            required_data_dir=tmp_path,
+            symbol="NVDA",
+            limit_expirations=1,
+            want_put=True,
+            want_call=False,
+            sell_put_cfg={"enabled": True},
+            sell_call_cfg={"enabled": False},
+            symbol_cfg={
+                "symbol": "NVDA",
+                "use": ["put_base"],
+                "sell_put": {"enabled": True},
+            },
+            fetch_host="127.0.0.1",
+            fetch_port=11111,
+        )
+        raise AssertionError("expected unresolved strategy config failure")
+    except ValueError as exc:
+        assert "apply templates/profiles" in str(exc)
+
+
 def test_sell_call_short_vol_fetch_plan_requires_realized_volatility(monkeypatch, tmp_path: Path) -> None:
     import src.application.required_data_planning as mod
 
