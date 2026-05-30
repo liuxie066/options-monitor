@@ -526,6 +526,24 @@ om-agent run --tool get_close_advice --input-json '{"config_key":"us"}'
 
 ---
 
+## 5.12.1 `close_advice_read`
+
+用途：
+- 只读已有 `close_advice.csv`，按 account/symbol/option type/side/strike/expiration 过滤平仓建议行
+- 给 Assistant 的 `position_exit_analysis` 使用，例如“分析 long call 是不是应该平仓”
+- 不刷新行情、不连接 OpenD、不重新生成 close advice、不写报告
+
+示例：
+
+```bash
+om-agent run --tool close_advice_read --input-json '{"config_key":"us","query":{"option_type":"call","side":"long"}}'
+om-agent run --tool close_advice_read --input-json '{"config_key":"hk","run_id":"<run-id>","query":{"symbol":"9992.HK","option_type":"call","side":"long"}}'
+```
+
+如果没有找到已有报告，会返回 `DEPENDENCY_MISSING`；这时应先运行扫描或显式生成 close advice，再查询。
+
+---
+
 ## 5.13 `manage_symbols`
 
 用途：

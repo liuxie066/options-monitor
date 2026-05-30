@@ -30,6 +30,7 @@ from src.infrastructure.io_utils import safe_read_csv
 from src.application.agent_tool_healthcheck import run_healthcheck_tool
 from src.application.agent_tool_candidate_rank import candidate_rank_explain_tool
 from src.application.agent_tool_candidate_filter import candidate_filter_explain_tool
+from src.application.agent_tool_close_advice_read import close_advice_read_tool
 from src.application.research import research_tool
 from src.application.agent_tool_notifications import preview_notification_tool
 from src.application.agent_tool_openclaw import openclaw_readiness_tool
@@ -335,6 +336,16 @@ def _get_close_advice_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], lis
     )
 
 
+def _close_advice_read_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    return close_advice_read_tool(
+        payload,
+        load_runtime_config=load_runtime_config,
+        resolve_output_root=resolve_output_root,
+        repo_base=repo_base,
+        mask_path=mask_path,
+    )
+
+
 def _manage_symbols_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     return manage_symbols_tool(
         payload,
@@ -442,6 +453,7 @@ TOOL_HANDLERS = {
     "prepare_close_advice_inputs": _prepare_close_advice_inputs_tool,
     "close_advice": _close_advice_tool,
     "get_close_advice": _get_close_advice_tool,
+    "close_advice_read": _close_advice_read_tool,
     "manage_symbols": _manage_symbols_tool,
     "preview_notification": _preview_notification_tool,
     "runtime_status": _runtime_status_tool,

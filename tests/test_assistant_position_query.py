@@ -112,15 +112,24 @@ def test_position_query_reasoning_preserves_query_constraints() -> None:
     }
 
 
-def test_reasoning_keeps_unsupported_exit_analysis_out_of_tool_execution() -> None:
+def test_reasoning_routes_exit_analysis_to_close_advice_read() -> None:
     resolution = resolve_reasoning(
         PerceptionResult(intent_name="position_exit_analysis", arguments={"option_type": "call", "side": "long"}),
         request=AssistantRequest(text="分析 long call", sender_id="local", config_key="us"),
     )
 
-    assert resolution.status == "unsupported"
-    assert resolution.tool_call is None
-    assert "不能降级" in str(resolution.message)
+    assert resolution.status == "supported"
+    assert resolution.tool_call is not None
+    assert resolution.tool_call.tool_name == "close_advice_read"
+    assert resolution.tool_call.payload == {
+        "config_key": "us",
+        "query": {
+            "status": "open",
+            "option_type": "call",
+            "side": "long",
+            "limit": 50,
+        },
+    }
 
 
 def test_parser_does_not_downgrade_exit_analysis_to_position_query() -> None:
@@ -131,10 +140,22 @@ def test_parser_does_not_downgrade_exit_analysis_to_position_query() -> None:
     )
 
     assert perception.intent_name == "position_exit_analysis"
+    assert perception.arguments["symbol"] == "9992.HK"
     assert perception.arguments["option_type"] == "call"
     assert perception.arguments["side"] == "long"
-    assert resolution.status == "unsupported"
-    assert resolution.tool_call is None
+    assert resolution.status == "supported"
+    assert resolution.tool_call is not None
+    assert resolution.tool_call.tool_name == "close_advice_read"
+    assert resolution.tool_call.payload == {
+        "config_key": "hk",
+        "query": {
+            "status": "open",
+            "symbol": "9992.HK",
+            "option_type": "call",
+            "side": "long",
+            "limit": 50,
+        },
+    }
 
 
 def test_position_query_parser_keeps_symbol_type_and_month_constraints() -> None:

@@ -2396,6 +2396,185 @@ def test_close_advice_reads_cached_context_and_required_data(monkeypatch, tmp_pa
     assert out["meta"]["required_data_root"] == ".../required_data"
 
 
+def test_close_advice_read_filters_existing_run_report(tmp_path: Path) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    cfg_path = tmp_path / "config.us.json"
+    cfg_path.write_text(json.dumps(_minimal_cfg(), ensure_ascii=False, indent=2), encoding="utf-8")
+    report_dir = tmp_path / "output_runs" / "run-1" / "accounts" / "lx"
+    report_dir.mkdir(parents=True)
+    (report_dir / "config.override.json").write_text(
+        json.dumps(_minimal_cfg(market="us"), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    pd.DataFrame(
+        [
+            {
+                "account": "lx",
+                "symbol": "9992",
+                "option_type": "call",
+                "position_side": "buy",
+                "leg_role": "enhancement_call",
+                "expiration": "2026-08-21",
+                "strike": 152.45,
+                "evaluation_status": "priced",
+                "close_action": "hold_call_as_convexity",
+                "tier": "none",
+                "tier_label": "继续持有",
+                "reason": "long call 仍保留右尾 convexity，可继续持有",
+                "realized_if_close": 320,
+                "long_call_cost_basis": 500,
+                "long_call_current_value": 820,
+                "long_call_value_ratio": 1.64,
+                "capture_ratio": 0.42,
+            },
+            {
+                "account": "lx",
+                "symbol": "FUTU",
+                "option_type": "put",
+                "position_side": "short",
+                "expiration": "2026-06-19",
+                "strike": 100,
+                "evaluation_status": "priced",
+                "close_action": "hold",
+                "tier": "none",
+                "tier_label": "继续持有",
+                "reason": "short-vol thesis intact",
+            },
+        ]
+    ).to_csv(report_dir / "close_advice.csv", index=False)
+
+    out = run_tool(
+        "close_advice_read",
+        {
+            "config_path": str(cfg_path),
+            "runs_root": str(tmp_path / "output_runs"),
+            "run_id": "run-1",
+            "query": {"symbol": "9992.HK", "option_type": "call", "side": "long", "status": "open"},
+        },
+    )
+
+    assert out["ok"] is True
+    assert out["data"]["row_count"] == 2
+    assert out["data"]["matched_count"] == 1
+    assert out["data"]["source"]["run_id"] == "run-1"
+    row = out["data"]["rows"][0]
+    assert row["symbol"] == "9992.HK"
+    assert row["side"] == "long"
+    assert row["close_action"] == "hold_call_as_convexity"
+    assert row["realized_if_close"] == 320
+    assert row["long_call_cost_basis"] == 500
+    assert row["long_call_current_value"] == 820
+    assert row["long_call_value_ratio"] == 1.64
+
+
+def test_close_advice_read_respects_config_market_when_selecting_latest_run(tmp_path: Path) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    cfg_path = tmp_path / "config.us.json"
+    cfg_path.write_text(json.dumps(_minimal_cfg(market="us"), ensure_ascii=False, indent=2), encoding="utf-8")
+    runs_root = tmp_path / "output_runs"
+    run_us = runs_root / "run-us" / "accounts" / "lx"
+    run_hk = runs_root / "run-hk" / "accounts" / "lx"
+    for account_dir, market, symbol, realized in (
+        (run_us, "us", "NVDA", 100),
+        (run_hk, "hk", "0700.HK", 999),
+    ):
+        account_dir.mkdir(parents=True)
+        (account_dir / "config.override.json").write_text(
+            json.dumps(_minimal_cfg(market=market), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        pd.DataFrame(
+            [
+                {
+                    "account": "lx",
+                    "symbol": symbol,
+                    "option_type": "call",
+                    "position_side": "long",
+                    "expiration": "2026-08-21",
+                    "strike": 100,
+                    "evaluation_status": "priced",
+                    "close_action": "hold_call",
+                    "tier": "none",
+                    "tier_label": "继续持有",
+                    "realized_if_close": realized,
+                }
+            ]
+        ).to_csv(account_dir / "close_advice.csv", index=False)
+
+    os.utime(runs_root / "run-us", (1_000_000, 1_000_000))
+    os.utime(runs_root / "run-hk", (2_000_000, 2_000_000))
+
+    out = run_tool(
+        "close_advice_read",
+        {
+            "config_key": "us",
+            "config_path": str(cfg_path),
+            "runs_root": str(runs_root),
+            "query": {"option_type": "call", "side": "long"},
+        },
+    )
+
+    assert out["ok"] is True
+    assert out["data"]["source"]["run_id"] == "run-us"
+    assert out["meta"]["market_filter"] == "US"
+    assert out["data"]["row_count"] == 1
+    assert out["data"]["rows"][0]["symbol"] == "NVDA"
+    assert out["data"]["rows"][0]["realized_if_close"] == 100
+
+
+def test_close_advice_read_default_agent_report_prefers_runtime_root(monkeypatch, tmp_path: Path) -> None:
+    from src.application.agent_tool_close_advice_read import close_advice_read_tool
+
+    release_root = tmp_path / "release"
+    runtime_root = tmp_path / "runtime"
+    cfg_path = release_root / "config.us.json"
+    cfg_path.parent.mkdir(parents=True)
+    cfg_path.write_text(json.dumps(_minimal_cfg(market="us"), ensure_ascii=False, indent=2), encoding="utf-8")
+
+    for root, symbol, realized in (
+        (runtime_root, "NVDA", 100),
+        (release_root, "PDD", 999),
+    ):
+        report_dir = root / "output_shared" / "agent_tools" / "reports"
+        report_dir.mkdir(parents=True)
+        pd.DataFrame(
+            [
+                {
+                    "account": "lx",
+                    "symbol": symbol,
+                    "option_type": "call",
+                    "position_side": "long",
+                    "expiration": "2026-08-21",
+                    "strike": 100,
+                    "evaluation_status": "priced",
+                    "close_action": "hold_call",
+                    "tier": "none",
+                    "tier_label": "继续持有",
+                    "realized_if_close": realized,
+                }
+            ]
+        ).to_csv(report_dir / "close_advice.csv", index=False)
+
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime_root))
+
+    data, warnings, meta = close_advice_read_tool(
+        {"config_key": "us", "query": {"option_type": "call", "side": "long"}},
+        load_runtime_config=lambda **_kwargs: (cfg_path, _minimal_cfg(market="us")),
+        resolve_output_root=lambda _output_dir=None: release_root / "output_shared" / "agent_tools",
+        repo_base=lambda: release_root,
+        mask_path=lambda path: f".../{Path(path).name}",
+    )
+
+    assert warnings == []
+    assert meta["market_filter"] == "US"
+    assert data["row_count"] == 1
+    assert data["source"]["type"] == "agent_tool"
+    assert data["rows"][0]["symbol"] == "NVDA"
+    assert data["rows"][0]["realized_if_close"] == 100
+
+
 def test_close_advice_summary_uses_domain_tier_order_for_optional(tmp_path: Path) -> None:
     from src.infrastructure.io_utils import safe_read_csv
     from src.application.agent_tool_runtime import as_float

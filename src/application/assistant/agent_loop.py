@@ -145,7 +145,23 @@ def _planned_steps_from_translation(translation: LlmTranslationResult) -> tuple[
 
 
 def _safe_tool_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    allowed = {"config_key", "account", "status", "month", "run_id", "kind", "limit", "lines", "action"}
+    allowed = {
+        "config_key",
+        "account",
+        "status",
+        "month",
+        "run_id",
+        "kind",
+        "limit",
+        "lines",
+        "action",
+        "query",
+        "symbol",
+        "option_type",
+        "side",
+        "strike",
+        "expiration",
+    }
     return {key: payload[key] for key in sorted(allowed) if key in payload}
 
 

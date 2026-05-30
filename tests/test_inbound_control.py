@@ -303,6 +303,10 @@ def test_inbound_policy_allows_sender_and_rejects_non_pure_read_tool() -> None:
         enforce_tool_allowed(ToolCall(tool_name="scan_opportunities", payload={"config_key": "us"}))
 
     assert exc.value.code == "PERMISSION_DENIED"
+    with pytest.raises(AgentToolError) as close_exc:
+        enforce_tool_allowed(ToolCall(tool_name="get_close_advice", payload={"config_key": "us"}))
+
+    assert close_exc.value.code == "PERMISSION_DENIED"
     assert "inbound.manual_trade" not in PURE_READ_TOOLS
 
 
@@ -329,6 +333,71 @@ def test_inbound_read_tool_requires_config_scope(tmp_path: Path) -> None:
     assert out["error"]["code"] == "NEEDS_CLARIFICATION"
     assert out["error"]["details"] == {"intent_name": "runtime_status", "required": "config_key_or_config_path"}
     assert calls == []
+
+
+def test_inbound_exit_analysis_routes_to_close_advice_read(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict]] = []
+
+    def _execute_tool(tool_name: str, payload: dict) -> dict:
+        calls.append((tool_name, payload))
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "query": payload["query"],
+                "source": {"run_id": "run-1", "paths": [".../close_advice.csv"]},
+                "row_count": 2,
+                "matched_count": 1,
+                "returned_count": 1,
+                "rows": [
+                    {
+                        "account": "lx",
+                        "symbol": "FUTU",
+                        "option_type": "call",
+                        "side": "long",
+                        "expiration": "2026-08-21",
+                        "strike": 152.45,
+                        "close_action": "hold_call_as_convexity",
+                        "tier_label": "继续持有",
+                        "reason": "long call 仍保留右尾 convexity，可继续持有",
+                        "realized_if_close": 320,
+                        "long_call_cost_basis": 500,
+                        "long_call_current_value": 820,
+                        "long_call_value_ratio": 1.64,
+                        "capture_ratio": 0.42,
+                    }
+                ],
+                "summary": {"tier_counts": {"none": 1}},
+            },
+        )
+
+    out = handle_assistant_request(
+        AssistantRequest(
+            text="分析 long call 是不是应该平仓",
+            sender_id="local",
+            channel="local",
+            message_id="msg_exit_analysis",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute_tool,
+        allowed_senders="local:local",
+    )
+
+    assert out["ok"] is True
+    assert calls == [
+        (
+            "close_advice_read",
+            {"config_key": "us", "query": {"status": "open", "option_type": "call", "side": "long", "limit": 50}},
+        )
+    ]
+    assert out["data"]["perception"]["intent_name"] == "position_exit_analysis"
+    assert out["data"]["reasoning"]["tool_call"]["tool_name"] == "close_advice_read"
+    assert "平仓建议分析" in out["data"]["response_text"]
+    assert "继续持有 Call 凸性腿" in out["data"]["response_text"]
+    assert "Call现值 820" in out["data"]["response_text"]
+    assert "Call现值/成本 1.64" in out["data"]["response_text"]
+    assert "数据源：run run-1" in out["data"]["response_text"]
 
 
 def test_command_catalog_read_tool_names_match_inbound_policy() -> None:

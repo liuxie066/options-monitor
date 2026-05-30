@@ -143,7 +143,7 @@ def test_llm_intent_surface_is_read_only_only() -> None:
     assert schema["write_intents_allowed"] is False
     assert set(json_schema["properties"]["intent"]["enum"]) == recognizable_names
     assert allowed_names <= recognizable_names
-    assert "position_exit_analysis" in recognizable_names - allowed_names
+    assert "position_exit_analysis" in allowed_names
     assert not any(name.endswith(("_confirm", "_cancel")) for name in recognizable_names)
 
     pure_read_router_tools = {"inbound.pending", "inbound.symbols"}

@@ -120,7 +120,23 @@ def _safe_tool_payload(value: Any) -> dict[str, Any]:
         return {}
     if not isinstance(parsed, dict):
         return {}
-    allowed = {"config_key", "account", "status", "month", "run_id", "kind", "limit", "lines", "action"}
+    allowed = {
+        "config_key",
+        "account",
+        "status",
+        "month",
+        "run_id",
+        "kind",
+        "limit",
+        "lines",
+        "action",
+        "query",
+        "symbol",
+        "option_type",
+        "side",
+        "strike",
+        "expiration",
+    }
     return {key: parsed[key] for key in sorted(allowed) if key in parsed}
 
 
