@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.2.169 - 2026-05-30
+
+### Added
+- Added candidate rejection summaries to account scan notifications, grouping existing `candidate_filter_trace.jsonl` / reject-log evidence into user-readable causes such as missing data, volatility edge, liquidity, risk budget, event risk, and cash or coverage constraints.
+
+### Changed
+- Account scan notifications now surface why a run produced no candidates or filtered candidates, without changing candidate selection, ranking, or strategy thresholds.
+
 ## 1.2.168 - 2026-05-30
 
 ### Changed
