@@ -20,6 +20,7 @@ CONFIG_SCOPED_INTENTS = frozenset(
         "healthcheck",
         "config_validate",
         "position_query",
+        "position_exit_analysis",
         "monthly_income_report",
         "symbol_list",
     }
@@ -124,6 +125,12 @@ def _tool_payload_from_perception(
         return {
             **base,
             "action": "list",
+            "query": query,
+        }
+    if intent_name == "position_exit_analysis":
+        query = PositionQuery.from_payload(arguments).to_payload()
+        return {
+            **base,
             "query": query,
         }
     if intent_name == "monthly_income_report":

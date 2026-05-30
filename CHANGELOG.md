@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.166 - 2026-05-30
+
+### Added
+- Added a read-only `close_advice_read` agent tool and Assistant `position_exit_analysis` routing so chat can answer close/take-profit analysis requests from existing Close Advice reports without refreshing market data or writing reports.
+- Added readable chat rendering for Close Advice rows, including Yield Enhancement put/call action semantics and long-call value metrics.
+
+### Fixed
+- Fixed Close Advice chat source selection so `config_key`/runtime config market filters out runs from the wrong market.
+- Fixed Close Advice chat fallback ordering so runtime-root reports are preferred over repo/release-directory agent-tool artifacts.
+
 ## 1.2.165 - 2026-05-30
 
 ### Fixed
