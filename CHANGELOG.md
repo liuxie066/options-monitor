@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.167 - 2026-05-30
+
+### Fixed
+- Fixed Close Advice chat analysis so the default US runtime config no longer hides HK positions; symbol-specific queries now use the symbol market and symbol-less exit analysis reads recent US/HK reports.
+- Fixed monitor-symbol chat writes so explicit HK/US symbols choose the matching runtime config instead of inheriting the default chat market.
+
 ## 1.2.166 - 2026-05-30
 
 ### Added
