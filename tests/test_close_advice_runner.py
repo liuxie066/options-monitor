@@ -108,6 +108,8 @@ def test_run_close_advice_builds_csv_and_markdown_from_local_fixtures(
     text = (out_dir / "close_advice.txt").read_text(encoding="utf-8")
     assert "平仓建议" in text
     assert "NVDA Put 2026-05-15" in text
+    rows = pd.read_csv(out_dir / "close_advice.csv").to_dict("records")
+    assert rows[0]["strategy_exit_mode"] == "standard_short_option"
 
 
 def test_run_close_advice_enables_optimizer_by_default(
