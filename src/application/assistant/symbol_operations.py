@@ -9,6 +9,7 @@ from src.application.agent_tool_config import resolve_runtime_config_path
 from src.application.agent_tool_contracts import AgentToolError, build_response, mask_path
 from src.application.config_loader import resolve_watchlist_config, set_watchlist_config
 from src.application.config_validator import validate_config
+from src.application.runtime_config_freshness import infer_runtime_config_market
 from src.application.assistant.contracts import AssistantRequest, PerceptionResult
 from src.application.assistant.operation_lifecycle import (
     build_cancelled_operation_response,
@@ -20,6 +21,7 @@ from src.application.assistant.operation_policy import enforce_symbol_write_allo
 from src.application.assistant.operation_store import InboundOperationStore
 from src.application.assistant.operation_status_text import operation_candidate_hint
 from src.application.runtime_config_paths import write_json_atomic
+from src.application.symbol_calibration import calibrate_symbol
 from src.application.symbol_mutations import add_symbol_entry, edit_symbol_entry, remove_symbol_entry
 
 
@@ -40,8 +42,9 @@ def handle_symbol_operation(
         return _list_symbols(request)
     policy = enforce_symbol_write_allowed(channel=request.channel, sender_id=request.sender_id)
     if intent.intent_name in PREVIEW_INTENTS:
-        config_path, _cfg = _load_config(request)
-        payload = _build_operation_payload(intent.intent_name, dict(intent.arguments), request=request, config_path=config_path)
+        arguments = dict(intent.arguments)
+        config_path, _cfg, config_key = _load_config_for_symbol_request(request, arguments=arguments)
+        payload = _build_operation_payload(intent.intent_name, arguments, request=request, config_path=config_path, config_key=config_key)
         return _preview_and_save(payload, request=request, command_id=command_id, store=store, ttl_seconds=policy.confirm_ttl_seconds)
     if intent.intent_name == "symbol_confirm":
         return _confirm_operation(operation_id=_optional_text(intent.arguments.get("operation_id")), request=request, store=store)
@@ -194,13 +197,14 @@ def _build_operation_payload(
     *,
     request: AssistantRequest,
     config_path: Any | None = None,
+    config_key: str | None = None,
 ) -> dict[str, Any]:
     return {
         "schema_version": "1.0",
         "operation_type": operation_type,
         "arguments": arguments,
         "config": {
-            "config_key": request.config_key,
+            "config_key": config_key if config_key is not None else request.config_key,
             "config_path": str(config_path) if config_path else request.config_path,
         },
     }
@@ -264,16 +268,74 @@ def _load_config_for_payload(payload: dict[str, Any]) -> tuple[Any, dict[str, An
     return _load_config(AssistantRequest(text="", sender_id="", channel="local", config_key=config_key, config_path=config.get("config_path")))
 
 
+def _load_config_for_symbol_request(request: AssistantRequest, *, arguments: dict[str, Any]) -> tuple[Any, dict[str, Any], str | None]:
+    _require_runtime_config_scope(request)
+    current_path, current_cfg = _load_config(request)
+    target_market = _symbol_market_from_arguments(arguments, config=current_cfg)
+    if target_market is None:
+        return current_path, current_cfg, request.config_key
+
+    current_market = infer_runtime_config_market(
+        config_key=request.config_key,
+        config_path=current_path,
+        config=current_cfg,
+    )
+    if current_market == target_market:
+        return current_path, current_cfg, target_market
+
+    target_path = _runtime_config_path_for_market(request=request, current_path=current_path, target_market=target_market)
+    target_cfg = _read_runtime_config(target_path)
+    return target_path, target_cfg, target_market
+
+
 def _load_config(request: AssistantRequest) -> tuple[Any, dict[str, Any]]:
     _require_runtime_config_scope(request)
     config_path = resolve_runtime_config_path(config_key=request.config_key, config_path=request.config_path)
+    return config_path, _read_runtime_config(config_path)
+
+
+def _read_runtime_config(config_path: Any) -> dict[str, Any]:
     try:
         data = json.loads(config_path.read_text(encoding="utf-8"))
     except Exception as exc:
         raise AgentToolError(code="CONFIG_ERROR", message=f"failed to load runtime config: {config_path.name}", details={"error": f"{type(exc).__name__}: {exc}"}) from exc
     if not isinstance(data, dict):
         raise AgentToolError(code="CONFIG_ERROR", message="runtime config must be a JSON object")
-    return config_path, data
+    return data
+
+
+def _symbol_market_from_arguments(arguments: dict[str, Any], *, config: dict[str, Any]) -> str | None:
+    raw_symbol = str(arguments.get("symbol") or "").strip()
+    if not raw_symbol:
+        return None
+    calibrated = calibrate_symbol(raw_symbol, config=config)
+    if calibrated.status != "ok":
+        calibrated = calibrate_symbol(raw_symbol)
+    market = str(calibrated.market or "").strip().upper()
+    if market == "US":
+        return "us"
+    if market == "HK":
+        return "hk"
+    return None
+
+
+def _runtime_config_path_for_market(
+    *,
+    request: AssistantRequest,
+    current_path: Any,
+    target_market: str,
+) -> Any:
+    if request.config_path:
+        sibling = current_path.with_name(f"config.{target_market}.json")
+        if sibling.exists():
+            return sibling
+        raise AgentToolError(
+            code="NEEDS_CLARIFICATION",
+            message=f"监控标的属于 {target_market.upper()}，但没有找到对应 runtime config。",
+            hint=f"请传入 config.{target_market}.json 的 --config-path，或先构建对应市场配置。",
+            details={"requested_market": target_market, "current_config_path": str(current_path)},
+        )
+    return resolve_runtime_config_path(config_key=target_market, config_path=None)
 
 
 def _require_runtime_config_scope(request: AssistantRequest) -> None:
