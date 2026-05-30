@@ -6,7 +6,7 @@
 
 ### Fixed
 - Fixed upgrade checks and chat-triggered upgrades so an already-current release returns `没有可升级版本` and does not create a pending confirmation.
-- Fixed inbound confirmation lifecycle so expired preview records are persisted as `expired` and no longer remain pending or confirmable after the TTL.
+- Fixed inbound confirmation lifecycle so expired preview records are persisted as `expired`, and stale `confirmed`/`running` operations are finalized as `failed` instead of lingering without an audit result.
 
 ## 1.2.164 - 2026-05-30
 
