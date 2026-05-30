@@ -1296,6 +1296,33 @@ def test_service_upgrade_check_falls_back_to_git_cache_when_current_release_has_
     assert any(command[:3] == ["git", f"--git-dir={cache_repo}", "for-each-ref"] for command, _cwd in calls)
 
 
+def test_service_upgrade_check_reports_no_upgrade_available(tmp_path: Path) -> None:
+    from src.application.service_upgrade import service_upgrade_check
+
+    repo = tmp_path / "releases" / "1.0.1"
+    _write_upgrade_release_skeleton(repo, "1.0.1")
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    cache_root = tmp_path / "_cache"
+    cache_repo = cache_root / "git" / "options-monitor.git"
+    cache_repo.mkdir(parents=True)
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        target_query = _fake_release_target_query(list(command), tags=("1.0.1",))
+        if target_query is not None:
+            return target_query
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    out = service_upgrade_check(repo_root=repo, runtime_root=runtime, cache_root=cache_root, run_cmd=_run_cmd)
+
+    assert out["ok"] is True
+    assert out["status"] == "no_upgrade_available"
+    assert out["upgrade_available"] is False
+    assert out["current_version"] == "1.0.1"
+    assert out["latest_version"] == "1.0.1"
+    assert out["message"] == "没有可升级版本。当前已是最新版本 1.0.1"
+
+
 def test_service_upgrade_confirm_uses_cached_remote_when_current_release_has_no_git(tmp_path: Path) -> None:
     from src.application.service_upgrade import service_upgrade
 
@@ -1352,6 +1379,48 @@ def test_service_upgrade_confirm_uses_cached_remote_when_current_release_has_no_
     assert ["git", f"--git-dir={cache_repo}", "config", "--get", "remote.origin.url"] in calls
     assert ["git", f"--git-dir={cache_repo}", "fetch", "--tags", "--prune", "origin"] in calls
     assert not (releases / "1.0.1" / ".git").exists()
+
+
+def test_service_upgrade_confirm_noops_when_latest_is_current(tmp_path: Path) -> None:
+    from src.application.service_upgrade import load_upgrade_status, service_upgrade
+
+    install = tmp_path / "opt" / "options-monitor"
+    releases = install / "releases"
+    v101 = releases / "1.0.1"
+    _write_upgrade_release_skeleton(v101, "1.0.1")
+    current = install / "current"
+    current.parent.mkdir(parents=True, exist_ok=True)
+    current.symlink_to(v101, target_is_directory=True)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    cache_root = install / "_cache"
+    cache_repo = cache_root / "git" / "options-monitor.git"
+    cache_repo.mkdir(parents=True)
+    calls: list[list[str]] = []
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        calls.append(list(command))
+        target_query = _fake_release_target_query(list(command), tags=("1.0.1",))
+        if target_query is not None:
+            return target_query
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    out = service_upgrade(
+        repo_root=current,
+        runtime_root=runtime,
+        releases_root=releases,
+        cache_root=cache_root,
+        confirm=True,
+        run_cmd=_run_cmd,
+    )
+
+    assert out["ok"] is True
+    assert out["status"] == "already_current"
+    assert out["changed"] is False
+    assert out["message"] == "没有可升级版本。当前已是最新版本 1.0.1"
+    assert current.resolve() == v101.resolve()
+    assert not any(command[:3] == ["python3", "-m", "venv"] for command in calls)
+    assert load_upgrade_status(runtime_root=runtime)["message"] == "没有可升级版本。当前已是最新版本 1.0.1"
 
 
 def test_service_upgrade_runtime_prepare_auto_uses_pip_when_uv_missing(monkeypatch, tmp_path: Path) -> None:
