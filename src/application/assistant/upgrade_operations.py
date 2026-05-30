@@ -64,6 +64,24 @@ def _preview_and_save(
 ) -> dict[str, Any]:
     _attach_receipt_target(payload, request)
     preview = _preview_operation(payload)
+    if _preview_has_no_upgrade(preview):
+        return build_response(
+            tool_name="inbound.upgrade",
+            ok=True,
+            data={
+                "operation_type": payload["operation_type"],
+                "status": "no_upgrade_available",
+                "payload": payload,
+                "preview": preview,
+                "response_text": render_upgrade_response(
+                    status="no_upgrade_available",
+                    operation_id=command_id,
+                    payload=payload,
+                    preview=preview,
+                ),
+            },
+            meta={"audit_db": mask_path(store.path)},
+        )
     _freeze_preview_target(payload, preview)
     return build_previewed_operation_response(
         tool_name="inbound.upgrade",
@@ -244,6 +262,19 @@ def _preview_operation(payload: dict[str, Any]) -> dict[str, Any]:
     args = _upgrade_defaults(dict(payload.get("arguments") or {}))
     out = _preview_upgrade(args)
     return {"summary": _upgrade_summary(out), "upgrade": out}
+
+
+def _preview_has_no_upgrade(preview: dict[str, Any]) -> bool:
+    upgrade = preview.get("upgrade") if isinstance(preview, dict) else {}
+    if not isinstance(upgrade, dict):
+        return False
+    status = str(upgrade.get("status") or "").strip().lower()
+    if status == "no_upgrade_available":
+        return True
+    version_check = upgrade.get("version_check")
+    if status == "already_current" and isinstance(version_check, dict):
+        return not bool(version_check.get("update_available"))
+    return False
 
 
 def _apply_operation(payload: dict[str, Any]) -> dict[str, Any]:
@@ -567,12 +598,23 @@ def _preview_upgrade(args: dict[str, Any]) -> dict[str, Any]:
     if not bool(check.get("ok")):
         return {**base, "status": "upgrade_check_failed"}
     if not target:
-        return {**base, "status": "no_target_version", "ok": False}
+        return {**base, "status": "no_target_version", "ok": False, "message": check.get("message") or "没有可升级版本。"}
     cmp = compare_versions(current, target)
     if cmp == 0:
-        return {**base, "status": "already_current", "ok": True}
+        no_upgrade = not str(args.get("target_version") or "").strip() and not bool(check.get("upgrade_available"))
+        return {
+            **base,
+            "status": "no_upgrade_available" if no_upgrade else "already_current",
+            "ok": True,
+            "message": check.get("message") or f"没有可升级版本。当前已是最新版本 {current}",
+        }
     if cmp > 0:
-        return {**base, "status": "target_older_than_current", "ok": False}
+        return {
+            **base,
+            "status": "target_older_than_current",
+            "ok": False,
+            "message": check.get("message") or f"当前版本 {current} 高于目标版本 {target}",
+        }
     target_dir = releases_root / target
     planned = [
         f"materialize v{target} into {target_dir} from git cache {cache_root / 'git' / 'options-monitor.git'}"
@@ -613,6 +655,15 @@ def render_upgrade_response(
     current = summary.get("current_version") or "-"
     target = summary.get("target_version") or "-"
     upgrade_status = summary.get("status") or "-"
+    if status == "no_upgrade_available" or upgrade_status == "no_upgrade_available":
+        return "\n".join(
+            [
+                "没有可升级版本。",
+                f"当前版本：{current}",
+                f"远端最新版本：{target}",
+                "未执行升级。",
+            ]
+        )
     if status == "previewed":
         lines = [
             "升级预览：立即升级",

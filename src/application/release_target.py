@@ -237,7 +237,7 @@ def _target_result(
         message = f"发现新版本 {latest_version}，当前 {current_version}"
         update_available = True
     elif cmp == 0:
-        message = f"当前已是最新版本 {current_version}"
+        message = f"没有可升级版本。当前已是最新版本 {current_version}"
         update_available = False
     else:
         message = f"当前版本 {current_version} 高于远端最新版本 {latest_version}"

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -594,6 +594,127 @@ def test_inbound_operation_confirm_claim_is_atomic(tmp_path: Path) -> None:
     assert operation["status"] == "confirmed"
 
 
+def test_inbound_operation_store_expires_previewed_records(tmp_path: Path) -> None:
+    from src.application.assistant.operation_store import InboundOperationStore
+
+    store = InboundOperationStore(tmp_path / "inbound.sqlite3")
+    store.save_preview(
+        operation_id="in_expire_preview",
+        command_id="in_expire_preview",
+        channel="feishu",
+        sender_id="ou_1",
+        conversation_id="feishu:chat_a:ou_1",
+        operation_type="upgrade_now",
+        payload_hash="hash_1",
+        payload={"operation_type": "upgrade_now", "arguments": {"target_version": "1.2.164"}},
+        preview={"summary": {"current_version": "1.2.163", "target_version": "1.2.164"}},
+        ttl_seconds=60,
+        created_at="2026-05-30T00:00:00+00:00",
+    )
+
+    now = datetime(2026, 5, 30, 0, 2, tzinfo=timezone.utc)
+    pending = store.list_pending_operations(
+        channel="feishu",
+        sender_id="ou_1",
+        conversation_id="feishu:chat_a:ou_1",
+        now=now,
+    )
+
+    assert pending == []
+    operation = store.get("in_expire_preview")
+    assert operation is not None
+    assert operation["status"] == "expired"
+    assert operation["result"]["reason"] == "confirmation_ttl_expired"
+
+    expired = store.list_pending_operations(
+        channel="feishu",
+        sender_id="ou_1",
+        conversation_id="feishu:chat_a:ou_1",
+        include_expired=True,
+        now=now,
+    )
+    assert len(expired) == 1
+    assert expired[0]["operation_id"] == "in_expire_preview"
+    assert expired[0]["status"] == "expired"
+
+    confirm_resolution = store.resolve_pending_operation(
+        channel="feishu",
+        sender_id="ou_1",
+        conversation_id="feishu:chat_a:ou_1",
+        operation_types={"upgrade_now"},
+        explicit_operation_id="in_expire_preview",
+        allow_expired=False,
+        now=now,
+    )
+    assert confirm_resolution["status"] == "expired"
+
+
+def test_inbound_operation_store_fails_stale_confirmed_and_running_records(tmp_path: Path) -> None:
+    from src.application.assistant.operation_store import InboundOperationStore
+
+    store = InboundOperationStore(tmp_path / "inbound.sqlite3")
+    for operation_id in ("in_stale_confirmed", "in_stale_running", "in_recent_confirmed"):
+        store.save_preview(
+            operation_id=operation_id,
+            command_id=operation_id,
+            channel="feishu",
+            sender_id="ou_1",
+            conversation_id="feishu:chat_a:ou_1",
+            operation_type="upgrade_now",
+            payload_hash=f"hash_{operation_id}",
+            payload={"operation_type": "upgrade_now", "arguments": {"target_version": "1.2.164"}},
+            preview={"summary": {"current_version": "1.2.163", "target_version": "1.2.164"}},
+            ttl_seconds=600,
+            created_at="2026-05-30T00:00:00+00:00",
+        )
+
+    with sqlite3.connect(store.path) as conn:
+        conn.execute(
+            """
+            UPDATE inbound_pending_operations
+            SET status = 'confirmed',
+                confirmed_at = '2026-05-30T00:10:00+00:00',
+                result_json = NULL
+            WHERE operation_id = 'in_stale_confirmed'
+            """
+        )
+        conn.execute(
+            """
+            UPDATE inbound_pending_operations
+            SET status = 'running',
+                confirmed_at = '2026-05-30T00:20:00+00:00',
+                result_json = ?
+            WHERE operation_id = 'in_stale_running'
+            """,
+            (json.dumps({"status": "running"}),),
+        )
+        conn.execute(
+            """
+            UPDATE inbound_pending_operations
+            SET status = 'confirmed',
+                confirmed_at = '2026-05-30T01:55:00+00:00',
+                result_json = ?
+            WHERE operation_id = 'in_recent_confirmed'
+            """,
+            (json.dumps({"status": "confirmed"}),),
+        )
+
+    now = datetime(2026, 5, 30, 2, 0, tzinfo=timezone.utc)
+    pending = store.list_pending_operations(
+        channel="feishu",
+        sender_id="ou_1",
+        conversation_id="feishu:chat_a:ou_1",
+        now=now,
+    )
+
+    assert pending == []
+    assert store.get("in_stale_confirmed")["status"] == "failed"  # type: ignore[index]
+    assert store.get("in_stale_running")["status"] == "failed"  # type: ignore[index]
+    assert store.get("in_recent_confirmed")["status"] == "confirmed"  # type: ignore[index]
+    assert store.get("in_stale_confirmed")["result"]["reason"] == "operation_stale_after_confirmation"  # type: ignore[index]
+    assert store.get("in_stale_running")["result"]["previous_status"] == "running"  # type: ignore[index]
+
+
 def test_inbound_manual_trade_update_pending_preview_then_confirm(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import src.application.ledger.repository as ledger_repository
 
@@ -848,6 +969,80 @@ def test_inbound_upgrade_preview_and_confirm(monkeypatch: pytest.MonkeyPatch, tm
     assert calls[-1]["auto"] is True
     assert calls[-1]["target_version"] == "1.2.111"
     assert str(calls[-1]["runtime_root"]) == str(tmp_path / "runtime")
+
+
+def test_inbound_upgrade_returns_no_upgrade_without_pending_operation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from src.application.assistant import upgrade_operations
+
+    _enable_inbound_upgrade_write(monkeypatch)
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    audit_db = tmp_path / "inbound.sqlite3"
+    calls: list[dict[str, object]] = []
+
+    def _fake_service_upgrade_check(**kwargs):  # type: ignore[no-untyped-def]
+        calls.append({"check": True, **dict(kwargs)})
+        return {
+            "ok": True,
+            "status": "no_upgrade_available",
+            "repo_root": str(kwargs["repo_root"]),
+            "repo_root_resolved": str(kwargs["repo_root"]),
+            "repo_root_resolution": {"status": "input"},
+            "runtime_root": str(kwargs["runtime_root"]),
+            "current_version": "1.2.111",
+            "latest_version": "1.2.111",
+            "release_tag": "v1.2.111",
+            "upgrade_available": False,
+            "message": "没有可升级版本。当前已是最新版本 1.2.111",
+            "version_check": {"ok": True, "update_available": False},
+        }
+
+    monkeypatch.setattr(upgrade_operations, "service_upgrade_check", _fake_service_upgrade_check)
+    monkeypatch.setattr(
+        upgrade_operations,
+        "service_upgrade",
+        lambda **kwargs: pytest.fail(f"unexpected upgrade apply: {kwargs}"),
+    )
+    monkeypatch.setattr(
+        upgrade_operations,
+        "UPGRADE_WORKER_LAUNCHER",
+        lambda operation_id, audit_db: pytest.fail(f"unexpected upgrade worker: {operation_id}"),
+    )
+
+    preview = handle_assistant_request(
+        AssistantRequest(
+            text="立即升级",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_upgrade_noop",
+            conversation_id="feishu:chat_a:ou_1",
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert preview["ok"] is True
+    assert preview["tool_name"] == "inbound.upgrade"
+    assert preview["data"]["status"] == "no_upgrade_available"
+    assert "没有可升级版本" in preview["data"]["response_text"]
+    assert "确认执行" not in preview["data"]["response_text"]
+    assert "operation_id" not in preview["data"]
+    assert calls[-1]["check"] is True
+
+    pending = handle_assistant_request(
+        AssistantRequest(
+            text="待确认",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_upgrade_noop_pending",
+            conversation_id="feishu:chat_a:ou_1",
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert pending["ok"] is True
+    assert pending["data"]["pending_count"] == 0
+    assert pending["data"]["response_text"] == "当前对话没有待确认操作。"
 
 
 def test_inbound_upgrade_reconfirm_hides_internal_status(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

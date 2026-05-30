@@ -1462,8 +1462,10 @@ def service_upgrade_check(
         now_fn=now_fn,
     )
     status = load_upgrade_status(runtime_root=runtime)
+    check_status = _service_upgrade_check_status(version)
     return {
         "ok": bool(version.get("ok")),
+        "status": check_status,
         "repo_root": str(repo_link),
         "repo_root_resolved": str(repo),
         "repo_root_resolution": repo_root_resolution,
@@ -1481,9 +1483,29 @@ def service_upgrade_check(
         "tag_count": version.get("tag_count"),
         "highest_tag_seen": version.get("highest_tag_seen"),
         "selected_tag": version.get("selected_tag"),
+        "message": version.get("message"),
         "version_check": version,
         "last_upgrade": status,
     }
+
+
+def _service_upgrade_check_status(version: dict[str, Any]) -> str:
+    if not bool(version.get("ok")):
+        return "upgrade_check_failed"
+    if bool(version.get("update_available")):
+        return "upgrade_available"
+    current = _version_text(str(version.get("current_version") or ""))
+    latest = _version_text(str(version.get("latest_version") or ""))
+    if current and latest:
+        try:
+            cmp = compare_versions(current, latest)
+        except Exception:
+            return "upgrade_check_failed"
+        if cmp == 0:
+            return "no_upgrade_available"
+        if cmp > 0:
+            return "current_ahead"
+    return "no_upgrade_available"
 
 
 def _switch_current_symlink(*, current_link: Path, target_dir: Path) -> None:
@@ -1551,16 +1573,37 @@ def service_upgrade(
         "updated_at": utc_now_iso(now_fn),
     }
     if not target:
-        out = {**status_base, "ok": False, "status": "no_target_version", "changed": False, "operations": operations}
+        out = {
+            **status_base,
+            "ok": False,
+            "status": "no_target_version",
+            "changed": False,
+            "message": check.get("message") or "没有可升级版本。",
+            "operations": operations,
+        }
         write_upgrade_status(runtime_root=runtime, payload=out)
         return out
     cmp = compare_versions(current_version, target)
     if cmp == 0:
-        out = {**status_base, "ok": True, "status": "already_current", "changed": False, "operations": operations}
+        out = {
+            **status_base,
+            "ok": True,
+            "status": "already_current",
+            "changed": False,
+            "message": check.get("message") or f"没有可升级版本。当前已是最新版本 {current_version}",
+            "operations": operations,
+        }
         write_upgrade_status(runtime_root=runtime, payload=out)
         return out
     if cmp > 0:
-        out = {**status_base, "ok": False, "status": "target_older_than_current", "changed": False, "operations": operations}
+        out = {
+            **status_base,
+            "ok": False,
+            "status": "target_older_than_current",
+            "changed": False,
+            "message": check.get("message") or f"当前版本 {current_version} 高于目标版本 {target}",
+            "operations": operations,
+        }
         write_upgrade_status(runtime_root=runtime, payload=out)
         return out
     if _major_upgrade_blocked(current_version=current_version, target_version=target, allow_major=allow_major):

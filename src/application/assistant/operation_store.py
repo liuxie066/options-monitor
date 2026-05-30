@@ -115,17 +115,20 @@ class InboundOperationStore:
         now: datetime | None = None,
         limit: int | None = None,
     ) -> list[dict[str, Any]]:
+        self.reconcile_stale_operations(now=now)
         normalized_types = {str(item).strip() for item in (operation_types or set()) if str(item).strip()}
-        operations = self._list_previewed_operations(
+        statuses = {"previewed", "expired"} if include_expired else {"previewed"}
+        operations = self._list_operations(
             channel=channel,
             sender_id=sender_id,
             conversation_id=conversation_id,
             operation_types=normalized_types,
+            statuses=statuses,
             limit=limit,
         )
         out: list[dict[str, Any]] = []
         for operation in operations:
-            expired = operation_is_expired(operation, now=now)
+            expired = str(operation.get("status") or "").strip() == "expired" or operation_is_expired(operation, now=now)
             if expired and not include_expired:
                 continue
             summary = _operation_summary(operation)
@@ -144,6 +147,7 @@ class InboundOperationStore:
         allow_expired: bool = False,
         now: datetime | None = None,
     ) -> dict[str, Any]:
+        self.reconcile_stale_operations(now=now)
         normalized_types = {str(item).strip() for item in operation_types if str(item).strip()}
         operation_id = str(explicit_operation_id or "").strip()
         if operation_id:
@@ -166,16 +170,18 @@ class InboundOperationStore:
             )
             return {**resolution, **validation, "operation": operation}
 
-        candidates = self._list_previewed_operations(
+        candidate_statuses = {"previewed", "expired"} if allow_expired else {"previewed"}
+        candidates = self._list_operations(
             channel=channel,
             sender_id=sender_id,
             conversation_id=conversation_id,
             operation_types=normalized_types,
+            statuses=candidate_statuses,
         )
         active: list[dict[str, Any]] = []
         expired: list[dict[str, Any]] = []
         for operation in candidates:
-            if operation_is_expired(operation, now=now):
+            if str(operation.get("status") or "").strip() == "expired" or operation_is_expired(operation, now=now):
                 if allow_expired:
                     active.append(operation)
                 else:
@@ -208,6 +214,127 @@ class InboundOperationStore:
                 "candidate_operations": [_operation_summary(item) for item in expired],
             }
         return {**resolution, "status": "none", "operation": None}
+
+    def reconcile_stale_operations(
+        self,
+        *,
+        now: datetime | None = None,
+        confirmed_timeout_seconds: int = 3600,
+        running_timeout_seconds: int = 3600,
+    ) -> dict[str, int]:
+        self._ensure_schema()
+        effective_now = now or datetime.now(timezone.utc)
+        expired_previewed = self.expire_previewed_operations(now=effective_now)
+        failed_stale = self._fail_stale_active_operations(
+            now=effective_now,
+            confirmed_timeout_seconds=confirmed_timeout_seconds,
+            running_timeout_seconds=running_timeout_seconds,
+        )
+        return {
+            "expired_previewed": expired_previewed,
+            "failed_stale": failed_stale,
+        }
+
+    def expire_previewed_operations(self, *, now: datetime | None = None) -> int:
+        self._ensure_schema()
+        expired_ids: list[str] = []
+        effective_now = now or datetime.now(timezone.utc)
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM inbound_pending_operations
+                WHERE status = 'previewed'
+                """
+            ).fetchall()
+            for row in rows:
+                operation = _row_to_operation(row)
+                if operation is None or not operation_is_expired(operation, now=effective_now):
+                    continue
+                operation_id = str(operation.get("operation_id") or "").strip()
+                if operation_id:
+                    expired_ids.append(operation_id)
+            if not expired_ids:
+                return 0
+            expired_at = effective_now.astimezone(timezone.utc).isoformat()
+            result_json = _json(
+                {
+                    "status": "expired",
+                    "reason": "confirmation_ttl_expired",
+                    "expired_at": expired_at,
+                }
+            )
+            placeholders = ",".join("?" for _ in expired_ids)
+            cursor = conn.execute(
+                f"""
+                UPDATE inbound_pending_operations
+                SET status = 'expired',
+                    result_json = COALESCE(result_json, ?)
+                WHERE status = 'previewed'
+                  AND operation_id IN ({placeholders})
+                """,
+                (result_json, *expired_ids),
+            )
+            return int(cursor.rowcount or 0)
+
+    def _fail_stale_active_operations(
+        self,
+        *,
+        now: datetime,
+        confirmed_timeout_seconds: int,
+        running_timeout_seconds: int,
+    ) -> int:
+        stale_operations: list[dict[str, Any]] = []
+        effective_now = _as_utc(now)
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM inbound_pending_operations
+                WHERE status IN ('confirmed', 'running')
+                """
+            ).fetchall()
+            for row in rows:
+                operation = _row_to_operation(row)
+                if operation is None or not _operation_is_stale_active(
+                    operation,
+                    now=effective_now,
+                    confirmed_timeout_seconds=confirmed_timeout_seconds,
+                    running_timeout_seconds=running_timeout_seconds,
+                ):
+                    continue
+                stale_operations.append(operation)
+            if not stale_operations:
+                return 0
+            failed_at = effective_now.isoformat()
+            updated = 0
+            for operation in stale_operations:
+                operation_id = str(operation.get("operation_id") or "").strip()
+                previous_status = str(operation.get("status") or "").strip()
+                if not operation_id or previous_status not in {"confirmed", "running"}:
+                    continue
+                result_json = _json(
+                    {
+                        "operation_id": operation_id,
+                        "operation_type": operation.get("operation_type"),
+                        "status": "failed",
+                        "reason": "operation_stale_after_confirmation",
+                        "previous_status": previous_status,
+                        "failed_at": failed_at,
+                    }
+                )
+                cursor = conn.execute(
+                    """
+                    UPDATE inbound_pending_operations
+                    SET status = 'failed',
+                        result_json = ?
+                    WHERE operation_id = ?
+                      AND status = ?
+                    """,
+                    (result_json, operation_id, previous_status),
+                )
+                updated += int(cursor.rowcount or 0)
+            return updated
 
     def mark_confirmed(self, operation_id: str, *, result: dict[str, Any] | None = None) -> bool:
         self._ensure_schema()
@@ -349,22 +476,24 @@ class InboundOperationStore:
         conn.row_factory = sqlite3.Row
         return conn
 
-    def _list_previewed_operations(
+    def _list_operations(
         self,
         *,
         channel: str | None,
         sender_id: str | None,
         conversation_id: str | None,
         operation_types: set[str],
+        statuses: set[str],
         limit: int | None = None,
     ) -> list[dict[str, Any]]:
         self._ensure_schema()
         normalized_channel = str(channel or "").strip().lower()
         normalized_sender = str(sender_id or "").strip()
         normalized_conversation = str(conversation_id or "").strip()
+        normalized_statuses = {str(item).strip() for item in statuses if str(item).strip()} or {"previewed"}
         limit_value = max(1, min(int(limit or 100), 500))
-        where = ["status = 'previewed'"]
-        params: list[Any] = []
+        where = [f"status IN ({','.join('?' for _ in normalized_statuses)})"]
+        params: list[Any] = sorted(normalized_statuses)
         if normalized_channel:
             where.append("channel = ?")
             params.append(normalized_channel)
@@ -454,6 +583,50 @@ def operation_is_expired(operation: dict[str, Any], *, now: datetime | None = No
     return effective_now >= expires_at
 
 
+def _operation_is_stale_active(
+    operation: dict[str, Any],
+    *,
+    now: datetime,
+    confirmed_timeout_seconds: int,
+    running_timeout_seconds: int,
+) -> bool:
+    status = str(operation.get("status") or "").strip()
+    if status not in {"confirmed", "running"}:
+        return False
+    timeout_seconds = running_timeout_seconds if status == "running" else confirmed_timeout_seconds
+    if timeout_seconds <= 0:
+        return False
+    anchor = _operation_active_anchor(operation)
+    if anchor is None:
+        return True
+    return (now - anchor).total_seconds() >= timeout_seconds
+
+
+def _operation_active_anchor(operation: dict[str, Any]) -> datetime | None:
+    for key in ("confirmed_at", "created_at", "expires_at"):
+        value = _parse_iso_datetime(operation.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except Exception:
+        return None
+    return _as_utc(parsed)
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def _validate_pending_operation(
     operation: dict[str, Any],
     *,
@@ -474,6 +647,8 @@ def _validate_pending_operation(
     if operation_types and operation_type not in operation_types:
         return {"status": "wrong_family"}
     status = str(operation.get("status") or "").strip()
+    if status == "expired":
+        return {"status": "resolved" if allow_expired else "expired"}
     if status != "previewed":
         return {"status": "invalid_status"}
     if not allow_expired and operation_is_expired(operation, now=now):
