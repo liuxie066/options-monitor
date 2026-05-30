@@ -35,6 +35,11 @@ from src.application.portfolio_context_service import (
 from domain.services import adapt_holdings_context, adapt_option_positions_context
 from src.application.positions.context_builder import slice_shared_context_for_account as slice_shared_option_context_for_account
 from domain.storage.repositories import state_repo
+from src.application.strategy_policy import (
+    SELL_CALL_FAMILY,
+    SELL_PUT_FAMILY,
+    strategy_semantics_for_side_config,
+)
 
 
 def _persist_source_snapshot(base: Path, snapshot: dict) -> None:
@@ -184,19 +189,24 @@ def _wants_short_vol_risk_context(cfg: dict | None) -> bool:
     if not isinstance(cfg, dict):
         return False
 
-    def _is_short_vol(node: object) -> bool:
-        return isinstance(node, dict) and str(node.get("strategy") or "").strip().lower() == "short_vol"
+    def _uses_short_vol(node: object, *, family: str) -> bool:
+        return (
+            isinstance(node, dict)
+            and strategy_semantics_for_side_config(family=family, side_cfg=node).scan_uses_short_vol_gate
+        )
 
     templates = cfg.get("templates")
     if isinstance(templates, dict):
         for profile in templates.values():
             if isinstance(profile, dict) and (
-                _is_short_vol(profile.get("sell_put")) or _is_short_vol(profile.get("sell_call"))
+                _uses_short_vol(profile.get("sell_put"), family=SELL_PUT_FAMILY)
+                or _uses_short_vol(profile.get("sell_call"), family=SELL_CALL_FAMILY)
             ):
                 return True
     for item in cfg.get("symbols") or []:
         if isinstance(item, dict) and (
-            _is_short_vol(item.get("sell_put")) or _is_short_vol(item.get("sell_call"))
+            _uses_short_vol(item.get("sell_put"), family=SELL_PUT_FAMILY)
+            or _uses_short_vol(item.get("sell_call"), family=SELL_CALL_FAMILY)
         ):
             return True
     return False

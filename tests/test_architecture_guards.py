@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import re
 import pytest
 from pathlib import Path
 
@@ -111,6 +112,32 @@ def test_runtime_config_generation_excludes_assistant_control_plane() -> None:
 
     assert "assistant" not in cfg
     assert "inbound" not in cfg
+
+
+def test_strategy_mode_interpretation_stays_in_strategy_policy() -> None:
+    checked = [
+        ROOT / "src" / "application" / "required_data_planning.py",
+        ROOT / "src" / "application" / "required_data_prefetch_planning.py",
+        ROOT / "src" / "application" / "sell_put_steps.py",
+        ROOT / "src" / "application" / "sell_call_steps.py",
+        ROOT / "src" / "application" / "pipeline_context.py",
+        ROOT / "src" / "application" / "sell_put_call_helper.py",
+    ]
+    forbidden_patterns = {
+        "direct_short_vol_branch": re.compile(r"==\s*['\"]short_vol['\"]"),
+        "direct_return_first_branch": re.compile(r"==\s*['\"]return_first['\"]"),
+        "local_short_vol_helper": re.compile(r"def\s+_wants_short_vol\b"),
+        "yield_mode_branch": re.compile(r"yield_enhancement_policy\.mode\s*=="),
+        "vol_convexity_constant_branch": re.compile(r"YIELD_ENHANCEMENT_VOL_CONVEXITY_MODE"),
+    }
+    offenders: list[str] = []
+    for path in checked:
+        text = path.read_text(encoding="utf-8")
+        for label, pattern in forbidden_patterns.items():
+            if pattern.search(text):
+                offenders.append(f"{path.relative_to(ROOT)}:{label}")
+
+    assert offenders == []
 
 
 def test_assistant_config_rejects_business_runtime_shape() -> None:

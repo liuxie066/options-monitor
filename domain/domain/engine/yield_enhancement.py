@@ -31,6 +31,8 @@ class YieldEnhancementLeg:
 class YieldEnhancementMetrics:
     net_credit: float
     net_debit: float
+    net_credit_yield: float
+    annualized_net_credit_yield: float | None
     funding_ratio: float | None
     cash_required: float
     downside_breakeven: float
@@ -54,6 +56,8 @@ class YieldEnhancementFundingDecision:
     put_net_credit: float
     call_total_cost: float
     combo_net_credit: float
+    net_credit_yield: float
+    annualized_net_credit_yield: float | None
     call_cost_ratio: float | None
     upside_scenario_price: float | None
     upside_lift: float | None
@@ -161,6 +165,8 @@ def compute_yield_enhancement_metrics(
     cash_required = float(put_leg.strike) * multiplier - net_credit
     if cash_required <= 0:
         raise ValueError("cash_required must be > 0")
+    net_credit_yield = net_credit / cash_required
+    annualized_net_credit_yield = net_credit_yield * (365.0 / float(dte)) if dte > 0 else None
 
     downside_breakeven = float(put_leg.strike) - net_credit / multiplier
     upside_breakeven = float(call_leg.strike) + net_debit / multiplier
@@ -196,6 +202,12 @@ def compute_yield_enhancement_metrics(
     return YieldEnhancementMetrics(
         net_credit=round(net_credit, 6),
         net_debit=round(net_debit, 6),
+        net_credit_yield=round(net_credit_yield, 6),
+        annualized_net_credit_yield=(
+            round(annualized_net_credit_yield, 6)
+            if annualized_net_credit_yield is not None
+            else None
+        ),
         funding_ratio=(round(funding_ratio, 6) if funding_ratio is not None else None),
         cash_required=round(cash_required, 6),
         downside_breakeven=round(downside_breakeven, 6),
@@ -228,6 +240,7 @@ def compute_yield_enhancement_funding_decision(
     max_call_cost_to_put_credit: float | None = None,
     min_upside_lift_to_call_cost: float | None = None,
     min_upside_lift_to_put_credit: float | None = None,
+    min_net_credit_annualized: float | None = None,
     max_combo_spread_ratio: float | None = None,
 ) -> YieldEnhancementFundingDecision:
     """Decide whether the put premium can sensibly fund a speculative long call."""
@@ -239,6 +252,8 @@ def compute_yield_enhancement_funding_decision(
     put_net_credit = float(put_leg.bid) * multiplier - float(put_sell_fee)
     call_total_cost = float(call_leg.ask) * multiplier + float(call_buy_fee)
     combo_net_credit = float(combo_metrics.net_credit)
+    net_credit_yield = float(combo_metrics.net_credit_yield)
+    annualized_net_credit_yield = _safe_float(combo_metrics.annualized_net_credit_yield)
 
     combo_spread_ratio = _safe_float(combo_metrics.combo_spread_ratio)
 
@@ -264,6 +279,11 @@ def compute_yield_enhancement_funding_decision(
     min_credit = _safe_float(min_combo_net_credit)
     if min_credit is not None and combo_net_credit < min_credit:
         reject_reasons.append("combo_net_credit")
+
+    min_annualized_net_credit = _safe_float(min_net_credit_annualized)
+    if min_annualized_net_credit is not None:
+        if annualized_net_credit_yield is None or annualized_net_credit_yield < min_annualized_net_credit:
+            reject_reasons.append("annualized_net_credit_yield")
 
     max_cost_ratio = _safe_float(max_call_cost_to_put_credit)
     if max_cost_ratio is not None:
@@ -302,6 +322,8 @@ def compute_yield_enhancement_funding_decision(
         put_net_credit=round(put_net_credit, 6),
         call_total_cost=round(call_total_cost, 6),
         combo_net_credit=round(combo_net_credit, 6),
+        net_credit_yield=round(net_credit_yield, 6),
+        annualized_net_credit_yield=_round_optional(annualized_net_credit_yield),
         call_cost_ratio=_round_optional(call_cost_ratio),
         upside_scenario_price=_round_optional(upside_scenario_price),
         upside_lift=_round_optional(upside_lift),
@@ -337,6 +359,7 @@ def yield_enhancement_rank_key(row: dict[str, Any]) -> tuple[float, ...]:
     if mode == "vol_convexity_enhancement":
         return (
             -1.0 if funding_accepted else 0.0,
+            -f("annualized_net_credit_yield"),
             -f("vol_edge_score"),
             -f("delta_target_score"),
             -f("net_credit_retention"),

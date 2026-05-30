@@ -19,6 +19,7 @@ def _sample_candidate(symbol: str = "NVDA") -> dict:
         "call_ask": 1.5,
         "call_delta": 0.32,
         "net_credit": 145.33,
+        "annualized_net_credit_yield": 0.13,
         "scenario_score": 0.0458,
         "annualized_scenario_score": 0.38,
         "expected_move": 14.24,
@@ -46,6 +47,7 @@ def test_render_yield_enhancement_alerts_defaults_to_symbol_scoped_paths(tmp_pat
 
     output_path = report_dir / "nvda_yield_enhancement_alerts.txt"
     assert "[收益增强推荐] NVDA 2026-06-19 95P + 110C" in text
+    assert "净权利金年化: 13.00%" in text
     assert "Put: strike=95 | bid=3.00 | delta=-0.25" in text
     assert "Call候选: 2个" in text
     assert output_path.exists()

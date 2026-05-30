@@ -16,7 +16,7 @@ def _cfg() -> dict:
             {
                 "symbol": "AAPL",
                 "use": ["put_base", "call_base"],
-                "sell_put": {"enabled": True},
+                "sell_put": {"enabled": True, "strategy": "short_vol"},
                 "sell_call": {"enabled": True},
                 "yield_enhancement": {"enabled": True},
             }
@@ -45,6 +45,18 @@ def test_event_prefetch_fetches_symbol_once_across_strategy_lanes(tmp_path: Path
     assert out["summary"]["unique_symbols_total"] == 1
     assert out["summary"]["fetch_attempts"] == 1
     assert out["symbols"]["AAPL"]["source_status"] == "ok"
+
+
+def test_event_prefetch_includes_yield_enhancement_for_return_first() -> None:
+    from src.application.events.prefetch import build_event_prefetch_plan
+
+    cfg = _cfg()
+    cfg["symbols"][0]["sell_put"]["strategy"] = "return_first"
+
+    plan = build_event_prefetch_plan(cfg)
+
+    assert plan["symbols"] == ["AAPL"]
+    assert "yield_enhancement" in plan["reasons"]["AAPL"]
 
 
 def test_event_prefetch_provider_cooldown_stops_same_run_fanout(tmp_path: Path) -> None:

@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 553 (`src`: 290, `domain`: 51, `scripts`: 6, `tests`: 206)
-- Internal import edges: 2863 total, 1307 production/script edges excluding tests
+- Internal import edges: 2873 total, 1315 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -44,11 +44,11 @@ flowchart LR
   scripts -->|1| infrastructure
   scripts -->|2| storage
   storage -->|1| domain
-  tests -->|1010| application
+  tests -->|1013| application
   tests -->|264| domain
   tests -->|2| domain_services
   tests -->|98| infrastructure
-  tests -->|138| interfaces
+  tests -->|137| interfaces
   tests -->|8| scripts
   tests -->|18| storage
 ```
@@ -75,9 +75,9 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 1010 |
+| tests | application | 1013 |
 | tests | domain | 264 |
-| tests | interfaces | 138 |
+| tests | interfaces | 137 |
 | tests | infrastructure | 98 |
 | tests | storage | 18 |
 | tests | scripts | 8 |
@@ -203,13 +203,13 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.application.pipeline_runtime | 20 |
 | src.application.multi_tick.required_data_prefetch | 18 |
 | src.application.tick_notification_flow | 18 |
+| src.application.sell_put_steps | 17 |
 | src.application.agent_tool_runtime_status | 16 |
-| src.application.sell_put_steps | 16 |
 | src.application.ledger.commands | 15 |
 | src.application.trades.auto_intake | 15 |
 | src.application.account_run | 14 |
 | src.application.assistant.symbol_operations | 14 |
-| src.interfaces.cli.option_positions | 14 |
+| src.application.pipeline_context | 14 |
 
 ## Reading
 

@@ -13,6 +13,40 @@ SELL_PUT_FAMILY = "sell_put"
 SELL_CALL_FAMILY = "sell_call"
 RETURN_FIRST_PROFILE = "return_first"
 SHORT_VOL_PROFILE = "short_vol"
+YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE = "income_upside_enhancement"
+YIELD_ENHANCEMENT_VOL_CONVEXITY_MODE = "vol_convexity_enhancement"
+
+
+@dataclass(frozen=True)
+class StrategySemantics:
+    strategy_family: str
+    strategy_profile: str
+    risk_model: str
+    scan_requires_rv: bool
+    scan_uses_short_vol_gate: bool
+    scan_uses_event_risk: bool
+    scan_uses_path_risk: bool
+    yield_enhancement_mode: str | None
+    yield_enhancement_requires_rv: bool
+    yield_enhancement_uses_short_vol_gate: bool
+    close_advice_profile: str
+    close_requires_rv: bool
+    close_uses_short_vol_thesis: bool
+
+    def to_fields(self) -> dict[str, Any]:
+        return {
+            "strategy_family": self.strategy_family,
+            "strategy_profile": self.strategy_profile,
+            "risk_model": self.risk_model,
+            "scan_requires_rv": bool(self.scan_requires_rv),
+            "scan_uses_short_vol_gate": bool(self.scan_uses_short_vol_gate),
+            "yield_enhancement_mode": self.yield_enhancement_mode or "",
+            "yield_enhancement_requires_rv": bool(self.yield_enhancement_requires_rv),
+            "yield_enhancement_uses_short_vol_gate": bool(self.yield_enhancement_uses_short_vol_gate),
+            "close_advice_profile": self.close_advice_profile,
+            "close_requires_rv": bool(self.close_requires_rv),
+            "close_uses_short_vol_thesis": bool(self.close_uses_short_vol_thesis),
+        }
 
 
 @dataclass(frozen=True)
@@ -31,6 +65,46 @@ class StrategyResolution:
             "strategy_config_path": self.config_path,
             "risk_model": self.risk_model,
         }
+
+    def semantics(self) -> StrategySemantics:
+        return strategy_semantics_for_profile(
+            family=self.strategy_family,
+            profile=self.strategy_profile,
+        )
+
+
+@dataclass(frozen=True)
+class YieldEnhancementPositionRole:
+    strategy: str
+    leg_role: str
+    strategy_group_id: str
+    yield_enhancement_mode: str
+    is_yield_enhancement_short_put: bool
+    is_yield_enhancement_long_call: bool
+
+    @property
+    def is_yield_enhancement(self) -> bool:
+        return self.is_yield_enhancement_short_put or self.is_yield_enhancement_long_call
+
+
+def assert_strategy_config_resolved(symbol_cfg: dict[str, Any] | None) -> None:
+    """Fail fast when a template-backed symbol reaches strategy planning unexpanded."""
+
+    if not isinstance(symbol_cfg, dict) or not _has_template_refs(symbol_cfg):
+        return
+    unresolved: list[str] = []
+    for family, key in ((SELL_PUT_FAMILY, "sell_put"), (SELL_CALL_FAMILY, "sell_call")):
+        side_cfg = symbol_cfg.get(key)
+        if not isinstance(side_cfg, dict) or not bool(side_cfg.get("enabled", False)):
+            continue
+        if not _has_strategy_profile(side_cfg):
+            unresolved.append(family)
+    if unresolved:
+        symbol = str(symbol_cfg.get("symbol") or "").strip() or "<unknown>"
+        raise ValueError(
+            f"{symbol} strategy config is not resolved for: {', '.join(unresolved)}; "
+            "apply templates/profiles before strategy planning"
+        )
 
 
 def strategy_family_for_position(position: dict[str, Any]) -> str | None:
@@ -61,12 +135,132 @@ def risk_model_for_profile(profile: str) -> str:
     return "return_first_legacy"
 
 
+def yield_enhancement_mode_for_strategy_profile(profile: Any) -> str:
+    normalized = normalize_strategy_profile(profile)
+    if normalized == SHORT_VOL_PROFILE:
+        return YIELD_ENHANCEMENT_VOL_CONVEXITY_MODE
+    return YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE
+
+
+def strategy_profile_for_yield_enhancement_mode(mode: Any, *, default: str = RETURN_FIRST_PROFILE) -> str:
+    normalized = str(mode or "").strip().lower()
+    if normalized == YIELD_ENHANCEMENT_VOL_CONVEXITY_MODE:
+        return SHORT_VOL_PROFILE
+    if normalized == YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE:
+        return RETURN_FIRST_PROFILE
+    return normalize_strategy_profile(default)
+
+
+def yield_enhancement_mode_uses_short_vol(mode: Any) -> bool:
+    return strategy_profile_for_yield_enhancement_mode(mode) == SHORT_VOL_PROFILE
+
+
+def strategy_semantics_for_profile(*, family: str, profile: Any) -> StrategySemantics:
+    normalized_family = str(family or "").strip().lower()
+    normalized_profile = normalize_strategy_profile(profile)
+    uses_short_vol = normalized_profile == SHORT_VOL_PROFILE
+    yield_mode = (
+        yield_enhancement_mode_for_strategy_profile(normalized_profile)
+        if normalized_family == SELL_PUT_FAMILY
+        else None
+    )
+    if normalized_family == SELL_CALL_FAMILY:
+        close_profile = f"covered_call_{normalized_profile}"
+    elif normalized_family == SELL_PUT_FAMILY:
+        close_profile = f"sell_put_{normalized_profile}"
+    else:
+        close_profile = normalized_profile
+    return StrategySemantics(
+        strategy_family=normalized_family,
+        strategy_profile=normalized_profile,
+        risk_model=risk_model_for_profile(normalized_profile),
+        scan_requires_rv=uses_short_vol,
+        scan_uses_short_vol_gate=uses_short_vol,
+        scan_uses_event_risk=uses_short_vol,
+        scan_uses_path_risk=uses_short_vol,
+        yield_enhancement_mode=yield_mode,
+        yield_enhancement_requires_rv=uses_short_vol and normalized_family == SELL_PUT_FAMILY,
+        yield_enhancement_uses_short_vol_gate=uses_short_vol and normalized_family == SELL_PUT_FAMILY,
+        close_advice_profile=close_profile,
+        close_requires_rv=uses_short_vol,
+        close_uses_short_vol_thesis=uses_short_vol,
+    )
+
+
+def strategy_semantics_for_side_config(
+    *,
+    family: str,
+    side_cfg: dict[str, Any] | None,
+) -> StrategySemantics:
+    cfg = side_cfg if isinstance(side_cfg, dict) else {}
+    return strategy_semantics_for_profile(
+        family=family,
+        profile=cfg.get("strategy") or cfg.get("strategy_profile"),
+    )
+
+
+def resolve_yield_enhancement_position_role(position: dict[str, Any]) -> YieldEnhancementPositionRole:
+    option_type = str(position.get("option_type") or "").strip().lower()
+    side = str(position.get("side") or position.get("position_side") or "").strip().lower()
+    strategy = _first_position_strategy_field(position, "strategy").lower()
+    leg_role = _first_position_strategy_field(position, "leg_role").lower()
+    group_id = _first_position_strategy_field(position, "strategy_group_id")
+    mode = _yield_enhancement_mode(position)
+
+    has_yield_marker = _is_yield_enhancement_strategy_token(strategy) or bool(mode)
+    is_short_put = (
+        option_type == "put"
+        and side in {"", "short"}
+        and (
+            has_yield_marker
+            or leg_role in {"enhancement_put", "yield_enhancement_put"}
+            or (leg_role == "sell_put" and bool(group_id))
+        )
+    )
+    is_long_call = (
+        option_type == "call"
+        and side == "long"
+        and (
+            has_yield_marker
+            or leg_role in {"enhancement_call", "long_call", "upside_call", "convexity_call"}
+        )
+    )
+    return YieldEnhancementPositionRole(
+        strategy=strategy,
+        leg_role=leg_role,
+        strategy_group_id=group_id,
+        yield_enhancement_mode=mode,
+        is_yield_enhancement_short_put=is_short_put,
+        is_yield_enhancement_long_call=is_long_call,
+    )
+
+
+def resolve_position_strategy_semantics(
+    *,
+    position: dict[str, Any],
+    config: dict[str, Any] | None,
+) -> tuple[StrategyResolution, StrategySemantics]:
+    resolution = resolve_position_strategy(position=position, config=config)
+    return resolution, resolution.semantics()
+
+
 def resolve_position_strategy(
     *,
     position: dict[str, Any],
     config: dict[str, Any] | None,
 ) -> StrategyResolution:
     family = strategy_family_for_position(position) or ""
+    yield_profile = _yield_enhancement_strategy_profile(position, family=family)
+    if yield_profile:
+        profile = normalize_strategy_profile(yield_profile)
+        return StrategyResolution(
+            strategy_family=family,
+            strategy_profile=profile,
+            strategy_source="position_yield_enhancement_mode",
+            config_path=None,
+            risk_model=risk_model_for_profile(profile),
+        )
+
     snapshot_profile = _snapshot_strategy_profile(position, family=family)
     if snapshot_profile:
         profile = normalize_strategy_profile(snapshot_profile)
@@ -127,13 +321,55 @@ def _snapshot_strategy_profile(position: dict[str, Any], *, family: str) -> str 
             continue
         profile = raw.get("strategy_profile") or raw.get("profile") or raw.get("strategy")
         if profile:
+            if _is_yield_enhancement_strategy_token(profile):
+                continue
             return str(profile)
 
     raw_family = str(position.get("strategy_family") or "").strip()
     if raw_family and raw_family != family:
         return None
     profile = position.get("strategy_profile") or position.get("strategy")
+    if _is_yield_enhancement_strategy_token(profile):
+        return None
     return str(profile) if profile else None
+
+
+def _is_yield_enhancement_strategy_token(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"yield_enhancement", "rebound_combo"}
+
+
+def _yield_enhancement_strategy_profile(position: dict[str, Any], *, family: str) -> str | None:
+    if family != SELL_PUT_FAMILY:
+        return None
+    mode = _yield_enhancement_mode(position)
+    if mode:
+        return strategy_profile_for_yield_enhancement_mode(mode)
+    if _is_yield_enhancement_position(position):
+        return RETURN_FIRST_PROFILE
+    return None
+
+
+def _yield_enhancement_mode(position: dict[str, Any]) -> str:
+    for source in (position, *_position_strategy_snapshots(position)):
+        if not isinstance(source, dict):
+            continue
+        mode = str(source.get("yield_enhancement_mode") or "").strip().lower()
+        if mode:
+            return mode
+    return ""
+
+
+def _position_strategy_snapshots(position: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+    out: list[dict[str, Any]] = []
+    for key in ("strategy_snapshot", "open_strategy_snapshot", "strategy_resolution"):
+        raw = position.get(key)
+        if isinstance(raw, dict):
+            out.append(raw)
+    return tuple(out)
+
+
+def _is_yield_enhancement_position(position: dict[str, Any]) -> bool:
+    return resolve_yield_enhancement_position_role(position).is_yield_enhancement_short_put
 
 
 def _current_config_strategy_profile(
@@ -237,3 +473,26 @@ def _side_from_templates(templates: Any, *, template: str, family: str) -> dict[
 
 def _norm_symbol(value: Any) -> str:
     return canonical_contract_symbol(value)
+
+
+def _has_template_refs(symbol_cfg: dict[str, Any]) -> bool:
+    raw = symbol_cfg.get("use")
+    if isinstance(raw, str):
+        return bool(raw.strip())
+    if isinstance(raw, (list, tuple, set)):
+        return any(str(item or "").strip() for item in raw)
+    return False
+
+
+def _has_strategy_profile(side_cfg: dict[str, Any]) -> bool:
+    return side_cfg.get("strategy") is not None or side_cfg.get("strategy_profile") is not None
+
+
+def _first_position_strategy_field(position: dict[str, Any], key: str) -> str:
+    for source in (position, *_position_strategy_snapshots(position)):
+        if not isinstance(source, dict):
+            continue
+        value = str(source.get(key) or "").strip()
+        if value:
+            return value
+    return ""

@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 1.2.168 - 2026-05-30
+
+### Changed
+- Centralized Sell Put / Covered Call strategy semantics in `strategy_policy` so scanning, Yield Enhancement, required-data planning, and Close Advice share one mode contract.
+- Updated Yield Enhancement to follow the active Sell Put strategy: return-first uses income/upside enhancement, short-vol uses vol-convexity enhancement with short-vol put-universe gates.
+- Added net-credit-yield and annualized-net-credit-yield handling for Yield Enhancement reports, summaries, ranking evidence, and notifications.
+- Refactored Yield Enhancement pair selection so call-leg loading, pair evaluation, funding gates, and persistence are separated inside the existing pipeline.
+
+### Fixed
+- Fixed strategy required-data planning to fail fast when template-backed symbol configs reach planning before profile expansion.
+- Fixed Close Advice Yield Enhancement leg detection so short-put and long-call action semantics use one shared position-role contract instead of duplicated local checks.
+
 ## 1.2.167 - 2026-05-30
 
 ### Fixed
@@ -230,44 +242,12 @@
 ## 1.2.143 - 2026-05-25
 
 ### Removed
-- Removed the obsolete strategy replay analysis surface (`om strategy-replay analyze`, agent `strategy_replay_analyze`, and `scripts/tools/compare_strategy_replay.py`) after Strategy Analysis was retired for redesign.
+- Removed the obsolete strategy replay analysis surface (`om strategy-replay analyze`, agent `strategy_replay_analyze`, and `scripts/tools/compare_strategy_replay.py`) after the old analysis surface was retired for redesign.
 
 ### Changed
 - Renamed scan-quality evidence diagnostics from strategy evidence to candidate evidence across `healthcheck`, `doctor`, and `research`.
 - Renamed the user-facing Sell Call terminology to Covered Call while preserving the stable internal `sell_call` key for runtime snapshots, traces, and historical files.
 - Centralized strategy vocabulary in `domain.domain.strategy_vocab` so notifications, reports, scanner text, and agent manifests share one internal-key-to-display-name mapping.
-
-## 1.2.142 - 2026-05-24
-
-### Added
-- Added Strategy Lab dataset/experiment/current MVP entrypoints through `om strategy-lab dataset collect`, `om strategy-lab experiment`, `om strategy-lab current`, and matching agent tools.
-- Added Strategy Lab dataset freezing, preflight gates, conservative recommendations, report rendering, and runtime-root storage for datasets, experiment results, reports, and the current pointer.
-
-### Changed
-- Removed the public `strategy_lab` agent tool and `om strategy-lab replay` CLI surface so Strategy Lab no longer exposes single-run replay as its product entry.
-- Added `strategy_evidence` diagnostics to `healthcheck` / `doctor` for replay artifact row counts and lab-readiness warnings without producing strategy recommendations.
-
-## 1.2.141 - 2026-05-24
-
-### Fixed
-- Normalized first-party Strategy Lab candidate CSV evidence from `output_runs/*/accounts/<account>/` so account, sell-put strategy type, option side/type, contracts, and cash basis are understood without requiring duplicate columns in every candidate row.
-- Used explicit candidate `net_income` totals when calculating Strategy Lab premium inflow, avoiding incorrect per-share remultiplication for production candidate files.
-
-## 1.2.140 - 2026-05-24
-
-### Fixed
-- Kept Strategy Lab reject logs out of candidate selection so rejected rows remain diagnostics instead of becoming simulated candidates.
-- Added Strategy Lab evidence diagnostics for artifact row counts, candidate/reject/trace/replay rows, missing candidate fields, and capital-efficiency blockers.
-
-## 1.2.139 - 2026-05-24
-
-### Added
-- Added `om strategy-lab historical fetch` to fetch OpenD/Futu historical K-line data into frozen Strategy Lab snapshots.
-- Added a Futu historical-data provider with paginated `request_history_kline` support and snapshot output under `output_shared/strategy_lab/historical_data/`.
-
-### Changed
-- Kept Strategy Lab replay isolated from live broker calls: historical data must be fetched into snapshots first and then passed through `historical_snapshot_paths`.
-- Documented the historical fetch workflow and kept fetch dry-run by default unless `--confirm` is provided.
 
 ## 1.2.138 - 2026-05-24
 
@@ -278,12 +258,6 @@
 
 ### Added
 - Added the `research` evidence collector and agent tool as the public replacement for the old AI Cofunder naming.
-- Added deterministic Strategy Lab replay for `sell_put`, `sell_call`, `yield_enhancement`, and `close_advice`, including CLI and agent-tool entrypoints.
-- Added a frozen historical-data snapshot/cache contract for Strategy Lab so future Futu imports can write evidence snapshots without coupling replay to live broker APIs.
-
-### Changed
-- Updated agent manifests, operator docs, dependency graph artifacts, and CLI docs to use the `research` and `strategy_lab` surfaces.
-- Kept Strategy Lab output writes behind explicit local-write confirmation while leaving replay dry-run/read-only by default.
 
 ## 1.2.136 - 2026-05-24
 

@@ -314,6 +314,12 @@ def _build_sell_put_extra_parts(row: pd.Series) -> list[str]:
         except Exception:
             pass
         try:
+            value = row.get('linked_call_annualized_net_credit_yield')
+            if value is not None and not pd.isna(value):
+                parts.append(f"linked_net_credit_annualized {pct(value)}")
+        except Exception:
+            pass
+        try:
             value = row.get('linked_call_scenario_score')
             if value is not None and not pd.isna(value):
                 parts.append(f"linked_scenario_score {pct(value)}")
@@ -365,6 +371,12 @@ def _build_yield_enhancement_extra_parts(row: pd.Series) -> list[str]:
         value = row.get('net_credit')
         if value is not None and not pd.isna(value):
             parts.append(f"net_credit {num(value)}")
+    except Exception:
+        pass
+    try:
+        value = row.get('annualized_net_credit_yield')
+        if value is not None and not pd.isna(value):
+            parts.append(f"net_credit_annualized {pct(value)}")
     except Exception:
         pass
     try:

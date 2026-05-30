@@ -869,6 +869,7 @@ def test_sell_put_steps_yield_enhancement_put_universe_ignores_sell_put_return_f
             symbol_cfg={'symbol': 'AAPL', 'yield_enhancement': {'enabled': True}},
             sp={
                 'enabled': True,
+                'strategy': 'return_first',
                 'min_dte': 7,
                 'max_dte': 45,
                 'min_strike': 1,
@@ -898,7 +899,7 @@ def test_sell_put_steps_yield_enhancement_put_universe_ignores_sell_put_return_f
     assert calls[1]['max_dte'] == 45
 
 
-def test_sell_put_steps_yield_enhancement_put_universe_survives_sell_put_income_conversion_gap(tmp_path: Path) -> None:
+def test_sell_put_steps_yield_enhancement_return_first_runs_put_universe(tmp_path: Path) -> None:
     base = _add_repo_to_syspath()
     import src.application.sell_put_steps as steps
     import pandas as pd
@@ -939,7 +940,7 @@ def test_sell_put_steps_yield_enhancement_put_universe_survives_sell_put_income_
             report_dir=report_dir,
             timeout_sec=10,
             is_scheduled=True,
-            exchange_rate_converter=CurrencyConverter(ExchangeRates()),
+            exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=1.0)),
             portfolio_ctx=None,
         )
     finally:
@@ -947,12 +948,11 @@ def test_sell_put_steps_yield_enhancement_put_universe_survives_sell_put_income_
         steps.add_sell_put_labels = orig_add_labels
 
     assert [row["strategy"] for row in out] == ["sell_put", "yield_enhancement"]
-    assert len(calls) == 1
-    assert "yield_enhancement_put_universe" in str(calls[0]["output"])
-    assert calls[0]["min_annualized_net_return"] == 0.0
-    assert calls[0]["min_net_income"] == 0.0
-    assert calls[0]["min_dte"] == 7
-    assert calls[0]["max_dte"] == 45
+    assert len(calls) == 2
+    assert calls[0]["min_annualized_net_return"] == 0.25
+    assert calls[0]["min_net_income"] == 500.0
+    assert calls[1]["min_annualized_net_return"] == 0.0
+    assert calls[1]["min_net_income"] == 0.0
 
 
 def test_sell_put_steps_yield_enhancement_put_universe_is_not_cash_filtered(
@@ -1010,9 +1010,15 @@ def test_sell_put_steps_yield_enhancement_put_universe_is_not_cash_filtered(
         captured_pairs_input["df"] = kwargs["df_candidates"].copy()
         return pd.DataFrame()
 
+    def _fake_short_vol_gate(**kwargs):
+        df = kwargs["df_labeled"].copy()
+        df.to_csv(kwargs["out_path"], index=False)
+        return df
+
     monkeypatch.setattr(steps, "run_sell_put_scan", _fake_run_sell_put_scan)
     monkeypatch.setattr(steps, "add_sell_put_labels", _fake_add_sell_put_labels)
     monkeypatch.setattr(steps, "enrich_sell_put_candidates_with_cash", _fake_enrich)
+    monkeypatch.setattr(steps, "enrich_and_filter_sell_put_short_vol", _fake_short_vol_gate)
     monkeypatch.setattr(steps, "find_sell_put_yield_enhancement_pairs", _fake_find_pairs)
 
     out = steps.run_sell_put_scan_and_summarize(
@@ -1024,6 +1030,7 @@ def test_sell_put_steps_yield_enhancement_put_universe_is_not_cash_filtered(
         symbol_cfg={"symbol": "AAPL", "yield_enhancement": {"enabled": True}},
         sp={
             "enabled": True,
+            "strategy": "short_vol",
             "min_dte": 7,
             "max_dte": 45,
             "min_strike": 1,

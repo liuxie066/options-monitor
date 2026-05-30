@@ -10,7 +10,13 @@ from domain.domain.candidate_defaults import (
     resolve_candidate_window,
 )
 from domain.domain.fetch_source import is_futu_fetch_source, resolve_symbol_fetch_source
-from src.application.yield_enhancement_config import resolve_yield_enhancement_cfg
+from src.application.strategy_policy import (
+    SELL_CALL_FAMILY,
+    SELL_PUT_FAMILY,
+    assert_strategy_config_resolved,
+    strategy_semantics_for_side_config,
+)
+from src.application.yield_enhancement_config import derive_yield_enhancement_policy, resolve_yield_enhancement_cfg
 
 
 DEFAULT_STRIKE_EXPAND_PCT = 0.20
@@ -222,17 +228,22 @@ def strategy_prefetch_kwargs(symbol_cfg: dict[str, Any], *, enabled: bool) -> di
         return _clone_strategy_kwargs(precomputed)
     if not enabled:
         return {"option_types": "put,call"}
+    assert_strategy_config_resolved(symbol_cfg)
 
     sp = _as_dict(symbol_cfg.get("sell_put"))
     cc = _as_dict(symbol_cfg.get("sell_call"))
     ye = resolve_yield_enhancement_cfg(symbol_cfg)
     want_put = bool(sp.get("enabled", False))
     want_direct_call = bool(cc.get("enabled", False))
-    want_yield_call = bool(want_put and ye.get("enabled", False))
+    yield_policy = derive_yield_enhancement_policy(ye, sp)
+    want_yield_call = bool(want_put and yield_policy.enabled)
     want_call = bool(want_direct_call or want_yield_call)
+    sell_put_semantics = strategy_semantics_for_side_config(family=SELL_PUT_FAMILY, side_cfg=sp)
+    sell_call_semantics = strategy_semantics_for_side_config(family=SELL_CALL_FAMILY, side_cfg=cc)
     include_realized_volatility = bool(
-        (want_put and _wants_short_vol(sp))
-        or (want_direct_call and _wants_short_vol(cc))
+        (want_put and sell_put_semantics.scan_requires_rv)
+        or (want_direct_call and sell_call_semantics.scan_requires_rv)
+        or (want_yield_call and yield_policy.requires_realized_volatility)
     )
 
     option_types: list[str] = []
@@ -283,10 +294,6 @@ def strategy_prefetch_kwargs(symbol_cfg: dict[str, Any], *, enabled: bool) -> di
         side_strike_windows=side_strike_windows,
         include_realized_volatility=include_realized_volatility,
     )
-
-
-def _wants_short_vol(cfg: dict[str, Any]) -> bool:
-    return str(cfg.get("strategy") or "").strip().lower() == "short_vol"
 
 
 def _merge_strategy_prefetch_kwargs(items: list[dict[str, Any]]) -> dict[str, Any]:

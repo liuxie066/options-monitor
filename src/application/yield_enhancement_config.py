@@ -4,12 +4,17 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
+from src.application.strategy_policy import (
+    SELL_PUT_FAMILY,
+    YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE,
+    YIELD_ENHANCEMENT_VOL_CONVEXITY_MODE,
+    strategy_semantics_for_profile,
+)
+
 
 YIELD_ENHANCEMENT_OUTPUT_MODES: set[str] = {"inline", "separate", "both"}
 YIELD_ENHANCEMENT_OBJECTIVES: set[str] = {"premium_funded_long_call"}
 YIELD_ENHANCEMENT_FUNDING_MODES: set[str] = {"credit_or_even", "max_debit"}
-YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE = "income_upside_enhancement"
-YIELD_ENHANCEMENT_VOL_CONVEXITY_MODE = "vol_convexity_enhancement"
 YIELD_ENHANCEMENT_LEGACY_OPTIMIZER_FIELDS: tuple[str, ...] = (
     "optimizer_enabled",
     "max_downside_worsen_pct",
@@ -28,6 +33,7 @@ YIELD_ENHANCEMENT_DEFAULTS: dict[str, Any] = {
     "output_mode": "separate",
     "funding_mode": "credit_or_even",
     "min_combo_net_credit": 0.0,
+    "min_net_credit_annualized": 0.08,
     "max_call_cost_to_put_credit": 1.0,
     "min_upside_lift_to_call_cost": 1.5,
     "min_upside_lift_to_put_credit": 0.5,
@@ -87,6 +93,8 @@ class YieldEnhancementPolicy:
     enabled: bool
     mode: str
     derived_from_sell_put_strategy: str
+    requires_realized_volatility: bool
+    uses_short_vol_gate: bool
     config: dict[str, Any]
     explicit_fields: tuple[str, ...]
 
@@ -95,6 +103,8 @@ class YieldEnhancementPolicy:
         cfg["enabled"] = bool(self.enabled)
         cfg["yield_enhancement_mode"] = self.mode
         cfg["derived_from_sell_put_strategy"] = self.derived_from_sell_put_strategy
+        cfg["yield_enhancement_requires_rv"] = bool(self.requires_realized_volatility)
+        cfg["yield_enhancement_uses_short_vol_gate"] = bool(self.uses_short_vol_gate)
         cfg["_explicit_fields"] = tuple(self.explicit_fields)
         return cfg
 
@@ -102,6 +112,8 @@ class YieldEnhancementPolicy:
         return {
             "yield_enhancement_mode": self.mode,
             "derived_from_sell_put_strategy": self.derived_from_sell_put_strategy,
+            "yield_enhancement_requires_rv": bool(self.requires_realized_volatility),
+            "yield_enhancement_uses_short_vol_gate": bool(self.uses_short_vol_gate),
         }
 
 
@@ -148,17 +160,20 @@ def _explicit_overrides(cfg: dict[str, Any], explicit_fields: tuple[str, ...]) -
 
 def _normalize_sell_put_strategy(sell_put_cfg: dict[str, Any] | None) -> str:
     cfg = _as_dict(sell_put_cfg)
-    profile = str(cfg.get("strategy") or cfg.get("strategy_profile") or "").strip().lower()
-    if profile == "short_vol":
-        return "short_vol"
-    return "return_first"
+    return strategy_semantics_for_profile(
+        family=SELL_PUT_FAMILY,
+        profile=cfg.get("strategy") or cfg.get("strategy_profile"),
+    ).strategy_profile
 
 
 def yield_enhancement_mode_for_sell_put_strategy(strategy: Any) -> str:
-    profile = str(strategy or "").strip().lower()
-    if profile == "short_vol":
-        return YIELD_ENHANCEMENT_VOL_CONVEXITY_MODE
-    return YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE
+    return str(
+        strategy_semantics_for_profile(
+            family=SELL_PUT_FAMILY,
+            profile=strategy,
+        ).yield_enhancement_mode
+        or YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE
+    )
 
 
 def yield_enhancement_defaults_for_market(market: str | None = None) -> dict[str, Any]:
@@ -185,21 +200,26 @@ def derive_yield_enhancement_policy(
     explicit_fields = _explicit_fields(raw_cfg)
     enabled = bool(raw_cfg.get("enabled", False))
     sell_put_strategy = _normalize_sell_put_strategy(sell_put_cfg)
-    mode = yield_enhancement_mode_for_sell_put_strategy(sell_put_strategy)
+    semantics = strategy_semantics_for_profile(family=SELL_PUT_FAMILY, profile=sell_put_strategy)
+    mode = str(semantics.yield_enhancement_mode or YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE)
 
     base = yield_enhancement_defaults_for_market(market)
     derived_defaults = YIELD_ENHANCEMENT_DERIVED_POLICY_DEFAULTS.get(mode) or {}
     cfg = _deep_merge_dict(base, derived_defaults)
     cfg = _deep_merge_dict(cfg, _explicit_overrides(raw_cfg, explicit_fields))
-    cfg["enabled"] = enabled
+    cfg["enabled"] = bool(enabled)
     cfg["yield_enhancement_mode"] = mode
     cfg["derived_from_sell_put_strategy"] = sell_put_strategy
+    cfg["yield_enhancement_requires_rv"] = bool(semantics.yield_enhancement_requires_rv)
+    cfg["yield_enhancement_uses_short_vol_gate"] = bool(semantics.yield_enhancement_uses_short_vol_gate)
     output_mode = str(cfg.get("output_mode") or "").strip().lower()
     cfg["output_mode"] = output_mode if output_mode in YIELD_ENHANCEMENT_OUTPUT_MODES else "separate"
     return YieldEnhancementPolicy(
-        enabled=enabled,
+        enabled=bool(enabled),
         mode=mode,
         derived_from_sell_put_strategy=sell_put_strategy,
+        requires_realized_volatility=bool(semantics.yield_enhancement_requires_rv),
+        uses_short_vol_gate=bool(semantics.yield_enhancement_uses_short_vol_gate),
         config=cfg,
         explicit_fields=explicit_fields,
     )

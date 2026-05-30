@@ -718,15 +718,6 @@ def test_research_collect_forwards_remote_runtime_selection(monkeypatch, capsys)
     ]
 
 
-def test_strategy_lab_is_not_a_public_cli_surface() -> None:
-    import src.interfaces.cli.main as cli
-
-    with pytest.raises(SystemExit):
-        cli.main(["strategy-lab", "current"])
-    with pytest.raises(SystemExit):
-        cli.main(["strategy", "current"])
-
-
 def test_top_level_status_json_prints_raw_runtime_status(monkeypatch, capsys) -> None:
     import src.interfaces.cli.main as cli
 

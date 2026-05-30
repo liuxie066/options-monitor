@@ -118,6 +118,7 @@ def _linked_call_lines(row) -> list[str]:
     ask = None
     delta = None
     net_credit = None
+    annualized_net_credit_yield = None
     cost_to_credit = None
     upside_lift = None
     upside_lift_to_call_cost = None
@@ -139,6 +140,11 @@ def _linked_call_lines(row) -> list[str]:
         net_credit = float(value) if value is not None and not pd.isna(value) else None
     except Exception:
         net_credit = None
+    try:
+        value = row.get("linked_call_annualized_net_credit_yield")
+        annualized_net_credit_yield = float(value) if value is not None and not pd.isna(value) else None
+    except Exception:
+        annualized_net_credit_yield = None
     try:
         value = row.get("linked_call_annualized_scenario_score")
         annualized_scenario_score = float(value) if value is not None and not pd.isna(value) else None
@@ -172,6 +178,7 @@ def _linked_call_lines(row) -> list[str]:
 
     combo_parts = [
         f"净权利金={('-' if net_credit is None else num(net_credit))}",
+        f"净权利金年化={('-' if annualized_net_credit_yield is None else pct(annualized_net_credit_yield))}",
     ]
     if cost_to_credit is not None:
         combo_parts.append(f"Call成本/Put权利金={pct(cost_to_credit)}")
