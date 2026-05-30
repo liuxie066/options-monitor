@@ -23,6 +23,7 @@ from src.application.positions.maintenance_receipt import (
     resolve_auto_close_receipt_config,
     safe_send_auto_close_receipt,
 )
+from src.application.runtime_config_paths import resolve_data_config_ref
 
 
 def _bool_config(data: dict[str, Any], key: str, default: bool) -> bool:
@@ -265,10 +266,10 @@ def run_expired_position_maintenance_for_account(
     effective_broker = broker if broker is not None else (
         portfolio_cfg.get("broker") if isinstance(portfolio_cfg, dict) else None
     )
-    data_config_ref = portfolio_cfg.get("data_config") if isinstance(portfolio_cfg, dict) else None
+    data_config_ref = resolve_data_config_ref({}, portfolio_cfg if isinstance(portfolio_cfg, dict) else {})
     data_config = resolve_data_config_path(base=base, data_config=data_config_ref)
     ts = int(as_of_ms if as_of_ms is not None else datetime.now(timezone.utc).timestamp() * 1000)
-    if not data_config.exists():
+    if data_config_ref and not data_config.exists():
         result: dict[str, Any] = {
             "mode": "error",
             "reason": "missing_data_config",

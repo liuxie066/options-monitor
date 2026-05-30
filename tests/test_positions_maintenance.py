@@ -388,3 +388,28 @@ def test_position_maintenance_missing_data_config_is_failed_not_skipped(tmp_path
     assert "ERRORS: 1" in result["summary_text"]
     assert (report_dir / "auto_close_summary.txt").exists()
     assert result["receipt"]["status"] == "skipped"
+
+
+def test_position_maintenance_uses_runtime_ledger_default_when_data_config_omitted(tmp_path: Path) -> None:
+    from src.application.positions import maintenance as mod
+
+    report_dir = tmp_path / "reports"
+
+    result = mod.run_expired_position_maintenance_for_account(
+        base=tmp_path,
+        cfg={
+            "portfolio": {"broker": "富途"},
+            "option_positions": {"auto_close": {"enabled": True}},
+        },
+        account="lx",
+        report_dir=report_dir,
+        dry_run=False,
+        send_receipt=False,
+    )
+
+    assert result["mode"] == "applied"
+    assert result["errors"] == []
+    assert result["positions_checked"] == 0
+    assert result["ledger_store"]["sqlite_path"] == str((tmp_path / "output_shared" / "state" / "option_positions.sqlite3").resolve())
+    assert not (tmp_path / "portfolio.runtime.json").exists()
+    assert "summary_text" in result

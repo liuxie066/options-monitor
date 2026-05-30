@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.2.164 - 2026-05-30
+
+### Fixed
+- Fixed expired auto-close maintenance so omitted `portfolio.data_config` uses the runtime-root SQLite ledger default instead of failing on a missing `portfolio.runtime.json`.
+- Fixed `runtime_status` so maintenance runs no longer trigger stale scan-notification warnings and auto-close failures are surfaced explicitly.
+- Fixed Feishu status rendering so failed auto-close runs show `failed` with the failure reason instead of only `sent, closed=0`.
+
 ## 1.2.163 - 2026-05-29
 
 ### Added

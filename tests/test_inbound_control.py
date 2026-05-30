@@ -1966,6 +1966,40 @@ def test_inbound_renderer_summarizes_runtime_status() -> None:
     assert "异常：No symbols_notification.txt found." in text
 
 
+def test_inbound_renderer_status_summary_prioritizes_auto_close_failure() -> None:
+    intent = parse_inbound_text("状态")
+    text = render_inbound_text(
+        intent=intent,
+        tool_result=build_response(
+            tool_name="runtime_status",
+            ok=True,
+            data={
+                "summary": {"ok": False},
+                "latest_run": {
+                    "path": "output_runs/run-1",
+                    "accounts": {
+                        "lx": {
+                            "auto_close_receipt": {"status": "sent"},
+                            "expired_position_maintenance": {
+                                "json": {
+                                    "mode": "error",
+                                    "reason": "missing_data_config",
+                                    "applied_closed": 0,
+                                    "errors": ["missing_data_config: /var/lib/options-monitor/portfolio.runtime.json"],
+                                }
+                            },
+                        }
+                    },
+                },
+            },
+            warnings=["Auto-close lx failed: missing_data_config."],
+        ),
+    )
+
+    assert "auto-close lx：failed，receipt=sent，closed=0，reason=missing_data_config" in text
+    assert "异常：Auto-close lx failed: missing_data_config." in text
+
+
 def test_inbound_renderer_shows_service_upgrade_failure_details() -> None:
     intent = parse_inbound_text("状态")
     text = render_inbound_text(
