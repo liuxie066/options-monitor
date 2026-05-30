@@ -129,10 +129,13 @@ def _tool_payload_from_perception(
         }
     if intent_name == "position_exit_analysis":
         query = PositionQuery.from_payload(arguments).to_payload()
-        return {
+        payload = {
             **base,
             "query": query,
         }
+        if not query.get("symbol"):
+            payload["market_scope"] = "all"
+        return payload
     if intent_name == "monthly_income_report":
         payload = {**base}
         if arguments.get("account"):

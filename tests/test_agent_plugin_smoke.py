@@ -2468,6 +2468,161 @@ def test_close_advice_read_filters_existing_run_report(tmp_path: Path) -> None:
     assert row["long_call_value_ratio"] == 1.64
 
 
+def test_close_advice_read_uses_symbol_market_over_default_config(tmp_path: Path) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    cfg_path = tmp_path / "config.us.json"
+    cfg_path.write_text(json.dumps(_minimal_cfg(market="us"), ensure_ascii=False, indent=2), encoding="utf-8")
+    runs_root = tmp_path / "output_runs"
+
+    us_report = runs_root / "run-us" / "accounts" / "lx"
+    us_report.mkdir(parents=True)
+    (us_report / "config.override.json").write_text(
+        json.dumps(_minimal_cfg(market="us"), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    pd.DataFrame(
+        [
+            {
+                "account": "lx",
+                "symbol": "FUTU",
+                "option_type": "call",
+                "position_side": "short",
+                "expiration": "2026-08-21",
+                "strike": 152.45,
+                "evaluation_status": "priced",
+                "tier": "none",
+            },
+        ]
+    ).to_csv(us_report / "close_advice.csv", index=False)
+
+    hk_report = runs_root / "run-hk" / "accounts" / "sy"
+    hk_report.mkdir(parents=True)
+    (hk_report / "config.override.json").write_text(
+        json.dumps(_minimal_cfg(market="hk"), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    pd.DataFrame(
+        [
+            {
+                "account": "sy",
+                "symbol": "9992.HK",
+                "option_type": "call",
+                "position_side": "long",
+                "expiration": "2026-07-30",
+                "strike": 172.5,
+                "evaluation_status": "priced",
+                "close_action": "hold_call",
+                "tier": "none",
+            },
+        ]
+    ).to_csv(hk_report / "close_advice.csv", index=False)
+
+    out = run_tool(
+        "close_advice_read",
+        {
+            "config_path": str(cfg_path),
+            "runs_root": str(runs_root),
+            "query": {"symbol": "9992.HK", "option_type": "call", "side": "long", "status": "open"},
+        },
+    )
+
+    assert out["ok"] is True
+    assert out["data"]["matched_count"] == 1
+    assert out["data"]["source"]["run_id"] == "run-hk"
+    assert out["data"]["rows"][0]["account"] == "sy"
+    assert out["meta"]["market_filter"] == "HK"
+    assert out["meta"]["market_filter_source"] == "query_symbol"
+    assert out["meta"]["config_market_filter"] == "US"
+
+
+def test_close_advice_read_all_market_scope_reads_recent_runs_and_recovers_side_from_context(tmp_path: Path) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    cfg_path = tmp_path / "config.us.json"
+    cfg_path.write_text(json.dumps(_minimal_cfg(market="us"), ensure_ascii=False, indent=2), encoding="utf-8")
+    runs_root = tmp_path / "output_runs"
+
+    us_report = runs_root / "run-us" / "accounts" / "lx"
+    us_report.mkdir(parents=True)
+    (us_report / "config.override.json").write_text(
+        json.dumps(_minimal_cfg(market="us"), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    pd.DataFrame(
+        [
+            {
+                "account": "lx",
+                "symbol": "FUTU",
+                "option_type": "call",
+                "position_side": "short",
+                "expiration": "2026-08-21",
+                "strike": 152.45,
+                "evaluation_status": "priced",
+                "tier": "none",
+            },
+        ]
+    ).to_csv(us_report / "close_advice.csv", index=False)
+
+    hk_report = runs_root / "run-hk" / "accounts" / "sy"
+    (hk_report / "state").mkdir(parents=True)
+    (hk_report / "config.override.json").write_text(
+        json.dumps(_minimal_cfg(market="hk"), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (hk_report / "state" / "option_positions_context.json").write_text(
+        json.dumps(
+            {
+                "open_positions_min": [
+                    {
+                        "account": "sy",
+                        "symbol": "9992.HK",
+                        "option_type": "call",
+                        "side": "long",
+                        "expiration": 1785369600000,
+                        "strike": 172.5,
+                        "contracts_open": 1,
+                    }
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    pd.DataFrame(
+        [
+            {
+                "account": "sy",
+                "symbol": "9992.HK",
+                "option_type": "call",
+                "expiration": "2026-07-30",
+                "strike": 172.5,
+                "evaluation_status": "priced",
+                "close_action": "hold_call",
+                "tier": "none",
+            },
+        ]
+    ).to_csv(hk_report / "close_advice.csv", index=False)
+
+    out = run_tool(
+        "close_advice_read",
+        {
+            "config_path": str(cfg_path),
+            "market_scope": "all",
+            "runs_root": str(runs_root),
+            "query": {"option_type": "call", "side": "long", "status": "open"},
+        },
+    )
+
+    assert out["ok"] is True
+    assert out["data"]["matched_count"] == 1
+    assert out["data"]["source"]["run_ids"] == ["run-hk", "run-us"]
+    assert "fallback" not in out["data"]
+    assert out["meta"]["market_scope"] == "all"
+    assert out["data"]["rows"][0]["side"] == "long"
+
+
 def test_close_advice_read_respects_config_market_when_selecting_latest_run(tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 

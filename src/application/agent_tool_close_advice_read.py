@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import csv
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 from domain.domain.close_advice import TIER_PRIORITY
 from domain.domain.ledger.position_fields import normalize_account
-from domain.domain.symbol_identity import canonical_symbol
+from domain.domain.symbol_identity import canonical_symbol, symbol_market
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.assistant.position_query import PositionExpirationQuery, PositionQuery
 from src.application.runtime_config_freshness import infer_runtime_config_market
@@ -34,7 +34,10 @@ def close_advice_read_tool(
         config_path, cfg = load_runtime_config(config_key=payload.get("config_key"), config_path=payload.get("config_path"))
 
     query = _query_from_payload(payload)
-    desired_market = _desired_market(payload, cfg=cfg, config_path=config_path)
+    config_market = _desired_market(payload, cfg=cfg, config_path=config_path)
+    query_market = None if _has_explicit_source_scope(payload) else _query_market(query)
+    payload_market_scope = _payload_market_scope(payload)
+    desired_market = query_market or (None if payload_market_scope == "all" else config_market)
     sources = _resolve_sources(
         payload,
         base=base,
@@ -67,6 +70,14 @@ def close_advice_read_tool(
     }
     if desired_market:
         meta["market_filter"] = desired_market
+    if query_market:
+        meta["market_filter_source"] = "query_symbol"
+        if config_market and config_market != query_market:
+            meta["config_market_filter"] = config_market
+    elif config_market:
+        meta["market_filter_source"] = "payload" if payload_market_scope in {"us", "hk"} else "config"
+    if payload_market_scope:
+        meta["market_scope"] = payload_market_scope
     if config_path is not None:
         meta["config_path"] = mask_path(config_path)
     return data, [], meta
@@ -163,6 +174,8 @@ def _run_sources(
         return []
     requested_run = str(payload.get("run_id") or "").strip()
     run_dirs = [(root / requested_run).resolve()] if _is_direct_child_name(requested_run) else ([] if requested_run else _latest_run_dirs(root))
+    if not requested_run and desired_market is None:
+        return _latest_run_sources_across_markets(run_dirs, query=query)
     for run_dir in run_dirs:
         if not run_dir.exists() or not run_dir.is_dir():
             continue
@@ -170,6 +183,32 @@ def _run_sources(
         if sources:
             return sources
     return []
+
+
+def _latest_run_sources_across_markets(run_dirs: list[Path], *, query: PositionQuery) -> list[_Source]:
+    sources_out: list[_Source] = []
+    unknown_sources: list[_Source] = []
+    seen_markets: set[str] = set()
+    for run_dir in run_dirs:
+        if not run_dir.exists() or not run_dir.is_dir():
+            continue
+        sources = _sources_for_run_dir(run_dir, query=query, desired_market=None)
+        if not sources:
+            continue
+        run_markets: set[str] = set()
+        for source in sources:
+            run_markets.update(_source_market_values(source))
+        if not run_markets:
+            if not sources_out and not unknown_sources:
+                unknown_sources.extend(sources)
+            continue
+        if run_markets.issubset(seen_markets):
+            continue
+        seen_markets.update(run_markets)
+        sources_out.extend(sources)
+        if {"US", "HK"}.issubset(seen_markets):
+            break
+    return sources_out or unknown_sources
 
 
 def _runs_root(payload: dict[str, Any], *, base: Path) -> Path:
@@ -270,6 +309,7 @@ def _resolve_path(raw: Any, *, base: Path) -> Path:
 
 def _read_rows(source: _Source) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    context_side_index = _context_side_index(source)
     try:
         with source.path.open("r", encoding="utf-8-sig", newline="") as fh:
             reader = csv.DictReader(fh)
@@ -279,6 +319,16 @@ def _read_rows(source: _Source) -> list[dict[str, Any]]:
                 row = {str(key): value for key, value in raw.items() if key is not None}
                 if source.account and not str(row.get("account") or "").strip():
                     row["account"] = source.account
+                if not row.get("side") and not row.get("position_side"):
+                    key = _position_side_index_key(
+                        symbol=row.get("symbol"),
+                        option_type=row.get("option_type"),
+                        expiration=row.get("expiration") or row.get("expiration_ymd"),
+                        strike=row.get("strike"),
+                    )
+                    side = context_side_index.get(key) if key else None
+                    if side:
+                        row["position_side"] = side
                 row["_source_run_id"] = source.run_id
                 row["_source_type"] = source.source_type
                 rows.append(row)
@@ -291,13 +341,127 @@ def _read_rows(source: _Source) -> list[dict[str, Any]]:
     return rows
 
 
+def _context_side_index(source: _Source) -> dict[tuple[str, str, str, str], str]:
+    context_path = source.path.parent / "state" / "option_positions_context.json"
+    obj = _read_json(context_path)
+    positions = obj.get("open_positions_min") if isinstance(obj, dict) else []
+    if not isinstance(positions, list):
+        return {}
+    out: dict[tuple[str, str, str, str], str] = {}
+    for pos in positions:
+        if not isinstance(pos, dict):
+            continue
+        side = _canonical_side(pos.get("side") or pos.get("position_side"))
+        if not side:
+            continue
+        key = _position_side_index_key(
+            symbol=pos.get("symbol"),
+            option_type=pos.get("option_type"),
+            expiration=pos.get("expiration") or pos.get("expiration_ymd") or pos.get("exp"),
+            strike=pos.get("strike"),
+        )
+        if key:
+            out[key] = side
+    return out
+
+
+def _position_side_index_key(
+    *,
+    symbol: Any,
+    option_type: Any,
+    expiration: Any,
+    strike: Any,
+) -> tuple[str, str, str, str] | None:
+    canonical = canonical_symbol(symbol)
+    opt = _lower(option_type)
+    exp = _normalize_expiration_for_index(expiration)
+    strike_key = _normalize_strike_for_index(strike)
+    if not (canonical and opt and exp and strike_key):
+        return None
+    return canonical, opt, exp, strike_key
+
+
+def _normalize_expiration_for_index(value: Any) -> str:
+    if value in (None, ""):
+        return ""
+    if isinstance(value, (int, float)):
+        return _date_from_epoch_like(float(value))
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        if text.isdigit():
+            return _date_from_epoch_like(float(text))
+    except Exception:
+        pass
+    parsed = _parse_date(text)
+    return parsed.isoformat() if parsed else text[:10]
+
+
+def _date_from_epoch_like(value: float) -> str:
+    try:
+        seconds = value / 1000 if value > 10_000_000_000 else value
+        return datetime.fromtimestamp(seconds, tz=timezone.utc).date().isoformat()
+    except Exception:
+        return ""
+
+
+def _normalize_strike_for_index(value: Any) -> str:
+    parsed = _float_or_none(value)
+    if parsed is None:
+        return str(value or "").strip()
+    return f"{parsed:.8f}".rstrip("0").rstrip(".")
+
+
 def _desired_market(payload: dict[str, Any], *, cfg: dict[str, Any] | None, config_path: Path | None) -> str | None:
+    payload_scope = _payload_market_scope(payload)
+    if payload_scope == "all":
+        return None
+    if payload_scope in {"us", "hk"}:
+        return payload_scope.upper()
     market = infer_runtime_config_market(
         config_key=str(payload.get("config_key") or "").strip() or None,
         config_path=config_path,
         config=cfg,
     )
     return _normalize_market(market)
+
+
+def _payload_market_scope(payload: dict[str, Any]) -> str | None:
+    text = str(payload.get("market_scope") or payload.get("market_filter") or "").strip().lower()
+    if text in {"us", "hk", "all"}:
+        return text
+    return None
+
+
+def _query_market(query: PositionQuery) -> str | None:
+    if not query.symbol:
+        return None
+    return _normalize_market(symbol_market(query.symbol))
+
+
+def _has_explicit_source_scope(payload: dict[str, Any]) -> bool:
+    for key in ("run_id", "report_path", "csv_path", "output_dir"):
+        if str(payload.get(key) or "").strip():
+            return True
+    return False
+
+
+def _source_market_values(source: _Source) -> set[str]:
+    account_dir = source.path.parent if source.account else None
+    run_dir = _source_run_dir(source)
+    if run_dir is None:
+        return set()
+    return _run_market_values(run_dir=run_dir, account_dir=account_dir)
+
+
+def _source_run_dir(source: _Source) -> Path | None:
+    current = source.path.parent
+    while current.name:
+        if current.name == "accounts":
+            return current.parent
+        current = current.parent
+    return None
 
 
 def _matches_market(*, run_dir: Path, account_dir: Path | None, desired_market: str | None) -> bool:

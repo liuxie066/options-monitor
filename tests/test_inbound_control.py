@@ -39,20 +39,32 @@ def _write_symbols_runtime_config(tmp_path: Path) -> Path:
     data_cfg_path.write_text(json.dumps({"option_positions": {}}, ensure_ascii=False, indent=2), encoding="utf-8")
     cfg_path = tmp_path / "config.us.json"
     cfg_path.write_text(json.dumps(_runtime_cfg(str(data_cfg_path)), ensure_ascii=False, indent=2), encoding="utf-8")
+    hk_cfg_path = tmp_path / "config.hk.json"
+    hk_cfg = _runtime_cfg(str(data_cfg_path), market="hk")
+    hk_cfg["symbols"] = [
+        {
+            "symbol": "0883.HK",
+            "fetch": {"source": "futu", "limit_expirations": 8},
+            "use": ["put_base"],
+            "sell_put": {"enabled": True, "min_dte": 20, "max_dte": 45},
+            "sell_call": {"enabled": False},
+        }
+    ]
+    hk_cfg_path.write_text(json.dumps(hk_cfg, ensure_ascii=False, indent=2), encoding="utf-8")
     return cfg_path
 
 
-def _runtime_cfg(data_config_ref: str) -> dict:
+def _runtime_cfg(data_config_ref: str, *, market: str = "us") -> dict:
     return {
         "_generated": {
             "schema_version": "1.0",
             "generator": "options-monitor",
             "source_format": "yaml",
-            "market": "us",
+            "market": market,
         },
         "_resolved": {
             "source_format": "yaml",
-            "market": "us",
+            "market": market,
             "runtime_schema": "config-json-v1",
         },
         "accounts": ["sy"],
@@ -388,7 +400,11 @@ def test_inbound_exit_analysis_routes_to_close_advice_read(tmp_path: Path) -> No
     assert calls == [
         (
             "close_advice_read",
-            {"config_key": "us", "query": {"status": "open", "option_type": "call", "side": "long", "limit": 50}},
+            {
+                "config_key": "us",
+                "market_scope": "all",
+                "query": {"status": "open", "option_type": "call", "side": "long", "limit": 50},
+            },
         )
     ]
     assert out["data"]["perception"]["intent_name"] == "position_exit_analysis"
@@ -891,7 +907,7 @@ def test_inbound_pending_operations_lists_current_conversation(monkeypatch: pyte
 
     symbol_preview = handle_assistant_request(
         AssistantRequest(
-            text="增加监控标的 700 put",
+            text="增加监控标的 TIGR put",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_pending_symbol_preview",
@@ -919,7 +935,7 @@ def test_inbound_pending_operations_lists_current_conversation(monkeypatch: pyte
     assert pending_two["data"]["pending_count"] == 2
     assert "当前待确认：2 条" in pending_two["data"]["response_text"]
     assert "监控新增" in pending_two["data"]["response_text"]
-    assert "add 0700.HK put" in pending_two["data"]["response_text"]
+    assert "add TIGR put" in pending_two["data"]["response_text"]
     assert f"确认：确认监控 {symbol_id}" in pending_two["data"]["response_text"]
     assert f"确认：确认记录 {trade_id}" in pending_two["data"]["response_text"]
 
@@ -1672,6 +1688,64 @@ def test_inbound_symbol_add_edit_remove_preview_and_confirm(monkeypatch: pytest.
     assert nvda["use"] == ["put_base", "call_base"]
     assert nvda["sell_call"]["enabled"] is True
     assert nvda["sell_call"]["min_strike"] == 140.0
+
+
+def test_inbound_symbol_write_uses_symbol_market_over_default_us_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _enable_inbound_symbol_write(monkeypatch)
+    data_cfg_path = tmp_path / "portfolio.runtime.json"
+    data_cfg_path.write_text(json.dumps({"option_positions": {}}, ensure_ascii=False, indent=2), encoding="utf-8")
+    us_cfg_path = tmp_path / "config.us.json"
+    hk_cfg_path = tmp_path / "config.hk.json"
+    us_cfg = _runtime_cfg(str(data_cfg_path), market="us")
+    hk_cfg = _runtime_cfg(str(data_cfg_path), market="hk")
+    hk_cfg["symbols"] = [
+        {
+            "symbol": "0700.HK",
+            "fetch": {"source": "futu", "limit_expirations": 8},
+            "use": ["put_base"],
+            "sell_put": {"enabled": True, "min_dte": 20, "max_dte": 45, "max_strike": 450},
+            "sell_call": {"enabled": False},
+        }
+    ]
+    us_cfg_path.write_text(json.dumps(us_cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    hk_cfg_path.write_text(json.dumps(hk_cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    audit_db = tmp_path / "inbound.sqlite3"
+
+    preview = handle_assistant_request(
+        AssistantRequest(
+            text="修改监控标的 HK.00700 sell_put.max_strike=480",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_symbol_hk_edit",
+            config_path=str(us_cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert preview["ok"] is True
+    assert preview["data"]["payload"]["config"]["config_key"] == "hk"
+    assert preview["data"]["payload"]["config"]["config_path"] == str(hk_cfg_path)
+    assert "校准为：0700.HK" in preview["data"]["response_text"]
+    assert f"配置：{hk_cfg_path}" in preview["data"]["response_text"]
+
+    confirmed = handle_assistant_request(
+        AssistantRequest(
+            text="确认监控",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_symbol_hk_edit_confirm",
+            config_path=str(us_cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert confirmed["ok"] is True
+    current_us = json.loads(us_cfg_path.read_text(encoding="utf-8"))
+    current_hk = json.loads(hk_cfg_path.read_text(encoding="utf-8"))
+    assert current_us["symbols"][0]["symbol"] == "NVDA"
+    assert current_hk["symbols"][0]["sell_put"]["max_strike"] == 480
 
 
 def test_inbound_write_operations_are_disabled_by_default(tmp_path: Path) -> None:

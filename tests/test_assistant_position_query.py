@@ -123,6 +123,7 @@ def test_reasoning_routes_exit_analysis_to_close_advice_read() -> None:
     assert resolution.tool_call.tool_name == "close_advice_read"
     assert resolution.tool_call.payload == {
         "config_key": "us",
+        "market_scope": "all",
         "query": {
             "status": "open",
             "option_type": "call",
