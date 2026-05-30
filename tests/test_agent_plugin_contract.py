@@ -35,12 +35,6 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "strategy_replay_analyze" not in tool_names
     assert "doctor" not in tool_names
     assert "research" in tool_names
-    assert "strategy_lab" not in tool_names
-    assert "strategy_lab_dataset_collect" not in tool_names
-    assert "strategy_lab_experiment" not in tool_names
-    assert "strategy_lab_current" not in tool_names
-    assert "strategy_analyze" not in tool_names
-    assert "strategy_current" not in tool_names
     assert spec["schema_version"] == "1.0"
     assert spec["recommended_flow"] == ["healthcheck", "scan_opportunities", "get_close_advice"]
     get_close_advice = next(item for item in spec["tools"] if item["name"] == "get_close_advice")
@@ -158,35 +152,15 @@ def test_agent_run_unknown_tool_returns_structured_error() -> None:
     assert out["schema_version"] == "1.0"
 
 
-def test_strategy_lab_tools_are_removed() -> None:
-    from src.application.tool_execution import execute_tool as run_tool
-
-    out = run_tool("strategy_lab", {"write_outputs": False})
-
-    assert out["ok"] is False
-    assert out["error"]["code"] == "INPUT_ERROR"
-    assert "unknown tool" in out["error"]["message"]
-    out = run_tool("strategy_lab_dataset_collect", {"dry_run": True})
-    assert out["ok"] is False
-    assert out["error"]["code"] == "INPUT_ERROR"
-
-
-def test_removed_strategy_tools_return_unknown_tool(monkeypatch) -> None:
+def test_removed_strategy_replay_tool_returns_unknown_tool(monkeypatch) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
     monkeypatch.delenv("OM_AGENT_ENABLE_WRITE_TOOLS", raising=False)
 
-    out = run_tool("strategy_analyze", {"config_key": "us", "strategy_type": "sell_put", "confirm": True})
-
-    assert out["ok"] is False
-    assert out["error"]["code"] == "INPUT_ERROR"
-    assert "unknown tool" in out["error"]["message"]
-    out = run_tool("strategy_current", {})
-    assert out["ok"] is False
-    assert out["error"]["code"] == "INPUT_ERROR"
     out = run_tool("strategy_replay_analyze", {"rows": []})
     assert out["ok"] is False
     assert out["error"]["code"] == "INPUT_ERROR"
+    assert "unknown tool" in out["error"]["message"]
 
 
 def test_agent_cli_run_loads_explicit_env_file(monkeypatch, tmp_path: Path, capsys) -> None:

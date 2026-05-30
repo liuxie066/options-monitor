@@ -436,6 +436,153 @@ def test_run_close_advice_does_not_require_rv_for_return_first_position(
     assert rows[0]["tier"] == "strong"
 
 
+def test_run_close_advice_uses_income_upside_mode_for_yield_enhancement_put(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _freeze_close_advice_business_today(monkeypatch)
+    context = {
+        "open_positions_min": [
+            {
+                "account": "lx",
+                "symbol": "NVDA",
+                "option_type": "put",
+                "side": "short",
+                "status": "open",
+                "contracts_open": 1,
+                "currency": "USD",
+                "strike": 100,
+                "multiplier": 100,
+                "premium": 1.0,
+                "expiration": "2026-06-15",
+                "strategy": "yield_enhancement",
+                "leg_role": "sell_put",
+                "strategy_group_id": "ye_nvda_income",
+                "yield_enhancement_mode": "income_upside_enhancement",
+            }
+        ]
+    }
+    ctx_path = tmp_path / "option_positions_context.json"
+    ctx_path.write_text(json.dumps(context, ensure_ascii=False), encoding="utf-8")
+
+    required_root = tmp_path / "required_data"
+    parsed = required_root / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "NVDA",
+                "option_type": "put",
+                "expiration": "2026-06-15",
+                "strike": 100,
+                "mid": 0.20,
+                "bid": 0.19,
+                "ask": 0.21,
+                "dte": 60,
+                "multiplier": 100,
+                "spot": 120,
+                "currency": "USD",
+                "delta": -0.20,
+                "implied_volatility": 0.30,
+            }
+        ]
+    ).to_csv(parsed / "NVDA_required_data.csv", index=False)
+
+    out_dir = tmp_path / "reports"
+    result = run_close_advice(
+        config={
+            "close_advice": {"enabled": True, "notify_levels": ["strong", "medium"]},
+            "symbols": [{"symbol": "NVDA", "sell_put": {"strategy": "short_vol"}}],
+        },
+        context_path=ctx_path,
+        required_data_root=required_root,
+        output_dir=out_dir,
+        base_dir=Path.cwd(),
+    )
+
+    rows = pd.read_csv(out_dir / "close_advice.csv").to_dict("records")
+    assert result["evaluation_gap_rows"] == 0
+    assert rows[0]["strategy_profile"] == "return_first"
+    assert rows[0]["strategy_source"] == "position_yield_enhancement_mode"
+    assert rows[0]["risk_model"] == "return_first_legacy"
+    assert rows[0]["close_action"] == "close_put_keep_call"
+    assert "short_vol_risk_data_missing" not in str(rows[0]["data_quality_flags"])
+
+
+def test_run_close_advice_uses_vol_convexity_mode_for_yield_enhancement_put(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _freeze_close_advice_business_today(monkeypatch)
+    context = {
+        "open_positions_min": [
+            {
+                "account": "lx",
+                "symbol": "NVDA",
+                "option_type": "put",
+                "side": "short",
+                "status": "open",
+                "contracts_open": 1,
+                "currency": "USD",
+                "strike": 100,
+                "multiplier": 100,
+                "premium": 1.0,
+                "expiration": "2026-06-15",
+                "strategy": "yield_enhancement",
+                "leg_role": "sell_put",
+                "strategy_group_id": "ye_nvda_vol",
+                "yield_enhancement_mode": "vol_convexity_enhancement",
+            }
+        ]
+    }
+    ctx_path = tmp_path / "option_positions_context.json"
+    ctx_path.write_text(json.dumps(context, ensure_ascii=False), encoding="utf-8")
+
+    required_root = tmp_path / "required_data"
+    parsed = required_root / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "NVDA",
+                "option_type": "put",
+                "expiration": "2026-06-15",
+                "strike": 100,
+                "mid": 0.20,
+                "bid": 0.19,
+                "ask": 0.21,
+                "dte": 60,
+                "multiplier": 100,
+                "spot": 120,
+                "currency": "USD",
+                "delta": -0.20,
+                "implied_volatility": 0.30,
+            }
+        ]
+    ).to_csv(parsed / "NVDA_required_data.csv", index=False)
+
+    out_dir = tmp_path / "reports"
+    result = run_close_advice(
+        config={
+            "close_advice": {"enabled": True, "notify_levels": ["strong", "medium"]},
+            "symbols": [{"symbol": "NVDA", "sell_put": {"strategy": "return_first"}}],
+        },
+        context_path=ctx_path,
+        required_data_root=required_root,
+        output_dir=out_dir,
+        base_dir=Path.cwd(),
+    )
+
+    rows = pd.read_csv(out_dir / "close_advice.csv").to_dict("records")
+    assert result["evaluation_gap_rows"] == 1
+    assert rows[0]["strategy_profile"] == "short_vol"
+    assert rows[0]["strategy_source"] == "position_yield_enhancement_mode"
+    assert rows[0]["risk_model"] == "short_vol"
+    assert rows[0]["close_action"] == "not_evaluable"
+    assert "short_vol_risk_data_missing" in str(rows[0]["data_quality_flags"])
+    assert "rv" in rows[0]["reason"]
+
+
 def test_run_close_advice_merges_event_snapshot_for_short_vol_position(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

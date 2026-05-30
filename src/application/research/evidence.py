@@ -683,6 +683,7 @@ def _ranking_row_evidence(
                 "sort_tuple": list(yield_enhancement_rank_key(row)),
                 "sort_order": [
                     "funding_accepted",
+                    "annualized_net_credit_yield",
                     "premium_funding_score",
                     "upside_lift_to_call_cost",
                     "upside_lift_to_put_credit",
@@ -730,6 +731,7 @@ def _ranking_metrics(row: dict[str, Any]) -> dict[str, Any]:
             "annualized_net_premium_return",
             "annualized_net_return",
             "annualized_return",
+            "annualized_net_credit_yield",
             "annualized_scenario_score",
         ),
         "net_income": _first_float(row, "net_income", "net_credit", "combo_net_credit"),
@@ -939,6 +941,7 @@ def _collect_metric_values(row: dict[str, Any], values: dict[str, list[float]]) 
         "annualized_net_return",
         "annualized_net_return_on_cash_basis",
         "annualized_net_premium_return",
+        "annualized_net_credit_yield",
         "annualized_scenario_score",
         "net_income",
         "net_credit",

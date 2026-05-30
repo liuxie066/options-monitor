@@ -435,10 +435,10 @@ Covered Call 依赖真实持仓上下文。它在风险结构上和 Sell Put 同
 要点：
 
 - 依赖 `sell_put.enabled=true`
-- 模式由 `sell_put.strategy` 派生：`return_first` 使用 `income_upside_enhancement`，`short_vol` 使用 `vol_convexity_enhancement`
+- 策略语义跟随 `sell_put.strategy`：`return_first` 走 `income_upside_enhancement`，`short_vol` 走 `vol_convexity_enhancement`
 - 启用收益增强后会为 long call 侧规划 required data，即使没有启用 Covered Call 扫描
-- 核心约束包括 `funding_mode`、`min_combo_net_credit`、`max_call_cost_to_put_credit`、`min_net_credit_retention`、`max_combo_spread_ratio`、`scenario_weights` 和 `min_scenario_score`
-- 排序由 `yield_enhancement_rank_key` 处理：`income_upside_enhancement` 更看重净 credit 留存和 call 成本纪律；`vol_convexity_enhancement` 会额外看 short-vol 边际和 delta target
+- 核心约束包括 `funding_mode`、`min_combo_net_credit`、`min_net_credit_annualized`、`max_call_cost_to_put_credit`、`max_combo_spread_ratio`、`scenario_weights` 和 `min_scenario_score`
+- 默认要求扣除 long call 成本和手续费后的净权利金年化不低于 8%；`return_first` 更强调 premium funding、权利金留存和上行弹性，`short_vol` 额外要求 short-vol put universe 通过 IV/RV、delta、事件和路径风险评估
 
 ### Close Advice
 

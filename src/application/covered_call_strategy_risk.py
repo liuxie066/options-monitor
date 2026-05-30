@@ -18,11 +18,12 @@ from src.application.short_vol_risk_context import (
     build_portfolio_risk_context,
     enrich_short_vol_contract_cny_fields,
 )
+from src.application.strategy_policy import RETURN_FIRST_PROFILE, SHORT_VOL_PROFILE, normalize_strategy_profile
 from src.infrastructure.exchange_rates import CurrencyConverter
 
 
-RETURN_FIRST_STRATEGY = "return_first"
-SHORT_VOL_STRATEGY = "short_vol"
+RETURN_FIRST_STRATEGY = RETURN_FIRST_PROFILE
+SHORT_VOL_STRATEGY = SHORT_VOL_PROFILE
 
 
 @dataclass(frozen=True)
@@ -36,11 +37,7 @@ class CoveredCallShortVolConfig(ShortVolAssessmentConfig):
 
 def resolve_covered_call_short_vol_config(raw: dict[str, Any] | None) -> CoveredCallShortVolConfig:
     cfg = raw if isinstance(raw, dict) else {}
-    strategy = str(cfg.get("strategy") or cfg.get("strategy_profile") or RETURN_FIRST_STRATEGY).strip().lower()
-    if strategy in {"", "legacy", "yield_first", "return"}:
-        strategy = RETURN_FIRST_STRATEGY
-    if strategy not in {RETURN_FIRST_STRATEGY, SHORT_VOL_STRATEGY}:
-        strategy = RETURN_FIRST_STRATEGY
+    strategy = normalize_strategy_profile(cfg.get("strategy") or cfg.get("strategy_profile"))
 
     short_vol = cfg.get("short_vol") if isinstance(cfg.get("short_vol"), dict) else {}
     concentration = cfg.get("concentration") if isinstance(cfg.get("concentration"), dict) else {}

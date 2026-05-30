@@ -7,7 +7,7 @@ from typing import Any, Callable, Protocol
 from domain.domain.sell_call_config import resolve_effective_sell_call_min_strike
 from src.application.opend_fetch_config import opend_discovery_kwargs, opend_fetch_kwargs
 from src.application.required_data_planning import build_required_data_fetch_plan
-from src.application.yield_enhancement_config import resolve_yield_enhancement_cfg
+from src.application.yield_enhancement_config import derive_yield_enhancement_policy, resolve_yield_enhancement_cfg
 
 
 class _PrefilterResultLike(Protocol):
@@ -101,6 +101,7 @@ def run_symbol_monitoring(
     yield_enhancement_cfg = resolve_yield_enhancement_cfg(symbol_cfg)
     if yield_enhancement_cfg:
         symbol_cfg["yield_enhancement"] = yield_enhancement_cfg
+    yield_enhancement_policy = derive_yield_enhancement_policy(yield_enhancement_cfg, market_sp)
     stock = prefilters.stock
     if want_call and isinstance(stock, dict):
         effective_min_strike = resolve_effective_sell_call_min_strike(
@@ -111,7 +112,7 @@ def run_symbol_monitoring(
         if effective_min_strike is not None:
             cc["min_strike"] = effective_min_strike
             symbol_cfg["sell_call"] = cc
-    want_yield_enhancement = bool(market_want_put and yield_enhancement_cfg.get("enabled", False))
+    want_yield_enhancement = bool(market_want_put and yield_enhancement_policy.enabled)
     fetch_want_put = bool(want_put or want_yield_enhancement)
     fetch_want_call = bool(want_call or want_yield_enhancement)
     fetch_sell_put_cfg = market_sp if want_yield_enhancement else sp
@@ -143,6 +144,7 @@ def run_symbol_monitoring(
         sell_put_cfg=fetch_sell_put_cfg,
         sell_call_cfg=cc,
         yield_enhancement_cfg=yield_enhancement_cfg,
+        symbol_cfg=symbol_cfg,
         fetch_host=str(fetch_cfg.get("host") or "127.0.0.1"),
         fetch_port=int(fetch_cfg.get("port") or 11111),
         snapshot_max_wait_sec=float(discovery_fetch_kwargs["snapshot_max_wait_sec"]),

@@ -23,8 +23,8 @@ from domain.domain.symbol_identity import canonical_symbol, symbol_currency
 from src.infrastructure.io_utils import safe_read_csv
 from src.application.covered_call_strategy_risk import (
     enrich_and_filter_covered_call_short_vol,
-    resolve_covered_call_short_vol_config,
 )
+from src.application.strategy_policy import SELL_CALL_FAMILY, strategy_semantics_for_side_config
 from src.application.render_sell_call_alerts import render_sell_call_alerts
 from src.application.report_summaries import summarize_sell_call
 from src.application.scan_sell_call import run_sell_call_scan
@@ -178,8 +178,8 @@ def run_sell_call_scan_and_summarize(
         return summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
     shares_available_for_cover = max(0, int(shares_total) - int(locked))
 
-    strategy_cfg = resolve_covered_call_short_vol_config(cc)
-    min_annualized = 0.0 if strategy_cfg.enabled else resolve_min_annualized_net_premium_return_from_sell_call_cfg(
+    sell_call_semantics = strategy_semantics_for_side_config(family=SELL_CALL_FAMILY, side_cfg=cc)
+    min_annualized = 0.0 if sell_call_semantics.scan_uses_short_vol_gate else resolve_min_annualized_net_premium_return_from_sell_call_cfg(
         sell_call_cfg=cc,
         source_prefix=f'{symbol}.sell_call',
     )
@@ -192,7 +192,7 @@ def run_sell_call_scan_and_summarize(
     global_min_net_income = float((global_sell_call_liquidity or {}).get('min_net_income', 0.0) or 0.0)
     min_net_income_cny = float(cc.get('min_net_income', global_min_net_income) or 0.0)
     min_net_income_native = 0.0
-    if strategy_cfg.enabled:
+    if sell_call_semantics.scan_uses_short_vol_gate:
         min_net_income_native = 0.0
     elif min_net_income_cny > 0:
         native_ccy = symbol_currency(symbol)

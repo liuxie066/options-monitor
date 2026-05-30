@@ -33,7 +33,8 @@ from src.application.sell_put_call_helper import (
     select_best_yield_enhancement_pairs,
 )
 from src.application.sell_put_cash import enrich_sell_put_candidates_with_cash
-from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_short_vol, resolve_sell_put_short_vol_config
+from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_short_vol
+from src.application.strategy_policy import SELL_PUT_FAMILY, strategy_semantics_for_side_config
 from src.application.candidate_filter_trace import (
     append_candidate_filter_trace_rows,
     build_candidate_filter_trace_row,
@@ -43,7 +44,6 @@ from src.application.candidate_filter_trace import (
 from domain.domain.sell_put_config import validate_min_annualized_net_return
 from domain.domain.risk_capacity import compute_sell_put_cash_capacity
 from src.application.yield_enhancement_config import (
-    YIELD_ENHANCEMENT_VOL_CONVEXITY_MODE,
     derive_yield_enhancement_policy,
     resolve_yield_enhancement_cfg,
     wants_yield_enhancement_inline,
@@ -243,11 +243,11 @@ def run_sell_put_scan_and_summarize(
     yield_enhancement_cfg = resolve_yield_enhancement_cfg(symbol_cfg)
     yield_sp = dict(yield_enhancement_sell_put_cfg or sp)
     yield_enhancement_policy = derive_yield_enhancement_policy(yield_enhancement_cfg, yield_sp)
-    yield_enhancement_inline = wants_yield_enhancement_inline(yield_enhancement_cfg)
-    yield_enhancement_separate = wants_yield_enhancement_separate(yield_enhancement_cfg)
+    yield_enhancement_inline = bool(yield_enhancement_policy.enabled) and wants_yield_enhancement_inline(yield_enhancement_cfg)
+    yield_enhancement_separate = bool(yield_enhancement_policy.enabled) and wants_yield_enhancement_separate(yield_enhancement_cfg)
 
-    strategy_cfg = resolve_sell_put_short_vol_config(sp)
-    resolved_min_annualized_net_return = 0.0 if strategy_cfg.enabled else validate_min_annualized_net_return(
+    sell_put_semantics = strategy_semantics_for_side_config(family=SELL_PUT_FAMILY, side_cfg=sp)
+    resolved_min_annualized_net_return = 0.0 if sell_put_semantics.scan_uses_short_vol_gate else validate_min_annualized_net_return(
         sp.get('min_annualized_net_return'),
         source=f'{symbol}.sell_put.min_annualized_net_return',
     )
@@ -261,7 +261,7 @@ def run_sell_put_scan_and_summarize(
 
     min_net_income_native = 0.0
     sell_put_scan_allowed = True
-    if strategy_cfg.enabled:
+    if sell_put_semantics.scan_uses_short_vol_gate:
         min_net_income_native = 0.0
     elif min_net_income_cny > 0:
         native_ccy = symbol_currency(symbol)
@@ -346,10 +346,7 @@ def run_sell_put_scan_and_summarize(
         )
         add_sell_put_labels(base, symbol_yield_put_universe, symbol_yield_put_universe_labeled)
         df_yield_put_universe = safe_read_csv(symbol_yield_put_universe_labeled)
-        if (
-            yield_enhancement_policy.mode == YIELD_ENHANCEMENT_VOL_CONVEXITY_MODE
-            and not df_yield_put_universe.empty
-        ):
+        if yield_enhancement_policy.uses_short_vol_gate and not df_yield_put_universe.empty:
             df_yield_put_universe = enrich_and_filter_sell_put_short_vol(
                 df_labeled=df_yield_put_universe,
                 symbol=symbol,
@@ -359,15 +356,18 @@ def run_sell_put_scan_and_summarize(
                 out_path=symbol_yield_put_universe_labeled,
             )
 
-    raw_yield_pairs_df = find_sell_put_yield_enhancement_pairs(
-        df_candidates=df_yield_put_universe,
-        symbol=symbol,
-        input_root=required_data_dir,
-        yield_enhancement_cfg=yield_enhancement_cfg,
-        sell_put_cfg=yield_sp,
-        global_yield_enhancement_liquidity=(symbol_cfg.get('_global_yield_enhancement_liquidity') or {}),
-        output_path=None,
-    )
+    if bool(yield_enhancement_policy.enabled):
+        raw_yield_pairs_df = find_sell_put_yield_enhancement_pairs(
+            df_candidates=df_yield_put_universe,
+            symbol=symbol,
+            input_root=required_data_dir,
+            yield_enhancement_cfg=yield_enhancement_cfg,
+            sell_put_cfg=yield_sp,
+            global_yield_enhancement_liquidity=(symbol_cfg.get('_global_yield_enhancement_liquidity') or {}),
+            output_path=None,
+        )
+    else:
+        raw_yield_pairs_df = pd.DataFrame()
     recommended_yield_pairs_df = select_best_yield_enhancement_pairs(raw_yield_pairs_df)
     if bool(yield_enhancement_policy.enabled):
         scope = infer_trace_scope_from_path(symbol_yield_enhancement)

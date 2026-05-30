@@ -492,6 +492,7 @@ def _validate_yield_enhancement_cfg(cfg: dict, path: str):
         'min_annualized_scenario_score',
         'min_put_otm_pct',
         'min_combo_net_credit',
+        'min_net_credit_annualized',
         'max_call_cost_to_put_credit',
         'min_upside_lift_to_call_cost',
         'min_upside_lift_to_put_credit',

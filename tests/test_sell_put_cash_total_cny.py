@@ -277,6 +277,7 @@ def test_render_sell_put_alerts_shows_linked_call_summary(tmp_path: Path) -> Non
                 "linked_call_ask": 1.5,
                 "linked_call_delta": 0.32,
                 "linked_call_net_credit": 145.33,
+                "linked_call_annualized_net_credit_yield": 0.13,
                 "linked_call_scenario_score": 0.0458,
                 "linked_call_annualized_scenario_score": 0.38,
                 "linked_call_count": 2,
@@ -293,6 +294,6 @@ def test_render_sell_put_alerts_shows_linked_call_summary(tmp_path: Path) -> Non
 
     assert "推荐 Call: 2026-06-19 110C  (候选 2 个)" in text
     assert "买入参考: ask=1.50 | delta=0.32" in text
-    assert "组合估算: 净权利金=145.33 | 场景评分=4.58% | 场景年化=38.00%" in text
+    assert "组合估算: 净权利金=145.33 | 净权利金年化=13.00% | 场景评分=4.58% | 场景年化=38.00%" in text
     assert "目标价" not in text
     assert "目标收益" not in text

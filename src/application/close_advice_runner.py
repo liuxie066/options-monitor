@@ -69,7 +69,10 @@ from src.application.strategy_policy import (
     SELL_PUT_FAMILY,
     SHORT_VOL_PROFILE,
     resolve_position_strategy,
+    resolve_position_strategy_semantics,
+    resolve_yield_enhancement_position_role,
     strategy_side_config_for_resolution,
+    yield_enhancement_mode_uses_short_vol,
 )
 
 
@@ -123,6 +126,8 @@ OUTPUT_COLUMNS = [
     "strategy_source",
     "strategy_config_path",
     "risk_model",
+    "close_advice_profile",
+    "close_requires_rv",
     "short_vol_thesis_status",
     "short_vol_reason",
     "short_vol_mode",
@@ -404,7 +409,8 @@ def _position_requires_short_vol_source_data(pos: dict[str, Any], config: dict[s
     if not isinstance(pos, dict) or _is_yield_enhancement_long_call_position(pos):
         return False
     try:
-        return resolve_position_strategy(position=pos, config=config).strategy_profile == SHORT_VOL_PROFILE
+        _resolution, semantics = resolve_position_strategy_semantics(position=pos, config=config)
+        return bool(semantics.close_requires_rv)
     except Exception:
         return False
 
@@ -1094,13 +1100,15 @@ def _evaluate_position_close_advice(
                 "strategy_source": "position_snapshot",
                 "strategy_config_path": None,
                 "risk_model": "long_call_convexity",
+                "close_advice_profile": "yield_enhancement_long_call",
+                "close_requires_rv": False,
             }
         )
         row.update(_position_strategy_metadata(pos))
         return row
 
-    resolution = resolve_position_strategy(position=pos, config=config)
-    if resolution.strategy_profile == SHORT_VOL_PROFILE:
+    resolution, semantics = resolve_position_strategy_semantics(position=pos, config=config)
+    if semantics.close_uses_short_vol_thesis:
         side_cfg = strategy_side_config_for_resolution(
             resolution=resolution,
             position=pos,
@@ -1129,25 +1137,18 @@ def _evaluate_position_close_advice(
     else:
         row = evaluate_close_advice(inp, close_cfg)
     row.update(resolution.to_fields())
+    row.update(
+        {
+            "close_advice_profile": semantics.close_advice_profile,
+            "close_requires_rv": bool(semantics.close_requires_rv),
+        }
+    )
     row.update(_position_strategy_metadata(pos))
     return row
 
 
 def _is_yield_enhancement_long_call_position(pos: dict[str, Any]) -> bool:
-    option_type = str(pos.get("option_type") or "").strip().lower()
-    side = str(pos.get("side") or "").strip().lower()
-    if option_type != "call" or side != "long":
-        return False
-    strategy_snapshot = pos.get("strategy_snapshot") if isinstance(pos.get("strategy_snapshot"), dict) else {}
-    strategy = str(pos.get("strategy") or strategy_snapshot.get("strategy") or "").strip().lower()
-    leg_role = str(pos.get("leg_role") or strategy_snapshot.get("leg_role") or "").strip().lower()
-    if strategy == "yield_enhancement":
-        return True
-    if leg_role in {"enhancement_call", "long_call", "upside_call", "convexity_call"}:
-        return True
-    if str(pos.get("yield_enhancement_mode") or strategy_snapshot.get("yield_enhancement_mode") or "").strip():
-        return True
-    return False
+    return resolve_yield_enhancement_position_role(pos).is_yield_enhancement_long_call
 
 
 def _position_strategy_metadata(pos: dict[str, Any]) -> dict[str, Any]:
@@ -1256,35 +1257,11 @@ def _merge_event_snapshot_for_short_vol_positions(
 
 
 def _is_yield_enhancement_short_put(row: dict[str, Any]) -> bool:
-    if str(row.get("option_type") or "").strip().lower() != "put":
-        return False
-    if str(row.get("position_side") or "").strip().lower() not in {"", "short"}:
-        return False
-    strategy = str(row.get("strategy") or "").strip().lower()
-    leg_role = str(row.get("leg_role") or "").strip().lower()
-    if strategy == "yield_enhancement":
-        return True
-    if str(row.get("yield_enhancement_mode") or "").strip():
-        return True
-    if str(row.get("strategy_group_id") or "").strip():
-        return True
-    return leg_role == "sell_put"
+    return resolve_yield_enhancement_position_role(row).is_yield_enhancement_short_put
 
 
 def _is_yield_enhancement_long_call(row: dict[str, Any]) -> bool:
-    if str(row.get("option_type") or "").strip().lower() != "call":
-        return False
-    if str(row.get("position_side") or "").strip().lower() != "long":
-        return False
-    strategy = str(row.get("strategy") or "").strip().lower()
-    leg_role = str(row.get("leg_role") or "").strip().lower()
-    if strategy == "yield_enhancement":
-        return True
-    if leg_role in {"enhancement_call", "long_call", "upside_call", "convexity_call"}:
-        return True
-    if str(row.get("yield_enhancement_mode") or "").strip():
-        return True
-    return False
+    return resolve_yield_enhancement_position_role(row).is_yield_enhancement_long_call
 
 
 def _is_actionable_close(row: dict[str, Any]) -> bool:
@@ -1329,7 +1306,7 @@ def _apply_close_action_semantics(row: dict[str, Any]) -> dict[str, Any]:
             row["close_action"] = "sell_call_salvage"
         elif exit_state == EXIT_STATE_LET_EXPIRE:
             row["close_action"] = "hold_to_expiry_or_expire"
-        elif str(row.get("yield_enhancement_mode") or "").strip().lower() == "vol_convexity_enhancement":
+        elif yield_enhancement_mode_uses_short_vol(row.get("yield_enhancement_mode")):
             row["close_action"] = "hold_call_as_convexity"
         else:
             row["close_action"] = "hold_call"
