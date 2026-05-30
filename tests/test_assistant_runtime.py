@@ -121,7 +121,7 @@ def test_assistant_command_catalog_drives_llm_allowed_surface() -> None:
     assert set(schema["shape"]["intent"]) == llm_recognizable
     assert "runtime_status" in llm_executable
     assert "position_exit_analysis" in llm_recognizable
-    assert "position_exit_analysis" not in llm_executable
+    assert "position_exit_analysis" in llm_executable
     assert "manual_trade_open" in llm_denied
     assert "symbol_add" in llm_denied
     assert "upgrade_now" in llm_denied
@@ -130,9 +130,10 @@ def test_assistant_command_catalog_drives_llm_allowed_surface() -> None:
     assert payload["summary"]["command_count"] == len(command_specs())
     assert payload["summary"]["capability_count"] == len(command_specs())
     assert capabilities["runtime_status"]["display_name"] == "状态"
-    assert capabilities["position_exit_analysis"]["supported"] is False
+    assert capabilities["position_exit_analysis"]["supported"] is True
     assert capabilities["position_exit_analysis"]["llm_recognizable"] is True
-    assert capabilities["position_exit_analysis"]["llm_executable"] is False
+    assert capabilities["position_exit_analysis"]["llm_executable"] is True
+    assert capabilities["position_exit_analysis"]["tool_name"] == "close_advice_read"
     assert capabilities["manual_trade_open"]["risk_level"] == "preview_write"
     assert capabilities["manual_trade_open"]["llm_executable"] is False
     assert capabilities["symbol_add"]["risk_level"] == "preview_write"

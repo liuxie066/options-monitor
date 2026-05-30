@@ -40,6 +40,8 @@ def render_inbound_text(*, intent: PerceptionResult | None, tool_result: dict[st
         return _render_monthly_income(data)
     if name == "position_query":
         return _render_positions(data)
+    if name == "position_exit_analysis":
+        return _render_position_exit_analysis(data)
     if name == "runtime_runs":
         return _render_runs(data)
     if name == "runtime_logs":
@@ -362,6 +364,160 @@ def _render_positions(data: dict[str, Any]) -> str:
         lines.append("账本提示：" + _value(bootstrap.get("message") or bootstrap_status))
     lines.append("数据源：OM 本地 SQLite position_lots")
     return "\n".join(lines)
+
+
+def _render_position_exit_analysis(data: dict[str, Any]) -> str:
+    rows = _list(data.get("rows"))
+    query = _dict(data.get("query"))
+    source = _dict(data.get("source"))
+    scope = _position_exit_scope_text(query)
+    source_text = _close_advice_source_text(source)
+    if not rows:
+        matched = int(data.get("matched_count") or 0)
+        if matched <= 0:
+            return f"平仓建议分析：没有找到匹配的 open 持仓。\n范围：{scope}\n数据源：{source_text}"
+        return f"平仓建议分析：匹配 {matched} 条，但本次没有返回明细。\n范围：{scope}\n数据源：{source_text}"
+
+    lines = [
+        f"平仓建议分析（基于最近一次 Close Advice 报告）：{len(rows)} 条",
+        f"范围：{scope}",
+    ]
+    for row_raw in rows:
+        row = _dict(row_raw)
+        lines.append(
+            "- "
+            f"{_value(row.get('account'))} "
+            f"{_value(row.get('symbol'))} "
+            f"{_value(row.get('side'))} {_value(row.get('option_type'))} "
+            f"{_value(row.get('expiration') or row.get('expiration_ymd'))} "
+            f"{_num(row.get('strike'))}"
+        )
+        conclusion = _close_advice_conclusion(row)
+        if conclusion != "-":
+            lines.append(f"  结论：{conclusion}")
+        optional_action = _close_action_label(row.get("optional_combo_action"))
+        if optional_action != "-":
+            lines.append(f"  可选：{optional_action}")
+        status = _value(row.get("evaluation_status") or row.get("quote_status"))
+        if status != "-":
+            lines.append(f"  状态：{status}")
+        reason = _close_advice_reason(row)
+        if reason != "-":
+            lines.append(f"  原因：{reason}")
+        metrics = _close_advice_metric_text(row)
+        if metrics:
+            lines.append(f"  指标：{metrics}")
+    lines.append(f"数据源：{source_text}")
+    return "\n".join(lines)
+
+
+def _position_exit_scope_text(query: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for key in ("account", "symbol", "side", "option_type"):
+        value = _value(query.get(key))
+        if value != "-":
+            parts.append(value)
+    if query.get("strike") is not None:
+        parts.append(f"strike {_num(query.get('strike'))}")
+    expiration = _dict(query.get("expiration"))
+    expiration_text = _position_expiration_scope(expiration, filters={})
+    if expiration_text:
+        parts.append(expiration_text)
+    return " · ".join(parts) if parts else "全部 open 期权持仓"
+
+
+def _close_advice_source_text(source: dict[str, Any]) -> str:
+    run_id = _value(source.get("run_id"))
+    paths = _list(source.get("paths"))
+    if run_id != "-":
+        return f"run {run_id}"
+    if paths:
+        return _value(paths[0])
+    return "-"
+
+
+def _close_advice_conclusion(row: dict[str, Any]) -> str:
+    action = _close_action_label(row.get("close_action"))
+    tier_label = _value(row.get("tier_label"))
+    if action != "-":
+        return action if tier_label == "-" or tier_label == action else f"{action}（{tier_label}）"
+    for key in ("tier_label", "tier", "exit_state"):
+        value = _value(row.get(key))
+        if value != "-":
+            return value
+    return "-"
+
+
+def _close_action_label(value: Any) -> str:
+    action = str(value or "").strip().lower()
+    if not action:
+        return "-"
+    mapping = {
+        "close_put_keep_call": "买回 Put，保留收益增强 Call",
+        "hold_put_keep_call": "继续持有 Put，保留收益增强 Call",
+        "sell_call_take_profit": "卖出 Call 止盈",
+        "hold_call": "继续持有 Call",
+        "hold_call_as_convexity": "继续持有 Call 凸性腿",
+        "sell_call_salvage": "卖出 Call 回收残值",
+        "hold_to_expiry_or_expire": "保留至到期或允许归零",
+        "close_both_optional": "可选组合止盈",
+        "close": "平仓",
+        "hold": "持有观察",
+        "not_evaluable": "无法评估",
+    }
+    return mapping.get(action, action)
+
+
+def _close_advice_reason(row: dict[str, Any]) -> str:
+    for key in ("reason", "short_vol_reason", "optimizer_reason"):
+        value = _value(row.get(key))
+        if value != "-":
+            return value
+    return "-"
+
+
+def _close_advice_metric_text(row: dict[str, Any]) -> str:
+    parts: list[str] = []
+    realized = row.get("realized_if_close")
+    if realized is not None:
+        parts.append(f"平仓收益 {_num(realized)}")
+    put_realized = row.get("put_leg_realized_if_close")
+    if put_realized is not None:
+        parts.append(f"Put腿收益 {_num(put_realized)}")
+    combo_locked = row.get("combo_net_locked_if_close_put_keep_call")
+    if combo_locked is not None:
+        parts.append(f"组合锁定净收益 {_num(combo_locked)}")
+    combo_both = row.get("combo_net_if_close_both")
+    if combo_both is not None:
+        parts.append(f"组合全平净收益 {_num(combo_both)}")
+    call_value = row.get("long_call_current_value")
+    if call_value is not None:
+        parts.append(f"Call现值 {_num(call_value)}")
+    call_cost = row.get("long_call_cost_basis")
+    if call_cost is not None:
+        parts.append(f"Call成本 {_num(call_cost)}")
+    call_ratio = row.get("long_call_value_ratio")
+    if call_ratio is not None:
+        parts.append(f"Call现值/成本 {_num(call_ratio)}")
+    capture = row.get("capture_ratio")
+    if capture is not None:
+        parts.append(f"收益捕获 {_pct(capture)}")
+    remaining = row.get("remaining_annualized_return")
+    if remaining is not None:
+        parts.append(f"剩余年化 {_pct(remaining)}")
+    iv_rv = row.get("iv_rv_ratio")
+    if iv_rv is not None:
+        parts.append(f"IV/RV {_num(iv_rv)}")
+    delta = row.get("abs_delta") if row.get("abs_delta") is not None else row.get("delta")
+    if delta is not None:
+        parts.append(f"delta {_num(delta)}")
+    event_status = _value(row.get("event_source_status"))
+    if event_status != "-":
+        parts.append(f"事件源 {event_status}")
+    path_status = _value(row.get("path_stress_status"))
+    if path_status != "-":
+        parts.append(f"路径压力 {path_status}")
+    return "，".join(parts)
 
 
 def _position_scope_text(*, account_label: str, status: str, query: dict[str, Any], filters: dict[str, Any]) -> str:
