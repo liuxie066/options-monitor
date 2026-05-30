@@ -16,6 +16,7 @@ from domain.domain.engine import (
 from domain.domain.intermediate_objects import Decision, SchemaValidationError
 from domain.domain.multi_tick import decide_should_notify
 from domain.domain.tool_boundary import normalize_pipeline_subprocess_output
+from src.application.candidate_reject_summary import append_candidate_reject_summary_to_text
 from src.application.config_loader import resolve_watchlist_config, set_watchlist_config
 from src.application.close_advice_runner import run_close_advice
 from src.infrastructure.external_services import run_pipeline_script
@@ -555,6 +556,33 @@ def run_one_account(
     )
 
     text = notif_path.read_text(encoding="utf-8", errors="replace").strip() if notif_path.exists() else ""
+    try:
+        trace_path = acct_report_dir / "candidate_filter_trace.jsonl"
+        reject_log_paths = sorted(acct_report_dir.glob("*_reject_log.csv"))
+        should_append_reject_summary = (
+            trace_path.exists()
+            or bool(reject_log_paths)
+            or (not text.strip())
+            or ("暂无符合条件的候选" in text)
+            or ("本轮无候选" in text)
+        )
+        if should_append_reject_summary:
+            text = append_candidate_reject_summary_to_text(
+                text,
+                trace_path=trace_path,
+                reject_log_paths=reject_log_paths,
+                account=acct,
+                run_id=request.run_id,
+            )
+    except Exception as exc:
+        _record_account_run_degraded(
+            runlog=runlog,
+            audit_fn=audit_fn,
+            run_id=request.run_id,
+            account=acct,
+            action="candidate_reject_summary",
+            exc=exc,
+        )
 
     try:
         run_repo.write_run_account_text(
