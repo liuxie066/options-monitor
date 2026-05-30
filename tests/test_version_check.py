@@ -122,7 +122,7 @@ def test_check_version_update_reports_latest(tmp_path: Path) -> None:
     out = check_version_update(base_dir=base, run_cmd=_run, now_fn=_fixed_now)
     assert out["ok"] is True
     assert out["update_available"] is False
-    assert out["message"] == "当前已是最新版本 0.1.0"
+    assert out["message"] == "没有可升级版本。当前已是最新版本 0.1.0"
 
 
 def test_check_version_update_reports_current_ahead(tmp_path: Path) -> None:
