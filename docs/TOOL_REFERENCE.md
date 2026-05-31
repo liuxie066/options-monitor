@@ -397,6 +397,8 @@ om-agent run --tool candidate_rank_explain --input-json '{"mode":"put","score_we
 用途：
 - 通过 `research collect --scope candidate` 从已有候选 CSV、reject log 和 `candidate_filter_trace.jsonl` 收集离线 shadow replay readiness
 - 输出在 `candidate_evidence.shadow_replay`，用于检查 accepted/rejected universe 是否完整
+- `research shadow-replay status` / `list` 是只读 dataset readiness dashboard，会列出每个 dataset 的样本、mark、outcome 覆盖、采样新鲜度、路径采样点数量和下一步建议；`data_plan` 只包含 `collect_marks` / `settle`，`review_queue` 只提示可人工 `analyze` 的 dataset
+- `research shadow-replay run-data-plan` 消费 `status.data_plan`；默认 dry-run 且不写 receipt，显式 `--write` 才执行本地采样 / settle 并写本地 receipt；人工复盘仍走 `analyze`
 - `research shadow-replay collect-marks` 是数据采样入口，可从本地 required-data cache 或显式 OpenD 当前报价追加 mark path
 - `research shadow-replay mark` 可从 `required_data/parsed/*_required_data.csv` 为本地 dataset 生成 mark path
 - `research shadow-replay settle` 可从可用 mark 推导 mark-to-market outcome，也可在到期日/到期后用 spot/strike 推导到期 outcome
@@ -411,6 +413,10 @@ om research collect --config-key us --scope candidate --run-id 20260515T182459Z-
 om research collect --config-key us --scope candidate --candidate-report-dir output_shared/reports --output json --no-write-outputs
 om research collect --config-key us --scope candidate --candidate-path candidates.csv --trace-path candidate_filter_trace.jsonl --mark-path mark_path_snapshots.jsonl --outcome-path outcome_facts.jsonl --output json --no-write-outputs
 om research shadow-replay build --run-id 20260515T182459Z-474761 --dataset-id us-20260515
+om research shadow-replay status --min-sample 30 --min-mark-points 2 --mark-stale-hours 24
+om research shadow-replay run-data-plan --min-sample 30 --min-mark-points 2
+om research shadow-replay run-data-plan --min-sample 30 --min-mark-points 2 --source local --write
+om research shadow-replay run-data-plan --min-sample 30 --min-mark-points 2 --source opend --write --max-datasets 3
 om research shadow-replay collect-marks --dataset output_shared/research/shadow_replay/datasets/us-20260515 --source local --required-data-root output_shared/required_data --write
 om research shadow-replay collect-marks --dataset output_shared/research/shadow_replay/datasets/us-20260515 --source opend --required-data-root output_shared/required_data --opend-host 127.0.0.1 --opend-port 11111 --write
 om research shadow-replay mark --dataset output_shared/research/shadow_replay/datasets/us-20260515 --required-data-root output_shared/required_data --write
@@ -421,6 +427,8 @@ om research shadow-replay analyze --dataset output_shared/research/shadow_replay
 边界：
 - 只读源数据，来源可以是 `run_id`、`run_dir`、`candidate_report_dir`、`candidate_path`、`trace_path`、`reject_log_path`、`mark_path` 或 `outcome_path`。
 - 默认 `--no-write-outputs` 不写文件；显式 `--write-outputs --confirm` 时只写本地 research bundle/handoff。
+- `research shadow-replay status` / `list` 只读本地 dataset root，不采样、不 settle、不写输出文件；`next_suggested_action` 只会是 `collect_marks`、`settle`、`analyze` 或 `wait`。输出里的 `data_plan` 只是数据维护建议命令清单，不会自动执行；人工复盘提示在 `review_queue`。
+- `research shadow-replay run-data-plan` 不挂 tick / tick-cron；默认不写，`--write` 只写 replay dataset、local receipt，以及在显式 `--source opend` 时写本地 required-data / OpenD cache。它不执行 `analyze`，不写 Feishu、不写 broker、不写 trade state、不写 runtime config、不发送通知。
 - `research shadow-replay collect-marks --source local` 只读本地 required-data cache；`--source opend --write` 会读取 OpenD、刷新本地 required-data cache，并维护本地 OpenD 限流状态和 option-chain cache；不带 `--write` 时使用临时目录预览，不持久化这些文件。OpenD 只能提供当前采样点，不能恢复过去没有保存的 option mark。
 - `research shadow-replay mark --write` 只写本地 replay dataset 的 `mark_path_snapshots.jsonl`，缺报价记录为 `missing_quote`，不视为可用 mark；到期 spot-only mark 可作为到期结算证据。
 - `research shadow-replay settle --write` 只写本地 replay dataset 的 `outcome_facts.jsonl`，可输出 `expired_worthless`、`assigned_at_expiry`、`called_away_at_expiry` 或 mark-to-market outcome，不写交易状态。
@@ -539,6 +547,7 @@ om-agent run --tool get_portfolio_context --input-json '{"config_key":"us","acco
 - 输出 deterministic exit state：`profit_capture`、`risk_exit`、`take_profit`、`salvage`、`let_expire`、`hold`、`not_evaluable`
 - 收益增强腿会输出专用动作：`close_put_keep_call`、`hold_put_keep_call`、`sell_call_take_profit`、`hold_call_as_convexity` 等
 - `not_evaluable` 行会进入待补数据链路，不会被当成已定价建议
+- `optimizer_switch` 是 advisory-only redeploy 建议，必须携带 `alternative_symbol` / `alternative_contract_symbol` / `alternative_source_path` 等替代候选证据；没有候选报告证据时不会产生换仓建议
 
 示例：
 

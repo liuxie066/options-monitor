@@ -163,6 +163,12 @@ OUTPUT_COLUMNS = [
     "risk_adjusted_return",
     "switch_value_ratio",
     "alternative_annualized_return",
+    "alternative_symbol",
+    "alternative_contract_symbol",
+    "alternative_option_type",
+    "alternative_expiration",
+    "alternative_strike",
+    "alternative_source_path",
     "delta",
     "otm_pct",
 ]
@@ -1594,7 +1600,11 @@ def _optimizer_detail_lines(row: dict[str, Any]) -> list[str]:
     tail_str = f"{tail:.3f}" if isinstance(tail, (int, float)) else "-"
     if opt_tier == "optimizer_switch":
         alt_ann = _pct(row.get("alternative_annualized_return"))
-        lines.append(f"- 优化器: 持有年化={eff_ann} → 替代候选年化={alt_ann} | 尾部风险={tail_str}")
+        alt_label = _alternative_candidate_label(row)
+        alt_text = f"替代候选={alt_label} 年化={alt_ann}" if alt_label else f"替代候选年化={alt_ann}"
+        lines.append(
+            f"- 优化器: 持有年化={eff_ann} → {alt_text} | 尾部风险={tail_str}"
+        )
     elif opt_tier == "optimizer_close":
         lines.append(f"- 优化器: 持有年化={eff_ann} | 尾部风险={tail_str} | 无可替换候选")
     elif opt_tier == "optimizer_hold":
@@ -1795,7 +1805,9 @@ def _optimizer_detail_compact(row: dict[str, Any]) -> str:
     tail_str = f"{tail:.3f}" if isinstance(tail, (int, float)) else "-"
     if opt_tier == "optimizer_switch":
         alt_ann = _pct_compact(row.get("alternative_annualized_return"))
-        parts.append(f"持有 {eff_ann} → 替代 {alt_ann}")
+        alt_label = _alternative_candidate_label(row)
+        alt_text = f"替代 {alt_label} {alt_ann}" if alt_label else f"替代 {alt_ann}"
+        parts.append(f"持有 {eff_ann} → {alt_text}")
         parts.append(f"风险 {tail_str}")
     elif opt_tier == "optimizer_close":
         parts.append(f"持有 {eff_ann}")
@@ -1810,6 +1822,19 @@ def _optimizer_detail_compact(row: dict[str, Any]) -> str:
     if parts:
         return "- 💡 " + " · ".join(parts)
     return ""
+
+
+def _alternative_candidate_label(row: dict[str, Any]) -> str:
+    contract = str(row.get("alternative_contract_symbol") or "").strip()
+    if contract:
+        return contract
+    symbol = str(row.get("alternative_symbol") or "").strip().upper()
+    option_type = str(row.get("alternative_option_type") or "").strip().lower()
+    expiration = str(row.get("alternative_expiration") or "").strip()
+    strike = row.get("alternative_strike")
+    strike_text = _fmt_compact(strike) if strike not in (None, "") else ""
+    parts = [part for part in (symbol, option_type, expiration, strike_text) if part]
+    return " ".join(parts) if parts else ""
 
 
 def render_markdown_compact(
@@ -1960,15 +1985,9 @@ def _load_context(context_path: Path) -> dict[str, Any]:
     return obj if isinstance(obj, dict) else {}
 
 
-def _load_alternative_annualized_from_scan(
-    output_dir: Path,
-) -> float | None:
-    """从最近的 Sell Put scan 输出中读取 top 候选年化作为替代基准。
+def _load_alternative_redeploy_candidate_from_scan(output_dir: Path) -> dict[str, Any] | None:
+    """Read the best recent Sell Put candidate as explicit redeploy evidence."""
 
-    查找 output_dir 下最新的 <symbol>_sell_put_candidates.csv，
-    取 annualized_net_return_on_cash_basis 最大值。
-    如果找不到任何候选数据，返回 None。
-    """
     try:
         candidates_dir = output_dir
         if not candidates_dir.exists():
@@ -1983,21 +2002,46 @@ def _load_alternative_annualized_from_scan(
         df = safe_read_csv(csv_paths[0])
         if df.empty:
             return None
-        for col in (
-            "annualized_net_return_on_cash_basis",
-            "annualized_net_return_on_strike",
-            "annualized_return",
-        ):
-            if col in df.columns:
-                vals = df[col].dropna()
-                if not vals.empty:
-                    parsed = safe_float(vals.max())
-                    if parsed is not None:
-                        return float(parsed)
-                break
-        return None
+        best_row: dict[str, Any] | None = None
+        best_return: float | None = None
+        for raw_row in df.to_dict("records"):
+            annualized = _candidate_annualized_return(raw_row)
+            if annualized is None:
+                continue
+            if best_return is None or annualized > best_return:
+                best_return = annualized
+                best_row = raw_row if isinstance(raw_row, dict) else {}
+        if best_row is None or best_return is None:
+            return None
+        symbol = str(best_row.get("symbol") or best_row.get("underlying_symbol") or "").strip().upper()
+        contract_symbol = str(best_row.get("contract_symbol") or best_row.get("option_symbol") or "").strip()
+        if not symbol and not contract_symbol:
+            return None
+        return {
+            "alternative_annualized_return": best_return,
+            "alternative_symbol": symbol,
+            "alternative_contract_symbol": contract_symbol,
+            "alternative_option_type": str(best_row.get("option_type") or best_row.get("mode") or "").strip().lower(),
+            "alternative_expiration": str(best_row.get("expiration") or best_row.get("exp") or "").strip(),
+            "alternative_strike": safe_float(best_row.get("strike")),
+            "alternative_source_path": str(csv_paths[0]),
+        }
     except Exception:
         return None
+
+
+def _candidate_annualized_return(row: dict[str, Any]) -> float | None:
+    for col in (
+        "annualized_net_return_on_cash_basis",
+        "annualized_net_return_on_strike",
+        "annualized_return",
+    ):
+        if col not in row:
+            continue
+        parsed = safe_float(row.get(col))
+        if parsed is not None:
+            return float(parsed)
+    return None
 
 
 def run_close_advice(
@@ -2122,8 +2166,11 @@ def run_close_advice(
         optimizer_cfg = CloseOptimizerConfig.from_mapping(
             optimizer_cfg_raw if isinstance(optimizer_cfg_raw, dict) else None
         )
-        alt_annualized = _load_alternative_annualized_from_scan(
-            Path(output_dir)
+        alternative_candidate = _load_alternative_redeploy_candidate_from_scan(Path(output_dir))
+        alt_annualized = (
+            safe_float(alternative_candidate.get("alternative_annualized_return"))
+            if isinstance(alternative_candidate, dict)
+            else None
         )
         for row in rows:
             if str(row.get("evaluation_status") or "").strip().lower() != "priced":
@@ -2155,6 +2202,9 @@ def run_close_advice(
             )
             for key, val in opt_result.items():
                 row[key] = val
+            if alternative_candidate is not None:
+                for key, val in alternative_candidate.items():
+                    row[key] = val
             opt_tier = str(opt_result.get("optimizer_tier") or "")
             if opt_tier in ("optimizer_switch", "optimizer_close"):
                 row["tier"] = opt_tier
