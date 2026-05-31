@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 566 (`src`: 300, `domain`: 51, `scripts`: 6, `tests`: 209)
-- Internal import edges: 2929 total, 1346 production/script edges excluding tests
+- Python files scanned: 574 (`src`: 308, `domain`: 51, `scripts`: 6, `tests`: 209)
+- Internal import edges: 2954 total, 1371 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -38,7 +38,7 @@ flowchart LR
   domain_services -->|5| domain
   domain_services -->|2| storage
   infrastructure -->|2| domain
-  interfaces -->|72| application
+  interfaces -->|89| application
   interfaces -->|2| domain
   scripts -->|1| application
   scripts -->|1| infrastructure
@@ -59,7 +59,7 @@ flowchart LR
 |---|---|---|
 | application | domain | 206 |
 | application | infrastructure | 100 |
-| interfaces | application | 72 |
+| interfaces | application | 89 |
 | application | storage | 34 |
 | domain_services | domain | 5 |
 | application | domain_services | 2 |
@@ -91,7 +91,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 |---|---|---|
 | src.application | domain.domain | 102 |
 | src.application | src.infrastructure | 73 |
-| src.interfaces | src.application | 57 |
+| src.interfaces | src.application | 73 |
 | src.application.ledger | domain.domain.ledger | 29 |
 | src.application | domain.storage | 25 |
 | src.application | domain.domain.engine | 20 |
@@ -123,6 +123,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application.trades | domain.domain.ledger | 4 |
 | src.interfaces | src.application.ledger | 4 |
 | src.application | src.application.trades | 3 |
+| src.interfaces | src.application.settings | 3 |
 | src.interfaces | src.application.trades | 3 |
 | src.interfaces | src.application.positions | 3 |
 | domain.domain | domain.domain.ledger | 3 |
@@ -131,7 +132,6 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application.ledger | src.application.settings | 2 |
 | src.application.multi_tick | domain.storage | 2 |
 | src.infrastructure | domain.domain | 2 |
-| src.interfaces | src.application.settings | 2 |
 | domain.services | domain.storage | 2 |
 | scripts | domain.storage | 2 |
 | src.application.inbound | src.application.settings | 1 |
@@ -144,11 +144,11 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application.setup | src.application.settings | 1 |
 | src.application | src.application.setup | 1 |
 | src.application.trades | src.application.positions | 1 |
-| src.interfaces | src.application.inbound | 1 |
-| src.interfaces | src.application.setup | 1 |
 | src.interfaces | domain.domain | 1 |
-| src.interfaces | src.application.research | 1 |
+| src.interfaces | src.application.inbound | 1 |
 | src.interfaces | domain.domain.ledger | 1 |
+| src.interfaces | src.application.research | 1 |
+| src.interfaces | src.application.setup | 1 |
 
 ## Boundary Checks
 
@@ -175,28 +175,28 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 
 | module | incoming imports |
 |---|---|
-| src.application.agent_tool_contracts | 56 |
+| src.application.agent_tool_contracts | 64 |
 | domain.domain.ledger.position_fields | 41 |
 | src.infrastructure.io_utils | 37 |
 | domain.domain.symbol_identity | 29 |
 | src.application.config_loader | 24 |
-| src.application.settings | 23 |
+| src.application.settings | 24 |
 | src.application.assistant.contracts | 23 |
 | domain.domain.engine | 22 |
 | src.application.ledger.api | 22 |
 | src.application.runtime_cli_format | 20 |
+| src.application.agent_tool_config | 19 |
 | domain.domain.trade_contract_identity | 19 |
 | src.application.account_config | 18 |
 | domain.storage.repositories | 17 |
 | src.infrastructure.exchange_rates | 15 |
-| src.application.config_validator | 14 |
 
 ### Highest Fan-Out Production Modules
 
 | module | outgoing imports |
 |---|---|
-| src.interfaces.cli.main | 50 |
 | src.application.agent_tool_handlers | 36 |
+| src.interfaces.cli.main | 36 |
 | src.application.multi_account_tick | 26 |
 | src.application.close_advice_runner | 22 |
 | src.application.ledger.queries | 20 |
@@ -213,7 +213,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 
 ## Reading
 
-- `src.interfaces` is a thin facade by intent, but `src.interfaces.cli.main` has the highest fan-out. If CLI growth continues, split command handlers by domain area while preserving the public `om` facade.
+- `src.interfaces` is a thin facade by intent, but `src.interfaces.cli.main` still has high fan-out. If CLI growth continues, split command handlers by domain area while preserving the public `om` facade.
 - `src.application.agent_tool_handlers` is a large integration switchboard; keep manifest, handlers, and tests synchronized when moving tool ownership.
 - The strongest production dependency remains `src.application -> domain.domain`, which is the intended direction: application orchestration calls deterministic domain policy.
 - `src.application -> src.infrastructure` is also expected, but new external-system access should stay in infrastructure adapters rather than leaking directly into domain code.
