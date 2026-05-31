@@ -358,6 +358,170 @@ def test_shadow_replay_mark_generates_required_data_marks_and_settles(tmp_path: 
     assert analysis["outcome_stats"]["by_status"]["rejected"]["realized_pnl_total"] == -70
 
 
+def test_shadow_replay_collect_marks_fetches_opend_before_marking(monkeypatch, tmp_path: Path) -> None:
+    from src.application.shadow_replay import build_shadow_replay_dataset, collect_shadow_replay_marks
+    import src.application.shadow_replay.collection as collection
+
+    account_dir = tmp_path / "output_runs" / "run-1" / "accounts" / "lx"
+    account_dir.mkdir(parents=True)
+    (account_dir / "sell_put_candidates.csv").write_text(
+        (
+            "symbol,account,option_type,contract_symbol,expiration,dte,delta,strike,net_income,multiplier\n"
+            "NVDA,lx,put,NVDA260619P00100000,2026-06-19,30,-0.2,100,120,100\n"
+        ),
+        encoding="utf-8",
+    )
+    (account_dir / "candidate_filter_trace.jsonl").write_text(
+        json.dumps(
+            {
+                "symbol": "AMD",
+                "account": "lx",
+                "function": "sell_put",
+                "mode": "put",
+                "option_type": "put",
+                "contract_symbol": "AMD260619P00080000",
+                "expiration": "2026-06-19",
+                "strike": 80,
+                "net_income": 90,
+                "status": "rejected",
+                "rule": "spread_too_wide",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    calls = []
+
+    def _fake_execute_required_data_opend(*, base: Path, request):
+        calls.append(request)
+        contract = "NVDA260619P00100000" if request.symbol == "NVDA" else "AMD260619P00080000"
+        strike = 100 if request.symbol == "NVDA" else 80
+        bid = 0.7 if request.symbol == "NVDA" else 1.4
+        ask = 0.9 if request.symbol == "NVDA" else 1.8
+        return {
+            "symbol": request.symbol,
+            "expiration_count": 1,
+            "expirations": ["2026-06-19"],
+            "rows": [
+                {
+                    "symbol": request.symbol,
+                    "option_type": "put",
+                    "contract_symbol": contract,
+                    "expiration": "2026-06-19",
+                    "strike": strike,
+                    "bid": bid,
+                    "ask": ask,
+                    "last_price": (bid + ask) / 2,
+                    "dte": 30,
+                    "spot": 110,
+                    "multiplier": 100,
+                }
+            ],
+            "meta": {"source": "opend", "status": "ok"},
+        }
+
+    monkeypatch.setattr(collection, "execute_required_data_opend", _fake_execute_required_data_opend)
+
+    manifest = build_shadow_replay_dataset(repo_root=tmp_path, run_id="run-1", dataset_id="case-collect")
+    dataset_dir = Path(manifest["dataset_dir"])
+    result = collect_shadow_replay_marks(
+        dataset=dataset_dir,
+        required_data_root=tmp_path / "output_shared" / "required_data",
+        source="opend",
+        repo_root=tmp_path,
+        as_of="2026-05-31T00:00:00Z",
+        write=True,
+    )
+    marks = _jsonl(dataset_dir / "mark_path_snapshots.jsonl")
+    outcomes = _jsonl(dataset_dir / "outcome_facts.jsonl")
+
+    assert [request.symbol for request in calls] == ["AMD", "NVDA"]
+    assert {tuple(request.explicit_expirations or []) for request in calls} == {("2026-06-19",)}
+    assert result["summary"]["opend_fetch_ok_count"] == 2
+    assert result["summary"]["generated_mark_snapshot_count"] == 2
+    assert result["summary"]["usable_mark_snapshot_count"] == 2
+    assert result["summary"]["settled"] is False
+    assert result["summary"]["generated_outcome_fact_count"] == 0
+    assert result["safety"]["reads_opend"] is True
+    assert result["safety"]["writes_required_data_cache"] is True
+    assert result["safety"]["writes_persistent_outputs"] is True
+    assert result["safety"]["persistent_write_targets"] == [
+        "shadow_replay_dataset",
+        "required_data_cache",
+        "opend_rate_limit_state",
+        "opend_cache",
+    ]
+    assert {row["quote_status"] for row in marks} == {"matched"}
+    assert outcomes == []
+    assert (tmp_path / "output_shared" / "required_data" / "parsed" / "NVDA_required_data.csv").exists()
+
+
+def test_shadow_replay_collect_marks_opend_preview_does_not_persist(monkeypatch, tmp_path: Path) -> None:
+    from src.application.shadow_replay import build_shadow_replay_dataset, collect_shadow_replay_marks
+    import src.application.shadow_replay.collection as collection
+
+    account_dir = tmp_path / "output_runs" / "run-1" / "accounts" / "lx"
+    account_dir.mkdir(parents=True)
+    (account_dir / "sell_put_candidates.csv").write_text(
+        (
+            "symbol,account,option_type,contract_symbol,expiration,dte,delta,strike,net_income,multiplier\n"
+            "NVDA,lx,put,NVDA260619P00100000,2026-06-19,30,-0.2,100,120,100\n"
+        ),
+        encoding="utf-8",
+    )
+
+    fetch_bases = []
+
+    def _fake_execute_required_data_opend(*, base: Path, request):
+        fetch_bases.append(Path(base))
+        return {
+            "symbol": request.symbol,
+            "expiration_count": 1,
+            "expirations": ["2026-06-19"],
+            "rows": [
+                {
+                    "symbol": request.symbol,
+                    "option_type": "put",
+                    "contract_symbol": "NVDA260619P00100000",
+                    "expiration": "2026-06-19",
+                    "strike": 100,
+                    "bid": 0.7,
+                    "ask": 0.9,
+                    "last_price": 0.8,
+                    "dte": 30,
+                    "spot": 110,
+                    "multiplier": 100,
+                }
+            ],
+            "meta": {"source": "opend", "status": "ok"},
+        }
+
+    monkeypatch.setattr(collection, "execute_required_data_opend", _fake_execute_required_data_opend)
+
+    manifest = build_shadow_replay_dataset(repo_root=tmp_path, run_id="run-1", dataset_id="case-preview")
+    dataset_dir = Path(manifest["dataset_dir"])
+    result = collect_shadow_replay_marks(
+        dataset=dataset_dir,
+        required_data_root=tmp_path / "output_shared" / "required_data",
+        source="opend",
+        repo_root=tmp_path,
+        as_of="2026-05-31T00:00:00Z",
+        write=False,
+    )
+
+    assert result["summary"]["opend_fetch_attempted"] is True
+    assert result["summary"]["opend_fetch_persisted"] is False
+    assert result["summary"]["generated_mark_snapshot_count"] == 1
+    assert result["safety"]["writes_required_data_cache"] is False
+    assert result["safety"]["writes_persistent_outputs"] is False
+    assert result["safety"]["persistent_write_targets"] == []
+    assert fetch_bases and fetch_bases[0] != tmp_path
+    assert not fetch_bases[0].exists()
+    assert _jsonl(dataset_dir / "mark_path_snapshots.jsonl") == []
+    assert not (tmp_path / "output_shared" / "required_data").exists()
+
+
 def test_shadow_replay_mark_uses_expiration_spot_when_mid_is_missing(tmp_path: Path) -> None:
     from src.application.shadow_replay import (
         analyze_shadow_replay_dataset,

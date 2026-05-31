@@ -450,6 +450,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     shadow_mark.add_argument("--output", default=None)
     shadow_mark.add_argument("--write", action="store_true", help="write generated mark_path_snapshots.jsonl back to the local dataset")
     shadow_mark.add_argument("--replace", action="store_true", help="replace existing local mark path snapshots when used with --write")
+    shadow_collect = research_shadow_sub.add_parser("collect-marks", help="collect one replay mark sample from local cache or OpenD")
+    shadow_collect.add_argument("--dataset", required=True)
+    shadow_collect.add_argument("--source", default="local", choices=("local", "opend"), help="local reads required-data cache; opend fetches current quotes before marking")
+    shadow_collect.add_argument("--required-data-root", default=None, help="required-data root containing raw/ and parsed/; default output_shared/required_data")
+    shadow_collect.add_argument("--as-of", default=None, help="mark timestamp label; default current UTC time")
+    shadow_collect.add_argument("--output", default=None)
+    shadow_collect.add_argument("--write", action="store_true", help="persist generated mark snapshots; with --source opend also persist required-data/cache state")
+    shadow_collect.add_argument("--replace", action="store_true", help="replace existing local mark path snapshots when used with --write")
+    shadow_collect.add_argument("--settle", action="store_true", help="derive outcome_facts after writing marks")
+    shadow_collect.add_argument("--opend-host", default="127.0.0.1")
+    shadow_collect.add_argument("--opend-port", type=int, default=11111)
+    shadow_collect.add_argument("--limit-expirations", type=int, default=8)
+    shadow_collect.add_argument("--max-symbols", type=int, default=None)
+    shadow_collect.add_argument("--no-chain-cache", action="store_true")
+    shadow_collect.add_argument("--chain-cache-force-refresh", action="store_true")
+    shadow_collect.add_argument("--include-realized-volatility", action="store_true")
     shadow_settle = research_shadow_sub.add_parser("settle", help="derive outcome facts from a local shadow replay dataset")
     shadow_settle.add_argument("--dataset", required=True)
     shadow_settle.add_argument("--output", default=None)
@@ -1425,6 +1441,7 @@ def main(argv: list[str] | None = None) -> int:
             from src.application.shadow_replay import (
                 analyze_shadow_replay_dataset,
                 build_shadow_replay_dataset,
+                collect_shadow_replay_marks,
                 mark_shadow_replay_dataset,
                 settle_shadow_replay_dataset,
             )
@@ -1459,6 +1476,27 @@ def main(argv: list[str] | None = None) -> int:
                     replace=bool(args.replace),
                 )
                 return _print(build_response(tool_name="research.shadow-replay.mark", ok=True, data=data))
+            if args.shadow_replay_command == "collect-marks":
+                required_data_root = args.required_data_root or (repo_base() / "output_shared" / "required_data")
+                data = collect_shadow_replay_marks(
+                    dataset=args.dataset,
+                    required_data_root=required_data_root,
+                    source=args.source,
+                    repo_root=repo_base(),
+                    as_of=args.as_of,
+                    output=args.output,
+                    write=bool(args.write),
+                    replace=bool(args.replace),
+                    settle=bool(args.settle),
+                    opend_host=args.opend_host,
+                    opend_port=args.opend_port,
+                    limit_expirations=args.limit_expirations,
+                    chain_cache=not bool(args.no_chain_cache),
+                    chain_cache_force_refresh=bool(args.chain_cache_force_refresh),
+                    include_realized_volatility=bool(args.include_realized_volatility),
+                    max_symbols=args.max_symbols,
+                )
+                return _print(build_response(tool_name="research.shadow-replay.collect-marks", ok=True, data=data))
             if args.shadow_replay_command == "settle":
                 data = settle_shadow_replay_dataset(dataset=args.dataset, output=args.output, write=bool(args.write), replace=bool(args.replace))
                 return _print(build_response(tool_name="research.shadow-replay.settle", ok=True, data=data))

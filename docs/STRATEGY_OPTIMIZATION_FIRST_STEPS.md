@@ -72,6 +72,7 @@
   - `rank_snapshots.jsonl`: accepted-candidate rank explanations and score inputs
   - `mark_path_snapshots.jsonl`: later price/IV/Delta/PnL path observations
   - `outcome_facts.jsonl`: close, expiry, assignment, and counterfactual outcome facts
+- `research shadow-replay collect-marks --dataset <dataset-dir> --source local|opend --write` is the repeatable data-sampling entry. `local` reads existing required-data cache; `opend --write` refreshes current quotes from OpenD into local required-data before appending the mark, and may update local OpenD rate-limit state / option-chain cache. OpenD preview without `--write` uses temporary paths. OpenD cannot reconstruct past option marks that were not collected.
 - `research shadow-replay mark --dataset <dataset-dir> --required-data-root output_shared/required_data --write` generates local mark path snapshots from required-data CSV quotes. Missing quotes are preserved as `missing_quote` rows and do not count as usable mark evidence; expiry spot-only marks can still support expiration settlement.
 - `research shadow-replay settle --dataset <dataset-dir> --write` derives mark-to-market outcomes when price/PnL marks exist, and derives expiration outcomes such as `expired_worthless`, `assigned_at_expiry`, and `called_away_at_expiry` from spot/strike when the final mark is at or after expiration.
 - Analysis may summarize DTE, Delta, IV/RV, spread, concentration, path risk, outcome stats, and outcome-by-bucket performance, but only after the universe and lifecycle evidence are explicit.
@@ -80,7 +81,7 @@
 
 - Offline only.
 - Reads existing report/run artifacts.
-- Mark generation reads existing required-data CSV quotes and writes only the local replay dataset when `--write` is explicit.
+- Mark generation reads existing required-data CSV quotes and writes only the local replay dataset when `--write` is explicit; OpenD mark collection also writes local required-data cache plus OpenD cache/rate-limit state for the sampled symbols.
 - Defaults to `--no-write-outputs`; explicit Research output writes remain local bundle/handoff files only.
 - Does not mutate scanner defaults, live config, trade state, Feishu, broker state, or notification output.
 - Shadow recommendations remain advisory and require human review when samples, rejected samples, mark paths, and outcomes are sufficient.

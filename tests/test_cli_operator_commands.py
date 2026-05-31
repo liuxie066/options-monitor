@@ -872,6 +872,29 @@ def test_research_shadow_replay_mark_from_required_data(capsys, monkeypatch, tmp
     assert payload["data"]["summary"]["missing_quote_count"] == 0
     assert (dataset_dir / "mark_path_snapshots.jsonl").exists()
 
+    rc = cli.main(
+        [
+            "research",
+            "shadow-replay",
+            "collect-marks",
+            "--dataset",
+            str(dataset_dir),
+            "--source",
+            "local",
+            "--as-of",
+            "2026-06-01T00:00:00Z",
+            "--write",
+        ]
+    )
+    payload = _read_json_output(capsys)
+
+    assert rc == 0
+    assert payload["tool_name"] == "research.shadow-replay.collect-marks"
+    assert payload["data"]["summary"]["opend_fetch_attempted"] is False
+    assert payload["data"]["summary"]["generated_mark_snapshot_count"] == 2
+    assert payload["data"]["summary"]["settled"] is False
+    assert payload["data"]["summary"]["generated_outcome_fact_count"] == 0
+
 
 def test_top_level_status_json_prints_raw_runtime_status(monkeypatch, capsys) -> None:
     import src.interfaces.cli.main as cli

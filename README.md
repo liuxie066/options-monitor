@@ -290,14 +290,20 @@ om run tick --config config.us.json --accounts lx sy
 
 ```bash
 ./om research shadow-replay build --run-id <run-id> --dataset-id <dataset-id>
+./om research shadow-replay collect-marks --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --source local --required-data-root output_shared/required_data --write
+./om research shadow-replay collect-marks --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --source opend --required-data-root output_shared/required_data --opend-host 127.0.0.1 --opend-port 11111 --write
 ./om research shadow-replay mark --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --required-data-root output_shared/required_data --write
 ./om research shadow-replay settle --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --write
 ./om research shadow-replay analyze --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --min-sample 30
 ```
 
+`collect-marks` 是复盘数据采样入口：`--source local` 使用本地 `required_data` 当前报价；`--source opend --write` 会先按 dataset 中的 symbol / option type / expiration 从 OpenD 拉当前报价写入本地 required_data cache，再把这一刻的 mark 追加到 replay dataset，并维护本地 OpenD 限流状态和 option-chain cache。不带 `--write` 的 OpenD 预览使用临时目录，不持久化这些文件。OpenD 只能补当前/未来采样点，不能事后恢复过去未保存的 option mark，所以需要在 dataset 建好后持续采样。
+
 `mark` 只从 `required_data/parsed/*_required_data.csv` 读取报价，为本地 replay dataset 生成 `mark_path_snapshots.jsonl`。缺报价会写成 `missing_quote` 证据缺口，不会被当作可用 mark，也不会推动 settle/analyze 进入可审阅状态。到期日或到期后的 mark 可用 spot/strike 推导 `expired_worthless`、`assigned_at_expiry` 等 outcome；非到期 mark 仍需要可用 mid、bid/ask 或 PnL 字段。
 
 `analyze` 会同时输出总体 outcome stats 和按 DTE、Delta、IV/RV、Spread、集中度分桶的 outcome-by-bucket 表现，用于复盘哪些过滤区间贡献了盈利、亏损或幸存者偏差风险。
+
+完整操作手册见 [docs/SHADOW_REPLAY_RUNBOOK.md](docs/SHADOW_REPLAY_RUNBOOK.md)。
 
 - 这个 symbol 根本没被观测到，还是被某条规则拒掉了
 - 是扫描阶段被拒，还是账户级后过滤被拒
