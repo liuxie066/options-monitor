@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 1.2.172 - 2026-05-31
+
+### Added
+- Added `./om research shadow-replay collect-marks` for repeatable Shadow Replay mark sampling from local required-data cache or explicit OpenD current quotes.
+- Added a Shadow Replay runbook covering dataset construction, mark sampling cadence, settlement, analysis, and offline-only boundaries.
+
+### Changed
+- Documented Shadow Replay sampling in README, Tool Reference, Agent Wiki, and the strategy optimization first-steps guide.
+- Extended Shadow Replay mark collection safety output with explicit persistent write targets.
+
+### Fixed
+- Kept OpenD collect preview mode from persisting required-data, replay marks, OpenD limiter state, or OpenD cache files by routing preview fetches through temporary paths.
+
 ## 1.2.171 - 2026-05-31
 
 ### Added

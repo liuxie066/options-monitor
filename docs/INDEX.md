@@ -29,6 +29,7 @@
 
 ## 业务规则
 - [candidate_strategy.md](candidate_strategy.md)：候选筛选与排序规则
+- [SHADOW_REPLAY_RUNBOOK.md](SHADOW_REPLAY_RUNBOOK.md)：Shadow Replay 数据采样、OpenD 补价和复盘操作手册
 - [CLOSE_ADVICE_CONTRACT.md](CLOSE_ADVICE_CONTRACT.md)：平仓建议 exit-state、收益增强组合和渲染契约
 
 ## 安全与约束

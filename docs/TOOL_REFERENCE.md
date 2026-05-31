@@ -397,6 +397,7 @@ om-agent run --tool candidate_rank_explain --input-json '{"mode":"put","score_we
 用途：
 - 通过 `research collect --scope candidate` 从已有候选 CSV、reject log 和 `candidate_filter_trace.jsonl` 收集离线 shadow replay readiness
 - 输出在 `candidate_evidence.shadow_replay`，用于检查 accepted/rejected universe 是否完整
+- `research shadow-replay collect-marks` 是数据采样入口，可从本地 required-data cache 或显式 OpenD 当前报价追加 mark path
 - `research shadow-replay mark` 可从 `required_data/parsed/*_required_data.csv` 为本地 dataset 生成 mark path
 - `research shadow-replay settle` 可从可用 mark 推导 mark-to-market outcome，也可在到期日/到期后用 spot/strike 推导到期 outcome
 - `research shadow-replay analyze` 会在已有可用 mark path / outcome facts 时输出路径风险、outcome stats 和按 DTE/Delta/IV/Spread/集中度分桶的 outcome-by-bucket 表现
@@ -410,6 +411,8 @@ om research collect --config-key us --scope candidate --run-id 20260515T182459Z-
 om research collect --config-key us --scope candidate --candidate-report-dir output_shared/reports --output json --no-write-outputs
 om research collect --config-key us --scope candidate --candidate-path candidates.csv --trace-path candidate_filter_trace.jsonl --mark-path mark_path_snapshots.jsonl --outcome-path outcome_facts.jsonl --output json --no-write-outputs
 om research shadow-replay build --run-id 20260515T182459Z-474761 --dataset-id us-20260515
+om research shadow-replay collect-marks --dataset output_shared/research/shadow_replay/datasets/us-20260515 --source local --required-data-root output_shared/required_data --write
+om research shadow-replay collect-marks --dataset output_shared/research/shadow_replay/datasets/us-20260515 --source opend --required-data-root output_shared/required_data --opend-host 127.0.0.1 --opend-port 11111 --write
 om research shadow-replay mark --dataset output_shared/research/shadow_replay/datasets/us-20260515 --required-data-root output_shared/required_data --write
 om research shadow-replay settle --dataset output_shared/research/shadow_replay/datasets/us-20260515 --write
 om research shadow-replay analyze --dataset output_shared/research/shadow_replay/datasets/us-20260515 --min-sample 30
@@ -418,6 +421,7 @@ om research shadow-replay analyze --dataset output_shared/research/shadow_replay
 边界：
 - 只读源数据，来源可以是 `run_id`、`run_dir`、`candidate_report_dir`、`candidate_path`、`trace_path`、`reject_log_path`、`mark_path` 或 `outcome_path`。
 - 默认 `--no-write-outputs` 不写文件；显式 `--write-outputs --confirm` 时只写本地 research bundle/handoff。
+- `research shadow-replay collect-marks --source local` 只读本地 required-data cache；`--source opend --write` 会读取 OpenD、刷新本地 required-data cache，并维护本地 OpenD 限流状态和 option-chain cache；不带 `--write` 时使用临时目录预览，不持久化这些文件。OpenD 只能提供当前采样点，不能恢复过去没有保存的 option mark。
 - `research shadow-replay mark --write` 只写本地 replay dataset 的 `mark_path_snapshots.jsonl`，缺报价记录为 `missing_quote`，不视为可用 mark；到期 spot-only mark 可作为到期结算证据。
 - `research shadow-replay settle --write` 只写本地 replay dataset 的 `outcome_facts.jsonl`，可输出 `expired_worthless`、`assigned_at_expiry`、`called_away_at_expiry` 或 mark-to-market outcome，不写交易状态。
 - 不运行扫描、不发通知、不写 Feishu、不写交易状态、不写 runtime config。
