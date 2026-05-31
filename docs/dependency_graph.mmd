@@ -1,7 +1,7 @@
 flowchart LR
   src_application["src.application"] -->|102| domain_domain["domain.domain"]
+  src_interfaces["src.interfaces"] -->|75| src_application["src.application"]
   src_application["src.application"] -->|73| src_infrastructure["src.infrastructure"]
-  src_interfaces["src.interfaces"] -->|73| src_application["src.application"]
   src_application_ledger["src.application.ledger"] -->|29| domain_domain_ledger["domain.domain.ledger"]
   src_application["src.application"] -->|25| domain_storage["domain.storage"]
   src_application["src.application"] -->|20| domain_domain_engine["domain.domain.engine"]
