@@ -796,6 +796,20 @@ def test_research_shadow_replay_build_and_analyze(capsys, monkeypatch, tmp_path:
     assert rc == 0
     assert payload["data"]["summary"]["status"] == "needs_human_review"
 
+    rc = cli.main(["research", "shadow-replay", "status", "--min-sample", "1"])
+    payload = _read_json_output(capsys)
+
+    assert rc == 0
+    assert payload["tool_name"] == "research.shadow-replay.status"
+    assert payload["data"]["summary"]["dataset_count"] == 1
+    assert payload["data"]["summary"]["data_plan_actions"] == {}
+    assert payload["data"]["summary"]["review_queue_count"] == 1
+    assert payload["data"]["data_plan"] == []
+    assert payload["data"]["review_queue"][0]["dataset_id"] == "case-1"
+    assert payload["data"]["review_queue"][0]["action"] == "analyze"
+    assert payload["data"]["datasets"][0]["dataset_id"] == "case-1"
+    assert payload["data"]["datasets"][0]["next_suggested_action"] == "analyze"
+
 
 def test_research_shadow_replay_mark_from_required_data(capsys, monkeypatch, tmp_path: Path) -> None:
     import src.interfaces.cli.main as cli
@@ -894,6 +908,48 @@ def test_research_shadow_replay_mark_from_required_data(capsys, monkeypatch, tmp
     assert payload["data"]["summary"]["generated_mark_snapshot_count"] == 2
     assert payload["data"]["summary"]["settled"] is False
     assert payload["data"]["summary"]["generated_outcome_fact_count"] == 0
+
+    receipt_path = tmp_path / "shadow-plan-receipt.json"
+    rc = cli.main(
+        [
+            "research",
+            "shadow-replay",
+            "run-data-plan",
+            "--min-sample",
+            "1",
+            "--min-mark-points",
+            "1",
+            "--action",
+            "settle",
+            "--write",
+            "--receipt-output",
+            str(receipt_path),
+        ]
+    )
+    payload = _read_json_output(capsys)
+
+    assert rc == 0
+    assert payload["tool_name"] == "research.shadow-replay.run-data-plan"
+    assert payload["data"]["summary"]["executed_count"] == 1
+    assert payload["data"]["actions"][0]["action"] == "settle"
+    assert receipt_path.exists()
+
+    dry_run_receipt_path = tmp_path / "dry-run-receipt.json"
+    rc = cli.main(
+        [
+            "research",
+            "shadow-replay",
+            "run-data-plan",
+            "--receipt-output",
+            str(dry_run_receipt_path),
+        ]
+    )
+    payload = _read_json_output(capsys)
+
+    assert rc == 2
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "INPUT_ERROR"
+    assert not dry_run_receipt_path.exists()
 
 
 def test_top_level_status_json_prints_raw_runtime_status(monkeypatch, capsys) -> None:

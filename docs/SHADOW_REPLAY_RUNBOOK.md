@@ -35,6 +35,24 @@ DATASET=output_shared/research/shadow_replay/datasets/$DATASET_ID
 ./om research shadow-replay build --run-id <run-id> --dataset-id "$DATASET_ID"
 ```
 
+查看所有本地 dataset 是否已经能复盘：
+
+```bash
+./om research shadow-replay status --min-sample 30 --min-mark-points 2 --mark-stale-hours 24
+```
+
+`status` / `list` 不采样、不结算、不写 dataset。它会给每个 dataset 输出 `candidate_snapshot_count`、`has_rejected_universe`、`last_mark_at`、`usable_mark_path_snapshot_count`、`outcome_fact_count`、`sampling` 和 `next_suggested_action`。顶层 `data_plan` 只列出可执行的数据维护动作：`collect_marks` / `settle`；证据已经足够人工复盘的 dataset 会进入 `review_queue`，并给出显式 `analyze` 命令。`--min-mark-points` 用来避免只有单点 mark 就误以为路径证据充足；`--mark-stale-hours` 用来标记长时间未更新的 mark。
+
+独立执行当前数据计划：
+
+```bash
+./om research shadow-replay run-data-plan --min-sample 30 --min-mark-points 2
+./om research shadow-replay run-data-plan --min-sample 30 --min-mark-points 2 --source local --write
+./om research shadow-replay run-data-plan --min-sample 30 --min-mark-points 2 --source opend --write --max-datasets 3
+```
+
+默认 dry-run，只返回会执行的动作，不写 receipt。显式 `--write` 时才执行 `collect_marks` / `settle`，并写 receipt 到 `output_shared/research/shadow_replay/receipts/`。`--action` 只能限制为数据维护动作，例如 `--action settle`；它不接受 `analyze`，人工复盘仍从 `analyze` 命令进入。
+
 先检查 readiness：
 
 ```bash
@@ -81,6 +99,14 @@ DATASET=output_shared/research/shadow_replay/datasets/$DATASET_ID
 - 价格剧烈波动后：用于 stress path。
 - 到期日或到期后：用于到期 outcome。
 
+操作顺序：
+
+1. 先看 `status.data_plan`，优先处理 `priority=high` 的数据维护 dataset。
+2. 想批量处理时先跑 `run-data-plan` dry-run，确认动作和 dataset。
+3. `action=collect_marks` 时先用本地 required data；如果缺报价，再显式用 OpenD。
+4. `action=settle` 时说明路径证据已经够进入 outcome 推导。
+5. `review_queue` 里的 `next_suggested_action=analyze` 只表示证据已经可供人工复盘；不要把 `data_plan` 当策略建议，也不要通过 `run-data-plan` 执行分析。
+
 ## 单独 Mark / Settle
 
 如果只想用本地 required_data 生成 mark：
@@ -118,15 +144,18 @@ DATASET=output_shared/research/shadow_replay/datasets/$DATASET_ID
 | `not_ready / candidate_universe_missing` | 没有候选全集 | 重新指定 `run-id` / `run-dir` / candidate path |
 | `not_ready / candidate_snapshot_count_below_min_sample` | 样本数不足 | 多积累 run 或降低人工评审阈值 |
 | `evidence_incomplete / rejected_universe_missing` | 只有最终候选，缺被拒样本 | 检查 `candidate_filter_trace.jsonl` / reject log |
-| `not_ready / mark_path_snapshots_missing` | 没有路径采样 | 跑 `collect-marks --source local` 或 `--source opend` |
-| `not_ready / usable_mark_path_snapshots_missing` | 有 mark 但没有可用报价 | 检查 bid/ask/mid/spot，必要时用 OpenD 重新采样 |
-| `not_ready / outcome_facts_missing` | 有路径但未结算 outcome | 跑 `settle --write` 或 `collect-marks --write --settle` |
+| `ready_for_sampling / mark_path_snapshots_missing` | 没有路径采样 | 跑 `collect-marks --source local` 或 `--source opend` |
+| `ready_for_sampling / usable_mark_path_snapshots_missing` | 有 mark 但没有可用报价 | 检查 bid/ask/mid/spot，必要时用 OpenD 重新采样 |
+| `ready_for_settlement / outcome_facts_missing` | 有路径但未结算 outcome | 跑 `settle --write` 或 `collect-marks --write --settle` |
+| `ready_for_settlement / outcome_facts_incomplete` | 部分合约 outcome 缺失 | 补跑 `settle --write` 或继续采样 |
 | `needs_human_review / shadow_replay_ready_for_manual_review` | 证据够人工评审 | 看 bucket 和 accepted/rejected 对比 |
 
 ## 边界
 
 - 不自动执行；需要人工命令或独立低优先级调度。
 - 不跟随 tick 主链路同步执行；未来如自动化，应作为 post-tick / after-market job 消费 tick artifacts。
+- `status` / `list` 只读本地 dataset，`data_plan` 只生成数据维护建议命令，不执行命令；`review_queue` 只提示人工复盘入口。
+- `run-data-plan` 默认 dry-run 且不写 receipt；显式 `--write` 才执行数据维护动作并写本地 receipt。它不执行 `analyze`，仍不是 tick、不是通知、不是策略推荐。
 - `--source local` 只读 required_data cache，显式 `--write` 时只写 replay dataset。
 - `--source opend --write` 会读取 OpenD、刷新本地 required_data cache、写 replay dataset，并维护本地 OpenD 限流状态和 option-chain cache；不带 `--write` 时使用临时目录做预览，不持久化这些文件。
 - 不写 Feishu、不写 broker、不写 trade state、不写 runtime config、不发送通知。

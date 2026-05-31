@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 1.2.174 - 2026-05-31
+
+### Added
+- Added Shadow Replay `status` / `list` dashboards with local dataset readiness, sampling freshness, data-maintenance plans, and a separate manual review queue.
+- Added `research shadow-replay run-data-plan` as a dry-run-first local data-maintenance runner for eligible `collect_marks` / `settle` actions.
+
+### Changed
+- Split Shadow Replay maintenance actions from manual `analyze` review so `data_plan` stays executable-only and `review_queue` carries review prompts.
+- Extended Close Advice redeploy evidence so `optimizer_switch` rows include explicit alternative candidate identity and source path fields.
+
+### Fixed
+- Prevented Shadow Replay data-plan dry-runs from writing receipts and rejected receipt output flags unless `--write` is explicit.
+- Kept `run-data-plan` from accepting or executing `analyze`, preserving manual review as an explicit offline step.
+
 ## 1.2.173 - 2026-05-31
 
 ### Changed

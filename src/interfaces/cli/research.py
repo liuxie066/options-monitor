@@ -81,6 +81,88 @@ def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
     shadow_analyze.add_argument("--dataset", required=True)
     shadow_analyze.add_argument("--min-sample", type=int, default=30)
     shadow_analyze.add_argument("--output", default=None)
+    for command_name, help_text in (
+        ("status", "summarize local shadow replay dataset readiness"),
+        ("list", "list local shadow replay datasets and next actions"),
+    ):
+        shadow_status = research_shadow_sub.add_parser(command_name, help=help_text)
+        shadow_status.add_argument(
+            "--dataset-root",
+            default=None,
+            help="dataset root; default output_shared/research/shadow_replay/datasets",
+        )
+        shadow_status.add_argument("--min-sample", type=int, default=30)
+        shadow_status.add_argument(
+            "--min-mark-points",
+            type=int,
+            default=2,
+            help="minimum distinct usable mark timestamps before settlement is preferred",
+        )
+        shadow_status.add_argument(
+            "--mark-stale-hours",
+            type=int,
+            default=24,
+            help="age threshold used to flag stale replay marks",
+        )
+    shadow_plan = research_shadow_sub.add_parser(
+        "run-data-plan",
+        help="dry-run or execute local shadow replay data-maintenance actions",
+    )
+    shadow_plan.add_argument(
+        "--dataset-root",
+        default=None,
+        help="dataset root; default output_shared/research/shadow_replay/datasets",
+    )
+    shadow_plan.add_argument(
+        "--required-data-root",
+        default=None,
+        help="required-data root containing raw/ and parsed/; default output_shared/required_data",
+    )
+    shadow_plan.add_argument("--min-sample", type=int, default=30)
+    shadow_plan.add_argument("--min-mark-points", type=int, default=2)
+    shadow_plan.add_argument("--mark-stale-hours", type=int, default=24)
+    shadow_plan.add_argument(
+        "--action",
+        dest="actions",
+        action="append",
+        choices=("collect_marks", "settle"),
+        default=None,
+        help="enabled data maintenance action; repeatable; default collect_marks + settle",
+    )
+    shadow_plan.add_argument("--max-datasets", type=int, default=None)
+    shadow_plan.add_argument(
+        "--source",
+        default="local",
+        choices=("local", "opend"),
+        help="source for collect_marks actions; opend is explicit and may refresh local required-data cache with --write",
+    )
+    shadow_plan.add_argument(
+        "--write",
+        action="store_true",
+        help="execute eligible data-maintenance actions and write a local receipt",
+    )
+    shadow_plan.add_argument(
+        "--receipt-output",
+        default=None,
+        help="explicit receipt JSON path; requires --write",
+    )
+    shadow_plan.add_argument(
+        "--receipt-dir",
+        default=None,
+        help="receipt directory when --write is used; default output_shared/research/shadow_replay/receipts",
+    )
+    shadow_plan.add_argument(
+        "--settle-after-collect",
+        action="store_true",
+        help="derive outcome_facts after a successful collect_marks write",
+    )
+    shadow_plan.add_argument("--opend-host", default="127.0.0.1")
+    shadow_plan.add_argument("--opend-port", type=int, default=11111)
+    shadow_plan.add_argument("--limit-expirations", type=int, default=8)
+    shadow_plan.add_argument("--max-symbols", type=int, default=None)
+    shadow_plan.add_argument("--no-chain-cache", action="store_true")
+    shadow_plan.add_argument("--chain-cache-force-refresh", action="store_true")
+    shadow_plan.add_argument("--include-realized-volatility", action="store_true")
     shadow_mark = research_shadow_sub.add_parser(
         "mark",
         help="generate local mark path snapshots from required-data CSV quotes",
@@ -247,7 +329,9 @@ def handle_research_command(
         build_shadow_replay_dataset,
         collect_shadow_replay_marks,
         mark_shadow_replay_dataset,
+        run_shadow_replay_data_plan,
         settle_shadow_replay_dataset,
+        shadow_replay_dataset_status,
     )
 
     base = repo_base_fn()
@@ -271,6 +355,46 @@ def handle_research_command(
     if args.shadow_replay_command == "analyze":
         data = analyze_shadow_replay_dataset(dataset=args.dataset, min_sample=args.min_sample, output=args.output)
         return build_response(tool_name="research.shadow-replay.analyze", ok=True, data=data)
+
+    if args.shadow_replay_command in {"status", "list"}:
+        data = shadow_replay_dataset_status(
+            repo_root=base,
+            dataset_root=args.dataset_root,
+            min_sample=args.min_sample,
+            min_mark_points=args.min_mark_points,
+            mark_stale_hours=args.mark_stale_hours,
+        )
+        return build_response(tool_name=f"research.shadow-replay.{args.shadow_replay_command}", ok=True, data=data)
+
+    if args.shadow_replay_command == "run-data-plan":
+        if not bool(args.write) and (args.receipt_output or args.receipt_dir):
+            raise AgentToolError(
+                code="INPUT_ERROR",
+                message="--receipt-output and --receipt-dir require --write for shadow-replay run-data-plan",
+            )
+        data = run_shadow_replay_data_plan(
+            repo_root=base,
+            dataset_root=args.dataset_root,
+            required_data_root=args.required_data_root,
+            source=args.source,
+            min_sample=args.min_sample,
+            min_mark_points=args.min_mark_points,
+            mark_stale_hours=args.mark_stale_hours,
+            actions=args.actions,
+            max_datasets=args.max_datasets,
+            write=bool(args.write),
+            receipt_output=args.receipt_output,
+            receipt_dir=args.receipt_dir,
+            settle_after_collect=bool(args.settle_after_collect),
+            opend_host=args.opend_host,
+            opend_port=args.opend_port,
+            limit_expirations=args.limit_expirations,
+            chain_cache=not bool(args.no_chain_cache),
+            chain_cache_force_refresh=bool(args.chain_cache_force_refresh),
+            include_realized_volatility=bool(args.include_realized_volatility),
+            max_symbols=args.max_symbols,
+        )
+        return build_response(tool_name="research.shadow-replay.run-data-plan", ok=True, data=data)
 
     if args.shadow_replay_command == "mark":
         required_data_root = args.required_data_root or (base / "output_shared" / "required_data")
