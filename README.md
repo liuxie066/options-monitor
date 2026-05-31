@@ -290,12 +290,19 @@ om run tick --config config.us.json --accounts lx sy
 
 ```bash
 ./om research shadow-replay build --run-id <run-id> --dataset-id <dataset-id>
+./om research shadow-replay status --min-sample 30
+./om research shadow-replay run-data-plan --min-sample 30 --min-mark-points 2
+./om research shadow-replay run-data-plan --min-sample 30 --min-mark-points 2 --source local --write
 ./om research shadow-replay collect-marks --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --source local --required-data-root output_shared/required_data --write
 ./om research shadow-replay collect-marks --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --source opend --required-data-root output_shared/required_data --opend-host 127.0.0.1 --opend-port 11111 --write
 ./om research shadow-replay mark --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --required-data-root output_shared/required_data --write
 ./om research shadow-replay settle --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --write
 ./om research shadow-replay analyze --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --min-sample 30
 ```
+
+`status` / `list` 是只读复盘仪表盘，会列出每个本地 dataset 的 `dataset_id`、candidate 数、被拒样本是否存在、最后 mark 时间、usable mark 数、outcome facts 数，以及下一步建议：`collect_marks`、`settle`、`analyze` 或 `wait`。它还会输出 `sampling`、只包含 `collect_marks` / `settle` 的顶层 `data_plan`，以及只提示人工复盘的 `review_queue`，用于判断 mark 是否过期、路径采样点是否太少、哪些 dataset 应优先采样、哪些 dataset 已可人工复盘。它不采样、不结算、不写 dataset，用来回答“现在是否已经有足够数据可以复盘”。
+
+`run-data-plan` 是独立的低频数据维护入口，不挂 tick 主链路。默认 dry-run，只展示会执行哪些 `data_plan` 动作且不写 receipt；显式 `--write` 才会执行 `collect_marks` / `settle`，并写本地 receipt 到 `output_shared/research/shadow_replay/receipts/`。它不接受 `analyze` 作为执行动作；人工复盘仍从 `analyze` 命令进入。`--source opend --write` 需要人工显式选择，会刷新本地 required-data cache 后追加当前采样点。
 
 `collect-marks` 是复盘数据采样入口：`--source local` 使用本地 `required_data` 当前报价；`--source opend --write` 会先按 dataset 中的 symbol / option type / expiration 从 OpenD 拉当前报价写入本地 required_data cache，再把这一刻的 mark 追加到 replay dataset，并维护本地 OpenD 限流状态和 option-chain cache。不带 `--write` 的 OpenD 预览使用临时目录，不持久化这些文件。OpenD 只能补当前/未来采样点，不能事后恢复过去未保存的 option mark，所以需要在 dataset 建好后持续采样。
 
@@ -478,7 +485,7 @@ Covered Call 依赖真实持仓上下文。它在风险结构上和 Sell Put 同
 
 ### Close Advice
 
-`close_advice` 基于本地 `position_lots`、required data、报价和 lot 上的策略快照生成建议，属于 advisory-only 逻辑，不会自动平仓。
+`close_advice` 基于本地 `position_lots`、required data、报价和 lot 上的策略快照生成建议，属于 advisory-only 逻辑，不会自动平仓。`optimizer_switch` 必须带有本地候选报告中的替代候选身份字段，例如 `alternative_symbol`、`alternative_contract_symbol`、`alternative_expiration` 和 `alternative_source_path`；没有明确替代候选时不能把“换仓”当作可执行建议。
 
 当前支持的退出语义：
 
