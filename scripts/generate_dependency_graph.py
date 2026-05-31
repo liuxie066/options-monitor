@@ -413,7 +413,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 
 ## Reading
 
-- `src.interfaces` is a thin facade by intent, but `src.interfaces.cli.main` has the highest fan-out. If CLI growth continues, split command handlers by domain area while preserving the public `om` facade.
+- `src.interfaces` is a thin facade by intent, but `src.interfaces.cli.main` still has high fan-out. If CLI growth continues, split command handlers by domain area while preserving the public `om` facade.
 - `src.application.agent_tool_handlers` is a large integration switchboard; keep manifest, handlers, and tests synchronized when moving tool ownership.
 - The strongest production dependency remains `src.application -> domain.domain`, which is the intended direction: application orchestration calls deterministic domain policy.
 - `src.application -> src.infrastructure` is also expected, but new external-system access should stay in infrastructure adapters rather than leaking directly into domain code.
