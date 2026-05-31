@@ -47,6 +47,7 @@ def load_runtime_config(
     config_path: str | Path | None = None,
     expected_market: str | None = None,
     require_generated: bool = True,
+    require_identity: bool = True,
 ) -> tuple[Path, dict[str, Any]]:
     path = resolve_runtime_config_path(config_key=config_key, config_path=config_path)
     if not path.exists():
@@ -71,24 +72,25 @@ def load_runtime_config(
         )
     cfg = absolutize_portfolio_data_config(raw, config_path=path)
     cfg = normalize_portfolio_broker_config(cfg)
-    try:
-        ensure_runtime_config_identity(
-            cfg,
-            explicit_market=expected_market,
-            config_key=config_key,
-            runtime_config_path=path,
-            require_generated=require_generated,
-        )
-    except RuntimeConfigIdentityError as exc:
-        raise AgentToolError(
-            code="CONFIG_ERROR",
-            message=str(exc),
-            hint=(
-                "Use `om config migrate-yaml` for old JSON configs, then rebuild with "
-                "`om config build --source yaml --market <market>`."
-            ),
-            details=exc.result,
-        ) from exc
+    if require_identity:
+        try:
+            ensure_runtime_config_identity(
+                cfg,
+                explicit_market=expected_market,
+                config_key=config_key,
+                runtime_config_path=path,
+                require_generated=require_generated,
+            )
+        except RuntimeConfigIdentityError as exc:
+            raise AgentToolError(
+                code="CONFIG_ERROR",
+                message=str(exc),
+                hint=(
+                    "Use `om config migrate-yaml` for old JSON configs, then rebuild with "
+                    "`om config build --source yaml --market <market>`."
+                ),
+                details=exc.result,
+            ) from exc
     cfg["config_source_path"] = str(path)
     return path, cfg
 

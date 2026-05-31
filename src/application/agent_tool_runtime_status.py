@@ -10,6 +10,12 @@ from src.application.agent_tool_contracts import AgentToolError
 from src.application.environment_status import build_effective_env_with_status
 from src.application.ledger.api import ledger_store_payload
 from src.application.release_target import compare_versions
+from src.application.runtime_config_freshness import (
+    GENERATED_KEY,
+    check_runtime_config_freshness,
+    check_runtime_config_identity,
+    infer_runtime_config_market,
+)
 from src.application.runtime_config_paths import resolve_data_config_ref
 from src.application.runtime_trigger_context import build_trigger_context
 from src.application.service_deploy import service_status_from_profile
@@ -847,6 +853,110 @@ def _freshness_from_runtime_status(
     }
 
 
+def _config_authority_payload(
+    cfg: dict[str, Any],
+    *,
+    config_path: Path,
+    config_key: Any,
+    base: Path,
+    mask_path: Callable[[Any], str | None],
+) -> dict[str, Any]:
+    market = infer_runtime_config_market(
+        config_key=str(config_key or "").strip().lower() or None,
+        config_path=config_path,
+        config=cfg,
+    )
+    generated = cfg.get(GENERATED_KEY) if isinstance(cfg, dict) else None
+    generated_dict = generated if isinstance(generated, dict) else {}
+    identity = check_runtime_config_identity(
+        cfg,
+        config_key=str(config_key or "").strip().lower() or None,
+        runtime_config_path=config_path,
+    )
+    freshness: dict[str, Any] = {"ok": False, "errors": [{"code": "market_not_inferred"}]}
+    if market:
+        freshness = check_runtime_config_freshness(
+            cfg,
+            repo_root=base,
+            market=market,
+            runtime_config_path=config_path,
+        )
+    errors = [
+        item
+        for item in [*(identity.get("errors") or []), *(freshness.get("errors") or [])]
+        if isinstance(item, dict)
+    ]
+    source_summary = _generated_source_summary(generated_dict, base=base)
+    first_error = errors[0] if errors else None
+    yaml_source = _first_source_by_role(source_summary, "market_user")
+    system_source = _first_source_by_role(source_summary, "system")
+    return {
+        "ok": bool(identity.get("ok")) and bool(freshness.get("ok")),
+        "authoring_source": "config.yaml",
+        "runtime_config_path": mask_path(config_path),
+        "market": market,
+        "source_format": str(generated_dict.get("source_format") or "").strip().lower() or None,
+        "required_source_format": identity.get("required_source_format"),
+        "config_yaml_path": yaml_source.get("path"),
+        "config_yaml_sha256": yaml_source.get("sha256"),
+        "system_config_path": system_source.get("path"),
+        "system_config_sha256": system_source.get("sha256"),
+        "stale_or_invalid_reason": (
+            str(first_error.get("message") or first_error.get("code"))
+            if isinstance(first_error, dict)
+            else None
+        ),
+        "rebuild_command": identity.get("rebuild_command") or freshness.get("rebuild_command"),
+        "identity": _authority_check_summary(identity),
+        "freshness": _authority_check_summary(freshness),
+        "sources": source_summary,
+    }
+
+
+def _authority_check_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    errors = [item for item in (payload.get("errors") or []) if isinstance(item, dict)]
+    return {
+        "ok": bool(payload.get("ok")),
+        "error_count": len(errors),
+        "errors": errors[:5],
+    }
+
+
+def _generated_source_summary(generated: dict[str, Any], *, base: Path) -> list[dict[str, Any]]:
+    raw_sources = generated.get("sources")
+    sources = raw_sources if isinstance(raw_sources, list) else []
+    out: list[dict[str, Any]] = []
+    for item in sources:
+        if not isinstance(item, dict):
+            continue
+        raw_path = item.get("path")
+        path_display = None
+        if raw_path:
+            path = Path(str(raw_path)).expanduser()
+            if not path.is_absolute():
+                path = (base / path).resolve()
+            path_display = _relative_path(path, base=base)
+        out.append(
+            {
+                "role": str(item.get("role") or "").strip() or None,
+                "loaded": bool(item.get("loaded")),
+                "enabled": bool(item.get("enabled", True)),
+                "optional": bool(item.get("optional", False)),
+                "path": path_display,
+                "sha256": str(item.get("sha256") or "").strip() or None,
+                "inline": bool(item.get("inline", False)),
+            }
+        )
+    return out
+
+
+def _first_source_by_role(sources: list[dict[str, Any]], role: str) -> dict[str, Any]:
+    for item in sources:
+        if str(item.get("role") or "") == role:
+            return item
+    return {}
+
+
 def _account_summary(data: dict[str, Any]) -> dict[str, Any]:
     accounts_raw = data.get("accounts")
     accounts: dict[str, Any] = accounts_raw if isinstance(accounts_raw, dict) else {}
@@ -1606,6 +1716,7 @@ def runtime_status_tool(
     config_path, cfg = load_runtime_config(
         config_key=payload.get("config_key"),
         config_path=payload.get("config_path"),
+        require_identity=False,
     )
     portfolio_raw = cfg.get("portfolio")
     portfolio_cfg = cast(dict[str, Any], portfolio_raw) if isinstance(portfolio_raw, dict) else {}
@@ -1890,12 +2001,20 @@ def runtime_status_tool(
         mask_path=mask_path,
     )
 
+    config_authority = _config_authority_payload(
+        cfg,
+        config_path=config_path,
+        config_key=payload.get("config_key"),
+        base=base,
+        mask_path=mask_path,
+    )
     data: dict[str, Any] = {
         "config": {
             "config_path": mask_path(config_path),
             "accounts": accounts,
             "config_key": payload.get("config_key"),
         },
+        "config_authority": config_authority,
         "paths": {
             "report_dir": _relative_path(report_dir, base=base),
             "state_dir": _relative_path(state_dir, base=base),
@@ -1943,6 +2062,8 @@ def runtime_status_tool(
     }
     data["account_summary"] = _account_summary(data)
     data["freshness"] = _freshness_from_runtime_status(data, max_age_minutes=max_run_age_minutes)
+    data["summary"]["config_authority_ok"] = bool(config_authority.get("ok"))
+    data["summary"]["config_authority_reason"] = config_authority.get("stale_or_invalid_reason")
     data["summary"]["freshness_status"] = data["freshness"].get("status")
     data["summary"]["account_count"] = data["account_summary"].get("account_count")
     data["summary"]["latest_run_path"] = latest_run_payload.get("path") if latest_run_payload else None

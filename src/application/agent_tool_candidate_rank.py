@@ -97,6 +97,16 @@ def _default_report_dirs(
     base = repo_base()
     if payload.get("report_dir"):
         return [_resolve_path(payload["report_dir"], base=base)]
+    run_dir = _run_dir_from_payload(payload, base=base)
+    if run_dir is not None:
+        account = str(payload.get("account") or "").strip().lower()
+        if account:
+            return [(run_dir / "accounts" / account).resolve()]
+        dirs = [run_dir.resolve()]
+        accounts_dir = run_dir / "accounts"
+        if accounts_dir.exists() and accounts_dir.is_dir():
+            dirs.extend(path.resolve() for path in sorted(accounts_dir.iterdir()) if path.is_dir())
+        return dirs
     if payload.get("output_dir"):
         return [(resolve_output_root(payload.get("output_dir")) / "reports").resolve()]
     candidates = [
@@ -111,6 +121,14 @@ def _default_report_dirs(
         seen.add(path)
         out.append(path)
     return out
+
+
+def _run_dir_from_payload(payload: dict[str, Any], *, base: Path) -> Path | None:
+    if payload.get("run_dir"):
+        return _resolve_path(payload.get("run_dir"), base=base)
+    if payload.get("run_id"):
+        return (base / "output_runs" / str(payload.get("run_id")).strip()).resolve()
+    return None
 
 
 def _candidate_paths_for_mode(report_dir: Path, *, mode: str) -> list[Path]:

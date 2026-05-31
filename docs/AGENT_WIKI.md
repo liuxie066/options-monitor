@@ -55,6 +55,7 @@ Use the lowest-risk tool that can answer the question.
 | Did cron/tick decide to skip? | `scheduler_status`, `scheduler_decision.json` | Separates scheduler rules from cron execution |
 | Why did a symbol disappear? | `candidate_filter_explain` | Uses trace evidence instead of guessing from final CSV |
 | Why is candidate ranking odd? | `candidate_rank_explain` | Explains existing candidate CSV ranking |
+| Is shadow replay evidence ready for tuning? | `research collect --scope candidate` | Offline candidate/reject universe readiness; no live config mutation |
 | Is candidate evidence complete enough for scan diagnosis? | `healthcheck` / `doctor` with `candidate_evidence` inputs | Diagnostic row-count/readiness check, not a strategy recommendation |
 | Is Sell Put cash constrained? | `query_cash_headroom` | Account-aware cash and collateral view |
 | Is ledger projection trustworthy? | `option_positions_read action=inspect`, Research `ledger` scope | Reads canonical event/projection state |
@@ -107,11 +108,13 @@ Equivalent agent tool:
 | Scope | Purpose |
 |---|---|
 | `ledger` | Trade intake, position maintenance, and ledger quality evidence |
-| `candidate` | Per-account candidate evidence, ranking samples, and filter traces |
+| `candidate` | Per-account candidate evidence, ranking samples, filter traces, and shadow replay readiness |
 | `quality` | Runtime freshness, latest run status, scheduler evidence, optional healthcheck |
 | `full` | Combined default |
 
 Research keeps candidate CSVs separate from `*_candidates_reject_log.csv` files. Reject logs remain available as rejection evidence, but they must not inflate candidate row counts.
+
+For strategy tuning, inspect `candidate_evidence.shadow_replay` in the Research bundle. It is an offline readiness and analysis surface only; it cannot mutate scanner config.
 
 Default runs do not write files. Writing reports requires `write_outputs=true`, `confirm=true`, and `OM_AGENT_ENABLE_WRITE_TOOLS=true`. Default output locations are:
 
@@ -181,6 +184,18 @@ def rank_candidate_rows(rows: list[dict[str, Any]], *, mode: StrategyMode | str)
 - Docs: `docs/candidate_strategy.md`
 
 For "why did this symbol/account not get a candidate", start from `candidate_filter_explain` and trace artifacts, not from final candidate CSV alone.
+
+For strategy tuning, collect a candidate-scoped Research bundle first:
+
+```bash
+./om research collect --config-key us --scope candidate --run-id <run-id> --output json --no-write-outputs --shadow-replay-min-sample 30
+```
+
+Treat the shadow replay payload as offline evidence. If it lacks rejected samples, mark path snapshots, or outcome facts, it is not ready for strategy recommendations and must not mutate production scanner config, Feishu, trade state, or notifications.
+
+For an explicit local dataset, use `./om research shadow-replay build --run-id <run-id>`, generate mark path snapshots with `./om research shadow-replay mark --dataset <dataset-dir> --required-data-root output_shared/required_data --write`, derive mark-based or expiration outcomes with `./om research shadow-replay settle --dataset <dataset-dir> --write`, and analyze it with `./om research shadow-replay analyze --dataset <dataset-dir>`. Build, mark, and settle only write the local replay dataset. Missing required-data quotes are recorded as `missing_quote` evidence gaps and are not usable marks; expiry spot-only marks can be used for expiration outcome facts.
+
+Use `outcome_by_bucket` from the analysis output to review DTE, Delta, IV/RV, spread, and concentration buckets before proposing filter or ranking changes.
 
 ### Tick Runtime
 

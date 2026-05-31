@@ -206,3 +206,31 @@ def test_candidate_filter_explain_reads_trace_path(tmp_path: Path) -> None:
     assert cash["status"] == "post_filtered"
     assert cash["reason_counts"]["usd_cash_insufficient"] == 1
     assert out["meta"]["source_files"][0]["rows"] == 1
+
+
+def test_candidate_rank_explain_reads_run_account_candidates(tmp_path: Path) -> None:
+    from src.application.agent_tool_candidate_rank import candidate_rank_explain_tool
+
+    account_dir = tmp_path / "output_runs" / "run-1" / "accounts" / "lx"
+    account_dir.mkdir(parents=True)
+    (account_dir / "nvda_sell_put_candidates_labeled.csv").write_text(
+        (
+            "symbol,option_type,dte,delta,strike,spot,annualized_net_return_on_cash_basis,"
+            "net_income,otm_pct,spread_ratio,open_interest,volume\n"
+            "NVDA,put,30,-0.2,100,110,0.12,120,0.09,0.1,500,20\n"
+        ),
+        encoding="utf-8",
+    )
+
+    data, warnings, meta = candidate_rank_explain_tool(
+        {"run_id": "run-1", "account": "lx", "mode": "put", "top_n": 5, "compare_baseline": True},
+        repo_base=lambda: tmp_path,
+        resolve_output_root=lambda _value: tmp_path / "output_shared" / "agent_tools",
+        mask_path=lambda path: f".../{Path(path).name}" if path else None,
+    )
+
+    assert warnings == []
+    assert data["row_count"] == 1
+    assert data["source_files"][0]["path"] == ".../nvda_sell_put_candidates_labeled.csv"
+    assert data["groups"][0]["baseline"]["name"] == "return_then_income"
+    assert meta["source_files"][0]["row_count"] == 1

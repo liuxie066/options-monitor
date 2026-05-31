@@ -13,6 +13,7 @@ from domain.domain.engine import CandidateScoreWeights, explain_candidate_rank, 
 from src.application.research.redaction import redact_value
 from src.application.runtime_logs_cli import collect_runtime_logs
 from src.application.runtime_runs_cli import collect_runtime_runs
+from src.application.shadow_replay import summarize_shadow_replay_readiness
 
 
 def collect_evidence(
@@ -137,7 +138,11 @@ def _safe_input_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "max_notification_chars",
         "candidate_paths",
         "trace_paths",
+        "reject_log_paths",
+        "mark_paths",
+        "outcome_paths",
         "candidate_report_dir",
+        "shadow_replay_min_sample",
         "profile_path",
         "output",
         "scope",
@@ -337,23 +342,39 @@ def _audit_tails(source_paths: dict[str, Path | None], *, base: Path, tail_limit
 def _candidate_evidence(payload: dict[str, Any], *, source_paths: dict[str, Path | None], base: Path, tail_limit: int, cfg: dict[str, Any]) -> dict[str, Any]:
     candidate_paths = _explicit_paths(payload.get("candidate_paths") or payload.get("candidate_path"), base=base)
     trace_paths = _explicit_paths(payload.get("trace_paths") or payload.get("trace_path"), base=base)
-    reject_log_paths: list[Path] = []
+    reject_log_paths = _explicit_paths(payload.get("reject_log_paths") or payload.get("reject_log_path"), base=base)
+    mark_paths = _explicit_paths(payload.get("mark_paths") or payload.get("mark_path"), base=base)
+    outcome_paths = _explicit_paths(payload.get("outcome_paths") or payload.get("outcome_path"), base=base)
     for directory in _candidate_dirs(source_paths, base=base):
         found_candidates, found_reject_logs = _candidate_and_reject_log_paths(directory)
         candidate_paths.extend(found_candidates)
         reject_log_paths.extend(found_reject_logs)
         trace_paths.append(directory / "candidate_filter_trace.jsonl")
+        mark_paths.extend(_glob_many(directory, ("mark_path_snapshots.jsonl", "mark_path_snapshots.csv", "*mark_path*.jsonl", "*mark_path*.csv")))
+        outcome_paths.extend(_glob_many(directory, ("outcome_facts.jsonl", "outcome_facts.csv", "*outcome*.jsonl", "*outcome*.csv")))
 
     explicit_reject_logs = [path for path in candidate_paths if _is_reject_log_path(path)]
     reject_log_paths.extend(explicit_reject_logs)
     candidate_paths = _unique_paths([path for path in candidate_paths if _is_candidate_report_path(path)])[:30]
     reject_log_paths = _unique_paths(reject_log_paths)[:30]
     trace_paths = _unique_paths(trace_paths)[:20]
+    mark_paths = _unique_paths(mark_paths)[:30]
+    outcome_paths = _unique_paths(outcome_paths)[:30]
     candidate_reports = [_candidate_csv_summary(path, base=base) for path in candidate_paths]
     reject_logs = [_reject_log_summary(path, base=base) for path in reject_log_paths]
     filter_traces = [_trace_summary(path, base=base, limit=tail_limit) for path in trace_paths]
     ranking_limit = _as_int(payload.get("ranking_limit"), default=5, low=1, high=20)
     ranking_evidence = _ranking_evidence(candidate_paths, base=base, cfg=cfg, limit=ranking_limit)
+    shadow_replay = summarize_shadow_replay_readiness(
+        candidate_paths=candidate_paths,
+        trace_paths=trace_paths,
+        reject_log_paths=reject_log_paths,
+        mark_paths=mark_paths,
+        outcome_paths=outcome_paths,
+        base=base,
+        min_sample=_as_int(payload.get("shadow_replay_min_sample"), default=30, low=1, high=10000),
+    )
+    shadow_replay_status = _first_shadow_replay_status(shadow_replay)
     total_candidate_rows = sum(int(item.get("row_count") or 0) for item in candidate_reports if item.get("exists"))
     total_reject_rows = sum(int(item.get("row_count") or 0) for item in reject_logs if item.get("exists"))
     return {
@@ -362,6 +383,7 @@ def _candidate_evidence(payload: dict[str, Any], *, source_paths: dict[str, Path
         "reject_logs": reject_logs,
         "filter_traces": filter_traces,
         "ranking_evidence": ranking_evidence,
+        "shadow_replay": shadow_replay,
         "summary": {
             "candidate_file_count": sum(1 for item in candidate_reports if item.get("exists")),
             "candidate_row_count": total_candidate_rows,
@@ -370,9 +392,19 @@ def _candidate_evidence(payload: dict[str, Any], *, source_paths: dict[str, Path
             "filter_trace_file_count": sum(1 for item in filter_traces if item.get("exists")),
             "ranking_report_count": _nested(_dict_or_empty(ranking_evidence), "summary", "report_count"),
             "ranking_top_row_count": _nested(_dict_or_empty(ranking_evidence), "summary", "top_row_count"),
+            "shadow_replay_status": shadow_replay_status,
             "evidence_level": "candidate_and_trace" if total_candidate_rows and any(item.get("exists") for item in filter_traces) else ("candidate_only" if total_candidate_rows else "limited"),
         },
     }
+
+
+def _first_shadow_replay_status(profile: dict[str, Any]) -> str | None:
+    raw = profile.get("recommendations")
+    items = raw if isinstance(raw, list) else []
+    if not items or not isinstance(items[0], dict):
+        return None
+    status = str(items[0].get("status") or "").strip()
+    return status or None
 
 
 def _candidate_dirs(source_paths: dict[str, Path | None], *, base: Path) -> list[Path]:

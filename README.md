@@ -237,6 +237,7 @@ om run tick --config config.us.json --accounts lx sy
 
 ```bash
 ./om-agent run --tool candidate_rank_explain --input-json '{"mode":"put","top_n":5}'
+./om-agent run --tool candidate_rank_explain --input-json '{"run_id":"<run-id>","account":"lx","mode":"put","top_n":5}'
 ./om-agent run --tool candidate_rank_explain --input-json '{"candidate_path":"output_shared/reports/sell_call_candidates.csv","mode":"call","top_n":5}'
 ```
 
@@ -268,6 +269,35 @@ om run tick --config config.us.json --accounts lx sy
 - `share_coverage`
 
 适合回答这些问题：
+
+### 离线 Shadow Replay 证据
+
+需要做策略参数、过滤规则或排序质量分析时，先收集现有 run/report 证据，不重跑扫描、不改配置：
+
+```bash
+./om research collect --config-key us --scope candidate --run-id <run-id> --output json --no-write-outputs --shadow-replay-min-sample 30
+```
+
+`research` 的 candidate evidence 会读取已有候选 CSV、reject log 和 `candidate_filter_trace.jsonl`，输出 `candidate_evidence.shadow_replay` readiness。它不改 runtime config、不写交易状态、不发通知；缺少被拒样本、mark path 或 outcome facts 时会明确标记 `not_ready` / `evidence_incomplete`，避免只用最终候选造成幸存者偏差。
+
+如果已有路径和结果证据，可显式传入：
+
+```bash
+./om research collect --config-key us --scope candidate --candidate-path candidates.csv --trace-path candidate_filter_trace.jsonl --mark-path mark_path_snapshots.jsonl --outcome-path outcome_facts.jsonl --output json --no-write-outputs
+```
+
+需要落地本地 replay dataset 时使用：
+
+```bash
+./om research shadow-replay build --run-id <run-id> --dataset-id <dataset-id>
+./om research shadow-replay mark --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --required-data-root output_shared/required_data --write
+./om research shadow-replay settle --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --write
+./om research shadow-replay analyze --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --min-sample 30
+```
+
+`mark` 只从 `required_data/parsed/*_required_data.csv` 读取报价，为本地 replay dataset 生成 `mark_path_snapshots.jsonl`。缺报价会写成 `missing_quote` 证据缺口，不会被当作可用 mark，也不会推动 settle/analyze 进入可审阅状态。到期日或到期后的 mark 可用 spot/strike 推导 `expired_worthless`、`assigned_at_expiry` 等 outcome；非到期 mark 仍需要可用 mid、bid/ask 或 PnL 字段。
+
+`analyze` 会同时输出总体 outcome stats 和按 DTE、Delta、IV/RV、Spread、集中度分桶的 outcome-by-bucket 表现，用于复盘哪些过滤区间贡献了盈利、亏损或幸存者偏差风险。
 
 - 这个 symbol 根本没被观测到，还是被某条规则拒掉了
 - 是扫描阶段被拒，还是账户级后过滤被拒
