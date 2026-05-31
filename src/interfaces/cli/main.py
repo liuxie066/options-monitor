@@ -32,7 +32,6 @@ from src.application.config_yaml import (
     default_yaml_config_path,
     load_yaml_config_file,
 )
-from src.application.healthcheck import run_healthcheck
 from src.application.assistant.contracts import AssistantRequest
 from src.application.assistant.operation_diagnostics import collect_pending_operations, collect_recent_audit
 from src.application.inbound import (
@@ -45,12 +44,7 @@ from src.application.assistant.upgrade_operations import run_confirmed_upgrade_o
 from src.application.multi_account_tick import run_tick
 from src.application.pipeline_runtime import main as run_scan_pipeline
 from src.application.tick_cron import run_tick_cron
-from src.application.tool_execution import execute_tool
-from src.application.runtime_logs_cli import collect_runtime_logs, format_runtime_logs
-from src.application.runtime_runs_cli import collect_runtime_runs, format_runtime_runs
-from src.application.runtime_status_cli import format_runtime_status_summary, runtime_status_payload_from_args
 from src.application.settings import bootstrap_process_env
-from src.application.support_bundle import support_bundle_response
 from src.application.version_check import check_version_update
 from src.interfaces.cli.account_ops import (
     add_account,
@@ -79,6 +73,20 @@ from src.interfaces.cli.operator_ops import (
     preview_notification,
     run_close_advice,
     run_scan,
+)
+from src.interfaces.cli.observability_ops import (
+    add_diagnostic_commands,
+    add_runtime_observability_commands,
+    collect_runtime_logs,
+    collect_runtime_runs,
+    execute_tool,
+    format_runtime_logs,
+    format_runtime_runs,
+    format_runtime_status_summary,
+    handle_observability_command,
+    run_healthcheck,
+    runtime_status_payload_from_args,
+    support_bundle_response,
 )
 from src.interfaces.cli.research import add_research_commands, handle_research_command
 from src.interfaces.cli.scheduler_ops import (
@@ -230,56 +238,11 @@ def _add_assistant_commands(parser: argparse.ArgumentParser) -> None:
     assistant_upgrade_worker.add_argument("--format", choices=("json", "text"), default="json")
 
 
-def _add_candidate_evidence_diagnostic_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--candidate-report-dir", default=None, help="directory containing candidate diagnostic evidence files")
-    parser.add_argument("--candidate-path", action="append", dest="candidate_paths", default=None)
-    parser.add_argument("--candidate-reject-log-path", action="append", dest="candidate_reject_log_paths", default=None)
-    parser.add_argument("--candidate-trace-path", action="append", dest="candidate_trace_paths", default=None)
-    parser.add_argument("--candidate-evidence-min-sample", type=int, default=None)
-
-
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="options-monitor unified CLI")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    health = sub.add_parser("healthcheck", help="run readiness checks")
-    health.add_argument("--config-key", default=None, choices=("us", "hk"))
-    health.add_argument("--config-path", default=None)
-    health.add_argument("--accounts", nargs="*", default=None)
-    health.add_argument("--opend-telnet-host", default=None)
-    health.add_argument("--opend-telnet-port", type=int, default=None)
-    health.add_argument("--audit-db", default=None)
-    health.add_argument("--profile-path", default=None)
-    health.add_argument("--env-file", default=None)
-    health.add_argument("--no-local-env-file", action="store_true")
-    health.add_argument("--include-service-status", action="store_true")
-    _add_candidate_evidence_diagnostic_args(health)
-
-    doctor = sub.add_parser("doctor", help="diagnose runtime readiness and common operator issues")
-    doctor.add_argument("--config-key", default=None, choices=("us", "hk"))
-    doctor.add_argument("--config-path", default=None)
-    doctor.add_argument("--accounts", nargs="*", default=None)
-    doctor.add_argument("--opend-telnet-host", default=None)
-    doctor.add_argument("--opend-telnet-port", type=int, default=None)
-    doctor.add_argument("--audit-db", default=None)
-    doctor.add_argument("--profile-path", default=None)
-    doctor.add_argument("--env-file", default=None)
-    doctor.add_argument("--no-local-env-file", action="store_true")
-    doctor.add_argument("--include-service-status", action="store_true")
-    _add_candidate_evidence_diagnostic_args(doctor)
-
-    support = sub.add_parser("support", help="collect redacted support diagnostics")
-    support_sub = support.add_subparsers(dest="support_command", required=True)
-    support_bundle = support_sub.add_parser("bundle", help="write a redacted support bundle JSON")
-    support_bundle.add_argument("--config-key", default=None, choices=("us", "hk"))
-    support_bundle.add_argument("--config-path", default=None)
-    support_bundle.add_argument("--accounts", nargs="*", default=None)
-    support_bundle.add_argument("--profile-path", default=None)
-    support_bundle.add_argument("--env-file", default=None)
-    support_bundle.add_argument("--no-local-env-file", action="store_true")
-    support_bundle.add_argument("--include-healthcheck", action="store_true")
-    support_bundle.add_argument("--runtime-root", default=None)
-    support_bundle.add_argument("--output-dir", default=None)
+    add_diagnostic_commands(sub)
 
     _add_assistant_commands(sub.add_parser("assistant", help="inspect optional conversational assistant runtime"))
 
@@ -310,43 +273,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     inbound_ws.add_argument("--queue-size", type=int, default=None)
     inbound_ws.add_argument("--lock-path", default=None)
     inbound_ws.add_argument("--check", action="store_true", help="validate and print redacted long-connection configuration without starting the client")
-    status = sub.add_parser("status", help="summarize runtime status")
-    status.add_argument("--config-key", default=None, choices=("us", "hk"))
-    status.add_argument("--config-path", default=None)
-    status.add_argument("--accounts", nargs="*", default=None)
-    status.add_argument("--profile-path", default=None)
-    status.add_argument("--env-file", default=None)
-    status.add_argument("--no-local-env-file", action="store_true")
-    status.add_argument("--run-id", default=None)
-    status.add_argument("--run-dir", default=None)
-    status.add_argument("--report-dir", default=None)
-    status.add_argument("--state-dir", default=None)
-    status.add_argument("--shared-state-dir", default=None)
-    status.add_argument("--accounts-root", default=None)
-    status.add_argument("--runs-root", default=None)
-    status.add_argument("--max-run-age-minutes", type=int, default=None)
-    status.add_argument("--max-notification-chars", type=int, default=None)
-    status.add_argument("--json", action="store_true", help="print raw runtime_status JSON envelope")
-
-    runs = sub.add_parser("runs", help="list runtime run snapshots")
-    runs.add_argument("--runs-root", default=None)
-    runs.add_argument("--profile-path", default=None)
-    runs.add_argument("--limit", type=int, default=10)
-    runs.add_argument("--run-id", default=None)
-    runs.add_argument("--run-dir", default=None)
-    runs.add_argument("--scanned-only", action="store_true")
-    runs.add_argument("--json", action="store_true", help="print JSON envelope")
-
-    logs = sub.add_parser("logs", help="tail runtime logs and run audit files")
-    logs.add_argument("--runs-root", default=None)
-    logs.add_argument("--logs-root", default=None)
-    logs.add_argument("--profile-path", default=None)
-    logs.add_argument("--run-id", default=None)
-    logs.add_argument("--run-dir", default=None)
-    logs.add_argument("--kind", default="all", choices=("all", "audit", "tool", "tick", "service"))
-    logs.add_argument("--lines", type=int, default=50)
-    logs.add_argument("--file", dest="log_file", default=None)
-    logs.add_argument("--json", action="store_true", help="print JSON envelope")
+    add_runtime_observability_commands(sub)
 
     add_research_commands(sub)
 
@@ -615,62 +542,20 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(actual_argv)
     _bootstrap_runtime_env_from_args(args)
     try:
-        if args.command == "healthcheck":
-            return _print(
-                run_healthcheck(
-                    config_key=args.config_key,
-                    config_path=args.config_path,
-                    accounts=args.accounts,
-                    opend_telnet_host=args.opend_telnet_host,
-                    opend_telnet_port=args.opend_telnet_port,
-                    audit_db=args.audit_db,
-                    profile_path=args.profile_path,
-                    include_service_status=bool(args.include_service_status),
-                    env_file=args.env_file,
-                    candidate_report_dir=args.candidate_report_dir,
-                    candidate_paths=args.candidate_paths,
-                    candidate_reject_log_paths=args.candidate_reject_log_paths,
-                    candidate_trace_paths=args.candidate_trace_paths,
-                    candidate_evidence_min_sample=args.candidate_evidence_min_sample,
-                )
+        if args.command in {"healthcheck", "doctor", "support", "status", "runs", "logs"}:
+            return handle_observability_command(
+                args,
+                repo_base_fn=repo_base,
+                run_healthcheck_fn=run_healthcheck,
+                support_bundle_response_fn=support_bundle_response,
+                execute_tool_fn=execute_tool,
+                runtime_status_payload_from_args_fn=runtime_status_payload_from_args,
+                format_runtime_status_summary_fn=format_runtime_status_summary,
+                collect_runtime_runs_fn=collect_runtime_runs,
+                format_runtime_runs_fn=format_runtime_runs,
+                collect_runtime_logs_fn=collect_runtime_logs,
+                format_runtime_logs_fn=format_runtime_logs,
             )
-
-        if args.command == "doctor":
-            healthcheck = run_healthcheck(
-                config_key=args.config_key,
-                config_path=args.config_path,
-                accounts=args.accounts,
-                opend_telnet_host=args.opend_telnet_host,
-                opend_telnet_port=args.opend_telnet_port,
-                audit_db=args.audit_db,
-                profile_path=args.profile_path,
-                include_service_status=bool(args.include_service_status),
-                env_file=args.env_file,
-                candidate_report_dir=args.candidate_report_dir,
-                candidate_paths=args.candidate_paths,
-                candidate_reject_log_paths=args.candidate_reject_log_paths,
-                candidate_trace_paths=args.candidate_trace_paths,
-                candidate_evidence_min_sample=args.candidate_evidence_min_sample,
-            )
-            return _print(build_response(
-                tool_name="doctor",
-                ok=bool(healthcheck.get("ok", True)),
-                data={"healthcheck": healthcheck},
-            ))
-
-        if args.command == "support" and args.support_command == "bundle":
-            return _print(support_bundle_response(
-                repo_root=repo_base(),
-                config_key=args.config_key,
-                config_path=args.config_path,
-                accounts=args.accounts,
-                profile_path=args.profile_path,
-                env_file=args.env_file,
-                include_local_env_file=not bool(args.no_local_env_file),
-                include_healthcheck=bool(args.include_healthcheck),
-                output_dir=args.output_dir,
-                runtime_root=args.runtime_root,
-            ))
 
         if args.command == "assistant" and args.assistant_command == "llm-check":
             data = check_llm_translator(
@@ -913,55 +798,6 @@ def main(argv: list[str] | None = None) -> int:
                 sys.stdout.write(text + "\n")
                 return 0 if out.get("ok", True) else 2
             return _print(out)
-
-        if args.command == "status":
-            out = execute_tool("runtime_status", runtime_status_payload_from_args(args))
-            if args.json:
-                return _print(out)
-            sys.stdout.write(format_runtime_status_summary(out))
-            return 0 if out.get("ok", True) else 2
-
-        if args.command == "runs":
-            data = collect_runtime_runs(
-                repo_root=repo_base(),
-                runs_root=args.runs_root,
-                profile_path=args.profile_path,
-                limit=int(args.limit),
-                run_id=args.run_id,
-                run_dir=args.run_dir,
-                scanned_only=bool(args.scanned_only),
-            )
-            envelope = build_response(
-                tool_name="runs",
-                ok=bool(data.get("summary", {}).get("ok", True)),
-                data=data,
-            )
-            if args.json:
-                return _print(envelope)
-            sys.stdout.write(format_runtime_runs(data))
-            return 0 if envelope.get("ok", True) else 2
-
-        if args.command == "logs":
-            data = collect_runtime_logs(
-                repo_root=repo_base(),
-                runs_root=args.runs_root,
-                logs_root=args.logs_root,
-                profile_path=args.profile_path,
-                run_id=args.run_id,
-                run_dir=args.run_dir,
-                kind=args.kind,
-                lines=int(args.lines),
-                log_file=args.log_file,
-            )
-            envelope = build_response(
-                tool_name="logs",
-                ok=bool(data.get("summary", {}).get("ok", True)),
-                data=data,
-            )
-            if args.json:
-                return _print(envelope)
-            sys.stdout.write(format_runtime_logs(data))
-            return 0 if envelope.get("ok", True) else 2
 
         if args.command == "research":
             return _print(handle_research_command(args, execute_tool_fn=execute_tool, repo_base_fn=repo_base))
