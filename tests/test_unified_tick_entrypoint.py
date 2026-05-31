@@ -280,12 +280,14 @@ def test_ensure_runtime_schedule_matches_market_accepts_hk_day_schedule() -> Non
 
 def test_production_tick_entrypoints_enable_sibling_external_guard() -> None:
     cli_src = Path("src/interfaces/cli/main.py").read_text(encoding="utf-8")
+    run_ops_src = Path("src/interfaces/cli/run_ops.py").read_text(encoding="utf-8")
     multi_src = Path("src/application/multi_account_tick.py").read_text(encoding="utf-8")
 
-    assert "from src.application.multi_account_tick import run_tick" in cli_src
-    assert "return int(run_tick(tick_argv))" in cli_src
-    assert 'run_sub.add_parser("tick-cron"' in cli_src
-    assert "run_tick_cron(" in cli_src
+    assert "handle_run_command(" in cli_src
+    assert "from src.application.multi_account_tick import run_tick" in run_ops_src
+    assert "return int(run_tick_fn(_tick_argv(args)))" in run_ops_src
+    assert 'run_sub.add_parser("tick-cron"' in run_ops_src
+    assert "run_tick_cron_fn(" in run_ops_src
     assert "require_sibling_external=True" in multi_src
     assert "ensure_runtime_schedule_matches_market(" in multi_src
     assert "build_trigger_context()" in multi_src

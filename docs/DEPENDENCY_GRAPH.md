@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 575 (`src`: 309, `domain`: 51, `scripts`: 6, `tests`: 209)
-- Internal import edges: 2957 total, 1374 production/script edges excluding tests
+- Python files scanned: 578 (`src`: 312, `domain`: 51, `scripts`: 6, `tests`: 209)
+- Internal import edges: 2964 total, 1381 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -38,7 +38,7 @@ flowchart LR
   domain_services -->|5| domain
   domain_services -->|2| storage
   infrastructure -->|2| domain
-  interfaces -->|91| application
+  interfaces -->|95| application
   interfaces -->|2| domain
   scripts -->|1| application
   scripts -->|1| infrastructure
@@ -59,7 +59,7 @@ flowchart LR
 |---|---|---|
 | application | domain | 206 |
 | application | infrastructure | 100 |
-| interfaces | application | 91 |
+| interfaces | application | 95 |
 | application | storage | 34 |
 | domain_services | domain | 5 |
 | application | domain_services | 2 |
@@ -90,7 +90,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | from | to | imports |
 |---|---|---|
 | src.application | domain.domain | 102 |
-| src.interfaces | src.application | 75 |
+| src.interfaces | src.application | 79 |
 | src.application | src.infrastructure | 73 |
 | src.application.ledger | domain.domain.ledger | 29 |
 | src.application | domain.storage | 25 |
@@ -124,8 +124,8 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.interfaces | src.application.ledger | 4 |
 | src.application | src.application.trades | 3 |
 | src.interfaces | src.application.settings | 3 |
-| src.interfaces | src.application.trades | 3 |
 | src.interfaces | src.application.positions | 3 |
+| src.interfaces | src.application.trades | 3 |
 | domain.domain | domain.domain.ledger | 3 |
 | src.application | src.application.research | 2 |
 | src.application.inbound | src.infrastructure | 2 |
@@ -175,7 +175,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 
 | module | incoming imports |
 |---|---|
-| src.application.agent_tool_contracts | 65 |
+| src.application.agent_tool_contracts | 68 |
 | domain.domain.ledger.position_fields | 41 |
 | src.infrastructure.io_utils | 37 |
 | domain.domain.symbol_identity | 29 |
@@ -184,7 +184,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.application.assistant.contracts | 23 |
 | domain.domain.engine | 22 |
 | src.application.ledger.api | 22 |
-| src.application.agent_tool_config | 20 |
+| src.application.agent_tool_config | 21 |
 | src.application.runtime_cli_format | 20 |
 | domain.domain.trade_contract_identity | 19 |
 | src.application.account_config | 18 |
@@ -196,11 +196,11 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | module | outgoing imports |
 |---|---|
 | src.application.agent_tool_handlers | 36 |
-| src.interfaces.cli.main | 31 |
 | src.application.multi_account_tick | 26 |
 | src.application.close_advice_runner | 22 |
 | src.application.ledger.queries | 20 |
 | src.application.pipeline_runtime | 20 |
+| src.interfaces.cli.main | 20 |
 | src.application.multi_tick.required_data_prefetch | 18 |
 | src.application.tick_notification_flow | 18 |
 | src.application.agent_tool_runtime_status | 17 |
@@ -213,7 +213,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 
 ## Reading
 
-- `src.interfaces` is a thin facade by intent, but `src.interfaces.cli.main` still has high fan-out. If CLI growth continues, split command handlers by domain area while preserving the public `om` facade.
+- `src.interfaces` is a thin facade by intent. Keep `src.interfaces.cli.main` as the public `om` dispatcher, and keep command-specific application imports in focused `src.interfaces.cli.*_ops` owners.
 - `src.application.agent_tool_handlers` is a large integration switchboard; keep manifest, handlers, and tests synchronized when moving tool ownership.
 - The strongest production dependency remains `src.application -> domain.domain`, which is the intended direction: application orchestration calls deterministic domain policy.
 - `src.application -> src.infrastructure` is also expected, but new external-system access should stay in infrastructure adapters rather than leaking directly into domain code.
