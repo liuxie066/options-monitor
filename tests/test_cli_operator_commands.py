@@ -680,6 +680,12 @@ def test_research_collect_forwards_remote_runtime_selection(monkeypatch, capsys)
         "3",
         "--tail-limit",
         "50",
+        "--shadow-replay-min-sample",
+        "20",
+        "--mark-path",
+        "/var/lib/options-monitor/marks.jsonl",
+        "--outcome-path",
+        "/var/lib/options-monitor/outcomes.jsonl",
         "--max-run-age-minutes",
         "90",
         "--max-notification-chars",
@@ -707,6 +713,9 @@ def test_research_collect_forwards_remote_runtime_selection(monkeypatch, capsys)
                 "run_id": "run-1",
                 "runs_limit": 3,
                 "tail_limit": 50,
+                "shadow_replay_min_sample": 20,
+                "mark_paths": ["/var/lib/options-monitor/marks.jsonl"],
+                "outcome_paths": ["/var/lib/options-monitor/outcomes.jsonl"],
                 "max_run_age_minutes": 90,
                 "max_notification_chars": 2000,
                 "output": "json",
@@ -716,6 +725,152 @@ def test_research_collect_forwards_remote_runtime_selection(monkeypatch, capsys)
             },
         )
     ]
+
+
+def test_research_shadow_replay_build_and_analyze(capsys, monkeypatch, tmp_path: Path) -> None:
+    import src.interfaces.cli.main as cli
+
+    monkeypatch.setattr(cli, "repo_base", lambda: tmp_path)
+    account_dir = tmp_path / "output_runs" / "run-1" / "accounts" / "lx"
+    account_dir.mkdir(parents=True)
+    (account_dir / "nvda_sell_put_candidates_labeled.csv").write_text(
+        (
+            "symbol,account,option_type,contract_symbol,dte,delta,strike,iv_rv_ratio,spread_ratio\n"
+            "NVDA,lx,put,NVDA260619P00100000,30,-0.2,100,1.25,0.10\n"
+        ),
+        encoding="utf-8",
+    )
+    (account_dir / "candidate_filter_trace.jsonl").write_text(
+        json.dumps(
+            {
+                "symbol": "AMD",
+                "account": "lx",
+                "function": "sell_put",
+                "mode": "put",
+                "contract_symbol": "AMD260619P00080000",
+                "status": "rejected",
+                "rule": "spread_too_wide",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (account_dir / "mark_path_snapshots.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps({"contract_symbol": "NVDA260619P00100000", "unrealized_pnl": 10}),
+                json.dumps({"contract_symbol": "AMD260619P00080000", "unrealized_pnl": -20}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    rc = cli.main(["research", "shadow-replay", "build", "--run-id", "run-1", "--dataset-id", "case-1"])
+    payload = _read_json_output(capsys)
+    dataset_dir = Path(payload["data"]["dataset_dir"])
+
+    assert rc == 0
+    assert payload["tool_name"] == "research.shadow-replay.build"
+    assert payload["data"]["summary"]["candidate_snapshot_count"] == 2
+    assert payload["data"]["summary"]["rejected_count"] == 1
+
+    rc = cli.main(["research", "shadow-replay", "analyze", "--dataset", str(dataset_dir), "--min-sample", "1"])
+    payload = _read_json_output(capsys)
+
+    assert rc == 0
+    assert payload["tool_name"] == "research.shadow-replay.analyze"
+    assert payload["data"]["summary"]["status"] == "not_ready"
+    assert payload["data"]["summary"]["reason"] == "outcome_facts_missing"
+
+    rc = cli.main(["research", "shadow-replay", "settle", "--dataset", str(dataset_dir), "--write"])
+    payload = _read_json_output(capsys)
+
+    assert rc == 0
+    assert payload["tool_name"] == "research.shadow-replay.settle"
+    assert payload["data"]["summary"]["generated_outcome_fact_count"] == 2
+
+    rc = cli.main(["research", "shadow-replay", "analyze", "--dataset", str(dataset_dir), "--min-sample", "1"])
+    payload = _read_json_output(capsys)
+
+    assert rc == 0
+    assert payload["data"]["summary"]["status"] == "needs_human_review"
+
+
+def test_research_shadow_replay_mark_from_required_data(capsys, monkeypatch, tmp_path: Path) -> None:
+    import src.interfaces.cli.main as cli
+
+    monkeypatch.setattr(cli, "repo_base", lambda: tmp_path)
+    account_dir = tmp_path / "output_runs" / "run-1" / "accounts" / "lx"
+    account_dir.mkdir(parents=True)
+    (account_dir / "sell_put_candidates.csv").write_text(
+        (
+            "symbol,account,option_type,contract_symbol,expiration,dte,delta,strike,net_income\n"
+            "NVDA,lx,put,NVDA260619P00100000,2026-06-19,30,-0.2,100,120\n"
+        ),
+        encoding="utf-8",
+    )
+    (account_dir / "candidate_filter_trace.jsonl").write_text(
+        json.dumps(
+            {
+                "symbol": "AMD",
+                "account": "lx",
+                "function": "sell_put",
+                "mode": "put",
+                "contract_symbol": "AMD260619P00080000",
+                "expiration": "2026-06-19",
+                "strike": 80,
+                "net_income": 90,
+                "status": "rejected",
+                "rule": "spread_too_wide",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    required_parsed = tmp_path / "output_shared" / "required_data" / "parsed"
+    required_parsed.mkdir(parents=True)
+    (required_parsed / "NVDA_required_data.csv").write_text(
+        (
+            "symbol,option_type,contract_symbol,expiration,strike,bid,ask,last_price,multiplier\n"
+            "NVDA,put,NVDA260619P00100000,2026-06-19,100,0.7,0.9,0.8,100\n"
+        ),
+        encoding="utf-8",
+    )
+    (required_parsed / "AMD_required_data.csv").write_text(
+        (
+            "symbol,option_type,contract_symbol,expiration,strike,bid,ask,last_price,multiplier\n"
+            "AMD,put,AMD260619P00080000,2026-06-19,80,1.4,1.8,1.6,100\n"
+        ),
+        encoding="utf-8",
+    )
+
+    rc = cli.main(["research", "shadow-replay", "build", "--run-id", "run-1", "--dataset-id", "case-mark"])
+    payload = _read_json_output(capsys)
+    dataset_dir = Path(payload["data"]["dataset_dir"])
+
+    assert rc == 0
+
+    rc = cli.main(
+        [
+            "research",
+            "shadow-replay",
+            "mark",
+            "--dataset",
+            str(dataset_dir),
+            "--as-of",
+            "2026-05-31T00:00:00Z",
+            "--write",
+        ]
+    )
+    payload = _read_json_output(capsys)
+
+    assert rc == 0
+    assert payload["tool_name"] == "research.shadow-replay.mark"
+    assert payload["data"]["summary"]["generated_mark_snapshot_count"] == 2
+    assert payload["data"]["summary"]["usable_mark_snapshot_count"] == 2
+    assert payload["data"]["summary"]["missing_quote_count"] == 0
+    assert (dataset_dir / "mark_path_snapshots.jsonl").exists()
 
 
 def test_top_level_status_json_prints_raw_runtime_status(monkeypatch, capsys) -> None:

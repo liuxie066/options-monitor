@@ -410,8 +410,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     research_collect.add_argument("--scheduler-evidence-file", default=None)
     research_collect.add_argument("--candidate-path", action="append", dest="candidate_paths", default=None)
     research_collect.add_argument("--trace-path", action="append", dest="trace_paths", default=None)
+    research_collect.add_argument("--reject-log-path", action="append", dest="reject_log_paths", default=None)
+    research_collect.add_argument("--mark-path", action="append", dest="mark_paths", default=None)
+    research_collect.add_argument("--outcome-path", action="append", dest="outcome_paths", default=None)
     research_collect.add_argument("--candidate-report-dir", default=None)
     research_collect.add_argument("--ranking-limit", type=int, default=None, help="top candidate rows per report included in ranking evidence")
+    research_collect.add_argument("--shadow-replay-min-sample", type=int, default=None, help="minimum candidate universe sample for offline shadow replay readiness")
     research_collect.add_argument("--include-healthcheck", action="store_true")
     research_collect.add_argument("--data-config", default=None)
     research_collect.add_argument("--timeout-sec", type=int, default=None)
@@ -422,6 +426,35 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     research_collect.add_argument("--confirm", action="store_true")
     research_handoff = research_sub.add_parser("handoff", help="render handoff from a collected bundle")
     research_handoff.add_argument("--bundle", required=True)
+    research_shadow = research_sub.add_parser("shadow-replay", help="build or analyze offline shadow replay datasets")
+    research_shadow_sub = research_shadow.add_subparsers(dest="shadow_replay_command", required=True)
+    shadow_build = research_shadow_sub.add_parser("build", help="build a local shadow replay dataset from existing artifacts")
+    shadow_build.add_argument("--run-id", default=None)
+    shadow_build.add_argument("--run-dir", default=None)
+    shadow_build.add_argument("--report-dir", default=None)
+    shadow_build.add_argument("--candidate-path", action="append", dest="candidate_paths", default=None)
+    shadow_build.add_argument("--trace-path", action="append", dest="trace_paths", default=None)
+    shadow_build.add_argument("--reject-log-path", action="append", dest="reject_log_paths", default=None)
+    shadow_build.add_argument("--mark-path", action="append", dest="mark_paths", default=None)
+    shadow_build.add_argument("--outcome-path", action="append", dest="outcome_paths", default=None)
+    shadow_build.add_argument("--output-dir", default=None)
+    shadow_build.add_argument("--dataset-id", default=None)
+    shadow_analyze = research_shadow_sub.add_parser("analyze", help="analyze a local shadow replay dataset")
+    shadow_analyze.add_argument("--dataset", required=True)
+    shadow_analyze.add_argument("--min-sample", type=int, default=30)
+    shadow_analyze.add_argument("--output", default=None)
+    shadow_mark = research_shadow_sub.add_parser("mark", help="generate local mark path snapshots from required-data CSV quotes")
+    shadow_mark.add_argument("--dataset", required=True)
+    shadow_mark.add_argument("--required-data-root", default=None, help="required-data root containing parsed/*_required_data.csv; default output_shared/required_data")
+    shadow_mark.add_argument("--as-of", default=None, help="mark timestamp label; default current UTC time")
+    shadow_mark.add_argument("--output", default=None)
+    shadow_mark.add_argument("--write", action="store_true", help="write generated mark_path_snapshots.jsonl back to the local dataset")
+    shadow_mark.add_argument("--replace", action="store_true", help="replace existing local mark path snapshots when used with --write")
+    shadow_settle = research_shadow_sub.add_parser("settle", help="derive outcome facts from a local shadow replay dataset")
+    shadow_settle.add_argument("--dataset", required=True)
+    shadow_settle.add_argument("--output", default=None)
+    shadow_settle.add_argument("--write", action="store_true", help="write derived outcome_facts.jsonl back to the local dataset")
+    shadow_settle.add_argument("--replace", action="store_true", help="replace existing local outcome facts when used with --write")
 
     scan = sub.add_parser("scan", help="run opportunity scan")
     scan.add_argument("--config-key", default=None, choices=("us", "hk"))
@@ -1351,8 +1384,12 @@ def main(argv: list[str] | None = None) -> int:
                 "output": args.output,
                 "candidate_paths": args.candidate_paths,
                 "trace_paths": args.trace_paths,
+                "reject_log_paths": args.reject_log_paths,
+                "mark_paths": args.mark_paths,
+                "outcome_paths": args.outcome_paths,
                 "candidate_report_dir": args.candidate_report_dir,
                 "ranking_limit": args.ranking_limit,
+                "shadow_replay_min_sample": args.shadow_replay_min_sample,
                 "include_healthcheck": bool(args.include_healthcheck),
                 "data_config": args.data_config,
                 "timeout_sec": args.timeout_sec,
@@ -1383,6 +1420,48 @@ def main(argv: list[str] | None = None) -> int:
                 ok=True,
                 data={"handoff_markdown": render_research_handoff(bundle)},
             ))
+
+        if args.command == "research" and args.research_command == "shadow-replay":
+            from src.application.shadow_replay import (
+                analyze_shadow_replay_dataset,
+                build_shadow_replay_dataset,
+                mark_shadow_replay_dataset,
+                settle_shadow_replay_dataset,
+            )
+
+            if args.shadow_replay_command == "build":
+                data = build_shadow_replay_dataset(
+                    repo_root=repo_base(),
+                    run_id=args.run_id,
+                    run_dir=args.run_dir,
+                    report_dir=args.report_dir,
+                    candidate_paths=args.candidate_paths,
+                    trace_paths=args.trace_paths,
+                    reject_log_paths=args.reject_log_paths,
+                    mark_paths=args.mark_paths,
+                    outcome_paths=args.outcome_paths,
+                    output_dir=args.output_dir,
+                    dataset_id=args.dataset_id,
+                )
+                return _print(build_response(tool_name="research.shadow-replay.build", ok=True, data=data))
+            if args.shadow_replay_command == "analyze":
+                data = analyze_shadow_replay_dataset(dataset=args.dataset, min_sample=args.min_sample, output=args.output)
+                return _print(build_response(tool_name="research.shadow-replay.analyze", ok=True, data=data))
+            if args.shadow_replay_command == "mark":
+                required_data_root = args.required_data_root or (repo_base() / "output_shared" / "required_data")
+                data = mark_shadow_replay_dataset(
+                    dataset=args.dataset,
+                    required_data_root=required_data_root,
+                    as_of=args.as_of,
+                    repo_root=repo_base(),
+                    output=args.output,
+                    write=bool(args.write),
+                    replace=bool(args.replace),
+                )
+                return _print(build_response(tool_name="research.shadow-replay.mark", ok=True, data=data))
+            if args.shadow_replay_command == "settle":
+                data = settle_shadow_replay_dataset(dataset=args.dataset, output=args.output, write=bool(args.write), replace=bool(args.replace))
+                return _print(build_response(tool_name="research.shadow-replay.settle", ok=True, data=data))
 
         if args.command == "scan":
             symbols = [s.strip().upper() for s in str(args.symbols or "").split(",") if s.strip()] or None

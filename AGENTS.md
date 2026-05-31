@@ -71,6 +71,13 @@ When a dry-run or read-only surface exists, use it first.
 
 Do not run Python scripts just to see what happens.
 
+## Memory / LLM Wiki
+
+- LLM wiki / memory only stores why a decision exists and where to verify it; it must not be treated as proof of what is currently true.
+- Before using memory, verify against current code, tests, configs, docs, or runtime artifacts. If memory conflicts with current evidence, current evidence wins.
+- Long-term memory should only preserve durable decisions, reusable patterns, and failure lessons. Do not promote ordinary implementation details, temporary state, or one-off release notes into long-term memory.
+- When writing memory, prefer verification entry points, related files, and validation commands over implementation facts that can drift.
+
 ## Fast Diagnostic Commands
 
 ```bash

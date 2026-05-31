@@ -285,8 +285,9 @@ def test_research_collects_candidate_evidence_for_handoff(tmp_path: Path) -> Non
     (account_report_dir / "nvda_sell_put_candidates_labeled.csv").write_text(
         (
             "symbol,account,option_type,dte,delta,strike,spot,annualized_net_return_on_cash_basis,"
-            "net_income,otm_pct,spread_ratio,open_interest,volume,cash_required_usd,cash_free_usd\n"
-            "NVDA,lx,put,30,-0.2,140,150,0.12,120,0.066667,0.12,500,20,14000,28000\n"
+            "net_income,otm_pct,iv_rv_ratio,spread_ratio,single_trade_concentration,open_interest,volume,"
+            "cash_required_usd,cash_free_usd\n"
+            "NVDA,lx,put,30,-0.2,140,150,0.12,120,0.066667,1.25,0.12,0.04,500,20,14000,28000\n"
         ),
         encoding="utf-8",
     )
@@ -332,6 +333,7 @@ def test_research_collects_candidate_evidence_for_handoff(tmp_path: Path) -> Non
     summary = data["bundle"]["candidate_evidence"]["summary"]
     reject_logs = data["bundle"]["candidate_evidence"]["reject_logs"]
     ranking = data["bundle"]["candidate_evidence"]["ranking_evidence"]
+    shadow_replay = data["bundle"]["candidate_evidence"]["shadow_replay"]
     ranking_row = ranking["reports"][0]["top_rows"][0]
     account_candidate = data["bundle"]["account_candidate_matrix"]["accounts"]["lx"]["candidate_evidence"]
     assert data["status"] == "ok"
@@ -340,6 +342,7 @@ def test_research_collects_candidate_evidence_for_handoff(tmp_path: Path) -> Non
     assert summary["reject_log_row_count"] == 1
     assert summary["ranking_report_count"] == 1
     assert summary["ranking_top_row_count"] == 1
+    assert summary["shadow_replay_status"] == "not_ready"
     assert reject_logs[0]["reason_counts"] == {"risk_spread": 1}
     assert reject_logs[0]["sample_rows"][0]["engine_reject_reason"] == "risk_spread"
     assert ranking["summary"]["strategy_counts"] == {"sell_put": 1}
@@ -347,6 +350,14 @@ def test_research_collects_candidate_evidence_for_handoff(tmp_path: Path) -> Non
     assert ranking_row["metrics"]["otm_pct"] == 0.066667
     assert ranking_row["cash_constraint"]["cash_headroom_ratio"] == 2.0
     assert ranking_row["rank_explanation"]["score_inputs"]["spread_ratio"] == 0.12
+    assert shadow_replay["schema_version"] == "shadow_replay_readiness.v1"
+    assert shadow_replay["summary"]["candidate_snapshot_count"] == 3
+    assert shadow_replay["summary"]["counterfactual_candidate_count"] == 2
+    assert shadow_replay["summary"]["reason"] == "candidate_snapshot_count_below_min_sample"
+    assert shadow_replay["bucket_stats"]["dte"]["30-44"]["count"] == 1
+    assert shadow_replay["bucket_stats"]["dte"]["missing"]["count"] == 2
+    assert shadow_replay["evidence_checks"]["survivorship_bias_risk"] == "medium"
+    assert shadow_replay["safety"]["writes_runtime_config"] is False
     assert account_candidate["candidate_rows"] == 1
     assert account_candidate["reject_log_rows"] == 1
     assert account_candidate["trace_rows"] == 1
@@ -355,6 +366,91 @@ def test_research_collects_candidate_evidence_for_handoff(tmp_path: Path) -> Non
     assert "reject_log_rows: 1" in data["handoff_markdown"]
     assert "## Ranking Evidence" in data["handoff_markdown"]
     assert "cash_headroom=2" in data["handoff_markdown"]
+
+
+def test_research_shadow_replay_uses_mark_and_outcome_paths(tmp_path: Path) -> None:
+    from src.application.research.service import research_tool
+
+    report_dir = tmp_path / "reports"
+    report_dir.mkdir()
+    candidate_path = report_dir / "sell_put_candidates.csv"
+    trace_path = report_dir / "candidate_filter_trace.jsonl"
+    mark_path = report_dir / "mark_path_snapshots.jsonl"
+    outcome_path = report_dir / "outcome_facts.jsonl"
+    candidate_path.write_text(
+        (
+            "symbol,account,option_type,contract_symbol,dte,delta,strike,iv_rv_ratio,spread_ratio\n"
+            "NVDA,lx,put,NVDA260619P00100000,30,-0.2,100,1.25,0.10\n"
+        ),
+        encoding="utf-8",
+    )
+    trace_path.write_text(
+        json.dumps(
+            {
+                "symbol": "AMD",
+                "account": "lx",
+                "function": "sell_put",
+                "mode": "put",
+                "contract_symbol": "AMD260619P00080000",
+                "status": "rejected",
+                "rule": "spread_too_wide",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    mark_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"contract_symbol": "NVDA260619P00100000", "unrealized_pnl": 20}),
+                json.dumps({"contract_symbol": "AMD260619P00080000", "unrealized_pnl": -50}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    outcome_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"contract_symbol": "NVDA260619P00100000", "outcome": "expired_worthless", "realized_pnl": 100}),
+                json.dumps({"contract_symbol": "AMD260619P00080000", "outcome": "would_close_loss", "realized_pnl": -60}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    def _runtime_status(_payload):
+        return _runtime_status_data(), [], {}
+
+    data, _warnings, _meta = research_tool(
+        {
+            "config_path": str(tmp_path / "config.us.json"),
+            "candidate_paths": [str(candidate_path)],
+            "trace_paths": [str(trace_path)],
+            "mark_paths": [str(mark_path)],
+            "outcome_paths": [str(outcome_path)],
+            "shadow_replay_min_sample": 2,
+            "write_outputs": False,
+            "scheduler_evidence": {
+                "provider": "openclaw",
+                "job_name": "us-tick",
+                "last_triggered_at": "2026-05-16T01:00:00Z",
+                "last_status": "success",
+                "last_exit_code": 0,
+            },
+        },
+        runtime_status_tool_fn=_runtime_status,
+        **_tool_kwargs(tmp_path),
+    )
+
+    shadow_replay = data["bundle"]["candidate_evidence"]["shadow_replay"]
+    assert data["status"] == "ok"
+    assert data["bundle"]["candidate_evidence"]["summary"]["shadow_replay_status"] == "needs_human_review"
+    assert shadow_replay["summary"]["evidence_level"] == "closed_replay"
+    assert shadow_replay["outcome_coverage"]["marked_instrument_count"] == 2
+    assert shadow_replay["path_risk"]["by_status"]["rejected"]["max_adverse_pnl"] == -50
+    assert shadow_replay["outcome_stats"]["by_status"]["accepted"]["realized_pnl_total"] == 100
 
 
 def test_research_collects_candidate_evidence_from_profile_runtime_root(tmp_path: Path) -> None:

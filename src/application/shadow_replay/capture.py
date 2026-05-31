@@ -1,0 +1,398 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from domain.domain.engine import CandidateScoreWeights, explain_candidate_rank
+
+from src.application.candidate_filter_trace import read_candidate_filter_trace
+from src.application.shadow_replay.analysis import analyze_rows
+from src.application.shadow_replay.common import (
+    CANDIDATE_SNAPSHOT_SCHEMA_VERSION,
+    DATASET_FILES,
+    DATASET_SCHEMA_VERSION,
+    FILTER_DECISION_SCHEMA_VERSION,
+    MARK_PATH_SCHEMA_VERSION,
+    OUTCOME_FACT_SCHEMA_VERSION,
+    RANK_SNAPSHOT_SCHEMA_VERSION,
+    abs_first_float,
+    account_hint,
+    dataset_output_dir,
+    default_dataset_id,
+    first_float,
+    glob_many,
+    normal_status,
+    read_csv_rows,
+    read_jsonl,
+    resolve_many,
+    resolve_optional,
+    safe_rel,
+    safety_payload,
+    strategy_hint,
+    strategy_mode,
+    text,
+    unique,
+    utc_now,
+    write_json,
+    write_jsonl,
+)
+
+
+@dataclass(frozen=True)
+class ShadowReplaySourceSelection:
+    repo_root: Path
+    run_id: str | None = None
+    run_dir: Path | None = None
+    report_dir: Path | None = None
+    candidate_paths: tuple[Path, ...] = ()
+    trace_paths: tuple[Path, ...] = ()
+    reject_log_paths: tuple[Path, ...] = ()
+    mark_paths: tuple[Path, ...] = ()
+    outcome_paths: tuple[Path, ...] = ()
+
+
+def build_shadow_replay_dataset(
+    *,
+    repo_root: Path,
+    run_id: str | None = None,
+    run_dir: str | Path | None = None,
+    report_dir: str | Path | None = None,
+    candidate_paths: list[str | Path] | tuple[str | Path, ...] | None = None,
+    trace_paths: list[str | Path] | tuple[str | Path, ...] | None = None,
+    reject_log_paths: list[str | Path] | tuple[str | Path, ...] | None = None,
+    mark_paths: list[str | Path] | tuple[str | Path, ...] | None = None,
+    outcome_paths: list[str | Path] | tuple[str | Path, ...] | None = None,
+    output_dir: str | Path | None = None,
+    dataset_id: str | None = None,
+) -> dict[str, Any]:
+    """Build a local replay dataset from existing read-only scan artifacts."""
+
+    base = repo_root.resolve()
+    selection = ShadowReplaySourceSelection(
+        repo_root=base,
+        run_id=(str(run_id).strip() or None) if run_id else None,
+        run_dir=resolve_optional(run_dir, base=base),
+        report_dir=resolve_optional(report_dir, base=base),
+        candidate_paths=tuple(resolve_many(candidate_paths, base=base)),
+        trace_paths=tuple(resolve_many(trace_paths, base=base)),
+        reject_log_paths=tuple(resolve_many(reject_log_paths, base=base)),
+        mark_paths=tuple(resolve_many(mark_paths, base=base)),
+        outcome_paths=tuple(resolve_many(outcome_paths, base=base)),
+    )
+    resolved_candidates = candidate_paths_from_selection(selection)
+    resolved_traces = trace_paths_from_selection(selection)
+    resolved_reject_logs = reject_log_paths_from_selection(selection)
+    resolved_marks = mark_paths_from_selection(selection)
+    resolved_outcomes = outcome_paths_from_selection(selection)
+
+    candidate_rows = accepted_candidate_snapshots(resolved_candidates, base=base)
+    filter_decisions = filter_decision_rows(resolved_traces, resolved_reject_logs, base=base)
+    rejected_rows = candidate_snapshots_from_filter_decisions(filter_decisions)
+    candidate_snapshots = dedupe_snapshots(candidate_rows + rejected_rows)
+    rank_snapshots = rank_snapshots_for_candidates(candidate_snapshots)
+    mark_snapshots = read_replay_rows(resolved_marks, schema_version=MARK_PATH_SCHEMA_VERSION, base=base)
+    outcome_facts = read_replay_rows(resolved_outcomes, schema_version=OUTCOME_FACT_SCHEMA_VERSION, base=base)
+
+    ds_id = str(dataset_id or "").strip() or default_dataset_id()
+    target = dataset_output_dir(output_dir, dataset_id=ds_id, base=base)
+    target.mkdir(parents=True, exist_ok=True)
+    write_jsonl(target / "candidate_snapshots.jsonl", candidate_snapshots)
+    write_jsonl(target / "filter_decisions.jsonl", filter_decisions)
+    write_jsonl(target / "rank_snapshots.jsonl", rank_snapshots)
+    write_jsonl(target / "mark_path_snapshots.jsonl", mark_snapshots)
+    write_jsonl(target / "outcome_facts.jsonl", outcome_facts)
+
+    analysis_seed = analyze_rows(
+        candidate_snapshots=candidate_snapshots,
+        filter_decisions=filter_decisions,
+        mark_snapshots=mark_snapshots,
+        outcome_facts=outcome_facts,
+        min_sample=1,
+    )
+    manifest = {
+        "schema_version": DATASET_SCHEMA_VERSION,
+        "dataset_id": ds_id,
+        "created_at_utc": utc_now(),
+        "dataset_dir": str(target),
+        "source": {
+            "run_id": selection.run_id,
+            "run_dir": safe_rel(selection.run_dir, base=base),
+            "report_dir": safe_rel(selection.report_dir, base=base),
+            "candidate_paths": [safe_rel(path, base=base) for path in resolved_candidates],
+            "trace_paths": [safe_rel(path, base=base) for path in resolved_traces],
+            "reject_log_paths": [safe_rel(path, base=base) for path in resolved_reject_logs],
+            "mark_paths": [safe_rel(path, base=base) for path in resolved_marks],
+            "outcome_paths": [safe_rel(path, base=base) for path in resolved_outcomes],
+        },
+        "files": {name: str((target / name).resolve()) for name in DATASET_FILES},
+        "summary": analysis_seed["summary"],
+        "evidence_checks": analysis_seed["evidence_checks"],
+        "safety": safety_payload(writes_local_dataset=True),
+    }
+    write_json(target / "manifest.json", manifest)
+    return manifest
+
+
+def accepted_candidate_snapshots(paths: list[Path], *, base: Path) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for path in paths:
+        strategy = strategy_hint(path)
+        mode = strategy_mode(strategy)
+        account = account_hint(path)
+        for row_number, row in enumerate(read_csv_rows(path), start=1):
+            item = snapshot_from_row(
+                row,
+                schema_version=CANDIDATE_SNAPSHOT_SCHEMA_VERSION,
+                source_kind="candidate_csv",
+                source_path=safe_rel(path, base=base),
+                source_row_number=row_number,
+                status="accepted",
+                strategy=strategy,
+                mode=mode,
+                account_hint=account,
+            )
+            out.append(item)
+    return out
+
+
+def filter_decision_rows(trace_paths: list[Path], reject_log_paths: list[Path], *, base: Path) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for path in trace_paths:
+        for row_number, row in enumerate(read_candidate_filter_trace(path), start=1):
+            item = dict(row)
+            item["schema_version"] = FILTER_DECISION_SCHEMA_VERSION
+            item["source_kind"] = "candidate_filter_trace"
+            item["source_path"] = safe_rel(path, base=base)
+            item["source_row_number"] = row_number
+            item["status"] = normal_status(item.get("status") or "rejected")
+            item["symbol"] = text(item.get("symbol") or item.get("underlying_symbol")).upper() or None
+            item["rule"] = text(item.get("rule") or item.get("reject_rule") or item.get("reject_reason")) or None
+            out.append(item)
+    for path in reject_log_paths:
+        strategy = strategy_hint(path)
+        mode = strategy_mode(strategy)
+        account = account_hint(path)
+        for row_number, row in enumerate(read_csv_rows(path), start=1):
+            out.append(
+                {
+                    "schema_version": FILTER_DECISION_SCHEMA_VERSION,
+                    "source_kind": "reject_log_csv",
+                    "source_path": safe_rel(path, base=base),
+                    "source_row_number": row_number,
+                    "run_id": text(row.get("run_id")) or None,
+                    "account": text(row.get("account") or account).lower() or None,
+                    "symbol": text(row.get("symbol") or row.get("underlying_symbol")).upper() or None,
+                    "contract_symbol": text(row.get("contract_symbol") or row.get("option_symbol")) or None,
+                    "function": text(row.get("function") or strategy) or None,
+                    "mode": text(row.get("mode") or row.get("option_type")).lower() or mode,
+                    "status": normal_status(row.get("status") or "rejected"),
+                    "stage": text(row.get("engine_reject_stage") or row.get("reject_stage") or row.get("stage")) or None,
+                    "rule": text(row.get("engine_reject_reason") or row.get("reject_rule") or row.get("reject_reason") or row.get("rule")) or None,
+                    "metric_value": text(row.get("metric_value")) or None,
+                    "threshold": text(row.get("threshold")) or None,
+                    "message": text(row.get("message")) or None,
+                }
+            )
+    return out
+
+
+def candidate_snapshots_from_filter_decisions(decisions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for idx, row in enumerate(decisions, start=1):
+        status = normal_status(row.get("status") or "rejected")
+        if status not in {"rejected", "post_filtered", "ranked_below"}:
+            continue
+        item = snapshot_from_row(
+            row,
+            schema_version=CANDIDATE_SNAPSHOT_SCHEMA_VERSION,
+            source_kind="filter_decision",
+            source_path=row.get("source_path"),
+            source_row_number=row.get("source_row_number") or idx,
+            status=status,
+            strategy=text(row.get("function")) or None,
+            mode=text(row.get("mode")).lower() or strategy_mode(text(row.get("function")) or None),
+            account_hint=text(row.get("account")).lower() or None,
+        )
+        item["filter_stage"] = row.get("stage")
+        item["filter_rule"] = row.get("rule")
+        item["filter_metric_value"] = row.get("metric_value")
+        item["filter_threshold"] = row.get("threshold")
+        out.append(item)
+    return out
+
+
+def snapshot_from_row(
+    row: dict[str, Any],
+    *,
+    schema_version: str,
+    source_kind: str,
+    source_path: Any,
+    source_row_number: Any,
+    status: str,
+    strategy: str | None,
+    mode: str | None,
+    account_hint: str | None,
+) -> dict[str, Any]:
+    mode_norm = text(row.get("mode") or row.get("option_type") or mode).lower() or None
+    return {
+        "schema_version": schema_version,
+        "source_kind": source_kind,
+        "source_path": source_path,
+        "source_row_number": source_row_number,
+        "status": normal_status(status),
+        "strategy": strategy,
+        "mode": mode_norm,
+        "run_id": text(row.get("run_id")) or None,
+        "account": text(row.get("account") or account_hint).lower() or None,
+        "symbol": text(row.get("symbol") or row.get("underlying_symbol")).upper() or None,
+        "contract_symbol": text(row.get("contract_symbol") or row.get("option_symbol")) or None,
+        "option_type": text(row.get("option_type")).lower() or mode_norm,
+        "expiration": text(row.get("expiration") or row.get("exp")) or None,
+        "strike": first_float(row, "strike"),
+        "side": text(row.get("side") or row.get("position_side")).lower() or None,
+        "contracts": first_float(row, "contracts", "contract_count", "quantity", "qty"),
+        "multiplier": first_float(row, "multiplier", "contract_multiplier"),
+        "spot": first_float(row, "spot", "underlying_price"),
+        "dte": first_float(row, "dte"),
+        "delta": first_float(row, "delta", "put_delta", "call_delta"),
+        "abs_delta": abs_first_float(row, "delta", "put_delta", "call_delta"),
+        "iv_rv_ratio": first_float(row, "iv_rv_ratio"),
+        "iv_minus_rv": first_float(row, "iv_minus_rv"),
+        "spread_ratio": first_float(row, "spread_ratio", "combo_spread_ratio"),
+        "single_trade_concentration": first_float(row, "single_trade_concentration"),
+        "symbol_concentration_after": first_float(row, "symbol_concentration_after"),
+        "annualized_return": first_float(
+            row,
+            "annualized_net_return_on_cash_basis",
+            "annualized_net_premium_return",
+            "annualized_net_return",
+            "annualized_return",
+        ),
+        "net_income": first_float(row, "net_income", "net_credit", "combo_net_credit"),
+    }
+
+
+def rank_snapshots_for_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for idx, row in enumerate(candidates, start=1):
+        if str(row.get("status") or "") != "accepted":
+            continue
+        mode = str(row.get("mode") or "").strip()
+        if mode not in {"put", "call"}:
+            continue
+        try:
+            explanation = explain_candidate_rank(row, mode=mode, score_weights=CandidateScoreWeights())
+        except Exception as exc:
+            explanation = {"error": f"{type(exc).__name__}: {exc}"}
+        out.append(
+            {
+                "schema_version": RANK_SNAPSHOT_SCHEMA_VERSION,
+                "source_candidate_index": idx,
+                "symbol": row.get("symbol"),
+                "contract_symbol": row.get("contract_symbol"),
+                "mode": mode,
+                "rank_explanation": explanation,
+            }
+        )
+    return out
+
+
+def read_replay_rows(paths: list[Path], *, schema_version: str, base: Path) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for path in paths:
+        if path.suffix.lower() == ".csv":
+            rows = read_csv_rows(path)
+        else:
+            rows = read_jsonl(path)
+        for row_number, row in enumerate(rows, start=1):
+            item = dict(row)
+            item.setdefault("schema_version", schema_version)
+            item["source_path"] = safe_rel(path, base=base)
+            item["source_row_number"] = row_number
+            out.append(item)
+    return out
+
+
+def candidate_paths_from_selection(selection: ShadowReplaySourceSelection) -> list[Path]:
+    explicit = [path for path in selection.candidate_paths if path.exists()]
+    if explicit:
+        return unique(explicit)
+    out: list[Path] = []
+    for directory in source_dirs(selection):
+        out.extend(glob_many(directory, ("*sell_put_candidates*.csv", "*sell_call_candidates*.csv", "*yield_enhancement_candidates*.csv")))
+    return unique(path for path in out if "reject_log" not in path.name.lower())
+
+
+def trace_paths_from_selection(selection: ShadowReplaySourceSelection) -> list[Path]:
+    explicit = [path for path in selection.trace_paths if path.exists()]
+    if explicit:
+        return unique(explicit)
+    return unique(directory / "candidate_filter_trace.jsonl" for directory in source_dirs(selection) if (directory / "candidate_filter_trace.jsonl").exists())
+
+
+def reject_log_paths_from_selection(selection: ShadowReplaySourceSelection) -> list[Path]:
+    explicit = [path for path in selection.reject_log_paths if path.exists()]
+    if explicit:
+        return unique(explicit)
+    out: list[Path] = []
+    for directory in source_dirs(selection):
+        out.extend(glob_many(directory, ("*candidates_reject_log*.csv", "*reject_log*.csv")))
+    return unique(out)
+
+
+def mark_paths_from_selection(selection: ShadowReplaySourceSelection) -> list[Path]:
+    explicit = [path for path in selection.mark_paths if path.exists()]
+    if explicit:
+        return unique(explicit)
+    out: list[Path] = []
+    for directory in source_dirs(selection):
+        out.extend(glob_many(directory, ("mark_path_snapshots.jsonl", "mark_path_snapshots.csv", "*mark_path*.jsonl", "*mark_path*.csv")))
+    return unique(out)
+
+
+def outcome_paths_from_selection(selection: ShadowReplaySourceSelection) -> list[Path]:
+    explicit = [path for path in selection.outcome_paths if path.exists()]
+    if explicit:
+        return unique(explicit)
+    out: list[Path] = []
+    for directory in source_dirs(selection):
+        out.extend(glob_many(directory, ("outcome_facts.jsonl", "outcome_facts.csv", "*outcome*.jsonl", "*outcome*.csv")))
+    return unique(out)
+
+
+def source_dirs(selection: ShadowReplaySourceSelection) -> list[Path]:
+    dirs: list[Path] = []
+    run_dir = selection.run_dir
+    if run_dir is None and selection.run_id:
+        run_dir = (selection.repo_root / "output_runs" / selection.run_id).resolve()
+    for root in (run_dir, selection.report_dir):
+        if root is None:
+            continue
+        dirs.append(root.resolve())
+        accounts_dir = root / "accounts"
+        if accounts_dir.exists() and accounts_dir.is_dir():
+            dirs.extend(path.resolve() for path in accounts_dir.iterdir() if path.is_dir())
+    if not dirs:
+        dirs.append((selection.repo_root / "output_shared" / "reports").resolve())
+    return unique(dirs)
+
+
+def dedupe_snapshots(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    for row in rows:
+        key = (
+            row.get("source_kind"),
+            row.get("source_path"),
+            row.get("source_row_number"),
+            row.get("status"),
+            row.get("symbol"),
+            row.get("contract_symbol"),
+            row.get("filter_rule"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(row)
+    return out
