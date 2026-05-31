@@ -380,14 +380,48 @@ om-agent run --tool scan_opportunities --input-json '{"config_key":"us","symbols
 
 ```bash
 om-agent run --tool candidate_rank_explain --input-json '{"mode":"put","top_n":5}'
+om-agent run --tool candidate_rank_explain --input-json '{"run_id":"20260515T182459Z-474761","account":"lx","mode":"put","top_n":5}'
 om-agent run --tool candidate_rank_explain --input-json '{"candidate_path":"output_shared/reports/sell_call_candidates.csv","mode":"call","top_n":5}'
 om-agent run --tool candidate_rank_explain --input-json '{"mode":"put","score_weights":{"liquidity":0.02},"compare_baseline":true}'
 ```
 
 注意：
 - 该工具只读本地 CSV，不重新扫描、不发通知、不写 Feishu、不写报告。
-- 默认先找 `output_shared/reports`，再找 `output_shared/agent_tools/reports`；也可传 `report_dir`、`output_dir` 或 `candidate_path`。
+- 默认先找 `output_shared/reports`，再找 `output_shared/agent_tools/reports`；也可传 `run_id`、`run_dir`、`account`、`report_dir`、`output_dir` 或 `candidate_path`。
 - `score_weights` 只影响本次解释输出，不修改配置，也不改变生产排序默认值。
+
+---
+
+## 5.5.2 Offline Shadow Replay Evidence
+
+用途：
+- 通过 `research collect --scope candidate` 从已有候选 CSV、reject log 和 `candidate_filter_trace.jsonl` 收集离线 shadow replay readiness
+- 输出在 `candidate_evidence.shadow_replay`，用于检查 accepted/rejected universe 是否完整
+- `research shadow-replay mark` 可从 `required_data/parsed/*_required_data.csv` 为本地 dataset 生成 mark path
+- `research shadow-replay settle` 可从可用 mark 推导 mark-to-market outcome，也可在到期日/到期后用 spot/strike 推导到期 outcome
+- `research shadow-replay analyze` 会在已有可用 mark path / outcome facts 时输出路径风险、outcome stats 和按 DTE/Delta/IV/Spread/集中度分桶的 outcome-by-bucket 表现
+- 缺少被拒样本、mark path 或 outcome facts 时返回 `not_ready` / `evidence_incomplete`，防止幸存者偏差
+- 只输出人工评审用建议，不自动改配置
+
+示例：
+
+```bash
+om research collect --config-key us --scope candidate --run-id 20260515T182459Z-474761 --output json --no-write-outputs --shadow-replay-min-sample 30
+om research collect --config-key us --scope candidate --candidate-report-dir output_shared/reports --output json --no-write-outputs
+om research collect --config-key us --scope candidate --candidate-path candidates.csv --trace-path candidate_filter_trace.jsonl --mark-path mark_path_snapshots.jsonl --outcome-path outcome_facts.jsonl --output json --no-write-outputs
+om research shadow-replay build --run-id 20260515T182459Z-474761 --dataset-id us-20260515
+om research shadow-replay mark --dataset output_shared/research/shadow_replay/datasets/us-20260515 --required-data-root output_shared/required_data --write
+om research shadow-replay settle --dataset output_shared/research/shadow_replay/datasets/us-20260515 --write
+om research shadow-replay analyze --dataset output_shared/research/shadow_replay/datasets/us-20260515 --min-sample 30
+```
+
+边界：
+- 只读源数据，来源可以是 `run_id`、`run_dir`、`candidate_report_dir`、`candidate_path`、`trace_path`、`reject_log_path`、`mark_path` 或 `outcome_path`。
+- 默认 `--no-write-outputs` 不写文件；显式 `--write-outputs --confirm` 时只写本地 research bundle/handoff。
+- `research shadow-replay mark --write` 只写本地 replay dataset 的 `mark_path_snapshots.jsonl`，缺报价记录为 `missing_quote`，不视为可用 mark；到期 spot-only mark 可作为到期结算证据。
+- `research shadow-replay settle --write` 只写本地 replay dataset 的 `outcome_facts.jsonl`，可输出 `expired_worthless`、`assigned_at_expiry`、`called_away_at_expiry` 或 mark-to-market outcome，不写交易状态。
+- 不运行扫描、不发通知、不写 Feishu、不写交易状态、不写 runtime config。
+- 样本、被拒样本、mark path 或 outcome facts 不足时不会产生可落地配置。
 
 ---
 
@@ -580,6 +614,7 @@ om-agent run --tool preview_notification --input-json '{"alerts_path":"output_sh
 
 用途：
 - 只读汇总现有 runtime / OpenClaw 输出文件
+- 暴露 `config_authority`，用于确认 `config.yaml` 到 `config.<market>.json` 的生成来源、sha256、身份和 freshness
 - 不运行 pipeline
 - 不发送通知
 - 可读取 `openclaw.profile.json` / `.openclaw-profile.json` 或 payload 里的
@@ -640,6 +675,7 @@ om-agent run --tool openclaw_readiness --input-json '{"profile_path":"openclaw.p
 ```bash
 om-agent run --tool research --input-json '{"config_key":"us","scope":"full","output":"both","write_outputs":false}'
 om research collect --config-key us --scope full --output both --no-write-outputs
+om research collect --config-key us --scope candidate --run-id 20260515T182459Z-474761 --output json --no-write-outputs --shadow-replay-min-sample 30
 ```
 
 带线上调度证据：
@@ -663,7 +699,7 @@ om-agent run --tool research --input-json '{
 
 Scope：
 - `ledger`：交易入账、持仓维护和账本质量
-- `candidate`：多账户候选、排名样本和 filter trace
+- `candidate`：多账户候选、排名样本、filter trace 和 shadow replay readiness
 - `quality`：runtime freshness、最新 run、调度证据和可选 healthcheck
 - `full`：默认全量证据
 
@@ -683,6 +719,7 @@ output_shared/state/current/research.current.json
 - 它是证据打包工具，不是线上 AI 推理功能。
 - `scheduler_evidence` 来自线上调度系统；尽量提供 `last_run_id` 和 `last_triggered_at`，否则本地 runtime 文件不能完整证明线上 cron 是否按时触发。
 - `include_healthcheck=true` 只在 `quality` / `full` scope 下有意义。
+- `--shadow-replay-min-sample` 只影响 Research bundle 里的 `candidate_evidence.shadow_replay` 样本充足性判断，不会改生产策略参数。
 
 ---
 

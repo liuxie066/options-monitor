@@ -1344,6 +1344,76 @@ def test_runtime_status_summarizes_openclaw_runtime_files(tmp_path: Path) -> Non
     assert "option_positions_feishu_sync_receipt_status" not in out["data"]["summary"]
 
 
+def test_runtime_status_reports_config_authority(tmp_path: Path) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    cfg_path = tmp_path / "config.us.json"
+    cfg = _minimal_cfg()
+    cfg["_generated"]["sources"] = [
+        {"role": "system", "loaded": True, "inline": True, "sha256": "system-sha"},
+        {"role": "common_user", "loaded": False, "optional": True, "enabled": False},
+        {"role": "market_user", "loaded": True, "inline": True, "sha256": "yaml-sha"},
+    ]
+    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    out = run_tool(
+        "runtime_status",
+        {
+            "config_path": str(cfg_path),
+            "state_dir": str(tmp_path / "state"),
+            "report_dir": str(tmp_path / "reports"),
+            "shared_state_dir": str(tmp_path / "state"),
+            "accounts_root": str(tmp_path / "accounts"),
+            "runs_root": str(tmp_path / "runs"),
+        },
+    )
+
+    assert out["ok"] is True
+    authority = out["data"]["config_authority"]
+    assert authority["ok"] is True
+    assert authority["authoring_source"] == "config.yaml"
+    assert authority["source_format"] == "yaml"
+    assert authority["config_yaml_sha256"] == "yaml-sha"
+    assert authority["system_config_sha256"] == "system-sha"
+    assert authority["identity"]["ok"] is True
+    assert authority["freshness"]["ok"] is True
+    assert out["data"]["summary"]["config_authority_ok"] is True
+
+
+def test_runtime_status_reports_config_authority_for_legacy_runtime_config(tmp_path: Path) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    cfg_path = tmp_path / "config.us.json"
+    cfg = _minimal_cfg()
+    cfg["_generated"].pop("source_format")
+    cfg["_generated"]["sources"] = [
+        {"role": "system", "loaded": True, "inline": True, "sha256": "system-sha"},
+        {"role": "market_user", "loaded": True, "inline": True, "sha256": "legacy-json-sha"},
+    ]
+    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    out = run_tool(
+        "runtime_status",
+        {
+            "config_path": str(cfg_path),
+            "state_dir": str(tmp_path / "state"),
+            "report_dir": str(tmp_path / "reports"),
+            "shared_state_dir": str(tmp_path / "state"),
+            "accounts_root": str(tmp_path / "accounts"),
+            "runs_root": str(tmp_path / "runs"),
+        },
+    )
+
+    assert out["ok"] is True
+    authority = out["data"]["config_authority"]
+    assert authority["ok"] is False
+    assert authority["source_format"] is None
+    assert authority["identity"]["ok"] is False
+    assert authority["stale_or_invalid_reason"] == "runtime config generation metadata is missing source_format"
+    assert "--market us" in authority["rebuild_command"]
+    assert out["data"]["summary"]["config_authority_ok"] is False
+
+
 def _runtime_status_upgrade_fixture(tmp_path: Path, *, target_version: str = "1.2.82") -> dict[str, Any]:
     (tmp_path / "VERSION").write_text("1.2.82\n", encoding="utf-8")
     data_config = tmp_path / "portfolio.runtime.json"
@@ -1737,7 +1807,7 @@ def test_runtime_status_service_profile_does_not_default_to_us_when_market_is_am
     else:
         raise AssertionError("expected load_runtime_config sentinel")
 
-    assert calls == [{"config_key": None, "config_path": None}]
+    assert calls == [{"config_key": None, "config_path": None, "require_identity": False}]
 
 
 def test_runtime_status_marks_remediated_upgrade_failure(monkeypatch, tmp_path: Path) -> None:

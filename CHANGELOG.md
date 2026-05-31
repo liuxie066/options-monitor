@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 1.2.171 - 2026-05-31
+
+### Added
+- Added offline shadow replay evidence under `src/application/shadow_replay/` with staged capture, marking, settlement, analysis, and readiness modules for accepted/rejected candidate universes.
+- Added `./om research shadow-replay build|mark|settle|analyze` and `candidate_evidence.shadow_replay` readiness output for Research candidate bundles.
+- Added `runtime_status.config_authority` so operators can verify runtime config identity, freshness, source hashes, stale reasons, and rebuild commands.
+- Added `run_id` / `run_dir` / `account` lookup support to `candidate_rank_explain` for run-specific candidate ranking diagnosis.
+
+### Changed
+- Updated Research, CLI, agent-tool metadata, README, Tool Reference, and Agent Wiki docs for offline shadow replay evidence boundaries and candidate evidence handoff.
+- Updated the agent manual guidance so LLM memory is treated as navigation context, not current-state proof.
+
 ## 1.2.170 - 2026-05-30
 
 ### Added
