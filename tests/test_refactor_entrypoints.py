@@ -45,6 +45,7 @@ def test_runtime_entrypoints_use_application_facades() -> None:
     agent_runtime_src = (ROOT / "src" / "application" / "agent_tool_runtime.py").read_text(encoding="utf-8")
     pipeline_runtime_src = (ROOT / "src" / "application" / "pipeline_runtime.py").read_text(encoding="utf-8")
     cli_src = (ROOT / "src" / "interfaces" / "cli" / "main.py").read_text(encoding="utf-8")
+    run_ops_src = (ROOT / "src" / "interfaces" / "cli" / "run_ops.py").read_text(encoding="utf-8")
     om_src = (ROOT / "om").read_text(encoding="utf-8")
     agent_src = (ROOT / "om-agent").read_text(encoding="utf-8")
     multi_account_tick_src = (ROOT / "src" / "application" / "multi_account_tick.py").read_text(encoding="utf-8")
@@ -102,8 +103,9 @@ def test_runtime_entrypoints_use_application_facades() -> None:
     assert "from src.infrastructure.opend_watchdog import run_watchdog_check" in service_src
     assert "src.interfaces.cli.main" in om_src
     assert "src.interfaces.agent.cli" in agent_src
-    assert "from src.application.multi_account_tick import run_tick" in cli_src
-    assert "return int(run_tick(tick_argv))" in cli_src
+    assert "handle_run_command(" in cli_src
+    assert "from src.application.multi_account_tick import run_tick" in run_ops_src
+    assert "return int(run_tick_fn(_tick_argv(args)))" in run_ops_src
     assert "src.interfaces.cli.option_positions" in cli_src
     assert "src.application.multi_tick.main" not in multi_account_tick_src
     assert not (ROOT / "scripts" / "multi_tick" / "main.py").exists()

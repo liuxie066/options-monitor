@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.173 - 2026-05-31
+
+### Changed
+- Split the unified CLI assistant, inbound, and run command implementations into focused `src.interfaces.cli.*_ops` owners while preserving the public `./om` facade.
+- Updated dependency graph generation and docs to reflect the split CLI ownership model without stale high-fan-out guidance.
+
+### Fixed
+- Strengthened architecture guard coverage so CLI boundary checks continue to cover the new assistant and inbound owner files after refactors.
+
 ## 1.2.172 - 2026-05-31
 
 ### Added

@@ -15,9 +15,11 @@ def _read(path: str) -> str:
 def test_entry_imports_service_module() -> None:
     multi_tick = _read("src/application/multi_account_tick.py")
     cli = _read("src/interfaces/cli/main.py")
+    run_ops = _read("src/interfaces/cli/run_ops.py")
 
     assert "from src.infrastructure.external_services import (" in multi_tick
-    assert "from src.application.multi_account_tick import run_tick" in cli
+    assert "handle_run_command(" in cli
+    assert "from src.application.multi_account_tick import run_tick" in run_ops
 
 
 def test_legacy_infra_service_wrappers_are_removed() -> None:

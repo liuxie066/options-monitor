@@ -357,7 +357,7 @@ def test_runtime_router_and_arbitrator_do_not_know_model_profiles() -> None:
 
 
 def test_assistant_model_cli_does_not_accept_secret_values() -> None:
-    text = (ROOT / "src" / "interfaces" / "cli" / "main.py").read_text(encoding="utf-8")
+    text = (ROOT / "src" / "interfaces" / "cli" / "assistant_ops.py").read_text(encoding="utf-8")
 
     assert '"--api-key"' not in text
     assert "'--api-key'" not in text
@@ -444,26 +444,32 @@ def test_config_section_helpers_have_neutral_owner() -> None:
 
 
 def test_feishu_ws_cli_keeps_runtime_and_assistant_config_flags_separate() -> None:
-    text = (ROOT / "src" / "interfaces" / "cli" / "main.py").read_text(encoding="utf-8")
+    main_text = (ROOT / "src" / "interfaces" / "cli" / "main.py").read_text(encoding="utf-8")
+    inbound_text = (ROOT / "src" / "interfaces" / "cli" / "inbound_ops.py").read_text(encoding="utf-8")
 
-    assert 'inbound_ws.add_argument("--config-path"' in text
-    assert 'inbound_ws.add_argument("--assistant-config"' in text
-    assert "build_feishu_ws_settings(" in text
-    assert "config_path=args.config_path" in text
-    assert "assistant_config_path=args.assistant_config" in text
+    assert 'inbound_ws.add_argument("--config-path"' in inbound_text
+    assert 'inbound_ws.add_argument("--assistant-config"' in inbound_text
+    assert "handle_inbound_command(" in main_text
+    assert "build_feishu_ws_settings_fn(" in inbound_text
+    assert "config_path=args.config_path" in inbound_text
+    assert "assistant_config_path=args.assistant_config" in inbound_text
 
 
 def test_cli_public_surface_keeps_assistant_control_and_inbound_transport_separate() -> None:
-    text = (ROOT / "src" / "interfaces" / "cli" / "main.py").read_text(encoding="utf-8")
+    main_text = (ROOT / "src" / "interfaces" / "cli" / "main.py").read_text(encoding="utf-8")
+    assistant_text = (ROOT / "src" / "interfaces" / "cli" / "assistant_ops.py").read_text(encoding="utf-8")
+    inbound_text = (ROOT / "src" / "interfaces" / "cli" / "inbound_ops.py").read_text(encoding="utf-8")
+    cli_text = "\n".join([main_text, assistant_text, inbound_text])
 
-    assert 'assistant_sub.add_parser("handle"' in text
-    assert 'inbound_sub.add_parser("handle"' not in text
-    assert 'inbound_sub.add_parser("pending"' not in text
-    assert 'inbound_sub.add_parser("audit"' not in text
-    assert 'inbound_sub.add_parser("upgrade-worker"' not in text
-    assert "AgentRuntime" not in text
-    assert '"--agent-runtime"' not in text
-    assert '"--no-agent-runtime"' not in text
+    assert 'assistant_sub.add_parser("handle"' in assistant_text
+    assert "handle_assistant_command(" in main_text
+    assert 'inbound_sub.add_parser("handle"' not in inbound_text
+    assert 'inbound_sub.add_parser("pending"' not in inbound_text
+    assert 'inbound_sub.add_parser("audit"' not in inbound_text
+    assert 'inbound_sub.add_parser("upgrade-worker"' not in inbound_text
+    assert "AgentRuntime" not in cli_text
+    assert '"--agent-runtime"' not in cli_text
+    assert '"--no-agent-runtime"' not in cli_text
 
 
 def test_feishu_payload_adapter_public_signature_uses_assistant_naming() -> None:
