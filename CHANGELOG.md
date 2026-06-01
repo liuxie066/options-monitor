@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.183 - 2026-06-01
+
+### Added
+- Added compact read-only `om update verify` release verification for symlink, version, runtime config freshness, event-source config, upgrade status, and service health.
+- Added `om event-source probe --summary-only` for remote event-source checks without raw event payload noise.
+- Added the read-only `scripts/release_test_plan.py` advisor to map changed files to a focused release validation plan.
+
+### Changed
+- Documented the faster release verification loop and refreshed the dependency graph for the new release-planning module.
+
 ## 1.2.182 - 2026-06-01
 
 ### Changed

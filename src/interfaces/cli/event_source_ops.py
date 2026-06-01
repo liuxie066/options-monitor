@@ -15,6 +15,11 @@ def add_event_source_commands(subparsers: Any) -> None:
     probe.add_argument("--symbols", nargs="+", required=True, help="symbols or comma-separated symbols")
     probe.add_argument("--host", default="127.0.0.1", help="Futu OpenD host for provider=futu")
     probe.add_argument("--port", type=int, default=11111, help="Futu OpenD port for provider=futu")
+    probe.add_argument(
+        "--summary-only",
+        action="store_true",
+        help="omit raw event payloads and print only probe health/counts",
+    )
 
 
 def handle_event_source_command(
@@ -29,6 +34,8 @@ def handle_event_source_command(
             host=args.host,
             port=int(args.port),
         )
+        if bool(getattr(args, "summary_only", False)):
+            data = _compact_probe_data(data)
         return build_response(
             tool_name="event_source_probe",
             ok=bool(data.get("ok", True)),
@@ -46,3 +53,49 @@ def _split_symbols(values: list[str] | None) -> list[str]:
             if symbol:
                 out.append(symbol)
     return out
+
+
+def _compact_probe_data(data: dict[str, Any]) -> dict[str, Any]:
+    symbols = data.get("symbols") if isinstance(data.get("symbols"), dict) else {}
+    compact_symbols = {
+        str(symbol): _compact_symbol_probe(row)
+        for symbol, row in symbols.items()
+        if isinstance(row, dict)
+    }
+    compact: dict[str, Any] = {
+        "ok": bool(data.get("ok")),
+        "provider": data.get("provider"),
+        "created_at": data.get("created_at"),
+        "summary": data.get("summary", {}),
+        "symbols": compact_symbols,
+    }
+    if isinstance(data.get("endpoint"), dict):
+        compact["endpoint"] = data["endpoint"]
+    providers = data.get("providers")
+    if isinstance(providers, dict):
+        compact["providers"] = {
+            str(provider): {
+                "ok": bool(payload.get("ok")),
+                "summary": payload.get("summary", {}),
+            }
+            for provider, payload in providers.items()
+            if isinstance(payload, dict)
+        }
+    if isinstance(data.get("error"), dict):
+        compact["error"] = data["error"]
+    return compact
+
+
+def _compact_symbol_probe(row: dict[str, Any]) -> dict[str, Any]:
+    compact: dict[str, Any] = {"ok": bool(row.get("ok"))}
+    for key in ("event_count", "error_code", "error_type", "source_error"):
+        if key in row:
+            compact[key] = row.get(key)
+    source_results = row.get("source_results")
+    if isinstance(source_results, dict):
+        compact["source_results"] = {
+            str(provider): _compact_symbol_probe(payload)
+            for provider, payload in source_results.items()
+            if isinstance(payload, dict)
+        }
+    return compact
