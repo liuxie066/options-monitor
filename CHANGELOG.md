@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.2.176 - 2026-06-01
+
+### Fixed
+- Preserved runtime event-risk snapshot paths through resolved candidate defaults so event-source failures remain visible to scanner and reject-summary diagnostics.
+- Made `runtime_status` service-profile config resolution honor an explicit `config_key` when selecting the runtime `config_path`.
+- Surfaced `event_source_unavailable` as an event-risk warning in candidate rejection summaries instead of burying it as generic missing data.
+- Fixed account notification overview counts so rejection summaries and other explanatory text no longer inflate Covered Call or Yield Enhancement candidate totals when no detailed candidates are rendered.
+
 ## 1.2.175 - 2026-06-01
 
 ### Added

@@ -27,6 +27,16 @@ SELL_PUT_ACTION_LABEL = strategy_action_label(STRATEGY_SELL_PUT)
 SELL_PUT_SECTION_LABEL = strategy_section_label(STRATEGY_SELL_PUT)
 COVERED_CALL_ACTION_LABEL = strategy_action_label(STRATEGY_COVERED_CALL)
 COVERED_CALL_SECTION_LABEL = strategy_section_label(STRATEGY_COVERED_CALL)
+_COMPACT_EXPIRY_RE = re.compile(r"@\s*\d{2}-\d{2}\b")
+_ISO_EXPIRY_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
+_OPTION_STRIKE_RE = re.compile(r"\b\d+(?:\.\d+)?[PC]\b")
+
+
+def _looks_like_option_candidate_line(text: str) -> bool:
+    s = str(text or "").strip()
+    if not s:
+        return False
+    return bool(_ISO_EXPIRY_RE.search(s) or _COMPACT_EXPIRY_RE.search(s) or _OPTION_STRIKE_RE.search(s))
 
 
 def _highlight_optimizer_lines(text: str) -> str:
@@ -62,7 +72,18 @@ def count_optimizer_actions(text: str) -> tuple[int, int]:
 
 
 def _is_covered_call_line(text: str) -> bool:
-    return f" {COVERED_CALL_ACTION_LABEL} " in text or " 卖Call " in text
+    return (
+        (f" {COVERED_CALL_ACTION_LABEL} " in text or " 卖Call " in text)
+        and _looks_like_option_candidate_line(text)
+    )
+
+
+def _is_sell_put_line(text: str) -> bool:
+    return f" {SELL_PUT_ACTION_LABEL} " in text and _looks_like_option_candidate_line(text)
+
+
+def _is_yield_enhancement_line(text: str) -> bool:
+    return " 收益增强 " in text and _looks_like_option_candidate_line(text)
 
 
 def _parse_cny(s: str) -> float | None:
@@ -171,9 +192,9 @@ def build_account_message(
         return ''
 
     kept = result.notification_text.strip().splitlines()
-    put_n = sum(1 for ln in kept if f' {SELL_PUT_ACTION_LABEL} ' in ln)
+    put_n = sum(1 for ln in kept if _is_sell_put_line(ln))
     call_n = sum(1 for ln in kept if _is_covered_call_line(ln))
-    enhancement_n = sum(1 for ln in kept if ' 收益增强 ' in ln)
+    enhancement_n = sum(1 for ln in kept if _is_yield_enhancement_line(ln))
     switch_n, close_n = count_optimizer_actions(result.notification_text)
     acct = str(result.account).strip().lower()
 
@@ -217,9 +238,9 @@ def build_account_message_compact(
         return ''
 
     text = result.notification_text.strip()
-    put_n = sum(1 for ln in text.splitlines() if f' {SELL_PUT_ACTION_LABEL} ' in ln)
+    put_n = sum(1 for ln in text.splitlines() if _is_sell_put_line(ln))
     call_n = sum(1 for ln in text.splitlines() if _is_covered_call_line(ln))
-    enhancement_n = sum(1 for ln in text.splitlines() if ' 收益增强 ' in ln)
+    enhancement_n = sum(1 for ln in text.splitlines() if _is_yield_enhancement_line(ln))
     switch_n, close_n = count_optimizer_actions(text)
     acct = str(result.account).strip().lower()
 

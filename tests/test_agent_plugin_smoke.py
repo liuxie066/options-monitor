@@ -1810,6 +1810,49 @@ def test_runtime_status_service_profile_does_not_default_to_us_when_market_is_am
     assert calls == [{"config_key": None, "config_path": None, "require_identity": False}]
 
 
+def test_runtime_status_service_profile_resolves_config_key_to_profile_config_path(tmp_path: Path) -> None:
+    from src.application.agent_tool_runtime_status import runtime_status_tool
+
+    us_path = tmp_path / "config.us.json"
+    hk_path = tmp_path / "config.hk.json"
+    profile_path = tmp_path / "service.profile.json"
+    profile_path.write_text(
+        json.dumps(
+            {
+                "service_provider": "systemd",
+                "config_paths": {
+                    "us": str(us_path),
+                    "hk": str(hk_path),
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    calls: list[dict[str, Any]] = []
+
+    def _load_runtime_config(**kwargs):
+        calls.append(kwargs)
+        raise RuntimeError("stop after config-scope capture")
+
+    try:
+        runtime_status_tool(
+            {"profile_path": str(profile_path), "config_key": "hk"},
+            load_runtime_config=_load_runtime_config,
+            normalize_accounts=lambda value, fallback=(): list(value or fallback),
+            accounts_from_config=lambda loaded: list(loaded.get("accounts") or []),
+            read_json_object_or_empty=lambda path: json.loads(path.read_text(encoding="utf-8")) if path.exists() else {},
+            repo_base=lambda: tmp_path,
+            mask_path=lambda path: str(path),
+        )
+    except RuntimeError as exc:
+        assert str(exc) == "stop after config-scope capture"
+    else:
+        raise AssertionError("expected load_runtime_config sentinel")
+
+    assert calls == [{"config_key": "hk", "config_path": str(hk_path), "require_identity": False}]
+
+
 def test_runtime_status_marks_remediated_upgrade_failure(monkeypatch, tmp_path: Path) -> None:
     import src.application.agent_tool_runtime_status as runtime_status
 
