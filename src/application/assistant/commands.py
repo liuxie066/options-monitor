@@ -120,7 +120,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         commands=("/income",),
         display_name="收益",
         arguments=("account", "month"),
-        examples=("收益", "收益 [账户]", "收益 [账户] [YYYY-MM|本月|上月]", "/income [lx|sy] [YYYY-MM|本月|上月]"),
+        examples=("收益", "收益 [账户]", "收益 [账户] [YYYY-MM|6月|本月|上月]", "/income [lx|sy] [YYYY-MM|6月|本月|上月]"),
         summary="show monthly income report",
     ),
     AssistantCommandSpec(
