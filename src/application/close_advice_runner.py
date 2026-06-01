@@ -1672,9 +1672,13 @@ def render_markdown(rows: list[dict[str, Any]], *, notify_levels: set[str], max_
                     [
                         f"- {row.get('symbol')} {opt} {exp} {strike}{suffix} · {_close_action_label(row)} · {row.get('tier_label')}",
                         (
-                            f"- 已锁定: {_pct(row.get('capture_ratio'))} | "
-                            f"剩余DTE={row.get('dte') if row.get('dte') is not None else '-'} | "
-                            f"剩余收益年化={_pct(row.get('remaining_annualized_return'))}"
+                            _long_call_metric_line(row)
+                            if _is_long_call_convexity_display_row(row)
+                            else (
+                                f"- 已锁定: {_pct(row.get('capture_ratio'))} | "
+                                f"剩余DTE={row.get('dte') if row.get('dte') is not None else '-'} | "
+                                f"剩余收益年化={_pct(row.get('remaining_annualized_return'))}"
+                            )
                         ),
                         f"- 价格: 开仓权利金={_num(row.get('premium'))} | 平仓 mid={_num(row.get('close_mid'))}",
                         (
@@ -1770,6 +1774,64 @@ def _pct_compact(val) -> str:
         return f"{n * 100:.1f}%"
     except Exception:
         return str(val) if val is not None else "-"
+
+
+def _signed_pct_compact(val: Any) -> str:
+    n = safe_float(val)
+    if n is None:
+        return "-"
+    sign = "+" if n > 0 else ""
+    if abs(n) >= 0.1:
+        return f"{sign}{int(round(n * 100))}%"
+    return f"{sign}{n * 100:.1f}%"
+
+
+def _ratio_x_compact(val: Any) -> str:
+    n = safe_float(val)
+    if n is None:
+        return "-"
+    if abs(n) >= 10:
+        return f"{n:.0f}x"
+    return f"{n:.1f}x"
+
+
+def _is_long_call_convexity_display_row(row: dict[str, Any]) -> bool:
+    if _is_yield_enhancement_long_call(row):
+        return True
+    if str(row.get("risk_model") or "").strip().lower() == "long_call_convexity":
+        return True
+    option_type = str(row.get("option_type") or "").strip().lower()
+    side = str(row.get("position_side") or row.get("side") or "").strip().lower()
+    return (
+        option_type == "call"
+        and side == "long"
+        and safe_float(row.get("long_call_value_ratio")) is not None
+    )
+
+
+def _long_call_gain_ratio(row: dict[str, Any]) -> float | None:
+    value_ratio = safe_float(row.get("long_call_value_ratio"))
+    if value_ratio is not None:
+        return value_ratio - 1.0
+    realized = safe_float(row.get("realized_if_close"))
+    cost = safe_float(row.get("long_call_cost_basis"))
+    if realized is None or cost is None or cost <= 0:
+        return None
+    return realized / cost
+
+
+def _long_call_metric_line(row: dict[str, Any]) -> str:
+    ratio = _ratio_x_compact(row.get("long_call_value_ratio"))
+    dte = row.get("dte")
+    dte_text = dte if dte is not None else "-"
+    gain = _signed_pct_compact(_long_call_gain_ratio(row))
+    return f"- Call价值: 现值/成本={ratio} | 剩余DTE={dte_text} | 浮盈={gain}"
+
+
+def _long_call_metric_line_compact(row: dict[str, Any], *, dte_str: str) -> str:
+    ratio = _ratio_x_compact(row.get("long_call_value_ratio"))
+    gain = _signed_pct_compact(_long_call_gain_ratio(row))
+    return f"- 现值/成本 {ratio} · {dte_str} · 浮盈 {gain}"
 
 
 def _money_compact(val, currency: str | None) -> str:
@@ -1876,7 +1938,10 @@ def render_markdown_compact(
                 dte = row.get("dte")
                 dte_str = f"{int(dte)}天" if dte is not None else "-"
                 remaining_ann = _pct_compact(row.get("remaining_annualized_return"))
-                l2 = f"- 已锁定 {capture} · {dte_str} · 余年化 {remaining_ann}"
+                if _is_long_call_convexity_display_row(row):
+                    l2 = _long_call_metric_line_compact(row, dte_str=dte_str)
+                else:
+                    l2 = f"- 已锁定 {capture} · {dte_str} · 余年化 {remaining_ann}"
                 close_mid = _money_compact(row.get("close_mid"), currency)
                 realized = _money_compact(row.get("realized_if_close"), currency)
                 remaining = _money_compact(row.get("remaining_premium"), currency)
