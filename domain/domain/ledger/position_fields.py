@@ -31,8 +31,16 @@ class _Unset:
 
 
 _UNSET = _Unset()
-_PatchValue = int | float | str | None | _Unset
+_PatchValue = int | float | str | dict[str, Any] | None | _Unset
 PRICE_DECIMAL_PLACES = 3
+
+POSITION_LOT_STRATEGY_PATCH_FIELDS = (
+    "strategy",
+    "leg_role",
+    "strategy_group_id",
+    "yield_enhancement_mode",
+    "strategy_snapshot",
+)
 
 POSITION_LOT_PATCH_FIELDS = (
     "contracts_open",
@@ -55,6 +63,7 @@ POSITION_LOT_PATCH_FIELDS = (
     "position_id",
     "currency",
     "note",
+    *POSITION_LOT_STRATEGY_PATCH_FIELDS,
 )
 
 
@@ -72,6 +81,23 @@ def _required_text(value: Any, field_name: str) -> str:
     if not text:
         raise ValueError(f"{field_name} is required")
     return text
+
+
+def _optional_patch_text(value: Any, field_name: str) -> str | _Unset:
+    if value is None:
+        return _UNSET
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError(f"{field_name} must be non-empty when provided")
+    return text
+
+
+def _optional_patch_object(value: Any, field_name: str) -> dict[str, Any] | _Unset:
+    if value is None:
+        return _UNSET
+    if not isinstance(value, dict) or not value:
+        raise ValueError(f"{field_name} must be a non-empty JSON object when provided")
+    return dict(value)
 
 
 def normalize_trade_price(value: Any, field_name: str = "premium_per_share", *, allow_zero: bool = False) -> float:
@@ -336,6 +362,11 @@ class PositionLotPatch:
     position_id: _PatchValue = _UNSET
     currency: _PatchValue = _UNSET
     note: _PatchValue = _UNSET
+    strategy: _PatchValue = _UNSET
+    leg_role: _PatchValue = _UNSET
+    strategy_group_id: _PatchValue = _UNSET
+    yield_enhancement_mode: _PatchValue = _UNSET
+    strategy_snapshot: _PatchValue = _UNSET
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {}
@@ -351,7 +382,7 @@ class PositionLotPatch:
             raise KeyError(f"unsupported position lot patch field: {key}")
         return getattr(self, key) is not _UNSET
 
-    def value(self, key: str) -> int | float | str | None:
+    def value(self, key: str) -> int | float | str | dict[str, Any] | None:
         if key not in POSITION_LOT_PATCH_FIELDS:
             raise KeyError(f"unsupported position lot patch field: {key}")
         value = getattr(self, key)
@@ -387,6 +418,11 @@ def decode_position_lot_patch(payload: Any) -> PositionLotPatch:
         position_id=payload.get("position_id", _UNSET),
         currency=payload.get("currency", _UNSET),
         note=payload.get("note", _UNSET),
+        strategy=payload.get("strategy", _UNSET),
+        leg_role=payload.get("leg_role", _UNSET),
+        strategy_group_id=payload.get("strategy_group_id", _UNSET),
+        yield_enhancement_mode=payload.get("yield_enhancement_mode", _UNSET),
+        strategy_snapshot=payload.get("strategy_snapshot", _UNSET),
     )
 
 
@@ -508,9 +544,29 @@ def build_open_adjustment_patch_contract(
     premium_per_share: float | None = None,
     multiplier: float | None = None,
     opened_at_ms: int | None = None,
+    strategy: str | None = None,
+    leg_role: str | None = None,
+    strategy_group_id: str | None = None,
+    yield_enhancement_mode: str | None = None,
+    strategy_snapshot: dict[str, Any] | None = None,
     as_of_ms: int | None = None,
 ) -> PositionLotPatch:
-    if all(value is None for value in (contracts, strike, expiration_ymd, premium_per_share, multiplier, opened_at_ms)):
+    if all(
+        value is None
+        for value in (
+            contracts,
+            strike,
+            expiration_ymd,
+            premium_per_share,
+            multiplier,
+            opened_at_ms,
+            strategy,
+            leg_role,
+            strategy_group_id,
+            yield_enhancement_mode,
+            strategy_snapshot,
+        )
+    ):
         raise ValueError("at least one adjustment field is required")
 
     symbol = norm_symbol(fields.get("symbol") or "")
@@ -553,6 +609,11 @@ def build_open_adjustment_patch_contract(
     patch_underlying_locked: _PatchValue = _UNSET
     patch_position_id: _PatchValue = _UNSET
     patch_note: _PatchValue = _UNSET
+    patch_strategy = _optional_patch_text(strategy, "strategy")
+    patch_leg_role = _optional_patch_text(leg_role, "leg_role")
+    patch_strategy_group_id = _optional_patch_text(strategy_group_id, "strategy_group_id")
+    patch_yield_enhancement_mode = _optional_patch_text(yield_enhancement_mode, "yield_enhancement_mode")
+    patch_strategy_snapshot = _optional_patch_object(strategy_snapshot, "strategy_snapshot")
 
     if contracts is not None:
         patch_contracts = next_contracts
@@ -620,6 +681,11 @@ def build_open_adjustment_patch_contract(
         underlying_share_locked=patch_underlying_locked,
         position_id=patch_position_id,
         note=patch_note,
+        strategy=patch_strategy,
+        leg_role=patch_leg_role,
+        strategy_group_id=patch_strategy_group_id,
+        yield_enhancement_mode=patch_yield_enhancement_mode,
+        strategy_snapshot=patch_strategy_snapshot,
     )
 
 
@@ -632,6 +698,11 @@ def build_open_adjustment_patch(
     premium_per_share: float | None = None,
     multiplier: float | None = None,
     opened_at_ms: int | None = None,
+    strategy: str | None = None,
+    leg_role: str | None = None,
+    strategy_group_id: str | None = None,
+    yield_enhancement_mode: str | None = None,
+    strategy_snapshot: dict[str, Any] | None = None,
     as_of_ms: int | None = None,
 ) -> dict[str, Any]:
     return build_open_adjustment_patch_contract(
@@ -642,6 +713,11 @@ def build_open_adjustment_patch(
         premium_per_share=premium_per_share,
         multiplier=multiplier,
         opened_at_ms=opened_at_ms,
+        strategy=strategy,
+        leg_role=leg_role,
+        strategy_group_id=strategy_group_id,
+        yield_enhancement_mode=yield_enhancement_mode,
+        strategy_snapshot=strategy_snapshot,
         as_of_ms=as_of_ms,
     ).to_dict()
 

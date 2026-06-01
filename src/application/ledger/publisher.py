@@ -11,6 +11,7 @@ from domain.domain.ledger.position_fields import (
     EXPIRE_AUTO_CLOSE,
     SELL_TO_CLOSE,
     OpenPositionCommand,
+    POSITION_LOT_STRATEGY_PATCH_FIELDS,
     build_position_id,
     build_position_lot_fields,
     normalize_currency,
@@ -75,6 +76,7 @@ def _position_lot_to_legacy_record(
     legacy_open_event = legacy_by_event_id.get(lot.open_event_id, {})
     base_fields = _base_fields_for_lot(lot, open_event=open_event, legacy_open_event=legacy_open_event)
     fields = _apply_lot_state_fields(base_fields, lot, ledger_by_event_id=ledger_by_event_id)
+    fields = _apply_adjust_strategy_patch_fields(fields, lot, ledger_events=ledger_events)
     close_event = ledger_by_event_id.get(lot.close_event_ids[-1]) if lot.close_event_ids else None
     if close_event is not None:
         fields.update(_close_fields(close_event, legacy_by_event_id=legacy_by_event_id, lot=lot))
@@ -225,6 +227,38 @@ def _last_action_at(lot: PositionLot, *, ledger_by_event_id: dict[str, TradeEven
     if event is not None:
         return int(event.event_time_ms)
     return int(lot.opened_at_ms)
+
+
+def _apply_adjust_strategy_patch_fields(
+    fields: dict[str, Any],
+    lot: PositionLot,
+    *,
+    ledger_events: list[TradeEvent],
+) -> dict[str, Any]:
+    out = dict(fields)
+    adjust_events = [
+        event
+        for event in ledger_events
+        if event.event_type == "adjust" and str(event.target_lot_id or "").strip() == lot.lot_id
+    ]
+    adjust_events.sort(key=lambda event: (int(event.event_time_ms), str(event.event_id)))
+    for event in adjust_events:
+        payload = event.raw_payload if isinstance(event.raw_payload, dict) else {}
+        patch = payload.get("patch")
+        if not isinstance(patch, dict):
+            continue
+        for key in POSITION_LOT_STRATEGY_PATCH_FIELDS:
+            if key not in patch:
+                continue
+            value = patch.get(key)
+            if value in (None, ""):
+                out.pop(key, None)
+            elif key == "strategy_snapshot":
+                if isinstance(value, dict):
+                    out[key] = dict(value)
+            else:
+                out[key] = str(value).strip()
+    return out
 
 
 def _event_payload(event: dict[str, Any]) -> dict[str, Any]:
