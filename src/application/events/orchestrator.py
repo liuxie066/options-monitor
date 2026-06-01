@@ -12,12 +12,13 @@ from src.application.events.store import EventFetchResult, EventStore
 
 
 EventFetcher = Callable[[str], list[dict[str, Any]]]
+DEFAULT_EVENT_SOURCE_PROVIDER = "futu"
 
 
 def normalize_event_source_provider(value: Any) -> str:
     provider = str(value or "").strip().lower()
     if not provider:
-        return "yfinance"
+        return DEFAULT_EVENT_SOURCE_PROVIDER
     if provider in {"yf", "yahoo", "yahoo_finance"}:
         return "yfinance"
     if provider in {"futu", "opend", "futu_opend", "futu-openapi"}:
@@ -156,7 +157,7 @@ def build_event_source_policy(cfg: dict[str, Any], *, provider_override: str | N
         or source_cfg.get("provider")
         or source_cfg.get("source")
         or _legacy_event_source_provider(cfg)
-        or "yfinance"
+        or DEFAULT_EVENT_SOURCE_PROVIDER
     )
     mode = str(source_cfg.get("mode") or "").strip().lower()
     if not mode:
@@ -354,7 +355,7 @@ def _event_source_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
 
 def _legacy_event_source_provider(cfg: dict[str, Any]) -> str:
     runtime = cfg.get("runtime") if isinstance(cfg.get("runtime"), dict) else {}
-    return normalize_event_source_provider(runtime.get("event_risk_provider") or "yfinance")
+    return normalize_event_source_provider(runtime.get("event_risk_provider") or DEFAULT_EVENT_SOURCE_PROVIDER)
 
 
 def _symbol_market(symbol: str) -> str:

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.182 - 2026-06-01
+
+### Changed
+- Made Futu/OpenD the default event-risk source, with HK scans pinned to Futu and US scans using Futu before yfinance fallback.
+- Added the default Futu-first event-source policy to generated runtime configs so missing user overrides no longer fall back to yfinance.
+
 ## 1.2.181 - 2026-06-01
 
 ### Fixed

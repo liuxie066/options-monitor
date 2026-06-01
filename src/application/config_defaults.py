@@ -151,6 +151,23 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "pipeline_timeout_sec": 600,
             "option_positions_context_ttl_sec": 900,
             "portfolio_context_ttl_sec": 900,
+            "event_risk_source": {
+                "mode": "primary_fallback",
+                "default_provider": "futu",
+                "providers": {
+                    "futu": {
+                        "enabled": True,
+                        "role": "primary",
+                        "host": "127.0.0.1",
+                        "port": 11111,
+                    },
+                    "yfinance": {"enabled": True, "role": "fallback"},
+                },
+                "market_rules": {
+                    "hk": {"chain": ["futu"]},
+                    "us": {"chain": ["futu", "yfinance"]},
+                },
+            },
         },
         "notifications": {
             "opend_alert_cooldown_sec": 600,
