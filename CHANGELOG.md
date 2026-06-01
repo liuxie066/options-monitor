@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.188 - 2026-06-01
+
+### Fixed
+- Allowed LLM-first Assistant routing to fall back to deterministic confirm commands only when the LLM rejected the same known non-executable OM intent, fixing `确认升级` without broadening LLM write execution.
+- Added explicit LLM rejection reasons for known non-executable intents versus unknown intents so fallback decisions stay auditable.
+
 ## 1.2.187 - 2026-06-01
 
 ### Added
