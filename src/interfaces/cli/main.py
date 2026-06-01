@@ -87,6 +87,7 @@ from src.interfaces.cli.service_ops import (
     service_status_from_profile,
     service_upgrade,
     service_upgrade_check,
+    service_upgrade_verify,
     write_service_bundle,
 )
 from src.interfaces.cli.settings_ops import (
@@ -297,6 +298,7 @@ def main(argv: list[str] | None = None) -> int:
                 service_drift_fn=service_drift,
                 service_cleanup_fn=service_cleanup,
                 service_upgrade_check_fn=service_upgrade_check,
+                service_upgrade_verify_fn=service_upgrade_verify,
                 service_upgrade_fn=service_upgrade,
                 service_rollback_fn=service_rollback,
             ))

@@ -14,6 +14,14 @@
 
 ## 发布前检查
 
+先用只读 advisor 看本次变更建议跑哪些检查：
+
+```bash
+python3 scripts/release_test_plan.py --mode standard --base origin/main
+```
+
+它只读取 git diff 和 `VERSION`，输出 JSON 计划，不执行测试、不写文件。`--mode fast|standard|full` 用来选择预检强度；如果命中 ledger/position/trade 等高风险路径，计划会显式要求完整 pytest。
+
 常规本地预检先跑统一入口：
 
 ```bash
@@ -99,6 +107,17 @@ python3 -m pytest tests/test_config_yaml.py tests/test_layered_config.py
   --repo-root /opt/options-monitor/current \
   --runtime-root /var/lib/options-monitor
 ```
+
+发布或升级后的 compact 验证只读：
+
+```bash
+./om update verify \
+  --repo-root /opt/options-monitor/current \
+  --runtime-root /var/lib/options-monitor \
+  --no-check-latest
+```
+
+`update verify` 汇总当前 symlink、版本、runtime config freshness、事件源配置、最近 upgrade status 和长期 service health；`--no-check-latest` 会跳过 git tag 查询，适合 release 已确认后快速复核远端状态。
 
 升级默认 dry-run：
 

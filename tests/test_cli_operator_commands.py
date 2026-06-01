@@ -1460,12 +1460,17 @@ def test_top_level_update_commands_delegate_to_service_upgrade(monkeypatch, caps
         calls.append(("apply", kwargs))
         return {"ok": True, "status": "dry_run"}
 
+    def _verify(**kwargs):
+        calls.append(("verify", kwargs))
+        return {"ok": True, "status": "ok"}
+
     def _rollback(**kwargs):
         calls.append(("rollback", kwargs))
         return {"ok": True, "status": "dry_run"}
 
     monkeypatch.setattr(cli, "service_upgrade_check", _check)
     monkeypatch.setattr(cli, "service_upgrade", _upgrade)
+    monkeypatch.setattr(cli, "service_upgrade_verify", _verify)
     monkeypatch.setattr(cli, "service_rollback", _rollback)
 
     repo = tmp_path / "current"
@@ -1473,6 +1478,17 @@ def test_top_level_update_commands_delegate_to_service_upgrade(monkeypatch, caps
 
     assert cli.main(["update", "check", "--repo-root", str(repo), "--runtime-root", str(runtime)]) == 0
     assert _read_json_output(capsys)["tool_name"] == "update.check"
+
+    assert cli.main([
+        "update",
+        "verify",
+        "--repo-root",
+        str(repo),
+        "--runtime-root",
+        str(runtime),
+        "--no-check-latest",
+    ]) == 0
+    assert _read_json_output(capsys)["tool_name"] == "update.verify"
 
     assert cli.main([
         "update",
@@ -1499,14 +1515,24 @@ def test_top_level_update_commands_delegate_to_service_upgrade(monkeypatch, caps
     assert _read_json_output(capsys)["tool_name"] == "update.rollback"
 
     assert calls[0] == ("check", {"repo_root": str(repo), "runtime_root": str(runtime), "cache_root": None, "remote_name": "origin"})
-    assert calls[1][0] == "apply"
-    assert calls[1][1]["repo_root"] == str(repo)
-    assert calls[1][1]["runtime_root"] == str(runtime)
-    assert calls[1][1]["target_version"] == "1.2.70"
-    assert calls[1][1]["confirm"] is False
-    assert calls[2][0] == "rollback"
-    assert calls[2][1]["to_version"] == "1.2.69"
+    assert calls[1] == (
+        "verify",
+        {
+            "repo_root": str(repo),
+            "runtime_root": str(runtime),
+            "cache_root": None,
+            "remote_name": "origin",
+            "check_latest": False,
+        },
+    )
+    assert calls[2][0] == "apply"
+    assert calls[2][1]["repo_root"] == str(repo)
+    assert calls[2][1]["runtime_root"] == str(runtime)
+    assert calls[2][1]["target_version"] == "1.2.70"
     assert calls[2][1]["confirm"] is False
+    assert calls[3][0] == "rollback"
+    assert calls[3][1]["to_version"] == "1.2.69"
+    assert calls[3][1]["confirm"] is False
 
 
 def test_service_upgrade_compat_commands_are_removed(capsys) -> None:

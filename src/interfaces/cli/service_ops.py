@@ -15,7 +15,7 @@ from src.application.service_deploy import (
     write_service_bundle,
 )
 from src.application.service_drift import service_drift
-from src.application.service_upgrade import service_rollback, service_upgrade, service_upgrade_check
+from src.application.service_upgrade import service_rollback, service_upgrade, service_upgrade_check, service_upgrade_verify
 from src.application.write_contract import attach_write_contract
 
 
@@ -101,6 +101,16 @@ def add_service_update_commands(subparsers: Any) -> None:
     update_check.add_argument("--runtime-root", default="/var/lib/options-monitor")
     update_check.add_argument("--cache-root", default=None)
     update_check.add_argument("--remote-name", default="origin")
+    update_verify = update_sub.add_parser("verify", help="compact read-only release/runtime verification")
+    update_verify.add_argument("--repo-root", default=None)
+    update_verify.add_argument("--runtime-root", default="/var/lib/options-monitor")
+    update_verify.add_argument("--cache-root", default=None)
+    update_verify.add_argument("--remote-name", default="origin")
+    update_verify.add_argument(
+        "--no-check-latest",
+        action="store_true",
+        help="skip git tag/latest-version lookup for a faster local runtime verification",
+    )
     update_apply = update_sub.add_parser("apply", help="upgrade a current symlink to a released version")
     update_apply.add_argument("--repo-root", default=None)
     update_apply.add_argument("--runtime-root", default="/var/lib/options-monitor")
@@ -165,6 +175,7 @@ def handle_service_update_command(
     service_drift_fn: Callable[..., dict[str, Any]] = service_drift,
     service_cleanup_fn: Callable[..., dict[str, Any]] = service_cleanup,
     service_upgrade_check_fn: Callable[..., dict[str, Any]] = service_upgrade_check,
+    service_upgrade_verify_fn: Callable[..., dict[str, Any]] = service_upgrade_verify,
     service_upgrade_fn: Callable[..., dict[str, Any]] = service_upgrade,
     service_rollback_fn: Callable[..., dict[str, Any]] = service_rollback,
 ) -> dict[str, Any]:
@@ -257,6 +268,16 @@ def handle_service_update_command(
             remote_name=args.remote_name,
         )
         return build_response(tool_name="update.check", ok=bool(data.get("ok")), data=data)
+
+    if args.command == "update" and args.update_command == "verify":
+        data = service_upgrade_verify_fn(
+            repo_root=args.repo_root or repo_base_fn(),
+            runtime_root=args.runtime_root,
+            cache_root=args.cache_root,
+            remote_name=args.remote_name,
+            check_latest=not bool(args.no_check_latest),
+        )
+        return build_response(tool_name="update.verify", ok=bool(data.get("ok")), data=data)
 
     if args.command == "update" and args.update_command == "apply":
         confirmed = _confirmed(args)
