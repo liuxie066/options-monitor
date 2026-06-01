@@ -494,6 +494,13 @@ def test_inbound_parser_maps_manual_trade_and_symbol_operations() -> None:
         "set": {"sell_call.enabled": True, "sell_call.min_strike": 6.5},
         "ensure_use": ["call_base"],
     }
+    covered_call_setting = parse_inbound_text("设置 09898 covered call min strike 85")
+    assert covered_call_setting.intent_name == "symbol_edit"
+    assert covered_call_setting.arguments == {
+        "symbol": "09898",
+        "set": {"sell_call.enabled": True, "sell_call.min_strike": 85.0},
+        "ensure_use": ["call_base"],
+    }
     assert parse_inbound_text("删除监控标的 腾讯").arguments == {"symbol": "腾讯"}
     assert parse_inbound_text("确认监控 in_abc123").intent_name == "symbol_confirm"
     assert parse_inbound_text("cancel monitor in_abc123").intent_name == "symbol_cancel"
@@ -1753,6 +1760,74 @@ def test_inbound_symbol_write_uses_symbol_market_over_default_us_config(monkeypa
     current_hk = json.loads(hk_cfg_path.read_text(encoding="utf-8"))
     assert current_us["symbols"][0]["symbol"] == "NVDA"
     assert current_hk["symbols"][0]["sell_put"]["max_strike"] == 480
+
+
+def test_inbound_symbol_setting_writes_yaml_and_rebuilds_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from src.application.config_yaml import build_yaml_runtime_config_file
+
+    _enable_inbound_symbol_write(monkeypatch)
+    config_yaml = tmp_path / "config.yaml"
+    config_yaml.write_text(
+        """\
+accounts:
+  lx:
+    type: futu
+markets:
+  us:
+    accounts: [lx]
+    symbols: [NVDA]
+  hk:
+    accounts: [lx]
+    symbols: ["0700.HK"]
+""",
+        encoding="utf-8",
+    )
+    us_cfg_path = tmp_path / "config.us.json"
+    hk_cfg_path = tmp_path / "config.hk.json"
+    build_yaml_runtime_config_file(repo_root=Path(__file__).resolve().parents[1], market="us", config_path=config_yaml, output_config_path=us_cfg_path)
+    build_yaml_runtime_config_file(repo_root=Path(__file__).resolve().parents[1], market="hk", config_path=config_yaml, output_config_path=hk_cfg_path)
+    audit_db = tmp_path / "inbound.sqlite3"
+
+    preview = handle_assistant_request(
+        AssistantRequest(
+            text="设置 09898 covered call min strike 85",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_yaml_symbol_setting",
+            config_path=str(us_cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert preview["ok"] is True
+    assert preview["data"]["payload"]["config"]["source_format"] == "yaml"
+    assert preview["data"]["payload"]["config"]["config_yaml_path"] == str(config_yaml)
+    assert preview["data"]["payload"]["config"]["market"] == "hk"
+    assert "校准为：9898.HK" in preview["data"]["response_text"]
+    assert f"配置：{config_yaml}" in preview["data"]["response_text"]
+    assert "9898.HK" not in config_yaml.read_text(encoding="utf-8")
+
+    confirmed = handle_assistant_request(
+        AssistantRequest(
+            text="确认监控",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_yaml_symbol_setting_confirm",
+            config_path=str(us_cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert confirmed["ok"] is True
+    updated_yaml = config_yaml.read_text(encoding="utf-8")
+    assert "9898.HK" in updated_yaml
+    current_hk = json.loads(hk_cfg_path.read_text(encoding="utf-8"))
+    item = next(row for row in current_hk["symbols"] if row["symbol"] == "9898.HK")
+    assert item["sell_put"]["enabled"] is False
+    assert item["sell_call"]["enabled"] is True
+    assert item["sell_call"]["min_strike"] == 85.0
 
 
 def test_inbound_write_operations_are_disabled_by_default(tmp_path: Path) -> None:

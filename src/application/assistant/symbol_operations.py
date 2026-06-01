@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from pathlib import Path
 from typing import Any
 
 from src.application.account_config import normalize_accounts
-from src.application.agent_tool_config import resolve_runtime_config_path
+from src.application.agent_tool_config import repo_base, resolve_runtime_config_path
 from src.application.agent_tool_contracts import AgentToolError, build_response, mask_path
 from src.application.config_loader import resolve_watchlist_config, set_watchlist_config
 from src.application.config_validator import validate_config
-from src.application.runtime_config_freshness import infer_runtime_config_market
+from src.application.config_yaml import RESOLVED_KEY, load_yaml_config_file
+from src.application.config_yaml_symbols import set_yaml_symbol_config
+from src.application.runtime_config_freshness import GENERATED_KEY, infer_runtime_config_market
 from src.application.assistant.contracts import AssistantRequest, PerceptionResult
 from src.application.assistant.operation_lifecycle import (
     build_cancelled_operation_response,
@@ -43,6 +46,15 @@ def handle_symbol_operation(
     policy = enforce_symbol_write_allowed(channel=request.channel, sender_id=request.sender_id)
     if intent.intent_name in PREVIEW_INTENTS:
         arguments = dict(intent.arguments)
+        yaml_payload = _build_yaml_operation_payload(intent.intent_name, arguments, request=request)
+        if yaml_payload is not None:
+            return _preview_and_save(
+                yaml_payload,
+                request=request,
+                command_id=command_id,
+                store=store,
+                ttl_seconds=policy.confirm_ttl_seconds,
+            )
         config_path, _cfg, config_key = _load_config_for_symbol_request(request, arguments=arguments)
         payload = _build_operation_payload(intent.intent_name, arguments, request=request, config_path=config_path, config_key=config_key)
         return _preview_and_save(payload, request=request, command_id=command_id, store=store, ttl_seconds=policy.confirm_ttl_seconds)
@@ -210,7 +222,61 @@ def _build_operation_payload(
     }
 
 
+def _build_yaml_operation_payload(
+    operation_type: str,
+    arguments: dict[str, Any],
+    *,
+    request: AssistantRequest,
+) -> dict[str, Any] | None:
+    if operation_type != "symbol_edit":
+        return None
+    config_yaml_path = _discover_config_yaml_path(request)
+    if config_yaml_path is None:
+        return None
+    settings = _yaml_symbol_settings_from_edit(arguments)
+    if settings is None:
+        raise AgentToolError(
+            code="NEEDS_CLARIFICATION",
+            message="IM config.yaml 设置目前只支持 covered call 开关、covered call 最低行权价、sell put 开关。",
+            hint="示例：设置 09898 covered call min strike 85，或使用 covered_call.min_strike=85 / sell_put.enabled=false。",
+            details={"supported_fields": ["sell_call.enabled", "covered_call.enabled", "sell_call.min_strike", "covered_call.min_strike", "sell_put.enabled"]},
+        )
+    config_doc = load_yaml_config_file(config_yaml_path)
+    market = _yaml_symbol_market(arguments, config_doc=config_doc, request=request)
+    if market is None:
+        raise AgentToolError(
+            code="NEEDS_CLARIFICATION",
+            message="监控标的设置前需要明确市场。",
+            hint="请明确美股或港股，或使用可以校准市场的 symbol，例如 09898 / 9898.HK / NVDA。",
+        )
+    runtime_root = _runtime_root_for_rebuild(request)
+    return {
+        "schema_version": "1.0",
+        "operation_type": operation_type,
+        "arguments": arguments,
+        "config": {
+            "source_format": "yaml",
+            "config_yaml_path": str(config_yaml_path),
+            "market": market,
+            "runtime_root": str(runtime_root) if runtime_root else None,
+        },
+        "yaml_symbol_set": {
+            "symbol": _required_text(arguments.get("symbol"), "symbol"),
+            **settings,
+        },
+    }
+
+
 def _preview_operation(payload: dict[str, Any]) -> dict[str, Any]:
+    if _payload_source_format(payload) == "yaml":
+        result = _run_yaml_symbol_set(payload, apply=False)
+        summary = result["summary"] if isinstance(result.get("summary"), dict) else {}
+        return {
+            "config_path": result.get("config_yaml_path"),
+            "summary": summary,
+            "validation": result.get("validation"),
+            "source_format": "yaml",
+        }
     config_path, cfg = _load_config_for_payload(payload)
     mutated = deepcopy(cfg)
     summary = _apply_symbol_payload(mutated, payload)
@@ -219,6 +285,19 @@ def _preview_operation(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _apply_operation(payload: dict[str, Any]) -> dict[str, Any]:
+    if _payload_source_format(payload) == "yaml":
+        result = _run_yaml_symbol_set(payload, apply=True)
+        return {
+            "status": "applied",
+            "config_path": result.get("config_yaml_path"),
+            "summary": result.get("summary"),
+            "validation": result.get("validation"),
+            "rebuild": result.get("rebuild"),
+            "source_format": "yaml",
+            "backup_path": result.get("backup_path"),
+            "audit_id": result.get("audit_id"),
+            "rollback_hint": result.get("rollback_hint"),
+        }
     config_path, cfg = _load_config_for_payload(payload)
     summary = _apply_symbol_payload(cfg, payload)
     canonical = set_watchlist_config(cfg, resolve_watchlist_config(cfg))
@@ -260,6 +339,30 @@ def _apply_symbol_payload(cfg: dict[str, Any], payload: dict[str, Any]) -> dict[
     if operation_type == "symbol_remove":
         return remove_symbol_entry(cfg, symbol=_required_text(args.get("symbol"), "symbol"), error_factory=_input_error).public_payload()
     raise AgentToolError(code="INPUT_ERROR", message=f"unsupported symbol operation_type: {operation_type}")
+
+
+def _payload_source_format(payload: dict[str, Any]) -> str:
+    config = payload.get("config") if isinstance(payload.get("config"), dict) else {}
+    return str(config.get("source_format") or "").strip().lower()
+
+
+def _run_yaml_symbol_set(payload: dict[str, Any], *, apply: bool) -> dict[str, Any]:
+    config = payload.get("config") if isinstance(payload.get("config"), dict) else {}
+    settings = payload.get("yaml_symbol_set") if isinstance(payload.get("yaml_symbol_set"), dict) else {}
+    config_yaml_path = _resolve_path(config.get("config_yaml_path"))
+    runtime_root = _optional_path(config.get("runtime_root"))
+    return set_yaml_symbol_config(
+        repo_root=repo_base(),
+        market=_required_text(config.get("market"), "market"),
+        symbol=_required_text(settings.get("symbol"), "symbol"),
+        config_path=config_yaml_path,
+        covered_call_enabled=_optional_bool(settings.get("covered_call_enabled"), "covered_call_enabled"),
+        covered_call_min_strike=_optional_float(settings.get("covered_call_min_strike"), "covered_call_min_strike"),
+        sell_put_enabled=_optional_bool(settings.get("sell_put_enabled"), "sell_put_enabled"),
+        rebuild_runtime_root=runtime_root,
+        apply=apply,
+        backup=True,
+    )
 
 
 def _load_config_for_payload(payload: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
@@ -304,6 +407,102 @@ def _read_runtime_config(config_path: Any) -> dict[str, Any]:
     return data
 
 
+def _discover_config_yaml_path(request: AssistantRequest) -> Path | None:
+    repo_root = repo_base()
+    for raw_path in (request.assistant_config_path, request.config_path):
+        path_text = str(raw_path or "").strip()
+        if not path_text:
+            continue
+        discovered = _config_yaml_path_from_json(_resolve_path(path_text), repo_root=repo_root)
+        if discovered is not None:
+            return discovered
+    if request.config_key:
+        try:
+            runtime_path = resolve_runtime_config_path(config_key=request.config_key, config_path=None)
+        except AgentToolError:
+            runtime_path = None
+        if runtime_path is not None:
+            discovered = _config_yaml_path_from_json(runtime_path, repo_root=repo_root)
+            if discovered is not None:
+                return discovered
+    return None
+
+
+def _config_yaml_path_from_json(path: Path, *, repo_root: Path) -> Path | None:
+    payload = _load_json_if_exists(path)
+    if not payload:
+        return None
+    for candidate in (
+        _nested_text(payload, RESOLVED_KEY, "config_yaml_path"),
+        _nested_text(payload, GENERATED_KEY, "config_yaml_path"),
+        _generated_source_path(payload),
+    ):
+        if candidate:
+            return _resolve_path(candidate, repo_root=repo_root)
+    return None
+
+
+def _generated_source_path(payload: dict[str, Any]) -> str | None:
+    generated = payload.get(GENERATED_KEY)
+    generated_map = generated if isinstance(generated, dict) else {}
+    sources = generated_map.get("sources")
+    if not isinstance(sources, list):
+        return None
+    for item in sources:
+        source = item if isinstance(item, dict) else {}
+        if str(source.get("role") or "").strip() == "config_yaml":
+            return str(source.get("path") or "").strip() or None
+    return None
+
+
+def _nested_text(payload: dict[str, Any], *keys: str) -> str | None:
+    current: Any = payload
+    for key in keys:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    text = str(current or "").strip()
+    return text or None
+
+
+def _load_json_if_exists(path: Path) -> dict[str, Any]:
+    if not path.exists() or not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _runtime_root_for_rebuild(request: AssistantRequest) -> Path | None:
+    if request.config_path:
+        return _resolve_path(request.config_path).parent
+    if request.config_key:
+        try:
+            return resolve_runtime_config_path(config_key=request.config_key, config_path=None).parent
+        except AgentToolError:
+            return None
+    if request.assistant_config_path:
+        path = _resolve_path(request.assistant_config_path)
+        if path.parent.name == "resolved":
+            return path.parent.parent
+    return None
+
+
+def _resolve_path(raw: Any, *, repo_root: Path | None = None) -> Path:
+    path = Path(str(raw or "")).expanduser()
+    if not path.is_absolute():
+        base = repo_root or Path.cwd()
+        path = base / path
+    return path.resolve()
+
+
+def _optional_path(raw: Any) -> Path | None:
+    text = str(raw or "").strip()
+    return _resolve_path(text) if text else None
+
+
 def _symbol_market_from_arguments(arguments: dict[str, Any], *, config: dict[str, Any]) -> str | None:
     raw_symbol = str(arguments.get("symbol") or "").strip()
     if not raw_symbol:
@@ -316,6 +515,32 @@ def _symbol_market_from_arguments(arguments: dict[str, Any], *, config: dict[str
         return "us"
     if market == "HK":
         return "hk"
+    return None
+
+
+def _yaml_symbol_market(
+    arguments: dict[str, Any],
+    *,
+    config_doc: dict[str, Any],
+    request: AssistantRequest,
+) -> str | None:
+    raw_symbol = str(arguments.get("symbol") or "").strip()
+    if raw_symbol:
+        calibrated = calibrate_symbol(raw_symbol, config=config_doc)
+        if calibrated.status != "ok":
+            calibrated = calibrate_symbol(raw_symbol)
+        market = str(calibrated.market or "").strip().upper()
+        if market == "US":
+            return "us"
+        if market == "HK":
+            return "hk"
+    if request.config_key in {"us", "hk"}:
+        return request.config_key
+    if request.config_path:
+        config = _load_json_if_exists(_resolve_path(request.config_path))
+        inferred = infer_runtime_config_market(config_path=_resolve_path(request.config_path), config=config)
+        if inferred in {"us", "hk"}:
+            return inferred
     return None
 
 
@@ -433,6 +658,56 @@ def render_symbol_response(
 
 def _input_error(message: str) -> AgentToolError:
     return AgentToolError(code="INPUT_ERROR", message=message)
+
+
+def _yaml_symbol_settings_from_edit(arguments: dict[str, Any]) -> dict[str, Any] | None:
+    sets = arguments.get("set")
+    if not isinstance(sets, dict) or not sets:
+        return None
+    normalized = {str(key).strip(): value for key, value in sets.items()}
+    supported = {
+        "sell_call.enabled",
+        "covered_call.enabled",
+        "sell_call.min_strike",
+        "covered_call.min_strike",
+        "sell_put.enabled",
+    }
+    if any(key not in supported for key in normalized):
+        return None
+    out: dict[str, Any] = {}
+    if "sell_call.enabled" in normalized:
+        out["covered_call_enabled"] = _optional_bool(normalized["sell_call.enabled"], "sell_call.enabled")
+    if "covered_call.enabled" in normalized:
+        out["covered_call_enabled"] = _optional_bool(normalized["covered_call.enabled"], "covered_call.enabled")
+    if "sell_call.min_strike" in normalized:
+        out["covered_call_min_strike"] = _optional_float(normalized["sell_call.min_strike"], "sell_call.min_strike")
+    if "covered_call.min_strike" in normalized:
+        out["covered_call_min_strike"] = _optional_float(normalized["covered_call.min_strike"], "covered_call.min_strike")
+    if "sell_put.enabled" in normalized:
+        out["sell_put_enabled"] = _optional_bool(normalized["sell_put.enabled"], "sell_put.enabled")
+    return out or None
+
+
+def _optional_bool(value: Any, field_name: str) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    raise AgentToolError(code="INPUT_ERROR", message=f"{field_name} must be true/false")
+
+
+def _optional_float(value: Any, field_name: str) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except Exception as exc:
+        raise AgentToolError(code="INPUT_ERROR", message=f"{field_name} must be a number") from exc
 
 
 def _required_text(value: Any, field_name: str) -> str:
