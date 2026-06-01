@@ -46,14 +46,14 @@ class EventStore:
         self,
         path: Path,
         *,
-        provider: str = "yfinance",
+        provider: str = "futu",
         success_ttl_seconds: int = 86400,
         stale_ttl_seconds: int = 30 * 86400,
         error_cooldown_seconds: int = 30 * 60,
         rate_limit_cooldown_seconds: int = 60 * 60,
     ) -> None:
         self.path = Path(path)
-        self.provider = str(provider or "yfinance").strip().lower() or "yfinance"
+        self.provider = str(provider or "futu").strip().lower() or "futu"
         self.success_ttl_seconds = max(1, int(success_ttl_seconds))
         self.stale_ttl_seconds = max(1, int(stale_ttl_seconds))
         self.error_cooldown_seconds = max(1, int(error_cooldown_seconds))

@@ -9,6 +9,7 @@ from domain.domain.symbol_identity import canonical_symbol
 from src.application.config_loader import resolve_templates_config, resolve_watchlist_config
 from src.application.config_profiles import apply_profiles
 from src.application.events.orchestrator import (
+    DEFAULT_EVENT_SOURCE_PROVIDER,
     EventFetcher,
     normalize_event_source_provider,
     resolve_event_source_snapshot,
@@ -151,7 +152,7 @@ def _event_source_provider(cfg: dict[str, Any]) -> str:
         source_cfg.get("provider")
         or source_cfg.get("source")
         or runtime.get("event_risk_provider")
-        or "yfinance"
+        or DEFAULT_EVENT_SOURCE_PROVIDER
     )
 
 

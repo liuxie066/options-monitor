@@ -48,7 +48,7 @@ def annotate_candidates_with_event_risk(
     # Explicit fetcher mode is kept for focused unit tests and manual diagnostics.
     # Production scan entry points should pass a run-level snapshot instead.
     symbols = sorted({str(s).strip().upper() for s in df.get("symbol", pd.Series(dtype=str)).dropna().tolist() if str(s).strip()})
-    store = EventStore((Path(base_dir) / "output_shared" / "state" / "event_store.json").resolve())
+    store = EventStore((Path(base_dir) / "output_shared" / "state" / "event_store.json").resolve(), provider="yfinance")
     snapshot_payload = {
         "schema_version": 1,
         "provider": "yfinance",
