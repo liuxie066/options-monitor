@@ -5,7 +5,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from src.application.assistant import AssistantSettings, LlmTranslatorSettings, handle_assistant_message
+from src.application.assistant import AssistantSettings, LlmTranslatorSettings, PerceptionEngine, handle_assistant_message
 from src.application.assistant.agent_loop import (
     AGENT_LOOP_SCHEMA_VERSION,
     build_tool_observation,
@@ -570,6 +570,170 @@ def test_assistant_runtime_falls_back_to_deterministic_when_llm_unavailable(tmp_
     assert perception_trace["candidates"][1]["source"] == "deterministic"
     assert perception_trace["candidates"][1]["status"] == "accepted"
     assert perception_trace["candidates"][1]["intent_name"] == "small_talk"
+
+
+def test_assistant_runtime_falls_back_to_deterministic_confirm_when_llm_rejects_write_intent(tmp_path: Path) -> None:
+    settings = AssistantSettings(
+        mode="llm_router",
+        llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+    )
+
+    def _translate(
+        text: str,
+        runtime_settings: AssistantSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> LlmTranslationResult:
+        assert text == "确认升级 in_abc123"
+        assert runtime_settings is settings
+        assert conversation_context is not None
+        return parse_llm_translation_payload(
+            {
+                "schema_version": LLM_INTENT_SCHEMA_VERSION,
+                "intent": "upgrade_confirm",
+                "arguments": {"operation_id": "in_abc123"},
+                "confidence": 0.96,
+            },
+            settings=runtime_settings.llm,
+        )
+
+    engine = PerceptionEngine(
+        request=AssistantRequest(
+            text="确认升级 in_abc123",
+            sender_id="local",
+            message_id="msg_llm_denied_confirm_fallback",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        audit_store=InboundAuditStore(tmp_path / "inbound.sqlite3"),
+        settings=settings,
+        translate_intent_fn=_translate,
+    )
+
+    perception = engine.perceive("确认升级 in_abc123", None)
+
+    assert perception.intent_name == "upgrade_confirm"
+    assert perception.arguments == {"operation_id": "in_abc123", "operation_resolution": "explicit"}
+    assert perception.source == "deterministic"
+    assert engine.route == "deterministic"
+    assert engine.trace is not None
+    trace = engine.trace.public_payload()
+    assert trace["decision"] == "deterministic_fallback_selected"
+    assert trace["selected_source"] == "deterministic"
+    assert trace["candidates"][0]["source"] == "llm"
+    assert trace["candidates"][0]["status"] == "rejected"
+    assert trace["candidates"][0]["error_code"] == "PERMISSION_DENIED"
+    assert trace["candidates"][0]["error"]["details"]["llm_rejected_reason"] == "known_non_executable_intent"
+    assert trace["candidates"][1]["source"] == "deterministic"
+    assert trace["candidates"][1]["status"] == "accepted"
+    assert trace["candidates"][1]["intent_name"] == "upgrade_confirm"
+
+
+def test_assistant_runtime_does_not_fallback_for_unknown_llm_permission_denial(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(tool_name=tool_name, ok=True, data={"summary": {"ok": True}})
+
+    def _translate(
+        text: str,
+        runtime_settings: AssistantSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> LlmTranslationResult:
+        assert text == "状态"
+        assert conversation_context is not None
+        return parse_llm_translation_payload(
+            {
+                "schema_version": LLM_INTENT_SCHEMA_VERSION,
+                "intent": "unsupported_project_command",
+                "arguments": {},
+                "confidence": 0.96,
+            },
+            settings=runtime_settings.llm,
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="状态",
+            sender_id="local",
+            message_id="msg_unknown_llm_permission_no_fallback",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="llm_router",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        translate_intent_fn=_translate,
+    )
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "PERMISSION_DENIED"
+    assert out["error"]["details"]["llm_rejected_reason"] == "unknown_intent"
+    assert out["meta"]["assistant"]["route"] == "llm"
+    perception_trace = out["meta"]["assistant"]["perception_trace"]
+    assert perception_trace["decision"] == "llm_error"
+    assert perception_trace["selected_source"] is None
+    assert perception_trace["candidates"][0]["source"] == "llm"
+    assert perception_trace["candidates"][0]["error_code"] == "PERMISSION_DENIED"
+    assert perception_trace["candidates"][1]["source"] == "deterministic"
+    assert perception_trace["candidates"][1]["status"] == "accepted"
+    assert perception_trace["candidates"][1]["intent_name"] == "runtime_status"
+    assert calls == []
+
+
+def test_assistant_runtime_does_not_fallback_for_mismatched_known_llm_denial(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(tool_name=tool_name, ok=True, data={"summary": {"ok": True}})
+
+    def _translate(
+        text: str,
+        runtime_settings: AssistantSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> LlmTranslationResult:
+        assert text == "状态"
+        assert conversation_context is not None
+        return parse_llm_translation_payload(
+            {
+                "schema_version": LLM_INTENT_SCHEMA_VERSION,
+                "intent": "manual_trade_open",
+                "arguments": {"raw_text": "记录开仓 sy NVDA"},
+                "confidence": 0.96,
+            },
+            settings=runtime_settings.llm,
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="状态",
+            sender_id="local",
+            message_id="msg_mismatched_known_llm_permission_no_fallback",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="llm_router",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        translate_intent_fn=_translate,
+    )
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "PERMISSION_DENIED"
+    assert out["error"]["details"]["intent_name"] == "manual_trade_open"
+    assert out["error"]["details"]["llm_rejected_reason"] == "known_non_executable_intent"
+    assert out["meta"]["assistant"]["route"] == "llm"
+    perception_trace = out["meta"]["assistant"]["perception_trace"]
+    assert perception_trace["decision"] == "llm_error"
+    assert perception_trace["selected_source"] is None
+    assert perception_trace["candidates"][0]["source"] == "llm"
+    assert perception_trace["candidates"][0]["error_code"] == "PERMISSION_DENIED"
+    assert perception_trace["candidates"][1]["source"] == "deterministic"
+    assert perception_trace["candidates"][1]["status"] == "accepted"
+    assert perception_trace["candidates"][1]["intent_name"] == "runtime_status"
+    assert calls == []
 
 
 def test_assistant_runtime_unknown_slash_command_returns_clarification(tmp_path: Path) -> None:
@@ -1521,6 +1685,9 @@ def test_llm_intent_schema_rejects_write_intents_and_extra_arguments() -> None:
     assert write_result.intent is None
     assert write_result.error is not None
     assert write_result.error.code == "PERMISSION_DENIED"
+    assert write_result.error.details is not None
+    assert write_result.error.details["intent_name"] == "manual_trade_open"
+    assert write_result.error.details["llm_rejected_reason"] == "known_non_executable_intent"
 
     confirm_result = parse_llm_translation_payload(
         {
@@ -1534,6 +1701,9 @@ def test_llm_intent_schema_rejects_write_intents_and_extra_arguments() -> None:
     assert confirm_result.intent is None
     assert confirm_result.error is not None
     assert confirm_result.error.code == "PERMISSION_DENIED"
+    assert confirm_result.error.details is not None
+    assert confirm_result.error.details["intent_name"] == "manual_trade_confirm"
+    assert confirm_result.error.details["llm_rejected_reason"] == "known_non_executable_intent"
 
     unsupported_intent_result = parse_llm_translation_payload(
         {
@@ -1547,6 +1717,9 @@ def test_llm_intent_schema_rejects_write_intents_and_extra_arguments() -> None:
     assert unsupported_intent_result.intent is None
     assert unsupported_intent_result.error is not None
     assert unsupported_intent_result.error.code == "PERMISSION_DENIED"
+    assert unsupported_intent_result.error.details is not None
+    assert unsupported_intent_result.error.details["intent_name"] == "unsupported_project_command"
+    assert unsupported_intent_result.error.details["llm_rejected_reason"] == "unknown_intent"
 
     extra_result = parse_llm_translation_payload(
         {

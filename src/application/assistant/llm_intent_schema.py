@@ -13,6 +13,7 @@ from src.application.assistant.commands import (
     llm_executable_arguments,
     llm_executable_intent_names,
     llm_recognizable_intent_names,
+    spec_by_intent,
 )
 from src.application.assistant.settings import LlmTranslatorSettings
 from src.application.agent_tool_contracts import AgentToolError
@@ -25,6 +26,7 @@ _LOG_KIND_VALUES = frozenset(LOG_KIND_VALUES)
 _MONTH_RE = re.compile(r"^20\d{2}-(0[1-9]|1[0-2])$")
 
 _ALLOWED_ARGUMENTS = llm_executable_arguments()
+_COMMAND_SPECS_BY_INTENT = spec_by_intent()
 
 
 def llm_intent_schema() -> dict[str, Any]:
@@ -91,7 +93,11 @@ def inbound_intent_from_llm_payload(
             code="PERMISSION_DENIED",
             message=f"LLM intent is not allowed: {intent_name}",
             hint="LLM translator is currently restricted to recognizable read-only intents.",
-            details={"allowed_intents": llm_recognizable_intent_names()},
+            details={
+                "intent_name": intent_name,
+                "llm_rejected_reason": _llm_rejected_reason(intent_name),
+                "allowed_intents": llm_recognizable_intent_names(),
+            },
         )
 
     confidence = _parse_confidence(payload.get("confidence"))
@@ -173,6 +179,13 @@ def _normalize_arguments(intent_name: str, arguments: dict[str, Any]) -> dict[st
         lines = _optional_int(arguments.get("lines"), default=50, minimum=1, maximum=500, field="lines")
         return {"run_id": run_id, "kind": kind, "lines": lines}
     raise AgentToolError(code="INPUT_ERROR", message=f"unsupported LLM intent: {intent_name}")
+
+
+def _llm_rejected_reason(intent_name: str) -> str:
+    spec = _COMMAND_SPECS_BY_INTENT.get(intent_name)
+    if spec is None:
+        return "unknown_intent"
+    return "known_non_executable_intent"
 
 
 def _optional_account(raw: Any) -> str | None:
