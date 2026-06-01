@@ -160,6 +160,7 @@ DATASET_ID=us-<run-id>
 - `outcome_coverage`：有多少 candidate instrument 被 mark、被 usable mark、被 outcome 覆盖。
 - `path_risk.by_status`：accepted / rejected 的最大浮亏和路径样本数量。
 - `outcome_stats.by_status`：accepted 与 rejected 的 PnL、胜率、损失次数。
+- `insurance_metrics`：把 Sell Put / Covered Call 当作承保组合复盘，重点看收取保费、赔付/回补成本、loss ratio、保费/资本占用、接货/被叫走比例，以及路径最大浮亏/保费。
 - `outcome_by_bucket`：DTE、Delta、IV/RV、Spread、集中度各区间的表现。
 
 ## Status 解释

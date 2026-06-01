@@ -656,6 +656,7 @@ def _public_row(row: dict[str, Any]) -> dict[str, Any]:
         "reason",
         "exit_state",
         "exit_reason_type",
+        "hold_reason_type",
         "close_action",
         "optional_combo_action",
         "strategy_exit_mode",
