@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.186 - 2026-06-01
+
+### Changed
+- Simplified rejection-summary notification receipts to keep total pass/filter counts and top rejection categories while removing module breakdowns, rule-level details, and sample symbols from the main message.
+
 ## 1.2.185 - 2026-06-01
 
 ### Fixed
