@@ -621,6 +621,7 @@ def evaluate_short_vol_close_advice(
             tier="strong",
             reason="到期前存在事件风险，short-vol 持仓的尾部风险上升，优先考虑平仓",
             status="event_risk",
+            allow_loss=True,
         )
 
     ratio = safe_float(risk_fields.get("iv_rv_ratio"))
@@ -685,8 +686,22 @@ def _short_vol_not_evaluable(row: dict[str, Any], *, reason: str, flag: str) -> 
     return out
 
 
-def _short_vol_override(row: dict[str, Any], *, tier: str, reason: str, status: str) -> dict[str, Any]:
+def _short_vol_override(
+    row: dict[str, Any], *, tier: str, reason: str, status: str, allow_loss: bool = False
+) -> dict[str, Any]:
     out = dict(row)
+    realized = safe_float(out.get("realized_if_close"))
+    if not allow_loss and realized is not None and realized <= 0:
+        out["tier"] = "none"
+        out["tier_label"] = TIER_LABELS["none"]
+        out["reason"] = f"{reason}，但当前买回为亏损，未达到风险止损条件，不作为平仓提醒"
+        out["short_vol_thesis_status"] = status
+        out["exit_state"] = EXIT_STATE_HOLD
+        out["exit_reason_type"] = EXIT_REASON_TYPE_HOLD
+        flags = [x for x in str(out.get("data_quality_flags") or "").split(";") if x]
+        flags.append("risk_exit_loss_not_actionable")
+        out["data_quality_flags"] = ";".join(dict.fromkeys(flags))
+        return out
     out["tier"] = tier
     out["tier_label"] = TIER_LABELS.get(tier, tier)
     out["reason"] = reason
