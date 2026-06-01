@@ -741,7 +741,58 @@ output_shared/state/current/research.current.json
 
 ---
 
-## 6. 人工 CLI：版本检查
+## 6. 人工 CLI：事件源探针
+
+`om event-source probe` 是只读事件风险数据源探针。它不写 runtime state、不发送通知、不运行扫描。
+
+```bash
+om event-source probe --provider futu --symbols NVDA 0700.HK --host 127.0.0.1 --port 11111
+om event-source probe --provider yfinance --symbols NVDA
+om event-source probe --provider all --symbols NVDA 0700.HK
+```
+
+Futu/OpenD provider 读取财报、分红和拆合股事件，需要 `futu-api>=10.6.6608` 以及可用 OpenD quote 连接。
+`--provider all` 会并行展示 Futu 与 yfinance 的只读探针结果，便于比较数据源可用性；它不会写事件缓存。
+
+线上事件预取由 `runtime.event_risk_source` 控制。单源配置仍兼容：
+
+```yaml
+runtime:
+  event_risk_source:
+    provider: futu
+    futu:
+      host: 127.0.0.1
+      port: 11111
+```
+
+多源 fallback 配置示例：
+
+```yaml
+runtime:
+  event_risk_source:
+    mode: primary_fallback
+    default_provider: futu
+    providers:
+      futu:
+        enabled: true
+        role: primary
+        host: 127.0.0.1
+        port: 11111
+      yfinance:
+        enabled: true
+        role: fallback
+    market_rules:
+      hk:
+        chain: [futu]
+      us:
+        chain: [futu, yfinance]
+```
+
+扫描和 close-advice 只消费 resolved event snapshot；数据源选择、fallback、provider cooldown 和 stale cache 都在事件源子系统内完成。
+
+---
+
+## 7. 人工 CLI：版本检查
 
 `om version` 仍然保留为人工 CLI 能力。Agent 使用 `version_check`，二者读取同一个本地 `VERSION` 和远端 `v*` tags。
 
@@ -753,7 +804,7 @@ om version
 
 ---
 
-## 7. 字段口径
+## 8. 字段口径
 
 ### 工具输入
 - `broker`
@@ -765,7 +816,7 @@ Agent 工具输入统一使用 `broker`。数据表里的 `market` 字段不作�
 
 ---
 
-## 8. 相关文档
+## 9. 相关文档
 
 - Agent 合同：[`AGENT_INTEGRATION.md`](AGENT_INTEGRATION.md)
 - 快速开始：[`GETTING_STARTED.md`](GETTING_STARTED.md)

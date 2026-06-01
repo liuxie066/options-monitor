@@ -61,6 +61,40 @@ def test_shared_short_vol_assessment_accepts_sell_put_and_covered_call() -> None
     assert call["fields"]["equity_delta_equivalent"] == 0.8
 
 
+def test_shared_short_vol_assessment_accepts_event_source_fallback_success() -> None:
+    from domain.domain.short_vol_assessment import (
+        ShortVolAssessmentConfig,
+        ShortVolPortfolioContext,
+        assess_short_vol_candidate,
+    )
+
+    decision = assess_short_vol_candidate(
+        {
+            "symbol": "NVDA",
+            "implied_volatility": 0.36,
+            "realized_volatility_estimate": 0.24,
+            "delta": -0.20,
+            "spot": 120.0,
+            "strike": 100.0,
+            "dte": 30,
+            "net_income_cny": 1_400.0,
+            "option_contract_point_value_cny": 700.0,
+            "cash_required_cny": 70_000.0,
+            "event_source_status": "ok_with_fallback",
+        },
+        mode="put",
+        cfg=ShortVolAssessmentConfig(),
+        risk_ctx=ShortVolPortfolioContext(
+            nav_cny=1_000_000.0,
+            stock_value_cny_by_symbol={},
+            short_put_assignment_cny_by_symbol={},
+            short_put_assignment_total_cny=0.0,
+        ),
+    )
+
+    assert decision["accepted"] is True
+
+
 def test_shared_short_vol_assessment_rejects_covered_call_without_vol_edge() -> None:
     from domain.domain.short_vol_assessment import (
         ShortVolAssessmentConfig,

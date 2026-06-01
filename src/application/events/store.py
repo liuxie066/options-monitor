@@ -293,6 +293,13 @@ def _has_stale_success(entry: dict[str, Any], now_dt: datetime, stale_ttl_second
 def _error_code(exc: Exception) -> str:
     if isinstance(exc, EventSourceError) and exc.error_code:
         return exc.error_code
+    raw_code = str(getattr(exc, "error_code", "") or getattr(exc, "code", "") or "").strip().lower()
+    if raw_code in {"rate_limit", "rate_limited"}:
+        return "rate_limited"
+    if raw_code in {"need_2fa", "auth_required"}:
+        return "auth_required"
+    if raw_code in {"auth_expired", "not_logged_in"}:
+        return "auth_expired"
     return classify_event_source_error(f"{type(exc).__name__}: {exc}")
 
 

@@ -340,7 +340,58 @@ markets:
 - `fetch.source`: 行情源，当前 symbol required-data 运行时仅支持 `futu`（富途数据源，经本机 OpenD 网关 + Futu API）；旧值 `opend` 仍兼容。
 - `yahoo` / `yfinance` 不作为 symbol required-data 的受支持运行时来源；它们只保留给独立的事件风险数据抓取等非 OpenD fallback 场景。
 
-### 4.4 portfolio：账户约束来源
+### 4.4 runtime.event_risk_source：事件风险数据源
+
+事件风险数据源由 runtime 层统一控制，扫描和 close-advice 只读取本轮 resolved event snapshot，不直接调用 Futu / yfinance。
+
+单源配置：
+
+```yaml
+runtime:
+  event_risk_source:
+    provider: futu
+    futu:
+      host: 127.0.0.1
+      port: 11111
+```
+
+多源 fallback 配置：
+
+```yaml
+runtime:
+  event_risk_source:
+    mode: primary_fallback
+    default_provider: futu
+    providers:
+      futu:
+        enabled: true
+        role: primary
+        host: 127.0.0.1
+        port: 11111
+      yfinance:
+        enabled: true
+        role: fallback
+    market_rules:
+      hk:
+        chain: [futu]
+      us:
+        chain: [futu, yfinance]
+```
+
+字段口径：
+- `mode=single`：只使用一个 provider；兼容旧的 `provider/source/event_risk_provider` 配置。
+- `mode=primary_fallback`：按 `chain` 顺序解析，主源失败时才查备源。
+- `mode=shadow`：保留为对比模式，查询链路中的多个 provider，但扫描仍消费 resolved 结果。
+- `providers.<name>.enabled=false`：从链路中移除该 provider。
+- `market_rules.<market>.chain`：按市场覆盖 provider chain；当前市场识别以 `.HK` 为港股，其余默认美股。
+
+结果语义：
+- `source_status=ok`：首选源成功。
+- `source_status=ok_with_fallback`：首选源失败，fallback 成功。
+- `source_status=stale`：所有实时源失败，但 stale cache 仍在允许窗口内。
+- `source_status=error`：所有源失败且无可用 stale cache；short-vol fail-closed 时不能进入推荐。
+
+### 4.5 portfolio：账户约束来源
 - `data_config`: 可选迁移配置；最小部署不需要，正式路径由 runtime root 与环境变量决定
 - `broker`: 对外公开配置名，用来过滤 holdings / option_positions（例如 `富途`）
 - `market`: 兼容旧配置的别名；新配置不再推荐继续使用
@@ -434,7 +485,7 @@ markets:
 
 `intake.multiplier_by_symbol`、`intake.default_multiplier_hk`、`intake.default_multiplier_us` 已退休。multiplier 是标的元数据，不属于 US/HK 策略配置；runtime config 只保留 `intake.symbol_aliases` 这类解析辅助字段。
 
-### 4.5 notifications：推送目标
+### 4.6 notifications：推送目标
 - `provider`: 通用投递器，当前主流程使用 `openclaw`
 - `channel`: OpenClaw 传输通道，当前微信 Clawbot 使用 `openclaw-weixin`
 - `target`: OpenClaw 目标字符串
@@ -458,7 +509,7 @@ markets:
 
 说明：旧配置里的 `channel: "wechat_clawbot"` 会继续兼容并转换为 OpenClaw 实际通道名 `openclaw-weixin`。
 
-### 4.6 schedule：监控时间窗口
+### 4.7 schedule：监控时间窗口
 - `timezone`: 业务运行窗口所在市场时区，例如美股 `America/New_York`、港股 `Asia/Hong_Kong`。不要用北京时间伪装市场时间；夏令时 / 冬令时由时区自动换算。
 - `cron_interval_min`: 外部 cron / tick 触发频率，线上当前按 10 分钟一轮配置；它只用于允许轻微延迟补跑，不代表通知频率。
 - `run_window`: 扫描和通知的业务运行窗口，字段为 `start`、`end`、`breaks`。港股午休等中场休市写在 `breaks`，休市窗口内会跳过。
@@ -519,7 +570,7 @@ markets:
 }
 ```
 
-### 4.7 runtime：超时（线上稳定）
+### 4.8 runtime：超时（线上稳定）
 - `symbol_timeout_sec`：单标的 fetch/scan 超时
 - `portfolio_timeout_sec`：读取 holdings/positions 超时
 - `prefetch.max_workers`：required_data 预取并发；OpenD 限流敏感场景建议 US/HK 统一设为 `1`
@@ -549,7 +600,7 @@ markets:
 }
 ```
 
-### 4.8 alert_policy：提醒变化阈值
+### 4.9 alert_policy：提醒变化阈值
 - `change_annual_threshold`：年化变化达到该阈值才写入 changes
 - `sell_put`：Sell Put 候选评级阈值（可选；缺省即下表默认值）
   - `high_annual`：年化净收益≥该值且 `high_spread_max` 同时满足，归为「优先」（默认 0.20）
@@ -575,7 +626,7 @@ alert_policy:
     medium_annual: 0.06
 ```
 
-### 4.9 close_advice：平仓建议
+### 4.10 close_advice：平仓建议
 - `enabled`: 是否生成平仓建议；关闭时仍会产出空文件，不会报错
 - `quote_source`: `auto` / `required_data`
   - `auto`: 优先用 `required_data`，缺价格时再尝试通过 OpenD/Futu 补 quote
@@ -606,7 +657,7 @@ alert_policy:
 - 独立 close-advice 命令：默认写到 `output_shared/reports/close_advice.csv` / `output_shared/reports/close_advice.txt`
 - 统一 tick 运行：按账户写到 `output_runs/<run_id>/accounts/<account>/close_advice.csv|txt`
 
-### 4.10 手续费：内置规则
+### 4.11 手续费：内置规则
 - `fees` 已不再支持配置。
 - 当前默认内置规则：
   - US：富途美股期权完整手续费口径

@@ -45,6 +45,7 @@ from src.interfaces.cli.config_ops import (
     validate_config,
     validate_yaml_runtime_config,
 )
+from src.interfaces.cli.event_source_ops import add_event_source_commands, handle_event_source_command
 from src.interfaces.cli.operator_ops import (
     add_operator_commands,
     handle_operator_command,
@@ -116,6 +117,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add_research_commands(sub)
 
     add_operator_commands(sub)
+
+    add_event_source_commands(sub)
 
     add_account_commands(sub)
 
@@ -235,6 +238,9 @@ def main(argv: list[str] | None = None) -> int:
                 run_close_advice_fn=run_close_advice,
                 preview_notification_fn=preview_notification,
             ))
+
+        if args.command == "event-source":
+            return _print(handle_event_source_command(args))
 
         if args.command == "accounts":
             return _print(handle_account_command(

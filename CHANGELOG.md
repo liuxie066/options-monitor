@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.179 - 2026-06-01
+
+### Added
+- Added a multi-source event-risk resolver with Futu/OpenD primary support, yfinance fallback support, market-specific provider chains, and resolved per-run event snapshots.
+- Added the read-only `om event-source probe` CLI for checking Futu/OpenD and yfinance event-source availability without writing runtime state.
+
+### Changed
+- Treated `ok_with_fallback` event-source results as usable for short-vol scanning and Close Advice while preserving per-provider failure details in `source_results`.
+- Kept `futu-api` and `yfinance` as lower-bounded runtime dependencies instead of pinned constraints so validated data-source SDK upgrades can be picked up during normal releases.
+
 ## 1.2.178 - 2026-06-01
 
 ### Fixed
