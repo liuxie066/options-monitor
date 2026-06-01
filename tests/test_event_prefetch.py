@@ -118,6 +118,34 @@ def test_event_prefetch_uses_stale_after_refresh_failure(tmp_path: Path) -> None
     assert "source unavailable" in item["source_error"]
 
 
+def test_event_prefetch_defaults_to_futu_provider(tmp_path: Path) -> None:
+    from src.application.events.prefetch import prefetch_event_data
+
+    calls: list[tuple[str, str]] = []
+
+    def futu_fetcher(symbol: str) -> list[dict]:
+        calls.append(("futu", symbol))
+        return [{"type": "earnings", "date": "2026-06-01"}]
+
+    def yfinance_fetcher(symbol: str) -> list[dict]:
+        calls.append(("yfinance", symbol))
+        return [{"type": "earnings", "date": "2026-06-02"}]
+
+    out = prefetch_event_data(
+        base=tmp_path,
+        cfg=_cfg(),
+        snapshot_path=tmp_path / "run_state" / "event_snapshot.json",
+        fetchers={"futu": futu_fetcher, "yfinance": yfinance_fetcher},
+        now=datetime(2026, 6, 1, tzinfo=timezone.utc),
+    )
+
+    item = out["symbols"]["AAPL"]
+    assert item["selected_provider"] == "futu"
+    assert item["provider_chain"] == ["futu"]
+    assert item["events"] == [{"type": "earnings", "date": "2026-06-01"}]
+    assert calls == [("futu", "AAPL")]
+
+
 def test_event_prefetch_resolves_primary_fallback_chain(tmp_path: Path) -> None:
     from src.application.events.prefetch import prefetch_event_data
     from src.application.events.source_yfinance import EventSourceError
