@@ -53,8 +53,8 @@ Feishu / future channels
 
 `src.application.inbound` should stay thin: extract channel payloads, enforce
 channel-specific receive/reply mechanics, and build the transport request.
-Command parsing, deterministic natural-language parsing, optional LLM routing,
-bounded agent-loop tracing, sender allowlist checks, SQLite audit,
+Command parsing, optional LLM-first natural-language routing, deterministic
+fallback parsing, bounded agent-loop tracing, sender allowlist checks, SQLite audit,
 preview/confirm operations, and user-facing rendering are owned by
 `src.application.assistant`.
 
@@ -68,10 +68,15 @@ Model selection is a control-plane concern. `config.yaml` may define multiple
 `config.assistant.json`. Runtime, router, perception, reasoning, action, and
 tool execution must not depend on model profiles or choose models per message.
 
-Assistant uses one internal contract ladder:
+Assistant uses one internal contract ladder. Slash commands enter through the
+command parser and never call LLM. In `llm_router` and `agent_loop` modes,
+non-slash natural language enters through the LLM translator first; the
+deterministic parser is a fallback/shadow parser when the LLM is unavailable,
+low-confidence, or provider-failed. In `deterministic` mode, non-slash natural
+language uses the deterministic parser directly.
 
 ```text
-command / deterministic parser / LLM translator
+command parser / LLM translator / deterministic parser
 -> PerceptionResult (om-perception-result-v1; what the user appears to want)
 -> ReasoningResolution (om-reasoning-resolution-v1; support, safety, and action choice)
 -> ActionResult (om-action-result-v1; executed tool/operation/local response result)

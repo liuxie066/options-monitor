@@ -98,8 +98,9 @@ class PerceptionEngine:
         self._settings = settings
         self._translate_intent_fn = translate_intent_fn
         self._generate_reply_fn = generate_reply_fn
-        self.route = "command" if looks_like_command(request.text) else "deterministic"
-        self.llm_trace = skipped_llm_trace(settings.llm, reason="command" if self.route == "command" else "not_needed")
+        self.route = self._initial_route(request.text)
+        skipped_reason = "command" if self.route == "command" else "not_needed"
+        self.llm_trace = skipped_llm_trace(settings.llm, reason=skipped_reason)
         self.trace: PerceptionTrace | None = None
 
     def perceive(self, text: str, parser_now_fn: Callable[[], date] | None) -> PerceptionResult:
@@ -129,6 +130,23 @@ class PerceptionEngine:
                 ],
             )
             return command_perception
+        if self._llm_first_enabled():
+            return self._perceive_llm_first(text, parser_now_fn)
+        return self._perceive_deterministic_first(text, parser_now_fn)
+
+    def _initial_route(self, text: str) -> str:
+        if looks_like_command(text):
+            return "command"
+        if self._settings.mode == "agent_loop":
+            return "agent_loop"
+        if self._settings.mode == "llm_router":
+            return "llm"
+        return "deterministic"
+
+    def _llm_first_enabled(self) -> bool:
+        return self._settings.mode in {"llm_router", "agent_loop"}
+
+    def _perceive_deterministic_first(self, text: str, parser_now_fn: Callable[[], date] | None) -> PerceptionResult:
         try:
             deterministic_perception = parse_inbound_text(text, now_fn=parser_now_fn)
             self.trace = build_perception_trace(
@@ -143,6 +161,130 @@ class PerceptionEngine:
             return deterministic_perception
         except AgentToolError as err:
             return self._handle_deterministic_error(text, err)
+
+    def _perceive_llm_first(self, text: str, parser_now_fn: Callable[[], date] | None) -> PerceptionResult:
+        conversation_context = self._conversation_context()
+        llm_result = self._translate(text, conversation_context=conversation_context)
+        if "context" not in self.llm_trace:
+            self.llm_trace["context"] = context_trace(conversation_context)
+        deterministic_candidate, deterministic_perception, deterministic_error = self._deterministic_candidate(
+            text,
+            parser_now_fn,
+        )
+        if llm_result.intent is not None:
+            return self._handle_llm_perception(llm_result.intent, deterministic_candidate, llm_first=True)
+        if llm_result.error is not None:
+            return self._handle_llm_first_error(
+                text,
+                llm_result.error,
+                deterministic_candidate,
+                deterministic_perception,
+                deterministic_error,
+                conversation_context,
+            )
+        llm_source = self._llm_source()
+        llm_candidate = skipped_candidate(llm_source, str(self.llm_trace.get("reason") or "no_intent"))
+        if deterministic_perception is not None:
+            return self._handle_deterministic_fallback(
+                deterministic_perception,
+                candidates=[llm_candidate, deterministic_candidate],
+            )
+        self.trace = build_perception_trace(
+            decision="needs_clarification",
+            selected_source=None,
+            selected_perception=None,
+            candidates=[llm_candidate, deterministic_candidate],
+        )
+        if deterministic_error is not None:
+            raise deterministic_error
+        raise AgentToolError(code="NEEDS_CLARIFICATION", message="没有识别出可执行的只读命令。")
+
+    def _deterministic_candidate(
+        self,
+        text: str,
+        parser_now_fn: Callable[[], date] | None,
+    ) -> tuple[Any, PerceptionResult | None, AgentToolError | None]:
+        try:
+            perception = parse_inbound_text(text, now_fn=parser_now_fn)
+        except AgentToolError as err:
+            return error_candidate("deterministic", err), None, err
+        return accepted_candidate("deterministic", perception), perception, None
+
+    def _handle_deterministic_fallback(
+        self,
+        perception: PerceptionResult,
+        *,
+        candidates: list[Any],
+    ) -> PerceptionResult:
+        self.route = "deterministic"
+        self.trace = build_perception_trace(
+            decision="deterministic_fallback_selected",
+            selected_source="deterministic",
+            selected_perception=perception,
+            candidates=candidates,
+        )
+        return perception
+
+    def _handle_llm_first_error(
+        self,
+        text: str,
+        llm_error: AgentToolError,
+        deterministic_candidate: Any,
+        deterministic_perception: PerceptionResult | None,
+        deterministic_error: AgentToolError | None,
+        conversation_context: dict[str, Any] | None,
+    ) -> PerceptionResult:
+        llm_source = self._llm_source()
+        llm_error_candidate = error_candidate(llm_source, llm_error, reason=str(self.llm_trace.get("reason") or ""))
+        if deterministic_perception is not None and _llm_error_allows_deterministic_fallback(llm_error):
+            return self._handle_deterministic_fallback(
+                deterministic_perception,
+                candidates=[llm_error_candidate, deterministic_candidate],
+            )
+        reply_result = self._maybe_generate_general_reply(
+            text,
+            translate_error=llm_error,
+            conversation_context=conversation_context,
+        )
+        if reply_result.response_text:
+            self.route = "llm_reply"
+            self.llm_trace = dict(reply_result.trace)
+            reply_perception = PerceptionResult(
+                intent_name="small_talk",
+                arguments={
+                    "kind": "llm_reply",
+                    "response_text": reply_result.response_text,
+                },
+                source="llm_reply",
+                confidence=1.0,
+            )
+            self.trace = build_perception_trace(
+                decision="llm_reply_selected",
+                selected_source="llm_reply",
+                selected_perception=reply_perception,
+                candidates=[
+                    llm_error_candidate,
+                    deterministic_candidate,
+                    accepted_candidate("llm_reply", reply_perception),
+                ],
+            )
+            return reply_perception
+        if deterministic_error is not None and llm_error.code == "NEEDS_CLARIFICATION":
+            self.route = "deterministic"
+            self.trace = build_perception_trace(
+                decision="needs_clarification",
+                selected_source=None,
+                selected_perception=None,
+                candidates=[llm_error_candidate, deterministic_candidate],
+            )
+            raise deterministic_error
+        self.trace = build_perception_trace(
+            decision="llm_error",
+            selected_source=None,
+            selected_perception=None,
+            candidates=[llm_error_candidate, deterministic_candidate],
+        )
+        raise llm_error
 
     def _handle_deterministic_error(self, text: str, err: AgentToolError) -> PerceptionResult:
         deterministic_candidate = error_candidate("deterministic", err)
@@ -218,9 +360,19 @@ class PerceptionEngine:
         self.llm_trace = dict(llm_result.trace)
         return llm_result
 
-    def _handle_llm_perception(self, perception: PerceptionResult, deterministic_candidate: Any) -> PerceptionResult:
+    def _llm_source(self) -> str:
+        return "agent_loop" if self._settings.mode == "agent_loop" else "llm"
+
+    def _handle_llm_perception(
+        self,
+        perception: PerceptionResult,
+        deterministic_candidate: Any,
+        *,
+        llm_first: bool = False,
+    ) -> PerceptionResult:
         self.route = "agent_loop" if self._settings.mode == "agent_loop" else "llm"
         llm_candidate = accepted_candidate(self.route, perception)
+        candidates = [llm_candidate, deterministic_candidate] if llm_first else [deterministic_candidate, llm_candidate]
         try:
             ensure_llm_perception_allowed(perception)
         except AgentToolError as policy_err:
@@ -228,18 +380,14 @@ class PerceptionEngine:
                 decision="llm_denied_by_policy",
                 selected_source=None,
                 selected_perception=None,
-                candidates=[
-                    deterministic_candidate,
-                    llm_candidate,
-                    error_candidate("policy", policy_err),
-                ],
+                candidates=[*candidates, error_candidate("policy", policy_err)],
             )
             raise
         self.trace = build_perception_trace(
             decision=f"{self.route}_selected",
             selected_source=self.route,
             selected_perception=perception,
-            candidates=[deterministic_candidate, llm_candidate],
+            candidates=candidates,
         )
         return perception
 
@@ -344,6 +492,10 @@ def ensure_llm_perception_allowed(perception: PerceptionResult) -> None:
             hint="LLM translator is restricted to recognizable read-only capabilities; write/admin operations require deterministic preview/confirm commands.",
             details={"intent_name": perception.intent_name},
         )
+
+
+def _llm_error_allows_deterministic_fallback(err: AgentToolError) -> bool:
+    return err.code in {"LLM_UNAVAILABLE", "LLM_PROVIDER_ERROR", "NEEDS_CLARIFICATION"}
 
 
 __all__ = [

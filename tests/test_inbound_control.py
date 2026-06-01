@@ -218,6 +218,13 @@ def test_inbound_parser_maps_core_read_only_commands() -> None:
     last_month = parse_inbound_text("收益 lx 上月", now_fn=lambda: date(2026, 1, 3))
     assert last_month.arguments == {"account": "lx", "month": "2025-12"}
 
+    june_income = parse_inbound_text("6月sy的收益", now_fn=lambda: date(2026, 6, 1))
+    assert june_income.intent_name == "monthly_income_report"
+    assert june_income.arguments == {"account": "sy", "month": "2026-06"}
+
+    june_income_year = parse_inbound_text("收益 sy 2026年6月", now_fn=lambda: date(2026, 6, 1))
+    assert june_income_year.arguments == {"account": "sy", "month": "2026-06"}
+
     logs = parse_inbound_text("日志 20260515T182459Z-474761")
     assert logs.intent_name == "runtime_logs"
     assert logs.arguments["run_id"] == "20260515T182459Z-474761"
@@ -2024,12 +2031,56 @@ def test_inbound_monthly_income_renderer_prefers_return_summary() -> None:
     )
 
     assert "lx 2026-05 收益摘要" in text
-    assert "净收益率：6.81%" in text
-    assert "净流入：CNY 36,097（USD 5,000）" in text
-    assert "现金担保" not in text
-    assert "按 19 天折年化：130.74%" in text
-    assert "权利金收入：CNY 36,800（USD 5,100）" in text
-    assert "已实现平仓PnL：CNY -703（USD -100）" in text
+    assert "净现金流：CNY 36,097（USD 5,000） | 现金流率 6.81%" in text
+    assert "年化：130.74%（按净现金流，19 天）" in text
+    assert "权利金：CNY 36,800（USD 5,100） | 权利金率 6.97%" in text
+    assert "已实现PnL：CNY -703（USD -100） | 已实现率 -" in text
+    assert "口径：现金流率=净现金流/当前现金担保，不是账户总资产收益率。" in text
+
+
+def test_inbound_monthly_income_renderer_flags_long_option_cash_recovery() -> None:
+    intent = parse_inbound_text("收益 sy 2026-06")
+    text = render_inbound_text(
+        intent=intent,
+        tool_result=build_response(
+            tool_name="monthly_income_report",
+            ok=True,
+            data={
+                "summary": [
+                    {
+                        "month": "2026-06",
+                        "account": "sy",
+                        "currency": "HKD",
+                        "close_proceeds_gross": 7416.0,
+                        "realized_long_pnl_gross": 5036.0,
+                    }
+                ],
+                "return_summary": [
+                    {
+                        "month": "2026-06",
+                        "account": "sy",
+                        "net_return_rate": 0.014232,
+                        "net_income_by_ccy": {"HKD": 7416.0},
+                        "net_income_cny": 6430.132141,
+                        "cash_secured_cny": 451822.630243,
+                        "annualized_basis_days": 1,
+                        "annualized_net_return_rate": 5.19468,
+                        "premium_income_by_ccy": {"HKD": 0.0},
+                        "premium_income_cny": 0.0,
+                        "premium_return_rate": 0.0,
+                        "realized_pnl_by_ccy": {"HKD": 5036.0},
+                        "realized_pnl_cny": 4366.524469,
+                        "realized_return_rate": 0.009664,
+                    }
+                ],
+            },
+        ),
+    )
+
+    assert "净现金流：CNY 6,430（HKD 7,416） | 现金流率 1.42%" in text
+    assert "已实现PnL：CNY 4,367（HKD 5,036） | 已实现率 0.97%" in text
+    assert "年化：519.47%（按净现金流，1 天，短周期仅参考）" in text
+    assert "提示：净现金流包含 long option 成本回收约 HKD 2,380，交易盈利看已实现PnL" in text
 
 
 def test_inbound_monthly_income_renderer_does_not_cap_return_summary_rows() -> None:
@@ -2160,8 +2211,8 @@ def test_inbound_monthly_income_renderer_shows_original_currency_when_rates_miss
     assert "本月有开仓权利金收入，但缺汇率导致无法计算 CNY 收益率" in text
     assert "当前持仓缺少现金担保金额" not in text
     assert "账本缺少已平仓/close 数据" not in text
-    assert "净流入：HKD 22,751 + USD 2,400" in text
-    assert "权利金收入：HKD 23,735 + USD 2,400" in text
+    assert "净现金流：HKD 22,751 + USD 2,400" in text
+    assert "权利金：HKD 23,735 + USD 2,400" in text
     assert "现金担保：HKD 377,500 + USD 29,745" not in text
     assert "原币权利金收益率：HKD 6.29%，USD 8.07%" in text
 

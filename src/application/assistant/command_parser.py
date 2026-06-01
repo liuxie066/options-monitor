@@ -12,11 +12,27 @@ from src.application.assistant.position_query import parse_position_query_text, 
 
 
 _MONTH_RE = re.compile(r"^(20\d{2})[-/.](0[1-9]|1[0-2])$")
+_YEAR_MONTH_CN_RE = re.compile(r"^(20\d{2})年(1[0-2]|0?[1-9]|十[一二]?|[一二三四五六七八九])月$")
+_MONTH_CN_RE = re.compile(r"^(1[0-2]|0?[1-9]|十[一二]?|[一二三四五六七八九])月$")
 _OPERATION_ID_RE = re.compile(r"^in_[A-Za-z0-9_.:-]+$")
 _ACCOUNTS = frozenset({"lx", "sy"})
 _COMMANDS = commands_by_intent()
 _CONFIRM_TARGETS = operation_target_intents("confirm")
 _CANCEL_TARGETS = operation_target_intents("cancel")
+_CN_MONTHS = {
+    "一": 1,
+    "二": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+    "十": 10,
+    "十一": 11,
+    "十二": 12,
+}
 
 
 def parse_assistant_command(text: str, *, now_fn: Callable[[], date] | None = None) -> PerceptionResult | None:
@@ -138,8 +154,16 @@ def _parse_income(command: str, args: list[str], *, today: date) -> PerceptionRe
             month = _previous_month(today)
         elif _MONTH_RE.match(normalized):
             month = normalized.replace("/", "-").replace(".", "-")
+        elif match := _YEAR_MONTH_CN_RE.match(normalized):
+            month_number = _month_number(match.group(2))
+            if month_number is not None:
+                month = f"{int(match.group(1)):04d}-{month_number:02d}"
+        elif match := _MONTH_CN_RE.match(normalized):
+            month_number = _month_number(match.group(1))
+            if month_number is not None:
+                month = f"{today.year:04d}-{month_number:02d}"
         else:
-            raise _bad_arg(command, arg, "支持：/income、/income sy、/income sy 2026-05、/income 上月。")
+            raise _bad_arg(command, arg, "支持：/income、/income sy、/income sy 2026-05、/income sy 6月、/income 上月。")
     payload: dict[str, object] = {}
     if account:
         payload["account"] = account
@@ -225,6 +249,14 @@ def _previous_month(today: date) -> str:
         year -= 1
         month = 12
     return f"{year:04d}-{month:02d}"
+
+
+def _month_number(raw: str) -> int | None:
+    if raw.isdigit():
+        value = int(raw)
+    else:
+        value = _CN_MONTHS.get(raw)
+    return value if value is not None and 1 <= value <= 12 else None
 
 
 def _reject_extra(command: str, args: list[str]) -> None:

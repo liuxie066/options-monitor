@@ -21,7 +21,7 @@ Allowed architecture:
 ```text
 Feishu / WeChat / Hermes
   -> thin inbound transport adapter
-  -> Assistant runtime command / deterministic / optional LLM routing
+  -> Assistant runtime command / optional LLM-first / deterministic fallback routing
   -> Assistant execution router with sender allowlist, audit, idempotency, and preview/confirm
   -> existing deterministic OM tools
   -> canonical Assistant renderer
@@ -42,7 +42,7 @@ Feishu / WeChat / Hermes
 
 ## First Supported Commands
 
-The first implementation is read-only and deterministic. It supports:
+The base deterministic command surface supports:
 
 | Pattern | Tool |
 |---|---|
@@ -54,7 +54,7 @@ The first implementation is read-only and deterministic. It supports:
 | `持仓 [到期月份/到期日/标的/类型/方向]` | `option_positions_read` with structured filters |
 | `收益` | `monthly_income_report` for all accounts/months |
 | `收益 [账户]` | `monthly_income_report` for one account |
-| `收益 [账户] [YYYY-MM|本月|上月]` | `monthly_income_report` with month filter |
+| `收益 [账户] [YYYY-MM|6月|本月|上月]` | `monthly_income_report` with month filter |
 | `最近运行` | `runtime_runs` |
 | `日志 <run_id>` | `runtime_logs` |
 
@@ -70,7 +70,7 @@ Read commands use the pure-read whitelist. Admin write operations are separate a
 | `/health` | `healthcheck` |
 | `/positions [lx|sy|all]` | open/all option positions |
 | `分析 long call 是不是应该平仓` | close-advice analysis for matching open option positions |
-| `/income [lx|sy] [YYYY-MM|本月|上月]` | income report |
+| `/income [lx|sy] [YYYY-MM|6月|本月|上月]` | income report |
 | `/runs [limit]` | recent runs |
 | `/logs <run_id>` | runtime logs |
 | `/symbols` | monitored symbols |
@@ -116,7 +116,7 @@ assistant:
       max_output_tokens: 512
 ```
 
-When enabled, LLM translation only runs after command and deterministic parsing fail. It must return an `om-llm-intent-v1` JSON intent into the same Assistant execution router; it must not execute tools or rewrite canonical OM responses. The LLM executable intent schema is read-only and only allows help/status/health/config/positions/close-advice analysis/income/runs/logs/symbols/pending operations. Write-preview slash commands such as `/record-open` and `/record-close` are deterministic command-facade entries, not LLM-executable intents.
+When `assistant.mode` is `llm_router` or `agent_loop`, non-slash natural language is LLM-first: OM asks the translator for an `om-llm-intent-v1` JSON intent before deterministic natural-language parsing can select a command. The deterministic parser stays as a fallback/shadow parser when the LLM is unavailable, provider-failed, or returns a clarification. Slash commands remain command-first and never call LLM. The LLM must not execute tools or rewrite canonical OM responses; its output still enters the same Assistant execution router. The LLM executable intent schema is read-only and only allows help/status/health/config/positions/close-advice analysis/income/runs/logs/symbols/pending operations. Write-preview slash commands such as `/record-open` and `/record-close` are deterministic command-facade entries, not LLM-executable intents.
 
 The command surface authority is `src/application/assistant/commands.py`. Slash command metadata, the read-only LLM intent surface, and inbound help text should use that catalog instead of maintaining separate command lists.
 
@@ -373,7 +373,7 @@ Only subscribe this event for the OM Bot in Feishu Open Platform. Install `requi
 
 ## LLM Translator
 
-LLM translation is opt-in and inactive unless `assistant.mode` is `llm_router` or `agent_loop`.
+LLM translation is opt-in and inactive unless `assistant.mode` is `llm_router` or `agent_loop`. In those modes, non-slash natural language is routed LLM-first; deterministic parsing is only fallback/shadow evidence. Slash commands are resolved by the command catalog before LLM and do not call the translator.
 
 The current provider adapters use OpenAI Responses API for `openai` and Chat Completions JSON output for `deepseek`. They must only translate natural language into an `om-llm-intent-v1` structured intent. The translated intent must still go through the same sender allowlist, pure-read whitelist, audit, and idempotency checks. Low-confidence, incomplete, or write-like intents must return clarification or preview only.
 

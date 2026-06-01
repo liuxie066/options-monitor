@@ -67,6 +67,15 @@ def test_assistant_command_parser_maps_read_commands() -> None:
     assert income.intent_name == "monthly_income_report"
     assert income.arguments == {"account": "sy", "month": "2025-12"}
 
+    june_income = parse_assistant_command("/income sy 6月", now_fn=lambda: date(2026, 6, 1))
+    assert june_income is not None
+    assert june_income.intent_name == "monthly_income_report"
+    assert june_income.arguments == {"account": "sy", "month": "2026-06"}
+
+    june_income_year = parse_assistant_command("/income sy 2026年6月", now_fn=lambda: date(2026, 6, 1))
+    assert june_income_year is not None
+    assert june_income_year.arguments == {"account": "sy", "month": "2026-06"}
+
     runs = parse_assistant_command("/runs 20")
     assert runs is not None
     assert runs.arguments == {"limit": 20}
@@ -145,7 +154,7 @@ def test_assistant_command_catalog_drives_llm_allowed_surface() -> None:
     assert "Command：" in payload["help_text"]
     assert "只读查询" in payload["help_text"]
     assert "记录开仓：记录开仓" in payload["help_text"]
-    assert "收益 [账户] [YYYY-MM|本月|上月]" in payload["help_text"]
+    assert "收益 [账户] [YYYY-MM|6月|本月|上月]" in payload["help_text"]
     assert "立即升级到 v<version>" in payload["help_text"]
     assert "收益 sy 2026-05" not in payload["help_text"]
     assert "立即升级到 v1.2.111" not in payload["help_text"]
@@ -525,7 +534,7 @@ def test_assistant_runtime_records_deterministic_perception_trace_in_audit(tmp_p
     assert audited_response["meta"]["assistant"]["decision"] == decision
 
 
-def test_assistant_runtime_answers_small_talk_without_tool_or_llm(tmp_path: Path) -> None:
+def test_assistant_runtime_falls_back_to_deterministic_when_llm_unavailable(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
 
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -550,7 +559,17 @@ def test_assistant_runtime_answers_small_talk_without_tool_or_llm(tmp_path: Path
     assert calls == []
     assert out["data"]["perception"]["intent_name"] == "small_talk"
     assert out["meta"]["assistant"]["route"] == "deterministic"
-    assert out["meta"]["assistant"]["llm"]["reason"] == "not_needed"
+    assert out["meta"]["assistant"]["llm"]["reason"] == "missing_api_key"
+    perception_trace = out["meta"]["assistant"]["perception_trace"]
+    assert perception_trace["decision"] == "deterministic_fallback_selected"
+    assert perception_trace["selected_source"] == "deterministic"
+    assert perception_trace["candidates"][0]["source"] == "llm"
+    assert perception_trace["candidates"][0]["status"] == "rejected"
+    assert perception_trace["candidates"][0]["reason"] == "missing_api_key"
+    assert perception_trace["candidates"][0]["error_code"] == "LLM_UNAVAILABLE"
+    assert perception_trace["candidates"][1]["source"] == "deterministic"
+    assert perception_trace["candidates"][1]["status"] == "accepted"
+    assert perception_trace["candidates"][1]["intent_name"] == "small_talk"
 
 
 def test_assistant_runtime_unknown_slash_command_returns_clarification(tmp_path: Path) -> None:
@@ -613,6 +632,70 @@ def test_assistant_runtime_keeps_llm_disabled_for_unrecognized_text(tmp_path: Pa
     assert out["meta"]["assistant"]["llm"]["enabled"] is False
     assert out["meta"]["assistant"]["llm"]["attempted"] is False
     assert out["meta"]["assistant"]["llm"]["reason"] == "disabled"
+
+
+def test_assistant_runtime_llm_router_tries_llm_before_deterministic_alias(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+    translated: list[str] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(tool_name=tool_name, ok=True, data={"summary": {"ok": True}})
+
+    def _translate(
+        text: str,
+        _settings: AssistantSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> LlmTranslationResult:
+        translated.append(text)
+        assert conversation_context is not None
+        return LlmTranslationResult(
+            intent=PerceptionResult(intent_name="runtime_status", arguments={}, source="llm", confidence=0.93),
+            trace={
+                "enabled": True,
+                "attempted": True,
+                "reason": "accepted",
+                "provider": "openai",
+                "base_url": "",
+                "model": "gpt-5.2",
+                "api_key_env": "OM_LLM_API_KEY",
+                "confidence_min": 0.75,
+                "timeout_seconds": 20,
+                "max_output_tokens": 512,
+                "schema_version": LLM_INTENT_SCHEMA_VERSION,
+            },
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="状态",
+            sender_id="local",
+            message_id="msg_llm_first_parseable_alias",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="llm_router",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        translate_intent_fn=_translate,
+    )
+
+    assert translated == ["状态"]
+    assert out["ok"] is True
+    assert calls == [("runtime_status", {"config_key": "us"})]
+    assert out["data"]["perception"]["source"] == "llm"
+    assert out["meta"]["assistant"]["route"] == "llm"
+    perception_trace = out["meta"]["assistant"]["perception_trace"]
+    assert perception_trace["decision"] == "llm_selected"
+    assert perception_trace["selected_source"] == "llm"
+    assert perception_trace["candidates"][0]["source"] == "llm"
+    assert perception_trace["candidates"][0]["status"] == "accepted"
+    assert perception_trace["candidates"][0]["intent_name"] == "runtime_status"
+    assert perception_trace["candidates"][1]["source"] == "deterministic"
+    assert perception_trace["candidates"][1]["status"] == "accepted"
+    assert perception_trace["candidates"][1]["intent_name"] == "runtime_status"
 
 
 def test_assistant_runtime_uses_llm_reply_for_non_business_text_after_low_confidence(tmp_path: Path) -> None:
@@ -873,12 +956,12 @@ def test_assistant_runtime_routes_valid_llm_translation_through_inbound_router(t
     assert perception_trace["decision"] == "llm_selected"
     assert perception_trace["selected_source"] == "llm"
     assert perception_trace["selected_perception"]["intent_name"] == "monthly_income_report"
-    assert perception_trace["candidates"][0]["source"] == "deterministic"
-    assert perception_trace["candidates"][0]["status"] == "rejected"
-    assert perception_trace["candidates"][0]["error_code"] == "NEEDS_CLARIFICATION"
-    assert perception_trace["candidates"][1]["source"] == "llm"
-    assert perception_trace["candidates"][1]["status"] == "accepted"
-    assert perception_trace["candidates"][1]["intent_name"] == "monthly_income_report"
+    assert perception_trace["candidates"][0]["source"] == "llm"
+    assert perception_trace["candidates"][0]["status"] == "accepted"
+    assert perception_trace["candidates"][0]["intent_name"] == "monthly_income_report"
+    assert perception_trace["candidates"][1]["source"] == "deterministic"
+    assert perception_trace["candidates"][1]["status"] == "rejected"
+    assert perception_trace["candidates"][1]["error_code"] == "NEEDS_CLARIFICATION"
     decision = out["meta"]["assistant"]["decision"]
     assert decision["route"] == "llm"
     assert decision["selected_source"] == "llm"
@@ -1363,11 +1446,11 @@ def test_assistant_runtime_rejects_llm_injected_write_intent_even_with_custom_tr
     perception_trace = out["meta"]["assistant"]["perception_trace"]
     assert perception_trace["decision"] == "llm_denied_by_policy"
     assert perception_trace["selected_source"] is None
-    assert perception_trace["candidates"][0]["source"] == "deterministic"
-    assert perception_trace["candidates"][0]["error_code"] == "NEEDS_CLARIFICATION"
-    assert perception_trace["candidates"][1]["source"] == "agent_loop"
-    assert perception_trace["candidates"][1]["status"] == "accepted"
-    assert perception_trace["candidates"][1]["intent_name"] == "manual_trade_open"
+    assert perception_trace["candidates"][0]["source"] == "agent_loop"
+    assert perception_trace["candidates"][0]["status"] == "accepted"
+    assert perception_trace["candidates"][0]["intent_name"] == "manual_trade_open"
+    assert perception_trace["candidates"][1]["source"] == "deterministic"
+    assert perception_trace["candidates"][1]["error_code"] == "NEEDS_CLARIFICATION"
     assert perception_trace["candidates"][2]["source"] == "policy"
     assert perception_trace["candidates"][2]["error_code"] == "PERMISSION_DENIED"
     decision = out["meta"]["assistant"]["decision"]

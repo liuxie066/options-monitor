@@ -105,21 +105,21 @@ def _render_monthly_income(data: dict[str, Any]) -> str:
         calculable_rows = [row for row in return_summary if isinstance(row, dict) and _return_row_is_calculable(row)]
         if not calculable_rows:
             return _render_monthly_income_diagnostics(data)
-        lines = ["收益统计完成（基于 OM 本地账本）："]
-        for row in calculable_rows:
+        lines = ["收益统计完成（OM 本地账本）："]
+        long_option_recovery_notes: list[str] = []
+        for idx, row in enumerate(calculable_rows):
             if not isinstance(row, dict):
                 continue
-            lines.extend(
-                [
-                    f"{row.get('account') or '-'} {row.get('month') or '-'} 收益摘要",
-                    f"净收益率：{_pct(row.get('net_return_rate'))}",
-                    f"净流入：{_cny_with_original(row.get('net_income_cny'), _dict(row.get('net_income_by_ccy')))}",
-                    f"按 {row.get('annualized_basis_days') or 0} 天折年化：{_pct(row.get('annualized_net_return_rate'))}",
-                    f"权利金毛收益率：{_pct(row.get('premium_return_rate'))}",
-                    f"权利金收入：{_cny_with_original(row.get('premium_income_cny'), _dict(row.get('premium_income_by_ccy')))}",
-                    f"已实现平仓PnL：{_cny_with_original(row.get('realized_pnl_cny'), _dict(row.get('realized_pnl_by_ccy')))}",
-                ]
-            )
+            if idx > 0:
+                lines.append("")
+            lines.extend(_monthly_income_return_row_lines(row))
+            recovery_note = _monthly_income_long_option_recovery_note(data, row)
+            if recovery_note:
+                long_option_recovery_notes.append(recovery_note)
+        lines.append("")
+        lines.append("口径：现金流率=净现金流/当前现金担保，不是账户总资产收益率。")
+        if long_option_recovery_notes:
+            lines.append("提示：" + "；".join(_unique(long_option_recovery_notes)))
         return "\n".join(lines)
 
     rows = data.get("summary")
@@ -139,6 +139,43 @@ def _render_monthly_income(data: dict[str, Any]) -> str:
             f"open_basis={row.get('open_basis_lifecycle_pnl_gross', 0)}"
         )
     return "\n".join(lines)
+
+
+def _monthly_income_return_row_lines(row: dict[str, Any]) -> list[str]:
+    annualized_days = int(row.get("annualized_basis_days") or 0)
+    annualized_suffix = f"{annualized_days} 天"
+    if 0 < annualized_days < 7:
+        annualized_suffix += "，短周期仅参考"
+    return [
+        f"{row.get('account') or '-'} {row.get('month') or '-'} 收益摘要",
+        f"- 净现金流：{_cny_with_original(row.get('net_income_cny'), _dict(row.get('net_income_by_ccy')))} | 现金流率 {_pct(row.get('net_return_rate'))}",
+        f"- 已实现PnL：{_cny_with_original(row.get('realized_pnl_cny'), _dict(row.get('realized_pnl_by_ccy')))} | 已实现率 {_pct(row.get('realized_return_rate'))}",
+        f"- 权利金：{_cny_with_original(row.get('premium_income_cny'), _dict(row.get('premium_income_by_ccy')))} | 权利金率 {_pct(row.get('premium_return_rate'))}",
+        f"- 年化：{_pct(row.get('annualized_net_return_rate'))}（按净现金流，{annualized_suffix}）",
+    ]
+
+
+def _monthly_income_long_option_recovery_note(data: dict[str, Any], return_row: dict[str, Any]) -> str:
+    account = str(return_row.get("account") or "-")
+    month = str(return_row.get("month") or "-")
+    recovered_by_ccy: dict[str, float] = {}
+    for summary_row_raw in _list(data.get("summary")):
+        summary_row = _dict(summary_row_raw)
+        if str(summary_row.get("account") or "-") != account or str(summary_row.get("month") or "-") != month:
+            continue
+        currency = str(summary_row.get("currency") or "").upper().strip()
+        if not currency:
+            continue
+        realized_long = _float_or_none(summary_row.get("realized_long_pnl_gross"))
+        close_proceeds = _float_or_none(summary_row.get("close_proceeds_gross"))
+        if realized_long is None or close_proceeds is None or realized_long <= 0:
+            continue
+        recovered = close_proceeds - realized_long
+        if recovered > 0:
+            recovered_by_ccy[currency] = recovered_by_ccy.get(currency, 0.0) + recovered
+    if not recovered_by_ccy:
+        return ""
+    return "净现金流包含 long option 成本回收约 " + _format_ccy_amounts(recovered_by_ccy) + "，交易盈利看已实现PnL"
 
 
 def _return_row_is_calculable(row: dict[str, Any]) -> bool:
@@ -263,9 +300,9 @@ def _original_currency_summary_lines(return_row: dict[str, Any]) -> list[str]:
     net = _dict(return_row.get("net_income_by_ccy"))
     premium = _dict(return_row.get("premium_income_by_ccy"))
     if net:
-        lines.append("净流入：" + _format_ccy_amounts(net))
+        lines.append("净现金流：" + _format_ccy_amounts(net))
     if premium:
-        lines.append("权利金收入：" + _format_ccy_amounts(premium))
+        lines.append("权利金：" + _format_ccy_amounts(premium))
     cash = _dict(return_row.get("cash_secured_by_ccy"))
     premium_rates = _dict(return_row.get("premium_return_rate_by_ccy"))
     if not premium_rates and premium and cash:
@@ -304,6 +341,15 @@ def _format_ccy_rates(values: dict[str, Any]) -> str:
         if pct != "-":
             parts.append(f"{str(currency).upper()} {pct}")
     return "，".join(parts) if parts else "-"
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
 
 
 def _cny_with_original(cny_value: Any, by_ccy: dict[str, Any]) -> str:
@@ -820,6 +866,17 @@ def _csv(value: Any) -> str:
     if isinstance(value, tuple):
         return ", ".join(str(item) for item in value) or "-"
     return _value(value)
+
+
+def _unique(values: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value in seen:
+            continue
+        out.append(value)
+        seen.add(value)
+    return out
 
 
 def _yes_no(value: Any) -> str:
