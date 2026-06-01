@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.189 - 2026-06-01
+
+### Changed
+- Kept Assistant natural-language routing LLM-first while reconciling same-intent read slots from the deterministic shadow parser, so explicit account/month filters such as `sy 2026-06` stay stable.
+- Allowed LLM to recognize monitored-symbol `symbol_edit` requests only as preview-write operations for covered-call and sell-put settings, leaving confirm/apply/cancel paths deterministic-only.
+
+### Fixed
+- Rejected conflicting LLM preview-write interpretations when the deterministic parser identifies a different operation, preventing ambiguous text from creating unintended pending writes.
+- Added offline LLM intent replay coverage for income, positions, close advice, runs, upgrade-confirm rejection, and symbol-edit previews.
+
 ## 1.2.188 - 2026-06-01
 
 ### Fixed
