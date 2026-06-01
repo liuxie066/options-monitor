@@ -17,6 +17,8 @@ from domain.domain.close_advice import (
     CloseAdviceConfig,
     CloseAdviceInput,
     CloseOptimizerConfig,
+    HOLD_REASON_TYPE_ASSIGNMENT_ACCEPTABLE,
+    HOLD_REASON_TYPE_CALLED_AWAY_ACCEPTABLE,
     LongCallConvexityConfig,
     EXIT_STATE_HOLD,
     EXIT_STATE_LET_EXPIRE,
@@ -114,6 +116,7 @@ OUTPUT_COLUMNS = [
     "reason",
     "exit_state",
     "exit_reason_type",
+    "hold_reason_type",
     "close_action",
     "optional_combo_action",
     "strategy_exit_mode",
@@ -1406,6 +1409,29 @@ def _apply_fee_profitability_gate(row: dict[str, Any]) -> dict[str, Any]:
         return row
     if str(row.get("exit_reason_type") or "").strip().lower() == EXIT_STATE_RISK_EXIT:
         status = str(row.get("short_vol_thesis_status") or "").strip().lower()
+        option_type = str(row.get("option_type") or "").strip().lower()
+        if status == "event_risk" and option_type in {"put", "call"} and realized <= 0:
+            if option_type == "call":
+                reason = (
+                    "到期前存在事件风险；Covered Call 默认可被行权卖出正股，"
+                    "扣除平仓手续费后买回为亏损，作为风险观察，不作为平仓提醒"
+                )
+                hold_reason_type = HOLD_REASON_TYPE_CALLED_AWAY_ACCEPTABLE
+            else:
+                reason = (
+                    "到期前存在事件风险；Sell Put 默认可接货，扣除平仓手续费后买回为亏损，"
+                    "作为风险观察，不作为平仓提醒"
+                )
+                hold_reason_type = HOLD_REASON_TYPE_ASSIGNMENT_ACCEPTABLE
+            row = _with_extra_flags(row, ["risk_exit_loss_not_actionable"])
+            row["tier"] = "none"
+            row["tier_label"] = "不提醒"
+            row["reason"] = reason
+            row["short_vol_reason"] = row["reason"]
+            row["hold_reason_type"] = hold_reason_type
+            row["exit_state"] = EXIT_STATE_HOLD
+            row["exit_reason_type"] = EXIT_STATE_HOLD
+            return row
         if status == "event_risk" or realized > 0:
             return row
         row = _with_extra_flags(row, ["risk_exit_loss_not_actionable"])

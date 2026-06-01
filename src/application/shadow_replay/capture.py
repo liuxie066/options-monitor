@@ -297,6 +297,11 @@ def snapshot_from_row(
         "spread_ratio": first_float(row, "spread_ratio", "combo_spread_ratio"),
         "single_trade_concentration": first_float(row, "single_trade_concentration"),
         "symbol_concentration_after": first_float(row, "symbol_concentration_after"),
+        "assignment_notional_cny": first_float(row, "assignment_notional_cny"),
+        "cash_required_cny": first_float(row, "cash_required_cny"),
+        "covered_notional_cny": first_float(row, "covered_notional_cny"),
+        "underlying_notional_cny": first_float(row, "underlying_notional_cny"),
+        "capital_at_risk_cny": first_float(row, "capital_at_risk_cny"),
         "annualized_return": first_float(
             row,
             "annualized_net_return_on_cash_basis",
@@ -304,6 +309,7 @@ def snapshot_from_row(
             "annualized_net_return",
             "annualized_return",
         ),
+        "net_income_cny": first_float(row, "net_income_cny", "net_credit_cny", "premium_cny"),
         "net_income": first_float(row, "net_income", "net_credit", "combo_net_credit"),
     }
 

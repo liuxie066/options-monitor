@@ -3245,3 +3245,51 @@ def test_compact_close_advice_renders_risk_exit_loss_as_stop_loss_not_profit() -
     assert "- 建议价 ¥22 · 平仓损益 ¥-940（余 ¥2,178）" in text
     assert "已锁定 -72.8%" not in text
     assert "收益 ¥-940" not in text
+
+
+def test_fee_gate_keeps_sell_put_event_loss_as_assignment_hold() -> None:
+    from domain.domain.close_advice import HOLD_REASON_TYPE_ASSIGNMENT_ACCEPTABLE
+    from src.application.close_advice_runner import _apply_fee_profitability_gate
+
+    row = _apply_fee_profitability_gate(
+        {
+            "option_type": "put",
+            "tier": "strong",
+            "tier_label": "强烈建议平仓",
+            "exit_state": "risk_exit",
+            "exit_reason_type": "risk_exit",
+            "short_vol_thesis_status": "event_risk",
+            "realized_if_close": -1.0,
+            "data_quality_flags": "",
+        }
+    )
+
+    assert row["tier"] == "none"
+    assert row["exit_state"] == "hold"
+    assert row["exit_reason_type"] == "hold"
+    assert row["hold_reason_type"] == HOLD_REASON_TYPE_ASSIGNMENT_ACCEPTABLE
+    assert "默认可接货" in row["reason"]
+
+
+def test_fee_gate_keeps_covered_call_event_loss_as_called_away_hold() -> None:
+    from domain.domain.close_advice import HOLD_REASON_TYPE_CALLED_AWAY_ACCEPTABLE
+    from src.application.close_advice_runner import _apply_fee_profitability_gate
+
+    row = _apply_fee_profitability_gate(
+        {
+            "option_type": "call",
+            "tier": "strong",
+            "tier_label": "强烈建议平仓",
+            "exit_state": "risk_exit",
+            "exit_reason_type": "risk_exit",
+            "short_vol_thesis_status": "event_risk",
+            "realized_if_close": -1.0,
+            "data_quality_flags": "",
+        }
+    )
+
+    assert row["tier"] == "none"
+    assert row["exit_state"] == "hold"
+    assert row["exit_reason_type"] == "hold"
+    assert row["hold_reason_type"] == HOLD_REASON_TYPE_CALLED_AWAY_ACCEPTABLE
+    assert "默认可被行权卖出正股" in row["reason"]

@@ -15,6 +15,8 @@ from domain.domain.close_advice import (
     EXIT_STATE_RISK_EXIT,
     EXIT_STATE_SALVAGE,
     EXIT_STATE_TAKE_PROFIT,
+    HOLD_REASON_TYPE_ASSIGNMENT_ACCEPTABLE,
+    HOLD_REASON_TYPE_CALLED_AWAY_ACCEPTABLE,
     evaluate_close_advice,
     evaluate_long_call_convexity_advice,
     evaluate_short_vol_close_advice,
@@ -100,10 +102,12 @@ def test_short_vol_soft_risk_loss_is_not_actionable() -> None:
     assert row["exit_state"] == EXIT_STATE_HOLD
     assert row["exit_reason_type"] == EXIT_STATE_HOLD
     assert row["realized_if_close"] < 0
+    assert row["hold_reason_type"] == HOLD_REASON_TYPE_ASSIGNMENT_ACCEPTABLE
+    assert "默认可接货" in row["reason"]
     assert "risk_exit_loss_not_actionable" in row["data_quality_flags"]
 
 
-def test_short_vol_event_risk_can_emit_risk_exit_even_when_not_profitable() -> None:
+def test_short_vol_sell_put_event_risk_loss_is_assignment_hold() -> None:
     row = evaluate_short_vol_close_advice(
         _short_put_input(close_mid=1.20, bid=1.19, ask=1.21),
         short_vol_config=ShortVolAssessmentConfig(enable_stress_check=False, reject_event_risk=True),
@@ -124,10 +128,122 @@ def test_short_vol_event_risk_can_emit_risk_exit_even_when_not_profitable() -> N
     )
 
     assert row["short_vol_thesis_status"] == "event_risk"
+    assert row["tier"] == "none"
+    assert row["exit_state"] == EXIT_STATE_HOLD
+    assert row["exit_reason_type"] == EXIT_STATE_HOLD
+    assert row["hold_reason_type"] == HOLD_REASON_TYPE_ASSIGNMENT_ACCEPTABLE
+    assert "风险观察" in row["reason"]
+    assert "risk_exit_loss_not_actionable" in row["data_quality_flags"]
+    assert row["realized_if_close"] < 0
+
+
+def test_short_vol_covered_call_event_risk_loss_is_called_away_hold() -> None:
+    row = evaluate_short_vol_close_advice(
+        _short_put_input(option_type="call", close_mid=1.20, bid=1.19, ask=1.21, delta=0.20),
+        short_vol_config=ShortVolAssessmentConfig(enable_stress_check=False, reject_event_risk=True),
+        close_config=CloseAdviceConfig(),
+        quote_row={
+            "symbol": "NVDA",
+            "option_type": "call",
+            "expiration": "2026-06-19",
+            "strike": 100,
+            "spot": 120,
+            "delta": 0.20,
+            "implied_volatility": 0.20,
+            "realized_volatility_estimate": 0.20,
+            "event_flag": True,
+            "event_source_status": "ok",
+        },
+        mode="call",
+    )
+
+    assert row["short_vol_thesis_status"] == "event_risk"
+    assert row["tier"] == "none"
+    assert row["exit_state"] == EXIT_STATE_HOLD
+    assert row["exit_reason_type"] == EXIT_STATE_HOLD
+    assert row["hold_reason_type"] == HOLD_REASON_TYPE_CALLED_AWAY_ACCEPTABLE
+    assert "默认可被行权卖出正股" in row["reason"]
+    assert "risk_exit_loss_not_actionable" in row["data_quality_flags"]
+    assert row["realized_if_close"] < 0
+
+
+def test_short_vol_call_event_risk_profit_can_emit_risk_exit() -> None:
+    row = evaluate_short_vol_close_advice(
+        _short_put_input(option_type="call", close_mid=0.80, bid=0.79, ask=0.81, delta=0.20),
+        short_vol_config=ShortVolAssessmentConfig(enable_stress_check=False, reject_event_risk=True),
+        close_config=CloseAdviceConfig(),
+        quote_row={
+            "symbol": "NVDA",
+            "option_type": "call",
+            "expiration": "2026-06-19",
+            "strike": 100,
+            "spot": 120,
+            "delta": 0.20,
+            "implied_volatility": 0.20,
+            "realized_volatility_estimate": 0.20,
+            "event_flag": True,
+            "event_source_status": "ok",
+        },
+        mode="call",
+    )
+
+    assert row["short_vol_thesis_status"] == "event_risk"
     assert row["tier"] == "strong"
     assert row["exit_state"] == EXIT_STATE_RISK_EXIT
     assert row["exit_reason_type"] == EXIT_REASON_TYPE_RISK_EXIT
-    assert row["realized_if_close"] < 0
+    assert row["realized_if_close"] > 0
+
+
+def test_short_vol_sell_put_valid_loss_marks_assignment_hold() -> None:
+    row = evaluate_short_vol_close_advice(
+        _short_put_input(close_mid=1.20, bid=1.19, ask=1.21),
+        short_vol_config=ShortVolAssessmentConfig(enable_stress_check=False, reject_event_risk=True),
+        close_config=CloseAdviceConfig(),
+        quote_row={
+            "symbol": "NVDA",
+            "option_type": "put",
+            "expiration": "2026-06-19",
+            "strike": 100,
+            "spot": 120,
+            "delta": -0.20,
+            "implied_volatility": 0.30,
+            "realized_volatility_estimate": 0.20,
+            "event_source_status": "ok",
+        },
+        mode="put",
+    )
+
+    assert row["short_vol_thesis_status"] == "valid"
+    assert row["tier"] == "none"
+    assert row["exit_state"] == EXIT_STATE_HOLD
+    assert row["hold_reason_type"] == HOLD_REASON_TYPE_ASSIGNMENT_ACCEPTABLE
+    assert "等待归零或接货" in row["reason"]
+
+
+def test_short_vol_covered_call_valid_loss_marks_called_away_hold() -> None:
+    row = evaluate_short_vol_close_advice(
+        _short_put_input(option_type="call", close_mid=1.20, bid=1.19, ask=1.21, delta=0.20),
+        short_vol_config=ShortVolAssessmentConfig(enable_stress_check=False, reject_event_risk=True),
+        close_config=CloseAdviceConfig(),
+        quote_row={
+            "symbol": "NVDA",
+            "option_type": "call",
+            "expiration": "2026-06-19",
+            "strike": 100,
+            "spot": 120,
+            "delta": 0.20,
+            "implied_volatility": 0.30,
+            "realized_volatility_estimate": 0.20,
+            "event_source_status": "ok",
+        },
+        mode="call",
+    )
+
+    assert row["short_vol_thesis_status"] == "valid"
+    assert row["tier"] == "none"
+    assert row["exit_state"] == EXIT_STATE_HOLD
+    assert row["hold_reason_type"] == HOLD_REASON_TYPE_CALLED_AWAY_ACCEPTABLE
+    assert "等待归零或被行权" in row["reason"]
 
 
 def test_long_call_take_profit_contract() -> None:

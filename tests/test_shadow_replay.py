@@ -40,9 +40,9 @@ def test_shadow_replay_builds_universe_and_analyzes_closed_replay(tmp_path: Path
         (
             "symbol,account,option_type,contract_symbol,expiration,dte,delta,strike,spot,iv_rv_ratio,"
             "annualized_net_return_on_cash_basis,net_income,otm_pct,spread_ratio,"
-            "single_trade_concentration,open_interest,volume\n"
+            "single_trade_concentration,multiplier,open_interest,volume\n"
             "NVDA,lx,put,NVDA260619P00100000,2026-06-19,30,-0.2,100,110,1.25,"
-            "0.12,120,0.09,0.10,0.04,500,20\n"
+            "0.12,120,0.09,0.10,0.04,100,500,20\n"
         ),
         encoding="utf-8",
     )
@@ -59,10 +59,13 @@ def test_shadow_replay_builds_universe_and_analyzes_closed_replay(tmp_path: Path
                 "option_type": "put",
                 "expiration": "2026-06-19",
                 "strike": 80,
+                "spot": 95,
                 "dte": 30,
                 "delta": -0.28,
                 "iv_rv_ratio": 0.9,
                 "spread_ratio": 0.45,
+                "net_income": 60,
+                "multiplier": 100,
                 "status": "rejected",
                 "stage": "stage3_risk_filter",
                 "rule": "spread_too_wide",
@@ -118,11 +121,19 @@ def test_shadow_replay_builds_universe_and_analyzes_closed_replay(tmp_path: Path
     assert analysis["path_risk"]["by_status"]["rejected"]["max_adverse_pnl"] == -35
     assert analysis["outcome_stats"]["by_status"]["accepted"]["realized_pnl_total"] == 120
     assert analysis["outcome_stats"]["by_status"]["rejected"]["win_rate"] == 0
+    assert analysis["insurance_metrics"]["by_status"]["accepted"]["premium_collected_total"] == 120
+    assert analysis["insurance_metrics"]["by_status"]["accepted"]["loss_ratio"] == 0
+    assert analysis["insurance_metrics"]["by_status"]["rejected"]["premium_collected_total"] == 60
+    assert analysis["insurance_metrics"]["by_status"]["rejected"]["liability_cost_total"] == 140
+    assert analysis["insurance_metrics"]["by_status"]["rejected"]["loss_ratio"] == pytest.approx(140 / 60)
+    assert analysis["insurance_metrics"]["by_status"]["rejected"]["path_adverse_loss_to_premium"] == pytest.approx(35 / 60)
+    assert analysis["insurance_metrics"]["by_bucket"]["dte"]["30-44"]["premium_collected_total"] == 180
     assert analysis["outcome_by_bucket"]["dte"]["30-44"]["realized_pnl_total"] == 40
     assert analysis["outcome_by_bucket"]["dte"]["30-44"]["by_status"]["accepted"]["realized_pnl_total"] == 120
     assert analysis["outcome_by_bucket"]["spread_ratio"]["0.40+"]["by_status"]["rejected"]["loss_count"] == 1
     assert readiness["summary"]["status"] == "needs_human_review"
     assert readiness["evidence_checks"]["survivorship_bias_risk"] == "low"
+    assert readiness["insurance_metrics"]["by_status"]["accepted"]["premium_to_capital"] == pytest.approx(120 / 10000)
     assert readiness["outcome_by_bucket"]["dte"]["30-44"]["win_count"] == 1
     assert readiness["safety"]["writes_runtime_config"] is False
 
@@ -151,6 +162,62 @@ def test_shadow_replay_readiness_flags_final_candidates_only_survivorship_bias(t
     assert readiness["evidence_checks"]["final_candidates_only"] is True
     assert readiness["evidence_checks"]["survivorship_bias_risk"] == "high"
     assert readiness["recommendations"][0]["writes_runtime_config"] is False
+
+
+def test_shadow_replay_insurance_metrics_cover_put_and_call_outcomes() -> None:
+    from src.application.shadow_replay.analysis import analyze_rows
+
+    analysis = analyze_rows(
+        candidate_snapshots=[
+            {
+                "contract_symbol": "NVDA260619P00100000",
+                "option_type": "put",
+                "status": "accepted",
+                "strike": 100,
+                "net_income": 120,
+                "multiplier": 100,
+                "dte": 30,
+                "abs_delta": 0.20,
+                "iv_rv_ratio": 1.25,
+                "spread_ratio": 0.12,
+                "single_trade_concentration": 0.04,
+            },
+            {
+                "contract_symbol": "NVDA260619C00110000",
+                "option_type": "call",
+                "status": "accepted",
+                "strike": 110,
+                "spot": 100,
+                "net_income": 80,
+                "multiplier": 100,
+                "dte": 30,
+                "abs_delta": 0.22,
+                "iv_rv_ratio": 1.30,
+                "spread_ratio": 0.10,
+                "single_trade_concentration": 0.04,
+            },
+        ],
+        filter_decisions=[{"contract_symbol": "NOPE", "status": "rejected"}],
+        mark_snapshots=[
+            {"contract_symbol": "NVDA260619P00100000", "unrealized_pnl": -50},
+            {"contract_symbol": "NVDA260619C00110000", "unrealized_pnl": -240},
+        ],
+        outcome_facts=[
+            {"contract_symbol": "NVDA260619P00100000", "outcome": "assigned_at_expiry", "realized_pnl": -380},
+            {"contract_symbol": "NVDA260619C00110000", "outcome": "called_away_at_expiry", "realized_pnl": -220},
+        ],
+        min_sample=2,
+    )
+
+    metrics = analysis["insurance_metrics"]
+    assert metrics["by_mode"]["put"]["assignment_rate"] == 1
+    assert metrics["by_mode"]["put"]["loss_ratio"] == pytest.approx(500 / 120)
+    assert metrics["by_mode"]["call"]["called_away_rate"] == 1
+    assert metrics["by_mode"]["call"]["capital_at_risk_total"] == 10000
+    assert metrics["by_mode"]["call"]["loss_ratio"] == pytest.approx(300 / 80)
+    assert metrics["by_status"]["accepted"]["loss_ratio"] == pytest.approx(800 / 200)
+    assert metrics["by_status"]["accepted"]["path_adverse_loss_to_premium"] == pytest.approx(290 / 200)
+    assert metrics["by_bucket"]["abs_delta"]["0.20-0.30"]["exercise_rate"] == 1
 
 
 def test_shadow_replay_build_selects_latest_runtime_run_with_evidence(tmp_path: Path) -> None:

@@ -108,6 +108,7 @@ def analyze_rows(
         "outcome_coverage": outcome_coverage(candidate_snapshots, mark_snapshots, outcome_facts),
         "path_risk": path_risk_stats(candidate_snapshots, mark_snapshots),
         "outcome_stats": outcome_stats(candidate_snapshots, outcome_facts),
+        "insurance_metrics": insurance_metrics(candidate_snapshots, mark_snapshots, outcome_facts),
         "outcome_by_bucket": outcome_bucket_stats(candidate_snapshots, outcome_facts),
         "recommendations": [recommendation],
     }
@@ -203,6 +204,59 @@ def outcome_bucket_stats(candidates: list[dict[str, Any]], outcomes: list[dict[s
             label: {
                 **_summarize_outcome_group(payload["all"]),
                 "by_status": _outcome_payload(payload["by_status"]),
+            }
+            for label, payload in sorted(bucketed.items())
+        }
+    return out
+
+
+def insurance_metrics(candidates: list[dict[str, Any]], marks: list[dict[str, Any]], outcomes: list[dict[str, Any]]) -> dict[str, Any]:
+    candidate_by_key = _candidate_by_instrument(candidates)
+    adverse_by_key = _max_adverse_pnl_by_instrument(marks)
+    by_status: dict[str, dict[str, Any]] = defaultdict(_empty_insurance_group)
+    by_mode: dict[str, dict[str, Any]] = defaultdict(_empty_insurance_group)
+    for row in outcomes:
+        key = instrument_key(row)
+        candidate = candidate_by_key.get(key) or {}
+        sample = _insurance_sample(candidate=candidate, outcome=row, instrument_key=key, max_adverse_pnl=adverse_by_key.get(key))
+        _record_insurance_payload(by_status[sample["status"]], sample)
+        _record_insurance_payload(by_mode[sample["mode"]], sample)
+    return {
+        "by_status": _insurance_payload(by_status),
+        "by_mode": _insurance_payload(by_mode),
+        "by_bucket": insurance_bucket_stats(candidate_by_key, adverse_by_key, outcomes),
+    }
+
+
+def insurance_bucket_stats(
+    candidate_by_key: dict[str, dict[str, Any]],
+    adverse_by_key: dict[str, float],
+    outcomes: list[dict[str, Any]],
+) -> dict[str, Any]:
+    dimensions: dict[str, tuple[str, Any]] = {
+        "dte": ("dte", _dte_bucket),
+        "abs_delta": ("abs_delta", _delta_bucket),
+        "iv_rv_ratio": ("iv_rv_ratio", _iv_rv_bucket),
+        "spread_ratio": ("spread_ratio", _spread_bucket),
+        "single_trade_concentration": ("single_trade_concentration", _concentration_bucket),
+    }
+    out: dict[str, Any] = {}
+    for dimension, (field, bucket_fn) in dimensions.items():
+        bucketed: dict[str, dict[str, Any]] = defaultdict(lambda: {"all": _empty_insurance_group(), "by_status": defaultdict(_empty_insurance_group)})
+        for row in outcomes:
+            key = instrument_key(row)
+            candidate = candidate_by_key.get(key)
+            if not candidate:
+                continue
+            label = bucket_fn(float_or_none(candidate.get(field)))
+            sample = _insurance_sample(candidate=candidate, outcome=row, instrument_key=key, max_adverse_pnl=adverse_by_key.get(key))
+            payload = bucketed[label]
+            _record_insurance_payload(payload["all"], sample)
+            _record_insurance_payload(payload["by_status"][sample["status"]], sample)
+        out[dimension] = {
+            label: {
+                **_summarize_insurance_group(payload["all"]),
+                "by_status": _insurance_payload(payload["by_status"]),
             }
             for label, payload in sorted(bucketed.items())
         }
@@ -364,6 +418,241 @@ def _record_outcome_payload(payload: dict[str, Any], *, instrument_key: str, pnl
         payload["pnl_values"].append(pnl)
     if outcome:
         payload["outcomes"][outcome] += 1
+
+
+def _empty_insurance_group() -> dict[str, Any]:
+    return {
+        "outcome_count": 0,
+        "instruments": set(),
+        "outcomes": Counter(),
+        "premium_values": [],
+        "pnl_values": [],
+        "pnl_premium_pairs": [],
+        "liability_cost_pairs": [],
+        "capital_pairs": [],
+        "adverse_values": [],
+        "adverse_premium_pairs": [],
+    }
+
+
+def _insurance_sample(
+    *,
+    candidate: dict[str, Any],
+    outcome: dict[str, Any],
+    instrument_key: str,
+    max_adverse_pnl: float | None,
+) -> dict[str, Any]:
+    mode = _insurance_mode(candidate, outcome)
+    status = normal_status(candidate.get("status") or outcome.get("candidate_status"))
+    pnl, value_basis = _outcome_pnl_with_basis(outcome)
+    premium = _entry_premium(candidate, value_basis=value_basis)
+    capital = _capital_at_risk(candidate, mode=mode, value_basis=value_basis)
+    outcome_label = text(outcome.get("outcome") or outcome.get("settlement") or outcome.get("status"))
+    liability_cost = None
+    if premium is not None and premium > 0 and pnl is not None:
+        liability_cost = max(premium - pnl, 0.0)
+    return {
+        "instrument_key": instrument_key,
+        "status": status,
+        "mode": mode,
+        "outcome": outcome_label,
+        "premium": premium if premium is not None and premium > 0 else None,
+        "pnl": pnl,
+        "liability_cost": liability_cost,
+        "capital": capital if capital is not None and capital > 0 else None,
+        "max_adverse_pnl": max_adverse_pnl,
+    }
+
+
+def _record_insurance_payload(payload: dict[str, Any], sample: dict[str, Any]) -> None:
+    payload["outcome_count"] += 1
+    key = text(sample.get("instrument_key"))
+    if key:
+        payload["instruments"].add(key)
+    outcome = text(sample.get("outcome"))
+    if outcome:
+        payload["outcomes"][outcome] += 1
+    premium = sample.get("premium")
+    pnl = sample.get("pnl")
+    liability_cost = sample.get("liability_cost")
+    capital = sample.get("capital")
+    adverse = sample.get("max_adverse_pnl")
+    if premium is not None:
+        payload["premium_values"].append(float(premium))
+    if pnl is not None:
+        payload["pnl_values"].append(float(pnl))
+    if premium is not None and pnl is not None:
+        payload["pnl_premium_pairs"].append((float(pnl), float(premium)))
+    if premium is not None and liability_cost is not None:
+        payload["liability_cost_pairs"].append((float(liability_cost), float(premium)))
+    if premium is not None and capital is not None:
+        payload["capital_pairs"].append((float(premium), float(capital)))
+    if adverse is not None:
+        adverse_value = float(adverse)
+        payload["adverse_values"].append(adverse_value)
+        if premium is not None and adverse_value < 0:
+            payload["adverse_premium_pairs"].append((abs(adverse_value), float(premium)))
+
+
+def _insurance_payload(grouped: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for label, payload in sorted(grouped.items()):
+        out[label] = _summarize_insurance_group(payload)
+    return out
+
+
+def _summarize_insurance_group(payload: dict[str, Any]) -> dict[str, Any]:
+    premium_values = list(payload["premium_values"])
+    pnl_values = list(payload["pnl_values"])
+    pnl_premium_pairs = list(payload["pnl_premium_pairs"])
+    liability_cost_pairs = list(payload["liability_cost_pairs"])
+    capital_pairs = list(payload["capital_pairs"])
+    adverse_values = list(payload["adverse_values"])
+    adverse_premium_pairs = list(payload["adverse_premium_pairs"])
+    outcome_count = int(payload["outcome_count"])
+    negative_margin_count = sum(1 for value in pnl_values if value < 0)
+    liability_cost_count = sum(1 for cost, _premium in liability_cost_pairs if cost > 0)
+    premium_for_pnl = sum(premium for _pnl, premium in pnl_premium_pairs)
+    pnl_with_premium = sum(pnl for pnl, _premium in pnl_premium_pairs)
+    liability_cost_total = sum(cost for cost, _premium in liability_cost_pairs)
+    premium_for_cost = sum(premium for _cost, premium in liability_cost_pairs)
+    premium_for_capital = sum(premium for premium, _capital in capital_pairs)
+    capital_total = sum(capital for _premium, capital in capital_pairs)
+    adverse_loss_total = sum(loss for loss, _premium in adverse_premium_pairs)
+    premium_for_adverse = sum(premium for _loss, premium in adverse_premium_pairs)
+    outcomes = payload["outcomes"]
+    assignment_count = int(outcomes.get("assigned_at_expiry", 0))
+    called_away_count = int(outcomes.get("called_away_at_expiry", 0))
+    expired_worthless_count = int(outcomes.get("expired_worthless", 0))
+    exercise_count = assignment_count + called_away_count + int(outcomes.get("expired_in_the_money", 0))
+    return {
+        "instrument_count": len(payload["instruments"]),
+        "outcome_count": outcome_count,
+        "premium_observation_count": len(premium_values),
+        "premium_collected_total": sum(premium_values) if premium_values else None,
+        "premium_collected_avg": (sum(premium_values) / len(premium_values)) if premium_values else None,
+        "pnl_observation_count": len(pnl_values),
+        "realized_pnl_total": sum(pnl_values) if pnl_values else None,
+        "realized_pnl_avg": (sum(pnl_values) / len(pnl_values)) if pnl_values else None,
+        "underwriting_margin": (pnl_with_premium / premium_for_pnl) if premium_for_pnl > 0 else None,
+        "liability_cost_observation_count": len(liability_cost_pairs),
+        "liability_cost_total": liability_cost_total if liability_cost_pairs else None,
+        "loss_ratio": (liability_cost_total / premium_for_cost) if premium_for_cost > 0 else None,
+        "liability_cost_count": liability_cost_count,
+        "liability_cost_rate": (liability_cost_count / len(liability_cost_pairs)) if liability_cost_pairs else None,
+        "negative_margin_count": negative_margin_count,
+        "negative_margin_rate": (negative_margin_count / len(pnl_values)) if pnl_values else None,
+        "exercise_count": exercise_count,
+        "exercise_rate": (exercise_count / outcome_count) if outcome_count > 0 else None,
+        "assignment_count": assignment_count,
+        "assignment_rate": (assignment_count / outcome_count) if outcome_count > 0 else None,
+        "called_away_count": called_away_count,
+        "called_away_rate": (called_away_count / outcome_count) if outcome_count > 0 else None,
+        "expired_worthless_count": expired_worthless_count,
+        "expired_worthless_rate": (expired_worthless_count / outcome_count) if outcome_count > 0 else None,
+        "capital_observation_count": len(capital_pairs),
+        "capital_at_risk_total": capital_total if capital_pairs else None,
+        "premium_to_capital": (premium_for_capital / capital_total) if capital_total > 0 else None,
+        "max_adverse_pnl_observation_count": len(adverse_values),
+        "max_adverse_pnl_worst": min(adverse_values) if adverse_values else None,
+        "path_adverse_loss_total": adverse_loss_total if adverse_premium_pairs else None,
+        "path_adverse_loss_to_premium": (adverse_loss_total / premium_for_adverse) if premium_for_adverse > 0 else None,
+        "outcome_counts": dict(outcomes.most_common(20)),
+    }
+
+
+def _max_adverse_pnl_by_instrument(marks: list[dict[str, Any]]) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for row in marks:
+        key = instrument_key(row)
+        if not key:
+            continue
+        pnl = first_float(row, "unrealized_pnl", "counterfactual_pnl", "pnl", "mark_pnl")
+        if pnl is None:
+            continue
+        current = out.get(key)
+        if current is None or pnl < current:
+            out[key] = pnl
+    return out
+
+
+def _insurance_mode(candidate: dict[str, Any], outcome: dict[str, Any]) -> str:
+    mode = text(candidate.get("option_type") or candidate.get("mode") or outcome.get("option_type") or outcome.get("mode")).lower()
+    if mode in {"put", "call"}:
+        return mode
+    return "unknown"
+
+
+def _entry_premium(candidate: dict[str, Any], *, value_basis: str) -> float | None:
+    cny_value = first_float(
+        candidate,
+        "net_income_cny",
+        "net_credit_cny",
+        "entry_credit_cny",
+        "premium_received_gross_cny",
+        "premium_income_cny",
+        "premium_cny",
+    )
+    native_value = first_float(
+        candidate,
+        "net_income",
+        "net_credit",
+        "entry_credit",
+        "premium_received_gross",
+        "premium_income",
+        "premium",
+    )
+    if value_basis == "cny" and cny_value is not None:
+        return cny_value
+    if native_value is not None:
+        return native_value
+    return cny_value
+
+
+def _outcome_pnl_with_basis(outcome: dict[str, Any]) -> tuple[float | None, str]:
+    cny_value = first_float(outcome, "realized_pnl_cny", "counterfactual_pnl_cny", "pnl_cny", "net_pnl_cny")
+    if cny_value is not None:
+        return cny_value, "cny"
+    return first_float(outcome, "realized_pnl", "counterfactual_pnl", "pnl", "net_pnl"), "native"
+
+
+def _capital_at_risk(candidate: dict[str, Any], *, mode: str, value_basis: str) -> float | None:
+    cny_value = first_float(
+        candidate,
+        "assignment_notional_cny",
+        "cash_required_cny",
+        "covered_notional_cny",
+        "underlying_notional_cny",
+        "capital_at_risk_cny",
+    )
+    native_value = first_float(
+        candidate,
+        "cash_required",
+        "assignment_notional",
+        "covered_notional",
+        "underlying_notional",
+        "notional",
+    )
+    inferred_value = _inferred_capital_at_risk(candidate, mode=mode)
+    if value_basis == "cny" and cny_value is not None:
+        return cny_value
+    if native_value is not None:
+        return native_value
+    if inferred_value is not None:
+        return inferred_value
+    return cny_value
+
+
+def _inferred_capital_at_risk(candidate: dict[str, Any], *, mode: str) -> float | None:
+    contracts = first_float(candidate, "contracts", "contract_count") or 1.0
+    multiplier = first_float(candidate, "multiplier", "contract_multiplier")
+    strike = first_float(candidate, "strike")
+    spot = first_float(candidate, "spot", "underlying_price")
+    if multiplier is None or strike is None:
+        return None
+    if mode == "call" and spot is not None:
+        return spot * multiplier * contracts
+    return strike * multiplier * contracts
 
 
 def _risk_payload(grouped: dict[str, dict[str, Any]]) -> dict[str, Any]:

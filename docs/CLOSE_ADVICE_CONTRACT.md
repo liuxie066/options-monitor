@@ -120,7 +120,8 @@ When a paired call or its cost basis cannot be resolved, the system exposes
 |---|---|
 | Strategy priority | Lot strategy metadata has priority over current symbol config. |
 | Return-first exit | Actionable exits require positive fee-adjusted profit. |
-| Short-vol risk exit | IV/RV edge loss or event/path risk can produce `risk_exit` even when the short leg is not currently profitable. |
+| Short-vol hold thesis | Short-vol Sell Put defaults to assignment-acceptable and Covered Call defaults to called-away-acceptable; a non-profitable buyback stays `hold` with `hold_reason_type=assignment_acceptable` or `called_away_acceptable` unless a separate risk-budget exit is explicit. |
+| Short-vol risk exit | Profitable short-vol exits or explicit risk-budget cases can produce `risk_exit`; non-profitable Sell Put / Covered Call IV/RV/event signals are risk observation by default. |
 | YE short put | Action is `close_put_keep_call` / `hold_put_keep_call`, never plain `close`. |
 | YE long call | Action is based on convexity state, not short-premium capture rules. |
 | Combo cost | Missing paired call cost is explicit and never treated as zero. |
