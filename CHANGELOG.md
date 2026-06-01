@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.190 - 2026-06-02
+
+### Added
+- Added offline short-vol insurance replay metrics for Sell Put and Covered Call, including loss ratio, underwriting margin, premium-to-capital, assignment/called-away rates, and adverse-path loss versus premium.
+- Exposed insurance replay metrics by status, option mode, and DTE/Delta/IV-RV/Spread/concentration buckets for parameter review before production config tuning.
+
+### Changed
+- Treated non-profitable short-vol close scenarios as hold-by-default when assignment or called-away is acceptable, while keeping explicit risk-budget exits separate from mark-to-market losses.
+- Preserved premium and capital-at-risk fields in shadow replay candidate snapshots so replay analysis can evaluate underwriting quality instead of only trade PnL.
+
 ## 1.2.189 - 2026-06-01
 
 ### Changed

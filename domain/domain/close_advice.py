@@ -53,6 +53,9 @@ EXIT_REASON_TYPE_TAKE_PROFIT = "take_profit"
 EXIT_REASON_TYPE_SALVAGE = "salvage"
 EXIT_REASON_TYPE_THESIS_EXPIRED = "thesis_expired"
 
+HOLD_REASON_TYPE_ASSIGNMENT_ACCEPTABLE = "assignment_acceptable"
+HOLD_REASON_TYPE_CALLED_AWAY_ACCEPTABLE = "called_away_acceptable"
+
 PRICING_BLOCKING_FLAGS = {
     "missing_premium",
     "invalid_premium",
@@ -616,6 +619,17 @@ def evaluate_short_vol_close_advice(
         )
 
     if short_vol_config.reject_event_risk and risk_fields.get("event_risk_flag") is True:
+        if _short_close_is_loss_or_flat(row):
+            return _short_vol_acceptance_hold(
+                row,
+                reason=_short_vol_loss_hold_reason(
+                    mode_norm,
+                    "到期前存在事件风险",
+                ),
+                status="event_risk",
+                hold_reason_type=_short_vol_loss_hold_reason_type(mode_norm),
+                flag="risk_exit_loss_not_actionable",
+            )
         return _short_vol_override(
             row,
             tier="strong",
@@ -634,6 +648,8 @@ def evaluate_short_vol_close_advice(
             tier="strong",
             reason="IV/RV edge 已不满足 short-vol 要求，继续持有缺少波动率补偿",
             status="vol_edge_lost",
+            hold_reason_type=_short_vol_loss_hold_reason_type(mode_norm),
+            loss_hold_reason=_short_vol_loss_hold_reason(mode_norm, "IV/RV edge 已不满足新开 short-vol 要求"),
         )
     if ratio_bad or spread_bad:
         return _short_vol_override(
@@ -641,6 +657,8 @@ def evaluate_short_vol_close_advice(
             tier="medium",
             reason="IV/RV edge 已低于 short-vol 目标，建议评估买回或换仓",
             status="vol_edge_weakened",
+            hold_reason_type=_short_vol_loss_hold_reason_type(mode_norm),
+            loss_hold_reason=_short_vol_loss_hold_reason(mode_norm, "IV/RV edge 已低于新开 short-vol 目标"),
         )
 
     abs_delta = safe_float(risk_fields.get("abs_delta"))
@@ -650,10 +668,23 @@ def evaluate_short_vol_close_advice(
             tier="medium",
             reason="delta 已高于 short-vol 目标区间，路径风险上升，建议评估平仓",
             status="delta_risk_high",
+            hold_reason_type=_short_vol_loss_hold_reason_type(mode_norm),
+            loss_hold_reason=_short_vol_loss_hold_reason(
+                mode_norm,
+                "delta 已高于 short-vol 目标区间",
+                observation="作为路径风险观察",
+            ),
         )
 
     row["short_vol_thesis_status"] = "valid"
     row["short_vol_reason"] = "IV/RV edge、事件风险和 delta 区间仍支持 short-vol 持仓"
+    if str(row.get("exit_state") or "").strip().lower() == EXIT_STATE_HOLD:
+        return _short_vol_acceptance_hold(
+            row,
+            reason=_short_vol_valid_hold_reason(mode_norm),
+            status="valid",
+            hold_reason_type=_short_vol_loss_hold_reason_type(mode_norm),
+        )
     return row
 
 
@@ -686,16 +717,71 @@ def _short_vol_not_evaluable(row: dict[str, Any], *, reason: str, flag: str) -> 
     return out
 
 
+def _short_close_is_loss_or_flat(row: dict[str, Any]) -> bool:
+    realized = safe_float(row.get("realized_if_close"))
+    return realized is not None and realized <= 0
+
+
+def _short_vol_loss_hold_reason_type(mode: str) -> str:
+    return HOLD_REASON_TYPE_CALLED_AWAY_ACCEPTABLE if mode == "call" else HOLD_REASON_TYPE_ASSIGNMENT_ACCEPTABLE
+
+
+def _short_vol_loss_hold_reason(mode: str, lead: str, *, observation: str = "作为风险观察") -> str:
+    if mode == "call":
+        return f"{lead}；Covered Call 默认可被行权卖出正股，当前买回为亏损，{observation}，不作为平仓提醒"
+    return f"{lead}；Sell Put 默认可接货，当前买回为亏损，{observation}，不作为平仓提醒"
+
+
+def _short_vol_valid_hold_reason(mode: str) -> str:
+    if mode == "call":
+        return "Covered Call 默认可被行权卖出正股；当前未达到收益回收阈值，继续持有等待归零或被行权"
+    return "Sell Put 默认可接货；当前未达到收益回收阈值，继续持有等待归零或接货"
+
+
+def _short_vol_acceptance_hold(
+    row: dict[str, Any],
+    *,
+    reason: str,
+    status: str,
+    hold_reason_type: str,
+    flag: str | None = None,
+) -> dict[str, Any]:
+    out = dict(row)
+    out["tier"] = "none"
+    out["tier_label"] = TIER_LABELS["none"]
+    out["reason"] = reason
+    out["short_vol_thesis_status"] = status
+    out["short_vol_reason"] = reason
+    out["hold_reason_type"] = hold_reason_type
+    out["exit_state"] = EXIT_STATE_HOLD
+    out["exit_reason_type"] = EXIT_REASON_TYPE_HOLD
+    if flag:
+        flags = [x for x in str(out.get("data_quality_flags") or "").split(";") if x]
+        flags.append(flag)
+        out["data_quality_flags"] = ";".join(dict.fromkeys(flags))
+    return out
+
+
 def _short_vol_override(
-    row: dict[str, Any], *, tier: str, reason: str, status: str, allow_loss: bool = False
+    row: dict[str, Any],
+    *,
+    tier: str,
+    reason: str,
+    status: str,
+    allow_loss: bool = False,
+    hold_reason_type: str | None = None,
+    loss_hold_reason: str | None = None,
 ) -> dict[str, Any]:
     out = dict(row)
     realized = safe_float(out.get("realized_if_close"))
     if not allow_loss and realized is not None and realized <= 0:
         out["tier"] = "none"
         out["tier_label"] = TIER_LABELS["none"]
-        out["reason"] = f"{reason}，但当前买回为亏损，未达到风险止损条件，不作为平仓提醒"
+        out["reason"] = loss_hold_reason or f"{reason}，但当前买回为亏损，未达到风险止损条件，不作为平仓提醒"
         out["short_vol_thesis_status"] = status
+        out["short_vol_reason"] = out["reason"]
+        if hold_reason_type:
+            out["hold_reason_type"] = hold_reason_type
         out["exit_state"] = EXIT_STATE_HOLD
         out["exit_reason_type"] = EXIT_REASON_TYPE_HOLD
         flags = [x for x in str(out.get("data_quality_flags") or "").split(";") if x]
