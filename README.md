@@ -290,8 +290,12 @@ om run tick --config config.us.json --accounts lx sy
 
 ```bash
 ./om research shadow-replay build --run-id <run-id> --dataset-id <dataset-id>
+./om research shadow-replay build --profile-path /var/lib/options-monitor/service.profile.json --latest-scanned-run --dataset-id us-<run-id>
+./om research shadow-replay build --runs-root /var/lib/options-monitor/output_runs --run-id <run-id> --dataset-root /var/lib/options-monitor/output_shared/research/shadow_replay/datasets --dataset-id <dataset-id>
 ./om research shadow-replay status --min-sample 30
+./om research shadow-replay status --profile-path /var/lib/options-monitor/service.profile.json --min-sample 30
 ./om research shadow-replay run-data-plan --min-sample 30 --min-mark-points 2
+./om research shadow-replay run-data-plan --profile-path /var/lib/options-monitor/service.profile.json --min-sample 30 --min-mark-points 2
 ./om research shadow-replay run-data-plan --min-sample 30 --min-mark-points 2 --source local --write
 ./om research shadow-replay collect-marks --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --source local --required-data-root output_shared/required_data --write
 ./om research shadow-replay collect-marks --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --source opend --required-data-root output_shared/required_data --opend-host 127.0.0.1 --opend-port 11111 --write
@@ -299,6 +303,8 @@ om run tick --config config.us.json --accounts lx sy
 ./om research shadow-replay settle --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --write
 ./om research shadow-replay analyze --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --min-sample 30
 ```
+
+线上 runtime 查询优先传 `--profile-path`，它只用于解析 `output_runs`、dataset root、required-data root 和 receipt root；`build` 仍然只读取扫描证据并写 Shadow Replay dataset，不修改 runtime config、交易状态或通知。
 
 `status` / `list` 是只读复盘仪表盘，会列出每个本地 dataset 的 `dataset_id`、candidate 数、被拒样本是否存在、最后 mark 时间、usable mark 数、outcome facts 数，以及下一步建议：`collect_marks`、`settle`、`analyze` 或 `wait`。它还会输出 `sampling`、只包含 `collect_marks` / `settle` 的顶层 `data_plan`，以及只提示人工复盘的 `review_queue`，用于判断 mark 是否过期、路径采样点是否太少、哪些 dataset 应优先采样、哪些 dataset 已可人工复盘。它不采样、不结算、不写 dataset，用来回答“现在是否已经有足够数据可以复盘”。
 

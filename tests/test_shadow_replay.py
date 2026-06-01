@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -150,6 +151,56 @@ def test_shadow_replay_readiness_flags_final_candidates_only_survivorship_bias(t
     assert readiness["evidence_checks"]["final_candidates_only"] is True
     assert readiness["evidence_checks"]["survivorship_bias_risk"] == "high"
     assert readiness["recommendations"][0]["writes_runtime_config"] is False
+
+
+def test_shadow_replay_build_selects_latest_runtime_run_with_evidence(tmp_path: Path) -> None:
+    from src.application.shadow_replay import build_shadow_replay_dataset
+
+    runtime_root = tmp_path / "runtime"
+    runs_root = runtime_root / "output_runs"
+    empty_newer = runs_root / "run-empty" / "accounts" / "lx"
+    evidence_older = runs_root / "run-evidence" / "accounts" / "lx"
+    empty_newer.mkdir(parents=True)
+    evidence_older.mkdir(parents=True)
+    (evidence_older / "sell_put_candidates.csv").write_text(
+        (
+            "symbol,account,option_type,contract_symbol,expiration,dte,delta,strike,net_income\n"
+            "NVDA,lx,put,NVDA260619P00100000,2026-06-19,30,-0.2,100,120\n"
+        ),
+        encoding="utf-8",
+    )
+    (evidence_older / "candidate_filter_trace.jsonl").write_text(
+        json.dumps(
+            {
+                "symbol": "AMD",
+                "account": "lx",
+                "function": "sell_put",
+                "mode": "put",
+                "contract_symbol": "AMD260619P00080000",
+                "status": "rejected",
+                "rule": "spread_too_wide",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    os.utime(runs_root / "run-evidence", (100, 100))
+    os.utime(runs_root / "run-empty", (200, 200))
+
+    manifest = build_shadow_replay_dataset(
+        repo_root=tmp_path,
+        runs_root=runs_root,
+        latest_scanned_run=True,
+        dataset_root=runtime_root / "output_shared" / "research" / "shadow_replay" / "datasets",
+        dataset_id="latest-case",
+    )
+
+    assert Path(manifest["dataset_dir"]).parent == runtime_root / "output_shared" / "research" / "shadow_replay" / "datasets"
+    assert manifest["source"]["run_id"] == "run-evidence"
+    assert manifest["source"]["latest_scanned_run_selection"]["found"] is True
+    assert manifest["source"]["latest_scanned_run_selection"]["skipped_without_evidence_count"] == 1
+    assert manifest["summary"]["candidate_snapshot_count"] == 2
+    assert manifest["summary"]["rejected_count"] == 1
 
 
 def test_shadow_replay_dataset_status_dashboard_guides_next_actions(tmp_path: Path) -> None:

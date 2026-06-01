@@ -413,8 +413,12 @@ om research collect --config-key us --scope candidate --run-id 20260515T182459Z-
 om research collect --config-key us --scope candidate --candidate-report-dir output_shared/reports --output json --no-write-outputs
 om research collect --config-key us --scope candidate --candidate-path candidates.csv --trace-path candidate_filter_trace.jsonl --mark-path mark_path_snapshots.jsonl --outcome-path outcome_facts.jsonl --output json --no-write-outputs
 om research shadow-replay build --run-id 20260515T182459Z-474761 --dataset-id us-20260515
+om research shadow-replay build --profile-path /var/lib/options-monitor/service.profile.json --latest-scanned-run --dataset-id us-20260515
+om research shadow-replay build --runs-root /var/lib/options-monitor/output_runs --run-id 20260515T182459Z-474761 --dataset-root /var/lib/options-monitor/output_shared/research/shadow_replay/datasets --dataset-id us-20260515
 om research shadow-replay status --min-sample 30 --min-mark-points 2 --mark-stale-hours 24
+om research shadow-replay status --profile-path /var/lib/options-monitor/service.profile.json --min-sample 30 --min-mark-points 2 --mark-stale-hours 24
 om research shadow-replay run-data-plan --min-sample 30 --min-mark-points 2
+om research shadow-replay run-data-plan --profile-path /var/lib/options-monitor/service.profile.json --min-sample 30 --min-mark-points 2
 om research shadow-replay run-data-plan --min-sample 30 --min-mark-points 2 --source local --write
 om research shadow-replay run-data-plan --min-sample 30 --min-mark-points 2 --source opend --write --max-datasets 3
 om research shadow-replay collect-marks --dataset output_shared/research/shadow_replay/datasets/us-20260515 --source local --required-data-root output_shared/required_data --write
@@ -426,6 +430,7 @@ om research shadow-replay analyze --dataset output_shared/research/shadow_replay
 
 边界：
 - 只读源数据，来源可以是 `run_id`、`run_dir`、`candidate_report_dir`、`candidate_path`、`trace_path`、`reject_log_path`、`mark_path` 或 `outcome_path`。
+- `--profile-path` / `--runtime-root` 只用于解析 runtime `output_runs`、dataset root、required-data root 和 receipt root；`--latest-scanned-run` 只选择最新已有 replay 证据的 run，不运行扫描。
 - 默认 `--no-write-outputs` 不写文件；显式 `--write-outputs --confirm` 时只写本地 research bundle/handoff。
 - `research shadow-replay status` / `list` 只读本地 dataset root，不采样、不 settle、不写输出文件；`next_suggested_action` 只会是 `collect_marks`、`settle`、`analyze` 或 `wait`。输出里的 `data_plan` 只是数据维护建议命令清单，不会自动执行；人工复盘提示在 `review_queue`。
 - `research shadow-replay run-data-plan` 不挂 tick / tick-cron；默认不写，`--write` 只写 replay dataset、local receipt，以及在显式 `--source opend` 时写本地 required-data / OpenD cache。它不执行 `analyze`，不写 Feishu、不写 broker、不写 trade state、不写 runtime config、不发送通知。
