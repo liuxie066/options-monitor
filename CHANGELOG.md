@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.185 - 2026-06-01
+
+### Fixed
+- Prevented soft short-vol thesis warnings from being promoted to actionable close notifications when buying back would lock in a loss.
+- Rendered actionable risk exits as `风险平仓` / `风险止损` with `平仓损益`, avoiding profit-capture wording such as negative `已锁定` or negative `收益`.
+
 ## 1.2.184 - 2026-06-01
 
 ### Changed

@@ -3209,3 +3209,39 @@ def test_close_advice_text_can_drive_account_message_without_opening_candidates(
     assert "账户提醒（lx）" in msg
     assert "平仓建议" in msg
     assert "Put 0 / Covered Call 0" in msg
+
+
+def test_compact_close_advice_renders_risk_exit_loss_as_stop_loss_not_profit() -> None:
+    from src.application.close_advice_runner import render_markdown_compact
+
+    text = render_markdown_compact(
+        [
+            {
+                "account": "lx",
+                "symbol": "0700.HK",
+                "option_type": "put",
+                "expiration": "2026-07-30",
+                "strike": 440,
+                "currency": "HKD",
+                "tier": "strong",
+                "tier_label": "强烈建议平仓",
+                "exit_state": "risk_exit",
+                "short_vol_thesis_status": "event_risk",
+                "capture_ratio": -0.728,
+                "dte": 59,
+                "remaining_annualized_return": 0.31,
+                "close_mid": 22,
+                "realized_if_close": -940,
+                "remaining_premium": 2178,
+                "evaluation_status": "priced",
+            }
+        ],
+        notify_levels={"strong", "medium"},
+        max_items=5,
+    )
+
+    assert "🔴 风险止损 0700.HK Put 440P @ 07-30" in text
+    assert "- 风险退出 事件风险 · 59天 · 余年化 31%" in text
+    assert "- 建议价 ¥22 · 平仓损益 ¥-940（余 ¥2,178）" in text
+    assert "已锁定 -72.8%" not in text
+    assert "收益 ¥-940" not in text

@@ -1401,12 +1401,24 @@ def _apply_buy_to_close_fee(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _apply_fee_profitability_gate(row: dict[str, Any]) -> dict[str, Any]:
-    if str(row.get("exit_reason_type") or "").strip().lower() == EXIT_STATE_RISK_EXIT:
-        return row
-    if str(row.get("position_side") or "").strip().lower() == "long":
-        return row
     realized = safe_float(row.get("realized_if_close"))
     if realized is None:
+        return row
+    if str(row.get("exit_reason_type") or "").strip().lower() == EXIT_STATE_RISK_EXIT:
+        status = str(row.get("short_vol_thesis_status") or "").strip().lower()
+        if status == "event_risk" or realized > 0:
+            return row
+        row = _with_extra_flags(row, ["risk_exit_loss_not_actionable"])
+        row["tier"] = "none"
+        row["tier_label"] = "不提醒"
+        row["reason"] = (
+            f"{row.get('reason') or 'short-vol 风险退出信号'}，但扣除平仓手续费后买回为亏损，"
+            "未达到风险止损条件，不作为平仓提醒"
+        )
+        row["exit_state"] = EXIT_STATE_HOLD
+        row["exit_reason_type"] = EXIT_STATE_HOLD
+        return row
+    if str(row.get("position_side") or "").strip().lower() == "long":
         return row
     if str(row.get("tier") or "").strip().lower() == "none":
         return row
@@ -1616,6 +1628,9 @@ def _optimizer_detail_lines(row: dict[str, Any]) -> list[str]:
 
 
 def _close_action_label(row: dict[str, Any]) -> str:
+    if _is_risk_exit_display_row(row):
+        realized = safe_float(row.get("realized_if_close"))
+        return "风险止损" if realized is not None and realized < 0 else "风险平仓"
     action = str(row.get("close_action") or "").strip().lower()
     mapping = {
         "close_put_keep_call": "买回 Put，保留收益增强 Call",
@@ -1637,6 +1652,17 @@ def _close_action_label(row: dict[str, Any]) -> str:
     if action == "close_put_keep_call" and optional == "close_both_optional":
         return f"{label}；组合止盈可选"
     return label
+
+
+def _close_tier_label_display(row: dict[str, Any]) -> str:
+    if _is_risk_exit_display_row(row):
+        tier = str(row.get("tier") or "").strip().lower()
+        if tier == "strong":
+            return "高优先级风险退出"
+        if tier == "medium":
+            return "中优先级风险退出"
+        return "风险退出"
+    return str(row.get("tier_label") or "-")
 
 
 def render_markdown(rows: list[dict[str, Any]], *, notify_levels: set[str], max_items: int) -> str:
@@ -1670,10 +1696,16 @@ def render_markdown(rows: list[dict[str, Any]], *, notify_levels: set[str], max_
                 currency = row.get("currency")
                 lines.extend(
                     [
-                        f"- {row.get('symbol')} {opt} {exp} {strike}{suffix} · {_close_action_label(row)} · {row.get('tier_label')}",
+                        f"- {row.get('symbol')} {opt} {exp} {strike}{suffix} · {_close_action_label(row)} · {_close_tier_label_display(row)}",
                         (
                             _long_call_metric_line(row)
                             if _is_long_call_convexity_display_row(row)
+                            else (
+                                f"- 风险: {_short_vol_status_label(row)} | "
+                                f"剩余DTE={row.get('dte') if row.get('dte') is not None else '-'} | "
+                                f"剩余收益年化={_pct(row.get('remaining_annualized_return'))}"
+                            )
+                            if _is_risk_exit_display_row(row)
                             else (
                                 f"- 已锁定: {_pct(row.get('capture_ratio'))} | "
                                 f"剩余DTE={row.get('dte') if row.get('dte') is not None else '-'} | "
@@ -1687,6 +1719,9 @@ def render_markdown(rows: list[dict[str, Any]], *, notify_levels: set[str], max_
                         ),
                         (
                             f"- 估算: 平仓后锁定收益 {_money(row.get('realized_if_close'), currency)} | "
+                            f"剩余权利金 {_money(row.get('remaining_premium'), currency)}"
+                            if not _is_risk_exit_display_row(row)
+                            else f"- 估算: 平仓损益 {_money(row.get('realized_if_close'), currency)} | "
                             f"剩余权利金 {_money(row.get('remaining_premium'), currency)}"
                         ),
                         f"- 理由: {row.get('reason') or '-'}",
@@ -1739,7 +1774,31 @@ def _tier_verb_compact(tier: str) -> str:
     return verb_map.get(str(tier).strip().lower(), "评估")
 
 
+def _is_risk_exit_display_row(row: dict[str, Any]) -> bool:
+    return str(row.get("exit_state") or "").strip().lower() == EXIT_STATE_RISK_EXIT
+
+
+def _short_vol_status_label(row: dict[str, Any]) -> str:
+    status = str(row.get("short_vol_thesis_status") or "").strip().lower()
+    mapping = {
+        "event_risk": "事件风险",
+        "vol_edge_lost": "IV/RV edge丢失",
+        "vol_edge_weakened": "IV/RV edge转弱",
+        "delta_risk_high": "delta风险升高",
+    }
+    return mapping.get(status, "风险退出")
+
+
+def _risk_exit_verb_compact(row: dict[str, Any], fallback: str) -> str:
+    realized = safe_float(row.get("realized_if_close"))
+    if realized is not None and realized < 0:
+        return "风险止损"
+    return "风险平仓" if fallback in {"强烈平仓", "建议平仓", "考虑平仓", "可选平仓"} else fallback
+
+
 def _close_action_verb_compact(row: dict[str, Any], fallback: str) -> str:
+    if _is_risk_exit_display_row(row):
+        return _risk_exit_verb_compact(row, fallback)
     action = str(row.get("close_action") or "").strip().lower()
     mapping = {
         "close_put_keep_call": "买回Put留Call",
@@ -1838,6 +1897,11 @@ def _long_call_metric_line_compact(row: dict[str, Any], *, dte_str: str) -> str:
     return f"- 现值/成本 {ratio} · {dte_str} · 浮盈 {gain}"
 
 
+def _risk_exit_metric_line_compact(row: dict[str, Any], *, dte_str: str) -> str:
+    remaining_ann = _pct_compact(row.get("remaining_annualized_return"))
+    return f"- 风险退出 {_short_vol_status_label(row)} · {dte_str} · 余年化 {remaining_ann}"
+
+
 def _price_compact(val: Any, currency: str | None) -> str:
     n = safe_float(val)
     if n is None:
@@ -1868,6 +1932,14 @@ def _long_call_price_line_compact(row: dict[str, Any], currency: str | None) -> 
     remaining = _money_compact(row.get("remaining_premium"), currency)
     quote_range = _quote_range_compact(row, currency)
     return f"- 建议出价 {suggested}{quote_range} · 收益 {realized}（余 {remaining}）"
+
+
+def _short_option_price_line_compact(row: dict[str, Any], currency: str | None) -> str:
+    close_mid = _money_compact(row.get("close_mid"), currency)
+    realized = _money_compact(row.get("realized_if_close"), currency)
+    remaining = _money_compact(row.get("remaining_premium"), currency)
+    label = "平仓损益" if _is_risk_exit_display_row(row) else "收益"
+    return f"- 建议价 {close_mid} · {label} {realized}（余 {remaining}）"
 
 
 def _money_compact(val, currency: str | None) -> str:
@@ -2000,15 +2072,14 @@ def render_markdown_compact(
                 remaining_ann = _pct_compact(row.get("remaining_annualized_return"))
                 if is_long_call_row:
                     l2 = _long_call_metric_line_compact(row, dte_str=dte_str)
+                elif _is_risk_exit_display_row(row):
+                    l2 = _risk_exit_metric_line_compact(row, dte_str=dte_str)
                 else:
                     l2 = f"- 已锁定 {capture} · {dte_str} · 余年化 {remaining_ann}"
                 if is_long_call_row:
                     l3 = _long_call_price_line_compact(row, currency)
                 else:
-                    close_mid = _money_compact(row.get("close_mid"), currency)
-                    realized = _money_compact(row.get("realized_if_close"), currency)
-                    remaining = _money_compact(row.get("remaining_premium"), currency)
-                    l3 = f"- 建议价 {close_mid} · 收益 {realized}（余 {remaining}）"
+                    l3 = _short_option_price_line_compact(row, currency)
                 opt_detail = _optimizer_detail_compact(row)
                 lines.append(l1)
                 lines.append(l2)
