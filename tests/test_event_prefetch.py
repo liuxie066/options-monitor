@@ -118,6 +118,97 @@ def test_event_prefetch_uses_stale_after_refresh_failure(tmp_path: Path) -> None
     assert "source unavailable" in item["source_error"]
 
 
+def test_event_prefetch_resolves_primary_fallback_chain(tmp_path: Path) -> None:
+    from src.application.events.prefetch import prefetch_event_data
+    from src.application.events.source_yfinance import EventSourceError
+
+    cfg = _cfg()
+    cfg["runtime"] = {
+        "event_risk_source": {
+            "mode": "primary_fallback",
+            "default_provider": "futu",
+            "providers": {
+                "futu": {"enabled": True, "role": "primary"},
+                "yfinance": {"enabled": True, "role": "fallback"},
+            },
+            "market_rules": {"us": {"chain": ["futu", "yfinance"]}},
+        }
+    }
+    calls: list[tuple[str, str]] = []
+
+    def futu_fetcher(symbol: str) -> list[dict]:
+        calls.append(("futu", symbol))
+        raise EventSourceError("OpenD source unavailable", error_code="source_error")
+
+    def yfinance_fetcher(symbol: str) -> list[dict]:
+        calls.append(("yfinance", symbol))
+        return [{"type": "earnings", "date": "2026-06-01"}]
+
+    out = prefetch_event_data(
+        base=tmp_path,
+        cfg=cfg,
+        snapshot_path=tmp_path / "run_state" / "event_snapshot.json",
+        fetchers={"futu": futu_fetcher, "yfinance": yfinance_fetcher},
+        now=datetime(2026, 6, 1, tzinfo=timezone.utc),
+    )
+
+    item = out["symbols"]["AAPL"]
+    assert out["provider"] == "resolved"
+    assert item["source_status"] == "ok_with_fallback"
+    assert item["selected_provider"] == "yfinance"
+    assert item["events"] == [{"type": "earnings", "date": "2026-06-01"}]
+    assert item["source_results"]["futu"]["source_status"] == "error"
+    assert item["source_results"]["yfinance"]["source_status"] == "ok"
+    assert out["summary"]["fallback_used"] == 1
+    assert calls == [("futu", "AAPL"), ("yfinance", "AAPL")]
+
+
+def test_event_prefetch_market_rules_keep_hk_on_futu(tmp_path: Path) -> None:
+    from src.application.events.prefetch import prefetch_event_data
+
+    cfg = _cfg()
+    cfg["symbols"] = [
+        {"symbol": "0700.HK", "use": ["put_base"], "sell_put": {"enabled": True, "strategy": "short_vol"}}
+    ]
+    cfg["runtime"] = {
+        "event_risk_source": {
+            "mode": "primary_fallback",
+            "default_provider": "futu",
+            "providers": {
+                "futu": {"enabled": True, "role": "primary"},
+                "yfinance": {"enabled": True, "role": "fallback"},
+            },
+            "market_rules": {
+                "hk": {"chain": ["futu"]},
+                "us": {"chain": ["futu", "yfinance"]},
+            },
+        }
+    }
+    calls: list[tuple[str, str]] = []
+
+    def futu_fetcher(symbol: str) -> list[dict]:
+        calls.append(("futu", symbol))
+        return [{"type": "earnings", "date": "2026-06-01"}]
+
+    def yfinance_fetcher(symbol: str) -> list[dict]:
+        calls.append(("yfinance", symbol))
+        return [{"type": "earnings", "date": "2026-06-02"}]
+
+    out = prefetch_event_data(
+        base=tmp_path,
+        cfg=cfg,
+        snapshot_path=tmp_path / "run_state" / "event_snapshot.json",
+        fetchers={"futu": futu_fetcher, "yfinance": yfinance_fetcher},
+        now=datetime(2026, 6, 1, tzinfo=timezone.utc),
+    )
+
+    item = out["symbols"]["0700.HK"]
+    assert item["source_status"] == "ok"
+    assert item["selected_provider"] == "futu"
+    assert item["provider_chain"] == ["futu"]
+    assert calls == [("futu", "0700.HK")]
+
+
 def test_event_annotation_without_snapshot_fails_closed_input() -> None:
     from src.application.events.annotator import annotate_candidates_with_event_snapshot
 

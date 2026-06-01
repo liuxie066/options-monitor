@@ -8,6 +8,7 @@ from domain.domain.symbol_identity import canonical_symbol
 
 
 ShortVolMode = Literal["put", "call"]
+EVENT_SOURCE_OK_STATUSES = {"ok", "ok_with_fallback"}
 
 
 @dataclass(frozen=True)
@@ -80,7 +81,7 @@ def assess_short_vol_candidate(
     if abs_delta > cfg.max_abs_delta:
         return _reject_decision("delta_above_target_band", fields, abs_delta, cfg.max_abs_delta, "abs(delta) above band")
 
-    if cfg.event_source_fail_closed and fields["event_source_status"] != "ok":
+    if cfg.event_source_fail_closed and fields["event_source_status"] not in EVENT_SOURCE_OK_STATUSES:
         return _reject_decision(
             "event_source_unavailable",
             fields,

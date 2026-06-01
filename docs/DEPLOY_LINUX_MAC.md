@@ -51,7 +51,7 @@ python3 -m venv .venv
 ./.venv/bin/pip install -r requirements/dev.txt -c constraints/dev.txt
 ```
 
-`futu-api` 的默认固定版本在 constraints 中，业务代码不应依赖某个硬编码版本判断行为。
+`futu-api` / `yfinance` 这类数据源 SDK 不在 constraints 中精确锁死；`requirements/runtime.txt` 只声明最低能力版本，升级时应安装当前可用版本并通过发布验证。
 
 ## 3. Linux: systemd
 

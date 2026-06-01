@@ -175,7 +175,8 @@
 更准确地说：
 
 - tick run 先由 `src/application/events/prefetch.py` 按 symbol 去重准备事件数据
-- 事件成功、失败、限流冷却和 stale fallback 由 `src/application/events/store.py` 管理
+- 多数据源选择、primary/fallback、市场规则和 resolved snapshot 由 `src/application/events/orchestrator.py` 管理
+- 单个 provider 的成功、失败、限流冷却和 stale fallback 由 `src/application/events/store.py` 管理
 - candidate scan 只读本轮 `event_snapshot.json`，再由 `src/application/events/annotator.py` 做标注
 - 最后由 `domain/domain/short_vol_assessment.py` 按 `reject_event_risk` 和 `event_source_fail_closed` 决定是否通过
 
@@ -184,8 +185,9 @@
 > 事件数据的获取是 run 级 source-data 准备，不是 candidate scan 的副作用；事件风险是否允许进入推荐结果，则由 short-vol 评估契约统一判断。
 
 验收边界：
-- 同一 tick 内同一 symbol 跨账户、Sell Put、Covered Call、Yield Enhancement 只能有一次事件源获取
+- 同一 tick 内同一 symbol 跨账户、Sell Put、Covered Call、Yield Enhancement 只能走同一份 resolved 事件快照；每个 provider 是否发起获取由 provider chain 和缓存状态决定
 - `ok + events=[]` 表示可信无事件；`error` / `stale` 不能伪装成无事件
+- `ok_with_fallback` 表示主源失败但备源成功，必须在 snapshot 中保留各 provider 的 `source_results`
 - `event_source_fail_closed=true` 时，`error` / `stale` 默认不能进入 short-vol 推荐
 - `runtime_status` 暴露最近一轮 `event_prefetch` 摘要，包括 fetch、cache、stale、rate limit 和 error 计数
 

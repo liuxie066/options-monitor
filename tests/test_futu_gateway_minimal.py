@@ -190,3 +190,61 @@ def test_gateway_request_history_kline_returns_page_key() -> None:
         "ktype": "K_DAY",
         "autype": "NONE",
     }
+
+
+def test_gateway_event_source_methods_delegate_to_quote_client() -> None:
+    import sys
+
+    base = Path(__file__).resolve().parents[1]
+    if str(base) not in sys.path:
+        sys.path.insert(0, str(base))
+
+    from src.infrastructure.futu_gateway import build_futu_gateway
+
+    class FakeQuote:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def get_financials_earnings_price_history(self, **kwargs):
+            self.calls.append(("earnings", kwargs))
+            return 0, [{"pub_trading_day_str": "2026-06-01"}]
+
+        def get_corporate_actions_dividends(self, **kwargs):
+            self.calls.append(("dividends", kwargs))
+            return 0, {"dividend_list": [{"ex_date": "2026-06-05"}]}
+
+        def get_corporate_actions_stock_splits(self, **kwargs):
+            self.calls.append(("splits", kwargs))
+            return 0, {"next_key": "-1", "split_list": [{"ex_date_str": "2026-06-10"}]}
+
+    class FakeBackend:
+        def __init__(self, *, host: str, port: int) -> None:
+            self.host = host
+            self.port = port
+            self.quote = FakeQuote()
+
+        def _ensure_clients(self):
+            return self.quote, None
+
+    class FakeClient:
+        def __init__(self, backend, *, is_option_chain_cache_enabled: bool) -> None:
+            self.backend = backend
+            self.is_option_chain_cache_enabled = is_option_chain_cache_enabled
+
+        def get_financials_earnings_price_history(self, **kwargs):
+            return self.backend.quote.get_financials_earnings_price_history(**kwargs)[1]
+
+        def get_corporate_actions_dividends(self, **kwargs):
+            return self.backend.quote.get_corporate_actions_dividends(**kwargs)[1]
+
+        def get_corporate_actions_stock_splits(self, **kwargs):
+            return self.backend.quote.get_corporate_actions_stock_splits(**kwargs)[1]
+
+    gw = build_futu_gateway(backend_cls=FakeBackend, client_cls=FakeClient)
+
+    assert gw.get_financials_earnings_price_history("US.NVDA") == [{"pub_trading_day_str": "2026-06-01"}]
+    assert gw.get_corporate_actions_dividends("US.NVDA") == {"dividend_list": [{"ex_date": "2026-06-05"}]}
+    assert gw.get_corporate_actions_stock_splits("US.NVDA", next_key=None, num=50) == {
+        "next_key": "-1",
+        "split_list": [{"ex_date_str": "2026-06-10"}],
+    }

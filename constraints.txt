@@ -1,7 +1,8 @@
-# Backward-compatible runtime constraints.
+# Backward-compatible runtime constraints for stable core packages.
 # Canonical split constraints live under constraints/.
+# Market-data/source SDKs are intentionally lower-bounded in requirements/runtime.txt
+# instead of pinned here, so API fixes and new OpenD capabilities can be picked up
+# during normal upgrades after validation.
 pandas==3.0.2
 pyyaml==6.0.3
 tabulate==0.10.0
-futu-api==10.4.6408
-yfinance==0.2.66
