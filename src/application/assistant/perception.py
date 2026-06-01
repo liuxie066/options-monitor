@@ -236,7 +236,10 @@ class PerceptionEngine:
     ) -> PerceptionResult:
         llm_source = self._llm_source()
         llm_error_candidate = error_candidate(llm_source, llm_error, reason=str(self.llm_trace.get("reason") or ""))
-        if deterministic_perception is not None and _llm_error_allows_deterministic_fallback(llm_error):
+        if deterministic_perception is not None and _llm_error_allows_deterministic_fallback(
+            llm_error,
+            deterministic_perception,
+        ):
             return self._handle_deterministic_fallback(
                 deterministic_perception,
                 candidates=[llm_error_candidate, deterministic_candidate],
@@ -494,8 +497,18 @@ def ensure_llm_perception_allowed(perception: PerceptionResult) -> None:
         )
 
 
-def _llm_error_allows_deterministic_fallback(err: AgentToolError) -> bool:
-    return err.code in {"LLM_UNAVAILABLE", "LLM_PROVIDER_ERROR", "NEEDS_CLARIFICATION"}
+def _llm_error_allows_deterministic_fallback(
+    err: AgentToolError,
+    deterministic_perception: PerceptionResult,
+) -> bool:
+    if err.code in {"LLM_UNAVAILABLE", "LLM_PROVIDER_ERROR", "NEEDS_CLARIFICATION"}:
+        return True
+    details = err.details if isinstance(err.details, dict) else {}
+    return (
+        err.code == "PERMISSION_DENIED"
+        and details.get("llm_rejected_reason") == "known_non_executable_intent"
+        and details.get("intent_name") == deterministic_perception.intent_name
+    )
 
 
 __all__ = [
