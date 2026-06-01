@@ -1,5 +1,5 @@
 pandas
 pyyaml
 tabulate
-futu-api
-yfinance
+futu-api>=10.6.6608
+yfinance>=1.4.1

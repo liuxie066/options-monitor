@@ -5,6 +5,7 @@ import math
 from typing import Any
 
 from domain.domain.short_vol_assessment import (
+    EVENT_SOURCE_OK_STATUSES,
     ShortVolAssessmentConfig,
     ShortVolPortfolioContext,
     short_vol_assessment_fields,
@@ -607,7 +608,7 @@ def evaluate_short_vol_close_advice(
         )
 
     event_status = str(risk_fields.get("event_source_status") or "").strip().lower()
-    if short_vol_config.event_source_fail_closed and event_status != "ok":
+    if short_vol_config.event_source_fail_closed and event_status not in EVENT_SOURCE_OK_STATUSES:
         return _short_vol_not_evaluable(
             row,
             reason="事件风险数据源不可用，无法确认 short-vol 持仓是否仍可继续持有",
