@@ -43,6 +43,7 @@ from src.application.shadow_replay.common import (
 class ShadowReplaySourceSelection:
     repo_root: Path
     run_id: str | None = None
+    runs_root: Path | None = None
     run_dir: Path | None = None
     report_dir: Path | None = None
     candidate_paths: tuple[Path, ...] = ()
@@ -56,6 +57,7 @@ def build_shadow_replay_dataset(
     *,
     repo_root: Path,
     run_id: str | None = None,
+    runs_root: str | Path | None = None,
     run_dir: str | Path | None = None,
     report_dir: str | Path | None = None,
     candidate_paths: list[str | Path] | tuple[str | Path, ...] | None = None,
@@ -64,15 +66,40 @@ def build_shadow_replay_dataset(
     mark_paths: list[str | Path] | tuple[str | Path, ...] | None = None,
     outcome_paths: list[str | Path] | tuple[str | Path, ...] | None = None,
     output_dir: str | Path | None = None,
+    dataset_root: str | Path | None = None,
     dataset_id: str | None = None,
+    latest_scanned_run: bool = False,
 ) -> dict[str, Any]:
     """Build a local replay dataset from existing read-only scan artifacts."""
 
     base = repo_root.resolve()
+    run_id_text = (str(run_id).strip() or None) if run_id else None
+    runs_root_path = resolve_optional(runs_root, base=base)
+    run_dir_path = resolve_optional(run_dir, base=base)
+    latest_selection: dict[str, Any] = {
+        "requested": bool(latest_scanned_run),
+        "found": None,
+        "path": None,
+        "run_id": None,
+        "searched_count": 0,
+        "skipped_without_evidence_count": 0,
+    }
+    if run_dir_path is None and bool(latest_scanned_run):
+        run_dir_path, latest_selection = latest_shadow_replay_run_dir(
+            repo_root=base,
+            runs_root=runs_root_path,
+        )
+        if run_dir_path is None:
+            raise ValueError("latest scanned run with shadow replay evidence not found")
+        run_id_text = run_dir_path.name
+    elif run_dir_path is None and run_id_text:
+        root = runs_root_path or (base / "output_runs").resolve()
+        run_dir_path = (root / run_id_text).resolve()
     selection = ShadowReplaySourceSelection(
         repo_root=base,
-        run_id=(str(run_id).strip() or None) if run_id else None,
-        run_dir=resolve_optional(run_dir, base=base),
+        run_id=run_id_text,
+        runs_root=runs_root_path,
+        run_dir=run_dir_path,
         report_dir=resolve_optional(report_dir, base=base),
         candidate_paths=tuple(resolve_many(candidate_paths, base=base)),
         trace_paths=tuple(resolve_many(trace_paths, base=base)),
@@ -95,7 +122,12 @@ def build_shadow_replay_dataset(
     outcome_facts = read_replay_rows(resolved_outcomes, schema_version=OUTCOME_FACT_SCHEMA_VERSION, base=base)
 
     ds_id = str(dataset_id or "").strip() or default_dataset_id()
-    target = dataset_output_dir(output_dir, dataset_id=ds_id, base=base)
+    dataset_root_path = resolve_optional(dataset_root, base=base)
+    target = (
+        (dataset_root_path / ds_id).resolve()
+        if output_dir is None and dataset_root_path is not None
+        else dataset_output_dir(output_dir, dataset_id=ds_id, base=base)
+    )
     target.mkdir(parents=True, exist_ok=True)
     write_jsonl(target / "candidate_snapshots.jsonl", candidate_snapshots)
     write_jsonl(target / "filter_decisions.jsonl", filter_decisions)
@@ -117,7 +149,10 @@ def build_shadow_replay_dataset(
         "dataset_dir": str(target),
         "source": {
             "run_id": selection.run_id,
+            "runs_root": safe_rel(selection.runs_root, base=base),
             "run_dir": safe_rel(selection.run_dir, base=base),
+            "latest_scanned_run": bool(latest_scanned_run),
+            "latest_scanned_run_selection": latest_selection,
             "report_dir": safe_rel(selection.report_dir, base=base),
             "candidate_paths": [safe_rel(path, base=base) for path in resolved_candidates],
             "trace_paths": [safe_rel(path, base=base) for path in resolved_traces],
@@ -365,7 +400,8 @@ def source_dirs(selection: ShadowReplaySourceSelection) -> list[Path]:
     dirs: list[Path] = []
     run_dir = selection.run_dir
     if run_dir is None and selection.run_id:
-        run_dir = (selection.repo_root / "output_runs" / selection.run_id).resolve()
+        runs_root = selection.runs_root or (selection.repo_root / "output_runs").resolve()
+        run_dir = (runs_root / selection.run_id).resolve()
     for root in (run_dir, selection.report_dir):
         if root is None:
             continue
@@ -376,6 +412,59 @@ def source_dirs(selection: ShadowReplaySourceSelection) -> list[Path]:
     if not dirs:
         dirs.append((selection.repo_root / "output_shared" / "reports").resolve())
     return unique(dirs)
+
+
+def latest_shadow_replay_run_dir(*, repo_root: Path, runs_root: Path | None = None) -> tuple[Path | None, dict[str, Any]]:
+    root = (runs_root or (repo_root / "output_runs")).resolve()
+    searched_count = 0
+    skipped_without_evidence_count = 0
+    if not root.exists() or not root.is_dir():
+        return None, {
+            "requested": True,
+            "found": False,
+            "source": "runs_root_mtime",
+            "runs_root": safe_rel(root, base=repo_root),
+            "path": None,
+            "run_id": None,
+            "searched_count": 0,
+            "skipped_without_evidence_count": 0,
+        }
+    run_dirs = sorted(
+        [item.resolve() for item in root.iterdir() if item.is_dir()],
+        key=lambda item: (item.stat().st_mtime, item.name),
+        reverse=True,
+    )
+    for run_dir in run_dirs:
+        searched_count += 1
+        probe = ShadowReplaySourceSelection(repo_root=repo_root, run_dir=run_dir, runs_root=root)
+        candidate_count = len(candidate_paths_from_selection(probe))
+        trace_count = len(trace_paths_from_selection(probe))
+        reject_log_count = len(reject_log_paths_from_selection(probe))
+        if candidate_count or trace_count or reject_log_count:
+            return run_dir, {
+                "requested": True,
+                "found": True,
+                "source": "runs_root_mtime",
+                "runs_root": safe_rel(root, base=repo_root),
+                "path": safe_rel(run_dir, base=repo_root),
+                "run_id": run_dir.name,
+                "searched_count": searched_count,
+                "skipped_without_evidence_count": skipped_without_evidence_count,
+                "candidate_path_count": candidate_count,
+                "trace_path_count": trace_count,
+                "reject_log_path_count": reject_log_count,
+            }
+        skipped_without_evidence_count += 1
+    return None, {
+        "requested": True,
+        "found": False,
+        "source": "runs_root_mtime",
+        "runs_root": safe_rel(root, base=repo_root),
+        "path": None,
+        "run_id": None,
+        "searched_count": searched_count,
+        "skipped_without_evidence_count": skipped_without_evidence_count,
+    }
 
 
 def dedupe_snapshots(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

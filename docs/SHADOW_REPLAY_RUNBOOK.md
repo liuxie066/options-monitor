@@ -35,6 +35,31 @@ DATASET=output_shared/research/shadow_replay/datasets/$DATASET_ID
 ./om research shadow-replay build --run-id <run-id> --dataset-id "$DATASET_ID"
 ```
 
+生产 runtime 已有 `service.profile.json` 时，优先用 profile 解析线上证据路径，避免手拼 runtime 目录：
+
+```bash
+PROFILE=/var/lib/options-monitor/service.profile.json
+DATASET_ID=us-<run-id>
+
+./om research shadow-replay build \
+  --profile-path "$PROFILE" \
+  --latest-scanned-run \
+  --dataset-id "$DATASET_ID"
+
+./om research shadow-replay status \
+  --profile-path "$PROFILE" \
+  --min-sample 30 \
+  --min-mark-points 2 \
+  --mark-stale-hours 24
+
+./om research shadow-replay run-data-plan \
+  --profile-path "$PROFILE" \
+  --min-sample 30 \
+  --min-mark-points 2
+```
+
+`--profile-path` 只解析 `output_runs`、dataset root、required-data root 和 receipt root；不会改 runtime config、交易状态、Feishu 或 broker-facing 数据。`--latest-scanned-run` 会从 profile/runtime 的 `output_runs` 中按 mtime 找最新包含候选、reject log 或 `candidate_filter_trace.jsonl` 的 run；如果要复盘指定 run，用 `--run-id <run-id>` 或 `--run-dir <path>`。
+
 查看所有本地 dataset 是否已经能复盘：
 
 ```bash

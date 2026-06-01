@@ -811,6 +811,101 @@ def test_research_shadow_replay_build_and_analyze(capsys, monkeypatch, tmp_path:
     assert payload["data"]["datasets"][0]["next_suggested_action"] == "analyze"
 
 
+def test_research_shadow_replay_build_from_service_profile_latest_run(capsys, monkeypatch, tmp_path: Path) -> None:
+    import src.interfaces.cli.main as cli
+
+    repo = tmp_path / "repo"
+    runtime_root = tmp_path / "runtime"
+    repo.mkdir()
+    monkeypatch.setattr(cli, "repo_base", lambda: repo)
+    profile_path = repo / "service.profile.json"
+    profile_path.write_text(
+        json.dumps(
+            {
+                "runtime_root": str(runtime_root),
+                "paths": {
+                    "runs_root": str(runtime_root / "output_runs"),
+                    "report_dir": str(runtime_root / "output_shared" / "reports"),
+                    "shared_state_dir": str(runtime_root / "output_shared" / "state"),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    empty_run = runtime_root / "output_runs" / "run-empty" / "accounts" / "lx"
+    account_dir = runtime_root / "output_runs" / "run-1" / "accounts" / "lx"
+    empty_run.mkdir(parents=True)
+    account_dir.mkdir(parents=True)
+    (account_dir / "sell_put_candidates.csv").write_text(
+        (
+            "symbol,account,option_type,contract_symbol,expiration,dte,delta,strike,net_income\n"
+            "NVDA,lx,put,NVDA260619P00100000,2026-06-19,30,-0.2,100,120\n"
+        ),
+        encoding="utf-8",
+    )
+    (account_dir / "candidate_filter_trace.jsonl").write_text(
+        json.dumps(
+            {
+                "symbol": "AMD",
+                "account": "lx",
+                "function": "sell_put",
+                "mode": "put",
+                "contract_symbol": "AMD260619P00080000",
+                "status": "rejected",
+                "rule": "spread_too_wide",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    os.utime(runtime_root / "output_runs" / "run-1", (100, 100))
+    os.utime(runtime_root / "output_runs" / "run-empty", (200, 200))
+
+    rc = cli.main(
+        [
+            "research",
+            "shadow-replay",
+            "build",
+            "--profile-path",
+            str(profile_path),
+            "--latest-scanned-run",
+            "--dataset-id",
+            "profile-latest",
+        ]
+    )
+    payload = _read_json_output(capsys)
+
+    assert rc == 0
+    assert payload["tool_name"] == "research.shadow-replay.build"
+    assert Path(payload["data"]["dataset_dir"]) == (
+        runtime_root / "output_shared" / "research" / "shadow_replay" / "datasets" / "profile-latest"
+    )
+    assert payload["data"]["source"]["run_id"] == "run-1"
+    assert payload["data"]["summary"]["candidate_snapshot_count"] == 2
+
+    rc = cli.main(
+        [
+            "research",
+            "shadow-replay",
+            "status",
+            "--profile-path",
+            str(profile_path),
+            "--min-sample",
+            "1",
+        ]
+    )
+    payload = _read_json_output(capsys)
+
+    assert rc == 0
+    assert payload["data"]["dataset_root"] == str(
+        runtime_root / "output_shared" / "research" / "shadow_replay" / "datasets"
+    )
+    assert payload["data"]["required_data_root"] == str(runtime_root / "output_shared" / "required_data")
+    assert payload["data"]["summary"]["dataset_count"] == 1
+    assert payload["data"]["data_plan"][0]["action"] == "collect_marks"
+    assert str(runtime_root / "output_shared" / "required_data") in payload["data"]["data_plan"][0]["suggested_command"]
+
+
 def test_research_shadow_replay_mark_from_required_data(capsys, monkeypatch, tmp_path: Path) -> None:
     import src.interfaces.cli.main as cli
 

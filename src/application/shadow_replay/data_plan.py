@@ -69,6 +69,7 @@ def run_shadow_replay_data_plan(
     before = shadow_replay_dataset_status(
         repo_root=base,
         dataset_root=dataset_root,
+        required_data_root=required_root,
         min_sample=min_sample,
         min_mark_points=min_mark_points,
         mark_stale_hours=mark_stale_hours,
@@ -120,6 +121,7 @@ def run_shadow_replay_data_plan(
             shadow_replay_dataset_status(
                 repo_root=base,
                 dataset_root=dataset_root,
+                required_data_root=required_root,
                 min_sample=min_sample,
                 min_mark_points=min_mark_points,
                 mark_stale_hours=mark_stale_hours,
