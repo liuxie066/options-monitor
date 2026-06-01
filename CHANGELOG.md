@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.180 - 2026-06-01
+
+### Fixed
+- Rendered Yield Enhancement long-call Close Advice rows with call value ratio and unrealized gain metrics instead of empty short-option capture fields.
+
 ## 1.2.179 - 2026-06-01
 
 ### Added
