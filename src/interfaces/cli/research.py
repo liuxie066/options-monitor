@@ -69,13 +69,26 @@ def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
     )
     shadow_build.add_argument("--run-id", default=None)
     shadow_build.add_argument("--run-dir", default=None)
+    shadow_build.add_argument("--runs-root", default=None)
+    shadow_build.add_argument("--profile-path", default=None)
+    shadow_build.add_argument("--runtime-root", default=None)
+    shadow_build.add_argument(
+        "--latest-scanned-run",
+        action="store_true",
+        help="select the newest run under runs-root/profile runtime root that has replay evidence",
+    )
     shadow_build.add_argument("--report-dir", default=None)
     shadow_build.add_argument("--candidate-path", action="append", dest="candidate_paths", default=None)
     shadow_build.add_argument("--trace-path", action="append", dest="trace_paths", default=None)
     shadow_build.add_argument("--reject-log-path", action="append", dest="reject_log_paths", default=None)
     shadow_build.add_argument("--mark-path", action="append", dest="mark_paths", default=None)
     shadow_build.add_argument("--outcome-path", action="append", dest="outcome_paths", default=None)
-    shadow_build.add_argument("--output-dir", default=None)
+    shadow_build.add_argument("--output-dir", default=None, help="exact dataset output directory")
+    shadow_build.add_argument(
+        "--dataset-root",
+        default=None,
+        help="dataset root; defaults to profile/runtime output_shared/research/shadow_replay/datasets when provided",
+    )
     shadow_build.add_argument("--dataset-id", default=None)
     shadow_analyze = research_shadow_sub.add_parser("analyze", help="analyze a local shadow replay dataset")
     shadow_analyze.add_argument("--dataset", required=True)
@@ -90,6 +103,13 @@ def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
             "--dataset-root",
             default=None,
             help="dataset root; default output_shared/research/shadow_replay/datasets",
+        )
+        shadow_status.add_argument("--profile-path", default=None)
+        shadow_status.add_argument("--runtime-root", default=None)
+        shadow_status.add_argument(
+            "--required-data-root",
+            default=None,
+            help="required-data root used in suggested commands",
         )
         shadow_status.add_argument("--min-sample", type=int, default=30)
         shadow_status.add_argument(
@@ -113,6 +133,8 @@ def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
         default=None,
         help="dataset root; default output_shared/research/shadow_replay/datasets",
     )
+    shadow_plan.add_argument("--profile-path", default=None)
+    shadow_plan.add_argument("--runtime-root", default=None)
     shadow_plan.add_argument(
         "--required-data-root",
         default=None,
@@ -168,6 +190,8 @@ def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
         help="generate local mark path snapshots from required-data CSV quotes",
     )
     shadow_mark.add_argument("--dataset", required=True)
+    shadow_mark.add_argument("--profile-path", default=None)
+    shadow_mark.add_argument("--runtime-root", default=None)
     shadow_mark.add_argument(
         "--required-data-root",
         default=None,
@@ -190,6 +214,8 @@ def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
         help="collect one replay mark sample from local cache or OpenD",
     )
     shadow_collect.add_argument("--dataset", required=True)
+    shadow_collect.add_argument("--profile-path", default=None)
+    shadow_collect.add_argument("--runtime-root", default=None)
     shadow_collect.add_argument(
         "--source",
         default="local",
@@ -300,6 +326,112 @@ def _research_collect_payload(args: argparse.Namespace) -> dict[str, Any]:
     return {key: value for key, value in payload.items() if value not in (None, [])}
 
 
+def _shadow_replay_profile(args: argparse.Namespace, *, base: Path) -> dict[str, Any]:
+    raw = str(getattr(args, "profile_path", "") or "").strip()
+    if not raw:
+        return {}
+    path = _resolve_shadow_path(raw, base=base)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise AgentToolError(code="CONFIG_ERROR", message=f"profile not found: {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise AgentToolError(code="CONFIG_ERROR", message=f"profile is not valid JSON: {path}") from exc
+    if not isinstance(payload, dict):
+        raise AgentToolError(code="CONFIG_ERROR", message=f"profile must be a JSON object: {path}")
+    return payload
+
+
+def _resolve_shadow_path(value: str | Path, *, base: Path) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = (base / path).resolve()
+    return path.resolve()
+
+
+def _profile_paths(profile: dict[str, Any]) -> dict[str, Any]:
+    paths = profile.get("paths")
+    return paths if isinstance(paths, dict) else {}
+
+
+def _profile_path_value(profile: dict[str, Any], key: str, *, base: Path) -> Path | None:
+    raw = _profile_paths(profile).get(key)
+    if raw is None or not str(raw).strip():
+        return None
+    return _resolve_shadow_path(str(raw), base=base)
+
+
+def _shadow_replay_runtime_root(args: argparse.Namespace, *, profile: dict[str, Any], base: Path) -> Path | None:
+    raw = str(getattr(args, "runtime_root", "") or "").strip() or str(profile.get("runtime_root") or "").strip()
+    if raw:
+        return _resolve_shadow_path(raw, base=base)
+    runs_root = _profile_path_value(profile, "runs_root", base=base)
+    if runs_root is not None and runs_root.name == "output_runs":
+        return runs_root.parent.resolve()
+    for key in ("report_dir", "state_dir", "shared_state_dir"):
+        path = _profile_path_value(profile, key, base=base)
+        if path is not None and path.parent.name == "output_shared":
+            return path.parent.parent.resolve()
+    return None
+
+
+def _shadow_replay_runs_root(
+    args: argparse.Namespace,
+    *,
+    profile: dict[str, Any],
+    runtime_root: Path | None,
+    base: Path,
+) -> Path | None:
+    raw = str(getattr(args, "runs_root", "") or "").strip()
+    if raw:
+        return _resolve_shadow_path(raw, base=base)
+    profile_root = _profile_path_value(profile, "runs_root", base=base)
+    if profile_root is not None:
+        return profile_root
+    if runtime_root is not None:
+        return (runtime_root / "output_runs").resolve()
+    return None
+
+
+def _shadow_replay_dataset_root(
+    raw_value: str | Path | None,
+    *,
+    runtime_root: Path | None,
+    base: Path,
+) -> Path | None:
+    if raw_value is not None and str(raw_value).strip():
+        return _resolve_shadow_path(raw_value, base=base)
+    if runtime_root is not None:
+        return (runtime_root / "output_shared" / "research" / "shadow_replay" / "datasets").resolve()
+    return None
+
+
+def _shadow_replay_required_data_root(
+    raw_value: str | Path | None,
+    *,
+    runtime_root: Path | None,
+    base: Path,
+) -> Path | None:
+    if raw_value is not None and str(raw_value).strip():
+        return _resolve_shadow_path(raw_value, base=base)
+    if runtime_root is not None:
+        return (runtime_root / "output_shared" / "required_data").resolve()
+    return None
+
+
+def _shadow_replay_receipt_dir(
+    raw_value: str | Path | None,
+    *,
+    runtime_root: Path | None,
+    base: Path,
+) -> Path | None:
+    if raw_value is not None and str(raw_value).strip():
+        return _resolve_shadow_path(raw_value, base=base)
+    if runtime_root is not None:
+        return (runtime_root / "output_shared" / "research" / "shadow_replay" / "receipts").resolve()
+    return None
+
+
 def handle_research_command(
     args: argparse.Namespace,
     *,
@@ -335,21 +467,36 @@ def handle_research_command(
     )
 
     base = repo_base_fn()
+    profile = _shadow_replay_profile(args, base=base)
+    runtime_root = _shadow_replay_runtime_root(args, profile=profile, base=base)
 
     if args.shadow_replay_command == "build":
-        data = build_shadow_replay_dataset(
-            repo_root=base,
-            run_id=args.run_id,
-            run_dir=args.run_dir,
-            report_dir=args.report_dir,
-            candidate_paths=args.candidate_paths,
-            trace_paths=args.trace_paths,
-            reject_log_paths=args.reject_log_paths,
-            mark_paths=args.mark_paths,
-            outcome_paths=args.outcome_paths,
-            output_dir=args.output_dir,
-            dataset_id=args.dataset_id,
+        if bool(args.latest_scanned_run) and (args.run_id or args.run_dir):
+            raise AgentToolError(
+                code="INPUT_ERROR",
+                message="--latest-scanned-run cannot be combined with --run-id or --run-dir",
         )
+        runs_root = _shadow_replay_runs_root(args, profile=profile, runtime_root=runtime_root, base=base)
+        dataset_root = _shadow_replay_dataset_root(args.dataset_root, runtime_root=runtime_root, base=base)
+        try:
+            data = build_shadow_replay_dataset(
+                repo_root=base,
+                run_id=args.run_id,
+                runs_root=runs_root,
+                run_dir=args.run_dir,
+                report_dir=args.report_dir,
+                candidate_paths=args.candidate_paths,
+                trace_paths=args.trace_paths,
+                reject_log_paths=args.reject_log_paths,
+                mark_paths=args.mark_paths,
+                outcome_paths=args.outcome_paths,
+                output_dir=args.output_dir,
+                dataset_root=dataset_root,
+                dataset_id=args.dataset_id,
+                latest_scanned_run=bool(args.latest_scanned_run),
+            )
+        except ValueError as exc:
+            raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
         return build_response(tool_name="research.shadow-replay.build", ok=True, data=data)
 
     if args.shadow_replay_command == "analyze":
@@ -357,9 +504,12 @@ def handle_research_command(
         return build_response(tool_name="research.shadow-replay.analyze", ok=True, data=data)
 
     if args.shadow_replay_command in {"status", "list"}:
+        dataset_root = _shadow_replay_dataset_root(args.dataset_root, runtime_root=runtime_root, base=base)
+        required_data_root = _shadow_replay_required_data_root(args.required_data_root, runtime_root=runtime_root, base=base)
         data = shadow_replay_dataset_status(
             repo_root=base,
-            dataset_root=args.dataset_root,
+            dataset_root=dataset_root,
+            required_data_root=required_data_root,
             min_sample=args.min_sample,
             min_mark_points=args.min_mark_points,
             mark_stale_hours=args.mark_stale_hours,
@@ -372,10 +522,17 @@ def handle_research_command(
                 code="INPUT_ERROR",
                 message="--receipt-output and --receipt-dir require --write for shadow-replay run-data-plan",
             )
+        dataset_root = _shadow_replay_dataset_root(args.dataset_root, runtime_root=runtime_root, base=base)
+        required_data_root = _shadow_replay_required_data_root(args.required_data_root, runtime_root=runtime_root, base=base)
+        receipt_dir = (
+            _shadow_replay_receipt_dir(args.receipt_dir, runtime_root=runtime_root, base=base)
+            if bool(args.write)
+            else None
+        )
         data = run_shadow_replay_data_plan(
             repo_root=base,
-            dataset_root=args.dataset_root,
-            required_data_root=args.required_data_root,
+            dataset_root=dataset_root,
+            required_data_root=required_data_root,
             source=args.source,
             min_sample=args.min_sample,
             min_mark_points=args.min_mark_points,
@@ -384,7 +541,7 @@ def handle_research_command(
             max_datasets=args.max_datasets,
             write=bool(args.write),
             receipt_output=args.receipt_output,
-            receipt_dir=args.receipt_dir,
+            receipt_dir=receipt_dir,
             settle_after_collect=bool(args.settle_after_collect),
             opend_host=args.opend_host,
             opend_port=args.opend_port,
@@ -397,7 +554,9 @@ def handle_research_command(
         return build_response(tool_name="research.shadow-replay.run-data-plan", ok=True, data=data)
 
     if args.shadow_replay_command == "mark":
-        required_data_root = args.required_data_root or (base / "output_shared" / "required_data")
+        required_data_root = _shadow_replay_required_data_root(args.required_data_root, runtime_root=runtime_root, base=base) or (
+            base / "output_shared" / "required_data"
+        )
         data = mark_shadow_replay_dataset(
             dataset=args.dataset,
             required_data_root=required_data_root,
@@ -410,7 +569,9 @@ def handle_research_command(
         return build_response(tool_name="research.shadow-replay.mark", ok=True, data=data)
 
     if args.shadow_replay_command == "collect-marks":
-        required_data_root = args.required_data_root or (base / "output_shared" / "required_data")
+        required_data_root = _shadow_replay_required_data_root(args.required_data_root, runtime_root=runtime_root, base=base) or (
+            base / "output_shared" / "required_data"
+        )
         data = collect_shadow_replay_marks(
             dataset=args.dataset,
             required_data_root=required_data_root,

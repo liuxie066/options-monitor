@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 1.2.175 - 2026-06-01
+
+### Added
+- Added service-profile and runtime-root aware Shadow Replay dataset construction so production scan evidence can be replayed without manually stitching `output_runs` and dataset paths.
+- Added `--latest-scanned-run`, `--runs-root`, `--runtime-root`, and `--dataset-root` support to `research shadow-replay build`.
+- Added founder operating model guidance to the agent manual, including CEO final decision authority and CTO/strategy-lead boundaries.
+
+### Changed
+- Made Shadow Replay `status`, `list`, and `run-data-plan` derive runtime dataset, required-data, and receipt roots from `service.profile.json` when provided.
+- Updated Shadow Replay docs and runbooks with the profile-driven production evidence workflow and offline-only safety boundary.
+
 ## 1.2.174 - 2026-05-31
 
 ### Added

@@ -24,6 +24,7 @@ def shadow_replay_dataset_status(
     *,
     repo_root: str | Path,
     dataset_root: str | Path | None = None,
+    required_data_root: str | Path | None = None,
     min_sample: int = 30,
     min_mark_points: int = 2,
     mark_stale_hours: int = 24,
@@ -38,12 +39,20 @@ def shadow_replay_dataset_status(
         if dataset_root is not None and str(dataset_root).strip()
         else (base / "output_shared" / "research" / "shadow_replay" / "datasets").resolve()
     )
+    has_required_root = required_data_root is not None and str(required_data_root).strip()
+    required_root = (
+        resolve_path(required_data_root, base=base)
+        if has_required_root
+        else (base / "output_shared" / "required_data").resolve()
+    )
+    command_required_root = required_root if has_required_root else None
     sample_floor = max(1, int(min_sample))
     mark_floor = max(1, int(min_mark_points))
     stale_hours = max(1, int(mark_stale_hours))
     datasets = [
         _dataset_status(
             path,
+            required_data_root=command_required_root,
             min_sample=sample_floor,
             min_mark_points=mark_floor,
             mark_stale_hours=stale_hours,
@@ -59,6 +68,7 @@ def shadow_replay_dataset_status(
     return {
         "schema_version": STATUS_SCHEMA_VERSION,
         "dataset_root": str(root),
+        "required_data_root": str(required_root),
         "generated_at_utc": _format_utc(now),
         "summary": {
             "dataset_count": len(datasets),
@@ -94,6 +104,7 @@ def _discover_dataset_dirs(root: Path) -> list[Path]:
 def _dataset_status(
     dataset_dir: Path,
     *,
+    required_data_root: Path | None,
     min_sample: int,
     min_mark_points: int,
     mark_stale_hours: int,
@@ -118,6 +129,7 @@ def _dataset_status(
         status=status,
         reason=reason,
         dataset_dir=dataset_dir,
+        required_data_root=required_data_root,
         mark_snapshots=mark_snapshots,
         outcome_fact_count=summary["outcome_fact_count"],
         min_sample=summary["min_sample"],
@@ -174,6 +186,7 @@ def _sampling_payload(
     status: str,
     reason: str,
     dataset_dir: Path,
+    required_data_root: Path | None,
     mark_snapshots: list[dict[str, Any]],
     outcome_fact_count: int,
     min_sample: int,
@@ -199,7 +212,7 @@ def _sampling_payload(
             "state": state,
             "priority": "high",
             "action": "collect_marks",
-            **_commands(dataset_dir, action="collect_marks", min_sample=min_mark_points),
+            **_commands(dataset_dir, action="collect_marks", min_sample=min_mark_points, required_data_root=required_data_root),
         }
     if status == "ready_for_settlement" and outcome_fact_count <= 0 and usable_mark_point_count < min_mark_points:
         return {
@@ -207,7 +220,7 @@ def _sampling_payload(
             "state": "needs_more_path_samples",
             "priority": "medium",
             "action": "collect_marks",
-            **_commands(dataset_dir, action="collect_marks", min_sample=min_mark_points),
+            **_commands(dataset_dir, action="collect_marks", min_sample=min_mark_points, required_data_root=required_data_root),
         }
     if status == "ready_for_settlement":
         return {
@@ -215,7 +228,7 @@ def _sampling_payload(
             "state": "ready_to_settle",
             "priority": "high",
             "action": "settle",
-            **_commands(dataset_dir, action="settle", min_sample=min_mark_points),
+            **_commands(dataset_dir, action="settle", min_sample=min_mark_points, required_data_root=required_data_root),
         }
     if status == "needs_human_review":
         return {
@@ -223,7 +236,7 @@ def _sampling_payload(
             "state": "ready_to_analyze",
             "priority": "low",
             "action": "analyze",
-            **_commands(dataset_dir, action="analyze", min_sample=min_sample),
+            **_commands(dataset_dir, action="analyze", min_sample=min_sample, required_data_root=required_data_root),
         }
     return {
         **base,
@@ -323,17 +336,24 @@ def _plan_sort_key(row: dict[str, Any]) -> tuple[int, float, str]:
     return (_PLAN_PRIORITY.get(str(row.get("priority") or "none"), 9), age_value, str(row.get("dataset_id") or ""))
 
 
-def _commands(dataset_dir: Path, *, action: str, min_sample: int) -> dict[str, str | None]:
+def _commands(
+    dataset_dir: Path,
+    *,
+    action: str,
+    min_sample: int,
+    required_data_root: Path | None,
+) -> dict[str, str | None]:
     dataset = str(dataset_dir)
+    required_root = str(required_data_root) if required_data_root is not None else "output_shared/required_data"
     if action == "collect_marks":
         return {
             "suggested_command": (
                 f"./om research shadow-replay collect-marks --dataset {dataset} "
-                "--source local --required-data-root output_shared/required_data --write"
+                f"--source local --required-data-root {required_root} --write"
             ),
             "suggested_opend_command": (
                 f"./om research shadow-replay collect-marks --dataset {dataset} "
-                "--source opend --required-data-root output_shared/required_data --write"
+                f"--source opend --required-data-root {required_root} --write"
             ),
         }
     if action == "settle":
