@@ -116,7 +116,7 @@ om assistant model current
 om assistant model check --active
 ```
 
-它不是 `om-agent` manifest 里的工具，也不是 shell bridge。`inbound feishu` 只解析 Feishu 事件 payload，然后进入同一条 sender allowlist、message_id 幂等、SQLite audit 和工具白名单路径。Assistant command facade 默认开启；assistant config 可选择启用 LLM intent translation，但 LLM 只能从 `assistant capabilities` 暴露的只读可执行 capability 中产出结构化 intent，不能执行工具或改写事实输出。`assistant model` 只管理 `config.yaml` 里的 LLM model profile；聊天里对应 `/model`、`/model list`、`/model use <name>`，其中切换模型必须先 preview，再 `确认模型` 或 `/confirm model <operation_id>`。生成后的运行时 assistant config 仍然只包含一个 resolved `assistant.llm`。`inbound feishu-ws` 是长驻 Feishu App long-connection client：通过飞书 SDK 长连接接收消息、进入 assistant control，并使用同一个 Bot 自动回复；Assistant 由 `assistant.mode` 控制，reaction、reply、queue 行为配置在 assistant config 的 `inbound.feishu_ws` 下。完整边界见 [INBOUND_CONTROL.md](INBOUND_CONTROL.md)。
+它不是 `om-agent` manifest 里的工具，也不是 shell bridge。`inbound feishu` 只解析 Feishu 事件 payload，然后进入同一条 sender allowlist、message_id 幂等、SQLite audit 和工具白名单路径。Assistant command facade 默认开启；assistant config 可选择启用 LLM intent translation，但 LLM 只能从 `assistant capabilities` 暴露的只读可执行 capability 中产出结构化 intent，不能执行工具或改写事实输出。监控标的设置可用自然语言预览，例如 `设置 09898 covered call min strike 85`；确认监控后，如果 runtime JSON 带有 YAML 生成元数据，会写回 `config.yaml` 并重建同目录 runtime config。`assistant model` 只管理 `config.yaml` 里的 LLM model profile；聊天里对应 `/model`、`/model list`、`/model use <name>`，其中切换模型必须先 preview，再 `确认模型` 或 `/confirm model <operation_id>`。生成后的运行时 assistant config 仍然只包含一个 resolved `assistant.llm`。`inbound feishu-ws` 是长驻 Feishu App long-connection client：通过飞书 SDK 长连接接收消息、进入 assistant control，并使用同一个 Bot 自动回复；Assistant 由 `assistant.mode` 控制，reaction、reply、queue 行为配置在 assistant config 的 `inbound.feishu_ws` 下。完整边界见 [INBOUND_CONTROL.md](INBOUND_CONTROL.md)。
 
 ### Tick 入口关系
 
@@ -168,10 +168,12 @@ om setup check --no-local-env-file
 om config init --output config.yaml --runtime-output-dir .
 om config validate --source yaml --market us
 om config build --source yaml --market us --output config.us.json
+om config symbol set --config-yaml config.yaml --market hk --symbol 09898 --covered-call-enabled true --covered-call-min-strike 85 --sell-put-enabled false
 ```
 
 `config init` 默认写 `config.yaml` 并生成 `config.us.json` / `config.hk.json`；`--dry-run` 只预览 YAML，`--force` 才覆盖已有 starter/runtime 文件。
 `config build` / `config explain` 读取 YAML authoring config。
+`config symbol set` 默认 dry-run；`--apply` 写入 `config.yaml` 并生成备份，`--rebuild-runtime-root <dir>` 可在同一步重建 `config.us.json` / `config.hk.json` / `resolved/config.assistant.json`。
 
 写入命令的语义统一为：默认只读或 dry-run；`--apply` 允许本地文件/状态写入；`--confirm` 允许交易事件、Feishu、服务变更这类高风险写入；`--yes` 用于非交互脚本，等价显式确认并在输出里带 `audit_id`。结构化输出统一包含 `dry_run`、`write_applied`、`backup_path`、`audit_id`、`rollback_hint`。
 

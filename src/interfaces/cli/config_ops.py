@@ -17,6 +17,7 @@ from src.application.config_yaml import (
 )
 from src.application.config_yaml_init import init_yaml_config
 from src.application.config_yaml_migration import preview_config_yaml_migration
+from src.application.config_yaml_symbols import set_yaml_symbol_config
 from src.application.runtime_config_freshness import (
     RuntimeConfigFreshnessError,
     ensure_runtime_config_freshness,
@@ -84,6 +85,27 @@ def add_config_commands(subparsers: Any) -> None:
     get_config.add_argument("--config-key", default=None, choices=("us", "hk"))
     get_config.add_argument("--config-path", default=None)
     get_config.add_argument("--key", required=True)
+    symbol = config_sub.add_parser("symbol", help="edit config.yaml symbol authoring entries")
+    symbol_sub = symbol.add_subparsers(dest="config_symbol_command", required=True)
+    symbol_set = symbol_sub.add_parser("set", help="set one symbol strategy override in config.yaml")
+    symbol_set.add_argument("--config-yaml", default=None)
+    symbol_set.add_argument("--market", required=True, choices=("us", "hk"))
+    symbol_set.add_argument("--symbol", required=True)
+    symbol_set.add_argument("--covered-call-enabled", type=_parse_bool_value, default=None)
+    symbol_set.add_argument("--covered-call-min-strike", type=float, default=None)
+    symbol_set.add_argument("--sell-put-enabled", type=_parse_bool_value, default=None)
+    symbol_set.add_argument("--rebuild-runtime-root", default=None)
+    symbol_set.add_argument("--apply", action="store_true")
+    symbol_set.add_argument("--no-backup", action="store_true")
+
+
+def _parse_bool_value(raw: str) -> bool:
+    value = str(raw or "").strip().lower()
+    if value in {"1", "true", "yes", "y", "on"}:
+        return True
+    if value in {"0", "false", "no", "n", "off"}:
+        return False
+    raise argparse.ArgumentTypeError("expected boolean: true/false")
 
 
 def _normalize_config_source(
@@ -204,6 +226,7 @@ def handle_config_command(
     preview_config_yaml_migration_fn: Callable[..., dict[str, Any]] = preview_config_yaml_migration,
     init_yaml_config_fn: Callable[..., dict[str, Any]] = init_yaml_config,
     get_runtime_config_value_fn: Callable[..., dict[str, Any]] = get_runtime_config_value,
+    set_yaml_symbol_config_fn: Callable[..., dict[str, Any]] = set_yaml_symbol_config,
 ) -> dict[str, Any]:
     if args.config_command == "validate":
         source = _normalize_config_source(args, allowed=("runtime", "yaml"))
@@ -293,5 +316,20 @@ def handle_config_command(
                 key=args.key,
             ),
         )
+
+    if args.config_command == "symbol":
+        if args.config_symbol_command == "set":
+            return set_yaml_symbol_config_fn(
+                repo_root=repo_base_fn(),
+                market=args.market,
+                symbol=args.symbol,
+                config_path=args.config_yaml,
+                covered_call_enabled=args.covered_call_enabled,
+                covered_call_min_strike=args.covered_call_min_strike,
+                sell_put_enabled=args.sell_put_enabled,
+                rebuild_runtime_root=args.rebuild_runtime_root,
+                apply=bool(args.apply),
+                backup=not bool(args.no_backup),
+            )
 
     raise AgentToolError(code="INPUT_ERROR", message=f"unsupported config command: {args.config_command}")

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.187 - 2026-06-01
+
+### Added
+- Added `om config symbol set` for audited `config.yaml` symbol strategy edits, including covered-call min-strike updates and optional runtime config rebuilds.
+- Enabled Assistant/IM monitored-symbol setting previews to write YAML-backed config after confirmation while preserving sender allowlist, audit, and pending-operation confirmation controls.
+
+### Fixed
+- Prevented natural-language symbol setting phrases such as `设置 09898 covered call min strike 85` from treating command words as symbols.
+
 ## 1.2.186 - 2026-06-01
 
 ### Changed
