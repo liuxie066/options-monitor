@@ -1197,6 +1197,66 @@ def test_option_positions_cli_adjust_lot_dry_run_outputs_patch(monkeypatch, tmp_
     assert '"premium": 3.1' in out
 
 
+def test_option_positions_cli_adjust_lot_dry_run_outputs_strategy_metadata(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    import src.interfaces.cli.option_positions as cli_mod
+    from domain.domain.option_position_lots import OpenPositionCommand
+
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo.data_config_path = data_config  # type: ignore[attr-defined]
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="NVDA",
+            option_type="call",
+            side="long",
+            contracts=1,
+            currency="USD",
+            strike=140.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=1.0,
+            opened_at_ms=1000,
+        ),
+    )
+    lot = repo.list_position_lots()[0]
+
+    monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "om option-positions",
+            "--data-config",
+            str(data_config),
+            "adjust-lot",
+            "--record-id",
+            lot["record_id"],
+            "--strategy",
+            "yield_enhancement",
+            "--leg-role",
+            "enhancement_call",
+            "--yield-enhancement-mode",
+            "income_upside_enhancement",
+            "--dry-run",
+        ],
+    )
+
+    cli_mod.main()
+
+    out = capsys.readouterr().out
+    assert "[DRY_RUN] adjust fields:" in out
+    assert '"strategy": "yield_enhancement"' in out
+    assert '"leg_role": "enhancement_call"' in out
+    assert '"yield_enhancement_mode": "income_upside_enhancement"' in out
+
+
 def test_option_positions_cli_history_json_includes_related_events(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
     from domain.domain.option_position_lots import OpenPositionCommand

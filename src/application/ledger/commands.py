@@ -233,6 +233,11 @@ def persist_manual_adjust_event_with_ledger(
     premium_per_share: float | None = None,
     multiplier: float | None = None,
     opened_at_ms: int | None = None,
+    strategy: str | None = None,
+    leg_role: str | None = None,
+    strategy_group_id: str | None = None,
+    yield_enhancement_mode: str | None = None,
+    strategy_snapshot: dict[str, Any] | None = None,
     as_of_ms: int | None = None,
 ) -> ManualAdjustLedgerResult:
     preflight_result = _preflight_lot_adjust(
@@ -245,6 +250,11 @@ def persist_manual_adjust_event_with_ledger(
         premium_per_share=premium_per_share,
         multiplier=multiplier,
         opened_at_ms=opened_at_ms,
+        strategy=strategy,
+        leg_role=leg_role,
+        strategy_group_id=strategy_group_id,
+        yield_enhancement_mode=yield_enhancement_mode,
+        strategy_snapshot=strategy_snapshot,
         as_of_ms=as_of_ms,
         source="manual_adjust_preflight",
         operation_label="manual adjust",
@@ -262,6 +272,11 @@ def persist_manual_adjust_event_with_ledger(
         premium_per_share=premium_per_share,
         multiplier=multiplier,
         opened_at_ms=opened_at_ms,
+        strategy=strategy,
+        leg_role=leg_role,
+        strategy_group_id=strategy_group_id,
+        yield_enhancement_mode=yield_enhancement_mode,
+        strategy_snapshot=strategy_snapshot,
         as_of_ms=int(ledger_preflight["event_time_ms"]),
     )
     return ManualAdjustLedgerResult(
@@ -1178,6 +1193,11 @@ def preview_manual_position_adjust(
     premium_per_share: float | None,
     multiplier: float | None,
     opened_at_ms: int | None,
+    strategy: str | None = None,
+    leg_role: str | None = None,
+    strategy_group_id: str | None = None,
+    yield_enhancement_mode: str | None = None,
+    strategy_snapshot: dict[str, Any] | None = None,
 ) -> ManualAdjustPreviewResult:
     fields = repo.get_record_fields(record_id)
     ledger_preflight = preflight_manual_adjust(
@@ -1190,6 +1210,11 @@ def preview_manual_position_adjust(
         premium_per_share=premium_per_share,
         multiplier=multiplier,
         opened_at_ms=opened_at_ms,
+        strategy=strategy,
+        leg_role=leg_role,
+        strategy_group_id=strategy_group_id,
+        yield_enhancement_mode=yield_enhancement_mode,
+        strategy_snapshot=strategy_snapshot,
     )
     patch_contract = build_open_adjustment_patch_contract(
         fields,
@@ -1199,6 +1224,11 @@ def preview_manual_position_adjust(
         premium_per_share=premium_per_share,
         multiplier=multiplier,
         opened_at_ms=opened_at_ms,
+        strategy=strategy,
+        leg_role=leg_role,
+        strategy_group_id=strategy_group_id,
+        yield_enhancement_mode=yield_enhancement_mode,
+        strategy_snapshot=strategy_snapshot,
         as_of_ms=int(ledger_preflight["event_time_ms"]),
     )
     return ManualAdjustPreviewResult(
@@ -1219,6 +1249,11 @@ def record_manual_position_adjust(
     premium_per_share: float | None = None,
     multiplier: float | None = None,
     opened_at_ms: int | None = None,
+    strategy: str | None = None,
+    leg_role: str | None = None,
+    strategy_group_id: str | None = None,
+    yield_enhancement_mode: str | None = None,
+    strategy_snapshot: dict[str, Any] | None = None,
 ) -> ManualAdjustLedgerResult:
     return persist_manual_adjust_event_with_ledger(
         repo,
@@ -1230,6 +1265,11 @@ def record_manual_position_adjust(
         premium_per_share=premium_per_share,
         multiplier=multiplier,
         opened_at_ms=opened_at_ms,
+        strategy=strategy,
+        leg_role=leg_role,
+        strategy_group_id=strategy_group_id,
+        yield_enhancement_mode=yield_enhancement_mode,
+        strategy_snapshot=strategy_snapshot,
     )
 
 
