@@ -23,3 +23,6 @@ agent-smoke:
 release-check:
 	chmod +x ./om-agent
 	$(PYTHON) scripts/release_check.py
+
+release-preflight:
+	bash scripts/release_preflight.sh $(ARGS)
