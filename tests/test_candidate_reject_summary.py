@@ -128,6 +128,54 @@ def test_candidate_reject_summary_falls_back_to_reject_log(tmp_path: Path) -> No
     assert summary["top_categories"][0]["category"] == "liquidity"
 
 
+def test_candidate_reject_summary_surfaces_event_source_unavailable(tmp_path: Path) -> None:
+    from src.application.candidate_filter_trace import append_candidate_filter_trace_rows, build_candidate_filter_trace_row
+    from src.application.candidate_reject_summary import build_candidate_reject_summary, render_candidate_reject_summary
+
+    trace_path = tmp_path / "output_runs" / "run-1" / "accounts" / "lx" / "candidate_filter_trace.jsonl"
+    append_candidate_filter_trace_rows(
+        trace_path,
+        [
+            build_candidate_filter_trace_row(
+                run_id="run-1",
+                account="lx",
+                symbol="NVDA",
+                function="sell_put",
+                mode="put",
+                status="post_filtered",
+                stage="post_filter",
+                rule="event_source_unavailable",
+            ),
+            build_candidate_filter_trace_row(
+                run_id="run-1",
+                account="lx",
+                symbol="PDD",
+                function="sell_put",
+                mode="put",
+                status="post_filtered",
+                stage="post_filter",
+                rule="volatility_estimate_missing",
+            ),
+        ],
+    )
+
+    summary = build_candidate_reject_summary(trace_path=trace_path, account="lx", run_id="run-1")
+
+    assert summary["top_categories"][0]["category"] == "event_risk"
+    assert summary["risk_alerts"] == [
+        {
+            "rule": "event_source_unavailable",
+            "label": "事件风险数据源不可用",
+            "count": 1,
+            "sample_symbols": ["NVDA"],
+        }
+    ]
+    rendered = render_candidate_reject_summary(summary)
+    assert "风控注意：事件风险数据源不可用 1；样例 NVDA" in rendered
+    assert "事件风险 1：事件风险数据源不可用 1；样例 NVDA" not in rendered
+    assert "数据缺失 1：RV 缺失 1；样例 PDD" in rendered
+
+
 def test_append_candidate_reject_summary_reports_unavailable_when_no_evidence(tmp_path: Path) -> None:
     from src.application.candidate_reject_summary import append_candidate_reject_summary_to_text
 

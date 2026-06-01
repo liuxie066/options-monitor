@@ -78,3 +78,61 @@ def test_account_message_counts_yield_enhancement_when_present() -> None:
     )
 
     assert "### 账户 lx · 本轮候选\n- Put 1 / Covered Call 0 / Enhance 1" in message
+
+
+def test_compact_account_overview_ignores_reject_summary_strategy_names() -> None:
+    from src.application.multi_tick.misc import AccountResult
+    from src.application.multi_tick.notify_format import build_account_message_compact
+
+    notif = (
+        "📋 本轮扫描完成，暂无符合条件的候选。\n\n"
+        "### 拒绝摘要\n"
+        "- 通过 184 条；拒绝/后过滤 279 条\n"
+        "- 涉及模块：Sell Put 168 / Covered Call 109 / 收益增强 2\n"
+        "- 波动率边际不足 127：IV/RV 不足 127；样例 0883.HK、0700.HK、3690.HK\n"
+    )
+
+    message = build_account_message_compact(
+        AccountResult(
+            account='lx',
+            ran_scan=True,
+            should_notify=True,
+            decision_reason='dense',
+            notification_text=notif,
+        ),
+        now_bj='2026-06-01 10:00:24',
+        cash_footer_lines=[],
+    )
+
+    assert "  Put 0 · Covered Call 0\n" in message
+    assert "增强 1" not in message
+
+
+def test_compact_account_overview_counts_candidate_lines_only() -> None:
+    from src.application.multi_tick.misc import AccountResult
+    from src.application.multi_tick.notify_format import build_account_message_compact
+
+    notif = (
+        "### Covered Call\n\n"
+        "🟢 Covered Call 英伟达 180C @ 06-18 | 🎯建议挂单 2.4\n"
+        "- 权利金 2.4USD · 年化 12% · 44天\n\n"
+        "### Enhancement\n\n"
+        "💎 收益增强 英伟达 95P+110C @ 06-19 | 🎯卖1.2/买0.4\n"
+        "- 净权利金 0.8USD · 年化 15% · 45天\n\n"
+        "### 拒绝摘要\n"
+        "- 涉及模块：Sell Put 1 / Covered Call 9 / 收益增强 2\n"
+    )
+
+    message = build_account_message_compact(
+        AccountResult(
+            account='lx',
+            ran_scan=True,
+            should_notify=True,
+            decision_reason='dense',
+            notification_text=notif,
+        ),
+        now_bj='2026-06-01 10:00:24',
+        cash_footer_lines=[],
+    )
+
+    assert "  Put 0 · Covered Call 1 · 增强 1\n" in message
