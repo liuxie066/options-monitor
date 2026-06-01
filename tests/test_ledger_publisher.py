@@ -5,13 +5,19 @@ from domain.domain.option_position_lots import parse_exp_to_ms
 from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
 
 
-def _key(*, strike: float, expiration_ymd: str) -> ContractKey:
+def _key(
+    *,
+    strike: float,
+    expiration_ymd: str,
+    option_type: str = "put",
+    position_side: str = "short",
+) -> ContractKey:
     return ContractKey.from_values(
         broker="富途",
         account="lx",
         underlying_symbol="NVDA",
-        option_type="put",
-        position_side="short",
+        option_type=option_type,
+        position_side=position_side,
         strike=strike,
         expiration_ymd=expiration_ymd,
     )
@@ -119,3 +125,60 @@ def test_publisher_preserves_open_strategy_snapshot() -> None:
         "strategy_source": "current_config",
         "risk_model": "short_vol",
     }
+
+
+def test_publisher_applies_adjust_strategy_metadata_patch() -> None:
+    open_key = _key(
+        strike=140.0,
+        expiration_ymd="2026-06-19",
+        option_type="call",
+        position_side="long",
+    )
+
+    projection = project_stored_trade_events_to_position_lots(
+        [
+            TradeEvent(
+                event_id="open-nvda-call",
+                event_type="open",
+                event_time_ms=1000,
+                contract_key=open_key,
+                contracts=1,
+                price=1.0,
+                currency="USD",
+                source="cli_manual_open",
+                multiplier=100,
+                lot_id="lot_open-nvda-call",
+                raw_payload={"source": "test", "source_type": "manual_trade_event", "side": "buy"},
+            ),
+            TradeEvent(
+                event_id="adjust-nvda-call-strategy",
+                event_type="adjust",
+                event_time_ms=3000,
+                contract_key=open_key,
+                contracts=0,
+                price=0.0,
+                currency="USD",
+                source="cli_manual_adjust",
+                multiplier=100,
+                target_lot_id="lot_open-nvda-call",
+                raw_payload={
+                    "record_id": "lot_open-nvda-call",
+                    "target_lot_id": "lot_open-nvda-call",
+                    "patch": {
+                        "last_action_at": 3000,
+                        "strategy": "yield_enhancement",
+                        "leg_role": "enhancement_call",
+                        "strategy_group_id": "ye_nvda_1",
+                        "yield_enhancement_mode": "income_upside_enhancement",
+                    },
+                },
+            ),
+        ]
+    )
+
+    assert projection.diagnostics == []
+    fields = projection.lots[0].fields
+    assert fields["strategy"] == "yield_enhancement"
+    assert fields["leg_role"] == "enhancement_call"
+    assert fields["strategy_group_id"] == "ye_nvda_1"
+    assert fields["yield_enhancement_mode"] == "income_upside_enhancement"

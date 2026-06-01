@@ -366,6 +366,11 @@ def persist_manual_adjust_event(
     premium_per_share: float | None = None,
     multiplier: float | None = None,
     opened_at_ms: int | None = None,
+    strategy: str | None = None,
+    leg_role: str | None = None,
+    strategy_group_id: str | None = None,
+    yield_enhancement_mode: str | None = None,
+    strategy_snapshot: dict[str, Any] | None = None,
     as_of_ms: int | None = None,
 ) -> LedgerWriteResult:
     fields = assert_position_lot_target_matches_current_state(
@@ -383,6 +388,11 @@ def persist_manual_adjust_event(
         premium_per_share=premium_per_share,
         multiplier=multiplier,
         opened_at_ms=opened_at_ms,
+        strategy=strategy,
+        leg_role=leg_role,
+        strategy_group_id=strategy_group_id,
+        yield_enhancement_mode=yield_enhancement_mode,
+        strategy_snapshot=strategy_snapshot,
         as_of_ms=as_of_ms,
     )
     patch = patch_contract.to_dict()

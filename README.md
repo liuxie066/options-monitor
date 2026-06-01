@@ -402,6 +402,12 @@ Agent 只读列出：
 ./om option-positions exercise --account lx --symbol AAPL --option-type call --strike 200 --exp 2026-05-22 --contracts 2 --stock-side buy --stock-qty 200 --stock-price 200 --dry-run
 ```
 
+修复历史 lot 的策略元数据也走 `adjust-lot`，先 dry-run，再确认写入审计事件：
+
+```bash
+./om option-positions adjust-lot --record-id <lot_id> --strategy yield_enhancement --leg-role enhancement_call --yield-enhancement-mode income_upside_enhancement --dry-run
+```
+
 到期生命周期证据和冲突可直接检查：
 
 ```bash

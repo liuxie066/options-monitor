@@ -448,6 +448,11 @@ def execute_manual_adjust(
     premium_per_share: float | None,
     multiplier: float | None,
     opened_at_ms: int | None,
+    strategy: str | None = None,
+    leg_role: str | None = None,
+    strategy_group_id: str | None = None,
+    yield_enhancement_mode: str | None = None,
+    strategy_snapshot: dict[str, Any] | None = None,
     dry_run: bool,
 ) -> dict[str, Any]:
     if dry_run:
@@ -462,6 +467,11 @@ def execute_manual_adjust(
                 premium_per_share=premium_per_share,
                 multiplier=multiplier,
                 opened_at_ms=opened_at_ms,
+                strategy=strategy,
+                leg_role=leg_role,
+                strategy_group_id=strategy_group_id,
+                yield_enhancement_mode=yield_enhancement_mode,
+                strategy_snapshot=strategy_snapshot,
             ).to_payload(),
         }
     adjust_payload = record_manual_position_adjust(
@@ -473,6 +483,11 @@ def execute_manual_adjust(
         premium_per_share=premium_per_share,
         multiplier=multiplier,
         opened_at_ms=opened_at_ms,
+        strategy=strategy,
+        leg_role=leg_role,
+        strategy_group_id=strategy_group_id,
+        yield_enhancement_mode=yield_enhancement_mode,
+        strategy_snapshot=strategy_snapshot,
     ).to_payload()
     result = adjust_payload["result"]
     fields = adjust_payload["fields"]

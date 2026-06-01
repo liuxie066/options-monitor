@@ -669,6 +669,40 @@ def test_build_open_adjustment_patch_contract_matches_legacy_dict_api() -> None:
     )
 
 
+def test_build_open_adjustment_patch_updates_strategy_metadata() -> None:
+    patch = build_open_adjustment_patch(
+        {
+            "symbol": "9992.HK",
+            "option_type": "call",
+            "side": "long",
+            "status": "open",
+            "contracts": 1,
+            "contracts_open": 1,
+            "contracts_closed": 0,
+            "currency": "HKD",
+            "strike": 170.0,
+            "multiplier": 100,
+            "expiration": 1785369600000,
+            "premium": 2.5,
+        },
+        strategy="yield_enhancement",
+        leg_role="enhancement_call",
+        strategy_group_id="ye_9992_20260730",
+        yield_enhancement_mode="income_upside_enhancement",
+        strategy_snapshot={"strategy_family": "sell_put", "strategy_profile": "return_first"},
+        as_of_ms=4000,
+    )
+
+    assert patch == {
+        "last_action_at": 4000,
+        "strategy": "yield_enhancement",
+        "leg_role": "enhancement_call",
+        "strategy_group_id": "ye_9992_20260730",
+        "yield_enhancement_mode": "income_upside_enhancement",
+        "strategy_snapshot": {"strategy_family": "sell_put", "strategy_profile": "return_first"},
+    }
+
+
 def test_build_open_adjustment_patch_rejects_contracts_below_closed() -> None:
     try:
         build_open_adjustment_patch(

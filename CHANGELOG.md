@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.2.177 - 2026-06-01
+
+### Added
+- Added audited `option-positions adjust-lot` strategy metadata repair fields so historical Yield Enhancement long-call lots can be marked without direct SQLite edits.
+
+### Fixed
+- Preserved adjusted strategy metadata in projected position lots so Close Advice can evaluate repaired Yield Enhancement long-call legs.
+
 ## 1.2.176 - 2026-06-01
 
 ### Fixed

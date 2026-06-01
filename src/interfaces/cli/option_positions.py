@@ -65,6 +65,19 @@ def _load_json_object(path: Path) -> dict[str, Any]:
     return payload
 
 
+def _parse_json_object_arg(raw: str | None, *, name: str) -> dict[str, Any] | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"{name} must be a JSON object: {exc}") from exc
+    if not isinstance(payload, dict) or not payload:
+        raise SystemExit(f"{name} must be a non-empty JSON object")
+    return dict(payload)
+
+
 def _store_inspect_data_config(args: argparse.Namespace, *, base: Path) -> tuple[Path, Path | None]:
     config_ref = str(getattr(args, "store_config", "") or "").strip()
     explicit_data_config = str(getattr(args, "store_data_config", "") or getattr(args, "data_config", "") or "").strip()
@@ -286,6 +299,11 @@ def main(argv: list[str] | None = None) -> int:
     p_adjust.add_argument('--premium-per-share', type=float, default=None)
     p_adjust.add_argument('--multiplier', type=float, default=None)
     p_adjust.add_argument('--opened-at-ms', type=int, default=None)
+    p_adjust.add_argument('--strategy', default=None, help='strategy marker, e.g. yield_enhancement')
+    p_adjust.add_argument('--leg-role', default=None, help='strategy leg role, e.g. enhancement_call')
+    p_adjust.add_argument('--strategy-group-id', default=None)
+    p_adjust.add_argument('--yield-enhancement-mode', default=None)
+    p_adjust.add_argument('--strategy-snapshot-json', default=None, help='JSON object stored as strategy_snapshot')
     p_adjust.add_argument('--format', default='text', choices=['text', 'json'])
     _add_local_write_flags(p_adjust, high_risk=True)
 
@@ -884,6 +902,11 @@ def main(argv: list[str] | None = None) -> int:
                 premium_per_share=args.premium_per_share,
                 multiplier=args.multiplier,
                 opened_at_ms=args.opened_at_ms,
+                strategy=args.strategy,
+                leg_role=args.leg_role,
+                strategy_group_id=args.strategy_group_id,
+                yield_enhancement_mode=args.yield_enhancement_mode,
+                strategy_snapshot=_parse_json_object_arg(args.strategy_snapshot_json, name="--strategy-snapshot-json"),
                 dry_run=dry_run,
             )
         except ValueError as e:

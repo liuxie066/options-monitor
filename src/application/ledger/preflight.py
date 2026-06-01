@@ -97,6 +97,11 @@ def preflight_manual_adjust(
     premium_per_share: float | None = None,
     multiplier: float | None = None,
     opened_at_ms: int | None = None,
+    strategy: str | None = None,
+    leg_role: str | None = None,
+    strategy_group_id: str | None = None,
+    yield_enhancement_mode: str | None = None,
+    strategy_snapshot: dict[str, Any] | None = None,
     as_of_ms: int | None = None,
 ) -> LedgerPreflightResult:
     result = _preflight_lot_adjust(
@@ -109,6 +114,11 @@ def preflight_manual_adjust(
         premium_per_share=premium_per_share,
         multiplier=multiplier,
         opened_at_ms=opened_at_ms,
+        strategy=strategy,
+        leg_role=leg_role,
+        strategy_group_id=strategy_group_id,
+        yield_enhancement_mode=yield_enhancement_mode,
+        strategy_snapshot=strategy_snapshot,
         as_of_ms=as_of_ms,
         source="manual_adjust_preflight",
         operation_label="manual adjust",
@@ -563,6 +573,11 @@ def _preflight_lot_adjust(
     as_of_ms: int | None,
     source: str,
     operation_label: str,
+    strategy: str | None = None,
+    leg_role: str | None = None,
+    strategy_group_id: str | None = None,
+    yield_enhancement_mode: str | None = None,
+    strategy_snapshot: dict[str, Any] | None = None,
 ) -> ManualAdjustPreflightResult:
     resolved_record_id = str(record_id or "").strip()
     if not resolved_record_id:
@@ -625,6 +640,11 @@ def _preflight_lot_adjust(
         premium_per_share=premium_per_share,
         multiplier=multiplier,
         opened_at_ms=opened_at_ms,
+        strategy=strategy,
+        leg_role=leg_role,
+        strategy_group_id=strategy_group_id,
+        yield_enhancement_mode=yield_enhancement_mode,
+        strategy_snapshot=strategy_snapshot,
         as_of_ms=event_time_ms,
     )
     patch = patch_contract.to_dict()
