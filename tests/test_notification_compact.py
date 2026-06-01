@@ -191,6 +191,43 @@ def test_render_markdown_compact_close_advice() -> None:
     assert "理由: switch" not in md
 
 
+def test_render_markdown_compact_long_call_metrics() -> None:
+    from src.application.close_advice_runner import render_markdown_compact
+
+    rows = [
+        {
+            "account": "sy",
+            "symbol": "9992.HK",
+            "option_type": "call",
+            "position_side": "long",
+            "expiration": "2026-07-30",
+            "strike": 167.5,
+            "tier": "medium",
+            "evaluation_status": "priced",
+            "dte": 59,
+            "premium": 6.38,
+            "close_mid": 19.0,
+            "realized_if_close": 2458.0,
+            "remaining_premium": 3760.0,
+            "long_call_value_ratio": 2.978,
+            "long_call_cost_basis": 1276.0,
+            "long_call_current_value": 3760.0,
+            "currency": "HKD",
+            "strategy": "yield_enhancement",
+            "leg_role": "enhancement_call",
+            "risk_model": "long_call_convexity",
+            "close_action": "sell_call_take_profit",
+        }
+    ]
+
+    md = render_markdown_compact(rows, notify_levels={"strong", "medium"}, max_items=5)
+
+    assert "🟠 卖Call止盈 9992.HK Call 167.5C @ 07-30" in md
+    assert "- 现值/成本 3.0x · 59天 · 浮盈 +198%" in md
+    assert "已锁定 -" not in md
+    assert "余年化 -" not in md
+
+
 def test_render_markdown_compact_hold() -> None:
     from src.application.close_advice_runner import render_markdown_compact
 
