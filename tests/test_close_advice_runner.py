@@ -1185,6 +1185,7 @@ def test_run_close_advice_uses_yield_enhancement_long_call_exit_action(
     text = (out_dir / "close_advice.txt").read_text(encoding="utf-8")
     assert "卖出收益增强 Call 止盈" in text
     assert "Call价值: 现值/成本=2.2x | 剩余DTE=29 | 浮盈=+120%" in text
+    assert "建议出价=$2.20 | 买一/卖一=$2.10/$2.30" in text
 
 
 def test_run_close_advice_reports_yield_enhancement_combo_economics(

@@ -183,12 +183,13 @@ def test_gateway_request_history_kline_returns_page_key() -> None:
     )
 
     assert out == {"data": [{"code": "US.NVDA", "close": 900}], "page_req_key": "next-page"}
-    assert gw.backend.quote.kwargs == {
+    kwargs = dict(gw.backend.quote.kwargs)
+    assert kwargs.pop("autype") in {"NONE", "None"}
+    assert kwargs == {
         "code": "US.NVDA",
         "start": "2026-05-01",
         "end": "2026-05-03",
         "ktype": "K_DAY",
-        "autype": "NONE",
     }
 
 

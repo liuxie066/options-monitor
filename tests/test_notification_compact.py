@@ -177,6 +177,10 @@ def test_render_markdown_compact_close_advice() -> None:
             "optimizer_tier": "optimizer_switch",
             "effective_annualized_return": 0.05,
             "alternative_annualized_return": 0.12,
+            "alternative_symbol": "TSLA",
+            "alternative_option_type": "put",
+            "alternative_expiration": "2026-07-17",
+            "alternative_strike": 120.0,
             "tail_risk_score": 0.045,
         }
     ]
@@ -186,7 +190,7 @@ def test_render_markdown_compact_close_advice() -> None:
     assert "### [lx] 平仓建议 (1)" in md
     assert "🔴 换仓 NVDA Put 150P @ 06-19" in md
     assert "已锁定 85%" in md
-    assert "💡 持有 5.0% → 替代 12%" in md
+    assert "💡 持有 5.0% → 替代 TSLA put 2026-07-17 120 12%" in md
     assert "---" not in md
     assert "理由: switch" not in md
 
@@ -207,6 +211,8 @@ def test_render_markdown_compact_long_call_metrics() -> None:
             "dte": 59,
             "premium": 6.38,
             "close_mid": 19.0,
+            "bid": 18.8,
+            "ask": 19.2,
             "realized_if_close": 2458.0,
             "remaining_premium": 3760.0,
             "long_call_value_ratio": 2.978,
@@ -224,6 +230,7 @@ def test_render_markdown_compact_long_call_metrics() -> None:
 
     assert "🟠 卖Call止盈 9992.HK Call 167.5C @ 07-30" in md
     assert "- 现值/成本 3.0x · 59天 · 浮盈 +198%" in md
+    assert "- 建议出价 ¥19 · 买一/卖一 ¥18.8/¥19.2 · 收益 ¥2,458（余 ¥3,760）" in md
     assert "已锁定 -" not in md
     assert "余年化 -" not in md
 

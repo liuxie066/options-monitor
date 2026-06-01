@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.2.181 - 2026-06-01
+
+### Fixed
+- Added explicit Yield Enhancement long-call take-profit ask guidance with bid/ask context in Close Advice notifications.
+- Fixed compact close-advice alternative candidate strike rendering so Ruff lint passes.
+- Kept trade-intake deal-json stdout machine-readable when the Futu SDK writes connection logs.
+
 ## 1.2.180 - 2026-06-01
 
 ### Fixed
