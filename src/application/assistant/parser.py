@@ -608,6 +608,10 @@ def _extract_symbol(text: str) -> str | None:
         "max",
         "setting",
         "settings",
+        "设置",
+        "配置",
+        "修改",
+        "调整",
         "lx",
         "sy",
     }

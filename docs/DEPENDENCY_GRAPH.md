@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 588 (`src`: 319, `domain`: 51, `scripts`: 7, `tests`: 211)
-- Internal import edges: 3033 total, 1408 production/script edges excluding tests
+- Python files scanned: 589 (`src`: 320, `domain`: 51, `scripts`: 7, `tests`: 211)
+- Internal import edges: 3044 total, 1416 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -38,17 +38,17 @@ flowchart LR
   domain_services -->|5| domain
   domain_services -->|2| storage
   infrastructure -->|2| domain
-  interfaces -->|97| application
+  interfaces -->|98| application
   interfaces -->|2| domain
   scripts -->|2| application
   scripts -->|1| infrastructure
   scripts -->|2| storage
   storage -->|1| domain
-  tests -->|1068| application
+  tests -->|1070| application
   tests -->|267| domain
   tests -->|2| domain_services
   tests -->|99| infrastructure
-  tests -->|145| interfaces
+  tests -->|146| interfaces
   tests -->|8| scripts
   tests -->|18| storage
 ```
@@ -59,7 +59,7 @@ flowchart LR
 |---|---|---|
 | application | domain | 207 |
 | application | infrastructure | 102 |
-| interfaces | application | 97 |
+| interfaces | application | 98 |
 | application | storage | 34 |
 | domain_services | domain | 5 |
 | application | domain_services | 2 |
@@ -75,9 +75,9 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 1068 |
+| tests | application | 1070 |
 | tests | domain | 267 |
-| tests | interfaces | 145 |
+| tests | interfaces | 146 |
 | tests | infrastructure | 99 |
 | tests | storage | 18 |
 | tests | scripts | 8 |
@@ -90,7 +90,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | from | to | imports |
 |---|---|---|
 | src.application | domain.domain | 103 |
-| src.interfaces | src.application | 81 |
+| src.interfaces | src.application | 82 |
 | src.application | src.infrastructure | 75 |
 | src.application.ledger | domain.domain.ledger | 29 |
 | src.application | domain.storage | 25 |
@@ -175,7 +175,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 
 | module | incoming imports |
 |---|---|
-| src.application.agent_tool_contracts | 69 |
+| src.application.agent_tool_contracts | 70 |
 | domain.domain.ledger.position_fields | 41 |
 | src.infrastructure.io_utils | 37 |
 | domain.domain.symbol_identity | 30 |
@@ -205,10 +205,10 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.application.tick_notification_flow | 18 |
 | src.application.agent_tool_runtime_status | 17 |
 | src.application.sell_put_steps | 17 |
+| src.application.assistant.symbol_operations | 16 |
 | src.application.account_run | 15 |
 | src.application.ledger.commands | 15 |
 | src.application.trades.auto_intake | 15 |
-| src.application.assistant.symbol_operations | 14 |
 | src.application.pipeline_context | 14 |
 
 ## Reading

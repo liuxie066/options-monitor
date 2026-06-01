@@ -1586,6 +1586,58 @@ def test_config_get_reads_runtime_snapshot(capsys, tmp_path: Path) -> None:
     assert json.loads(path.read_text(encoding="utf-8"))["runtime"]["prefetch"]["max_workers"] == 2
 
 
+def test_config_symbol_set_delegates_to_yaml_authoring(monkeypatch, capsys, tmp_path: Path) -> None:
+    import src.interfaces.cli.main as cli
+
+    calls: list[dict] = []
+
+    def _set_yaml_symbol_config(**kwargs):
+        calls.append(kwargs)
+        return {"ok": True, "dry_run": False, "write_applied": True, "summary": {"canonical_symbol": "9898.HK"}}
+
+    config_yaml = tmp_path / "config.yaml"
+    runtime_root = tmp_path / "runtime"
+    monkeypatch.setattr(cli, "repo_base", lambda: tmp_path)
+    monkeypatch.setattr(cli, "set_yaml_symbol_config", _set_yaml_symbol_config)
+
+    assert cli.main([
+        "config",
+        "symbol",
+        "set",
+        "--config-yaml",
+        str(config_yaml),
+        "--market",
+        "hk",
+        "--symbol",
+        "09898",
+        "--covered-call-enabled",
+        "true",
+        "--covered-call-min-strike",
+        "85",
+        "--sell-put-enabled",
+        "false",
+        "--rebuild-runtime-root",
+        str(runtime_root),
+        "--apply",
+        "--no-backup",
+    ]) == 0
+
+    payload = _read_json_output(capsys)
+    assert payload["ok"] is True
+    assert calls == [{
+        "repo_root": tmp_path,
+        "market": "hk",
+        "symbol": "09898",
+        "config_path": str(config_yaml),
+        "covered_call_enabled": True,
+        "covered_call_min_strike": 85.0,
+        "sell_put_enabled": False,
+        "rebuild_runtime_root": str(runtime_root),
+        "apply": True,
+        "backup": False,
+    }]
+
+
 def test_config_set_command_is_removed(capsys) -> None:
     import src.interfaces.cli.main as cli
 

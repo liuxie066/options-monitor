@@ -17,6 +17,7 @@ from src.application.config_yaml import (
     resolve_yaml_runtime_config,
 )
 from src.application.config_yaml_init import init_yaml_config
+from src.application.config_yaml_symbols import set_yaml_symbol_config
 from src.application.runtime_config_freshness import GENERATED_KEY
 
 
@@ -235,6 +236,117 @@ markets:
     assert cfg["symbols"][0]["sell_call"]["enabled"] is False
     assert "covered_call" not in cfg["alert_policy"]
     assert cfg["alert_policy"]["sell_call"]["medium_annual"] == 0.07
+
+
+def test_yaml_symbol_set_adds_hk_call_only_symbol_as_dry_run(tmp_path: Path) -> None:
+    config_path = _write_yaml(tmp_path / "config.yaml", _minimal_yaml())
+    before = config_path.read_text(encoding="utf-8")
+
+    out = set_yaml_symbol_config(
+        repo_root=REPO_ROOT,
+        market="hk",
+        symbol="09898",
+        config_path=config_path,
+        covered_call_min_strike=85,
+        apply=False,
+    )
+
+    assert out["dry_run"] is True
+    assert out["write_applied"] is False
+    assert out["summary"]["canonical_symbol"] == "9898.HK"
+    assert out["summary"]["symbol_added"] is True
+    assert out["summary"]["entry"] == {
+        "sell_put": {"enabled": False},
+        "covered_call": {"enabled": True, "min_strike": 85.0},
+        "use": ["call_base"],
+    }
+    assert out["validation"]["hk"]["ok"] is True
+    assert config_path.read_text(encoding="utf-8") == before
+
+
+def test_yaml_symbol_set_apply_rebuilds_runtime_configs(tmp_path: Path) -> None:
+    config_path = _write_yaml(tmp_path / "config.yaml", _minimal_yaml())
+    runtime_root = tmp_path / "runtime"
+
+    out = set_yaml_symbol_config(
+        repo_root=REPO_ROOT,
+        market="hk",
+        symbol="09898",
+        config_path=config_path,
+        covered_call_min_strike=85,
+        apply=True,
+        rebuild_runtime_root=runtime_root,
+    )
+
+    assert out["dry_run"] is False
+    assert out["write_applied"] is True
+    assert out["backup_path"]
+    assert Path(out["backup_path"]).exists()
+    doc = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert "9898.HK" in doc["markets"]["hk"]["symbols"]
+    assert doc["markets"]["hk"]["overrides"]["9898.HK"] == {
+        "sell_put": {"enabled": False},
+        "covered_call": {"enabled": True, "min_strike": 85.0},
+        "use": ["call_base"],
+    }
+    hk_runtime = json.loads((runtime_root / "config.hk.json").read_text(encoding="utf-8"))
+    item = next(row for row in hk_runtime["symbols"] if row["symbol"] == "9898.HK")
+    assert item["sell_put"]["enabled"] is False
+    assert item["sell_call"]["enabled"] is True
+    assert item["sell_call"]["min_strike"] == 85.0
+    assert (runtime_root / "config.us.json").exists()
+    assert (runtime_root / "resolved" / "config.assistant.json").exists()
+
+
+def test_yaml_symbol_set_preserves_existing_legacy_sell_call_key(tmp_path: Path) -> None:
+    config_path = _write_yaml(
+        tmp_path / "config.yaml",
+        """\
+accounts:
+  lx:
+    type: futu
+markets:
+  us:
+    accounts: [lx]
+    symbols: [NVDA]
+  hk:
+    accounts: [lx]
+    symbols: [0700.HK]
+    overrides:
+      0700.HK:
+        use:
+        - call_base
+        sell_call:
+          enabled: true
+          min_strike: 550
+""",
+    )
+
+    out = set_yaml_symbol_config(
+        repo_root=REPO_ROOT,
+        market="hk",
+        symbol="700",
+        config_path=config_path,
+        covered_call_min_strike=560,
+        apply=False,
+    )
+
+    assert out["summary"]["entry"]["sell_call"]["min_strike"] == 560.0
+    assert out["summary"]["entry"]["sell_put"]["enabled"] is False
+    assert "covered_call" not in out["summary"]["entry"]
+
+
+def test_yaml_symbol_set_rejects_empty_setting(tmp_path: Path) -> None:
+    config_path = _write_yaml(tmp_path / "config.yaml", _minimal_yaml())
+
+    with pytest.raises(AgentToolError, match="at least one symbol setting is required"):
+        set_yaml_symbol_config(
+            repo_root=REPO_ROOT,
+            market="hk",
+            symbol="09898",
+            config_path=config_path,
+            apply=False,
+        )
 
 
 def test_yaml_assistant_config_merges_system_defaults(tmp_path: Path) -> None:
