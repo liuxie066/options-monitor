@@ -1680,7 +1680,11 @@ def render_markdown(rows: list[dict[str, Any]], *, notify_levels: set[str], max_
                                 f"剩余收益年化={_pct(row.get('remaining_annualized_return'))}"
                             )
                         ),
-                        f"- 价格: 开仓权利金={_num(row.get('premium'))} | 平仓 mid={_num(row.get('close_mid'))}",
+                        (
+                            _long_call_price_line(row, currency)
+                            if _is_long_call_convexity_display_row(row)
+                            else f"- 价格: 开仓权利金={_num(row.get('premium'))} | 平仓 mid={_num(row.get('close_mid'))}"
+                        ),
                         (
                             f"- 估算: 平仓后锁定收益 {_money(row.get('realized_if_close'), currency)} | "
                             f"剩余权利金 {_money(row.get('remaining_premium'), currency)}"
@@ -1834,6 +1838,38 @@ def _long_call_metric_line_compact(row: dict[str, Any], *, dte_str: str) -> str:
     return f"- 现值/成本 {ratio} · {dte_str} · 浮盈 {gain}"
 
 
+def _price_compact(val: Any, currency: str | None) -> str:
+    n = safe_float(val)
+    if n is None:
+        return "-"
+    prefix = "$" if currency == "USD" else "¥"
+    if abs(n) >= 1000:
+        body = f"{n:,.2f}"
+    else:
+        body = f"{n:.2f}"
+    return f"{prefix}{body.rstrip('0').rstrip('.')}"
+
+
+def _quote_range_compact(row: dict[str, Any], currency: str | None) -> str:
+    bid = safe_float(row.get("bid"))
+    ask = safe_float(row.get("ask"))
+    if bid is not None and ask is not None:
+        return f" · 买一/卖一 {_price_compact(bid, currency)}/{_price_compact(ask, currency)}"
+    if bid is not None:
+        return f" · 买一 {_price_compact(bid, currency)}"
+    if ask is not None:
+        return f" · 卖一 {_price_compact(ask, currency)}"
+    return ""
+
+
+def _long_call_price_line_compact(row: dict[str, Any], currency: str | None) -> str:
+    suggested = _price_compact(row.get("close_mid"), currency)
+    realized = _money_compact(row.get("realized_if_close"), currency)
+    remaining = _money_compact(row.get("remaining_premium"), currency)
+    quote_range = _quote_range_compact(row, currency)
+    return f"- 建议出价 {suggested}{quote_range} · 收益 {realized}（余 {remaining}）"
+
+
 def _money_compact(val, currency: str | None) -> str:
     try:
         n = float(val)
@@ -1855,6 +1891,29 @@ def _strike_compact(val: Any) -> str:
         return f"{n:.2f}".rstrip("0").rstrip(".")
     except Exception:
         return str(val) if val is not None else "-"
+
+
+def _quote_range_text(row: dict[str, Any], currency: Any) -> str:
+    bid = safe_float(row.get("bid"))
+    ask = safe_float(row.get("ask"))
+    if bid is not None and ask is not None:
+        return f"买一/卖一={_money(bid, currency)}/{_money(ask, currency)}"
+    if bid is not None:
+        return f"买一={_money(bid, currency)}"
+    if ask is not None:
+        return f"卖一={_money(ask, currency)}"
+    return ""
+
+
+def _long_call_price_line(row: dict[str, Any], currency: Any) -> str:
+    parts = [
+        f"开仓权利金={_num(row.get('premium'))}",
+        f"建议出价={_money(row.get('close_mid'), currency)}",
+    ]
+    quote_range = _quote_range_text(row, currency)
+    if quote_range:
+        parts.append(quote_range)
+    return "- 价格: " + " | ".join(parts)
 
 
 def _optimizer_detail_compact(row: dict[str, Any]) -> str:
@@ -1894,7 +1953,7 @@ def _alternative_candidate_label(row: dict[str, Any]) -> str:
     option_type = str(row.get("alternative_option_type") or "").strip().lower()
     expiration = str(row.get("alternative_expiration") or "").strip()
     strike = row.get("alternative_strike")
-    strike_text = _fmt_compact(strike) if strike not in (None, "") else ""
+    strike_text = _strike_compact(strike) if strike not in (None, "") else ""
     parts = [part for part in (symbol, option_type, expiration, strike_text) if part]
     return " ".join(parts) if parts else ""
 
@@ -1934,18 +1993,22 @@ def render_markdown_compact(
                 emoji = _tier_emoji_compact(tier)
                 verb = _close_action_verb_compact(row, _tier_verb_compact(tier))
                 l1 = f"{emoji} {verb} {row.get('symbol')} {opt} {strike}{suffix} {_fmt_date_compact_ca(exp)}"
+                is_long_call_row = _is_long_call_convexity_display_row(row)
                 capture = _pct_compact(row.get("capture_ratio"))
                 dte = row.get("dte")
                 dte_str = f"{int(dte)}天" if dte is not None else "-"
                 remaining_ann = _pct_compact(row.get("remaining_annualized_return"))
-                if _is_long_call_convexity_display_row(row):
+                if is_long_call_row:
                     l2 = _long_call_metric_line_compact(row, dte_str=dte_str)
                 else:
                     l2 = f"- 已锁定 {capture} · {dte_str} · 余年化 {remaining_ann}"
-                close_mid = _money_compact(row.get("close_mid"), currency)
-                realized = _money_compact(row.get("realized_if_close"), currency)
-                remaining = _money_compact(row.get("remaining_premium"), currency)
-                l3 = f"- 建议价 {close_mid} · 收益 {realized}（余 {remaining}）"
+                if is_long_call_row:
+                    l3 = _long_call_price_line_compact(row, currency)
+                else:
+                    close_mid = _money_compact(row.get("close_mid"), currency)
+                    realized = _money_compact(row.get("realized_if_close"), currency)
+                    remaining = _money_compact(row.get("remaining_premium"), currency)
+                    l3 = f"- 建议价 {close_mid} · 收益 {realized}（余 {remaining}）"
                 opt_detail = _optimizer_detail_compact(row)
                 lines.append(l1)
                 lines.append(l2)

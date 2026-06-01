@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -236,26 +237,27 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.deal_json:
         payload = json.loads(Path(args.deal_json).read_text(encoding="utf-8"))
-        if apply_changes:
-            _data_config, repo = open_position_ledger_from_runtime_config(base=runtime_root, cfg=cfg, data_config=args.data_config)
-        else:
-            repo = _ReplayRepo()
-        result = _process_payload(
-            payload,
-            repo=repo,
-            state_path=state_path,
-            audit_path=audit_path,
-            account_mapping=intake_cfg["account_mapping"],
-            futu_account_ids=intake_cfg["futu_account_ids"],
-            apply_changes=apply_changes,
-            host=args.host,
-            port=args.port,
-            config=cfg,
-            config_path=cfg_path,
-            runtime_root=runtime_root,
-            on_result_fn=receipt_callback,
-            retry_failed_deal=bool(args.retry_failed),
-        )
+        with contextlib.redirect_stdout(sys.stderr):
+            if apply_changes:
+                _data_config, repo = open_position_ledger_from_runtime_config(base=runtime_root, cfg=cfg, data_config=args.data_config)
+            else:
+                repo = _ReplayRepo()
+            result = _process_payload(
+                payload,
+                repo=repo,
+                state_path=state_path,
+                audit_path=audit_path,
+                account_mapping=intake_cfg["account_mapping"],
+                futu_account_ids=intake_cfg["futu_account_ids"],
+                apply_changes=apply_changes,
+                host=args.host,
+                port=args.port,
+                config=cfg,
+                config_path=cfg_path,
+                runtime_root=runtime_root,
+                on_result_fn=receipt_callback,
+                retry_failed_deal=bool(args.retry_failed),
+            )
         if apply_changes:
             _write_listener_status(
                 status_path,
