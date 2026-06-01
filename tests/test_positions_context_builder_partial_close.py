@@ -75,6 +75,39 @@ def test_position_lot_risk_view_is_typed_context_read_model() -> None:
     assert view.as_open_position_min(as_of_date=expiration_business_today())["symbol"] == "0700.HK"
 
 
+def test_build_context_preserves_strategy_metadata_for_close_advice() -> None:
+    records = [
+        {
+            "record_id": "rec_1",
+            "fields": {
+                "broker": "富途",
+                "account": "sy",
+                "symbol": "9992.HK",
+                "status": "open",
+                "side": "long",
+                "option_type": "call",
+                "contracts": 1,
+                "contracts_open": 1,
+                "currency": "HKD",
+                "strike": 167.5,
+                "multiplier": 200,
+                "premium": 6.38,
+                "strategy": "yield_enhancement",
+                "leg_role": "enhancement_call",
+                "yield_enhancement_mode": "income_upside_enhancement",
+            },
+        }
+    ]
+
+    ctx = build_context(records, broker="富途", account="sy", rates={"HKDCNY": 0.92})
+
+    row = ctx["open_positions_min"][0]
+    assert row["strategy"] == "yield_enhancement"
+    assert row["leg_role"] == "enhancement_call"
+    assert row["yield_enhancement_mode"] == "income_upside_enhancement"
+    assert row["strategy_group_id"] is None
+
+
 def test_build_context_reads_premium_from_note_fallback() -> None:
     records = [
         {

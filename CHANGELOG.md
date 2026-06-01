@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.178 - 2026-06-01
+
+### Fixed
+- Preserved position-lot strategy metadata in the option-positions context so Close Advice can evaluate repaired Yield Enhancement long-call lots.
+
 ## 1.2.177 - 2026-06-01
 
 ### Added

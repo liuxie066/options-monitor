@@ -147,6 +147,10 @@ class RiskPositionView:
             "close_type": self.close_type,
             "close_reason": self.close_reason,
             "note": self.note,
+            "strategy": _text_or_none(self.fields.get("strategy")),
+            "leg_role": _text_or_none(self.fields.get("leg_role")),
+            "strategy_group_id": _text_or_none(self.fields.get("strategy_group_id")),
+            "yield_enhancement_mode": _text_or_none(self.fields.get("yield_enhancement_mode")),
             "strategy_snapshot": (
                 dict(self.fields["strategy_snapshot"])
                 if isinstance(self.fields.get("strategy_snapshot"), dict)
