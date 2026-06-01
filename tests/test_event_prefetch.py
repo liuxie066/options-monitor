@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -125,3 +126,42 @@ def test_event_annotation_without_snapshot_fails_closed_input() -> None:
 
     assert out.iloc[0]["event_source_status"] == "error"
     assert out.iloc[0]["event_source_error"] == "event snapshot missing for symbol"
+
+
+def test_resolved_event_risk_config_preserves_runtime_snapshot_path(tmp_path: Path) -> None:
+    from domain.domain.candidate_defaults import resolve_event_risk_config
+    from src.application.event_risk_filter import annotate_candidates_with_event_risk
+
+    snapshot_path = tmp_path / "state" / "event_snapshot.json"
+    snapshot_path.parent.mkdir(parents=True)
+    snapshot_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "provider": "yfinance",
+                "symbols": {
+                    "AAPL": {
+                        "symbol": "AAPL",
+                        "events": [],
+                        "source_status": "error",
+                        "source_error": "EventSourceError: rate limited",
+                        "error_code": "rate_limited",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg = resolve_event_risk_config(
+        {"enabled": True, "mode": "warn", "snapshot_path": str(snapshot_path)}
+    )
+
+    out = annotate_candidates_with_event_risk(
+        pd.DataFrame([{"symbol": "AAPL", "expiration": "2026-05-15"}]),
+        base_dir=tmp_path,
+        event_risk_cfg=cfg,
+    )
+
+    assert cfg["snapshot_path"] == str(snapshot_path)
+    assert out.iloc[0]["event_source_status"] == "error"
+    assert out.iloc[0]["event_source_error"] == "EventSourceError: rate limited"

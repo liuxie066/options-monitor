@@ -81,7 +81,11 @@ def resolve_event_risk_config(raw: dict | None) -> dict[str, Any]:
     src = dict(DEFAULT_EVENT_RISK_CONFIG)
     if isinstance(raw, dict):
         src.update(raw)
-    return {
+    out = {
         "enabled": bool(src.get("enabled", DEFAULT_EVENT_RISK_CONFIG["enabled"])),
         "mode": str(src.get("mode") or DEFAULT_EVENT_RISK_CONFIG["mode"]),
     }
+    for key in ("snapshot_path", "snapshot"):
+        if key in src:
+            out[key] = src[key]
+    return out

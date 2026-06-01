@@ -19,6 +19,8 @@ SCAN_FUNCTIONS = {
     "share_coverage",
 }
 
+RISK_ALERT_RULES = {"event_source_unavailable"}
+
 FUNCTION_LABELS = {
     "sell_put": "Sell Put",
     "sell_call": "Covered Call",
@@ -44,7 +46,7 @@ RULE_LABELS = {
     "volatility_estimate_missing": "RV 缺失",
     "implied_volatility_missing": "IV 缺失",
     "delta_missing": "Delta 缺失",
-    "event_source_unavailable": "事件源不可用",
+    "event_source_unavailable": "事件风险数据源不可用",
     "vol_edge_ratio_below_min": "IV/RV 不足",
     "vol_edge_spread_below_min": "IV-RV 不足",
     "risk_open_interest": "OI 不足",
@@ -149,6 +151,7 @@ def build_candidate_reject_summary(
         "total_rejected": len(rejected_rows),
         "status_counts": dict(status_counts.most_common()),
         "function_counts": dict(function_counts.most_common()),
+        "risk_alerts": _risk_alerts(rejected_rows),
         "top_categories": top_categories,
     }
 
@@ -166,13 +169,21 @@ def render_candidate_reject_summary(summary: dict[str, Any], *, max_categories: 
     function_line = _format_function_counts(summary.get("function_counts"))
     if function_line:
         lines.append(f"- 涉及模块：{function_line}")
+    risk_alerts = _format_risk_alerts(summary.get("risk_alerts"))
+    if risk_alerts:
+        lines.extend(f"- 风控注意：{item}" for item in risk_alerts)
 
     top_categories = summary.get("top_categories")
     if not isinstance(top_categories, list) or not top_categories:
         lines.append("- 未记录主要拒绝原因")
         return "\n".join(lines).strip() + "\n"
 
-    for item in top_categories[: max(0, int(max_categories or 0))]:
+    display_categories = [
+        item
+        for item in top_categories
+        if not (isinstance(item, dict) and risk_alerts and _category_only_has_risk_alerts(item))
+    ]
+    for item in display_categories[: max(0, int(max_categories or 0))]:
         if not isinstance(item, dict):
             continue
         label = str(item.get("label") or item.get("category") or "其他")
@@ -264,10 +275,16 @@ def _category_for_row(row: dict[str, Any]) -> str:
 
     if function == "yield_enhancement":
         return "yield_enhancement"
-    if any(token in combined for token in ("event_risk_within", "risk_event", "event risk exists")):
+    if any(
+        token in combined
+        for token in (
+            "event_risk_within",
+            "event_source_unavailable",
+            "risk_event",
+            "event risk exists",
+        )
+    ):
         return "event_risk"
-    if "event_source_unavailable" in combined:
-        return "data_missing"
     if any(token in combined for token in ("missing", "unavailable", "required_data", "not_evaluable", "metrics_")):
         return "data_missing"
     if any(token in combined for token in ("vol_edge", "iv/rv", "iv-rv")):
@@ -311,6 +328,52 @@ def _rule_label(rule: str) -> str:
     if "open_interest" in lower:
         return "OI 不足"
     return raw
+
+
+def _risk_alerts(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        rule = _rule_for_row(row)
+        if rule in RISK_ALERT_RULES:
+            grouped[rule].append(row)
+    alerts: list[dict[str, Any]] = []
+    for rule, grouped_rows in sorted(grouped.items()):
+        alerts.append(
+            {
+                "rule": rule,
+                "label": _rule_label(rule),
+                "count": len(grouped_rows),
+                "sample_symbols": _sample_symbols(grouped_rows),
+            }
+        )
+    return alerts
+
+
+def _format_risk_alerts(raw_alerts: Any) -> list[str]:
+    if not isinstance(raw_alerts, list):
+        return []
+    out: list[str] = []
+    for item in raw_alerts:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or item.get("rule") or "").strip()
+        count = _int(item.get("count"))
+        if not label or count <= 0:
+            continue
+        detail = f"{label} {count}"
+        samples = _format_samples(item.get("sample_symbols"))
+        if samples:
+            detail += f"；样例 {samples}"
+        out.append(detail)
+    return out
+
+
+def _category_only_has_risk_alerts(item: dict[str, Any]) -> bool:
+    raw_rules = item.get("rule_counts")
+    if not isinstance(raw_rules, dict) or not raw_rules:
+        return False
+    rules = {str(rule) for rule in raw_rules}
+    return bool(rules) and rules.issubset(RISK_ALERT_RULES)
 
 
 def _format_rule_counts(raw_counts: Any, raw_labels: Any) -> str:
@@ -371,11 +434,11 @@ def _matches_run_id(row: dict[str, Any], run_id: str) -> bool:
 
 def _category_sort_key(category: str) -> int:
     order = {
-        "data_missing": 0,
-        "vol_edge": 1,
-        "liquidity": 2,
-        "risk_budget": 3,
-        "event_risk": 4,
+        "event_risk": 0,
+        "data_missing": 1,
+        "vol_edge": 2,
+        "liquidity": 3,
+        "risk_budget": 4,
         "return_floor": 5,
         "cash_or_coverage": 6,
         "yield_enhancement": 7,

@@ -260,15 +260,16 @@ def _merge_service_profile_payload(payload: dict[str, Any], *, profile: dict[str
     paths: dict[str, Any] = paths_raw if isinstance(paths_raw, dict) else {}
     config_paths_raw = profile.get("config_paths")
     config_paths: dict[str, Any] = config_paths_raw if isinstance(config_paths_raw, dict) else {}
-    if "config_path" not in merged and "config_key" not in merged and config_paths:
-        profile_markets = profile.get("markets")
-        market = ""
-        if isinstance(profile_markets, list) and profile_markets:
-            market = str(profile_markets[0]).strip().lower()
-        else:
-            available_markets = [key for key in ("us", "hk") if key in config_paths]
-            if len(available_markets) == 1:
-                market = available_markets[0]
+    if "config_path" not in merged and config_paths:
+        market = str(merged.get("config_key") or profile.get("config_key") or "").strip().lower()
+        if not market and "config_key" not in merged:
+            profile_markets = profile.get("markets")
+            if isinstance(profile_markets, list) and profile_markets:
+                market = str(profile_markets[0]).strip().lower()
+            else:
+                available_markets = [key for key in ("us", "hk") if key in config_paths]
+                if len(available_markets) == 1:
+                    market = available_markets[0]
         if market in config_paths:
             merged["config_path"] = config_paths[market]
     for key in ("config_key", "config_path", "accounts", "max_notification_chars", "max_run_age_minutes"):
