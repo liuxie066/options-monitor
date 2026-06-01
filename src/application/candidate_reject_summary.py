@@ -165,10 +165,7 @@ def render_candidate_reject_summary(summary: dict[str, Any], *, max_categories: 
     total_rejected = _int(summary.get("total_rejected"))
     accepted_count = _int(summary.get("accepted_count"))
     lines = ["### 拒绝摘要"]
-    lines.append(f"- 通过 {accepted_count} 条；拒绝/后过滤 {total_rejected} 条")
-    function_line = _format_function_counts(summary.get("function_counts"))
-    if function_line:
-        lines.append(f"- 涉及模块：{function_line}")
+    lines.append(f"- 通过 {accepted_count} 条；过滤 {total_rejected} 条")
     risk_alerts = _format_risk_alerts(summary.get("risk_alerts"))
     if risk_alerts:
         lines.extend(f"- 风控注意：{item}" for item in risk_alerts)
@@ -183,19 +180,18 @@ def render_candidate_reject_summary(summary: dict[str, Any], *, max_categories: 
         for item in top_categories
         if not (isinstance(item, dict) and risk_alerts and _category_only_has_risk_alerts(item))
     ]
+    reason_parts: list[str] = []
     for item in display_categories[: max(0, int(max_categories or 0))]:
         if not isinstance(item, dict):
             continue
         label = str(item.get("label") or item.get("category") or "其他")
         count = _int(item.get("count"))
-        rules = _format_rule_counts(item.get("rule_counts"), item.get("rule_labels"))
-        samples = _format_samples(item.get("sample_symbols"))
-        detail = f"{label} {count}"
-        if rules:
-            detail += f"：{rules}"
-        if samples:
-            detail += f"；样例 {samples}"
-        lines.append(f"- {detail}")
+        if count > 0:
+            reason_parts.append(f"{label} {count}")
+    if reason_parts:
+        lines.append(f"- 主要原因：{'、'.join(reason_parts)}")
+    else:
+        lines.append("- 未记录主要拒绝原因")
     return "\n".join(lines).strip() + "\n"
 
 
@@ -360,11 +356,7 @@ def _format_risk_alerts(raw_alerts: Any) -> list[str]:
         count = _int(item.get("count"))
         if not label or count <= 0:
             continue
-        detail = f"{label} {count}"
-        samples = _format_samples(item.get("sample_symbols"))
-        if samples:
-            detail += f"；样例 {samples}"
-        out.append(detail)
+        out.append(f"{label} {count} 条")
     return out
 
 

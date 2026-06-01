@@ -87,9 +87,8 @@ def test_compact_account_overview_ignores_reject_summary_strategy_names() -> Non
     notif = (
         "📋 本轮扫描完成，暂无符合条件的候选。\n\n"
         "### 拒绝摘要\n"
-        "- 通过 184 条；拒绝/后过滤 279 条\n"
-        "- 涉及模块：Sell Put 168 / Covered Call 109 / 收益增强 2\n"
-        "- 波动率边际不足 127：IV/RV 不足 127；样例 0883.HK、0700.HK、3690.HK\n"
+        "- 通过 184 条；过滤 279 条\n"
+        "- 主要原因：波动率边际不足 127、基础条件不符 49、其他 31\n"
     )
 
     message = build_account_message_compact(
@@ -120,7 +119,7 @@ def test_compact_account_overview_counts_candidate_lines_only() -> None:
         "💎 收益增强 英伟达 95P+110C @ 06-19 | 🎯卖1.2/买0.4\n"
         "- 净权利金 0.8USD · 年化 15% · 45天\n\n"
         "### 拒绝摘要\n"
-        "- 涉及模块：Sell Put 1 / Covered Call 9 / 收益增强 2\n"
+        "- 主要原因：波动率边际不足 9、收益增强组合不成立 2\n"
     )
 
     message = build_account_message_compact(

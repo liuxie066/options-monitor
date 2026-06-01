@@ -381,9 +381,10 @@ def test_run_one_account_appends_candidate_reject_summary_for_no_candidate_run(m
     )
 
     assert "### 拒绝摘要" in outcome.result.notification_text
-    assert "拒绝/后过滤 2 条" in outcome.result.notification_text
-    assert "数据缺失 1：RV 缺失 1；样例 PDD" in outcome.result.notification_text
-    assert "流动性不足 1：价差不合格 1；样例 FUTU" in outcome.result.notification_text
+    assert "过滤 2 条" in outcome.result.notification_text
+    assert "主要原因：数据缺失 1、流动性不足 1" in outcome.result.notification_text
+    assert "涉及模块" not in outcome.result.notification_text
+    assert "样例" not in outcome.result.notification_text
 
 
 def test_run_one_account_passes_force_mode_to_prefetch(monkeypatch, tmp_path: Path) -> None:
