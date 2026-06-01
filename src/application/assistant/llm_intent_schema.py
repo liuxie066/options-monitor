@@ -27,6 +27,14 @@ _MONTH_RE = re.compile(r"^20\d{2}-(0[1-9]|1[0-2])$")
 
 _ALLOWED_ARGUMENTS = llm_executable_arguments()
 _COMMAND_SPECS_BY_INTENT = spec_by_intent()
+_SYMBOL_EDIT_SET_ALIASES = {
+    "sell_call.enabled": "sell_call.enabled",
+    "covered_call.enabled": "sell_call.enabled",
+    "sell_call.min_strike": "sell_call.min_strike",
+    "covered_call.min_strike": "sell_call.min_strike",
+    "sell_put.enabled": "sell_put.enabled",
+}
+_SAFE_ENSURE_USE_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 def llm_intent_schema() -> dict[str, Any]:
@@ -92,7 +100,7 @@ def inbound_intent_from_llm_payload(
         raise AgentToolError(
             code="PERMISSION_DENIED",
             message=f"LLM intent is not allowed: {intent_name}",
-            hint="LLM translator is currently restricted to recognizable read-only intents.",
+            hint="LLM translator is restricted to read-only intents plus explicitly allowed preview-only symbol settings.",
             details={
                 "intent_name": intent_name,
                 "llm_rejected_reason": _llm_rejected_reason(intent_name),
@@ -178,7 +186,104 @@ def _normalize_arguments(intent_name: str, arguments: dict[str, Any]) -> dict[st
             raise AgentToolError(code="INPUT_ERROR", message="LLM runtime_logs kind must be all, tool, or state")
         lines = _optional_int(arguments.get("lines"), default=50, minimum=1, maximum=500, field="lines")
         return {"run_id": run_id, "kind": kind, "lines": lines}
+    if intent_name == "symbol_edit":
+        return _normalize_symbol_edit_arguments(arguments)
     raise AgentToolError(code="INPUT_ERROR", message=f"unsupported LLM intent: {intent_name}")
+
+
+def _normalize_symbol_edit_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    symbol = str(arguments.get("symbol") or "").strip()
+    if not symbol:
+        raise AgentToolError(code="NEEDS_CLARIFICATION", message="LLM symbol_edit intent requires symbol")
+
+    raw_sets = arguments.get("set")
+    if not isinstance(raw_sets, dict) or not raw_sets:
+        raise AgentToolError(code="NEEDS_CLARIFICATION", message="LLM symbol_edit intent requires set")
+
+    normalized_sets: dict[str, Any] = {}
+    for raw_key, raw_value in raw_sets.items():
+        key = _SYMBOL_EDIT_SET_ALIASES.get(str(raw_key or "").strip())
+        if key is None:
+            raise AgentToolError(
+                code="PERMISSION_DENIED",
+                message="LLM symbol_edit can only preview covered-call or sell-put monitored-symbol settings",
+                details={
+                    "unsupported_field": str(raw_key or "").strip(),
+                    "supported_fields": sorted(_SYMBOL_EDIT_SET_ALIASES),
+                },
+            )
+        value = _normalize_symbol_edit_set_value(key, raw_value)
+        if key in normalized_sets and normalized_sets[key] != value:
+            raise AgentToolError(
+                code="NEEDS_CLARIFICATION",
+                message=f"LLM symbol_edit has conflicting values for {key}",
+            )
+        normalized_sets[key] = value
+
+    ensure_use = _optional_ensure_use(arguments.get("ensure_use"))
+    if "sell_call.min_strike" in normalized_sets:
+        normalized_sets.setdefault("sell_call.enabled", True)
+        ensure_use = _append_unique(ensure_use, "call_base")
+    if normalized_sets.get("sell_call.enabled") is True:
+        ensure_use = _append_unique(ensure_use, "call_base")
+    if normalized_sets.get("sell_put.enabled") is True:
+        ensure_use = _append_unique(ensure_use, "put_base")
+
+    out: dict[str, Any] = {"symbol": symbol, "set": normalized_sets}
+    if ensure_use:
+        out["ensure_use"] = ensure_use
+    return out
+
+
+def _normalize_symbol_edit_set_value(key: str, raw_value: Any) -> bool | float:
+    if key.endswith(".enabled"):
+        return _required_bool(raw_value, key)
+    if key.endswith(".min_strike"):
+        return _required_positive_float(raw_value, key)
+    raise AgentToolError(code="INPUT_ERROR", message=f"unsupported LLM symbol_edit field: {key}")
+
+
+def _required_bool(raw: Any, field: str) -> bool:
+    if isinstance(raw, bool):
+        return raw
+    value = str(raw or "").strip().lower()
+    if value in {"1", "true", "yes", "y", "on", "enable", "enabled"}:
+        return True
+    if value in {"0", "false", "no", "n", "off", "disable", "disabled"}:
+        return False
+    raise AgentToolError(code="INPUT_ERROR", message=f"LLM {field} must be boolean")
+
+
+def _required_positive_float(raw: Any, field: str) -> float:
+    try:
+        value = float(raw)
+    except Exception as exc:
+        raise AgentToolError(code="INPUT_ERROR", message=f"LLM {field} must be a number") from exc
+    if value <= 0:
+        raise AgentToolError(code="INPUT_ERROR", message=f"LLM {field} must be positive")
+    return value
+
+
+def _optional_ensure_use(raw: Any) -> list[str]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise AgentToolError(code="INPUT_ERROR", message="LLM ensure_use must be an array")
+    out: list[str] = []
+    for item in raw:
+        value = str(item or "").strip()
+        if not value:
+            continue
+        if not _SAFE_ENSURE_USE_RE.fullmatch(value):
+            raise AgentToolError(code="INPUT_ERROR", message="LLM ensure_use contains an unsafe template name")
+        out = _append_unique(out, value)
+    return out
+
+
+def _append_unique(values: list[str], value: str) -> list[str]:
+    if value in values:
+        return values
+    return [*values, value]
 
 
 def _llm_rejected_reason(intent_name: str) -> str:

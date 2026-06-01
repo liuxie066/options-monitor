@@ -16,6 +16,8 @@ from src.application.assistant.commands import (
     command_catalog_payload,
     command_specs,
     llm_capability_manifest,
+    llm_executable_specs,
+    llm_recognizable_specs,
     operation_specs,
     operation_target_intents,
 )
@@ -112,16 +114,8 @@ def test_assistant_command_parser_maps_manual_trade_preview_commands() -> None:
 
 
 def test_assistant_command_catalog_drives_llm_allowed_surface() -> None:
-    llm_recognizable = {
-        spec.intent_name
-        for spec in command_specs()
-        if spec.read_only and spec.llm_allowed
-    }
-    llm_executable = {
-        spec.intent_name
-        for spec in command_specs()
-        if spec.read_only and spec.llm_allowed and spec.supported and spec.tool_name is not None
-    }
+    llm_recognizable = {spec.intent_name for spec in llm_recognizable_specs()}
+    llm_executable = {spec.intent_name for spec in llm_executable_specs()}
     llm_denied = {spec.intent_name for spec in command_specs()} - llm_recognizable
     schema = llm_intent_schema()
     payload = command_catalog_payload()
@@ -133,6 +127,8 @@ def test_assistant_command_catalog_drives_llm_allowed_surface() -> None:
     assert "position_exit_analysis" in llm_executable
     assert "manual_trade_open" in llm_denied
     assert "symbol_add" in llm_denied
+    assert "symbol_edit" in llm_recognizable
+    assert "symbol_edit" not in llm_executable
     assert "upgrade_now" in llm_denied
     assert "manual_trade_confirm" in llm_denied
     assert not (llm_executable & llm_denied)
@@ -146,6 +142,8 @@ def test_assistant_command_catalog_drives_llm_allowed_surface() -> None:
     assert capabilities["manual_trade_open"]["risk_level"] == "preview_write"
     assert capabilities["manual_trade_open"]["llm_executable"] is False
     assert capabilities["symbol_add"]["risk_level"] == "preview_write"
+    assert capabilities["symbol_edit"]["llm_recognizable"] is True
+    assert capabilities["symbol_edit"]["llm_executable"] is False
     assert capabilities["upgrade_now"]["risk_level"] == "preview_admin"
     assert capabilities["manual_trade_confirm"]["operation_action"] == "confirm"
     assert capabilities["manual_trade_confirm"]["operation_target"] == "trade"
@@ -172,6 +170,7 @@ def test_llm_capability_manifest_lists_known_but_non_executable_operations() -> 
     assert capabilities["manual_trade_close"]["llm_executable"] is False
     assert capabilities["manual_trade_update"]["llm_executable"] is False
     assert capabilities["symbol_add"]["llm_executable"] is False
+    assert capabilities["symbol_edit"]["llm_recognizable"] is True
     assert capabilities["symbol_edit"]["llm_executable"] is False
     assert capabilities["symbol_remove"]["llm_executable"] is False
     assert capabilities["upgrade_now"]["llm_executable"] is False
@@ -212,9 +211,14 @@ def test_assistant_capability_catalog_has_safe_llm_invariants() -> None:
         assert item["commands"] or item["examples"]
         if item["llm_allowed"] and item["read_only"]:
             assert item["llm_recognizable"] is True
-        if item["llm_allowed"] and item["supported"] and item["tool_name"] is not None:
-            assert item["read_only"] is True
+        if item["llm_allowed"] and item["supported"] and item["tool_name"] is not None and item["read_only"]:
             assert item["llm_executable"] is True
+        if item["llm_recognizable"] and not item["llm_executable"]:
+            assert item["capability_id"] in {"help", "symbol_edit"}
+            if item["capability_id"] == "symbol_edit":
+                assert item["risk_level"] == "preview_write"
+                assert item["operation_action"] == "preview"
+                assert item["operation_target"] == "symbol"
         if item["llm_executable"]:
             assert item["read_only"] is True
             assert item["llm_allowed"] is True
@@ -862,6 +866,68 @@ def test_assistant_runtime_llm_router_tries_llm_before_deterministic_alias(tmp_p
     assert perception_trace["candidates"][1]["intent_name"] == "runtime_status"
 
 
+def test_assistant_runtime_rejects_llm_preview_write_conflict_with_deterministic_intent(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(tool_name=tool_name, ok=True, data={})
+
+    def _translate(
+        text: str,
+        runtime_settings: AssistantSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> LlmTranslationResult:
+        assert text == "premium 改成 2.75"
+        assert conversation_context is not None
+        return parse_llm_translation_payload(
+            {
+                "schema_version": LLM_INTENT_SCHEMA_VERSION,
+                "intent": "symbol_edit",
+                "arguments": {
+                    "symbol": "NVDA",
+                    "set": {"sell_call.min_strike": 140},
+                    "ensure_use": None,
+                },
+                "confidence": 0.96,
+            },
+            settings=runtime_settings.llm,
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="premium 改成 2.75",
+            sender_id="local",
+            message_id="msg_llm_symbol_edit_conflicts_with_trade_update",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="llm_router",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        translate_intent_fn=_translate,
+    )
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "NEEDS_CLARIFICATION"
+    assert calls == []
+    assert out["meta"]["assistant"]["route"] == "llm"
+    perception_trace = out["meta"]["assistant"]["perception_trace"]
+    assert perception_trace["decision"] == "llm_conflict_needs_clarification"
+    assert perception_trace["selected_source"] is None
+    assert perception_trace["conflict"] is True
+    assert perception_trace["candidates"][0]["source"] == "llm"
+    assert perception_trace["candidates"][0]["intent_name"] == "symbol_edit"
+    assert perception_trace["candidates"][1]["source"] == "deterministic"
+    assert perception_trace["candidates"][1]["intent_name"] == "manual_trade_update"
+    assert perception_trace["candidates"][2]["error_code"] == "NEEDS_CLARIFICATION"
+    assert perception_trace["candidates"][2]["error"]["details"] == {
+        "llm_intent_name": "symbol_edit",
+        "deterministic_intent_name": "manual_trade_update",
+    }
+
+
 def test_assistant_runtime_uses_llm_reply_for_non_business_text_after_low_confidence(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
 
@@ -1139,6 +1205,134 @@ def test_assistant_runtime_routes_valid_llm_translation_through_inbound_router(t
         "window_messages": 8,
         "recent_count": 0,
         "pending_count": 0,
+    }
+
+
+def test_assistant_runtime_reconciles_missing_llm_read_slots_from_shadow_parser(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(tool_name=tool_name, ok=True, data={"summary": {"ok": True}})
+
+    def _translate(
+        text: str,
+        _settings: AssistantSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> LlmTranslationResult:
+        assert text == "查远端 sy 2026-06 收益摘要"
+        assert conversation_context is not None
+        return LlmTranslationResult(
+            intent=PerceptionResult(
+                intent_name="monthly_income_report",
+                arguments={"account": "sy"},
+                source="llm",
+                confidence=0.93,
+            ),
+            trace={
+                "enabled": True,
+                "attempted": True,
+                "reason": "accepted",
+                "provider": "openai",
+                "base_url": "",
+                "model": "gpt-5.2",
+                "api_key_env": "OM_LLM_API_KEY",
+                "confidence_min": 0.75,
+                "timeout_seconds": 20,
+                "max_output_tokens": 512,
+                "schema_version": LLM_INTENT_SCHEMA_VERSION,
+            },
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="查远端 sy 2026-06 收益摘要",
+            sender_id="local",
+            message_id="msg_llm_income_missing_month_reconciled",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="llm_router",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        translate_intent_fn=_translate,
+        now_fn=lambda: date(2026, 6, 1),
+    )
+
+    assert out["ok"] is True
+    assert calls == [("monthly_income_report", {"config_key": "us", "account": "sy", "month": "2026-06"})]
+    assert out["data"]["perception"]["source"] == "llm"
+    assert out["data"]["perception"]["arguments"] == {"account": "sy", "month": "2026-06"}
+    assert out["data"]["perception"]["evidence"]["argument_reconciliation"] == {
+        "source": "deterministic_shadow",
+        "filled": {"month": "2026-06"},
+        "overridden": {},
+    }
+    assert out["meta"]["assistant"]["perception_trace"]["selected_source"] == "llm"
+
+
+def test_assistant_runtime_reconciles_stale_llm_month_from_shadow_parser(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(tool_name=tool_name, ok=True, data={"summary": {"ok": True}})
+
+    def _translate(
+        text: str,
+        _settings: AssistantSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> LlmTranslationResult:
+        assert text == "6月 sy 的收益"
+        assert conversation_context is not None
+        return LlmTranslationResult(
+            intent=PerceptionResult(
+                intent_name="monthly_income_report",
+                arguments={"account": "sy", "month": "2026-05"},
+                source="llm",
+                confidence=0.93,
+            ),
+            trace={
+                "enabled": True,
+                "attempted": True,
+                "reason": "accepted",
+                "provider": "openai",
+                "base_url": "",
+                "model": "gpt-5.2",
+                "api_key_env": "OM_LLM_API_KEY",
+                "confidence_min": 0.75,
+                "timeout_seconds": 20,
+                "max_output_tokens": 512,
+                "schema_version": LLM_INTENT_SCHEMA_VERSION,
+            },
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="6月 sy 的收益",
+            sender_id="local",
+            message_id="msg_llm_income_stale_month_reconciled",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="llm_router",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        translate_intent_fn=_translate,
+        now_fn=lambda: date(2026, 6, 1),
+    )
+
+    assert out["ok"] is True
+    assert calls == [("monthly_income_report", {"config_key": "us", "account": "sy", "month": "2026-06"})]
+    assert out["data"]["perception"]["arguments"] == {"account": "sy", "month": "2026-06"}
+    assert out["data"]["perception"]["evidence"]["argument_reconciliation"] == {
+        "source": "deterministic_shadow",
+        "filled": {},
+        "overridden": {"month": {"llm": "2026-05", "deterministic": "2026-06"}},
     }
 
 
@@ -1605,7 +1799,7 @@ def test_assistant_runtime_rejects_llm_injected_write_intent_even_with_custom_tr
 
     assert out["ok"] is False
     assert out["error"]["code"] == "PERMISSION_DENIED"
-    assert "deterministic preview/confirm commands" in out["error"]["hint"]
+    assert "preview-only symbol settings" in out["error"]["hint"]
     assert out["meta"]["assistant"]["route"] == "agent_loop"
     perception_trace = out["meta"]["assistant"]["perception_trace"]
     assert perception_trace["decision"] == "llm_denied_by_policy"
@@ -1735,6 +1929,48 @@ def test_llm_intent_schema_rejects_write_intents_and_extra_arguments() -> None:
     assert extra_result.error.code == "INPUT_ERROR"
 
 
+def test_llm_intent_schema_accepts_symbol_edit_as_preview_only() -> None:
+    result = parse_llm_translation_payload(
+        {
+            "schema_version": LLM_INTENT_SCHEMA_VERSION,
+            "intent": "symbol_edit",
+            "arguments": {
+                "symbol": "09898",
+                "set": {"covered_call.min_strike": 85},
+                "ensure_use": None,
+            },
+            "confidence": 0.95,
+        },
+        settings=LlmTranslatorSettings(enabled=True),
+    )
+
+    assert result.error is None
+    assert result.intent is not None
+    assert result.intent.intent_name == "symbol_edit"
+    assert result.intent.arguments == {
+        "symbol": "09898",
+        "set": {"sell_call.min_strike": 85.0, "sell_call.enabled": True},
+        "ensure_use": ["call_base"],
+    }
+
+    unsupported_field = parse_llm_translation_payload(
+        {
+            "schema_version": LLM_INTENT_SCHEMA_VERSION,
+            "intent": "symbol_edit",
+            "arguments": {
+                "symbol": "09898",
+                "set": {"sell_put.max_strike": 80},
+                "ensure_use": None,
+            },
+            "confidence": 0.95,
+        },
+        settings=LlmTranslatorSettings(enabled=True),
+    )
+    assert unsupported_field.intent is None
+    assert unsupported_field.error is not None
+    assert unsupported_field.error.code == "PERMISSION_DENIED"
+
+
 def test_llm_intent_schema_rejects_low_confidence_and_missing_required_args() -> None:
     low_confidence = parse_llm_translation_payload(
         {
@@ -1773,13 +2009,19 @@ def test_llm_intent_schema_documents_allowed_surface() -> None:
     assert schema["schema_version"] == LLM_INTENT_SCHEMA_VERSION
     assert schema["write_intents_allowed"] is False
     assert "manual_trade_open" not in schema["shape"]["intent"]
+    assert "symbol_edit" in schema["shape"]["intent"]
     assert capabilities["manual_trade_open"]["llm_executable"] is False
+    assert capabilities["symbol_edit"]["llm_recognizable"] is True
+    assert capabilities["symbol_edit"]["llm_executable"] is False
+    assert capabilities["symbol_edit"]["risk_level"] == "preview_write"
     assert capabilities["upgrade_now"]["risk_level"] == "preview_admin"
     assert schema["argument_keys"]["runtime_logs"] == ["kind", "lines", "run_id"]
+    assert schema["argument_keys"]["symbol_edit"] == ["ensure_use", "set", "symbol"]
 
     json_schema = llm_intent_json_schema()
     assert json_schema["additionalProperties"] is False
     assert "manual_trade_open" not in json_schema["properties"]["intent"]["enum"]
+    assert "symbol_edit" in json_schema["properties"]["intent"]["enum"]
     assert json_schema["properties"]["arguments"]["additionalProperties"] is False
     assert set(json_schema["properties"]["arguments"]["required"]) == {
         "account",
@@ -1794,6 +2036,8 @@ def test_llm_intent_schema_documents_allowed_surface() -> None:
         "kind",
         "limit",
         "lines",
+        "set",
+        "ensure_use",
     }
 
 

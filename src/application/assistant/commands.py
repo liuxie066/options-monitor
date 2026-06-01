@@ -57,6 +57,15 @@ ARGUMENT_JSON_SCHEMA: dict[str, dict[str, Any]] = {
     "limit": {"type": ["integer", "null"]},
     "lines": {"type": ["integer", "null"]},
     "model_profile": {"type": ["string", "null"]},
+    "set": {
+        "type": ["object", "null"],
+        "additionalProperties": {"type": ["string", "number", "integer", "boolean", "null"]},
+    },
+    "ensure_use": {
+        "type": ["array", "null"],
+        "items": {"type": "string"},
+        "maxItems": 8,
+    },
 }
 
 COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
@@ -309,12 +318,12 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         tool_name="inbound.symbols",
         commands=(),
         display_name="修改监控标的",
-        arguments=("symbol", "set"),
+        arguments=("symbol", "set", "ensure_use"),
         read_only=False,
-        llm_allowed=False,
+        llm_allowed=True,
         risk_level="preview_write",
-        examples=("修改监控标的 <symbol> <field>=<value>",),
-        summary="preview editing a monitored symbol",
+        examples=("设置 09898 covered call min strike 85", "修改监控标的 <symbol> <field>=<value>"),
+        summary="preview editing covered-call or sell-put monitored-symbol settings",
         operation_action="preview",
         operation_target="symbol",
     ),
@@ -561,7 +570,8 @@ def llm_capability_prompt() -> str:
     lines = [
         "Available OM capabilities:",
         "The JSON `intent` field must be one llm_recognizable capability_id from this manifest.",
-        "Capabilities with llm_recognizable=true and llm_executable=false may be identified, but they will not be executed.",
+        "Capabilities with llm_executable=true are read-only tool calls.",
+        "Capabilities with llm_recognizable=true and llm_executable=false may only enter deterministic reasoning; preview-write capabilities can create a pending preview but cannot apply writes.",
         "Capabilities with llm_recognizable=false must not be routed by LLM.",
     ]
     for item in manifest["capabilities"]:
@@ -615,7 +625,20 @@ def _is_llm_executable_spec(spec: AssistantCommandSpec) -> bool:
 
 
 def _is_llm_recognizable_spec(spec: AssistantCommandSpec) -> bool:
-    return bool(spec.read_only and spec.llm_allowed)
+    return bool((spec.read_only and spec.llm_allowed) or _is_llm_preview_recognizable_spec(spec))
+
+
+def _is_llm_preview_recognizable_spec(spec: AssistantCommandSpec) -> bool:
+    return bool(
+        spec.intent_name == "symbol_edit"
+        and spec.llm_allowed
+        and not spec.read_only
+        and spec.risk_level == "preview_write"
+        and spec.operation_action == "preview"
+        and spec.operation_target == "symbol"
+        and spec.supported
+        and spec.tool_name == "inbound.symbols"
+    )
 
 
 def _risk_level(spec: AssistantCommandSpec) -> str:
