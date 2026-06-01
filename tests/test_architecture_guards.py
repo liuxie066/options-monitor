@@ -156,7 +156,7 @@ def test_assistant_config_rejects_business_runtime_shape() -> None:
     assert "use config.assistant.json, not config.<market>.json" in str(exc.value)
 
 
-def test_llm_intent_surface_is_read_only_only() -> None:
+def test_llm_intent_surface_keeps_executable_read_only_and_preview_limited() -> None:
     from src.application.assistant.llm_intent_schema import llm_intent_json_schema, llm_intent_schema
     from src.application.agent_tool_registry import get_tool_definition
     from src.application.assistant.commands import llm_executable_specs, llm_recognizable_specs
@@ -171,7 +171,10 @@ def test_llm_intent_surface_is_read_only_only() -> None:
     assert set(json_schema["properties"]["intent"]["enum"]) == recognizable_names
     assert allowed_names <= recognizable_names
     assert "position_exit_analysis" in allowed_names
+    assert "symbol_edit" in recognizable_names
+    assert "symbol_edit" not in allowed_names
     assert not any(name.endswith(("_confirm", "_cancel")) for name in recognizable_names)
+    assert recognizable_names - allowed_names == {"help", "symbol_edit"}
 
     pure_read_router_tools = {"inbound.pending", "inbound.symbols"}
     for spec in llm_executable_specs():

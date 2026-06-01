@@ -374,6 +374,8 @@ class PerceptionEngine:
         llm_first: bool = False,
     ) -> PerceptionResult:
         self.route = "agent_loop" if self._settings.mode == "agent_loop" else "llm"
+        if llm_first:
+            perception = _reconcile_llm_read_perception(perception, deterministic_candidate)
         llm_candidate = accepted_candidate(self.route, perception)
         candidates = [llm_candidate, deterministic_candidate] if llm_first else [deterministic_candidate, llm_candidate]
         try:
@@ -386,6 +388,15 @@ class PerceptionEngine:
                 candidates=[*candidates, error_candidate("policy", policy_err)],
             )
             raise
+        conflict_err = _llm_preview_conflict_error(perception, deterministic_candidate)
+        if conflict_err is not None:
+            self.trace = build_perception_trace(
+                decision="llm_conflict_needs_clarification",
+                selected_source=None,
+                selected_perception=None,
+                candidates=[*candidates, error_candidate("policy", conflict_err)],
+            )
+            raise conflict_err
         self.trace = build_perception_trace(
             decision=f"{self.route}_selected",
             selected_source=self.route,
@@ -488,13 +499,123 @@ def general_reply_allowed(text: str, *, translate_error: AgentToolError) -> bool
 
 def ensure_llm_perception_allowed(perception: PerceptionResult) -> None:
     spec = _COMMAND_SPECS_BY_INTENT.get(perception.intent_name)
-    if spec is None or not spec.llm_allowed or not spec.read_only:
+    if spec is None or not spec.llm_allowed or not (spec.read_only or _is_llm_preview_perception_allowed(spec)):
         raise AgentToolError(
             code="PERMISSION_DENIED",
             message=f"LLM is not allowed to route intent: {perception.intent_name}",
-            hint="LLM translator is restricted to recognizable read-only capabilities; write/admin operations require deterministic preview/confirm commands.",
+            hint="LLM translator is restricted to read-only capabilities plus explicitly allowed preview-only symbol settings; confirm/apply operations require deterministic commands.",
             details={"intent_name": perception.intent_name},
         )
+
+
+def _llm_preview_conflict_error(perception: PerceptionResult, deterministic_candidate: Any) -> AgentToolError | None:
+    spec = _COMMAND_SPECS_BY_INTENT.get(perception.intent_name)
+    if spec is None or not _is_llm_preview_perception_allowed(spec):
+        return None
+    deterministic_perception = getattr(deterministic_candidate, "perception", None)
+    if not isinstance(deterministic_perception, PerceptionResult):
+        return None
+    if deterministic_perception.intent_name == perception.intent_name:
+        return None
+    return AgentToolError(
+        code="NEEDS_CLARIFICATION",
+        message="这句话同时像监控配置修改和其他操作，请确认要修改监控配置，还是处理交易/确认等其他事项。",
+        hint="如果是监控配置，请明确写：设置 <symbol> covered call min strike <价格>；如果是交易记录修改，请使用记录相关说法。",
+        details={
+            "llm_intent_name": perception.intent_name,
+            "deterministic_intent_name": deterministic_perception.intent_name,
+        },
+    )
+
+
+def _is_llm_preview_perception_allowed(spec: Any) -> bool:
+    return bool(
+        spec.intent_name == "symbol_edit"
+        and not spec.read_only
+        and spec.risk_level == "preview_write"
+        and spec.operation_action == "preview"
+        and spec.operation_target == "symbol"
+        and spec.tool_name == "inbound.symbols"
+        and spec.supported
+    )
+
+
+def _reconcile_llm_read_perception(perception: PerceptionResult, deterministic_candidate: Any) -> PerceptionResult:
+    deterministic_perception = getattr(deterministic_candidate, "perception", None)
+    if not isinstance(deterministic_perception, PerceptionResult):
+        return perception
+    if deterministic_perception.intent_name != perception.intent_name:
+        return perception
+    spec = _COMMAND_SPECS_BY_INTENT.get(perception.intent_name)
+    if spec is None or not spec.read_only:
+        return perception
+
+    merged, changes = _merge_argument_slots(
+        llm_arguments=dict(perception.arguments or {}),
+        deterministic_arguments=dict(deterministic_perception.arguments or {}),
+    )
+    if not changes:
+        return perception
+    evidence = dict(perception.evidence or {})
+    evidence["argument_reconciliation"] = {
+        "source": "deterministic_shadow",
+        "filled": changes["filled"],
+        "overridden": changes["overridden"],
+    }
+    return PerceptionResult(
+        intent_name=perception.intent_name,
+        arguments=merged,
+        source=perception.source,
+        confidence=perception.confidence,
+        evidence=evidence,
+    )
+
+
+def _merge_argument_slots(
+    *,
+    llm_arguments: dict[str, Any],
+    deterministic_arguments: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, dict[str, Any]] | None]:
+    merged = dict(llm_arguments)
+    filled: dict[str, Any] = {}
+    overridden: dict[str, Any] = {}
+    for key, deterministic_value in deterministic_arguments.items():
+        if _is_empty_slot(deterministic_value):
+            continue
+        if key not in merged or _is_empty_slot(merged.get(key)):
+            merged[key] = deterministic_value
+            filled[key] = deterministic_value
+            continue
+        llm_value = merged.get(key)
+        if isinstance(llm_value, dict) and isinstance(deterministic_value, dict):
+            nested, nested_changes = _merge_argument_slots(
+                llm_arguments=llm_value,
+                deterministic_arguments=deterministic_value,
+            )
+            if nested_changes:
+                merged[key] = nested
+                if nested_changes["filled"]:
+                    filled[key] = nested_changes["filled"]
+                if nested_changes["overridden"]:
+                    overridden[key] = nested_changes["overridden"]
+            continue
+        if llm_value != deterministic_value:
+            merged[key] = deterministic_value
+            overridden[key] = {"llm": llm_value, "deterministic": deterministic_value}
+
+    if not filled and not overridden:
+        return merged, None
+    return merged, {"filled": filled, "overridden": overridden}
+
+
+def _is_empty_slot(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str) and not value.strip():
+        return True
+    if isinstance(value, dict) and not any(not _is_empty_slot(item) for item in value.values()):
+        return True
+    return False
 
 
 def _llm_error_allows_deterministic_fallback(

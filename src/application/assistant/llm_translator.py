@@ -42,11 +42,14 @@ Rules:
 - Only choose the read-only or explicitly recognizable intents present in the schema.
 - The input may be plain text or a JSON object with `message` and bounded, redacted `context`; translate the current `message`.
 - Context is a hint only. The current message wins whenever it explicitly names an account, month, run id, or status.
-- Do not translate write/admin actions such as recording trades, changing monitored symbols, upgrades, or confirmations.
+- Do not translate write/admin actions such as recording trades, upgrades, or confirmations.
+- Exception: `symbol_edit` may be chosen only for monitored-symbol setting changes that can create a preview, never for applying/confirming/canceling a change.
+- For `symbol_edit`, only use these set keys: sell_call.enabled, sell_call.min_strike, sell_put.enabled. Covered call min strike implies sell_call.enabled=true and ensure_use includes call_base.
 - Use null for unknown optional arguments.
 - For unclear or unknown messages, return a low confidence value below 0.5.
 - Use account only when the user explicitly mentions lx or sy.
-- Use month only when the user explicitly mentions a YYYY-MM month.
+- Use month only when the user explicitly mentions a month such as YYYY-MM, YYYY年M月, M月, 本月, or 上月.
+- Normalize explicit month arguments to YYYY-MM. If the year cannot be inferred safely, use null rather than guessing.
 - The JSON `intent` field is an OM capability_id.
 - You can only choose capabilities marked llm_recognizable=true in the manifest below.
 - If the user asks for a known but non-executable read-only analysis capability, choose that capability instead of downgrading to a nearby executable query.

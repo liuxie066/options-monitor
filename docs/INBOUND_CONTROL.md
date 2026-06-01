@@ -116,9 +116,9 @@ assistant:
       max_output_tokens: 512
 ```
 
-When `assistant.mode` is `llm_router` or `agent_loop`, non-slash natural language is LLM-first: OM asks the translator for an `om-llm-intent-v1` JSON intent before deterministic natural-language parsing can select a command. The deterministic parser stays as a fallback/shadow parser when the LLM is unavailable, provider-failed, or returns a clarification. Slash commands remain command-first and never call LLM. The LLM must not execute tools or rewrite canonical OM responses; its output still enters the same Assistant execution router. The LLM executable intent schema is read-only and only allows help/status/health/config/positions/close-advice analysis/income/runs/logs/symbols/pending operations. Write-preview slash commands such as `/record-open` and `/record-close` are deterministic command-facade entries, not LLM-executable intents.
+When `assistant.mode` is `llm_router` or `agent_loop`, non-slash natural language is LLM-first: OM asks the translator for an `om-llm-intent-v1` JSON intent before deterministic natural-language parsing can select a command. The deterministic parser stays as a fallback/shadow parser when the LLM is unavailable, provider-failed, or returns a clarification. Slash commands remain command-first and never call LLM. The LLM must not execute tools or rewrite canonical OM responses; its output still enters the same Assistant execution router. The LLM executable intent schema is read-only and only allows help/status/health/config/positions/close-advice analysis/income/runs/logs/symbols/pending operations. `symbol_edit` is the only LLM-recognizable preview-write exception: it may identify covered-call or sell-put monitored-symbol setting changes and create a pending preview through `inbound.symbols`, but it cannot confirm, cancel, apply, or write config directly. Other write-preview commands such as `/record-open` and `/record-close` are deterministic command-facade entries, not LLM-executable intents.
 
-The command surface authority is `src/application/assistant/commands.py`. Slash command metadata, the read-only LLM intent surface, and inbound help text should use that catalog instead of maintaining separate command lists.
+The command surface authority is `src/application/assistant/commands.py`. Slash command metadata, the LLM intent surface, and inbound help text should use that catalog instead of maintaining separate command lists.
 
 After an inbound message is parsed, the execution router follows one chain:
 `PerceptionResult -> ReasoningResolution -> ActionResult -> ObservationResponse`.
@@ -210,7 +210,7 @@ Check the translator control plane before enabling it in Feishu:
 ./om assistant llm-check --live
 ```
 
-`assistant commands` renders the slash-command help surface. `assistant capabilities` renders the full assistant capability catalog used by the LLM routing manifest: read-only capabilities are executable by LLM routing, while write, confirm, symbol-edit, and upgrade capabilities are visible but non-executable. The default LLM check validates `config.assistant.json`, the effective env file, redacted API-key presence, the resolved provider endpoint URL, and the current capability routing surface. `--live` sends one read-only structured translation probe to the configured provider.
+`assistant commands` renders the slash-command help surface. `assistant capabilities` renders the full assistant capability catalog used by the LLM routing manifest: read-only capabilities are executable by LLM routing, `symbol_edit` is recognizable but preview-only, and other write/confirm/upgrade capabilities are visible but non-executable. The default LLM check validates `config.assistant.json`, the effective env file, redacted API-key presence, the resolved provider endpoint URL, and the current capability routing surface. `--live` sends one read-only structured translation probe to the configured provider.
 
 ## Sender Allowlist
 

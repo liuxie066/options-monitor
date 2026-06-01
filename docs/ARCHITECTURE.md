@@ -59,8 +59,9 @@ preview/confirm operations, and user-facing rendering are owned by
 `src.application.assistant`.
 
 LLM providers are optional. They may translate a message into a structured
-read-only Assistant intent, but deterministic OM tools own facts and write
-actions remain behind preview/confirm gates.
+read-only Assistant intent, or the explicitly allowed preview-only `symbol_edit`
+intent for monitored-symbol settings. Deterministic OM tools own facts, and
+write actions remain behind preview/confirm gates.
 
 Model selection is a control-plane concern. `config.yaml` may define multiple
 `assistant.models` profiles and an `assistant.active_model`, but
@@ -74,6 +75,17 @@ non-slash natural language enters through the LLM translator first; the
 deterministic parser is a fallback/shadow parser when the LLM is unavailable,
 low-confidence, or provider-failed. In `deterministic` mode, non-slash natural
 language uses the deterministic parser directly.
+When LLM-first and the deterministic shadow parser agree on the same read-only
+intent, Assistant may use the deterministic shadow to fill or correct objective
+slots such as account, month, symbol, status, and limit. The selected source
+remains LLM, and the reconciliation is recorded in perception evidence.
+For preview-write LLM recognition, `symbol_edit` is intentionally narrow: LLM
+may identify covered-call or sell-put monitored-symbol setting changes, but the
+result can only enter the existing `inbound.symbols` preview/pending path.
+Confirm, cancel, apply, manual trade, upgrade, and model mutations remain
+deterministic-only. If the deterministic shadow parser accepts a different
+intent for the same text, Assistant stops and asks for clarification instead of
+creating a preview.
 
 ```text
 command parser / LLM translator / deterministic parser

@@ -4,6 +4,7 @@ import json
 import sqlite3
 from datetime import date, datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -15,11 +16,15 @@ from src.application.assistant.contracts import (
     REASONING_RESOLUTION_SCHEMA_VERSION,
     ToolCall,
 )
+from src.application.assistant.llm_intent_schema import LLM_INTENT_SCHEMA_VERSION
+from src.application.assistant.llm_translator import LlmTranslationResult, parse_llm_translation_payload
 from src.application.inbound.feishu import feishu_payload_to_inbound_request, handle_feishu_payload
 from src.application.assistant.parser import parse_inbound_text
 from src.application.assistant.policy import PURE_READ_TOOLS, check_sender_allowed, enforce_tool_allowed
 from src.application.assistant.renderer import render_inbound_text
 from src.application.assistant.router import handle_assistant_request
+from src.application.assistant.runtime import handle_assistant_message
+from src.application.assistant.settings import AssistantSettings, LlmTranslatorSettings
 
 
 def _write_inbound_runtime_config(tmp_path: Path) -> tuple[Path, Path]:
@@ -1702,6 +1707,85 @@ def test_inbound_symbol_add_edit_remove_preview_and_confirm(monkeypatch: pytest.
     assert nvda["use"] == ["put_base", "call_base"]
     assert nvda["sell_call"]["enabled"] is True
     assert nvda["sell_call"]["min_strike"] == 140.0
+
+
+def test_inbound_llm_symbol_edit_creates_preview_only(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _enable_inbound_symbol_write(monkeypatch)
+    cfg_path = _write_symbols_runtime_config(tmp_path)
+    audit_db = tmp_path / "inbound.sqlite3"
+    before = json.loads(cfg_path.read_text(encoding="utf-8"))
+
+    def _translate(
+        text: str,
+        runtime_settings: AssistantSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> LlmTranslationResult:
+        assert text == "设置 NVDA covered call min strike 140"
+        assert conversation_context is not None
+        return parse_llm_translation_payload(
+            {
+                "schema_version": LLM_INTENT_SCHEMA_VERSION,
+                "intent": "symbol_edit",
+                "arguments": {
+                    "symbol": "NVDA",
+                    "set": {"covered_call.min_strike": 140},
+                    "ensure_use": None,
+                },
+                "confidence": 0.96,
+            },
+            settings=runtime_settings.llm,
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="设置 NVDA covered call min strike 140",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_llm_symbol_edit_preview",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+        settings=AssistantSettings(
+            mode="llm_router",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        translate_intent_fn=_translate,
+    )
+
+    assert out["ok"] is True
+    assert out["tool_name"] == "inbound.symbols"
+    assert out["data"]["perception"]["source"] == "llm"
+    assert out["data"]["perception"]["intent_name"] == "symbol_edit"
+    assert out["data"]["reasoning"]["status"] == "preview_required"
+    assert out["data"]["reasoning"]["safety_class"] == "write_preview"
+    assert out["data"]["reasoning"]["requires_confirmation"] is True
+    assert out["data"]["status"] == "previewed"
+    assert out["data"]["operation_type"] == "symbol_edit"
+    assert out["data"]["payload"]["arguments"] == {
+        "symbol": "NVDA",
+        "set": {"sell_call.min_strike": 140.0, "sell_call.enabled": True},
+        "ensure_use": ["call_base"],
+    }
+    assert "未写入配置" in out["data"]["response_text"]
+    assert "确认监控" in out["data"]["response_text"]
+    assert json.loads(cfg_path.read_text(encoding="utf-8")) == before
+
+    assistant_meta = out["meta"]["assistant"]
+    assert assistant_meta["route"] == "llm"
+    assert assistant_meta["decision"]["execution_contract"] == {
+        "read_only": False,
+        "risk_level": "preview_write",
+        "operation_action": "preview",
+        "operation_target": "symbol",
+        "llm_allowed": True,
+        "supported": True,
+        "direct_writes_allowed": False,
+        "llm_write_allowed": False,
+        "preview_confirm_required": True,
+        "canonical_renderer_required": True,
+    }
+    assert assistant_meta["perception_trace"]["decision"] == "llm_selected"
 
 
 def test_inbound_symbol_write_uses_symbol_market_over_default_us_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
