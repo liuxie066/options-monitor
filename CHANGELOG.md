@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.184 - 2026-06-01
+
+### Changed
+- Made `llm_router` and `agent_loop` natural-language Assistant perception LLM-first, with deterministic parsing kept as fallback/shadow evidence while slash commands remain command-first and LLM-skipped.
+- Simplified monthly income Assistant receipts around net cashflow, realized PnL, premium, annualization, and explicit long-option cash-recovery hints.
+
+### Fixed
+- Parsed Chinese month expressions such as `6月`, `六月`, and `2026年6月` for natural-language and slash-command income queries.
+
 ## 1.2.183 - 2026-06-01
 
 ### Added
