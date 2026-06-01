@@ -78,11 +78,10 @@ def test_candidate_reject_summary_groups_trace_rejections(tmp_path: Path) -> Non
 
     rendered = render_candidate_reject_summary(summary)
     assert "### 拒绝摘要" in rendered
-    assert "通过 1 条；拒绝/后过滤 3 条" in rendered
-    assert "Sell Put 2 / Covered Call 1" in rendered
-    assert "数据缺失 1：RV 缺失 1；样例 PDD" in rendered
-    assert "波动率边际不足 1：IV/RV 不足 1；样例 FUTU" in rendered
-    assert "流动性不足 1：价差不合格 1；样例 NVDA" in rendered
+    assert "通过 1 条；过滤 3 条" in rendered
+    assert "主要原因：数据缺失 1、波动率边际不足 1、流动性不足 1" in rendered
+    assert "涉及模块" not in rendered
+    assert "样例" not in rendered
     assert "spread_too_wide" not in rendered
 
 
@@ -171,9 +170,10 @@ def test_candidate_reject_summary_surfaces_event_source_unavailable(tmp_path: Pa
         }
     ]
     rendered = render_candidate_reject_summary(summary)
-    assert "风控注意：事件风险数据源不可用 1；样例 NVDA" in rendered
-    assert "事件风险 1：事件风险数据源不可用 1；样例 NVDA" not in rendered
-    assert "数据缺失 1：RV 缺失 1；样例 PDD" in rendered
+    assert "风控注意：事件风险数据源不可用 1 条" in rendered
+    assert "事件风险 1" not in rendered
+    assert "主要原因：数据缺失 1" in rendered
+    assert "样例" not in rendered
 
 
 def test_append_candidate_reject_summary_reports_unavailable_when_no_evidence(tmp_path: Path) -> None:
