@@ -14,9 +14,32 @@
 
 ## 发布前检查
 
+常规本地预检先跑统一入口：
+
+```bash
+make release-preflight ARGS="--full"
+```
+
+这会按快到慢的顺序检查：
+
+- 当前 Python 解释器和 git 工作区状态
+- `VERSION` / `CHANGELOG.md` / tag metadata
+- `docs/DEPENDENCY_GRAPH.md` 是否过期
+- agent plugin focused tests
+- 完整 pytest（传 `--full` 时）
+
+如果只是想先看 metadata / dependency graph / focused tests，可省略 `--full`。如果需要在提交后确认发布 commit 没有额外本地改动：
+
+```bash
+make release-preflight ARGS="--full --require-clean"
+```
+
+展开后的手工命令如下：
+
 ```bash
 VERSION="$(cat VERSION)"
 python3 scripts/release_check.py --tag "v${VERSION}"
+python3 scripts/generate_dependency_graph.py --check
 python3 tests/run_smoke.py
 python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py
 python3 -m pytest tests/test_config_yaml.py tests/test_layered_config.py
