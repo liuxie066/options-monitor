@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -348,6 +349,97 @@ def test_render_systemd_bundle_can_include_auto_upgrade_timer(tmp_path: Path) ->
     assert "OnCalendar=*-*-* 06:10:00 Asia/Shanghai" in timer
     assert profile["auto_upgrade"]["enabled"] is True
     assert profile["config_paths"]["us"] == str(runtime / "config.us.json")
+
+
+def test_service_upgrade_verify_returns_compact_read_only_summary(tmp_path: Path) -> None:
+    from src.application.service_upgrade import service_upgrade_verify
+
+    releases = tmp_path / "releases"
+    release = releases / "1.2.3"
+    release.mkdir(parents=True)
+    (release / "VERSION").write_text("1.2.3\n", encoding="utf-8")
+    (release / "configs").mkdir()
+    system_config = release / "configs" / "system.json"
+    system_config.write_text('{"runtime": {}}\n', encoding="utf-8")
+    current = tmp_path / "current"
+    current.symlink_to(release, target_is_directory=True)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    config_yaml = runtime / "config.yaml"
+    config_yaml.write_text("accounts: {}\nmarkets: {}\n", encoding="utf-8")
+
+    def _sha(path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    def _write_runtime_config(market: str) -> Path:
+        path = runtime / f"config.{market}.json"
+        payload = {
+            "_generated": {
+                "schema_version": "1.0",
+                "generator": "options-monitor",
+                "source_format": "yaml",
+                "version": "1.2.3",
+                "market": market,
+                "sources": [
+                    {
+                        "role": "system",
+                        "loaded": True,
+                        "optional": False,
+                        "enabled": True,
+                        "path": str(system_config),
+                        "sha256": _sha(system_config),
+                    },
+                    {
+                        "role": "market_user",
+                        "loaded": True,
+                        "optional": False,
+                        "enabled": True,
+                        "path": str(config_yaml),
+                        "sha256": _sha(config_yaml),
+                    },
+                ],
+            },
+            "runtime": {
+                "event_risk_source": {
+                    "mode": "fallback",
+                    "default_provider": "futu",
+                    "providers": {"futu": {}, "yfinance": {}},
+                    "market_rules": {market: {"chain": ["futu", "yfinance"]}},
+                }
+            },
+        }
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        return path
+
+    config_us = _write_runtime_config("us")
+    config_hk = _write_runtime_config("hk")
+    (runtime / "service.profile.json").write_text(
+        json.dumps(
+            {
+                "service_provider": "systemd",
+                "repo_root": str(current),
+                "config_paths": {"us": str(config_us), "hk": str(config_hk)},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    out = service_upgrade_verify(repo_root=current, runtime_root=runtime, check_latest=False)
+
+    assert out["ok"] is True
+    assert out["status"] == "ok"
+    assert out["repo_root"] == str(current)
+    assert out["repo_root_resolved"] == str(release)
+    assert out["version"]["current"] == "1.2.3"
+    assert out["version"]["update_status"] == "not_checked"
+    assert out["config"]["us"]["ok"] is True
+    assert out["config"]["hk"]["freshness_ok"] is True
+    assert out["event_source"]["default_provider"] == "futu"
+    assert out["event_source"]["providers"] == ["futu", "yfinance"]
+    assert out["event_source"]["markets"]["us"]["chain"] == ["futu", "yfinance"]
+    assert out["services"]["status"] == "unknown"
+    assert out["upgrade"] == {"available": False}
 
 
 def test_render_systemd_bundle_records_yaml_authoring_source(tmp_path: Path) -> None:

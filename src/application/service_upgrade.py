@@ -15,6 +15,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from src.application.release_target import compare_versions, parse_version, resolve_upgrade_target
+from src.application.runtime_config_freshness import (
+    GENERATED_KEY,
+    check_runtime_config_freshness,
+    check_runtime_config_identity,
+)
 from src.application.service_drift import service_drift
 
 _CHILD_ENV_PASSTHROUGH_NAMES = {
@@ -1487,6 +1492,239 @@ def service_upgrade_check(
         "version_check": version,
         "last_upgrade": status,
     }
+
+
+def service_upgrade_verify(
+    *,
+    repo_root: str | Path,
+    runtime_root: str | Path,
+    cache_root: str | Path | None = None,
+    remote_name: str = "origin",
+    check_latest: bool = True,
+    run_cmd: Callable[..., Any] = subprocess.run,
+    now_fn: Callable[[], datetime] | None = None,
+) -> dict[str, Any]:
+    runtime = Path(runtime_root).expanduser().resolve()
+    repo_link, repo, repo_root_resolution = _coerce_repo_root_to_current_symlink(repo_root=repo_root, runtime_root=runtime)
+    cache = Path(cache_root).expanduser().resolve() if cache_root else default_upgrade_cache_root(repo_link)
+    current_version = _read_version(repo)
+    update_check = (
+        service_upgrade_check(
+            repo_root=repo_link,
+            runtime_root=runtime,
+            cache_root=cache,
+            remote_name=remote_name,
+            run_cmd=run_cmd,
+            now_fn=now_fn,
+        )
+        if check_latest
+        else None
+    )
+    profile = _load_service_profile(runtime)
+    configs = {
+        market: _runtime_config_verify_summary(
+            market=market,
+            repo_root=repo,
+            runtime_root=runtime,
+            profile=profile,
+            current_version=current_version,
+        )
+        for market in _verify_markets(runtime_root=runtime, profile=profile)
+    }
+    upgrade_status = load_upgrade_status(runtime_root=runtime) or {}
+    services = _compact_service_health(upgrade_status.get("service_health"), profile=profile)
+    event_source = _event_source_verify_summary(configs)
+    update_ok = True
+    if update_check is not None:
+        update_ok = bool(update_check.get("ok")) and not bool(update_check.get("upgrade_available"))
+    config_ok = all(bool(item.get("ok")) for item in configs.values()) if configs else False
+    service_ok = bool(services.get("ok", True))
+    upgrade_ok = not _upgrade_status_failed(upgrade_status)
+    ok = bool(current_version) and update_ok and config_ok and service_ok and upgrade_ok
+    return {
+        "ok": ok,
+        "status": "ok" if ok else "attention_required",
+        "checked_at": utc_now_iso(now_fn),
+        "repo_root": str(repo_link),
+        "repo_root_resolved": str(repo),
+        "repo_root_is_symlink": repo_link.is_symlink(),
+        "repo_root_resolution": repo_root_resolution,
+        "runtime_root": str(runtime),
+        "upgrade_cache_root": str(cache),
+        "version": {
+            "current": current_version,
+            "latest": update_check.get("latest_version") if update_check else None,
+            "release_tag": update_check.get("release_tag") if update_check else f"v{current_version}",
+            "update_status": update_check.get("status") if update_check else "not_checked",
+            "upgrade_available": bool(update_check.get("upgrade_available")) if update_check else None,
+        },
+        "config": configs,
+        "event_source": event_source,
+        "services": services,
+        "upgrade": _compact_upgrade_status(upgrade_status),
+    }
+
+
+def _verify_markets(*, runtime_root: Path, profile: dict[str, Any]) -> list[str]:
+    config_paths = profile.get("config_paths") if isinstance(profile.get("config_paths"), dict) else {}
+    markets = [str(market).strip().lower() for market in config_paths if str(market).strip().lower() in {"us", "hk"}]
+    if markets:
+        return sorted(set(markets))
+    discovered = []
+    for market in ("us", "hk"):
+        if (runtime_root / f"config.{market}.json").exists():
+            discovered.append(market)
+    return discovered
+
+
+def _runtime_config_path_for_market(*, market: str, runtime_root: Path, profile: dict[str, Any]) -> Path:
+    config_paths = profile.get("config_paths") if isinstance(profile.get("config_paths"), dict) else {}
+    raw = config_paths.get(market) if isinstance(config_paths, dict) else None
+    return Path(raw).expanduser().resolve() if raw else runtime_root / f"config.{market}.json"
+
+
+def _runtime_config_verify_summary(
+    *,
+    market: str,
+    repo_root: Path,
+    runtime_root: Path,
+    profile: dict[str, Any],
+    current_version: str,
+) -> dict[str, Any]:
+    path = _runtime_config_path_for_market(market=market, runtime_root=runtime_root, profile=profile)
+    if not path.exists():
+        return {"ok": False, "path": str(path), "exists": False, "reason": "runtime_config_missing"}
+    try:
+        cfg = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {"ok": False, "path": str(path), "exists": True, "reason": f"runtime_config_invalid:{type(exc).__name__}"}
+    if not isinstance(cfg, dict):
+        return {"ok": False, "path": str(path), "exists": True, "reason": "runtime_config_not_object"}
+    identity = check_runtime_config_identity(
+        cfg,
+        explicit_market=market,
+        runtime_config_path=path,
+        required_source_format="yaml",
+    )
+    freshness = check_runtime_config_freshness(
+        cfg,
+        repo_root=repo_root,
+        market=market,
+        runtime_config_path=path,
+    )
+    generated = cfg.get(GENERATED_KEY) if isinstance(cfg.get(GENERATED_KEY), dict) else {}
+    generated_version = str(generated.get("version") or "").strip()
+    version_ok = (not generated_version) or generated_version == current_version
+    event_source = cfg.get("runtime", {}).get("event_risk_source") if isinstance(cfg.get("runtime"), dict) else None
+    return {
+        "ok": bool(identity.get("ok")) and bool(freshness.get("ok")) and version_ok,
+        "path": str(path),
+        "exists": True,
+        "market": market,
+        "source_format": freshness.get("source_format"),
+        "generated_version": generated_version or None,
+        "version_ok": version_ok,
+        "identity_ok": bool(identity.get("ok")),
+        "freshness_ok": bool(freshness.get("ok")),
+        "error_codes": _config_error_codes(identity, freshness, version_ok=version_ok),
+        "event_source": event_source if isinstance(event_source, dict) else None,
+    }
+
+
+def _config_error_codes(*results: dict[str, Any], version_ok: bool) -> list[str]:
+    codes: list[str] = []
+    for result in results:
+        errors = result.get("errors") if isinstance(result.get("errors"), list) else []
+        for item in errors:
+            if isinstance(item, dict) and item.get("code"):
+                codes.append(str(item["code"]))
+    if not version_ok:
+        codes.append("generated_version_mismatch")
+    return codes
+
+
+def _event_source_verify_summary(configs: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    by_market: dict[str, dict[str, Any]] = {}
+    default_provider = None
+    mode = None
+    providers: dict[str, Any] | None = None
+    for market, item in configs.items():
+        source = item.get("event_source") if isinstance(item.get("event_source"), dict) else {}
+        market_rules = source.get("market_rules") if isinstance(source.get("market_rules"), dict) else {}
+        rule = market_rules.get(market) if isinstance(market_rules.get(market), dict) else {}
+        chain = rule.get("chain") if isinstance(rule.get("chain"), list) else None
+        by_market[market] = {
+            "mode": source.get("mode"),
+            "default_provider": source.get("default_provider"),
+            "chain": chain or ([source.get("default_provider")] if source.get("default_provider") else []),
+        }
+        default_provider = default_provider or source.get("default_provider")
+        mode = mode or source.get("mode")
+        providers = providers or (source.get("providers") if isinstance(source.get("providers"), dict) else None)
+    return {
+        "mode": mode,
+        "default_provider": default_provider,
+        "providers": sorted(providers) if isinstance(providers, dict) else [],
+        "markets": by_market,
+    }
+
+
+def _compact_service_health(raw: Any, *, profile: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        provider = str(profile.get("service_provider") or "").strip().lower() if profile else ""
+        return {"ok": True, "status": "unknown", "source": "upgrade_status", "provider": provider, "services": {}}
+    checks = raw.get("checks") if isinstance(raw.get("checks"), list) else []
+    services: dict[str, dict[str, Any]] = {}
+    for check in checks:
+        if not isinstance(check, dict):
+            continue
+        service = str(check.get("service") or "").strip()
+        action = str(check.get("check") or "").strip()
+        if not service or not action:
+            continue
+        services.setdefault(service, {})[action] = "ok" if bool(check.get("ok")) else "error"
+    return {
+        "ok": bool(raw.get("ok", True)),
+        "status": raw.get("status") or ("ok" if bool(raw.get("ok", True)) else "error"),
+        "source": "upgrade_status",
+        "provider": raw.get("provider"),
+        "services": services,
+        "failed_checks": [
+            {
+                "service": item.get("service"),
+                "check": item.get("check"),
+            }
+            for item in (raw.get("failed_checks") if isinstance(raw.get("failed_checks"), list) else [])
+            if isinstance(item, dict)
+        ],
+    }
+
+
+def _compact_upgrade_status(status: dict[str, Any]) -> dict[str, Any]:
+    if not status:
+        return {"available": False}
+    return {
+        "available": True,
+        "ok": bool(status.get("ok")),
+        "status": status.get("status"),
+        "current_version": status.get("current_version"),
+        "target_version": status.get("target_version"),
+        "release_tag": status.get("release_tag"),
+        "updated_at": status.get("updated_at"),
+        "symlink_switched": bool(status.get("symlink_switched")),
+        "config_rebuilt": bool(status.get("config_rebuilt")),
+        "runtime_failed": bool(status.get("runtime_failed")),
+        "restart_failed_services": status.get("restart_failed_services") or [],
+        "remediation": status.get("manual_remediation") or status.get("remediation") or [],
+    }
+
+
+def _upgrade_status_failed(status: dict[str, Any]) -> bool:
+    if not status:
+        return False
+    if bool(status.get("ok", True)):
+        return False
+    return str(status.get("status") or "").strip() not in {"already_current", "dry_run"}
 
 
 def _service_upgrade_check_status(version: dict[str, Any]) -> str:

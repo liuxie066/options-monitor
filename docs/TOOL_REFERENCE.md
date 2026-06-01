@@ -243,6 +243,8 @@ om-agent run --tool runtime_status --input-json '{"profile_path":"/var/lib/optio
 
 `service drift` 会用当前 release 的 `render_service_bundle()` 重新生成期望 service/timer，再和 `$RUNTIME/service.profile.json` 以及 systemd unit 文件对比。默认只读；带 `--confirm` 或 `--yes` 时只写入缺失 unit/profile、执行 `systemctl daemon-reload`，并 `enable --now` 缺失 timer，不会自动启用或重启新增长期 service。`runtime_status` 同样会暴露 service drift 摘要；缺失 `options-monitor-projection-verify.timer` 这类维护 timer 会作为 warning/error 返回。
 
+`om update verify --repo-root <current> --runtime-root <runtime>` 是发布/升级后的 compact 只读复核入口，汇总 current symlink、版本、runtime config freshness、事件源配置、最近 upgrade status 和长期 service health。`--no-check-latest` 可跳过 git tag 查询，用于已经确认 release 发布成功后的远端快速收口。
+
 systemd 的 US/HK tick timer 使用 market timezone 的 `OnCalendar` 在 10 分钟整数边界唤醒：US 为 `Mon..Fri *-*-* 09..16:00/10:00 America/New_York`，HK 为 `Mon..Fri *-*-* 09..16:00/10:00 Asia/Hong_Kong`。业务 run point 是否执行仍由 `tick-cron` scheduler 决定。
 
 渲染出的长期服务包含每天北京时间 05:30 执行的 expired auto-close，以及每天北京时间 06:00 执行的 option-position projection verify。auto-close 会以非交互方式运行 `auto-close-expired --apply --yes --quiet`；projection verify 使用 `om option-positions --data-config <runtime_root>/portfolio.runtime.json verify-projection --mode auto`。systemd 分别使用 `OnCalendar=*-*-* 05:30:00 Asia/Shanghai` 和 `OnCalendar=*-*-* 06:00:00 Asia/Shanghai`；launchd 使用本机时区的 `Hour=5, Minute=30` 和 `Hour=6, Minute=0`。
@@ -749,10 +751,11 @@ output_shared/state/current/research.current.json
 om event-source probe --provider futu --symbols NVDA 0700.HK --host 127.0.0.1 --port 11111
 om event-source probe --provider yfinance --symbols NVDA
 om event-source probe --provider all --symbols NVDA 0700.HK
+om event-source probe --provider all --symbols NVDA 0700.HK --summary-only
 ```
 
 Futu/OpenD provider 读取财报、分红和拆合股事件，需要 `futu-api>=10.6.6608` 以及可用 OpenD quote 连接。
-`--provider all` 会并行展示 Futu 与 yfinance 的只读探针结果，便于比较数据源可用性；它不会写事件缓存。
+`--provider all` 会并行展示 Futu 与 yfinance 的只读探针结果，便于比较数据源可用性；它不会写事件缓存。`--summary-only` 会省略原始事件 payload，只保留 provider health、计数和错误码，适合远端发布验证。
 
 线上事件预取由 `runtime.event_risk_source` 控制。单源配置仍兼容：
 

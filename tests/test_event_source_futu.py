@@ -127,6 +127,57 @@ def test_event_source_probe_cli_handler_splits_symbol_args() -> None:
     ]
 
 
+def test_event_source_probe_summary_only_omits_raw_events() -> None:
+    from src.interfaces.cli.event_source_ops import handle_event_source_command
+    from src.interfaces.cli.main import parse_args
+
+    args = parse_args(["event-source", "probe", "--provider", "all", "--symbols", "NVDA", "--summary-only"])
+    calls = []
+
+    def fake_probe(**kwargs):
+        calls.append(kwargs)
+        return {
+            "ok": True,
+            "provider": kwargs["provider"],
+            "created_at": "2026-06-01T00:00:00Z",
+            "summary": {"symbol_count": 1, "ok_count": 1},
+            "symbols": {
+                "NVDA": {
+                    "ok": True,
+                    "event_count": 2,
+                    "events": [{"type": "earnings"}, {"type": "ex_dividend"}],
+                    "source_results": {
+                        "futu": {"ok": True, "event_count": 2, "events": [{"type": "earnings"}]},
+                        "yfinance": {"ok": False, "error_code": "rate_limited", "error_type": "YFRateLimitError"},
+                    },
+                }
+            },
+            "providers": {
+                "futu": {
+                    "ok": True,
+                    "summary": {"symbol_count": 1, "ok_count": 1},
+                    "symbols": {"NVDA": {"events": [{"type": "earnings"}]}},
+                }
+            },
+        }
+
+    out = handle_event_source_command(args, probe_event_source_fn=fake_probe)
+    symbol = out["data"]["symbols"]["NVDA"]
+
+    assert out["ok"] is True
+    assert calls[0]["provider"] == "all"
+    assert symbol == {
+        "ok": True,
+        "event_count": 2,
+        "source_results": {
+            "futu": {"ok": True, "event_count": 2},
+            "yfinance": {"ok": False, "error_code": "rate_limited", "error_type": "YFRateLimitError"},
+        },
+    }
+    assert "events" not in symbol
+    assert out["data"]["providers"] == {"futu": {"ok": True, "summary": {"symbol_count": 1, "ok_count": 1}}}
+
+
 def test_event_source_probe_all_collects_provider_results(monkeypatch) -> None:
     from src.application.events import probe as probe_mod
 
