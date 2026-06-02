@@ -568,7 +568,8 @@ def evaluate_short_vol_close_advice(
     The existing close advice model is a return-capture model.  This wrapper keeps
     the same quote-quality and profitability gates, then overlays the short-vol
     thesis checks that decide whether the original reason to stay short still
-    holds: IV/RV edge, event risk, delta band, and path-stress observability.
+    holds: IV/RV edge, delta band, and path-stress observability. Event data is
+    carried as context for the close decision.
     """
 
     row = evaluate_close_advice(inp, close_config)
@@ -588,6 +589,16 @@ def evaluate_short_vol_close_advice(
     )
     row.update(risk_fields)
     row["path_stress_status"] = "ok" if risk_fields.get("path_stress_evaluable") is True else "not_evaluable"
+    event_status = str(risk_fields.get("event_source_status") or "").strip().lower()
+    if risk_fields.get("event_risk_flag") is True:
+        event_context_status = "in_window"
+    elif event_status in EVENT_SOURCE_OK_STATUSES:
+        event_context_status = "clear"
+    else:
+        event_context_status = event_status or "unknown"
+    row["event_context_status"] = event_context_status
+    row["event_context_types"] = risk_fields.get("event_risk_types")
+    row["event_context_dates"] = risk_fields.get("event_risk_dates")
 
     flags = {x for x in str(row.get("data_quality_flags") or "").split(";") if x}
     if str(row.get("tier") or "").strip().lower() == "not_evaluable" or (flags & PRICING_BLOCKING_FLAGS):
@@ -608,34 +619,6 @@ def evaluate_short_vol_close_advice(
             row,
             reason=f"缺少 short-vol 平仓评估数据: {', '.join(missing)}",
             flag="short_vol_risk_data_missing",
-        )
-
-    event_status = str(risk_fields.get("event_source_status") or "").strip().lower()
-    if short_vol_config.event_source_fail_closed and event_status not in EVENT_SOURCE_OK_STATUSES:
-        return _short_vol_not_evaluable(
-            row,
-            reason="事件风险数据源不可用，无法确认 short-vol 持仓是否仍可继续持有",
-            flag="event_source_unavailable",
-        )
-
-    if short_vol_config.reject_event_risk and risk_fields.get("event_risk_flag") is True:
-        if _short_close_is_loss_or_flat(row):
-            return _short_vol_acceptance_hold(
-                row,
-                reason=_short_vol_loss_hold_reason(
-                    mode_norm,
-                    "到期前存在事件风险",
-                ),
-                status="event_risk",
-                hold_reason_type=_short_vol_loss_hold_reason_type(mode_norm),
-                flag="risk_exit_loss_not_actionable",
-            )
-        return _short_vol_override(
-            row,
-            tier="strong",
-            reason="到期前存在事件风险，short-vol 持仓的尾部风险上升，优先考虑平仓",
-            status="event_risk",
-            allow_loss=True,
         )
 
     ratio = safe_float(risk_fields.get("iv_rv_ratio"))
@@ -677,7 +660,7 @@ def evaluate_short_vol_close_advice(
         )
 
     row["short_vol_thesis_status"] = "valid"
-    row["short_vol_reason"] = "IV/RV edge、事件风险和 delta 区间仍支持 short-vol 持仓"
+    row["short_vol_reason"] = "IV/RV edge 和 delta 区间仍支持 short-vol 持仓"
     if str(row.get("exit_state") or "").strip().lower() == EXIT_STATE_HOLD:
         return _short_vol_acceptance_hold(
             row,

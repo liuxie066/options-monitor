@@ -150,6 +150,9 @@ OUTPUT_COLUMNS = [
     "event_risk_dates",
     "event_source_status",
     "event_source_error",
+    "event_context_status",
+    "event_context_types",
+    "event_context_dates",
     "path_stress_status",
     "path_stress_evaluable",
     "path_stress_unavailable_reason",
@@ -1255,9 +1258,6 @@ def _merge_event_snapshot_for_short_vol_positions(
         if key not in quotes:
             continue
         quote = dict(quotes.get(key) or {})
-        if snapshot_path is None and str(quote.get("event_source_status") or "").strip():
-            quotes[key] = quote
-            continue
         quote.setdefault("symbol", key[0])
         quote.setdefault("option_type", key[1])
         quote.setdefault("expiration", key[2])
@@ -1266,6 +1266,7 @@ def _merge_event_snapshot_for_short_vol_positions(
             pd.DataFrame([quote]),
             snapshot=snapshot,
             event_risk_cfg=_event_risk_cfg_for_position(pos=pos, config=config),
+            as_of_date=expiration_business_today(),
         )
         if annotated.empty:
             continue

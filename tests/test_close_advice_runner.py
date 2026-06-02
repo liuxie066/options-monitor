@@ -833,14 +833,17 @@ def test_run_close_advice_reports_missing_event_snapshot_for_short_vol_position(
 
     rows = pd.read_csv(out_dir / "close_advice.csv").to_dict("records")
     text = (out_dir / "close_advice.txt").read_text(encoding="utf-8")
-    assert result["evaluation_gap_rows"] == 1
-    assert rows[0]["tier"] == "not_evaluable"
+    assert result["evaluation_gap_rows"] == 0
+    assert rows[0]["tier"] == "strong"
+    assert rows[0]["evaluation_status"] == "priced"
     assert rows[0]["event_source_status"] == "error"
     assert rows[0]["event_source_error"] == "event snapshot missing for symbol"
-    assert "event snapshot missing for symbol" in text
+    assert rows[0]["event_context_status"] == "error"
+    assert "event_source_unavailable" not in str(rows[0]["data_quality_flags"])
+    assert "event snapshot missing for symbol" not in text
 
 
-def test_run_close_advice_fails_closed_when_event_snapshot_missing_symbol(
+def test_run_close_advice_records_missing_event_snapshot_symbol_as_context(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -910,11 +913,85 @@ def test_run_close_advice_fails_closed_when_event_snapshot_missing_symbol(
 
     rows = pd.read_csv(out_dir / "close_advice.csv").to_dict("records")
     text = (out_dir / "close_advice.txt").read_text(encoding="utf-8")
-    assert result["evaluation_gap_rows"] == 1
-    assert rows[0]["tier"] == "not_evaluable"
+    assert result["evaluation_gap_rows"] == 0
+    assert rows[0]["tier"] == "strong"
+    assert rows[0]["evaluation_status"] == "priced"
     assert rows[0]["event_source_status"] == "error"
-    assert "event_source_unavailable" in str(rows[0]["data_quality_flags"])
-    assert "event snapshot missing for symbol" in text
+    assert rows[0]["event_context_status"] == "error"
+    assert "event_source_unavailable" not in str(rows[0]["data_quality_flags"])
+    assert "event snapshot missing for symbol" not in text
+
+
+def test_run_close_advice_rechecks_stale_quote_event_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _freeze_close_advice_business_today(monkeypatch)
+    context = {
+        "open_positions_min": [
+            {
+                "account": "lx",
+                "symbol": "PDD",
+                "option_type": "put",
+                "side": "short",
+                "status": "open",
+                "contracts_open": 1,
+                "currency": "USD",
+                "strike": 85,
+                "multiplier": 100,
+                "premium": 1.0,
+                "expiration": "2026-06-18",
+            }
+        ]
+    }
+    ctx_path = tmp_path / "option_positions_context.json"
+    ctx_path.write_text(json.dumps(context, ensure_ascii=False), encoding="utf-8")
+
+    required_root = tmp_path / "required_data"
+    parsed = required_root / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "PDD",
+                "option_type": "put",
+                "expiration": "2026-06-18",
+                "strike": 85,
+                "mid": 0.20,
+                "bid": 0.19,
+                "ask": 0.21,
+                "dte": 63,
+                "multiplier": 100,
+                "spot": 110,
+                "currency": "USD",
+                "delta": -0.20,
+                "implied_volatility": 0.30,
+                "realized_volatility_estimate": 0.20,
+                "event_flag": True,
+                "event_types": "earnings",
+                "event_dates": "2026-07-01",
+                "event_source_status": "ok",
+            }
+        ]
+    ).to_csv(parsed / "PDD_required_data.csv", index=False)
+
+    out_dir = tmp_path / "reports"
+    result = run_close_advice(
+        config={
+            "close_advice": {"enabled": True, "notify_levels": ["strong", "medium"]},
+            "symbols": [{"symbol": "PDD", "sell_put": {"strategy": "short_vol"}}],
+        },
+        context_path=ctx_path,
+        required_data_root=required_root,
+        output_dir=out_dir,
+        base_dir=tmp_path,
+    )
+
+    rows = pd.read_csv(out_dir / "close_advice.csv").to_dict("records")
+    assert result["evaluation_gap_rows"] == 0
+    assert rows[0]["event_risk_flag"] is False or rows[0]["event_risk_flag"] == "False"
+    assert rows[0]["event_context_status"] != "in_window"
+    assert str(rows[0].get("event_risk_dates") or "") in {"", "nan"}
 
 
 def test_run_close_advice_prefers_position_strategy_snapshot_over_current_config(

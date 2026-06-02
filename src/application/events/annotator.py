@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
+from domain.domain.expiration_dates import expiration_business_today
 from domain.domain.symbol_identity import canonical_symbol
 from src.application.events.source_yfinance import to_date_str
 
@@ -27,6 +28,7 @@ def annotate_candidates_with_event_snapshot(
     snapshot: dict[str, Any] | None = None,
     snapshot_path: Path | None = None,
     event_risk_cfg: dict[str, Any] | None = None,
+    as_of_date: Any | None = None,
 ) -> pd.DataFrame:
     out = df.copy()
     for col, default in (
@@ -45,6 +47,7 @@ def annotate_candidates_with_event_snapshot(
         out["event_source_status"] = "disabled"
         return out
 
+    window_start = _as_of_date(as_of_date if as_of_date is not None else cfg.get("as_of_date"))
     payload = snapshot if isinstance(snapshot, dict) else load_event_snapshot(snapshot_path)
     symbols = _snapshot_symbols(payload)
 
@@ -80,7 +83,8 @@ def annotate_candidates_with_event_snapshot(
             t = str(ev.get("type") or "").strip()
             if not d or not t:
                 continue
-            if datetime.fromisoformat(d).date() <= exp_date:
+            event_date = datetime.fromisoformat(d).date()
+            if window_start <= event_date <= exp_date:
                 hits.append((d, t))
         hits = sorted(set(hits))
 
@@ -116,6 +120,17 @@ def _normalize_event_risk_cfg(cfg: dict[str, Any] | None) -> dict[str, Any]:
     mode = str(out.get("mode") or "warn").strip().lower()
     out["mode"] = mode or "warn"
     return out
+
+
+def _as_of_date(value: Any | None) -> date:
+    if value in (None, ""):
+        return expiration_business_today()
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    ds = to_date_str(value)
+    if not ds:
+        return expiration_business_today()
+    return datetime.fromisoformat(ds).date()
 
 
 def _snapshot_symbols(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
