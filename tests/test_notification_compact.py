@@ -297,13 +297,14 @@ def test_build_account_message_compact() -> None:
         cash_footer_lines=["LX 持有 ¥1,000 (CNY) | 可用 ¥200 (CNY)"],
     )
 
-    assert "⏰ 北京时间 2026-05-12 22:31:00" in message
-    assert "📋 本轮概览" in message
-    assert "Put 1 · Covered Call 0" in message
-    assert "──────────────" in message
-    assert "💰 资金概览" in message
-    assert "  LX 持有 ¥1,000 (CNY) | 可用 ¥200 (CNY)" in message
-    assert "🔴 优化器" in message
+    assert "# OM · lx" in message
+    assert "2026-05-12 22:31:00 BJ" in message
+    assert "状态：Put 1 · Covered Call 0 · 平仓 1" in message
+    assert "候选\nPut\n- 腾讯 卖Put 2026-04-29 460P" in message
+    assert "持仓\n- NVDA Put 2026-06-19 150P · 强烈建议平仓换仓" in message
+    assert "资金\n- LX 持有 ¥1,000 (CNY) | 可用 ¥200 (CNY)" in message
+    assert "优化器：换仓 1 · 平仓 0" in message
+    assert "──────────────" not in message
 
 
 def test_build_account_message_compact_without_optimizer() -> None:
@@ -327,6 +328,7 @@ def test_build_account_message_compact_without_optimizer() -> None:
         cash_footer_lines=None,
     )
 
-    assert "📋 本轮概览" in message
-    assert "🔴 优化器" not in message
-    assert "💰 资金概览" not in message
+    assert "# OM · sy" in message
+    assert "状态：Put 1 · Covered Call 0 · 平仓 0" in message
+    assert "优化器：" not in message
+    assert "\n资金\n" not in message
