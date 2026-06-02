@@ -41,6 +41,61 @@ Shadow Replay 的分析结论使用 [Opportunity Quality](OPPORTUNITY_QUALITY.md
 3. 样本足够后运行 `analyze`，人工评审分桶表现。
 4. 人工决定是否调整策略参数；replay 不自动修改 runtime config。
 
+## 参数回测
+
+`parameter-backtest` 用已有扫描证据做参数反事实回放，用来回答“如果当时 short-vol 参数换成这一组，会新增/移除哪些候选”。它不是重新扫描市场，也不会用 OpenD 事后恢复当时没有保存的期权链。
+
+```bash
+cat > params.json <<'JSON'
+{
+  "baseline": "production",
+  "variants": [
+    {
+      "name": "iv_rv_1_10",
+      "short_vol": {
+        "min_iv_rv_ratio": 1.10,
+        "min_iv_minus_rv": 0.05,
+        "min_abs_delta": 0.15,
+        "max_abs_delta": 0.30,
+        "min_dte": 20,
+        "max_dte": 60
+      }
+    }
+  ]
+}
+JSON
+
+./om research shadow-replay parameter-backtest \
+  --profile-path /var/lib/options-monitor/service.profile.json \
+  --start-date 2026-06-01 \
+  --end-date 2026-06-02 \
+  --account lx \
+  --market hk \
+  --params params.json \
+  --min-sample 30
+```
+
+也可以对已建立的 dataset 回测，并输出 Markdown 报告：
+
+```bash
+./om research shadow-replay parameter-backtest \
+  --dataset output_shared/research/shadow_replay/datasets/<dataset-id> \
+  --params params.json \
+  --format markdown \
+  --output backtest.md
+```
+
+参数文件只允许调整 `short_vol` 的 `min_iv_rv_ratio`、`min_iv_minus_rv`、`min_abs_delta`、`max_abs_delta`、`min_dte`、`max_dte`、`min_annualized_return`。事件风险、spread、流动性、集中度、合约身份、交易状态和通知都不是可调参数；如果 variant 触碰这些安全边界，结果会保留拒绝原因而不是放行。
+
+结果里的关键字段：
+
+- `coverage.strict_backtest_allowed`：指定日期窗口是否真的有扫描 artifacts。没有指定起始日数据时不会静默补数。
+- `universe_scope=observed_run_universe`：只评估历史 artifacts 中出现过的合约。
+- `data_mode=filter_only/path_only/closed_replay`：是否已有路径和 outcome，可以支持到什么级别的结论。
+- `baseline`：生产实际观察结果。
+- `variants`：每个参数组的 accepted/rejected、新增/移除候选、拒绝原因、安全边界原因和 outcome/insurance 指标。
+- `recommendation`：只给下一步 gate；即使 ready，也只是进入 live shadow / 人工评审，不自动改生产配置。
+
 ## 建立 Dataset
 
 ```bash

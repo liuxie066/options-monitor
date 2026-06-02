@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.193 - 2026-06-02
+
+### Added
+- Added read-only `research shadow-replay parameter-backtest` for counterfactual short-vol parameter replay across existing datasets or historical `output_runs` date windows.
+- Added parameter-variant whitelist validation, coverage gating for missing scan artifacts, observed-universe reporting, and Markdown report output for replay reviews.
+
+### Changed
+- Preserved bid/ask/mid/last, open interest, and volume fields in Shadow Replay candidate snapshots so parameter backtests can retain liquidity evidence.
+
 ## 1.2.192 - 2026-06-02
 
 ### Changed

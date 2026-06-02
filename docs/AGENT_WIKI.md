@@ -114,7 +114,7 @@ Equivalent agent tool:
 
 Research keeps candidate CSVs separate from `*_candidates_reject_log.csv` files. Reject logs remain available as rejection evidence, but they must not inflate candidate row counts.
 
-For strategy tuning, inspect `candidate_evidence.shadow_replay` in the Research bundle. It is an offline readiness and analysis surface only; it cannot mutate scanner config.
+For strategy tuning, inspect `candidate_evidence.shadow_replay` in the Research bundle. It is an offline readiness and analysis surface only; it cannot mutate scanner config. To compare a concrete parameter hypothesis, use `./om research shadow-replay parameter-backtest --params <params.json>` against either an existing dataset or a `--profile-path` / date window. The backtest stays inside `observed_run_universe`: if the requested start date has no scan artifacts, it must report coverage failure instead of reconstructing a historical option chain.
 
 Default runs do not write files. Writing reports requires `write_outputs=true`, `confirm=true`, and `OM_AGENT_ENABLE_WRITE_TOOLS=true`. Default output locations are:
 

@@ -120,6 +120,8 @@ def test_shadow_replay_builds_universe_and_analyzes_closed_replay(tmp_path: Path
     assert manifest["summary"]["outcome_fact_count"] == 2
     assert {row["status"] for row in snapshots} == {"accepted", "rejected"}
     assert {row["strategy_profile"] for row in snapshots} == {"short_vol"}
+    assert next(row for row in snapshots if row["symbol"] == "NVDA")["open_interest"] == 500
+    assert next(row for row in snapshots if row["symbol"] == "NVDA")["volume"] == 20
     assert next(row for row in snapshots if row["status"] == "rejected")["event_risk_status"] == "source_unavailable"
     assert analysis["summary"]["status"] == "needs_human_review"
     assert analysis["summary"]["evidence_level"] == "closed_replay"
