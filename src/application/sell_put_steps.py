@@ -8,12 +8,15 @@ Goal: minimal/no behavior change.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
 import pandas as pd
 
 from domain.domain.candidate_defaults import (
+    CandidateLiquidityDefaults,
+    CandidateWindowDefaults,
     DEFAULT_SELL_PUT_WINDOW,
     resolve_candidate_liquidity,
     resolve_candidate_window,
@@ -44,6 +47,7 @@ from src.application.candidate_filter_trace import (
 from domain.domain.sell_put_config import validate_min_annualized_net_return
 from domain.domain.risk_capacity import compute_sell_put_cash_capacity
 from src.application.yield_enhancement_config import (
+    YieldEnhancementPolicy,
     derive_yield_enhancement_policy,
     resolve_yield_enhancement_cfg,
     wants_yield_enhancement_inline,
@@ -51,6 +55,14 @@ from src.application.yield_enhancement_config import (
 )
 
 log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _YieldEnhancementOverlayResult:
+    recommended_pairs: pd.DataFrame
+    separate_enabled: bool
+    candidates_path: Path
+    alerts_path: Path
 
 
 def _row_value(row: pd.Series, column: str) -> Any:
@@ -213,6 +225,136 @@ def _enrich_and_filter_sell_put_cash(
     return df_out
 
 
+def _run_premium_funded_convexity_overlay(
+    *,
+    base: Path,
+    sym: str,
+    symbol: str,
+    symbol_lower: str,
+    symbol_cfg: dict[str, Any],
+    yield_enhancement_cfg: dict[str, Any],
+    yield_sp: dict[str, Any],
+    yield_enhancement_policy: YieldEnhancementPolicy,
+    yield_enhancement_inline: bool,
+    yield_enhancement_separate: bool,
+    df_sell_put_labeled: pd.DataFrame,
+    sell_put_labeled_path: Path,
+    required_data_dir: Path,
+    report_dir: Path,
+    yield_window: CandidateWindowDefaults,
+    liquidity: CandidateLiquidityDefaults,
+    event_risk: dict[str, Any],
+    exchange_rate_converter: CurrencyConverter,
+    portfolio_ctx: dict[str, Any] | None,
+) -> _YieldEnhancementOverlayResult:
+    symbol_yield_put_universe = (report_dir / f'{symbol_lower}_yield_enhancement_put_universe.csv').resolve()
+    symbol_yield_put_universe_labeled = (
+        report_dir / f'{symbol_lower}_yield_enhancement_put_universe_labeled.csv'
+    ).resolve()
+    symbol_yield_enhancement = (report_dir / f'{symbol_lower}_yield_enhancement_candidates.csv').resolve()
+    yield_enhancement_alerts = (report_dir / f'{symbol_lower}_yield_enhancement_alerts.txt').resolve()
+
+    if not bool(yield_enhancement_policy.enabled):
+        return _YieldEnhancementOverlayResult(
+            recommended_pairs=pd.DataFrame(),
+            separate_enabled=False,
+            candidates_path=symbol_yield_enhancement,
+            alerts_path=yield_enhancement_alerts,
+        )
+
+    run_sell_put_scan(
+        symbols=[sym],
+        input_root=required_data_dir,
+        output=symbol_yield_put_universe,
+        min_dte=yield_window.min_dte,
+        max_dte=yield_window.max_dte,
+        min_annualized_net_return=0.0,
+        min_net_income=0.0,
+        min_strike=_optional_float(yield_sp, 'min_strike'),
+        max_strike=_optional_float(yield_sp, 'max_strike'),
+        min_open_interest=liquidity.min_open_interest,
+        min_volume=liquidity.min_volume,
+        max_spread_ratio=liquidity.max_spread_ratio,
+        event_risk_cfg=event_risk,
+        score_weights=yield_sp.get('score_weights'),
+        quiet=True,
+    )
+    add_sell_put_labels(base, symbol_yield_put_universe, symbol_yield_put_universe_labeled)
+    df_yield_put_universe = safe_read_csv(symbol_yield_put_universe_labeled)
+    if yield_enhancement_policy.uses_short_vol_gate and not df_yield_put_universe.empty:
+        df_yield_put_universe = enrich_and_filter_sell_put_short_vol(
+            df_labeled=df_yield_put_universe,
+            symbol=symbol,
+            sell_put_cfg=yield_sp,
+            portfolio_ctx=portfolio_ctx,
+            exchange_rate_converter=exchange_rate_converter,
+            out_path=symbol_yield_put_universe_labeled,
+        )
+
+    raw_yield_pairs_df = find_sell_put_yield_enhancement_pairs(
+        df_candidates=df_yield_put_universe,
+        symbol=symbol,
+        input_root=required_data_dir,
+        yield_enhancement_cfg=yield_enhancement_cfg,
+        sell_put_cfg=yield_sp,
+        global_yield_enhancement_liquidity=(symbol_cfg.get('_global_yield_enhancement_liquidity') or {}),
+        output_path=None,
+    )
+    recommended_yield_pairs_df = select_best_yield_enhancement_pairs(raw_yield_pairs_df)
+
+    scope = infer_trace_scope_from_path(symbol_yield_enhancement)
+    if df_yield_put_universe.empty:
+        yield_rule = "yield_enhancement_put_universe_empty"
+        yield_status = "post_filtered"
+    elif raw_yield_pairs_df.empty:
+        yield_rule = "yield_enhancement_no_pair"
+        yield_status = "post_filtered"
+    elif recommended_yield_pairs_df.empty:
+        yield_rule = "yield_enhancement_no_recommended_pair"
+        yield_status = "post_filtered"
+    else:
+        yield_rule = "yield_enhancement_pair_accepted"
+        yield_status = "accepted"
+    append_candidate_filter_trace_rows(
+        candidate_trace_path_for_output(symbol_yield_enhancement),
+        [
+            build_candidate_filter_trace_row(
+                run_id=scope.get("run_id"),
+                account=scope.get("account"),
+                symbol=symbol,
+                function="yield_enhancement",
+                mode=yield_enhancement_policy.mode,
+                status=yield_status,
+                stage="post_filter",
+                rule=yield_rule,
+                metric_value=len(recommended_yield_pairs_df),
+                threshold=1,
+                message="yield enhancement pair selection",
+                evidence_path=symbol_yield_enhancement.name,
+            )
+        ],
+    )
+
+    if yield_enhancement_separate:
+        try:
+            recommended_yield_pairs_df.to_csv(symbol_yield_enhancement, index=False)
+        except Exception:
+            pass
+    if yield_enhancement_inline:
+        attach_best_linked_calls(
+            df_candidates=df_sell_put_labeled,
+            pairs_df=recommended_yield_pairs_df,
+            out_path=sell_put_labeled_path,
+        )
+
+    return _YieldEnhancementOverlayResult(
+        recommended_pairs=recommended_yield_pairs_df,
+        separate_enabled=yield_enhancement_separate,
+        candidates_path=symbol_yield_enhancement,
+        alerts_path=yield_enhancement_alerts,
+    )
+
+
 def run_sell_put_scan_and_summarize(
     *,
     py: str,
@@ -236,10 +378,6 @@ def run_sell_put_scan_and_summarize(
 ) -> list[dict[str, Any]]:
     symbol_sp = (report_dir / f'{symbol_lower}_sell_put_candidates.csv').resolve()
     symbol_sp_labeled = (report_dir / f'{symbol_lower}_sell_put_candidates_labeled.csv').resolve()
-    symbol_yield_put_universe = (report_dir / f'{symbol_lower}_yield_enhancement_put_universe.csv').resolve()
-    symbol_yield_put_universe_labeled = (report_dir / f'{symbol_lower}_yield_enhancement_put_universe_labeled.csv').resolve()
-    symbol_yield_enhancement = (report_dir / f'{symbol_lower}_yield_enhancement_candidates.csv').resolve()
-    yield_enhancement_alerts = (report_dir / f'{symbol_lower}_yield_enhancement_alerts.txt').resolve()
     yield_enhancement_cfg = resolve_yield_enhancement_cfg(symbol_cfg)
     yield_sp = dict(yield_enhancement_sell_put_cfg or sp)
     yield_enhancement_policy = derive_yield_enhancement_policy(yield_enhancement_cfg, yield_sp)
@@ -325,94 +463,27 @@ def run_sell_put_scan_and_summarize(
         except Exception as exc:
             log.warning("sell_put_steps: failed to write fail-closed sell-put CSV for %s: %s", symbol, exc)
 
-    df_yield_put_universe = df_sp_lab
-    if bool(yield_enhancement_policy.enabled):
-        run_sell_put_scan(
-            symbols=[sym],
-            input_root=required_data_dir,
-            output=symbol_yield_put_universe,
-            min_dte=yield_window.min_dte,
-            max_dte=yield_window.max_dte,
-            min_annualized_net_return=0.0,
-            min_net_income=0.0,
-            min_strike=_optional_float(yield_sp, 'min_strike'),
-            max_strike=_optional_float(yield_sp, 'max_strike'),
-            min_open_interest=liquidity.min_open_interest,
-            min_volume=liquidity.min_volume,
-            max_spread_ratio=liquidity.max_spread_ratio,
-            event_risk_cfg=event_risk,
-            score_weights=yield_sp.get('score_weights'),
-            quiet=True,
-        )
-        add_sell_put_labels(base, symbol_yield_put_universe, symbol_yield_put_universe_labeled)
-        df_yield_put_universe = safe_read_csv(symbol_yield_put_universe_labeled)
-        if yield_enhancement_policy.uses_short_vol_gate and not df_yield_put_universe.empty:
-            df_yield_put_universe = enrich_and_filter_sell_put_short_vol(
-                df_labeled=df_yield_put_universe,
-                symbol=symbol,
-                sell_put_cfg=yield_sp,
-                portfolio_ctx=portfolio_ctx,
-                exchange_rate_converter=exchange_rate_converter,
-                out_path=symbol_yield_put_universe_labeled,
-            )
-
-    if bool(yield_enhancement_policy.enabled):
-        raw_yield_pairs_df = find_sell_put_yield_enhancement_pairs(
-            df_candidates=df_yield_put_universe,
-            symbol=symbol,
-            input_root=required_data_dir,
-            yield_enhancement_cfg=yield_enhancement_cfg,
-            sell_put_cfg=yield_sp,
-            global_yield_enhancement_liquidity=(symbol_cfg.get('_global_yield_enhancement_liquidity') or {}),
-            output_path=None,
-        )
-    else:
-        raw_yield_pairs_df = pd.DataFrame()
-    recommended_yield_pairs_df = select_best_yield_enhancement_pairs(raw_yield_pairs_df)
-    if bool(yield_enhancement_policy.enabled):
-        scope = infer_trace_scope_from_path(symbol_yield_enhancement)
-        if df_yield_put_universe.empty:
-            yield_rule = "yield_enhancement_put_universe_empty"
-            yield_status = "post_filtered"
-        elif raw_yield_pairs_df.empty:
-            yield_rule = "yield_enhancement_no_pair"
-            yield_status = "post_filtered"
-        elif recommended_yield_pairs_df.empty:
-            yield_rule = "yield_enhancement_no_recommended_pair"
-            yield_status = "post_filtered"
-        else:
-            yield_rule = "yield_enhancement_pair_accepted"
-            yield_status = "accepted"
-        append_candidate_filter_trace_rows(
-            candidate_trace_path_for_output(symbol_yield_enhancement),
-            [
-                build_candidate_filter_trace_row(
-                    run_id=scope.get("run_id"),
-                    account=scope.get("account"),
-                    symbol=symbol,
-                    function="yield_enhancement",
-                    mode=yield_enhancement_policy.mode,
-                    status=yield_status,
-                    stage="post_filter",
-                    rule=yield_rule,
-                    metric_value=len(recommended_yield_pairs_df),
-                    threshold=1,
-                    message="yield enhancement pair selection",
-                    evidence_path=symbol_yield_enhancement.name,
-                )
-            ],
-        )
-    if yield_enhancement_separate:
-        try:
-            recommended_yield_pairs_df.to_csv(symbol_yield_enhancement, index=False)
-        except Exception:
-            pass
-    if yield_enhancement_inline:
-        df_sp_lab = attach_best_linked_calls(
-            df_candidates=df_sp_lab,
-            pairs_df=recommended_yield_pairs_df,
-            out_path=symbol_sp_labeled,
-        )
+    yield_overlay = _run_premium_funded_convexity_overlay(
+        base=base,
+        sym=sym,
+        symbol=symbol,
+        symbol_lower=symbol_lower,
+        symbol_cfg=symbol_cfg,
+        yield_enhancement_cfg=yield_enhancement_cfg,
+        yield_sp=yield_sp,
+        yield_enhancement_policy=yield_enhancement_policy,
+        yield_enhancement_inline=yield_enhancement_inline,
+        yield_enhancement_separate=yield_enhancement_separate,
+        df_sell_put_labeled=df_sp_lab,
+        sell_put_labeled_path=symbol_sp_labeled,
+        required_data_dir=required_data_dir,
+        report_dir=report_dir,
+        yield_window=yield_window,
+        liquidity=liquidity,
+        event_risk=event_risk,
+        exchange_rate_converter=exchange_rate_converter,
+        portfolio_ctx=portfolio_ctx,
+    )
 
     if not is_scheduled:
         render_sell_put_alerts(
@@ -423,18 +494,18 @@ def run_sell_put_scan_and_summarize(
             output_path=report_dir / f'{symbol_lower}_sell_put_alerts.txt',
             base_dir=base,
         )
-        if yield_enhancement_separate:
+        if yield_overlay.separate_enabled:
             render_yield_enhancement_alerts(
-                input_path=symbol_yield_enhancement,
+                input_path=yield_overlay.candidates_path,
                 symbol=symbol,
                 top=int(top_n),
-                output_path=yield_enhancement_alerts,
+                output_path=yield_overlay.alerts_path,
                 base_dir=base,
             )
 
     rows = [summarize_sell_put(safe_read_csv(symbol_sp_labeled), symbol, symbol_cfg=symbol_cfg)]
-    if yield_enhancement_separate:
-        rows.append(summarize_yield_enhancement(recommended_yield_pairs_df, symbol, symbol_cfg=symbol_cfg))
+    if yield_overlay.separate_enabled:
+        rows.append(summarize_yield_enhancement(yield_overlay.recommended_pairs, symbol, symbol_cfg=symbol_cfg))
     return rows
 
 
