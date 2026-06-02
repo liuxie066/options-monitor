@@ -124,6 +124,8 @@ def enrich_and_filter_covered_call_short_vol(
                 symbol=row.get("symbol") or symbol,
                 function="sell_call",
                 mode="call",
+                strategy_family="sell_call",
+                strategy_profile=cfg.strategy,
                 status="post_filtered",
                 stage="post_filter",
                 rule=decision["rule"],
@@ -136,6 +138,8 @@ def enrich_and_filter_covered_call_short_vol(
                 evidence_path=getattr(out_path, "name", str(out_path)),
                 config_values={
                     "strategy": cfg.strategy,
+                    "strategy_family": "sell_call",
+                    "strategy_profile": cfg.strategy,
                     "min_iv_rv_ratio": cfg.min_iv_rv_ratio,
                     "min_iv_minus_rv": cfg.min_iv_minus_rv,
                     "min_abs_delta": cfg.min_abs_delta,

@@ -165,6 +165,8 @@ def test_enrich_and_filter_sell_put_short_vol_writes_reject_trace(tmp_path: Path
     assert filtered.empty
     trace = (out_path.parent / "candidate_filter_trace.jsonl").read_text(encoding="utf-8")
     assert "vol_edge_ratio_below_min" in trace
+    assert '"strategy_family": "sell_put"' in trace
+    assert '"strategy_profile": "short_vol"' in trace
 
 
 def test_enrich_and_filter_sell_put_short_vol_rejects_event_risk(tmp_path: Path) -> None:
