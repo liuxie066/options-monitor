@@ -39,18 +39,37 @@ def _looks_like_option_candidate_line(text: str) -> bool:
     return bool(_ISO_EXPIRY_RE.search(s) or _COMPACT_EXPIRY_RE.search(s) or _OPTION_STRIKE_RE.search(s))
 
 
+def _is_optimizer_detail_line(line: str) -> bool:
+    return str(line or "").strip().startswith("- 优化器:")
+
+
+def _next_nonblank_line(lines: list[str], idx: int) -> str:
+    for item in lines[idx + 1:]:
+        if str(item or "").strip():
+            return str(item)
+    return ""
+
+
+def _is_optimizer_close_line(line: str, next_line: str) -> bool:
+    stripped = str(line or "").rstrip()
+    return (
+        OPTIMIZER_CLOSE_LABEL in stripped
+        and OPTIMIZER_SWITCH_LABEL not in stripped
+        and _is_optimizer_detail_line(next_line)
+    )
+
+
 def _highlight_optimizer_lines(text: str) -> str:
     if not text:
         return text
     out_lines: list[str] = []
-    for ln in text.splitlines():
+    raw_lines = text.splitlines()
+    for idx, ln in enumerate(raw_lines):
         stripped = ln.rstrip()
         if OPTIMIZER_SWITCH_LABEL in stripped and not stripped.endswith(OPTIMIZER_SWITCH_TAG):
             out_lines.append(stripped + OPTIMIZER_SWITCH_TAG)
-        elif (
-            OPTIMIZER_CLOSE_LABEL in stripped
-            and OPTIMIZER_SWITCH_LABEL not in stripped
-            and not stripped.endswith(OPTIMIZER_CLOSE_TAG)
+        elif _is_optimizer_close_line(stripped, _next_nonblank_line(raw_lines, idx)) and not stripped.endswith(
+            OPTIMIZER_CLOSE_TAG
         ):
             out_lines.append(stripped + OPTIMIZER_CLOSE_TAG)
         else:
@@ -63,10 +82,11 @@ def count_optimizer_actions(text: str) -> tuple[int, int]:
         return (0, 0)
     switch_n = 0
     close_n = 0
-    for ln in text.splitlines():
+    raw_lines = text.splitlines()
+    for idx, ln in enumerate(raw_lines):
         if OPTIMIZER_SWITCH_LABEL in ln:
             switch_n += 1
-        elif OPTIMIZER_CLOSE_LABEL in ln:
+        elif _is_optimizer_close_line(ln, _next_nonblank_line(raw_lines, idx)):
             close_n += 1
     return (switch_n, close_n)
 
@@ -228,6 +248,175 @@ def build_account_message(
 SECTION_DIVIDER = "──────────────"
 
 
+def _strip_markdown_heading(line: str) -> str:
+    s = str(line or "").strip()
+    if s.startswith("### "):
+        s = s[4:].strip()
+    if s.startswith("## "):
+        s = s[3:].strip()
+    if s in {"Put:", f"{SELL_PUT_SECTION_LABEL}:", f"{COVERED_CALL_SECTION_LABEL}:", "Enhancement:"}:
+        return s[:-1]
+    return s
+
+
+def _split_monitor_sections(text: str) -> tuple[list[str], list[str], list[str]]:
+    candidate_lines: list[str] = []
+    reject_lines: list[str] = []
+    close_lines: list[str] = []
+    section = "candidate"
+    for raw in str(text or "").splitlines():
+        line = raw.rstrip()
+        stripped = line.strip()
+        if stripped.startswith("### 拒绝摘要"):
+            section = "reject"
+            reject_lines.append(stripped)
+            continue
+        if stripped.startswith("### [") and "平仓建议" in stripped:
+            section = "close"
+            close_lines.append(stripped)
+            continue
+        if stripped.startswith("### ") and section in {"reject", "close"}:
+            section = "candidate"
+        if section == "reject":
+            reject_lines.append(line)
+        elif section == "close":
+            close_lines.append(line)
+        else:
+            candidate_lines.append(line)
+    return candidate_lines, reject_lines, close_lines
+
+
+def _compact_candidate_lines(lines: list[str]) -> list[str]:
+    out: list[str] = []
+    saw_no_candidate = False
+    for raw in lines:
+        s = str(raw or "").strip()
+        if not s:
+            if out and out[-1] != "":
+                out.append("")
+            continue
+        if "暂无符合条件的候选" in s:
+            saw_no_candidate = True
+            continue
+        if s.startswith("📋 本轮扫描完成"):
+            continue
+        out.append(_strip_markdown_heading(s))
+    while out and out[-1] == "":
+        out.pop()
+    if not out and saw_no_candidate:
+        return ["- 无符合承保条件候选"]
+    return out
+
+
+def _compact_reject_lines(lines: list[str]) -> list[str]:
+    if not lines:
+        return []
+    total_line = ""
+    reason_line = ""
+    unavailable_line = ""
+    for raw in lines:
+        s = str(raw or "").strip()
+        if not s or s.startswith("###"):
+            continue
+        body = s[2:].strip() if s.startswith("- ") else s
+        if "拒绝摘要不可用" in body:
+            unavailable_line = body
+        elif body.startswith("主要原因："):
+            reason_line = "主要过滤：" + body.removeprefix("主要原因：").strip()
+        elif body.startswith("通过 ") and ("过滤" in body or "拒绝" in body):
+            total_line = body.replace("；", " · ")
+    if unavailable_line:
+        return [f"- {unavailable_line}"]
+    out: list[str] = []
+    if reason_line:
+        out.append(f"- {reason_line}")
+    if total_line:
+        out.append(f"- {total_line}")
+    return out
+
+
+def _is_close_action_line(line: str) -> bool:
+    s = str(line or "").strip()
+    if not s or s.startswith("###") or "本次无" in s or "待补数据" in s or "无法评估" in s:
+        return False
+    has_contract = bool(re.search(r"\b(?:Put|Call)\b", s))
+    if not has_contract:
+        return False
+    if s[:1] in {"🔴", "🟠", "🟡", "🟢", "⚪"}:
+        return True
+    return s.startswith("- ") and any(token in s for token in ("平仓", "换仓", "止盈", "风险"))
+
+
+def _is_close_gap_line(line: str) -> bool:
+    s = str(line or "").strip()
+    return s.startswith("- ") and "无法评估" in s and bool(re.search(r"\b(?:Put|Call)\b", s))
+
+
+def _compact_close_gap_line(line: str) -> str:
+    s = str(line or "").strip()
+    s = s.replace(" · 无法评估 | ", " · ")
+    s = s.replace("收益捕获平仓仅支持 open short put/call", "非 short put/call，跳过收益捕获")
+    return s
+
+
+def _compact_close_lines(lines: list[str], *, max_gap_items: int = 3) -> tuple[list[str], int, int]:
+    if not lines:
+        return ["- 无高/中优先级平仓建议"], 0, 0
+    action_count = sum(1 for line in lines if _is_close_action_line(line))
+    gap_lines = [str(line).strip() for line in lines if _is_close_gap_line(str(line))]
+    gap_count = len(gap_lines)
+
+    out: list[str] = []
+    skip_header = True
+    in_gap = False
+    shown_gap = 0
+    for raw in lines:
+        s = str(raw or "").strip()
+        if not s:
+            continue
+        if skip_header and s.startswith("###"):
+            continue
+        if "本次无 strong/medium 平仓建议" in s or "本次未生成 strong/medium 提醒" in s:
+            if not action_count:
+                out.append("- 无高/中优先级平仓建议")
+            continue
+        if s == "- 待补数据:" or s == "待补数据:":
+            in_gap = True
+            if gap_count:
+                out.append("- 待补:")
+            continue
+        if in_gap:
+            if _is_close_gap_line(s):
+                if shown_gap < max_gap_items:
+                    out.append(_compact_close_gap_line(s))
+                shown_gap += 1
+            continue
+        out.append(s)
+
+    if gap_count > max_gap_items:
+        out.append(f"- 另有 {gap_count - max_gap_items} 条待补数据")
+    if not out:
+        out.append("- 无高/中优先级平仓建议")
+    return out, action_count, gap_count
+
+
+def _compact_cash_footer_lines(footer_lines: list[str]) -> list[str]:
+    out: list[str] = []
+    for raw in footer_lines:
+        s = str(raw or "").strip()
+        if not s:
+            continue
+        if "💰" in s:
+            continue
+        cleaned = s.replace("**", "")
+        if cleaned.startswith("- "):
+            cleaned = cleaned[2:].strip()
+        cleaned = cleaned.replace("总现金折算 ", "总现金 ")
+        cleaned = cleaned.replace("担保后可用 ", "担保后 ")
+        out.append(f"- {cleaned}")
+    return out
+
+
 def build_account_message_compact(
     result: AccountResult,
     *,
@@ -238,6 +427,12 @@ def build_account_message_compact(
         return ''
 
     text = result.notification_text.strip()
+    body = annotate_notification(result.account, text + '\n').strip()
+    body = _highlight_optimizer_lines(body)
+    candidate_raw, reject_raw, close_raw = _split_monitor_sections(body)
+    candidate_lines = _compact_candidate_lines(candidate_raw)
+    reject_lines = _compact_reject_lines(reject_raw)
+    close_lines, close_action_n, close_gap_n = _compact_close_lines(close_raw)
     put_n = sum(1 for ln in text.splitlines() if _is_sell_put_line(ln))
     call_n = sum(1 for ln in text.splitlines() if _is_covered_call_line(ln))
     enhancement_n = sum(1 for ln in text.splitlines() if _is_yield_enhancement_line(ln))
@@ -245,36 +440,37 @@ def build_account_message_compact(
     acct = str(result.account).strip().lower()
 
     lines: list[str] = []
-    lines.append("# 📊 Options Monitor")
-    lines.append(f"## 账户提醒（{acct}）")
+    lines.append(f"# OM · {acct}")
+    lines.append(f"{now_bj} BJ")
     lines.append('')
-    lines.append(f"⏰ 北京时间 {now_bj}")
-    lines.append('')
-    lines.append("📋 本轮概览")
     overview_parts = [f"{SELL_PUT_SECTION_LABEL} {put_n}", f"{COVERED_CALL_SECTION_LABEL} {call_n}"]
     if enhancement_n > 0:
         overview_parts.append(f"增强 {enhancement_n}")
-    lines.append(f"  {' · '.join(overview_parts)}")
+    overview_parts.append(f"平仓 {close_action_n}")
+    if close_gap_n > 0:
+        overview_parts.append(f"待补 {close_gap_n}")
+    lines.append(f"状态：{' · '.join(overview_parts)}")
     if switch_n > 0 or close_n > 0:
-        lines.append(f"  🔴 优化器 换仓 {switch_n} · 平仓 {close_n}")
-    lines.append('')
-    lines.append(SECTION_DIVIDER)
+        lines.append(f"优化器：换仓 {switch_n} · 平仓 {close_n}")
     lines.append('')
 
-    body = annotate_notification(result.account, text + '\n').strip()
-    body = _highlight_optimizer_lines(body)
-    lines.append(body)
-    lines.append('')
-    lines.append(SECTION_DIVIDER)
+    lines.append("候选")
+    if candidate_lines:
+        lines.extend(candidate_lines)
+    else:
+        lines.append("- 无符合承保条件候选")
+    if reject_lines:
+        lines.extend(reject_lines)
     lines.append('')
 
-    footer_lines = cash_footer_lines or []
-    if footer_lines:
-        has_emoji_header = any('💰' in str(ln) for ln in footer_lines[:1])
-        if not has_emoji_header:
-            lines.append("💰 资金概览")
-        for ln in footer_lines:
-            lines.append(f"  {ln}")
+    lines.append("持仓")
+    lines.extend(close_lines)
+    lines.append('')
+
+    cash_lines = _compact_cash_footer_lines(cash_footer_lines or [])
+    if cash_lines:
+        lines.append("资金")
+        lines.extend(cash_lines)
         lines.append('')
 
     return '\n'.join(lines).strip() + '\n'
