@@ -202,6 +202,78 @@ def test_parameter_backtest_date_window_reports_missing_prefix_data(tmp_path: Pa
     assert result["recommendation"]["next_action"] == "collect_scan_artifacts_for_requested_window"
 
 
+def test_parameter_backtest_infers_short_vol_profile_for_accepted_candidate_csv(tmp_path: Path) -> None:
+    from src.application.shadow_replay import run_shadow_replay_parameter_backtest
+
+    account_dir = tmp_path / "output_runs" / "20260602T010000Z-run" / "accounts" / "lx"
+    account_dir.mkdir(parents=True)
+    (account_dir / "nvda_sell_put_candidates.csv").write_text(
+        (
+            "symbol,account,option_type,contract_symbol,expiration,dte,delta,strike,"
+            "iv_rv_ratio,iv_minus_rv,spread_ratio,single_trade_concentration,net_income\n"
+            "NVDA,lx,put,NVDA260619P00100000,2026-06-19,30,-0.2,100,"
+            "1.25,0.08,0.10,0.02,120\n"
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_shadow_replay_parameter_backtest(
+        repo_root=tmp_path,
+        runs_root=tmp_path / "output_runs",
+        start_date="2026-06-02",
+        end_date="2026-06-02",
+        params=_params(),
+        min_sample=1,
+    )
+
+    assert result["summary"]["short_vol_candidate_count"] == 1
+    assert result["summary"]["parameter_complete_candidate_count"] == 1
+    assert result["evidence_quality"]["parameter_fields_ready"] is True
+    assert result["baseline"]["accepted_count"] == 1
+    assert result["variants"][0]["accepted_count"] == 1
+
+
+def test_parameter_backtest_reports_parameter_field_evidence_gap(tmp_path: Path) -> None:
+    from src.application.shadow_replay import run_shadow_replay_parameter_backtest
+
+    dataset = tmp_path / "output_shared" / "research" / "shadow_replay" / "datasets" / "missing-fields"
+    _write_jsonl(
+        dataset / "candidate_snapshots.jsonl",
+        [
+            {
+                "contract_symbol": "NVDA260619P00100000",
+                "symbol": "NVDA",
+                "account": "lx",
+                "option_type": "put",
+                "status": "rejected",
+                "strategy_profile": "short_vol",
+                "filter_rule": "delta_below_target_band",
+            }
+        ],
+    )
+    _write_jsonl(dataset / "filter_decisions.jsonl", [{"contract_symbol": "NVDA260619P00100000", "status": "rejected"}])
+    _write_jsonl(dataset / "mark_path_snapshots.jsonl", [])
+    _write_jsonl(dataset / "outcome_facts.jsonl", [])
+
+    result = run_shadow_replay_parameter_backtest(
+        repo_root=tmp_path,
+        dataset=dataset,
+        params=_params(),
+        min_sample=1,
+    )
+
+    assert result["evidence_quality"]["complete_candidate_count"] == 0
+    assert result["evidence_quality"]["field_coverage"]["dte"]["missing_count"] == 1
+    assert set(result["recommendation"]["missing_required_fields"]) == {
+        "abs_delta",
+        "dte",
+        "iv_minus_rv",
+        "iv_rv_ratio",
+    }
+    assert result["recommendation"]["reason"] == "parameter_fields_missing"
+    assert result["recommendation"]["next_action"] == "collect_candidate_parameter_fields"
+
+
 def test_parameter_backtest_without_outcomes_is_filter_only(tmp_path: Path) -> None:
     from src.application.shadow_replay import run_shadow_replay_parameter_backtest
 

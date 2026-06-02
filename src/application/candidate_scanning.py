@@ -22,6 +22,7 @@ from src.application.candidate_filter_trace import (
     append_candidate_filter_trace_rows,
     build_candidate_filter_trace_row,
     build_candidate_filter_trace_rows_from_decision,
+    build_candidate_replay_fields,
     candidate_trace_path_for_output,
     infer_trace_scope_from_path,
     trace_function_for_mode,
@@ -134,6 +135,27 @@ def _spread_values(contract: CandidateContractInput) -> tuple[float | None, floa
     return spread, spread / mid_value
 
 
+def _contract_replay_fields(
+    contract: CandidateContractInput,
+    base_values: CandidateBaseValues | None = None,
+    metrics: dict[str, Any] | None = None,
+    *,
+    annualized_return: Any = None,
+) -> dict[str, Any]:
+    source = contract.to_gate_payload()
+    if base_values is not None:
+        source.update(
+            {
+                "dte": base_values.dte,
+                "strike": base_values.strike,
+                "open_interest": base_values.open_interest,
+                "volume": base_values.volume,
+                "spread_ratio": base_values.spread_ratio,
+            }
+        )
+    return build_candidate_replay_fields(source, metrics, annualized_return=annualized_return)
+
+
 def _build_base_values(
     contract: CandidateContractInput,
     *,
@@ -227,10 +249,12 @@ def run_candidate_scan(
                 extra_hard_kwargs=hard_kwargs,
             )
             if base_values is None:
+                replay_fields = _contract_replay_fields(contract)
                 reject_rows.extend(
                     _decision_reject_log_rows(
                         decision=stage1,
                         reject_stage=config.reject_stage,
+                        replay_fields=replay_fields,
                     )
                 )
                 trace_rows.extend(
@@ -242,6 +266,7 @@ def run_candidate_scan(
                         evidence_path=reject_out_path.name,
                         config_values=config_values,
                         output_path=out_path,
+                        replay_fields=replay_fields,
                     )
                 )
                 continue
@@ -273,14 +298,16 @@ def run_candidate_scan(
                         message=str(reason.get("message") or "candidate metrics unavailable"),
                         evidence_path=out_path.name,
                         config_values=config_values,
+                        replay_fields=_contract_replay_fields(contract, base_values),
                     )
                 )
                 continue
+            annualized_return = deps.annualized_return_value_fn(metrics)
             stage2 = evaluate_candidate_return_floor(
                 stage1,
                 min_annualized_return=config.min_annualized_net_return,
                 min_net_income=config.min_net_income,
-                annualized_return=deps.annualized_return_value_fn(metrics),
+                annualized_return=annualized_return,
                 net_income=metrics.get("net_income"),
             )
             stage3 = evaluate_candidate_risk_filter(
@@ -292,10 +319,17 @@ def run_candidate_scan(
                 volume=base_values.volume,
                 spread_ratio=base_values.spread_ratio,
             )
+            replay_fields = _contract_replay_fields(
+                contract,
+                base_values,
+                metrics,
+                annualized_return=annualized_return,
+            )
             reject_rows.extend(
                 _decision_reject_log_rows(
                     decision=stage3,
                     reject_stage=config.reject_stage,
+                    replay_fields=replay_fields,
                 )
             )
             trace_rows.extend(
@@ -307,6 +341,7 @@ def run_candidate_scan(
                     evidence_path=reject_out_path.name,
                     config_values=config_values,
                     output_path=out_path,
+                    replay_fields=replay_fields,
                 )
             )
             if not bool(stage3.get("accepted")):
@@ -326,7 +361,7 @@ def run_candidate_scan(
                         status="accepted",
                         stage="stage4_ranking",
                         rule="candidate_accepted",
-                        metric_value=deps.annualized_return_value_fn(metrics),
+                        metric_value=annualized_return,
                         threshold=config.min_annualized_net_return,
                         contract_symbol=candidate.get("contract_symbol") or contract.contract_symbol,
                         expiration=candidate.get("expiration") or contract.expiration,
@@ -334,6 +369,12 @@ def run_candidate_scan(
                         message="candidate passed scan filters",
                         evidence_path=out_path.name,
                         config_values=config_values,
+                        replay_fields=_contract_replay_fields(
+                            contract,
+                            base_values,
+                            candidate,
+                            annualized_return=annualized_return,
+                        ),
                     )
                 )
 
@@ -385,9 +426,15 @@ def _trace_config_values(config: CandidateScanConfig) -> dict[str, object]:
     }
 
 
-def _decision_reject_log_rows(*, decision: dict[str, Any], reject_stage: str) -> list[dict[str, Any]]:
+def _decision_reject_log_rows(
+    *,
+    decision: dict[str, Any],
+    reject_stage: str,
+    replay_fields: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     normalized = dict(decision.get("normalized_input") or {})
+    replay_payload = build_candidate_replay_fields(normalized, replay_fields)
     for reject in list(decision.get("rejects") or []):
         reason = str(reject.get("reason") or "")
         rule = CANDIDATE_REJECT_REASON_RULE_MAP.get(reason)
@@ -404,6 +451,7 @@ def _decision_reject_log_rows(*, decision: dict[str, Any], reject_stage: str) ->
                 "expiration": normalized.get("expiration"),
                 "strike": normalized.get("strike"),
                 "mode": decision.get("mode"),
+                **replay_payload,
                 "engine_reject_stage": reject.get("stage"),
                 "engine_reject_reason": reason,
             }

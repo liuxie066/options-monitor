@@ -270,6 +270,8 @@ def snapshot_from_row(
     account_hint: str | None,
 ) -> dict[str, Any]:
     mode_norm = text(row.get("mode") or row.get("option_type") or mode).lower() or None
+    family = _strategy_family_value(row, strategy)
+    profile = _strategy_profile_value(row, strategy=strategy, family=family)
     return {
         "schema_version": schema_version,
         "source_kind": source_kind,
@@ -277,20 +279,8 @@ def snapshot_from_row(
         "source_row_number": source_row_number,
         "status": normal_status(status),
         "strategy": strategy,
-        "strategy_family": text(
-            row.get("strategy_family")
-            or _config_value(row, "strategy_family", "family")
-            or row.get("function")
-            or strategy
-        )
-        or None,
-        "strategy_profile": text(
-            row.get("strategy_profile")
-            or row.get("profile")
-            or row.get("strategy_mode")
-            or _config_value(row, "strategy_profile", "profile", "strategy")
-        )
-        or None,
+        "strategy_family": family,
+        "strategy_profile": profile,
         "mode": mode_norm,
         "run_id": text(row.get("run_id")) or None,
         "account": text(row.get("account") or account_hint).lower() or None,
@@ -348,6 +338,47 @@ def _config_value(row: dict[str, Any], *keys: str) -> Any:
         if text(value):
             return value
     return None
+
+
+def _strategy_family_value(row: dict[str, Any], strategy: str | None) -> str | None:
+    return (
+        text(
+            row.get("strategy_family")
+            or _config_value(row, "strategy_family", "family")
+            or row.get("function")
+            or strategy
+        )
+        or None
+    )
+
+
+def _strategy_profile_value(row: dict[str, Any], *, strategy: str | None, family: str | None) -> str | None:
+    explicit = text(
+        row.get("strategy_profile")
+        or row.get("profile")
+        or row.get("strategy_mode")
+        or _config_value(row, "strategy_profile", "profile", "strategy")
+    )
+    if explicit:
+        return explicit
+    family_norm = text(family or row.get("function") or strategy).lower().replace("-", "_")
+    if family_norm in {"sell_put", "sell_call"} and _has_short_vol_replay_fields(row):
+        return "short_vol"
+    return None
+
+
+def _has_short_vol_replay_fields(row: dict[str, Any]) -> bool:
+    return any(
+        first_float(row, key) is not None
+        for key in (
+            "iv_rv_ratio",
+            "iv_minus_rv",
+            "abs_delta",
+            "delta",
+            "vol_edge_score",
+            "delta_target_score",
+        )
+    )
 
 
 def rank_snapshots_for_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
