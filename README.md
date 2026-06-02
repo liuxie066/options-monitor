@@ -321,6 +321,8 @@ om run tick --config config.us.json --accounts lx sy
 ./om research shadow-replay run-data-plan --min-sample 30 --min-mark-points 2
 ./om research shadow-replay run-data-plan --profile-path /var/lib/options-monitor/service.profile.json --min-sample 30 --min-mark-points 2
 ./om research shadow-replay run-data-plan --min-sample 30 --min-mark-points 2 --source local --write
+./om research shadow-replay parameter-backtest --profile-path /var/lib/options-monitor/service.profile.json --start-date 2026-06-01 --end-date 2026-06-02 --account lx --market hk --params params.json --min-sample 30
+./om research shadow-replay parameter-backtest --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --params params.json --format markdown --output backtest.md
 ./om research shadow-replay collect-marks --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --source local --required-data-root output_shared/required_data --write
 ./om research shadow-replay collect-marks --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --source opend --required-data-root output_shared/required_data --opend-host 127.0.0.1 --opend-port 11111 --write
 ./om research shadow-replay mark --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --required-data-root output_shared/required_data --write
@@ -333,6 +335,8 @@ om run tick --config config.us.json --accounts lx sy
 `status` / `list` 是只读复盘仪表盘，会列出每个本地 dataset 的 `dataset_id`、candidate 数、被拒样本是否存在、最后 mark 时间、usable mark 数、outcome facts 数，以及下一步建议：`collect_marks`、`settle`、`analyze` 或 `wait`。它还会输出 `sampling`、只包含 `collect_marks` / `settle` 的顶层 `data_plan`，以及只提示人工复盘的 `review_queue`，用于判断 mark 是否过期、路径采样点是否太少、哪些 dataset 应优先采样、哪些 dataset 已可人工复盘。它不采样、不结算、不写 dataset，用来回答“现在是否已经有足够数据可以复盘”。
 
 `run-data-plan` 是独立的低频数据维护入口，不挂 tick 主链路。默认 dry-run，只展示会执行哪些 `data_plan` 动作且不写 receipt；显式 `--write` 才会执行 `collect_marks` / `settle`，并写本地 receipt 到 `output_shared/research/shadow_replay/receipts/`。它不接受 `analyze` 作为执行动作；人工复盘仍从 `analyze` 命令进入。`--source opend --write` 需要人工显式选择，会刷新本地 required-data cache 后追加当前采样点。
+
+`parameter-backtest` 是只读的参数反事实回放入口，用历史扫描 artifacts 或已落地 dataset 比较 `production_observed` 与参数 variants。它只在 `observed_run_universe` 内评估，不用 OpenD 事后重建当时没有保存的期权链；如果 `--start-date` 对应日期没有扫描 artifacts，会返回 `strict_backtest_allowed=false` 和 coverage reason。参数文件只允许调整 short-vol 的 `min_iv_rv_ratio`、`min_iv_minus_rv`、`min_abs_delta`、`max_abs_delta`、`min_dte`、`max_dte`、`min_annualized_return`；事件、spread、流动性、集中度、合约身份和交易状态仍是不可调安全边界。缺少 mark/outcome 时结果会标为 `filter_only` 或 `path_only`，不能作为生产参数变更结论。
 
 `collect-marks` 是复盘数据采样入口：`--source local` 使用本地 `required_data` 当前报价；`--source opend --write` 会先按 dataset 中的 symbol / option type / expiration 从 OpenD 拉当前报价写入本地 required_data cache，再把这一刻的 mark 追加到 replay dataset，并维护本地 OpenD 限流状态和 option-chain cache。不带 `--write` 的 OpenD 预览使用临时目录，不持久化这些文件。OpenD 只能补当前/未来采样点，不能事后恢复过去未保存的 option mark，所以需要在 dataset 建好后持续采样。
 
