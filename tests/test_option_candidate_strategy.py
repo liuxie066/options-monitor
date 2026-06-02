@@ -594,6 +594,7 @@ def test_run_candidate_scan_logs_hard_liquidity_and_missing_spread_rejects(tmp_p
                 "open_interest": 100,
                 "volume": 50,
                 "implied_volatility": 0.3,
+                "realized_volatility_estimate": 0.2,
                 "delta": -0.2,
             },
             {
@@ -613,6 +614,7 @@ def test_run_candidate_scan_logs_hard_liquidity_and_missing_spread_rejects(tmp_p
                 "open_interest": 1,
                 "volume": 2,
                 "implied_volatility": 0.3,
+                "realized_volatility_estimate": 0.2,
                 "delta": -0.2,
             },
             {
@@ -632,6 +634,7 @@ def test_run_candidate_scan_logs_hard_liquidity_and_missing_spread_rejects(tmp_p
                 "open_interest": 100,
                 "volume": 50,
                 "implied_volatility": 0.3,
+                "realized_volatility_estimate": 0.2,
                 "delta": -0.2,
             },
             {
@@ -711,3 +714,9 @@ def test_run_candidate_scan_logs_hard_liquidity_and_missing_spread_rejects(tmp_p
     assert by_contract["FAIL_LIQUIDITY"] == ["min_open_interest", "min_volume"]
     assert by_contract["FAIL_MISSING_SPREAD"] == ["max_spread_ratio"]
     assert set(reject_log["engine_reject_stage"]) == {"stage1_hard_constraints", "stage3_risk_filter"}
+    fail_dte = reject_log.loc[reject_log["contract_symbol"] == "FAIL_DTE"].iloc[0]
+    assert fail_dte["dte"] == 5
+    assert fail_dte["delta"] == -0.2
+    assert fail_dte["abs_delta"] == 0.2
+    assert fail_dte["iv_rv_ratio"] == 1.5
+    assert fail_dte["iv_minus_rv"] == 0.1

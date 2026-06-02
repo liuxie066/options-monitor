@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -109,6 +110,11 @@ def test_covered_call_short_vol_enrichment_writes_reject_trace(tmp_path: Path) -
     assert "\"function\": \"sell_call\"" in trace
     assert '"strategy_family": "sell_call"' in trace
     assert '"strategy_profile": "short_vol"' in trace
+    trace_row = json.loads(trace)
+    assert trace_row["dte"] == 30
+    assert trace_row["abs_delta"] == 0.2
+    assert trace_row["iv_rv_ratio"] == 1.041667
+    assert trace_row["iv_minus_rv"] == 0.01
 
 
 def test_covered_call_short_vol_enrichment_rejects_concentration(tmp_path: Path) -> None:

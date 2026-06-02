@@ -42,6 +42,15 @@ from src.application.shadow_replay.settlement import is_usable_mark
 PARAMETER_BACKTEST_SCHEMA_VERSION = "shadow_replay_parameter_backtest.v1"
 ACCEPTED_STATUSES = {"accepted", "notified"}
 REJECTED_STATUSES = {"rejected", "post_filtered", "ranked_below"}
+PARAMETER_FIELD_MAP = {
+    "min_iv_rv_ratio": "iv_rv_ratio",
+    "min_iv_minus_rv": "iv_minus_rv",
+    "min_abs_delta": "abs_delta",
+    "max_abs_delta": "abs_delta",
+    "min_dte": "dte",
+    "max_dte": "dte",
+    "min_annualized_return": "annualized_return",
+}
 
 
 def run_shadow_replay_parameter_backtest(
@@ -97,6 +106,10 @@ def run_shadow_replay_parameter_backtest(
     mark_snapshots = evidence["mark_snapshots"]
     outcome_facts = evidence["outcome_facts"]
     scoped_candidates = [row for row in candidate_snapshots if _strategy_profile(row) == "short_vol"]
+    evidence_quality = _parameter_evidence_quality(
+        scoped_candidates,
+        required_fields=_required_parameter_fields(parameter_set),
+    )
     baseline = _baseline_payload(
         candidates=scoped_candidates,
         filter_decisions=filter_decisions,
@@ -121,6 +134,7 @@ def run_shadow_replay_parameter_backtest(
         variants=variants,
         data_mode=data_mode,
         min_sample=sample_floor,
+        evidence_quality=evidence_quality,
     )
     result: dict[str, Any] = {
         "schema_version": PARAMETER_BACKTEST_SCHEMA_VERSION,
@@ -143,7 +157,9 @@ def run_shadow_replay_parameter_backtest(
             "outcome_fact_count": len(outcome_facts),
             "min_sample": sample_floor,
             "variant_count": len(variants),
+            "parameter_complete_candidate_count": evidence_quality["complete_candidate_count"],
         },
+        "evidence_quality": evidence_quality,
         "baseline": baseline,
         "variants": variants,
         "recommendation": recommendation,
@@ -424,6 +440,60 @@ def _variant_payload(
     }
 
 
+def _required_parameter_fields(parameter_set: ParameterSet) -> list[str]:
+    fields: set[str] = set()
+    for variant in parameter_set.variants:
+        for params in variant.profiles.values():
+            for key in params:
+                field = PARAMETER_FIELD_MAP.get(key)
+                if field:
+                    fields.add(field)
+    return sorted(fields)
+
+
+def _parameter_evidence_quality(
+    candidates: list[dict[str, Any]],
+    *,
+    required_fields: list[str],
+) -> dict[str, Any]:
+    candidate_count = len(candidates)
+    coverage = {
+        field: _field_coverage(candidates, field)
+        for field in required_fields
+    }
+    missing_required = [
+        field
+        for field, item in coverage.items()
+        if int(item.get("present_count") or 0) < candidate_count
+    ]
+    complete_count = sum(1 for row in candidates if all(_has_parameter_field(row, field) for field in required_fields))
+    return {
+        "required_fields": required_fields,
+        "candidate_count": candidate_count,
+        "complete_candidate_count": complete_count,
+        "complete_ratio": round(complete_count / candidate_count, 6) if candidate_count else 0.0,
+        "missing_required_fields": missing_required,
+        "parameter_fields_ready": bool(candidate_count and not missing_required),
+        "field_coverage": coverage,
+    }
+
+
+def _field_coverage(candidates: list[dict[str, Any]], field: str) -> dict[str, Any]:
+    present = sum(1 for row in candidates if _has_parameter_field(row, field))
+    total = len(candidates)
+    return {
+        "present_count": present,
+        "missing_count": max(0, total - present),
+        "coverage_ratio": round(present / total, 6) if total else 0.0,
+    }
+
+
+def _has_parameter_field(row: dict[str, Any], field: str) -> bool:
+    if field == "abs_delta":
+        return abs_first_float(row, "abs_delta", "delta") is not None
+    return first_float(row, field) is not None
+
+
 def _evaluate_candidate(row: dict[str, Any], *, variant: ParameterVariant) -> dict[str, Any]:
     profile = _strategy_profile(row)
     params = variant.profiles.get(profile)
@@ -563,6 +633,7 @@ def _recommendation(
     variants: list[dict[str, Any]],
     data_mode: str,
     min_sample: int,
+    evidence_quality: dict[str, Any],
 ) -> dict[str, Any]:
     if not coverage.get("strict_backtest_allowed"):
         return {
@@ -575,6 +646,15 @@ def _recommendation(
             "status": "not_ready",
             "reason": "sample_size_below_min_sample",
             "next_action": "collect_more_scan_artifacts",
+        }
+    if evidence_quality.get("missing_required_fields"):
+        return {
+            "status": "not_ready",
+            "reason": "parameter_fields_missing",
+            "missing_required_fields": evidence_quality.get("missing_required_fields"),
+            "complete_candidate_count": evidence_quality.get("complete_candidate_count"),
+            "candidate_count": evidence_quality.get("candidate_count"),
+            "next_action": "collect_candidate_parameter_fields",
         }
     if not variants or max(int(row.get("accepted_count") or 0) for row in variants) <= 0:
         return {
@@ -683,6 +763,7 @@ def _render_markdown(result: dict[str, Any]) -> str:
         f"- Universe: {result['universe_scope']}",
         f"- Coverage: {coverage.get('reason')} / strict={coverage.get('strict_backtest_allowed')}",
         f"- Samples: short_vol {summary['short_vol_candidate_count']} / all {summary['candidate_snapshot_count']}",
+        f"- Parameter fields: complete {summary.get('parameter_complete_candidate_count')} / {summary['short_vol_candidate_count']}",
         f"- Baseline accepted: {result['baseline']['accepted_count']}",
         "",
         "## Variants",
@@ -706,4 +787,7 @@ def _render_markdown(result: dict[str, Any]) -> str:
             f"- Next action: {recommendation.get('next_action')}",
         ]
     )
+    missing_required = recommendation.get("missing_required_fields")
+    if missing_required:
+        lines.append(f"- Missing required fields: {missing_required}")
     return "\n".join(lines) + "\n"

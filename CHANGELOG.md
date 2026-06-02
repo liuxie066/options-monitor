@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.2.194 - 2026-06-03
+
+### Fixed
+- Preserved short-vol parameter fields in candidate trace and reject evidence so Shadow Replay parameter backtests can evaluate DTE, Delta, IV/RV, IV-RV edge, and annualized return gates instead of producing empty candidate results.
+- Reported missing parameter evidence as `parameter_fields_missing` with field coverage diagnostics before treating zero accepted variants as a parameter outcome.
+- Inferred short-vol replay profile for accepted Sell Put and Covered Call candidate snapshots when explicit strategy metadata is absent but replay fields are present.
+
 ## 1.2.193 - 2026-06-02
 
 ### Added

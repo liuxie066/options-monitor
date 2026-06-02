@@ -92,6 +92,7 @@ JSON
 - `coverage.strict_backtest_allowed`：指定日期窗口是否真的有扫描 artifacts。没有指定起始日数据时不会静默补数。
 - `universe_scope=observed_run_universe`：只评估历史 artifacts 中出现过的合约。
 - `data_mode=filter_only/path_only/closed_replay`：是否已有路径和 outcome，可以支持到什么级别的结论。
+- `evidence_quality.parameter_field_coverage`：参数文件实际引用字段的覆盖率，例如 `dte`、`abs_delta`、`iv_rv_ratio`、`iv_minus_rv`、`annualized_return`；字段不足时先修证据，不把结果解释成参数过严。
 - `baseline`：生产实际观察结果。
 - `variants`：每个参数组的 accepted/rejected、新增/移除候选、拒绝原因、安全边界原因和 outcome/insurance 指标。
 - `recommendation`：只给下一步 gate；即使 ready，也只是进入 live shadow / 人工评审，不自动改生产配置。
@@ -239,6 +240,7 @@ DATASET_ID=us-<run-id>
 |---|---|---|
 | `not_ready / candidate_universe_missing` | 没有候选全集 | 重新指定 `run-id` / `run-dir` / candidate path |
 | `not_ready / candidate_snapshot_count_below_min_sample` | 样本数不足 | 多积累 run 或降低人工评审阈值 |
+| `not_ready / parameter_fields_missing` | 参数回测候选缺少实际可调字段，不能可靠判断参数组 | 让新扫描 trace/reject evidence 写入 `dte`、`delta/abs_delta`、`iv_rv_ratio`、`iv_minus_rv` 后重跑 |
 | `evidence_incomplete / rejected_universe_missing` | 只有最终候选，缺被拒样本 | 检查 `candidate_filter_trace.jsonl` / reject log |
 | `ready_for_sampling / mark_path_snapshots_missing` | 没有路径采样 | 跑 `collect-marks --source local` 或 `--source opend` |
 | `ready_for_sampling / usable_mark_path_snapshots_missing` | 有 mark 但没有可用报价 | 检查 bid/ask/mid/spot，必要时用 OpenD 重新采样 |

@@ -166,6 +166,7 @@ def _sell_put_cash_trace_rows(
                 strike=row.get("strike"),
                 message=message,
                 evidence_path=out_path.name,
+                replay_fields=row.to_dict(),
                 config_values={"basis": capacity.basis},
             )
         )
