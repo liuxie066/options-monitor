@@ -40,6 +40,7 @@ def test_sell_put_scan_writes_candidate_filter_trace(tmp_path: Path) -> None:
                 "open_interest": 100,
                 "volume": 50,
                 "implied_volatility": 0.3,
+                "realized_volatility_estimate": 0.2,
                 "delta": -0.2,
                 "multiplier": 100,
             },
@@ -59,6 +60,7 @@ def test_sell_put_scan_writes_candidate_filter_trace(tmp_path: Path) -> None:
                 "open_interest": 1,
                 "volume": 0,
                 "implied_volatility": 0.3,
+                "realized_volatility_estimate": 0.2,
                 "delta": -0.2,
                 "multiplier": 100,
             },
@@ -78,6 +80,7 @@ def test_sell_put_scan_writes_candidate_filter_trace(tmp_path: Path) -> None:
                 "open_interest": 100,
                 "volume": 50,
                 "implied_volatility": 0.3,
+                "realized_volatility_estimate": 0.2,
                 "delta": -0.2,
                 "multiplier": 100,
             },
@@ -112,6 +115,14 @@ def test_sell_put_scan_writes_candidate_filter_trace(tmp_path: Path) -> None:
     assert {row["option_type"] for row in trace_rows} == {"put"}
     assert {row["strategy_family"] for row in trace_rows} == {"sell_put"}
     assert {row["strategy_profile"] for row in trace_rows} == {"short_vol"}
+    by_contract = {row["contract_symbol"]: row for row in trace_rows if row.get("contract_symbol")}
+    assert by_contract["PASS"]["dte"] == 30
+    assert by_contract["PASS"]["delta"] == -0.2
+    assert by_contract["PASS"]["abs_delta"] == 0.2
+    assert by_contract["PASS"]["iv_rv_ratio"] == 1.5
+    assert by_contract["PASS"]["iv_minus_rv"] == 0.1
+    assert by_contract["FAIL_LIQUIDITY"]["dte"] == 30
+    assert by_contract["FAIL_LIQUIDITY"]["abs_delta"] == 0.2
 
 
 def test_candidate_scan_traces_missing_required_data_chain(tmp_path: Path) -> None:

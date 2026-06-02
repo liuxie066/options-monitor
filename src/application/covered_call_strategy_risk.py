@@ -136,6 +136,7 @@ def enrich_and_filter_covered_call_short_vol(
                 strike=row.get("strike"),
                 message=decision.get("message") or "covered-call short-vol strategy risk filter",
                 evidence_path=getattr(out_path, "name", str(out_path)),
+                replay_fields={**row_payload, **dict(decision.get("fields") or {})},
                 config_values={
                     "strategy": cfg.strategy,
                     "strategy_family": "sell_call",

@@ -33,6 +33,21 @@ TRACE_STATUS_ORDER: dict[str, int] = {
     "not_applicable": 6,
 }
 
+TRACE_REPLAY_FIELD_KEYS: tuple[str, ...] = (
+    "spot",
+    "dte",
+    "delta",
+    "abs_delta",
+    "iv_rv_ratio",
+    "iv_minus_rv",
+    "annualized_return",
+    "spread_ratio",
+    "open_interest",
+    "volume",
+    "net_income",
+    "multiplier",
+)
+
 
 def trace_function_for_mode(mode: Any) -> str:
     mode_norm = str(mode or "").strip().lower()
@@ -91,6 +106,7 @@ def build_candidate_filter_trace_row(
     message: Any = "",
     evidence_path: Any = None,
     config_values: dict[str, Any] | None = None,
+    replay_fields: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     function_norm = _clean_text(function).lower()
     if function_norm not in CANDIDATE_FILTER_FUNCTIONS:
@@ -107,6 +123,7 @@ def build_candidate_filter_trace_row(
         or _trace_config_value(config_values_json, "strategy_profile", "profile", "strategy")
     )
     option_type_norm = _clean_option_type(option_type or mode)
+    replay_fields_json = build_candidate_replay_fields(replay_fields)
     return {
         "schema_version": TRACE_SCHEMA_VERSION,
         "run_id": _clean_optional_text(run_id),
@@ -125,6 +142,7 @@ def build_candidate_filter_trace_row(
         "contract_symbol": _clean_optional_text(contract_symbol),
         "expiration": _clean_optional_text(expiration),
         "strike": _jsonable(strike),
+        **replay_fields_json,
         "message": _clean_text(message),
         "evidence_path": _clean_optional_text(evidence_path),
         "config_values": config_values_json,
@@ -140,9 +158,11 @@ def build_candidate_filter_trace_rows_from_decision(
     evidence_path: str | None,
     config_values: dict[str, Any],
     output_path: Path | str | None = None,
+    replay_fields: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     scope = infer_trace_scope_from_path(output_path)
     normalized = dict(decision.get("normalized_input") or {})
+    replay_payload = build_candidate_replay_fields(normalized, replay_fields)
     rows: list[dict[str, Any]] = []
     for reject in list(decision.get("rejects") or []):
         reason = str(reject.get("reason") or "").strip()
@@ -166,6 +186,7 @@ def build_candidate_filter_trace_rows_from_decision(
                 message=reject.get("message") or "",
                 evidence_path=evidence_path,
                 config_values=config_values,
+                replay_fields=replay_payload,
             )
         )
     return rows
@@ -202,9 +223,70 @@ def read_candidate_filter_trace(path: Path | str) -> list[dict[str, Any]]:
     return rows
 
 
+def build_candidate_replay_fields(*sources: dict[str, Any] | None, annualized_return: Any = None) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in TRACE_REPLAY_FIELD_KEYS:
+            if key in source and not _is_missing_scalar(source.get(key)):
+                out[key] = _jsonable(source.get(key))
+        if "annualized_return" not in out:
+            annual = _first_present(
+                source,
+                "annualized_return",
+                "annualized_net_return_on_cash_basis",
+                "annualized_net_premium_return",
+                "annualized_net_return",
+            )
+            if annual is not None:
+                out["annualized_return"] = _jsonable(annual)
+
+    if annualized_return is not None and not _is_missing_scalar(annualized_return):
+        out["annualized_return"] = _jsonable(annualized_return)
+
+    delta = _number_or_none(out.get("delta"))
+    if "abs_delta" not in out and delta is not None:
+        out["abs_delta"] = abs(delta)
+    elif "abs_delta" in out:
+        abs_delta = _number_or_none(out.get("abs_delta"))
+        if abs_delta is not None:
+            out["abs_delta"] = abs(abs_delta)
+
+    if "iv_rv_ratio" not in out or "iv_minus_rv" not in out:
+        merged: dict[str, Any] = {}
+        for source in sources:
+            if isinstance(source, dict):
+                merged.update(source)
+        iv = _number_or_none(_first_present(merged, "implied_volatility", "iv"))
+        rv = _number_or_none(_first_present(merged, "realized_volatility_estimate", "realized_volatility", "rv"))
+        if "iv_rv_ratio" not in out and iv is not None and rv is not None and rv > 0:
+            out["iv_rv_ratio"] = round(iv / rv, 6)
+        if "iv_minus_rv" not in out and iv is not None and rv is not None:
+            out["iv_minus_rv"] = round(iv - rv, 6)
+
+    return {key: out[key] for key in TRACE_REPLAY_FIELD_KEYS if key in out and not _is_missing_scalar(out[key])}
+
+
 def _clean_optional_text(value: Any) -> str | None:
     text = _clean_text(value)
     return text or None
+
+
+def _first_present(source: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in source and not _is_missing_scalar(source.get(key)):
+            return source.get(key)
+    return None
+
+
+def _number_or_none(value: Any) -> float | None:
+    if _is_missing_scalar(value) or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
 
 
 def _default_strategy_family(function_norm: str) -> str | None:
