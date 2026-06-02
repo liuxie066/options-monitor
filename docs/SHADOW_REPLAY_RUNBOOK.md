@@ -15,6 +15,21 @@ Shadow Replay 的目标不是重新跑一次扫描，而是把某次扫描当时
 
 `required_data/parsed/*_required_data.csv` 只是 mark 的报价来源，不是 replay 结果本身。真正的复盘路径要写进 replay dataset 的 `mark_path_snapshots.jsonl`。
 
+## Opportunity Quality
+
+Shadow Replay 的分析结论使用 [Opportunity Quality](OPPORTUNITY_QUALITY.md) 口径。它不把单次 PnL 直接等同于好机会或坏机会，而是先按 `short_vol` / `return_first` 策略口径判断当时 accept/reject 是否合理，再把参数建议限制为人工审查的 dry-run-only 假设。
+
+`decision_quality` 标签包括 `good_accept`、`bad_accept`、`good_reject`、`bad_reject` 和 `inconclusive`。样本不足、缺少 outcome、缺少策略口径或关键字段不足时必须输出 `inconclusive`，不能生成参数建议。`parameter_advice_gate` 只判断是否具备进入参数讨论的资格，不输出具体参数数值。
+
+`parameter_advice_gate.status=ready_for_parameter_review` 只表示可以人工讨论参数假设；仍然不能自动改配置。常见 blocker 的处理口径：
+
+| blocker | 含义 | 处理 |
+|---|---|---|
+| `sample_size_below_min_sample` | 样本数低于人工评审阈值 | 继续积累样本或显式降低本次人工评审阈值 |
+| `strategy_profile_breakdown_missing` | 样本缺少 `short_vol` / `return_first` 等策略口径 | 先修证据字段，不做参数结论 |
+| `bad_decision_signal_missing` | 没有可解释的坏接受或坏拒绝信号 | 暂不需要参数讨论，继续观察 |
+| `inconclusive_rate_too_high` | `inconclusive` 比例过高 | 补 mark / outcome / 策略口径，再复盘 |
+
 ## 执行模型
 
 不要把完整 replay 放进 tick 主路径。tick 的职责是产生扫描证据和 required_data cache；Shadow Replay 的职责是离线采样、离线 settle、离线 analyze。
