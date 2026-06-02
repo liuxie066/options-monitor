@@ -36,7 +36,7 @@ def test_event_risk_hit_is_flagged_but_not_blocked() -> None:
         out = annotate_candidates_with_event_risk(
             df,
             base_dir=Path(td),
-            event_risk_cfg={"enabled": True, "mode": "warn"},
+            event_risk_cfg={"enabled": True, "mode": "warn", "as_of_date": "2026-04-01"},
             event_fetcher=lambda _symbol: [{"type": "earnings", "date": "2026-05-01"}],
         )
 
@@ -47,6 +47,41 @@ def test_event_risk_hit_is_flagged_but_not_blocked() -> None:
         assert out.iloc[0]["event_source_status"] == "ok"
         assert out.iloc[0]["event_source_error"] == ""
         assert out.iloc[0]["reject_stage_candidate"] == "EVENT_WARN"
+
+
+def test_event_risk_uses_current_position_window() -> None:
+    from tempfile import TemporaryDirectory
+
+    _add_repo_to_syspath()
+    from src.application.event_risk_filter import annotate_candidates_with_event_risk
+
+    df = pd.DataFrame(
+        [
+            {
+                "symbol": "AAPL",
+                "expiration": "2026-05-15",
+                "contract_symbol": "AAPL260515P00100000",
+                "strike": 100.0,
+            }
+        ]
+    )
+
+    events = [
+        {"type": "earnings", "date": "2026-04-14"},
+        {"type": "earnings", "date": "2026-05-01"},
+        {"type": "earnings", "date": "2026-05-16"},
+    ]
+    with TemporaryDirectory() as td:
+        out = annotate_candidates_with_event_risk(
+            df,
+            base_dir=Path(td),
+            event_risk_cfg={"enabled": True, "mode": "warn", "as_of_date": "2026-04-15"},
+            event_fetcher=lambda _symbol: events,
+        )
+
+        assert bool(out.iloc[0]["event_flag"]) is True
+        assert out.iloc[0]["event_types"] == "earnings"
+        assert out.iloc[0]["event_dates"] == "2026-05-01"
 
 
 def test_event_risk_fetch_error_is_not_cached_as_empty_events() -> None:

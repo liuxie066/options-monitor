@@ -107,7 +107,7 @@ def test_short_vol_soft_risk_loss_is_not_actionable() -> None:
     assert "risk_exit_loss_not_actionable" in row["data_quality_flags"]
 
 
-def test_short_vol_sell_put_event_risk_loss_is_assignment_hold() -> None:
+def test_short_vol_sell_put_event_context_does_not_override_loss_hold() -> None:
     row = evaluate_short_vol_close_advice(
         _short_put_input(close_mid=1.20, bid=1.19, ask=1.21),
         short_vol_config=ShortVolAssessmentConfig(enable_stress_check=False, reject_event_risk=True),
@@ -119,25 +119,30 @@ def test_short_vol_sell_put_event_risk_loss_is_assignment_hold() -> None:
             "strike": 100,
             "spot": 120,
             "delta": -0.20,
-            "implied_volatility": 0.20,
+            "implied_volatility": 0.30,
             "realized_volatility_estimate": 0.20,
             "event_flag": True,
+            "event_types": "earnings",
+            "event_dates": "2026-06-01",
             "event_source_status": "ok",
         },
         mode="put",
     )
 
-    assert row["short_vol_thesis_status"] == "event_risk"
+    assert row["event_context_status"] == "in_window"
+    assert row["event_context_types"] == "earnings"
+    assert row["event_context_dates"] == "2026-06-01"
+    assert row["short_vol_thesis_status"] == "valid"
     assert row["tier"] == "none"
     assert row["exit_state"] == EXIT_STATE_HOLD
     assert row["exit_reason_type"] == EXIT_STATE_HOLD
     assert row["hold_reason_type"] == HOLD_REASON_TYPE_ASSIGNMENT_ACCEPTABLE
-    assert "风险观察" in row["reason"]
-    assert "risk_exit_loss_not_actionable" in row["data_quality_flags"]
+    assert "默认可接货" in row["reason"]
+    assert "risk_exit_loss_not_actionable" not in row["data_quality_flags"]
     assert row["realized_if_close"] < 0
 
 
-def test_short_vol_covered_call_event_risk_loss_is_called_away_hold() -> None:
+def test_short_vol_covered_call_event_context_does_not_override_loss_hold() -> None:
     row = evaluate_short_vol_close_advice(
         _short_put_input(option_type="call", close_mid=1.20, bid=1.19, ask=1.21, delta=0.20),
         short_vol_config=ShortVolAssessmentConfig(enable_stress_check=False, reject_event_risk=True),
@@ -149,27 +154,30 @@ def test_short_vol_covered_call_event_risk_loss_is_called_away_hold() -> None:
             "strike": 100,
             "spot": 120,
             "delta": 0.20,
-            "implied_volatility": 0.20,
+            "implied_volatility": 0.30,
             "realized_volatility_estimate": 0.20,
             "event_flag": True,
+            "event_types": "earnings",
+            "event_dates": "2026-06-01",
             "event_source_status": "ok",
         },
         mode="call",
     )
 
-    assert row["short_vol_thesis_status"] == "event_risk"
+    assert row["event_context_status"] == "in_window"
+    assert row["short_vol_thesis_status"] == "valid"
     assert row["tier"] == "none"
     assert row["exit_state"] == EXIT_STATE_HOLD
     assert row["exit_reason_type"] == EXIT_STATE_HOLD
     assert row["hold_reason_type"] == HOLD_REASON_TYPE_CALLED_AWAY_ACCEPTABLE
     assert "默认可被行权卖出正股" in row["reason"]
-    assert "risk_exit_loss_not_actionable" in row["data_quality_flags"]
+    assert "risk_exit_loss_not_actionable" not in row["data_quality_flags"]
     assert row["realized_if_close"] < 0
 
 
-def test_short_vol_call_event_risk_profit_can_emit_risk_exit() -> None:
+def test_short_vol_event_context_profit_still_uses_return_capture() -> None:
     row = evaluate_short_vol_close_advice(
-        _short_put_input(option_type="call", close_mid=0.80, bid=0.79, ask=0.81, delta=0.20),
+        _short_put_input(option_type="call", close_mid=0.20, bid=0.19, ask=0.21, delta=0.20),
         short_vol_config=ShortVolAssessmentConfig(enable_stress_check=False, reject_event_risk=True),
         close_config=CloseAdviceConfig(),
         quote_row={
@@ -179,18 +187,21 @@ def test_short_vol_call_event_risk_profit_can_emit_risk_exit() -> None:
             "strike": 100,
             "spot": 120,
             "delta": 0.20,
-            "implied_volatility": 0.20,
+            "implied_volatility": 0.30,
             "realized_volatility_estimate": 0.20,
             "event_flag": True,
+            "event_types": "earnings",
+            "event_dates": "2026-06-01",
             "event_source_status": "ok",
         },
         mode="call",
     )
 
-    assert row["short_vol_thesis_status"] == "event_risk"
+    assert row["event_context_status"] == "in_window"
+    assert row["short_vol_thesis_status"] == "valid"
     assert row["tier"] == "strong"
-    assert row["exit_state"] == EXIT_STATE_RISK_EXIT
-    assert row["exit_reason_type"] == EXIT_REASON_TYPE_RISK_EXIT
+    assert row["exit_state"] == EXIT_STATE_PROFIT_CAPTURE
+    assert row["exit_reason_type"] == EXIT_REASON_TYPE_PROFIT_CAPTURE
     assert row["realized_if_close"] > 0
 
 
