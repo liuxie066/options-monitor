@@ -39,9 +39,11 @@ def test_shadow_replay_builds_universe_and_analyzes_closed_replay(tmp_path: Path
     candidate_path.write_text(
         (
             "symbol,account,option_type,contract_symbol,expiration,dte,delta,strike,spot,iv_rv_ratio,"
+            "strategy_profile,strategy_family,"
             "annualized_net_return_on_cash_basis,net_income,otm_pct,spread_ratio,"
             "single_trade_concentration,multiplier,open_interest,volume\n"
             "NVDA,lx,put,NVDA260619P00100000,2026-06-19,30,-0.2,100,110,1.25,"
+            "short_vol,sell_put,"
             "0.12,120,0.09,0.10,0.04,100,500,20\n"
         ),
         encoding="utf-8",
@@ -55,6 +57,8 @@ def test_shadow_replay_builds_universe_and_analyzes_closed_replay(tmp_path: Path
                 "symbol": "AMD",
                 "contract_symbol": "AMD260619P00080000",
                 "function": "sell_put",
+                "strategy_profile": "short_vol",
+                "strategy_family": "sell_put",
                 "mode": "put",
                 "option_type": "put",
                 "expiration": "2026-06-19",
@@ -63,6 +67,7 @@ def test_shadow_replay_builds_universe_and_analyzes_closed_replay(tmp_path: Path
                 "dte": 30,
                 "delta": -0.28,
                 "iv_rv_ratio": 0.9,
+                "event_risk_status": "source_unavailable",
                 "spread_ratio": 0.45,
                 "net_income": 60,
                 "multiplier": 100,
@@ -114,6 +119,8 @@ def test_shadow_replay_builds_universe_and_analyzes_closed_replay(tmp_path: Path
     assert manifest["summary"]["mark_path_snapshot_count"] == 2
     assert manifest["summary"]["outcome_fact_count"] == 2
     assert {row["status"] for row in snapshots} == {"accepted", "rejected"}
+    assert {row["strategy_profile"] for row in snapshots} == {"short_vol"}
+    assert next(row for row in snapshots if row["status"] == "rejected")["event_risk_status"] == "source_unavailable"
     assert analysis["summary"]["status"] == "needs_human_review"
     assert analysis["summary"]["evidence_level"] == "closed_replay"
     assert analysis["outcome_coverage"]["marked_instrument_count"] == 2
@@ -135,6 +142,8 @@ def test_shadow_replay_builds_universe_and_analyzes_closed_replay(tmp_path: Path
     assert readiness["evidence_checks"]["survivorship_bias_risk"] == "low"
     assert readiness["insurance_metrics"]["by_status"]["accepted"]["premium_to_capital"] == pytest.approx(120 / 10000)
     assert readiness["outcome_by_bucket"]["dte"]["30-44"]["win_count"] == 1
+    assert readiness["parameter_advice_gate"]["status"] == analysis["parameter_advice_gate"]["status"]
+    assert readiness["decision_quality"]["by_strategy_profile"]["short_vol"]["good_accept"] == 1
     assert readiness["safety"]["writes_runtime_config"] is False
 
 
@@ -218,6 +227,166 @@ def test_shadow_replay_insurance_metrics_cover_put_and_call_outcomes() -> None:
     assert metrics["by_status"]["accepted"]["loss_ratio"] == pytest.approx(800 / 200)
     assert metrics["by_status"]["accepted"]["path_adverse_loss_to_premium"] == pytest.approx(290 / 200)
     assert metrics["by_bucket"]["abs_delta"]["0.20-0.30"]["exercise_rate"] == 1
+
+
+def test_shadow_replay_decision_quality_is_not_pnl_only() -> None:
+    from src.application.shadow_replay.analysis import analyze_rows
+
+    analysis = analyze_rows(
+        candidate_snapshots=[
+            {
+                "contract_symbol": "BADACCEPT260619P00100000",
+                "symbol": "BADACCEPT",
+                "option_type": "put",
+                "status": "accepted",
+                "strategy_profile": "short_vol",
+                "strategy_family": "sell_put",
+                "iv_rv_ratio": 0.90,
+                "delta": -0.20,
+                "spread_ratio": 0.10,
+                "single_trade_concentration": 0.02,
+                "net_income": 100,
+            },
+            {
+                "contract_symbol": "GOODLOSS260619P00100000",
+                "symbol": "GOODLOSS",
+                "option_type": "put",
+                "status": "accepted",
+                "strategy_profile": "short_vol",
+                "strategy_family": "sell_put",
+                "iv_rv_ratio": 1.30,
+                "delta": -0.20,
+                "spread_ratio": 0.10,
+                "single_trade_concentration": 0.02,
+                "net_income": 120,
+            },
+            {
+                "contract_symbol": "EVENTREJ260619P00100000",
+                "symbol": "EVENTREJ",
+                "option_type": "put",
+                "status": "rejected",
+                "strategy_profile": "short_vol",
+                "strategy_family": "sell_put",
+                "iv_rv_ratio": 1.35,
+                "delta": -0.20,
+                "event_risk_status": "source_unavailable",
+                "net_income": 90,
+            },
+            {
+                "contract_symbol": "RETGOOD260619P00100000",
+                "symbol": "RETGOOD",
+                "option_type": "put",
+                "status": "accepted",
+                "strategy_profile": "return_first",
+                "strategy_family": "sell_put",
+                "iv_rv_ratio": 0.80,
+                "annualized_net_return_on_cash_basis": 0.12,
+                "net_income": 80,
+                "dte": 30,
+            },
+            {
+                "contract_symbol": "BADREJ260619P00100000",
+                "symbol": "BADREJ",
+                "option_type": "put",
+                "status": "rejected",
+                "strategy_profile": "short_vol",
+                "strategy_family": "sell_put",
+                "iv_rv_ratio": 1.35,
+                "delta": -0.20,
+                "spread_ratio": 0.10,
+                "single_trade_concentration": 0.02,
+                "net_income": 110,
+            },
+        ],
+        filter_decisions=[{"contract_symbol": "BADREJ260619P00100000", "status": "rejected"}],
+        mark_snapshots=[
+            {"contract_symbol": "BADACCEPT260619P00100000", "unrealized_pnl": 20},
+            {"contract_symbol": "GOODLOSS260619P00100000", "unrealized_pnl": -50},
+            {"contract_symbol": "EVENTREJ260619P00100000", "unrealized_pnl": 10},
+            {"contract_symbol": "RETGOOD260619P00100000", "unrealized_pnl": 15},
+            {"contract_symbol": "BADREJ260619P00100000", "unrealized_pnl": 25},
+        ],
+        outcome_facts=[
+            {"contract_symbol": "BADACCEPT260619P00100000", "outcome": "expired_worthless", "realized_pnl": 100},
+            {"contract_symbol": "GOODLOSS260619P00100000", "outcome": "assigned_at_expiry", "realized_pnl": -50},
+            {"contract_symbol": "EVENTREJ260619P00100000", "outcome": "expired_worthless", "realized_pnl": 90},
+            {"contract_symbol": "RETGOOD260619P00100000", "outcome": "expired_worthless", "realized_pnl": 80},
+            {"contract_symbol": "BADREJ260619P00100000", "outcome": "expired_worthless", "realized_pnl": 110},
+        ],
+        min_sample=5,
+    )
+
+    samples = {row["symbol"]: row for row in analysis["decision_quality"]["samples"]}
+    assert samples["BADACCEPT"]["label"] == "bad_accept"
+    assert "iv_rv_ratio_below_minimum" in samples["BADACCEPT"]["reasons"]
+    assert samples["GOODLOSS"]["label"] == "good_accept"
+    assert samples["EVENTREJ"]["label"] == "good_reject"
+    assert samples["RETGOOD"]["label"] == "good_accept"
+    assert samples["BADREJ"]["label"] == "bad_reject"
+    assert analysis["decision_quality"]["summary"]["label_counts"] == {
+        "bad_accept": 1,
+        "bad_reject": 1,
+        "good_accept": 2,
+        "good_reject": 1,
+    }
+    assert analysis["decision_quality"]["summary"]["parameter_advice_allowed"] is True
+    assert analysis["summary"]["decision_quality_status"] == "ready_for_parameter_review"
+    assert analysis["summary"]["bad_decision_count"] == 2
+    assert analysis["summary"]["inconclusive_count"] == 0
+    assert analysis["summary"]["parameter_advice_allowed"] is True
+    assert analysis["parameter_advice_gate"] == {
+        "status": "ready_for_parameter_review",
+        "parameter_advice_allowed": True,
+        "shadow_dry_run_only": True,
+        "sample_count": 5,
+        "min_sample": 5,
+        "sample_floor_met": True,
+        "strategy_profiles": ["return_first", "short_vol"],
+        "has_strategy_profile_breakdown": True,
+        "bad_accept_count": 1,
+        "bad_reject_count": 1,
+        "bad_decision_count": 2,
+        "has_bad_decision_signal": True,
+        "inconclusive_count": 0,
+        "inconclusive_rate": 0.0,
+        "inconclusive_too_high": False,
+        "blockers": [],
+    }
+
+
+def test_shadow_replay_decision_quality_requires_sample_floor() -> None:
+    from src.application.shadow_replay.analysis import analyze_rows
+
+    analysis = analyze_rows(
+        candidate_snapshots=[
+            {
+                "contract_symbol": "NVDA260619P00100000",
+                "symbol": "NVDA",
+                "option_type": "put",
+                "status": "accepted",
+                "strategy_profile": "short_vol",
+                "iv_rv_ratio": 1.30,
+                "delta": -0.20,
+                "net_income": 120,
+            }
+        ],
+        filter_decisions=[],
+        mark_snapshots=[{"contract_symbol": "NVDA260619P00100000", "unrealized_pnl": 10}],
+        outcome_facts=[{"contract_symbol": "NVDA260619P00100000", "outcome": "expired_worthless", "realized_pnl": 120}],
+        min_sample=2,
+    )
+
+    quality = analysis["decision_quality"]
+    assert quality["summary"]["label_counts"] == {"inconclusive": 1}
+    assert quality["summary"]["parameter_advice_allowed"] is False
+    assert quality["samples"][0]["reasons"] == ["sample_size_below_min_sample"]
+    assert analysis["summary"]["decision_quality_status"] == "not_ready_for_parameter_review"
+    assert analysis["summary"]["parameter_advice_allowed"] is False
+    assert analysis["parameter_advice_gate"]["blockers"] == [
+        "sample_size_below_min_sample",
+        "bad_decision_signal_missing",
+        "inconclusive_rate_too_high",
+    ]
 
 
 def test_shadow_replay_build_selects_latest_runtime_run_with_evidence(tmp_path: Path) -> None:
