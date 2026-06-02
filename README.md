@@ -1,13 +1,37 @@
 # options-monitor
 
-`options-monitor` 是一个本地运行的期权监控、筛选、报告和通知工具，主要服务四个用户功能：
+`options-monitor` 是一个本地运行的期权收益与承保决策系统。它把行情、持仓、现金、期权仓位、策略阈值、账本和通知串起来，帮助用户判断什么时候可以卖期权收保费、哪张合约值得卖、风险预算是否合适、已开仓位是否还应该持有，以及这套策略最终赚得是否科学。
 
-- `Sell Put`：用 short-vol 视角扫描 Put 候选，结合 IV/RV、Delta、事件、路径压力、现金和组合集中度，筛出适合人工复核的卖 Put 机会。
-- `Covered Call`：基于已有正股持仓扫描 Call 候选，检查覆盖能力、short-vol 风险和 gap-up 右尾机会成本。
-- `Sell Put` 收益增强 `yield_enhancement`：在 Sell Put 候选基础上配对同到期 long call，评估 put 权利金是否足以支持上行 convexity。
-- `close_advice`：检查已有期权 lot，按开仓策略语义给出止盈、风险退出、继续持有或无法评估的平仓参考。
+主要服务四个用户功能：
 
-它不是自动交易系统，也不会替你下单。它的职责是把行情、持仓、现金、期权仓位、策略阈值和通知串起来，给出便于人工复核的结果。
+- `Sell Put`：卖 Put 机会扫描。收益优先模式下是收益筛选；波动率溢价模式下是卖下跌保险的承保评估，默认接货是可接受结果。
+- `Covered Call`：已有正股上的卖 Call 机会扫描。收益优先模式下是收益筛选；波动率溢价模式下是卖上涨保险的承保评估，默认被行权卖出正股是可接受结果。
+- `yield_enhancement`：Sell Put 的收益增强 overlay，用 short put 保费资助同到期 long call，换取上行 convexity。
+- `close_advice`：已有期权 lot 的生命周期管理，按开仓时记录的策略语义给出止盈、风险退出、继续持有或无法评估的平仓参考。
+
+它不是自动交易系统，也不会替你下单。它的输出是 advisory-only，给出便于人工复核的候选、拒绝原因、平仓建议和复盘证据。
+
+## 产品框架
+
+系统支持两种策略口径。它们不是同一种风控深度：
+
+| 策略口径 | 本质 | 推荐含义 |
+|---|---|---|
+| `return_first` 收益优先 | 收益筛选器 | 收益条件合格，基础交易约束合格 |
+| `short_vol` 波动率溢价 | 承保评估器 | 这张保单的风险/赔率相对合理 |
+
+收益优先模式主要看 DTE、strike 范围、年化收益、单笔净收入、流动性、价差、Sell Put 现金是否够、Covered Call 股票是否够覆盖。它不系统性判断保费是否足够补偿 IV/RV、Delta、事件、跳空、路径压力和组合集中度风险。
+
+波动率溢价模式才是“开保险公司”的主逻辑。它系统性看 IV/RV、IV-RV、Delta、事件风险、跳空压力、NAV 占用、集中度、Covered Call 右尾机会成本等，用来判断当前保费是否足够补偿波动率、事件、路径、流动性和组合风险。
+
+完整产品闭环：
+
+```text
+扫描机会 -> 生成建议 -> 人工决策 -> 记录开仓 -> 持仓监控
+-> 平仓建议 -> 记录结果 -> 收益统计 -> 扫描质量复盘 -> 参数优化建议
+```
+
+`Sell Put` / `Covered Call` 看当前配置里的策略意图生成开仓候选。`yield_enhancement` 跟随当次 Sell Put 策略语义。`close_advice` 比较特殊：它优先读取 lot 上的开仓策略快照；只有旧仓位没有策略快照时，才 fallback 到当前 symbol 配置或默认策略，并在输出中保留 `strategy_source`。
 
 ## 入口
 
@@ -278,7 +302,7 @@ om run tick --config config.us.json --accounts lx sy
 ./om research collect --config-key us --scope candidate --run-id <run-id> --output json --no-write-outputs --shadow-replay-min-sample 30
 ```
 
-`research` 的 candidate evidence 会读取已有候选 CSV、reject log 和 `candidate_filter_trace.jsonl`，输出 `candidate_evidence.shadow_replay` readiness。它不改 runtime config、不写交易状态、不发通知；缺少被拒样本、mark path 或 outcome facts 时会明确标记 `not_ready` / `evidence_incomplete`，避免只用最终候选造成幸存者偏差。
+`research` 的 candidate evidence 会读取已有候选 CSV、reject log 和 `candidate_filter_trace.jsonl`，输出 `candidate_evidence.shadow_replay` readiness。它不改 runtime config、不写交易状态、不发通知；缺少被拒样本、mark path 或 outcome facts 时会明确标记 `not_ready` / `evidence_incomplete`，避免只用最终候选造成幸存者偏差。Shadow Replay 的 `decision_quality` 使用 [Opportunity Quality](docs/OPPORTUNITY_QUALITY.md) 口径，先判断 accept/reject 是否合理，再把参数建议限制为 dry-run-only 假设。
 
 如果已有路径和结果证据，可显式传入：
 
@@ -456,9 +480,20 @@ python3 -m src.application.option_intake --config /var/lib/options-monitor/confi
 
 ## 策略模型
 
+### 策略口径
+
+`sell_put.strategy` / `sell_call.strategy` 支持两种口径：
+
+- `return_first`：收益优先。它是收益筛选器，主要用年化收益、单笔净收入、基础 DTE/strike、流动性、现金或股票覆盖能力筛出“收益条件合格”的候选；它不系统性判断保费是否足够补偿 IV/RV、Delta、事件、跳空、路径压力和组合集中度风险。
+- `short_vol`：波动率溢价。它是承保评估器，先看波动率边际、Delta、事件风险、路径压力、组合集中度和流动性，再把收益率和单笔净收入纳入排序。默认 profile 是 `short_vol`。
+
+`close_advice` 不使用“当前默认策略”直接重判所有历史仓位。它优先使用 lot 上的 `strategy_snapshot`、`yield_enhancement_mode` 或其他开仓策略元数据；只有缺少开仓策略信息时，才 fallback 到当前 symbol 配置或模板默认值。
+
 ### Sell Put
 
-Sell Put 默认使用 `short_vol` profile。系统把 short put 视为 long equity delta + short gamma + short vega 的组合，先确认波动率边际、路径风险和组合容量，再把收益指标纳入排序：
+Sell Put 在 `return_first` 下是卖 Put 收益筛选；在 `short_vol` 下是卖下跌保险的承保评估。
+
+`short_vol` profile 会把 short put 视为 long equity delta + short gamma + short vega 的组合，先确认波动率边际、路径风险和组合容量，再把收益指标纳入排序：
 
 - `min_dte` / `max_dte`
 - `min_strike` / `max_strike`
@@ -481,6 +516,8 @@ Sell Put 默认使用 `short_vol` profile。系统把 short put 视为 long equi
 
 ### Covered Call
 
+Covered Call 在 `return_first` 下是已有正股上的卖 Call 收益筛选；在 `short_vol` 下是卖上涨保险的承保评估。
+
 Covered Call 依赖真实持仓上下文。它在风险结构上和 Sell Put 同属 short vol / short gamma，只是现金、持仓和行权方向不同：
 
 - `shares` / `avg_cost` 来自 holdings
@@ -493,7 +530,7 @@ Covered Call 依赖真实持仓上下文。它在风险结构上和 Sell Put 同
 
 ### Yield Enhancement
 
-`yield_enhancement` 是 symbol 维度配置。它基于已通过 Sell Put 筛选的 put 候选，配对同 symbol、同到期、同乘数、put strike < call strike 的 long call，寻找“short put 权利金足够支持 long call 成本”的组合。
+`yield_enhancement` 是 Sell Put 上的收益增强 overlay，不是独立主策略。它基于 Sell Put put-universe，配对同 symbol、同到期、同乘数、put strike < call strike 的 long call，寻找“short put 权利金足够支持 long call 成本”的组合。
 
 要点：
 
@@ -505,7 +542,9 @@ Covered Call 依赖真实持仓上下文。它在风险结构上和 Sell Put 同
 
 ### Close Advice
 
-`close_advice` 基于本地 `position_lots`、required data、报价和 lot 上的策略快照生成建议，属于 advisory-only 逻辑，不会自动平仓。`optimizer_switch` 必须带有本地候选报告中的替代候选身份字段，例如 `alternative_symbol`、`alternative_contract_symbol`、`alternative_expiration` 和 `alternative_source_path`；没有明确替代候选时不能把“换仓”当作可执行建议。
+`close_advice` 基于本地 `position_lots`、required data、报价和 lot 上的开仓策略快照生成建议，属于 advisory-only 逻辑，不会自动平仓。它回答的是“这张仓位开仓时的 thesis 现在还成立吗”，不是“按当前配置重新评价这张旧仓位”。
+
+`optimizer_switch` 必须带有本地候选报告中的替代候选身份字段，例如 `alternative_symbol`、`alternative_contract_symbol`、`alternative_expiration` 和 `alternative_source_path`；没有明确替代候选时不能把“换仓”当作可执行建议。
 
 当前支持的退出语义：
 
@@ -513,6 +552,8 @@ Covered Call 依赖真实持仓上下文。它在风险结构上和 Sell Put 同
 - Short-vol lot：IV/RV edge 丢失、事件风险或路径风险可以触发 `risk_exit`
 - 收益增强 short put 腿：`close_put_keep_call` 或 `hold_put_keep_call`
 - 收益增强 long call 腿：`sell_call_take_profit`、`hold_call`、`hold_call_as_convexity`、`sell_call_salvage`、`hold_to_expiry_or_expire`
+
+收益优先开仓的仓位主要按收益捕获逻辑评估。波动率溢价开仓的仓位才按承保 thesis 是否失效评估，例如 IV edge、事件风险、路径风险和风险预算是否恶化。非盈利买回不是 short-vol Sell Put / Covered Call 的默认强平理由：Sell Put 默认可接货，Covered Call 默认可被行权卖出正股。
 
 `strategy_exit_mode` 是平仓动作映射的状态机入口：普通 short option 使用 `standard_short_option`，收益增强 put 腿使用 `yield_enhancement_put_leg`，收益增强 long call 腿使用 `yield_enhancement_long_call_leg`。渲染层只展示已决策的动作，不改变平仓判断。
 

@@ -6,6 +6,7 @@ from typing import Any
 
 from src.application.shadow_replay.common import (
     ANALYSIS_SCHEMA_VERSION,
+    abs_first_float,
     dataset_dir_from_arg,
     first_float,
     float_or_none,
@@ -77,6 +78,9 @@ def analyze_rows(
         usable_mark_count=usable_mark_count,
         outcome_count=len(outcome_facts),
     )
+    quality = decision_quality(candidate_snapshots, mark_snapshots, outcome_facts, min_sample=sample_floor)
+    quality_summary = quality["summary"]
+    advice_gate = parameter_advice_gate(quality)
     return {
         "summary": {
             "status": recommendation["status"],
@@ -95,6 +99,10 @@ def analyze_rows(
             "ranked_below_count": status_counts.get("ranked_below", 0),
             "counterfactual_candidate_count": rejected_count,
             "evidence_level": _evidence_level(candidate_snapshots, filter_decisions, mark_snapshots, outcome_facts),
+            "decision_quality_status": advice_gate["status"],
+            "bad_decision_count": quality_summary["bad_decision_count"],
+            "inconclusive_count": quality_summary["inconclusive_count"],
+            "parameter_advice_allowed": advice_gate["parameter_advice_allowed"],
         },
         "evidence_checks": checks,
         "bucket_stats": {
@@ -110,6 +118,8 @@ def analyze_rows(
         "outcome_stats": outcome_stats(candidate_snapshots, outcome_facts),
         "insurance_metrics": insurance_metrics(candidate_snapshots, mark_snapshots, outcome_facts),
         "outcome_by_bucket": outcome_bucket_stats(candidate_snapshots, outcome_facts),
+        "decision_quality": quality,
+        "parameter_advice_gate": advice_gate,
         "recommendations": [recommendation],
     }
 
@@ -226,6 +236,338 @@ def insurance_metrics(candidates: list[dict[str, Any]], marks: list[dict[str, An
         "by_mode": _insurance_payload(by_mode),
         "by_bucket": insurance_bucket_stats(candidate_by_key, adverse_by_key, outcomes),
     }
+
+
+def decision_quality(
+    candidates: list[dict[str, Any]],
+    marks: list[dict[str, Any]],
+    outcomes: list[dict[str, Any]],
+    *,
+    min_sample: int,
+) -> dict[str, Any]:
+    sample_floor = max(1, int(min_sample))
+    outcome_by_key = {instrument_key(row): row for row in outcomes if instrument_key(row)}
+    adverse_by_key = _max_adverse_pnl_by_instrument(marks)
+    sample_count = len(candidates)
+    force_inconclusive = sample_count < sample_floor
+    samples: list[dict[str, Any]] = []
+    label_counts: Counter[str] = Counter()
+    by_strategy_profile: dict[str, Counter[str]] = defaultdict(Counter)
+    for candidate in candidates:
+        key = instrument_key(candidate)
+        outcome = outcome_by_key.get(key) if key else None
+        sample = _decision_quality_sample(
+            candidate=candidate,
+            outcome=outcome,
+            max_adverse_pnl=adverse_by_key.get(key),
+            force_inconclusive=force_inconclusive,
+            sample_floor=sample_floor,
+            sample_count=sample_count,
+        )
+        label = str(sample.get("label") or "inconclusive")
+        profile = str(sample.get("strategy_profile") or "unknown")
+        label_counts[label] += 1
+        by_strategy_profile[profile][label] += 1
+        if len(samples) < 50:
+            samples.append(sample)
+    bad_count = int(label_counts.get("bad_accept", 0) + label_counts.get("bad_reject", 0))
+    result = {
+        "summary": {
+            "sample_count": sample_count,
+            "min_sample": sample_floor,
+            "parameter_advice_allowed": False,
+            "shadow_dry_run_only": True,
+            "label_counts": dict(sorted(label_counts.items())),
+            "bad_decision_count": bad_count,
+            "inconclusive_count": int(label_counts.get("inconclusive", 0)),
+        },
+        "by_strategy_profile": {profile: dict(sorted(counts.items())) for profile, counts in sorted(by_strategy_profile.items())},
+        "samples": samples,
+    }
+    result["summary"]["parameter_advice_allowed"] = parameter_advice_gate(result)["parameter_advice_allowed"]
+    return result
+
+
+def parameter_advice_gate(quality: dict[str, Any]) -> dict[str, Any]:
+    summary = quality.get("summary") if isinstance(quality, dict) else {}
+    summary = summary if isinstance(summary, dict) else {}
+    label_counts_raw = summary.get("label_counts")
+    label_counts = label_counts_raw if isinstance(label_counts_raw, dict) else {}
+    by_profile_raw = quality.get("by_strategy_profile") if isinstance(quality, dict) else {}
+    by_profile = by_profile_raw if isinstance(by_profile_raw, dict) else {}
+    sample_count = int(summary.get("sample_count") or 0)
+    min_sample = max(1, int(summary.get("min_sample") or 1))
+    bad_accept_count = int(label_counts.get("bad_accept") or 0)
+    bad_reject_count = int(label_counts.get("bad_reject") or 0)
+    bad_decision_count = bad_accept_count + bad_reject_count
+    inconclusive_count = int(label_counts.get("inconclusive") or 0)
+    inconclusive_rate = round(inconclusive_count / sample_count, 4) if sample_count > 0 else None
+    strategy_profiles = sorted(profile for profile in by_profile if profile and profile != "unknown")
+    sample_floor_met = sample_count >= min_sample
+    has_strategy_profile_breakdown = bool(strategy_profiles)
+    has_bad_decision_signal = bad_decision_count > 0
+    inconclusive_too_high = bool(inconclusive_rate is not None and inconclusive_rate > 0.50)
+    blockers: list[str] = []
+    if not sample_floor_met:
+        blockers.append("sample_size_below_min_sample")
+    if not has_strategy_profile_breakdown:
+        blockers.append("strategy_profile_breakdown_missing")
+    if not has_bad_decision_signal:
+        blockers.append("bad_decision_signal_missing")
+    if inconclusive_too_high:
+        blockers.append("inconclusive_rate_too_high")
+    allowed = not blockers
+    return {
+        "status": "ready_for_parameter_review" if allowed else "not_ready_for_parameter_review",
+        "parameter_advice_allowed": allowed,
+        "shadow_dry_run_only": True,
+        "sample_count": sample_count,
+        "min_sample": min_sample,
+        "sample_floor_met": sample_floor_met,
+        "strategy_profiles": strategy_profiles,
+        "has_strategy_profile_breakdown": has_strategy_profile_breakdown,
+        "bad_accept_count": bad_accept_count,
+        "bad_reject_count": bad_reject_count,
+        "bad_decision_count": bad_decision_count,
+        "has_bad_decision_signal": has_bad_decision_signal,
+        "inconclusive_count": inconclusive_count,
+        "inconclusive_rate": inconclusive_rate,
+        "inconclusive_too_high": inconclusive_too_high,
+        "blockers": blockers,
+    }
+
+
+def _decision_quality_sample(
+    *,
+    candidate: dict[str, Any],
+    outcome: dict[str, Any] | None,
+    max_adverse_pnl: float | None,
+    force_inconclusive: bool,
+    sample_floor: int,
+    sample_count: int,
+) -> dict[str, Any]:
+    key = instrument_key(candidate)
+    status = normal_status(candidate.get("status"))
+    profile = _strategy_profile(candidate)
+    family = _strategy_family(candidate)
+    pnl = first_float(outcome or {}, "realized_pnl", "counterfactual_pnl", "pnl", "net_pnl") if outcome else None
+    base = {
+        "instrument_key": key,
+        "symbol": text(candidate.get("symbol")),
+        "status": status,
+        "strategy_family": family,
+        "strategy_profile": profile,
+        "realized_pnl": pnl,
+        "max_adverse_pnl": max_adverse_pnl,
+    }
+    if force_inconclusive:
+        return {
+            **base,
+            "label": "inconclusive",
+            "confidence": "low",
+            "reasons": ["sample_size_below_min_sample"],
+            "sample_count": sample_count,
+            "min_sample": sample_floor,
+        }
+    if profile not in {"short_vol", "return_first"}:
+        return {**base, "label": "inconclusive", "confidence": "low", "reasons": ["strategy_profile_missing_or_unknown"]}
+    if status not in {"accepted", "rejected", "post_filtered", "ranked_below"}:
+        return {**base, "label": "inconclusive", "confidence": "low", "reasons": ["decision_status_not_classifiable"]}
+    if outcome is None:
+        return {**base, "label": "inconclusive", "confidence": "low", "reasons": ["outcome_fact_missing"]}
+
+    ex_ante = _ex_ante_quality(candidate, profile=profile)
+    path = _path_quality(candidate, pnl=pnl, max_adverse_pnl=max_adverse_pnl)
+    rejected_like = status in {"rejected", "post_filtered", "ranked_below"}
+    if status == "accepted":
+        if ex_ante["status"] == "fail" or path["status"] == "fail":
+            return {
+                **base,
+                "label": "bad_accept",
+                "confidence": _quality_confidence(ex_ante, path),
+                "reasons": ex_ante["reasons"] + path["reasons"],
+            }
+        if ex_ante["status"] == "unknown":
+            return {**base, "label": "inconclusive", "confidence": "low", "reasons": ex_ante["reasons"] + path["reasons"]}
+        return {
+            **base,
+            "label": "good_accept",
+            "confidence": _quality_confidence(ex_ante, path),
+            "reasons": ex_ante["reasons"] + path["reasons"],
+        }
+    if rejected_like:
+        if ex_ante["status"] == "fail":
+            return {
+                **base,
+                "label": "good_reject",
+                "confidence": _quality_confidence(ex_ante, path),
+                "reasons": ex_ante["reasons"],
+            }
+        if ex_ante["status"] == "pass" and pnl is not None and pnl > 0:
+            return {
+                **base,
+                "label": "bad_reject",
+                "confidence": _quality_confidence(ex_ante, path),
+                "reasons": ex_ante["reasons"] + ["positive_outcome_after_ex_ante_pass"],
+            }
+        return {**base, "label": "inconclusive", "confidence": "low", "reasons": ex_ante["reasons"] + path["reasons"]}
+    return {**base, "label": "inconclusive", "confidence": "low", "reasons": ["decision_status_not_classifiable"]}
+
+
+def _strategy_profile(candidate: dict[str, Any]) -> str:
+    raw = text(
+        candidate.get("strategy_profile")
+        or candidate.get("profile")
+        or candidate.get("strategy_mode")
+    ).lower()
+    if raw in {"short_vol", "short-vol", "volatility_premium", "vol_premium"}:
+        return "short_vol"
+    if raw in {"return_first", "return-first", "income", "yield_first"}:
+        return "return_first"
+    return "unknown"
+
+
+def _strategy_family(candidate: dict[str, Any]) -> str:
+    raw = text(candidate.get("strategy_family") or candidate.get("function") or candidate.get("strategy_name")).lower()
+    if raw in {"sell_put", "put"}:
+        return "sell_put"
+    if raw in {"sell_call", "covered_call", "call"}:
+        return "sell_call"
+    if raw in {"yield_enhancement", "income_upside_enhancement", "vol_convexity_enhancement"}:
+        return "yield_enhancement"
+    return raw or "unknown"
+
+
+def _ex_ante_quality(candidate: dict[str, Any], *, profile: str) -> dict[str, Any]:
+    if profile == "short_vol":
+        return _short_vol_ex_ante_quality(candidate)
+    if profile == "return_first":
+        return _return_first_ex_ante_quality(candidate)
+    return {"status": "unknown", "reasons": ["strategy_profile_missing_or_unknown"]}
+
+
+def _short_vol_ex_ante_quality(candidate: dict[str, Any]) -> dict[str, Any]:
+    reasons: list[str] = []
+    checked = 0
+    iv_rv = first_float(candidate, "iv_rv_ratio", "iv_to_rv_ratio")
+    min_iv_rv = first_float(candidate, "min_iv_rv_ratio", "short_vol_min_iv_rv_ratio") or 1.15
+    if iv_rv is not None:
+        checked += 1
+        if iv_rv < min_iv_rv:
+            reasons.append("iv_rv_ratio_below_minimum")
+    iv_minus_rv = first_float(candidate, "iv_minus_rv", "iv_rv_spread", "iv_minus_realized_volatility")
+    min_iv_minus_rv = first_float(candidate, "min_iv_minus_rv", "short_vol_min_iv_minus_rv") or 0.05
+    if iv_minus_rv is not None:
+        checked += 1
+        if iv_minus_rv < min_iv_minus_rv:
+            reasons.append("iv_minus_rv_below_minimum")
+    abs_delta = abs_first_float(candidate, "abs_delta", "delta")
+    min_abs_delta = first_float(candidate, "min_abs_delta", "short_vol_min_abs_delta") or 0.15
+    max_abs_delta = first_float(candidate, "max_abs_delta", "short_vol_max_abs_delta") or 0.30
+    if abs_delta is not None:
+        checked += 1
+        if abs_delta < min_abs_delta:
+            reasons.append("delta_below_target_band")
+        elif abs_delta > max_abs_delta:
+            reasons.append("delta_above_target_band")
+    spread = first_float(candidate, "spread_ratio", "bid_ask_spread_ratio")
+    max_spread = first_float(candidate, "max_spread_ratio") or 0.30
+    if spread is not None:
+        checked += 1
+        if spread > max_spread:
+            reasons.append("spread_ratio_above_maximum")
+    concentration = first_float(candidate, "single_trade_concentration", "single_trade_nav_pct", "trade_nav_pct")
+    max_concentration = first_float(candidate, "max_single_trade_nav_pct") or 0.05
+    if concentration is not None:
+        checked += 1
+        if concentration > max_concentration:
+            reasons.append("single_trade_concentration_above_maximum")
+    event_reason = _event_risk_reason(candidate)
+    if event_reason:
+        checked += 1
+        reasons.append(event_reason)
+    if reasons:
+        return {"status": "fail", "reasons": reasons}
+    if checked <= 0:
+        return {"status": "unknown", "reasons": ["short_vol_ex_ante_fields_missing"]}
+    return {"status": "pass", "reasons": ["short_vol_ex_ante_quality_pass"]}
+
+
+def _return_first_ex_ante_quality(candidate: dict[str, Any]) -> dict[str, Any]:
+    reasons: list[str] = []
+    checked = 0
+    net_income = first_float(candidate, "net_income", "premium", "net_premium", "premium_received")
+    if net_income is not None:
+        checked += 1
+        if net_income <= 0:
+            reasons.append("net_income_not_positive")
+    annualized = first_float(candidate, "annualized_net_return_on_cash_basis", "annualized_return", "annualized_net_return")
+    if annualized is not None:
+        checked += 1
+        if annualized <= 0:
+            reasons.append("annualized_return_not_positive")
+    dte = first_float(candidate, "dte")
+    if dte is not None:
+        checked += 1
+        if dte <= 0:
+            reasons.append("dte_not_positive")
+    spread = first_float(candidate, "spread_ratio", "bid_ask_spread_ratio")
+    max_spread = first_float(candidate, "max_spread_ratio") or 0.50
+    if spread is not None:
+        checked += 1
+        if spread > max_spread:
+            reasons.append("spread_ratio_above_maximum")
+    if reasons:
+        return {"status": "fail", "reasons": reasons}
+    if checked <= 0:
+        return {"status": "unknown", "reasons": ["return_first_ex_ante_fields_missing"]}
+    return {"status": "pass", "reasons": ["return_first_ex_ante_quality_pass"]}
+
+
+def _event_risk_reason(candidate: dict[str, Any]) -> str | None:
+    raw_values = [
+        candidate.get("event_risk_status"),
+        candidate.get("event_status"),
+        candidate.get("event_source_status"),
+        candidate.get("event_risk"),
+        candidate.get("has_event_before_expiry"),
+    ]
+    text_values = [text(value).lower() for value in raw_values if text(value)]
+    for value in text_values:
+        if value in {"true", "yes", "1"}:
+            return "event_risk_before_expiry"
+        if any(token in value for token in ("unavailable", "missing", "failed", "source_fail", "before_expiry", "event_risk")):
+            return "event_risk_not_acceptable"
+    return None
+
+
+def _path_quality(candidate: dict[str, Any], *, pnl: float | None, max_adverse_pnl: float | None) -> dict[str, Any]:
+    premium = first_float(
+        candidate,
+        "net_income",
+        "net_credit",
+        "entry_credit",
+        "premium_received_gross",
+        "premium_income",
+        "premium",
+    )
+    reasons: list[str] = []
+    if premium is not None and premium > 0:
+        if max_adverse_pnl is not None and max_adverse_pnl < 0 and abs(max_adverse_pnl) > premium * 3:
+            reasons.append("path_adverse_loss_exceeds_premium_budget")
+        if pnl is not None and pnl < 0 and abs(pnl) > premium * 3:
+            reasons.append("realized_loss_exceeds_premium_budget")
+    if reasons:
+        return {"status": "fail", "reasons": reasons}
+    return {"status": "pass", "reasons": ["path_quality_not_disqualifying"]}
+
+
+def _quality_confidence(ex_ante: dict[str, Any], path: dict[str, Any]) -> str:
+    if ex_ante.get("status") == "unknown":
+        return "low"
+    if path.get("status") == "unknown":
+        return "medium"
+    return "medium"
 
 
 def insurance_bucket_stats(
