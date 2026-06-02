@@ -94,6 +94,22 @@ def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
     shadow_analyze.add_argument("--dataset", required=True)
     shadow_analyze.add_argument("--min-sample", type=int, default=30)
     shadow_analyze.add_argument("--output", default=None)
+    shadow_backtest = research_shadow_sub.add_parser(
+        "parameter-backtest",
+        help="compare production observations with counterfactual parameter variants",
+    )
+    shadow_backtest.add_argument("--params", required=True, help="parameter variant JSON file")
+    shadow_backtest.add_argument("--dataset", default=None, help="existing shadow replay dataset directory")
+    shadow_backtest.add_argument("--runs-root", default=None)
+    shadow_backtest.add_argument("--profile-path", default=None)
+    shadow_backtest.add_argument("--runtime-root", default=None)
+    shadow_backtest.add_argument("--start-date", default=None, help="YYYY-MM-DD, required for strict date-window checks")
+    shadow_backtest.add_argument("--end-date", default=None, help="YYYY-MM-DD; defaults to start-date when omitted by caller")
+    shadow_backtest.add_argument("--account", dest="accounts", action="append", default=None)
+    shadow_backtest.add_argument("--market", choices=("hk", "us"), default=None)
+    shadow_backtest.add_argument("--min-sample", type=int, default=30)
+    shadow_backtest.add_argument("--format", dest="output_format", choices=("json", "markdown"), default="json")
+    shadow_backtest.add_argument("--output", default=None)
     for command_name, help_text in (
         ("status", "summarize local shadow replay dataset readiness"),
         ("list", "list local shadow replay datasets and next actions"),
@@ -462,6 +478,7 @@ def handle_research_command(
         collect_shadow_replay_marks,
         mark_shadow_replay_dataset,
         run_shadow_replay_data_plan,
+        run_shadow_replay_parameter_backtest,
         settle_shadow_replay_dataset,
         shadow_replay_dataset_status,
     )
@@ -502,6 +519,26 @@ def handle_research_command(
     if args.shadow_replay_command == "analyze":
         data = analyze_shadow_replay_dataset(dataset=args.dataset, min_sample=args.min_sample, output=args.output)
         return build_response(tool_name="research.shadow-replay.analyze", ok=True, data=data)
+
+    if args.shadow_replay_command == "parameter-backtest":
+        runs_root = _shadow_replay_runs_root(args, profile=profile, runtime_root=runtime_root, base=base)
+        try:
+            data = run_shadow_replay_parameter_backtest(
+                repo_root=base,
+                params=args.params,
+                dataset=args.dataset,
+                runs_root=runs_root,
+                start_date=args.start_date,
+                end_date=args.end_date or args.start_date,
+                accounts=args.accounts,
+                market=args.market,
+                min_sample=args.min_sample,
+                output_format=args.output_format,
+                output=args.output,
+            )
+        except ValueError as exc:
+            raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
+        return build_response(tool_name="research.shadow-replay.parameter-backtest", ok=True, data=data)
 
     if args.shadow_replay_command in {"status", "list"}:
         dataset_root = _shadow_replay_dataset_root(args.dataset_root, runtime_root=runtime_root, base=base)

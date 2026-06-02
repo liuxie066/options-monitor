@@ -407,6 +407,7 @@ om-agent run --tool candidate_rank_explain --input-json '{"mode":"put","score_we
 - `research shadow-replay mark` 可从 `required_data/parsed/*_required_data.csv` 为本地 dataset 生成 mark path
 - `research shadow-replay settle` 可从可用 mark 推导 mark-to-market outcome，也可在到期日/到期后用 spot/strike 推导到期 outcome
 - `research shadow-replay analyze` 会在已有可用 mark path / outcome facts 时输出路径风险、outcome stats 和按 DTE/Delta/IV/Spread/集中度分桶的 outcome-by-bucket 表现
+- `research shadow-replay parameter-backtest` 用历史 run artifacts 或已有 dataset 做 short-vol 参数反事实回放，比较生产实际结果和 variants，不重建历史期权链、不修改 runtime config
 - 缺少被拒样本、mark path 或 outcome facts 时返回 `not_ready` / `evidence_incomplete`，防止幸存者偏差
 - 只输出人工评审用建议，不自动改配置
 
@@ -425,6 +426,8 @@ om research shadow-replay run-data-plan --min-sample 30 --min-mark-points 2
 om research shadow-replay run-data-plan --profile-path /var/lib/options-monitor/service.profile.json --min-sample 30 --min-mark-points 2
 om research shadow-replay run-data-plan --min-sample 30 --min-mark-points 2 --source local --write
 om research shadow-replay run-data-plan --min-sample 30 --min-mark-points 2 --source opend --write --max-datasets 3
+om research shadow-replay parameter-backtest --profile-path /var/lib/options-monitor/service.profile.json --start-date 2026-06-01 --end-date 2026-06-02 --account lx --market hk --params params.json --min-sample 30
+om research shadow-replay parameter-backtest --dataset output_shared/research/shadow_replay/datasets/us-20260515 --params params.json --format markdown --output backtest.md
 om research shadow-replay collect-marks --dataset output_shared/research/shadow_replay/datasets/us-20260515 --source local --required-data-root output_shared/required_data --write
 om research shadow-replay collect-marks --dataset output_shared/research/shadow_replay/datasets/us-20260515 --source opend --required-data-root output_shared/required_data --opend-host 127.0.0.1 --opend-port 11111 --write
 om research shadow-replay mark --dataset output_shared/research/shadow_replay/datasets/us-20260515 --required-data-root output_shared/required_data --write
