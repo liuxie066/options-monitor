@@ -103,7 +103,9 @@ def test_compact_account_overview_ignores_reject_summary_strategy_names() -> Non
         cash_footer_lines=[],
     )
 
-    assert "  Put 0 · Covered Call 0\n" in message
+    assert "状态：Put 0 · Covered Call 0 · 平仓 0\n" in message
+    assert "候选\n- 无符合承保条件候选" in message
+    assert "- 主要过滤：波动率边际不足 127、基础条件不符 49、其他 31" in message
     assert "增强 1" not in message
 
 
@@ -134,4 +136,35 @@ def test_compact_account_overview_counts_candidate_lines_only() -> None:
         cash_footer_lines=[],
     )
 
-    assert "  Put 0 · Covered Call 1 · 增强 1\n" in message
+    assert "状态：Put 0 · Covered Call 1 · 增强 1 · 平仓 0\n" in message
+    assert "候选\nCovered Call" in message
+    assert "- 主要过滤：波动率边际不足 9、收益增强组合不成立 2" in message
+
+
+def test_compact_account_overview_does_not_count_gap_as_close_action() -> None:
+    from src.application.multi_tick.misc import AccountResult
+    from src.application.multi_tick.notify_format import build_account_message_compact
+
+    notif = (
+        "📋 本轮扫描完成，暂无符合条件的候选。\n\n"
+        "### [lx] 平仓建议 (0)\n"
+        "- 本次无 strong/medium 平仓建议\n"
+        "- 待补数据:\n"
+        "- 0700.HK Call 2026-07-30 520.00C · 无法评估 | 收益捕获平仓仅支持 open short put/call\n"
+    )
+
+    message = build_account_message_compact(
+        AccountResult(
+            account='lx',
+            ran_scan=True,
+            should_notify=True,
+            decision_reason='dense',
+            notification_text=notif,
+        ),
+        now_bj='2026-06-01 15:50:24',
+        cash_footer_lines=[],
+    )
+
+    assert "状态：Put 0 · Covered Call 0 · 平仓 0 · 待补 1" in message
+    assert "持仓\n- 无高/中优先级平仓建议\n- 待补:" in message
+    assert "0700.HK Call 2026-07-30 520.00C · 非 short put/call，跳过收益捕获" in message

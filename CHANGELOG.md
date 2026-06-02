@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.192 - 2026-06-02
+
+### Changed
+- Reworked short-vol Close Advice so IV/RV edge weakness, delta drift, and event context remain underwriting observations unless profit-capture thresholds are met.
+- Simplified compact monitoring receipts into status, candidate, position, and funding sections with compressed rejection summaries and clearer pending-data text.
+
+### Fixed
+- Prevented normal medium close advice from being counted or tagged as optimizer close actions unless optimizer detail evidence is present.
+
 ## 1.2.191 - 2026-06-02
 
 ### Added

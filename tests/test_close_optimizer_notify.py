@@ -13,10 +13,13 @@ def test_highlight_optimizer_lines_tags_switch_rows() -> None:
 def test_highlight_optimizer_lines_tags_close_rows() -> None:
     from src.application.multi_tick.notify_format import _highlight_optimizer_lines
 
-    text = "- TSLA Put 2026-06-19 200P · 建议平仓"
+    text = (
+        "- TSLA Put 2026-06-19 200P · 建议平仓\n"
+        "- 优化器: 持有年化=4.0% | 尾部风险=0.060 | 无可替换候选"
+    )
     out = _highlight_optimizer_lines(text)
 
-    assert out.endswith("⚠️")
+    assert "建议平仓 ⚠️" in out
 
 
 def test_highlight_optimizer_lines_does_not_double_tag() -> None:
@@ -31,7 +34,10 @@ def test_highlight_optimizer_lines_does_not_double_tag() -> None:
 def test_highlight_optimizer_lines_skips_normal_close_advice() -> None:
     from src.application.multi_tick.notify_format import _highlight_optimizer_lines
 
-    text = "- NVDA Put 2026-06-19 150P · 强烈推荐平仓"
+    text = (
+        "- NVDA Put 2026-06-19 150P · 强烈推荐平仓\n"
+        "- TSLA Put 2026-06-19 200P · 建议平仓"
+    )
     out = _highlight_optimizer_lines(text)
 
     assert "🔄" not in out
@@ -63,6 +69,7 @@ def test_count_optimizer_actions_counts_both_kinds() -> None:
     text = (
         "- NVDA · 强烈建议平仓换仓\n"
         "- TSLA · 建议平仓\n"
+        "- 优化器: 持有年化=4.0% | 尾部风险=0.060 | 无可替换候选\n"
         "- AAPL · 强烈建议平仓换仓\n"
         "- MSFT · 建议持有\n"
     )
@@ -76,6 +83,14 @@ def test_count_optimizer_actions_switch_does_not_double_count_close() -> None:
     text = "- NVDA · 强烈建议平仓换仓"
 
     assert count_optimizer_actions(text) == (1, 0)
+
+
+def test_count_optimizer_actions_does_not_count_normal_medium_close() -> None:
+    from src.application.multi_tick.notify_format import count_optimizer_actions
+
+    text = "- TSLA Put 2026-06-19 200P · 建议平仓"
+
+    assert count_optimizer_actions(text) == (0, 0)
 
 
 def test_build_account_message_appends_optimizer_counts_to_header() -> None:
@@ -120,7 +135,7 @@ def test_build_account_message_without_optimizer_omits_optimizer_counts() -> Non
         "腾讯 卖Put 2026-04-29 460P\n"
         "\n"
         "### [lx] 平仓建议\n"
-        "- NVDA Put 2026-06-19 150P · 强烈推荐平仓\n"
+        "- NVDA Put 2026-06-19 150P · 建议平仓\n"
     )
 
     message = build_account_message(

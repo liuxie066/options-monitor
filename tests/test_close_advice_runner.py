@@ -351,9 +351,9 @@ def test_run_close_advice_uses_short_vol_strategy_from_sell_put_config(
     assert rows[0]["strategy_family"] == "sell_put"
     assert rows[0]["strategy_profile"] == "short_vol"
     assert rows[0]["risk_model"] == "short_vol"
-    assert rows[0]["short_vol_thesis_status"] == "vol_edge_lost"
+    assert rows[0]["short_vol_thesis_status"] == "observe"
     assert rows[0]["tier"] == "strong"
-    assert "IV/RV edge" in rows[0]["reason"]
+    assert "IV/RV edge" in rows[0]["short_vol_reason"]
 
 
 def test_run_close_advice_refreshes_short_vol_quote_missing_rv(
@@ -3322,6 +3322,40 @@ def test_compact_close_advice_renders_risk_exit_loss_as_stop_loss_not_profit() -
     assert "- 建议价 ¥22 · 平仓损益 ¥-940（余 ¥2,178）" in text
     assert "已锁定 -72.8%" not in text
     assert "收益 ¥-940" not in text
+
+
+def test_compact_close_advice_does_not_render_short_vol_observation_as_close() -> None:
+    from src.application.close_advice_runner import render_markdown_compact
+
+    text = render_markdown_compact(
+        [
+            {
+                "account": "lx",
+                "symbol": "0700.HK",
+                "option_type": "put",
+                "expiration": "2026-07-30",
+                "strike": 440,
+                "currency": "HKD",
+                "tier": "none",
+                "tier_label": "不提醒",
+                "exit_state": "hold",
+                "exit_reason_type": "hold",
+                "short_vol_thesis_status": "observe",
+                "short_vol_reason": "short-vol 持仓存在观察项：到期前存在事件风险",
+                "capture_ratio": 0.20,
+                "dte": 59,
+                "remaining_annualized_return": 0.31,
+                "close_mid": 22,
+                "realized_if_close": 100,
+                "remaining_premium": 2178,
+                "evaluation_status": "priced",
+            }
+        ],
+        notify_levels={"strong", "medium"},
+        max_items=5,
+    )
+
+    assert text == ""
 
 
 def test_fee_gate_keeps_sell_put_event_loss_as_assignment_hold() -> None:

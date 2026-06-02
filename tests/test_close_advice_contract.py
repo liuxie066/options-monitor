@@ -97,14 +97,15 @@ def test_short_vol_soft_risk_loss_is_not_actionable() -> None:
         mode="put",
     )
 
-    assert row["short_vol_thesis_status"] == "vol_edge_lost"
+    assert row["short_vol_thesis_status"] == "observe"
     assert row["tier"] == "none"
     assert row["exit_state"] == EXIT_STATE_HOLD
     assert row["exit_reason_type"] == EXIT_STATE_HOLD
     assert row["realized_if_close"] < 0
     assert row["hold_reason_type"] == HOLD_REASON_TYPE_ASSIGNMENT_ACCEPTABLE
     assert "默认可接货" in row["reason"]
-    assert "risk_exit_loss_not_actionable" in row["data_quality_flags"]
+    assert "IV/RV edge" in row["short_vol_reason"]
+    assert "risk_exit_loss_not_actionable" not in row["data_quality_flags"]
 
 
 def test_short_vol_sell_put_event_context_does_not_override_loss_hold() -> None:
@@ -132,12 +133,13 @@ def test_short_vol_sell_put_event_context_does_not_override_loss_hold() -> None:
     assert row["event_context_status"] == "in_window"
     assert row["event_context_types"] == "earnings"
     assert row["event_context_dates"] == "2026-06-01"
-    assert row["short_vol_thesis_status"] == "valid"
+    assert row["short_vol_thesis_status"] == "observe"
     assert row["tier"] == "none"
     assert row["exit_state"] == EXIT_STATE_HOLD
     assert row["exit_reason_type"] == EXIT_STATE_HOLD
     assert row["hold_reason_type"] == HOLD_REASON_TYPE_ASSIGNMENT_ACCEPTABLE
     assert "默认可接货" in row["reason"]
+    assert "到期前存在事件风险" in row["short_vol_reason"]
     assert "risk_exit_loss_not_actionable" not in row["data_quality_flags"]
     assert row["realized_if_close"] < 0
 
@@ -165,12 +167,13 @@ def test_short_vol_covered_call_event_context_does_not_override_loss_hold() -> N
     )
 
     assert row["event_context_status"] == "in_window"
-    assert row["short_vol_thesis_status"] == "valid"
+    assert row["short_vol_thesis_status"] == "observe"
     assert row["tier"] == "none"
     assert row["exit_state"] == EXIT_STATE_HOLD
     assert row["exit_reason_type"] == EXIT_STATE_HOLD
     assert row["hold_reason_type"] == HOLD_REASON_TYPE_CALLED_AWAY_ACCEPTABLE
     assert "默认可被行权卖出正股" in row["reason"]
+    assert "到期前存在事件风险" in row["short_vol_reason"]
     assert "risk_exit_loss_not_actionable" not in row["data_quality_flags"]
     assert row["realized_if_close"] < 0
 
@@ -198,11 +201,103 @@ def test_short_vol_event_context_profit_still_uses_return_capture() -> None:
     )
 
     assert row["event_context_status"] == "in_window"
-    assert row["short_vol_thesis_status"] == "valid"
+    assert row["short_vol_thesis_status"] == "observe"
     assert row["tier"] == "strong"
     assert row["exit_state"] == EXIT_STATE_PROFIT_CAPTURE
     assert row["exit_reason_type"] == EXIT_REASON_TYPE_PROFIT_CAPTURE
     assert row["realized_if_close"] > 0
+    assert "到期前存在事件风险" in row["short_vol_reason"]
+
+
+def test_short_vol_profitable_soft_risk_without_capture_is_hold_observation() -> None:
+    row = evaluate_short_vol_close_advice(
+        _short_put_input(close_mid=0.80, bid=0.79, ask=0.81, dte=30),
+        short_vol_config=ShortVolAssessmentConfig(enable_stress_check=False),
+        close_config=CloseAdviceConfig(),
+        quote_row={
+            "symbol": "NVDA",
+            "option_type": "put",
+            "expiration": "2026-06-19",
+            "strike": 100,
+            "spot": 120,
+            "delta": -0.20,
+            "implied_volatility": 0.20,
+            "realized_volatility_estimate": 0.20,
+            "event_source_status": "ok",
+        },
+        mode="put",
+    )
+
+    assert row["realized_if_close"] > 0
+    assert row["short_vol_thesis_status"] == "observe"
+    assert row["tier"] == "none"
+    assert row["exit_state"] == EXIT_STATE_HOLD
+    assert row["exit_reason_type"] == EXIT_STATE_HOLD
+    assert row["hold_reason_type"] == HOLD_REASON_TYPE_ASSIGNMENT_ACCEPTABLE
+    assert "IV/RV edge" in row["short_vol_reason"]
+    assert "不作为平仓提醒" in row["reason"]
+    assert "risk_exit_loss_not_actionable" not in row["data_quality_flags"]
+
+
+def test_short_vol_delta_high_without_capture_is_hold_observation_for_covered_call() -> None:
+    row = evaluate_short_vol_close_advice(
+        _short_put_input(option_type="call", close_mid=0.80, bid=0.79, ask=0.81, dte=30, delta=0.45),
+        short_vol_config=ShortVolAssessmentConfig(enable_stress_check=False),
+        close_config=CloseAdviceConfig(),
+        quote_row={
+            "symbol": "NVDA",
+            "option_type": "call",
+            "expiration": "2026-06-19",
+            "strike": 100,
+            "spot": 120,
+            "delta": 0.45,
+            "implied_volatility": 0.30,
+            "realized_volatility_estimate": 0.20,
+            "event_source_status": "ok",
+        },
+        mode="call",
+    )
+
+    assert row["realized_if_close"] > 0
+    assert row["short_vol_thesis_status"] == "observe"
+    assert row["tier"] == "none"
+    assert row["exit_state"] == EXIT_STATE_HOLD
+    assert row["exit_reason_type"] == EXIT_STATE_HOLD
+    assert row["hold_reason_type"] == HOLD_REASON_TYPE_CALLED_AWAY_ACCEPTABLE
+    assert "delta 偏离承保观察区间" in row["short_vol_reason"]
+    assert "不作为平仓提醒" in row["reason"]
+
+
+def test_short_vol_event_without_capture_is_hold_observation() -> None:
+    row = evaluate_short_vol_close_advice(
+        _short_put_input(close_mid=0.80, bid=0.79, ask=0.81, dte=30),
+        short_vol_config=ShortVolAssessmentConfig(enable_stress_check=False, reject_event_risk=True),
+        close_config=CloseAdviceConfig(),
+        quote_row={
+            "symbol": "NVDA",
+            "option_type": "put",
+            "expiration": "2026-06-19",
+            "strike": 100,
+            "spot": 120,
+            "delta": -0.20,
+            "implied_volatility": 0.30,
+            "realized_volatility_estimate": 0.20,
+            "event_flag": True,
+            "event_types": "earnings",
+            "event_dates": "2026-06-01",
+            "event_source_status": "ok",
+        },
+        mode="put",
+    )
+
+    assert row["event_context_status"] == "in_window"
+    assert row["realized_if_close"] > 0
+    assert row["short_vol_thesis_status"] == "observe"
+    assert row["tier"] == "none"
+    assert row["exit_state"] == EXIT_STATE_HOLD
+    assert row["exit_reason_type"] == EXIT_STATE_HOLD
+    assert "到期前存在事件风险" in row["short_vol_reason"]
+    assert "不作为平仓提醒" in row["reason"]
 
 
 def test_short_vol_sell_put_valid_loss_marks_assignment_hold() -> None:
