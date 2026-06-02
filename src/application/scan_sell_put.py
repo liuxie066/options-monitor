@@ -257,6 +257,8 @@ def run_sell_put_scan(
     event_risk_cfg: dict[str, Any] | None = None,
     score_weights: dict[str, Any] | None = None,
     reject_log_output: Path | None = None,
+    strategy_family: str | None = None,
+    strategy_profile: str | None = None,
     quiet: bool = False,
 ) -> pd.DataFrame:
     """执行卖出看跌期权扫描并写出候选 CSV。"""
@@ -283,6 +285,8 @@ def run_sell_put_scan(
             min_annualized_net_return=threshold,
             min_net_income=float(min_net_income),
             score_weights=resolve_candidate_score_weights(score_weights),
+            strategy_family=strategy_family,
+            strategy_profile=strategy_profile,
             quiet=bool(quiet),
         ),
         deps=CandidateScanDependencies(

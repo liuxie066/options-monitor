@@ -277,8 +277,20 @@ def snapshot_from_row(
         "source_row_number": source_row_number,
         "status": normal_status(status),
         "strategy": strategy,
-        "strategy_family": text(row.get("strategy_family") or row.get("function") or strategy) or None,
-        "strategy_profile": text(row.get("strategy_profile") or row.get("profile") or row.get("strategy_mode")) or None,
+        "strategy_family": text(
+            row.get("strategy_family")
+            or _config_value(row, "strategy_family", "family")
+            or row.get("function")
+            or strategy
+        )
+        or None,
+        "strategy_profile": text(
+            row.get("strategy_profile")
+            or row.get("profile")
+            or row.get("strategy_mode")
+            or _config_value(row, "strategy_profile", "profile", "strategy")
+        )
+        or None,
         "mode": mode_norm,
         "run_id": text(row.get("run_id")) or None,
         "account": text(row.get("account") or account_hint).lower() or None,
@@ -319,6 +331,17 @@ def snapshot_from_row(
         "net_income_cny": first_float(row, "net_income_cny", "net_credit_cny", "premium_cny"),
         "net_income": first_float(row, "net_income", "net_credit", "combo_net_credit"),
     }
+
+
+def _config_value(row: dict[str, Any], *keys: str) -> Any:
+    raw = row.get("config_values")
+    if not isinstance(raw, dict):
+        return None
+    for key in keys:
+        value = raw.get(key)
+        if text(value):
+            return value
+    return None
 
 
 def rank_snapshots_for_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:

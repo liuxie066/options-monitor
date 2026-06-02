@@ -48,6 +48,8 @@ class CandidateScanConfig:
     score_weights: CandidateScoreWeights | None = None
     reject_stage: str = "step3_risk_gate"
     trace_output: Path | None = None
+    strategy_family: str | None = None
+    strategy_profile: str | None = None
     quiet: bool = False
 
 
@@ -201,6 +203,8 @@ def run_candidate_scan(
                     symbol=symbol,
                     function=trace_function,
                     mode=config.mode,
+                    strategy_family=config.strategy_family,
+                    strategy_profile=config.strategy_profile,
                     status="rejected",
                     stage="fetch_visibility",
                     rule=f"required_data_missing_{config.mode}_chain",
@@ -256,6 +260,8 @@ def run_candidate_scan(
                         symbol=contract.symbol,
                         function=trace_function,
                         mode=config.mode,
+                        strategy_family=config.strategy_family,
+                        strategy_profile=config.strategy_profile,
                         status="rejected",
                         stage="metrics",
                         rule=str(reason.get("rule") or "candidate_metrics_unavailable"),
@@ -315,6 +321,8 @@ def run_candidate_scan(
                         symbol=candidate.get("symbol") or contract.symbol,
                         function=trace_function,
                         mode=config.mode,
+                        strategy_family=config.strategy_family,
+                        strategy_profile=config.strategy_profile,
                         status="accepted",
                         stage="stage4_ranking",
                         rule="candidate_accepted",
@@ -372,6 +380,8 @@ def _trace_config_values(config: CandidateScanConfig) -> dict[str, object]:
         "max_spread_ratio": config.max_spread_ratio,
         "min_annualized_net_return": config.min_annualized_net_return,
         "min_net_income": config.min_net_income,
+        "strategy_family": config.strategy_family,
+        "strategy_profile": config.strategy_profile,
     }
 
 

@@ -77,6 +77,9 @@ def build_candidate_filter_trace_row(
     symbol: Any,
     function: Any,
     mode: Any = None,
+    option_type: Any = None,
+    strategy_family: Any = None,
+    strategy_profile: Any = None,
     status: Any,
     stage: Any,
     rule: Any,
@@ -93,6 +96,17 @@ def build_candidate_filter_trace_row(
     if function_norm not in CANDIDATE_FILTER_FUNCTIONS:
         raise ValueError(f"unsupported candidate filter function: {function}")
     status_norm = _clean_text(status).lower() or "rejected"
+    config_values_json = _jsonable(config_values or {})
+    family_norm = _clean_strategy_family(
+        strategy_family
+        or _trace_config_value(config_values_json, "strategy_family", "family")
+        or _default_strategy_family(function_norm)
+    )
+    profile_norm = _clean_strategy_profile(
+        strategy_profile
+        or _trace_config_value(config_values_json, "strategy_profile", "profile", "strategy")
+    )
+    option_type_norm = _clean_option_type(option_type or mode)
     return {
         "schema_version": TRACE_SCHEMA_VERSION,
         "run_id": _clean_optional_text(run_id),
@@ -100,6 +114,9 @@ def build_candidate_filter_trace_row(
         "symbol": _clean_text(symbol).upper(),
         "function": function_norm,
         "mode": _clean_optional_text(mode),
+        "option_type": option_type_norm,
+        "strategy_family": family_norm,
+        "strategy_profile": profile_norm,
         "status": status_norm,
         "stage": _clean_text(stage),
         "rule": _clean_text(rule),
@@ -110,7 +127,7 @@ def build_candidate_filter_trace_row(
         "strike": _jsonable(strike),
         "message": _clean_text(message),
         "evidence_path": _clean_optional_text(evidence_path),
-        "config_values": _jsonable(config_values or {}),
+        "config_values": config_values_json,
     }
 
 
@@ -187,6 +204,49 @@ def read_candidate_filter_trace(path: Path | str) -> list[dict[str, Any]]:
 
 def _clean_optional_text(value: Any) -> str | None:
     text = _clean_text(value)
+    return text or None
+
+
+def _default_strategy_family(function_norm: str) -> str | None:
+    if function_norm in {FUNCTION_SELL_PUT, FUNCTION_SELL_CALL, FUNCTION_YIELD_ENHANCEMENT}:
+        return function_norm
+    return None
+
+
+def _trace_config_value(config_values: Any, *keys: str) -> Any:
+    if not isinstance(config_values, dict):
+        return None
+    for key in keys:
+        value = config_values.get(key)
+        if not _is_missing_scalar(value):
+            return value
+    return None
+
+
+def _clean_option_type(value: Any) -> str | None:
+    text = _clean_text(value).lower()
+    if text in {"put", "call"}:
+        return text
+    return None
+
+
+def _clean_strategy_family(value: Any) -> str | None:
+    text = _clean_text(value).lower().replace("-", "_")
+    if text in {"sell_put", "put"}:
+        return FUNCTION_SELL_PUT
+    if text in {"sell_call", "covered_call", "call"}:
+        return FUNCTION_SELL_CALL
+    if text in {"yield_enhancement", "income_upside_enhancement", "vol_convexity_enhancement"}:
+        return FUNCTION_YIELD_ENHANCEMENT
+    return text or None
+
+
+def _clean_strategy_profile(value: Any) -> str | None:
+    text = _clean_text(value).lower().replace("-", "_")
+    if text in {"legacy", "return", "return_first", "yield_first", "income"}:
+        return "return_first"
+    if text in {"short_vol", "volatility_premium", "vol_premium"}:
+        return "short_vol"
     return text or None
 
 

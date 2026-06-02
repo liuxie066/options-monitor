@@ -107,6 +107,8 @@ def test_covered_call_short_vol_enrichment_writes_reject_trace(tmp_path: Path) -
     trace = (out_path.parent / "candidate_filter_trace.jsonl").read_text(encoding="utf-8")
     assert "vol_edge_ratio_below_min" in trace
     assert "\"function\": \"sell_call\"" in trace
+    assert '"strategy_family": "sell_call"' in trace
+    assert '"strategy_profile": "short_vol"' in trace
 
 
 def test_covered_call_short_vol_enrichment_rejects_concentration(tmp_path: Path) -> None:
