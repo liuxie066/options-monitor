@@ -53,6 +53,8 @@ def _append_share_coverage_trace(
     message: str,
     metric_value: Any = None,
     threshold: Any = None,
+    strategy_family: str | None = None,
+    strategy_profile: str | None = None,
     config_values: dict[str, Any] | None = None,
 ) -> None:
     scope = infer_trace_scope_from_path(output_path)
@@ -65,6 +67,8 @@ def _append_share_coverage_trace(
                 symbol=symbol,
                 function="share_coverage",
                 mode="call",
+                strategy_family=strategy_family,
+                strategy_profile=strategy_profile,
                 status=status,
                 stage="post_filter",
                 rule=rule,
@@ -111,6 +115,7 @@ def run_sell_call_scan_and_summarize(
     Returns the summary row dict (same schema as summarize_sell_call).
     """
     symbol_cc = report_dir / f'{symbol_lower}_sell_call_candidates.csv'
+    sell_call_semantics = strategy_semantics_for_side_config(family=SELL_CALL_FAMILY, side_cfg=cc)
     # sell_call avg_cost/shares are sourced from account-scoped portfolio context.
     # The upstream portfolio source may be OpenD or holdings, but the downstream stock schema stays the same.
     if not stock:
@@ -120,6 +125,8 @@ def run_sell_call_scan_and_summarize(
             status="not_applicable",
             rule="stock_context_missing",
             message=f"{COVERED_CALL_TRACE_LABEL} stock context missing",
+            strategy_family=sell_call_semantics.strategy_family,
+            strategy_profile=sell_call_semantics.strategy_profile,
         )
         return summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
 
@@ -137,6 +144,8 @@ def run_sell_call_scan_and_summarize(
             status="not_applicable",
             rule="stock_context_invalid",
             message=f"{COVERED_CALL_TRACE_LABEL} stock context invalid",
+            strategy_family=sell_call_semantics.strategy_family,
+            strategy_profile=sell_call_semantics.strategy_profile,
         )
         return summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
 
@@ -149,6 +158,8 @@ def run_sell_call_scan_and_summarize(
             message=f"{COVERED_CALL_TRACE_LABEL} shares or avg_cost non-positive",
             metric_value=shares_total,
             threshold=1,
+            strategy_family=sell_call_semantics.strategy_family,
+            strategy_profile=sell_call_semantics.strategy_profile,
             config_values={"avg_cost": avg_cost},
         )
         return summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
@@ -163,6 +174,8 @@ def run_sell_call_scan_and_summarize(
                 status="post_filtered",
                 rule="locked_shares_unavailable",
                 message=str(locked_shares_unavailable_by_symbol.get(symbol_key) or "locked shares unavailable"),
+                strategy_family=sell_call_semantics.strategy_family,
+                strategy_profile=sell_call_semantics.strategy_profile,
             )
             return summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
         if locked_shares_by_symbol and symbol:
@@ -174,11 +187,12 @@ def run_sell_call_scan_and_summarize(
             status="post_filtered",
             rule="share_coverage_calc_failed",
             message=f"{COVERED_CALL_TRACE_LABEL} share coverage calculation failed",
+            strategy_family=sell_call_semantics.strategy_family,
+            strategy_profile=sell_call_semantics.strategy_profile,
         )
         return summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
     shares_available_for_cover = max(0, int(shares_total) - int(locked))
 
-    sell_call_semantics = strategy_semantics_for_side_config(family=SELL_CALL_FAMILY, side_cfg=cc)
     min_annualized = 0.0 if sell_call_semantics.scan_uses_short_vol_gate else resolve_min_annualized_net_premium_return_from_sell_call_cfg(
         sell_call_cfg=cc,
         source_prefix=f'{symbol}.sell_call',
@@ -230,6 +244,8 @@ def run_sell_call_scan_and_summarize(
         max_spread_ratio=liquidity.max_spread_ratio,
         event_risk_cfg=event_risk,
         score_weights=cc.get('score_weights'),
+        strategy_family=sell_call_semantics.strategy_family,
+        strategy_profile=sell_call_semantics.strategy_profile,
         quiet=bool(is_scheduled),
     )
 

@@ -341,8 +341,19 @@ def test_shadow_replay_decision_quality_is_not_pnl_only() -> None:
         "sample_count": 5,
         "min_sample": 5,
         "sample_floor_met": True,
+        "candidate_universe_missing": False,
         "strategy_profiles": ["return_first", "short_vol"],
         "has_strategy_profile_breakdown": True,
+        "instrument_identity_ready_count": 5,
+        "instrument_identity_missing_count": 0,
+        "has_instrument_identity": True,
+        "strategy_profile_ready_count": 5,
+        "strategy_profile_missing_count": 0,
+        "trace_only_evidence": False,
+        "usable_mark_ready_count": 5,
+        "usable_mark_missing_count": 0,
+        "outcome_ready_count": 5,
+        "outcome_missing_count": 0,
         "bad_accept_count": 1,
         "bad_reject_count": 1,
         "bad_decision_count": 2,
@@ -387,6 +398,76 @@ def test_shadow_replay_decision_quality_requires_sample_floor() -> None:
         "bad_decision_signal_missing",
         "inconclusive_rate_too_high",
     ]
+
+
+def test_shadow_replay_gate_separates_evidence_gap_blockers() -> None:
+    from src.application.shadow_replay.analysis import analyze_rows
+
+    analysis = analyze_rows(
+        candidate_snapshots=[
+            {
+                "symbol": "NOID",
+                "status": "accepted",
+                "source_kind": "candidate_csv",
+                "strategy_profile": "short_vol",
+                "iv_rv_ratio": 1.30,
+                "delta": -0.20,
+                "net_income": 120,
+            },
+            {
+                "contract_symbol": "NOPROFILE260619P00100000",
+                "symbol": "NOPROFILE",
+                "option_type": "put",
+                "status": "accepted",
+                "source_kind": "candidate_csv",
+                "iv_rv_ratio": 1.30,
+                "delta": -0.20,
+                "net_income": 120,
+            },
+            {
+                "contract_symbol": "NOOUTCOME260619P00100000",
+                "symbol": "NOOUTCOME",
+                "option_type": "put",
+                "status": "accepted",
+                "source_kind": "filter_decision",
+                "strategy_profile": "short_vol",
+                "iv_rv_ratio": 1.30,
+                "delta": -0.20,
+                "net_income": 120,
+            },
+        ],
+        filter_decisions=[],
+        mark_snapshots=[
+            {"contract_symbol": "NOPROFILE260619P00100000", "unrealized_pnl": 10},
+        ],
+        outcome_facts=[
+            {"contract_symbol": "NOPROFILE260619P00100000", "outcome": "expired_worthless", "realized_pnl": 120},
+        ],
+        min_sample=3,
+    )
+
+    gate = analysis["parameter_advice_gate"]
+    assert gate["sample_floor_met"] is True
+    assert gate["instrument_identity_ready_count"] == 2
+    assert gate["instrument_identity_missing_count"] == 1
+    assert gate["strategy_profile_ready_count"] == 2
+    assert gate["strategy_profile_missing_count"] == 1
+    assert gate["usable_mark_ready_count"] == 1
+    assert gate["usable_mark_missing_count"] == 1
+    assert gate["outcome_ready_count"] == 1
+    assert gate["outcome_missing_count"] == 1
+    assert gate["trace_only_evidence"] is False
+    assert gate["blockers"] == [
+        "instrument_identity_missing",
+        "strategy_profile_missing",
+        "usable_mark_path_missing",
+        "outcome_fact_missing",
+        "bad_decision_signal_missing",
+        "inconclusive_rate_too_high",
+    ]
+    assert analysis["evidence_checks"]["instrument_identity_missing_count"] == 1
+    assert analysis["evidence_checks"]["strategy_profile_missing_count"] == 1
+    assert analysis["evidence_checks"]["outcome_missing_count"] == 1
 
 
 def test_shadow_replay_build_selects_latest_runtime_run_with_evidence(tmp_path: Path) -> None:

@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 1.2.191 - 2026-06-02
+
+### Added
+- Added strategy-aware candidate-filter trace fields for option type, strategy family, and strategy profile across Sell Put, Covered Call, Yield Enhancement, and Close Advice evidence.
+- Added Shadow Replay readiness diagnostics that separate sample size, instrument identity, strategy profile, trace-only evidence, mark coverage, outcome coverage, and bad-decision signal blockers.
+- Added an Opportunity Quality gate for Shadow Replay parameter review so replay remains dry-run-only until evidence is sufficient.
+
+### Changed
+- Extracted Yield Enhancement overlay orchestration out of the Sell Put main flow while preserving the existing scanner and notification behavior.
+- Kept Close Advice event-risk failures contextual for lifecycle review instead of fail-closing profitable or acceptable short-vol positions solely because an event source is unavailable.
+- Preserved strategy metadata from scan and post-filter contexts into replay snapshots before parameter review, reducing reliance on filename or function inference.
+
 ## 1.2.190 - 2026-06-02
 
 ### Added

@@ -118,7 +118,14 @@ def _optional_float(mapping: dict[str, Any], key: str) -> float | None:
     return float(value)
 
 
-def _sell_put_cash_trace_rows(*, df: pd.DataFrame, symbol: str, out_path: Path) -> list[dict[str, Any]]:
+def _sell_put_cash_trace_rows(
+    *,
+    df: pd.DataFrame,
+    symbol: str,
+    out_path: Path,
+    strategy_family: str | None = None,
+    strategy_profile: str | None = None,
+) -> list[dict[str, Any]]:
     scope = infer_trace_scope_from_path(out_path)
     rows: list[dict[str, Any]] = []
     for _, row in df.iterrows():
@@ -147,6 +154,8 @@ def _sell_put_cash_trace_rows(*, df: pd.DataFrame, symbol: str, out_path: Path) 
                 symbol=row.get("symbol") or symbol,
                 function="cash_reserve",
                 mode="put",
+                strategy_family=strategy_family,
+                strategy_profile=strategy_profile,
                 status="post_filtered",
                 stage="post_filter",
                 rule=rule,
@@ -170,6 +179,8 @@ def _enrich_and_filter_sell_put_cash(
     portfolio_ctx: dict[str, Any] | None,
     exchange_rate_converter: CurrencyConverter,
     out_path: Path,
+    strategy_family: str | None = None,
+    strategy_profile: str | None = None,
 ) -> pd.DataFrame:
     if df_labeled.empty:
         return df_labeled
@@ -192,7 +203,13 @@ def _enrich_and_filter_sell_put_cash(
         if mask_drop.any():
             append_candidate_filter_trace_rows(
                 candidate_trace_path_for_output(out_path),
-                _sell_put_cash_trace_rows(df=d.loc[mask_drop].copy(), symbol=symbol, out_path=out_path),
+                _sell_put_cash_trace_rows(
+                    df=d.loc[mask_drop].copy(),
+                    symbol=symbol,
+                    out_path=out_path,
+                    strategy_family=strategy_family,
+                    strategy_profile=strategy_profile,
+                ),
             )
             d = d.loc[~mask_drop].copy()
             d.to_csv(out_path, index=False)
@@ -209,6 +226,8 @@ def _enrich_and_filter_sell_put_cash(
                     symbol=symbol,
                     function="cash_reserve",
                     mode="put",
+                    strategy_family=strategy_family,
+                    strategy_profile=strategy_profile,
                     status="post_filtered",
                     stage="post_filter",
                     rule="cash_filter_failed_closed",
@@ -277,6 +296,8 @@ def _run_premium_funded_convexity_overlay(
         max_spread_ratio=liquidity.max_spread_ratio,
         event_risk_cfg=event_risk,
         score_weights=yield_sp.get('score_weights'),
+        strategy_family=SELL_PUT_FAMILY,
+        strategy_profile=yield_enhancement_policy.derived_from_sell_put_strategy,
         quiet=True,
     )
     add_sell_put_labels(base, symbol_yield_put_universe, symbol_yield_put_universe_labeled)
@@ -324,6 +345,8 @@ def _run_premium_funded_convexity_overlay(
                 symbol=symbol,
                 function="yield_enhancement",
                 mode=yield_enhancement_policy.mode,
+                strategy_family="yield_enhancement",
+                strategy_profile=yield_enhancement_policy.derived_from_sell_put_strategy,
                 status=yield_status,
                 stage="post_filter",
                 rule=yield_rule,
@@ -331,6 +354,7 @@ def _run_premium_funded_convexity_overlay(
                 threshold=1,
                 message="yield enhancement pair selection",
                 evidence_path=symbol_yield_enhancement.name,
+                config_values=yield_enhancement_policy.to_fields(),
             )
         ],
     )
@@ -434,6 +458,8 @@ def run_sell_put_scan_and_summarize(
             max_spread_ratio=liquidity.max_spread_ratio,
             event_risk_cfg=event_risk,
             score_weights=sp.get('score_weights'),
+            strategy_family=sell_put_semantics.strategy_family,
+            strategy_profile=sell_put_semantics.strategy_profile,
             quiet=bool(is_scheduled),
         )
         add_sell_put_labels(base, symbol_sp, symbol_sp_labeled)
@@ -445,6 +471,8 @@ def run_sell_put_scan_and_summarize(
                 portfolio_ctx=portfolio_ctx,
                 exchange_rate_converter=exchange_rate_converter,
                 out_path=symbol_sp_labeled,
+                strategy_family=sell_put_semantics.strategy_family,
+                strategy_profile=sell_put_semantics.strategy_profile,
             )
         if not df_sp_lab.empty:
             df_sp_lab = enrich_and_filter_sell_put_short_vol(

@@ -96,6 +96,8 @@ def test_sell_put_scan_writes_candidate_filter_trace(tmp_path: Path) -> None:
         min_open_interest=10,
         min_volume=10,
         max_spread_ratio=1.0,
+        strategy_family="sell_put",
+        strategy_profile="short_vol",
         quiet=True,
     )
 
@@ -107,6 +109,9 @@ def test_sell_put_scan_writes_candidate_filter_trace(tmp_path: Path) -> None:
     assert "risk_volume" in rules
     assert "metrics_mid_non_positive" in rules
     assert {row["function"] for row in trace_rows} == {"sell_put"}
+    assert {row["option_type"] for row in trace_rows} == {"put"}
+    assert {row["strategy_family"] for row in trace_rows} == {"sell_put"}
+    assert {row["strategy_profile"] for row in trace_rows} == {"short_vol"}
 
 
 def test_candidate_scan_traces_missing_required_data_chain(tmp_path: Path) -> None:

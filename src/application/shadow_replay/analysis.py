@@ -81,6 +81,20 @@ def analyze_rows(
     quality = decision_quality(candidate_snapshots, mark_snapshots, outcome_facts, min_sample=sample_floor)
     quality_summary = quality["summary"]
     advice_gate = parameter_advice_gate(quality)
+    checks.update(
+        {
+            "has_instrument_identity": bool(advice_gate["has_instrument_identity"]),
+            "instrument_identity_ready_count": int(advice_gate["instrument_identity_ready_count"]),
+            "instrument_identity_missing_count": int(advice_gate["instrument_identity_missing_count"]),
+            "strategy_profile_ready_count": int(advice_gate["strategy_profile_ready_count"]),
+            "strategy_profile_missing_count": int(advice_gate["strategy_profile_missing_count"]),
+            "trace_only_evidence": bool(advice_gate["trace_only_evidence"]),
+            "usable_mark_ready_count": int(advice_gate["usable_mark_ready_count"]),
+            "usable_mark_missing_count": int(advice_gate["usable_mark_missing_count"]),
+            "outcome_ready_count": int(advice_gate["outcome_ready_count"]),
+            "outcome_missing_count": int(advice_gate["outcome_missing_count"]),
+        }
+    )
     return {
         "summary": {
             "status": recommendation["status"],
@@ -248,13 +262,41 @@ def decision_quality(
     sample_floor = max(1, int(min_sample))
     outcome_by_key = {instrument_key(row): row for row in outcomes if instrument_key(row)}
     adverse_by_key = _max_adverse_pnl_by_instrument(marks)
+    usable_mark_keys = {instrument_key(row) for row in marks if is_usable_mark(row) and instrument_key(row)}
     sample_count = len(candidates)
     force_inconclusive = sample_count < sample_floor
     samples: list[dict[str, Any]] = []
     label_counts: Counter[str] = Counter()
     by_strategy_profile: dict[str, Counter[str]] = defaultdict(Counter)
+    source_kind_counts: Counter[str] = Counter()
+    instrument_identity_missing_count = 0
+    instrument_identity_ready_count = 0
+    strategy_profile_missing_count = 0
+    strategy_profile_ready_count = 0
+    outcome_missing_count = 0
+    outcome_ready_count = 0
+    usable_mark_missing_count = 0
+    usable_mark_ready_count = 0
     for candidate in candidates:
         key = instrument_key(candidate)
+        has_identity = _has_instrument_identity(candidate)
+        if has_identity:
+            instrument_identity_ready_count += 1
+        else:
+            instrument_identity_missing_count += 1
+        if _strategy_profile(candidate) == "unknown":
+            strategy_profile_missing_count += 1
+        else:
+            strategy_profile_ready_count += 1
+        if has_identity and key and key not in outcome_by_key:
+            outcome_missing_count += 1
+        elif has_identity and key:
+            outcome_ready_count += 1
+        if has_identity and key and key not in usable_mark_keys:
+            usable_mark_missing_count += 1
+        elif has_identity and key:
+            usable_mark_ready_count += 1
+        source_kind_counts[str(candidate.get("source_kind") or "unknown")] += 1
         outcome = outcome_by_key.get(key) if key else None
         sample = _decision_quality_sample(
             candidate=candidate,
@@ -280,6 +322,16 @@ def decision_quality(
             "label_counts": dict(sorted(label_counts.items())),
             "bad_decision_count": bad_count,
             "inconclusive_count": int(label_counts.get("inconclusive", 0)),
+            "instrument_identity_ready_count": instrument_identity_ready_count,
+            "instrument_identity_missing_count": instrument_identity_missing_count,
+            "has_instrument_identity": instrument_identity_ready_count > 0,
+            "strategy_profile_ready_count": strategy_profile_ready_count,
+            "strategy_profile_missing_count": strategy_profile_missing_count,
+            "outcome_ready_count": outcome_ready_count,
+            "outcome_missing_count": outcome_missing_count,
+            "usable_mark_ready_count": usable_mark_ready_count,
+            "usable_mark_missing_count": usable_mark_missing_count,
+            "source_kind_counts": dict(sorted(source_kind_counts.items())),
         },
         "by_strategy_profile": {profile: dict(sorted(counts.items())) for profile, counts in sorted(by_strategy_profile.items())},
         "samples": samples,
@@ -302,16 +354,44 @@ def parameter_advice_gate(quality: dict[str, Any]) -> dict[str, Any]:
     bad_decision_count = bad_accept_count + bad_reject_count
     inconclusive_count = int(label_counts.get("inconclusive") or 0)
     inconclusive_rate = round(inconclusive_count / sample_count, 4) if sample_count > 0 else None
+    instrument_identity_ready_count = int(summary.get("instrument_identity_ready_count") or 0)
+    instrument_identity_missing_count = int(summary.get("instrument_identity_missing_count") or 0)
+    strategy_profile_ready_count = int(summary.get("strategy_profile_ready_count") or 0)
+    strategy_profile_missing_count = int(summary.get("strategy_profile_missing_count") or 0)
+    outcome_ready_count = int(summary.get("outcome_ready_count") or 0)
+    outcome_missing_count = int(summary.get("outcome_missing_count") or 0)
+    usable_mark_ready_count = int(summary.get("usable_mark_ready_count") or 0)
+    usable_mark_missing_count = int(summary.get("usable_mark_missing_count") or 0)
+    source_kind_counts_raw = summary.get("source_kind_counts")
+    source_kind_counts = source_kind_counts_raw if isinstance(source_kind_counts_raw, dict) else {}
     strategy_profiles = sorted(profile for profile in by_profile if profile and profile != "unknown")
     sample_floor_met = sample_count >= min_sample
     has_strategy_profile_breakdown = bool(strategy_profiles)
     has_bad_decision_signal = bad_decision_count > 0
     inconclusive_too_high = bool(inconclusive_rate is not None and inconclusive_rate > 0.50)
+    candidate_universe_missing = sample_count <= 0
+    trace_only_evidence = (
+        sample_count > 0
+        and int(source_kind_counts.get("candidate_csv") or 0) == 0
+        and int(source_kind_counts.get("filter_decision") or 0) > 0
+    )
     blockers: list[str] = []
-    if not sample_floor_met:
+    if candidate_universe_missing:
+        blockers.append("candidate_universe_missing")
+    elif not sample_floor_met:
         blockers.append("sample_size_below_min_sample")
+    if sample_floor_met and instrument_identity_ready_count < min_sample:
+        blockers.append("instrument_identity_missing")
     if not has_strategy_profile_breakdown:
         blockers.append("strategy_profile_breakdown_missing")
+    elif sample_floor_met and strategy_profile_ready_count < min_sample:
+        blockers.append("strategy_profile_missing")
+    if sample_floor_met and trace_only_evidence:
+        blockers.append("trace_only_evidence")
+    if sample_floor_met and usable_mark_ready_count < min_sample:
+        blockers.append("usable_mark_path_missing")
+    if sample_floor_met and outcome_ready_count < min_sample:
+        blockers.append("outcome_fact_missing")
     if not has_bad_decision_signal:
         blockers.append("bad_decision_signal_missing")
     if inconclusive_too_high:
@@ -324,8 +404,19 @@ def parameter_advice_gate(quality: dict[str, Any]) -> dict[str, Any]:
         "sample_count": sample_count,
         "min_sample": min_sample,
         "sample_floor_met": sample_floor_met,
+        "candidate_universe_missing": candidate_universe_missing,
         "strategy_profiles": strategy_profiles,
         "has_strategy_profile_breakdown": has_strategy_profile_breakdown,
+        "instrument_identity_ready_count": instrument_identity_ready_count,
+        "instrument_identity_missing_count": instrument_identity_missing_count,
+        "has_instrument_identity": instrument_identity_ready_count > 0,
+        "strategy_profile_ready_count": strategy_profile_ready_count,
+        "strategy_profile_missing_count": strategy_profile_missing_count,
+        "trace_only_evidence": trace_only_evidence,
+        "usable_mark_ready_count": usable_mark_ready_count,
+        "usable_mark_missing_count": usable_mark_missing_count,
+        "outcome_ready_count": outcome_ready_count,
+        "outcome_missing_count": outcome_missing_count,
         "bad_accept_count": bad_accept_count,
         "bad_reject_count": bad_reject_count,
         "bad_decision_count": bad_decision_count,
@@ -425,6 +516,17 @@ def _strategy_profile(candidate: dict[str, Any]) -> str:
     if raw in {"return_first", "return-first", "income", "yield_first"}:
         return "return_first"
     return "unknown"
+
+
+def _has_instrument_identity(candidate: dict[str, Any]) -> bool:
+    if text(candidate.get("contract_symbol") or candidate.get("option_symbol")):
+        return True
+    return bool(
+        text(candidate.get("symbol") or candidate.get("underlying_symbol"))
+        and text(candidate.get("option_type") or candidate.get("mode"))
+        and text(candidate.get("expiration") or candidate.get("exp"))
+        and text(candidate.get("strike"))
+    )
 
 
 def _strategy_family(candidate: dict[str, Any]) -> str:
