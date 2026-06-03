@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.2.197 - 2026-06-03
+
+### Added
+- Added `research shadow-replay parameter-report` to generate paired JSON and Markdown parameter candidate-impact reports from existing scan evidence and explicit parameter files.
+
+### Changed
+- Renamed filter-only parameter backtest recommendations to `ready_for_live_shadow_candidate_review` so reports no longer imply live shadow has already run.
+
 ## 1.2.196 - 2026-06-03
 
 ### Changed

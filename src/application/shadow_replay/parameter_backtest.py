@@ -659,7 +659,7 @@ def _recommendation(
         }
     if data_mode != "closed_replay":
         return {
-            "status": "live_shadow_candidate_only",
+            "status": "ready_for_live_shadow_candidate_review",
             "reason": "outcome_evidence_missing",
             "candidate_impact_allowed": True,
             "candidate_impact_reason": candidate_impact.get("reason"),
@@ -667,7 +667,7 @@ def _recommendation(
             "parameter_field_status": field_gate.get("status"),
             "missing_required_fields": evidence_quality.get("missing_required_fields"),
             "production_recommendation_allowed": False,
-            "next_action": "run_live_shadow_or_collect_mark_outcomes_before_production_change",
+            "next_action": "review_candidate_impact_and_collect_mark_outcomes_before_production_change",
         }
     return {
         "status": "ready_for_live_shadow_review",

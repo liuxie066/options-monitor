@@ -75,6 +75,22 @@ JSON
   --min-sample 30
 ```
 
+用户常用入口是 `parameter-report`：它复用同一套回测逻辑，一次写出 JSON 和 Markdown，不自动生成参数、不修改 runtime config、不发送通知。
+
+```bash
+./om research shadow-replay parameter-report \
+  --runtime-root /var/lib/options-monitor \
+  --start-date 2026-06-03 \
+  --end-date 2026-06-03 \
+  --account lx \
+  --account sy \
+  --market us \
+  --params-dir /var/lib/options-monitor/output_shared/research/shadow_replay/backtests/<params-dir> \
+  --min-sample 30
+```
+
+`parameter-report` 默认写入 `output_shared/research/shadow_replay/backtests/parameter-report-<market>-<date-window>-<timestamp>/result.<market>.json|md`；也可以用 `--output-dir` 指定精确目录。
+
 也可以对已建立的 dataset 回测，并输出 Markdown 报告：
 
 ```bash
@@ -98,7 +114,7 @@ JSON
 - `candidate_impact`：候选影响摘要，包括 baseline 接受数、每组 variant 的新增/移除数量，以及新增候选数最多的 variant。
 - `baseline`：生产实际观察结果。
 - `variants`：每个参数组的 accepted/rejected、新增/移除候选、拒绝原因、安全边界原因和 outcome/insurance 指标。
-- `recommendation`：只给下一步 gate；即使 ready，也只是进入 live shadow / 人工评审，不自动改生产配置。
+- `recommendation`：只给下一步 gate。`ready_for_live_shadow_candidate_review` 表示候选影响可进入人工评审，不表示已经完成 live shadow；生产改参仍取决于 `gates.production_recommendation`。
 
 ## 建立 Dataset
 
