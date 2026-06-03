@@ -3,7 +3,13 @@ from __future__ import annotations
 from datetime import date
 from typing import Any, Callable
 
-from src.application.assistant.agent_loop import build_tool_observation
+from src.application.assistant.agent_loop import (
+    AgentLoopPlanFn,
+    AgentLoopSynthesizeFn,
+    INTERNAL_TOOL_PLAN_NAME,
+    build_tool_observation,
+    execute_tool_plan,
+)
 from src.application.assistant.perception_trace import (
     PerceptionTrace,
     build_assistant_decision,
@@ -31,6 +37,8 @@ def handle_assistant_message(
     now_fn: Callable[[], date] | None = None,
     settings: AssistantSettings | None = None,
     translate_intent_fn: TranslateIntentFn | None = None,
+    plan_tools_fn: AgentLoopPlanFn | None = None,
+    synthesize_response_fn: AgentLoopSynthesizeFn | None = None,
     generate_reply_fn: GenerateReplyFn | None = None,
 ) -> dict[str, Any]:
     runtime_settings = settings or AssistantSettings()
@@ -60,6 +68,7 @@ def handle_assistant_message(
         audit_store=store,
         settings=runtime_settings,
         translate_intent_fn=translate_intent_fn,
+        plan_tools_fn=plan_tools_fn,
         generate_reply_fn=generate_reply_fn,
     )
 
@@ -67,6 +76,10 @@ def handle_assistant_message(
     if runtime_settings.mode == "agent_loop":
         router_execute_tool_fn = _agent_loop_execute_tool_fn(
             execute_tool_fn=execute_tool_fn,
+            request=request,
+            settings=runtime_settings,
+            conversation_context_fn=lambda: perception_engine.last_conversation_context,
+            synthesize_response_fn=synthesize_response_fn,
             tool_events=agent_loop_tool_events,
             observations=agent_loop_observations,
             should_trace=lambda: perception_engine.route == "agent_loop",
@@ -116,6 +129,10 @@ def _request_with_default_market_scope(request: AssistantRequest, settings: Assi
 def _agent_loop_execute_tool_fn(
     *,
     execute_tool_fn: ExecuteToolFn,
+    request: AssistantRequest,
+    settings: AssistantSettings,
+    conversation_context_fn: Callable[[], dict[str, Any] | None],
+    synthesize_response_fn: AgentLoopSynthesizeFn | None,
     tool_events: list[dict[str, Any]],
     observations: list[dict[str, Any]],
     should_trace: Callable[[], bool],
@@ -123,6 +140,24 @@ def _agent_loop_execute_tool_fn(
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         if not should_trace():
             return execute_tool_fn(tool_name, dict(payload or {}))
+        if str(tool_name or "") == INTERNAL_TOOL_PLAN_NAME:
+            result = execute_tool_plan(
+                question=str((payload or {}).get("question") or request.text),
+                request=request,
+                plan_payload=dict((payload or {}).get("plan") or {}),
+                settings=settings,
+                conversation_context=conversation_context_fn(),
+                execute_tool_fn=execute_tool_fn,
+                synthesize_response_fn=synthesize_response_fn,
+            )
+            data = result.get("data") if isinstance(result, dict) else {}
+            if isinstance(data, dict):
+                tool_events.extend([dict(item) for item in data.get("tool_events") or [] if isinstance(item, dict)])
+                observations.extend([dict(item) for item in data.get("observations") or [] if isinstance(item, dict)])
+                final_response = data.get("final_response")
+                if isinstance(final_response, dict):
+                    tool_events.append({"phase": "final_response", **dict(final_response)})
+            return result
         call = ToolCall(tool_name=tool_name, payload=dict(payload or {}))
         try:
             decision = DEFAULT_TOOL_POLICY.authorize_read_tool(call, source="agent_loop")
@@ -184,14 +219,18 @@ def _merge_agent_loop_tool_events(
     loop["writes_allowed"] = False
     final_response_raw = loop.get("final_response")
     final_response: dict[str, Any] = dict(final_response_raw) if isinstance(final_response_raw, dict) else {}
-    final_response.update(
-        {
-            "status": "rendered",
-            "reason": "canonical renderer produced the factual response",
-            "canonical_renderer_required": True,
-            "llm_may_summarize": False,
-        }
-    )
+    final_event = next((item for item in reversed(tool_events) if item.get("phase") == "final_response"), None)
+    if isinstance(final_event, dict):
+        final_response.update({key: value for key, value in final_event.items() if key != "phase"})
+    else:
+        final_response.update(
+            {
+                "status": "rendered",
+                "reason": "canonical renderer produced the factual response",
+                "canonical_renderer_required": True,
+                "llm_may_summarize": False,
+            }
+        )
     loop["final_response"] = final_response
     merged["agent_loop"] = loop
     return merged

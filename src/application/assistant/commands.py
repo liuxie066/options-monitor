@@ -66,6 +66,10 @@ ARGUMENT_JSON_SCHEMA: dict[str, dict[str, Any]] = {
         "items": {"type": "string"},
         "maxItems": 8,
     },
+    "plan": {
+        "type": ["object", "null"],
+        "additionalProperties": True,
+    },
 }
 
 COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
@@ -660,7 +664,7 @@ def _capability_text_line(item: dict[str, Any]) -> str:
 
 def command_help_text() -> str:
     specs = [_spec_payload(spec) for spec in COMMAND_SPECS]
-    read_only = [item for item in specs if item["read_only"]]
+    read_only = [item for item in specs if item["read_only"] and item["llm_visible"]]
     preview_writes = [
         item
         for item in specs

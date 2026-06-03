@@ -5,7 +5,7 @@ import re
 from typing import Any, Callable
 
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.assistant.agent_loop import run_read_only_agent_loop
+from src.application.assistant.agent_loop import AgentLoopPlanFn, run_read_only_agent_loop
 from src.application.assistant.audit import InboundAuditStore
 from src.application.assistant.command_parser import parse_assistant_command
 from src.application.assistant.commands import spec_by_intent
@@ -91,17 +91,20 @@ class PerceptionEngine:
         audit_store: InboundAuditStore,
         settings: AssistantSettings,
         translate_intent_fn: TranslateIntentFn | None = None,
+        plan_tools_fn: AgentLoopPlanFn | None = None,
         generate_reply_fn: GenerateReplyFn | None = None,
     ) -> None:
         self._request = request
         self._audit_store = audit_store
         self._settings = settings
         self._translate_intent_fn = translate_intent_fn
+        self._plan_tools_fn = plan_tools_fn
         self._generate_reply_fn = generate_reply_fn
         self.route = self._initial_route(request.text)
         skipped_reason = "command" if self.route == "command" else "not_needed"
         self.llm_trace = skipped_llm_trace(settings.llm, reason=skipped_reason)
         self.trace: PerceptionTrace | None = None
+        self.last_conversation_context: dict[str, Any] | None = None
 
     def perceive(self, text: str, parser_now_fn: Callable[[], date] | None) -> PerceptionResult:
         try:
@@ -340,11 +343,12 @@ class PerceptionEngine:
         llm_mode = self._settings.mode in {"llm_router", "agent_loop"}
         if not llm_mode and self._translate_intent_fn is None:
             return None
-        return build_conversation_context(
+        self.last_conversation_context = build_conversation_context(
             self._request,
             audit_store=self._audit_store,
             max_messages=self._settings.context_window_messages,
         )
+        return self.last_conversation_context
 
     def _translate(self, text: str, *, conversation_context: dict[str, Any] | None) -> LlmTranslationResult:
         if self._settings.mode == "agent_loop":
@@ -353,6 +357,7 @@ class PerceptionEngine:
                 settings=self._settings,
                 conversation_context=conversation_context,
                 translate_intent_fn=self._translate_intent_fn,
+                plan_tools_fn=self._plan_tools_fn,
             )
             self.llm_trace = dict(loop_result.trace)
             return loop_result.translation
@@ -498,6 +503,8 @@ def general_reply_allowed(text: str, *, translate_error: AgentToolError) -> bool
 
 
 def ensure_llm_perception_allowed(perception: PerceptionResult) -> None:
+    if perception.intent_name == "tool_plan" and perception.source == "agent_loop_plan":
+        return
     spec = _COMMAND_SPECS_BY_INTENT.get(perception.intent_name)
     if spec is None or not spec.llm_allowed or not (spec.read_only or _is_llm_preview_perception_allowed(spec)):
         raise AgentToolError(
