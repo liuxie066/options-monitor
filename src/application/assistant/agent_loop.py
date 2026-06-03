@@ -266,6 +266,7 @@ def execute_tool_plan(
     synthesize_response_fn: AgentLoopSynthesizeFn | None = None,
 ) -> dict[str, Any]:
     plan = parse_tool_plan_payload(plan_payload)
+    plan = _normalize_tool_plan(plan, question=question, today=_planner_today(None))
     validate_tool_plan(plan)
     tool_events: list[dict[str, Any]] = []
     observations: list[dict[str, Any]] = []
@@ -477,6 +478,7 @@ def plan_read_only_tools(
         )
     try:
         plan = parse_tool_plan_payload(payload)
+        plan = _normalize_tool_plan(plan, question=text, today=_planner_today_from_context(conversation_context))
         if not plan.steps:
             return LlmPlannerResult(
                 plan=None,
@@ -766,6 +768,17 @@ def _planner_today(now_fn: Callable[[], date] | None) -> date:
     return datetime.now(ZoneInfo("Asia/Shanghai")).date()
 
 
+def _planner_today_from_context(conversation_context: dict[str, Any] | None) -> date:
+    temporal = conversation_context.get("temporal_context") if isinstance(conversation_context, dict) else None
+    current_date = temporal.get("current_date") if isinstance(temporal, dict) else None
+    if isinstance(current_date, str):
+        try:
+            return date.fromisoformat(current_date)
+        except ValueError:
+            pass
+    return _planner_today(None)
+
+
 def _with_temporal_context(conversation_context: dict[str, Any] | None, *, today: date) -> dict[str, Any]:
     context = dict(conversation_context or {})
     context["temporal_context"] = {
@@ -787,16 +800,29 @@ def _normalize_tool_plan_result(result: LlmPlannerResult, *, question: str, toda
 def _normalize_tool_plan(plan: PlannerPlan, *, question: str, today: date) -> PlannerPlan:
     month = extract_month_filter(question, today=today)
     detail_requested = _question_requests_income_detail(question)
+    response_mode = plan.response_mode
     changed = False
     steps: list[PlannerPlanStep] = []
     for step in plan.steps:
         arguments = dict(step.arguments)
+        if "response_mode" in arguments:
+            misplaced_response_mode = arguments.pop("response_mode")
+            normalized_response_mode = str(misplaced_response_mode or "").strip().lower()
+            if normalized_response_mode in {"canonical", "synthesis"}:
+                if response_mode != normalized_response_mode:
+                    response_mode = normalized_response_mode
+                changed = True
+            else:
+                arguments["response_mode"] = misplaced_response_mode
         if step.tool_name == "monthly_income_report":
             if month and arguments.get("month") != month:
                 arguments["month"] = month
                 changed = True
             if detail_requested and arguments.get("include_rows") is not True:
                 arguments["include_rows"] = True
+                changed = True
+            if detail_requested and response_mode != "synthesis":
+                response_mode = "synthesis"
                 changed = True
         if arguments == step.arguments:
             steps.append(step)
@@ -807,7 +833,7 @@ def _normalize_tool_plan(plan: PlannerPlan, *, question: str, today: date) -> Pl
     return PlannerPlan(
         goal=plan.goal,
         steps=tuple(steps),
-        response_mode=plan.response_mode,
+        response_mode=response_mode,
         schema_version=plan.schema_version,
     )
 
@@ -910,6 +936,19 @@ def _build_final_response(
     synthesis = synthesizer(question, settings, plan, synthesis_observations, conversation_context)
     if synthesis.response_text:
         return synthesis
+    if len(plan.steps) == 1 and synthesis_observations:
+        text = _canonical_response(plan.steps[0], synthesis_observations[0])
+        if text:
+            return LlmSynthesisResult(
+                response_text=text,
+                trace={
+                    **dict(synthesis.trace),
+                    "reason": "canonical_renderer_fallback",
+                    "fallback": "canonical_renderer",
+                    "error_code": synthesis.error.code if synthesis.error else None,
+                },
+                error=synthesis.error,
+            )
     return LlmSynthesisResult(
         response_text=_fallback_response(plan=plan, observations=synthesis_observations, error_payload=error_payload),
         trace={
@@ -927,6 +966,13 @@ def _final_response_payload(synthesis: LlmSynthesisResult) -> dict[str, Any]:
         return FinalResponsePlan(
             status="rendered",
             reason="canonical renderer produced the factual response",
+            canonical_renderer_required=True,
+            llm_may_summarize=False,
+        ).public_payload()
+    if reason == "canonical_renderer_fallback":
+        return FinalResponsePlan(
+            status="rendered",
+            reason="canonical renderer used after synthesis was unavailable",
             canonical_renderer_required=True,
             llm_may_summarize=False,
         ).public_payload()
@@ -1031,7 +1077,8 @@ Rules:
 - Do not include system-scoped or path arguments such as config_key, config_path, data_config, output_dir, report_path, run_dir, or audit_db. The system injects those.
 - Resolve relative dates using context.temporal_context.current_date in Asia/Shanghai. For a month without a year such as "6月", use the current_date year.
 - For monthly income summary questions, use monthly_income_report with account/month when available.
-- For cashflow detail, net cashflow composition, net inflow source, "明细", "组成", "构成", "来源", or "由什么组成", use monthly_income_report with include_rows=true and response_mode=synthesis.
+- For cashflow detail, net cashflow composition, net inflow source, "明细", "组成", "构成", "来源", or "由什么组成", use monthly_income_report with include_rows=true.
+- response_mode is a top-level plan field only. Never include response_mode inside any step.arguments.
 - Use response_mode=canonical only for direct status/summary/list queries that do not require explanation, comparison, or composition.
 - Use response_mode=synthesis for analysis, detail, comparison, why/how, or composition questions.
 - If there is no safe read-only plan, or required slots are missing and the tool cannot safely handle them, return steps=[] instead of guessing.
