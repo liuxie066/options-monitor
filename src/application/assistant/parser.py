@@ -254,6 +254,11 @@ def _extract_account(text: str) -> str | None:
     return match.group(1).lower() if match else None
 
 
+def extract_month_filter(text: str, *, today: date) -> str | None:
+    compact = _compact(text)
+    return _extract_month(text, compact=compact, today=today)
+
+
 def _extract_month(text: str, *, compact: str, today: date) -> str | None:
     match = _MONTH_RE.search(text)
     if match:
@@ -759,7 +764,14 @@ def _looks_like_exit_analysis(compact: str, lower: str) -> bool:
 
 
 def _looks_like_income(compact: str, lower: str) -> bool:
-    return "收益" in compact or "income" in lower or "pnl" in lower or "p&l" in lower
+    return (
+        "收益" in compact
+        or "现金流" in compact
+        or "净现金流" in compact
+        or "income" in lower
+        or "pnl" in lower
+        or "p&l" in lower
+    )
 
 
 def _looks_like_runs(compact: str, lower: str) -> bool:

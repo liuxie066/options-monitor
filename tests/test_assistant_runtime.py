@@ -1738,6 +1738,10 @@ def test_assistant_runtime_agent_loop_executes_planned_cashflow_detail(tmp_path:
         assert text == "分析 lx 6月的净现金流明细"
         assert settings.mode == "agent_loop"
         assert conversation_context is not None
+        assert conversation_context["temporal_context"] == {
+            "current_date": "2026-06-03",
+            "timezone": "Asia/Shanghai",
+        }
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="分析 lx 2026-06 的净现金流明细",
@@ -1746,7 +1750,7 @@ def test_assistant_runtime_agent_loop_executes_planned_cashflow_detail(tmp_path:
                     PlannerPlanStep(
                         id="step_1",
                         tool_name="monthly_income_report",
-                        arguments={"account": "lx", "month": "2026-06", "include_rows": True},
+                        arguments={"account": "lx", "month": "2025-06"},
                         purpose="需要 cashflow_rows 解释净现金流组成",
                     ),
                 ),
