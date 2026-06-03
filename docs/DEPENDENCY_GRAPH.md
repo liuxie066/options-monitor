@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 597 (`src`: 324, `domain`: 51, `scripts`: 7, `tests`: 215)
-- Internal import edges: 3097 total, 1427 production/script edges excluding tests
+- Internal import edges: 3109 total, 1436 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -33,7 +33,7 @@ flowchart LR
   storage["domain.storage"]
   application -->|208| domain
   application -->|2| domain_services
-  application -->|103| infrastructure
+  application -->|105| infrastructure
   application -->|34| storage
   domain_services -->|5| domain
   domain_services -->|2| storage
@@ -44,7 +44,7 @@ flowchart LR
   scripts -->|1| infrastructure
   scripts -->|2| storage
   storage -->|1| domain
-  tests -->|1108| application
+  tests -->|1111| application
   tests -->|269| domain
   tests -->|2| domain_services
   tests -->|99| infrastructure
@@ -58,7 +58,7 @@ flowchart LR
 | from | to | imports |
 |---|---|---|
 | application | domain | 208 |
-| application | infrastructure | 103 |
+| application | infrastructure | 105 |
 | interfaces | application | 98 |
 | application | storage | 34 |
 | domain_services | domain | 5 |
@@ -75,7 +75,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 1108 |
+| tests | application | 1111 |
 | tests | domain | 269 |
 | tests | interfaces | 148 |
 | tests | infrastructure | 99 |
@@ -91,7 +91,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 |---|---|---|
 | src.application | domain.domain | 104 |
 | src.interfaces | src.application | 82 |
-| src.application | src.infrastructure | 75 |
+| src.application | src.infrastructure | 77 |
 | src.application.ledger | domain.domain.ledger | 29 |
 | src.application | domain.storage | 25 |
 | src.application | domain.domain.engine | 20 |
@@ -175,13 +175,13 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 
 | module | incoming imports |
 |---|---|
-| src.application.agent_tool_contracts | 70 |
+| src.application.agent_tool_contracts | 71 |
 | domain.domain.ledger.position_fields | 41 |
 | src.infrastructure.io_utils | 38 |
 | domain.domain.symbol_identity | 30 |
 | src.application.config_loader | 24 |
 | src.application.settings | 24 |
-| src.application.assistant.contracts | 23 |
+| src.application.assistant.contracts | 24 |
 | domain.domain.engine | 22 |
 | src.application.ledger.api | 22 |
 | src.application.agent_tool_config | 21 |

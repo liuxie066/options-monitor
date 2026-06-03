@@ -12,6 +12,7 @@ from src.application.assistant.contracts import (
     ToolCall,
 )
 from src.application.assistant.position_query import PositionQuery
+from src.application.assistant.tool_policy import INTERNAL_TOOL_PLAN_NAME
 
 
 CONFIG_SCOPED_INTENTS = frozenset(
@@ -47,6 +48,8 @@ def resolve_reasoning(perception: PerceptionResult, *, request: AssistantRequest
             action_kind="local_response",
             reason="local_help",
         )
+    if perception.intent_name == "tool_plan":
+        return _internal_tool_plan_resolution(perception, request=request)
 
     spec = _COMMAND_SPECS_BY_INTENT.get(perception.intent_name)
     if spec is None:
@@ -74,6 +77,34 @@ def resolve_reasoning(perception: PerceptionResult, *, request: AssistantRequest
         read_only=bool(spec.read_only),
         requires_confirmation=requires_confirmation,
         reason=_resolution_reason(risk_level, read_only=spec.read_only),
+    )
+
+
+def _internal_tool_plan_resolution(perception: PerceptionResult, *, request: AssistantRequest) -> ReasoningResolution:
+    if perception.source != "agent_loop_plan":
+        raise AgentToolError(
+            code="PERMISSION_DENIED",
+            message="tool_plan is only allowed from agent_loop planning",
+            details={"source": perception.source},
+        )
+    plan = perception.arguments.get("plan")
+    if not isinstance(plan, dict):
+        raise AgentToolError(code="INPUT_ERROR", message="tool_plan intent requires a structured plan")
+    payload = {
+        **_base_payload(request),
+        "question": request.text,
+        "plan": dict(plan),
+    }
+    return ReasoningResolution(
+        status="supported",
+        intent_name=perception.intent_name,
+        arguments=dict(perception.arguments),
+        safety_class="read",
+        action_kind="tool",
+        tool_call=ToolCall(tool_name=INTERNAL_TOOL_PLAN_NAME, payload=payload),
+        read_only=True,
+        requires_confirmation=False,
+        reason="internal_agent_loop_plan",
     )
 
 
@@ -143,6 +174,15 @@ def _tool_payload_from_perception(
         if arguments.get("month"):
             payload["month"] = arguments["month"]
         return payload
+    if intent_name == "tool_plan":
+        plan = arguments.get("plan")
+        if not isinstance(plan, dict):
+            raise AgentToolError(code="INPUT_ERROR", message="tool_plan intent requires a structured plan")
+        return {
+            **base,
+            "question": request.text,
+            "plan": dict(plan),
+        }
     if intent_name == "runtime_runs":
         return {"limit": int(arguments.get("limit") or 10)}
     if intent_name == "runtime_logs":
