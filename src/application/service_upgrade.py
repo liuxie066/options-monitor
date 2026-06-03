@@ -385,7 +385,7 @@ def _restart_service_names(profile: dict[str, Any]) -> list[str]:
     for name in names:
         if not name.endswith(".service"):
             continue
-        if not explicit and "trade-intake" not in name and "feishu-ws" not in name:
+        if not explicit and "opend" not in name and "trade-intake" not in name and "feishu-ws" not in name:
             continue
         if name not in out:
             out.append(name)

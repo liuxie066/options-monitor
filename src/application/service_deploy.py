@@ -28,6 +28,7 @@ PROJECTION_VERIFY_SYSTEMD_CALENDAR = "*-*-* 06:00:00 Asia/Shanghai"
 PROJECTION_VERIFY_LAUNCHD_CALENDAR = {"Hour": 6, "Minute": 0}
 AUTO_UPGRADE_SYSTEMD_CALENDAR = "*-*-* 06:10:00 Asia/Shanghai"
 AUTO_UPGRADE_LAUNCHD_CALENDAR = {"Hour": 6, "Minute": 10}
+DEFAULT_OPEND_EXECUTABLE = "FutuOpenD"
 
 
 @dataclass(frozen=True)
@@ -114,6 +115,10 @@ def default_systemd_deploy_home(deploy_user: str) -> Path:
     return Path("/home") / user
 
 
+def default_opend_root(*, deploy_home: Path | None = None) -> Path:
+    return (deploy_home or Path.home()) / "apps" / "futu-opend" / "current"
+
+
 def _resolve_path(value: str | Path | None, *, base: Path, default: Path) -> Path:
     raw = str(value or "").strip()
     if not raw:
@@ -181,19 +186,30 @@ def _systemd_unit(
     env_file: Path | None = None,
     deploy_user: str | None = None,
     deploy_home: Path | None = None,
+    working_directory: Path | None = None,
     service_type: str = "oneshot",
     restart: str | None = None,
+    after: list[str] | None = None,
+    wants: list[str] | None = None,
+    before: list[str] | None = None,
 ) -> str:
+    after_units = _dedupe_unit_dependencies(["network-online.target", *(after or [])])
+    wants_units = _dedupe_unit_dependencies(["network-online.target", *(wants or [])])
     lines = [
         "[Unit]",
         f"Description={description}",
-        "After=network-online.target",
-        "Wants=network-online.target",
+        f"After={' '.join(after_units)}",
+        f"Wants={' '.join(wants_units)}",
+    ]
+    before_units = _dedupe_unit_dependencies(before or [])
+    if before_units:
+        lines.append(f"Before={' '.join(before_units)}")
+    lines.extend([
         "",
         "[Service]",
         f"Type={service_type}",
-        f"WorkingDirectory={_systemd_quote_arg(repo_root)}",
-    ]
+        f"WorkingDirectory={_systemd_quote_arg(working_directory or repo_root)}",
+    ])
     if deploy_user:
         lines.append(f"User={deploy_user}")
     if deploy_home is not None:
@@ -212,6 +228,15 @@ def _systemd_unit(
         lines.append("RestartSec=10")
     lines.extend(["StandardOutput=journal", "StandardError=journal", ""])
     return "\n".join(lines)
+
+
+def _dedupe_unit_dependencies(values: list[str]) -> list[str]:
+    out: list[str] = []
+    for raw in values:
+        value = str(raw or "").strip()
+        if value and value not in out:
+            out.append(value)
+    return out
 
 
 def _systemd_timer(*, description: str, unit_name: str, interval: str | None = None, calendar: str | None = None) -> str:
@@ -252,6 +277,7 @@ def _launchd_plist(
     program_args: list[str],
     log_root: Path,
     env_file: Path | None = None,
+    working_directory: Path | None = None,
     start_interval: int | None = None,
     start_calendar_interval: dict[str, int] | None = None,
     keep_alive: bool = False,
@@ -265,7 +291,7 @@ def _launchd_plist(
     payload: dict[str, Any] = {
         "Label": label,
         "ProgramArguments": program_args,
-        "WorkingDirectory": str(repo_root),
+        "WorkingDirectory": str(working_directory or repo_root),
         "EnvironmentVariables": environment,
         "StandardOutPath": str(log_root / f"{label}.out.log"),
         "StandardErrorPath": str(log_root / f"{label}.err.log"),
@@ -295,12 +321,16 @@ def build_service_profile(
     deploy_user: str | None = None,
     deploy_home: Path | None = None,
     auto_upgrade_enabled: bool = False,
+    opend: dict[str, Any] | None = None,
     feishu_ws: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     restartable_services = [
         name
         for name in service_names
-        if (str(name).endswith(".service") and ("trade-intake" in str(name) or "feishu-ws" in str(name)))
+        if (
+            str(name).endswith(".service")
+            and ("opend" in str(name) or "trade-intake" in str(name) or "feishu-ws" in str(name))
+        )
     ]
     profile: dict[str, Any] = {
         "schema_version": 1,
@@ -354,6 +384,8 @@ def build_service_profile(
             "enabled": True,
             "schedule_beijing": "06:10",
         }
+    if opend is not None:
+        profile["opend"] = dict(opend)
     if feishu_ws is not None:
         profile["feishu_ws"] = dict(feishu_ws)
     return profile
@@ -374,6 +406,9 @@ def render_service_bundle(
     use_default_deploy_user: bool = True,
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
     include_auto_upgrade: bool = False,
+    include_opend: bool = False,
+    opend_root: str | Path | None = None,
+    opend_executable: str | Path | None = None,
     include_feishu_ws: bool = False,
     feishu_ws_config_key: str | None = None,
     include_content: bool = True,
@@ -388,6 +423,20 @@ def render_service_bundle(
     systemd_home = default_systemd_deploy_home(systemd_user) if target_key == "systemd" and systemd_user else None
     if deploy_home is not None and str(deploy_home).strip():
         systemd_home = Path(deploy_home).expanduser()
+    opend_root_path = (
+        _resolve_path(
+            opend_root,
+            base=repo,
+            default=default_opend_root(deploy_home=systemd_home),
+        )
+        if include_opend
+        else None
+    )
+    opend_executable_value = str(opend_executable or DEFAULT_OPEND_EXECUTABLE).strip() or DEFAULT_OPEND_EXECUTABLE
+    opend_executable_path = None
+    if opend_root_path is not None:
+        raw_opend_executable = Path(opend_executable_value).expanduser()
+        opend_executable_path = raw_opend_executable if raw_opend_executable.is_absolute() else opend_root_path / raw_opend_executable
     account_values = normalize_accounts(accounts)
     market_values = normalize_markets(markets)
     config_default_root = runtime if include_auto_upgrade else None
@@ -566,6 +615,29 @@ def render_service_bundle(
             service_name=verify_timer,
         )
 
+        opend_service = "options-monitor-opend.service"
+        if include_opend:
+            assert opend_root_path is not None
+            assert opend_executable_path is not None
+            add(
+                f"systemd/{opend_service}",
+                _systemd_unit(
+                    description="Futu OpenD gateway for Options Monitor",
+                    repo_root=repo,
+                    runtime_root=runtime,
+                    deploy_user=systemd_user,
+                    deploy_home=systemd_home,
+                    working_directory=opend_root_path,
+                    exec_args=[str(opend_executable_path)],
+                    service_type="simple",
+                    restart="always",
+                    before=["options-monitor-trade-intake.service"],
+                ),
+                install_path=f"/etc/systemd/system/{opend_service}",
+                kind="systemd_service",
+                service_name=opend_service,
+            )
+
         trade_market = "us" if "us" in config_by_market else market_values[0]
         trade_service = "options-monitor-trade-intake.service"
         trade_args = [
@@ -590,6 +662,8 @@ def render_service_bundle(
                 exec_args=trade_args,
                 service_type="simple",
                 restart="always",
+                after=[opend_service] if include_opend else None,
+                wants=[opend_service] if include_opend else None,
             ),
             install_path=f"/etc/systemd/system/{trade_service}",
             kind="systemd_service",
@@ -801,6 +875,26 @@ def render_service_bundle(
             service_name=verify_label,
         )
 
+        opend_label = "com.options-monitor.opend"
+        if include_opend:
+            assert opend_root_path is not None
+            assert opend_executable_path is not None
+            add(
+                f"launchd/{opend_label}.plist",
+                _launchd_plist(
+                    label=opend_label,
+                    repo_root=repo,
+                    runtime_root=runtime,
+                    program_args=[str(opend_executable_path)],
+                    log_root=log_root,
+                    working_directory=opend_root_path,
+                    keep_alive=True,
+                ),
+                install_path=f"~/Library/LaunchAgents/{opend_label}.plist",
+                kind="launchd_plist",
+                service_name=opend_label,
+            )
+
         trade_market = "us" if "us" in config_by_market else market_values[0]
         trade_label = "com.options-monitor.trade-intake"
         trade_args = [
@@ -932,6 +1026,12 @@ def render_service_bundle(
         deploy_user=systemd_user,
         deploy_home=systemd_home,
         auto_upgrade_enabled=bool(include_auto_upgrade),
+        opend={
+            "enabled": True,
+            "root": str(opend_root_path),
+            "executable": str(opend_executable_path),
+            "service_name": "options-monitor-opend.service" if target_key == "systemd" else "com.options-monitor.opend",
+        } if include_opend and opend_root_path is not None and opend_executable_path is not None else None,
         feishu_ws={
             "enabled": True,
             "config_key": feishu_ws_config_key_value,
@@ -956,6 +1056,17 @@ def render_service_bundle(
         **({"env_file": str(env_file_path)} if env_file_path is not None else {}),
         **({"deploy_user": str(systemd_user)} if systemd_user else {}),
         **({"deploy_home": str(systemd_home)} if systemd_home is not None else {}),
+        **(
+            {
+                "opend": {
+                    "enabled": True,
+                    "root": str(opend_root_path),
+                    "executable": str(opend_executable_path),
+                }
+            }
+            if include_opend and opend_root_path is not None and opend_executable_path is not None
+            else {}
+        ),
         "accounts": account_values,
         "markets": market_values,
         "files": [item.to_dict(include_content=include_content) for item in files],
@@ -983,7 +1094,7 @@ def _install_commands(target: ServiceTarget, *, files: list[RenderedServiceFile]
             Path(item.install_path).name
             for item in files
             if item.kind == "systemd_service"
-            and ("trade-intake" in item.install_path or "feishu-ws" in item.install_path)
+            and ("opend" in item.install_path or "trade-intake" in item.install_path or "feishu-ws" in item.install_path)
         ]
         return {
             "prepare": mkdirs,
