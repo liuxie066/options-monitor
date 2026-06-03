@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.195 - 2026-06-03
+
+### Added
+- Added explicit Shadow Replay parameter-backtest gates for candidate-impact review versus production parameter recommendation, so filter-only evidence can show candidate-count effects without implying production config readiness.
+- Added candidate-impact summaries to JSON and Markdown parameter-backtest reports, including best variants by newly accepted and total accepted candidates.
+
+### Changed
+- Allowed parameter backtests with enough complete parameter-field samples to report filter-only candidate impact even when a small portion of fields is still missing, while keeping production recommendation blocked until mark/outcome evidence is available.
+
 ## 1.2.194 - 2026-06-03
 
 ### Fixed

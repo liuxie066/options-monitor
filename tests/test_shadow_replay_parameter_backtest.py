@@ -274,6 +274,70 @@ def test_parameter_backtest_reports_parameter_field_evidence_gap(tmp_path: Path)
     assert result["recommendation"]["next_action"] == "collect_candidate_parameter_fields"
 
 
+def test_parameter_backtest_allows_filter_only_candidate_impact_with_partial_fields(tmp_path: Path) -> None:
+    from src.application.shadow_replay import run_shadow_replay_parameter_backtest
+
+    dataset = tmp_path / "output_shared" / "research" / "shadow_replay" / "datasets" / "partial-fields"
+    _write_jsonl(
+        dataset / "candidate_snapshots.jsonl",
+        [
+            {
+                "contract_symbol": "NVDA260619P00100000",
+                "symbol": "NVDA",
+                "account": "lx",
+                "option_type": "put",
+                "status": "rejected",
+                "strategy_profile": "short_vol",
+                "iv_rv_ratio": 1.20,
+                "iv_minus_rv": 0.06,
+                "delta": -0.20,
+                "dte": 30,
+                "spread_ratio": 0.10,
+                "single_trade_concentration": 0.02,
+                "net_income": 120,
+            },
+            {
+                "contract_symbol": "AMD260619P00080000",
+                "symbol": "AMD",
+                "account": "lx",
+                "option_type": "put",
+                "status": "rejected",
+                "strategy_profile": "short_vol",
+                "delta": -0.20,
+                "dte": 30,
+                "spread_ratio": 0.10,
+                "single_trade_concentration": 0.02,
+                "net_income": 90,
+            },
+        ],
+    )
+    _write_jsonl(
+        dataset / "filter_decisions.jsonl",
+        [
+            {"contract_symbol": "NVDA260619P00100000", "status": "rejected"},
+            {"contract_symbol": "AMD260619P00080000", "status": "rejected"},
+        ],
+    )
+    _write_jsonl(dataset / "mark_path_snapshots.jsonl", [])
+    _write_jsonl(dataset / "outcome_facts.jsonl", [])
+
+    result = run_shadow_replay_parameter_backtest(
+        repo_root=tmp_path,
+        dataset=dataset,
+        params=_params(),
+        min_sample=1,
+    )
+
+    assert result["evidence_quality"]["parameter_fields_ready"] is False
+    assert result["gates"]["parameter_fields"]["status"] == "warn"
+    assert result["gates"]["candidate_impact"]["allowed"] is True
+    assert result["candidate_impact"]["allowed"] is True
+    assert result["candidate_impact"]["limitations"] == ["parameter_fields_partial_counts_are_lower_bound"]
+    assert result["variants"][0]["accepted_count"] == 1
+    assert result["recommendation"]["status"] == "live_shadow_candidate_only"
+    assert result["recommendation"]["production_recommendation_allowed"] is False
+
+
 def test_parameter_backtest_without_outcomes_is_filter_only(tmp_path: Path) -> None:
     from src.application.shadow_replay import run_shadow_replay_parameter_backtest
 
@@ -311,6 +375,9 @@ def test_parameter_backtest_without_outcomes_is_filter_only(tmp_path: Path) -> N
 
     assert result["data_mode"] == "filter_only"
     assert result["variants"][0]["newly_accepted_count"] == 1
+    assert result["gates"]["candidate_impact"]["status"] == "ready"
+    assert result["gates"]["production_recommendation"]["status"] == "blocked"
+    assert result["candidate_impact"]["best_variant_by_new_accepts"] == "iv_rv_1_10"
     assert result["recommendation"]["status"] == "live_shadow_candidate_only"
     assert result["recommendation"]["reason"] == "outcome_evidence_missing"
 
