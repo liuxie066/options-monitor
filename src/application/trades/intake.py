@@ -238,6 +238,7 @@ def _finalize_trade_payload_result(
     write_trade_intake_state_fn: Callable[[Any, dict[str, Any]], Any],
     append_trade_intake_audit_fn: Callable[[Any, dict[str, Any]], Any],
     on_result_fn: Callable[[dict[str, Any]], dict[str, Any] | None] | None,
+    source: str,
 ) -> dict[str, Any]:
     if _is_ignored_non_option_result(result_dict):
         return result_dict
@@ -254,6 +255,7 @@ def _finalize_trade_payload_result(
                 "apply_changes": apply_changes,
                 "state_path": state_path,
                 "audit_path": audit_path,
+                "source": source,
             }
         )
     except Exception as exc:
@@ -274,6 +276,7 @@ def _finalize_trade_payload_result(
         audit_path,
         build_trade_intake_audit_event(
             _receipt_audit_phase(receipt_result),
+            source=source,
             payload=effective_payload if deal is None else None,
             deal=deal,
             result=result_with_receipt,
@@ -302,12 +305,16 @@ def _finalize_trade_payload_result(
 def build_trade_intake_audit_event(
     phase: str,
     *,
+    source: str | None = None,
     payload: dict[str, Any] | None = None,
     deal: object | None = None,
     result: dict[str, Any] | None = None,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     out: dict[str, Any] = {"phase": str(phase)}
+    source_text = str(source or "").strip()
+    if source_text:
+        out["source"] = source_text
     if isinstance(payload, dict):
         out["payload"] = payload
     to_dict = getattr(deal, "to_dict", None)
@@ -358,9 +365,10 @@ def process_trade_payload(
     resolve_trade_deal_fn: Callable[..., Any],
     on_result_fn: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
     retry_failed_deal: bool = False,
+    source: str = "push",
 ) -> dict[str, Any]:
     state = load_trade_intake_state_fn(state_path) if apply_changes else {}
-    append_trade_intake_audit_fn(audit_path, build_trade_intake_audit_event("received", payload=payload))
+    append_trade_intake_audit_fn(audit_path, build_trade_intake_audit_event("received", source=source, payload=payload))
     effective_payload = dict(payload)
     if enrich_trade_payload_fn is not None:
         enrich_result = enrich_trade_payload_fn(effective_payload)
@@ -373,11 +381,16 @@ def process_trade_payload(
         else:
             raise TypeError("enrich_trade_payload_fn must return a dict or an object with payload and diagnostics")
         if effective_payload != payload:
-            append_trade_intake_audit_fn(audit_path, build_trade_intake_audit_event("enriched", payload=effective_payload))
+            append_trade_intake_audit_fn(audit_path, build_trade_intake_audit_event("enriched", source=source, payload=effective_payload))
         if enrich_diagnostics:
             append_trade_intake_audit_fn(
                 audit_path,
-                build_trade_intake_audit_event("enrichment_lookup", payload=effective_payload, extra={"enrichment": enrich_diagnostics}),
+                build_trade_intake_audit_event(
+                    "enrichment_lookup",
+                    source=source,
+                    payload=effective_payload,
+                    extra={"enrichment": enrich_diagnostics},
+                ),
             )
     try:
         deal = normalize_trade_deal_fn(effective_payload, futu_account_mapping=account_mapping)
@@ -385,7 +398,7 @@ def process_trade_payload(
         result_dict = _exception_result_dict(exc, payload=effective_payload, stage="normalize")
         append_trade_intake_audit_fn(
             audit_path,
-            build_trade_intake_audit_event("failed", payload=effective_payload, result=result_dict),
+            build_trade_intake_audit_event("failed", source=source, payload=effective_payload, result=result_dict),
         )
         if apply_changes:
             state = _record_failed_deal_state(
@@ -407,8 +420,9 @@ def process_trade_payload(
             write_trade_intake_state_fn=write_trade_intake_state_fn,
             append_trade_intake_audit_fn=append_trade_intake_audit_fn,
             on_result_fn=on_result_fn,
+            source=source,
         )
-    append_trade_intake_audit_fn(audit_path, build_trade_intake_audit_event("normalized", deal=deal))
+    append_trade_intake_audit_fn(audit_path, build_trade_intake_audit_event("normalized", source=source, deal=deal))
     try:
         result = resolve_trade_deal_fn(
             deal,
@@ -423,12 +437,12 @@ def process_trade_payload(
             repo=repo,
             apply_changes=apply_changes,
         )
-        append_trade_intake_audit_fn(audit_path, build_trade_intake_audit_event("resolved", deal=deal, result=result_dict))
+        append_trade_intake_audit_fn(audit_path, build_trade_intake_audit_event("resolved", source=source, deal=deal, result=result_dict))
     except Exception as exc:
         result_dict = _exception_result_dict(exc, payload=effective_payload, deal=deal, stage="resolve")
         append_trade_intake_audit_fn(
             audit_path,
-            build_trade_intake_audit_event("failed", deal=deal, result=result_dict),
+            build_trade_intake_audit_event("failed", source=source, deal=deal, result=result_dict),
         )
         if apply_changes:
             state = _record_failed_deal_state(
@@ -450,6 +464,7 @@ def process_trade_payload(
             write_trade_intake_state_fn=write_trade_intake_state_fn,
             append_trade_intake_audit_fn=append_trade_intake_audit_fn,
             on_result_fn=on_result_fn,
+            source=source,
         )
 
     if apply_changes and deal.deal_id:
@@ -471,6 +486,7 @@ def process_trade_payload(
                 audit_path,
                 {
                     "phase": "ledger_persisted",
+                    "source": source,
                     "deal_id": deal.deal_id,
                     "account": result.account,
                     "event_id": deal.deal_id,
@@ -526,4 +542,5 @@ def process_trade_payload(
         write_trade_intake_state_fn=write_trade_intake_state_fn,
         append_trade_intake_audit_fn=append_trade_intake_audit_fn,
         on_result_fn=on_result_fn,
+        source=source,
     )

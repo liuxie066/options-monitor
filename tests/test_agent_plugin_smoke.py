@@ -1161,7 +1161,17 @@ def test_runtime_status_summarizes_openclaw_runtime_files(tmp_path: Path) -> Non
                 "status": "listening",
                 "stage": "deal_processed",
                 "last_heartbeat_utc": "2026-01-01T00:00:00+00:00",
+                "last_push_received_utc": "2026-01-01T00:01:00+00:00",
+                "last_push_deal_id": "deal-1",
+                "last_backfill_check_utc": "2026-01-01T00:05:00+00:00",
+                "last_backfill_window_start_utc": "2026-01-01T00:00:00+00:00",
+                "last_backfill_window_end_utc": "2026-01-01T00:05:00+00:00",
+                "last_backfill_deal_count": 2,
+                "last_backfill_applied_count": 1,
+                "last_backfill_skipped_duplicate_count": 1,
+                "missed_push_backfill_count": 1,
                 "last_deal_result": {"status": "applied", "deal_id": "deal-1"},
+                "last_backfill_result": {"status": "skipped", "deal_id": "deal-0"},
                 "last_receipt_result": {"status": "sent", "delivery_confirmed": True},
             }
         ),
@@ -1336,6 +1346,11 @@ def test_runtime_status_summarizes_openclaw_runtime_files(tmp_path: Path) -> Non
     assert out["data"]["required_data_prefetch"]["accounts"]["user1"]["deduped_count"] == 1
     assert out["data"]["required_data_prefetch"]["accounts"]["user1"]["cache"]["option_expiration_hits"] == 3
     assert out["data"]["trade_intake"]["summary"]["listener_status"] == "listening"
+    assert out["data"]["trade_intake"]["summary"]["last_push_received_utc"] == "2026-01-01T00:01:00+00:00"
+    assert out["data"]["trade_intake"]["summary"]["last_push_deal_id"] == "deal-1"
+    assert out["data"]["trade_intake"]["summary"]["last_backfill_check_utc"] == "2026-01-01T00:05:00+00:00"
+    assert out["data"]["trade_intake"]["summary"]["last_backfill_applied_count"] == 1
+    assert out["data"]["trade_intake"]["summary"]["missed_push_backfill_count"] == 1
     assert out["data"]["trade_intake"]["summary"]["processed_count"] == 1
     assert out["data"]["trade_intake"]["summary"]["receipt_confirmed_count"] == 1
     assert out["data"]["trade_intake"]["audit"]["exists"] is True
