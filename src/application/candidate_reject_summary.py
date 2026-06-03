@@ -31,6 +31,8 @@ FUNCTION_LABELS = {
 
 CATEGORY_LABELS = {
     "data_missing": "数据缺失",
+    "quote_unavailable": "报价不可评估/流动性不足",
+    "net_income_non_positive": "净收入非正",
     "vol_edge": "波动率边际不足",
     "liquidity": "流动性不足",
     "risk_budget": "风险预算超限",
@@ -70,6 +72,7 @@ RULE_LABELS = {
     "input_missing": "基础字段缺失",
     "candidate_metrics_unavailable": "候选指标不可用",
     "metrics_mid_non_positive": "mid 不可用",
+    "metrics_net_income_non_positive": "净收入非正",
     "usd_cash_insufficient": "USD 现金不足",
     "cny_cash_insufficient": "CNY 现金不足",
     "total_cny_cash_insufficient": "总 CNY 现金不足",
@@ -156,7 +159,7 @@ def build_candidate_reject_summary(
     }
 
 
-def render_candidate_reject_summary(summary: dict[str, Any], *, max_categories: int = 3) -> str:
+def render_candidate_reject_summary(summary: dict[str, Any], *, max_categories: int = 4) -> str:
     if not isinstance(summary, dict):
         return ""
     if not bool(summary.get("available")):
@@ -281,6 +284,10 @@ def _category_for_row(row: dict[str, Any]) -> str:
         )
     ):
         return "event_risk"
+    if _is_net_income_non_positive(rule_l):
+        return "net_income_non_positive"
+    if _is_quote_unavailable(row, message_l):
+        return "quote_unavailable"
     if any(token in combined for token in ("missing", "unavailable", "required_data", "not_evaluable", "metrics_")):
         return "data_missing"
     if any(token in combined for token in ("vol_edge", "iv/rv", "iv-rv")):
@@ -324,6 +331,17 @@ def _rule_label(rule: str) -> str:
     if "open_interest" in lower:
         return "OI 不足"
     return raw
+
+
+def _is_net_income_non_positive(rule: str) -> bool:
+    return rule == "metrics_net_income_non_positive"
+
+
+def _is_quote_unavailable(row: dict[str, Any], message: str) -> bool:
+    if "spread ratio unavailable" in message:
+        return True
+    reject_rule = _clean(row.get("reject_rule")).lower()
+    return reject_rule == "max_spread_ratio" and "metric_value" in row and not _clean(row.get("metric_value"))
 
 
 def _risk_alerts(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -428,14 +446,16 @@ def _category_sort_key(category: str) -> int:
     order = {
         "event_risk": 0,
         "data_missing": 1,
-        "vol_edge": 2,
-        "liquidity": 3,
-        "risk_budget": 4,
-        "return_floor": 5,
-        "cash_or_coverage": 6,
-        "yield_enhancement": 7,
-        "hard_constraints": 8,
-        "other": 9,
+        "quote_unavailable": 2,
+        "net_income_non_positive": 3,
+        "vol_edge": 4,
+        "liquidity": 5,
+        "risk_budget": 6,
+        "return_floor": 7,
+        "cash_or_coverage": 8,
+        "yield_enhancement": 9,
+        "hard_constraints": 10,
+        "other": 11,
     }
     return order.get(category, 99)
 
