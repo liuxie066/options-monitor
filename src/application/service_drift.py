@@ -250,7 +250,10 @@ def _profile_with_discovered_managed_services(profile: dict[str, Any], *, ctx: d
         return profile
     services = _service_names_from_profile(profile)
     discovered = []
+    opend_unit = Path(ctx["systemd_unit_root"]) / "options-monitor-opend.service"
     feishu_unit = Path(ctx["systemd_unit_root"]) / "options-monitor-feishu-ws.service"
+    if "options-monitor-opend.service" not in services and opend_unit.exists():
+        discovered.append("options-monitor-opend.service")
     if "options-monitor-feishu-ws.service" not in services and feishu_unit.exists():
         discovered.append("options-monitor-feishu-ws.service")
     if not discovered:
@@ -260,6 +263,11 @@ def _profile_with_discovered_managed_services(profile: dict[str, Any], *, ctx: d
     service_items = list(raw_services) if isinstance(raw_services, list) else []
     service_items.extend({"name": name} for name in discovered)
     out["services"] = service_items
+    if "options-monitor-opend.service" in discovered:
+        opend = out.get("opend")
+        next_opend = dict(opend) if isinstance(opend, dict) else {}
+        next_opend.setdefault("enabled", True)
+        out["opend"] = next_opend
     if "options-monitor-feishu-ws.service" in discovered:
         feishu_ws = out.get("feishu_ws")
         next_feishu_ws = dict(feishu_ws) if isinstance(feishu_ws, dict) else {}
@@ -277,6 +285,8 @@ def _expected_bundle_from_profile(
 ) -> dict[str, Any]:
     config_paths_raw = profile.get("config_paths")
     config_paths = config_paths_raw if isinstance(config_paths_raw, dict) else {}
+    opend_raw = profile.get("opend")
+    opend = opend_raw if isinstance(opend_raw, dict) else {}
     feishu_ws_raw = profile.get("feishu_ws")
     feishu_ws = feishu_ws_raw if isinstance(feishu_ws_raw, dict) else {}
     services = _service_names_from_profile(profile)
@@ -290,6 +300,11 @@ def _expected_bundle_from_profile(
         feishu_ws.get("enabled")
         or "options-monitor-feishu-ws.service" in services
         or "com.options-monitor.feishu-ws" in services
+    )
+    include_opend = bool(
+        opend.get("enabled")
+        or "options-monitor-opend.service" in services
+        or "com.options-monitor.opend" in services
     )
     market_values = _profile_markets(profile)
     feishu_ws_config_key = str(feishu_ws.get("config_key") or "").strip() or None
@@ -308,6 +323,9 @@ def _expected_bundle_from_profile(
         deploy_home=profile.get("deploy_home"),
         use_default_deploy_user=False,
         include_auto_upgrade=include_auto_upgrade,
+        include_opend=include_opend,
+        opend_root=opend.get("root"),
+        opend_executable=opend.get("executable"),
         include_feishu_ws=include_feishu_ws,
         feishu_ws_config_key=feishu_ws_config_key,
         include_content=True,
@@ -451,6 +469,7 @@ def _profile_content_changed(profile: dict[str, Any], bundle: dict[str, Any]) ->
         "deploy_user",
         "deploy_home",
         "auto_upgrade",
+        "opend",
         "feishu_ws",
         "restart",
     )

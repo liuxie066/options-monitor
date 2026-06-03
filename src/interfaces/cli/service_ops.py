@@ -49,6 +49,13 @@ def add_service_update_commands(subparsers: Any) -> None:
         help="render an opt-in daily auto-upgrade service/timer",
     )
     service_render.add_argument(
+        "--include-opend",
+        action="store_true",
+        help="render the long-running Futu OpenD gateway service",
+    )
+    service_render.add_argument("--opend-root", default=None, help="Futu OpenD installation/current directory")
+    service_render.add_argument("--opend-executable", default=None, help="Futu OpenD executable name or absolute path")
+    service_render.add_argument(
         "--include-feishu-ws",
         action="store_true",
         help="render the long-running Feishu long-connection inbound service",
@@ -193,6 +200,9 @@ def handle_service_update_command(
             deploy_home=args.deploy_home,
             timeout_seconds=args.timeout_seconds,
             include_auto_upgrade=bool(args.include_auto_upgrade),
+            include_opend=bool(args.include_opend),
+            opend_root=args.opend_root,
+            opend_executable=args.opend_executable,
             include_feishu_ws=bool(args.include_feishu_ws),
             feishu_ws_config_key=args.feishu_ws_config_key,
             include_content=(not bool(args.no_content)) or bool(args.output_dir),

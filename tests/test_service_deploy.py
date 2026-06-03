@@ -97,6 +97,47 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
     assert "deploy_home" not in profile
 
 
+def test_render_systemd_bundle_can_include_opend_service(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    opend = tmp_path / "futu-opend" / "current"
+    repo.mkdir()
+    opend.mkdir(parents=True)
+
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        accounts=["lx"],
+        markets=["us"],
+        include_opend=True,
+        opend_root=opend,
+    )
+
+    files = {item["relative_path"]: item for item in bundle["files"]}
+    opend_service = files["systemd/options-monitor-opend.service"]["content"]
+    intake = files["systemd/options-monitor-trade-intake.service"]["content"]
+    profile = json.loads(files["service.profile.json"]["content"])
+
+    assert "WorkingDirectory=" + str(opend) in opend_service
+    assert "ExecStart=" + str(opend / "FutuOpenD") in opend_service
+    assert "Restart=always" in opend_service
+    assert "Before=options-monitor-trade-intake.service" in opend_service
+    assert "After=network-online.target options-monitor-opend.service" in intake
+    assert "Wants=network-online.target options-monitor-opend.service" in intake
+    assert {"name": "options-monitor-opend.service"} in profile["services"]
+    assert profile["opend"]["enabled"] is True
+    assert profile["opend"]["root"] == str(opend)
+    assert profile["opend"]["executable"] == str(opend / "FutuOpenD")
+    assert profile["restart"]["services"] == [
+        "options-monitor-opend.service",
+        "options-monitor-trade-intake.service",
+    ]
+    assert "systemctl enable --now options-monitor-opend.service" in bundle["commands"]["enable"]
+
+
 def _write_systemd_units_from_bundle(bundle: dict, systemd_root: Path, *, skip: set[str] | None = None) -> None:
     skip = skip or set()
     systemd_root.mkdir(parents=True, exist_ok=True)
@@ -292,6 +333,37 @@ def test_service_drift_discovers_installed_feishu_ws_as_managed_service(tmp_path
         "options-monitor-trade-intake.service",
         "options-monitor-feishu-ws.service",
     ]
+
+
+def test_service_drift_preserves_profile_opend_service(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+    from src.application.service_drift import service_drift
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    systemd_root = tmp_path / "systemd"
+    opend = tmp_path / "futu-opend" / "current"
+    repo.mkdir()
+    runtime.mkdir()
+    opend.mkdir(parents=True)
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        accounts=["lx"],
+        markets=["us"],
+        include_opend=True,
+        opend_root=opend,
+    )
+    profile = json.loads({item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"])
+    (runtime / "service.profile.json").write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")
+    _write_systemd_units_from_bundle(bundle, systemd_root)
+
+    out = service_drift(repo_root=repo, runtime_root=runtime, systemd_unit_root=systemd_root)
+
+    assert out["summary"]["status"] == "ok"
+    assert "options-monitor-opend.service" in out["expected_services"]
+    assert out["mismatched_units"] == []
 
 
 def test_render_systemd_bundle_aligns_hk_tick_timer_to_calendar_boundaries(tmp_path: Path) -> None:
@@ -1182,6 +1254,45 @@ def test_service_upgrade_restart_uses_sudo_prefix_from_deploy_profile(tmp_path: 
     assert calls == [
         ["sudo", "-n", "systemctl", "restart", "options-monitor-trade-intake.service"],
         ["sudo", "-n", "systemctl", "restart", "options-monitor-feishu-ws.service"],
+    ]
+
+
+def test_service_upgrade_restart_includes_opend_when_profile_declares_it(tmp_path: Path) -> None:
+    from src.application.service_upgrade import _restart_services_from_profile
+
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / "service.profile.json").write_text(
+        json.dumps(
+            {
+                "service_provider": "systemd",
+                "restart": {"requires_sudo": False},
+                "services": [
+                    {"name": "options-monitor-opend.service"},
+                    {"name": "options-monitor-trade-intake.service"},
+                    {"name": "options-monitor-feishu-ws.service"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls: list[list[str]] = []
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        calls.append(list(command))
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    restarted = _restart_services_from_profile(runtime_root=runtime, run_cmd=_run_cmd, operations=[])
+
+    assert restarted == [
+        "options-monitor-opend.service",
+        "options-monitor-trade-intake.service",
+        "options-monitor-feishu-ws.service",
+    ]
+    assert calls == [
+        ["systemctl", "restart", "options-monitor-opend.service"],
+        ["systemctl", "restart", "options-monitor-trade-intake.service"],
+        ["systemctl", "restart", "options-monitor-feishu-ws.service"],
     ]
 
 
