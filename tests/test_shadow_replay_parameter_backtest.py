@@ -334,7 +334,7 @@ def test_parameter_backtest_allows_filter_only_candidate_impact_with_partial_fie
     assert result["candidate_impact"]["allowed"] is True
     assert result["candidate_impact"]["limitations"] == ["parameter_fields_partial_counts_are_lower_bound"]
     assert result["variants"][0]["accepted_count"] == 1
-    assert result["recommendation"]["status"] == "live_shadow_candidate_only"
+    assert result["recommendation"]["status"] == "ready_for_live_shadow_candidate_review"
     assert result["recommendation"]["production_recommendation_allowed"] is False
 
 
@@ -378,7 +378,7 @@ def test_parameter_backtest_without_outcomes_is_filter_only(tmp_path: Path) -> N
     assert result["gates"]["candidate_impact"]["status"] == "ready"
     assert result["gates"]["production_recommendation"]["status"] == "blocked"
     assert result["candidate_impact"]["best_variant_by_new_accepts"] == "iv_rv_1_10"
-    assert result["recommendation"]["status"] == "live_shadow_candidate_only"
+    assert result["recommendation"]["status"] == "ready_for_live_shadow_candidate_review"
     assert result["recommendation"]["reason"] == "outcome_evidence_missing"
 
 
@@ -421,3 +421,59 @@ def test_cli_shadow_replay_parameter_backtest(capsys, monkeypatch, tmp_path: Pat
     assert payload["tool_name"] == "research.shadow-replay.parameter-backtest"
     assert payload["data"]["coverage"]["strict_backtest_allowed"] is True
     assert payload["data"]["variants"][0]["accepted_count"] == 1
+
+
+def test_cli_shadow_replay_parameter_report_writes_json_and_markdown(capsys, monkeypatch, tmp_path: Path) -> None:
+    import src.interfaces.cli.main as cli
+
+    monkeypatch.setattr(cli, "repo_base", lambda: tmp_path)
+    params_path = tmp_path / "params.json"
+    params_path.write_text(json.dumps(_params()), encoding="utf-8")
+    output_dir = tmp_path / "parameter-report"
+    account_dir = tmp_path / "output_runs" / "20260602T010000Z-run" / "accounts" / "lx"
+    account_dir.mkdir(parents=True)
+    (account_dir / "sell_put_candidates.csv").write_text(
+        (
+            "symbol,account,option_type,contract_symbol,expiration,dte,delta,strike,"
+            "strategy_profile,iv_rv_ratio,iv_minus_rv,spread_ratio,single_trade_concentration,net_income\n"
+            "NVDA,lx,put,NVDA260619P00100000,2026-06-19,30,-0.2,100,"
+            "short_vol,1.25,0.08,0.10,0.02,120\n"
+        ),
+        encoding="utf-8",
+    )
+
+    rc = cli.main(
+        [
+            "research",
+            "shadow-replay",
+            "parameter-report",
+            "--params",
+            str(params_path),
+            "--start-date",
+            "2026-06-02",
+            "--account",
+            "lx",
+            "--market",
+            "us",
+            "--min-sample",
+            "1",
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    json_output = Path(payload["data"]["json_output"])
+    markdown_output = Path(payload["data"]["markdown_output"])
+    result = json.loads(json_output.read_text(encoding="utf-8"))
+    markdown = markdown_output.read_text(encoding="utf-8")
+
+    assert rc == 0
+    assert payload["tool_name"] == "research.shadow-replay.parameter-report"
+    assert json_output == output_dir / "result.us.json"
+    assert markdown_output == output_dir / "result.us.md"
+    assert result["recommendation"]["status"] == "ready_for_live_shadow_candidate_review"
+    assert result["gates"]["production_recommendation"]["status"] == "blocked"
+    assert payload["data"]["backtest"]["candidate_impact"]["allowed"] is True
+    assert "## Gates" in markdown
+    assert "## Candidate Impact" in markdown
+    assert "Production recommendation: blocked / outcome_evidence_missing" in markdown
