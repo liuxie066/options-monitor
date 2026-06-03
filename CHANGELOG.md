@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.202 - 2026-06-04
+
+### Fixed
+- Fixed release cleanup so internal directories such as `releases/_cache` are not counted as retained releases, preserving the intended rollback release count.
+
 ## 1.2.201 - 2026-06-04
 
 ### Fixed
