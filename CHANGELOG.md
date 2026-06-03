@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.199 - 2026-06-03
+
+### Added
+- Added optional OpenD service rendering via `om service render --include-opend`, including systemd/launchd service files, profile metadata, install commands, and upgrade restart participation.
+
+### Changed
+- Made rendered trade-intake systemd units declare `After/Wants=options-monitor-opend.service` when OpenD is included, so broker connectivity is managed before the deal listener starts.
+- Documented OpenD service rendering and upgrade restart behavior for production service bundles.
+
 ## 1.2.198 - 2026-06-03
 
 ### Added

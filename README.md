@@ -135,7 +135,9 @@ om service render \
   --runtime-root /var/lib/options-monitor \
   --config-yaml /var/lib/options-monitor/config.yaml \
   --config-us /var/lib/options-monitor/config.us.json \
-  --config-hk /var/lib/options-monitor/config.hk.json
+  --config-hk /var/lib/options-monitor/config.hk.json \
+  --include-opend \
+  --opend-root /home/liuxie/apps/futu-opend/current
 ```
 
 生成的 runtime config 会记录 `_generated` 指纹。`config.yaml` 更新后需要重新
