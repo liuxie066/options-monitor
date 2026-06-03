@@ -1832,6 +1832,133 @@ def test_assistant_runtime_agent_loop_executes_planned_cashflow_detail(tmp_path:
     }
 
 
+def test_assistant_runtime_agent_loop_uses_canonical_fallback_when_synthesis_unavailable(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "return_summary": [
+                    {
+                        "month": "2026-06",
+                        "account": "lx",
+                        "cash_secured_cny": 315722.31,
+                        "net_income_by_ccy": {"HKD": -51.0},
+                        "net_income_cny": -44.22,
+                        "premium_income_by_ccy": {"HKD": 77.0},
+                        "premium_income_cny": 66.76,
+                        "realized_pnl_by_ccy": {"HKD": 1132.0},
+                        "realized_pnl_cny": 981.51,
+                        "net_return_rate": -0.00014,
+                        "premium_return_rate": 0.000211,
+                        "realized_return_rate": 0.003109,
+                        "annualized_net_return_rate": -0.012775,
+                        "annualized_basis_days": 4,
+                    }
+                ],
+                "summary": [
+                    {
+                        "month": "2026-06",
+                        "account": "lx",
+                        "currency": "HKD",
+                        "net_cashflow_gross": -51.0,
+                        "realized_pnl_gross": 1132.0,
+                        "realized_long_pnl_gross": 0.0,
+                        "close_proceeds_gross": 0.0,
+                    }
+                ],
+                "row_count": 1,
+                "premium_row_count": 1,
+                "cashflow_row_count": 2,
+                "realized_row_count": 1,
+            },
+        )
+
+    def _plan(
+        text: str,
+        settings: AssistantSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        assert text == "查询lx账户2026年6月的收益情况"
+        assert settings.mode == "agent_loop"
+        assert conversation_context is not None
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="查询lx账户2026年6月的收益情况",
+                response_mode="synthesis",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="monthly_income_report",
+                        arguments={"account": "lx", "month": "2026-06"},
+                        purpose="查询收益情况",
+                    ),
+                ),
+            ),
+            trace={
+                "enabled": True,
+                "attempted": True,
+                "reason": "accepted",
+                "provider": "openai",
+                "base_url": "",
+                "model": "gpt-5.2",
+                "api_key_env": "OM_LLM_API_KEY",
+                "confidence_min": 0.75,
+                "timeout_seconds": 20,
+                "max_output_tokens": 512,
+                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+            },
+        )
+
+    def _synthesize(
+        _question: str,
+        _settings: AssistantSettings,
+        _plan: PlannerPlan,
+        _observations: list[dict[str, Any]],
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmSynthesisResult:
+        return LlmSynthesisResult(
+            response_text="",
+            trace={"attempted": True, "reason": "unavailable", "schema_version": "om-tool-plan-synthesis-v1"},
+            error=AgentToolError(code="LLM_UNAVAILABLE", message="LLM synthesis unavailable."),
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="查询lx账户2026年6月的收益情况",
+            sender_id="local",
+            message_id="msg_agent_loop_income_fallback",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+        synthesize_response_fn=_synthesize,
+    )
+
+    assert out["ok"] is True
+    assert calls == [("monthly_income_report", {"account": "lx", "config_key": "us", "month": "2026-06"})]
+    assert "LLM 生成不可用" not in out["data"]["response_text"]
+    assert "lx 2026-06 收益摘要" in out["data"]["response_text"]
+    assert "净现金流" in out["data"]["response_text"]
+    agent_loop = out["meta"]["assistant"]["llm"]["agent_loop"]
+    assert agent_loop["final_response"] == {
+        "status": "rendered",
+        "reason": "canonical renderer used after synthesis was unavailable",
+        "canonical_renderer_required": True,
+        "llm_may_summarize": False,
+    }
+    assert out["data"]["action"]["result"]["data"]["synthesis"]["fallback"] == "canonical_renderer"
+    assert out["data"]["action"]["result"]["data"]["synthesis"]["error_code"] == "LLM_UNAVAILABLE"
+
+
 def test_assistant_runtime_agent_loop_rejects_disallowed_plan_tool(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
 
@@ -1930,6 +2057,49 @@ def test_plan_read_only_tools_treats_empty_steps_as_no_plan() -> None:
     assert result.error.code == "NEEDS_CLARIFICATION"
     assert result.trace["reason"] == "no_plan"
     assert result.trace["error_code"] == "NEEDS_CLARIFICATION"
+
+
+def test_plan_read_only_tools_hoists_misplaced_response_mode_argument() -> None:
+    calls: list[dict[str, Any]] = []
+
+    def _create_response(**kwargs: Any) -> dict[str, Any]:
+        calls.append(dict(kwargs))
+        return {
+            "output_text": json.dumps(
+                {
+                    "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+                    "goal": "查询历史以来总的净现金流",
+                    "response_mode": "canonical",
+                    "steps": [
+                        {
+                            "id": "step_1",
+                            "tool_name": "monthly_income_report",
+                            "arguments": {"response_mode": "synthesis"},
+                            "purpose": "读取OM本地账本收益现金流",
+                        }
+                    ],
+                }
+            )
+        }
+
+    result = plan_read_only_tools(
+        "历史以来总的净现金流",
+        AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        conversation_context={"temporal_context": {"current_date": "2026-06-04", "timezone": "Asia/Shanghai"}},
+        create_response_fn=_create_response,
+        environ={"OM_LLM_API_KEY": "sk-test"},
+    )
+
+    assert calls
+    assert result.error is None
+    assert result.plan is not None
+    assert result.plan.response_mode == "synthesis"
+    assert result.plan.steps[0].tool_name == "monthly_income_report"
+    assert result.plan.steps[0].arguments == {}
+    assert result.trace["reason"] == "accepted"
 
 
 def test_assistant_runtime_agent_loop_empty_plan_uses_general_reply_for_non_business_text(tmp_path: Path) -> None:
