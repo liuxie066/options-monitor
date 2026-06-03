@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.201 - 2026-06-04
+
+### Fixed
+- Fixed assistant `agent_loop` planning for no-year month phrases such as `6月` by injecting Asia/Shanghai temporal context and normalizing monthly income plan arguments before tool execution.
+- Treated cashflow/net-cashflow natural-language requests as income-report intents in deterministic fallback so detail questions do not fall through to clarification when LLM planning is unavailable.
+
 ## 1.2.200 - 2026-06-03
 
 ### Added

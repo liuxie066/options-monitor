@@ -163,11 +163,11 @@ class PerceptionEngine:
             )
             return deterministic_perception
         except AgentToolError as err:
-            return self._handle_deterministic_error(text, err)
+            return self._handle_deterministic_error(text, err, parser_now_fn=parser_now_fn)
 
     def _perceive_llm_first(self, text: str, parser_now_fn: Callable[[], date] | None) -> PerceptionResult:
         conversation_context = self._conversation_context()
-        llm_result = self._translate(text, conversation_context=conversation_context)
+        llm_result = self._translate(text, conversation_context=conversation_context, now_fn=parser_now_fn)
         if "context" not in self.llm_trace:
             self.llm_trace["context"] = context_trace(conversation_context)
         deterministic_candidate, deterministic_perception, deterministic_error = self._deterministic_candidate(
@@ -292,7 +292,13 @@ class PerceptionEngine:
         )
         raise llm_error
 
-    def _handle_deterministic_error(self, text: str, err: AgentToolError) -> PerceptionResult:
+    def _handle_deterministic_error(
+        self,
+        text: str,
+        err: AgentToolError,
+        *,
+        parser_now_fn: Callable[[], date] | None,
+    ) -> PerceptionResult:
         deterministic_candidate = error_candidate("deterministic", err)
         if err.code != "NEEDS_CLARIFICATION":
             self.trace = build_perception_trace(
@@ -318,7 +324,7 @@ class PerceptionEngine:
             )
             raise err
         conversation_context = self._conversation_context()
-        llm_result = self._translate(text, conversation_context=conversation_context)
+        llm_result = self._translate(text, conversation_context=conversation_context, now_fn=parser_now_fn)
         if "context" not in self.llm_trace:
             self.llm_trace["context"] = context_trace(conversation_context)
         if llm_result.intent is not None:
@@ -350,7 +356,13 @@ class PerceptionEngine:
         )
         return self.last_conversation_context
 
-    def _translate(self, text: str, *, conversation_context: dict[str, Any] | None) -> LlmTranslationResult:
+    def _translate(
+        self,
+        text: str,
+        *,
+        conversation_context: dict[str, Any] | None,
+        now_fn: Callable[[], date] | None,
+    ) -> LlmTranslationResult:
         if self._settings.mode == "agent_loop":
             loop_result = run_read_only_agent_loop(
                 text,
@@ -358,6 +370,7 @@ class PerceptionEngine:
                 conversation_context=conversation_context,
                 translate_intent_fn=self._translate_intent_fn,
                 plan_tools_fn=self._plan_tools_fn,
+                now_fn=now_fn,
             )
             self.llm_trace = dict(loop_result.trace)
             return loop_result.translation
