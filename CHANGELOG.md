@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.196 - 2026-06-03
+
+### Changed
+- Split candidate rejection summaries so unavailable spread ratios render as `报价不可评估/流动性不足` and non-positive candidate net income renders as `净收入非正` instead of being folded into generic data-missing counts.
+- Tuned default option liquidity gates by adding low open-interest floors to Sell Put and Covered Call templates and relaxing the Yield Enhancement open-interest floor.
+
 ## 1.2.195 - 2026-06-03
 
 ### Added
