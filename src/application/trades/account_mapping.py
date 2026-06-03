@@ -37,6 +37,7 @@ def resolve_trade_intake_config(
     audit_path = Path(audit_path_override or ti.get("audit_path") or "output_shared/state/auto_trade_intake_audit.jsonl")
     status_path = Path(status_path_override or ti.get("status_path") or "output_shared/state/auto_trade_intake_status.json")
     receipt_cfg = resolve_trade_intake_receipt_config(ti.get("receipt"))
+    backfill_cfg = resolve_trade_intake_backfill_config(ti.get("backfill"))
     account_mapping = resolve_futu_account_mapping(src)
     futu_lookup_account_ids = resolve_futu_lookup_account_ids(src, account_mapping=account_mapping)
 
@@ -48,6 +49,7 @@ def resolve_trade_intake_config(
         "status_path": status_path,
         "reconnect_sec": reconnect_sec,
         "receipt": receipt_cfg,
+        "backfill": backfill_cfg,
         "account_mapping": account_mapping,
         "futu_account_ids": futu_lookup_account_ids,
     }
@@ -61,19 +63,43 @@ def resolve_trade_intake_receipt_config(value: Any) -> dict[str, bool]:
     else:
         raise ValueError("trade_intake.receipt must be an object")
     return {
-        "enabled": _bool_from_config(src, "enabled", default=True),
-        "notify_applied": _bool_from_config(src, "notify_applied", default=True),
-        "notify_unresolved": _bool_from_config(src, "notify_unresolved", default=True),
-        "notify_failed": _bool_from_config(src, "notify_failed", default=True),
-        "notify_duplicate": _bool_from_config(src, "notify_duplicate", default=False),
-        "retry_unconfirmed_duplicate": _bool_from_config(src, "retry_unconfirmed_duplicate", default=True),
+        "enabled": _bool_from_config(src, "enabled", default=True, section="receipt"),
+        "notify_applied": _bool_from_config(src, "notify_applied", default=True, section="receipt"),
+        "notify_unresolved": _bool_from_config(src, "notify_unresolved", default=True, section="receipt"),
+        "notify_failed": _bool_from_config(src, "notify_failed", default=True, section="receipt"),
+        "notify_duplicate": _bool_from_config(src, "notify_duplicate", default=False, section="receipt"),
+        "retry_unconfirmed_duplicate": _bool_from_config(src, "retry_unconfirmed_duplicate", default=True, section="receipt"),
     }
 
 
-def _bool_from_config(src: dict[str, Any], key: str, *, default: bool) -> bool:
+def resolve_trade_intake_backfill_config(value: Any) -> dict[str, Any]:
+    if value is None:
+        src: dict[str, Any] = {}
+    elif isinstance(value, dict):
+        src = value
+    else:
+        raise ValueError("trade_intake.backfill must be an object")
+
+    enabled = _bool_from_config(src, "enabled", default=True, section="backfill")
+    startup_check = _bool_from_config(src, "startup_check", default=True, section="backfill")
+    interval_sec = int(src.get("interval_sec", 300) or 300)
+    lookback_hours = float(src.get("lookback_hours", 6) or 6)
+    if interval_sec <= 0:
+        raise ValueError("trade_intake.backfill.interval_sec must be > 0")
+    if lookback_hours <= 0:
+        raise ValueError("trade_intake.backfill.lookback_hours must be > 0")
+    return {
+        "enabled": enabled,
+        "startup_check": startup_check,
+        "interval_sec": interval_sec,
+        "lookback_hours": lookback_hours,
+    }
+
+
+def _bool_from_config(src: dict[str, Any], key: str, *, default: bool, section: str) -> bool:
     value = src.get(key, default)
     if not isinstance(value, bool):
-        raise ValueError(f"trade_intake.receipt.{key} must be a boolean")
+        raise ValueError(f"trade_intake.{section}.{key} must be a boolean")
     return bool(value)
 
 

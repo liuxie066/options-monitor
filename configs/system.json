@@ -96,6 +96,12 @@
         "notify_failed": true,
         "notify_duplicate": false,
         "retry_unconfirmed_duplicate": true
+      },
+      "backfill": {
+        "enabled": true,
+        "startup_check": true,
+        "interval_sec": 300,
+        "lookback_hours": 6
       }
     },
     "option_positions": {
