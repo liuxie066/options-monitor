@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.200 - 2026-06-03
+
+### Added
+- Added a bounded read-only assistant tool planner for Feishu/assistant `agent_loop` mode, allowing natural-language analysis requests to plan up to three safe read-only tool calls before generating a response.
+- Added planner synthesis for detail/composition questions such as monthly net-cashflow breakdowns, including `monthly_income_report(include_rows=true)` observations.
+
+### Changed
+- Kept `assistant.tool_plan` as an internal pseudo-tool hidden from the public LLM capability manifest while routing execution through the existing inbound router and read-only tool policy.
+- Allowed the planner to return an explicit no-plan result instead of guessing when no safe read-only tool plan exists.
+
 ## 1.2.199 - 2026-06-03
 
 ### Added
