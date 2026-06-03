@@ -300,8 +300,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 },
             },
             "templates": {
-                "put_base": {"sell_put": {"min_volume": 0}},
-                "call_base": {"sell_call": {"min_volume": 0}},
+                "put_base": {"sell_put": {"min_open_interest": 20, "min_volume": 0}},
+                "call_base": {"sell_call": {"min_open_interest": 20, "min_volume": 0}},
             },
             "symbol_defaults": {
                 "broker": "HK",
@@ -324,7 +324,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
                     "min_upside_lift_to_call_cost": 1.5,
                     "min_upside_lift_to_put_credit": 0.5,
                     "min_put_otm_pct": 0.05,
-                    "min_open_interest": 100,
+                    "min_open_interest": 50,
                     "min_volume": 0,
                     "max_spread_ratio": 0.35,
                     "max_combo_spread_ratio": 0.5,
