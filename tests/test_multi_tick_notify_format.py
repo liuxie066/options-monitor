@@ -105,7 +105,8 @@ def test_compact_account_overview_ignores_reject_summary_strategy_names() -> Non
 
     assert "状态：Put 0 · Covered Call 0 · 平仓 0\n" in message
     assert "候选\n- 无符合承保条件候选" in message
-    assert "- 主要过滤：波动率边际不足 127、基础条件不符 49、其他 31" in message
+    assert "- 主要过滤：" not in message
+    assert "通过 184 条" not in message
     assert "增强 1" not in message
 
 
