@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.203 - 2026-06-04
+
+### Fixed
+- Fixed assistant `agent_loop` fallback responses so successful tool results are rendered through the canonical formatter when LLM synthesis is unavailable, instead of showing raw tool row-count summaries to users.
+- Fixed assistant tool-plan normalization so misplaced `response_mode` fields inside tool arguments are hoisted to the plan level before validation, preventing `monthly_income_report` detail queries from failing with unsupported arguments.
+
 ## 1.2.202 - 2026-06-04
 
 ### Fixed
