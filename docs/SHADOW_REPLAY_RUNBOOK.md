@@ -91,8 +91,11 @@ JSON
 
 - `coverage.strict_backtest_allowed`：指定日期窗口是否真的有扫描 artifacts。没有指定起始日数据时不会静默补数。
 - `universe_scope=observed_run_universe`：只评估历史 artifacts 中出现过的合约。
-- `data_mode=filter_only/path_only/closed_replay`：是否已有路径和 outcome，可以支持到什么级别的结论。
-- `evidence_quality.parameter_field_coverage`：参数文件实际引用字段的覆盖率，例如 `dte`、`abs_delta`、`iv_rv_ratio`、`iv_minus_rv`、`annualized_return`；字段不足时先修证据，不把结果解释成参数过严。
+- `data_mode=filter_only/path_only/closed_replay`：是否已有路径和 outcome，可以支持到什么级别的结论。`filter_only` 只能回答“候选数量会怎么变”，不能回答收益、回撤或是否应改生产参数。
+- `evidence_quality.field_coverage`：参数文件实际引用字段的覆盖率，例如 `dte`、`abs_delta`、`iv_rv_ratio`、`iv_minus_rv`、`annualized_return`；字段不足时先修证据，不把结果解释成参数过严。
+- `gates.candidate_impact`：候选影响层 gate。扫描证据、样本量和参数字段完整样本达到下限时，可以输出 filter-only 候选影响；如果仍有部分字段缺失，计数应按 lower bound 解读。
+- `gates.production_recommendation`：生产推荐层 gate。只有 `closed_replay` 可进入人工评审；即使通过，也不会自动修改 runtime config。
+- `candidate_impact`：候选影响摘要，包括 baseline 接受数、每组 variant 的新增/移除数量，以及新增候选数最多的 variant。
 - `baseline`：生产实际观察结果。
 - `variants`：每个参数组的 accepted/rejected、新增/移除候选、拒绝原因、安全边界原因和 outcome/insurance 指标。
 - `recommendation`：只给下一步 gate；即使 ready，也只是进入 live shadow / 人工评审，不自动改生产配置。
