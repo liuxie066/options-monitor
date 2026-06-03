@@ -115,7 +115,10 @@ def test_layered_config_derives_external_holdings_defaults(tmp_path: Path) -> No
     assert cfg["trade_intake"]["account_mapping"]["futu"] == {"REAL_87654321": "lx"}
     assert cfg["schedule"]["timezone"] == "Asia/Hong_Kong"
     assert cfg["schedule"]["run_window"]["breaks"] == [{"start": "12:00", "end": "13:00"}]
+    assert cfg["templates"]["put_base"]["sell_put"]["min_open_interest"] == 20
     assert cfg["templates"]["put_base"]["sell_put"]["min_volume"] == 0
+    assert cfg["templates"]["call_base"]["sell_call"]["min_open_interest"] == 20
+    assert cfg["symbols"][0]["yield_enhancement"]["min_open_interest"] == 50
     assert cfg["symbols"][0]["broker"] == "HK"
     assert cfg["symbols"][0]["sell_put"]["max_dte"] == 90
 
