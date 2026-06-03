@@ -3148,6 +3148,8 @@ def test_service_cleanup_dry_run_reports_releases_and_caches(tmp_path: Path) -> 
     for release in (v100, v101, v102):
         _write_upgrade_release_skeleton(release, release.name)
         (release / "payload.txt").write_text(release.name, encoding="utf-8")
+    internal_cache = releases / "_cache"
+    internal_cache.mkdir()
     current = apps / "current"
     current.symlink_to(v102, target_is_directory=True)
     downloads = apps / "_downloads"
@@ -3171,6 +3173,7 @@ def test_service_cleanup_dry_run_reports_releases_and_caches(tmp_path: Path) -> 
     assert out["freed_bytes"] == 0
     assert out["deleted_paths"] == []
     assert v100.exists()
+    assert internal_cache.exists()
     assert downloads.exists()
 
 
@@ -3184,6 +3187,8 @@ def test_service_cleanup_confirm_deletes_only_old_releases_and_selected_caches(t
     v102 = releases / "1.0.2"
     for release in (v100, v101, v102):
         _write_upgrade_release_skeleton(release, release.name)
+    internal_cache = releases / "_cache"
+    internal_cache.mkdir()
     current = apps / "current"
     current.symlink_to(v102, target_is_directory=True)
     downloads = apps / "_downloads"
@@ -3203,6 +3208,7 @@ def test_service_cleanup_confirm_deletes_only_old_releases_and_selected_caches(t
     assert v102.exists()
     assert v101.exists()
     assert not v100.exists()
+    assert internal_cache.exists()
     assert not downloads.exists()
     assert str(v100) in out["deleted_paths"]
     assert str(downloads) in out["deleted_paths"]
