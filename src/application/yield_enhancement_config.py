@@ -51,6 +51,7 @@ YIELD_ENHANCEMENT_DEFAULTS: dict[str, Any] = {
 }
 YIELD_ENHANCEMENT_MARKET_DEFAULT_OVERRIDES: dict[str, dict[str, Any]] = {
     "hk": {
+        "min_open_interest": 50,
         "min_volume": 0,
     },
 }
