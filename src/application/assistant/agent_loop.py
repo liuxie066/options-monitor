@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import date, datetime
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response
 from src.application.agent_tool_registry import get_tool_definition
@@ -18,6 +20,7 @@ from src.application.assistant.llm_common import (
     unsupported_llm_provider_error,
 )
 from src.application.assistant.llm_translator import LlmTranslationResult, translate_inbound_intent
+from src.application.assistant.parser import extract_month_filter
 from src.application.assistant.renderer import render_inbound_text
 from src.application.assistant.settings import AssistantSettings
 from src.application.assistant.tool_policy import DEFAULT_TOOL_POLICY
@@ -199,6 +202,7 @@ def run_read_only_agent_loop(
     conversation_context: dict[str, Any] | None,
     translate_intent_fn: AgentLoopTranslateFn | None = None,
     plan_tools_fn: AgentLoopPlanFn | None = None,
+    now_fn: Callable[[], date] | None = None,
     max_steps: int = MAX_TOOL_PLAN_STEPS,
 ) -> AgentLoopResult:
     """Build a bounded read-only tool plan.
@@ -208,13 +212,16 @@ def run_read_only_agent_loop(
     tool policy at action time.
     """
     steps = max(1, min(int(max_steps), MAX_TOOL_PLAN_STEPS))
+    today = _planner_today(now_fn)
+    loop_context = _with_temporal_context(conversation_context, today=today)
     if plan_tools_fn is not None or translate_intent_fn is None:
-        plan_result = (plan_tools_fn or plan_read_only_tools)(text, settings, conversation_context)
+        plan_result = (plan_tools_fn or plan_read_only_tools)(text, settings, loop_context)
+        plan_result = _normalize_tool_plan_result(plan_result, question=text, today=today)
         translation, planned_steps = _translation_from_tool_plan_result(plan_result)
         trace = dict(translation.trace or plan_result.trace)
     else:
         translator = translate_intent_fn
-        translation = translator(text, settings, conversation_context)
+        translation = translator(text, settings, loop_context)
         planned_steps = _planned_steps_from_translation(translation)
         trace = dict(translation.trace)
     trace["agent_loop"] = {
@@ -753,6 +760,63 @@ def _safe_tool_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return {key: payload[key] for key in sorted(allowed) if key in payload}
 
 
+def _planner_today(now_fn: Callable[[], date] | None) -> date:
+    if now_fn is not None:
+        return now_fn()
+    return datetime.now(ZoneInfo("Asia/Shanghai")).date()
+
+
+def _with_temporal_context(conversation_context: dict[str, Any] | None, *, today: date) -> dict[str, Any]:
+    context = dict(conversation_context or {})
+    context["temporal_context"] = {
+        "current_date": today.isoformat(),
+        "timezone": "Asia/Shanghai",
+    }
+    return context
+
+
+def _normalize_tool_plan_result(result: LlmPlannerResult, *, question: str, today: date) -> LlmPlannerResult:
+    if result.plan is None:
+        return result
+    normalized_plan = _normalize_tool_plan(result.plan, question=question, today=today)
+    if normalized_plan is result.plan:
+        return result
+    return LlmPlannerResult(plan=normalized_plan, trace=result.trace, error=result.error)
+
+
+def _normalize_tool_plan(plan: PlannerPlan, *, question: str, today: date) -> PlannerPlan:
+    month = extract_month_filter(question, today=today)
+    detail_requested = _question_requests_income_detail(question)
+    changed = False
+    steps: list[PlannerPlanStep] = []
+    for step in plan.steps:
+        arguments = dict(step.arguments)
+        if step.tool_name == "monthly_income_report":
+            if month and arguments.get("month") != month:
+                arguments["month"] = month
+                changed = True
+            if detail_requested and arguments.get("include_rows") is not True:
+                arguments["include_rows"] = True
+                changed = True
+        if arguments == step.arguments:
+            steps.append(step)
+        else:
+            steps.append(PlannerPlanStep(id=step.id, tool_name=step.tool_name, arguments=arguments, purpose=step.purpose))
+    if not changed:
+        return plan
+    return PlannerPlan(
+        goal=plan.goal,
+        steps=tuple(steps),
+        response_mode=plan.response_mode,
+        schema_version=plan.schema_version,
+    )
+
+
+def _question_requests_income_detail(question: str) -> bool:
+    text = str(question or "")
+    return any(token in text for token in ("明细", "组成", "构成", "来源", "由什么组成"))
+
+
 def build_synthesis_observation(*, index: int, tool_name: str, payload: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
     error = result.get("error") if isinstance(result, dict) else None
     data = result.get("data") if isinstance(result, dict) else None
@@ -944,6 +1008,9 @@ def _planner_input_text(text: str, *, conversation_context: dict[str, Any] | Non
     if isinstance(conversation_context, dict):
         payload["context"] = {
             "window_messages": int(conversation_context.get("window_messages") or 0),
+            "temporal_context": conversation_context.get("temporal_context")
+            if isinstance(conversation_context.get("temporal_context"), dict)
+            else {},
             "semantics": conversation_context.get("semantics") if isinstance(conversation_context.get("semantics"), dict) else {},
             "last_successful_read": conversation_context.get("last_successful_read")
             if isinstance(conversation_context.get("last_successful_read"), dict)
@@ -962,6 +1029,7 @@ Rules:
 - Use only tools in the provided tool manifest.
 - Never plan write/admin/notification/config-change actions.
 - Do not include system-scoped or path arguments such as config_key, config_path, data_config, output_dir, report_path, run_dir, or audit_db. The system injects those.
+- Resolve relative dates using context.temporal_context.current_date in Asia/Shanghai. For a month without a year such as "6月", use the current_date year.
 - For monthly income summary questions, use monthly_income_report with account/month when available.
 - For cashflow detail, net cashflow composition, net inflow source, "明细", "组成", "构成", "来源", or "由什么组成", use monthly_income_report with include_rows=true and response_mode=synthesis.
 - Use response_mode=canonical only for direct status/summary/list queries that do not require explanation, comparison, or composition.
