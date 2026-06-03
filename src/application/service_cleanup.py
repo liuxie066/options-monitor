@@ -67,7 +67,11 @@ def _compare_release_dirs_desc(left: Path, right: Path) -> int:
 def _release_dirs(releases_root: Path) -> list[Path]:
     if not releases_root.exists():
         return []
-    dirs = [path for path in releases_root.iterdir() if path.is_dir() and not path.is_symlink()]
+    dirs = [
+        path
+        for path in releases_root.iterdir()
+        if path.is_dir() and not path.is_symlink() and (path / "VERSION").is_file()
+    ]
     return sorted(dirs, key=cmp_to_key(_compare_release_dirs_desc))
 
 
