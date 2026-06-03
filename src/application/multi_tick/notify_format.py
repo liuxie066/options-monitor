@@ -450,14 +450,12 @@ def build_account_message_compact(
     text = result.notification_text.strip()
     body = annotate_notification(result.account, text + '\n').strip()
     body = _highlight_optimizer_lines(body)
-    candidate_raw, reject_raw, close_raw = _split_monitor_sections(body)
+    candidate_raw, _reject_raw, close_raw = _split_monitor_sections(body)
     candidate_lines = _compact_candidate_lines(candidate_raw)
-    reject_lines = _compact_reject_lines(reject_raw)
     close_lines, close_action_n, close_gap_n = _compact_close_lines(close_raw)
     put_n = sum(1 for ln in text.splitlines() if _is_sell_put_line(ln))
     call_n = sum(1 for ln in text.splitlines() if _is_covered_call_line(ln))
     enhancement_n = sum(1 for ln in text.splitlines() if _is_yield_enhancement_line(ln))
-    has_candidate = put_n + call_n + enhancement_n > 0
     switch_n, close_n = count_optimizer_actions(text)
     acct = str(result.account).strip().lower()
 
@@ -481,8 +479,6 @@ def build_account_message_compact(
         lines.extend(candidate_lines)
     else:
         lines.append("- 无符合承保条件候选")
-    if reject_lines and not has_candidate:
-        lines.extend(reject_lines)
     lines.append('')
 
     lines.append("持仓")
