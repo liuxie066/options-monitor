@@ -138,7 +138,7 @@ def test_compact_account_overview_counts_candidate_lines_only() -> None:
 
     assert "状态：Put 0 · Covered Call 1 · 增强 1 · 平仓 0\n" in message
     assert "候选\nCovered Call" in message
-    assert "- 主要过滤：波动率边际不足 9、收益增强组合不成立 2" in message
+    assert "- 主要过滤：" not in message
 
 
 def test_compact_account_overview_does_not_count_gap_as_close_action() -> None:
@@ -146,11 +146,15 @@ def test_compact_account_overview_does_not_count_gap_as_close_action() -> None:
     from src.application.multi_tick.notify_format import build_account_message_compact
 
     notif = (
-        "📋 本轮扫描完成，暂无符合条件的候选。\n\n"
+        "### Covered Call\n\n"
+        "🟢 Covered Call 英伟达 180C @ 06-18 | 🎯建议挂单 2.4\n"
+        "- 权利金 2.4USD · 年化 12% · 44天\n\n"
         "### [lx] 平仓建议 (0)\n"
         "- 本次无 strong/medium 平仓建议\n"
         "- 待补数据:\n"
         "- 0700.HK Call 2026-07-30 520.00C · 无法评估 | 收益捕获平仓仅支持 open short put/call\n"
+        "- 0700.HK Put 2026-07-30 440.00P · 无法评估 | 价差过宽\n"
+        "- 9992.HK Call 2026-07-30 200.00C · 无法评估 | 持仓对应合约已定位，但当前未取得可用价格，暂无法评估平仓建议\n"
     )
 
     message = build_account_message_compact(
@@ -165,6 +169,38 @@ def test_compact_account_overview_does_not_count_gap_as_close_action() -> None:
         cash_footer_lines=[],
     )
 
-    assert "状态：Put 0 · Covered Call 0 · 平仓 0 · 待补 1" in message
+    assert "状态：Put 0 · Covered Call 1 · 平仓 0 · 待补 1" in message
     assert "持仓\n- 无高/中优先级平仓建议\n- 待补:" in message
-    assert "0700.HK Call 2026-07-30 520.00C · 非 short put/call，跳过收益捕获" in message
+    assert "9992.HK Call 2026-07-30 200.00C · 持仓对应合约已定位，但当前未取得可用价格" in message
+    assert "0700.HK Call 2026-07-30 520.00C" not in message
+    assert "价差过宽" not in message
+
+
+def test_compact_account_overview_hides_non_data_gap_count() -> None:
+    from src.application.multi_tick.misc import AccountResult
+    from src.application.multi_tick.notify_format import build_account_message_compact
+
+    notif = (
+        "📋 本轮扫描完成，暂无符合条件的候选。\n\n"
+        "### [lx] 平仓建议 (0)\n"
+        "- 本次无 strong/medium 平仓建议\n"
+        "- 待补数据:\n"
+        "- 0700.HK Call 2026-07-30 520.00C · 无法评估 | 收益捕获平仓仅支持 open short put/call\n"
+        "- 0700.HK Put 2026-07-30 440.00P · 无法评估 | 价差过宽\n"
+    )
+
+    message = build_account_message_compact(
+        AccountResult(
+            account='lx',
+            ran_scan=True,
+            should_notify=True,
+            decision_reason='dense',
+            notification_text=notif,
+        ),
+        now_bj='2026-06-01 15:50:24',
+        cash_footer_lines=[],
+    )
+
+    assert "状态：Put 0 · Covered Call 0 · 平仓 0\n" in message
+    assert "待补" not in message
+    assert "价差过宽" not in message

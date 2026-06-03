@@ -30,6 +30,20 @@ COVERED_CALL_SECTION_LABEL = strategy_section_label(STRATEGY_COVERED_CALL)
 _COMPACT_EXPIRY_RE = re.compile(r"@\s*\d{2}-\d{2}\b")
 _ISO_EXPIRY_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
 _OPTION_STRIKE_RE = re.compile(r"\b\d+(?:\.\d+)?[PC]\b")
+_DISPLAYABLE_CLOSE_GAP_PHRASES = (
+    "缺少",
+    "未取得可用价格",
+    "无可用报价",
+    "无可用 bid/ask",
+    "补拉",
+    "行情覆盖",
+    "拉取失败",
+    "限频",
+    "重试预算",
+    "数据源不可用",
+    "OpenD",
+    "价差无效",
+)
 
 
 def _looks_like_option_candidate_line(text: str) -> bool:
@@ -352,6 +366,13 @@ def _is_close_gap_line(line: str) -> bool:
     return s.startswith("- ") and "无法评估" in s and bool(re.search(r"\b(?:Put|Call)\b", s))
 
 
+def _is_displayable_close_gap_line(line: str) -> bool:
+    s = str(line or "").strip()
+    if not _is_close_gap_line(s):
+        return False
+    return any(phrase in s for phrase in _DISPLAYABLE_CLOSE_GAP_PHRASES)
+
+
 def _compact_close_gap_line(line: str) -> str:
     s = str(line or "").strip()
     s = s.replace(" · 无法评估 | ", " · ")
@@ -363,7 +384,7 @@ def _compact_close_lines(lines: list[str], *, max_gap_items: int = 3) -> tuple[l
     if not lines:
         return ["- 无高/中优先级平仓建议"], 0, 0
     action_count = sum(1 for line in lines if _is_close_action_line(line))
-    gap_lines = [str(line).strip() for line in lines if _is_close_gap_line(str(line))]
+    gap_lines = [str(line).strip() for line in lines if _is_displayable_close_gap_line(str(line))]
     gap_count = len(gap_lines)
 
     out: list[str] = []
@@ -386,7 +407,7 @@ def _compact_close_lines(lines: list[str], *, max_gap_items: int = 3) -> tuple[l
                 out.append("- 待补:")
             continue
         if in_gap:
-            if _is_close_gap_line(s):
+            if _is_displayable_close_gap_line(s):
                 if shown_gap < max_gap_items:
                     out.append(_compact_close_gap_line(s))
                 shown_gap += 1
@@ -436,6 +457,7 @@ def build_account_message_compact(
     put_n = sum(1 for ln in text.splitlines() if _is_sell_put_line(ln))
     call_n = sum(1 for ln in text.splitlines() if _is_covered_call_line(ln))
     enhancement_n = sum(1 for ln in text.splitlines() if _is_yield_enhancement_line(ln))
+    has_candidate = put_n + call_n + enhancement_n > 0
     switch_n, close_n = count_optimizer_actions(text)
     acct = str(result.account).strip().lower()
 
@@ -459,7 +481,7 @@ def build_account_message_compact(
         lines.extend(candidate_lines)
     else:
         lines.append("- 无符合承保条件候选")
-    if reject_lines:
+    if reject_lines and not has_candidate:
         lines.extend(reject_lines)
     lines.append('')
 
