@@ -128,13 +128,24 @@ def run_shadow_replay_parameter_backtest(
         for variant in parameter_set.variants
     ]
     data_mode = _data_mode(mark_snapshots, outcome_facts)
-    recommendation = _recommendation(
+    gates = _gate_payload(
         coverage=coverage,
         baseline=baseline,
         variants=variants,
         data_mode=data_mode,
         min_sample=sample_floor,
         evidence_quality=evidence_quality,
+    )
+    candidate_impact = _candidate_impact_payload(
+        baseline=baseline,
+        variants=variants,
+        gates=gates,
+    )
+    recommendation = _recommendation(
+        data_mode=data_mode,
+        evidence_quality=evidence_quality,
+        gates=gates,
+        candidate_impact=candidate_impact,
     )
     result: dict[str, Any] = {
         "schema_version": PARAMETER_BACKTEST_SCHEMA_VERSION,
@@ -162,6 +173,8 @@ def run_shadow_replay_parameter_backtest(
         "evidence_quality": evidence_quality,
         "baseline": baseline,
         "variants": variants,
+        "gates": gates,
+        "candidate_impact": candidate_impact,
         "recommendation": recommendation,
         "safety": safety_payload(writes_local_dataset=False),
     }
@@ -628,6 +641,47 @@ def _market_matches(row: dict[str, Any], market: str) -> bool:
 
 def _recommendation(
     *,
+    data_mode: str,
+    evidence_quality: dict[str, Any],
+    gates: dict[str, Any],
+    candidate_impact: dict[str, Any],
+) -> dict[str, Any]:
+    candidate_gate = gates.get("candidate_impact") or {}
+    field_gate = gates.get("parameter_fields") or {}
+    if not bool(candidate_gate.get("allowed")):
+        return {
+            "status": "not_ready",
+            "reason": candidate_gate.get("reason") or "candidate_impact_not_ready",
+            "next_action": candidate_gate.get("next_action") or "review_backtest_evidence",
+            "missing_required_fields": evidence_quality.get("missing_required_fields"),
+            "complete_candidate_count": evidence_quality.get("complete_candidate_count"),
+            "candidate_count": evidence_quality.get("candidate_count"),
+        }
+    if data_mode != "closed_replay":
+        return {
+            "status": "live_shadow_candidate_only",
+            "reason": "outcome_evidence_missing",
+            "candidate_impact_allowed": True,
+            "candidate_impact_reason": candidate_impact.get("reason"),
+            "candidate_variant": candidate_impact.get("best_variant_by_new_accepts"),
+            "parameter_field_status": field_gate.get("status"),
+            "missing_required_fields": evidence_quality.get("missing_required_fields"),
+            "production_recommendation_allowed": False,
+            "next_action": "run_live_shadow_or_collect_mark_outcomes_before_production_change",
+        }
+    return {
+        "status": "ready_for_live_shadow_review",
+        "reason": "closed_replay_available",
+        "candidate_impact_allowed": True,
+        "candidate_variant": candidate_impact.get("best_variant_by_new_accepts"),
+        "parameter_field_status": field_gate.get("status"),
+        "production_recommendation_allowed": True,
+        "next_action": "review_variant_then_run_live_shadow_before_production_change",
+    }
+
+
+def _gate_payload(
+    *,
     coverage: dict[str, Any],
     baseline: dict[str, Any],
     variants: list[dict[str, Any]],
@@ -635,45 +689,179 @@ def _recommendation(
     min_sample: int,
     evidence_quality: dict[str, Any],
 ) -> dict[str, Any]:
-    if not coverage.get("strict_backtest_allowed"):
-        return {
-            "status": "not_ready",
-            "reason": coverage.get("reason") or "coverage_not_strict",
-            "next_action": "collect_scan_artifacts_for_requested_window",
-        }
-    if baseline["candidate_count"] < min_sample:
-        return {
-            "status": "not_ready",
-            "reason": "sample_size_below_min_sample",
-            "next_action": "collect_more_scan_artifacts",
-        }
-    if evidence_quality.get("missing_required_fields"):
-        return {
-            "status": "not_ready",
-            "reason": "parameter_fields_missing",
-            "missing_required_fields": evidence_quality.get("missing_required_fields"),
-            "complete_candidate_count": evidence_quality.get("complete_candidate_count"),
-            "candidate_count": evidence_quality.get("candidate_count"),
-            "next_action": "collect_candidate_parameter_fields",
-        }
+    scan_gate = _scan_artifact_gate(coverage)
+    sample_gate = _sample_size_gate(baseline, min_sample=min_sample)
+    field_gate = _parameter_field_gate(evidence_quality, min_sample=min_sample)
+    candidate_gate = _candidate_impact_gate(
+        scan_gate=scan_gate,
+        sample_gate=sample_gate,
+        field_gate=field_gate,
+        variants=variants,
+    )
+    production_gate = _production_recommendation_gate(
+        candidate_gate=candidate_gate,
+        data_mode=data_mode,
+    )
+    return {
+        "scan_artifacts": scan_gate,
+        "sample_size": sample_gate,
+        "parameter_fields": field_gate,
+        "candidate_impact": candidate_gate,
+        "production_recommendation": production_gate,
+    }
+
+
+def _scan_artifact_gate(coverage: dict[str, Any]) -> dict[str, Any]:
+    allowed = bool(coverage.get("strict_backtest_allowed"))
+    return {
+        "allowed": allowed,
+        "status": "pass" if allowed else "fail",
+        "reason": "scan_artifacts_ready" if allowed else (coverage.get("reason") or "coverage_not_strict"),
+        "next_action": None if allowed else "collect_scan_artifacts_for_requested_window",
+    }
+
+
+def _sample_size_gate(baseline: dict[str, Any], *, min_sample: int) -> dict[str, Any]:
+    candidate_count = int(baseline.get("candidate_count") or 0)
+    allowed = candidate_count >= int(min_sample)
+    return {
+        "allowed": allowed,
+        "status": "pass" if allowed else "fail",
+        "reason": "sample_size_ready" if allowed else "sample_size_below_min_sample",
+        "candidate_count": candidate_count,
+        "min_sample": int(min_sample),
+        "next_action": None if allowed else "collect_more_scan_artifacts",
+    }
+
+
+def _parameter_field_gate(evidence_quality: dict[str, Any], *, min_sample: int) -> dict[str, Any]:
+    candidate_count = int(evidence_quality.get("candidate_count") or 0)
+    complete_count = int(evidence_quality.get("complete_candidate_count") or 0)
+    missing_required = list(evidence_quality.get("missing_required_fields") or [])
+    allowed = complete_count >= int(min_sample)
+    if not allowed:
+        status = "fail"
+        reason = "parameter_fields_missing"
+        next_action = "collect_candidate_parameter_fields"
+    elif missing_required:
+        status = "warn"
+        reason = "parameter_fields_partially_available"
+        next_action = "treat_filter_only_counts_as_lower_bound_and_collect_missing_fields"
+    else:
+        status = "pass"
+        reason = "parameter_fields_complete"
+        next_action = None
+    return {
+        "allowed": allowed,
+        "status": status,
+        "reason": reason,
+        "candidate_count": candidate_count,
+        "complete_candidate_count": complete_count,
+        "complete_ratio": evidence_quality.get("complete_ratio"),
+        "min_sample": int(min_sample),
+        "missing_required_fields": missing_required,
+        "next_action": next_action,
+    }
+
+
+def _candidate_impact_gate(
+    *,
+    scan_gate: dict[str, Any],
+    sample_gate: dict[str, Any],
+    field_gate: dict[str, Any],
+    variants: list[dict[str, Any]],
+) -> dict[str, Any]:
+    for gate in (scan_gate, sample_gate, field_gate):
+        if not bool(gate.get("allowed")):
+            return {
+                "allowed": False,
+                "status": "not_ready",
+                "reason": gate.get("reason") or "candidate_impact_not_ready",
+                "next_action": gate.get("next_action") or "review_backtest_evidence",
+            }
     if not variants or max(int(row.get("accepted_count") or 0) for row in variants) <= 0:
         return {
+            "allowed": False,
             "status": "not_ready",
             "reason": "no_variant_accepts_candidates",
             "next_action": "review_parameter_hypothesis",
         }
+    limitations: list[str] = []
+    if str(field_gate.get("status") or "") == "warn":
+        limitations.append("parameter_fields_partial_counts_are_lower_bound")
+    return {
+        "allowed": True,
+        "status": "ready",
+        "reason": "filter_counterfactual_available",
+        "next_action": None,
+        "limitations": limitations,
+    }
+
+
+def _production_recommendation_gate(*, candidate_gate: dict[str, Any], data_mode: str) -> dict[str, Any]:
+    if not bool(candidate_gate.get("allowed")):
+        return {
+            "allowed": False,
+            "status": "blocked",
+            "reason": "candidate_impact_not_ready",
+            "next_action": candidate_gate.get("next_action") or "review_backtest_evidence",
+            "runtime_config_write_allowed": False,
+        }
     if data_mode != "closed_replay":
         return {
-            "status": "live_shadow_candidate_only",
+            "allowed": False,
+            "status": "blocked",
             "reason": "outcome_evidence_missing",
-            "next_action": "run_live_shadow_or_collect_mark_outcomes_before_production_change",
+            "next_action": "collect_mark_outcomes_before_parameter_recommendation",
+            "runtime_config_write_allowed": False,
         }
-    best = max(variants, key=lambda row: (int(row.get("newly_accepted_count") or 0), int(row.get("accepted_count") or 0)))
     return {
-        "status": "ready_for_live_shadow_review",
+        "allowed": True,
+        "status": "review_ready",
         "reason": "closed_replay_available",
-        "candidate_variant": best["name"],
-        "next_action": "review_variant_then_run_live_shadow_before_production_change",
+        "next_action": "human_review_then_live_shadow",
+        "runtime_config_write_allowed": False,
+    }
+
+
+def _candidate_impact_payload(
+    *,
+    baseline: dict[str, Any],
+    variants: list[dict[str, Any]],
+    gates: dict[str, Any],
+) -> dict[str, Any]:
+    gate = gates.get("candidate_impact") or {}
+    variant_summaries = [
+        {
+            "name": row.get("name"),
+            "accepted_count": int(row.get("accepted_count") or 0),
+            "newly_accepted_count": int(row.get("newly_accepted_count") or 0),
+            "newly_rejected_count": int(row.get("newly_rejected_count") or 0),
+            "safety_violation_count": int(row.get("safety_violation_count") or 0),
+        }
+        for row in variants
+    ]
+    best_by_new = None
+    best_by_total = None
+    if variant_summaries:
+        best_by_new = max(
+            variant_summaries,
+            key=lambda row: (row["newly_accepted_count"], row["accepted_count"]),
+        )
+        best_by_total = max(
+            variant_summaries,
+            key=lambda row: (row["accepted_count"], row["newly_accepted_count"]),
+        )
+    return {
+        "status": gate.get("status") or "not_ready",
+        "reason": gate.get("reason"),
+        "allowed": bool(gate.get("allowed")),
+        "baseline_accepted_count": int(baseline.get("accepted_count") or 0),
+        "baseline_candidate_count": int(baseline.get("candidate_count") or 0),
+        "best_variant_by_new_accepts": best_by_new.get("name") if best_by_new else None,
+        "best_variant_by_total_accepts": best_by_total.get("name") if best_by_total else None,
+        "variant_summaries": variant_summaries,
+        "limitations": list(gate.get("limitations") or []),
     }
 
 
@@ -756,6 +944,8 @@ def _render_markdown(result: dict[str, Any]) -> str:
     summary = result["summary"]
     coverage = result["coverage"]
     recommendation = result["recommendation"]
+    gates = result.get("gates") or {}
+    candidate_impact = result.get("candidate_impact") or {}
     lines = [
         "# Shadow Replay Parameter Backtest",
         "",
@@ -765,6 +955,17 @@ def _render_markdown(result: dict[str, Any]) -> str:
         f"- Samples: short_vol {summary['short_vol_candidate_count']} / all {summary['candidate_snapshot_count']}",
         f"- Parameter fields: complete {summary.get('parameter_complete_candidate_count')} / {summary['short_vol_candidate_count']}",
         f"- Baseline accepted: {result['baseline']['accepted_count']}",
+        "",
+        "## Gates",
+        f"- Candidate impact: {(gates.get('candidate_impact') or {}).get('status')} / {(gates.get('candidate_impact') or {}).get('reason')}",
+        f"- Production recommendation: {(gates.get('production_recommendation') or {}).get('status')} / {(gates.get('production_recommendation') or {}).get('reason')}",
+        f"- Parameter fields: {(gates.get('parameter_fields') or {}).get('status')} / {(gates.get('parameter_fields') or {}).get('reason')}",
+        "",
+        "## Candidate Impact",
+        f"- Status: {candidate_impact.get('status')} / allowed={candidate_impact.get('allowed')}",
+        f"- Best by newly accepted: {candidate_impact.get('best_variant_by_new_accepts')}",
+        f"- Best by total accepted: {candidate_impact.get('best_variant_by_total_accepts')}",
+        f"- Limitations: {candidate_impact.get('limitations') or []}",
         "",
         "## Variants",
     ]
