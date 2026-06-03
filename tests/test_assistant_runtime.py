@@ -8,8 +8,15 @@ from typing import Any
 from src.application.assistant import AssistantSettings, LlmTranslatorSettings, PerceptionEngine, handle_assistant_message
 from src.application.assistant.agent_loop import (
     AGENT_LOOP_SCHEMA_VERSION,
+    TOOL_PLAN_SCHEMA_VERSION,
+    LlmSynthesisResult,
+    LlmPlannerResult,
+    PlannerPlan,
+    PlannerPlanStep,
     build_tool_observation,
+    plan_read_only_tools,
     run_read_only_agent_loop,
+    tool_plan_json_schema,
 )
 from src.application.assistant.commands import (
     capability_catalog_payload,
@@ -28,9 +35,10 @@ from src.application.assistant.llm_intent_schema import LLM_INTENT_SCHEMA_VERSIO
 from src.application.assistant.llm_common import provider_api_kind, provider_endpoint_url, supported_llm_providers
 from src.application.assistant.llm_reply import LlmReplyResult, generate_general_reply
 from src.application.assistant.llm_translator import LlmTranslationResult, parse_llm_translation_payload, translate_inbound_intent
+from src.application.assistant.tool_policy import DEFAULT_TOOL_POLICY
 from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.assistant.audit import InboundAuditStore
-from src.application.assistant.contracts import PERCEPTION_RESULT_SCHEMA_VERSION, AssistantRequest, PerceptionResult
+from src.application.assistant.contracts import PERCEPTION_RESULT_SCHEMA_VERSION, AssistantRequest, PerceptionResult, ToolCall
 from src.infrastructure.openai_chat_completions import create_json_chat_completion, extract_chat_completion_text
 from src.infrastructure.openai_responses import OpenAIResponsesError, create_structured_response, extract_response_text
 
@@ -165,6 +173,7 @@ def test_llm_capability_manifest_lists_known_but_non_executable_operations() -> 
     capabilities = {item["capability_id"]: item for item in manifest["capabilities"]}
 
     assert "runtime_status" in manifest["llm_executable_intents"]
+    assert "tool_plan" not in capabilities
     assert capabilities["runtime_status"]["llm_executable"] is True
     assert capabilities["manual_trade_open"]["llm_executable"] is False
     assert capabilities["manual_trade_close"]["llm_executable"] is False
@@ -175,6 +184,27 @@ def test_llm_capability_manifest_lists_known_but_non_executable_operations() -> 
     assert capabilities["symbol_remove"]["llm_executable"] is False
     assert capabilities["upgrade_now"]["llm_executable"] is False
     assert "Choose only capabilities" in manifest["routing_rule"]
+
+
+def test_internal_tool_plan_is_agent_loop_only() -> None:
+    call = ToolCall(tool_name="assistant.tool_plan", payload={"plan": {}})
+    inbound_decision = DEFAULT_TOOL_POLICY.authorize_read_tool(call, source="inbound")
+    assert inbound_decision.allowed is True
+    assert inbound_decision.risk_level == "read_only"
+    assert inbound_decision.reason == "inbound_agent_loop_plan"
+
+    try:
+        DEFAULT_TOOL_POLICY.authorize_read_tool(call, source="public")
+    except AgentToolError as err:
+        assert err.code == "PERMISSION_DENIED"
+        assert err.details == {"source": "public"}
+    else:
+        raise AssertionError("public should not be allowed to call internal tool_plan")
+
+    decision = DEFAULT_TOOL_POLICY.authorize_read_tool(call, source="agent_loop")
+    assert decision.allowed is True
+    assert decision.risk_level == "read_only"
+    assert decision.reason == "internal_read_only_tool_plan"
 
 
 def test_assistant_capability_catalog_has_safe_llm_invariants() -> None:
@@ -1613,7 +1643,7 @@ def test_assistant_runtime_agent_loop_is_bounded_read_only_router(tmp_path: Path
     assert agent_loop["enabled"] is True
     assert agent_loop["schema_version"] == AGENT_LOOP_SCHEMA_VERSION
     assert agent_loop["planner"] == "llm_read_only_intent"
-    assert agent_loop["max_steps"] == 2
+    assert agent_loop["max_steps"] == 3
     assert agent_loop["steps_used"] == 1
     assert agent_loop["writes_allowed"] is False
     assert agent_loop["steps"] == [
@@ -1622,6 +1652,7 @@ def test_assistant_runtime_agent_loop_is_bounded_read_only_router(tmp_path: Path
             "phase": "plan_tool",
             "status": "planned",
             "intent_name": "runtime_status",
+            "tool_name": "runtime_status",
             "arguments": {},
         }
     ]
@@ -1651,6 +1682,332 @@ def test_assistant_runtime_agent_loop_is_bounded_read_only_router(tmp_path: Path
         "ok": True,
         "error_code": None,
     }
+
+
+def test_assistant_runtime_agent_loop_executes_planned_cashflow_detail(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "summary": [
+                    {
+                        "month": "2026-06",
+                        "account": "lx",
+                        "currency": "HKD",
+                        "net_cashflow_gross": 1200.0,
+                    }
+                ],
+                "return_summary": [
+                    {
+                        "month": "2026-06",
+                        "account": "lx",
+                        "net_income_cny": 1104.0,
+                        "net_income_by_ccy": {"HKD": 1200.0},
+                        "cash_secured_cny": 10000.0,
+                        "net_return_rate": 0.1104,
+                    }
+                ],
+                "cashflow_rows": [
+                    {
+                        "month": "2026-06",
+                        "account": "lx",
+                        "symbol": "0700.HK",
+                        "trade_action": "sell_open",
+                        "currency": "HKD",
+                        "contracts": 1,
+                        "price": 12.0,
+                        "cash_in_gross": 1200.0,
+                        "cash_out_gross": 0.0,
+                        "net_cashflow_gross": 1200.0,
+                    }
+                ],
+                "row_count": 1,
+                "premium_row_count": 1,
+            },
+        )
+
+    def _plan(
+        text: str,
+        settings: AssistantSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        assert text == "分析 lx 6月的净现金流明细"
+        assert settings.mode == "agent_loop"
+        assert conversation_context is not None
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="分析 lx 2026-06 的净现金流明细",
+                response_mode="synthesis",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="monthly_income_report",
+                        arguments={"account": "lx", "month": "2026-06", "include_rows": True},
+                        purpose="需要 cashflow_rows 解释净现金流组成",
+                    ),
+                ),
+            ),
+            trace={
+                "enabled": True,
+                "attempted": True,
+                "reason": "accepted",
+                "provider": "openai",
+                "base_url": "",
+                "model": "gpt-5.2",
+                "api_key_env": "OM_LLM_API_KEY",
+                "confidence_min": 0.75,
+                "timeout_seconds": 20,
+                "max_output_tokens": 512,
+                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+            },
+        )
+
+    def _synthesize(
+        question: str,
+        settings: AssistantSettings,
+        plan: PlannerPlan,
+        observations: list[dict[str, Any]],
+        conversation_context: dict[str, Any] | None,
+    ) -> LlmSynthesisResult:
+        assert question == "分析 lx 6月的净现金流明细"
+        assert settings.mode == "agent_loop"
+        assert plan.response_mode == "synthesis"
+        assert conversation_context is not None
+        assert observations[0]["data"]["cashflow_rows"][0]["symbol"] == "0700.HK"
+        return LlmSynthesisResult(
+            response_text="lx 2026-06 净现金流明细\n- 0700.HK sell_open 流入 HKD 1,200\n口径：OM 本地账本 cashflow_rows。",
+            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="分析 lx 6月的净现金流明细",
+            sender_id="local",
+            message_id="msg_agent_loop_cashflow_detail",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+        synthesize_response_fn=_synthesize,
+        now_fn=lambda: date(2026, 6, 3),
+    )
+
+    assert out["ok"] is True
+    assert calls == [
+        (
+            "monthly_income_report",
+            {"account": "lx", "config_key": "us", "include_rows": True, "month": "2026-06"},
+        )
+    ]
+    assert out["data"]["response_text"].startswith("lx 2026-06 净现金流明细")
+    agent_loop = out["meta"]["assistant"]["llm"]["agent_loop"]
+    assert agent_loop["planner"] == "llm_tool_plan"
+    assert agent_loop["max_steps"] == 3
+    assert agent_loop["steps_used"] == 1
+    assert agent_loop["steps"][0]["tool_name"] == "monthly_income_report"
+    assert agent_loop["observations"][0]["payload"] == {
+        "account": "lx",
+        "config_key": "us",
+        "include_rows": True,
+        "month": "2026-06",
+    }
+    assert agent_loop["final_response"] == {
+        "status": "synthesized",
+        "reason": "LLM synthesized the response from tool observations",
+        "canonical_renderer_required": False,
+        "llm_may_summarize": True,
+    }
+
+
+def test_assistant_runtime_agent_loop_rejects_disallowed_plan_tool(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(tool_name=tool_name, ok=True, data={})
+
+    def _plan(
+        _text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="非法升级",
+                response_mode="synthesis",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="inbound.upgrade",
+                        arguments={"target_version": "latest"},
+                        purpose="write operation must be rejected",
+                    ),
+                ),
+            ),
+            trace={
+                "enabled": True,
+                "attempted": True,
+                "reason": "accepted",
+                "provider": "openai",
+                "base_url": "",
+                "model": "gpt-5.2",
+                "api_key_env": "OM_LLM_API_KEY",
+                "confidence_min": 0.75,
+                "timeout_seconds": 20,
+                "max_output_tokens": 512,
+            },
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="直接帮我升级远端",
+            sender_id="local",
+            message_id="msg_agent_loop_reject_write_plan",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+    )
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "PERMISSION_DENIED"
+    assert calls == []
+    assert out["meta"]["assistant"]["route"] == "agent_loop"
+    assert out["meta"]["assistant"]["llm"]["agent_loop"]["steps_used"] == 0
+    assert out["meta"]["assistant"]["perception_trace"]["decision"] == "llm_error"
+
+
+def test_plan_read_only_tools_treats_empty_steps_as_no_plan() -> None:
+    calls: list[dict[str, Any]] = []
+
+    def _create_response(**kwargs: Any) -> dict[str, Any]:
+        calls.append(dict(kwargs))
+        return {
+            "output_text": json.dumps(
+                {
+                    "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+                    "goal": "无法安全规划",
+                    "response_mode": "synthesis",
+                    "steps": [],
+                }
+            )
+        }
+
+    result = plan_read_only_tools(
+        "你是什么模型",
+        AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        conversation_context=None,
+        create_response_fn=_create_response,
+        environ={"OM_LLM_API_KEY": "sk-test"},
+    )
+
+    assert calls
+    assert calls[0]["json_schema"]["properties"]["steps"]["minItems"] == 0
+    assert tool_plan_json_schema()["properties"]["steps"]["maxItems"] == 3
+    assert result.plan is None
+    assert result.error is not None
+    assert result.error.code == "NEEDS_CLARIFICATION"
+    assert result.trace["reason"] == "no_plan"
+    assert result.trace["error_code"] == "NEEDS_CLARIFICATION"
+
+
+def test_assistant_runtime_agent_loop_empty_plan_uses_general_reply_for_non_business_text(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(tool_name=tool_name, ok=True, data={})
+
+    def _plan(
+        _text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        return LlmPlannerResult(
+            plan=PlannerPlan(goal="无法安全规划", response_mode="synthesis", steps=()),
+            trace={
+                "enabled": True,
+                "attempted": True,
+                "reason": "accepted",
+                "provider": "openai",
+                "base_url": "",
+                "model": "gpt-5.2",
+                "api_key_env": "OM_LLM_API_KEY",
+                "confidence_min": 0.75,
+                "timeout_seconds": 20,
+                "max_output_tokens": 512,
+                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+            },
+        )
+
+    def _reply(
+        text: str,
+        settings: AssistantSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> LlmReplyResult:
+        assert text == "你是什么模型"
+        assert settings.mode == "agent_loop"
+        assert conversation_context is not None
+        return LlmReplyResult(
+            response_text="我是 OM 的交易系统助手，当前启用了 LLM 自然语言入口。",
+            trace={
+                "enabled": True,
+                "attempted": True,
+                "reason": "general_reply",
+                "provider": "openai",
+                "base_url": "",
+                "model": "gpt-5.2",
+                "api_key_env": "OM_LLM_API_KEY",
+                "confidence_min": 0.75,
+                "timeout_seconds": 20,
+                "max_output_tokens": 512,
+                "facts_source": "none",
+                "tools_allowed": False,
+                "writes_allowed": False,
+                "schema_version": "om-llm-reply-v1",
+            },
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="你是什么模型",
+            sender_id="local",
+            message_id="msg_agent_loop_empty_plan_reply",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+        generate_reply_fn=_reply,
+    )
+
+    assert out["ok"] is True
+    assert calls == []
+    assert out["data"]["perception"]["intent_name"] == "small_talk"
+    assert out["data"]["response_text"] == "我是 OM 的交易系统助手，当前启用了 LLM 自然语言入口。"
+    assert out["meta"]["assistant"]["route"] == "llm_reply"
+    assert out["meta"]["assistant"]["llm"]["intent_router"]["reason"] == "no_plan"
+    assert out["meta"]["assistant"]["llm"]["intent_router"]["agent_loop"]["steps_used"] == 0
 
 
 def test_read_only_agent_loop_records_no_plan_without_tool_step() -> None:
@@ -1691,7 +2048,7 @@ def test_read_only_agent_loop_records_no_plan_without_tool_step() -> None:
         "schema_version": AGENT_LOOP_SCHEMA_VERSION,
         "enabled": True,
         "planner": "llm_read_only_intent",
-        "max_steps": 2,
+        "max_steps": 3,
         "steps_used": 0,
         "writes_allowed": False,
         "steps": [],

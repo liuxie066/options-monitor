@@ -6,6 +6,8 @@ from types import SimpleNamespace
 from typing import Any
 
 from src.application.agent_tool_contracts import build_response
+from src.application.assistant import AssistantSettings
+from src.application.assistant.agent_loop import LlmSynthesisResult, LlmPlannerResult, PlannerPlan, PlannerPlanStep
 from src.application.inbound.feishu_ws import (
     FeishuWsSettings,
     build_feishu_ws_settings,
@@ -108,6 +110,115 @@ def test_feishu_ws_can_route_through_assistant(tmp_path: Path) -> None:
     assert inbound_result["data"]["perception"]["intent_name"] == "runtime_status"
     assert inbound_result["meta"]["assistant"]["route"] == "command"
     assert inbound_result["meta"]["assistant"]["llm"]["enabled"] is False
+
+
+def test_feishu_ws_agent_loop_routes_cashflow_detail_plan(tmp_path: Path) -> None:
+    replies: list[dict[str, Any]] = []
+    calls: list[tuple[str, dict[str, Any]]] = []
+    assistant_config_path = tmp_path / "config.assistant.json"
+    assistant_config_path.write_text(
+        json.dumps(
+            {
+                "assistant": {
+                    "mode": "agent_loop",
+                    "llm": {"provider": "openai", "model": "gpt-5.2", "api_key_env": "OM_LLM_API_KEY"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "summary": [{"month": "2026-06", "account": "lx", "currency": "HKD", "net_cashflow_gross": 1200}],
+                "return_summary": [{"month": "2026-06", "account": "lx", "cash_secured_cny": 10000, "net_income_cny": 1104}],
+                "cashflow_rows": [{"symbol": "0700.HK", "trade_action": "sell_open", "currency": "HKD", "net_cashflow_gross": 1200}],
+                "row_count": 1,
+                "premium_row_count": 1,
+            },
+        )
+
+    def _reply(**kwargs: Any) -> dict[str, Any]:
+        replies.append(dict(kwargs))
+        return {"code": 0, "data": {"message_id": "reply_1"}}
+
+    def _plan(
+        text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        assert text == "分析 lx 6月的净现金流明细"
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="分析 lx 2026-06 的净现金流明细",
+                response_mode="synthesis",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="monthly_income_report",
+                        arguments={"account": "lx", "month": "2026-06", "include_rows": True},
+                        purpose="cashflow detail",
+                    ),
+                ),
+            ),
+            trace={
+                "enabled": True,
+                "attempted": True,
+                "reason": "accepted",
+                "provider": "openai",
+                "base_url": "",
+                "model": "gpt-5.2",
+                "api_key_env": "OM_LLM_API_KEY",
+                "confidence_min": 0.75,
+                "timeout_seconds": 20,
+                "max_output_tokens": 512,
+            },
+        )
+
+    def _synthesize(
+        _question: str,
+        _settings: AssistantSettings,
+        _plan: PlannerPlan,
+        observations: list[dict[str, Any]],
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmSynthesisResult:
+        assert observations[0]["data"]["cashflow_rows"][0]["symbol"] == "0700.HK"
+        return LlmSynthesisResult(
+            response_text="lx 2026-06 净现金流明细\n- 0700.HK sell_open HKD 1,200",
+            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+        )
+
+    out = handle_feishu_ws_event(
+        _message_payload(text="分析 lx 6月的净现金流明细"),
+        settings=FeishuWsSettings(
+            config_key="us",
+            assistant_config_path=str(assistant_config_path),
+            allowed_senders="feishu:ou_1",
+            app_id="app_1",
+            app_secret="secret_1",
+            audit_db=str(tmp_path / "audit.sqlite3"),
+        ),
+        reply_fn=_reply,
+        execute_tool_fn=_execute,
+        plan_tools_fn=_plan,
+        synthesize_response_fn=_synthesize,
+    )
+
+    inbound_result = out["data"]["inbound"]["data"]["inbound_result"]
+    assert out["ok"] is True
+    assert calls == [
+        (
+            "monthly_income_report",
+            {"account": "lx", "config_key": "us", "include_rows": True, "month": "2026-06"},
+        )
+    ]
+    assert replies[0]["text"].startswith("lx 2026-06 净现金流明细")
+    assert inbound_result["meta"]["assistant"]["route"] == "agent_loop"
+    assert inbound_result["meta"]["assistant"]["llm"]["agent_loop"]["final_response"]["status"] == "synthesized"
 
 
 def test_feishu_ws_reaction_failure_does_not_fail_inbound_or_reply(tmp_path: Path) -> None:
