@@ -74,6 +74,12 @@ def test_resolve_trade_intake_config_uses_defaults() -> None:
         "notify_duplicate": False,
         "retry_unconfirmed_duplicate": True,
     }
+    assert out["backfill"] == {
+        "enabled": True,
+        "startup_check": True,
+        "interval_sec": 300,
+        "lookback_hours": 6.0,
+    }
 
 
 def test_resolve_trade_intake_config_accepts_receipt_overrides() -> None:
@@ -98,6 +104,29 @@ def test_resolve_trade_intake_config_accepts_receipt_overrides() -> None:
     assert out["receipt"]["notify_applied"] is True
 
 
+def test_resolve_trade_intake_config_accepts_backfill_overrides() -> None:
+    cfg = {
+        "accounts": ["lx"],
+        "trade_intake": {
+            "backfill": {
+                "enabled": False,
+                "startup_check": False,
+                "interval_sec": 120,
+                "lookback_hours": 12,
+            }
+        },
+    }
+
+    out = resolve_trade_intake_config(cfg)
+
+    assert out["backfill"] == {
+        "enabled": False,
+        "startup_check": False,
+        "interval_sec": 120,
+        "lookback_hours": 12.0,
+    }
+
+
 def test_resolve_trade_intake_config_rejects_non_boolean_receipt_flag() -> None:
     cfg = {"accounts": ["lx"], "trade_intake": {"receipt": {"enabled": "yes"}}}
 
@@ -105,6 +134,17 @@ def test_resolve_trade_intake_config_rejects_non_boolean_receipt_flag() -> None:
         resolve_trade_intake_config(cfg)
     except ValueError as exc:
         assert "trade_intake.receipt.enabled must be a boolean" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
+
+
+def test_resolve_trade_intake_config_rejects_invalid_backfill_flag() -> None:
+    cfg = {"accounts": ["lx"], "trade_intake": {"backfill": {"enabled": "yes"}}}
+
+    try:
+        resolve_trade_intake_config(cfg)
+    except ValueError as exc:
+        assert "trade_intake.backfill.enabled must be a boolean" in str(exc)
     else:
         raise AssertionError("expected ValueError")
 

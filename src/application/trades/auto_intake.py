@@ -6,6 +6,7 @@ import contextlib
 import json
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -25,6 +26,7 @@ from src.application.trades.state import (
     upsert_deal_state,
     write_trade_intake_state,
 )
+from src.application.trades.backfill import payload_deal_id, run_history_backfill
 from src.application.trades.state_reconcile import reconcile_trade_intake_state
 from src.application.trades.push_listener import OpenDTradePushListener
 from src.application.trades.receipt import send_trade_intake_receipt
@@ -78,6 +80,7 @@ def _process_payload(
     runtime_root: Path | None = None,
     on_result_fn: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
     retry_failed_deal: bool = False,
+    source: str = "push",
 ) -> dict[str, Any]:
     opend_config = opend_fetch_kwargs(config) if isinstance(config, dict) else None
     normalize_fn = normalize_trade_deal
@@ -117,6 +120,7 @@ def _process_payload(
         resolve_trade_deal_fn=resolve_trade_deal,
         on_result_fn=on_result_fn,
         retry_failed_deal=retry_failed_deal,
+        source=source,
     )
 
 
@@ -212,6 +216,7 @@ def main(argv: list[str] | None = None) -> int:
                     "audit_path": str(audit_path),
                     "status_path": str(status_path),
                     "receipt": dict(intake_cfg["receipt"]),
+                    "backfill": dict(intake_cfg["backfill"]),
                     "mapped_accounts": sorted(intake_cfg["account_mapping"].values()),
                 },
                 ensure_ascii=False,
@@ -257,6 +262,7 @@ def main(argv: list[str] | None = None) -> int:
                 runtime_root=runtime_root,
                 on_result_fn=receipt_callback,
                 retry_failed_deal=bool(args.retry_failed),
+                source="manual",
             )
         if apply_changes:
             _write_listener_status(
@@ -282,29 +288,42 @@ def main(argv: list[str] | None = None) -> int:
         _write_listener_status(status_path, status_base, status="error", stage="config", last_error="trade_intake.enabled=false")
         raise SystemExit("trade_intake.enabled=false; refusing to start listener")
 
+    status_state = dict(status_base)
+    process_lock = threading.RLock()
+
     def _on_deal(payload: dict[str, Any]) -> None:
-        result = _process_payload(
-            payload,
-            repo=repo,
-            state_path=state_path,
-            audit_path=audit_path,
-            account_mapping=intake_cfg["account_mapping"],
-            futu_account_ids=intake_cfg["futu_account_ids"],
-            apply_changes=apply_changes,
-            host=args.host,
-            port=args.port,
-            config=cfg,
-            config_path=cfg_path,
-            runtime_root=runtime_root,
-            on_result_fn=receipt_callback,
+        nonlocal status_state
+        push_received_at = utc_now()
+        with process_lock:
+            result = _process_payload(
+                payload,
+                repo=repo,
+                state_path=state_path,
+                audit_path=audit_path,
+                account_mapping=intake_cfg["account_mapping"],
+                futu_account_ids=intake_cfg["futu_account_ids"],
+                apply_changes=apply_changes,
+                host=args.host,
+                port=args.port,
+                config=cfg,
+                config_path=cfg_path,
+                runtime_root=runtime_root,
+                on_result_fn=receipt_callback,
+                source="push",
+            )
+        status_state.update(
+            {
+                "last_push_received_utc": push_received_at,
+                "last_push_deal_id": result.get("deal_id") or payload_deal_id(payload) or None,
+                "last_deal_result": _result_summary(result),
+                "last_receipt_result": _receipt_summary(result.get("receipt")),
+            }
         )
         _write_listener_status(
             status_path,
-            status_base,
+            status_state,
             status="listening",
             stage="deal_processed",
-            last_deal_result=_result_summary(result),
-            last_receipt_result=_receipt_summary(result.get("receipt")),
         )
         _log(_format_result_summary(result))
 
@@ -314,25 +333,84 @@ def main(argv: list[str] | None = None) -> int:
         on_deal=_on_deal,
     )
     restart_count = 0
+    last_backfill_monotonic: float | None = None
+    backfill_cfg = dict(intake_cfg.get("backfill") or {})
     while True:
         try:
-            _write_listener_status(status_path, status_base, status="starting", stage="listener_start", restart_count=restart_count)
+            _write_listener_status(status_path, status_state, status="starting", stage="listener_start", restart_count=restart_count)
             listener.start()
             _log("[OK] auto trade intake listener started")
-            _write_listener_status(status_path, status_base, status="listening", stage="listener_started", restart_count=restart_count)
+            _write_listener_status(status_path, status_state, status="listening", stage="listener_started", restart_count=restart_count)
+            if bool(backfill_cfg.get("enabled", True)) and not bool(backfill_cfg.get("startup_check", True)) and last_backfill_monotonic is None:
+                last_backfill_monotonic = time.monotonic()
             while True:
-                _write_listener_status(status_path, status_base, status="listening", stage="heartbeat", restart_count=restart_count)
+                should_backfill = bool(backfill_cfg.get("enabled", True))
+                now_mono = time.monotonic()
+                if should_backfill:
+                    interval_sec = int(backfill_cfg.get("interval_sec") or 300)
+                    startup_check = bool(backfill_cfg.get("startup_check", True))
+                    due = (
+                        last_backfill_monotonic is None
+                        and startup_check
+                    ) or (
+                        last_backfill_monotonic is not None
+                        and now_mono - last_backfill_monotonic >= interval_sec
+                    )
+                    if due:
+                        try:
+                            result = run_history_backfill(
+                                repo=repo,
+                                state_path=state_path,
+                                audit_path=audit_path,
+                                account_mapping=intake_cfg["account_mapping"],
+                                futu_account_ids=intake_cfg["futu_account_ids"],
+                                apply_changes=apply_changes,
+                                host=args.host,
+                                port=args.port,
+                                config=cfg,
+                                config_path=cfg_path,
+                                runtime_root=runtime_root,
+                                backfill_config=backfill_cfg,
+                                on_result_fn=receipt_callback,
+                                process_payload_fn=_process_payload,
+                                process_lock=process_lock,
+                            )
+                        except Exception as exc:
+                            result = {
+                                "ok": False,
+                                "finished_at_utc": utc_now(),
+                                "deal_count": 0,
+                                "applied_count": 0,
+                                "skipped_duplicate_count": 0,
+                                "failed_count": 1,
+                                "unresolved_count": 0,
+                                "error": f"{type(exc).__name__}: {exc}",
+                            }
+                            append_trade_intake_audit(
+                                audit_path,
+                                {
+                                    "phase": "backfill_failed",
+                                    "source": "backfill",
+                                    "finished_at_utc": result["finished_at_utc"],
+                                    "error": result["error"],
+                                },
+                            )
+                        last_backfill_monotonic = time.monotonic()
+                        status_state = _update_status_from_backfill(status_state, result)
+                        _write_listener_status(status_path, status_state, status="listening", stage="backfill_check", restart_count=restart_count)
+                _write_listener_status(status_path, status_state, status="listening", stage="heartbeat", restart_count=restart_count)
                 time.sleep(60)
         except KeyboardInterrupt:
             listener.close()
-            _write_listener_status(status_path, status_base, status="stopped", stage="keyboard_interrupt", restart_count=restart_count)
+            _write_listener_status(status_path, status_state, status="stopped", stage="keyboard_interrupt", restart_count=restart_count)
             return 0
         except Exception as exc:
             listener.close()
             restart_count += 1
+            status_state["last_error"] = f"{type(exc).__name__}: {exc}"
             _write_listener_status(
                 status_path,
-                status_base,
+                status_state,
                 status="reconnecting",
                 stage="listener_exception",
                 restart_count=restart_count,
@@ -385,6 +463,7 @@ def _status_base_payload(
         "port": int(port),
         "mapped_accounts": sorted(intake_cfg["account_mapping"].values()),
         "receipt": dict(intake_cfg.get("receipt") or {}),
+        "backfill": dict(intake_cfg.get("backfill") or {}),
         "started_at_utc": utc_now(),
     }
 
@@ -400,6 +479,28 @@ def _write_listener_status(path: Path, base_payload: dict[str, Any], *, status: 
     )
     payload.update({key: value for key, value in extra.items() if value is not None})
     atomic_write_json(path, payload)
+
+
+def _update_status_from_backfill(status_state: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    diagnostics = result.get("diagnostics") if isinstance(result.get("diagnostics"), dict) else {}
+    out = dict(status_state)
+    out.update(
+        {
+            "last_backfill_check_utc": result.get("finished_at_utc"),
+            "last_backfill_window_start_utc": diagnostics.get("window_start_utc"),
+            "last_backfill_window_end_utc": diagnostics.get("window_end_utc"),
+            "last_backfill_deal_count": result.get("deal_count"),
+            "last_backfill_applied_count": result.get("applied_count"),
+            "last_backfill_skipped_duplicate_count": result.get("skipped_duplicate_count"),
+            "last_backfill_failed_count": result.get("failed_count"),
+            "last_backfill_unresolved_count": result.get("unresolved_count"),
+            "last_backfill_result": result.get("last_result"),
+            "last_backfill_error": result.get("error"),
+        }
+    )
+    prior = int(out.get("missed_push_backfill_count") or 0)
+    out["missed_push_backfill_count"] = prior + int(result.get("applied_count") or 0)
+    return out
 
 
 def _result_summary(result: dict[str, Any] | None) -> dict[str, Any]:

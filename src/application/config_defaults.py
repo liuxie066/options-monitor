@@ -104,6 +104,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 "notify_duplicate": False,
                 "retry_unconfirmed_duplicate": True,
             },
+            "backfill": {
+                "enabled": True,
+                "startup_check": True,
+                "interval_sec": 300,
+                "lookback_hours": 6,
+            },
         },
         "option_positions": {
             "auto_close": {

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.198 - 2026-06-03
+
+### Added
+- Added periodic Futu history-deal backfill to auto trade intake so missed realtime deal pushes can still be detected and routed through the existing idempotent intake pipeline.
+- Exposed push/backfill timestamps, applied counts, duplicate counts, and backfill errors in `runtime_status` trade-intake diagnostics.
+
+### Changed
+- Tagged trade-intake audit and receipt context with `push`, `backfill`, or `manual` source to make missed-push repairs distinguishable from realtime intake.
+- Serialized realtime push and backfill processing with a shared lock to keep deal-state updates idempotent under concurrent OpenD callbacks and scheduled checks.
+
 ## 1.2.197 - 2026-06-03
 
 ### Added
