@@ -28,6 +28,16 @@ AgentCommandSpec = AssistantCommandSpec
 
 
 LLM_INTENT_SCHEMA_VERSION = "om-llm-intent-v1"
+LLM_PLANNER_PREVIEW_INTENTS = frozenset(
+    {
+        "manual_trade_open",
+        "manual_trade_close",
+        "manual_trade_update",
+        "symbol_edit",
+        "model_use",
+        "upgrade_now",
+    }
+)
 
 ACCOUNT_VALUES = ("lx", "sy")
 POSITION_STATUS_VALUES = ("open", "close", "all")
@@ -228,7 +238,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         tool_name="inbound.manual_trade",
         commands=("/record-open",),
         display_name="记录开仓",
-        arguments=("raw_text",),
+        arguments=("raw_text", "account"),
         read_only=False,
         llm_allowed=False,
         risk_level="preview_write",
@@ -246,7 +256,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         tool_name="inbound.manual_trade",
         commands=("/record-close",),
         display_name="记录平仓",
-        arguments=("raw_text",),
+        arguments=("raw_text", "account"),
         read_only=False,
         llm_allowed=False,
         risk_level="preview_write",
@@ -528,6 +538,25 @@ def llm_recognizable_specs() -> tuple[AssistantCommandSpec, ...]:
 
 def llm_allowed_specs() -> tuple[AssistantCommandSpec, ...]:
     return llm_recognizable_specs()
+
+
+def llm_planner_preview_specs() -> tuple[AssistantCommandSpec, ...]:
+    return tuple(spec for spec in COMMAND_SPECS if is_llm_planner_preview_spec(spec))
+
+
+def llm_planner_preview_intent_names() -> list[str]:
+    return sorted(spec.intent_name for spec in llm_planner_preview_specs())
+
+
+def is_llm_planner_preview_spec(spec: AssistantCommandSpec) -> bool:
+    return bool(
+        spec.intent_name in LLM_PLANNER_PREVIEW_INTENTS
+        and not spec.read_only
+        and spec.risk_level in {"preview_write", "preview_admin"}
+        and spec.operation_action == "preview"
+        and spec.supported
+        and spec.tool_name is not None
+    )
 
 
 def llm_executable_arguments() -> dict[str, frozenset[str]]:

@@ -9,6 +9,12 @@ from zoneinfo import ZoneInfo
 
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response
 from src.application.agent_tool_registry import get_tool_definition
+from src.application.assistant.commands import (
+    ACCOUNT_VALUES,
+    is_llm_planner_preview_spec,
+    llm_planner_preview_specs,
+    spec_by_intent,
+)
 from src.application.assistant.contracts import AssistantRequest, PerceptionResult, ToolCall
 from src.application.assistant.llm_common import (
     CreateStructuredResponseFn,
@@ -36,7 +42,7 @@ TOOL_PLAN_SCHEMA_VERSION = "om-tool-plan-v1"
 TOOL_PLAN_SYNTHESIS_SCHEMA_VERSION = "om-tool-plan-synthesis-v1"
 INTERNAL_TOOL_PLAN_NAME = "assistant.tool_plan"
 MAX_TOOL_PLAN_STEPS = 3
-AGENT_LOOP_ALLOWED_TOOLS = frozenset(
+AGENT_LOOP_READ_TOOLS = frozenset(
     {
         "monthly_income_report",
         "option_positions_read",
@@ -46,6 +52,9 @@ AGENT_LOOP_ALLOWED_TOOLS = frozenset(
         "close_advice_read",
     }
 )
+AGENT_LOOP_PREVIEW_CAPABILITIES = frozenset(spec.intent_name for spec in llm_planner_preview_specs())
+AGENT_LOOP_ALLOWED_TOOLS = AGENT_LOOP_READ_TOOLS | AGENT_LOOP_PREVIEW_CAPABILITIES
+_COMMAND_SPECS_BY_INTENT = spec_by_intent()
 _BANNED_PLAN_ARGUMENTS = frozenset(
     {
         "audit_db",
@@ -206,11 +215,11 @@ def run_read_only_agent_loop(
     now_fn: Callable[[], date] | None = None,
     max_steps: int = MAX_TOOL_PLAN_STEPS,
 ) -> AgentLoopResult:
-    """Build a bounded read-only tool plan.
+    """Build a bounded assistant plan.
 
-    The plan itself is an internal pseudo-tool routed through the existing
-    inbound router. Individual step execution still goes through the read-only
-    tool policy at action time.
+    Pure-read plans route through the internal pseudo-tool. A single preview
+    operation plan routes back into the existing deterministic operation path
+    and still requires a later explicit confirm/apply step.
     """
     steps = max(1, min(int(max_steps), MAX_TOOL_PLAN_STEPS))
     today = _planner_today(now_fn)
@@ -218,7 +227,7 @@ def run_read_only_agent_loop(
     if plan_tools_fn is not None or translate_intent_fn is None:
         plan_result = (plan_tools_fn or plan_read_only_tools)(text, settings, loop_context)
         plan_result = _normalize_tool_plan_result(plan_result, question=text, today=today)
-        translation, planned_steps = _translation_from_tool_plan_result(plan_result)
+        translation, planned_steps = _translation_from_tool_plan_result(plan_result, question=text)
         trace = dict(translation.trace or plan_result.trace)
     else:
         translator = translate_intent_fn
@@ -232,12 +241,13 @@ def run_read_only_agent_loop(
         "max_steps": steps,
         "steps_used": len(planned_steps),
         "writes_allowed": False,
+        "preview_operations_allowed": True,
         "steps": [step.public_payload() for step in planned_steps],
         "final_response": FinalResponsePlan(
             status="pending_tool_execution" if translation.intent is not None else "no_plan",
             reason="canonical renderer will own factual output"
             if translation.intent is not None
-            else "translator did not produce an executable read-only intent",
+            else "planner did not produce an executable assistant capability",
         ).public_payload(),
     }
     return AgentLoopResult(translation=translation, trace=trace, steps=planned_steps)
@@ -268,7 +278,7 @@ def execute_tool_plan(
 ) -> dict[str, Any]:
     plan = parse_tool_plan_payload(plan_payload)
     plan = _normalize_tool_plan(plan, question=question, today=_planner_today(None))
-    validate_tool_plan(plan)
+    validate_tool_plan(plan, allow_preview=False)
     tool_events: list[dict[str, Any]] = []
     observations: list[dict[str, Any]] = []
     synthesis_observations: list[dict[str, Any]] = []
@@ -493,7 +503,7 @@ def plan_read_only_tools(
                 ),
                 error=_no_tool_plan_error(),
             )
-        validate_tool_plan(plan)
+        validate_tool_plan(plan, question=text)
     except AgentToolError as err:
         return LlmPlannerResult(
             plan=None,
@@ -650,7 +660,7 @@ def parse_tool_plan_payload(payload: dict[str, Any]) -> PlannerPlan:
     )
 
 
-def validate_tool_plan(plan: PlannerPlan) -> None:
+def validate_tool_plan(plan: PlannerPlan, *, question: str | None = None, allow_preview: bool = True) -> None:
     if plan.schema_version != TOOL_PLAN_SCHEMA_VERSION:
         raise AgentToolError(code="INPUT_ERROR", message="unsupported tool plan schema version")
     if not plan.steps:
@@ -661,14 +671,17 @@ def validate_tool_plan(plan: PlannerPlan) -> None:
             message=f"这个问题需要超过 {MAX_TOOL_PLAN_STEPS} 次工具调用，请拆分问题。",
             details={"max_steps": MAX_TOOL_PLAN_STEPS, "steps": len(plan.steps)},
         )
+    kinds: list[str] = []
     for step in plan.steps:
-        if step.tool_name not in AGENT_LOOP_ALLOWED_TOOLS:
+        step_kind = _plan_step_kind(step.tool_name)
+        if step_kind is None:
             raise AgentToolError(
                 code="PERMISSION_DENIED",
                 message=f"{step.tool_name} is not allowed in assistant planner",
-                hint="Planner MVP only allows bounded pure-read analysis tools.",
+                hint="Planner only allows bounded read tools and explicit preview-only capabilities.",
                 details={"allowed_tools": sorted(AGENT_LOOP_ALLOWED_TOOLS), "tool_name": step.tool_name},
             )
+        kinds.append(step_kind)
         banned = sorted(key for key in step.arguments if str(key) in _BANNED_PLAN_ARGUMENTS)
         if banned:
             raise AgentToolError(
@@ -677,8 +690,7 @@ def validate_tool_plan(plan: PlannerPlan) -> None:
                 hint="config/path/runtime fields are injected by the system, not by LLM plans.",
                 details={"tool_name": step.tool_name, "banned_arguments": banned},
             )
-        definition = get_tool_definition(step.tool_name)
-        allowed_args = set(definition.input_schema) if definition is not None else set()
+        allowed_args = _allowed_plan_arguments(step.tool_name)
         allowed_args.difference_update(_BANNED_PLAN_ARGUMENTS)
         extra = sorted(str(key) for key in step.arguments if allowed_args and str(key) not in allowed_args)
         if extra:
@@ -687,6 +699,85 @@ def validate_tool_plan(plan: PlannerPlan) -> None:
                 message=f"tool plan has unsupported arguments for {step.tool_name}: {', '.join(extra)}",
                 details={"tool_name": step.tool_name, "allowed_arguments": sorted(allowed_args), "extra_arguments": extra},
             )
+    preview_count = sum(1 for kind in kinds if kind == "preview")
+    read_count = sum(1 for kind in kinds if kind == "read")
+    if preview_count:
+        if not allow_preview:
+            raise AgentToolError(
+                code="PERMISSION_DENIED",
+                message="preview-write capabilities cannot be executed through assistant.tool_plan",
+                hint="LLM planner may create a pending preview, but direct tool execution remains read-only.",
+                details={"preview_capabilities": sorted(step.tool_name for step in plan.steps if _plan_step_kind(step.tool_name) == "preview")},
+            )
+        if preview_count > 1 or read_count:
+            raise AgentToolError(
+                code="PLAN_UNSUPPORTED_COMPOSITION",
+                message="一次聊天计划只能包含纯只读分析，或一个写入预览操作。",
+                hint="请把查询分析和写入预览拆成两条消息。",
+                details={"read_steps": read_count, "preview_steps": preview_count},
+            )
+    elif question is not None and _question_requests_preview_operation(question):
+        raise AgentToolError(
+            code="PLAN_RISK_MISMATCH",
+            message="这句话像写入预览请求，但 LLM 规划成了只读查询。",
+            hint="请重新规划为对应的 preview capability；不要把记录交易、成交提醒或配置修改降级成持仓/收益查询。",
+            details={"planned_tools": [step.tool_name for step in plan.steps]},
+        )
+
+
+def _plan_step_kind(tool_name: str) -> str | None:
+    name = str(tool_name or "")
+    if name in AGENT_LOOP_READ_TOOLS:
+        return "read"
+    if name in AGENT_LOOP_PREVIEW_CAPABILITIES:
+        spec = _COMMAND_SPECS_BY_INTENT.get(name)
+        if spec is not None and is_llm_planner_preview_spec(spec):
+            return "preview"
+    return None
+
+
+def _single_preview_step(plan: PlannerPlan) -> PlannerPlanStep | None:
+    preview_steps = [step for step in plan.steps if _plan_step_kind(step.tool_name) == "preview"]
+    if len(preview_steps) == 1 and len(plan.steps) == 1:
+        return preview_steps[0]
+    return None
+
+
+def _allowed_plan_arguments(tool_name: str) -> set[str]:
+    if tool_name in AGENT_LOOP_READ_TOOLS:
+        definition = get_tool_definition(tool_name)
+        return set(definition.input_schema) if definition is not None else set()
+    spec = _COMMAND_SPECS_BY_INTENT.get(tool_name)
+    if spec is None or not is_llm_planner_preview_spec(spec):
+        return set()
+    allowed = set(spec.arguments)
+    if tool_name in {"manual_trade_open", "manual_trade_close"}:
+        allowed.add("account")
+    return allowed
+
+
+def _question_requests_preview_operation(question: str) -> bool:
+    compact = re.sub(r"\s+", "", str(question or "").strip().lower())
+    if not compact:
+        return False
+    high_confidence_tokens = (
+        "记录开仓",
+        "记录平仓",
+        "记录交易",
+        "写入交易",
+        "成交提醒",
+        "委托已全部成交",
+        "成功卖出",
+        "成功买入",
+        "recordopen",
+        "recordclose",
+    )
+    if any(token in compact for token in high_confidence_tokens):
+        return True
+    symbol_setting_tokens = ("coveredcall", "sellcall", "sellput", "minstrike", "maxstrike", "min_strike", "max_strike")
+    if ("设置" in compact or "修改监控" in compact or "配置标的" in compact) and any(token in compact for token in symbol_setting_tokens):
+        return True
+    return "立即升级" in compact or "切换模型" in compact or "使用模型" in compact
 
 
 def _planned_steps_from_translation(translation: LlmTranslationResult) -> tuple[AgentLoopStep, ...]:
@@ -704,7 +795,7 @@ def _planned_steps_from_translation(translation: LlmTranslationResult) -> tuple[
     )
 
 
-def _translation_from_tool_plan_result(result: LlmPlannerResult) -> tuple[LlmTranslationResult, tuple[AgentLoopStep, ...]]:
+def _translation_from_tool_plan_result(result: LlmPlannerResult, *, question: str) -> tuple[LlmTranslationResult, tuple[AgentLoopStep, ...]]:
     if result.error is not None:
         return LlmTranslationResult(intent=None, trace=dict(result.trace), error=result.error), ()
     if result.plan is None:
@@ -712,7 +803,7 @@ def _translation_from_tool_plan_result(result: LlmPlannerResult) -> tuple[LlmTra
     if not result.plan.steps:
         return LlmTranslationResult(intent=None, trace={**dict(result.trace), "reason": "no_plan"}, error=_no_tool_plan_error()), ()
     try:
-        validate_tool_plan(result.plan)
+        validate_tool_plan(result.plan, question=question)
     except AgentToolError as err:
         return LlmTranslationResult(intent=None, trace={**dict(result.trace), "reason": "invalid_plan", "error_code": err.code}, error=err), ()
     planned_steps = tuple(
@@ -720,12 +811,27 @@ def _translation_from_tool_plan_result(result: LlmPlannerResult) -> tuple[LlmTra
             index=index,
             phase="plan_tool",
             status="planned",
+            intent_name=step.tool_name if _plan_step_kind(step.tool_name) == "preview" else None,
             tool_name=step.tool_name,
             arguments=dict(step.arguments),
             purpose=step.purpose,
         )
         for index, step in enumerate(result.plan.steps, start=1)
     )
+    preview_step = _single_preview_step(result.plan)
+    if preview_step is not None:
+        return (
+            LlmTranslationResult(
+                intent=PerceptionResult(
+                    intent_name=preview_step.tool_name,
+                    arguments=dict(preview_step.arguments),
+                    source="agent_loop_plan",
+                    confidence=1.0,
+                ),
+                trace=dict(result.trace),
+            ),
+            planned_steps,
+        )
     return (
         LlmTranslationResult(
             intent=PerceptionResult(
@@ -1343,29 +1449,33 @@ def _planner_input_text(text: str, *, conversation_context: dict[str, Any] | Non
 
 def _planner_instructions() -> str:
     return """\
-You are the options-monitor read-only tool planner.
+You are the options-monitor assistant capability planner.
 Return only JSON that matches the requested schema.
 
 Rules:
-- Produce 1 to 3 tool calls. If the question needs more, choose the most direct useful plan, or fail by returning no unsupported tool.
-- Use only tools in the provided tool manifest.
-- Never plan write/admin/notification/config-change actions.
+- Produce 1 to 3 read-only tool calls, or exactly 1 preview-write capability call.
+- Use only tools/capabilities in the provided manifest.
+- Preview-write capabilities only create a pending preview. They never apply writes, confirm pending operations, notify users externally, or mutate config/ledger directly.
+- Never plan confirm/cancel/apply actions. Confirm/cancel must be handled by deterministic user commands bound to a pending operation.
 - Do not include system-scoped or path arguments such as config_key, config_path, data_config, output_dir, report_path, run_dir, or audit_db. The system injects those.
 - Resolve relative dates using context.temporal_context.current_date in Asia/Shanghai. For a month without a year such as "6月", use the current_date year.
 - For monthly income summary questions, use monthly_income_report with account/month when available.
 - For cashflow detail, net cashflow composition, net inflow source, "明细", "组成", "构成", "来源", or "由什么组成", use monthly_income_report with include_rows=true.
 - For all-history, cumulative, or total net cashflow questions, omit month so monthly_income_report reads all OM local ledger months.
 - For multiple explicit months, either call monthly_income_report once per month with matching arguments, or omit month and synthesize from all available rows; never duplicate one month while claiming another.
+- For "记录开仓", "记录平仓", Futu 成交提醒, 成功卖出/买入 option fills, use manual_trade_open or manual_trade_close with raw_text set to the original user message.
+- For monitored-symbol setting requests such as covered call min strike, use symbol_edit.
+- For model switch requests, use model_use. For immediate software upgrade requests, use upgrade_now.
 - response_mode is a top-level plan field only. Never include response_mode inside any step.arguments.
 - Use response_mode=canonical only for direct status/summary/list queries that do not require explanation, comparison, or composition.
 - Use response_mode=synthesis for analysis, detail, comparison, why/how, or composition questions.
-- If there is no safe read-only plan, or required slots are missing and the tool cannot safely handle them, return steps=[] instead of guessing.
+- If there is no safe plan, or required slots are missing and the capability cannot safely handle them, return steps=[] instead of guessing.
 """
 
 
 def _planner_tool_manifest() -> list[dict[str, Any]]:
     tools: list[dict[str, Any]] = []
-    for name in sorted(AGENT_LOOP_ALLOWED_TOOLS):
+    for name in sorted(AGENT_LOOP_READ_TOOLS):
         definition = get_tool_definition(name)
         if definition is None:
             continue
@@ -1409,7 +1519,82 @@ def _planner_tool_manifest() -> list[dict[str, Any]]:
         if semantics:
             item["semantics"] = semantics
         tools.append(item)
+    for spec in llm_planner_preview_specs():
+        item = {
+            "name": spec.intent_name,
+            "description": spec.summary,
+            "capabilities": ["preview_operation"],
+            "input_schema": _planner_preview_input_schema(spec.intent_name),
+            "safe_default_input": {},
+            "risk_level": spec.risk_level,
+            "operation_action": "preview",
+            "operation_target": spec.operation_target,
+            "planner_notes": _planner_preview_notes(spec.intent_name),
+        }
+        tools.append(item)
     return tools
+
+
+def _planner_preview_input_schema(intent_name: str) -> dict[str, Any]:
+    if intent_name in {"manual_trade_open", "manual_trade_close"}:
+        return {
+            "raw_text": {
+                "type": "string",
+                "description": "Original user message, including account label and broker fill text when present.",
+            },
+            "account": {
+                "type": ["string", "null"],
+                "enum": [*ACCOUNT_VALUES, None],
+                "description": "Optional account label if explicitly present. Keep raw_text complete regardless.",
+            },
+        }
+    if intent_name == "manual_trade_update":
+        return {
+            "operation_id": {"type": ["string", "null"]},
+            "operation_resolution": {"type": ["string", "null"]},
+            "updates": {"type": "object"},
+        }
+    if intent_name == "symbol_edit":
+        return {
+            "symbol": {"type": "string"},
+            "set": {"type": "object"},
+            "ensure_use": {"type": ["array", "null"], "items": {"type": "string"}},
+        }
+    if intent_name == "model_use":
+        return {"model_profile": {"type": "string"}}
+    if intent_name == "upgrade_now":
+        return {"target_version": {"type": ["string", "null"]}}
+    return {}
+
+
+def _planner_preview_notes(intent_name: str) -> list[str]:
+    if intent_name == "manual_trade_open":
+        return [
+            "Use for 记录开仓, Futu 成交提醒, 成功卖出/买入 option opening fills.",
+            "Set raw_text to the original user message so the deterministic trade parser can extract symbol, expiration, strike, contracts, premium, and account.",
+            "Creates only a pending preview; it never writes the ledger until a deterministic confirm command is received.",
+        ]
+    if intent_name == "manual_trade_close":
+        return [
+            "Use for 记录平仓 and closing fill reminders.",
+            "Set raw_text to the original user message.",
+            "Creates only a pending preview; it never writes the ledger until a deterministic confirm command is received.",
+        ]
+    if intent_name == "manual_trade_update":
+        return [
+            "Use only to modify an existing pending manual trade preview.",
+            "Creates an updated pending preview; it does not confirm or write the ledger.",
+        ]
+    if intent_name == "symbol_edit":
+        return [
+            "Use for monitored-symbol setting changes such as covered call min strike or sell put thresholds.",
+            "Creates only a pending config-change preview.",
+        ]
+    if intent_name == "model_use":
+        return ["Use for assistant model switch requests. Creates only a pending model-switch preview."]
+    if intent_name == "upgrade_now":
+        return ["Use for immediate software upgrade requests. Creates only a pending admin preview."]
+    return []
 
 
 def _synthesis_input_text(
@@ -1631,8 +1816,8 @@ def _clip_mapping(value: dict[str, Any], *, limit: int = 12) -> dict[str, Any]:
 def _no_tool_plan_error() -> AgentToolError:
     return AgentToolError(
         code="NEEDS_CLARIFICATION",
-        message="没有识别出可安全执行的只读工具计划。",
-        hint="请明确要查收益、持仓、运行状态、最近任务、日志或平仓建议。",
+        message="没有识别出可安全执行的能力计划。",
+        hint="请明确要查收益、持仓、运行状态、最近任务、日志、平仓建议，或要创建哪类写入预览。",
     )
 
 
