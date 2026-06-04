@@ -392,6 +392,76 @@ def test_resolve_trade_close_apply_keeps_zero_price_option_leg_pending_without_s
     assert repo.get_record_fields(lot_id)["contracts_open"] == 10
 
 
+def test_resolve_trade_close_retry_failed_routes_early_zero_price_assignment_to_lifecycle_pending(tmp_path) -> None:
+    from domain.domain.option_position_lots import OpenPositionCommand
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="FUTU",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=120.0,
+            multiplier=100,
+            expiration_ymd="2026-06-05",
+            premium_per_share=3.6,
+            opened_at_ms=1779129615442,
+        ),
+    )
+    lot_id = repo.list_position_lots()[0]["record_id"]
+
+    result = resolve_trade_deal(
+        _deal(
+            deal_id="3254612655429789712",
+            order_id="FH1C9F208E1EAE8000",
+            symbol="FUTU",
+            contracts=1,
+            price=0.0,
+            strike=120.0,
+            expiration_ymd="2026-06-05",
+            currency="USD",
+            trade_time_ms=1780506955360,
+            raw_payload={
+                "deal_id": "3254612655429789712",
+                "order_id": "FH1C9F208E1EAE8000",
+                "code": "US.FUTU260605P120000",
+                "trd_side": "BUY_BACK",
+                "status": "OK",
+            },
+        ),
+        repo=repo,
+        state={
+            "failed_deal_ids": {
+                "3254612655429789712": {
+                    "status": "failed",
+                    "reason": "exception:LedgerPreflightError",
+                }
+            }
+        },
+        apply_changes=True,
+        retry_failed_deal=True,
+    )
+
+    assert result.status == "unresolved"
+    assert result.action == "lifecycle"
+    assert result.reason == "waiting_settlement_evidence"
+    close_events = [item for item in repo.list_trade_events() if item["position_effect"] == "close"]
+    assert close_events == []
+    cases = repo.list_trade_lifecycle_cases()
+    assert cases[0]["symbol"] == "FUTU"
+    assert cases[0]["status"] == "waiting_settlement_evidence"
+    assert cases[0]["decision_type"] == "needs_review"
+    evidence = repo.list_trade_lifecycle_evidence(case_id=cases[0]["case_id"])
+    assert evidence[0]["source_event_id"] == "3254612655429789712"
+    assert evidence[0]["evidence_type"] == "option_zero_price_close"
+    assert repo.get_record_fields(lot_id)["contracts_open"] == 1
+
+
 def test_resolve_trade_lifecycle_option_first_stock_settlement_records_assignment(tmp_path) -> None:
     from domain.domain.option_position_lots import OpenPositionCommand
 
