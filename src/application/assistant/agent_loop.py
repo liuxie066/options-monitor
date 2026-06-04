@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Callable
@@ -798,11 +799,16 @@ def _normalize_tool_plan_result(result: LlmPlannerResult, *, question: str, toda
 
 
 def _normalize_tool_plan(plan: PlannerPlan, *, question: str, today: date) -> PlannerPlan:
-    month = extract_month_filter(question, today=today)
+    months = _extract_month_filters(question, today=today)
+    month = months[0] if len(months) == 1 else None
     detail_requested = _question_requests_income_detail(question)
+    all_history_requested = _question_requests_all_income_history(question)
+    all_accounts_requested = _question_requests_all_accounts(question)
     response_mode = plan.response_mode
     changed = False
     steps: list[PlannerPlanStep] = []
+    monthly_step_index = 0
+    monthly_step_count = sum(1 for step in plan.steps if step.tool_name == "monthly_income_report")
     for step in plan.steps:
         arguments = dict(step.arguments)
         if "response_mode" in arguments:
@@ -815,7 +821,28 @@ def _normalize_tool_plan(plan: PlannerPlan, *, question: str, today: date) -> Pl
             else:
                 arguments["response_mode"] = misplaced_response_mode
         if step.tool_name == "monthly_income_report":
-            if month and arguments.get("month") != month:
+            monthly_step_index += 1
+            purpose_months = _extract_month_filters(step.purpose, today=today)
+            if all_accounts_requested and "account" in arguments:
+                arguments.pop("account", None)
+                changed = True
+            if all_history_requested and not months and "month" in arguments:
+                arguments.pop("month", None)
+                changed = True
+                if response_mode != "synthesis":
+                    response_mode = "synthesis"
+            elif len(months) > 1 and monthly_step_count == 1 and "month" in arguments:
+                arguments.pop("month", None)
+                changed = True
+                if response_mode != "synthesis":
+                    response_mode = "synthesis"
+            elif len(months) > 1 and monthly_step_index <= len(months) and arguments.get("month") != months[monthly_step_index - 1]:
+                arguments["month"] = months[monthly_step_index - 1]
+                changed = True
+            elif purpose_months and arguments.get("month") not in {None, purpose_months[0]}:
+                arguments["month"] = purpose_months[0]
+                changed = True
+            elif month and arguments.get("month") != month:
                 arguments["month"] = month
                 changed = True
             if detail_requested and arguments.get("include_rows") is not True:
@@ -841,6 +868,77 @@ def _normalize_tool_plan(plan: PlannerPlan, *, question: str, today: date) -> Pl
 def _question_requests_income_detail(question: str) -> bool:
     text = str(question or "")
     return any(token in text for token in ("明细", "组成", "构成", "来源", "由什么组成"))
+
+
+def _question_requests_all_income_history(question: str) -> bool:
+    compact = re.sub(r"\s+", "", str(question or ""))
+    return (
+        any(token in compact for token in ("历史以来", "历史至今", "从开始", "全部历史"))
+        or ("累计" in compact and "净现金流" in compact)
+        or ("以来" in compact and "净现金流" in compact)
+        or ("今年以来" in compact and ("收益" in compact or "现金流" in compact))
+    )
+
+
+def _question_requests_all_accounts(question: str) -> bool:
+    compact = re.sub(r"\s+", "", str(question or ""))
+    return any(token in compact for token in ("所有账户", "全部账户", "各账户", "全账户"))
+
+
+_MONTH_FILTER_RE = re.compile(r"(?<!\d)(20\d{2})[-/.](0[1-9]|1[0-2])(?!\d)")
+_YEAR_MONTH_CN_FILTER_RE = re.compile(r"(?<!\d)(20\d{2})年(1[0-2]|0?[1-9]|十[一二]?|[一二三四五六七八九])月")
+_MONTH_CN_FILTER_RE = re.compile(r"(?<!\d)(1[0-2]|0?[1-9]|十[一二]?|[一二三四五六七八九])月")
+_CN_MONTH_NUMBERS = {
+    "一": 1,
+    "二": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+    "十": 10,
+    "十一": 11,
+    "十二": 12,
+}
+
+
+def _extract_month_filters(text: str, *, today: date) -> list[str]:
+    raw = str(text or "")
+    compact = re.sub(r"\s+", "", raw)
+    found: list[tuple[int, str]] = []
+    for match in _MONTH_FILTER_RE.finditer(raw):
+        found.append((match.start(), f"{match.group(1)}-{match.group(2)}"))
+    occupied = [(match.start(), match.end()) for match in _YEAR_MONTH_CN_FILTER_RE.finditer(compact)]
+    for match in _YEAR_MONTH_CN_FILTER_RE.finditer(compact):
+        month = _month_filter_number(match.group(2))
+        if month:
+            found.append((match.start(), f"{int(match.group(1)):04d}-{month:02d}"))
+    for match in _MONTH_CN_FILTER_RE.finditer(compact):
+        if any(start <= match.start() < end for start, end in occupied):
+            continue
+        month = _month_filter_number(match.group(1))
+        if month:
+            found.append((match.start(), f"{today.year:04d}-{month:02d}"))
+    if not found:
+        month = extract_month_filter(raw, today=today)
+        return [month] if month else []
+    out: list[str] = []
+    seen: set[str] = set()
+    for _position, month in sorted(found, key=lambda item: item[0]):
+        if month not in seen:
+            out.append(month)
+            seen.add(month)
+    return out
+
+
+def _month_filter_number(raw: str) -> int | None:
+    if raw.isdigit():
+        value = int(raw)
+    else:
+        value = _CN_MONTH_NUMBERS.get(raw)
+    return value if value is not None and 1 <= value <= 12 else None
 
 
 def build_synthesis_observation(*, index: int, tool_name: str, payload: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
@@ -935,18 +1033,48 @@ def _build_final_response(
     synthesizer = synthesize_response_fn or synthesize_tool_plan_response
     synthesis = synthesizer(question, settings, plan, synthesis_observations, conversation_context)
     if synthesis.response_text:
-        return synthesis
+        guard = _verify_answer_guard(synthesis.response_text, observations=synthesis_observations)
+        if not guard["violations"]:
+            return LlmSynthesisResult(
+                response_text=synthesis.response_text,
+                trace={**dict(synthesis.trace), "answer_guard": {"status": "passed"}},
+                error=synthesis.error,
+            )
+        retry_observations = _with_answer_guard_feedback(synthesis_observations, guard)
+        retry = synthesizer(question, settings, plan, retry_observations, conversation_context)
+        if retry.response_text:
+            retry_guard = _verify_answer_guard(retry.response_text, observations=synthesis_observations)
+            if not retry_guard["violations"]:
+                return LlmSynthesisResult(
+                    response_text=retry.response_text,
+                    trace={
+                        **dict(retry.trace),
+                        "reason": "synthesized_after_answer_guard",
+                        "answer_guard": {
+                            "status": "failed_then_rewritten",
+                            "violations": guard["violations"],
+                        },
+                    },
+                    error=retry.error,
+                )
+            guard = {
+                "violations": guard["violations"],
+                "retry_violations": retry_guard["violations"],
+            }
     if len(plan.steps) == 1 and synthesis_observations:
         text = _canonical_response(plan.steps[0], synthesis_observations[0])
         if text:
+            trace = {
+                **dict(synthesis.trace),
+                "reason": "canonical_renderer_fallback",
+                "fallback": "canonical_renderer",
+                "error_code": synthesis.error.code if synthesis.error else None,
+            }
+            if "guard" in locals():
+                trace["answer_guard"] = {"status": "failed_then_fallback", **guard}
             return LlmSynthesisResult(
                 response_text=text,
-                trace={
-                    **dict(synthesis.trace),
-                    "reason": "canonical_renderer_fallback",
-                    "fallback": "canonical_renderer",
-                    "error_code": synthesis.error.code if synthesis.error else None,
-                },
+                trace=trace,
                 error=synthesis.error,
             )
     return LlmSynthesisResult(
@@ -976,7 +1104,7 @@ def _final_response_payload(synthesis: LlmSynthesisResult) -> dict[str, Any]:
             canonical_renderer_required=True,
             llm_may_summarize=False,
         ).public_payload()
-    if reason == "synthesized":
+    if reason in {"synthesized", "synthesized_after_answer_guard"}:
         return FinalResponsePlan(
             status="synthesized",
             reason="LLM synthesized the response from tool observations",
@@ -1029,6 +1157,154 @@ def _fallback_response(
     return "\n".join(lines)
 
 
+def _verify_answer_guard(response_text: str, *, observations: list[dict[str, Any]]) -> dict[str, Any]:
+    text = str(response_text or "")
+    compact = re.sub(r"\s+", "", text.lower())
+    facts = _answer_guard_facts(observations)
+    violations: list[dict[str, Any]] = []
+    if facts["all_tools_ok"] and any(token in compact for token in ("工具查询失败", "工具调用失败", "查询失败")):
+        violations.append(
+            {
+                "type": "contradicts_tool_status",
+                "claim": "工具查询失败",
+                "evidence": "all observed tools returned ok=true",
+            }
+        )
+    if facts["complete_for_query_scope"]:
+        missing_scope_tokens = (
+            "无法直接确认",
+            "无法确认",
+            "不能确认",
+            "无法提供完整",
+            "需要提供完整",
+            "请提供完整",
+            "缺少所有月份",
+            "缺少完整月份",
+            "缺少所有账户",
+        )
+        if any(token in compact for token in missing_scope_tokens):
+            violations.append(
+                {
+                    "type": "contradicts_query_coverage",
+                    "claim": "缺少查询范围内的数据",
+                    "evidence": f"coverage is complete for query scope; months={facts['months']}; accounts={facts['accounts']}",
+                }
+            )
+    for account in facts["accounts"]:
+        account_text = str(account).lower()
+        if not account_text:
+            continue
+        if re.search(rf"(未包含|不包含|缺少|没有|未提供)[^，。；;\n]{{0,12}}{re.escape(account_text)}", compact) or re.search(
+            rf"{re.escape(account_text)}[^，。；;\n]{{0,12}}(未包含|不包含|缺少|没有|未提供)",
+            compact,
+        ):
+            violations.append(
+                {
+                    "type": "contradicts_account_coverage",
+                    "claim": f"缺少账户 {account}",
+                    "evidence": f"coverage.accounts includes {account}",
+                }
+            )
+    for month in facts["months"]:
+        month_text = str(month)
+        month_cn = _month_label_cn(month_text)
+        month_tokens = [month_text, month_text.replace("-", "年") + "月", month_cn]
+        for token in month_tokens:
+            if not token:
+                continue
+            normalized = token.lower()
+            if re.search(rf"(未提供|缺少|没有)[^，。；;\n]{{0,12}}{re.escape(normalized)}", compact) or re.search(
+                rf"{re.escape(normalized)}[^，。；;\n]{{0,12}}(未提供|缺少|没有|数据缺失)",
+                compact,
+            ):
+                violations.append(
+                    {
+                        "type": "contradicts_month_coverage",
+                        "claim": f"缺少月份 {month}",
+                        "evidence": f"coverage.months includes {month}",
+                    }
+                )
+                break
+    if facts["cashflow_row_count"] > 0 and any(token in compact for token in ("没有明细", "明细为空", "无明细")):
+        violations.append(
+            {
+                "type": "contradicts_detail_rows",
+                "claim": "没有明细",
+                "evidence": f"cashflow_row_count={facts['cashflow_row_count']}",
+            }
+        )
+    return {"facts": facts, "violations": violations}
+
+
+def _with_answer_guard_feedback(observations: list[dict[str, Any]], guard: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        *observations,
+        {
+            "index": len(observations) + 1,
+            "tool_name": "assistant.answer_guard",
+            "payload": {},
+            "ok": True,
+            "error": None,
+            "data": {
+                "violations": guard.get("violations") or [],
+                "rewrite_instruction": (
+                    "Your previous response contradicted tool observations. Rewrite using only observations. "
+                    "When monthly_income_report query_scope.month=all_available, answer over the OM local ledger coverage. "
+                    "Do not claim missing months/accounts unless coverage or diagnostics explicitly says so."
+                ),
+            },
+        },
+    ]
+
+
+def _answer_guard_facts(observations: list[dict[str, Any]]) -> dict[str, Any]:
+    months: set[str] = set()
+    accounts: set[str] = set()
+    all_tools_ok = True
+    complete_for_query_scope = False
+    cashflow_row_count = 0
+    for item in observations:
+        if not bool(item.get("ok", False)):
+            all_tools_ok = False
+        data = item.get("data") if isinstance(item.get("data"), dict) else {}
+        if not isinstance(data, dict):
+            continue
+        coverage = data.get("coverage") if isinstance(data.get("coverage"), dict) else {}
+        for month in coverage.get("months") or []:
+            if str(month).strip():
+                months.add(str(month))
+        for account in coverage.get("accounts") or []:
+            if str(account).strip():
+                accounts.add(str(account))
+        if bool(coverage.get("complete_for_query_scope")):
+            complete_for_query_scope = True
+        count = data.get("cashflow_row_count")
+        if count is None:
+            rows = data.get("cashflow_rows")
+            count = len(rows) if isinstance(rows, list) else 0
+        try:
+            cashflow_row_count = max(cashflow_row_count, int(count or 0))
+        except Exception:
+            pass
+    return {
+        "months": sorted(months),
+        "accounts": sorted(accounts),
+        "all_tools_ok": all_tools_ok,
+        "complete_for_query_scope": complete_for_query_scope,
+        "cashflow_row_count": cashflow_row_count,
+    }
+
+
+def _month_label_cn(month: str) -> str:
+    parts = str(month or "").split("-")
+    if len(parts) != 2:
+        return ""
+    try:
+        return f"{int(parts[1])}月"
+    except Exception:
+        return ""
+
+
 def _inject_system_fields(arguments: dict[str, Any], *, request: AssistantRequest, tool_name: str) -> dict[str, Any]:
     payload = dict(arguments or {})
     if tool_name in _CONFIG_SCOPED_PLAN_TOOLS:
@@ -1078,6 +1354,8 @@ Rules:
 - Resolve relative dates using context.temporal_context.current_date in Asia/Shanghai. For a month without a year such as "6月", use the current_date year.
 - For monthly income summary questions, use monthly_income_report with account/month when available.
 - For cashflow detail, net cashflow composition, net inflow source, "明细", "组成", "构成", "来源", or "由什么组成", use monthly_income_report with include_rows=true.
+- For all-history, cumulative, or total net cashflow questions, omit month so monthly_income_report reads all OM local ledger months.
+- For multiple explicit months, either call monthly_income_report once per month with matching arguments, or omit month and synthesize from all available rows; never duplicate one month while claiming another.
 - response_mode is a top-level plan field only. Never include response_mode inside any step.arguments.
 - Use response_mode=canonical only for direct status/summary/list queries that do not require explanation, comparison, or composition.
 - Use response_mode=synthesis for analysis, detail, comparison, why/how, or composition questions.
@@ -1097,19 +1375,40 @@ def _planner_tool_manifest() -> list[dict[str, Any]]:
             if key not in _BANNED_PLAN_ARGUMENTS
         }
         notes: list[str] = []
+        semantics: dict[str, Any] = {}
         if name == "monthly_income_report":
             notes.append("Set include_rows=true for cashflow details, composition, source, 明细, 组成, 构成, 来源, or 由什么组成.")
             notes.append("Data comes from OM local ledger, not broker realtime cash statements.")
-        tools.append(
-            {
-                "name": name,
-                "description": definition.description,
-                "capabilities": list(definition.capabilities),
-                "input_schema": input_schema,
-                "safe_default_input": dict(definition.safe_default_input),
-                "planner_notes": notes,
+            notes.append("If month is omitted, the tool reads all months currently available in the OM local ledger.")
+            notes.append("If account is omitted, the tool reads all ledger accounts available for the selected broker/config.")
+            semantics = {
+                "data_source": "OM local ledger",
+                "scope_semantics": {
+                    "month omitted": "all months currently available in the OM local ledger",
+                    "account omitted": "all available ledger accounts for the selected broker/config",
+                    "include_rows": "include detail rows for composition/source questions",
+                },
+                "not_promised": [
+                    "complete broker account history before OM ledger ingestion",
+                    "realtime broker cash statement",
+                ],
+                "answer_rules": [
+                    "For 历史以来, 累计, or 总净现金流, answer over the OM local ledger coverage returned by the tool.",
+                    "Do not claim missing history solely because coverage contains only some months.",
+                    "Do not claim an account is missing if coverage.accounts includes it.",
+                ],
             }
-        )
+        item = {
+            "name": name,
+            "description": definition.description,
+            "capabilities": list(definition.capabilities),
+            "input_schema": input_schema,
+            "safe_default_input": dict(definition.safe_default_input),
+            "planner_notes": notes,
+        }
+        if semantics:
+            item["semantics"] = semantics
+        tools.append(item)
     return tools
 
 
@@ -1142,6 +1441,8 @@ Rules:
 - Do not downgrade a detail/composition question into a nearby summary.
 - Keep Chinese output concise and Markdown-friendly.
 - Mention the data scope when relevant, for example OM 本地账本.
+- For monthly_income_report, "历史以来", "累计", and "总净现金流" mean the OM local ledger coverage returned by the tool.
+- Do not claim missing months/accounts when observation.coverage includes them or complete_for_query_scope=true.
 """
 
 _SYNTHESIS_JSON_SCHEMA = {
@@ -1209,15 +1510,20 @@ def _llm_trace(
 
 def _synthesis_data(tool_name: str, data: dict[str, Any]) -> dict[str, Any]:
     if tool_name == "monthly_income_report":
+        coverage = _monthly_income_coverage(data)
         out = {
             "summary": _clip_list(data.get("summary"), limit=8),
             "return_summary": _clip_list(data.get("return_summary"), limit=8),
             "diagnostics": _clip_list(data.get("diagnostics"), limit=4),
             "filters": dict(data.get("filters") or {}) if isinstance(data.get("filters"), dict) else {},
+            "data_scope": "OM 本地账本",
+            "query_scope": coverage.get("query_scope"),
+            "coverage": coverage.get("coverage"),
             "calculation_method": data.get("calculation_method"),
-            "row_count": data.get("row_count"),
-            "premium_row_count": data.get("premium_row_count"),
         }
+        for key in ("row_count", "premium_row_count", "cashflow_row_count", "realized_row_count"):
+            if data.get(key) is not None:
+                out[key] = data.get(key)
         for key in ("cashflow_rows", "realized_rows", "open_basis_rows", "premium_rows", "enhancement_rows"):
             rows = data.get(key)
             if isinstance(rows, list):
@@ -1233,6 +1539,40 @@ def _synthesis_data(tool_name: str, data: dict[str, Any]) -> dict[str, Any]:
             "row_count": data.get("row_count"),
         }
     return _clip_mapping(data, limit=20)
+
+
+def _monthly_income_coverage(data: dict[str, Any]) -> dict[str, Any]:
+    filters = data.get("filters") if isinstance(data.get("filters"), dict) else {}
+    rows: list[dict[str, Any]] = []
+    for key in ("summary", "return_summary", "cashflow_rows", "realized_rows", "premium_rows"):
+        value = data.get(key)
+        if isinstance(value, list):
+            rows.extend(item for item in value if isinstance(item, dict))
+    months = sorted({str(row.get("month")) for row in rows if str(row.get("month") or "").strip()})
+    accounts = sorted({str(row.get("account")) for row in rows if str(row.get("account") or "").strip()})
+    warnings = data.get("report_warnings")
+    if not isinstance(warnings, list):
+        warnings = data.get("warnings") if isinstance(data.get("warnings"), list) else []
+    month_filter = filters.get("month")
+    account_filter = filters.get("account")
+    return {
+        "query_scope": {
+            "data_source": "OM local ledger",
+            "month": str(month_filter) if month_filter else "all_available",
+            "account": str(account_filter) if account_filter else "all",
+            "broker": filters.get("broker"),
+        },
+        "coverage": {
+            "months": months,
+            "month_start": months[0] if months else None,
+            "month_end": months[-1] if months else None,
+            "accounts": accounts,
+            "summary_count": len(data.get("summary") or []) if isinstance(data.get("summary"), list) else 0,
+            "return_summary_count": len(data.get("return_summary") or []) if isinstance(data.get("return_summary"), list) else 0,
+            "warnings": [str(item) for item in warnings if str(item).strip()][:8],
+            "complete_for_query_scope": bool(months or accounts) and not warnings,
+        },
+    }
 
 
 def _clip_list(value: Any, *, limit: int) -> list[Any]:

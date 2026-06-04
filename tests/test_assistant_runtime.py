@@ -1959,6 +1959,176 @@ def test_assistant_runtime_agent_loop_uses_canonical_fallback_when_synthesis_una
     assert out["data"]["action"]["result"]["data"]["synthesis"]["error_code"] == "LLM_UNAVAILABLE"
 
 
+def test_assistant_runtime_agent_loop_answer_guard_rewrites_contradictory_income_synthesis(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+    synthesis_observation_counts: list[int] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "filters": {"account": None, "broker": "富途", "month": None},
+                "summary": [
+                    {
+                        "month": "2026-05",
+                        "account": "lx",
+                        "currency": "HKD",
+                        "net_cashflow_gross": 22525.0,
+                        "net_cashflow_gross_cny": 19530.57,
+                    },
+                    {
+                        "month": "2026-05",
+                        "account": "lx",
+                        "currency": "USD",
+                        "net_cashflow_gross": 2400.0,
+                        "net_cashflow_gross_cny": 16311.62,
+                    },
+                    {
+                        "month": "2026-06",
+                        "account": "lx",
+                        "currency": "HKD",
+                        "net_cashflow_gross": -51.0,
+                        "net_cashflow_gross_cny": -44.22,
+                    },
+                    {
+                        "month": "2026-05",
+                        "account": "sy",
+                        "currency": "HKD",
+                        "net_cashflow_gross": 17766.1,
+                        "net_cashflow_gross_cny": 15418.6,
+                    },
+                    {
+                        "month": "2026-05",
+                        "account": "sy",
+                        "currency": "USD",
+                        "net_cashflow_gross": 890.0,
+                        "net_cashflow_gross_cny": 6054.29,
+                    },
+                    {
+                        "month": "2026-06",
+                        "account": "sy",
+                        "currency": "HKD",
+                        "net_cashflow_gross": 10416.0,
+                        "net_cashflow_gross_cny": 9026.71,
+                    },
+                ],
+                "return_summary": [
+                    {"month": "2026-05", "account": "lx", "net_income_cny": 35842.41},
+                    {"month": "2026-06", "account": "lx", "net_income_cny": -44.22},
+                    {"month": "2026-05", "account": "sy", "net_income_cny": 21453.29},
+                    {"month": "2026-06", "account": "sy", "net_income_cny": 9026.71},
+                ],
+                "cashflow_rows": [{"month": "2026-05", "account": "lx", "currency": "HKD", "net_cashflow_gross": 22525.0}],
+                "row_count": 6,
+                "premium_row_count": 34,
+                "cashflow_row_count": 56,
+                "report_warnings": [],
+                "calculation_method": "trade_events",
+            },
+        )
+
+    def _plan(
+        text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        assert text == "历史以来总的净现金流"
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="查询历史以来总的净现金流",
+                response_mode="synthesis",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="monthly_income_report",
+                        arguments={"include_rows": True},
+                        purpose="获取所有月份的总净现金流明细",
+                    ),
+                ),
+            ),
+            trace={
+                "enabled": True,
+                "attempted": True,
+                "reason": "accepted",
+                "provider": "openai",
+                "base_url": "",
+                "model": "gpt-5.2",
+                "api_key_env": "OM_LLM_API_KEY",
+                "confidence_min": 0.75,
+                "timeout_seconds": 20,
+                "max_output_tokens": 512,
+                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+            },
+        )
+
+    def _synthesize(
+        _question: str,
+        _settings: AssistantSettings,
+        _plan: PlannerPlan,
+        observations: list[dict[str, Any]],
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmSynthesisResult:
+        synthesis_observation_counts.append(len(observations))
+        if observations[-1]["tool_name"] != "assistant.answer_guard":
+            return LlmSynthesisResult(
+                response_text=(
+                    "根据OM本地账本中富途账户的数据，历史以来总的净现金流无法直接确认，"
+                    "因为缺少所有月份的数据，且未包含所有账户（如sy账户的完整历史）。"
+                ),
+                trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+            )
+        return LlmSynthesisResult(
+            response_text=(
+                "按 OM 本地账本现有记录统计，覆盖 2026-05 至 2026-06。"
+                "历史以来总净现金流约 CNY 66,283；原币合计 HKD 50,656.10 + USD 3,290。"
+                "账户覆盖 lx、sy。"
+            ),
+            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="历史以来总的净现金流",
+            sender_id="local",
+            message_id="msg_agent_loop_total_cashflow_guard",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+        synthesize_response_fn=_synthesize,
+        now_fn=lambda: date(2026, 6, 4),
+    )
+
+    assert out["ok"] is True
+    assert calls == [("monthly_income_report", {"config_key": "us", "include_rows": True})]
+    assert synthesis_observation_counts == [1, 2]
+    text = out["data"]["response_text"]
+    assert "OM 本地账本现有记录" in text
+    assert "2026-05 至 2026-06" in text
+    assert "CNY 66,283" in text
+    assert "HKD 50,656.10 + USD 3,290" in text
+    assert "无法直接确认" not in text
+    assert "缺少所有月份" not in text
+    assert "未包含所有账户" not in text
+    agent_loop = out["meta"]["assistant"]["llm"]["agent_loop"]
+    assert agent_loop["final_response"]["status"] == "synthesized"
+    synthesis = out["data"]["action"]["result"]["data"]["synthesis"]
+    assert synthesis["reason"] == "synthesized_after_answer_guard"
+    assert synthesis["answer_guard"]["status"] == "failed_then_rewritten"
+    assert synthesis["answer_guard"]["violations"][0]["type"] == "contradicts_query_coverage"
+    coverage = out["data"]["action"]["result"]["data"]["synthesis_observations"][0]["data"]["coverage"]
+    assert coverage["months"] == ["2026-05", "2026-06"]
+    assert coverage["accounts"] == ["lx", "sy"]
+    assert coverage["complete_for_query_scope"] is True
+
+
 def test_assistant_runtime_agent_loop_rejects_disallowed_plan_tool(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
 
@@ -2100,6 +2270,193 @@ def test_plan_read_only_tools_hoists_misplaced_response_mode_argument() -> None:
     assert result.plan.steps[0].tool_name == "monthly_income_report"
     assert result.plan.steps[0].arguments == {}
     assert result.trace["reason"] == "accepted"
+
+
+def test_agent_loop_income_cashflow_eval_plan_guard() -> None:
+    cases = [
+        {
+            "text": "历史以来总的净现金流",
+            "plan": PlannerPlan(
+                goal="查询历史以来总的净现金流",
+                response_mode="canonical",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="monthly_income_report",
+                        arguments={"month": "2026-06", "response_mode": "synthesis"},
+                        purpose="获取所有月份的总净现金流",
+                    ),
+                ),
+            ),
+            "expected": [{"tool_name": "monthly_income_report", "arguments": {}}],
+        },
+        {
+            "text": "所有账户累计净现金流",
+            "plan": PlannerPlan(
+                goal="查询所有账户累计净现金流",
+                response_mode="synthesis",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="monthly_income_report",
+                        arguments={"account": "lx", "month": "2026-05"},
+                        purpose="读取累计净现金流",
+                    ),
+                ),
+            ),
+            "expected": [{"tool_name": "monthly_income_report", "arguments": {}}],
+        },
+        {
+            "text": "5月和6月的总收益",
+            "plan": PlannerPlan(
+                goal="获取5月和6月的总收益",
+                response_mode="canonical",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="monthly_income_report",
+                        arguments={"month": "2026-05"},
+                        purpose="获取2026年5月的收益数据",
+                    ),
+                    PlannerPlanStep(
+                        id="step_2",
+                        tool_name="monthly_income_report",
+                        arguments={"month": "2026-05"},
+                        purpose="获取2026年6月的收益数据",
+                    ),
+                ),
+            ),
+            "expected": [
+                {"tool_name": "monthly_income_report", "arguments": {"month": "2026-05"}},
+                {"tool_name": "monthly_income_report", "arguments": {"month": "2026-06"}},
+            ],
+        },
+        {
+            "text": "今年以来各账户收益对比",
+            "plan": PlannerPlan(
+                goal="今年以来各账户收益对比",
+                response_mode="synthesis",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="monthly_income_report",
+                        arguments={"month": "2026-06"},
+                        purpose="读取OM本地账本全部月份收益用于对比",
+                    ),
+                ),
+            ),
+            "expected": [{"tool_name": "monthly_income_report", "arguments": {}}],
+        },
+        {
+            "text": "分析 lx 6月的净现金流明细，重点是明细",
+            "plan": PlannerPlan(
+                goal="分析 lx 6月的净现金流明细",
+                response_mode="canonical",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="monthly_income_report",
+                        arguments={"account": "lx", "month": "2025-06"},
+                        purpose="读取cashflow_rows",
+                    ),
+                ),
+            ),
+            "expected": [
+                {"tool_name": "monthly_income_report", "arguments": {"account": "lx", "include_rows": True, "month": "2026-06"}}
+            ],
+        },
+        {
+            "text": "sy 2026-06 收益由什么组成",
+            "plan": PlannerPlan(
+                goal="sy 2026-06 收益组成",
+                response_mode="canonical",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="monthly_income_report",
+                        arguments={"account": "sy", "month": "2026-06"},
+                        purpose="收益组成需要明细",
+                    ),
+                ),
+            ),
+            "expected": [
+                {"tool_name": "monthly_income_report", "arguments": {"account": "sy", "include_rows": True, "month": "2026-06"}}
+            ],
+        },
+        {
+            "text": "lx 6月权利金收入和已实现PnL分别是多少",
+            "plan": PlannerPlan(
+                goal="lx 6月权利金和已实现PnL",
+                response_mode="synthesis",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="monthly_income_report",
+                        arguments={"account": "lx"},
+                        purpose="查询6月收益摘要",
+                    ),
+                ),
+            ),
+            "expected": [{"tool_name": "monthly_income_report", "arguments": {"account": "lx", "month": "2026-06"}}],
+        },
+        {
+            "text": "6月收益",
+            "plan": PlannerPlan(
+                goal="6月收益",
+                response_mode="synthesis",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="monthly_income_report",
+                        arguments={},
+                        purpose="查询6月收益",
+                    ),
+                ),
+            ),
+            "expected": [{"tool_name": "monthly_income_report", "arguments": {"month": "2026-06"}}],
+        },
+    ]
+
+    settings = AssistantSettings(
+        mode="agent_loop",
+        llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+    )
+    for case in cases:
+        def _plan(
+            _text: str,
+            _settings: AssistantSettings,
+            _conversation_context: dict[str, Any] | None,
+            *,
+            plan: PlannerPlan = case["plan"],
+        ) -> LlmPlannerResult:
+            return LlmPlannerResult(
+                plan=plan,
+                trace={
+                    "enabled": True,
+                    "attempted": True,
+                    "reason": "accepted",
+                    "provider": "openai",
+                    "base_url": "",
+                    "model": "gpt-5.2",
+                    "api_key_env": "OM_LLM_API_KEY",
+                    "confidence_min": 0.75,
+                    "timeout_seconds": 20,
+                    "max_output_tokens": 512,
+                    "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+                },
+            )
+
+        result = run_read_only_agent_loop(
+            str(case["text"]),
+            settings=settings,
+            conversation_context=None,
+            plan_tools_fn=_plan,
+            now_fn=lambda: date(2026, 6, 4),
+        )
+
+        assert result.translation.error is None, case["text"]
+        actual = [{"tool_name": step.tool_name, "arguments": step.arguments} for step in result.steps]
+        assert actual == case["expected"], case["text"]
 
 
 def test_assistant_runtime_agent_loop_empty_plan_uses_general_reply_for_non_business_text(tmp_path: Path) -> None:

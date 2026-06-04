@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.204 - 2026-06-04
+
+### Added
+- Added assistant `agent_loop` tool semantics and coverage metadata for monthly income observations, so LLM synthesis can distinguish OM local-ledger scope from broker account history.
+- Added assistant answer-guard verification that catches LLM replies contradicting tool observations and asks for one guarded rewrite before falling back to canonical rendering.
+
+### Fixed
+- Fixed assistant plan normalization for all-history, all-account, and multi-month income/cashflow requests so tool arguments do not silently collapse to the wrong account or month.
+- Added income/cashflow agent-loop regressions covering cumulative cashflow, multi-month income, account comparisons, detail/composition, premium, realized PnL, and default month queries.
+
 ## 1.2.203 - 2026-06-04
 
 ### Fixed
