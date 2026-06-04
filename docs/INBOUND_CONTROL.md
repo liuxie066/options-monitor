@@ -116,7 +116,7 @@ assistant:
       max_output_tokens: 512
 ```
 
-When `assistant.mode` is `llm_router` or `agent_loop`, non-slash natural language is LLM-first: OM asks the translator for an `om-llm-intent-v1` JSON intent before deterministic natural-language parsing can select a command. The deterministic parser stays as a fallback/shadow parser when the LLM is unavailable, provider-failed, or returns a clarification. Slash commands remain command-first and never call LLM. The LLM must not execute tools or rewrite canonical OM responses; its output still enters the same Assistant execution router. The LLM executable intent schema is read-only and only allows help/status/health/config/positions/close-advice analysis/income/runs/logs/symbols/pending operations. `symbol_edit` is the only LLM-recognizable preview-write exception: it may identify covered-call or sell-put monitored-symbol setting changes and create a pending preview through `inbound.symbols`, but it cannot confirm, cancel, apply, or write config directly. Other write-preview commands such as `/record-open` and `/record-close` are deterministic command-facade entries, not LLM-executable intents.
+When `assistant.mode` is `llm_router` or `agent_loop`, non-slash natural language is LLM-first. Slash commands remain command-first and never call LLM. In `llm_router`, OM asks the translator for an `om-llm-intent-v1` JSON intent; that legacy intent schema stays read-only, with `symbol_edit` as the only preview-write exception for monitored-symbol setting changes. In `agent_loop`, OM asks the Planner for a bounded capability plan: it may plan pure-read tools directly, or exactly one preview-write capability such as `manual_trade_open`, `manual_trade_close`, `manual_trade_update`, `symbol_edit`, `model_use`, or `upgrade_now`. Preview-write plans create pending previews through the existing operation handlers only; they cannot confirm, cancel, apply, notify externally, write the ledger, or write config directly. The deterministic parser stays as fallback/shadow evidence when the LLM is unavailable, provider-failed, or returns a clarification, and remains the authority for slash commands plus explicit confirm/cancel commands.
 
 The command surface authority is `src/application/assistant/commands.py`. Slash command metadata, the LLM intent surface, and inbound help text should use that catalog instead of maintaining separate command lists.
 
@@ -210,7 +210,7 @@ Check the translator control plane before enabling it in Feishu:
 ./om assistant llm-check --live
 ```
 
-`assistant commands` renders the slash-command help surface. `assistant capabilities` renders the full assistant capability catalog used by the LLM routing manifest: read-only capabilities are executable by LLM routing, `symbol_edit` is recognizable but preview-only, and other write/confirm/upgrade capabilities are visible but non-executable. The default LLM check validates `config.assistant.json`, the effective env file, redacted API-key presence, the resolved provider endpoint URL, and the current capability routing surface. `--live` sends one read-only structured translation probe to the configured provider.
+`assistant commands` renders the slash-command help surface. `assistant capabilities` renders the full assistant capability catalog used by the LLM routing manifest: read-only capabilities are executable by legacy LLM routing, `symbol_edit` is recognizable but preview-only, and other write/confirm/upgrade capabilities are visible but non-executable in `om-llm-intent-v1`. `agent_loop` has a separate Planner manifest for read tools plus approved preview-write capabilities; confirm/cancel/apply capabilities are intentionally absent from that manifest. The default LLM check validates `config.assistant.json`, the effective env file, redacted API-key presence, the resolved provider endpoint URL, and the current capability routing surface. `--live` sends one read-only structured translation probe to the configured provider.
 
 ## Sender Allowlist
 
@@ -373,11 +373,11 @@ Only subscribe this event for the OM Bot in Feishu Open Platform. Install `requi
 
 ## LLM Translator
 
-LLM translation is opt-in and inactive unless `assistant.mode` is `llm_router` or `agent_loop`. In those modes, non-slash natural language is routed LLM-first; deterministic parsing is only fallback/shadow evidence. Slash commands are resolved by the command catalog before LLM and do not call the translator.
+LLM translation/planning is opt-in and inactive unless `assistant.mode` is `llm_router` or `agent_loop`. In those modes, non-slash natural language is routed LLM-first; deterministic parsing is only fallback/shadow evidence. Slash commands are resolved by the command catalog before LLM and do not call the translator or Planner.
 
-The current provider adapters use OpenAI Responses API for `openai` and Chat Completions JSON output for `deepseek`. They must only translate natural language into an `om-llm-intent-v1` structured intent. The translated intent must still go through the same sender allowlist, pure-read whitelist, audit, and idempotency checks. Low-confidence, incomplete, or write-like intents must return clarification or preview only.
+The current provider adapters use OpenAI Responses API for `openai` and Chat Completions JSON output for `deepseek`. In `llm_router`, they translate natural language into an `om-llm-intent-v1` structured intent. In `agent_loop`, they produce an `om-tool-plan-v1` capability plan. Planner read steps still go through the read whitelist before execution. Planner preview-write steps are converted back into the same operation preview path as deterministic commands, so sender allowlist, operation gates, preview storage, audit, idempotency, and later explicit confirmation still apply. Low-confidence or incomplete requests must return clarification.
 
-`agent_loop` is the bounded stateful lane for future LangGraph-backed workflows. The current implementation still keeps deterministic execution, factual rendering, preview/confirm/apply, and audit ownership outside the loop.
+`agent_loop` is the bounded Planner lane. It may plan read tools or one preview-write operation, but deterministic execution, factual rendering, preview storage, confirm/apply, and audit ownership remain outside the loop. If a write-like request such as a Futu fill alert is planned as a read query, OM rejects the plan instead of silently returning nearby holdings or income data.
 
 ## Write Actions
 

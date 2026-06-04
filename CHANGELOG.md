@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.205 - 2026-06-04
+
+### Added
+- Added approved preview-write capability planning to assistant `agent_loop`, allowing natural-language requests to create pending previews for manual trade records, monitored-symbol edits, model switches, and upgrade requests.
+- Added agent-loop safeguards that reject write-like requests when the LLM incorrectly plans a read-only query, preventing Futu fill alerts from being answered as nearby position or income queries.
+
+### Changed
+- Kept legacy `llm_router` on its existing structured intent surface while moving broader natural-language capability planning to bounded `agent_loop` plans.
+- Kept confirm/cancel/apply operations deterministic and outside the Planner manifest; Planner preview steps can only create pending operation previews.
+
 ## 1.2.204 - 2026-06-04
 
 ### Added

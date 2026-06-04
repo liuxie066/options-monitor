@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,64 @@ from src.application.assistant.audit import InboundAuditStore
 from src.application.assistant.contracts import PERCEPTION_RESULT_SCHEMA_VERSION, AssistantRequest, PerceptionResult, ToolCall
 from src.infrastructure.openai_chat_completions import create_json_chat_completion, extract_chat_completion_text
 from src.infrastructure.openai_responses import OpenAIResponsesError, create_structured_response, extract_response_text
+
+
+def _write_agent_loop_trade_runtime_config(tmp_path: Path) -> tuple[Path, Path]:
+    sqlite_path = tmp_path / "output_shared" / "state" / "option_positions.sqlite3"
+    data_cfg_path = tmp_path / "portfolio.runtime.json"
+    data_cfg_path.write_text(
+        json.dumps({"option_positions": {"sqlite_path": str(sqlite_path)}}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    cfg_path = tmp_path / "config.hk.json"
+    cfg_path.write_text(
+        json.dumps(
+            {
+                "_generated": {
+                    "schema_version": "1.0",
+                    "generator": "options-monitor",
+                    "source_format": "yaml",
+                    "market": "hk",
+                },
+                "_resolved": {
+                    "source_format": "yaml",
+                    "market": "hk",
+                    "runtime_schema": "config-json-v1",
+                },
+                "accounts": ["sy"],
+                "portfolio": {
+                    "broker": "富途",
+                    "source": "futu",
+                    "account": "sy",
+                    "data_config": str(data_cfg_path),
+                },
+                "templates": {
+                    "put_base": {
+                        "sell_put": {
+                            "min_annualized_net_return": 0.1,
+                            "min_net_income": 50,
+                            "min_open_interest": 10,
+                            "min_volume": 1,
+                            "max_spread_ratio": 0.3,
+                        }
+                    }
+                },
+                "symbols": [
+                    {
+                        "symbol": "0700.HK",
+                        "fetch": {"source": "futu", "limit_expirations": 8},
+                        "use": ["put_base"],
+                        "sell_put": {"enabled": True, "min_dte": 1, "max_dte": 45},
+                        "sell_call": {"enabled": False},
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return cfg_path, sqlite_path
 
 
 def test_assistant_perception_payload_contract() -> None:
@@ -2192,6 +2251,245 @@ def test_assistant_runtime_agent_loop_rejects_disallowed_plan_tool(tmp_path: Pat
     assert out["meta"]["assistant"]["perception_trace"]["decision"] == "llm_error"
 
 
+def test_assistant_runtime_agent_loop_plans_manual_trade_open_preview(monkeypatch: Any, tmp_path: Path) -> None:
+    monkeypatch.setenv("OM_INBOUND_OPERATIONS_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_TRADE_WRITE_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_ADMIN_OPEN_IDS", "local:local")
+    monkeypatch.setenv("OM_INBOUND_OPERATION_HMAC_KEY", "test-operation-hmac-key")
+
+    def _fake_resolve(**_kwargs: object) -> tuple[int, str, dict[str, Any]]:
+        return 500, "cache", {"attempted_sources": [{"source": "cache", "status": "resolved", "value": 500}]}
+
+    monkeypatch.setattr("src.application.assistant.manual_trade_parser.resolve_multiplier_with_source_and_diagnostics", _fake_resolve)
+
+    cfg_path, sqlite_path = _write_agent_loop_trade_runtime_config(tmp_path)
+    calls: list[tuple[str, dict[str, Any]]] = []
+    text = "记录开仓 sy 成交提醒: 【成交提醒】成功卖出2张$腾讯 260605 440.00 沽$，成交价格：0.86，此笔订单委托已全部成交，2026/06/04 10:52:44 (香港)。【富途证券(香港)】"
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(tool_name=tool_name, ok=True, data={})
+
+    def _plan(
+        incoming: str,
+        settings: AssistantSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        assert incoming == text
+        assert settings.mode == "agent_loop"
+        assert conversation_context is not None
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="记录 sy 的腾讯开仓成交",
+                response_mode="canonical",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="manual_trade_open",
+                        arguments={"raw_text": text, "account": "sy"},
+                        purpose="Futu 成交提醒是交易记录开仓预览",
+                    ),
+                ),
+            ),
+            trace={
+                "enabled": True,
+                "attempted": True,
+                "reason": "accepted",
+                "provider": "openai",
+                "base_url": "",
+                "model": "gpt-5.2",
+                "api_key_env": "OM_LLM_API_KEY",
+                "confidence_min": 0.75,
+                "timeout_seconds": 20,
+                "max_output_tokens": 512,
+                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+            },
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text=text,
+            sender_id="local",
+            channel="local",
+            message_id="msg_agent_loop_manual_trade_open_preview",
+            config_path=str(cfg_path),
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        allowed_senders="local:local",
+        settings=AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+        now_fn=lambda: date(2026, 6, 4),
+    )
+
+    assert out["ok"] is True
+    assert calls == []
+    assert out["tool_name"] == "inbound.manual_trade"
+    assert out["data"]["response_text"].startswith("交易记录预览：开仓")
+    assert "未写入账本" in out["data"]["response_text"]
+    assert out["data"]["perception"]["intent_name"] == "manual_trade_open"
+    assert out["data"]["perception"]["source"] == "agent_loop_plan"
+    assert out["data"]["reasoning"]["action_kind"] == "operation"
+    assert out["data"]["reasoning"]["safety_class"] == "write_preview"
+    args = out["data"]["payload"]["arguments"]
+    assert args["account"] == "sy"
+    assert args["symbol"] == "0700.HK"
+    assert args["option_type"] == "put"
+    assert args["side"] == "short"
+    assert args["contracts"] == 2
+    assert args["strike"] == 440.0
+    assert args["expiration_ymd"] == "2026-06-05"
+    assert args["premium_per_share"] == 0.86
+    assert args["multiplier"] == 500.0
+    agent_loop = out["meta"]["assistant"]["llm"]["agent_loop"]
+    assert agent_loop["planner"] == "llm_tool_plan"
+    assert agent_loop["steps_used"] == 1
+    assert agent_loop["steps"][0]["intent_name"] == "manual_trade_open"
+    assert agent_loop["steps"][0]["tool_name"] == "manual_trade_open"
+    assert out["meta"]["assistant"]["perception_trace"]["selected_source"] == "agent_loop"
+    assert out["meta"]["assistant"]["perception_trace"]["selected_perception"]["source"] == "agent_loop_plan"
+    if sqlite_path.exists():
+        with sqlite3.connect(sqlite_path) as conn:
+            has_trade_events = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='trade_events'"
+            ).fetchone()
+            if has_trade_events:
+                assert conn.execute("SELECT COUNT(*) FROM trade_events").fetchone()[0] == 0
+
+
+def test_assistant_runtime_agent_loop_rejects_read_plan_for_trade_preview_request(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+    text = "记录开仓 sy 成交提醒: 【成交提醒】成功卖出2张$腾讯 260605 440.00 沽$，成交价格：0.86"
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(tool_name=tool_name, ok=True, data={"response_text": "不应执行"})
+
+    def _plan(
+        _text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="误判为持仓查询",
+                response_mode="canonical",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="option_positions_read",
+                        arguments={"status": "open"},
+                        purpose="错误地读取持仓",
+                    ),
+                ),
+            ),
+            trace={
+                "enabled": True,
+                "attempted": True,
+                "reason": "accepted",
+                "provider": "openai",
+                "base_url": "",
+                "model": "gpt-5.2",
+                "api_key_env": "OM_LLM_API_KEY",
+                "confidence_min": 0.75,
+                "timeout_seconds": 20,
+                "max_output_tokens": 512,
+                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+            },
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text=text,
+            sender_id="local",
+            channel="local",
+            message_id="msg_agent_loop_reject_read_plan_for_trade",
+            config_key="hk",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+        now_fn=lambda: date(2026, 6, 4),
+    )
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "PLAN_RISK_MISMATCH"
+    assert calls == []
+    assert out["meta"]["assistant"]["route"] == "agent_loop"
+    assert out["meta"]["assistant"]["llm"]["agent_loop"]["steps_used"] == 0
+    assert out["meta"]["assistant"]["perception_trace"]["decision"] == "llm_error"
+
+
+def test_assistant_runtime_agent_loop_rejects_confirm_plan(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(tool_name=tool_name, ok=True, data={})
+
+    def _plan(
+        _text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="非法确认",
+                response_mode="canonical",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="manual_trade_confirm",
+                        arguments={"operation_id": "in_123"},
+                        purpose="confirm must not be planned by LLM",
+                    ),
+                ),
+            ),
+            trace={
+                "enabled": True,
+                "attempted": True,
+                "reason": "accepted",
+                "provider": "openai",
+                "base_url": "",
+                "model": "gpt-5.2",
+                "api_key_env": "OM_LLM_API_KEY",
+                "confidence_min": 0.75,
+                "timeout_seconds": 20,
+                "max_output_tokens": 512,
+                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+            },
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="确认记录 in_123",
+            sender_id="local",
+            channel="local",
+            message_id="msg_agent_loop_reject_confirm_plan",
+            config_key="hk",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+    )
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "PERMISSION_DENIED"
+    assert "manual_trade_confirm is not allowed" in out["error"]["message"]
+    assert calls == []
+
+
 def test_plan_read_only_tools_treats_empty_steps_as_no_plan() -> None:
     calls: list[dict[str, Any]] = []
 
@@ -2582,10 +2880,11 @@ def test_read_only_agent_loop_records_no_plan_without_tool_step() -> None:
         "max_steps": 3,
         "steps_used": 0,
         "writes_allowed": False,
+        "preview_operations_allowed": True,
         "steps": [],
         "final_response": {
             "status": "no_plan",
-            "reason": "translator did not produce an executable read-only intent",
+            "reason": "planner did not produce an executable assistant capability",
             "canonical_renderer_required": True,
             "llm_may_summarize": False,
         },
