@@ -62,6 +62,54 @@ def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
     research_collect.add_argument("--confirm", action="store_true")
     research_handoff = research_sub.add_parser("handoff", help="render handoff from a collected bundle")
     research_handoff.add_argument("--bundle", required=True)
+    research_archive = research_sub.add_parser("archive", help="mirror remote Research evidence for local replay")
+    research_archive_sub = research_archive.add_subparsers(dest="archive_command", required=True)
+
+    archive_inventory = research_archive_sub.add_parser("inventory", help="inspect the local remote-evidence archive")
+    archive_inventory.add_argument("--remote", default="prod")
+    archive_inventory.add_argument("--archive-root", default=None)
+
+    archive_pull = research_archive_sub.add_parser("pull", help="dry-run or rsync remote runtime evidence into local archive")
+    archive_pull.add_argument("--remote", default="prod")
+    archive_pull.add_argument("--archive-root", default=None)
+    archive_pull.add_argument("--source-root", default=None, help="local or mounted runtime root; mutually exclusive with --ssh-target")
+    archive_pull.add_argument("--ssh-target", default=None, help="ssh target such as deploy@host")
+    archive_pull.add_argument("--remote-runtime-root", default="/var/lib/options-monitor")
+    archive_pull.add_argument("--since-days", type=int, default=None)
+    archive_pull.add_argument("--run-id", dest="run_ids", action="append", default=None)
+    archive_pull.add_argument("--no-logs", action="store_true")
+    archive_pull.add_argument("--rsync-path", default="rsync")
+    archive_pull.add_argument("--write", action="store_true", help="execute rsync and write local sync/verify manifests")
+
+    archive_verify = research_archive_sub.add_parser("verify", help="verify local archive structure and write inventory.latest.json")
+    archive_verify.add_argument("--remote", default="prod")
+    archive_verify.add_argument("--archive-root", default=None)
+
+    archive_build = research_archive_sub.add_parser(
+        "build-datasets",
+        help="build local shadow replay datasets from verified archived runs",
+    )
+    archive_build.add_argument("--remote", default="prod")
+    archive_build.add_argument("--archive-root", default=None)
+    archive_build.add_argument("--dataset-root", default=None)
+    archive_build.add_argument("--market", choices=("us", "hk"), default=None)
+    archive_build.add_argument("--run-id", dest="run_ids", action="append", default=None)
+    archive_build.add_argument("--latest-scanned", action="store_true")
+    archive_build.add_argument("--write", action="store_true")
+
+    archive_prune = research_archive_sub.add_parser(
+        "prune-remote",
+        help="guarded remote cleanup after local archive verification",
+    )
+    archive_prune.add_argument("--remote", default="prod")
+    archive_prune.add_argument("--archive-root", default=None)
+    archive_prune.add_argument("--ssh-target", required=True)
+    archive_prune.add_argument("--remote-repo-root", default="/opt/options-monitor/current")
+    archive_prune.add_argument("--remote-runtime-root", default="/var/lib/options-monitor")
+    archive_prune.add_argument("--keep-days", type=int, default=3)
+    archive_prune.add_argument("--keep-count", type=int, default=30)
+    archive_prune.add_argument("--no-logs", action="store_true")
+    archive_prune.add_argument("--confirm", action="store_true")
     research_shadow = research_sub.add_parser("shadow-replay", help="build or analyze offline shadow replay datasets")
     research_shadow_sub = research_shadow.add_subparsers(dest="shadow_replay_command", required=True)
     shadow_build = research_shadow_sub.add_parser(
@@ -551,6 +599,65 @@ def handle_research_command(
             ok=True,
             data={"handoff_markdown": render_research_handoff(bundle)},
         )
+
+    if args.research_command == "archive":
+        from src.application.research.archive import (
+            archive_build_datasets,
+            archive_inventory,
+            archive_prune_remote,
+            archive_pull,
+            archive_verify,
+        )
+
+        base = repo_base_fn()
+        if args.archive_command == "inventory":
+            data = archive_inventory(repo_root=base, remote=args.remote, archive_root=args.archive_root)
+            return build_response(tool_name="research.archive.inventory", ok=bool(data.get("ok")), data=data)
+        if args.archive_command == "pull":
+            data = archive_pull(
+                repo_root=base,
+                remote=args.remote,
+                archive_root=args.archive_root,
+                source_root=args.source_root,
+                ssh_target=args.ssh_target,
+                remote_runtime_root=args.remote_runtime_root,
+                since_days=args.since_days,
+                run_ids=args.run_ids,
+                include_logs=not bool(args.no_logs),
+                write=bool(args.write),
+                rsync_path=args.rsync_path,
+            )
+            return build_response(tool_name="research.archive.pull", ok=bool(data.get("ok")), data=data)
+        if args.archive_command == "verify":
+            data = archive_verify(repo_root=base, remote=args.remote, archive_root=args.archive_root)
+            return build_response(tool_name="research.archive.verify", ok=bool(data.get("ok")), data=data)
+        if args.archive_command == "build-datasets":
+            data = archive_build_datasets(
+                repo_root=base,
+                remote=args.remote,
+                archive_root=args.archive_root,
+                dataset_root=args.dataset_root,
+                market=args.market,
+                run_ids=args.run_ids,
+                latest_scanned=bool(args.latest_scanned),
+                write=bool(args.write),
+            )
+            return build_response(tool_name="research.archive.build-datasets", ok=bool(data.get("ok")), data=data)
+        if args.archive_command == "prune-remote":
+            data = archive_prune_remote(
+                repo_root=base,
+                remote=args.remote,
+                archive_root=args.archive_root,
+                ssh_target=args.ssh_target,
+                remote_repo_root=args.remote_repo_root,
+                remote_runtime_root=args.remote_runtime_root,
+                keep_days=args.keep_days,
+                keep_count=args.keep_count,
+                include_logs=not bool(args.no_logs),
+                confirm=bool(args.confirm),
+            )
+            return build_response(tool_name="research.archive.prune-remote", ok=bool(data.get("ok")), data=data)
+        raise AgentToolError(code="INPUT_ERROR", message=f"unsupported research archive command: {args.archive_command}")
 
     if args.research_command != "shadow-replay":
         raise AgentToolError(code="INPUT_ERROR", message=f"unsupported research command: {args.research_command}")
