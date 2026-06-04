@@ -8,7 +8,7 @@ from src.application.agent_tool_contracts import AgentToolError
 from src.application.assistant.agent_loop import AgentLoopPlanFn, run_read_only_agent_loop
 from src.application.assistant.audit import InboundAuditStore
 from src.application.assistant.command_parser import parse_assistant_command
-from src.application.assistant.commands import spec_by_intent
+from src.application.assistant.commands import is_llm_planner_preview_spec, spec_by_intent
 from src.application.assistant.contracts import AssistantRequest, PerceptionResult
 from src.application.assistant.conversation_context import build_conversation_context, context_trace
 from src.application.assistant.llm_reply import LlmReplyResult, generate_general_reply
@@ -519,11 +519,13 @@ def ensure_llm_perception_allowed(perception: PerceptionResult) -> None:
     if perception.intent_name == "tool_plan" and perception.source == "agent_loop_plan":
         return
     spec = _COMMAND_SPECS_BY_INTENT.get(perception.intent_name)
+    if perception.source == "agent_loop_plan" and spec is not None and is_llm_planner_preview_spec(spec):
+        return
     if spec is None or not spec.llm_allowed or not (spec.read_only or _is_llm_preview_perception_allowed(spec)):
         raise AgentToolError(
             code="PERMISSION_DENIED",
             message=f"LLM is not allowed to route intent: {perception.intent_name}",
-            hint="LLM translator is restricted to read-only capabilities plus explicitly allowed preview-only symbol settings; confirm/apply operations require deterministic commands.",
+            hint="LLM translator is restricted to read-only capabilities plus explicitly allowed preview-only symbol settings; agent_loop plans may create approved previews, but confirm/apply operations require deterministic commands.",
             details={"intent_name": perception.intent_name},
         )
 
