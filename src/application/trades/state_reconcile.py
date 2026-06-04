@@ -25,6 +25,7 @@ def reconcile_trade_intake_state(
     requested = _normalize_deal_ids(deal_ids)
     audit_by_deal = _audit_events_by_deal(audit_file)
     ledger_by_deal = _ledger_events_by_deal(repo)
+    lifecycle_by_deal = _completed_lifecycle_cases_by_deal(repo)
     candidates = _pending_deal_ids(state, requested=requested)
 
     actions: list[dict[str, Any]] = []
@@ -64,6 +65,29 @@ def reconcile_trade_intake_state(
                     "reason": "ledger_event_already_recorded",
                     "ledger_event_id": payload["diagnostics"]["reconciled_ledger_event_id"],
                     "ledger_event_type": payload["diagnostics"]["reconciled_ledger_event_type"],
+                    "write_state": True,
+                }
+            )
+            new_state = upsert_deal_state(new_state, bucket="processed_deal_ids", deal_id=deal_id, payload=payload)
+            continue
+
+        lifecycle_entries = lifecycle_by_deal.get(deal_id) or []
+        if lifecycle_entries:
+            payload = _processed_payload_from_lifecycle(
+                deal_id=deal_id,
+                from_bucket=bucket,
+                state_item=item,
+                lifecycle_entry=lifecycle_entries[-1],
+            )
+            actions.append(
+                {
+                    "deal_id": deal_id,
+                    "from_bucket": bucket,
+                    "to_bucket": "processed_deal_ids",
+                    "action": "mark_processed",
+                    "reason": "lifecycle_case_already_recorded",
+                    "lifecycle_case_id": payload["diagnostics"]["reconciled_lifecycle_case_id"],
+                    "lifecycle_decision_type": payload["diagnostics"]["reconciled_lifecycle_decision_type"],
                     "write_state": True,
                 }
             )
@@ -182,6 +206,59 @@ def _deal_ids_from_ledger_event(event: dict[str, Any]) -> list[str]:
     return out
 
 
+def _completed_lifecycle_cases_by_deal(repo: Any) -> dict[str, list[dict[str, Any]]]:
+    list_cases = getattr(repo, "list_trade_lifecycle_cases", None)
+    list_evidence = getattr(repo, "list_trade_lifecycle_evidence", None)
+    if not callable(list_cases) or not callable(list_evidence):
+        return {}
+    out: dict[str, list[dict[str, Any]]] = {}
+    for case in list_cases():
+        if not isinstance(case, dict):
+            continue
+        status = str(case.get("status") or "").strip().lower()
+        decision_type = str(case.get("decision_type") or "").strip().lower()
+        if status != "ledger_written" or decision_type not in {"assignment", "exercise"}:
+            continue
+        case_id = str(case.get("case_id") or "").strip()
+        if not case_id:
+            continue
+        try:
+            evidence_rows = list_evidence(case_id=case_id)
+        except Exception:
+            evidence_rows = []
+        for evidence in evidence_rows:
+            if not isinstance(evidence, dict):
+                continue
+            deal_ids = _deal_ids_from_lifecycle_evidence(evidence)
+            if not deal_ids:
+                continue
+            entry = {
+                "case": dict(case),
+                "evidence": dict(evidence),
+            }
+            for deal_id in deal_ids:
+                out.setdefault(deal_id, []).append(entry)
+    return out
+
+
+def _deal_ids_from_lifecycle_evidence(evidence: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    for key in ("source_event_id", "deal_id"):
+        if evidence.get(key) not in (None, ""):
+            values.append(str(evidence.get(key)))
+    raw = evidence.get("raw")
+    raw_payload = raw if isinstance(raw, dict) else {}
+    for key in ("deal_id", "source_deal_id", "futu_deal_id"):
+        if raw_payload.get(key) not in (None, ""):
+            values.append(str(raw_payload.get(key)))
+    nested = raw_payload.get("raw_payload")
+    if isinstance(nested, dict):
+        for key in ("deal_id", "source_deal_id", "futu_deal_id"):
+            if nested.get(key) not in (None, ""):
+                values.append(str(nested.get(key)))
+    return _normalize_deal_ids(values)
+
+
 def _audit_events_by_deal(path: Path | None) -> dict[str, list[dict[str, Any]]]:
     if path is None or not path.exists() or not path.is_file():
         return {}
@@ -248,6 +325,43 @@ def _processed_payload_from_ledger(
             "reconciled_from_bucket": from_bucket,
             "reconciled_ledger_event_id": ledger_event.get("event_id"),
             "reconciled_ledger_event_type": event_type,
+            "reconciled_source_deal_id": deal_id,
+            "previous_status": state_item.get("status"),
+            "previous_reason": state_item.get("reason"),
+        },
+    }
+
+
+def _processed_payload_from_lifecycle(
+    *,
+    deal_id: str,
+    from_bucket: str,
+    state_item: dict[str, Any],
+    lifecycle_entry: dict[str, Any],
+) -> dict[str, Any]:
+    case = lifecycle_entry.get("case") if isinstance(lifecycle_entry.get("case"), dict) else {}
+    evidence = lifecycle_entry.get("evidence") if isinstance(lifecycle_entry.get("evidence"), dict) else {}
+    decision_type = str(case.get("decision_type") or "").strip().lower()
+    raw_target_lot_ids = case.get("target_lot_ids")
+    target_lot_ids = (
+        [str(item).strip() for item in raw_target_lot_ids if str(item or "").strip()]
+        if isinstance(raw_target_lot_ids, list)
+        else []
+    )
+    action = str(state_item.get("action") or "").strip() or decision_type or None
+    return {
+        "status": "reconciled",
+        "action": action,
+        "account": state_item.get("account") or case.get("account"),
+        "applied_record_ids": target_lot_ids,
+        "reason": "lifecycle_case_already_recorded",
+        "diagnostics": {
+            "reconciled_from_bucket": from_bucket,
+            "reconciled_lifecycle_case_id": case.get("case_id"),
+            "reconciled_lifecycle_status": case.get("status"),
+            "reconciled_lifecycle_decision_type": decision_type,
+            "reconciled_lifecycle_evidence_id": evidence.get("evidence_id"),
+            "reconciled_lifecycle_evidence_type": evidence.get("evidence_type"),
             "reconciled_source_deal_id": deal_id,
             "previous_status": state_item.get("status"),
             "previous_reason": state_item.get("reason"),
