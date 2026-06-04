@@ -166,14 +166,25 @@ class PerceptionEngine:
             return self._handle_deterministic_error(text, err, parser_now_fn=parser_now_fn)
 
     def _perceive_llm_first(self, text: str, parser_now_fn: Callable[[], date] | None) -> PerceptionResult:
-        conversation_context = self._conversation_context()
-        llm_result = self._translate(text, conversation_context=conversation_context, now_fn=parser_now_fn)
-        if "context" not in self.llm_trace:
-            self.llm_trace["context"] = context_trace(conversation_context)
         deterministic_candidate, deterministic_perception, deterministic_error = self._deterministic_candidate(
             text,
             parser_now_fn,
         )
+        if deterministic_perception is not None and _deterministic_operation_command_has_priority(deterministic_perception):
+            llm_source = self._llm_source()
+            self.llm_trace = skipped_llm_trace(self._settings.llm, reason="deterministic_operation_command")
+            return self._handle_deterministic_fallback(
+                deterministic_perception,
+                candidates=[
+                    deterministic_candidate,
+                    skipped_candidate(llm_source, "deterministic_operation_command"),
+                ],
+            )
+
+        conversation_context = self._conversation_context()
+        llm_result = self._translate(text, conversation_context=conversation_context, now_fn=parser_now_fn)
+        if "context" not in self.llm_trace:
+            self.llm_trace["context"] = context_trace(conversation_context)
         if llm_result.intent is not None:
             return self._handle_llm_perception(llm_result.intent, deterministic_candidate, llm_first=True)
         if llm_result.error is not None:
@@ -652,6 +663,11 @@ def _llm_error_allows_deterministic_fallback(
         and details.get("llm_rejected_reason") == "known_non_executable_intent"
         and details.get("intent_name") == deterministic_perception.intent_name
     )
+
+
+def _deterministic_operation_command_has_priority(perception: PerceptionResult) -> bool:
+    spec = _COMMAND_SPECS_BY_INTENT.get(perception.intent_name)
+    return bool(spec is not None and spec.operation_action in {"confirm", "cancel"})
 
 
 __all__ = [

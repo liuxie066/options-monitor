@@ -665,25 +665,26 @@ def test_assistant_runtime_falls_back_to_deterministic_when_llm_unavailable(tmp_
     assert perception_trace["candidates"][1]["intent_name"] == "small_talk"
 
 
-def test_assistant_runtime_falls_back_to_deterministic_confirm_when_llm_rejects_write_intent(tmp_path: Path) -> None:
+def test_assistant_runtime_falls_back_to_deterministic_preview_when_llm_rejects_write_intent(tmp_path: Path) -> None:
     settings = AssistantSettings(
         mode="llm_router",
         llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
     )
+    text = "记录开仓 sy NVDA 1张 put 100 2026-06-19 premium 1.2"
 
     def _translate(
-        text: str,
+        incoming: str,
         runtime_settings: AssistantSettings,
         conversation_context: dict[str, Any] | None,
     ) -> LlmTranslationResult:
-        assert text == "确认升级 in_abc123"
+        assert incoming == text
         assert runtime_settings is settings
         assert conversation_context is not None
         return parse_llm_translation_payload(
             {
                 "schema_version": LLM_INTENT_SCHEMA_VERSION,
-                "intent": "upgrade_confirm",
-                "arguments": {"operation_id": "in_abc123"},
+                "intent": "manual_trade_open",
+                "arguments": {"raw_text": text, "account": "sy"},
                 "confidence": 0.96,
             },
             settings=runtime_settings.llm,
@@ -691,9 +692,9 @@ def test_assistant_runtime_falls_back_to_deterministic_confirm_when_llm_rejects_
 
     engine = PerceptionEngine(
         request=AssistantRequest(
-            text="确认升级 in_abc123",
+            text=text,
             sender_id="local",
-            message_id="msg_llm_denied_confirm_fallback",
+            message_id="msg_llm_denied_preview_fallback",
             audit_db=str(tmp_path / "inbound.sqlite3"),
         ),
         audit_store=InboundAuditStore(tmp_path / "inbound.sqlite3"),
@@ -701,10 +702,10 @@ def test_assistant_runtime_falls_back_to_deterministic_confirm_when_llm_rejects_
         translate_intent_fn=_translate,
     )
 
-    perception = engine.perceive("确认升级 in_abc123", None)
+    perception = engine.perceive(text, None)
 
-    assert perception.intent_name == "upgrade_confirm"
-    assert perception.arguments == {"operation_id": "in_abc123", "operation_resolution": "explicit"}
+    assert perception.intent_name == "manual_trade_open"
+    assert perception.arguments == {"raw_text": text, "account": "sy"}
     assert perception.source == "deterministic"
     assert engine.route == "deterministic"
     assert engine.trace is not None
@@ -717,7 +718,79 @@ def test_assistant_runtime_falls_back_to_deterministic_confirm_when_llm_rejects_
     assert trace["candidates"][0]["error"]["details"]["llm_rejected_reason"] == "known_non_executable_intent"
     assert trace["candidates"][1]["source"] == "deterministic"
     assert trace["candidates"][1]["status"] == "accepted"
-    assert trace["candidates"][1]["intent_name"] == "upgrade_confirm"
+    assert trace["candidates"][1]["intent_name"] == "manual_trade_open"
+
+
+def test_assistant_runtime_agent_loop_prioritizes_bare_upgrade_confirm_over_planner(tmp_path: Path) -> None:
+    settings = AssistantSettings(
+        mode="agent_loop",
+        llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+    )
+    plan_calls: list[str] = []
+
+    def _plan(
+        text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        plan_calls.append(text)
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="误判为立即升级",
+                response_mode="canonical",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="upgrade_now",
+                        arguments={},
+                        purpose="should not run for deterministic confirm commands",
+                    ),
+                ),
+            ),
+            trace={
+                "enabled": True,
+                "attempted": True,
+                "reason": "accepted",
+                "provider": "openai",
+                "base_url": "",
+                "model": "gpt-5.2",
+                "api_key_env": "OM_LLM_API_KEY",
+                "confidence_min": 0.75,
+                "timeout_seconds": 20,
+                "max_output_tokens": 512,
+                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+            },
+        )
+
+    engine = PerceptionEngine(
+        request=AssistantRequest(
+            text="确认升级",
+            sender_id="local",
+            message_id="msg_bare_upgrade_confirm_deterministic_priority",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        audit_store=InboundAuditStore(tmp_path / "inbound.sqlite3"),
+        settings=settings,
+        plan_tools_fn=_plan,
+    )
+
+    perception = engine.perceive("确认升级", None)
+
+    assert plan_calls == []
+    assert perception.intent_name == "upgrade_confirm"
+    assert perception.arguments == {"operation_id": None, "operation_resolution": "latest_pending"}
+    assert perception.source == "deterministic"
+    assert engine.route == "deterministic"
+    assert engine.llm_trace["reason"] == "deterministic_operation_command"
+    assert engine.trace is not None
+    trace = engine.trace.public_payload()
+    assert trace["decision"] == "deterministic_fallback_selected"
+    assert trace["selected_source"] == "deterministic"
+    assert trace["candidates"][0]["source"] == "deterministic"
+    assert trace["candidates"][0]["status"] == "accepted"
+    assert trace["candidates"][1]["source"] == "agent_loop"
+    assert trace["candidates"][1]["status"] == "skipped"
+    assert trace["candidates"][1]["reason"] == "deterministic_operation_command"
 
 
 def test_assistant_runtime_does_not_fallback_for_unknown_llm_permission_denial(tmp_path: Path) -> None:
@@ -2469,7 +2542,7 @@ def test_assistant_runtime_agent_loop_rejects_confirm_plan(tmp_path: Path) -> No
 
     out = handle_assistant_message(
         AssistantRequest(
-            text="确认记录 in_123",
+            text="执行这个待办 in_123",
             sender_id="local",
             channel="local",
             message_id="msg_agent_loop_reject_confirm_plan",
