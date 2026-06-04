@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.209 - 2026-06-04
+
+### Fixed
+- Fixed assistant LLM-first routing so deterministic confirm/cancel operation commands such as `确认升级` take priority over agent-loop planning, preventing bare upgrade confirmations from creating a new dry-run upgrade preview.
+- Added regression coverage for bare upgrade confirmation in agent-loop mode while preserving deterministic fallback for preview-write intents rejected by the LLM translator.
+
 ## 1.2.208 - 2026-06-04
 
 ### Added
