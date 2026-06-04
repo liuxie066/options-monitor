@@ -125,6 +125,50 @@ DATASET=output_shared/research/shadow_replay/datasets/$DATASET_ID
 ./om research shadow-replay build --run-id <run-id> --dataset-id "$DATASET_ID"
 ```
 
+## 远端证据归档
+
+远端 runtime 空间有限时，把原始 run 证据镜像到本地归档，再从本地归档生成 Shadow Replay dataset。默认归档根目录：
+
+```text
+output_shared/research/remote_archive/prod/
+  manifests/
+  output_runs/
+  output_shared/research/
+  output_shared/required_data/
+  logs/
+```
+
+先预览，再写入：
+
+```bash
+./om research archive pull --remote prod --ssh-target deploy@example --since-days 7
+./om research archive pull --remote prod --ssh-target deploy@example --since-days 7 --write
+./om research archive verify --remote prod
+./om research archive inventory --remote prod
+```
+
+`pull` 使用 `rsync` 增量同步，不在远端打 tar 包；默认 dry-run，显式 `--write` 才写本地归档和 manifest。没有 SSH 时，也可以用已挂载 runtime 根目录：
+
+```bash
+./om research archive pull --remote prod --source-root /Volumes/prod-runtime --run-id <run-id> --write
+```
+
+从已验证归档生成本地 dataset：
+
+```bash
+./om research archive build-datasets --remote prod --market us
+./om research archive build-datasets --remote prod --market us --write
+```
+
+远端清理必须独立执行。默认只预览远端 `service cleanup`；加 `--confirm` 前会读取本地 `output_shared/research/remote_archive/prod/manifests/inventory.latest.json`，确认远端计划删除的每个 run 都已经在本地归档中 verified：
+
+```bash
+./om research archive prune-remote --remote prod --ssh-target deploy@example --keep-days 3 --keep-count 30
+./om research archive prune-remote --remote prod --ssh-target deploy@example --keep-days 3 --keep-count 30 --confirm
+```
+
+归档不同步 secrets、runtime config、SQLite、trade events、locks 或 broker-facing state。需要分析交易状态时，应另走脱敏导出，不把生产写路径混进 replay 归档。
+
 生产 runtime 已有 `service.profile.json` 时，优先用 profile 解析线上证据路径，避免手拼 runtime 目录：
 
 ```bash
