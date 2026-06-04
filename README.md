@@ -312,6 +312,18 @@ om run tick --config config.us.json --accounts lx sy
 ./om research collect --config-key us --scope candidate --candidate-path candidates.csv --trace-path candidate_filter_trace.jsonl --mark-path mark_path_snapshots.jsonl --outcome-path outcome_facts.jsonl --output json --no-write-outputs
 ```
 
+远端磁盘有限时，先把线上 runtime 证据增量拉到本地归档，再从归档生成 replay dataset：
+
+```bash
+./om research archive pull --remote prod --ssh-target deploy@example --since-days 7
+./om research archive pull --remote prod --ssh-target deploy@example --since-days 7 --write
+./om research archive verify --remote prod
+./om research archive build-datasets --remote prod --market us --write
+./om research archive prune-remote --remote prod --ssh-target deploy@example --keep-days 3 --keep-count 30
+```
+
+`archive pull` 默认 dry-run；显式 `--write` 才用 `rsync` 写入本地 `output_shared/research/remote_archive/prod/` 并生成 sync / verify manifest。归档会镜像 `output_runs`、`output_shared/research`、`output_shared/required_data` 和 runtime logs；它不同步 secrets、runtime config、SQLite、trade events 或 broker-facing state。`archive prune-remote` 默认只预览远端 `service cleanup`，`--confirm` 前会复查本地 `inventory.latest.json`，只有待删 run 已在本地 verified manifest 中才会执行远端清理。
+
 需要落地本地 replay dataset 时使用：
 
 ```bash

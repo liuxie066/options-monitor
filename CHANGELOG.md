@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.2.208 - 2026-06-04
+
+### Added
+- Added `om research archive` commands to mirror remote runtime evidence into local `output_shared/research/remote_archive/<remote>/`, verify archive manifests, and build Shadow Replay datasets from verified archived runs.
+- Added guarded `research archive prune-remote` cleanup, which previews remote `service cleanup` and refuses confirmed deletion unless every planned `output_runs` removal is present in the local verified inventory.
+- Documented the remote-evidence archive workflow for low-storage production hosts, including dry-run-first pull, local verify, dataset build, and separate remote prune steps.
+
 ## 1.2.207 - 2026-06-04
 
 ### Fixed

@@ -411,12 +411,18 @@ om-agent run --tool candidate_rank_explain --input-json '{"mode":"put","score_we
 - `research shadow-replay analyze` 会在已有可用 mark path / outcome facts 时输出路径风险、outcome stats 和按 DTE/Delta/IV/Spread/集中度分桶的 outcome-by-bucket 表现
 - `research shadow-replay parameter-backtest` 用历史 run artifacts 或已有 dataset 做 short-vol 参数反事实回放，比较生产实际结果和 variants，不重建历史期权链、不修改 runtime config
 - `research shadow-replay parameter-report` 是用户常用报告入口，会一次写出 JSON + Markdown 候选影响报告；参数仍来自 `--params` 或 `--params-dir`，不会自动生成参数、不修改 runtime config
+- `research archive pull/verify/inventory/build-datasets/prune-remote` 是远端空间有限时的证据归档链路：先把远端 runtime 证据 rsync 到本地 `output_shared/research/remote_archive/<remote>/`，再从 verified archive 生成 Shadow Replay dataset
 - 缺少被拒样本、mark path 或 outcome facts 时返回 `not_ready` / `evidence_incomplete`，防止幸存者偏差
 - 只输出人工评审用建议，不自动改配置
 
 示例：
 
 ```bash
+om research archive pull --remote prod --ssh-target deploy@example --since-days 7
+om research archive pull --remote prod --ssh-target deploy@example --since-days 7 --write
+om research archive verify --remote prod
+om research archive build-datasets --remote prod --market us --write
+om research archive prune-remote --remote prod --ssh-target deploy@example --keep-days 3 --keep-count 30
 om research collect --config-key us --scope candidate --run-id 20260515T182459Z-474761 --output json --no-write-outputs --shadow-replay-min-sample 30
 om research collect --config-key us --scope candidate --candidate-report-dir output_shared/reports --output json --no-write-outputs
 om research collect --config-key us --scope candidate --candidate-path candidates.csv --trace-path candidate_filter_trace.jsonl --mark-path mark_path_snapshots.jsonl --outcome-path outcome_facts.jsonl --output json --no-write-outputs
@@ -442,6 +448,7 @@ om research shadow-replay analyze --dataset output_shared/research/shadow_replay
 边界：
 - 只读源数据，来源可以是 `run_id`、`run_dir`、`candidate_report_dir`、`candidate_path`、`trace_path`、`reject_log_path`、`mark_path` 或 `outcome_path`。
 - `--profile-path` / `--runtime-root` 只用于解析 runtime `output_runs`、dataset root、required-data root 和 receipt root；`--latest-scanned-run` 只选择最新已有 replay 证据的 run，不运行扫描。
+- `research archive pull` 默认 dry-run；`--write` 只写本地归档和 manifest，不删除远端文件。`prune-remote --confirm` 会先解析远端 cleanup dry-run 计划，并要求每个待删 run 都已经在本地 `inventory.latest.json` 中 verified。
 - 默认 `--no-write-outputs` 不写文件；显式 `--write-outputs --confirm` 时只写本地 research bundle/handoff。
 - `research shadow-replay status` / `list` 只读本地 dataset root，不采样、不 settle、不写输出文件；`next_suggested_action` 只会是 `collect_marks`、`settle`、`analyze` 或 `wait`。输出里的 `data_plan` 只是数据维护建议命令清单，不会自动执行；人工复盘提示在 `review_queue`。
 - `research shadow-replay run-data-plan` 不挂 tick / tick-cron；默认不写，`--write` 只写 replay dataset、local receipt，以及在显式 `--source opend` 时写本地 required-data / OpenD cache。它不执行 `analyze`，不写 Feishu、不写 broker、不写 trade state、不写 runtime config、不发送通知。
