@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.207 - 2026-06-04
+
+### Fixed
+- Fixed trade-intake state reconciliation so pending lifecycle deals are marked processed when their lifecycle case has already been written as assignment or exercise.
+- Added regression coverage to keep waiting lifecycle cases pending while allowing completed lifecycle evidence to reconcile unresolved deal state.
+
 ## 1.2.206 - 2026-06-04
 
 ### Fixed

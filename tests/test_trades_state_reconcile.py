@@ -8,11 +8,38 @@ from src.application.trades.state_reconcile import reconcile_trade_intake_state
 
 
 class FakeRepo:
-    def __init__(self, events: list[dict]) -> None:
+    def __init__(
+        self,
+        events: list[dict],
+        *,
+        lifecycle_cases: list[dict] | None = None,
+        lifecycle_evidence: list[dict] | None = None,
+    ) -> None:
         self.events = events
+        self.lifecycle_cases = list(lifecycle_cases or [])
+        self.lifecycle_evidence = list(lifecycle_evidence or [])
 
     def list_trade_events(self) -> list[dict]:
         return list(self.events)
+
+    def list_trade_lifecycle_cases(self) -> list[dict]:
+        return list(self.lifecycle_cases)
+
+    def list_trade_lifecycle_evidence(
+        self,
+        *,
+        case_id: str | None = None,
+        account: str | None = None,
+        symbol: str | None = None,
+    ) -> list[dict]:
+        rows = list(self.lifecycle_evidence)
+        if case_id:
+            rows = [item for item in rows if str(item.get("case_id") or "") == str(case_id)]
+        if account:
+            rows = [item for item in rows if str(item.get("account") or "") == str(account)]
+        if symbol:
+            rows = [item for item in rows if str(item.get("symbol") or "") == str(symbol)]
+        return rows
 
 
 def test_reconcile_trade_intake_state_dry_run_keeps_file_unchanged(tmp_path: Path) -> None:
@@ -137,6 +164,168 @@ def test_reconcile_trade_intake_state_marks_ignored_non_option_unresolved_deal_p
     processed = state["processed_deal_ids"]["4246552780115108684"]
     assert processed["status"] == "skipped"
     assert processed["reason"] == "not_option_deal"
+
+
+def test_reconcile_trade_intake_state_marks_completed_lifecycle_deal_processed(tmp_path: Path) -> None:
+    state_path = tmp_path / "auto_trade_intake_state.json"
+    write_trade_intake_state(
+        state_path,
+        {
+            "processed_deal_ids": {},
+            "failed_deal_ids": {},
+            "unresolved_deal_ids": {
+                "3254612655429789712": {
+                    "status": "unresolved",
+                    "action": "lifecycle",
+                    "account": "lx",
+                    "reason": "waiting_settlement_evidence",
+                    "retryable": True,
+                }
+            },
+        },
+    )
+    repo = FakeRepo(
+        [],
+        lifecycle_cases=[
+            {
+                "case_id": "lc_futu_assignment",
+                "status": "ledger_written",
+                "decision_type": "assignment",
+                "account": "lx",
+                "symbol": "FUTU",
+                "target_lot_ids": ["lot_manual-open-df078270b91449a1"],
+            }
+        ],
+        lifecycle_evidence=[
+            {
+                "case_id": "lc_futu_assignment",
+                "evidence_id": "ev_option_close",
+                "evidence_type": "option_zero_price_close",
+                "source_event_id": "3254612655429789712",
+                "account": "lx",
+                "symbol": "FUTU",
+            }
+        ],
+    )
+
+    out = reconcile_trade_intake_state(state_path=state_path, repo=repo, apply_changes=True)
+
+    assert out["planned_count"] == 1
+    assert out["applied_count"] == 1
+    assert out["actions"][0]["reason"] == "lifecycle_case_already_recorded"
+    state = load_trade_intake_state(state_path)
+    assert "3254612655429789712" not in state["unresolved_deal_ids"]
+    processed = state["processed_deal_ids"]["3254612655429789712"]
+    assert processed["status"] == "reconciled"
+    assert processed["action"] == "lifecycle"
+    assert processed["reason"] == "lifecycle_case_already_recorded"
+    assert processed["applied_record_ids"] == ["lot_manual-open-df078270b91449a1"]
+    assert processed["diagnostics"]["reconciled_lifecycle_case_id"] == "lc_futu_assignment"
+    assert processed["diagnostics"]["reconciled_lifecycle_decision_type"] == "assignment"
+    assert processed["diagnostics"]["reconciled_lifecycle_evidence_id"] == "ev_option_close"
+
+
+def test_reconcile_trade_intake_state_dry_run_keeps_completed_lifecycle_file_unchanged(tmp_path: Path) -> None:
+    state_path = tmp_path / "auto_trade_intake_state.json"
+    write_trade_intake_state(
+        state_path,
+        {
+            "processed_deal_ids": {},
+            "failed_deal_ids": {},
+            "unresolved_deal_ids": {
+                "deal-option-1": {
+                    "status": "unresolved",
+                    "action": "lifecycle",
+                    "account": "lx",
+                    "reason": "waiting_settlement_evidence",
+                    "retryable": True,
+                }
+            },
+        },
+    )
+    repo = FakeRepo(
+        [],
+        lifecycle_cases=[
+            {
+                "case_id": "lc_assignment_1",
+                "status": "ledger_written",
+                "decision_type": "assignment",
+                "account": "lx",
+                "symbol": "TIGR",
+                "target_lot_ids": ["lot-1"],
+            }
+        ],
+        lifecycle_evidence=[
+            {
+                "case_id": "lc_assignment_1",
+                "evidence_id": "ev-option-1",
+                "evidence_type": "option_zero_price_close",
+                "source_event_id": "deal-option-1",
+                "account": "lx",
+                "symbol": "TIGR",
+            }
+        ],
+    )
+
+    out = reconcile_trade_intake_state(state_path=state_path, repo=repo, apply_changes=False)
+
+    assert out["planned_count"] == 1
+    assert out["applied_count"] == 0
+    assert out["pending_after"]["unresolved_deal_ids"] == 0
+    state = load_trade_intake_state(state_path)
+    assert "deal-option-1" in state["unresolved_deal_ids"]
+    assert "deal-option-1" not in state["processed_deal_ids"]
+
+
+def test_reconcile_trade_intake_state_keeps_waiting_lifecycle_pending(tmp_path: Path) -> None:
+    state_path = tmp_path / "auto_trade_intake_state.json"
+    write_trade_intake_state(
+        state_path,
+        {
+            "processed_deal_ids": {},
+            "failed_deal_ids": {},
+            "unresolved_deal_ids": {
+                "deal-option-waiting": {
+                    "status": "unresolved",
+                    "action": "lifecycle",
+                    "account": "lx",
+                    "reason": "waiting_settlement_evidence",
+                    "retryable": True,
+                }
+            },
+        },
+    )
+    repo = FakeRepo(
+        [],
+        lifecycle_cases=[
+            {
+                "case_id": "lc_waiting",
+                "status": "waiting_settlement_evidence",
+                "decision_type": "needs_review",
+                "account": "lx",
+                "symbol": "FUTU",
+                "target_lot_ids": [],
+            }
+        ],
+        lifecycle_evidence=[
+            {
+                "case_id": "lc_waiting",
+                "evidence_id": "ev-option-waiting",
+                "evidence_type": "option_zero_price_close",
+                "source_event_id": "deal-option-waiting",
+                "account": "lx",
+                "symbol": "FUTU",
+            }
+        ],
+    )
+
+    out = reconcile_trade_intake_state(state_path=state_path, repo=repo, apply_changes=True)
+
+    assert out["planned_count"] == 0
+    assert out["applied_count"] == 0
+    assert out["actions"][0]["reason"] == "no_reconciliation_evidence"
+    state = load_trade_intake_state(state_path)
+    assert "deal-option-waiting" in state["unresolved_deal_ids"]
 
 
 def test_reconcile_trade_intake_state_keeps_pending_without_evidence(tmp_path: Path) -> None:
