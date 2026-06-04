@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.206 - 2026-06-04
+
+### Fixed
+- Fixed broker trade intake for early assignment/exercise evidence so zero-price option close legs enter the lifecycle workflow before settlement evidence arrives, instead of failing normal close-price preflight.
+- Added regression coverage for retrying a failed Futu zero-price assignment close so it records a lifecycle pending case rather than repeating `LedgerPreflightError`.
+
 ## 1.2.205 - 2026-06-04
 
 ### Added
