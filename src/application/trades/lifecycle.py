@@ -595,26 +595,7 @@ def _is_zero_price_option_close(deal: NormalizedTradeDeal) -> bool:
         return False
     if not deal.trade_time_ms:
         return False
-    return _trade_time_on_or_after_expiry(deal)
-
-
-def _trade_time_on_or_after_expiry(deal: NormalizedTradeDeal) -> bool:
-    expiration = normalize_contract_expiration(deal.expiration_ymd)
-    if not expiration:
-        return False
-    try:
-        expiration_date = datetime.strptime(expiration, "%Y-%m-%d").date()
-    except ValueError:
-        return False
-    try:
-        ts = int(deal.trade_time_ms or 0)
-    except Exception:
-        return False
-    for tz_name in ("America/New_York", "Asia/Shanghai"):
-        trade_date = datetime.fromtimestamp(ts / 1000, tz=ZoneInfo(tz_name)).date()
-        if trade_date >= expiration_date:
-            return True
-    return False
+    return True
 
 
 def _trade_time_on_or_after_expiration_ymd(trade_time_ms: int, expiration_ymd: str | None) -> bool:
