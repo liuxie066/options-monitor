@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 from src.application.agent_tool_contracts import build_response
 from src.application.assistant import AssistantSettings
+from src.application.assistant.audit import InboundAuditStore
 from src.application.assistant.agent_loop import LlmSynthesisResult, LlmPlannerResult, PlannerPlan, PlannerPlanStep
 from src.application.inbound.feishu_ws import (
     FeishuWsSettings,
@@ -219,6 +221,83 @@ def test_feishu_ws_agent_loop_routes_cashflow_detail_plan(tmp_path: Path) -> Non
     assert replies[0]["text"].startswith("lx 2026-06 净现金流明细")
     assert inbound_result["meta"]["assistant"]["route"] == "agent_loop"
     assert inbound_result["meta"]["assistant"]["llm"]["agent_loop"]["final_response"]["status"] == "synthesized"
+
+
+def test_feishu_ws_agent_loop_degrades_when_conversation_context_fails(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    replies: list[dict[str, Any]] = []
+    contexts: list[dict[str, Any] | None] = []
+    assistant_config_path = tmp_path / "config.assistant.json"
+    assistant_config_path.write_text(
+        json.dumps(
+            {
+                "assistant": {
+                    "mode": "agent_loop",
+                    "llm": {"provider": "openai", "model": "gpt-5.2", "api_key_env": "OM_LLM_API_KEY"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _broken_list_recent(self: InboundAuditStore, **_kwargs: Any) -> list[dict[str, Any]]:
+        raise sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr(InboundAuditStore, "list_recent", _broken_list_recent)
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return build_response(tool_name=tool_name, ok=True, data={"status": "ok"})
+
+    def _reply(**kwargs: Any) -> dict[str, Any]:
+        replies.append(dict(kwargs))
+        return {"code": 0, "data": {"message_id": "reply_1"}}
+
+    def _plan(
+        _text: str,
+        _settings: AssistantSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        contexts.append(conversation_context)
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="runtime status",
+                response_mode="canonical",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="runtime_status",
+                        arguments={},
+                        purpose="status",
+                    ),
+                ),
+            ),
+            trace={"enabled": True, "attempted": True, "reason": "accepted"},
+        )
+
+    out = handle_feishu_ws_event(
+        _message_payload(text="状态"),
+        settings=FeishuWsSettings(
+            config_key="us",
+            assistant_config_path=str(assistant_config_path),
+            allowed_senders="feishu:ou_1",
+            app_id="app_1",
+            app_secret="secret_1",
+            audit_db=str(tmp_path / "audit.sqlite3"),
+        ),
+        reply_fn=_reply,
+        execute_tool_fn=_execute,
+        plan_tools_fn=_plan,
+    )
+
+    inbound_result = out["data"]["inbound"]["data"]["inbound_result"]
+    assert out["ok"] is True
+    assert replies
+    assert contexts[0] is not None
+    assert contexts[0]["degraded"] is True
+    assert contexts[0]["recent_messages"] == []
+    assert inbound_result["meta"]["assistant"]["route"] == "agent_loop"
 
 
 def test_feishu_ws_reaction_failure_does_not_fail_inbound_or_reply(tmp_path: Path) -> None:

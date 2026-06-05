@@ -360,11 +360,39 @@ class PerceptionEngine:
         llm_mode = self._settings.mode in {"llm_router", "agent_loop"}
         if not llm_mode and self._translate_intent_fn is None:
             return None
-        self.last_conversation_context = build_conversation_context(
-            self._request,
-            audit_store=self._audit_store,
-            max_messages=self._settings.context_window_messages,
-        )
+        try:
+            self.last_conversation_context = build_conversation_context(
+                self._request,
+                audit_store=self._audit_store,
+                max_messages=self._settings.context_window_messages,
+            )
+        except Exception as exc:
+            self.last_conversation_context = {
+                "scope": {
+                    "channel": str(self._request.channel or "local").strip().lower() or "local",
+                    "sender_id": str(self._request.sender_id or "").strip(),
+                    "conversation_id": str(self._request.conversation_id or "").strip(),
+                },
+                "window_messages": 0,
+                "limits": {
+                    "max_recent_messages": 0,
+                    "max_pending_operations": 0,
+                },
+                "semantics": {
+                    "explicit_message_wins": True,
+                    "context_is_hint_only": True,
+                    "confirmation_must_be_deterministic": True,
+                },
+                "recent_messages": [],
+                "last_successful_read": None,
+                "pending_operations": [],
+                "degraded": True,
+                "error": {
+                    "stage": "conversation_context",
+                    "error_type": type(exc).__name__,
+                    "message": str(exc),
+                },
+            }
         return self.last_conversation_context
 
     def _translate(
