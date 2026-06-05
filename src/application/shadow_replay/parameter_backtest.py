@@ -35,7 +35,13 @@ from src.application.shadow_replay.common import (
     utc_now,
     write_json,
 )
-from src.application.shadow_replay.parameter_sets import ParameterSet, ParameterVariant, load_parameter_set
+from src.application.shadow_replay.parameter_sets import (
+    CURRENT_UNDERWRITING_PROFILE,
+    LEGACY_SHORT_VOL_PROFILE,
+    ParameterSet,
+    ParameterVariant,
+    load_parameter_set,
+)
 from src.application.shadow_replay.settlement import is_usable_mark
 
 
@@ -105,7 +111,11 @@ def run_shadow_replay_parameter_backtest(
     )
     mark_snapshots = evidence["mark_snapshots"]
     outcome_facts = evidence["outcome_facts"]
-    scoped_candidates = [row for row in candidate_snapshots if _strategy_profile(row) == "short_vol"]
+    scoped_candidates = [
+        row
+        for row in candidate_snapshots
+        if _parameter_profile_for_candidate(row) == CURRENT_UNDERWRITING_PROFILE
+    ]
     evidence_quality = _parameter_evidence_quality(
         scoped_candidates,
         required_fields=_required_parameter_fields(parameter_set),
@@ -161,7 +171,7 @@ def run_shadow_replay_parameter_backtest(
         "parameters": parameter_set.to_payload(),
         "summary": {
             "candidate_snapshot_count": len(candidate_snapshots),
-            "short_vol_candidate_count": len(scoped_candidates),
+            "underwriting_candidate_count": len(scoped_candidates),
             "out_of_scope_candidate_count": max(0, len(candidate_snapshots) - len(scoped_candidates)),
             "mark_path_snapshot_count": len(mark_snapshots),
             "usable_mark_path_snapshot_count": sum(1 for row in mark_snapshots if is_usable_mark(row)),
@@ -406,7 +416,7 @@ def _variant_payload(
         candidate["status"] = evaluation["status"]
         candidate["variant_name"] = variant.name
         candidate["variant_reasons"] = evaluation["reasons"]
-        candidate.update(variant.profiles.get("short_vol", {}))
+        candidate.update(variant.profiles.get(_parameter_profile_for_candidate(row), {}))
         evaluated_rows.append(candidate)
         baseline_status = _status_group(row)
         if baseline_status == "rejected" and evaluation["status"] == "accepted":
@@ -508,7 +518,7 @@ def _has_parameter_field(row: dict[str, Any], field: str) -> bool:
 
 
 def _evaluate_candidate(row: dict[str, Any], *, variant: ParameterVariant) -> dict[str, Any]:
-    profile = _strategy_profile(row)
+    profile = _parameter_profile_for_candidate(row)
     params = variant.profiles.get(profile)
     if not params:
         return {"status": "rejected", "reasons": ["strategy_profile_out_of_scope"], "safety_reasons": []}
@@ -885,8 +895,15 @@ def _status_group(row: dict[str, Any]) -> str:
 def _strategy_profile(row: dict[str, Any]) -> str:
     raw = text(row.get("strategy_profile") or row.get("profile") or row.get("strategy_mode")).lower()
     if raw in {"short_vol", "short-vol", "volatility_premium", "vol_premium"}:
-        return "short_vol"
+        return LEGACY_SHORT_VOL_PROFILE
     return raw or "unknown"
+
+
+def _parameter_profile_for_candidate(row: dict[str, Any]) -> str:
+    profile = _strategy_profile(row)
+    if profile in {CURRENT_UNDERWRITING_PROFILE, LEGACY_SHORT_VOL_PROFILE}:
+        return CURRENT_UNDERWRITING_PROFILE
+    return profile
 
 
 def _candidate_change(row: dict[str, Any], *, reasons: list[str]) -> dict[str, Any]:
@@ -952,8 +969,8 @@ def _render_markdown(result: dict[str, Any]) -> str:
         f"- Data mode: {result['data_mode']}",
         f"- Universe: {result['universe_scope']}",
         f"- Coverage: {coverage.get('reason')} / strict={coverage.get('strict_backtest_allowed')}",
-        f"- Samples: short_vol {summary['short_vol_candidate_count']} / all {summary['candidate_snapshot_count']}",
-        f"- Parameter fields: complete {summary.get('parameter_complete_candidate_count')} / {summary['short_vol_candidate_count']}",
+        f"- Samples: underwriting {summary['underwriting_candidate_count']} / all {summary['candidate_snapshot_count']}",
+        f"- Parameter fields: complete {summary.get('parameter_complete_candidate_count')} / {summary['underwriting_candidate_count']}",
         f"- Baseline accepted: {result['baseline']['accepted_count']}",
         "",
         "## Gates",

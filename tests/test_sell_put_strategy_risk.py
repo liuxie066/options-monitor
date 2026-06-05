@@ -63,6 +63,31 @@ def test_sell_put_underwriting_accepts_priced_candidate_without_concentration_ga
     assert "single_trade_concentration" not in fields
 
 
+def test_sell_put_close_thesis_config_prefers_top_level_underwriting_fields() -> None:
+    from src.application.sell_put_strategy_risk import resolve_sell_put_short_vol_config
+
+    cfg = resolve_sell_put_short_vol_config(
+        {
+            "strategy": "insurance_underwriting",
+            "min_iv_rv_ratio": 1.10,
+            "min_iv_minus_rv": 0.05,
+            "reject_event_risk": False,
+            "event_source_fail_closed": False,
+            "short_vol": {
+                "min_iv_rv_ratio": 1.25,
+                "min_iv_minus_rv": 0.10,
+                "reject_event_risk": True,
+                "event_source_fail_closed": True,
+            },
+        }
+    )
+
+    assert cfg.min_iv_rv_ratio == 1.10
+    assert cfg.min_iv_minus_rv == 0.05
+    assert cfg.reject_event_risk is False
+    assert cfg.event_source_fail_closed is False
+
+
 def test_sell_put_underwriting_rejects_when_iv_rv_edge_is_too_low() -> None:
     from src.application.sell_put_strategy_risk import evaluate_sell_put_underwriting_row, resolve_sell_put_underwriting_config
 
@@ -198,7 +223,6 @@ def test_enrich_and_filter_sell_put_underwriting_does_not_reject_stress_or_conce
             "strategy": "insurance_underwriting",
             "max_strike": 110.0,
             "concentration": {"max_single_trade_nav_pct": 0.0001},
-            "short_vol": {"max_put_sigma_stress_loss_nav_pct": 0.0001},
         },
         portfolio_ctx=None,
         exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),

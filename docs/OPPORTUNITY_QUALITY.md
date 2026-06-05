@@ -23,27 +23,25 @@ Shadow Replay 的目标是离线评估扫描质量：
 
 ## 策略口径
 
-`short_vol` 和 `return_first` 必须分开评价。
+`insurance_underwriting` 和 `return_first` 必须分开评价。历史 `short_vol` 样本归入当前承保口径。
 
-### short_vol
+### insurance_underwriting
 
-`short_vol` 是承保评估器。好机会的核心不是单次盈利，而是保费是否足够补偿 IV/RV、Delta、事件、跳空、路径压力、流动性、现金占用和集中度风险。
+`insurance_underwriting` 是承保评估器。好机会的核心不是单次盈利，而是保费是否足够补偿 IV/RV、事件、流动性、现金或持股覆盖和 strike 边界风险。
 
 事前质量重点：
 
 - IV/RV 和 IV-RV 边际是否足够
-- Delta 是否在目标风险带内
 - 事件风险是否可评估且可接受
-- 跳空和路径压力是否在 NAV 预算内
 - 流动性和价差是否可交易
-- 单笔和标的集中度是否可接受
+- 现金或持股覆盖是否满足开仓前提
 - 收益补偿是否足够
 
-一个 `short_vol` 候选最终赚钱，不自动说明它是好机会；如果开仓时 IV/RV 不足、事件不可评估或集中度超预算，它仍可能是坏承保。一个 `short_vol` 候选最终亏损，也不自动说明它是坏机会；如果风险在预算内且保费补偿合理，亏损可能只是已接受风险兑现。
+一个 `insurance_underwriting` 候选最终赚钱，不自动说明它是好机会；如果开仓时 IV/RV 不足、事件不可评估或执行质量差，它仍可能是坏承保。一个 `insurance_underwriting` 候选最终亏损，也不自动说明它是坏机会；如果风险在预算内且保费补偿合理，亏损可能只是已接受风险兑现。
 
 ### return_first
 
-`return_first` 是收益筛选器。它主要判断 DTE、strike、年化收益、单笔净收入、流动性、现金或持股覆盖是否满足收益目标。它不系统性评价完整承保风险，所以不能用 `short_vol` 的完整承保标准直接判定 `return_first` 样本。
+`return_first` 是收益筛选器。它主要判断 DTE、strike、年化收益、单笔净收入、流动性、现金或持股覆盖是否满足收益目标。它不系统性评价完整承保风险，所以不能用 `insurance_underwriting` 的承保标准直接判定 `return_first` 样本。
 
 ## 决策质量标签
 
@@ -82,8 +80,8 @@ Shadow Replay 先输出 `parameter_advice_gate`，只判断当前证据是否允
 
 ## 最小验收样例
 
-1. `short_vol` 候选最终赚钱，但开仓时 IV/RV 不足，不能标 `good_accept`。
-2. `short_vol` 候选最终亏损，但风险在预算内且保费补偿合理，不自动标 `bad_accept`。
+1. `insurance_underwriting` 候选最终赚钱，但开仓时 IV/RV 不足，不能标 `good_accept`。
+2. `insurance_underwriting` 候选最终亏损，但风险在预算内且保费补偿合理，不自动标 `bad_accept`。
 3. rejected 候选后来赚钱，但当时事件风险不可评估，不能标 `bad_reject`。
-4. `return_first` 样本不能用 `short_vol` 的 IV/RV 失败直接判坏。
+4. `return_first` 样本不能用 `insurance_underwriting` 的 IV/RV 失败直接判坏。
 5. 样本不足时只能输出 `inconclusive`，不能生成参数建议。

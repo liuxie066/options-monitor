@@ -6,9 +6,12 @@ from pathlib import Path
 from typing import Any
 
 
-ALLOWED_PROFILES = {"short_vol"}
+CURRENT_UNDERWRITING_PROFILE = "insurance_underwriting"
+LEGACY_SHORT_VOL_PROFILE = "short_vol"
+
+ALLOWED_PROFILES = {CURRENT_UNDERWRITING_PROFILE}
 ALLOWED_PARAMETERS = {
-    "short_vol": {
+    CURRENT_UNDERWRITING_PROFILE: {
         "min_iv_rv_ratio",
         "min_iv_minus_rv",
         "min_abs_delta",
@@ -82,7 +85,7 @@ def parse_parameter_set(payload: dict[str, Any]) -> ParameterSet:
 
 def _variant_profiles(raw: dict[str, Any], *, variant_name: str) -> dict[str, dict[str, float]]:
     reserved = {"name", "description"}
-    profile_names = [key for key in raw if key not in reserved]
+    profile_names = [_normalize_profile_key(key) for key in raw if key not in reserved]
     if not profile_names:
         raise ValueError(f"variant {variant_name} requires at least one profile block")
     unknown_profiles = sorted(set(profile_names) - ALLOWED_PROFILES)
@@ -90,8 +93,9 @@ def _variant_profiles(raw: dict[str, Any], *, variant_name: str) -> dict[str, di
         raise ValueError(f"variant {variant_name} has unsupported profile blocks: {', '.join(unknown_profiles)}")
 
     profiles: dict[str, dict[str, float]] = {}
-    for profile in profile_names:
-        block = raw.get(profile)
+    for raw_profile in (key for key in raw if key not in reserved):
+        profile = _normalize_profile_key(raw_profile)
+        block = raw.get(raw_profile)
         if not isinstance(block, dict) or not block:
             raise ValueError(f"variant {variant_name}.{profile} must be a non-empty object")
         allowed = ALLOWED_PARAMETERS[profile]
@@ -106,6 +110,13 @@ def _variant_profiles(raw: dict[str, Any], *, variant_name: str) -> dict[str, di
         _validate_range(params, variant_name=variant_name, profile=profile)
         profiles[profile] = params
     return profiles
+
+
+def _normalize_profile_key(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text == CURRENT_UNDERWRITING_PROFILE:
+        return CURRENT_UNDERWRITING_PROFILE
+    return text
 
 
 def _number(value: Any, *, label: str) -> float:

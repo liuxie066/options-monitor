@@ -353,7 +353,7 @@ om run tick --config config.us.json --accounts lx sy
 
 `run-data-plan` 是独立的低频数据维护入口，不挂 tick 主链路。默认 dry-run，只展示会执行哪些 `data_plan` 动作且不写 receipt；显式 `--write` 才会执行 `collect_marks` / `settle`，并写本地 receipt 到 `output_shared/research/shadow_replay/receipts/`。它不接受 `analyze` 作为执行动作；人工复盘仍从 `analyze` 命令进入。`--source opend --write` 需要人工显式选择，会刷新本地 required-data cache 后追加当前采样点。
 
-`parameter-backtest` 是只读的参数反事实回放入口，用历史扫描 artifacts 或已落地 dataset 比较 `production_observed` 与参数 variants。它只在 `observed_run_universe` 内评估，不用 OpenD 事后重建当时没有保存的期权链；如果 `--start-date` 对应日期没有扫描 artifacts，会返回 `strict_backtest_allowed=false` 和 coverage reason。参数文件只允许调整 short-vol 的 `min_iv_rv_ratio`、`min_iv_minus_rv`、`min_abs_delta`、`max_abs_delta`、`min_dte`、`max_dte`、`min_annualized_return`；事件、spread、流动性、集中度、合约身份和交易状态仍是不可调安全边界。缺少 mark/outcome 时结果会标为 `filter_only` 或 `path_only`，不能作为生产参数变更结论。
+`parameter-backtest` 是只读的参数反事实回放入口，用历史扫描 artifacts 或已落地 dataset 比较 `production_observed` 与参数 variants。它只在 `observed_run_universe` 内评估，不用 OpenD 事后重建当时没有保存的期权链；如果 `--start-date` 对应日期没有扫描 artifacts，会返回 `strict_backtest_allowed=false` 和 coverage reason。参数文件只允许调整 `insurance_underwriting` 的 `min_iv_rv_ratio`、`min_iv_minus_rv`、`min_abs_delta`、`max_abs_delta`、`min_dte`、`max_dte`、`min_annualized_return`；历史 `short_vol` 样本会映射到当前承保参数口径。事件、spread、流动性、集中度、合约身份和交易状态仍是不可调安全边界。缺少 mark/outcome 时结果会标为 `filter_only` 或 `path_only`，不能作为生产参数变更结论。
 
 `collect-marks` 是复盘数据采样入口：`--source local` 使用本地 `required_data` 当前报价；`--source opend --write` 会先按 dataset 中的 symbol / option type / expiration 从 OpenD 拉当前报价写入本地 required_data cache，再把这一刻的 mark 追加到 replay dataset，并维护本地 OpenD 限流状态和 option-chain cache。不带 `--write` 的 OpenD 预览使用临时目录，不持久化这些文件。OpenD 只能补当前/未来采样点，不能事后恢复过去未保存的 option mark，所以需要在 dataset 建好后持续采样。
 
@@ -520,9 +520,9 @@ Sell Put 在 `return_first` 下是卖 Put 收益筛选；在 `insurance_underwri
 
 - `min_dte` / `max_dte`
 - `min_strike` / `max_strike`
-- `short_vol.min_iv_rv_ratio`
-- `short_vol.min_iv_minus_rv`
-- `short_vol.reject_event_risk` / `short_vol.event_source_fail_closed`
+- `min_iv_rv_ratio`
+- `min_iv_minus_rv`
+- `reject_event_risk` / `event_source_fail_closed`
 - `min_open_interest`
 - `min_volume`
 - `max_spread_ratio`

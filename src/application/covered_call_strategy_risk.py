@@ -42,7 +42,6 @@ def resolve_covered_call_underwriting_config(raw: dict[str, Any] | None) -> Insu
     cfg = raw if isinstance(raw, dict) else {}
     raw_strategy = cfg.get("strategy") or cfg.get("strategy_profile")
     strategy = normalize_underwriting_strategy(raw_strategy)
-    short_vol = cfg.get("short_vol") if isinstance(cfg.get("short_vol"), dict) else {}
     pricing = cfg.get("pricing") if isinstance(cfg.get("pricing"), dict) else {}
 
     return InsuranceUnderwritingConfig(
@@ -54,10 +53,10 @@ def resolve_covered_call_underwriting_config(raw: dict[str, Any] | None) -> Insu
             cfg,
         ),
         min_net_income=_float_setting_from_sources("min_net_income", 50.0, pricing, cfg),
-        min_iv_rv_ratio=_float_setting_from_sources("min_iv_rv_ratio", 1.10, pricing, short_vol),
-        min_iv_minus_rv=_float_setting_from_sources("min_iv_minus_rv", 0.05, pricing, short_vol),
-        reject_event_risk=_bool_setting_from_sources("reject_event_risk", True, pricing, short_vol),
-        event_source_fail_closed=_bool_setting_from_sources("event_source_fail_closed", True, pricing, short_vol),
+        min_iv_rv_ratio=_float_setting_from_sources("min_iv_rv_ratio", 1.10, pricing, cfg),
+        min_iv_minus_rv=_float_setting_from_sources("min_iv_minus_rv", 0.05, pricing, cfg),
+        reject_event_risk=_bool_setting_from_sources("reject_event_risk", True, pricing, cfg),
+        event_source_fail_closed=_bool_setting_from_sources("event_source_fail_closed", True, pricing, cfg),
         premium_score_cap=_float_setting_from_sources("premium_score_cap", 1.5, pricing, cfg),
         min_strike=_optional_float_setting(cfg, "min_strike"),
         max_strike=_optional_float_setting(cfg, "max_strike"),
@@ -73,13 +72,13 @@ def resolve_covered_call_short_vol_config(raw: dict[str, Any] | None) -> Covered
 
     return CoveredCallShortVolConfig(
         strategy=strategy if strategy == SHORT_VOL_STRATEGY else SHORT_VOL_STRATEGY,
-        min_iv_rv_ratio=_float_setting(short_vol, "min_iv_rv_ratio", 1.15),
-        min_iv_minus_rv=_float_setting(short_vol, "min_iv_minus_rv", 0.05),
+        min_iv_rv_ratio=_float_setting_from_sources("min_iv_rv_ratio", 1.10, cfg, short_vol),
+        min_iv_minus_rv=_float_setting_from_sources("min_iv_minus_rv", 0.05, cfg, short_vol),
         min_abs_delta=_float_setting(short_vol, "min_abs_delta", 0.15),
         max_abs_delta=_float_setting(short_vol, "max_abs_delta", 0.30),
         target_abs_delta=_float_setting(short_vol, "target_abs_delta", 0.20),
-        reject_event_risk=_bool_setting(short_vol, "reject_event_risk", True),
-        event_source_fail_closed=_bool_setting(short_vol, "event_source_fail_closed", True),
+        reject_event_risk=_bool_setting_from_sources("reject_event_risk", True, cfg, short_vol),
+        event_source_fail_closed=_bool_setting_from_sources("event_source_fail_closed", True, cfg, short_vol),
         enable_stress_check=_bool_setting(short_vol, "enable_stress_check", True),
         stress_down_sigma_multiple=_float_setting(short_vol, "stress_down_sigma_multiple", 2.0),
         max_put_sigma_stress_loss_nav_pct=_float_setting(short_vol, "max_put_sigma_stress_loss_nav_pct", 0.02),

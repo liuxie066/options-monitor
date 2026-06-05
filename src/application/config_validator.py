@@ -45,25 +45,6 @@ SCORE_WEIGHT_FIELDS = (
     'concentration',
     'path_risk',
 )
-OPENING_SHORT_VOL_ALLOWED_FIELDS = (
-    'min_iv_rv_ratio',
-    'min_iv_minus_rv',
-    'reject_event_risk',
-    'event_source_fail_closed',
-)
-OPENING_SHORT_VOL_REMOVED_FIELDS = (
-    'min_abs_delta',
-    'max_abs_delta',
-    'target_abs_delta',
-    'enable_stress_check',
-    'stress_down_sigma_multiple',
-    'max_put_sigma_stress_loss_nav_pct',
-    'gap_down_pct',
-    'max_put_gap_down_loss_nav_pct',
-    'call_gap_up_pct',
-    'max_call_gap_up_opportunity_cost_nav_pct',
-    'max_call_gap_up_opportunity_cost_to_premium',
-)
 YIELD_ENHANCEMENT_LIQUIDITY_FIELDS = LIQUIDITY_ALLOWED_GLOBAL_FIELDS + (
     'max_combo_spread_ratio',
 )
@@ -341,36 +322,22 @@ def _validate_opening_strategy_config(cfg: dict, path: str) -> None:
         _validate_optional_bool(event_risk, 'enabled', f'{path}.event_risk')
     short_vol = cfg.get('short_vol')
     if short_vol is not None:
-        if not isinstance(short_vol, dict):
-            die(f'{path}.short_vol must be an object')
-        removed_short_vol_keys = [key for key in OPENING_SHORT_VOL_REMOVED_FIELDS if key in short_vol]
-        if removed_short_vol_keys:
-            die(
-                f"{path}.short_vol has removed opening fields: {', '.join(removed_short_vol_keys)}; "
-                "insurance_underwriting only uses min_iv_rv_ratio, min_iv_minus_rv, reject_event_risk, event_source_fail_closed"
-            )
-        unsupported_short_vol_keys = [
-            str(key)
-            for key in short_vol.keys()
-            if key not in OPENING_SHORT_VOL_ALLOWED_FIELDS and key not in OPENING_SHORT_VOL_REMOVED_FIELDS
-        ]
-        if unsupported_short_vol_keys:
-            die(
-                f"{path}.short_vol has unsupported keys: {', '.join(unsupported_short_vol_keys)}; "
-                "allowed keys: min_iv_rv_ratio, min_iv_minus_rv, reject_event_risk, event_source_fail_closed"
-            )
-        for key in ('min_iv_rv_ratio', 'min_iv_minus_rv'):
-            _validate_optional_non_negative_number(short_vol, key, f'{path}.short_vol')
-        for key in ('reject_event_risk', 'event_source_fail_closed'):
-            _validate_optional_bool(short_vol, key, f'{path}.short_vol')
+        die(
+            f'{path}.short_vol has been removed from opening config; '
+            'put min_iv_rv_ratio, min_iv_minus_rv, reject_event_risk, and event_source_fail_closed on the opening config'
+        )
+    for key in ('min_iv_rv_ratio', 'min_iv_minus_rv'):
+        _validate_optional_non_negative_number(cfg, key, path)
+    for key in ('reject_event_risk', 'event_source_fail_closed'):
+        _validate_optional_bool(cfg, key, path)
     if strategy == 'insurance_underwriting' and isinstance(event_risk, dict) and event_risk.get('enabled') is False:
         fail_closed = True
-        if isinstance(short_vol, dict) and short_vol.get('event_source_fail_closed') is not None:
-            fail_closed = bool(short_vol.get('event_source_fail_closed'))
+        if cfg.get('event_source_fail_closed') is not None:
+            fail_closed = bool(cfg.get('event_source_fail_closed'))
         if fail_closed:
             die(
                 f'{path}.event_risk.enabled=false conflicts with '
-                f'{path}.short_vol.event_source_fail_closed=true'
+                f'{path}.event_source_fail_closed=true'
             )
     concentration = cfg.get('concentration')
     if concentration is not None:
