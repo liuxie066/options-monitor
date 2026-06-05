@@ -330,6 +330,7 @@ def resolve_lifecycle_expired_unassigned(
             diagnostics={"lifecycle_case": case, "deal_id": deal_id, "retryable": False},
         )
 
+    case = _canonicalized_lifecycle_case(case)
     normalized_status = str(case.get("status") or "").strip().lower()
     decision_type = str(case.get("decision_type") or "").strip().lower()
     diagnostics = {
@@ -481,6 +482,14 @@ def _resolve_expiry_case_selector(
     if not case:
         return None, evidence, "lifecycle_case_not_found"
     return case, evidence, None
+
+
+def _canonicalized_lifecycle_case(case: dict[str, Any]) -> dict[str, Any]:
+    out = dict(case)
+    symbol = canonical_contract_symbol(out.get("symbol"))
+    if symbol:
+        out["symbol"] = symbol
+    return out
 
 
 def _get_case_by_id(repo: Any, case_id: str) -> dict[str, Any] | None:
