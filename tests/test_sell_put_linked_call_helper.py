@@ -11,7 +11,7 @@ def test_yield_enhancement_defaults_match_system_template() -> None:
 
     system_config = json.loads((Path(__file__).resolve().parents[1] / "configs" / "system.json").read_text())
     for market in ("us", "hk"):
-        template = system_config["markets"][market]["symbol_defaults"]["yield_enhancement"]
+        template = system_config["markets"][market]["symbol_defaults"]["combo_yield"]
         assert template == yield_enhancement_defaults_for_market(market)
 
 
@@ -38,13 +38,13 @@ def test_yield_enhancement_policy_is_isolated_from_sell_put_strategy() -> None:
     assert isolated.config["call"]["min_delta"] == 0.05
     assert isolated.config["call"]["max_delta"] == 0.20
 
-    partial = resolve_yield_enhancement_cfg({"yield_enhancement": {"enabled": True, "call": {"min_delta": 0.18}}})
+    partial = resolve_yield_enhancement_cfg({"combo_yield": {"enabled": True, "call": {"min_delta": 0.18}}})
     partial_policy = derive_yield_enhancement_policy(partial, {"strategy": "insurance_underwriting"})
     assert partial_policy.config["call"]["min_delta"] == 0.18
     assert partial_policy.config["call"]["max_delta"] == 0.20
     assert "max_otm_pct" not in partial_policy.config["call"]
 
-    income_partial = resolve_yield_enhancement_cfg({"yield_enhancement": {"enabled": True, "call": {"min_delta": 0.10}}})
+    income_partial = resolve_yield_enhancement_cfg({"combo_yield": {"enabled": True, "call": {"min_delta": 0.10}}})
     income_partial_policy = derive_yield_enhancement_policy(income_partial, {"strategy": "return_first"})
     assert income_partial_policy.config["call"]["min_delta"] == 0.10
     assert income_partial_policy.config["call"]["max_delta"] == 0.20

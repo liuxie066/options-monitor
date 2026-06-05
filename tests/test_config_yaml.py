@@ -70,7 +70,7 @@ markets:
           enabled: true
           dte: [20, 60]
           strike: [90, 120]
-        yield_enhancement: true
+        combo_yield: true
 
   hk:
     accounts: [lx]
@@ -126,7 +126,7 @@ def test_yaml_config_resolves_user_overrides_and_defaults(tmp_path: Path) -> Non
     assert futu["sell_call"]["max_dte"] == 60
     assert futu["sell_call"]["min_strike"] == 90
     assert futu["sell_call"]["max_strike"] == 120
-    assert futu["yield_enhancement"]["enabled"] is True
+    assert futu["combo_yield"]["enabled"] is True
     sell_put_template = cfg["templates"]["put_base"]["sell_put"]
     sell_call_template = cfg["templates"]["call_base"]["sell_call"]
     for side_cfg in (sell_put_template, sell_call_template):
@@ -651,7 +651,7 @@ def test_yaml_config_rejects_tabs(tmp_path: Path) -> None:
         resolve_yaml_runtime_config(repo_root=REPO_ROOT, market="us", config_path=config_path)
 
 
-def test_yaml_config_rejects_global_yield_enhancement_switch(tmp_path: Path) -> None:
+def test_yaml_config_rejects_global_combo_yield_switch(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",
         """\
@@ -659,7 +659,7 @@ accounts:
   lx:
     type: futu
 features:
-  yield_enhancement: true
+  combo_yield: true
 markets:
   us:
     accounts: [lx]
@@ -824,7 +824,7 @@ def test_config_migrate_yaml_preview_generates_valid_yaml(tmp_path: Path) -> Non
                     {
                         "symbol": "PDD",
                         "sell_call": {"enabled": True, "min_dte": 20, "max_dte": 45, "min_strike": 120},
-                        "yield_enhancement": {"enabled": True},
+                        "combo_yield": {"enabled": True},
                     },
                 ]
             },
@@ -870,7 +870,7 @@ def test_config_migrate_yaml_preview_generates_valid_yaml(tmp_path: Path) -> Non
     assert payload["markets"]["us"]["symbols"] == ["NVDA", "PDD"]
     assert "sell_call" not in payload["markets"]["us"]["overrides"]["PDD"]
     assert payload["markets"]["us"]["overrides"]["PDD"]["covered_call"]["min_strike"] == 120
-    assert payload["markets"]["us"]["overrides"]["PDD"]["yield_enhancement"] is True
+    assert payload["markets"]["us"]["overrides"]["PDD"]["combo_yield"] is True
     assert "sell_call" not in payload["alert_policy"]
     assert payload["alert_policy"]["covered_call"]["medium_annual"] == 0.07
     assert "sell_call" not in payload["templates"]["call_base"]

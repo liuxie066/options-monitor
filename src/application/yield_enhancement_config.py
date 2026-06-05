@@ -88,6 +88,8 @@ YIELD_ENHANCEMENT_DERIVED_POLICY_DEFAULTS: dict[str, dict[str, Any]] = {
         },
     },
 }
+COMBO_YIELD_CONFIG_KEY = "combo_yield"
+YIELD_ENHANCEMENT_LEGACY_CONFIG_KEY = "yield_enhancement"
 
 
 @dataclass(frozen=True)
@@ -228,9 +230,14 @@ def derive_yield_enhancement_policy(
 
 def resolve_yield_enhancement_cfg(symbol_cfg: dict[str, Any] | None) -> dict[str, Any]:
     cfg = dict(symbol_cfg or {})
-    top_level = _as_dict(cfg.get("yield_enhancement"))
+    raw_top_level = (
+        cfg.get(COMBO_YIELD_CONFIG_KEY)
+        if isinstance(cfg.get(COMBO_YIELD_CONFIG_KEY), dict)
+        else cfg.get(YIELD_ENHANCEMENT_LEGACY_CONFIG_KEY)
+    )
+    top_level = _as_dict(raw_top_level)
 
-    has_top_level = isinstance(cfg.get("yield_enhancement"), dict)
+    has_top_level = isinstance(raw_top_level, dict)
     if not has_top_level:
         return {}
 

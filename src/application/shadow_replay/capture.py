@@ -428,7 +428,17 @@ def candidate_paths_from_selection(selection: ShadowReplaySourceSelection) -> li
         return unique(explicit)
     out: list[Path] = []
     for directory in source_dirs(selection):
-        out.extend(glob_many(directory, ("*sell_put_candidates*.csv", "*sell_call_candidates*.csv", "*yield_enhancement_candidates*.csv")))
+        out.extend(
+            glob_many(
+                directory,
+                (
+                    "*sell_put_candidates*.csv",
+                    "*sell_call_candidates*.csv",
+                    "*combo_yield_candidates*.csv",
+                    "*yield_enhancement_candidates*.csv",
+                ),
+            )
+        )
     return unique(path for path in out if "reject_log" not in path.name.lower())
 
 

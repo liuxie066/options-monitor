@@ -45,7 +45,7 @@
 当前状态：
 
 - Sell Put / Covered Call 已完成本轮 `insurance_underwriting` 语义重构。
-- Combo Yield 产品上属于平行开仓策略，运行编排已从 Sell Put 模块迁出到独立模块；内部 runtime key 仍为 legacy `yield_enhancement`，但详细策略已按价格边界、融资经济性、call 参与质量和执行质量重构，不继承 Sell Put / Covered Call 的 underwriting RV、event 或 gate。
+- Combo Yield 产品上属于平行开仓策略，运行编排已从 Sell Put 模块迁出到独立模块；当前 runtime key 为 `combo_yield`，详细策略已按价格边界、融资经济性、call 参与质量和执行质量重构，不继承 Sell Put / Covered Call 的 underwriting RV、event 或 gate。
 
 标准生命周期：
 
@@ -271,7 +271,7 @@ output_runs / required_data / candidate trace / reject logs / marks / outcomes
 
 当前未完全对齐：
 
-- Combo Yield 内部仍使用 legacy `yield_enhancement` 文件名、配置 key 和持仓标记。
+- Combo Yield 仍有部分内部模块/函数名沿用 legacy `yield_enhancement`。
 - Close Advice 侧仍保留 legacy `yield_enhancement` 持仓退出适配。
 
 下一步目标：
@@ -286,4 +286,4 @@ position management
   -> ledger / lifecycle / close_advice / reports
 ```
 
-Combo Yield 详细开仓策略已对齐；剩余差距是 runtime 命名和持仓退出适配仍保留 legacy `yield_enhancement`。
+Combo Yield 详细开仓策略和 runtime key 已对齐；剩余差距是部分内部模块名、历史 artifact 读取和持仓退出适配仍保留 legacy `yield_enhancement`。

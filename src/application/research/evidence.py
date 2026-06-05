@@ -445,7 +445,15 @@ def _glob_many(directory: Path, patterns: tuple[str, ...]) -> list[Path]:
 
 
 def _candidate_and_reject_log_paths(directory: Path) -> tuple[list[Path], list[Path]]:
-    candidate_like = _glob_many(directory, ("*sell_put_candidates*.csv", "*sell_call_candidates*.csv", "*yield_enhancement_candidates*.csv"))
+    candidate_like = _glob_many(
+        directory,
+        (
+            "*sell_put_candidates*.csv",
+            "*sell_call_candidates*.csv",
+            "*combo_yield_candidates*.csv",
+            "*yield_enhancement_candidates*.csv",
+        ),
+    )
     reject_like = _glob_many(directory, ("*reject_log.csv",))
     candidates = [path for path in candidate_like if _is_candidate_report_path(path)]
     reject_logs = [path for path in [*candidate_like, *reject_like] if _is_reject_log_path(path)]
@@ -459,6 +467,7 @@ def _is_candidate_report_path(path: Path) -> bool:
     return (
         "sell_put_candidates" in name
         or "sell_call_candidates" in name
+        or "combo_yield_candidates" in name
         or "yield_enhancement_candidates" in name
     ) and name.endswith(".csv")
 
@@ -709,7 +718,7 @@ def _ranking_row_evidence(
             rank_explanation = explain_candidate_rank(row, mode=mode, score_weights=score_weights)
         except Exception as exc:
             rank_explanation = {"error": f"{type(exc).__name__}: {exc}"}
-    elif strategy == "yield_enhancement":
+    elif strategy == "combo_yield":
         try:
             rank_key = {
                 "sort_tuple": list(yield_enhancement_rank_key(row)),
@@ -750,7 +759,7 @@ def _ranking_row_evidence(
         "configured_thresholds": _strategy_thresholds(strategy_cfg),
         "configured_score_weights": _score_weights_payload(score_weights),
         "rank_explanation": rank_explanation,
-        "yield_enhancement_rank": rank_key,
+        "combo_yield_rank": rank_key,
     }
 
 
@@ -806,7 +815,7 @@ def _strategy_mode(strategy: str | None) -> str | None:
         return "put"
     if strategy == "sell_call":
         return "call"
-    if strategy == "yield_enhancement":
+    if strategy in {"combo_yield", "yield_enhancement"}:
         return "enhancement"
     return None
 
@@ -1026,8 +1035,8 @@ def _account_hint(path: Path) -> str | None:
 
 def _strategy_hint(path: Path) -> str | None:
     name = path.name.lower()
-    if "yield_enhancement" in name:
-        return "yield_enhancement"
+    if "combo_yield" in name or "yield_enhancement" in name:
+        return "combo_yield"
     if "sell_call" in name:
         return "sell_call"
     if "sell_put" in name:

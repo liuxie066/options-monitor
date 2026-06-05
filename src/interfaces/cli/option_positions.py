@@ -323,7 +323,7 @@ def main(argv: list[str] | None = None) -> int:
     p_adjust.add_argument('--premium-per-share', type=float, default=None)
     p_adjust.add_argument('--multiplier', type=float, default=None)
     p_adjust.add_argument('--opened-at-ms', type=int, default=None)
-    p_adjust.add_argument('--strategy', default=None, help='strategy marker, e.g. yield_enhancement')
+    p_adjust.add_argument('--strategy', default=None, help='strategy marker, e.g. combo_yield')
     p_adjust.add_argument('--leg-role', default=None, help='strategy leg role, e.g. enhancement_call')
     p_adjust.add_argument('--strategy-group-id', default=None)
     p_adjust.add_argument('--yield-enhancement-mode', default=None)

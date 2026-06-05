@@ -215,7 +215,7 @@ def test_strategy_prefetch_kwargs_uses_strategy_dte_and_strike_bounds() -> None:
                 "max_strike": 450,
             },
             "sell_call": {"enabled": True, "min_dte": 30, "max_dte": 90, "min_strike": 550},
-            "yield_enhancement": {"enabled": True, "max_dte": 120},
+            "combo_yield": {"enabled": True, "max_dte": 120},
         },
         enabled=True,
     )
@@ -236,7 +236,7 @@ def test_strategy_prefetch_kwargs_fetches_yield_enhancement_call_without_rv_for_
             "symbol": "NVDA",
             "sell_put": {"enabled": True, "strategy": "return_first", "min_dte": 20, "max_dte": 60, "max_strike": 95},
             "sell_call": {"enabled": False},
-            "yield_enhancement": {"enabled": True, "call": {"min_delta": 0.08, "max_delta": 0.20}},
+            "combo_yield": {"enabled": True, "call": {"min_delta": 0.08, "max_delta": 0.20}},
         },
         enabled=True,
     )

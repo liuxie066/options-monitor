@@ -220,8 +220,8 @@ def account_hint(path: Path) -> str | None:
 
 def strategy_hint(path: Path) -> str | None:
     name = path.name.lower()
-    if "yield_enhancement" in name:
-        return "yield_enhancement"
+    if "combo_yield" in name or "yield_enhancement" in name:
+        return "combo_yield"
     if "sell_call" in name:
         return "sell_call"
     if "sell_put" in name:

@@ -346,7 +346,7 @@ def test_run_symbol_monitoring_fetches_calls_for_sell_put_yield_enhancement(monk
         )(),
         apply_multiplier_cache_fn=lambda **kwargs: None,
         ensure_required_data_fn=lambda **kwargs: captured_required_data.update(kwargs),
-        run_sell_put_scan_fn=lambda **kwargs: [{"strategy": "sell_put"}, {"strategy": "yield_enhancement"}],
+        run_sell_put_scan_fn=lambda **kwargs: [{"strategy": "sell_put"}, {"strategy": "combo_yield"}],
         empty_sell_put_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_put"},
         run_sell_call_scan_fn=lambda **kwargs: {"strategy": "sell_call"},
         empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_call"},
@@ -364,7 +364,7 @@ def test_run_symbol_monitoring_fetches_calls_for_sell_put_yield_enhancement(monk
                     "min_dte": 20,
                     "max_dte": 60,
                 },
-                "yield_enhancement": {"enabled": True},
+                "combo_yield": {"enabled": True},
                 "sell_call": {"enabled": False},
             },
             top_n=3,
@@ -381,7 +381,7 @@ def test_run_symbol_monitoring_fetches_calls_for_sell_put_yield_enhancement(monk
     )
 
     assert len(out) == 3
-    assert [row["strategy"] for row in out] == ["sell_put", "yield_enhancement", "sell_call"]
+    assert [row["strategy"] for row in out] == ["sell_put", "combo_yield", "sell_call"]
     assert captured_plan["yield_enhancement_cfg"]["enabled"] is True
     assert captured_plan["yield_enhancement_cfg"]["objective"] == "premium_funded_long_call"
     assert captured_plan["yield_enhancement_cfg"]["output_mode"] == "separate"
@@ -430,7 +430,7 @@ def test_run_symbol_monitoring_keeps_yield_enhancement_market_put_scope_after_ac
         apply_prefilters_fn=_apply_prefilters_fn,
         apply_multiplier_cache_fn=lambda **kwargs: None,
         ensure_required_data_fn=lambda **kwargs: captured_required_data.update(kwargs),
-        run_sell_put_scan_fn=lambda **kwargs: captured_scan.update(kwargs) or {"strategy": "yield_enhancement"},
+        run_sell_put_scan_fn=lambda **kwargs: captured_scan.update(kwargs) or {"strategy": "combo_yield"},
         empty_sell_put_summary_fn=lambda symbol, symbol_cfg: (_ for _ in ()).throw(AssertionError("sell_put scan should still run for yield enhancement")),
         run_sell_call_scan_fn=lambda **kwargs: {"strategy": "sell_call"},
         empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_call"},
@@ -450,7 +450,7 @@ def test_run_symbol_monitoring_keeps_yield_enhancement_market_put_scope_after_ac
                     "min_strike": 10,
                     "max_strike": 50,
                 },
-                "yield_enhancement": {"enabled": True},
+                "combo_yield": {"enabled": True},
                 "sell_call": {"enabled": False},
             },
             top_n=3,
@@ -466,7 +466,7 @@ def test_run_symbol_monitoring_keeps_yield_enhancement_market_put_scope_after_ac
         deps=deps,
     )
 
-    assert [row["strategy"] for row in out] == ["yield_enhancement", "sell_call"]
+    assert [row["strategy"] for row in out] == ["combo_yield", "sell_call"]
     assert captured_required_data["want_put"] is True
     assert captured_required_data["want_call"] is True
     assert captured_required_data["max_strike"] == 50.0

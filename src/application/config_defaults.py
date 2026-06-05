@@ -214,7 +214,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 },
                 "use": ["put_base", "call_base"],
                 "sell_put": {"enabled": True, "min_dte": 20, "max_dte": 60},
-                "yield_enhancement": {
+                "combo_yield": {
                     "enabled": False,
                     "objective": "premium_funded_long_call",
                     "output_mode": "separate",
@@ -264,7 +264,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 },
                 "use": ["put_base", "call_base"],
                 "sell_put": {"enabled": True, "min_dte": 20, "max_dte": 90},
-                "yield_enhancement": {
+                "combo_yield": {
                     "enabled": False,
                     "objective": "premium_funded_long_call",
                     "output_mode": "separate",

@@ -14,6 +14,7 @@ REJECT_STATUSES = {"rejected", "post_filtered"}
 SCAN_FUNCTIONS = {
     "sell_put",
     "sell_call",
+    "combo_yield",
     "yield_enhancement",
     "cash_reserve",
     "share_coverage",
@@ -24,6 +25,7 @@ RISK_ALERT_RULES = {"event_source_unavailable"}
 FUNCTION_LABELS = {
     "sell_put": "Sell Put",
     "sell_call": "Covered Call",
+    "combo_yield": "组合收益",
     "yield_enhancement": "组合收益",
     "cash_reserve": "现金过滤",
     "share_coverage": "覆盖能力",
@@ -39,6 +41,7 @@ CATEGORY_LABELS = {
     "event_risk": "事件风险",
     "return_floor": "收益门槛不足",
     "cash_or_coverage": "资金或覆盖不足",
+    "combo_yield": "组合收益不成立",
     "yield_enhancement": "组合收益不成立",
     "hard_constraints": "基础条件不符",
     "other": "其他",
@@ -79,6 +82,9 @@ RULE_LABELS = {
     "cash_secured_unavailable": "担保现金不可评估",
     "hard_capacity_put": "Put 资金容量不足",
     "hard_capacity_call": "Call 覆盖能力不足",
+    "combo_yield_put_universe_empty": "Put 候选为空",
+    "combo_yield_no_pair": "没有可配对 Call",
+    "combo_yield_no_recommended_pair": "没有推荐组合",
     "yield_enhancement_put_universe_empty": "Put 候选为空",
     "yield_enhancement_no_pair": "没有可配对 Call",
     "yield_enhancement_no_recommended_pair": "没有推荐组合",
@@ -272,8 +278,8 @@ def _category_for_row(row: dict[str, Any]) -> str:
     message_l = _clean(row.get("message")).lower()
     combined = f"{rule_l} {message_l}"
 
-    if function == "yield_enhancement":
-        return "yield_enhancement"
+    if function in {"combo_yield", "yield_enhancement"}:
+        return "combo_yield"
     if any(
         token in combined
         for token in (
@@ -453,6 +459,7 @@ def _category_sort_key(category: str) -> int:
         "risk_budget": 6,
         "return_floor": 7,
         "cash_or_coverage": 8,
+        "combo_yield": 9,
         "yield_enhancement": 9,
         "hard_constraints": 10,
         "other": 11,

@@ -14,6 +14,8 @@ SELL_CALL_FAMILY = "sell_call"
 RETURN_FIRST_PROFILE = "return_first"
 SHORT_VOL_PROFILE = "short_vol"
 INSURANCE_UNDERWRITING_PROFILE = "insurance_underwriting"
+COMBO_YIELD_STRATEGY = "combo_yield"
+LEGACY_YIELD_ENHANCEMENT_STRATEGY = "yield_enhancement"
 YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE = "income_upside_enhancement"
 YIELD_ENHANCEMENT_VOL_CONVEXITY_MODE = "vol_convexity_enhancement"
 
@@ -352,7 +354,11 @@ def _snapshot_strategy_profile(position: dict[str, Any], *, family: str) -> str 
 
 
 def _is_yield_enhancement_strategy_token(value: Any) -> bool:
-    return str(value or "").strip().lower() in {"yield_enhancement", "rebound_combo"}
+    return str(value or "").strip().lower() in {
+        COMBO_YIELD_STRATEGY,
+        LEGACY_YIELD_ENHANCEMENT_STRATEGY,
+        "rebound_combo",
+    }
 
 
 def _yield_enhancement_strategy_profile(position: dict[str, Any], *, family: str) -> str | None:

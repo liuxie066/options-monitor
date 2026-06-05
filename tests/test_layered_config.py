@@ -37,7 +37,7 @@ def test_layered_config_builds_minimal_us_user_config(tmp_path: Path) -> None:
                     "symbol": "NVDA",
                     "market": "US",
                     "sell_put": {"min_strike": 150, "max_strike": 160},
-                    "yield_enhancement": {"enabled": True},
+                    "combo_yield": {"enabled": True},
                 }
             ],
         },
@@ -73,7 +73,7 @@ def test_layered_config_builds_minimal_us_user_config(tmp_path: Path) -> None:
     assert cfg["symbols"][0]["fetch"]["limit_expirations"] == 10
     assert cfg["symbols"][0]["sell_put"]["min_dte"] == 20
     assert cfg["symbols"][0]["sell_put"]["max_strike"] == 160
-    assert cfg["symbols"][0]["yield_enhancement"]["enabled"] is True
+    assert cfg["symbols"][0]["combo_yield"]["enabled"] is True
     assert cfg.get("notifications", {}).get("channel") is None
     assert cfg["notifications"]["opend_alert_cooldown_sec"] == 600
     assert cfg[GENERATED_KEY]["market"] == "us"
@@ -118,7 +118,7 @@ def test_layered_config_derives_external_holdings_defaults(tmp_path: Path) -> No
     assert cfg["templates"]["put_base"]["sell_put"]["min_open_interest"] == 20
     assert cfg["templates"]["put_base"]["sell_put"]["min_volume"] == 0
     assert cfg["templates"]["call_base"]["sell_call"]["min_open_interest"] == 20
-    assert cfg["symbols"][0]["yield_enhancement"]["min_open_interest"] == 50
+    assert cfg["symbols"][0]["combo_yield"]["min_open_interest"] == 50
     assert cfg["symbols"][0]["broker"] == "HK"
     assert cfg["symbols"][0]["sell_put"]["max_dte"] == 90
 
