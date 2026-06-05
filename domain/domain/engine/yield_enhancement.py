@@ -159,8 +159,6 @@ def compute_yield_enhancement_metrics(
     funding_ratio = (put_proceeds / call_cost) if call_cost > 0 else None
     iv = _positive(expected_move_iv)
     expected_move = spot * iv * sqrt(float(dte) / 365.0) if iv is not None and dte > 0 else None
-    if expected_move is None:
-        raise ValueError("expected_move_iv is required for yield enhancement metrics")
 
     cash_required = float(put_leg.strike) * multiplier - net_credit
     if cash_required <= 0:
@@ -173,7 +171,7 @@ def compute_yield_enhancement_metrics(
     max_loss_if_zero = float(put_leg.strike) * multiplier - net_credit
     scenario_score = None
     annualized_scenario_score = None
-    if cash_required > 0:
+    if cash_required > 0 and expected_move is not None:
         factors = tuple(float(value) for value in scenario_move_factors if value is not None)
         if factors:
             weights = _normalize_weights(scenario_weights, len(factors))
@@ -238,8 +236,6 @@ def compute_yield_enhancement_funding_decision(
     combo_metrics: YieldEnhancementMetrics,
     min_combo_net_credit: float | None = None,
     max_call_cost_to_put_credit: float | None = None,
-    min_upside_lift_to_call_cost: float | None = None,
-    min_upside_lift_to_put_credit: float | None = None,
     min_net_credit_annualized: float | None = None,
     max_combo_spread_ratio: float | None = None,
 ) -> YieldEnhancementFundingDecision:
@@ -270,8 +266,6 @@ def compute_yield_enhancement_funding_decision(
     if upside_scenario_price is not None:
         upside_lift = max(0.0, upside_scenario_price - float(call_leg.strike)) * multiplier
         upside_net_lift = upside_lift - call_total_cost
-    else:
-        reject_reasons.append("expected_move")
 
     upside_lift_to_call_cost = (upside_lift / call_total_cost) if upside_lift is not None and call_total_cost > 0 else None
     upside_lift_to_put_credit = (upside_lift / put_net_credit) if upside_lift is not None and put_net_credit > 0 else None
@@ -290,16 +284,6 @@ def compute_yield_enhancement_funding_decision(
         if call_cost_ratio is None or call_cost_ratio > max_cost_ratio:
             reject_reasons.append("call_cost_to_put_credit")
 
-    min_lift_to_cost = _safe_float(min_upside_lift_to_call_cost)
-    if min_lift_to_cost is not None:
-        if upside_lift_to_call_cost is None or upside_lift_to_call_cost < min_lift_to_cost:
-            reject_reasons.append("upside_lift_to_call_cost")
-
-    min_lift_to_credit = _safe_float(min_upside_lift_to_put_credit)
-    if min_lift_to_credit is not None:
-        if upside_lift_to_put_credit is None or upside_lift_to_put_credit < min_lift_to_credit:
-            reject_reasons.append("upside_lift_to_put_credit")
-
     max_combo_spread = _safe_float(max_combo_spread_ratio)
     if max_combo_spread is not None:
         if combo_spread_ratio is None or combo_spread_ratio > max_combo_spread:
@@ -307,9 +291,13 @@ def compute_yield_enhancement_funding_decision(
 
     spread_penalty = max(combo_spread_ratio or 0.0, 0.0) * 0.10
     cost_penalty = max(call_cost_ratio or 0.0, 0.0)
+    net_credit_retention = (combo_net_credit / put_net_credit) if put_net_credit > 0 else 0.0
+    call_delta = abs(float(call_leg.delta)) if _safe_float(call_leg.delta) is not None else 0.0
+    participation_score = call_delta if call_delta > 0 else max(0.0, 1.0 - max(float(combo_metrics.call_otm_pct), 0.0) / 0.20)
     components = {
-        "upside_lift_to_call_cost": float(upside_lift_to_call_cost or 0.0),
-        "upside_lift_to_put_credit": float(upside_lift_to_put_credit or 0.0),
+        "annualized_net_credit_yield": float(annualized_net_credit_yield or 0.0),
+        "net_credit_retention": float(net_credit_retention),
+        "call_participation": float(participation_score),
         "call_cost_penalty": -float(cost_penalty),
         "spread_penalty": -float(spread_penalty),
     }
@@ -342,49 +330,25 @@ def yield_enhancement_rank_key(row: dict[str, Any]) -> tuple[float, ...]:
         return float(default if value is None else value)
 
     funding_accepted = str(row.get("funding_accepted") or "").strip().lower() in {"1", "true", "yes"}
-    mode = str(row.get("yield_enhancement_mode") or "").strip().lower()
-    if mode == "income_upside_enhancement":
-        return (
-            -1.0 if funding_accepted else 0.0,
-            -f("net_credit_retention"),
-            f("call_cost_to_put_credit", default=999.0),
-            -f("upside_lift_to_call_cost"),
-            -f("upside_lift_to_put_credit"),
-            f("combo_spread_ratio", default=999.0),
-            -f("combo_net_credit"),
-            -f("scenario_score"),
-            -min(f("put_open_interest"), f("call_open_interest")),
-            -f("call_delta"),
-        )
-    if mode == "vol_convexity_enhancement":
-        return (
-            -1.0 if funding_accepted else 0.0,
-            -f("annualized_net_credit_yield"),
-            -f("vol_edge_score"),
-            -f("delta_target_score"),
-            -f("net_credit_retention"),
-            f("call_cost_to_put_credit", default=999.0),
-            -f("upside_lift_to_call_cost"),
-            -f("scenario_score"),
-            f("combo_spread_ratio", default=999.0),
-            -min(f("put_open_interest"), f("call_open_interest")),
-            -f("call_delta"),
-        )
+    assignment_margin = f("put_assignment_margin_pct")
+    if assignment_margin == 0.0:
+        assignment_margin = f("put_otm_pct")
+    call_participation = f("call_delta")
+    if call_participation == 0.0:
+        call_participation = max(0.0, 1.0 - max(f("call_otm_pct"), 0.0) / 0.20)
     return (
         -1.0 if funding_accepted else 0.0,
         -f("premium_funding_score"),
-        -f("upside_lift_to_call_cost"),
-        -f("upside_lift_to_put_credit"),
+        -f("net_credit_retention"),
         f("call_cost_to_put_credit", default=999.0),
+        -call_participation,
+        -assignment_margin,
+        -f("annualized_net_credit_yield"),
         f("combo_spread_ratio", default=999.0),
         -f("combo_net_credit"),
-        -f("scenario_score"),
-        -f("annualized_scenario_score"),
         f("upside_breakeven_pct_above_spot", default=999.0),
         -f("net_credit"),
-        -f("put_otm_pct"),
         -min(f("put_open_interest"), f("call_open_interest")),
-        -f("call_delta"),
     )
 
 

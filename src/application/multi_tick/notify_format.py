@@ -117,7 +117,10 @@ def _is_sell_put_line(text: str) -> bool:
 
 
 def _is_yield_enhancement_line(text: str) -> bool:
-    return " 收益增强 " in text and _looks_like_option_candidate_line(text)
+    return (
+        (" 收益增强 " in text or " 组合收益 " in text)
+        and _looks_like_option_candidate_line(text)
+    )
 
 
 def _parse_cny(s: str) -> float | None:
@@ -241,7 +244,7 @@ def build_account_message(
     lines.append(f"### 账户 {acct} · 本轮候选")
     counts_line = f"- {SELL_PUT_SECTION_LABEL} {put_n} / {COVERED_CALL_SECTION_LABEL} {call_n}"
     if enhancement_n > 0:
-        counts_line += f" / Enhance {enhancement_n}"
+        counts_line += f" / Combo Yield {enhancement_n}"
     if switch_n > 0 or close_n > 0:
         counts_line += f" / 优化器 换仓{switch_n} 平仓{close_n}"
     lines.append(counts_line)
@@ -268,7 +271,7 @@ def _strip_markdown_heading(line: str) -> str:
         s = s[4:].strip()
     if s.startswith("## "):
         s = s[3:].strip()
-    if s in {"Put:", f"{SELL_PUT_SECTION_LABEL}:", f"{COVERED_CALL_SECTION_LABEL}:", "Enhancement:"}:
+    if s in {"Put:", f"{SELL_PUT_SECTION_LABEL}:", f"{COVERED_CALL_SECTION_LABEL}:", "Enhancement:", "Combo Yield:"}:
         return s[:-1]
     return s
 
@@ -465,7 +468,7 @@ def build_account_message_compact(
     lines.append('')
     overview_parts = [f"{SELL_PUT_SECTION_LABEL} {put_n}", f"{COVERED_CALL_SECTION_LABEL} {call_n}"]
     if enhancement_n > 0:
-        overview_parts.append(f"增强 {enhancement_n}")
+        overview_parts.append(f"组合收益 {enhancement_n}")
     overview_parts.append(f"平仓 {close_action_n}")
     if close_gap_n > 0:
         overview_parts.append(f"待补 {close_gap_n}")

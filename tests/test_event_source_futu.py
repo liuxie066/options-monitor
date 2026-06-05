@@ -85,7 +85,7 @@ def test_event_prefetch_can_use_futu_provider_with_explicit_fetcher(tmp_path: Pa
             {
                 "symbol": "AAPL",
                 "use": ["put_base"],
-                "sell_put": {"enabled": True, "strategy": "short_vol"},
+                "sell_put": {"enabled": True, "strategy": "insurance_underwriting"},
             }
         ],
     }

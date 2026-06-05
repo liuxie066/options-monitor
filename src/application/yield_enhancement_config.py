@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from src.application.strategy_policy import (
+    RETURN_FIRST_PROFILE,
     SELL_PUT_FAMILY,
     YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE,
     YIELD_ENHANCEMENT_VOL_CONVEXITY_MODE,
@@ -27,6 +28,21 @@ YIELD_ENHANCEMENT_LEGACY_CALL_BOUND_FIELDS: tuple[str, ...] = (
     "min_call_otm_pct",
     "max_call_otm_pct",
 )
+YIELD_ENHANCEMENT_LEGACY_CALL_OTM_FIELDS: tuple[str, ...] = (
+    "min_otm_pct",
+    "max_otm_pct",
+)
+YIELD_ENHANCEMENT_LEGACY_PUT_OTM_FIELDS: tuple[str, ...] = (
+    "min_put_otm_pct",
+)
+YIELD_ENHANCEMENT_LEGACY_SCENARIO_FIELDS: tuple[str, ...] = (
+    "min_scenario_score",
+    "min_annualized_scenario_score",
+    "scenario_move_factors",
+    "scenario_weights",
+    "min_upside_lift_to_call_cost",
+    "min_upside_lift_to_put_credit",
+)
 YIELD_ENHANCEMENT_DEFAULTS: dict[str, Any] = {
     "enabled": False,
     "objective": "premium_funded_long_call",
@@ -35,16 +51,11 @@ YIELD_ENHANCEMENT_DEFAULTS: dict[str, Any] = {
     "min_combo_net_credit": 0.0,
     "min_net_credit_annualized": 0.08,
     "max_call_cost_to_put_credit": 1.0,
-    "min_upside_lift_to_call_cost": 1.5,
-    "min_upside_lift_to_put_credit": 0.5,
-    "min_put_otm_pct": 0.05,
     "min_open_interest": 100,
     "min_volume": 5,
     "max_spread_ratio": 0.35,
     "max_combo_spread_ratio": 0.50,
     "call": {
-        "min_otm_pct": 0.03,
-        "max_otm_pct": 0.40,
         "min_delta": 0.10,
         "max_delta": 0.45,
     },
@@ -61,12 +72,7 @@ YIELD_ENHANCEMENT_DERIVED_POLICY_DEFAULTS: dict[str, dict[str, Any]] = {
         "min_combo_net_credit": 0.0,
         "max_call_cost_to_put_credit": 0.20,
         "min_net_credit_retention": 0.75,
-        "min_upside_lift_to_call_cost": 1.5,
-        "min_upside_lift_to_put_credit": 0.5,
-        "min_put_otm_pct": 0.05,
         "call": {
-            "min_otm_pct": 0.08,
-            "max_otm_pct": 0.20,
             "min_delta": 0.05,
             "max_delta": 0.20,
         },
@@ -76,12 +82,7 @@ YIELD_ENHANCEMENT_DERIVED_POLICY_DEFAULTS: dict[str, dict[str, Any]] = {
         "min_combo_net_credit": 0.0,
         "max_call_cost_to_put_credit": 0.35,
         "min_net_credit_retention": None,
-        "min_upside_lift_to_call_cost": 1.2,
-        "min_upside_lift_to_put_credit": 0.25,
-        "min_put_otm_pct": 0.05,
         "call": {
-            "min_otm_pct": 0.05,
-            "max_otm_pct": 0.12,
             "min_delta": 0.15,
             "max_delta": 0.30,
         },
@@ -200,9 +201,8 @@ def derive_yield_enhancement_policy(
     raw_cfg = _as_dict(yield_enhancement_cfg)
     explicit_fields = _explicit_fields(raw_cfg)
     enabled = bool(raw_cfg.get("enabled", False))
-    sell_put_strategy = _normalize_sell_put_strategy(sell_put_cfg)
-    semantics = strategy_semantics_for_profile(family=SELL_PUT_FAMILY, profile=sell_put_strategy)
-    mode = str(semantics.yield_enhancement_mode or YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE)
+    combo_strategy = RETURN_FIRST_PROFILE
+    mode = YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE
 
     base = yield_enhancement_defaults_for_market(market)
     derived_defaults = YIELD_ENHANCEMENT_DERIVED_POLICY_DEFAULTS.get(mode) or {}
@@ -210,17 +210,17 @@ def derive_yield_enhancement_policy(
     cfg = _deep_merge_dict(cfg, _explicit_overrides(raw_cfg, explicit_fields))
     cfg["enabled"] = bool(enabled)
     cfg["yield_enhancement_mode"] = mode
-    cfg["derived_from_sell_put_strategy"] = sell_put_strategy
-    cfg["yield_enhancement_requires_rv"] = bool(semantics.yield_enhancement_requires_rv)
-    cfg["yield_enhancement_uses_short_vol_gate"] = bool(semantics.yield_enhancement_uses_short_vol_gate)
+    cfg["derived_from_sell_put_strategy"] = combo_strategy
+    cfg["yield_enhancement_requires_rv"] = False
+    cfg["yield_enhancement_uses_short_vol_gate"] = False
     output_mode = str(cfg.get("output_mode") or "").strip().lower()
     cfg["output_mode"] = output_mode if output_mode in YIELD_ENHANCEMENT_OUTPUT_MODES else "separate"
     return YieldEnhancementPolicy(
         enabled=bool(enabled),
         mode=mode,
-        derived_from_sell_put_strategy=sell_put_strategy,
-        requires_realized_volatility=bool(semantics.yield_enhancement_requires_rv),
-        uses_short_vol_gate=bool(semantics.yield_enhancement_uses_short_vol_gate),
+        derived_from_sell_put_strategy=combo_strategy,
+        requires_realized_volatility=False,
+        uses_short_vol_gate=False,
         config=cfg,
         explicit_fields=explicit_fields,
     )

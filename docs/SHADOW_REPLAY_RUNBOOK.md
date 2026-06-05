@@ -143,11 +143,12 @@ output_shared/research/remote_archive/prod/
 ```bash
 ./om research archive pull --remote prod --ssh-target deploy@example --since-days 7
 ./om research archive pull --remote prod --ssh-target deploy@example --since-days 7 --write
+./om research archive pull --remote prod --ssh-target deploy@example --require-replay-evidence --write
 ./om research archive verify --remote prod
 ./om research archive inventory --remote prod
 ```
 
-`pull` 使用 `rsync` 增量同步，不在远端打 tar 包；默认 dry-run，显式 `--write` 才写本地归档和 manifest。没有 SSH 时，也可以用已挂载 runtime 根目录：
+`pull` 使用 `rsync` 增量同步，不在远端打 tar 包；默认 dry-run，显式 `--write` 才写本地归档和 manifest。`--require-replay-evidence` 会在源端只选择含候选 CSV、reject log 或 `candidate_filter_trace.jsonl` 的 run，避免把 scheduler skip / tick 心跳当 replay 样本。没有 SSH 时，也可以用已挂载 runtime 根目录：
 
 ```bash
 ./om research archive pull --remote prod --source-root /Volumes/prod-runtime --run-id <run-id> --write
@@ -159,6 +160,8 @@ output_shared/research/remote_archive/prod/
 ./om research archive build-datasets --remote prod --market us
 ./om research archive build-datasets --remote prod --market us --write
 ```
+
+`build-datasets --market us|hk --write` 会按归档 run 的候选/reject 文件名推断市场并过滤样本；不传 `--market` 才会保留所有市场。dataset build 默认会尝试读取每个归档 run 内的 `required_data/parsed/*_required_data.csv`，给 dataset 生成第一批本地 `mark_path_snapshots.jsonl`。这是 scan-time mark，不等于最终 outcome；后续仍要用 `run-data-plan` / `collect-marks --source opend` 追加路径采样，再由 `settle --write` 产出 `outcome_facts.jsonl`。如需只构建候选/拒绝样本，可加 `--no-mark-from-run-required-data`。
 
 远端清理必须独立执行。默认只预览远端 `service cleanup`；加 `--confirm` 前会读取本地 `output_shared/research/remote_archive/prod/manifests/inventory.latest.json`，确认远端计划删除的每个 run 都已经在本地归档中 verified：
 

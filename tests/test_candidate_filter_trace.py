@@ -250,3 +250,83 @@ def test_candidate_rank_explain_reads_run_account_candidates(tmp_path: Path) -> 
     assert data["source_files"][0]["path"] == ".../nvda_sell_put_candidates_labeled.csv"
     assert data["groups"][0]["baseline"]["name"] == "return_then_income"
     assert meta["source_files"][0]["row_count"] == 1
+
+
+def test_candidate_rank_explain_uses_underwriting_policy_for_underwriting_csv(tmp_path: Path) -> None:
+    from src.application.agent_tool_candidate_rank import candidate_rank_explain_tool
+
+    candidate_path = tmp_path / "sell_put_candidates_labeled.csv"
+    candidate_path.write_text(
+        (
+            "symbol,option_type,contract_symbol,expiration,strike,max_strike,spot,strategy_profile,"
+            "premium_edge_score,strike_safety_margin_pct,net_income,spread_ratio,"
+            "annualized_net_return_on_cash_basis,iv_rv_ratio,iv_minus_rv,dte\n"
+            "NVDA,put,NVDA_NEAR,2026-06-19,105,110,110,insurance_underwriting,"
+            "1.10,0.045455,300,0.05,0.30,1.20,0.08,30\n"
+            "NVDA,put,NVDA_SAFE,2026-06-19,95,110,110,insurance_underwriting,"
+            "1.10,0.136364,180,0.05,0.12,1.20,0.08,30\n"
+        ),
+        encoding="utf-8",
+    )
+
+    data, warnings, meta = candidate_rank_explain_tool(
+        {"candidate_path": str(candidate_path), "mode": "put", "top_n": 2, "compare_baseline": True},
+        repo_base=lambda: tmp_path,
+        resolve_output_root=lambda _value: tmp_path / "output_shared" / "agent_tools",
+        mask_path=lambda path: f".../{Path(path).name}" if path else None,
+    )
+
+    assert warnings == []
+    assert data["groups"][0]["ranking_policy"] == "insurance_underwriting"
+    assert data["ranked"][0]["contract_symbol"] == "NVDA_SAFE"
+    assert data["ranked"][0]["ranking_policy"] == "insurance_underwriting"
+    assert data["ranked"][0]["score_components"]["strike_safety_margin_pct"] > data["ranked"][1]["score_components"][
+        "strike_safety_margin_pct"
+    ]
+
+
+def test_candidate_rank_explain_partitions_mixed_ranking_policies(tmp_path: Path) -> None:
+    from src.application.agent_tool_candidate_rank import candidate_rank_explain_tool
+
+    legacy_path = tmp_path / "legacy_sell_put_candidates_labeled.csv"
+    underwriting_path = tmp_path / "underwriting_sell_put_candidates_labeled.csv"
+    legacy_path.write_text(
+        (
+            "symbol,option_type,contract_symbol,expiration,strike,spot,"
+            "annualized_net_return_on_cash_basis,net_income,spread_ratio,open_interest,volume,dte,strategy_profile\n"
+            "NVDA,put,NVDA_LEGACY,2026-06-19,95,110,0.30,500,0.05,500,20,30,return_first\n"
+        ),
+        encoding="utf-8",
+    )
+    underwriting_path.write_text(
+        (
+            "symbol,option_type,contract_symbol,expiration,strike,max_strike,spot,strategy_profile,"
+            "premium_edge_score,strike_safety_margin_pct,net_income,spread_ratio,"
+            "annualized_net_return_on_cash_basis,dte\n"
+            "AMD,put,AMD_UW,2026-06-19,80,90,100,insurance_underwriting,"
+            "0.10,0.111111,100,0.05,0.10,30\n"
+        ),
+        encoding="utf-8",
+    )
+
+    data, warnings, meta = candidate_rank_explain_tool(
+        {
+            "candidate_paths": [str(legacy_path), str(underwriting_path)],
+            "mode": "put",
+            "top_n": 5,
+            "score_weights": {"annualized_return": 1.0},
+        },
+        repo_base=lambda: tmp_path,
+        resolve_output_root=lambda _value: tmp_path / "output_shared" / "agent_tools",
+        mask_path=lambda path: f".../{Path(path).name}" if path else None,
+    )
+
+    groups_by_policy = {group["ranking_policy"]: group for group in data["groups"]}
+    assert warnings == []
+    assert len(data["groups"]) == 2
+    assert groups_by_policy["candidate_engine"]["ranked"][0]["contract_symbol"] == "NVDA_LEGACY"
+    assert groups_by_policy["candidate_engine"].get("score_weights_ignored") is None
+    assert groups_by_policy["insurance_underwriting"]["ranked"][0]["contract_symbol"] == "AMD_UW"
+    assert groups_by_policy["insurance_underwriting"]["score_weights_ignored"] is True
+    assert meta["source_files"][0]["row_count"] == 1
+    assert meta["source_files"][1]["row_count"] == 1

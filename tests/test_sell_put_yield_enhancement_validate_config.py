@@ -120,7 +120,7 @@ def test_validate_config_rejects_invalid_yield_enhancement_objective() -> None:
         assert "NVDA.yield_enhancement.objective" in str(exc)
 
 
-def test_validate_config_rejects_invalid_yield_enhancement_funding_ratio() -> None:
+def test_validate_config_rejects_removed_yield_enhancement_scenario_fields() -> None:
     from src.application.config_validator import validate_config
 
     cfg = {
@@ -146,7 +146,7 @@ def test_validate_config_rejects_invalid_yield_enhancement_funding_ratio() -> No
         validate_config(cfg)
         raise AssertionError("expected config validation failure")
     except SystemExit as exc:
-        assert "NVDA.yield_enhancement.min_upside_lift_to_call_cost" in str(exc)
+        assert "NVDA.yield_enhancement has removed scenario fields: min_upside_lift_to_call_cost" in str(exc)
 
 
 def test_validate_config_rejects_invalid_yield_enhancement_net_credit_annualized() -> None:
@@ -159,7 +159,7 @@ def test_validate_config_rejects_invalid_yield_enhancement_net_credit_annualized
                 "symbol": "NVDA",
                 "sell_put": {
                     "enabled": True,
-                    "strategy": "short_vol",
+                    "strategy": "insurance_underwriting",
                     "min_dte": 20,
                     "max_dte": 60,
                 },
@@ -207,7 +207,7 @@ def test_validate_config_rejects_invalid_template_yield_enhancement_call_bounds(
         assert "templates.put_base.yield_enhancement.call.min_strike" in str(exc)
 
 
-def test_validate_config_rejects_invalid_template_yield_enhancement_call_otm_bounds() -> None:
+def test_validate_config_rejects_removed_template_yield_enhancement_call_otm_bounds() -> None:
     from src.application.config_validator import validate_config
 
     cfg = {
@@ -232,7 +232,7 @@ def test_validate_config_rejects_invalid_template_yield_enhancement_call_otm_bou
         validate_config(cfg)
         raise AssertionError("expected config validation failure")
     except SystemExit as exc:
-        assert "templates.put_base.yield_enhancement.call.min_otm_pct" in str(exc)
+        assert "templates.put_base.yield_enhancement.call has removed OTM fields: min_otm_pct, max_otm_pct" in str(exc)
 
 
 def test_validate_config_rejects_nested_sell_put_yield_enhancement_template_path() -> None:

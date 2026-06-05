@@ -81,6 +81,7 @@ def _process_payload(
     on_result_fn: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
     retry_failed_deal: bool = False,
     source: str = "push",
+    allow_external_lookup: bool = True,
 ) -> dict[str, Any]:
     opend_config = opend_fetch_kwargs(config) if isinstance(config, dict) else None
     normalize_fn = normalize_trade_deal
@@ -95,6 +96,7 @@ def _process_payload(
             host=host,
             port=port,
             opend_fetch_config=opend_config,
+            allow_opend_refresh=bool(allow_external_lookup),
         )
     def _enrich_payload(raw: dict[str, Any]) -> Any:
         return enrich_trade_push_payload_with_account_id(
@@ -115,7 +117,7 @@ def _process_payload(
         write_trade_intake_state_fn=write_trade_intake_state,
         upsert_deal_state_fn=upsert_deal_state,
         append_trade_intake_audit_fn=append_trade_intake_audit,
-        enrich_trade_payload_fn=_enrich_payload,
+        enrich_trade_payload_fn=_enrich_payload if allow_external_lookup else None,
         normalize_trade_deal_fn=normalize_fn,
         resolve_trade_deal_fn=resolve_trade_deal,
         on_result_fn=on_result_fn,
@@ -263,6 +265,7 @@ def main(argv: list[str] | None = None) -> int:
                 on_result_fn=receipt_callback,
                 retry_failed_deal=bool(args.retry_failed),
                 source="manual",
+                allow_external_lookup=bool(apply_changes),
             )
         if apply_changes:
             _write_listener_status(

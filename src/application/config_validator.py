@@ -22,7 +22,10 @@ from src.application.opend_fetch_config import OPEND_RATE_LIMIT_ENDPOINT_KEYS
 from src.application.yield_enhancement_config import (
     YIELD_ENHANCEMENT_FUNDING_MODES,
     YIELD_ENHANCEMENT_LEGACY_CALL_BOUND_FIELDS,
+    YIELD_ENHANCEMENT_LEGACY_CALL_OTM_FIELDS,
     YIELD_ENHANCEMENT_LEGACY_OPTIMIZER_FIELDS,
+    YIELD_ENHANCEMENT_LEGACY_PUT_OTM_FIELDS,
+    YIELD_ENHANCEMENT_LEGACY_SCENARIO_FIELDS,
     YIELD_ENHANCEMENT_OBJECTIVES,
     YIELD_ENHANCEMENT_OUTPUT_MODES,
 )
@@ -42,6 +45,25 @@ SCORE_WEIGHT_FIELDS = (
     'concentration',
     'path_risk',
 )
+OPENING_SHORT_VOL_ALLOWED_FIELDS = (
+    'min_iv_rv_ratio',
+    'min_iv_minus_rv',
+    'reject_event_risk',
+    'event_source_fail_closed',
+)
+OPENING_SHORT_VOL_REMOVED_FIELDS = (
+    'min_abs_delta',
+    'max_abs_delta',
+    'target_abs_delta',
+    'enable_stress_check',
+    'stress_down_sigma_multiple',
+    'max_put_sigma_stress_loss_nav_pct',
+    'gap_down_pct',
+    'max_put_gap_down_loss_nav_pct',
+    'call_gap_up_pct',
+    'max_call_gap_up_opportunity_cost_nav_pct',
+    'max_call_gap_up_opportunity_cost_to_premium',
+)
 YIELD_ENHANCEMENT_LIQUIDITY_FIELDS = LIQUIDITY_ALLOWED_GLOBAL_FIELDS + (
     'max_combo_spread_ratio',
 )
@@ -56,6 +78,7 @@ REMOVED_STRATEGY_FILTER_FIELDS = (
 )
 SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS = LIQUIDITY_ALLOWED_GLOBAL_FIELDS + REMOVED_STRATEGY_FILTER_FIELDS + ('event_risk',)
 LEGACY_SELL_CALL_FETCH_FIELDS = ('target_otm_pct_min', 'target_otm_pct_max')
+LEGACY_SELL_PUT_OTM_FIELDS = ('min_otm_pct',)
 YIELD_ENHANCEMENT_REMOVED_TARGET_FIELDS = (
     'target_price',
     'target_price_mode',
@@ -301,12 +324,16 @@ def _validate_score_weights(cfg: dict, path: str) -> None:
         _validate_optional_non_negative_number(raw, key, f'{path}.score_weights')
 
 
-def _validate_short_vol_strategy_config(cfg: dict, path: str) -> None:
+def _validate_opening_strategy_config(cfg: dict, path: str) -> None:
     strategy = None
     if 'strategy' in cfg and cfg.get('strategy') is not None:
         strategy = str(cfg.get('strategy') or '').strip().lower()
-        if strategy not in {'return_first', 'short_vol'}:
-            die(f'{path}.strategy must be one of: return_first, short_vol')
+        if strategy == 'short_vol':
+            die(f'{path}.strategy=short_vol is no longer supported for opening config; use insurance_underwriting')
+        if strategy not in {'return_first', 'insurance_underwriting'}:
+            die(f'{path}.strategy must be one of: return_first, insurance_underwriting')
+    if strategy == 'insurance_underwriting' and cfg.get('score_weights') is not None:
+        die(f'{path}.score_weights is not used by insurance_underwriting; remove it or use return_first')
     event_risk = cfg.get('event_risk')
     if event_risk is not None:
         if not isinstance(event_risk, dict):
@@ -316,33 +343,27 @@ def _validate_short_vol_strategy_config(cfg: dict, path: str) -> None:
     if short_vol is not None:
         if not isinstance(short_vol, dict):
             die(f'{path}.short_vol must be an object')
-        for key in ('min_iv_rv_ratio', 'min_iv_minus_rv', 'min_abs_delta', 'max_abs_delta', 'target_abs_delta'):
+        removed_short_vol_keys = [key for key in OPENING_SHORT_VOL_REMOVED_FIELDS if key in short_vol]
+        if removed_short_vol_keys:
+            die(
+                f"{path}.short_vol has removed opening fields: {', '.join(removed_short_vol_keys)}; "
+                "insurance_underwriting only uses min_iv_rv_ratio, min_iv_minus_rv, reject_event_risk, event_source_fail_closed"
+            )
+        unsupported_short_vol_keys = [
+            str(key)
+            for key in short_vol.keys()
+            if key not in OPENING_SHORT_VOL_ALLOWED_FIELDS and key not in OPENING_SHORT_VOL_REMOVED_FIELDS
+        ]
+        if unsupported_short_vol_keys:
+            die(
+                f"{path}.short_vol has unsupported keys: {', '.join(unsupported_short_vol_keys)}; "
+                "allowed keys: min_iv_rv_ratio, min_iv_minus_rv, reject_event_risk, event_source_fail_closed"
+            )
+        for key in ('min_iv_rv_ratio', 'min_iv_minus_rv'):
             _validate_optional_non_negative_number(short_vol, key, f'{path}.short_vol')
-        for key in ('reject_event_risk', 'event_source_fail_closed', 'enable_stress_check'):
+        for key in ('reject_event_risk', 'event_source_fail_closed'):
             _validate_optional_bool(short_vol, key, f'{path}.short_vol')
-        _validate_optional_non_negative_number(short_vol, 'stress_down_sigma_multiple', f'{path}.short_vol')
-        for key in (
-            'max_put_sigma_stress_loss_nav_pct',
-            'gap_down_pct',
-            'max_put_gap_down_loss_nav_pct',
-            'call_gap_up_pct',
-            'max_call_gap_up_opportunity_cost_nav_pct',
-        ):
-            _validate_optional_unit_interval_number(short_vol, key, f'{path}.short_vol')
-        _validate_optional_non_negative_number(
-            short_vol,
-            'max_call_gap_up_opportunity_cost_to_premium',
-            f'{path}.short_vol',
-        )
-        min_abs = short_vol.get('min_abs_delta')
-        max_abs = short_vol.get('max_abs_delta')
-        if min_abs is not None and max_abs is not None:
-            try:
-                if float(min_abs) > float(max_abs):
-                    die(f'{path}.short_vol.min_abs_delta > {path}.short_vol.max_abs_delta')
-            except Exception:
-                die(f'{path}.short_vol.min_abs_delta/max_abs_delta must be numbers')
-    if strategy == 'short_vol' and isinstance(event_risk, dict) and event_risk.get('enabled') is False:
+    if strategy == 'insurance_underwriting' and isinstance(event_risk, dict) and event_risk.get('enabled') is False:
         fail_closed = True
         if isinstance(short_vol, dict) and short_vol.get('event_source_fail_closed') is not None:
             fail_closed = bool(short_vol.get('event_source_fail_closed'))
@@ -353,10 +374,7 @@ def _validate_short_vol_strategy_config(cfg: dict, path: str) -> None:
             )
     concentration = cfg.get('concentration')
     if concentration is not None:
-        if not isinstance(concentration, dict):
-            die(f'{path}.concentration must be an object')
-        for key in ('max_single_trade_nav_pct', 'max_symbol_nav_pct', 'max_total_short_put_nav_pct'):
-            _validate_optional_unit_interval_number(concentration, key, f'{path}.concentration')
+        die(f'{path}.concentration has been removed from opening config; manage assignment exposure outside candidate scan')
 
 
 def _use_list(item: dict) -> list[str]:
@@ -455,7 +473,7 @@ def _validate_yield_enhancement_cfg(cfg: dict, path: str):
     if not isinstance(cfg, dict):
         die(f'{path} must be an object')
     if 'strategy' in cfg or 'strategy_profile' in cfg:
-        die(f'{path}.strategy is not supported; yield_enhancement uses sell_put.strategy')
+        die(f'{path}.strategy is not supported; yield_enhancement is isolated from sell_put.strategy in this release')
     bad_keys = [k for k in REMOVED_STRATEGY_FILTER_FIELDS if k in cfg]
     if bad_keys:
         die(f"{path} has unsupported strategy filter keys: {', '.join(bad_keys)}")
@@ -463,19 +481,31 @@ def _validate_yield_enhancement_cfg(cfg: dict, path: str):
     if removed_target_keys:
         die(
             f"{path} has removed target-price fields: {', '.join(removed_target_keys)}; "
-            "yield_enhancement now uses expected_move scenario scoring"
+            "yield_enhancement now uses price bounds and funding economics"
+        )
+    legacy_scenario_keys = [k for k in YIELD_ENHANCEMENT_LEGACY_SCENARIO_FIELDS if k in cfg]
+    if legacy_scenario_keys:
+        die(
+            f"{path} has removed scenario fields: {', '.join(legacy_scenario_keys)}; "
+            "use funding, call cost, strike bounds, and delta controls instead"
         )
     legacy_optimizer_keys = [k for k in YIELD_ENHANCEMENT_LEGACY_OPTIMIZER_FIELDS if k in cfg]
     if legacy_optimizer_keys:
         die(
             f"{path} has removed optimizer fields: {', '.join(legacy_optimizer_keys)}; "
-            "use premium_funded_long_call funding/upside fields instead"
+            "use funding, call cost, strike bounds, and delta controls instead"
         )
     legacy_call_bound_keys = [k for k in YIELD_ENHANCEMENT_LEGACY_CALL_BOUND_FIELDS if k in cfg]
     if legacy_call_bound_keys:
         die(
             f"{path} has removed call OTM fields: {', '.join(legacy_call_bound_keys)}; "
-            "use yield_enhancement.call.min_otm_pct/max_otm_pct instead"
+            "use yield_enhancement.call.min_strike/max_strike instead"
+        )
+    legacy_put_otm_keys = [k for k in YIELD_ENHANCEMENT_LEGACY_PUT_OTM_FIELDS if k in cfg]
+    if legacy_put_otm_keys:
+        die(
+            f"{path} has removed put OTM fields: {', '.join(legacy_put_otm_keys)}; "
+            "use sell_put.min_strike/max_strike assignment bounds instead"
         )
     if 'objective' in cfg and cfg.get('objective') is not None:
         objective = str(cfg.get('objective') or '').strip().lower()
@@ -488,18 +518,11 @@ def _validate_yield_enhancement_cfg(cfg: dict, path: str):
     for key in YIELD_ENHANCEMENT_LIQUIDITY_FIELDS:
         _validate_optional_non_negative_number(cfg, key, path)
     for key in (
-        'min_scenario_score',
-        'min_annualized_scenario_score',
-        'min_put_otm_pct',
         'min_combo_net_credit',
         'min_net_credit_annualized',
         'max_call_cost_to_put_credit',
-        'min_upside_lift_to_call_cost',
-        'min_upside_lift_to_put_credit',
     ):
         _validate_optional_non_negative_number(cfg, key, path)
-    _validate_optional_non_negative_number_list(cfg, 'scenario_move_factors', path)
-    _validate_optional_non_negative_number_list(cfg, 'scenario_weights', path)
     if 'funding_mode' in cfg and cfg.get('funding_mode') is not None:
         mode = str(cfg.get('funding_mode') or '').strip().lower()
         if mode not in YIELD_ENHANCEMENT_FUNDING_MODES:
@@ -517,16 +540,12 @@ def _validate_yield_enhancement_cfg(cfg: dict, path: str):
     if isinstance(call_leg, dict):
         _validate_optional_dte_window(call_leg, f'{path}.call')
         _validate_optional_strike_bounds(call_leg, f'{path}.call')
-        for key in ('min_otm_pct', 'max_otm_pct'):
-            _validate_optional_non_negative_number(call_leg, key, f'{path}.call')
-        min_call_otm = call_leg.get('min_otm_pct')
-        max_call_otm = call_leg.get('max_otm_pct')
-        if (min_call_otm is not None) and (max_call_otm is not None):
-            try:
-                if float(min_call_otm) > float(max_call_otm):
-                    die(f'{path}.call.min_otm_pct > {path}.call.max_otm_pct')
-            except Exception:
-                die(f'{path}.call.min_otm_pct/max_otm_pct must be numbers')
+        legacy_call_otm_keys = [k for k in YIELD_ENHANCEMENT_LEGACY_CALL_OTM_FIELDS if k in call_leg]
+        if legacy_call_otm_keys:
+            die(
+                f"{path}.call has removed OTM fields: {', '.join(legacy_call_otm_keys)}; "
+                "use call.min_strike/max_strike and min_delta/max_delta instead"
+            )
         for key in ('min_delta', 'max_delta'):
             _validate_optional_unit_interval_number(call_leg, key, f'{path}.call')
         min_delta = call_leg.get('min_delta')
@@ -906,16 +925,17 @@ def validate_config(cfg: dict):
                             f"templates.{profile_name}.{side} has removed legacy fetch planning keys: "
                             f"{', '.join(unsupported_fetch_keys)}; use min_strike/max_strike only"
                         )
-                _validate_short_vol_strategy_config(
+                _validate_opening_strategy_config(
                     side_cfg,
                     f'templates.{profile_name}.{side}',
                 )
                 if side == 'sell_put':
-                    _validate_optional_unit_interval_number(
-                        side_cfg,
-                        'min_otm_pct',
-                        f'templates.{profile_name}.{side}',
-                    )
+                    unsupported_put_otm_keys = [k for k in LEGACY_SELL_PUT_OTM_FIELDS if k in side_cfg]
+                    if unsupported_put_otm_keys:
+                        die(
+                            f"templates.{profile_name}.{side} has removed OTM fields: "
+                            f"{', '.join(unsupported_put_otm_keys)}; use min_strike/max_strike only"
+                        )
                     yield_enhancement_cfg = side_cfg.get('yield_enhancement')
                     if yield_enhancement_cfg is not None:
                         die(
@@ -961,8 +981,13 @@ def validate_config(cfg: dict):
         if sp and not isinstance(sp, dict):
             die(f"{sym}.sell_put must be an object")
         _validate_score_weights(sp, f'{sym}.sell_put')
-        _validate_short_vol_strategy_config(sp, f'{sym}.sell_put')
-        _validate_optional_unit_interval_number(sp, 'min_otm_pct', f'{sym}.sell_put')
+        _validate_opening_strategy_config(sp, f'{sym}.sell_put')
+        unsupported_put_otm_keys = [k for k in LEGACY_SELL_PUT_OTM_FIELDS if k in sp]
+        if unsupported_put_otm_keys:
+            die(
+                f"{sym}.sell_put has removed OTM fields: "
+                f"{', '.join(unsupported_put_otm_keys)}; use min_strike/max_strike only"
+            )
         bad_keys = [k for k in SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS if k in sp]
         if bad_keys:
             die(f"{sym}.sell_put has forbidden symbol-level strategy filter keys: {', '.join(bad_keys)}")
@@ -1007,7 +1032,7 @@ def validate_config(cfg: dict):
         if sc and not isinstance(sc, dict):
             die(f"{sym}.sell_call must be an object")
         _validate_score_weights(sc, f'{sym}.sell_call')
-        _validate_short_vol_strategy_config(sc, f'{sym}.sell_call')
+        _validate_opening_strategy_config(sc, f'{sym}.sell_call')
         bad_keys = [k for k in SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS if k in sc]
         if bad_keys:
             die(f"{sym}.sell_call has forbidden symbol-level strategy filter keys: {', '.join(bad_keys)}")

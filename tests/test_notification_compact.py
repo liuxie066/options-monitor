@@ -26,16 +26,16 @@ def test_build_notification_block_compact_yield_enhancement() -> None:
 
     out = _build_notification_block_compact(
         symbol_name="英伟达",
-        action_label="收益增强",
+        action_label="组合收益",
         contract="2026-06-19 95+110",
         income_line="- 收益: 组合净权利金=95 | 年化 8% | 场景评分=0.82",
         contract_line="- 组合: Put=95 | Call=110 | DTE=45",
         risk_line="- 风控: 风险=中性 | Call delta=0.15 | Call ask=1.2",
         detail_line="- 预期波动: expected_move=5.2 | IV=0.35",
-        note="收益增强推荐",
+        note="组合收益推荐",
     )
 
-    assert "💎 收益增强 英伟达 95P+110C @ 06-19" in out
+    assert "💎 组合收益 英伟达 95P+110C @ 06-19" in out
     assert "净权利金 95" in out
     assert "评分 0.820" in out
     assert "Call Δ 0.15" in out
@@ -104,7 +104,7 @@ def test_build_notification_compact_style_uses_markdown_enhancement_heading() ->
     )
     out = build_notification("", alerts_text, render_style="compact")
 
-    assert "### Enhancement" in out
+    assert "### Combo Yield" in out
     assert "🎯卖2.150/买1.2" in out
     assert "卖0.950/买1.2" not in out
 

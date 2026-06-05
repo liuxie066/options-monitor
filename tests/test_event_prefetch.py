@@ -17,7 +17,7 @@ def _cfg() -> dict:
             {
                 "symbol": "AAPL",
                 "use": ["put_base", "call_base"],
-                "sell_put": {"enabled": True, "strategy": "short_vol"},
+                "sell_put": {"enabled": True, "strategy": "insurance_underwriting"},
                 "sell_call": {"enabled": True},
                 "yield_enhancement": {"enabled": True},
             }
@@ -196,7 +196,7 @@ def test_event_prefetch_market_rules_keep_hk_on_futu(tmp_path: Path) -> None:
 
     cfg = _cfg()
     cfg["symbols"] = [
-        {"symbol": "0700.HK", "use": ["put_base"], "sell_put": {"enabled": True, "strategy": "short_vol"}}
+        {"symbol": "0700.HK", "use": ["put_base"], "sell_put": {"enabled": True, "strategy": "insurance_underwriting"}}
     ]
     cfg["runtime"] = {
         "event_risk_source": {

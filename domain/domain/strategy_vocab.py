@@ -37,10 +37,10 @@ STRATEGY_TERMS: tuple[StrategyTerm, ...] = (
     ),
     StrategyTerm(
         internal_id=STRATEGY_YIELD_ENHANCEMENT,
-        display_name="Yield Enhancement",
-        section_label="Enhancement",
-        action_label="收益增强",
-        aliases=("yield enhancement", "yield-enhancement", "enhancement", "ye"),
+        display_name="Combo Yield",
+        section_label="Combo Yield",
+        action_label="组合收益",
+        aliases=("yield enhancement", "yield-enhancement", "enhancement", "combo yield", "combo-yield", "combo_yield", "ye"),
     ),
     StrategyTerm(
         internal_id=STRATEGY_CLOSE_ADVICE,
