@@ -16,6 +16,7 @@ from domain.domain.ledger.position_fields import (
     build_position_lot_fields,
     normalize_currency,
     parse_exp_to_ms,
+    strategy_metadata_fields_from_payload,
 )
 from domain.domain.trade_contract_identity import normalize_trade_side
 from src.application.ledger.event_codec import import_stored_trade_events, trade_event_payload_dict
@@ -121,6 +122,7 @@ def _base_fields_for_lot(
                 strategy_snapshot=_strategy_snapshot_from_payload(raw_payload),
             )
         ).to_dict()
+    fields.update(strategy_metadata_fields_from_payload(raw_payload))
     fields["source_event_id"] = lot.open_event_id
     fields["event_source_type"] = str(legacy_open_event.get("source_type") or "").strip()
     fields["event_source_name"] = str(legacy_open_event.get("source_name") or (open_event.source if open_event else "")).strip()

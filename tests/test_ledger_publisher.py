@@ -127,6 +127,43 @@ def test_publisher_preserves_open_strategy_snapshot() -> None:
     }
 
 
+def test_publisher_preserves_open_strategy_metadata_fields() -> None:
+    projection = project_stored_trade_events_to_position_lots(
+        [
+            TradeEvent(
+                event_id="open-pdd-call",
+                event_type="open",
+                event_time_ms=1000,
+                contract_key=_key(
+                    strike=100.0,
+                    expiration_ymd="2026-07-17",
+                    option_type="call",
+                    position_side="long",
+                ),
+                contracts=1,
+                price=0.73,
+                currency="USD",
+                source="opend_push",
+                multiplier=100,
+                lot_id="lot_open-pdd-call",
+                raw_payload={
+                    "strategy": "combo_yield",
+                    "leg_role": "enhancement_call",
+                    "strategy_group_id": "combo_yield:lot_pdd_short_put",
+                    "yield_enhancement_mode": "income_upside_enhancement",
+                },
+            ),
+        ]
+    )
+
+    assert projection.diagnostics == []
+    fields = projection.lots[0].fields
+    assert fields["strategy"] == "combo_yield"
+    assert fields["leg_role"] == "enhancement_call"
+    assert fields["strategy_group_id"] == "combo_yield:lot_pdd_short_put"
+    assert fields["yield_enhancement_mode"] == "income_upside_enhancement"
+
+
 def test_publisher_applies_adjust_strategy_metadata_patch() -> None:
     open_key = _key(
         strike=140.0,

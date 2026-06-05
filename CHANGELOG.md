@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.220 - 2026-06-06
+
+### Fixed
+- Fixed Futu trade intake for Combo Yield long-call legs when OpenD deals omit open/close position effect by resolving against current lots first, then safely recording unmatched buy calls as Combo Yield long calls.
+- Preserved Combo Yield strategy metadata on broker-open previews, preflight results, and projected `position_lots` so paired legs share a stable account/symbol/expiration group id even when the sell-put leg arrives later.
+
 ## 1.2.219 - 2026-06-05
 
 ### Changed

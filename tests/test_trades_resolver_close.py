@@ -198,6 +198,24 @@ def test_resolve_trade_close_dry_run_builds_patches() -> None:
     assert result.operations[0]["patch"]["close_type"] == "buy_to_close"
 
 
+def test_resolve_unknown_buy_call_prefers_existing_short_call_close() -> None:
+    short_call = _record("short-call", 100, 1)
+    short_call["fields"]["option_type"] = "call"
+    repo = FakeRepo([short_call])
+
+    result = resolve_trade_deal(
+        _deal(option_type="call", side="buy", position_effect=None, contracts=1),
+        repo=repo,
+        state={},
+        apply_changes=False,
+    )
+
+    assert result.status == "dry_run"
+    assert result.action == "close"
+    assert result.operations[0]["record_id"] == "short-call"
+    assert result.diagnostics["position_effect_inference"]["decision"] == "close"
+
+
 def test_resolve_trade_close_dry_run_routes_zero_price_expiry_leg_to_lifecycle_pending() -> None:
     repo = FakeRepo([_record("rec1", 100, 3)])
 
