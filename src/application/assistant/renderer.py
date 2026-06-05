@@ -689,7 +689,14 @@ def _render_logs(data: dict[str, Any]) -> str:
 
 def _render_runtime_status(data: dict[str, Any], tool_result: dict[str, Any]) -> str:
     summary = _dict(data.get("summary"))
-    status = "ok" if summary.get("ok") is True else "degraded" if summary.get("ok") is False else _value(summary.get("latest_status") or "unknown")
+    warnings = tool_result.get("warnings")
+    has_warnings = bool(warnings) if isinstance(warnings, list) else bool(summary.get("warning_count"))
+    if tool_result.get("ok") is False or summary.get("ok") is False or has_warnings:
+        status = "degraded"
+    elif tool_result.get("ok") is True or summary.get("ok") is True:
+        status = "ok"
+    else:
+        status = _value(summary.get("latest_status") or "unknown")
     lines = [f"OM 状态：{status}"]
 
     latest_status = summary.get("latest_status")
@@ -700,16 +707,23 @@ def _render_runtime_status(data: dict[str, Any], tool_result: dict[str, Any]) ->
     if latest_run:
         run_id = _run_id_from_path(latest_run.get("path"))
         tick_metrics = _json_file_payload(_dict(_dict(latest_run.get("state")).get("tick_metrics")))
-        notify = _dict(tick_metrics.get("notify_summary"))
-        notify_text = "-"
-        if notify:
-            notify_text = f"{int(notify.get('send_confirmed_count') or 0)}/{int(notify.get('send_attempted_count') or notify.get('account_messages_count') or 0)}"
+        if tick_metrics:
+            lines.append(
+                "最新运行："
+                f"{_value(run_id)} "
+                f"scan={_yes_no(tick_metrics.get('ran_scan'))} "
+                f"notify={_runtime_notify_text(tick_metrics)}"
+            )
+
+    shared_last_run = _json_file_payload(_dict(_dict(data.get("shared")).get("last_run")))
+    if shared_last_run and not any(line.startswith("最新运行：") for line in lines):
         lines.append(
-            "最新运行："
-            f"{_value(run_id)} "
-            f"scan={_yes_no(tick_metrics.get('ran_scan') if tick_metrics else None)} "
-            f"notify={notify_text}"
+            "最新通知："
+            f"scan={_yes_no(_shared_last_run_ran_scan(shared_last_run))} "
+            f"notify={_runtime_notify_text(shared_last_run)}"
         )
+    elif latest_run and not any(line.startswith("最新运行：") for line in lines):
+        lines.append(f"最新运行：{_value(_run_id_from_path(latest_run.get('path')))} scan=- notify=-")
 
     latest_scanned = _dict(data.get("latest_scanned_run"))
     if latest_scanned and latest_scanned is not latest_run:
@@ -739,7 +753,6 @@ def _render_runtime_status(data: dict[str, Any], tool_result: dict[str, Any]) ->
     auto_close_lines = _runtime_auto_close_lines(data)
     lines.extend(auto_close_lines[:2])
 
-    warnings = tool_result.get("warnings")
     if isinstance(warnings, list) and warnings:
         lines.append("异常：" + "；".join(str(item) for item in warnings[:3]))
     elif summary.get("warning_count"):
@@ -834,6 +847,39 @@ def _runtime_auto_close_lines(data: dict[str, Any]) -> list[str]:
     return out
 
 
+def _runtime_notify_text(payload: dict[str, Any]) -> str:
+    notify = _dict(payload.get("notify_summary"))
+    if not notify and not payload:
+        return "-"
+    confirmed = _as_int(notify.get("send_confirmed_count") or payload.get("send_confirmed_count"))
+    attempted = _as_int(
+        notify.get("send_attempted_count")
+        or payload.get("send_attempted_count")
+        or notify.get("account_messages_count")
+        or payload.get("account_messages_count")
+    )
+    if confirmed == 0 and attempted == 0 and not notify:
+        return "-"
+    return f"{confirmed}/{attempted}"
+
+
+def _shared_last_run_ran_scan(payload: dict[str, Any]) -> bool | None:
+    if isinstance(payload.get("ran_scan"), bool):
+        return bool(payload.get("ran_scan"))
+    results = payload.get("results")
+    if not isinstance(results, list):
+        return None
+    saw_false = False
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        if item.get("ran_scan") is True:
+            return True
+        if item.get("ran_scan") is False:
+            saw_false = True
+    return False if saw_false else None
+
+
 def _json_file_payload(file_info: dict[str, Any]) -> dict[str, Any]:
     return _dict(file_info.get("json"))
 
@@ -885,6 +931,13 @@ def _yes_no(value: Any) -> str:
     if value is False:
         return "no"
     return "-"
+
+
+def _as_int(value: Any) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return 0
 
 
 def _num(value: Any) -> str:

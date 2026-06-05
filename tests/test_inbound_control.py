@@ -2514,6 +2514,43 @@ def test_inbound_renderer_summarizes_runtime_status() -> None:
     assert "异常：No symbols_notification.txt found." in text
 
 
+def test_inbound_renderer_runtime_status_uses_tool_ok_and_shared_last_run() -> None:
+    intent = parse_inbound_text("状态")
+    text = render_inbound_text(
+        intent=intent,
+        tool_result=build_response(
+            tool_name="runtime_status",
+            ok=True,
+            data={
+                "summary": {"warning_count": 0, "latest_status": None},
+                "shared": {
+                    "last_run": {
+                        "json": {
+                            "sent": True,
+                            "results": [
+                                {"account": "lx", "ran_scan": True},
+                                {"account": "sy", "ran_scan": True},
+                            ],
+                            "notify_summary": {
+                                "account_messages_count": 2,
+                                "send_attempted_count": 2,
+                                "send_confirmed_count": 2,
+                                "send_failed_count": 0,
+                            },
+                        }
+                    }
+                },
+            },
+            warnings=[],
+        ),
+    )
+
+    assert "OM 状态：ok" in text
+    assert "最新通知：scan=yes notify=2/2" in text
+    assert "unknown" not in text
+    assert "异常：无" in text
+
+
 def test_inbound_renderer_status_summary_prioritizes_auto_close_failure() -> None:
     intent = parse_inbound_text("状态")
     text = render_inbound_text(

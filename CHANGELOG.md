@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.211 - 2026-06-05
+
+### Fixed
+- Fixed Feishu `状态` rendering so successful `runtime_status` results without a latest status field show `OM 状态：ok` instead of `unknown`.
+- Used shared `last_run.notify_summary` as fallback runtime evidence so status replies can show recent scan/notification counts when the latest run directory only contains audit or maintenance artifacts.
+
 ## 1.2.210 - 2026-06-05
 
 ### Fixed
