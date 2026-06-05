@@ -1,9 +1,4 @@
-"""Combo Yield opening-strategy orchestration.
-
-The current public config key remains ``yield_enhancement`` for compatibility,
-but this module owns the Combo Yield scan/pair/report flow as a strategy family
-separate from Sell Put.
-"""
+"""Combo Yield opening-strategy orchestration."""
 
 from __future__ import annotations
 
@@ -37,7 +32,7 @@ from src.application.yield_enhancement_config import (
 from src.infrastructure.io_utils import safe_read_csv
 
 
-COMBO_YIELD_FAMILY = "yield_enhancement"
+COMBO_YIELD_FAMILY = "combo_yield"
 
 
 @dataclass(frozen=True)
@@ -59,8 +54,8 @@ def _empty_result(*, report_dir: Path, symbol_lower: str) -> ComboYieldResult:
     return ComboYieldResult(
         recommended_pairs=pd.DataFrame(),
         separate_enabled=False,
-        candidates_path=(report_dir / f"{symbol_lower}_yield_enhancement_candidates.csv").resolve(),
-        alerts_path=(report_dir / f"{symbol_lower}_yield_enhancement_alerts.txt").resolve(),
+        candidates_path=(report_dir / f"{symbol_lower}_combo_yield_candidates.csv").resolve(),
+        alerts_path=(report_dir / f"{symbol_lower}_combo_yield_alerts.txt").resolve(),
     )
 
 
@@ -90,19 +85,15 @@ def run_combo_yield_scan_and_summarize(
     attach_calls_fn: Callable[..., pd.DataFrame] = attach_best_linked_calls,
     render_alerts_fn: Callable[..., str] = render_yield_enhancement_alerts,
 ) -> tuple[ComboYieldResult, dict[str, Any] | None]:
-    """Run the legacy yield-enhancement implementation as the Combo Yield family.
-
-    Returns the detailed result plus an optional summary row. The caller decides
-    where to place that row in the per-symbol summary.
-    """
+    """Run the Combo Yield scan and return an optional summary row."""
 
     result = _empty_result(report_dir=report_dir, symbol_lower=symbol_lower)
     if not bool(yield_enhancement_policy.enabled):
         return result, None
 
-    symbol_yield_put_universe = (report_dir / f"{symbol_lower}_yield_enhancement_put_universe.csv").resolve()
+    symbol_yield_put_universe = (report_dir / f"{symbol_lower}_combo_yield_put_universe.csv").resolve()
     symbol_yield_put_universe_labeled = (
-        report_dir / f"{symbol_lower}_yield_enhancement_put_universe_labeled.csv"
+        report_dir / f"{symbol_lower}_combo_yield_put_universe_labeled.csv"
     ).resolve()
 
     run_put_scan_fn(
@@ -140,16 +131,16 @@ def run_combo_yield_scan_and_summarize(
 
     scope = infer_trace_scope_from_path(result.candidates_path)
     if df_yield_put_universe.empty:
-        yield_rule = "yield_enhancement_put_universe_empty"
+        yield_rule = "combo_yield_put_universe_empty"
         yield_status = "post_filtered"
     elif raw_yield_pairs_df.empty:
-        yield_rule = "yield_enhancement_no_pair"
+        yield_rule = "combo_yield_no_pair"
         yield_status = "post_filtered"
     elif recommended_yield_pairs_df.empty:
-        yield_rule = "yield_enhancement_no_recommended_pair"
+        yield_rule = "combo_yield_no_recommended_pair"
         yield_status = "post_filtered"
     else:
-        yield_rule = "yield_enhancement_pair_accepted"
+        yield_rule = "combo_yield_pair_accepted"
         yield_status = "accepted"
     append_candidate_filter_trace_rows(
         candidate_trace_path_for_output(result.candidates_path),
@@ -158,7 +149,7 @@ def run_combo_yield_scan_and_summarize(
                 run_id=scope.get("run_id"),
                 account=scope.get("account"),
                 symbol=symbol,
-                function="yield_enhancement",
+                function=COMBO_YIELD_FAMILY,
                 mode=yield_enhancement_policy.mode,
                 strategy_family=COMBO_YIELD_FAMILY,
                 strategy_profile=yield_enhancement_policy.mode,
@@ -167,7 +158,7 @@ def run_combo_yield_scan_and_summarize(
                 rule=yield_rule,
                 metric_value=len(recommended_yield_pairs_df),
                 threshold=1,
-                message="yield enhancement pair selection",
+                message="combo yield pair selection",
                 evidence_path=result.candidates_path.name,
                 config_values=yield_enhancement_policy.to_fields(),
             )

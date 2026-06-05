@@ -17,7 +17,7 @@
         "enabled": true,
         "min_strike": 190
       },
-      "yield_enhancement": {
+      "combo_yield": {
         "enabled": true
       }
     }

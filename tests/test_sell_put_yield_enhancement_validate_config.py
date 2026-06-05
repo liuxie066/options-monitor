@@ -8,7 +8,7 @@ if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
 
-def test_validate_config_accepts_minimal_sell_put_yield_enhancement_symbol() -> None:
+def test_validate_config_accepts_minimal_sell_put_combo_yield_symbol() -> None:
     from src.application.config_validator import validate_config
 
     cfg = {
@@ -21,7 +21,7 @@ def test_validate_config_accepts_minimal_sell_put_yield_enhancement_symbol() -> 
                     "min_dte": 20,
                     "max_dte": 60,
                 },
-                "yield_enhancement": {
+                "combo_yield": {
                     "enabled": True
                 },
                 "sell_call": {"enabled": False},
@@ -32,7 +32,7 @@ def test_validate_config_accepts_minimal_sell_put_yield_enhancement_symbol() -> 
     validate_config(cfg)
 
 
-def test_validate_config_rejects_invalid_sell_put_yield_enhancement_funding_mode() -> None:
+def test_validate_config_rejects_invalid_sell_put_combo_yield_funding_mode() -> None:
     from src.application.config_validator import validate_config
 
     cfg = {
@@ -45,7 +45,7 @@ def test_validate_config_rejects_invalid_sell_put_yield_enhancement_funding_mode
                     "min_dte": 20,
                     "max_dte": 60,
                 },
-                "yield_enhancement": {
+                "combo_yield": {
                     "enabled": True,
                     "funding_mode": "bad_mode",
                     "call": {"min_strike": 108, "max_strike": 120},
@@ -59,10 +59,10 @@ def test_validate_config_rejects_invalid_sell_put_yield_enhancement_funding_mode
         validate_config(cfg)
         raise AssertionError("expected config validation failure")
     except SystemExit as exc:
-        assert "NVDA.yield_enhancement.funding_mode" in str(exc)
+        assert "NVDA.combo_yield.funding_mode" in str(exc)
 
 
-def test_validate_config_rejects_removed_yield_enhancement_optimizer_field() -> None:
+def test_validate_config_rejects_removed_combo_yield_optimizer_field() -> None:
     from src.application.config_validator import validate_config
 
     cfg = {
@@ -75,7 +75,7 @@ def test_validate_config_rejects_removed_yield_enhancement_optimizer_field() -> 
                     "min_dte": 20,
                     "max_dte": 60,
                 },
-                "yield_enhancement": {
+                "combo_yield": {
                     "enabled": True,
                     "max_downside_worsen_pct": -0.01,
                 },
@@ -88,10 +88,10 @@ def test_validate_config_rejects_removed_yield_enhancement_optimizer_field() -> 
         validate_config(cfg)
         raise AssertionError("expected config validation failure")
     except SystemExit as exc:
-        assert "NVDA.yield_enhancement has removed optimizer fields" in str(exc)
+        assert "NVDA.combo_yield has removed optimizer fields" in str(exc)
 
 
-def test_validate_config_rejects_invalid_yield_enhancement_objective() -> None:
+def test_validate_config_rejects_invalid_combo_yield_objective() -> None:
     from src.application.config_validator import validate_config
 
     cfg = {
@@ -104,7 +104,7 @@ def test_validate_config_rejects_invalid_yield_enhancement_objective() -> None:
                     "min_dte": 20,
                     "max_dte": 60,
                 },
-                "yield_enhancement": {
+                "combo_yield": {
                     "enabled": True,
                     "objective": "incremental_optimizer",
                 },
@@ -117,10 +117,10 @@ def test_validate_config_rejects_invalid_yield_enhancement_objective() -> None:
         validate_config(cfg)
         raise AssertionError("expected config validation failure")
     except SystemExit as exc:
-        assert "NVDA.yield_enhancement.objective" in str(exc)
+        assert "NVDA.combo_yield.objective" in str(exc)
 
 
-def test_validate_config_rejects_removed_yield_enhancement_scenario_fields() -> None:
+def test_validate_config_rejects_removed_combo_yield_scenario_fields() -> None:
     from src.application.config_validator import validate_config
 
     cfg = {
@@ -133,7 +133,7 @@ def test_validate_config_rejects_removed_yield_enhancement_scenario_fields() -> 
                     "min_dte": 20,
                     "max_dte": 60,
                 },
-                "yield_enhancement": {
+                "combo_yield": {
                     "enabled": True,
                     "min_upside_lift_to_call_cost": -0.1,
                 },
@@ -146,10 +146,10 @@ def test_validate_config_rejects_removed_yield_enhancement_scenario_fields() -> 
         validate_config(cfg)
         raise AssertionError("expected config validation failure")
     except SystemExit as exc:
-        assert "NVDA.yield_enhancement has removed scenario fields: min_upside_lift_to_call_cost" in str(exc)
+        assert "NVDA.combo_yield has removed scenario fields: min_upside_lift_to_call_cost" in str(exc)
 
 
-def test_validate_config_rejects_invalid_yield_enhancement_net_credit_annualized() -> None:
+def test_validate_config_rejects_invalid_combo_yield_net_credit_annualized() -> None:
     from src.application.config_validator import validate_config
 
     cfg = {
@@ -163,7 +163,7 @@ def test_validate_config_rejects_invalid_yield_enhancement_net_credit_annualized
                     "min_dte": 20,
                     "max_dte": 60,
                 },
-                "yield_enhancement": {
+                "combo_yield": {
                     "enabled": True,
                     "min_net_credit_annualized": -0.01,
                 },
@@ -176,16 +176,16 @@ def test_validate_config_rejects_invalid_yield_enhancement_net_credit_annualized
         validate_config(cfg)
         raise AssertionError("expected config validation failure")
     except SystemExit as exc:
-        assert "NVDA.yield_enhancement.min_net_credit_annualized" in str(exc)
+        assert "NVDA.combo_yield.min_net_credit_annualized" in str(exc)
 
 
-def test_validate_config_rejects_invalid_template_yield_enhancement_call_bounds() -> None:
+def test_validate_config_rejects_invalid_template_combo_yield_call_bounds() -> None:
     from src.application.config_validator import validate_config
 
     cfg = {
         "templates": {
             "put_base": {
-                "yield_enhancement": {
+                "combo_yield": {
                     "call": {"min_strike": 120, "max_strike": 108},
                 }
             }
@@ -204,16 +204,16 @@ def test_validate_config_rejects_invalid_template_yield_enhancement_call_bounds(
         validate_config(cfg)
         raise AssertionError("expected config validation failure")
     except SystemExit as exc:
-        assert "templates.put_base.yield_enhancement.call.min_strike" in str(exc)
+        assert "templates.put_base.combo_yield.call.min_strike" in str(exc)
 
 
-def test_validate_config_rejects_removed_template_yield_enhancement_call_otm_bounds() -> None:
+def test_validate_config_rejects_removed_template_combo_yield_call_otm_bounds() -> None:
     from src.application.config_validator import validate_config
 
     cfg = {
         "templates": {
             "put_base": {
-                "yield_enhancement": {
+                "combo_yield": {
                     "call": {"min_otm_pct": 0.5, "max_otm_pct": 0.2},
                 }
             }
@@ -232,17 +232,17 @@ def test_validate_config_rejects_removed_template_yield_enhancement_call_otm_bou
         validate_config(cfg)
         raise AssertionError("expected config validation failure")
     except SystemExit as exc:
-        assert "templates.put_base.yield_enhancement.call has removed OTM fields: min_otm_pct, max_otm_pct" in str(exc)
+        assert "templates.put_base.combo_yield.call has removed OTM fields: min_otm_pct, max_otm_pct" in str(exc)
 
 
-def test_validate_config_rejects_nested_sell_put_yield_enhancement_template_path() -> None:
+def test_validate_config_rejects_nested_sell_put_combo_yield_template_path() -> None:
     from src.application.config_validator import validate_config
 
     cfg = {
         "templates": {
             "put_base": {
                 "sell_put": {
-                    "yield_enhancement": {"enabled": True},
+                    "combo_yield": {"enabled": True},
                 }
             }
         },
@@ -260,10 +260,10 @@ def test_validate_config_rejects_nested_sell_put_yield_enhancement_template_path
         validate_config(cfg)
         raise AssertionError("expected config validation failure")
     except SystemExit as exc:
-        assert "templates.put_base.sell_put.yield_enhancement has been removed" in str(exc)
+        assert "templates.put_base.sell_put.combo_yield has been removed" in str(exc)
 
 
-def test_validate_config_rejects_nested_sell_put_yield_enhancement_symbol_path() -> None:
+def test_validate_config_rejects_nested_sell_put_combo_yield_symbol_path() -> None:
     from src.application.config_validator import validate_config
 
     cfg = {
@@ -275,7 +275,7 @@ def test_validate_config_rejects_nested_sell_put_yield_enhancement_symbol_path()
                     "enabled": True,
                     "min_dte": 20,
                     "max_dte": 60,
-                    "yield_enhancement": {"enabled": True},
+                    "combo_yield": {"enabled": True},
                 },
                 "sell_call": {"enabled": False},
             }
@@ -286,7 +286,7 @@ def test_validate_config_rejects_nested_sell_put_yield_enhancement_symbol_path()
         validate_config(cfg)
         raise AssertionError("expected config validation failure")
     except SystemExit as exc:
-        assert "NVDA.sell_put.yield_enhancement has been removed" in str(exc)
+        assert "NVDA.sell_put.combo_yield has been removed" in str(exc)
 
 
 def test_validate_config_rejects_legacy_rebound_combo_template_path() -> None:
@@ -337,7 +337,7 @@ def test_validate_config_rejects_legacy_rebound_combo_symbol_path() -> None:
         assert "NVDA.rebound_combo has been removed" in str(exc)
 
 
-def test_validate_config_rejects_removed_yield_enhancement_target_price_fields() -> None:
+def test_validate_config_rejects_removed_combo_yield_target_price_fields() -> None:
     from src.application.config_validator import validate_config
 
     cfg = {
@@ -346,7 +346,7 @@ def test_validate_config_rejects_removed_yield_enhancement_target_price_fields()
             {
                 "symbol": "NVDA",
                 "sell_put": {"enabled": True, "min_dte": 20, "max_dte": 60},
-                "yield_enhancement": {
+                "combo_yield": {
                     "enabled": True,
                     "target_upside_pct": 0.15,
                 },
@@ -359,4 +359,4 @@ def test_validate_config_rejects_removed_yield_enhancement_target_price_fields()
         validate_config(cfg)
         raise AssertionError("expected config validation failure")
     except SystemExit as exc:
-        assert "NVDA.yield_enhancement has removed target-price fields" in str(exc)
+        assert "NVDA.combo_yield has removed target-price fields" in str(exc)

@@ -19,7 +19,7 @@ def _cfg() -> dict:
                 "use": ["put_base", "call_base"],
                 "sell_put": {"enabled": True, "strategy": "insurance_underwriting"},
                 "sell_call": {"enabled": True},
-                "yield_enhancement": {"enabled": True},
+                "combo_yield": {"enabled": True},
             }
         ],
     }
@@ -57,7 +57,7 @@ def test_event_prefetch_includes_yield_enhancement_for_return_first() -> None:
     plan = build_event_prefetch_plan(cfg)
 
     assert plan["symbols"] == ["AAPL"]
-    assert "yield_enhancement" in plan["reasons"]["AAPL"]
+    assert "combo_yield" in plan["reasons"]["AAPL"]
 
 
 def test_event_prefetch_provider_cooldown_stops_same_run_fanout(tmp_path: Path) -> None:

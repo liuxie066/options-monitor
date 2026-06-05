@@ -21,6 +21,7 @@ from domain.domain.sell_call_config import resolve_min_annualized_net_premium_re
 from domain.domain.sell_put_config import resolve_min_annualized_net_return
 from domain.domain import normalize_processor_row, normalize_processor_rows
 from src.application.yield_enhancement_config import (
+    COMBO_YIELD_CONFIG_KEY,
     resolve_yield_enhancement_cfg,
     wants_yield_enhancement_separate,
 )
@@ -142,7 +143,8 @@ def resolve_watchlist_item_runtime_config(
     resolved['sell_call'] = sell_call_cfg
     resolved_yield_enhancement_cfg = resolve_yield_enhancement_cfg(resolved)
     if resolved_yield_enhancement_cfg:
-        resolved['yield_enhancement'] = resolved_yield_enhancement_cfg
+        resolved.pop('yield_enhancement', None)
+        resolved[COMBO_YIELD_CONFIG_KEY] = resolved_yield_enhancement_cfg
 
     resolved['_global_sell_put_liquidity'] = _extract_liquidity_fields(
         _resolve_profile_side_cfg(item, profiles, 'sell_put'),
@@ -245,7 +247,7 @@ def run_watchlist_pipeline(
                 normalize_processor_row(
                     {
                         'symbol': symbol,
-                        'strategy': 'yield_enhancement',
+                        'strategy': 'combo_yield',
                         'candidate_count': 0,
                         'note': f'处理失败: {exc}',
                     }

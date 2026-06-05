@@ -12,6 +12,7 @@ from typing import Any
 import pandas as pd
 
 from domain.domain.engine import rank_candidate_rows, rank_yield_enhancement_rows
+from domain.domain.strategy_vocab import STRATEGY_COMBO_YIELD
 from domain.domain.symbol_identity import symbol_currency
 
 
@@ -350,7 +351,7 @@ def summarize_sell_call(df: pd.DataFrame, symbol: str, *, symbol_cfg: dict | Non
 
 def summarize_yield_enhancement(df: pd.DataFrame, symbol: str, *, symbol_cfg: dict | None = None) -> dict[str, Any]:
     _ = symbol_cfg or {}
-    row = _empty_summary_row(symbol, 'yield_enhancement', extra_fields=YIELD_ENHANCEMENT_EMPTY_FIELDS)
+    row = _empty_summary_row(symbol, STRATEGY_COMBO_YIELD, extra_fields=YIELD_ENHANCEMENT_EMPTY_FIELDS)
     if df.empty:
         return row
 

@@ -666,7 +666,7 @@ def test_validate_config_rejects_yield_enhancement_strategy_mode() -> None:
             {
                 'symbol': 'AAPL',
                 'sell_put': {'enabled': True},
-                'yield_enhancement': {'enabled': True, 'strategy': 'short_vol'},
+                'combo_yield': {'enabled': True, 'strategy': 'short_vol'},
             }
         ],
     }
@@ -677,7 +677,7 @@ def test_validate_config_rejects_yield_enhancement_strategy_mode() -> None:
     except SystemExit as e:
         msg = str(e)
         assert '[CONFIG_ERROR]' in msg
-        assert 'yield_enhancement is isolated from sell_put.strategy' in msg
+        assert 'combo_yield is isolated from sell_put.strategy' in msg
 
 
 def test_validate_config_rejects_decimal_close_advice_max_items_per_account() -> None:
@@ -934,7 +934,7 @@ def test_sell_put_steps_use_global_liquidity_filters_only() -> None:
     assert 'require_bid_ask' not in kwargs
 
 
-def test_sell_put_steps_yield_enhancement_put_universe_ignores_sell_put_return_floor() -> None:
+def test_sell_put_steps_combo_yield_put_universe_ignores_sell_put_return_floor() -> None:
     base = _add_repo_to_syspath()
     import src.application.sell_put_steps as steps
     import pandas as pd
@@ -958,7 +958,7 @@ def test_sell_put_steps_yield_enhancement_put_universe_ignores_sell_put_return_f
             sym='AAPL',
             symbol='AAPL',
             symbol_lower='aapl',
-            symbol_cfg={'symbol': 'AAPL', 'yield_enhancement': {'enabled': True}},
+            symbol_cfg={'symbol': 'AAPL', 'combo_yield': {'enabled': True}},
             sp={
                 'enabled': True,
                 'strategy': 'return_first',
@@ -981,7 +981,7 @@ def test_sell_put_steps_yield_enhancement_put_universe_ignores_sell_put_return_f
         steps.run_sell_put_scan = orig_run_sell_put_scan
         steps.add_sell_put_labels = orig_add_labels
 
-    assert [row['strategy'] for row in out] == ['sell_put', 'yield_enhancement']
+    assert [row['strategy'] for row in out] == ['sell_put', 'combo_yield']
     assert len(calls) == 2
     assert calls[0]['min_annualized_net_return'] == 0.25
     assert calls[0]['min_net_income'] == 70.0
@@ -1017,7 +1017,7 @@ def test_sell_put_steps_yield_enhancement_return_first_runs_put_universe(tmp_pat
             sym="AAPL",
             symbol="AAPL",
             symbol_lower="aapl",
-            symbol_cfg={"symbol": "AAPL", "yield_enhancement": {"enabled": True}},
+            symbol_cfg={"symbol": "AAPL", "combo_yield": {"enabled": True}},
             sp={
                 "enabled": True,
                 "min_dte": 7,
@@ -1039,7 +1039,7 @@ def test_sell_put_steps_yield_enhancement_return_first_runs_put_universe(tmp_pat
         steps.run_sell_put_scan = orig_run_sell_put_scan
         steps.add_sell_put_labels = orig_add_labels
 
-    assert [row["strategy"] for row in out] == ["sell_put", "yield_enhancement"]
+    assert [row["strategy"] for row in out] == ["sell_put", "combo_yield"]
     assert len(calls) == 2
     assert calls[0]["min_annualized_net_return"] == 0.25
     assert calls[0]["min_net_income"] == 500.0
@@ -1047,7 +1047,7 @@ def test_sell_put_steps_yield_enhancement_return_first_runs_put_universe(tmp_pat
     assert calls[1]["min_net_income"] == 0.0
 
 
-def test_sell_put_steps_yield_enhancement_put_universe_is_not_cash_filtered(
+def test_sell_put_steps_combo_yield_put_universe_is_not_cash_filtered(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -1119,7 +1119,7 @@ def test_sell_put_steps_yield_enhancement_put_universe_is_not_cash_filtered(
         sym="AAPL",
         symbol="AAPL",
         symbol_lower="aapl",
-        symbol_cfg={"symbol": "AAPL", "yield_enhancement": {"enabled": True}},
+        symbol_cfg={"symbol": "AAPL", "combo_yield": {"enabled": True}},
         sp={
             "enabled": True,
             "strategy": "insurance_underwriting",
@@ -1139,7 +1139,7 @@ def test_sell_put_steps_yield_enhancement_put_universe_is_not_cash_filtered(
     )
 
     filtered_sell_put = pd.read_csv(report_dir / "aapl_sell_put_candidates_labeled.csv")
-    assert [row["strategy"] for row in out] == ["sell_put", "yield_enhancement"]
+    assert [row["strategy"] for row in out] == ["sell_put", "combo_yield"]
     assert filtered_sell_put.empty
     assert len(enrich_calls) == 1
     assert enrich_calls[0].name == "aapl_sell_put_candidates_labeled.csv"
@@ -1147,7 +1147,7 @@ def test_sell_put_steps_yield_enhancement_put_universe_is_not_cash_filtered(
     assert "cash_required_cny" not in captured_pairs_input["df"].columns
 
 
-def test_sell_put_steps_yield_enhancement_put_universe_skips_underwriting_gate_for_insurance(
+def test_sell_put_steps_combo_yield_put_universe_skips_underwriting_gate_for_insurance(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -1194,7 +1194,7 @@ def test_sell_put_steps_yield_enhancement_put_universe_skips_underwriting_gate_f
     def _fake_underwriting_gate(**kwargs):
         out_path = Path(kwargs["out_path"])
         underwriting_gate_paths.append(out_path.name)
-        if "yield_enhancement_put_universe" in out_path.name:
+        if "combo_yield_put_universe" in out_path.name:
             empty = kwargs["df_labeled"].iloc[0:0].copy()
             empty.to_csv(out_path, index=False)
             return empty
@@ -1217,7 +1217,7 @@ def test_sell_put_steps_yield_enhancement_put_universe_skips_underwriting_gate_f
         sym="AAPL",
         symbol="AAPL",
         symbol_lower="aapl",
-        symbol_cfg={"symbol": "AAPL", "yield_enhancement": {"enabled": True}},
+        symbol_cfg={"symbol": "AAPL", "combo_yield": {"enabled": True}},
         sp={
             "enabled": True,
             "strategy": "insurance_underwriting",
@@ -1236,11 +1236,11 @@ def test_sell_put_steps_yield_enhancement_put_universe_skips_underwriting_gate_f
         portfolio_ctx={"cash_by_currency": {"CNY": 100000}},
     )
 
-    assert "aapl_yield_enhancement_put_universe_labeled.csv" not in underwriting_gate_paths
+    assert "aapl_combo_yield_put_universe_labeled.csv" not in underwriting_gate_paths
     assert len(captured_pairs_input["df"]) == 1
 
 
-def test_sell_put_steps_yield_enhancement_put_universe_skips_underwriting_gate_for_return_first(
+def test_sell_put_steps_combo_yield_put_universe_skips_underwriting_gate_for_return_first(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -1306,7 +1306,7 @@ def test_sell_put_steps_yield_enhancement_put_universe_skips_underwriting_gate_f
         sym="AAPL",
         symbol="AAPL",
         symbol_lower="aapl",
-        symbol_cfg={"symbol": "AAPL", "yield_enhancement": {"enabled": True}},
+        symbol_cfg={"symbol": "AAPL", "combo_yield": {"enabled": True}},
         sp={
             "enabled": True,
             "strategy": "return_first",
@@ -1325,7 +1325,7 @@ def test_sell_put_steps_yield_enhancement_put_universe_skips_underwriting_gate_f
         portfolio_ctx={"cash_by_currency": {"CNY": 100000}},
     )
 
-    assert "aapl_yield_enhancement_put_universe_labeled.csv" not in underwriting_gate_paths
+    assert "aapl_combo_yield_put_universe_labeled.csv" not in underwriting_gate_paths
     assert len(captured_pairs_input["df"]) == 1
 
 

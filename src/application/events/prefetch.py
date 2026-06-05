@@ -17,7 +17,7 @@ from src.application.events.orchestrator import (
 from src.application.events.store import EventFetchResult, EventStore
 from src.application.pipeline_watchlist import resolve_watchlist_item_runtime_config
 from src.application.runtime_config_paths import write_json_atomic
-from src.application.yield_enhancement_config import derive_yield_enhancement_policy
+from src.application.yield_enhancement_config import derive_yield_enhancement_policy, resolve_yield_enhancement_cfg
 
 
 def prefetch_event_data(
@@ -160,14 +160,14 @@ def _event_reasons(item: dict[str, Any]) -> list[str]:
     reasons: list[str] = []
     sell_put = item.get("sell_put") if isinstance(item.get("sell_put"), dict) else {}
     sell_call = item.get("sell_call") if isinstance(item.get("sell_call"), dict) else {}
-    yield_enhancement = item.get("yield_enhancement") if isinstance(item.get("yield_enhancement"), dict) else {}
-    yield_policy = derive_yield_enhancement_policy(yield_enhancement, sell_put)
+    combo_yield = resolve_yield_enhancement_cfg(item)
+    yield_policy = derive_yield_enhancement_policy(combo_yield, sell_put)
     put_event = item.get("_global_sell_put_event_risk") if isinstance(item.get("_global_sell_put_event_risk"), dict) else {}
     call_event = item.get("_global_sell_call_event_risk") if isinstance(item.get("_global_sell_call_event_risk"), dict) else {}
     if bool(sell_put.get("enabled", True)) and bool(put_event.get("enabled", True)):
         reasons.append("sell_put")
     if bool(yield_policy.enabled) and bool(put_event.get("enabled", True)):
-        reasons.append("yield_enhancement")
+        reasons.append("combo_yield")
     if bool(sell_call.get("enabled", False)) and bool(call_event.get("enabled", True)):
         reasons.append("sell_call")
     return reasons

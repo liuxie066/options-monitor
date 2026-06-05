@@ -87,7 +87,7 @@ def test_sell_put_yield_enhancement_minimal_config_derives_call_fetch_window(mon
     }
 
     call_plan = next(side for side in plan.side_plans if side.option_type == "call")
-    assert call_plan.strike_window.source == "yield_enhancement.call.spot_derived_bounds"
+    assert call_plan.strike_window.source == "combo_yield.call.spot_derived_bounds"
     assert call_plan.strike_window.base_min_strike == 100.0
     assert call_plan.strike_window.base_max_strike == 140.0
     assert call_plan.strike_window.max_strike == 142.8
@@ -126,7 +126,7 @@ def test_yield_enhancement_fetch_plan_declares_put_and_call_without_sell_put(mon
     put_plan = next(side for side in plan.side_plans if side.option_type == "put")
     call_plan = next(side for side in plan.side_plans if side.option_type == "call")
     assert put_plan.strike_window.max_strike == 96.0
-    assert call_plan.strike_window.source == "yield_enhancement.call.spot_derived_bounds"
+    assert call_plan.strike_window.source == "combo_yield.call.spot_derived_bounds"
 
 
 def test_sell_put_yield_enhancement_merges_with_existing_sell_call_bounds(monkeypatch, tmp_path: Path) -> None:
