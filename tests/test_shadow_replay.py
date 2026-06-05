@@ -145,7 +145,7 @@ def test_shadow_replay_builds_universe_and_analyzes_closed_replay(tmp_path: Path
     assert readiness["insurance_metrics"]["by_status"]["accepted"]["premium_to_capital"] == pytest.approx(120 / 10000)
     assert readiness["outcome_by_bucket"]["dte"]["30-44"]["win_count"] == 1
     assert readiness["parameter_advice_gate"]["status"] == analysis["parameter_advice_gate"]["status"]
-    assert readiness["decision_quality"]["by_strategy_profile"]["short_vol"]["good_accept"] == 1
+    assert readiness["decision_quality"]["by_strategy_profile"]["insurance_underwriting"]["good_accept"] == 1
     assert readiness["safety"]["writes_runtime_config"] is False
 
 
@@ -344,7 +344,7 @@ def test_shadow_replay_decision_quality_is_not_pnl_only() -> None:
         "min_sample": 5,
         "sample_floor_met": True,
         "candidate_universe_missing": False,
-        "strategy_profiles": ["return_first", "short_vol"],
+        "strategy_profiles": ["insurance_underwriting", "return_first"],
         "has_strategy_profile_breakdown": True,
         "instrument_identity_ready_count": 5,
         "instrument_identity_missing_count": 0,

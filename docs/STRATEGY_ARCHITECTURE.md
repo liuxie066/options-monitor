@@ -223,7 +223,7 @@ Combo Yield 是与 Sell Put、Covered Call 平行的开仓策略，不是 Sell P
 
 - 开仓扫描证据使用 `scan_strategy_profile`，Sell Put / Covered Call 的承保扫描记录为 `insurance_underwriting`。
 - `enrich_and_filter_*_short_vol` 只保留为旧调用方兼容别名，内部转发到 underwriting 入口；配置层不再接受 `strategy=short_vol`。
-- Close Advice 继续使用 `short_vol` thesis 和对应 resolver，不在本轮重命名。
+- Close Advice 继续使用 `short_vol` thesis 字段，不在本轮重命名；当前 Sell Put / Covered Call 配置参数从顶层 `insurance_underwriting` 字段读取。
 - 开仓 underwriting 不再请求全局 path-risk / concentration context；只有明确声明 `scan_uses_path_risk` 的策略才应加载该上下文。
 
 不在本轮实现：

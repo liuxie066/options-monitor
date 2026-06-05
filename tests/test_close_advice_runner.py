@@ -336,7 +336,8 @@ def test_run_close_advice_uses_underwriting_config_for_short_vol_close_thesis(
                     "symbol": "NVDA",
                     "sell_put": {
                         "strategy": "insurance_underwriting",
-                        "short_vol": {"min_iv_rv_ratio": 1.15, "min_iv_minus_rv": 0.05},
+                        "min_iv_rv_ratio": 1.15,
+                        "min_iv_minus_rv": 0.05,
                     },
                 }
             ],
@@ -445,7 +446,7 @@ def test_run_close_advice_refreshes_short_vol_quote_missing_rv(
                     "fetch": {"source": "futu"},
                     "sell_put": {
                         "strategy": "insurance_underwriting",
-                        "short_vol": {"event_source_fail_closed": False},
+                        "event_source_fail_closed": False,
                     },
                 }
             ],

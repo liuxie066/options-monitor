@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.215 - 2026-06-05
+
+### Changed
+- Completed the Sell Put / Covered Call opening-config migration to `insurance_underwriting` by removing generated `short_vol` blocks and validating underwriting parameters as top-level opening fields.
+- Updated Close Advice configuration resolution so Sell Put / Covered Call close thesis still accepts historical `short_vol` positions while reading current underwriting thresholds from the new top-level fields.
+- Updated Shadow Replay parameter backtests and opportunity-quality analysis to use `insurance_underwriting` as the current parameter profile while mapping historical `short_vol` samples into that profile.
+
+### Fixed
+- Fixed agent config validation and health diagnostics after the strategy refactor by aligning generated defaults and validation rules with the new underwriting fields.
+
 ## 1.2.214 - 2026-06-05
 
 ### Added

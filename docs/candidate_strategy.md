@@ -230,7 +230,7 @@
 - 收益底线：年化收益率和单笔净收入必须达到最低承保价格
 - 边界距离：Sell Put 越低于 `max_strike` 越好；Covered Call 越高于有效 `min_strike` 越好
 
-Sell Put 和 Covered Call 都会对 IV/RV、事件源和必要价格输入 fail closed。开仓侧不再把 stress、gap-down、path pressure 或单标的集中度作为硬风险阈值；旧配置里的这些字段暂时兼容读取，但新默认模板不再输出它们。
+Sell Put 和 Covered Call 都会对 IV/RV、事件源和必要价格输入 fail closed。开仓侧不再把 stress、gap-down、path pressure 或单标的集中度作为硬风险阈值；旧开仓配置字段不再兼容读取，新默认模板也不再输出它们。
 
 ---
 
@@ -322,4 +322,4 @@ Covered Call 会先结合持仓 context 计算覆盖能力：
 
 当前候选策略是：
 
-> **候选引擎负责基础扫描和初次排序，Sell Put 与 Covered Call 后处理共同使用 ShortVolRiskAssessment 做 short-vol 风险评估和二次排序；Covered Call 额外保留持仓覆盖能力规则。**
+> **候选引擎负责基础扫描和初次排序，Sell Put 与 Covered Call 后处理共同使用 `insurance_underwriting` 做承保过滤和排序；Covered Call 额外保留持仓覆盖能力规则。**

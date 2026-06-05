@@ -460,7 +460,7 @@ def _decision_quality_sample(
             "sample_count": sample_count,
             "min_sample": sample_floor,
         }
-    if profile not in {"short_vol", "return_first"}:
+    if profile not in {"insurance_underwriting", "return_first"}:
         return {**base, "label": "inconclusive", "confidence": "low", "reasons": ["strategy_profile_missing_or_unknown"]}
     if status not in {"accepted", "rejected", "post_filtered", "ranked_below"}:
         return {**base, "label": "inconclusive", "confidence": "low", "reasons": ["decision_status_not_classifiable"]}
@@ -511,8 +511,8 @@ def _strategy_profile(candidate: dict[str, Any]) -> str:
         or candidate.get("profile")
         or candidate.get("strategy_mode")
     ).lower()
-    if raw in {"short_vol", "short-vol", "volatility_premium", "vol_premium"}:
-        return "short_vol"
+    if raw in {"insurance_underwriting", "short_vol", "short-vol", "volatility_premium", "vol_premium"}:
+        return "insurance_underwriting"
     if raw in {"return_first", "return-first", "income", "yield_first"}:
         return "return_first"
     return "unknown"
@@ -541,7 +541,7 @@ def _strategy_family(candidate: dict[str, Any]) -> str:
 
 
 def _ex_ante_quality(candidate: dict[str, Any], *, profile: str) -> dict[str, Any]:
-    if profile == "short_vol":
+    if profile == "insurance_underwriting":
         return _short_vol_ex_ante_quality(candidate)
     if profile == "return_first":
         return _return_first_ex_ante_quality(candidate)
@@ -552,7 +552,7 @@ def _short_vol_ex_ante_quality(candidate: dict[str, Any]) -> dict[str, Any]:
     reasons: list[str] = []
     checked = 0
     iv_rv = first_float(candidate, "iv_rv_ratio", "iv_to_rv_ratio")
-    min_iv_rv = first_float(candidate, "min_iv_rv_ratio", "short_vol_min_iv_rv_ratio") or 1.15
+    min_iv_rv = first_float(candidate, "min_iv_rv_ratio", "short_vol_min_iv_rv_ratio") or 1.10
     if iv_rv is not None:
         checked += 1
         if iv_rv < min_iv_rv:
