@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.218 - 2026-06-05
+
+### Fixed
+- Fixed assistant Planner capability validation so single-account income requests such as `lx 6月 收益` accept calculable `monthly_income_report.return_summary` results instead of incorrectly reporting missing `account_return` capability.
+
 ## 1.2.217 - 2026-06-05
 
 ### Fixed

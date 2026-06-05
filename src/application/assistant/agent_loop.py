@@ -1490,8 +1490,9 @@ def _assess_plan_capabilities(plan: PlannerPlan, observations: list[dict[str, An
     satisfied: list[str] = []
     gaps: list[str] = []
     for capability in required:
-        if capability == "combined_account_return":
-            if _observations_have_combined_account_return(observations):
+        checker = _MONTHLY_INCOME_CAPABILITY_CHECKS.get(capability)
+        if checker is not None:
+            if checker(observations):
                 satisfied.append(capability)
             else:
                 gaps.append(capability)
@@ -1500,10 +1501,47 @@ def _assess_plan_capabilities(plan: PlannerPlan, observations: list[dict[str, An
     return {"required": required, "satisfied": satisfied, "gaps": gaps}
 
 
-def _observations_have_combined_account_return(observations: list[dict[str, Any]]) -> bool:
-    for item in observations:
-        if str(item.get("tool_name") or "") != "monthly_income_report" or not bool(item.get("ok", False)):
+def _observations_have_monthly_income_report_result(observations: list[dict[str, Any]]) -> bool:
+    for item in _monthly_income_observations(observations):
+        data = item.get("data")
+        if not isinstance(data, dict):
             continue
+        if any(isinstance(data.get(key), list) and data.get(key) for key in ("summary", "return_summary", "diagnostics")):
+            return True
+    return False
+
+
+def _observations_have_account_return(observations: list[dict[str, Any]]) -> bool:
+    for item in _monthly_income_observations(observations):
+        data = item.get("data")
+        if not isinstance(data, dict):
+            continue
+        rows = data.get("return_summary")
+        if isinstance(rows, list) and any(isinstance(row, dict) and _return_summary_row_is_calculable(row) for row in rows):
+            return True
+    return False
+
+
+def _observations_have_all_accounts_breakdown(observations: list[dict[str, Any]]) -> bool:
+    for item in _monthly_income_observations(observations):
+        data = item.get("data")
+        if not isinstance(data, dict):
+            continue
+        rows = data.get("return_summary")
+        if not isinstance(rows, list):
+            continue
+        accounts = {
+            str(row.get("account") or "").strip()
+            for row in rows
+            if isinstance(row, dict) and str(row.get("account") or "").strip() and _return_summary_row_is_calculable(row)
+        }
+        if accounts:
+            return True
+    return False
+
+
+def _observations_have_combined_account_return(observations: list[dict[str, Any]]) -> bool:
+    for item in _monthly_income_observations(observations):
         data = item.get("data")
         if not isinstance(data, dict):
             continue
@@ -1511,6 +1549,32 @@ def _observations_have_combined_account_return(observations: list[dict[str, Any]
         if isinstance(rows, list) and any(isinstance(row, dict) and _return_summary_row_is_calculable(row) for row in rows):
             return True
     return False
+
+
+def _observations_have_cashflow_detail(observations: list[dict[str, Any]]) -> bool:
+    for item in _monthly_income_observations(observations):
+        data = item.get("data")
+        if not isinstance(data, dict):
+            continue
+        rows = data.get("cashflow_rows")
+        if isinstance(rows, list) and any(isinstance(row, dict) for row in rows):
+            return True
+    return False
+
+
+def _monthly_income_observations(observations: list[dict[str, Any]]):
+    for item in observations:
+        if str(item.get("tool_name") or "") == "monthly_income_report" and bool(item.get("ok", False)):
+            yield item
+
+
+_MONTHLY_INCOME_CAPABILITY_CHECKS = {
+    "income_report": _observations_have_monthly_income_report_result,
+    "account_return": _observations_have_account_return,
+    "all_accounts_breakdown": _observations_have_all_accounts_breakdown,
+    "combined_account_return": _observations_have_combined_account_return,
+    "cashflow_detail": _observations_have_cashflow_detail,
+}
 
 
 def _capability_gap_response(observations: list[dict[str, Any]]) -> str:
