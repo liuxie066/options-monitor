@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.216 - 2026-06-05
+
+### Fixed
+- Fixed lifecycle expiry confirmation for Futu HK option roots such as `TCH` by canonicalizing them to ledger symbols before resolving `expire_close` targets.
+
 ## 1.2.215 - 2026-06-05
 
 ### Changed
