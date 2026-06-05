@@ -136,6 +136,7 @@ class PlannerPlan:
     goal: str
     steps: tuple[PlannerPlanStep, ...]
     response_mode: str = "synthesis"
+    required_capabilities: tuple[str, ...] = ()
     schema_version: str = TOOL_PLAN_SCHEMA_VERSION
 
     def public_payload(self) -> dict[str, Any]:
@@ -143,6 +144,7 @@ class PlannerPlan:
             "schema_version": self.schema_version,
             "goal": self.goal,
             "response_mode": self.response_mode,
+            "required_capabilities": list(self.required_capabilities),
             "steps": [step.public_payload() for step in self.steps],
         }
 
@@ -342,6 +344,27 @@ def execute_tool_plan(
             error_payload = dict(error) if isinstance(error, dict) else {"code": "TOOL_FAILED", "message": "tool call failed"}
             break
 
+    capability_status = _assess_plan_capabilities(plan, synthesis_observations) if ok else {"required": [], "satisfied": [], "gaps": []}
+    if capability_status["required"]:
+        synthesis_observations.append(
+            {
+                "index": len(synthesis_observations) + 1,
+                "tool_name": "assistant.capability_check",
+                "payload": {},
+                "ok": not bool(capability_status["gaps"]),
+                "error": None,
+                "data": {"capability_status": capability_status},
+            }
+        )
+        tool_events.append(
+            {
+                "phase": "assess_capabilities",
+                "required": list(capability_status["required"]),
+                "satisfied": list(capability_status["satisfied"]),
+                "gaps": list(capability_status["gaps"]),
+            }
+        )
+
     synthesis = _build_final_response(
         question=question,
         settings=settings,
@@ -363,6 +386,7 @@ def execute_tool_plan(
         "final_response": _final_response_payload(synthesis),
         "synthesis": dict(synthesis.trace),
         "tool_results": tool_results,
+        "capability_status": capability_status,
     }
     return build_response(
         tool_name=INTERNAL_TOOL_PLAN_NAME,
@@ -656,8 +680,20 @@ def parse_tool_plan_payload(payload: dict[str, Any]) -> PlannerPlan:
         goal=str(payload.get("goal") or "").strip(),
         steps=tuple(steps),
         response_mode=response_mode,
+        required_capabilities=_normalized_capabilities(payload.get("required_capabilities")),
         schema_version=schema_version,
     )
+
+
+def _normalized_capabilities(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    out: list[str] = []
+    for item in value:
+        capability = str(item or "").strip()
+        if capability and capability not in out:
+            out.append(capability)
+    return tuple(out)
 
 
 def validate_tool_plan(plan: PlannerPlan, *, question: str | None = None, allow_preview: bool = True) -> None:
@@ -967,6 +1003,7 @@ def _normalize_tool_plan(plan: PlannerPlan, *, question: str, today: date) -> Pl
         goal=plan.goal,
         steps=tuple(steps),
         response_mode=response_mode,
+        required_capabilities=plan.required_capabilities,
         schema_version=plan.schema_version,
     )
 
@@ -1070,6 +1107,10 @@ def tool_plan_json_schema() -> dict[str, Any]:
             "schema_version": {"type": "string", "enum": [TOOL_PLAN_SCHEMA_VERSION]},
             "goal": {"type": "string"},
             "response_mode": {"type": "string", "enum": ["canonical", "synthesis"]},
+            "required_capabilities": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
             "steps": {
                 "type": "array",
                 "minItems": 0,
@@ -1087,7 +1128,7 @@ def tool_plan_json_schema() -> dict[str, Any]:
                 },
             },
         },
-        "required": ["schema_version", "goal", "response_mode", "steps"],
+        "required": ["schema_version", "goal", "response_mode", "required_capabilities", "steps"],
     }
 
 
@@ -1128,6 +1169,16 @@ def _build_final_response(
         return LlmSynthesisResult(
             response_text=_fallback_response(plan=plan, observations=synthesis_observations, error_payload=error_payload),
             trace={"attempted": False, "reason": "tool_error", "schema_version": TOOL_PLAN_SYNTHESIS_SCHEMA_VERSION},
+        )
+    capability_gap = _capability_gap_response(synthesis_observations)
+    if capability_gap:
+        return LlmSynthesisResult(
+            response_text=capability_gap,
+            trace={
+                "attempted": False,
+                "reason": "capability_gap",
+                "schema_version": TOOL_PLAN_SYNTHESIS_SCHEMA_VERSION,
+            },
         )
     if plan.response_mode == "canonical" and len(plan.steps) == 1 and synthesis_observations:
         text = _canonical_response(plan.steps[0], synthesis_observations[0])
@@ -1216,6 +1267,13 @@ def _final_response_payload(synthesis: LlmSynthesisResult) -> dict[str, Any]:
             reason="LLM synthesized the response from tool observations",
             canonical_renderer_required=False,
             llm_may_summarize=True,
+        ).public_payload()
+    if reason == "capability_gap":
+        return FinalResponsePlan(
+            status="partial",
+            reason="tool observations did not satisfy all requested capabilities",
+            canonical_renderer_required=False,
+            llm_may_summarize=False,
         ).public_payload()
     return FinalResponsePlan(
         status="fallback",
@@ -1401,6 +1459,81 @@ def _answer_guard_facts(observations: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _safe_float(value: Any) -> float | None:
+    try:
+        if value in (None, ""):
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _return_summary_row_is_calculable(row: dict[str, Any]) -> bool:
+    cash = _safe_float(row.get("cash_secured_cny"))
+    if cash is None or cash <= 0:
+        return False
+    return any(
+        row.get(key) is not None
+        for key in (
+            "net_return_rate",
+            "premium_return_rate",
+            "realized_return_rate",
+            "net_income_cny",
+            "premium_income_cny",
+            "realized_pnl_cny",
+        )
+    )
+
+
+def _assess_plan_capabilities(plan: PlannerPlan, observations: list[dict[str, Any]]) -> dict[str, Any]:
+    required = list(plan.required_capabilities)
+    satisfied: list[str] = []
+    gaps: list[str] = []
+    for capability in required:
+        if capability == "combined_account_return":
+            if _observations_have_combined_account_return(observations):
+                satisfied.append(capability)
+            else:
+                gaps.append(capability)
+        else:
+            gaps.append(capability)
+    return {"required": required, "satisfied": satisfied, "gaps": gaps}
+
+
+def _observations_have_combined_account_return(observations: list[dict[str, Any]]) -> bool:
+    for item in observations:
+        if str(item.get("tool_name") or "") != "monthly_income_report" or not bool(item.get("ok", False)):
+            continue
+        data = item.get("data")
+        if not isinstance(data, dict):
+            continue
+        rows = data.get("combined_return_summary")
+        if isinstance(rows, list) and any(isinstance(row, dict) and _return_summary_row_is_calculable(row) for row in rows):
+            return True
+    return False
+
+
+def _capability_gap_response(observations: list[dict[str, Any]]) -> str:
+    for item in observations:
+        if str(item.get("tool_name") or "") != "assistant.capability_check":
+            continue
+        data = item.get("data") if isinstance(item.get("data"), dict) else {}
+        status = data.get("capability_status") if isinstance(data, dict) else None
+        if not isinstance(status, dict):
+            continue
+        gaps = [str(value) for value in status.get("gaps") or [] if str(value).strip()]
+        if not gaps:
+            continue
+        if "combined_account_return" in gaps:
+            return (
+                "当前只能部分满足：工具已完成查询，但没有可用的合并账户收益率结果。"
+                "不能把分账户收益率直接平均成合并收益率；需要 combined_return_summary "
+                "按 sum(净现金流CNY)/sum(当前现金担保CNY) 输出后才能确认。"
+            )
+        return "当前只能部分满足：工具结果缺少请求所需能力：" + "、".join(gaps)
+    return ""
+
+
 def _month_label_cn(month: str) -> str:
     parts = str(month or "").split("-")
     if len(parts) != 2:
@@ -1455,11 +1588,13 @@ Return only JSON that matches the requested schema.
 Rules:
 - Produce 1 to 3 read-only tool calls, or exactly 1 preview-write capability call.
 - Use only tools/capabilities in the provided manifest.
+- Fill required_capabilities with the user's required answer capabilities from the tool manifest. Use [] only when the request needs no special capability beyond the planned tool call.
 - Preview-write capabilities only create a pending preview. They never apply writes, confirm pending operations, notify users externally, or mutate config/ledger directly.
 - Never plan confirm/cancel/apply actions. Confirm/cancel must be handled by deterministic user commands bound to a pending operation.
 - Do not include system-scoped or path arguments such as config_key, config_path, data_config, output_dir, report_path, run_dir, or audit_db. The system injects those.
 - Resolve relative dates using context.temporal_context.current_date in Asia/Shanghai. For a month without a year such as "6月", use the current_date year.
 - For monthly income summary questions, use monthly_income_report with account/month when available.
+- For combined/all-account return questions, include required_capabilities=["combined_account_return"] and use monthly_income_report without account.
 - For cashflow detail, net cashflow composition, net inflow source, "明细", "组成", "构成", "来源", or "由什么组成", use monthly_income_report with include_rows=true.
 - For all-history, cumulative, or total net cashflow questions, omit month so monthly_income_report reads all OM local ledger months.
 - For multiple explicit months, either call monthly_income_report once per month with matching arguments, or omit month and synthesize from all available rows; never duplicate one month while claiming another.
@@ -1491,8 +1626,15 @@ def _planner_tool_manifest() -> list[dict[str, Any]]:
             notes.append("Data comes from OM local ledger, not broker realtime cash statements.")
             notes.append("If month is omitted, the tool reads all months currently available in the OM local ledger.")
             notes.append("If account is omitted, the tool reads all ledger accounts available for the selected broker/config.")
+            notes.append("For combined/all-account return questions, require capability combined_account_return; the response must use combined_return_summary when available.")
             semantics = {
                 "data_source": "OM local ledger",
+                "answer_capabilities": {
+                    "account_return": "single-account monthly return_summary rows",
+                    "all_accounts_breakdown": "per-account return_summary rows when account is omitted",
+                    "combined_account_return": "combined_return_summary rows; compute rates as summed CNY numerator divided by summed CNY cash-secured denominator",
+                    "cashflow_detail": "cashflow_rows when include_rows=true",
+                },
                 "scope_semantics": {
                     "month omitted": "all months currently available in the OM local ledger",
                     "account omitted": "all available ledger accounts for the selected broker/config",
@@ -1623,6 +1765,7 @@ Return only JSON.
 Rules:
 - Do not invent facts beyond observations.
 - If required data is missing, say it cannot be confirmed and name the missing data.
+- If observation.capability_status has gaps, say the request is only partially satisfied and name the gap; do not present a nearby result as complete.
 - Do not downgrade a detail/composition question into a nearby summary.
 - Keep Chinese output concise and Markdown-friendly.
 - Mention the data scope when relevant, for example OM 本地账本.
@@ -1699,6 +1842,7 @@ def _synthesis_data(tool_name: str, data: dict[str, Any]) -> dict[str, Any]:
         out = {
             "summary": _clip_list(data.get("summary"), limit=8),
             "return_summary": _clip_list(data.get("return_summary"), limit=8),
+            "combined_return_summary": _clip_list(data.get("combined_return_summary"), limit=8),
             "diagnostics": _clip_list(data.get("diagnostics"), limit=4),
             "filters": dict(data.get("filters") or {}) if isinstance(data.get("filters"), dict) else {},
             "data_scope": "OM 本地账本",
@@ -1729,7 +1873,7 @@ def _synthesis_data(tool_name: str, data: dict[str, Any]) -> dict[str, Any]:
 def _monthly_income_coverage(data: dict[str, Any]) -> dict[str, Any]:
     filters = data.get("filters") if isinstance(data.get("filters"), dict) else {}
     rows: list[dict[str, Any]] = []
-    for key in ("summary", "return_summary", "cashflow_rows", "realized_rows", "premium_rows"):
+    for key in ("summary", "return_summary", "combined_return_summary", "cashflow_rows", "realized_rows", "premium_rows"):
         value = data.get(key)
         if isinstance(value, list):
             rows.extend(item for item in value if isinstance(item, dict))
@@ -1754,6 +1898,9 @@ def _monthly_income_coverage(data: dict[str, Any]) -> dict[str, Any]:
             "accounts": accounts,
             "summary_count": len(data.get("summary") or []) if isinstance(data.get("summary"), list) else 0,
             "return_summary_count": len(data.get("return_summary") or []) if isinstance(data.get("return_summary"), list) else 0,
+            "combined_return_summary_count": len(data.get("combined_return_summary") or [])
+            if isinstance(data.get("combined_return_summary"), list)
+            else 0,
             "warnings": [str(item) for item in warnings if str(item).strip()][:8],
             "complete_for_query_scope": bool(months or accounts) and not warnings,
         },
