@@ -1964,6 +1964,117 @@ def test_assistant_runtime_agent_loop_executes_planned_cashflow_detail(tmp_path:
     }
 
 
+def test_assistant_runtime_agent_loop_satisfies_single_account_return_capability(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "return_summary": [
+                    {
+                        "month": "2026-06",
+                        "account": "lx",
+                        "cash_secured_cny": 300000.0,
+                        "net_income_cny": 9000.0,
+                        "premium_income_cny": 10000.0,
+                        "net_return_rate": 0.03,
+                    }
+                ],
+                "row_count": 1,
+                "premium_row_count": 1,
+            },
+        )
+
+    def _plan(
+        text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        assert text == "lx 6月 收益"
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="查询 lx 2026-06 单账户收益",
+                response_mode="synthesis",
+                required_capabilities=("account_return",),
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="monthly_income_report",
+                        arguments={"account": "lx", "month": "2026-06"},
+                        purpose="读取 lx 6月账户收益",
+                    ),
+                ),
+            ),
+            trace={
+                "enabled": True,
+                "attempted": True,
+                "reason": "accepted",
+                "provider": "openai",
+                "base_url": "",
+                "model": "gpt-5.2",
+                "api_key_env": "OM_LLM_API_KEY",
+                "confidence_min": 0.75,
+                "timeout_seconds": 20,
+                "max_output_tokens": 512,
+                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+            },
+        )
+
+    def _synthesize(
+        question: str,
+        settings: AssistantSettings,
+        plan: PlannerPlan,
+        observations: list[dict[str, Any]],
+        conversation_context: dict[str, Any] | None,
+    ) -> LlmSynthesisResult:
+        assert question == "lx 6月 收益"
+        assert settings.mode == "agent_loop"
+        assert plan.required_capabilities == ("account_return",)
+        assert observations[0]["data"]["return_summary"][0]["account"] == "lx"
+        return LlmSynthesisResult(
+            response_text="lx 2026-06 收益：净现金流 CNY 9,000，净收益率 3.00%。",
+            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="lx 6月 收益",
+            sender_id="local",
+            message_id="msg_agent_loop_single_account_income",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+        synthesize_response_fn=_synthesize,
+        now_fn=lambda: date(2026, 6, 5),
+    )
+
+    assert out["ok"] is True
+    assert calls == [("monthly_income_report", {"account": "lx", "config_key": "us", "month": "2026-06"})]
+    assert out["data"]["response_text"].startswith("lx 2026-06 收益")
+    tool_plan_data = out["data"]["action"]["result"]["data"]
+    assert tool_plan_data["capability_status"] == {
+        "required": ["account_return"],
+        "satisfied": ["account_return"],
+        "gaps": [],
+    }
+    agent_loop = out["meta"]["assistant"]["llm"]["agent_loop"]
+    assert agent_loop["final_response"] == {
+        "status": "synthesized",
+        "reason": "LLM synthesized the response from tool observations",
+        "canonical_renderer_required": False,
+        "llm_may_summarize": True,
+    }
+
+
 def test_assistant_runtime_agent_loop_reports_unsatisfied_combined_income_capability(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
 
