@@ -20,6 +20,7 @@ from domain.domain.ledger.position_fields import (
     normalize_trade_price,
     now_ms,
     resolve_open_currency,
+    strategy_metadata_fields_from_payload,
 )
 from src.application.ledger.errors import LedgerPreflightError
 from src.application.ledger.event_codec import import_stored_trade_events, stored_trade_event_to_ledger_event
@@ -774,6 +775,7 @@ def _trade_open_ledger_inputs(deal: Any) -> tuple[Any, dict[str, Any], TradeEven
     resolved_deal = replace(deal, trade_time_ms=event_time_ms)
     command = _open_command_from_trade_deal(resolved_deal)
     fields = build_position_lot_fields(command).to_dict()
+    fields.update(strategy_metadata_fields_from_payload(getattr(resolved_deal, "raw_payload", None)))
     contract_key = _contract_key_from_fields(fields)
     event_id = str(getattr(resolved_deal, "deal_id", "") or "").strip()
     event = TradeEvent(
