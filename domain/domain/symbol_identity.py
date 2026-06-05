@@ -11,6 +11,7 @@ OPTION_CODE_RE = re.compile(
 )
 _US_SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9\.-]{0,10}$")
 _UNDERLIER_ALIAS_FALLBACKS = {
+    "TCH": "0700.HK",
     "腾讯": "0700.HK",
     "腾讯控股": "0700.HK",
     "POP": "9992.HK",
