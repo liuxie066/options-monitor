@@ -2197,6 +2197,62 @@ def test_inbound_monthly_income_renderer_prefers_return_summary() -> None:
     assert "口径：现金流率=净现金流/当前现金担保，不是账户总资产收益率。" in text
 
 
+def test_inbound_monthly_income_renderer_prefers_combined_return_summary() -> None:
+    intent = parse_inbound_text("收益 2026-05")
+    text = render_inbound_text(
+        intent=intent,
+        tool_result=build_response(
+            tool_name="monthly_income_report",
+            ok=True,
+            data={
+                "combined_return_summary": [
+                    {
+                        "month": "2026-05",
+                        "account": "all",
+                        "account_scope": "all",
+                        "accounts": ["lx", "sy"],
+                        "net_return_rate": 0.071619,
+                        "net_income_by_ccy": {"HKD": 50291.0, "USD": 890.0},
+                        "net_income_cny": 57295.0,
+                        "cash_secured_cny": 800000.0,
+                        "annualized_basis_days": 31,
+                        "annualized_net_return_rate": 0.843096,
+                        "premium_income_by_ccy": {"HKD": 60331.0, "USD": 890.0},
+                        "premium_income_cny": 62263.0,
+                        "premium_return_rate": 0.077829,
+                        "realized_pnl_by_ccy": {"HKD": 16159.0, "USD": 0.0},
+                        "realized_pnl_cny": 17167.0,
+                        "realized_return_rate": 0.021459,
+                    }
+                ],
+                "return_summary": [
+                    {
+                        "month": "2026-05",
+                        "account": "lx",
+                        "net_return_rate": 0.1316,
+                        "net_income_by_ccy": {"HKD": 32525.0},
+                        "net_income_cny": 35842.0,
+                        "cash_secured_cny": 272355.0,
+                    },
+                    {
+                        "month": "2026-05",
+                        "account": "sy",
+                        "net_return_rate": 0.0406,
+                        "net_income_by_ccy": {"HKD": 17766.0, "USD": 890.0},
+                        "net_income_cny": 21453.0,
+                        "cash_secured_cny": 527645.0,
+                    },
+                ],
+            },
+        ),
+    )
+
+    assert text.startswith("收益统计完成（OM 本地账本）：\n全部账户 2026-05 收益摘要")
+    assert "净现金流：CNY 57,295（HKD 50,291 + USD 890） | 现金流率 7.16%" in text
+    assert "分账户：\n- lx：净现金流 CNY 35,842（HKD 32,525） | 现金流率 13.16%" in text
+    assert "口径：合并现金流率=sum(净现金流CNY)/sum(当前现金担保CNY)，不是账户收益率平均值。" in text
+
+
 def test_inbound_monthly_income_renderer_flags_long_option_cash_recovery() -> None:
     intent = parse_inbound_text("收益 sy 2026-06")
     text = render_inbound_text(

@@ -717,6 +717,92 @@ def _build_return_summary(
     return out
 
 
+def _sum_optional(rows: list[dict[str, Any]], key: str) -> float | None:
+    total = 0.0
+    for row in rows:
+        value = safe_float(row.get(key))
+        if value is None:
+            return None
+        total += float(value)
+    return _round_money(total)
+
+
+def _build_combined_return_summary(return_summary: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in return_summary:
+        if not isinstance(row, dict):
+            continue
+        month = str(row.get("month") or "").strip()
+        if not month:
+            continue
+        grouped.setdefault(month, []).append(row)
+
+    out: list[dict[str, Any]] = []
+    for month, rows in sorted(grouped.items()):
+        cash_by_ccy: dict[str, float] = {}
+        net_by_ccy: dict[str, float] = {}
+        premium_by_ccy: dict[str, float] = {}
+        realized_by_ccy: dict[str, float] = {}
+        accounts: list[str] = []
+        annualized_basis_days = 0
+        for row in rows:
+            account = normalize_account(row.get("account")) or str(row.get("account") or "").strip()
+            if account and account not in accounts:
+                accounts.append(account)
+            cash_by_ccy_row = row.get("cash_secured_by_ccy") if isinstance(row.get("cash_secured_by_ccy"), dict) else {}
+            net_by_ccy_row = row.get("net_income_by_ccy") if isinstance(row.get("net_income_by_ccy"), dict) else {}
+            premium_by_ccy_row = (
+                row.get("premium_income_by_ccy") if isinstance(row.get("premium_income_by_ccy"), dict) else {}
+            )
+            realized_by_ccy_row = row.get("realized_pnl_by_ccy") if isinstance(row.get("realized_pnl_by_ccy"), dict) else {}
+            for currency, amount in cash_by_ccy_row.items():
+                _add_ccy_amount(cash_by_ccy, str(currency), amount)
+            for currency, amount in net_by_ccy_row.items():
+                _add_ccy_amount(net_by_ccy, str(currency), amount)
+            for currency, amount in premium_by_ccy_row.items():
+                _add_ccy_amount(premium_by_ccy, str(currency), amount)
+            for currency, amount in realized_by_ccy_row.items():
+                _add_ccy_amount(realized_by_ccy, str(currency), amount)
+            annualized_basis_days = max(annualized_basis_days, int(row.get("annualized_basis_days") or 0))
+
+        cash_secured_cny = _sum_optional(rows, "cash_secured_cny")
+        net_income_cny = _sum_optional(rows, "net_income_cny")
+        premium_income_cny = _sum_optional(rows, "premium_income_cny")
+        realized_pnl_cny = _sum_optional(rows, "realized_pnl_cny")
+        net_return_rate = _rate(net_income_cny, cash_secured_cny)
+        premium_return_rate = _rate(premium_income_cny, cash_secured_cny)
+        realized_return_rate = _rate(realized_pnl_cny, cash_secured_cny)
+        out.append(
+            {
+                "month": month,
+                "account": "all",
+                "account_scope": "all",
+                "accounts": sorted(accounts),
+                "cash_secured_by_ccy": dict(sorted(cash_by_ccy.items())),
+                "cash_secured_cny": cash_secured_cny,
+                "net_income_by_ccy": dict(sorted(net_by_ccy.items())),
+                "net_income_cny": net_income_cny,
+                "premium_income_by_ccy": dict(sorted(premium_by_ccy.items())),
+                "premium_income_cny": premium_income_cny,
+                "realized_pnl_by_ccy": dict(sorted(realized_by_ccy.items())),
+                "realized_pnl_cny": realized_pnl_cny,
+                "net_return_rate": net_return_rate,
+                "premium_return_rate": premium_return_rate,
+                "realized_return_rate": realized_return_rate,
+                "net_return_rate_by_ccy": _rate_by_ccy(net_by_ccy, cash_by_ccy),
+                "premium_return_rate_by_ccy": _rate_by_ccy(premium_by_ccy, cash_by_ccy),
+                "realized_return_rate_by_ccy": _rate_by_ccy(realized_by_ccy, cash_by_ccy),
+                "annualized_net_return_rate": _annualized(net_return_rate, annualized_basis_days),
+                "annualized_premium_return_rate": _annualized(premium_return_rate, annualized_basis_days),
+                "annualized_realized_return_rate": _annualized(realized_return_rate, annualized_basis_days),
+                "annualized_basis_days": annualized_basis_days,
+                "return_basis": "combined_current_cash_secured",
+                "calculation_method": "sum(net_cashflow_cny) / sum(current_open_cash_secured_cny)",
+            }
+        )
+    return out
+
+
 def _event_detail_sort_key(row: dict[str, Any]) -> tuple[Any, ...]:
     return (
         str(row.get("month") or ""),
@@ -1220,9 +1306,11 @@ def _build_monthly_income_report_from_events(
         warnings=warnings,
         now_fn=now_fn,
     )
+    combined_return_summary = _build_combined_return_summary(return_summary) if account_norm is None else []
     return {
         "summary": summary_rows,
         "return_summary": return_summary,
+        "combined_return_summary": combined_return_summary,
         "diagnostics": _build_monthly_income_diagnostics(
             account_norm=account_norm,
             broker_norm=broker_norm,
