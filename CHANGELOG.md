@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.217 - 2026-06-05
+
+### Fixed
+- Fixed trade-intake runtime-root propagation so remote services and one-shot CLI runs can explicitly use the active runtime root instead of falling back to the release directory.
+- Fixed option-position subcommands so `--runtime-root` can be passed at the parent or subcommand level for ledger-backed reads and writes.
+
 ## 1.2.216 - 2026-06-05
 
 ### Fixed

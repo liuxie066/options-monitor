@@ -3430,3 +3430,43 @@ def test_cli_run_trade_intake_delegates_reconcile_state_flags(monkeypatch) -> No
             "--apply",
         ]
     ]
+
+
+def test_cli_run_trade_intake_delegates_runtime_root(monkeypatch, tmp_path: Path) -> None:
+    import src.application.trades.auto_intake as auto_intake
+    from src.interfaces.cli.main import main
+
+    runtime_root = tmp_path / "runtime"
+    calls: list[list[str]] = []
+    monkeypatch.setattr(auto_intake, "main", lambda argv: calls.append(list(argv)) or 0)
+
+    rc = main([
+        "run",
+        "trade-intake",
+        "--config",
+        "config.us.json",
+        "--runtime-root",
+        str(runtime_root),
+        "--reconcile-state",
+        "--deal-id",
+        "deal-1",
+        "--dry-run",
+    ])
+
+    assert rc == 0
+    assert calls == [
+        [
+            "--config",
+            "config.us.json",
+            "--runtime-root",
+            str(runtime_root),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "11111",
+            "--reconcile-state",
+            "--deal-id",
+            "deal-1",
+            "--dry-run",
+        ]
+    ]
