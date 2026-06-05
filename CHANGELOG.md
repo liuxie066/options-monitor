@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.210 - 2026-06-05
+
+### Fixed
+- Fixed Feishu WebSocket `agent_loop` handling so conversation-context audit DB read failures degrade to empty context instead of dropping inbound messages before audit and reply.
+- Added regression coverage for Feishu WebSocket messages continuing through planner execution when recent conversation context cannot be read.
+
 ## 1.2.209 - 2026-06-04
 
 ### Fixed
