@@ -13,6 +13,7 @@ SELL_PUT_FAMILY = "sell_put"
 SELL_CALL_FAMILY = "sell_call"
 RETURN_FIRST_PROFILE = "return_first"
 SHORT_VOL_PROFILE = "short_vol"
+INSURANCE_UNDERWRITING_PROFILE = "insurance_underwriting"
 YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE = "income_upside_enhancement"
 YIELD_ENHANCEMENT_VOL_CONVEXITY_MODE = "vol_convexity_enhancement"
 
@@ -22,7 +23,9 @@ class StrategySemantics:
     strategy_family: str
     strategy_profile: str
     risk_model: str
+    scan_strategy_profile: str
     scan_requires_rv: bool
+    scan_uses_underwriting_gate: bool
     scan_uses_short_vol_gate: bool
     scan_uses_event_risk: bool
     scan_uses_path_risk: bool
@@ -38,7 +41,9 @@ class StrategySemantics:
             "strategy_family": self.strategy_family,
             "strategy_profile": self.strategy_profile,
             "risk_model": self.risk_model,
+            "scan_strategy_profile": self.scan_strategy_profile,
             "scan_requires_rv": bool(self.scan_requires_rv),
+            "scan_uses_underwriting_gate": bool(self.scan_uses_underwriting_gate),
             "scan_uses_short_vol_gate": bool(self.scan_uses_short_vol_gate),
             "yield_enhancement_mode": self.yield_enhancement_mode or "",
             "yield_enhancement_requires_rv": bool(self.yield_enhancement_requires_rv),
@@ -123,21 +128,29 @@ def normalize_strategy_profile(value: Any) -> str:
     profile = str(value or "").strip().lower()
     if profile in {"", "legacy", "yield_first", "return"}:
         return RETURN_FIRST_PROFILE
-    if profile in {RETURN_FIRST_PROFILE, SHORT_VOL_PROFILE}:
+    if profile in {RETURN_FIRST_PROFILE, SHORT_VOL_PROFILE, INSURANCE_UNDERWRITING_PROFILE}:
         return profile
     return RETURN_FIRST_PROFILE
 
 
+def opening_profile_for_strategy(*, family: str, profile: Any) -> str:
+    normalized_family = str(family or "").strip().lower()
+    normalized_profile = normalize_strategy_profile(profile)
+    if normalized_family in {SELL_PUT_FAMILY, SELL_CALL_FAMILY} and normalized_profile == INSURANCE_UNDERWRITING_PROFILE:
+        return INSURANCE_UNDERWRITING_PROFILE
+    return normalized_profile
+
+
 def risk_model_for_profile(profile: str) -> str:
     normalized = normalize_strategy_profile(profile)
-    if normalized == SHORT_VOL_PROFILE:
+    if normalized in {SHORT_VOL_PROFILE, INSURANCE_UNDERWRITING_PROFILE}:
         return SHORT_VOL_PROFILE
     return "return_first_legacy"
 
 
 def yield_enhancement_mode_for_strategy_profile(profile: Any) -> str:
     normalized = normalize_strategy_profile(profile)
-    if normalized == SHORT_VOL_PROFILE:
+    if normalized in {SHORT_VOL_PROFILE, INSURANCE_UNDERWRITING_PROFILE}:
         return YIELD_ENHANCEMENT_VOL_CONVEXITY_MODE
     return YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE
 
@@ -158,32 +171,36 @@ def yield_enhancement_mode_uses_short_vol(mode: Any) -> bool:
 def strategy_semantics_for_profile(*, family: str, profile: Any) -> StrategySemantics:
     normalized_family = str(family or "").strip().lower()
     normalized_profile = normalize_strategy_profile(profile)
-    uses_short_vol = normalized_profile == SHORT_VOL_PROFILE
-    yield_mode = (
-        yield_enhancement_mode_for_strategy_profile(normalized_profile)
-        if normalized_family == SELL_PUT_FAMILY
-        else None
+    scan_profile = opening_profile_for_strategy(family=normalized_family, profile=normalized_profile)
+    uses_underwriting = (
+        normalized_family in {SELL_PUT_FAMILY, SELL_CALL_FAMILY}
+        and scan_profile == INSURANCE_UNDERWRITING_PROFILE
     )
+    uses_short_vol_thesis = normalized_profile in {SHORT_VOL_PROFILE, INSURANCE_UNDERWRITING_PROFILE}
+    yield_mode = YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE if normalized_family == SELL_PUT_FAMILY else None
+    close_profile_token = SHORT_VOL_PROFILE if uses_short_vol_thesis else normalized_profile
     if normalized_family == SELL_CALL_FAMILY:
-        close_profile = f"covered_call_{normalized_profile}"
+        close_profile = f"covered_call_{close_profile_token}"
     elif normalized_family == SELL_PUT_FAMILY:
-        close_profile = f"sell_put_{normalized_profile}"
+        close_profile = f"sell_put_{close_profile_token}"
     else:
         close_profile = normalized_profile
     return StrategySemantics(
         strategy_family=normalized_family,
         strategy_profile=normalized_profile,
         risk_model=risk_model_for_profile(normalized_profile),
-        scan_requires_rv=uses_short_vol,
-        scan_uses_short_vol_gate=uses_short_vol,
-        scan_uses_event_risk=uses_short_vol,
-        scan_uses_path_risk=uses_short_vol,
+        scan_strategy_profile=scan_profile,
+        scan_requires_rv=uses_underwriting,
+        scan_uses_underwriting_gate=uses_underwriting,
+        scan_uses_short_vol_gate=False,
+        scan_uses_event_risk=uses_underwriting,
+        scan_uses_path_risk=False,
         yield_enhancement_mode=yield_mode,
-        yield_enhancement_requires_rv=uses_short_vol and normalized_family == SELL_PUT_FAMILY,
-        yield_enhancement_uses_short_vol_gate=uses_short_vol and normalized_family == SELL_PUT_FAMILY,
+        yield_enhancement_requires_rv=False,
+        yield_enhancement_uses_short_vol_gate=False,
         close_advice_profile=close_profile,
-        close_requires_rv=uses_short_vol,
-        close_uses_short_vol_thesis=uses_short_vol,
+        close_requires_rv=uses_short_vol_thesis,
+        close_uses_short_vol_thesis=uses_short_vol_thesis,
     )
 
 

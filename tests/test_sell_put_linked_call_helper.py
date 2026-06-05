@@ -15,7 +15,7 @@ def test_yield_enhancement_defaults_match_system_template() -> None:
         assert template == yield_enhancement_defaults_for_market(market)
 
 
-def test_yield_enhancement_policy_is_derived_from_sell_put_strategy() -> None:
+def test_yield_enhancement_policy_is_isolated_from_sell_put_strategy() -> None:
     from src.application.yield_enhancement_config import derive_yield_enhancement_policy, resolve_yield_enhancement_cfg
 
     income = derive_yield_enhancement_policy({"enabled": True}, {"strategy": "return_first"})
@@ -29,26 +29,26 @@ def test_yield_enhancement_policy_is_derived_from_sell_put_strategy() -> None:
     assert income.config["call"]["min_delta"] == 0.05
     assert income.config["call"]["max_delta"] == 0.20
 
-    convexity = derive_yield_enhancement_policy({"enabled": True}, {"strategy": "short_vol"})
-    assert convexity.mode == "vol_convexity_enhancement"
-    assert convexity.derived_from_sell_put_strategy == "short_vol"
-    assert convexity.enabled is True
-    assert convexity.config["min_net_credit_annualized"] == 0.08
-    assert convexity.config["max_call_cost_to_put_credit"] == 0.35
-    assert convexity.config["call"]["min_delta"] == 0.15
-    assert convexity.config["call"]["max_delta"] == 0.30
+    isolated = derive_yield_enhancement_policy({"enabled": True}, {"strategy": "insurance_underwriting"})
+    assert isolated.mode == "income_upside_enhancement"
+    assert isolated.derived_from_sell_put_strategy == "return_first"
+    assert isolated.enabled is True
+    assert isolated.config["min_net_credit_annualized"] == 0.08
+    assert isolated.config["max_call_cost_to_put_credit"] == 0.20
+    assert isolated.config["call"]["min_delta"] == 0.05
+    assert isolated.config["call"]["max_delta"] == 0.20
 
     partial = resolve_yield_enhancement_cfg({"yield_enhancement": {"enabled": True, "call": {"min_delta": 0.18}}})
-    partial_policy = derive_yield_enhancement_policy(partial, {"strategy": "short_vol"})
+    partial_policy = derive_yield_enhancement_policy(partial, {"strategy": "insurance_underwriting"})
     assert partial_policy.config["call"]["min_delta"] == 0.18
-    assert partial_policy.config["call"]["max_delta"] == 0.30
-    assert partial_policy.config["call"]["max_otm_pct"] == 0.12
+    assert partial_policy.config["call"]["max_delta"] == 0.20
+    assert "max_otm_pct" not in partial_policy.config["call"]
 
     income_partial = resolve_yield_enhancement_cfg({"yield_enhancement": {"enabled": True, "call": {"min_delta": 0.10}}})
     income_partial_policy = derive_yield_enhancement_policy(income_partial, {"strategy": "return_first"})
     assert income_partial_policy.config["call"]["min_delta"] == 0.10
     assert income_partial_policy.config["call"]["max_delta"] == 0.20
-    assert income_partial_policy.config["call"]["max_otm_pct"] == 0.20
+    assert "max_otm_pct" not in income_partial_policy.config["call"]
 
 
 def _write_single_call(
@@ -195,21 +195,17 @@ def test_enrich_sell_put_candidates_with_linked_calls_selects_best_call(tmp_path
             "min_dte": 20,
             "max_dte": 90,
             "funding_mode": "credit_or_even",
-            "min_put_otm_pct": 0.05,
             "call": {
-                "min_otm_pct": 0.03,
-                "max_otm_pct": 0.20,
                 "min_delta": 0.10,
                 "max_delta": 0.45,
             },
             "max_call_cost_to_put_credit": 0.60,
             "min_net_credit_retention": 0.0,
-            "min_scenario_score": 0.02,
             "min_open_interest": 100,
             "min_volume": 5,
             "max_combo_spread_ratio": 0.50,
         },
-        sell_put_cfg={"enabled": True, "strategy": "short_vol", "min_dte": 20, "max_dte": 90},
+        sell_put_cfg={"enabled": True, "strategy": "insurance_underwriting", "min_dte": 20, "max_dte": 90},
         output_path=tmp_path / "sell_put_linked_calls.csv",
     )
     selected = select_best_yield_enhancement_pairs(pairs)
@@ -234,7 +230,7 @@ def test_enrich_sell_put_candidates_with_linked_calls_selects_best_call(tmp_path
     assert set(persisted_pairs["call_contract_symbol"]) == {"NVDA_C110", "NVDA_C112"}
 
 
-def test_yield_enhancement_requires_iv_for_expected_move_scoring(tmp_path: Path) -> None:
+def test_yield_enhancement_does_not_require_iv_for_funding_decision(tmp_path: Path) -> None:
     from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
 
     parsed = tmp_path / "parsed"
@@ -249,8 +245,8 @@ def test_yield_enhancement_requires_iv_for_expected_move_scoring(tmp_path: Path)
                 "contract_symbol": "NVDA_C110",
                 "strike": 110,
                 "spot": 100,
-                "bid": 1.4,
-                "ask": 1.5,
+                "bid": 0.24,
+                "ask": 0.25,
                 "mid": 1.45,
                 "volume": 65,
                 "open_interest": 980,
@@ -286,11 +282,19 @@ def test_yield_enhancement_requires_iv_for_expected_move_scoring(tmp_path: Path)
         df_candidates=df,
         symbol="NVDA",
         input_root=tmp_path,
-        yield_enhancement_cfg={"enabled": True, "min_open_interest": 100, "min_volume": 5},
-        sell_put_cfg={"enabled": True, "strategy": "short_vol", "min_dte": 20, "max_dte": 60},
+        yield_enhancement_cfg={
+            "enabled": True,
+            "min_open_interest": 100,
+            "min_volume": 5,
+            "call": {"max_delta": 0.45},
+        },
+        sell_put_cfg={"enabled": True, "strategy": "insurance_underwriting", "min_dte": 20, "max_dte": 60},
     )
 
-    assert pairs.empty
+    assert len(pairs) == 1
+    row = pairs.iloc[0]
+    assert row["expected_move"] is None
+    assert bool(row["funding_accepted"]) is True
 
 
 def test_yield_enhancement_rejects_unfunded_call_by_default(tmp_path: Path) -> None:
@@ -351,9 +355,8 @@ def test_yield_enhancement_rejects_unfunded_call_by_default(tmp_path: Path) -> N
             "enabled": True,
             "min_open_interest": 100,
             "min_volume": 5,
-            "min_scenario_score": 0.0,
         },
-        sell_put_cfg={"enabled": True, "strategy": "short_vol", "min_dte": 20, "max_dte": 60},
+        sell_put_cfg={"enabled": True, "strategy": "insurance_underwriting", "min_dte": 20, "max_dte": 60},
     )
 
     assert pairs.empty
@@ -417,9 +420,8 @@ def test_yield_enhancement_accepts_premium_funded_call_with_clear_upside(tmp_pat
             "enabled": True,
             "min_open_interest": 100,
             "min_volume": 5,
-            "min_scenario_score": 0.0,
         },
-        sell_put_cfg={"enabled": True, "strategy": "short_vol", "min_dte": 20, "max_dte": 60},
+        sell_put_cfg={"enabled": True, "strategy": "insurance_underwriting", "min_dte": 20, "max_dte": 60},
     )
 
     assert len(pairs) == 1
@@ -431,11 +433,11 @@ def test_yield_enhancement_accepts_premium_funded_call_with_clear_upside(tmp_pat
     assert float(row["upside_lift_to_put_credit"]) >= 0.5
     assert float(row["annualized_net_credit_yield"]) >= 0.08
     assert float(row["premium_funding_score"]) > 0
-    assert row["yield_enhancement_mode"] == "vol_convexity_enhancement"
-    assert row["derived_from_sell_put_strategy"] == "short_vol"
+    assert row["yield_enhancement_mode"] == "income_upside_enhancement"
+    assert row["derived_from_sell_put_strategy"] == "return_first"
 
 
-def test_yield_enhancement_short_vol_policy_allows_wider_call_funding(tmp_path: Path) -> None:
+def test_yield_enhancement_does_not_inherit_underwriting_call_funding(tmp_path: Path) -> None:
     from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
 
     _write_single_call(
@@ -454,18 +456,13 @@ def test_yield_enhancement_short_vol_policy_allows_wider_call_funding(tmp_path: 
         symbol="NVDA",
         input_root=tmp_path,
         yield_enhancement_cfg={"enabled": True, "min_open_interest": 100, "min_volume": 5},
-        sell_put_cfg={"enabled": True, "strategy": "short_vol", "min_dte": 20, "max_dte": 60},
+        sell_put_cfg={"enabled": True, "strategy": "insurance_underwriting", "min_dte": 20, "max_dte": 60},
     )
 
-    assert len(pairs) == 1
-    row = pairs.iloc[0]
-    assert row["yield_enhancement_mode"] == "vol_convexity_enhancement"
-    assert row["derived_from_sell_put_strategy"] == "short_vol"
-    assert float(row["call_cost_to_put_credit"]) <= 0.35
-    assert float(row["annualized_net_credit_yield"]) >= 0.08
+    assert pairs.empty
 
 
-def test_yield_enhancement_short_vol_requires_min_annualized_net_credit(tmp_path: Path) -> None:
+def test_yield_enhancement_underwriting_requires_min_annualized_net_credit(tmp_path: Path) -> None:
     from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
 
     _write_single_call(
@@ -483,11 +480,9 @@ def test_yield_enhancement_short_vol_requires_min_annualized_net_credit(tmp_path
         "min_open_interest": 100,
         "min_volume": 5,
         "max_call_cost_to_put_credit": 1.0,
-        "min_upside_lift_to_call_cost": 0.0,
-        "min_upside_lift_to_put_credit": 0.0,
-        "min_scenario_score": 0.0,
+        "min_net_credit_retention": 0.0,
     }
-    sell_put_cfg = {"enabled": True, "strategy": "short_vol", "min_dte": 20, "max_dte": 60}
+    sell_put_cfg = {"enabled": True, "strategy": "insurance_underwriting", "min_dte": 20, "max_dte": 60}
 
     rejected = find_sell_put_yield_enhancement_pairs(
         df_candidates=_single_put_df(dte=44, implied_volatility=0.80),
@@ -553,9 +548,8 @@ def test_yield_enhancement_pair_filter_inherits_sell_put_dte(tmp_path: Path) -> 
             "enabled": True,
             "min_open_interest": 100,
             "min_volume": 5,
-            "min_scenario_score": 0.0,
         },
-        sell_put_cfg={"enabled": True, "strategy": "short_vol", "min_dte": 7, "max_dte": 45},
+        sell_put_cfg={"enabled": True, "strategy": "insurance_underwriting", "min_dte": 7, "max_dte": 45},
     )
 
     assert len(pairs) == 1
@@ -585,8 +579,7 @@ def test_yield_enhancement_max_debit_does_not_apply_default_cost_ratio(tmp_path:
                 "min_net_credit_annualized": None,
                 "min_open_interest": 100,
                 "min_volume": 5,
-                "min_scenario_score": 0.0,
-                "call": {"min_delta": 0.10, "max_delta": 0.45, "min_otm_pct": 0.03, "max_otm_pct": 0.40},
+                "call": {"min_delta": 0.10, "max_delta": 0.45},
             }
         }
     )
@@ -597,7 +590,7 @@ def test_yield_enhancement_max_debit_does_not_apply_default_cost_ratio(tmp_path:
         symbol="NVDA",
         input_root=tmp_path,
         yield_enhancement_cfg=cfg,
-        sell_put_cfg={"enabled": True, "strategy": "short_vol", "min_dte": 20, "max_dte": 60},
+        sell_put_cfg={"enabled": True, "strategy": "insurance_underwriting", "min_dte": 20, "max_dte": 60},
     )
 
     assert len(pairs) == 1
@@ -631,8 +624,7 @@ def test_yield_enhancement_max_debit_respects_explicit_cost_ratio(tmp_path: Path
                 "max_call_cost_to_put_credit": 1.0,
                 "min_open_interest": 100,
                 "min_volume": 5,
-                "min_scenario_score": 0.0,
-                "call": {"min_delta": 0.10, "max_delta": 0.45, "min_otm_pct": 0.03, "max_otm_pct": 0.40},
+                "call": {"min_delta": 0.10, "max_delta": 0.45},
             }
         }
     )
@@ -642,7 +634,7 @@ def test_yield_enhancement_max_debit_respects_explicit_cost_ratio(tmp_path: Path
         symbol="NVDA",
         input_root=tmp_path,
         yield_enhancement_cfg=cfg,
-        sell_put_cfg={"enabled": True, "strategy": "short_vol", "min_dte": 20, "max_dte": 60},
+        sell_put_cfg={"enabled": True, "strategy": "insurance_underwriting", "min_dte": 20, "max_dte": 60},
     )
 
     assert pairs.empty

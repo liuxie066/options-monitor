@@ -21,9 +21,7 @@ from domain.domain.candidate_defaults import (
 from src.infrastructure.exchange_rates import CurrencyConverter
 from domain.domain.symbol_identity import canonical_symbol, symbol_currency
 from src.infrastructure.io_utils import safe_read_csv
-from src.application.covered_call_strategy_risk import (
-    enrich_and_filter_covered_call_short_vol,
-)
+from src.application.covered_call_strategy_risk import enrich_and_filter_covered_call_underwriting
 from src.application.strategy_policy import SELL_CALL_FAMILY, strategy_semantics_for_side_config
 from src.application.render_sell_call_alerts import render_sell_call_alerts
 from src.application.report_summaries import summarize_sell_call
@@ -126,7 +124,7 @@ def run_sell_call_scan_and_summarize(
             rule="stock_context_missing",
             message=f"{COVERED_CALL_TRACE_LABEL} stock context missing",
             strategy_family=sell_call_semantics.strategy_family,
-            strategy_profile=sell_call_semantics.strategy_profile,
+            strategy_profile=sell_call_semantics.scan_strategy_profile,
         )
         return summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
 
@@ -145,7 +143,7 @@ def run_sell_call_scan_and_summarize(
             rule="stock_context_invalid",
             message=f"{COVERED_CALL_TRACE_LABEL} stock context invalid",
             strategy_family=sell_call_semantics.strategy_family,
-            strategy_profile=sell_call_semantics.strategy_profile,
+            strategy_profile=sell_call_semantics.scan_strategy_profile,
         )
         return summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
 
@@ -159,7 +157,7 @@ def run_sell_call_scan_and_summarize(
             metric_value=shares_total,
             threshold=1,
             strategy_family=sell_call_semantics.strategy_family,
-            strategy_profile=sell_call_semantics.strategy_profile,
+            strategy_profile=sell_call_semantics.scan_strategy_profile,
             config_values={"avg_cost": avg_cost},
         )
         return summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
@@ -175,7 +173,7 @@ def run_sell_call_scan_and_summarize(
                 rule="locked_shares_unavailable",
                 message=str(locked_shares_unavailable_by_symbol.get(symbol_key) or "locked shares unavailable"),
                 strategy_family=sell_call_semantics.strategy_family,
-                strategy_profile=sell_call_semantics.strategy_profile,
+                strategy_profile=sell_call_semantics.scan_strategy_profile,
             )
             return summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
         if locked_shares_by_symbol and symbol:
@@ -188,12 +186,12 @@ def run_sell_call_scan_and_summarize(
             rule="share_coverage_calc_failed",
             message=f"{COVERED_CALL_TRACE_LABEL} share coverage calculation failed",
             strategy_family=sell_call_semantics.strategy_family,
-            strategy_profile=sell_call_semantics.strategy_profile,
+            strategy_profile=sell_call_semantics.scan_strategy_profile,
         )
         return summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
     shares_available_for_cover = max(0, int(shares_total) - int(locked))
 
-    min_annualized = 0.0 if sell_call_semantics.scan_uses_short_vol_gate else resolve_min_annualized_net_premium_return_from_sell_call_cfg(
+    min_annualized = 0.0 if sell_call_semantics.scan_uses_underwriting_gate else resolve_min_annualized_net_premium_return_from_sell_call_cfg(
         sell_call_cfg=cc,
         source_prefix=f'{symbol}.sell_call',
     )
@@ -206,7 +204,7 @@ def run_sell_call_scan_and_summarize(
     global_min_net_income = float((global_sell_call_liquidity or {}).get('min_net_income', 0.0) or 0.0)
     min_net_income_cny = float(cc.get('min_net_income', global_min_net_income) or 0.0)
     min_net_income_native = 0.0
-    if sell_call_semantics.scan_uses_short_vol_gate:
+    if sell_call_semantics.scan_uses_underwriting_gate:
         min_net_income_native = 0.0
     elif min_net_income_cny > 0:
         native_ccy = symbol_currency(symbol)
@@ -245,13 +243,13 @@ def run_sell_call_scan_and_summarize(
         event_risk_cfg=event_risk,
         score_weights=cc.get('score_weights'),
         strategy_family=sell_call_semantics.strategy_family,
-        strategy_profile=sell_call_semantics.strategy_profile,
+        strategy_profile=sell_call_semantics.scan_strategy_profile,
         quiet=bool(is_scheduled),
     )
 
     df_cc = safe_read_csv(symbol_cc)
     if not df_cc.empty:
-        df_cc = enrich_and_filter_covered_call_short_vol(
+        df_cc = enrich_and_filter_covered_call_underwriting(
             df_labeled=df_cc,
             symbol=symbol,
             sell_call_cfg=cc,

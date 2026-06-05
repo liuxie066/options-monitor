@@ -24,7 +24,7 @@ RISK_ALERT_RULES = {"event_source_unavailable"}
 FUNCTION_LABELS = {
     "sell_put": "Sell Put",
     "sell_call": "Covered Call",
-    "yield_enhancement": "收益增强",
+    "yield_enhancement": "组合收益",
     "cash_reserve": "现金过滤",
     "share_coverage": "覆盖能力",
 }
@@ -39,7 +39,7 @@ CATEGORY_LABELS = {
     "event_risk": "事件风险",
     "return_floor": "收益门槛不足",
     "cash_or_coverage": "资金或覆盖不足",
-    "yield_enhancement": "收益增强组合不成立",
+    "yield_enhancement": "组合收益不成立",
     "hard_constraints": "基础条件不符",
     "other": "其他",
 }

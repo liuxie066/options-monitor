@@ -277,7 +277,7 @@ def test_run_close_advice_optimizer_switch_includes_redeploy_candidate(
     assert "AMD260619P00080000" in text
 
 
-def test_run_close_advice_uses_short_vol_strategy_from_sell_put_config(
+def test_run_close_advice_uses_underwriting_config_for_short_vol_close_thesis(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -335,7 +335,7 @@ def test_run_close_advice_uses_short_vol_strategy_from_sell_put_config(
                 {
                     "symbol": "NVDA",
                     "sell_put": {
-                        "strategy": "short_vol",
+                        "strategy": "insurance_underwriting",
                         "short_vol": {"min_iv_rv_ratio": 1.15, "min_iv_minus_rv": 0.05},
                     },
                 }
@@ -349,7 +349,7 @@ def test_run_close_advice_uses_short_vol_strategy_from_sell_put_config(
 
     rows = pd.read_csv(out_dir / "close_advice.csv").to_dict("records")
     assert rows[0]["strategy_family"] == "sell_put"
-    assert rows[0]["strategy_profile"] == "short_vol"
+    assert rows[0]["strategy_profile"] == "insurance_underwriting"
     assert rows[0]["risk_model"] == "short_vol"
     assert rows[0]["short_vol_thesis_status"] == "observe"
     assert rows[0]["tier"] == "strong"
@@ -444,7 +444,7 @@ def test_run_close_advice_refreshes_short_vol_quote_missing_rv(
                     "symbol": "NVDA",
                     "fetch": {"source": "futu"},
                     "sell_put": {
-                        "strategy": "short_vol",
+                        "strategy": "insurance_underwriting",
                         "short_vol": {"event_source_fail_closed": False},
                     },
                 }
@@ -521,7 +521,7 @@ def test_run_close_advice_does_not_require_rv_for_return_first_position(
     result = run_close_advice(
         config={
             "close_advice": {"enabled": True, "notify_levels": ["strong", "medium"]},
-            "symbols": [{"symbol": "NVDA", "fetch": {"source": "futu"}, "sell_put": {"strategy": "short_vol"}}],
+            "symbols": [{"symbol": "NVDA", "fetch": {"source": "futu"}, "sell_put": {"strategy": "insurance_underwriting"}}],
         },
         context_path=ctx_path,
         required_data_root=required_root,
@@ -591,7 +591,7 @@ def test_run_close_advice_uses_income_upside_mode_for_yield_enhancement_put(
     result = run_close_advice(
         config={
             "close_advice": {"enabled": True, "notify_levels": ["strong", "medium"]},
-            "symbols": [{"symbol": "NVDA", "sell_put": {"strategy": "short_vol"}}],
+            "symbols": [{"symbol": "NVDA", "sell_put": {"strategy": "insurance_underwriting"}}],
         },
         context_path=ctx_path,
         required_data_root=required_root,
@@ -755,7 +755,7 @@ def test_run_close_advice_merges_event_snapshot_for_short_vol_position(
     result = run_close_advice(
         config={
             "close_advice": {"enabled": True, "notify_levels": ["strong", "medium"]},
-            "symbols": [{"symbol": "PDD", "sell_put": {"strategy": "short_vol"}}],
+            "symbols": [{"symbol": "PDD", "sell_put": {"strategy": "insurance_underwriting"}}],
         },
         context_path=ctx_path,
         required_data_root=required_root,
@@ -823,7 +823,7 @@ def test_run_close_advice_reports_missing_event_snapshot_for_short_vol_position(
     result = run_close_advice(
         config={
             "close_advice": {"enabled": True, "notify_levels": ["strong", "medium"]},
-            "symbols": [{"symbol": "PDD", "sell_put": {"strategy": "short_vol"}}],
+            "symbols": [{"symbol": "PDD", "sell_put": {"strategy": "insurance_underwriting"}}],
         },
         context_path=ctx_path,
         required_data_root=required_root,
@@ -903,7 +903,7 @@ def test_run_close_advice_records_missing_event_snapshot_symbol_as_context(
         config={
             "runtime": {"event_snapshot_path": str(snapshot_path)},
             "close_advice": {"enabled": True, "notify_levels": ["strong", "medium"]},
-            "symbols": [{"symbol": "PDD", "sell_put": {"strategy": "short_vol"}}],
+            "symbols": [{"symbol": "PDD", "sell_put": {"strategy": "insurance_underwriting"}}],
         },
         context_path=ctx_path,
         required_data_root=required_root,
@@ -979,7 +979,7 @@ def test_run_close_advice_rechecks_stale_quote_event_context(
     result = run_close_advice(
         config={
             "close_advice": {"enabled": True, "notify_levels": ["strong", "medium"]},
-            "symbols": [{"symbol": "PDD", "sell_put": {"strategy": "short_vol"}}],
+            "symbols": [{"symbol": "PDD", "sell_put": {"strategy": "insurance_underwriting"}}],
         },
         context_path=ctx_path,
         required_data_root=required_root,
@@ -1045,7 +1045,7 @@ def test_run_close_advice_prefers_position_strategy_snapshot_over_current_config
     run_close_advice(
         config={
             "close_advice": {"enabled": True, "notify_levels": ["strong", "medium"]},
-            "symbols": [{"symbol": "NVDA", "sell_put": {"strategy": "short_vol"}}],
+            "symbols": [{"symbol": "NVDA", "sell_put": {"strategy": "insurance_underwriting"}}],
         },
         context_path=ctx_path,
         required_data_root=required_root,
@@ -1493,7 +1493,11 @@ def test_run_close_advice_prefers_context_expiration_ymd_field(
     assert "NVDA Put 2026-05-15" in (out_dir / "close_advice.txt").read_text(encoding="utf-8")
 
 
-def test_run_close_advice_normalizes_business_midnight_expiration_timestamp(tmp_path: Path) -> None:
+def test_run_close_advice_normalizes_business_midnight_expiration_timestamp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _freeze_close_advice_business_today(monkeypatch)
     context = {
         "open_positions_min": [
             {
@@ -1919,7 +1923,10 @@ def test_run_close_advice_blocks_last_price_only_quote_from_notifications(tmp_pa
     assert "not_evaluable" in csv_text
 
 
-def test_run_close_advice_reports_quote_issue_summary(tmp_path: Path) -> None:
+def test_run_close_advice_reports_quote_issue_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     ctx_path = tmp_path / "option_positions_context.json"
     ctx_path.write_text(
         json.dumps(
@@ -1945,6 +1952,11 @@ def test_run_close_advice_reports_quote_issue_summary(tmp_path: Path) -> None:
     required_root = tmp_path / "required_data"
     (required_root / "parsed").mkdir(parents=True)
     out_dir = tmp_path / "reports"
+
+    def fail_fetch_symbol(symbol: str, **kwargs: object) -> dict[str, object]:
+        raise RuntimeError(f"fetch unavailable for {symbol}")
+
+    monkeypatch.setattr("src.application.opend_symbol_fetching.fetch_symbol", fail_fetch_symbol)
 
     result = run_close_advice(
         config={"close_advice": {"enabled": True}},

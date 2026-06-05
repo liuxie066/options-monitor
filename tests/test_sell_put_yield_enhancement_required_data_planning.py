@@ -82,15 +82,51 @@ def test_sell_put_yield_enhancement_minimal_config_derives_call_fetch_window(mon
     assert len(plan.merged_specs) == 1
     assert tuple(plan.merged_specs[0].option_types) == ("put", "call")
     assert plan.merged_specs[0].side_strike_windows["call"] == {
-        "min_strike": 103.0,
+        "min_strike": 100.0,
         "max_strike": 142.8,
     }
 
     call_plan = next(side for side in plan.side_plans if side.option_type == "call")
     assert call_plan.strike_window.source == "yield_enhancement.call.spot_derived_bounds"
-    assert call_plan.strike_window.base_min_strike == 103.0
+    assert call_plan.strike_window.base_min_strike == 100.0
     assert call_plan.strike_window.base_max_strike == 140.0
     assert call_plan.strike_window.max_strike == 142.8
+
+
+def test_yield_enhancement_fetch_plan_declares_put_and_call_without_sell_put(monkeypatch, tmp_path: Path) -> None:
+    import src.application.required_data_planning as mod
+
+    monkeypatch.setattr(mod, "list_option_expirations", lambda *args, **kwargs: ["2026-06-19"])
+    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: 100.0)
+
+    plan = mod.build_required_data_fetch_plan(
+        base=tmp_path,
+        required_data_dir=tmp_path,
+        symbol="NVDA",
+        limit_expirations=1,
+        want_put=False,
+        want_call=False,
+        sell_put_cfg={
+            "enabled": False,
+            "strategy": "return_first",
+            "min_dte": 20,
+            "max_dte": 60,
+            "min_strike": 90,
+            "max_strike": 96,
+        },
+        sell_call_cfg={},
+        yield_enhancement_cfg={"enabled": True},
+        fetch_host="127.0.0.1",
+        fetch_port=11111,
+    )
+
+    assert {side.option_type for side in plan.side_plans} == {"put", "call"}
+    assert len(plan.merged_specs) == 1
+    assert tuple(plan.merged_specs[0].option_types) == ("put", "call")
+    put_plan = next(side for side in plan.side_plans if side.option_type == "put")
+    call_plan = next(side for side in plan.side_plans if side.option_type == "call")
+    assert put_plan.strike_window.max_strike == 96.0
+    assert call_plan.strike_window.source == "yield_enhancement.call.spot_derived_bounds"
 
 
 def test_sell_put_yield_enhancement_merges_with_existing_sell_call_bounds(monkeypatch, tmp_path: Path) -> None:
@@ -106,7 +142,14 @@ def test_sell_put_yield_enhancement_merges_with_existing_sell_call_bounds(monkey
         limit_expirations=1,
         want_put=True,
         want_call=True,
-        sell_put_cfg={"enabled": True, "strategy": "short_vol", "min_dte": 20, "max_dte": 60, "min_strike": 92, "max_strike": 96},
+        sell_put_cfg={
+            "enabled": True,
+            "strategy": "insurance_underwriting",
+            "min_dte": 20,
+            "max_dte": 60,
+            "min_strike": 92,
+            "max_strike": 96,
+        },
         sell_call_cfg={"enabled": True, "min_dte": 30, "max_dte": 45, "min_strike": 104, "max_strike": 118},
         yield_enhancement_cfg={
             "enabled": True,

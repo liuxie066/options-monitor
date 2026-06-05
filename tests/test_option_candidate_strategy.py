@@ -466,7 +466,7 @@ def test_run_candidate_scan_uses_configured_score_weights(tmp_path: Path) -> Non
     assert list(out["contract_symbol"]) == ["LOWER_RETURN_LIQUID", "HIGH_RETURN_WIDE"]
 
 
-def test_run_candidate_scan_applies_sell_put_min_otm_pct(tmp_path: Path) -> None:
+def test_run_candidate_scan_applies_sell_put_spot_ceiling(tmp_path: Path) -> None:
     _add_repo_to_syspath()
     import src.application.candidate_scanning as scan
 
@@ -479,10 +479,10 @@ def test_run_candidate_scan_applies_sell_put_min_otm_pct(tmp_path: Path) -> None
                 "option_type": "put",
                 "expiration": "2026-06-18",
                 "dte": 30,
-                "contract_symbol": "NEAR_SPOT",
+                "contract_symbol": "ITM_PUT",
                 "multiplier": 100,
                 "currency": "USD",
-                "strike": 98,
+                "strike": 101,
                 "spot": 100,
                 "bid": 1.0,
                 "ask": 1.2,
@@ -498,10 +498,10 @@ def test_run_candidate_scan_applies_sell_put_min_otm_pct(tmp_path: Path) -> None
                 "option_type": "put",
                 "expiration": "2026-06-18",
                 "dte": 30,
-                "contract_symbol": "FIVE_PCT_OTM",
+                "contract_symbol": "ATM_PUT",
                 "multiplier": 100,
                 "currency": "USD",
-                "strike": 95,
+                "strike": 100,
                 "spot": 100,
                 "bid": 0.8,
                 "ask": 1.0,
@@ -532,7 +532,6 @@ def test_run_candidate_scan_applies_sell_put_min_otm_pct(tmp_path: Path) -> None
             max_spread_ratio=1.0,
             min_annualized_net_return=0.01,
             min_net_income=1,
-            min_otm_pct=0.05,
             quiet=True,
         ),
         deps=scan.CandidateScanDependencies(
@@ -561,12 +560,11 @@ def test_run_candidate_scan_applies_sell_put_min_otm_pct(tmp_path: Path) -> None
         base_dir=tmp_path,
     )
 
-    assert list(out["contract_symbol"]) == ["FIVE_PCT_OTM"]
+    assert list(out["contract_symbol"]) == ["ATM_PUT"]
     reject_log = pd.read_csv(out_path.with_name("output_reject_log.csv"))
-    assert list(reject_log["contract_symbol"]) == ["NEAR_SPOT"]
+    assert list(reject_log["contract_symbol"]) == ["ITM_PUT"]
     assert list(reject_log["reject_rule"]) == ["strike"]
-    assert list(reject_log["metric_value"]) == [0.02]
-    assert list(reject_log["threshold"]) == [0.05]
+    assert list(reject_log["metric_value"]) == [101.0]
 
 
 def test_run_candidate_scan_logs_hard_liquidity_and_missing_spread_rejects(tmp_path: Path) -> None:

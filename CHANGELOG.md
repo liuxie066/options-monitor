@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 1.2.213 - 2026-06-05
+
+### Added
+- Added the target product architecture and strategy architecture docs for the underwriting-centered strategy module split.
+- Added mixed-policy candidate ranking diagnostics so `candidate_rank_explain` keeps `insurance_underwriting` and unsupported/legacy profiles in separate ranking groups.
+- Added trace-only research archive market inference so archived candidate traces can build usable local evidence when final run metadata is absent.
+
+### Changed
+- Reworked Sell Put and Covered Call opening semantics from short-vol trading toward `insurance_underwriting`, including shared recall, filtering, and ranking behavior around acceptable assignment/called-away prices.
+- Isolated Combo Yield as its own strategy family instead of treating it as an overlay on Sell Put or Covered Call.
+- Simplified strategy defaults and generated config/docs around the refreshed underwriting parameters, including the IV/RV floor update to `1.10`.
+- Refreshed the dependency graph after the strategy module split.
+
+### Fixed
+- Fixed close-advice supplementary quote refresh so RV-only refreshes do not build an implicit OpenD gateway in offline/unit-test paths.
+- Fixed auto trade-intake `deal-json` dry-run replay so it does not connect to OpenD for enrichment or multiplier refresh.
+
 ## 1.2.212 - 2026-06-05
 
 ### Added

@@ -20,6 +20,7 @@ class MultiTickAuditHelper:
     build_failure_audit_fields: Callable[..., dict[str, Any]]
     run_id: str
     idempotency_key: str
+    write_run_artifacts: bool = True
     guard_failure_recorded: bool = False
 
     def audit(
@@ -42,9 +43,13 @@ class MultiTickAuditHelper:
                 "idempotency_key": self.idempotency_key,
             }
             payload.update(kwargs)
-            self.append_audit_event(self.base, payload, run_id=(run_id or self.run_id))
+            run_scope = (run_id or self.run_id) if self.write_run_artifacts else None
+            self.append_audit_event(self.base, payload, run_id=run_scope)
         except Exception:
             pass
+
+    def enable_run_artifacts(self) -> None:
+        self.write_run_artifacts = True
 
     def guard_mark_failure(self, error_code: str, stage: str) -> None:
         if self.guard_failure_recorded:

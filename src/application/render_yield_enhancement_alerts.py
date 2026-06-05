@@ -73,7 +73,7 @@ def render_one(row: pd.Series) -> str:
         candidate_line = f"Call候选: {int(call_candidate_count)}个"
     return "\n".join(
         [
-            f"[收益增强推荐] {symbol} {expiration} {put_strike}P + {call_strike}C",
+            f"[组合收益推荐] {symbol} {expiration} {put_strike}P + {call_strike}C",
             "",
             f"DTE: {int(dte) if dte is not None else '-'}",
             *([mode_line] if mode_line else []),
@@ -89,7 +89,7 @@ def render_one(row: pd.Series) -> str:
             f"Expected Move: {('-' if expected_move is None else num(expected_move))} | IV={('-' if expected_move_iv is None else pct(expected_move_iv))}",
             f"组合价差比: {pct(row.get('combo_spread_ratio'))}",
             "",
-            "判断: 已按组合收益筛出推荐 Call，可作为该 Sell Put 的收益增强方案。",
+            "判断: 已按组合收益筛出推荐 Call，可作为 Combo Yield 组合方案。",
         ]
     )
 

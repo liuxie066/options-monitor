@@ -74,6 +74,7 @@ def test_validate_config_rejects_removed_global_strategy_filter_keys() -> None:
         'templates': {
             'put_base': {
                 'sell_put': {
+                    'strategy': 'return_first',
                     'min_open_interest': 60,
                     'min_volume': 10,
                     'max_spread_ratio': 0.3,
@@ -133,6 +134,7 @@ def test_validate_config_accepts_candidate_score_weights() -> None:
             },
             'call_base': {
                 'sell_call': {
+                    'strategy': 'return_first',
                     'min_open_interest': 50,
                     'min_volume': 10,
                     'max_spread_ratio': 0.3,
@@ -150,6 +152,7 @@ def test_validate_config_accepts_candidate_score_weights() -> None:
                     'max_dte': 45,
                     'min_strike': 10,
                     'max_strike': 200,
+                    'strategy': 'return_first',
                     'score_weights': {'liquidity': 0.01},
                 },
                 'sell_call': {'enabled': False},
@@ -160,7 +163,7 @@ def test_validate_config_accepts_candidate_score_weights() -> None:
     validate_config(cfg)
 
 
-def test_validate_config_accepts_sell_put_short_vol_strategy_config() -> None:
+def test_validate_config_accepts_sell_put_insurance_underwriting_strategy_config() -> None:
     _add_repo_to_syspath()
     from src.application.config_validator import validate_config
 
@@ -168,20 +171,12 @@ def test_validate_config_accepts_sell_put_short_vol_strategy_config() -> None:
         'templates': {
             'put_base': {
                 'sell_put': {
-                    'strategy': 'short_vol',
+                    'strategy': 'insurance_underwriting',
                     'short_vol': {
-                        'min_iv_rv_ratio': 1.15,
+                        'min_iv_rv_ratio': 1.10,
                         'min_iv_minus_rv': 0.05,
-                        'min_abs_delta': 0.15,
-                        'max_abs_delta': 0.30,
-                        'target_abs_delta': 0.20,
-                        'max_call_gap_up_opportunity_cost_nav_pct': 0.02,
-                        'max_call_gap_up_opportunity_cost_to_premium': 3.0,
-                    },
-                    'concentration': {
-                        'max_single_trade_nav_pct': 0.08,
-                        'max_symbol_nav_pct': 0.20,
-                        'max_total_short_put_nav_pct': 0.50,
+                        'reject_event_risk': True,
+                        'event_source_fail_closed': True,
                     },
                 }
             },
@@ -196,8 +191,8 @@ def test_validate_config_accepts_sell_put_short_vol_strategy_config() -> None:
                     'max_dte': 45,
                     'min_strike': 10,
                     'max_strike': 200,
-                    'strategy': 'short_vol',
-                    'short_vol': {'target_abs_delta': 0.22},
+                    'strategy': 'insurance_underwriting',
+                    'short_vol': {'min_iv_rv_ratio': 1.10},
                 },
                 'sell_call': {'enabled': False},
             }
@@ -207,7 +202,7 @@ def test_validate_config_accepts_sell_put_short_vol_strategy_config() -> None:
     validate_config(cfg)
 
 
-def test_validate_config_rejects_short_vol_fail_closed_with_disabled_event_risk() -> None:
+def test_validate_config_rejects_underwriting_fail_closed_with_disabled_event_risk() -> None:
     _add_repo_to_syspath()
     from src.application.config_validator import validate_config
 
@@ -215,7 +210,7 @@ def test_validate_config_rejects_short_vol_fail_closed_with_disabled_event_risk(
         'templates': {
             'put_base': {
                 'sell_put': {
-                    'strategy': 'short_vol',
+                    'strategy': 'insurance_underwriting',
                     'event_risk': {'enabled': False},
                     'short_vol': {'event_source_fail_closed': True},
                 }
@@ -247,7 +242,37 @@ def test_validate_config_rejects_short_vol_fail_closed_with_disabled_event_risk(
         assert 'templates.put_base.sell_put.short_vol.event_source_fail_closed=true' in msg
 
 
-def test_validate_config_rejects_invalid_sell_put_short_vol_strategy_config() -> None:
+def test_validate_config_rejects_opening_short_vol_strategy_value() -> None:
+    _add_repo_to_syspath()
+    from src.application.config_validator import validate_config
+
+    cfg = {
+        'templates': {
+            'put_base': {'sell_put': {'strategy': 'short_vol'}},
+        },
+        'symbols': [
+            {
+                'symbol': 'AAPL',
+                'use': ['put_base'],
+                'sell_put': {
+                    'enabled': True,
+                    'min_dte': 7,
+                    'max_dte': 45,
+                    'max_strike': 200,
+                },
+                'sell_call': {'enabled': False},
+            }
+        ],
+    }
+
+    try:
+        validate_config(cfg)
+        raise AssertionError('expected config validation failure')
+    except SystemExit as e:
+        assert 'templates.put_base.sell_put.strategy=short_vol is no longer supported' in str(e)
+
+
+def test_validate_config_rejects_underwriting_score_weights() -> None:
     _add_repo_to_syspath()
     from src.application.config_validator import validate_config
 
@@ -255,7 +280,77 @@ def test_validate_config_rejects_invalid_sell_put_short_vol_strategy_config() ->
         'templates': {
             'put_base': {
                 'sell_put': {
-                    'strategy': 'short_vol',
+                    'strategy': 'insurance_underwriting',
+                    'score_weights': {'liquidity': 0.02},
+                }
+            },
+        },
+        'symbols': [
+            {
+                'symbol': 'AAPL',
+                'use': ['put_base'],
+                'sell_put': {
+                    'enabled': True,
+                    'min_dte': 7,
+                    'max_dte': 45,
+                    'max_strike': 200,
+                },
+                'sell_call': {'enabled': False},
+            }
+        ],
+    }
+
+    try:
+        validate_config(cfg)
+        raise AssertionError('expected config validation failure')
+    except SystemExit as e:
+        assert 'templates.put_base.sell_put.score_weights is not used by insurance_underwriting' in str(e)
+
+
+def test_validate_config_rejects_opening_concentration_config() -> None:
+    _add_repo_to_syspath()
+    from src.application.config_validator import validate_config
+
+    cfg = {
+        'templates': {
+            'put_base': {
+                'sell_put': {
+                    'strategy': 'insurance_underwriting',
+                    'concentration': {'max_single_trade_nav_pct': 0.08},
+                }
+            },
+        },
+        'symbols': [
+            {
+                'symbol': 'AAPL',
+                'use': ['put_base'],
+                'sell_put': {
+                    'enabled': True,
+                    'min_dte': 7,
+                    'max_dte': 45,
+                    'max_strike': 200,
+                },
+                'sell_call': {'enabled': False},
+            }
+        ],
+    }
+
+    try:
+        validate_config(cfg)
+        raise AssertionError('expected config validation failure')
+    except SystemExit as e:
+        assert 'templates.put_base.sell_put.concentration has been removed from opening config' in str(e)
+
+
+def test_validate_config_rejects_removed_sell_put_short_vol_opening_fields() -> None:
+    _add_repo_to_syspath()
+    from src.application.config_validator import validate_config
+
+    cfg = {
+        'templates': {
+            'put_base': {
+                'sell_put': {
+                    'strategy': 'insurance_underwriting',
                     'short_vol': {'min_abs_delta': 0.35, 'max_abs_delta': 0.30},
                 }
             },
@@ -280,10 +375,10 @@ def test_validate_config_rejects_invalid_sell_put_short_vol_strategy_config() ->
         validate_config(cfg)
         raise AssertionError('expected config validation failure')
     except SystemExit as e:
-        assert 'templates.put_base.sell_put.short_vol.min_abs_delta > templates.put_base.sell_put.short_vol.max_abs_delta' in str(e)
+        assert 'templates.put_base.sell_put.short_vol has removed opening fields: min_abs_delta, max_abs_delta' in str(e)
 
 
-def test_validate_config_rejects_invalid_call_gap_up_nav_budget() -> None:
+def test_validate_config_rejects_removed_call_gap_up_nav_budget() -> None:
     _add_repo_to_syspath()
     from src.application.config_validator import validate_config
 
@@ -291,7 +386,7 @@ def test_validate_config_rejects_invalid_call_gap_up_nav_budget() -> None:
         'templates': {
             'call_base': {
                 'sell_call': {
-                    'strategy': 'short_vol',
+                    'strategy': 'insurance_underwriting',
                     'short_vol': {'max_call_gap_up_opportunity_cost_nav_pct': 1.2},
                 }
             },
@@ -316,10 +411,10 @@ def test_validate_config_rejects_invalid_call_gap_up_nav_budget() -> None:
         validate_config(cfg)
         raise AssertionError('expected config validation failure')
     except SystemExit as e:
-        assert 'templates.call_base.sell_call.short_vol.max_call_gap_up_opportunity_cost_nav_pct' in str(e)
+        assert 'templates.call_base.sell_call.short_vol has removed opening fields: max_call_gap_up_opportunity_cost_nav_pct' in str(e)
 
 
-def test_validate_config_rejects_invalid_call_gap_up_premium_budget() -> None:
+def test_validate_config_rejects_removed_call_gap_up_premium_budget() -> None:
     _add_repo_to_syspath()
     from src.application.config_validator import validate_config
 
@@ -327,7 +422,7 @@ def test_validate_config_rejects_invalid_call_gap_up_premium_budget() -> None:
         'templates': {
             'call_base': {
                 'sell_call': {
-                    'strategy': 'short_vol',
+                    'strategy': 'insurance_underwriting',
                     'short_vol': {'max_call_gap_up_opportunity_cost_to_premium': -0.1},
                 }
             },
@@ -352,7 +447,7 @@ def test_validate_config_rejects_invalid_call_gap_up_premium_budget() -> None:
         validate_config(cfg)
         raise AssertionError('expected config validation failure')
     except SystemExit as e:
-        assert 'templates.call_base.sell_call.short_vol.max_call_gap_up_opportunity_cost_to_premium' in str(e)
+        assert 'templates.call_base.sell_call.short_vol has removed opening fields: max_call_gap_up_opportunity_cost_to_premium' in str(e)
 
 
 def test_validate_config_rejects_invalid_candidate_score_weights() -> None:
@@ -363,6 +458,7 @@ def test_validate_config_rejects_invalid_candidate_score_weights() -> None:
         'templates': {
             'put_base': {
                 'sell_put': {
+                    'strategy': 'return_first',
                     'min_open_interest': 60,
                     'min_volume': 10,
                     'max_spread_ratio': 0.3,
@@ -394,7 +490,7 @@ def test_validate_config_rejects_invalid_candidate_score_weights() -> None:
         assert 'templates.put_base.sell_put.score_weights.liquidity must be >= 0' in msg
 
 
-def test_validate_config_rejects_invalid_sell_put_min_otm_pct() -> None:
+def test_validate_config_rejects_removed_sell_put_min_otm_pct() -> None:
     _add_repo_to_syspath()
     from src.application.config_validator import validate_config
 
@@ -402,7 +498,7 @@ def test_validate_config_rejects_invalid_sell_put_min_otm_pct() -> None:
         'templates': {
             'put_base': {
                 'sell_put': {
-                    'min_otm_pct': 1.5,
+                    'min_otm_pct': 0.05,
                 }
             },
         },
@@ -427,16 +523,16 @@ def test_validate_config_rejects_invalid_sell_put_min_otm_pct() -> None:
         raise AssertionError('expected config validation failure')
     except SystemExit as e:
         msg = str(e)
-        assert 'templates.put_base.sell_put.min_otm_pct must be between 0 and 1' in msg
+        assert 'templates.put_base.sell_put has removed OTM fields: min_otm_pct' in msg
 
-    cfg['templates']['put_base']['sell_put']['min_otm_pct'] = 0.05
-    cfg['symbols'][0]['sell_put']['min_otm_pct'] = -0.01
+    del cfg['templates']['put_base']['sell_put']['min_otm_pct']
+    cfg['symbols'][0]['sell_put']['min_otm_pct'] = 0.05
     try:
         validate_config(cfg)
         raise AssertionError('expected config validation failure')
     except SystemExit as e:
         msg = str(e)
-        assert 'AAPL.sell_put.min_otm_pct must be between 0 and 1' in msg
+        assert 'AAPL.sell_put has removed OTM fields: min_otm_pct' in msg
 
 
 def test_validate_config_rejects_removed_legacy_sell_call_fetch_fields_in_templates() -> None:
@@ -583,7 +679,7 @@ def test_validate_config_rejects_yield_enhancement_strategy_mode() -> None:
     except SystemExit as e:
         msg = str(e)
         assert '[CONFIG_ERROR]' in msg
-        assert 'yield_enhancement uses sell_put.strategy' in msg
+        assert 'yield_enhancement is isolated from sell_put.strategy' in msg
 
 
 def test_validate_config_rejects_decimal_close_advice_max_items_per_account() -> None:
@@ -805,7 +901,6 @@ def test_sell_put_steps_use_global_liquidity_filters_only() -> None:
                 'max_dte': 45,
                 'min_strike': 1,
                 'max_strike': 200,
-                'min_otm_pct': 0.05,
                 'min_annualized_net_return': 0.1,
                 'min_open_interest': 999,
                 'score_weights': {'liquidity': 0.02, 'risk_distance': 0.03},
@@ -836,7 +931,6 @@ def test_sell_put_steps_use_global_liquidity_filters_only() -> None:
     assert kwargs['min_open_interest'] == 50.0
     assert kwargs['min_volume'] == 12.0
     assert kwargs['max_spread_ratio'] == 0.31
-    assert kwargs['min_otm_pct'] == 0.05
     assert kwargs['score_weights'] == {'liquidity': 0.02, 'risk_distance': 0.03}
     assert 'min_iv' not in kwargs
     assert 'require_bid_ask' not in kwargs
@@ -1010,7 +1104,7 @@ def test_sell_put_steps_yield_enhancement_put_universe_is_not_cash_filtered(
         captured_pairs_input["df"] = kwargs["df_candidates"].copy()
         return pd.DataFrame()
 
-    def _fake_short_vol_gate(**kwargs):
+    def _fake_underwriting_gate(**kwargs):
         df = kwargs["df_labeled"].copy()
         df.to_csv(kwargs["out_path"], index=False)
         return df
@@ -1018,7 +1112,7 @@ def test_sell_put_steps_yield_enhancement_put_universe_is_not_cash_filtered(
     monkeypatch.setattr(steps, "run_sell_put_scan", _fake_run_sell_put_scan)
     monkeypatch.setattr(steps, "add_sell_put_labels", _fake_add_sell_put_labels)
     monkeypatch.setattr(steps, "enrich_sell_put_candidates_with_cash", _fake_enrich)
-    monkeypatch.setattr(steps, "enrich_and_filter_sell_put_short_vol", _fake_short_vol_gate)
+    monkeypatch.setattr(steps, "enrich_and_filter_sell_put_underwriting", _fake_underwriting_gate)
     monkeypatch.setattr(steps, "find_sell_put_yield_enhancement_pairs", _fake_find_pairs)
 
     out = steps.run_sell_put_scan_and_summarize(
@@ -1030,7 +1124,7 @@ def test_sell_put_steps_yield_enhancement_put_universe_is_not_cash_filtered(
         symbol_cfg={"symbol": "AAPL", "yield_enhancement": {"enabled": True}},
         sp={
             "enabled": True,
-            "strategy": "short_vol",
+            "strategy": "insurance_underwriting",
             "min_dte": 7,
             "max_dte": 45,
             "min_strike": 1,
@@ -1055,7 +1149,7 @@ def test_sell_put_steps_yield_enhancement_put_universe_is_not_cash_filtered(
     assert "cash_required_cny" not in captured_pairs_input["df"].columns
 
 
-def test_sell_put_steps_yield_enhancement_put_universe_uses_short_vol_gate(
+def test_sell_put_steps_yield_enhancement_put_universe_skips_underwriting_gate_for_insurance(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -1066,7 +1160,7 @@ def test_sell_put_steps_yield_enhancement_put_universe_uses_short_vol_gate(
     report_dir = tmp_path / "reports"
     report_dir.mkdir(parents=True, exist_ok=True)
     captured_pairs_input: dict[str, pd.DataFrame] = {}
-    short_vol_gate_paths: list[str] = []
+    underwriting_gate_paths: list[str] = []
 
     candidate = {
         "symbol": "AAPL",
@@ -1099,9 +1193,9 @@ def test_sell_put_steps_yield_enhancement_put_universe_uses_short_vol_gate(
         Path(output).parent.mkdir(parents=True, exist_ok=True)
         pd.DataFrame([candidate]).to_csv(output, index=False)
 
-    def _fake_short_vol_gate(**kwargs):
+    def _fake_underwriting_gate(**kwargs):
         out_path = Path(kwargs["out_path"])
-        short_vol_gate_paths.append(out_path.name)
+        underwriting_gate_paths.append(out_path.name)
         if "yield_enhancement_put_universe" in out_path.name:
             empty = kwargs["df_labeled"].iloc[0:0].copy()
             empty.to_csv(out_path, index=False)
@@ -1116,7 +1210,7 @@ def test_sell_put_steps_yield_enhancement_put_universe_uses_short_vol_gate(
 
     monkeypatch.setattr(steps, "run_sell_put_scan", _fake_run_sell_put_scan)
     monkeypatch.setattr(steps, "add_sell_put_labels", _fake_add_sell_put_labels)
-    monkeypatch.setattr(steps, "enrich_and_filter_sell_put_short_vol", _fake_short_vol_gate)
+    monkeypatch.setattr(steps, "enrich_and_filter_sell_put_underwriting", _fake_underwriting_gate)
     monkeypatch.setattr(steps, "find_sell_put_yield_enhancement_pairs", _fake_find_pairs)
 
     steps.run_sell_put_scan_and_summarize(
@@ -1128,7 +1222,7 @@ def test_sell_put_steps_yield_enhancement_put_universe_uses_short_vol_gate(
         symbol_cfg={"symbol": "AAPL", "yield_enhancement": {"enabled": True}},
         sp={
             "enabled": True,
-            "strategy": "short_vol",
+            "strategy": "insurance_underwriting",
             "min_dte": 7,
             "max_dte": 45,
             "min_strike": 1,
@@ -1144,11 +1238,11 @@ def test_sell_put_steps_yield_enhancement_put_universe_uses_short_vol_gate(
         portfolio_ctx={"cash_by_currency": {"CNY": 100000}},
     )
 
-    assert "aapl_yield_enhancement_put_universe_labeled.csv" in short_vol_gate_paths
-    assert captured_pairs_input["df"].empty
+    assert "aapl_yield_enhancement_put_universe_labeled.csv" not in underwriting_gate_paths
+    assert len(captured_pairs_input["df"]) == 1
 
 
-def test_sell_put_steps_yield_enhancement_put_universe_skips_short_vol_gate_for_return_first(
+def test_sell_put_steps_yield_enhancement_put_universe_skips_underwriting_gate_for_return_first(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -1159,7 +1253,7 @@ def test_sell_put_steps_yield_enhancement_put_universe_skips_short_vol_gate_for_
     report_dir = tmp_path / "reports"
     report_dir.mkdir(parents=True, exist_ok=True)
     captured_pairs_input: dict[str, pd.DataFrame] = {}
-    short_vol_gate_paths: list[str] = []
+    underwriting_gate_paths: list[str] = []
 
     candidate = {
         "symbol": "AAPL",
@@ -1192,9 +1286,9 @@ def test_sell_put_steps_yield_enhancement_put_universe_skips_short_vol_gate_for_
         Path(output).parent.mkdir(parents=True, exist_ok=True)
         pd.DataFrame([candidate]).to_csv(output, index=False)
 
-    def _fake_short_vol_gate(**kwargs):
+    def _fake_underwriting_gate(**kwargs):
         out_path = Path(kwargs["out_path"])
-        short_vol_gate_paths.append(out_path.name)
+        underwriting_gate_paths.append(out_path.name)
         df = kwargs["df_labeled"].copy()
         df.to_csv(out_path, index=False)
         return df
@@ -1205,7 +1299,7 @@ def test_sell_put_steps_yield_enhancement_put_universe_skips_short_vol_gate_for_
 
     monkeypatch.setattr(steps, "run_sell_put_scan", _fake_run_sell_put_scan)
     monkeypatch.setattr(steps, "add_sell_put_labels", _fake_add_sell_put_labels)
-    monkeypatch.setattr(steps, "enrich_and_filter_sell_put_short_vol", _fake_short_vol_gate)
+    monkeypatch.setattr(steps, "enrich_and_filter_sell_put_underwriting", _fake_underwriting_gate)
     monkeypatch.setattr(steps, "find_sell_put_yield_enhancement_pairs", _fake_find_pairs)
 
     steps.run_sell_put_scan_and_summarize(
@@ -1233,7 +1327,7 @@ def test_sell_put_steps_yield_enhancement_put_universe_skips_short_vol_gate_for_
         portfolio_ctx={"cash_by_currency": {"CNY": 100000}},
     )
 
-    assert "aapl_yield_enhancement_put_universe_labeled.csv" not in short_vol_gate_paths
+    assert "aapl_yield_enhancement_put_universe_labeled.csv" not in underwriting_gate_paths
     assert len(captured_pairs_input["df"]) == 1
 
 
@@ -1644,7 +1738,7 @@ def test_sell_put_steps_fallback_to_global_min_net_income() -> None:
     assert kwargs['min_net_income'] == 14.000000000000002
 
 
-def test_sell_put_short_vol_scan_bypasses_return_income_floor() -> None:
+def test_sell_put_underwriting_scan_bypasses_return_income_floor() -> None:
     base = _add_repo_to_syspath()
     import src.application.sell_put_steps as steps
     import pandas as pd
@@ -1671,7 +1765,7 @@ def test_sell_put_short_vol_scan_bypasses_return_income_floor() -> None:
             symbol_cfg={'symbol': 'AAPL', 'sell_put': {}},
             sp={
                 'enabled': True,
-                'strategy': 'short_vol',
+                'strategy': 'insurance_underwriting',
                 'min_dte': 7,
                 'max_dte': 45,
                 'min_annualized_net_return': 0.25,
@@ -1740,7 +1834,7 @@ def test_sell_call_steps_fallback_to_global_min_net_income() -> None:
     assert kwargs['min_net_income'] == 14.000000000000002
 
 
-def test_sell_call_short_vol_scan_bypasses_return_income_floor() -> None:
+def test_sell_call_underwriting_scan_bypasses_return_income_floor() -> None:
     base = _add_repo_to_syspath()
     import src.application.sell_call_steps as steps
     import pandas as pd
@@ -1764,7 +1858,7 @@ def test_sell_call_short_vol_scan_bypasses_return_income_floor() -> None:
             symbol_cfg={'symbol': 'AAPL'},
             cc={
                 'enabled': True,
-                'strategy': 'short_vol',
+                'strategy': 'insurance_underwriting',
                 'min_annualized_net_premium_return': 0.25,
                 'min_net_income': 500,
             },

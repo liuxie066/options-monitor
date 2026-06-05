@@ -420,6 +420,7 @@ om-agent run --tool candidate_rank_explain --input-json '{"mode":"put","score_we
 ```bash
 om research archive pull --remote prod --ssh-target deploy@example --since-days 7
 om research archive pull --remote prod --ssh-target deploy@example --since-days 7 --write
+om research archive pull --remote prod --ssh-target deploy@example --require-replay-evidence --write
 om research archive verify --remote prod
 om research archive build-datasets --remote prod --market us --write
 om research archive prune-remote --remote prod --ssh-target deploy@example --keep-days 3 --keep-count 30
@@ -448,7 +449,8 @@ om research shadow-replay analyze --dataset output_shared/research/shadow_replay
 边界：
 - 只读源数据，来源可以是 `run_id`、`run_dir`、`candidate_report_dir`、`candidate_path`、`trace_path`、`reject_log_path`、`mark_path` 或 `outcome_path`。
 - `--profile-path` / `--runtime-root` 只用于解析 runtime `output_runs`、dataset root、required-data root 和 receipt root；`--latest-scanned-run` 只选择最新已有 replay 证据的 run，不运行扫描。
-- `research archive pull` 默认 dry-run；`--write` 只写本地归档和 manifest，不删除远端文件。`prune-remote --confirm` 会先解析远端 cleanup dry-run 计划，并要求每个待删 run 都已经在本地 `inventory.latest.json` 中 verified。
+- `research archive pull` 默认 dry-run；`--write` 只写本地归档和 manifest，不删除远端文件。`--require-replay-evidence` 只拉含候选 CSV、reject log 或 `candidate_filter_trace.jsonl` 的 run，跳过 scheduler skip / tick 心跳目录。`prune-remote --confirm` 会先解析远端 cleanup dry-run 计划，并要求每个待删 run 都已经在本地 `inventory.latest.json` 中 verified。
+- `research archive build-datasets --market us|hk --write` 会按归档 run 的候选/reject 文件名推断市场并过滤样本；不传 `--market` 才会保留所有市场。dataset build 默认会从归档 run 自带的 `required_data/parsed` 生成第一批 scan-time `mark_path_snapshots.jsonl`；这不是最终 outcome，后续仍需 path mark / expiry mark 后再 `settle --write`。用 `--no-mark-from-run-required-data` 可关闭这个本地 mark 步骤。
 - 默认 `--no-write-outputs` 不写文件；显式 `--write-outputs --confirm` 时只写本地 research bundle/handoff。
 - `research shadow-replay status` / `list` 只读本地 dataset root，不采样、不 settle、不写输出文件；`next_suggested_action` 只会是 `collect_marks`、`settle`、`analyze` 或 `wait`。输出里的 `data_plan` 只是数据维护建议命令清单，不会自动执行；人工复盘提示在 `review_queue`。
 - `research shadow-replay run-data-plan` 不挂 tick / tick-cron；默认不写，`--write` 只写 replay dataset、local receipt，以及在显式 `--source opend` 时写本地 required-data / OpenD cache。它不执行 `analyze`，不写 Feishu、不写 broker、不写 trade state、不写 runtime config、不发送通知。

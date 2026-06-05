@@ -39,7 +39,7 @@ def test_sell_call_min_strike_builds_configured_bounds_plan(monkeypatch, tmp_pat
     assert plan.merged_specs[0].include_realized_volatility is False
 
 
-def test_sell_put_short_vol_fetch_plan_requires_realized_volatility(monkeypatch, tmp_path: Path) -> None:
+def test_sell_put_underwriting_fetch_plan_requires_realized_volatility(monkeypatch, tmp_path: Path) -> None:
     import src.application.required_data_planning as mod
 
     monkeypatch.setattr(mod, "list_option_expirations", lambda *args, **kwargs: ["2026-05-29"])
@@ -52,7 +52,7 @@ def test_sell_put_short_vol_fetch_plan_requires_realized_volatility(monkeypatch,
         limit_expirations=1,
         want_put=True,
         want_call=False,
-        sell_put_cfg={"enabled": True, "strategy": "short_vol"},
+        sell_put_cfg={"enabled": True, "strategy": "insurance_underwriting"},
         sell_call_cfg={"enabled": False},
         fetch_host="127.0.0.1",
         fetch_port=11111,
@@ -92,7 +92,7 @@ def test_fetch_plan_rejects_unexpanded_template_strategy_config(monkeypatch, tmp
         assert "apply templates/profiles" in str(exc)
 
 
-def test_sell_call_short_vol_fetch_plan_requires_realized_volatility(monkeypatch, tmp_path: Path) -> None:
+def test_sell_call_underwriting_fetch_plan_requires_realized_volatility(monkeypatch, tmp_path: Path) -> None:
     import src.application.required_data_planning as mod
 
     monkeypatch.setattr(mod, "list_option_expirations", lambda *args, **kwargs: ["2026-05-29"])
@@ -106,7 +106,7 @@ def test_sell_call_short_vol_fetch_plan_requires_realized_volatility(monkeypatch
         want_put=False,
         want_call=True,
         sell_put_cfg={"enabled": False},
-        sell_call_cfg={"enabled": True, "strategy": "short_vol", "min_dte": 10, "max_dte": 60},
+        sell_call_cfg={"enabled": True, "strategy": "insurance_underwriting", "min_dte": 10, "max_dte": 60},
         fetch_host="127.0.0.1",
         fetch_port=11111,
     )
@@ -180,7 +180,7 @@ def test_sell_call_without_strikes_derives_bounds_from_spot(monkeypatch, tmp_pat
     )
 
     call_plan = plan.side_plans[0]
-    assert round(call_plan.strike_window.base_min_strike or 0.0, 2) == 484.10
+    assert round(call_plan.strike_window.base_min_strike or 0.0, 2) == 470.00
     assert round(call_plan.strike_window.base_max_strike or 0.0, 2) == 564.00
     assert call_plan.strike_window.max_strike is not None
     assert call_plan.strike_window.max_strike > (call_plan.strike_window.base_max_strike or 0.0)
@@ -233,7 +233,7 @@ def test_sell_call_max_strike_only_keeps_configured_far_bound(monkeypatch, tmp_p
     )
 
     call_plan = plan.side_plans[0]
-    assert call_plan.strike_window.base_min_strike is None
+    assert round(call_plan.strike_window.base_min_strike or 0.0, 2) == 470.00
     assert round(call_plan.strike_window.base_max_strike or 0.0, 2) == 550.00
     assert round(call_plan.strike_window.max_strike or 0.0, 2) == 561.00
     assert "near/far bounds" in call_plan.planning_reason
@@ -259,7 +259,7 @@ def test_sell_call_without_strikes_uses_spot_20pct_max(monkeypatch, tmp_path: Pa
     )
 
     call_plan = plan.side_plans[0]
-    assert round(call_plan.strike_window.base_min_strike or 0.0, 2) == 484.10
+    assert round(call_plan.strike_window.base_min_strike or 0.0, 2) == 470.00
     assert round(call_plan.strike_window.base_max_strike or 0.0, 2) == 564.00
     assert call_plan.strike_window.max_strike is not None
     assert call_plan.strike_window.max_strike > 564.00
@@ -314,7 +314,7 @@ def test_sell_put_min_strike_only_keeps_direct_lower_bound(monkeypatch, tmp_path
     put_plan = plan.side_plans[0]
     assert round(put_plan.strike_window.base_min_strike or 0.0, 2) == 420.00
     assert round(put_plan.strike_window.min_strike or 0.0, 2) == 420.00
-    assert put_plan.strike_window.max_strike is None
+    assert round(put_plan.strike_window.max_strike or 0.0, 2) == 470.00
 
 
 def test_put_and_call_same_expirations_merge_into_single_request(monkeypatch, tmp_path: Path) -> None:

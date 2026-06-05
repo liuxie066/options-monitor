@@ -45,68 +45,48 @@ def _candidate(**overrides):
     return row
 
 
-def test_sell_put_short_vol_accepts_iv_edge_delta_and_concentration() -> None:
-    from src.application.sell_put_strategy_risk import SellPutShortVolConfig, evaluate_sell_put_short_vol_row
+def test_sell_put_underwriting_accepts_priced_candidate_without_concentration_gate() -> None:
+    from src.application.sell_put_strategy_risk import evaluate_sell_put_underwriting_row, resolve_sell_put_underwriting_config
 
-    decision = evaluate_sell_put_short_vol_row(
+    decision = evaluate_sell_put_underwriting_row(
         _candidate(),
-        cfg=SellPutShortVolConfig(strategy="short_vol"),
-        risk_ctx=_risk_context(),
+        cfg=resolve_sell_put_underwriting_config({"strategy": "insurance_underwriting", "max_strike": 110.0}),
     )
 
     assert decision["accepted"] is True
     fields = decision["fields"]
+    assert fields["strategy_profile"] == "insurance_underwriting"
     assert fields["iv_rv_ratio"] == 1.5
     assert fields["iv_minus_rv"] == 0.12
-    assert fields["single_trade_concentration"] == 0.07
-    assert fields["symbol_concentration_after"] == 0.17
-    assert fields["total_short_put_concentration_after"] == 0.17
+    assert fields["strike_safety_margin_pct"] == 0.090909
+    assert fields["premium_edge_score"] > 1.0
+    assert "single_trade_concentration" not in fields
 
 
-def test_sell_put_short_vol_rejects_when_iv_rv_edge_is_too_low() -> None:
-    from src.application.sell_put_strategy_risk import SellPutShortVolConfig, evaluate_sell_put_short_vol_row
+def test_sell_put_underwriting_rejects_when_iv_rv_edge_is_too_low() -> None:
+    from src.application.sell_put_strategy_risk import evaluate_sell_put_underwriting_row, resolve_sell_put_underwriting_config
 
-    decision = evaluate_sell_put_short_vol_row(
+    decision = evaluate_sell_put_underwriting_row(
         _candidate(implied_volatility=0.25, realized_volatility_estimate=0.24),
-        cfg=SellPutShortVolConfig(strategy="short_vol"),
-        risk_ctx=_risk_context(),
+        cfg=resolve_sell_put_underwriting_config({"strategy": "insurance_underwriting"}),
     )
 
     assert decision["accepted"] is False
     assert decision["rule"] == "vol_edge_ratio_below_min"
 
 
-def test_sell_put_short_vol_rejects_when_concentration_is_not_evaluable() -> None:
-    from src.application.sell_put_strategy_risk import PortfolioRiskContext, SellPutShortVolConfig, evaluate_sell_put_short_vol_row
+def test_sell_put_underwriting_rejects_when_return_is_too_low() -> None:
+    from src.application.sell_put_strategy_risk import evaluate_sell_put_underwriting_row, resolve_sell_put_underwriting_config
 
-    decision = evaluate_sell_put_short_vol_row(
-        _candidate(),
-        cfg=SellPutShortVolConfig(strategy="short_vol"),
-        risk_ctx=PortfolioRiskContext(
-            nav_cny=None,
-            stock_value_cny_by_symbol={},
-            short_put_assignment_cny_by_symbol={},
-            short_put_assignment_total_cny=None,
-            unavailable_reasons=("holdings_context_missing",),
+    decision = evaluate_sell_put_underwriting_row(
+        _candidate(annualized_net_return_on_cash_basis=0.08),
+        cfg=resolve_sell_put_underwriting_config(
+            {"strategy": "insurance_underwriting", "min_annualized_net_return": 0.10}
         ),
     )
 
     assert decision["accepted"] is False
-    assert decision["rule"] == "concentration_not_evaluable"
-    assert "holdings_context_missing" in str(decision["message"])
-
-
-def test_sell_put_short_vol_rejects_symbol_concentration_after_assignment() -> None:
-    from src.application.sell_put_strategy_risk import SellPutShortVolConfig, evaluate_sell_put_short_vol_row
-
-    decision = evaluate_sell_put_short_vol_row(
-        _candidate(),
-        cfg=SellPutShortVolConfig(strategy="short_vol"),
-        risk_ctx=_risk_context(nvda_stock=160_000.0, nvda_short_put=30_000.0),
-    )
-
-    assert decision["accepted"] is False
-    assert decision["rule"] == "symbol_concentration_exceeded"
+    assert decision["rule"] == "annualized_return_below_min"
 
 
 def test_build_portfolio_risk_context_uses_global_holdings_and_option_context() -> None:
@@ -143,22 +123,19 @@ def test_build_portfolio_risk_context_uses_global_holdings_and_option_context() 
     assert risk.unavailable_reasons == ()
 
 
-def test_enrich_and_filter_sell_put_short_vol_writes_reject_trace(tmp_path: Path) -> None:
-    from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_short_vol
+def test_enrich_and_filter_sell_put_underwriting_writes_reject_trace(tmp_path: Path) -> None:
+    from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_underwriting
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
     out_path = tmp_path / "output_runs" / "run-1" / "accounts" / "lx" / "nvda_sell_put_candidates_labeled.csv"
     out_path.parent.mkdir(parents=True)
     df = pd.DataFrame([_candidate(implied_volatility=0.25, realized_volatility_estimate=0.24)])
 
-    filtered = enrich_and_filter_sell_put_short_vol(
+    filtered = enrich_and_filter_sell_put_underwriting(
         df_labeled=df,
         symbol="NVDA",
-        sell_put_cfg={"strategy": "short_vol"},
-        portfolio_ctx={
-            "_global_portfolio_ctx": {"cash_by_currency": {"CNY": 1_000_000.0}, "stocks_by_symbol": {}},
-            "_global_option_ctx": {"cash_secured_by_symbol_by_ccy": {}, "cash_secured_total_cny": 0.0},
-        },
+        sell_put_cfg={"strategy": "insurance_underwriting"},
+        portfolio_ctx=None,
         exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
         out_path=out_path,
     )
@@ -167,7 +144,7 @@ def test_enrich_and_filter_sell_put_short_vol_writes_reject_trace(tmp_path: Path
     trace = (out_path.parent / "candidate_filter_trace.jsonl").read_text(encoding="utf-8")
     assert "vol_edge_ratio_below_min" in trace
     assert '"strategy_family": "sell_put"' in trace
-    assert '"strategy_profile": "short_vol"' in trace
+    assert '"strategy_profile": "insurance_underwriting"' in trace
     trace_row = json.loads(trace)
     assert trace_row["dte"] == 30
     assert trace_row["abs_delta"] == 0.2
@@ -175,22 +152,19 @@ def test_enrich_and_filter_sell_put_short_vol_writes_reject_trace(tmp_path: Path
     assert trace_row["iv_minus_rv"] == 0.01
 
 
-def test_enrich_and_filter_sell_put_short_vol_rejects_event_risk(tmp_path: Path) -> None:
-    from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_short_vol
+def test_enrich_and_filter_sell_put_underwriting_rejects_event_risk(tmp_path: Path) -> None:
+    from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_underwriting
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
     out_path = tmp_path / "output_runs" / "run-1" / "accounts" / "lx" / "nvda_sell_put_candidates_labeled.csv"
     out_path.parent.mkdir(parents=True)
     df = pd.DataFrame([_candidate(event_flag=True, event_types="earnings", event_dates="2026-06-01")])
 
-    filtered = enrich_and_filter_sell_put_short_vol(
+    filtered = enrich_and_filter_sell_put_underwriting(
         df_labeled=df,
         symbol="NVDA",
-        sell_put_cfg={"strategy": "short_vol"},
-        portfolio_ctx={
-            "_global_portfolio_ctx": {"cash_by_currency": {"CNY": 1_000_000.0}, "stocks_by_symbol": {}},
-            "_global_option_ctx": {"cash_secured_by_symbol_by_ccy": {}, "cash_secured_total_cny": 0.0},
-        },
+        sell_put_cfg={"strategy": "insurance_underwriting"},
+        portfolio_ctx=None,
         exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
         out_path=out_path,
     )
@@ -200,8 +174,8 @@ def test_enrich_and_filter_sell_put_short_vol_rejects_event_risk(tmp_path: Path)
     assert "event_risk_within_expiry" in trace
 
 
-def test_enrich_and_filter_sell_put_short_vol_computes_cny_stress_inputs(tmp_path: Path) -> None:
-    from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_short_vol
+def test_enrich_and_filter_sell_put_underwriting_does_not_reject_stress_or_concentration(tmp_path: Path) -> None:
+    from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_underwriting
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
     out_path = tmp_path / "output_runs" / "run-1" / "accounts" / "lx" / "nvda_sell_put_candidates_labeled.csv"
@@ -210,9 +184,6 @@ def test_enrich_and_filter_sell_put_short_vol_computes_cny_stress_inputs(tmp_pat
         [
             _candidate(
                 spot=102.0,
-                net_income=20.0,
-                net_income_cny=None,
-                option_contract_point_value_cny=None,
                 implied_volatility=0.70,
                 realized_volatility_estimate=0.50,
                 dte=60,
@@ -220,31 +191,57 @@ def test_enrich_and_filter_sell_put_short_vol_computes_cny_stress_inputs(tmp_pat
         ]
     )
 
-    filtered = enrich_and_filter_sell_put_short_vol(
+    filtered = enrich_and_filter_sell_put_underwriting(
         df_labeled=df,
         symbol="NVDA",
-        sell_put_cfg={"strategy": "short_vol"},
-        portfolio_ctx={
-            "_global_portfolio_ctx": {"cash_by_currency": {"CNY": 1_000_000.0}, "stocks_by_symbol": {}},
-            "_global_option_ctx": {"cash_secured_by_symbol_by_ccy": {}, "cash_secured_total_cny": 0.0},
+        sell_put_cfg={
+            "strategy": "insurance_underwriting",
+            "max_strike": 110.0,
+            "concentration": {"max_single_trade_nav_pct": 0.0001},
+            "short_vol": {"max_put_sigma_stress_loss_nav_pct": 0.0001},
         },
+        portfolio_ctx=None,
         exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
         out_path=out_path,
     )
 
-    assert filtered.empty
-    persisted = pd.read_csv(out_path)
-    assert persisted.empty
-    trace = (out_path.parent / "candidate_filter_trace.jsonl").read_text(encoding="utf-8")
-    assert "put_sigma_stress_loss_exceeded" in trace
+    assert len(filtered) == 1
+    assert filtered.iloc[0]["contract_symbol"] == "NVDA260619P00100000"
 
 
-def test_enrich_and_filter_sell_put_short_vol_raises_when_filtered_csv_cannot_be_written(
+def test_sell_put_underwriting_ranking_prefers_premium_edge_then_strike_safety(tmp_path: Path) -> None:
+    from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_underwriting
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    out_path = tmp_path / "output_runs" / "run-1" / "accounts" / "lx" / "nvda_sell_put_candidates_labeled.csv"
+    out_path.parent.mkdir(parents=True)
+    df = pd.DataFrame(
+        [
+            _candidate(contract_symbol="NEAR", strike=105.0, net_income=210.0, net_income_cny=1470.0),
+            _candidate(contract_symbol="FAR", strike=95.0, net_income=210.0, net_income_cny=1470.0),
+            _candidate(contract_symbol="RICH", strike=104.0, net_income=280.0, net_income_cny=1960.0),
+        ]
+    )
+
+    filtered = enrich_and_filter_sell_put_underwriting(
+        df_labeled=df,
+        symbol="NVDA",
+        sell_put_cfg={"strategy": "insurance_underwriting", "max_strike": 110.0, "min_net_income": 1000.0},
+        portfolio_ctx=None,
+        exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
+        out_path=out_path,
+    )
+
+    assert list(filtered["contract_symbol"]) == ["RICH", "FAR", "NEAR"]
+    assert filtered.iloc[1]["strike_safety_margin_pct"] > filtered.iloc[2]["strike_safety_margin_pct"]
+
+
+def test_enrich_and_filter_sell_put_underwriting_raises_when_filtered_csv_cannot_be_written(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
     import pytest
-    from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_short_vol
+    from src.application.sell_put_strategy_risk import enrich_and_filter_sell_put_underwriting
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
     out_path = tmp_path / "output_runs" / "run-1" / "accounts" / "lx" / "nvda_sell_put_candidates_labeled.csv"
@@ -256,15 +253,12 @@ def test_enrich_and_filter_sell_put_short_vol_raises_when_filtered_csv_cannot_be
 
     monkeypatch.setattr(pd.DataFrame, "to_csv", _boom)
 
-    with pytest.raises(RuntimeError, match="failed to persist short-vol filtered sell-put candidates"):
-        enrich_and_filter_sell_put_short_vol(
+    with pytest.raises(RuntimeError, match="failed to persist insurance-underwriting filtered sell-put candidates"):
+        enrich_and_filter_sell_put_underwriting(
             df_labeled=df,
             symbol="NVDA",
-            sell_put_cfg={"strategy": "short_vol"},
-            portfolio_ctx={
-                "_global_portfolio_ctx": {"cash_by_currency": {"CNY": 1_000_000.0}, "stocks_by_symbol": {}},
-                "_global_option_ctx": {"cash_secured_by_symbol_by_ccy": {}, "cash_secured_total_cny": 0.0},
-            },
+            sell_put_cfg={"strategy": "insurance_underwriting"},
+            portfolio_ctx=None,
             exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
             out_path=out_path,
         )
