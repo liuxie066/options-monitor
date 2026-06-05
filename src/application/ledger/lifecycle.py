@@ -6,6 +6,7 @@ from typing import Any
 
 from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.ledger.position_fields import (
+    EXPIRE_AUTO_CLOSE,
     effective_contracts_open,
     effective_expiration_ymd,
     effective_multiplier,
@@ -85,6 +86,31 @@ def persist_exercise_events(
     )
 
 
+def persist_expire_close_events(
+    repo: Any,
+    *,
+    close_target_resolution: CloseTargetResolution,
+    contracts_to_close: int,
+    event_time_ms: int | None,
+    case_id: str | None,
+    evidence_ids: list[str] | tuple[str, ...] | None = None,
+    close_reason: str = "expired_unassigned",
+    source: str = "option_lifecycle_decision",
+) -> list[LifecycleLedgerWrite]:
+    return _persist_lifecycle_close_events(
+        repo,
+        event_type="expire_close",
+        close_target_resolution=close_target_resolution,
+        contracts_to_close=contracts_to_close,
+        event_time_ms=event_time_ms,
+        case_id=case_id,
+        evidence_ids=evidence_ids,
+        stock_settlement=None,
+        source=source,
+        close_reason=close_reason,
+    )
+
+
 def _persist_lifecycle_close_events(
     repo: Any,
     *,
@@ -96,10 +122,11 @@ def _persist_lifecycle_close_events(
     evidence_ids: list[str] | tuple[str, ...] | None = None,
     stock_settlement: dict[str, Any] | None = None,
     source: str = "option_lifecycle_decision",
+    close_reason: str | None = None,
 ) -> list[LifecycleLedgerWrite]:
     normalized_event_type = str(event_type or "").strip().lower()
-    if normalized_event_type not in {"assignment", "exercise"}:
-        raise ValueError("lifecycle close event_type must be assignment or exercise")
+    if normalized_event_type not in {"assignment", "exercise", "expire_close"}:
+        raise ValueError("lifecycle close event_type must be assignment, exercise, or expire_close")
     if not close_target_resolution.matches:
         raise ValueError(f"{normalized_event_type} requires at least one close target")
     writes: list[LifecycleLedgerWrite] = []
@@ -132,6 +159,7 @@ def _persist_lifecycle_close_events(
             evidence_ids=evidence_tuple,
             close_target_resolution=close_target_resolution.to_dict(),
             stock_settlement=dict(stock_settlement or {}),
+            close_reason=close_reason,
         )
         result = persist_trade_event_object(repo, event)
         result_payload = _ledger_write_result(result).to_dict()
@@ -226,10 +254,12 @@ def _lifecycle_close_event(
     evidence_ids: tuple[str, ...],
     close_target_resolution: dict[str, Any],
     stock_settlement: dict[str, Any],
+    close_reason: str | None = None,
 ) -> TradeEvent:
     strike = effective_strike(fields)
     multiplier = effective_multiplier(fields)
     event_id = f"{event_type}-{record_id}-{uuid.uuid4().hex}"
+    raw_close_type = EXPIRE_AUTO_CLOSE if event_type == "expire_close" else event_type
     return TradeEvent(
         event_id=event_id,
         event_type=event_type,
@@ -257,8 +287,8 @@ def _lifecycle_close_event(
             "close_target_source_event_id": str(fields.get("source_event_id") or "").strip() or None,
             "close_target_account": normalize_account(fields.get("account")),
             "close_target_broker": normalize_broker(fields.get("broker")),
-            "close_type": event_type,
-            "close_reason": event_type,
+            "close_type": raw_close_type,
+            "close_reason": str(close_reason or event_type),
             "case_id": case_id,
             "evidence_ids": list(evidence_ids),
             "stock_settlement": dict(stock_settlement),
@@ -282,4 +312,5 @@ __all__ = [
     "persist_assignment_events",
     "persist_exercise_event",
     "persist_exercise_events",
+    "persist_expire_close_events",
 ]

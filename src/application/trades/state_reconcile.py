@@ -217,7 +217,7 @@ def _completed_lifecycle_cases_by_deal(repo: Any) -> dict[str, list[dict[str, An
             continue
         status = str(case.get("status") or "").strip().lower()
         decision_type = str(case.get("decision_type") or "").strip().lower()
-        if status != "ledger_written" or decision_type not in {"assignment", "exercise"}:
+        if status != "ledger_written" or decision_type not in {"assignment", "exercise", "expire_close"}:
             continue
         case_id = str(case.get("case_id") or "").strip()
         if not case_id:

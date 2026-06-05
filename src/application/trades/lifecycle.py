@@ -20,8 +20,10 @@ from domain.domain.trade_contract_identity import canonical_contract_symbol, nor
 from src.application.ledger.api import (
     BrokerTradeOperation,
     LotCloseResolutionError,
+    preview_lifecycle_expire_close,
     record_lifecycle_assignment,
     record_lifecycle_exercise,
+    record_lifecycle_expire_close,
 )
 from src.application.trades.normalizer import NormalizedTradeDeal
 
@@ -299,6 +301,258 @@ def _write_lifecycle_close_from_case(
         operations=operations,
         diagnostics=diagnostics,
     )
+
+
+def resolve_lifecycle_expired_unassigned(
+    repo: Any,
+    *,
+    case_id: str | None = None,
+    deal_id: str | None = None,
+    apply_changes: bool,
+) -> LifecycleTradeResolution:
+    case, option_evidence, reason = _resolve_expiry_case_selector(repo, case_id=case_id, deal_id=deal_id)
+    if not case:
+        return LifecycleTradeResolution(
+            handled=True,
+            status="unresolved",
+            action="expire_close",
+            reason=reason or "lifecycle_case_not_found",
+            operations=[],
+            diagnostics={"case_id": case_id, "deal_id": deal_id, "retryable": False},
+        )
+    if not option_evidence:
+        return LifecycleTradeResolution(
+            handled=True,
+            status="unresolved",
+            action="expire_close",
+            reason="option_zero_price_evidence_not_found",
+            operations=[],
+            diagnostics={"lifecycle_case": case, "deal_id": deal_id, "retryable": False},
+        )
+
+    normalized_status = str(case.get("status") or "").strip().lower()
+    decision_type = str(case.get("decision_type") or "").strip().lower()
+    diagnostics = {
+        "lifecycle_case": case,
+        "option_evidence": option_evidence,
+    }
+    if normalized_status in FINAL_STATUSES:
+        return LifecycleTradeResolution(
+            handled=True,
+            status="skipped",
+            action=decision_type or "expire_close",
+            reason="lifecycle_already_written",
+            operations=[_lifecycle_operation("lifecycle_already_written", diagnostics)],
+            diagnostics=diagnostics,
+        )
+    if normalized_status == "conflict":
+        return LifecycleTradeResolution(
+            handled=True,
+            status="unresolved",
+            action="expire_close",
+            reason="lifecycle_conflict_requires_review",
+            operations=[_lifecycle_operation("lifecycle_conflict", diagnostics)],
+            diagnostics={**diagnostics, "retryable": False},
+        )
+    if normalized_status not in PENDING_STATUSES:
+        return LifecycleTradeResolution(
+            handled=True,
+            status="unresolved",
+            action="expire_close",
+            reason=f"unsupported_lifecycle_status:{normalized_status or '-'}",
+            operations=[_lifecycle_operation("lifecycle_status_unsupported", diagnostics)],
+            diagnostics={**diagnostics, "retryable": False},
+        )
+
+    stock_evidence = _find_matching_stock_evidence(repo, option_case=case)
+    diagnostics["matching_stock_evidence"] = stock_evidence
+    if stock_evidence:
+        return LifecycleTradeResolution(
+            handled=True,
+            status="unresolved",
+            action="expire_close",
+            reason="stock_settlement_evidence_present",
+            operations=[_lifecycle_operation("lifecycle_expire_close_blocked", diagnostics)],
+            diagnostics={**diagnostics, "retryable": False},
+        )
+
+    event_time_ms = _expiry_close_event_time_ms(case, option_evidence)
+    evidence_ids = [
+        str(option_evidence.get("evidence_id") or "").strip(),
+    ]
+    evidence_ids = [item for item in evidence_ids if item]
+    kwargs = {
+        "broker": case.get("broker") or "富途",
+        "account": case.get("account"),
+        "symbol": case.get("symbol"),
+        "option_type": case.get("option_type"),
+        "position_side": case.get("position_side"),
+        "strike": case.get("strike"),
+        "expiration_ymd": case.get("expiration_ymd"),
+        "contracts_to_close": int(case.get("contracts") or 0),
+        "event_time_ms": event_time_ms,
+    }
+    try:
+        if not apply_changes:
+            preview = preview_lifecycle_expire_close(repo, **kwargs)
+            operations = [BrokerTradeOperation.from_payload(item) for item in preview.get("operations") or []]
+            return LifecycleTradeResolution(
+                handled=True,
+                status="dry_run",
+                action="expire_close",
+                reason="preview_expire_close",
+                operations=operations,
+                diagnostics={**diagnostics, "preview": preview, "decision": {"decision_type": "expire_close"}},
+            )
+
+        ledger_result = record_lifecycle_expire_close(
+            repo,
+            **kwargs,
+            case_id=str(case.get("case_id") or ""),
+            evidence_ids=evidence_ids,
+            close_reason="expired_unassigned",
+        )
+    except LotCloseResolutionError as exc:
+        failed = _case_with_decision(case, status="needs_review", decision_type="expire_close")
+        if apply_changes:
+            _upsert_case(repo, failed)
+        error_payload = {
+            "code": exc.code,
+            "message": str(exc),
+            "selector": exc.selector.to_dict(),
+            "candidates": [item.to_dict() for item in exc.candidates],
+            "remaining_contracts": exc.remaining_contracts,
+        }
+        return LifecycleTradeResolution(
+            handled=True,
+            status="unresolved",
+            action="expire_close",
+            reason="expire_close_target_unresolved",
+            operations=[_lifecycle_operation("expire_close_needs_review", {**diagnostics, "lifecycle_case": failed})],
+            diagnostics={**diagnostics, "lifecycle_case": failed, "close_target_error": error_payload, "retryable": True},
+        )
+
+    close_target_resolution = ledger_result["close_target_resolution"]
+    operations = list(ledger_result["operations"])
+    written = _case_with_decision(
+        case,
+        status="ledger_written",
+        decision_type="expire_close",
+        target_lot_ids=list(close_target_resolution.record_ids),
+    )
+    _upsert_case(repo, written)
+    return LifecycleTradeResolution(
+        handled=True,
+        status="applied",
+        action="expire_close",
+        reason="expire_close_recorded",
+        operations=operations,
+        diagnostics={
+            **diagnostics,
+            "lifecycle_case": written,
+            "decision": {"decision_type": "expire_close"},
+            "close_target_resolution": close_target_resolution.to_dict(),
+        },
+    )
+
+
+def _resolve_expiry_case_selector(
+    repo: Any,
+    *,
+    case_id: str | None,
+    deal_id: str | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str | None]:
+    normalized_case_id = str(case_id or "").strip()
+    normalized_deal_id = str(deal_id or "").strip()
+    if normalized_case_id:
+        case = _get_case_by_id(repo, normalized_case_id)
+        if not case:
+            return None, None, "lifecycle_case_not_found"
+        return case, _first_option_evidence(repo, normalized_case_id), None
+    if not normalized_deal_id:
+        return None, None, "missing_lifecycle_case_selector"
+    evidence = _find_option_evidence_by_deal_id(repo, normalized_deal_id)
+    if not evidence:
+        return None, None, "option_zero_price_evidence_not_found"
+    evidence_case_id = str(evidence.get("case_id") or "").strip()
+    if not evidence_case_id:
+        return None, evidence, "option_zero_price_evidence_missing_case_id"
+    case = _get_case_by_id(repo, evidence_case_id)
+    if not case:
+        return None, evidence, "lifecycle_case_not_found"
+    return case, evidence, None
+
+
+def _get_case_by_id(repo: Any, case_id: str) -> dict[str, Any] | None:
+    get_fn = getattr(repo, "get_trade_lifecycle_case", None)
+    if callable(get_fn):
+        try:
+            row = get_fn(case_id)
+        except Exception:
+            row = None
+        if isinstance(row, dict):
+            return dict(row)
+    list_fn = getattr(repo, "list_trade_lifecycle_cases", None)
+    if not callable(list_fn):
+        return None
+    try:
+        rows = list_fn()
+    except Exception:
+        rows = []
+    for row in rows:
+        if isinstance(row, dict) and str(row.get("case_id") or "").strip() == case_id:
+            return dict(row)
+    return None
+
+
+def _find_option_evidence_by_deal_id(repo: Any, deal_id: str) -> dict[str, Any] | None:
+    list_fn = getattr(repo, "list_trade_lifecycle_evidence", None)
+    if not callable(list_fn):
+        return None
+    try:
+        rows = list_fn()
+    except Exception:
+        rows = []
+    for row in reversed(list(rows or [])):
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("evidence_type") or "") != "option_zero_price_close":
+            continue
+        if deal_id in _deal_ids_from_lifecycle_evidence_payload(row):
+            return dict(row)
+    return None
+
+
+def _deal_ids_from_lifecycle_evidence_payload(evidence: dict[str, Any]) -> set[str]:
+    values: set[str] = set()
+    for key in ("source_event_id", "deal_id"):
+        raw = str(evidence.get(key) or "").strip()
+        if raw:
+            values.add(raw)
+    raw_payload = evidence.get("raw") if isinstance(evidence.get("raw"), dict) else {}
+    for key in ("deal_id", "source_deal_id", "futu_deal_id"):
+        raw = str(raw_payload.get(key) or "").strip()
+        if raw:
+            values.add(raw)
+    nested = raw_payload.get("raw_payload")
+    if isinstance(nested, dict):
+        for key in ("deal_id", "source_deal_id", "futu_deal_id"):
+            raw = str(nested.get(key) or "").strip()
+            if raw:
+                values.add(raw)
+    return values
+
+
+def _expiry_close_event_time_ms(case: dict[str, Any], option_evidence: dict[str, Any]) -> int | None:
+    values: list[int] = []
+    for raw in (case.get("event_time_ms"), option_evidence.get("trade_time_ms")):
+        try:
+            value = int(raw or 0)
+        except Exception:
+            value = 0
+        if value > 0:
+            values.append(value)
+    return max(values) if values else None
 
 
 def _case_from_option_deal(deal: NormalizedTradeDeal) -> dict[str, Any]:
@@ -700,5 +954,6 @@ def _stable_id(prefix: str, value: Any) -> str:
 
 __all__ = [
     "LifecycleTradeResolution",
+    "resolve_lifecycle_expired_unassigned",
     "resolve_lifecycle_trade_deal",
 ]

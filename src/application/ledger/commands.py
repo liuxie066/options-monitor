@@ -86,7 +86,7 @@ from src.application.ledger.writer import (
     persist_trade_event,
     rebuild_position_lots_from_trade_events,
 )
-from src.application.ledger.lifecycle import persist_assignment_events, persist_exercise_events
+from src.application.ledger.lifecycle import persist_assignment_events, persist_exercise_events, persist_expire_close_events
 
 
 def supports_ledger_open_preflight(repo: Any) -> bool:
@@ -1058,6 +1058,103 @@ def record_lifecycle_exercise(
     }
 
 
+def preview_lifecycle_expire_close(
+    repo: Any,
+    *,
+    broker: str,
+    account: str | None,
+    symbol: str | None,
+    option_type: str | None,
+    position_side: str | None,
+    strike: float | None,
+    expiration_ymd: str | None,
+    contracts_to_close: int,
+    event_time_ms: int | None,
+) -> dict[str, Any]:
+    selector = LotCloseSelector.from_values(
+        broker=broker,
+        account=account,
+        symbol=symbol,
+        option_type=option_type,
+        position_side=position_side,
+        strike=strike,
+        expiration_ymd=expiration_ymd,
+        contracts_to_close=int(contracts_to_close),
+    )
+    close_target_resolution = resolve_fifo_close_targets(repo, selector, source="lifecycle_expire_close")
+    operations: list[dict[str, Any]] = []
+    for match in close_target_resolution.matches:
+        fields = _current_record_fields(repo, record_id=match.record_id)
+        ledger_preflight = preflight_broker_trade_close(
+            repo,
+            record_id=match.record_id,
+            fields=fields,
+            contracts_to_close=int(match.contracts_to_close),
+            close_price=0.0,
+            as_of_ms=event_time_ms,
+            event_type="expire_close",
+        )
+        operations.append(
+            BrokerTradeOperation(
+                action="expire_close",
+                record_id=match.record_id,
+                contracts_to_close=int(match.contracts_to_close),
+                matched_by=match.matched_by,
+                ledger_preflight=ledger_preflight,
+                close_target_resolution=close_target_resolution.to_dict(),
+            ).to_payload()
+        )
+    return {
+        "mode": "dry_run",
+        "event_type": "expire_close",
+        "close_target_resolution": close_target_resolution.to_dict(),
+        "operations": operations,
+    }
+
+
+def record_lifecycle_expire_close(
+    repo: Any,
+    *,
+    broker: str,
+    account: str | None,
+    symbol: str | None,
+    option_type: str | None,
+    position_side: str | None,
+    strike: float | None,
+    expiration_ymd: str | None,
+    contracts_to_close: int,
+    event_time_ms: int | None,
+    case_id: str | None,
+    evidence_ids: list[str] | tuple[str, ...] | None,
+    close_reason: str = "expired_unassigned",
+) -> dict[str, Any]:
+    selector = LotCloseSelector.from_values(
+        broker=broker,
+        account=account,
+        symbol=symbol,
+        option_type=option_type,
+        position_side=position_side,
+        strike=strike,
+        expiration_ymd=expiration_ymd,
+        contracts_to_close=int(contracts_to_close),
+    )
+    close_target_resolution = resolve_fifo_close_targets(repo, selector, source="lifecycle_expire_close")
+    writes = persist_expire_close_events(
+        repo,
+        close_target_resolution=close_target_resolution,
+        contracts_to_close=int(contracts_to_close),
+        event_time_ms=event_time_ms,
+        case_id=case_id,
+        evidence_ids=evidence_ids or [],
+        close_reason=close_reason,
+    )
+    return {
+        "close_target_resolution": close_target_resolution,
+        "operations": [write.operation for write in writes],
+        "writes": writes,
+    }
+
+
 def preview_manual_position_close(
     repo: Any,
     *,
@@ -1573,6 +1670,7 @@ __all__ = [
     "plan_expired_position_closes",
     "preview_broker_trade_close",
     "preview_broker_trade_open",
+    "preview_lifecycle_expire_close",
     "preview_manual_exercise",
     "preview_manual_assignment",
     "preview_manual_position_adjust",
@@ -1585,6 +1683,7 @@ __all__ = [
     "record_expired_position_closes",
     "record_lifecycle_assignment",
     "record_lifecycle_exercise",
+    "record_lifecycle_expire_close",
     "record_manual_exercise",
     "record_manual_assignment",
     "record_manual_position_adjust",
