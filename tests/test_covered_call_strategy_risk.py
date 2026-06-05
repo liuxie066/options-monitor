@@ -66,6 +66,31 @@ def test_covered_call_underwriting_enrichment_accepts_and_adds_pricing_fields(tm
     assert "call_gap_up_opportunity_cost_cny" not in top
 
 
+def test_covered_call_close_thesis_config_prefers_top_level_underwriting_fields() -> None:
+    from src.application.covered_call_strategy_risk import resolve_covered_call_short_vol_config
+
+    cfg = resolve_covered_call_short_vol_config(
+        {
+            "strategy": "insurance_underwriting",
+            "min_iv_rv_ratio": 1.10,
+            "min_iv_minus_rv": 0.05,
+            "reject_event_risk": False,
+            "event_source_fail_closed": False,
+            "short_vol": {
+                "min_iv_rv_ratio": 1.25,
+                "min_iv_minus_rv": 0.10,
+                "reject_event_risk": True,
+                "event_source_fail_closed": True,
+            },
+        }
+    )
+
+    assert cfg.min_iv_rv_ratio == 1.10
+    assert cfg.min_iv_minus_rv == 0.05
+    assert cfg.reject_event_risk is False
+    assert cfg.event_source_fail_closed is False
+
+
 def test_covered_call_underwriting_writes_reject_trace(tmp_path: Path) -> None:
     from src.application.covered_call_strategy_risk import enrich_and_filter_covered_call_underwriting
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
@@ -111,10 +136,6 @@ def test_covered_call_underwriting_does_not_reject_concentration_or_gap_up_budge
             "strategy": "insurance_underwriting",
             "min_strike": 100.0,
             "concentration": {"max_single_trade_nav_pct": 0.0001},
-            "short_vol": {
-                "max_call_gap_up_opportunity_cost_nav_pct": 0.0001,
-                "max_call_gap_up_opportunity_cost_to_premium": 20.0,
-            },
         },
         portfolio_ctx=None,
         exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),

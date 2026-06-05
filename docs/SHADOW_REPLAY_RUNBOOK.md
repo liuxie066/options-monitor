@@ -17,7 +17,7 @@ Shadow Replay 的目标不是重新跑一次扫描，而是把某次扫描当时
 
 ## Opportunity Quality
 
-Shadow Replay 的分析结论使用 [Opportunity Quality](OPPORTUNITY_QUALITY.md) 口径。它不把单次 PnL 直接等同于好机会或坏机会，而是先按 `short_vol` / `return_first` 策略口径判断当时 accept/reject 是否合理，再把参数建议限制为人工审查的 dry-run-only 假设。
+Shadow Replay 的分析结论使用 [Opportunity Quality](OPPORTUNITY_QUALITY.md) 口径。它不把单次 PnL 直接等同于好机会或坏机会，而是先按 `insurance_underwriting` / `return_first` 策略口径判断当时 accept/reject 是否合理，再把参数建议限制为人工审查的 dry-run-only 假设。历史 `short_vol` 样本会归入当前承保口径。
 
 `decision_quality` 标签包括 `good_accept`、`bad_accept`、`good_reject`、`bad_reject` 和 `inconclusive`。样本不足、缺少 outcome、缺少策略口径或关键字段不足时必须输出 `inconclusive`，不能生成参数建议。`parameter_advice_gate` 只判断是否具备进入参数讨论的资格，不输出具体参数数值。
 
@@ -26,7 +26,7 @@ Shadow Replay 的分析结论使用 [Opportunity Quality](OPPORTUNITY_QUALITY.md
 | blocker | 含义 | 处理 |
 |---|---|---|
 | `sample_size_below_min_sample` | 样本数低于人工评审阈值 | 继续积累样本或显式降低本次人工评审阈值 |
-| `strategy_profile_breakdown_missing` | 样本缺少 `short_vol` / `return_first` 等策略口径 | 先修证据字段，不做参数结论 |
+| `strategy_profile_breakdown_missing` | 样本缺少 `insurance_underwriting` / `return_first` 等策略口径 | 先修证据字段，不做参数结论 |
 | `bad_decision_signal_missing` | 没有可解释的坏接受或坏拒绝信号 | 暂不需要参数讨论，继续观察 |
 | `inconclusive_rate_too_high` | `inconclusive` 比例过高 | 补 mark / outcome / 策略口径，再复盘 |
 
@@ -43,7 +43,7 @@ Shadow Replay 的分析结论使用 [Opportunity Quality](OPPORTUNITY_QUALITY.md
 
 ## 参数回测
 
-`parameter-backtest` 用已有扫描证据做参数反事实回放，用来回答“如果当时 short-vol 参数换成这一组，会新增/移除哪些候选”。它不是重新扫描市场，也不会用 OpenD 事后恢复当时没有保存的期权链。
+`parameter-backtest` 用已有扫描证据做参数反事实回放，用来回答“如果当时承保参数换成这一组，会新增/移除哪些候选”。它不是重新扫描市场，也不会用 OpenD 事后恢复当时没有保存的期权链。
 
 ```bash
 cat > params.json <<'JSON'
@@ -52,7 +52,7 @@ cat > params.json <<'JSON'
   "variants": [
     {
       "name": "iv_rv_1_10",
-      "short_vol": {
+      "insurance_underwriting": {
         "min_iv_rv_ratio": 1.10,
         "min_iv_minus_rv": 0.05,
         "min_abs_delta": 0.15,
@@ -101,7 +101,7 @@ JSON
   --output backtest.md
 ```
 
-参数文件只允许调整 `short_vol` 的 `min_iv_rv_ratio`、`min_iv_minus_rv`、`min_abs_delta`、`max_abs_delta`、`min_dte`、`max_dte`、`min_annualized_return`。事件风险、spread、流动性、集中度、合约身份、交易状态和通知都不是可调参数；如果 variant 触碰这些安全边界，结果会保留拒绝原因而不是放行。
+参数文件只允许调整 `insurance_underwriting` 的 `min_iv_rv_ratio`、`min_iv_minus_rv`、`min_abs_delta`、`max_abs_delta`、`min_dte`、`max_dte`、`min_annualized_return`。历史 `short_vol` 样本会映射到当前承保参数口径。事件风险、spread、流动性、集中度、合约身份、交易状态和通知都不是可调参数；如果 variant 触碰这些安全边界，结果会保留拒绝原因而不是放行。
 
 结果里的关键字段：
 

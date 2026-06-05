@@ -172,12 +172,10 @@ def test_validate_config_accepts_sell_put_insurance_underwriting_strategy_config
             'put_base': {
                 'sell_put': {
                     'strategy': 'insurance_underwriting',
-                    'short_vol': {
-                        'min_iv_rv_ratio': 1.10,
-                        'min_iv_minus_rv': 0.05,
-                        'reject_event_risk': True,
-                        'event_source_fail_closed': True,
-                    },
+                    'min_iv_rv_ratio': 1.10,
+                    'min_iv_minus_rv': 0.05,
+                    'reject_event_risk': True,
+                    'event_source_fail_closed': True,
                 }
             },
         },
@@ -192,7 +190,7 @@ def test_validate_config_accepts_sell_put_insurance_underwriting_strategy_config
                     'min_strike': 10,
                     'max_strike': 200,
                     'strategy': 'insurance_underwriting',
-                    'short_vol': {'min_iv_rv_ratio': 1.10},
+                    'min_iv_rv_ratio': 1.10,
                 },
                 'sell_call': {'enabled': False},
             }
@@ -212,7 +210,7 @@ def test_validate_config_rejects_underwriting_fail_closed_with_disabled_event_ri
                 'sell_put': {
                     'strategy': 'insurance_underwriting',
                     'event_risk': {'enabled': False},
-                    'short_vol': {'event_source_fail_closed': True},
+                    'event_source_fail_closed': True,
                 }
             },
         },
@@ -239,7 +237,7 @@ def test_validate_config_rejects_underwriting_fail_closed_with_disabled_event_ri
         msg = str(e)
         assert '[CONFIG_ERROR]' in msg
         assert 'templates.put_base.sell_put.event_risk.enabled=false conflicts with' in msg
-        assert 'templates.put_base.sell_put.short_vol.event_source_fail_closed=true' in msg
+        assert 'templates.put_base.sell_put.event_source_fail_closed=true' in msg
 
 
 def test_validate_config_rejects_opening_short_vol_strategy_value() -> None:
@@ -342,7 +340,7 @@ def test_validate_config_rejects_opening_concentration_config() -> None:
         assert 'templates.put_base.sell_put.concentration has been removed from opening config' in str(e)
 
 
-def test_validate_config_rejects_removed_sell_put_short_vol_opening_fields() -> None:
+def test_validate_config_rejects_sell_put_short_vol_opening_config() -> None:
     _add_repo_to_syspath()
     from src.application.config_validator import validate_config
 
@@ -375,10 +373,10 @@ def test_validate_config_rejects_removed_sell_put_short_vol_opening_fields() -> 
         validate_config(cfg)
         raise AssertionError('expected config validation failure')
     except SystemExit as e:
-        assert 'templates.put_base.sell_put.short_vol has removed opening fields: min_abs_delta, max_abs_delta' in str(e)
+        assert 'templates.put_base.sell_put.short_vol has been removed from opening config' in str(e)
 
 
-def test_validate_config_rejects_removed_call_gap_up_nav_budget() -> None:
+def test_validate_config_rejects_sell_call_short_vol_opening_config() -> None:
     _add_repo_to_syspath()
     from src.application.config_validator import validate_config
 
@@ -411,10 +409,10 @@ def test_validate_config_rejects_removed_call_gap_up_nav_budget() -> None:
         validate_config(cfg)
         raise AssertionError('expected config validation failure')
     except SystemExit as e:
-        assert 'templates.call_base.sell_call.short_vol has removed opening fields: max_call_gap_up_opportunity_cost_nav_pct' in str(e)
+        assert 'templates.call_base.sell_call.short_vol has been removed from opening config' in str(e)
 
 
-def test_validate_config_rejects_removed_call_gap_up_premium_budget() -> None:
+def test_validate_config_rejects_sell_call_short_vol_opening_config_even_when_legacy_budget_key() -> None:
     _add_repo_to_syspath()
     from src.application.config_validator import validate_config
 
@@ -447,7 +445,7 @@ def test_validate_config_rejects_removed_call_gap_up_premium_budget() -> None:
         validate_config(cfg)
         raise AssertionError('expected config validation failure')
     except SystemExit as e:
-        assert 'templates.call_base.sell_call.short_vol has removed opening fields: max_call_gap_up_opportunity_cost_to_premium' in str(e)
+        assert 'templates.call_base.sell_call.short_vol has been removed from opening config' in str(e)
 
 
 def test_validate_config_rejects_invalid_candidate_score_weights() -> None:

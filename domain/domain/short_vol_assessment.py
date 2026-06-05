@@ -13,7 +13,7 @@ EVENT_SOURCE_OK_STATUSES = {"ok", "ok_with_fallback"}
 
 @dataclass(frozen=True)
 class ShortVolAssessmentConfig:
-    min_iv_rv_ratio: float = 1.15
+    min_iv_rv_ratio: float = 1.10
     min_iv_minus_rv: float = 0.05
     min_abs_delta: float = 0.15
     max_abs_delta: float = 0.30

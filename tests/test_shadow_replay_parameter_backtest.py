@@ -23,7 +23,7 @@ def _params() -> dict:
         "variants": [
             {
                 "name": "iv_rv_1_10",
-                "short_vol": {
+                "insurance_underwriting": {
                     "min_iv_rv_ratio": 1.10,
                     "min_iv_minus_rv": 0.05,
                     "min_abs_delta": 0.15,
@@ -45,7 +45,7 @@ def test_parameter_set_rejects_non_tunable_safety_floor() -> None:
                 "variants": [
                     {
                         "name": "unsafe",
-                        "short_vol": {
+                        "insurance_underwriting": {
                             "min_iv_rv_ratio": 1.10,
                             "max_spread_ratio": 0.50,
                         },
@@ -202,7 +202,7 @@ def test_parameter_backtest_date_window_reports_missing_prefix_data(tmp_path: Pa
     assert result["recommendation"]["next_action"] == "collect_scan_artifacts_for_requested_window"
 
 
-def test_parameter_backtest_infers_short_vol_profile_for_accepted_candidate_csv(tmp_path: Path) -> None:
+def test_parameter_backtest_maps_legacy_short_vol_candidate_profile_to_underwriting_params(tmp_path: Path) -> None:
     from src.application.shadow_replay import run_shadow_replay_parameter_backtest
 
     account_dir = tmp_path / "output_runs" / "20260602T010000Z-run" / "accounts" / "lx"
@@ -226,7 +226,7 @@ def test_parameter_backtest_infers_short_vol_profile_for_accepted_candidate_csv(
         min_sample=1,
     )
 
-    assert result["summary"]["short_vol_candidate_count"] == 1
+    assert result["summary"]["underwriting_candidate_count"] == 1
     assert result["summary"]["parameter_complete_candidate_count"] == 1
     assert result["evidence_quality"]["parameter_fields_ready"] is True
     assert result["baseline"]["accepted_count"] == 1
