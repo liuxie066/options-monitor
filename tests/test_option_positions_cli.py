@@ -225,6 +225,70 @@ def test_option_positions_cli_inspect_reports_projection_state(monkeypatch, tmp_
     assert payload["related_events"][0]["event_id"].startswith("manual-open-")
 
 
+def test_option_positions_cli_parent_runtime_root_survives_inspect_subparser(monkeypatch, tmp_path: Path, capsys) -> None:
+    import src.interfaces.cli.option_positions as cli_mod
+
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "legacy" / "option_positions.sqlite3")
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "output_shared" / "state" / "option_positions.sqlite3")
+    repo.data_config_path = data_config  # type: ignore[attr-defined]
+    runtime_root = tmp_path / "runtime"
+    captured: dict[str, object] = {}
+
+    def _fake_resolve(**kwargs: object) -> tuple[Path, object]:
+        captured.update(kwargs)
+        return data_config, repo
+
+    monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", _fake_resolve)
+
+    rc = cli_mod.main(
+        [
+            "--data-config",
+            str(data_config),
+            "--runtime-root",
+            str(runtime_root),
+            "inspect",
+            "--record-id",
+            "missing-lot",
+        ]
+    )
+
+    assert rc == 0
+    json.loads(capsys.readouterr().out)
+    assert captured["runtime_root"] == str(runtime_root)
+
+
+def test_option_positions_cli_inspect_accepts_subcommand_runtime_root(monkeypatch, tmp_path: Path, capsys) -> None:
+    import src.interfaces.cli.option_positions as cli_mod
+
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "legacy" / "option_positions.sqlite3")
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "output_shared" / "state" / "option_positions.sqlite3")
+    repo.data_config_path = data_config  # type: ignore[attr-defined]
+    runtime_root = tmp_path / "runtime"
+    captured: dict[str, object] = {}
+
+    def _fake_resolve(**kwargs: object) -> tuple[Path, object]:
+        captured.update(kwargs)
+        return data_config, repo
+
+    monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", _fake_resolve)
+
+    rc = cli_mod.main(
+        [
+            "--data-config",
+            str(data_config),
+            "inspect",
+            "--runtime-root",
+            str(runtime_root),
+            "--record-id",
+            "missing-lot",
+        ]
+    )
+
+    assert rc == 0
+    json.loads(capsys.readouterr().out)
+    assert captured["runtime_root"] == str(runtime_root)
+
+
 def test_option_positions_cli_inspect_reports_orphan_close_event_diagnostics(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
     from tests.ledger_legacy_helpers import LegacyTradeEvent as TradeEvent

@@ -145,6 +145,15 @@ def _json_or_text_format(args: argparse.Namespace) -> str:
     return str(getattr(args, "format", "") or "text")
 
 
+def _add_runtime_root_arg(
+    parser: argparse.ArgumentParser,
+    *,
+    default: Any = argparse.SUPPRESS,
+    help_text: str = "runtime root for active ledger store, e.g. /var/lib/options-monitor",
+) -> None:
+    parser.add_argument("--runtime-root", default=default, help=help_text)
+
+
 def resolve_option_positions_repo(**kwargs: Any) -> tuple[Path, Any]:
     """Compatibility wrapper kept for tests and older call sites."""
 
@@ -154,11 +163,12 @@ def resolve_option_positions_repo(**kwargs: Any) -> tuple[Path, Any]:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description='Manage position lots via trade events')
     ap.add_argument('--data-config', default=None, help='portfolio data config path; auto-resolves when omitted')
-    ap.add_argument('--runtime-root', default=None, help='runtime root for active ledger store, e.g. /var/lib/options-monitor')
+    _add_runtime_root_arg(ap, default=None)
 
     sub = ap.add_subparsers(dest='cmd', required=True)
 
     p_list = sub.add_parser('list', help='list records')
+    _add_runtime_root_arg(p_list)
     p_list.add_argument('--broker', default='富途')
     p_list.add_argument('--account', default=None)
     p_list.add_argument('--status', default='open', choices=['open', 'close', 'all'])
@@ -167,7 +177,7 @@ def main(argv: list[str] | None = None) -> int:
     p_list.add_argument('--exp-within-days', type=int, default=None, help='only include rows expiring within N days from today')
 
     p_add = sub.add_parser('add', help='add a record')
-    p_add.add_argument('--runtime-root', default=None, help='runtime root for active ledger store')
+    _add_runtime_root_arg(p_add)
     p_add.add_argument('--broker', default='富途')
     p_add.add_argument('--account', required=True)
     p_add.add_argument('--symbol', required=True)
@@ -185,7 +195,7 @@ def main(argv: list[str] | None = None) -> int:
     _add_local_write_flags(p_add, high_risk=True)
 
     p_buy_close = sub.add_parser('buy-close', help='buy to close a position by record_id or strict unique selector')
-    p_buy_close.add_argument('--runtime-root', default=None, help='runtime root for active ledger store')
+    _add_runtime_root_arg(p_buy_close)
     p_buy_close.add_argument('--record-id', default=None)
     p_buy_close.add_argument('--broker', default='富途')
     p_buy_close.add_argument('--account', default=None, help='required when --record-id is omitted')
@@ -201,7 +211,7 @@ def main(argv: list[str] | None = None) -> int:
     _add_local_write_flags(p_buy_close, high_risk=True)
 
     p_assign = sub.add_parser('assign', help='record an option assignment by record_id or strict selector')
-    p_assign.add_argument('--runtime-root', default=None, help='runtime root for active ledger store')
+    _add_runtime_root_arg(p_assign)
     p_assign.add_argument('--record-id', default=None)
     p_assign.add_argument('--broker', default='富途')
     p_assign.add_argument('--account', default=None, help='required when --record-id is omitted')
@@ -218,7 +228,7 @@ def main(argv: list[str] | None = None) -> int:
     _add_local_write_flags(p_assign, high_risk=True)
 
     p_exercise = sub.add_parser('exercise', help='record an option exercise by record_id or strict selector')
-    p_exercise.add_argument('--runtime-root', default=None, help='runtime root for active ledger store')
+    _add_runtime_root_arg(p_exercise)
     p_exercise.add_argument('--record-id', default=None)
     p_exercise.add_argument('--broker', default='富途')
     p_exercise.add_argument('--account', default=None, help='required when --record-id is omitted')
@@ -235,22 +245,24 @@ def main(argv: list[str] | None = None) -> int:
     _add_local_write_flags(p_exercise, high_risk=True)
 
     p_events = sub.add_parser('events', help='list canonical trade events')
+    _add_runtime_root_arg(p_events)
     p_events.add_argument('--broker', default=None)
     p_events.add_argument('--account', default=None)
     p_events.add_argument('--format', default='text', choices=['text', 'json'])
     p_events.add_argument('--limit', type=int, default=50)
 
     p_history = sub.add_parser('history', help='show related trade events for a position lot')
+    _add_runtime_root_arg(p_history)
     p_history.add_argument('--record-id', required=True)
     p_history.add_argument('--format', default='text', choices=['text', 'json'])
 
     p_rebuild = sub.add_parser('rebuild', help='rebuild position_lots projection from trade_events')
-    p_rebuild.add_argument('--runtime-root', default=None, help='runtime root for active ledger store')
+    _add_runtime_root_arg(p_rebuild)
     p_rebuild.add_argument('--format', default='text', choices=['text', 'json'])
     _add_local_write_flags(p_rebuild, high_risk=False)
 
     p_inspect = sub.add_parser('inspect', help='inspect projected lot state and related trade events')
-    p_inspect.add_argument('--runtime-root', default=None, help='runtime root for active ledger store')
+    _add_runtime_root_arg(p_inspect)
     p_inspect.add_argument('--record-id', default=None)
     p_inspect.add_argument('--account', default=None)
     p_inspect.add_argument('--symbol', default=None)
@@ -262,12 +274,14 @@ def main(argv: list[str] | None = None) -> int:
     p_lifecycle = sub.add_parser('lifecycle', help='inspect option lifecycle cases and evidence')
     lifecycle_sub = p_lifecycle.add_subparsers(dest='lifecycle_cmd', required=True)
     p_lifecycle_list = lifecycle_sub.add_parser('list', help='list pending/reviewed assignment/expiry lifecycle cases')
+    _add_runtime_root_arg(p_lifecycle_list)
     p_lifecycle_list.add_argument('--status', default=None)
     p_lifecycle_list.add_argument('--account', default=None)
     p_lifecycle_list.add_argument('--symbol', default=None)
     p_lifecycle_list.add_argument('--include-evidence', action='store_true')
     p_lifecycle_list.add_argument('--format', default='json', choices=['json', 'text'])
     p_lifecycle_inspect = lifecycle_sub.add_parser('inspect', help='inspect one lifecycle case with evidence')
+    _add_runtime_root_arg(p_lifecycle_inspect)
     p_lifecycle_inspect.add_argument('--case-id', required=True)
     p_lifecycle_inspect.add_argument('--format', default='json', choices=['json', 'text'])
     p_lifecycle_confirm_expired = lifecycle_sub.add_parser(
@@ -276,6 +290,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_lifecycle_confirm_expired.add_argument('--case-id', default=None)
     p_lifecycle_confirm_expired.add_argument('--deal-id', default=None)
+    _add_runtime_root_arg(p_lifecycle_confirm_expired)
     p_lifecycle_confirm_expired.add_argument('--format', default='json', choices=['json', 'text'])
     _add_local_write_flags(p_lifecycle_confirm_expired, high_risk=True)
 
@@ -284,23 +299,23 @@ def main(argv: list[str] | None = None) -> int:
     p_store_inspect = store_sub.add_parser('inspect', help='diagnose active SQLite store candidates')
     p_store_inspect.add_argument("--config", dest="store_config", default=None, help="runtime config path; resolves portfolio.data_config relative to the config file")
     p_store_inspect.add_argument("--data-config", dest="store_data_config", default=None, help="portfolio data config path override")
-    p_store_inspect.add_argument("--runtime-root", default=None, help="override runtime root for standard ledger path resolution")
+    _add_runtime_root_arg(p_store_inspect, help_text="override runtime root for standard ledger path resolution")
     p_store_inspect.add_argument("--format", default="json", choices=["json", "text"])
 
     p_verify = sub.add_parser('verify-projection', help='verify position_lots by replaying trade_events')
-    p_verify.add_argument('--runtime-root', default=None, help='runtime root for active ledger store')
+    _add_runtime_root_arg(p_verify)
     p_verify.add_argument('--mode', default='auto', choices=['auto', 'full'], help='auto may reuse a trusted checkpoint when events and lots are unchanged')
     p_verify.add_argument('--format', default='text', choices=['text', 'json'])
 
     p_void_event = sub.add_parser('void-event', help='append a void event for a canonical trade event')
-    p_void_event.add_argument('--runtime-root', default=None, help='runtime root for active ledger store')
+    _add_runtime_root_arg(p_void_event)
     p_void_event.add_argument('--event-id', required=True)
     p_void_event.add_argument('--void-reason', default='manual_void')
     p_void_event.add_argument('--format', default='text', choices=['text', 'json'])
     _add_local_write_flags(p_void_event, high_risk=True)
 
     p_adjust = sub.add_parser('adjust-lot', help='append an adjustment event for an existing position lot')
-    p_adjust.add_argument('--runtime-root', default=None, help='runtime root for active ledger store')
+    _add_runtime_root_arg(p_adjust)
     p_adjust.add_argument('--record-id', required=True)
     p_adjust.add_argument('--contracts', type=int, default=None)
     p_adjust.add_argument('--strike', type=float, default=None)
@@ -332,6 +347,7 @@ def main(argv: list[str] | None = None) -> int:
         formatter_class=argparse.RawTextHelpFormatter,
     )
     p_monthly.add_argument('--broker', default='富途')
+    _add_runtime_root_arg(p_monthly)
     p_monthly.add_argument('--account', default=None)
     p_monthly.add_argument('--month', default=None, help='YYYY-MM')
     p_monthly.add_argument('--format', choices=['text', 'json'], default='text')

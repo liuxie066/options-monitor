@@ -180,6 +180,42 @@ def test_auto_trade_intake_once_defaults_state_paths_to_runtime_root(tmp_path: P
     assert payload["state_path"] == str((runtime_root / "output_shared" / "state" / "auto_trade_intake_state.json").resolve())
     assert payload["audit_path"] == str((runtime_root / "output_shared" / "state" / "auto_trade_intake_audit.jsonl").resolve())
     assert payload["status_path"] == str((runtime_root / "output_shared" / "state" / "auto_trade_intake_status.json").resolve())
+    assert payload["runtime_root"] == str(runtime_root.resolve())
+    assert payload["runtime_root_source"] == "env:OM_RUNTIME_ROOT"
+
+
+def test_auto_trade_intake_once_accepts_explicit_runtime_root_over_env(tmp_path: Path) -> None:
+    config_path = _write_runtime_config(tmp_path)
+    explicit_runtime_root = tmp_path / "runtime-argument"
+    env_runtime_root = tmp_path / "runtime-env"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "src.application.trades.auto_intake",
+            "--config",
+            str(config_path),
+            "--runtime-root",
+            str(explicit_runtime_root),
+            "--mode",
+            "dry-run",
+            "--once",
+        ],
+        cwd=str(BASE),
+        env={**dict(os.environ), "OM_RUNTIME_ROOT": str(env_runtime_root)},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=AUTO_INTAKE_CLI_TIMEOUT_SEC,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["runtime_root"] == str(explicit_runtime_root.resolve())
+    assert payload["runtime_root_source"] == "argument"
+    assert payload["state_path"] == str((explicit_runtime_root / "output_shared" / "state" / "auto_trade_intake_state.json").resolve())
+    assert payload["audit_path"] == str((explicit_runtime_root / "output_shared" / "state" / "auto_trade_intake_audit.jsonl").resolve())
+    assert payload["status_path"] == str((explicit_runtime_root / "output_shared" / "state" / "auto_trade_intake_status.json").resolve())
 
 
 def test_auto_trade_intake_open_dry_run_accepts_futu_option_code_with_lookup_fields(tmp_path: Path) -> None:
