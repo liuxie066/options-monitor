@@ -367,6 +367,15 @@ def test_monthly_income_return_summary_outputs_each_account_when_account_filter_
         ("lx", 72000.0),
         ("sy", 18400.0),
     ]
+    assert len(report["combined_return_summary"]) == 1
+    combined = report["combined_return_summary"][0]
+    assert combined["account_scope"] == "all"
+    assert combined["accounts"] == ["lx", "sy"]
+    assert combined["cash_secured_cny"] == 90400.0
+    assert combined["net_income_cny"] == 1716.0
+    assert combined["premium_income_cny"] == 1716.0
+    assert combined["net_return_rate"] == round(1716.0 / 90400.0, 6)
+    assert combined["calculation_method"] == "sum(net_cashflow_cny) / sum(current_open_cash_secured_cny)"
 
 
 def test_monthly_income_return_summary_warns_when_exchange_rate_missing() -> None:

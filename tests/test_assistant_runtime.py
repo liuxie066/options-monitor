@@ -1964,6 +1964,107 @@ def test_assistant_runtime_agent_loop_executes_planned_cashflow_detail(tmp_path:
     }
 
 
+def test_assistant_runtime_agent_loop_reports_unsatisfied_combined_income_capability(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "return_summary": [
+                    {
+                        "month": "2026-05",
+                        "account": "lx",
+                        "cash_secured_cny": 272355.0,
+                        "net_income_cny": 35842.0,
+                        "net_return_rate": 0.1316,
+                    },
+                    {
+                        "month": "2026-05",
+                        "account": "sy",
+                        "cash_secured_cny": 527645.0,
+                        "net_income_cny": 21453.0,
+                        "net_return_rate": 0.0406,
+                    },
+                ],
+                "row_count": 2,
+                "premium_row_count": 2,
+            },
+        )
+
+    def _plan(
+        text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        assert text == "合并账户 5月总收益"
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="查询全部账户 2026-05 合并总收益",
+                response_mode="synthesis",
+                required_capabilities=("combined_account_return",),
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="monthly_income_report",
+                        arguments={"month": "2026-05"},
+                        purpose="读取全账户收益并返回合并收益率",
+                    ),
+                ),
+            ),
+            trace={
+                "enabled": True,
+                "attempted": True,
+                "reason": "accepted",
+                "provider": "openai",
+                "base_url": "",
+                "model": "gpt-5.2",
+                "api_key_env": "OM_LLM_API_KEY",
+                "confidence_min": 0.75,
+                "timeout_seconds": 20,
+                "max_output_tokens": 512,
+                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+            },
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="合并账户 5月总收益",
+            sender_id="local",
+            message_id="msg_agent_loop_combined_income_gap",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+        now_fn=lambda: date(2026, 6, 5),
+    )
+
+    assert out["ok"] is True
+    assert calls == [("monthly_income_report", {"config_key": "us", "month": "2026-05"})]
+    assert "当前只能部分满足" in out["data"]["response_text"]
+    assert "不能把分账户收益率直接平均成合并收益率" in out["data"]["response_text"]
+    tool_plan_data = out["data"]["action"]["result"]["data"]
+    assert tool_plan_data["capability_status"] == {
+        "required": ["combined_account_return"],
+        "satisfied": [],
+        "gaps": ["combined_account_return"],
+    }
+    agent_loop = out["meta"]["assistant"]["llm"]["agent_loop"]
+    assert agent_loop["final_response"] == {
+        "status": "partial",
+        "reason": "tool observations did not satisfy all requested capabilities",
+        "canonical_renderer_required": False,
+        "llm_may_summarize": False,
+    }
+
+
 def test_assistant_runtime_agent_loop_uses_canonical_fallback_when_synthesis_unavailable(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
 

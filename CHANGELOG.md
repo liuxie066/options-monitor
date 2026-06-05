@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.212 - 2026-06-05
+
+### Added
+- Added combined all-account monthly income summaries so `monthly_income_report` can return `combined_return_summary` using summed CNY cashflow and summed cash-secured denominator instead of averaging account return rates.
+- Added assistant Planner `required_capabilities` satisfaction checks so agent-loop replies report partial fulfillment when tool observations do not provide requested capabilities such as combined account returns.
+
+### Changed
+- Updated monthly income chat rendering to show combined account income first when available, followed by per-account breakdown.
+
 ## 1.2.211 - 2026-06-05
 
 ### Fixed

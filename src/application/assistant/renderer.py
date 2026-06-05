@@ -100,6 +100,33 @@ def _pending_operation_label(operation_type: str) -> str:
 
 
 def _render_monthly_income(data: dict[str, Any]) -> str:
+    combined_return_summary = data.get("combined_return_summary")
+    if isinstance(combined_return_summary, list) and combined_return_summary:
+        combined_rows = [row for row in combined_return_summary if isinstance(row, dict) and _return_row_is_calculable(row)]
+        if combined_rows:
+            lines = ["收益统计完成（OM 本地账本）："]
+            for idx, row in enumerate(combined_rows):
+                if idx > 0:
+                    lines.append("")
+                lines.extend(_monthly_income_return_row_lines(row))
+            return_summary = data.get("return_summary")
+            account_rows = (
+                [row for row in return_summary if isinstance(row, dict) and _return_row_is_calculable(row)]
+                if isinstance(return_summary, list)
+                else []
+            )
+            if account_rows:
+                lines.append("")
+                lines.append("分账户：")
+                for row in account_rows:
+                    lines.append(
+                        f"- {row.get('account') or '-'}：净现金流 {_cny_with_original(row.get('net_income_cny'), _dict(row.get('net_income_by_ccy')))}"
+                        f" | 现金流率 {_pct(row.get('net_return_rate'))}"
+                    )
+            lines.append("")
+            lines.append("口径：合并现金流率=sum(净现金流CNY)/sum(当前现金担保CNY)，不是账户收益率平均值。")
+            return "\n".join(lines)
+
     return_summary = data.get("return_summary")
     if isinstance(return_summary, list) and return_summary:
         calculable_rows = [row for row in return_summary if isinstance(row, dict) and _return_row_is_calculable(row)]
@@ -146,8 +173,9 @@ def _monthly_income_return_row_lines(row: dict[str, Any]) -> list[str]:
     annualized_suffix = f"{annualized_days} 天"
     if 0 < annualized_days < 7:
         annualized_suffix += "，短周期仅参考"
+    account_label = "全部账户" if row.get("account_scope") == "all" or row.get("account") == "all" else row.get("account") or "-"
     return [
-        f"{row.get('account') or '-'} {row.get('month') or '-'} 收益摘要",
+        f"{account_label} {row.get('month') or '-'} 收益摘要",
         f"- 净现金流：{_cny_with_original(row.get('net_income_cny'), _dict(row.get('net_income_by_ccy')))} | 现金流率 {_pct(row.get('net_return_rate'))}",
         f"- 已实现PnL：{_cny_with_original(row.get('realized_pnl_cny'), _dict(row.get('realized_pnl_by_ccy')))} | 已实现率 {_pct(row.get('realized_return_rate'))}",
         f"- 权利金：{_cny_with_original(row.get('premium_income_cny'), _dict(row.get('premium_income_by_ccy')))} | 权利金率 {_pct(row.get('premium_return_rate'))}",
