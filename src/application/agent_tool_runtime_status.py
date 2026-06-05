@@ -1214,13 +1214,39 @@ def _notification_diagnosis(
     scheduler: dict[str, Any] = scheduler_raw if isinstance(scheduler_raw, dict) else {}
     notify_summary_raw = tick_metrics.get("notify_summary")
     notify_summary: dict[str, Any] = notify_summary_raw if isinstance(notify_summary_raw, dict) else {}
+    shared_notify_summary_raw = shared_payload.get("notify_summary")
+    shared_notify_summary: dict[str, Any] = shared_notify_summary_raw if isinstance(shared_notify_summary_raw, dict) else {}
     route_summary = _resolve_notification_route_summary(cfg)
 
     no_send = bool(tick_metrics.get("no_send") or shared_payload.get("no_send"))
-    account_messages_count = int(notify_summary.get("account_messages_count") or tick_metrics.get("account_messages_count") or 0)
-    send_attempted_count = int(notify_summary.get("send_attempted_count") or tick_metrics.get("send_attempted_count") or 0)
-    send_confirmed_count = int(notify_summary.get("send_confirmed_count") or tick_metrics.get("send_confirmed_count") or 0)
-    send_failed_count = int(notify_summary.get("send_failed_count") or tick_metrics.get("send_failed_count") or 0)
+    account_messages_count = int(
+        notify_summary.get("account_messages_count")
+        or tick_metrics.get("account_messages_count")
+        or shared_notify_summary.get("account_messages_count")
+        or shared_payload.get("account_messages_count")
+        or 0
+    )
+    send_attempted_count = int(
+        notify_summary.get("send_attempted_count")
+        or tick_metrics.get("send_attempted_count")
+        or shared_notify_summary.get("send_attempted_count")
+        or shared_payload.get("send_attempted_count")
+        or 0
+    )
+    send_confirmed_count = int(
+        notify_summary.get("send_confirmed_count")
+        or tick_metrics.get("send_confirmed_count")
+        or shared_notify_summary.get("send_confirmed_count")
+        or shared_payload.get("send_confirmed_count")
+        or 0
+    )
+    send_failed_count = int(
+        notify_summary.get("send_failed_count")
+        or tick_metrics.get("send_failed_count")
+        or shared_notify_summary.get("send_failed_count")
+        or shared_payload.get("send_failed_count")
+        or 0
+    )
     scheduler_should_run = scheduler.get("should_run_scan")
     scheduler_should_notify = scheduler.get("is_notify_window_open")
     if scheduler_should_notify is None:
@@ -1237,9 +1263,6 @@ def _notification_diagnosis(
     elif no_send:
         status = "no_send"
         reason = "--no-send suppressed repository notification delivery"
-    elif not bool(route_summary.get("configured")):
-        status = "notification_route_missing"
-        reason = "notifications route is missing or incomplete"
     elif account_messages_count <= 0 and str(tick_metrics.get("reason") or "") == "no_account_notification":
         status = "no_notification_content"
         reason = "scan produced no account notification content"
@@ -1252,6 +1275,9 @@ def _notification_diagnosis(
     elif send_attempted_count > 0:
         status = "send_failed_or_unconfirmed"
         reason = "repository attempted notification delivery but no account send was confirmed"
+    elif not bool(route_summary.get("configured")):
+        status = "notification_route_missing"
+        reason = "notifications route is missing or incomplete"
     elif tick_metrics:
         status = str(tick_metrics.get("reason") or "not_sent")
         reason = "latest tick metrics did not record a confirmed send"

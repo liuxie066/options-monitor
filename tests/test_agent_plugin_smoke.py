@@ -2193,6 +2193,53 @@ def test_runtime_status_does_not_warn_missing_notification_for_expected_skip(tmp
     assert out["data"]["latest_run"]["path"].endswith("run-skip")
 
 
+def test_runtime_status_notification_diagnosis_uses_shared_last_run_counts(tmp_path: Path) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    def write_json(path: Path, payload: dict[str, object]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    cfg_path = tmp_path / "config.us.json"
+    cfg_path.write_text(json.dumps(_minimal_cfg(), ensure_ascii=False, indent=2), encoding="utf-8")
+    shared_state_dir = tmp_path / "output_shared" / "state"
+    runs_root = tmp_path / "output_runs"
+    latest_run = runs_root / "run-audit-only"
+    write_json(
+        shared_state_dir / "last_run.json",
+        {
+            "sent": True,
+            "sent_accounts": ["user1", "user2"],
+            "notify_summary": {
+                "account_messages_count": 2,
+                "send_attempted_count": 2,
+                "send_confirmed_count": 2,
+                "send_failed_count": 0,
+            },
+        },
+    )
+    write_json(latest_run / "state" / "audit_events.json", {"status": "ok"})
+    (shared_state_dir / "last_run_dir.txt").write_text(str(latest_run), encoding="utf-8")
+
+    out = run_tool(
+        "runtime_status",
+        {
+            "config_key": "us",
+            "config_path": str(cfg_path),
+            "shared_state_dir": str(shared_state_dir),
+            "runs_root": str(runs_root),
+            "report_dir": str(tmp_path / "output_shared" / "reports"),
+            "accounts_root": str(tmp_path / "output_accounts"),
+        },
+    )
+
+    diagnosis = out["data"]["notification_diagnosis"]
+    assert diagnosis["status"] == "sent"
+    assert diagnosis["account_messages_count"] == 2
+    assert diagnosis["send_attempted_count"] == 2
+    assert diagnosis["send_confirmed_count"] == 2
+
+
 def test_runtime_status_loads_openclaw_profile_and_masks_external_paths(tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
