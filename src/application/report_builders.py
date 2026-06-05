@@ -56,7 +56,10 @@ def build_symbols_digest(symbols: list[str], report_dir: Path):
         lines.append(f'## {symbol}')
         sp_path = report_dir / f'{symbol.lower()}_sell_put_alerts.txt'
         cc_path = report_dir / f'{symbol.lower()}_sell_call_alerts.txt'
-        ye_path = report_dir / f'{symbol.lower()}_yield_enhancement_alerts.txt'
+        ye_path = report_dir / f'{symbol.lower()}_combo_yield_alerts.txt'
+        legacy_ye_path = report_dir / f'{symbol.lower()}_yield_enhancement_alerts.txt'
+        if not ye_path.exists() and legacy_ye_path.exists():
+            ye_path = legacy_ye_path
 
         lines.append(f'### {strategy_display_name(STRATEGY_SELL_PUT)}')
         if sp_path.exists() and sp_path.stat().st_size > 0:

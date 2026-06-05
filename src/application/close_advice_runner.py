@@ -1110,7 +1110,7 @@ def _evaluate_position_close_advice(
         )
         row.update(
             {
-                "strategy_family": "yield_enhancement",
+                "strategy_family": "combo_yield",
                 "strategy_profile": str(
                     pos.get("yield_enhancement_mode")
                     or strategy_snapshot.get("yield_enhancement_mode")
@@ -1119,7 +1119,7 @@ def _evaluate_position_close_advice(
                 "strategy_source": "position_snapshot",
                 "strategy_config_path": None,
                 "risk_model": "long_call_convexity",
-                "close_advice_profile": "yield_enhancement_long_call",
+                "close_advice_profile": "combo_yield_long_call",
                 "close_requires_rv": False,
             }
         )

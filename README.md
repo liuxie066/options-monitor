@@ -6,7 +6,7 @@
 
 - `Sell Put`：卖 Put 机会扫描。收益优先模式下是收益筛选；承保模式下是卖下跌保险的评估，默认接货是可接受结果。
 - `Covered Call`：已有正股上的卖 Call 机会扫描。收益优先模式下是收益筛选；承保模式下是卖上涨保险的评估，默认被行权卖出正股是可接受结果。
-- `yield_enhancement`：当前 runtime legacy key；产品语义是 Combo Yield，作为平行开仓策略配对 short put + long call，用可接受的接货义务融资上行参与。
+- `combo_yield`：当前 Combo Yield runtime key；作为平行开仓策略配对 short put + long call，用可接受的接货义务融资上行参与。
 - `close_advice`：已有期权 lot 的生命周期管理，按开仓时记录的策略语义给出止盈、风险退出、继续持有或无法评估的平仓参考。
 
 它不是自动交易系统，也不会替你下单。它的输出是 advisory-only，给出便于人工复核的候选、拒绝原因、平仓建议和复盘证据。
@@ -33,7 +33,7 @@
 -> 平仓建议 -> 记录结果 -> 收益统计 -> 扫描质量复盘 -> 参数优化建议
 ```
 
-`Sell Put` / `Covered Call` 看当前配置里的策略意图生成开仓候选。`yield_enhancement` 当前仍是 legacy runtime key，但开仓语义已经按 Combo Yield 独立策略处理，不继承 Sell Put / Covered Call 的 underwriting gate。`close_advice` 比较特殊：它优先读取 lot 上的开仓策略快照；只有旧仓位没有策略快照时，才 fallback 到当前 symbol 配置或默认策略，并在输出中保留 `strategy_source`。
+`Sell Put` / `Covered Call` 看当前配置里的策略意图生成开仓候选。`combo_yield` 按 Combo Yield 独立策略处理，不继承 Sell Put / Covered Call 的 underwriting gate。`close_advice` 比较特殊：它优先读取 lot 上的开仓策略快照；只有旧仓位没有策略快照时，才 fallback 到当前 symbol 配置或默认策略，并在输出中保留 `strategy_source`。
 
 ## 入口
 
@@ -56,7 +56,7 @@
 
 - 为 `Sell Put` 扫描和筛选候选。
 - 为 `Covered Call` 生成已有持仓的 covered call 候选。
-- 为 `yield_enhancement` 评估 Combo Yield 组合。
+- 为 `combo_yield` 评估 Combo Yield 组合。
 - 为 `close_advice` 生成已有仓位的平仓参考。
 
 不做什么：
@@ -292,7 +292,7 @@ om run tick --config config.us.json --accounts lx sy
 - `sell_put`
 - `sell_call`（trace/runtime 内部 key；`config.yaml` authoring 使用 `covered_call`，对外显示为 Covered Call）
 - `close_advice`
-- `yield_enhancement`
+- `combo_yield`
 - `cash_reserve`
 - `share_coverage`
 
@@ -458,7 +458,7 @@ Agent 只读列出：
 修复历史 lot 的策略元数据也走 `adjust-lot`，先 dry-run，再确认写入审计事件：
 
 ```bash
-./om option-positions adjust-lot --record-id <lot_id> --strategy yield_enhancement --leg-role enhancement_call --yield-enhancement-mode income_upside_enhancement --dry-run
+./om option-positions adjust-lot --record-id <lot_id> --strategy combo_yield --leg-role enhancement_call --yield-enhancement-mode income_upside_enhancement --dry-run
 ```
 
 到期生命周期证据和冲突可直接检查：
@@ -510,7 +510,7 @@ python3 -m src.application.option_intake --config /var/lib/options-monitor/confi
 
 开仓配置不再接受 `strategy: short_vol`。`short_vol` 仍是 Close Advice、历史仓位和部分 replay 里的持仓 thesis 名称，不作为 Sell Put / Covered Call 的开仓配置值。
 
-`close_advice` 不使用“当前默认策略”直接重判所有历史仓位。它优先使用 lot 上的 `strategy_snapshot`、`yield_enhancement_mode` 或其他开仓策略元数据；只有缺少开仓策略信息时，才 fallback 到当前 symbol 配置或模板默认值。
+`close_advice` 不使用“当前默认策略”直接重判所有历史仓位。它优先使用 lot 上的 `strategy_snapshot`、`yield_enhancement_mode` 或其他开仓策略元数据；只有缺少开仓策略信息时，才 fallback 到当前 symbol 配置或模板默认值。`yield_enhancement_mode` 是持仓/平仓侧的历史字段，本轮不重命名。
 
 ### Sell Put
 
@@ -548,7 +548,7 @@ Covered Call 依赖真实持仓上下文。它在风险结构上和 Sell Put 同
 
 ### Combo Yield
 
-`yield_enhancement` 是当前 runtime 里的 legacy key；产品语义是 Combo Yield，和 Sell Put / Covered Call 平行。它配对同 symbol、同到期、同乘数、put strike < call strike 的 short put + long call，寻找“可接受接货义务能够合理融资上行参与”的组合。
+`combo_yield` 是当前 runtime key；历史 `yield_enhancement` 只作为旧配置、旧 artifact 和既有持仓的兼容读取口径。产品语义上，Combo Yield 和 Sell Put / Covered Call 平行。它配对同 symbol、同到期、同乘数、put strike < call strike 的 short put + long call，寻找“可接受接货义务能够合理融资上行参与”的组合。
 
 要点：
 
@@ -575,7 +575,7 @@ Covered Call 依赖真实持仓上下文。它在风险结构上和 Sell Put 同
 
 收益优先开仓的仓位主要按收益捕获逻辑评估。波动率溢价开仓的仓位才按承保 thesis 是否失效评估，例如 IV edge、事件风险、路径风险和风险预算是否恶化。非盈利买回不是 short-vol Sell Put / Covered Call 的默认强平理由：Sell Put 默认可接货，Covered Call 默认可被行权卖出正股。
 
-`strategy_exit_mode` 是平仓动作映射的状态机入口：普通 short option 使用 `standard_short_option`，收益增强 put 腿使用 `yield_enhancement_put_leg`，收益增强 long call 腿使用 `yield_enhancement_long_call_leg`。渲染层只展示已决策的动作，不改变平仓判断。
+`strategy_exit_mode` 是平仓动作映射的状态机入口：普通 short option 使用 `standard_short_option`，收益增强 put 腿使用 `yield_enhancement_put_leg`，收益增强 long call 腿使用 `yield_enhancement_long_call_leg`。这些是持仓/平仓侧历史动作字段，本轮不重命名；渲染层只展示已决策的动作，不改变平仓判断。
 
 收益增强组合会额外输出 `put_leg_realized_if_close`、`combo_call_cost`、`combo_call_value_if_close`、`combo_net_locked_if_close_put_keep_call`、`combo_net_if_close_both` 和 `combo_cost_basis_status`。只有配对 call 存在、成本和报价可计算时，put 腿才会显示 `close_both_optional`。
 

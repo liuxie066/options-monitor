@@ -7,7 +7,11 @@ from typing import Any, Callable, Protocol
 from domain.domain.sell_call_config import resolve_effective_sell_call_min_strike
 from src.application.opend_fetch_config import opend_discovery_kwargs, opend_fetch_kwargs
 from src.application.required_data_planning import build_required_data_fetch_plan
-from src.application.yield_enhancement_config import derive_yield_enhancement_policy, resolve_yield_enhancement_cfg
+from src.application.yield_enhancement_config import (
+    COMBO_YIELD_CONFIG_KEY,
+    derive_yield_enhancement_policy,
+    resolve_yield_enhancement_cfg,
+)
 
 
 class _PrefilterResultLike(Protocol):
@@ -100,7 +104,8 @@ def run_symbol_monitoring(
     symbol_cfg["sell_call"] = cc
     yield_enhancement_cfg = resolve_yield_enhancement_cfg(symbol_cfg)
     if yield_enhancement_cfg:
-        symbol_cfg["yield_enhancement"] = yield_enhancement_cfg
+        symbol_cfg.pop("yield_enhancement", None)
+        symbol_cfg[COMBO_YIELD_CONFIG_KEY] = yield_enhancement_cfg
     yield_enhancement_policy = derive_yield_enhancement_policy(yield_enhancement_cfg, market_sp)
     stock = prefilters.stock
     if want_call and isinstance(stock, dict):

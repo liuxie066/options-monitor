@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.219 - 2026-06-05
+
+### Changed
+- Renamed Combo Yield runtime/config/reporting surfaces from legacy `yield_enhancement` to canonical `combo_yield` while preserving safe legacy reads for old configs, artifacts, and existing positions.
+- Updated Combo Yield trace, reject-summary, research, shadow-replay, required-data, alert, and documentation surfaces to emit `combo_yield` naming for new outputs.
+
+### Fixed
+- Fixed operator-facing Combo Yield examples and config validation messages so new configs point to `combo_yield` instead of the removed `yield_enhancement` authoring key.
+
 ## 1.2.218 - 2026-06-05
 
 ### Fixed

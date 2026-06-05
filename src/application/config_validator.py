@@ -440,7 +440,7 @@ def _validate_yield_enhancement_cfg(cfg: dict, path: str):
     if not isinstance(cfg, dict):
         die(f'{path} must be an object')
     if 'strategy' in cfg or 'strategy_profile' in cfg:
-        die(f'{path}.strategy is not supported; yield_enhancement is isolated from sell_put.strategy in this release')
+        die(f'{path}.strategy is not supported; combo_yield is isolated from sell_put.strategy')
     bad_keys = [k for k in REMOVED_STRATEGY_FILTER_FIELDS if k in cfg]
     if bad_keys:
         die(f"{path} has unsupported strategy filter keys: {', '.join(bad_keys)}")
@@ -448,7 +448,7 @@ def _validate_yield_enhancement_cfg(cfg: dict, path: str):
     if removed_target_keys:
         die(
             f"{path} has removed target-price fields: {', '.join(removed_target_keys)}; "
-            "yield_enhancement now uses price bounds and funding economics"
+            "combo_yield uses price bounds and funding economics"
         )
     legacy_scenario_keys = [k for k in YIELD_ENHANCEMENT_LEGACY_SCENARIO_FIELDS if k in cfg]
     if legacy_scenario_keys:
@@ -466,7 +466,7 @@ def _validate_yield_enhancement_cfg(cfg: dict, path: str):
     if legacy_call_bound_keys:
         die(
             f"{path} has removed call OTM fields: {', '.join(legacy_call_bound_keys)}; "
-            "use yield_enhancement.call.min_strike/max_strike instead"
+            "use combo_yield.call.min_strike/max_strike instead"
         )
     legacy_put_otm_keys = [k for k in YIELD_ENHANCEMENT_LEGACY_PUT_OTM_FIELDS if k in cfg]
     if legacy_put_otm_keys:
@@ -903,22 +903,27 @@ def validate_config(cfg: dict):
                             f"templates.{profile_name}.{side} has removed OTM fields: "
                             f"{', '.join(unsupported_put_otm_keys)}; use min_strike/max_strike only"
                         )
-                    yield_enhancement_cfg = side_cfg.get('yield_enhancement')
-                    if yield_enhancement_cfg is not None:
+                    nested_combo_yield_keys = [key for key in ("combo_yield", "yield_enhancement") if side_cfg.get(key) is not None]
+                    if nested_combo_yield_keys:
                         die(
-                            f"templates.{profile_name}.sell_put.yield_enhancement has been removed; "
-                            f"use templates.{profile_name}.yield_enhancement instead"
+                            f"templates.{profile_name}.sell_put.{nested_combo_yield_keys[0]} has been removed; "
+                            f"use templates.{profile_name}.combo_yield instead"
                         )
-            yield_enhancement_cfg = profile.get('yield_enhancement')
+            yield_enhancement_cfg = profile.get('combo_yield')
             if yield_enhancement_cfg is not None:
                 _validate_yield_enhancement_cfg(
                     yield_enhancement_cfg,
-                    f'templates.{profile_name}.yield_enhancement',
+                    f'templates.{profile_name}.combo_yield',
+                )
+            if profile.get('yield_enhancement') is not None:
+                die(
+                    f"templates.{profile_name}.yield_enhancement has been removed; "
+                    "use templates.<name>.combo_yield instead"
                 )
             if profile.get('rebound_combo') is not None:
                 die(
                     f"templates.{profile_name}.rebound_combo has been removed; "
-                    "use templates.<name>.yield_enhancement instead"
+                    "use templates.<name>.combo_yield instead"
                 )
 
     seen = set()
@@ -958,15 +963,17 @@ def validate_config(cfg: dict):
         bad_keys = [k for k in SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS if k in sp]
         if bad_keys:
             die(f"{sym}.sell_put has forbidden symbol-level strategy filter keys: {', '.join(bad_keys)}")
-        yield_enhancement_cfg = sp.get('yield_enhancement')
-        if yield_enhancement_cfg is not None:
-            die(f"{sym}.sell_put.yield_enhancement has been removed; use {sym}.yield_enhancement instead")
-        yield_enhancement_cfg = item.get('yield_enhancement')
+        nested_combo_yield_keys = [key for key in ("combo_yield", "yield_enhancement") if sp.get(key) is not None]
+        if nested_combo_yield_keys:
+            die(f"{sym}.sell_put.{nested_combo_yield_keys[0]} has been removed; use {sym}.combo_yield instead")
+        yield_enhancement_cfg = item.get('combo_yield')
         if yield_enhancement_cfg is not None:
             _validate_yield_enhancement_cfg(
                 yield_enhancement_cfg,
-                f'{sym}.yield_enhancement',
+                f'{sym}.combo_yield',
             )
+        if item.get('yield_enhancement') is not None:
+            die(f"{sym}.yield_enhancement has been removed; use {sym}.combo_yield instead")
         if sp.get('enabled'):
             _validate_enabled_side_template_strategy(
                 sym=sym,
@@ -992,8 +999,8 @@ def validate_config(cfg: dict):
                 die(f"{sym}.sell_put min_strike > max_strike")
             if ('min_strike' in sp) and (sp.get('max_strike') is None):
                 warn(f"{sym}.sell_put only sets min_strike; near-bound max_strike is recommended")
-        elif isinstance(item.get('yield_enhancement'), dict) and item['yield_enhancement'].get('enabled'):
-            warn(f"{sym}.yield_enhancement is enabled but sell_put is disabled; it will be ignored")
+        elif isinstance(item.get('combo_yield'), dict) and item['combo_yield'].get('enabled'):
+            warn(f"{sym}.combo_yield is enabled but sell_put is disabled; it will be ignored")
 
         sc = item.get('sell_call') or {}
         if sc and not isinstance(sc, dict):
@@ -1043,4 +1050,4 @@ def validate_config(cfg: dict):
                 warn(f"{sym}.sell_call only sets max_strike; near-bound min_strike is recommended")
 
         if item.get('rebound_combo') is not None:
-            die(f"{sym}.rebound_combo has been removed; use {sym}.yield_enhancement instead")
+            die(f"{sym}.rebound_combo has been removed; use {sym}.combo_yield instead")

@@ -6,7 +6,8 @@ from typing import Iterable
 
 STRATEGY_SELL_PUT = "sell_put"
 STRATEGY_COVERED_CALL = "sell_call"
-STRATEGY_YIELD_ENHANCEMENT = "yield_enhancement"
+STRATEGY_COMBO_YIELD = "combo_yield"
+STRATEGY_YIELD_ENHANCEMENT = STRATEGY_COMBO_YIELD
 STRATEGY_CLOSE_ADVICE = "close_advice"
 STRATEGY_OTHER = "other"
 
@@ -36,11 +37,19 @@ STRATEGY_TERMS: tuple[StrategyTerm, ...] = (
         aliases=("call", "sell call", "sell-call", "covered_call", "covered call", "covered-call"),
     ),
     StrategyTerm(
-        internal_id=STRATEGY_YIELD_ENHANCEMENT,
+        internal_id=STRATEGY_COMBO_YIELD,
         display_name="Combo Yield",
         section_label="Combo Yield",
         action_label="组合收益",
-        aliases=("yield enhancement", "yield-enhancement", "enhancement", "combo yield", "combo-yield", "combo_yield", "ye"),
+        aliases=(
+            "yield_enhancement",
+            "yield enhancement",
+            "yield-enhancement",
+            "enhancement",
+            "combo yield",
+            "combo-yield",
+            "ye",
+        ),
     ),
     StrategyTerm(
         internal_id=STRATEGY_CLOSE_ADVICE,

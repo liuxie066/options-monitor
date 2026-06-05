@@ -45,7 +45,7 @@ def test_render_yield_enhancement_alerts_defaults_to_symbol_scoped_paths(tmp_pat
         top=1,
     )
 
-    output_path = report_dir / "nvda_yield_enhancement_alerts.txt"
+    output_path = report_dir / "nvda_combo_yield_alerts.txt"
     assert "[组合收益推荐] NVDA 2026-06-19 95P + 110C" in text
     assert "净权利金年化: 13.00%" in text
     assert "Put: strike=95 | bid=3.00 | delta=-0.25" in text
@@ -70,7 +70,7 @@ def test_render_yield_enhancement_alerts_keeps_aggregate_fallback_without_symbol
         top=1,
     )
 
-    output_path = report_dir / "yield_enhancement_alerts.txt"
+    output_path = report_dir / "combo_yield_alerts.txt"
     assert "[组合收益推荐] AAPL 2026-06-19 95P + 110C" in text
     assert output_path.exists()
     assert output_path.read_text(encoding="utf-8") == text
@@ -96,4 +96,4 @@ def test_render_yield_enhancement_alerts_preserves_explicit_paths(tmp_path: Path
     assert "[组合收益推荐] NVDA 2026-06-19 95P + 110C" in text
     assert output_path.exists()
     assert output_path.read_text(encoding="utf-8") == text
-    assert not (report_dir / "nvda_yield_enhancement_alerts.txt").exists()
+    assert not (report_dir / "nvda_combo_yield_alerts.txt").exists()

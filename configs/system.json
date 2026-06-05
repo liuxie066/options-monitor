@@ -235,7 +235,7 @@
           "min_dte": 20,
           "max_dte": 60
         },
-        "yield_enhancement": {
+        "combo_yield": {
           "enabled": false,
           "objective": "premium_funded_long_call",
           "output_mode": "separate",
@@ -311,7 +311,7 @@
           "min_dte": 20,
           "max_dte": 90
         },
-        "yield_enhancement": {
+        "combo_yield": {
           "enabled": false,
           "objective": "premium_funded_long_call",
           "output_mode": "separate",

@@ -145,7 +145,7 @@ Covered Call 的上行放弃是这个策略的自然代价，应通过 `min_stri
 
 Combo Yield 是与 Sell Put、Covered Call 平行的开仓策略，不是 Sell Put 或 Covered Call 的 overlay。
 
-内部 runtime key 仍是 legacy `yield_enhancement`，但产品语义已经按 Combo Yield 独立处理。技术上不继承 Sell Put / Covered Call 的 `insurance_underwriting` RV、event 或 underwriting gate。
+当前 runtime key 是 `combo_yield`，历史 `yield_enhancement` 只作为旧配置、旧 artifact 和既有持仓的兼容读取口径。产品语义已经按 Combo Yield 独立处理，技术上不继承 Sell Put / Covered Call 的 `insurance_underwriting` RV、event 或 underwriting gate。
 
 核心目标：用一张可接受接货义务的 short put，融资同 symbol、同到期的 long call，形成“保留净权利金，同时获得有限成本上行参与”的组合。
 
@@ -231,4 +231,4 @@ Combo Yield 是与 Sell Put、Covered Call 平行的开仓策略，不是 Sell P
 - 修改生产 `config.yaml` / `config.us.json` / `config.hk.json`
 - 重命名 close advice 的 short-vol thesis 字段
 - 重构 shadow replay 的历史策略画像
-- 重命名 Combo Yield 的 legacy `yield_enhancement` runtime key、文件名和持仓标记
+- 重命名 Combo Yield 的 legacy `yield_enhancement` 文件名和持仓标记

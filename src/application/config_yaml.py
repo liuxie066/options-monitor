@@ -55,6 +55,8 @@ MARKET_KEYS = {"accounts", "features", "overrides", "symbols", *PASSTHROUGH_KEYS
 WRITE_GATE_KEYS = {"write_gates", "write_permissions", "writes", "feishu_write", "feishu_writes"}
 COVERED_CALL_AUTHORING_KEY = "covered_call"
 SELL_CALL_LEGACY_AUTHORING_KEY = STRATEGY_COVERED_CALL
+COMBO_YIELD_AUTHORING_KEY = "combo_yield"
+YIELD_ENHANCEMENT_LEGACY_AUTHORING_KEY = "yield_enhancement"
 
 
 def default_yaml_config_path(*, repo_root: Path) -> Path:
@@ -259,6 +261,8 @@ def _canonical_strategy_authoring_key(raw_key: Any) -> str:
     key = str(raw_key or "").strip()
     if key == COVERED_CALL_AUTHORING_KEY:
         return SELL_CALL_LEGACY_AUTHORING_KEY
+    if key == YIELD_ENHANCEMENT_LEGACY_AUTHORING_KEY:
+        return COMBO_YIELD_AUTHORING_KEY
     return key
 
 
@@ -283,8 +287,16 @@ def _normalize_strategy_authoring_container(
                 message=f"{path} cannot define both {COVERED_CALL_AUTHORING_KEY} and {SELL_CALL_LEGACY_AUTHORING_KEY}",
                 hint="Use covered_call in config.yaml; sell_call is kept as the generated runtime/internal key.",
             )
+        if canonical_key == COMBO_YIELD_AUTHORING_KEY and canonical_key in out:
+            raise AgentToolError(
+                code="CONFIG_ERROR",
+                message=f"{path} cannot define both {COMBO_YIELD_AUTHORING_KEY} and {YIELD_ENHANCEMENT_LEGACY_AUTHORING_KEY}",
+                hint="Use combo_yield in config.yaml.",
+            )
         if normalize_strategy_values and canonical_key in {"sell_put", SELL_CALL_LEGACY_AUTHORING_KEY}:
             out[canonical_key] = _normalize_strategy(raw_value, path=f"{path}.{key}", allow_ranges=allow_ranges)
+        elif normalize_strategy_values and canonical_key == COMBO_YIELD_AUTHORING_KEY:
+            out[canonical_key] = _normalize_strategy(raw_value, path=f"{path}.{key}", allow_ranges=False)
         else:
             out[canonical_key] = deepcopy(raw_value)
     return out
@@ -309,8 +321,14 @@ def _normalize_symbol_override(raw: Any, *, path: str) -> dict[str, Any]:
             )
         if canonical_key in {"sell_put", SELL_CALL_LEGACY_AUTHORING_KEY}:
             out[canonical_key] = _normalize_strategy(raw_value, path=f"{path}.{key}", allow_ranges=True)
-        elif key == "yield_enhancement":
-            out[key] = _normalize_strategy(raw_value, path=f"{path}.{key}", allow_ranges=False)
+        elif canonical_key == COMBO_YIELD_AUTHORING_KEY:
+            if canonical_key in out:
+                raise AgentToolError(
+                    code="CONFIG_ERROR",
+                    message=f"{path} cannot define both {COMBO_YIELD_AUTHORING_KEY} and {YIELD_ENHANCEMENT_LEGACY_AUTHORING_KEY}",
+                    hint="Use combo_yield in config.yaml.",
+                )
+            out[canonical_key] = _normalize_strategy(raw_value, path=f"{path}.{key}", allow_ranges=False)
         else:
             out[key] = deepcopy(raw_value)
     return out
@@ -328,11 +346,11 @@ def _normalize_features(raw: Any, *, path: str) -> dict[str, Any]:
             close_advice = _normalize_strategy(raw_value, path=f"{path}.close_advice", allow_ranges=False)
             out["close_advice"] = close_advice
             continue
-        if key == "yield_enhancement":
+        if key in {COMBO_YIELD_AUTHORING_KEY, YIELD_ENHANCEMENT_LEGACY_AUTHORING_KEY}:
             raise AgentToolError(
                 code="CONFIG_ERROR",
-                message=f"{path}.yield_enhancement is not a global feature switch",
-                hint="Enable yield enhancement per symbol under markets.<market>.overrides.<symbol>.yield_enhancement.",
+                message=f"{path}.{key} is not a global feature switch",
+                hint="Enable Combo Yield per symbol under markets.<market>.overrides.<symbol>.combo_yield.",
             )
         if "write" in key or key in WRITE_GATE_KEYS:
             raise AgentToolError(
@@ -390,12 +408,17 @@ def runtime_strategy_keys_to_yaml_authoring(raw: Any) -> Any:
         out: dict[Any, Any] = {}
         for raw_key, raw_value in raw.items():
             key = str(raw_key or "").strip()
-            yaml_key: Any = COVERED_CALL_AUTHORING_KEY if key == SELL_CALL_LEGACY_AUTHORING_KEY else raw_key
+            if key == SELL_CALL_LEGACY_AUTHORING_KEY:
+                yaml_key: Any = COVERED_CALL_AUTHORING_KEY
+            elif key == YIELD_ENHANCEMENT_LEGACY_AUTHORING_KEY:
+                yaml_key = COMBO_YIELD_AUTHORING_KEY
+            else:
+                yaml_key = raw_key
             if yaml_key in out:
                 raise AgentToolError(
                     code="CONFIG_ERROR",
-                    message=f"cannot convert both {COVERED_CALL_AUTHORING_KEY} and {SELL_CALL_LEGACY_AUTHORING_KEY} to YAML authoring keys",
-                    hint="Keep only covered_call in config.yaml authoring data.",
+                    message=f"cannot convert duplicate YAML authoring key: {yaml_key}",
+                    hint="Keep only the canonical authoring key in config.yaml.",
                 )
             out[yaml_key] = runtime_strategy_keys_to_yaml_authoring(raw_value)
         return out

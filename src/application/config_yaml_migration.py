@@ -177,6 +177,31 @@ def _normalize_legacy_agent_config(raw: dict[str, Any] | None, *, warnings: list
     return out
 
 
+def _normalize_legacy_combo_yield_keys(raw: dict[str, Any] | None) -> dict[str, Any] | None:
+    if raw is None:
+        return None
+    out = deepcopy(raw)
+
+    def _normalize_container(container: dict[str, Any]) -> None:
+        if "yield_enhancement" in container and "combo_yield" not in container:
+            container["combo_yield"] = container.pop("yield_enhancement")
+        for key in ("symbols",):
+            symbols = container.get(key)
+            if isinstance(symbols, list):
+                for item in symbols:
+                    if isinstance(item, dict):
+                        _normalize_container(item)
+        for key in ("templates", "symbol_defaults", "overrides"):
+            nested = container.get(key)
+            if isinstance(nested, dict):
+                for item in nested.values():
+                    if isinstance(item, dict):
+                        _normalize_container(item)
+
+    _normalize_container(out)
+    return out
+
+
 def _compact_range(raw: dict[str, Any], *, min_key: str, max_key: str, target_key: str) -> None:
     if min_key not in raw or max_key not in raw:
         return
@@ -216,8 +241,10 @@ def _symbol_item_to_yaml(raw: Any, *, path: str) -> tuple[str, dict[str, Any]]:
     for key in ("sell_put", "sell_call"):
         if key in item:
             item[key] = _compact_strategy(item[key])
-    if "yield_enhancement" in item:
-        item["yield_enhancement"] = _compact_boolean_enabled(item["yield_enhancement"])
+    if "yield_enhancement" in item and "combo_yield" not in item:
+        item["combo_yield"] = item.pop("yield_enhancement")
+    if "combo_yield" in item:
+        item["combo_yield"] = _compact_boolean_enabled(item["combo_yield"])
     return symbol, runtime_strategy_keys_to_yaml_authoring(item)
 
 
@@ -329,7 +356,13 @@ def preview_config_yaml_migration(
     }
 
     warnings: list[str] = []
-    common_cfg = _normalize_legacy_agent_config(common_cfg, warnings=warnings)
+    common_cfg = _normalize_legacy_combo_yield_keys(
+        _normalize_legacy_agent_config(common_cfg, warnings=warnings)
+    )
+    user_cfgs = {
+        market: _normalize_legacy_combo_yield_keys(cfg) or {}
+        for market, cfg in user_cfgs.items()
+    }
     old_runtime: dict[str, dict[str, Any]] = {}
     legacy_market_accounts: dict[str, list[str]] = {}
     for market in MARKETS:

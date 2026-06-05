@@ -384,7 +384,7 @@ def _resolve_combo_yield_call_plan(
         available_expirations=available_expirations,
         spot_reference=spot_reference,
         defaults=sell_put_window,
-        source_prefix="yield_enhancement.call",
+        source_prefix="combo_yield.call",
         dte_source_prefix="sell_put",
         fallback_min_pct=0.0,
         fallback_max_pct=DEFAULT_COMBO_YIELD_CALL_FETCH_MAX_PCT,

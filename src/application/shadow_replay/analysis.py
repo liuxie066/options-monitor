@@ -535,8 +535,8 @@ def _strategy_family(candidate: dict[str, Any]) -> str:
         return "sell_put"
     if raw in {"sell_call", "covered_call", "call"}:
         return "sell_call"
-    if raw in {"yield_enhancement", "income_upside_enhancement", "vol_convexity_enhancement"}:
-        return "yield_enhancement"
+    if raw in {"combo_yield", "yield_enhancement", "income_upside_enhancement", "vol_convexity_enhancement"}:
+        return "combo_yield"
     return raw or "unknown"
 
 

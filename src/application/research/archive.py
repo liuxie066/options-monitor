@@ -853,7 +853,7 @@ def _infer_run_market(item: dict[str, Any], *, run_dir: Path) -> str:
     markets: set[str] = set()
     has_hk = any(".hk_" in name or ".hk-" in name or ".hk." in name for name in file_names)
     has_us = any(
-        ("_sell_put_candidates" in name or "_sell_call_candidates" in name or "_yield_enhancement" in name)
+        ("_sell_put_candidates" in name or "_sell_call_candidates" in name or "_combo_yield" in name or "_yield_enhancement" in name)
         and ".hk_" not in name
         and ".hk-" not in name
         and ".hk." not in name

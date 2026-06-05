@@ -934,7 +934,7 @@ def _build_open_basis_rows(open_lots: list[dict[str, Any]]) -> list[dict[str, An
         if side == "short":
             row["sell_open_premium"] = _round_money(row["sell_open_premium"] + open_amount)
             row["sell_close_cost_actual"] = _round_money(row["sell_close_cost_actual"] + close_amount)
-        elif leg_role == "enhancement_call" or str(lot.get("strategy") or "") == "yield_enhancement":
+        elif leg_role == "enhancement_call" or str(lot.get("strategy") or "") in {"combo_yield", "yield_enhancement"}:
             row["enhancement_call_buy_cost"] = _round_money(row["enhancement_call_buy_cost"] + open_amount)
             row["enhancement_call_sell_proceeds_actual"] = _round_money(
                 row["enhancement_call_sell_proceeds_actual"] + close_amount
@@ -1252,7 +1252,7 @@ def _build_monthly_income_report_from_events(
         else:
             bucket["realized_long_pnl_gross"] = _round_money(bucket["realized_long_pnl_gross"] + realized_pnl)
         is_enhancement_call = row.get("leg_role") == "enhancement_call" or (
-            row.get("strategy") == "yield_enhancement" and row.get("position_side") == "long"
+            row.get("strategy") in {"combo_yield", "yield_enhancement"} and row.get("position_side") == "long"
         )
         if is_enhancement_call:
             _add_money(
@@ -1285,7 +1285,7 @@ def _build_monthly_income_report_from_events(
         row
         for row in filtered_realized_rows
         if row.get("leg_role") == "enhancement_call"
-        or (row.get("strategy") == "yield_enhancement" and row.get("position_side") == "long")
+        or (row.get("strategy") in {"combo_yield", "yield_enhancement"} and row.get("position_side") == "long")
     ]
     summary_rows = _finalize_summary_rows(summary)
     cash_secured_by_account = _current_cash_secured_by_account_from_records(

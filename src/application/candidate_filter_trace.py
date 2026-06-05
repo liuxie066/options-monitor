@@ -10,7 +10,8 @@ TRACE_SCHEMA_VERSION = "candidate_filter_trace.v1"
 FUNCTION_SELL_PUT = "sell_put"
 FUNCTION_SELL_CALL = "sell_call"
 FUNCTION_CLOSE_ADVICE = "close_advice"
-FUNCTION_YIELD_ENHANCEMENT = "yield_enhancement"
+FUNCTION_COMBO_YIELD = "combo_yield"
+FUNCTION_YIELD_ENHANCEMENT = FUNCTION_COMBO_YIELD
 FUNCTION_CASH_RESERVE = "cash_reserve"
 FUNCTION_SHARE_COVERAGE = "share_coverage"
 
@@ -108,7 +109,7 @@ def build_candidate_filter_trace_row(
     config_values: dict[str, Any] | None = None,
     replay_fields: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    function_norm = _clean_text(function).lower()
+    function_norm = _clean_trace_function(function)
     if function_norm not in CANDIDATE_FILTER_FUNCTIONS:
         raise ValueError(f"unsupported candidate filter function: {function}")
     status_norm = _clean_text(status).lower() or "rejected"
@@ -318,9 +319,16 @@ def _clean_strategy_family(value: Any) -> str | None:
         return FUNCTION_SELL_PUT
     if text in {"sell_call", "covered_call", "call"}:
         return FUNCTION_SELL_CALL
-    if text in {"yield_enhancement", "income_upside_enhancement", "vol_convexity_enhancement"}:
+    if text in {"combo_yield", "yield_enhancement", "income_upside_enhancement", "vol_convexity_enhancement"}:
         return FUNCTION_YIELD_ENHANCEMENT
     return text or None
+
+
+def _clean_trace_function(value: Any) -> str:
+    text = _clean_text(value).lower().replace("-", "_")
+    if text in {"combo_yield", "yield_enhancement"}:
+        return FUNCTION_COMBO_YIELD
+    return text
 
 
 def _clean_strategy_profile(value: Any) -> str | None:

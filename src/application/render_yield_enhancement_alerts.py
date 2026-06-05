@@ -17,6 +17,11 @@ from src.infrastructure.io_utils import atomic_write_text
 from src.application.report_formatting import num, pct
 
 
+COMBO_YIELD_CANDIDATES_BASENAME = "combo_yield_candidates.csv"
+COMBO_YIELD_ALERTS_BASENAME = "combo_yield_alerts.txt"
+LEGACY_YIELD_ENHANCEMENT_CANDIDATES_BASENAME = "yield_enhancement_candidates.csv"
+
+
 def _safe_float(value) -> float | None:
     try:
         return float(value) if value is not None and not pd.isna(value) else None
@@ -116,9 +121,16 @@ def render_yield_enhancement_alerts(
     else:
         input_file = _default_report_file(
             report_dir_path,
-            'yield_enhancement_candidates.csv',
+            COMBO_YIELD_CANDIDATES_BASENAME,
             symbol=symbol,
         )
+        legacy_input_file = _default_report_file(
+            report_dir_path,
+            LEGACY_YIELD_ENHANCEMENT_CANDIDATES_BASENAME,
+            symbol=symbol,
+        )
+        if not input_file.exists() and legacy_input_file.exists():
+            input_file = legacy_input_file
 
     if output_path:
         output_file = Path(output_path)
@@ -127,7 +139,7 @@ def render_yield_enhancement_alerts(
     else:
         output_file = _default_report_file(
             report_dir_path,
-            'yield_enhancement_alerts.txt',
+            COMBO_YIELD_ALERTS_BASENAME,
             symbol=symbol,
         )
 
@@ -162,11 +174,11 @@ def render_yield_enhancement_alerts(
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description='Render yield enhancement alert text from candidate CSV')
+    parser = argparse.ArgumentParser(description='Render Combo Yield alert text from candidate CSV')
     parser.add_argument(
         '--input',
         default=None,
-        help='Input CSV path (default: <report-dir>/<symbol>_yield_enhancement_candidates.csv when --symbol is set; otherwise <report-dir>/yield_enhancement_candidates.csv)',
+        help='Input CSV path (default: <report-dir>/<symbol>_combo_yield_candidates.csv when --symbol is set; otherwise <report-dir>/combo_yield_candidates.csv)',
     )
     parser.add_argument('--report-dir', default='output_shared/reports', help='Report dir for default input/output (default: output_shared/reports)')
     parser.add_argument('--top', type=int, default=5)
@@ -174,7 +186,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         '--output',
         default=None,
-        help='Output txt path (default: <report-dir>/<symbol>_yield_enhancement_alerts.txt when --symbol is set; otherwise <report-dir>/yield_enhancement_alerts.txt)',
+        help='Output txt path (default: <report-dir>/<symbol>_combo_yield_alerts.txt when --symbol is set; otherwise <report-dir>/combo_yield_alerts.txt)',
     )
     return parser.parse_args(argv)
 
