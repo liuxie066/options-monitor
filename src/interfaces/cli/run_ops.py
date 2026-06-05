@@ -50,6 +50,7 @@ def add_run_commands(subparsers: Any) -> None:
     trade_intake = run_sub.add_parser("trade-intake", help="run OpenD trade intake listener")
     trade_intake.add_argument("--config", required=True)
     trade_intake.add_argument("--data-config", default=None)
+    trade_intake.add_argument("--runtime-root", default=None)
     trade_intake.add_argument("--mode", choices=["dry-run", "apply"], default=None)
     trade_intake.add_argument("--confirm", action="store_true")
     trade_intake.add_argument("--yes", action="store_true", help="non-interactive confirmation; emits an audit_id")
@@ -94,6 +95,8 @@ def _trade_intake_argv(args: argparse.Namespace) -> list[str]:
     intake_argv: list[str] = ["--config", str(args.config)]
     if args.data_config:
         intake_argv.extend(["--data-config", str(args.data_config)])
+    if args.runtime_root:
+        intake_argv.extend(["--runtime-root", str(args.runtime_root)])
     if args.mode:
         intake_argv.extend(["--mode", str(args.mode)])
     if args.confirm:

@@ -42,6 +42,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Auto trade intake via OpenD deal push")
     ap.add_argument("--config", required=True)
     ap.add_argument("--data-config", default=None)
+    ap.add_argument("--runtime-root", default=None, help="runtime root for state, audit, status, and active ledger store")
     ap.add_argument("--mode", choices=["dry-run", "apply"], default=None)
     ap.add_argument("--confirm", action="store_true", help="confirm high-risk trade-event writes and receipts")
     ap.add_argument("--yes", action="store_true", help="non-interactive confirmation; emits an audit_id")
@@ -140,7 +141,8 @@ class _ReplayRepo:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     base = repo_base
-    runtime_root = resolve_runtime_root(repo_root=base).runtime_root
+    runtime_resolution = resolve_runtime_root(repo_root=base, runtime_root=args.runtime_root)
+    runtime_root = runtime_resolution.runtime_root
     cfg_path = Path(args.config)
     if not cfg_path.is_absolute():
         cfg_path = (base / cfg_path).resolve()
@@ -169,6 +171,8 @@ def main(argv: list[str] | None = None) -> int:
         status_path=status_path,
         host=args.host,
         port=args.port,
+        runtime_root=runtime_root,
+        runtime_root_source=runtime_resolution.source,
     )
     if args.retry_failed and not args.deal_json:
         print("--retry-failed requires --deal-json replay")
@@ -197,6 +201,8 @@ def main(argv: list[str] | None = None) -> int:
             deal_ids=list(args.deal_id or []),
             apply_changes=bool(args.apply),
         )
+        result["runtime_root"] = str(runtime_root)
+        result["runtime_root_source"] = runtime_resolution.source
         result = attach_write_contract(
             result,
             dry_run=not bool(args.apply),
@@ -212,6 +218,8 @@ def main(argv: list[str] | None = None) -> int:
             json.dumps(
                 {
                     "ok": True,
+                    "runtime_root": str(runtime_root),
+                    "runtime_root_source": runtime_resolution.source,
                     "mode": intake_cfg["mode"],
                     "enabled": bool(intake_cfg["enabled"]),
                     "state_path": str(state_path),
@@ -453,10 +461,14 @@ def _status_base_payload(
     status_path: Path,
     host: str,
     port: int,
+    runtime_root: Path,
+    runtime_root_source: str,
 ) -> dict[str, Any]:
     return {
         "pid": os.getpid(),
         "config_path": str(cfg_path),
+        "runtime_root": str(runtime_root),
+        "runtime_root_source": str(runtime_root_source),
         "mode": intake_cfg["mode"],
         "enabled": bool(intake_cfg["enabled"]),
         "state_path": str(state_path),
