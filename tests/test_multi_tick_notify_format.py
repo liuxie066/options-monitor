@@ -61,8 +61,8 @@ def test_account_message_counts_yield_enhancement_when_present() -> None:
         "Put\n"
         "腾讯 卖Put 2026-04-29 460P\n"
         "\n"
-        "Enhancement\n"
-        "英伟达 收益增强 2026-06-19 95P+110C\n"
+        "Combo Yield\n"
+        "英伟达 组合收益 2026-06-19 95P+110C\n"
     )
 
     message = build_account_message(
@@ -77,7 +77,7 @@ def test_account_message_counts_yield_enhancement_when_present() -> None:
         cash_footer_lines=[],
     )
 
-    assert "### 账户 lx · 本轮候选\n- Put 1 / Covered Call 0 / Enhance 1" in message
+    assert "### 账户 lx · 本轮候选\n- Put 1 / Covered Call 0 / Combo Yield 1" in message
 
 
 def test_compact_account_overview_ignores_reject_summary_strategy_names() -> None:
@@ -107,7 +107,7 @@ def test_compact_account_overview_ignores_reject_summary_strategy_names() -> Non
     assert "候选\n- 无符合承保条件候选" in message
     assert "- 主要过滤：" not in message
     assert "通过 184 条" not in message
-    assert "增强 1" not in message
+    assert "组合收益 1" not in message
 
 
 def test_compact_account_overview_counts_candidate_lines_only() -> None:
@@ -118,11 +118,11 @@ def test_compact_account_overview_counts_candidate_lines_only() -> None:
         "### Covered Call\n\n"
         "🟢 Covered Call 英伟达 180C @ 06-18 | 🎯建议挂单 2.4\n"
         "- 权利金 2.4USD · 年化 12% · 44天\n\n"
-        "### Enhancement\n\n"
-        "💎 收益增强 英伟达 95P+110C @ 06-19 | 🎯卖1.2/买0.4\n"
+        "### Combo Yield\n\n"
+        "💎 组合收益 英伟达 95P+110C @ 06-19 | 🎯卖1.2/买0.4\n"
         "- 净权利金 0.8USD · 年化 15% · 45天\n\n"
         "### 拒绝摘要\n"
-        "- 主要原因：波动率边际不足 9、收益增强组合不成立 2\n"
+        "- 主要原因：波动率边际不足 9、组合收益不成立 2\n"
     )
 
     message = build_account_message_compact(
@@ -137,7 +137,7 @@ def test_compact_account_overview_counts_candidate_lines_only() -> None:
         cash_footer_lines=[],
     )
 
-    assert "状态：Put 0 · Covered Call 1 · 增强 1 · 平仓 0\n" in message
+    assert "状态：Put 0 · Covered Call 1 · 组合收益 1 · 平仓 0\n" in message
     assert "候选\nCovered Call" in message
     assert "- 主要过滤：" not in message
 

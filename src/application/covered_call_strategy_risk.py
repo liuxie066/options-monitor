@@ -5,7 +5,14 @@ from typing import Any
 
 import pandas as pd
 
-from domain.domain.short_vol_assessment import ShortVolAssessmentConfig, assess_short_vol_candidate
+from domain.domain.insurance_underwriting import (
+    INSURANCE_UNDERWRITING_PROFILE,
+    InsuranceUnderwritingConfig,
+    evaluate_underwriting_candidate,
+    normalize_underwriting_strategy,
+    rank_underwriting_candidates,
+)
+from domain.domain.short_vol_assessment import ShortVolAssessmentConfig
 from domain.domain.symbol_identity import symbol_currency
 from src.application.candidate_filter_trace import (
     append_candidate_filter_trace_rows,
@@ -13,11 +20,7 @@ from src.application.candidate_filter_trace import (
     candidate_trace_path_for_output,
     infer_trace_scope_from_path,
 )
-from src.application.short_vol_risk_context import (
-    amount_to_cny,
-    build_portfolio_risk_context,
-    enrich_short_vol_contract_cny_fields,
-)
+from src.application.short_vol_risk_context import amount_to_cny, enrich_short_vol_contract_cny_fields
 from src.application.strategy_policy import RETURN_FIRST_PROFILE, SHORT_VOL_PROFILE, normalize_strategy_profile
 from src.infrastructure.exchange_rates import CurrencyConverter
 
@@ -28,22 +31,48 @@ SHORT_VOL_STRATEGY = SHORT_VOL_PROFILE
 
 @dataclass(frozen=True)
 class CoveredCallShortVolConfig(ShortVolAssessmentConfig):
-    strategy: str = RETURN_FIRST_STRATEGY
+    strategy: str = SHORT_VOL_STRATEGY
 
     @property
     def enabled(self) -> bool:
         return self.strategy == SHORT_VOL_STRATEGY
 
 
+def resolve_covered_call_underwriting_config(raw: dict[str, Any] | None) -> InsuranceUnderwritingConfig:
+    cfg = raw if isinstance(raw, dict) else {}
+    raw_strategy = cfg.get("strategy") or cfg.get("strategy_profile")
+    strategy = normalize_underwriting_strategy(raw_strategy)
+    short_vol = cfg.get("short_vol") if isinstance(cfg.get("short_vol"), dict) else {}
+    pricing = cfg.get("pricing") if isinstance(cfg.get("pricing"), dict) else {}
+
+    return InsuranceUnderwritingConfig(
+        strategy=strategy,
+        min_annualized_return=_float_setting_from_sources(
+            "min_annualized_net_premium_return",
+            _float_setting_from_sources("min_annualized_net_return", 0.10, pricing, cfg),
+            pricing,
+            cfg,
+        ),
+        min_net_income=_float_setting_from_sources("min_net_income", 50.0, pricing, cfg),
+        min_iv_rv_ratio=_float_setting_from_sources("min_iv_rv_ratio", 1.10, pricing, short_vol),
+        min_iv_minus_rv=_float_setting_from_sources("min_iv_minus_rv", 0.05, pricing, short_vol),
+        reject_event_risk=_bool_setting_from_sources("reject_event_risk", True, pricing, short_vol),
+        event_source_fail_closed=_bool_setting_from_sources("event_source_fail_closed", True, pricing, short_vol),
+        premium_score_cap=_float_setting_from_sources("premium_score_cap", 1.5, pricing, cfg),
+        min_strike=_optional_float_setting(cfg, "min_strike"),
+        max_strike=_optional_float_setting(cfg, "max_strike"),
+    )
+
+
 def resolve_covered_call_short_vol_config(raw: dict[str, Any] | None) -> CoveredCallShortVolConfig:
     cfg = raw if isinstance(raw, dict) else {}
-    strategy = normalize_strategy_profile(cfg.get("strategy") or cfg.get("strategy_profile"))
-
+    raw_strategy = cfg.get("strategy") or cfg.get("strategy_profile")
+    strategy = normalize_strategy_profile(raw_strategy)
     short_vol = cfg.get("short_vol") if isinstance(cfg.get("short_vol"), dict) else {}
     concentration = cfg.get("concentration") if isinstance(cfg.get("concentration"), dict) else {}
 
     return CoveredCallShortVolConfig(
-        strategy=strategy,
+        strategy=strategy if strategy == SHORT_VOL_STRATEGY else SHORT_VOL_STRATEGY,
         min_iv_rv_ratio=_float_setting(short_vol, "min_iv_rv_ratio", 1.15),
         min_iv_minus_rv=_float_setting(short_vol, "min_iv_minus_rv", 0.05),
         min_abs_delta=_float_setting(short_vol, "min_abs_delta", 0.15),
@@ -73,7 +102,7 @@ def resolve_covered_call_short_vol_config(raw: dict[str, Any] | None) -> Covered
     )
 
 
-def enrich_and_filter_covered_call_short_vol(
+def enrich_and_filter_covered_call_underwriting(
     *,
     df_labeled: pd.DataFrame,
     symbol: str,
@@ -85,14 +114,11 @@ def enrich_and_filter_covered_call_short_vol(
     if df_labeled is None or df_labeled.empty:
         return df_labeled
 
-    cfg = resolve_covered_call_short_vol_config(sell_call_cfg)
+    cfg = resolve_covered_call_underwriting_config(sell_call_cfg)
     if not cfg.enabled:
         return df_labeled
 
-    risk_ctx = build_portfolio_risk_context(
-        portfolio_ctx=portfolio_ctx,
-        exchange_rate_converter=exchange_rate_converter,
-    )
+    _ = portfolio_ctx
     out = df_labeled.copy()
     reject_rows: list[dict[str, Any]] = []
     keep_mask: list[bool] = []
@@ -110,7 +136,10 @@ def enrich_and_filter_covered_call_short_vol(
                 exchange_rate_converter=exchange_rate_converter,
             )
         )
-        decision = assess_short_vol_candidate(row_payload, mode="call", cfg=cfg, risk_ctx=risk_ctx)
+        for key in ("covered_notional_cny", "net_income_cny", "option_contract_point_value_cny"):
+            if key in row_payload:
+                out.loc[idx, key] = row_payload.get(key)
+        decision = evaluate_covered_call_underwriting_row(row_payload, cfg=cfg)
         for key, value in decision.get("fields", {}).items():
             out.loc[idx, key] = value
         if decision["accepted"]:
@@ -125,7 +154,7 @@ def enrich_and_filter_covered_call_short_vol(
                 function="sell_call",
                 mode="call",
                 strategy_family="sell_call",
-                strategy_profile=cfg.strategy,
+                strategy_profile=INSURANCE_UNDERWRITING_PROFILE,
                 status="post_filtered",
                 stage="post_filter",
                 rule=decision["rule"],
@@ -134,47 +163,60 @@ def enrich_and_filter_covered_call_short_vol(
                 contract_symbol=row.get("contract_symbol"),
                 expiration=row.get("expiration"),
                 strike=row.get("strike"),
-                message=decision.get("message") or "covered-call short-vol strategy risk filter",
+                message=decision.get("message") or "covered-call insurance underwriting strategy filter",
                 evidence_path=getattr(out_path, "name", str(out_path)),
                 replay_fields={**row_payload, **dict(decision.get("fields") or {})},
                 config_values={
-                    "strategy": cfg.strategy,
+                    "strategy": INSURANCE_UNDERWRITING_PROFILE,
                     "strategy_family": "sell_call",
-                    "strategy_profile": cfg.strategy,
+                    "strategy_profile": INSURANCE_UNDERWRITING_PROFILE,
+                    "legacy_strategy_profile": SHORT_VOL_STRATEGY,
+                    "min_annualized_return": cfg.min_annualized_return,
+                    "min_net_income": cfg.min_net_income,
                     "min_iv_rv_ratio": cfg.min_iv_rv_ratio,
                     "min_iv_minus_rv": cfg.min_iv_minus_rv,
-                    "min_abs_delta": cfg.min_abs_delta,
-                    "max_abs_delta": cfg.max_abs_delta,
-                    "max_single_trade_nav_pct": cfg.max_single_trade_nav_pct,
-                    "max_symbol_nav_pct": cfg.max_symbol_nav_pct,
-                    "max_total_short_put_nav_pct": cfg.max_total_short_put_nav_pct,
                     "reject_event_risk": cfg.reject_event_risk,
                     "event_source_fail_closed": cfg.event_source_fail_closed,
-                    "enable_stress_check": cfg.enable_stress_check,
-                    "stress_down_sigma_multiple": cfg.stress_down_sigma_multiple,
-                    "gap_down_pct": cfg.gap_down_pct,
-                    "call_gap_up_pct": cfg.call_gap_up_pct,
-                    "max_call_gap_up_opportunity_cost_nav_pct": cfg.max_call_gap_up_opportunity_cost_nav_pct,
-                    "max_call_gap_up_opportunity_cost_to_premium": cfg.max_call_gap_up_opportunity_cost_to_premium,
                 },
             )
         )
 
     filtered = out.loc[keep_mask].copy()
     if not filtered.empty:
-        try:
-            from domain.domain.engine import rank_candidate_rows
-
-            weights = _score_weights_from_sell_call_cfg(sell_call_cfg)
-            filtered = pd.DataFrame(rank_candidate_rows(filtered.to_dict("records"), mode="call", score_weights=weights))
-        except Exception:
-            pass
+        filtered = pd.DataFrame(rank_underwriting_candidates(filtered.to_dict("records"), mode="call", cfg=cfg))
     try:
         filtered.to_csv(out_path, index=False)
     except Exception as exc:
-        raise RuntimeError(f"failed to persist short-vol filtered covered-call candidates: {out_path}") from exc
+        raise RuntimeError(f"failed to persist insurance-underwriting filtered covered-call candidates: {out_path}") from exc
     append_candidate_filter_trace_rows(candidate_trace_path_for_output(out_path), reject_rows)
     return filtered
+
+
+def enrich_and_filter_covered_call_short_vol(
+    *,
+    df_labeled: pd.DataFrame,
+    symbol: str,
+    sell_call_cfg: dict[str, Any],
+    portfolio_ctx: dict[str, Any] | None,
+    exchange_rate_converter: CurrencyConverter,
+    out_path: Any,
+) -> pd.DataFrame:
+    return enrich_and_filter_covered_call_underwriting(
+        df_labeled=df_labeled,
+        symbol=symbol,
+        sell_call_cfg=sell_call_cfg,
+        portfolio_ctx=portfolio_ctx,
+        exchange_rate_converter=exchange_rate_converter,
+        out_path=out_path,
+    )
+
+
+def evaluate_covered_call_underwriting_row(
+    row: dict[str, Any],
+    *,
+    cfg: InsuranceUnderwritingConfig,
+) -> dict[str, Any]:
+    return evaluate_underwriting_candidate(row, mode="call", cfg=cfg)
 
 
 def _covered_notional_cny(
@@ -188,26 +230,6 @@ def _covered_notional_cny(
         return None
     ccy = row.get("currency") or symbol_currency(row.get("symbol"))
     return amount_to_cny(spot * multiplier, ccy, exchange_rate_converter=exchange_rate_converter)
-
-
-def _score_weights_from_sell_call_cfg(raw: dict[str, Any]):
-    from domain.domain.engine import CandidateScoreWeights
-
-    weights = raw.get("score_weights") if isinstance(raw.get("score_weights"), dict) else {}
-
-    def get(name: str, default: float) -> float:
-        return _float_setting(weights, name, default)
-
-    return CandidateScoreWeights(
-        annualized_return=get("annualized_return", 0.40),
-        net_income=get("net_income", 0.000001),
-        liquidity=get("liquidity", 0.10),
-        risk_distance=get("risk_distance", 0.10),
-        vol_edge=get("vol_edge", 0.50),
-        delta_target=get("delta_target", 0.20),
-        concentration=get("concentration", 0.20),
-        path_risk=get("path_risk", 0.20),
-    )
 
 
 def _float(value: Any) -> float | None:
@@ -240,6 +262,24 @@ def _float_setting(raw: dict[str, Any], key: str, default: float) -> float:
         return float(default)
 
 
+def _float_setting_from_sources(key: str, default: float, *sources: dict[str, Any]) -> float:
+    for source in sources:
+        if not isinstance(source, dict) or key not in source:
+            continue
+        return _float_setting(source, key, default)
+    return float(default)
+
+
+def _optional_float_setting(raw: dict[str, Any], key: str) -> float | None:
+    try:
+        value = raw.get(key)
+        if value is None or value == "":
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
 def _bool_setting(raw: dict[str, Any], key: str, default: bool) -> bool:
     value = raw.get(key, default)
     if isinstance(value, bool):
@@ -253,4 +293,12 @@ def _bool_setting(raw: dict[str, Any], key: str, default: bool) -> bool:
         return True
     if text in {"0", "false", "no", "n", "off"}:
         return False
+    return bool(default)
+
+
+def _bool_setting_from_sources(key: str, default: bool, *sources: dict[str, Any]) -> bool:
+    for source in sources:
+        if not isinstance(source, dict) or key not in source:
+            continue
+        return _bool_setting(source, key, default)
     return bool(default)

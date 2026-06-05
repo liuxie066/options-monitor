@@ -11,6 +11,7 @@ from src.application.layered_config import build_layered_runtime_config
 
 
 BASE = Path(__file__).resolve().parents[1]
+AUTO_INTAKE_CLI_TIMEOUT_SEC = 15
 
 
 def _write_runtime_config(tmp_path: Path) -> Path:
@@ -71,6 +72,7 @@ def test_auto_trade_intake_open_example_dry_run_without_explicit_data_config(tmp
         capture_output=True,
         text=True,
         check=False,
+        timeout=AUTO_INTAKE_CLI_TIMEOUT_SEC,
     )
 
     assert result.returncode == 0, result.stderr or result.stdout
@@ -98,6 +100,7 @@ def test_auto_trade_intake_apply_mode_requires_confirm(tmp_path: Path) -> None:
         capture_output=True,
         text=True,
         check=False,
+        timeout=AUTO_INTAKE_CLI_TIMEOUT_SEC,
     )
 
     assert result.returncode == 2
@@ -121,6 +124,7 @@ def test_auto_trade_intake_retry_failed_requires_deal_json(tmp_path: Path) -> No
         capture_output=True,
         text=True,
         check=False,
+        timeout=AUTO_INTAKE_CLI_TIMEOUT_SEC,
     )
 
     assert result.returncode == 2
@@ -142,6 +146,7 @@ def test_auto_trade_intake_dry_run_flag_is_reconcile_state_only(tmp_path: Path) 
         capture_output=True,
         text=True,
         check=False,
+        timeout=AUTO_INTAKE_CLI_TIMEOUT_SEC,
     )
 
     assert result.returncode == 2
@@ -167,6 +172,7 @@ def test_auto_trade_intake_once_defaults_state_paths_to_runtime_root(tmp_path: P
         capture_output=True,
         text=True,
         check=False,
+        timeout=AUTO_INTAKE_CLI_TIMEOUT_SEC,
     )
 
     assert result.returncode == 0, result.stderr or result.stdout
@@ -214,6 +220,7 @@ def test_auto_trade_intake_open_dry_run_accepts_futu_option_code_with_lookup_fie
             capture_output=True,
             text=True,
             check=False,
+            timeout=AUTO_INTAKE_CLI_TIMEOUT_SEC,
         )
     finally:
         if payload_path:

@@ -127,6 +127,29 @@ def test_yaml_config_resolves_user_overrides_and_defaults(tmp_path: Path) -> Non
     assert futu["sell_call"]["min_strike"] == 90
     assert futu["sell_call"]["max_strike"] == 120
     assert futu["yield_enhancement"]["enabled"] is True
+    sell_put_template = cfg["templates"]["put_base"]["sell_put"]
+    sell_call_template = cfg["templates"]["call_base"]["sell_call"]
+    for side_cfg in (sell_put_template, sell_call_template):
+        assert side_cfg["strategy"] == "insurance_underwriting"
+        assert "concentration" not in side_cfg
+        assert "score_weights" not in side_cfg
+        short_vol = side_cfg.get("short_vol") or {}
+        assert set(short_vol) <= {
+            "min_iv_rv_ratio",
+            "min_iv_minus_rv",
+            "reject_event_risk",
+            "event_source_fail_closed",
+        }
+    for side_cfg in (futu["sell_put"], futu["sell_call"]):
+        assert "concentration" not in side_cfg
+        assert "score_weights" not in side_cfg
+        short_vol = side_cfg.get("short_vol") or {}
+        assert set(short_vol) <= {
+            "min_iv_rv_ratio",
+            "min_iv_minus_rv",
+            "reject_event_risk",
+            "event_source_fail_closed",
+        }
     assert cfg[GENERATED_KEY]["source_format"] == "yaml"
     assert cfg[GENERATED_KEY]["sources"][0]["inline"] is True
     assert cfg[GENERATED_KEY]["sources"][0]["ref"] == DEFAULT_CONFIG_REF

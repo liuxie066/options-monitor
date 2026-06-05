@@ -93,6 +93,15 @@ def current_run_id() -> str | None:
     return _CURRENT_RUN_ID
 
 
+def _has_scan_to_run(*, should_run_global: bool, scan_decision_by_account: dict[str, dict[str, Any]]) -> bool:
+    if bool(should_run_global):
+        return True
+    for item in (scan_decision_by_account or {}).values():
+        if isinstance(item, dict) and item.get("should_run") is True:
+            return True
+    return False
+
+
 def _is_trading_day_guard_for_market(cfg: dict[str, Any], market: str) -> tuple[bool | None, str]:
     """Return (is_trading_day, market_used) for one market.
 
@@ -232,6 +241,7 @@ def main(argv: list[str] | None = None) -> int:
         build_failure_audit_fields=build_failure_audit_fields,
         run_id=run_id,
         idempotency_key=execution_idempotency_key,
+        write_run_artifacts=False,
     )
 
     def complete_tick_idempotency(status: str = "completed", message: str | None = None) -> None:
@@ -316,18 +326,8 @@ def main(argv: list[str] | None = None) -> int:
     args.accounts = guard_outcome.accounts
     args.default_account = guard_outcome.default_account
     bj_tz = guard_outcome.bj_tz
-
+    account_ids = [str(acct).strip() for acct in (args.accounts or []) if str(acct).strip()]
     results: list[AccountResult] = []
-
-    workspace = prepare_tick_run_workspace(
-        base=base,
-        run_id=run_id,
-        default_account=args.default_account,
-    )
-    accounts_root = workspace.accounts_root
-    run_dir = workspace.run_dir
-    prefetch_done = False
-    shared_required = workspace.shared_required
 
     scheduler_outcome = build_tick_scheduler_context(
         TickSchedulerRequest(
@@ -365,6 +365,37 @@ def main(argv: list[str] | None = None) -> int:
     should_run_global = scheduler_context.should_run_global
     reason_global = scheduler_context.reason_global
 
+    if not _has_scan_to_run(
+        should_run_global=should_run_global,
+        scan_decision_by_account=scan_decision_by_account,
+    ):
+        runlog.safe_event(
+            'run_end',
+            'skip',
+            message=str(reason_global or 'scheduler_skip_no_scan'),
+            data=_safe_runlog_data(
+                {
+                    'reason': reason_global,
+                    'scheduler_decision': scheduler_decision,
+                    'accounts': account_ids,
+                    'run_workspace_created': False,
+                }
+            ),
+        )
+        complete_tick_idempotency(status='skipped', message=str(reason_global or 'scheduler_skip_no_scan'))
+        return 0
+
+    workspace = prepare_tick_run_workspace(
+        base=base,
+        run_id=run_id,
+        default_account=args.default_account,
+    )
+    audit_helper.enable_run_artifacts()
+    accounts_root = workspace.accounts_root
+    run_dir = workspace.run_dir
+    prefetch_done = False
+    shared_required = workspace.shared_required
+
     tick_metrics: dict[str, Any] = {
         'as_of_utc': utc_now(),
         'markets_to_run': markets_to_run,
@@ -378,7 +409,6 @@ def main(argv: list[str] | None = None) -> int:
         'reason': '',
     }
 
-    account_ids = [str(acct).strip() for acct in (args.accounts or []) if str(acct).strip()]
     account_count = len(account_ids)
     account_workers = _resolve_account_run_max_workers(base_cfg, account_count)
     account_execution = run_tick_account_execution(

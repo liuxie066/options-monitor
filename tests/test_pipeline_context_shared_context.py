@@ -97,7 +97,7 @@ def test_build_pipeline_context_resolves_portfolio_source_by_account() -> None:
         pc.load_exchange_rates = old_load_exchange_rates  # type: ignore[assignment]
 
 
-def test_build_pipeline_context_attaches_global_short_vol_risk_context() -> None:
+def test_build_pipeline_context_does_not_attach_global_path_risk_context_for_underwriting() -> None:
     import src.application.pipeline_context as pc
 
     old_load_portfolio_context = pc.load_portfolio_context
@@ -108,8 +108,11 @@ def test_build_pipeline_context_attaches_global_short_vol_risk_context() -> None
     try:
         pc.load_portfolio_context = lambda **_kwargs: {"cash_by_currency": {"USD": 1000.0}}  # type: ignore[assignment]
         pc.load_option_positions_context = lambda **_kwargs: ({"cash_secured_total_cny": 0.0}, False)  # type: ignore[assignment]
-        pc.load_global_holdings_risk_context = lambda **_kwargs: {"cash_by_currency": {"CNY": 1_000_000.0}}  # type: ignore[assignment]
-        pc.load_global_option_positions_risk_context = lambda **_kwargs: {"cash_secured_total_cny": 0.0}  # type: ignore[assignment]
+        def _unexpected_global_context(**_kwargs):  # type: ignore[no-untyped-def]
+            raise AssertionError("underwriting scan should not load global path-risk context")
+
+        pc.load_global_holdings_risk_context = _unexpected_global_context  # type: ignore[assignment]
+        pc.load_global_option_positions_risk_context = _unexpected_global_context  # type: ignore[assignment]
         pc.load_exchange_rates = lambda **_kwargs: (0.14, None)  # type: ignore[assignment]
 
         with TemporaryDirectory() as td:
@@ -119,7 +122,7 @@ def test_build_pipeline_context_attaches_global_short_vol_risk_context() -> None
                 base=root,
                 cfg={
                     "portfolio": {"data_config": "x.json", "broker": "富途", "account": "lx"},
-                    "templates": {"put_base": {"sell_put": {"strategy": "short_vol"}}},
+                    "templates": {"put_base": {"sell_put": {"strategy": "insurance_underwriting"}}},
                     "symbols": [{"symbol": "NVDA", "use": ["put_base"]}],
                 },
                 report_dir=(root / "reports").resolve(),
@@ -134,8 +137,7 @@ def test_build_pipeline_context_attaches_global_short_vol_risk_context() -> None
             )
 
         assert portfolio_ctx is not None
-        assert portfolio_ctx["_global_portfolio_ctx"]["cash_by_currency"]["CNY"] == 1_000_000.0
-        assert portfolio_ctx["_global_option_ctx"]["cash_secured_total_cny"] == 0.0
+        assert portfolio_ctx == {"cash_by_currency": {"USD": 1000.0}}
         assert option_ctx == {"cash_secured_total_cny": 0.0}
         assert usd_per_cny_exchange_rate == 0.14
     finally:
@@ -146,7 +148,7 @@ def test_build_pipeline_context_attaches_global_short_vol_risk_context() -> None
         pc.load_exchange_rates = old_load_exchange_rates  # type: ignore[assignment]
 
 
-def test_build_pipeline_context_attaches_global_short_vol_risk_context_for_covered_call() -> None:
+def test_build_pipeline_context_does_not_attach_global_path_risk_context_for_covered_call_underwriting() -> None:
     import src.application.pipeline_context as pc
 
     old_load_portfolio_context = pc.load_portfolio_context
@@ -157,8 +159,11 @@ def test_build_pipeline_context_attaches_global_short_vol_risk_context_for_cover
     try:
         pc.load_portfolio_context = lambda **_kwargs: {"cash_by_currency": {"USD": 1000.0}}  # type: ignore[assignment]
         pc.load_option_positions_context = lambda **_kwargs: ({"locked_shares_by_symbol": {}}, False)  # type: ignore[assignment]
-        pc.load_global_holdings_risk_context = lambda **_kwargs: {"cash_by_currency": {"CNY": 2_000_000.0}}  # type: ignore[assignment]
-        pc.load_global_option_positions_risk_context = lambda **_kwargs: {"cash_secured_total_cny": 100_000.0}  # type: ignore[assignment]
+        def _unexpected_global_context(**_kwargs):  # type: ignore[no-untyped-def]
+            raise AssertionError("underwriting scan should not load global path-risk context")
+
+        pc.load_global_holdings_risk_context = _unexpected_global_context  # type: ignore[assignment]
+        pc.load_global_option_positions_risk_context = _unexpected_global_context  # type: ignore[assignment]
         pc.load_exchange_rates = lambda **_kwargs: (0.14, None)  # type: ignore[assignment]
 
         with TemporaryDirectory() as td:
@@ -168,7 +173,7 @@ def test_build_pipeline_context_attaches_global_short_vol_risk_context_for_cover
                 base=root,
                 cfg={
                     "portfolio": {"data_config": "x.json", "broker": "富途", "account": "lx"},
-                    "templates": {"call_base": {"sell_call": {"strategy": "short_vol"}}},
+                    "templates": {"call_base": {"sell_call": {"strategy": "insurance_underwriting"}}},
                     "symbols": [{"symbol": "NVDA", "use": ["call_base"]}],
                 },
                 report_dir=(root / "reports").resolve(),
@@ -183,8 +188,7 @@ def test_build_pipeline_context_attaches_global_short_vol_risk_context_for_cover
             )
 
         assert portfolio_ctx is not None
-        assert portfolio_ctx["_global_portfolio_ctx"]["cash_by_currency"]["CNY"] == 2_000_000.0
-        assert portfolio_ctx["_global_option_ctx"]["cash_secured_total_cny"] == 100_000.0
+        assert portfolio_ctx == {"cash_by_currency": {"USD": 1000.0}}
         assert option_ctx == {"locked_shares_by_symbol": {}}
         assert usd_per_cny_exchange_rate == 0.14
     finally:

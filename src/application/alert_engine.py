@@ -29,7 +29,7 @@ from domain.domain.strategy_vocab import (
 )
 from src.application.report_formatting import num, pct, strike_text
 
-YIELD_ENHANCEMENT_NOTIFICATION_HIGH = '已按组合收益筛出推荐 Call，可作为该 Sell Put 的收益增强方案。'
+YIELD_ENHANCEMENT_NOTIFICATION_HIGH = '已按组合收益筛出推荐 Call，可作为 Combo Yield 组合方案。'
 
 def _load_symbol_display_map(base: Path, *, state_dir: Path | None = None) -> dict[str, str]:
     """Best-effort load display name mapping.
@@ -545,7 +545,7 @@ def classify_alert(row: pd.Series) -> tuple[str | None, str]:
     if strategy == STRATEGY_YIELD_ENHANCEMENT:
         if annual > 0:
             return 'high', YIELD_ENHANCEMENT_NOTIFICATION_HIGH
-        return 'low', '当前收益增强推荐未通过优先级阈值，仅供观察。'
+        return 'low', '当前组合收益推荐未通过优先级阈值，仅供观察。'
 
     return None, ''
 

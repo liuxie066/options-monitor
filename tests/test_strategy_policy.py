@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from src.application.strategy_policy import (
+    INSURANCE_UNDERWRITING_PROFILE,
     SELL_CALL_FAMILY,
     SELL_PUT_FAMILY,
     SHORT_VOL_PROFILE,
@@ -25,7 +26,7 @@ def test_strategy_resolution_prefers_position_snapshot() -> None:
         "side": "short",
         "strategy_snapshot": {"strategy_family": "sell_put", "strategy_profile": "return_first"},
     }
-    config = {"symbols": [{"symbol": "NVDA", "sell_put": {"strategy": "short_vol"}}]}
+    config = {"symbols": [{"symbol": "NVDA", "sell_put": {"strategy": "insurance_underwriting"}}]}
 
     resolution = resolve_position_strategy(position=position, config=config)
 
@@ -64,7 +65,7 @@ def test_strategy_resolution_defaults_legacy_yield_enhancement_to_return_first()
         "leg_role": "sell_put",
         "strategy_group_id": "ye_nvda_1",
     }
-    config = {"symbols": [{"symbol": "NVDA", "sell_put": {"strategy": "short_vol"}}]}
+    config = {"symbols": [{"symbol": "NVDA", "sell_put": {"strategy": "insurance_underwriting"}}]}
 
     resolution = resolve_position_strategy(position=position, config=config)
 
@@ -90,13 +91,14 @@ def test_strategy_resolution_uses_template_defaults_for_symbol_config() -> None:
     side_cfg = strategy_side_config_for_resolution(resolution=resolution, position=position, config=config)
 
     assert resolution.strategy_source == "current_config"
-    assert resolution.strategy_profile == "short_vol"
-    assert side_cfg["strategy"] == "short_vol"
+    assert resolution.strategy_profile == "insurance_underwriting"
+    assert side_cfg["strategy"] == "insurance_underwriting"
     assert side_cfg["min_open_interest"] == 50
 
 
 def test_sell_put_strategy_semantics_matrix() -> None:
     return_first = strategy_semantics_for_profile(family=SELL_PUT_FAMILY, profile=RETURN_FIRST_PROFILE)
+    underwriting = strategy_semantics_for_profile(family=SELL_PUT_FAMILY, profile=INSURANCE_UNDERWRITING_PROFILE)
     short_vol = strategy_semantics_for_profile(family=SELL_PUT_FAMILY, profile=SHORT_VOL_PROFILE)
 
     assert return_first.strategy_profile == RETURN_FIRST_PROFILE
@@ -109,22 +111,32 @@ def test_sell_put_strategy_semantics_matrix() -> None:
     assert return_first.close_advice_profile == "sell_put_return_first"
     assert return_first.close_requires_rv is False
 
+    assert underwriting.strategy_profile == INSURANCE_UNDERWRITING_PROFILE
+    assert underwriting.risk_model == "short_vol"
+    assert underwriting.scan_strategy_profile == INSURANCE_UNDERWRITING_PROFILE
+    assert underwriting.scan_requires_rv is True
+    assert underwriting.scan_uses_underwriting_gate is True
+    assert underwriting.scan_uses_short_vol_gate is False
+    assert underwriting.scan_uses_event_risk is True
+    assert underwriting.scan_uses_path_risk is False
+    assert underwriting.yield_enhancement_mode == YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE
+    assert underwriting.yield_enhancement_requires_rv is False
+    assert underwriting.yield_enhancement_uses_short_vol_gate is False
+    assert underwriting.close_advice_profile == "sell_put_short_vol"
+    assert underwriting.close_requires_rv is True
+    assert underwriting.close_uses_short_vol_thesis is True
+
     assert short_vol.strategy_profile == SHORT_VOL_PROFILE
-    assert short_vol.risk_model == "short_vol"
-    assert short_vol.scan_requires_rv is True
-    assert short_vol.scan_uses_short_vol_gate is True
-    assert short_vol.scan_uses_event_risk is True
-    assert short_vol.scan_uses_path_risk is True
-    assert short_vol.yield_enhancement_mode == YIELD_ENHANCEMENT_VOL_CONVEXITY_MODE
-    assert short_vol.yield_enhancement_requires_rv is True
-    assert short_vol.yield_enhancement_uses_short_vol_gate is True
+    assert short_vol.scan_strategy_profile == SHORT_VOL_PROFILE
+    assert short_vol.scan_requires_rv is False
+    assert short_vol.scan_uses_underwriting_gate is False
     assert short_vol.close_advice_profile == "sell_put_short_vol"
-    assert short_vol.close_requires_rv is True
     assert short_vol.close_uses_short_vol_thesis is True
 
 
 def test_sell_call_strategy_semantics_matrix() -> None:
     return_first = strategy_semantics_for_profile(family=SELL_CALL_FAMILY, profile=RETURN_FIRST_PROFILE)
+    underwriting = strategy_semantics_for_profile(family=SELL_CALL_FAMILY, profile=INSURANCE_UNDERWRITING_PROFILE)
     short_vol = strategy_semantics_for_profile(family=SELL_CALL_FAMILY, profile=SHORT_VOL_PROFILE)
 
     assert return_first.yield_enhancement_mode is None
@@ -132,8 +144,16 @@ def test_sell_call_strategy_semantics_matrix() -> None:
     assert return_first.close_advice_profile == "covered_call_return_first"
     assert return_first.close_requires_rv is False
 
-    assert short_vol.yield_enhancement_mode is None
-    assert short_vol.scan_requires_rv is True
+    assert underwriting.yield_enhancement_mode is None
+    assert underwriting.scan_strategy_profile == INSURANCE_UNDERWRITING_PROFILE
+    assert underwriting.scan_requires_rv is True
+    assert underwriting.scan_uses_underwriting_gate is True
+    assert underwriting.close_advice_profile == "covered_call_short_vol"
+    assert underwriting.close_requires_rv is True
+
+    assert short_vol.scan_strategy_profile == SHORT_VOL_PROFILE
+    assert short_vol.scan_requires_rv is False
+    assert short_vol.scan_uses_underwriting_gate is False
     assert short_vol.close_advice_profile == "covered_call_short_vol"
     assert short_vol.close_requires_rv is True
 
@@ -165,7 +185,7 @@ def test_position_strategy_semantics_preserves_yield_enhancement_mode() -> None:
     assert resolution.strategy_source == "position_yield_enhancement_mode"
     assert semantics.strategy_profile == SHORT_VOL_PROFILE
     assert semantics.close_requires_rv is True
-    assert semantics.yield_enhancement_uses_short_vol_gate is True
+    assert semantics.yield_enhancement_uses_short_vol_gate is False
 
 
 def test_yield_enhancement_mode_helpers_are_policy_owned() -> None:
@@ -193,9 +213,19 @@ def test_strategy_config_resolution_guard_accepts_expanded_template_symbol() -> 
         {
             "symbol": "NVDA",
             "use": ["put_base"],
-            "sell_put": {"enabled": True, "strategy": "short_vol"},
+            "sell_put": {"enabled": True, "strategy": "insurance_underwriting"},
         }
     )
+
+
+def test_unknown_strategy_family_does_not_enable_underwriting_scan() -> None:
+    semantics = strategy_semantics_for_profile(family="combo_yield", profile=INSURANCE_UNDERWRITING_PROFILE)
+
+    assert semantics.strategy_family == "combo_yield"
+    assert semantics.scan_strategy_profile == INSURANCE_UNDERWRITING_PROFILE
+    assert semantics.scan_uses_underwriting_gate is False
+    assert semantics.scan_requires_rv is False
+    assert semantics.scan_uses_path_risk is False
 
 
 def test_yield_enhancement_position_role_does_not_treat_any_grouped_put_as_yield_enhancement() -> None:

@@ -161,12 +161,28 @@ def test_candidate_engine_stage1_rejects_put_hard_constraints() -> None:
 
     assert payload["accepted"] is False
     reasons = [r["reason"] for r in payload["rejects"]]
-    assert reasons == ["hard_dte", "hard_strike", "hard_strike", "hard_capacity_put"]
+    assert reasons == ["hard_dte", "hard_strike", "hard_capacity_put"]
     assert all(r["stage"] == STAGE_HARD_CONSTRAINTS for r in payload["rejects"])
 
 
-def test_candidate_engine_stage1_rejects_put_below_min_otm_pct() -> None:
+def test_candidate_engine_stage1_allows_atm_put_and_rejects_itm_put() -> None:
     from domain.domain.engine import evaluate_candidate_hard_constraints
+
+    atm = evaluate_candidate_hard_constraints(
+        {
+            "symbol": "NVDA",
+            "option_type": "put",
+            "expiration": "2026-06-18",
+            "dte": "30",
+            "spot": "100",
+            "strike": "100",
+            "mid": "1.2",
+            "multiplier": "100",
+        },
+        mode="put",
+    )
+
+    assert atm["accepted"] is True
 
     payload = evaluate_candidate_hard_constraints(
         {
@@ -175,19 +191,17 @@ def test_candidate_engine_stage1_rejects_put_below_min_otm_pct() -> None:
             "expiration": "2026-06-18",
             "dte": "30",
             "spot": "100",
-            "strike": "98",
+            "strike": "101",
             "mid": "1.2",
             "multiplier": "100",
         },
         mode="put",
-        min_otm_pct=0.05,
+        max_strike=120,
     )
-
     assert payload["accepted"] is False
     assert [r["reason"] for r in payload["rejects"]] == ["hard_strike"]
-    assert payload["rejects"][0]["message"] == "put otm_pct below minimum"
-    assert payload["rejects"][0]["metric_value"] == 0.02
-    assert payload["rejects"][0]["threshold"] == 0.05
+    assert payload["rejects"][0]["message"] == "strike above maximum"
+    assert payload["rejects"][0]["threshold"]["effective_max_strike"] == 100.0
 
 
 def test_candidate_engine_stage1_rejects_call_hard_constraints() -> None:
@@ -214,6 +228,29 @@ def test_candidate_engine_stage1_rejects_call_hard_constraints() -> None:
     assert [r["reason"] for r in rejects] == ["hard_strike", "hard_capacity_call"]
     assert rejects[0]["message"] == "strike below minimum"
     assert rejects[1]["threshold"] == 1
+
+
+def test_candidate_engine_stage1_rejects_itm_call_by_spot_floor() -> None:
+    from domain.domain.engine import evaluate_candidate_hard_constraints
+
+    payload = evaluate_candidate_hard_constraints(
+        {
+            "symbol": "AAPL",
+            "option_type": "call",
+            "expiration": "2026-06-18",
+            "dte": "30",
+            "spot": "200",
+            "strike": "199",
+            "mid": "1.1",
+            "multiplier": "100",
+        },
+        mode="call",
+        min_strike=180,
+    )
+
+    assert payload["accepted"] is False
+    assert [r["reason"] for r in payload["rejects"]] == ["hard_strike"]
+    assert payload["rejects"][0]["threshold"]["effective_min_strike"] == 200.0
 
 
 def test_candidate_engine_stage1_stops_when_stage0_fails() -> None:

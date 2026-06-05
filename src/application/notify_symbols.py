@@ -234,7 +234,7 @@ def _parse_alert_line(raw_line: str) -> ParsedAlertLine | None:
     extras: dict[str, str] = {}
     comment = ''
     for p in parts[3:]:
-        if p.startswith('通过准入') or p.startswith('已通过准入') or p.startswith('已通过组合准入') or p.startswith('已通过收益增强准入') or p.startswith('当前') or p.startswith('所需') or p.startswith('组合所需'):
+        if p.startswith('通过准入') or p.startswith('已通过准入') or p.startswith('已通过组合准入') or p.startswith('已通过收益增强准入') or p.startswith('已通过组合收益准入') or p.startswith('当前') or p.startswith('所需') or p.startswith('组合所需'):
             comment = p
             continue
         if ' ' in p:
@@ -373,7 +373,7 @@ def _build_notification_block_compact(
     _, strike_raw = _parse_contract(contract)
     strike = _normalize_contract_strike(strike_raw)
     emoji = _action_emoji(action_label, risk_line)
-    is_enhancement = '收益增强' in action_label
+    is_enhancement = _is_combo_yield_action(action_label)
 
     if not is_enhancement:
         option_type = 'P' if 'Put' in action_label else 'C'
@@ -490,7 +490,7 @@ def _build_notification_block_compact(
             event_text = event_match.group(1).strip()
             if event_text:
                 l4_parts.append(f"事件 {event_text}")
-        if '收益增强' in extra_detail_line:
+        if '收益增强' in extra_detail_line or '组合收益' in extra_detail_line:
             call_match = re.search(r'推荐Call=([^|]+)', extra_detail_line)
             if call_match:
                 l4_parts.append(f"💡 推荐Call={call_match.group(1).strip()}")
@@ -509,7 +509,7 @@ def _build_notification_block_compact(
 
 
 def _action_emoji(action_label: str, risk_line: str = '') -> str:
-    if '收益增强' in action_label:
+    if _is_combo_yield_action(action_label):
         return '💎'
     if 'Covered Call' in action_label or '卖Call' in action_label:
         if '不可覆盖' in risk_line or 'cover=0' in risk_line:
@@ -518,6 +518,10 @@ def _action_emoji(action_label: str, risk_line: str = '') -> str:
     if '卖Put' in action_label:
         return '🟢'
     return '⚪'
+
+
+def _is_combo_yield_action(action_label: str) -> bool:
+    return '组合收益' in action_label or '收益增强' in action_label
 
 
 def _parse_shares_summary(shares: str) -> tuple[str, str, str]:
@@ -596,7 +600,7 @@ def _format_alert_line(line: str, *, account_label: str = '当前账户') -> str
             if not _is_missing_value(linked_call_count):
                 count_part = f"候选Call={linked_call_count}个 | "
             extra_detail_lines.append(
-                f"- 收益增强: 推荐Call={linked_call} | "
+                f"- 组合收益: 推荐Call={linked_call} | "
                 f"{count_part}"
                 f"参考买价={_present_or_missing(linked_call_ask, reason='告警未提供linked_call_ask')} | "
                 f"delta={_present_or_missing(linked_call_delta, reason='告警未提供linked_call_delta')} | "
@@ -659,7 +663,7 @@ def _format_alert_line(line: str, *, account_label: str = '当前账户') -> str
         candidate_tail = ""
         if not _is_missing_value(call_candidate_count):
             candidate_tail = f" | 备选Call={call_candidate_count}个"
-        note = parsed.comment or '已按组合收益筛出推荐 Call，可作为该 Sell Put 的收益增强方案。'
+        note = parsed.comment or '已按组合收益筛出推荐 Call，可作为 Combo Yield 组合方案。'
         enh_suggestion = _yield_enhancement_suggestion(put_bid, call_ask)
         return _build_notification_block(
             account_label=account_label,
@@ -720,7 +724,7 @@ def _format_alert_line_compact(line: str, *, account_label: str = '当前账户'
             if not _is_missing_value(linked_call_count):
                 count_part = f"候选Call={linked_call_count}个 | "
             extra_detail_lines.append(
-                f"- 收益增强: 推荐Call={linked_call} | "
+                f"- 组合收益: 推荐Call={linked_call} | "
                 f"{count_part}"
                 f"delta={_present_compact(linked_call_delta)} | "
                 f"场景评分={_present_compact(linked_scenario_score)}"
@@ -779,7 +783,7 @@ def _format_alert_line_compact(line: str, *, account_label: str = '当前账户'
         candidate_tail = ""
         if not _is_missing_value(call_candidate_count):
             candidate_tail = f" | 备选Call={call_candidate_count}个"
-        note = parsed.comment or '已按组合收益筛出推荐 Call，可作为该 Sell Put 的收益增强方案。'
+        note = parsed.comment or '已按组合收益筛出推荐 Call，可作为 Combo Yield 组合方案。'
         enh_suggestion = _yield_enhancement_suggestion(put_bid, call_ask)
         return _build_notification_block_compact(
             symbol_name=parsed.symbol_name,

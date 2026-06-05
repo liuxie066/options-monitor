@@ -166,6 +166,7 @@ def normalize_trade_deal(
     host: str = "127.0.0.1",
     port: int = 11111,
     opend_fetch_config: dict[str, float | int] | None = None,
+    allow_opend_refresh: bool = True,
 ) -> NormalizedTradeDeal:
     src = payload if isinstance(payload, dict) else {}
     visible_account_fields = extract_visible_account_fields(src)
@@ -222,7 +223,7 @@ def normalize_trade_deal(
         multiplier=multiplier,
         runtime_root=runtime_root,
         config_path=config_path,
-        allow_opend_refresh=True,
+        allow_opend_refresh=bool(allow_opend_refresh),
         host=host,
         port=port,
         opend_fetch_config=opend_fetch_config,

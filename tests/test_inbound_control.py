@@ -89,7 +89,7 @@ def _runtime_cfg(data_config_ref: str, *, market: str = "us") -> dict:
                     "max_spread_ratio": 0.3,
                 }
             },
-            "call_base": {"sell_call": {"strategy": "short_vol"}},
+            "call_base": {"sell_call": {"strategy": "insurance_underwriting"}},
         },
         "symbols": [
             {

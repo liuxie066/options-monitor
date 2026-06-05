@@ -889,7 +889,6 @@ def _strategy_thresholds(strategy_cfg: dict[str, Any]) -> dict[str, Any]:
         "max_dte",
         "min_strike",
         "max_strike",
-        "min_otm_pct",
         "min_annualized_net_return",
         "min_net_income",
         "min_open_interest",
@@ -898,8 +897,6 @@ def _strategy_thresholds(strategy_cfg: dict[str, Any]) -> dict[str, Any]:
         "min_strike_cost_multiplier",
         "min_combo_net_credit",
         "max_call_cost_to_put_credit",
-        "min_upside_lift_to_call_cost",
-        "min_upside_lift_to_put_credit",
         "max_combo_spread_ratio",
     )
     return {key: strategy_cfg.get(key) for key in keys if key in strategy_cfg}

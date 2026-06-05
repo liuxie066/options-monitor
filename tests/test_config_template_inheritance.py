@@ -12,8 +12,8 @@ def _base_cfg(symbol: dict) -> dict:
         "accounts": ["lx"],
         "account_settings": {"lx": {"type": "futu"}},
         "templates": {
-            "put_base": {"sell_put": {"strategy": "short_vol"}},
-            "call_base": {"sell_call": {"strategy": "short_vol"}},
+            "put_base": {"sell_put": {"strategy": "insurance_underwriting"}},
+            "call_base": {"sell_call": {"strategy": "insurance_underwriting"}},
         },
         "symbols": [symbol],
     }
@@ -51,7 +51,7 @@ def test_validate_config_accepts_enabled_sell_call_with_call_base() -> None:
     validate_config(cfg)
 
     effective = apply_profiles(cfg["symbols"][0], cfg["templates"])
-    assert effective["sell_call"]["strategy"] == "short_vol"
+    assert effective["sell_call"]["strategy"] == "insurance_underwriting"
 
 
 def test_edit_symbol_entry_can_ensure_call_base_for_covered_call() -> None:
@@ -85,7 +85,7 @@ def test_validate_config_accepts_enabled_sell_call_with_explicit_strategy() -> N
             "sell_put": {"enabled": True, "min_dte": 20, "max_dte": 45},
             "sell_call": {
                 "enabled": True,
-                "strategy": "short_vol",
+                "strategy": "insurance_underwriting",
                 "min_dte": 20,
                 "max_dte": 45,
                 "min_strike": 130,

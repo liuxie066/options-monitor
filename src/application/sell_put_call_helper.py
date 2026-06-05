@@ -191,17 +191,6 @@ def _normalized_iv(*values: Any) -> float | None:
     return sum(parsed) / float(len(parsed))
 
 
-def _float_list(value: Any, *, default: tuple[float, ...]) -> tuple[float, ...]:
-    if not isinstance(value, list):
-        return default
-    parsed: list[float] = []
-    for item in value:
-        out = _safe_float(item)
-        if out is not None:
-            parsed.append(float(out))
-    return tuple(parsed) if parsed else default
-
-
 def _funding_decision_row_fields(decision: YieldEnhancementFundingDecision) -> dict[str, Any]:
     components = ";".join(
         f"{name}={value:.6f}"
@@ -235,10 +224,9 @@ def _build_pair_row(
     put_leg: YieldEnhancementLeg,
     call_leg: YieldEnhancementLeg,
     expected_move_iv: float | None,
-    scenario_move_factors: tuple[float, ...],
-    scenario_weights: tuple[float, ...],
     min_combo_notional_floor: float,
     enhancement_cfg: dict[str, Any],
+    sell_put_cfg: dict[str, Any] | None,
 ) -> dict[str, Any]:
     multiplier = int(put_leg.multiplier)
     put_sell_fee = calc_futu_option_fee(put_leg.currency, put_leg.bid, contracts=1, multiplier=multiplier, is_sell=True)
@@ -249,11 +237,13 @@ def _build_pair_row(
         put_sell_fee=put_sell_fee,
         call_buy_fee=call_buy_fee,
         expected_move_iv=expected_move_iv,
-        scenario_move_factors=scenario_move_factors,
-        scenario_weights=scenario_weights,
         min_combo_notional_floor=min_combo_notional_floor,
     )
     risk = classify_sell_put_risk(metrics.put_otm_pct)
+    max_strike = _safe_float((sell_put_cfg or {}).get("max_strike")) if isinstance(sell_put_cfg, dict) else None
+    put_assignment_margin_pct = None
+    if max_strike is not None and max_strike > 0:
+        put_assignment_margin_pct = (max_strike - put_leg.strike) / max_strike
     row = {
         "symbol": put_leg.symbol,
         "expiration": put_leg.expiration,
@@ -294,13 +284,14 @@ def _build_pair_row(
         "downside_breakeven": metrics.downside_breakeven,
         "upside_breakeven": metrics.upside_breakeven,
         "max_loss_if_zero": metrics.max_loss_if_zero,
-        "annualized_return": metrics.annualized_scenario_score,
+        "annualized_return": metrics.annualized_net_credit_yield,
         "expected_move_iv": metrics.expected_move_iv,
         "expected_move": metrics.expected_move,
         "scenario_score": metrics.scenario_score,
         "annualized_scenario_score": metrics.annualized_scenario_score,
         "put_otm_pct": metrics.put_otm_pct,
         "call_otm_pct": metrics.call_otm_pct,
+        "put_assignment_margin_pct": round(float(put_assignment_margin_pct), 6) if put_assignment_margin_pct is not None else None,
         "gap_width_pct": metrics.gap_width_pct,
         "upside_breakeven_pct_above_spot": metrics.upside_breakeven_pct_above_spot,
         "combo_spread_ratio": metrics.combo_spread_ratio,
@@ -328,8 +319,6 @@ def _build_pair_row(
         min_combo_net_credit=min_combo_net_credit,
         min_net_credit_annualized=_safe_float(enhancement_cfg.get("min_net_credit_annualized")),
         max_call_cost_to_put_credit=max_call_cost_to_put_credit,
-        min_upside_lift_to_call_cost=_safe_float(enhancement_cfg.get("min_upside_lift_to_call_cost")),
-        min_upside_lift_to_put_credit=_safe_float(enhancement_cfg.get("min_upside_lift_to_put_credit")),
         max_combo_spread_ratio=_safe_float(enhancement_cfg.get("max_combo_spread_ratio")),
     )
     row.update(_funding_decision_row_fields(decision))
@@ -420,6 +409,16 @@ def _put_risk_fields(row: pd.Series) -> dict[str, Any]:
     return {key: row.get(key) for key in fields if key in row}
 
 
+def _put_leg_passes_assignment_bounds(put_leg: YieldEnhancementLeg, sell_put_cfg: dict[str, Any] | None) -> bool:
+    cfg = sell_put_cfg if isinstance(sell_put_cfg, dict) else {}
+    min_strike = _safe_float(cfg.get("min_strike"))
+    max_strike = _safe_float(cfg.get("max_strike"))
+    effective_max_strike = min(value for value in (max_strike, put_leg.spot) if value is not None)
+    if min_strike is not None and put_leg.strike < min_strike:
+        return False
+    return put_leg.strike <= effective_max_strike
+
+
 def _load_required_data_calls(*, input_root: Path, symbol: str) -> pd.DataFrame:
     path = Path(input_root) / "parsed" / f"{symbol}_required_data.csv"
     try:
@@ -453,25 +452,20 @@ def _load_yield_enhancement_call_legs_by_expiration(
     call_legs_by_expiration: dict[str, list[YieldEnhancementLeg]] = {}
     if raw_calls.empty:
         return call_legs_by_expiration
-    min_call_otm = float(call_cfg.get("min_otm_pct", 0.03) or 0.0)
-    max_call_otm = _safe_float(call_cfg.get("max_otm_pct"))
     min_call_delta = _safe_float(call_cfg.get("min_delta"))
     max_call_delta = _safe_float(call_cfg.get("max_delta"))
+    configured_min_strike = _safe_float(call_cfg.get("min_strike"))
+    configured_max_strike = _safe_float(call_cfg.get("max_strike"))
     for _, raw in raw_calls.iterrows():
         leg = _call_leg_from_required_data(raw)
         if leg is None:
             continue
         if not _passes_range(leg.dte, int(window.min_dte), int(window.max_dte)):
             continue
-        if not _passes_range(
-            leg.strike,
-            _safe_float(call_cfg.get("min_strike")),
-            _safe_float(call_cfg.get("max_strike")),
-        ):
+        effective_min_strike = max(value for value in (configured_min_strike, leg.spot) if value is not None)
+        if leg.strike < effective_min_strike:
             continue
-        if leg.strike < leg.spot * (1.0 + float(min_call_otm)):
-            continue
-        if max_call_otm is not None and leg.strike > leg.spot * (1.0 + float(max_call_otm)):
+        if configured_max_strike is not None and leg.strike > configured_max_strike:
             continue
         call_delta = _safe_float(leg.delta)
         if min_call_delta is not None and (call_delta is None or call_delta < float(min_call_delta)):
@@ -494,8 +488,6 @@ def _candidate_passes_pair_filters(
     *,
     funding_mode: str,
     max_debit_native: float | None,
-    min_scenario_score: float,
-    min_annualized_scenario_score: float | None,
     min_net_credit_retention: float | None,
 ) -> bool:
     if not bool(candidate.get("funding_accepted")):
@@ -503,14 +495,6 @@ def _candidate_passes_pair_filters(
     if funding_mode == "credit_or_even" and float(candidate["net_credit"]) < 0:
         return False
     if funding_mode == "max_debit" and max_debit_native is not None and float(candidate["net_debit"]) > float(max_debit_native):
-        return False
-    scenario_score = _safe_float(candidate["scenario_score"])
-    if scenario_score is None or scenario_score < min_scenario_score:
-        return False
-    annualized_scenario = _safe_float(candidate["annualized_scenario_score"])
-    if min_annualized_scenario_score is not None and (
-        annualized_scenario is None or annualized_scenario < float(min_annualized_scenario_score)
-    ):
         return False
     net_credit_retention = _safe_float(candidate.get("net_credit_retention"))
     if min_net_credit_retention is not None and (
@@ -525,17 +509,13 @@ def _build_yield_enhancement_pair_rows(
     df: pd.DataFrame,
     call_legs_by_expiration: dict[str, list[YieldEnhancementLeg]],
     window: Any,
-    min_put_otm_pct: float,
-    scenario_move_factors: tuple[float, ...],
-    scenario_weights: tuple[float, ...],
+    sell_put_cfg: dict[str, Any] | None,
     min_combo_notional_floor: float,
     cfg: dict[str, Any],
     put_strategy_fields: dict[str, Any],
     policy_fields: dict[str, Any],
     funding_mode: str,
     max_debit_native: float | None,
-    min_scenario_score: float,
-    min_annualized_scenario_score: float | None,
     min_net_credit_retention: float | None,
 ) -> list[dict[str, Any]]:
     pair_rows: list[dict[str, Any]] = []
@@ -545,7 +525,7 @@ def _build_yield_enhancement_pair_rows(
             continue
         if not _passes_range(put_leg.dte, int(window.min_dte), int(window.max_dte)):
             continue
-        if put_leg.strike > put_leg.spot * (1.0 - float(min_put_otm_pct)):
+        if not _put_leg_passes_assignment_bounds(put_leg, sell_put_cfg):
             continue
 
         for call_leg in call_legs_by_expiration.get(put_leg.expiration, []):
@@ -553,17 +533,14 @@ def _build_yield_enhancement_pair_rows(
             if pair_rejects:
                 continue
             expected_iv = _normalized_iv(put_leg.implied_volatility, call_leg.implied_volatility)
-            if expected_iv is None:
-                continue
             try:
                 candidate = _build_pair_row(
                     put_leg=put_leg,
                     call_leg=call_leg,
                     expected_move_iv=expected_iv,
-                    scenario_move_factors=scenario_move_factors,
-                    scenario_weights=scenario_weights,
                     min_combo_notional_floor=min_combo_notional_floor,
                     enhancement_cfg=cfg,
+                    sell_put_cfg=sell_put_cfg,
                 )
             except Exception:
                 continue
@@ -571,8 +548,6 @@ def _build_yield_enhancement_pair_rows(
                 candidate,
                 funding_mode=funding_mode,
                 max_debit_native=max_debit_native,
-                min_scenario_score=min_scenario_score,
-                min_annualized_scenario_score=min_annualized_scenario_score,
                 min_net_credit_retention=min_net_credit_retention,
             ):
                 continue
@@ -611,17 +586,6 @@ def find_sell_put_yield_enhancement_pairs(
         defaults=DEFAULT_SELL_PUT_WINDOW if sell_put_cfg is not None else DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_WINDOW,
     )
 
-    min_put_otm_pct = float(cfg.get("min_put_otm_pct", 0.05) or 0.0)
-    scenario_move_factors = _float_list(
-        cfg.get("scenario_move_factors"),
-        default=(0.0, 0.5, 1.0, 1.5),
-    )
-    scenario_weights = _float_list(
-        cfg.get("scenario_weights"),
-        default=(0.2, 0.3, 0.4, 0.1),
-    )
-    min_scenario_score = float(cfg.get("min_scenario_score", 0.0) or 0.0)
-    min_annualized_scenario_score = _safe_float(cfg.get("min_annualized_scenario_score"))
     funding_mode = str(cfg.get("funding_mode") or "credit_or_even").strip().lower()
     max_debit_native = _safe_float(cfg.get("max_debit_native"))
     if max_debit_native is None:
@@ -643,17 +607,13 @@ def find_sell_put_yield_enhancement_pairs(
         df=df,
         call_legs_by_expiration=call_legs_by_expiration,
         window=window,
-        min_put_otm_pct=min_put_otm_pct,
-        scenario_move_factors=scenario_move_factors,
-        scenario_weights=scenario_weights,
+        sell_put_cfg=sell_put_cfg,
         min_combo_notional_floor=min_combo_notional_floor,
         cfg=cfg,
         put_strategy_fields=put_strategy_fields,
         policy_fields=policy.to_fields(),
         funding_mode=funding_mode,
         max_debit_native=max_debit_native,
-        min_scenario_score=min_scenario_score,
-        min_annualized_scenario_score=min_annualized_scenario_score,
         min_net_credit_retention=min_net_credit_retention,
     )
 

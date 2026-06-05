@@ -223,3 +223,108 @@ def test_main_uses_env_runtime_root_for_stateful_tick_flows(monkeypatch, tmp_pat
     assert captured["runlog_base"] == runtime_root.resolve()
     assert captured["guard_base"] == runtime_root.resolve()
     assert captured["guard_vpy"] == Path(sys.executable)
+
+
+def test_main_scheduler_skip_does_not_create_output_run_workspace(monkeypatch, tmp_path) -> None:
+    import json
+    from zoneinfo import ZoneInfo
+
+    from domain.domain.engine import SchedulerDecisionView
+    from src.application import multi_account_tick as mod
+    from src.application.tick_guard_flow import TickGuardOutcome
+    from src.application.tick_scheduler_context import TickSchedulerContext, TickSchedulerOutcome
+
+    cfg = tmp_path / "config.us.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "_generated": {
+                    "schema_version": "1.0",
+                    "generator": "options-monitor",
+                    "source_format": "yaml",
+                    "market": "us",
+                },
+                "accounts": ["lx"],
+                "symbols": [{"symbol": "NVDA", "broker": "US"}],
+                "schedule": {"enabled": True},
+                "portfolio": {},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    runtime_root = tmp_path / "runtime"
+
+    class _RunLogger:
+        def __init__(self, base):
+            self.base = base
+            self.run_id = "run-skip"
+
+        def safe_event(self, *args, **kwargs):
+            pass
+
+    def _run_tick_guard_flow(request):
+        return TickGuardOutcome(
+            should_continue=True,
+            return_code=0,
+            base_cfg=request.base_cfg,
+            accounts=request.accounts,
+            default_account=request.default_account,
+            bj_tz=ZoneInfo("Asia/Shanghai"),
+        )
+
+    def _scheduler_context(_request):
+        decision = {
+            "schema_kind": "scheduler_decision",
+            "schema_version": "1.0",
+            "should_run_scan": False,
+            "is_notify_window_open": False,
+            "reason": "当前运行点已处理，等待下一个运行点。",
+        }
+        return TickSchedulerOutcome(
+            should_continue=True,
+            return_code=0,
+            results=[],
+            context=TickSchedulerContext(
+                markets_to_run=["US"],
+                scheduler_markets=["US"],
+                state_path=runtime_root / "output_shared" / "state" / "scheduler_state.json",
+                scheduler_schedule_key="schedule",
+                scheduler_ms=1,
+                scheduler_decision=decision,
+                scheduler_view=SchedulerDecisionView.from_payload(decision),
+                notify_decision_by_account={},
+                scan_decision_by_account={"lx": {"should_run": False, "reason": decision["reason"]}},
+                should_run_global=False,
+                reason_global=decision["reason"],
+            ),
+        )
+
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime_root))
+    monkeypatch.setattr(mod, "RunLogger", _RunLogger)
+    monkeypatch.setattr(mod, "resolve_config_contract", lambda *args, **kwargs: {})
+    monkeypatch.setattr(mod, "ensure_runtime_canonical_config", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mod, "ensure_runtime_schedule_matches_market", lambda *args, **kwargs: {"market": ""})
+    monkeypatch.setattr(mod.state_repo, "claim_idempotency_record", lambda *args, **kwargs: {"claimed": True})
+    monkeypatch.setattr(mod, "run_tick_guard_flow", _run_tick_guard_flow)
+    monkeypatch.setattr(mod, "build_tick_scheduler_context", _scheduler_context)
+    monkeypatch.setattr(
+        mod,
+        "prepare_tick_run_workspace",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("skip must not create run workspace")),
+    )
+    monkeypatch.setattr(
+        mod,
+        "run_tick_account_execution",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("skip must not run account execution")),
+    )
+    monkeypatch.setattr(
+        mod,
+        "run_tick_notification_flow",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("skip must not run notification flow")),
+    )
+
+    rc = mod.main(["--config", str(cfg), "--accounts", "lx"])
+
+    assert rc == 0
+    assert not (runtime_root / "output_runs").exists()

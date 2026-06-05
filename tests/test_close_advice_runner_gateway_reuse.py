@@ -33,7 +33,7 @@ def _config() -> dict[str, object]:
     }
 
 
-def test_ensure_required_data_coverage_reuses_single_lazy_gateway(tmp_path: Path, monkeypatch) -> None:
+def test_ensure_required_data_coverage_does_not_build_implicit_gateway(tmp_path: Path, monkeypatch) -> None:
     built: list[_Gateway] = []
     fetch_calls: list[dict[str, object]] = []
 
@@ -71,13 +71,12 @@ def test_ensure_required_data_coverage_reuses_single_lazy_gateway(tmp_path: Path
     )
 
     assert summary["attempted_symbols"] == 3
-    assert len(built) == 1
-    assert built[0].close_calls == 1
+    assert not built
     assert len(fetch_calls) == 3
-    assert all(call["gateway"] is built[0] for call in fetch_calls)
+    assert all(call["gateway"] is None for call in fetch_calls)
 
 
-def test_ensure_required_data_coverage_isolates_lazy_gateways_by_endpoint(tmp_path: Path, monkeypatch) -> None:
+def test_ensure_required_data_coverage_passes_endpoint_without_implicit_gateway(tmp_path: Path, monkeypatch) -> None:
     cfg = {
         "symbols": [
             {"symbol": "AAPL", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 8}},
@@ -95,8 +94,7 @@ def test_ensure_required_data_coverage_isolates_lazy_gateways_by_endpoint(tmp_pa
 
     def fake_fetch_symbol(symbol: str, **kwargs: object) -> dict[str, object]:
         gateway = kwargs["gateway"]
-        assert isinstance(gateway, _Gateway)
-        assert (gateway.host, gateway.port) == (kwargs["host"], kwargs["port"])
+        assert gateway is None
         fetch_calls.append({"symbol": symbol, **kwargs})
         return {
             "rows": [
@@ -125,10 +123,13 @@ def test_ensure_required_data_coverage_isolates_lazy_gateways_by_endpoint(tmp_pa
     )
 
     assert summary["attempted_symbols"] == 3
-    assert [(gw.host, gw.port) for gw in built] == [("127.0.0.1", 11111), ("127.0.0.1", 22222)]
-    assert fetch_calls[0]["gateway"] is fetch_calls[2]["gateway"]
-    assert fetch_calls[1]["gateway"] is not fetch_calls[0]["gateway"]
-    assert all(gw.close_calls == 1 for gw in built)
+    assert not built
+    assert [(call["host"], call["port"]) for call in fetch_calls] == [
+        ("127.0.0.1", 11111),
+        ("127.0.0.1", 22222),
+        ("127.0.0.1", 11111),
+    ]
+    assert all(call["gateway"] is None for call in fetch_calls)
 
 
 def test_ensure_required_data_coverage_uses_external_gateway_without_closing(tmp_path: Path, monkeypatch) -> None:

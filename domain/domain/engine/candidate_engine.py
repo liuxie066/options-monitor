@@ -667,7 +667,6 @@ def evaluate_candidate_hard_constraints(
     max_dte: int | float | None = None,
     min_strike: int | float | None = None,
     max_strike: int | float | None = None,
-    min_otm_pct: int | float | None = None,
     put_cash_required: int | float | None = None,
     put_cash_free: int | float | None = None,
     call_covered_contracts_available: int | float | None = None,
@@ -723,58 +722,50 @@ def evaluate_candidate_hard_constraints(
             threshold=max_dte_v,
         )
 
-    min_strike_v = _coerce_float(min_strike)
-    if min_strike_v is not None and strike is not None and strike < min_strike_v:
+    configured_min_strike = _coerce_float(min_strike)
+    configured_max_strike = _coerce_float(max_strike)
+    effective_min_strike = configured_min_strike
+    effective_max_strike = configured_max_strike
+    if mode_norm == "put" and spot is not None:
+        effective_max_strike = min(value for value in (configured_max_strike, spot) if value is not None)
+    if mode_norm == "call" and spot is not None:
+        effective_min_strike = max(value for value in (configured_min_strike, spot) if value is not None)
+
+    if effective_min_strike is not None and strike is not None and strike < effective_min_strike:
         _reject(
             rejects,
             stage=STAGE_HARD_CONSTRAINTS,
             reason=REJECT_HARD_STRIKE,
             message="strike below minimum",
             metric_value=strike,
-            threshold=min_strike_v,
+            threshold=(
+                {
+                    "min_strike": configured_min_strike,
+                    "spot": spot,
+                    "effective_min_strike": effective_min_strike,
+                }
+                if mode_norm == "call"
+                else effective_min_strike
+            ),
         )
 
-    max_strike_v = _coerce_float(max_strike)
-    if max_strike_v is not None and strike is not None and strike > max_strike_v:
+    if effective_max_strike is not None and strike is not None and strike > effective_max_strike:
         _reject(
             rejects,
             stage=STAGE_HARD_CONSTRAINTS,
             reason=REJECT_HARD_STRIKE,
             message="strike above maximum",
             metric_value=strike,
-            threshold=max_strike_v,
+            threshold=(
+                {
+                    "max_strike": configured_max_strike,
+                    "spot": spot,
+                    "effective_max_strike": effective_max_strike,
+                }
+                if mode_norm == "put"
+                else effective_max_strike
+            ),
         )
-
-    if mode_norm == "put" and strike is not None and spot is not None and strike >= spot:
-        _reject(
-            rejects,
-            stage=STAGE_HARD_CONSTRAINTS,
-            reason=REJECT_HARD_STRIKE,
-            message="put strike must be below spot",
-            metric_value=strike,
-            threshold={"spot": spot},
-        )
-
-    min_otm_pct_v = _coerce_float(min_otm_pct)
-    if (
-        mode_norm == "put"
-        and min_otm_pct_v is not None
-        and min_otm_pct_v > 0
-        and strike is not None
-        and spot is not None
-        and spot > 0
-        and strike < spot
-    ):
-        otm_pct = (spot - strike) / spot
-        if otm_pct < min_otm_pct_v:
-            _reject(
-                rejects,
-                stage=STAGE_HARD_CONSTRAINTS,
-                reason=REJECT_HARD_STRIKE,
-                message="put otm_pct below minimum",
-                metric_value=round(otm_pct, 6),
-                threshold=min_otm_pct_v,
-            )
 
     put_required_v = _coerce_float(put_cash_required)
     put_free_v = _coerce_float(put_cash_free)

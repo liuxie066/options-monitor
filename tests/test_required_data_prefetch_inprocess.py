@@ -207,7 +207,13 @@ def test_strategy_prefetch_kwargs_uses_strategy_dte_and_strike_bounds() -> None:
     out = mod._strategy_prefetch_kwargs(
         {
             "symbol": "0700.HK",
-            "sell_put": {"enabled": True, "strategy": "short_vol", "min_dte": 20, "max_dte": 60, "max_strike": 450},
+            "sell_put": {
+                "enabled": True,
+                "strategy": "insurance_underwriting",
+                "min_dte": 20,
+                "max_dte": 60,
+                "max_strike": 450,
+            },
             "sell_call": {"enabled": True, "min_dte": 30, "max_dte": 90, "min_strike": 550},
             "yield_enhancement": {"enabled": True, "max_dte": 120},
         },
@@ -230,7 +236,7 @@ def test_strategy_prefetch_kwargs_fetches_yield_enhancement_call_without_rv_for_
             "symbol": "NVDA",
             "sell_put": {"enabled": True, "strategy": "return_first", "min_dte": 20, "max_dte": 60, "max_strike": 95},
             "sell_call": {"enabled": False},
-            "yield_enhancement": {"enabled": True, "call": {"min_otm_pct": 0.08, "max_otm_pct": 0.20}},
+            "yield_enhancement": {"enabled": True, "call": {"min_delta": 0.08, "max_delta": 0.20}},
         },
         enabled=True,
     )
@@ -259,11 +265,11 @@ def test_strategy_prefetch_kwargs_rejects_unexpanded_template_strategy_config() 
         assert "apply templates/profiles" in str(exc)
 
 
-def test_strategy_prefetch_kwargs_requires_rv_for_sell_put_short_vol() -> None:
+def test_strategy_prefetch_kwargs_requires_rv_for_sell_put_underwriting() -> None:
     out = mod._strategy_prefetch_kwargs(
         {
             "symbol": "NVDA",
-            "sell_put": {"enabled": True, "strategy": "short_vol"},
+            "sell_put": {"enabled": True, "strategy": "insurance_underwriting"},
             "sell_call": {"enabled": False},
         },
         enabled=True,
@@ -273,12 +279,12 @@ def test_strategy_prefetch_kwargs_requires_rv_for_sell_put_short_vol() -> None:
     assert out["include_realized_volatility"] is True
 
 
-def test_strategy_prefetch_kwargs_requires_rv_for_covered_call_short_vol() -> None:
+def test_strategy_prefetch_kwargs_requires_rv_for_covered_call_underwriting() -> None:
     out = mod._strategy_prefetch_kwargs(
         {
             "symbol": "NVDA",
             "sell_put": {"enabled": False},
-            "sell_call": {"enabled": True, "strategy": "short_vol"},
+            "sell_call": {"enabled": True, "strategy": "insurance_underwriting"},
         },
         enabled=True,
     )

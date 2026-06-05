@@ -330,7 +330,7 @@ def test_notify_symbols_markdown_put_chain_shows_linked_call_hint() -> None:
         }
     )
 
-    assert "收益增强: 推荐Call=2026-06-19 110C" in out
+    assert "组合收益: 推荐Call=2026-06-19 110C" in out
     assert "候选Call=2个" in out
     assert "参考买价=1.500" in out
     assert "净权利金=145.33" in out
@@ -367,8 +367,8 @@ def test_notify_symbols_markdown_yield_enhancement_layout() -> None:
         }
     )
 
-    assert "Enhancement" in out
-    assert "### [sy] NVDA · 收益增强" in out
+    assert "Combo Yield" in out
+    assert "### [sy] NVDA · 组合收益" in out
     assert "组合净权利金=145.33" in out
     assert "场景评分=4.58%" in out
     assert "Put=95" in out

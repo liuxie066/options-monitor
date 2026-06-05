@@ -77,6 +77,11 @@ def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
     archive_pull.add_argument("--remote-runtime-root", default="/var/lib/options-monitor")
     archive_pull.add_argument("--since-days", type=int, default=None)
     archive_pull.add_argument("--run-id", dest="run_ids", action="append", default=None)
+    archive_pull.add_argument(
+        "--require-replay-evidence",
+        action="store_true",
+        help="auto-select only source runs with candidate, trace, or reject-log evidence",
+    )
     archive_pull.add_argument("--no-logs", action="store_true")
     archive_pull.add_argument("--rsync-path", default="rsync")
     archive_pull.add_argument("--write", action="store_true", help="execute rsync and write local sync/verify manifests")
@@ -95,6 +100,11 @@ def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
     archive_build.add_argument("--market", choices=("us", "hk"), default=None)
     archive_build.add_argument("--run-id", dest="run_ids", action="append", default=None)
     archive_build.add_argument("--latest-scanned", action="store_true")
+    archive_build.add_argument(
+        "--no-mark-from-run-required-data",
+        action="store_true",
+        help="do not generate initial mark_path_snapshots from archived run required_data/parsed",
+    )
     archive_build.add_argument("--write", action="store_true")
 
     archive_prune = research_archive_sub.add_parser(
@@ -623,6 +633,7 @@ def handle_research_command(
                 remote_runtime_root=args.remote_runtime_root,
                 since_days=args.since_days,
                 run_ids=args.run_ids,
+                require_replay_evidence=bool(args.require_replay_evidence),
                 include_logs=not bool(args.no_logs),
                 write=bool(args.write),
                 rsync_path=args.rsync_path,
@@ -640,6 +651,7 @@ def handle_research_command(
                 market=args.market,
                 run_ids=args.run_ids,
                 latest_scanned=bool(args.latest_scanned),
+                mark_from_run_required_data=not bool(args.no_mark_from_run_required_data),
                 write=bool(args.write),
             )
             return build_response(tool_name="research.archive.build-datasets", ok=bool(data.get("ok")), data=data)

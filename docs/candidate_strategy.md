@@ -19,8 +19,8 @@
 
 两类候选共享大体流程，但关注点不同：
 
-- **Sell Put**：IV/RV 波动率边际、Delta 暴露、现金担保能力、组合集中度、年化净收益率、单笔净收益、流动性
-- **Covered Call**：可覆盖股数、IV/RV 波动率边际、Delta 暴露、gap-up 右尾机会成本、年化权利金收益、单笔净收益、流动性
+- **Sell Put**：IV/RV 波动率边际、现金担保能力、年化净收益率、单笔净收益、strike 安全距离、流动性
+- **Covered Call**：可覆盖股数、IV/RV 波动率边际、strike 上行距离、年化权利金收益、单笔净收益、流动性
 
 ---
 
@@ -101,7 +101,7 @@
 - `min_dte <= dte <= max_dte`
 - `min_strike <= strike <= max_strike`
 - put 必须满足基本 moneyness 约束
-- 当 `sell_put.strategy=short_vol` 时，必须有可评估的 IV、RV、Delta、事件风险、现金需求、压力测试和组合风险输入
+- 当 `sell_put.strategy=insurance_underwriting` 时，必须有可评估的收益、IV/RV、事件风险、现金需求和流动性输入
 
 ### Covered Call
 主要硬约束包括：
@@ -128,7 +128,7 @@
 
 ## 3.3 收益门槛
 
-收益门槛只属于 `return_first` profile 的硬过滤。`short_vol` profile 不在扫描入口先用收益率或净收入踢掉合约；它先保留满足 DTE、strike、流动性和覆盖能力的可交易候选，再用 IV/RV、Delta、事件风险、路径压力、组合集中度和收益一起评估。
+收益门槛对 `return_first` 和 `insurance_underwriting` 都是开仓过滤条件，但语义不同：`return_first` 用它确认收益条件合格；`insurance_underwriting` 用它确认这张保险的最低保费足够，再继续评估 IV/RV、事件风险、流动性和 strike 安全距离。
 
 `return_first` 可使用的收益门槛包括：
 
@@ -144,7 +144,7 @@
 3. 代码默认值
 
 ### 当前默认值注意
-默认 profile 是 `short_vol`。收益门槛不是核心准入参数；收益率和单笔净收入参与排序。
+默认 Sell Put / Covered Call 开仓 profile 是 `insurance_underwriting`。开仓配置不再接受 `strategy=short_vol`。
 如果你要看当前默认值，请直接看：
 
 - `domain/domain/sell_put_config.py`
@@ -170,7 +170,7 @@
 
 ## 3.5 事件风险
 
-事件风险已经成为 `short_vol` profile 的正式风险输入。
+事件风险已经成为 `insurance_underwriting` profile 的正式风险输入。
 
 更准确地说：
 
@@ -178,17 +178,17 @@
 - 多数据源选择、primary/fallback、市场规则和 resolved snapshot 由 `src/application/events/orchestrator.py` 管理
 - 单个 provider 的成功、失败、限流冷却和 stale fallback 由 `src/application/events/store.py` 管理
 - candidate scan 只读本轮 `event_snapshot.json`，再由 `src/application/events/annotator.py` 做标注
-- 最后由 `domain/domain/short_vol_assessment.py` 按 `reject_event_risk` 和 `event_source_fail_closed` 决定是否通过
+- 最后由 `domain/domain/insurance_underwriting.py` 按 `reject_event_risk` 和 `event_source_fail_closed` 决定是否通过
 
 也就是说：
 
-> 事件数据的获取是 run 级 source-data 准备，不是 candidate scan 的副作用；事件风险是否允许进入推荐结果，则由 short-vol 评估契约统一判断。
+> 事件数据的获取是 run 级 source-data 准备，不是 candidate scan 的副作用；事件风险是否允许进入推荐结果，则由承保评估契约统一判断。
 
 验收边界：
 - 同一 tick 内同一 symbol 跨账户、Sell Put、Covered Call、Yield Enhancement 只能走同一份 resolved 事件快照；每个 provider 是否发起获取由 provider chain 和缓存状态决定
 - `ok + events=[]` 表示可信无事件；`error` / `stale` 不能伪装成无事件
 - `ok_with_fallback` 表示主源失败但备源成功，必须在 snapshot 中保留各 provider 的 `source_results`
-- `event_source_fail_closed=true` 时，`error` / `stale` 默认不能进入 short-vol 推荐
+- `event_source_fail_closed=true` 时，`error` / `stale` 默认不能进入承保推荐
 - `runtime_status` 暴露最近一轮 `event_prefetch` 摘要，包括 fetch、cache、stale、rate limit 和 error 计数
 
 ---
@@ -219,21 +219,18 @@
 
 ---
 
-## 5. Short-vol 风险规则
+## 5. 承保风险规则
 
-默认 Sell Put 与 Covered Call profile 都是 `short_vol`。这意味着系统会把二者视为同一类 short vol + short gamma 风险家族，而不是“折价买股”或“持股收租”。
+默认 Sell Put 与 Covered Call 开仓 profile 都是 `insurance_underwriting`。这意味着系统把二者视为承保候选：先确认这张保险的收益、波动率边际、事件风险、流动性和覆盖能力是否合格，再做推荐排序。
 
-当前共享评估由 `domain/domain/short_vol_assessment.py` 负责，规则分五组：
+当前共享评估由 `domain/domain/insurance_underwriting.py` 负责，规则分四组：
 
 - 波动率边际：`IV/RV >= min_iv_rv_ratio` 且 `IV - RV >= min_iv_minus_rv`
-- Delta 区间：`min_abs_delta <= abs(delta) <= max_abs_delta`，排序上更偏好接近 `target_abs_delta`
 - 事件风险：默认拒绝 expiry 前有财报等事件的候选；事件源不可用时 fail closed
-- 路径压力：Sell Put 默认检查 2σ 下跌和 10% gap-down 情景下的压力亏损占 NAV 比例；Covered Call 默认检查 gap-up 右尾机会成本占 NAV 和相对 premium 的比例
-- 集中度：Sell Put 按 assignment notional 计算；Covered Call 按 covered underlying notional 和现有正股集中度计算
+- 收益底线：年化收益率和单笔净收入必须达到最低承保价格
+- 边界距离：Sell Put 越低于 `max_strike` 越好；Covered Call 越高于有效 `min_strike` 越好
 
-组合集中度使用全局 holdings 作为 NAV 和正股暴露来源，不使用单一 Futu 账户总资产作为全局 NAV。已有 short put 占用来自 option-position projection。只要 Sell Put 或 Covered Call 任一侧启用 `short_vol`，pipeline 都会加载这份全局风险上下文。
-
-Sell Put 和 Covered Call 都会对 IV/RV、Delta、事件源、组合集中度和路径压力 fail closed。`max_total_short_put_nav_pct` 只适用于 Sell Put；Covered Call 使用 `max_single_trade_nav_pct` 和 `max_symbol_nav_pct` 控制单张 covered notional 与标的现有正股集中度。Sell Put 额外使用 `max_put_sigma_stress_loss_nav_pct` 和 `max_put_gap_down_loss_nav_pct` 控制下跌路径风险。Covered Call 使用 `max_call_gap_up_opportunity_cost_nav_pct` 和 `max_call_gap_up_opportunity_cost_to_premium` 控制 gap-up 右尾机会成本；通过硬预算的候选仍会把该字段交给 `path_risk` 参与排序。缺少 RV、IV、Delta、事件源或必要组合风险输入时，short-vol 后过滤会写入 candidate filter trace。
+Sell Put 和 Covered Call 都会对 IV/RV、事件源和必要价格输入 fail closed。开仓侧不再把 stress、gap-down、path pressure 或单标的集中度作为硬风险阈值；旧配置里的这些字段暂时兼容读取，但新默认模板不再输出它们。
 
 ---
 
@@ -254,33 +251,27 @@ Covered Call 会先结合持仓 context 计算覆盖能力：
 排序与过滤分离。
 
 ### Sell Put
-`return_first` profile 仍可用于收益优先排序。默认 `short_vol` profile 会综合：
+`return_first` profile 仍可用于收益优先排序。默认 `insurance_underwriting` profile 会综合：
 
-1. IV/RV 波动率边际
-2. Delta 是否接近目标区间
-3. 事件风险与路径压力是否可承受
-4. 组合集中度占用
-5. 年化净收益率
-6. 单笔净收益
-7. 流动性与风险距离
+1. 保费边际：收益率、单笔净收入、IV/RV、IV-RV 相对阈值的综合得分
+2. strike 安全距离：离 `max_strike` 越远越好
+3. 单笔净收入
+4. 价差
 
 ### Covered Call
-默认 `short_vol` profile 会综合：
+默认 `insurance_underwriting` profile 会综合：
 
-1. IV/RV 波动率边际
-2. Delta 是否接近目标区间
-3. 事件风险与 gap-up 右尾机会成本
-4. Covered underlying notional / 组合集中度字段
-5. 年化净权利金收益率
-6. 单笔净收益
-7. 流动性与风险距离
+1. 保费边际：收益率、单笔净收入、IV/RV、IV-RV 相对阈值的综合得分
+2. strike 上行距离：高于有效 `min_strike` 越多越好
+3. 单笔净收入
+4. 价差
 
-最终 CSV、summary 和 alerts 使用统一排序核心。
+最终 CSV、summary 和 alerts 使用与当前 opening profile 对应的排序核心。
 
 需要解释“为什么这个候选排在前面”时，用同一套排序核心：
 
-- `build_candidate_rank_key(...)` 生成排序分数和排序 tuple
-- `explain_candidate_rank(...)` 返回分数组件、输入指标、风险提示和中文排序原因
+- `return_first` 使用 `build_candidate_rank_key(...)` / `explain_candidate_rank(...)` 解释收益优先排序
+- `insurance_underwriting` 使用 `domain/domain/insurance_underwriting.py::rank_underwriting_candidates(...)` 对齐承保排序
 - Agent 可通过 `candidate_rank_explain` 读取已有候选 CSV 做只读诊断
 
 `candidate_rank_explain` 不重新扫描、不发通知、不写报告，只解释已有候选。

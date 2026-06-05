@@ -4,25 +4,27 @@
 
 主要服务四个用户功能：
 
-- `Sell Put`：卖 Put 机会扫描。收益优先模式下是收益筛选；波动率溢价模式下是卖下跌保险的承保评估，默认接货是可接受结果。
-- `Covered Call`：已有正股上的卖 Call 机会扫描。收益优先模式下是收益筛选；波动率溢价模式下是卖上涨保险的承保评估，默认被行权卖出正股是可接受结果。
-- `yield_enhancement`：Sell Put 的收益增强 overlay，用 short put 保费资助同到期 long call，换取上行 convexity。
+- `Sell Put`：卖 Put 机会扫描。收益优先模式下是收益筛选；承保模式下是卖下跌保险的评估，默认接货是可接受结果。
+- `Covered Call`：已有正股上的卖 Call 机会扫描。收益优先模式下是收益筛选；承保模式下是卖上涨保险的评估，默认被行权卖出正股是可接受结果。
+- `yield_enhancement`：当前 runtime legacy key；产品语义是 Combo Yield，作为平行开仓策略配对 short put + long call，用可接受的接货义务融资上行参与。
 - `close_advice`：已有期权 lot 的生命周期管理，按开仓时记录的策略语义给出止盈、风险退出、继续持有或无法评估的平仓参考。
 
 它不是自动交易系统，也不会替你下单。它的输出是 advisory-only，给出便于人工复核的候选、拒绝原因、平仓建议和复盘证据。
 
 ## 产品框架
 
+完整产品域、模块定义和模块依赖见 [docs/PRODUCT_ARCHITECTURE.md](docs/PRODUCT_ARCHITECTURE.md)。
+
 系统支持两种策略口径。它们不是同一种风控深度：
 
 | 策略口径 | 本质 | 推荐含义 |
 |---|---|---|
 | `return_first` 收益优先 | 收益筛选器 | 收益条件合格，基础交易约束合格 |
-| `short_vol` 波动率溢价 | 承保评估器 | 这张保单的风险/赔率相对合理 |
+| `insurance_underwriting` 承保 | 承保评估器 | 这张保单的保费、边界和基础风险相对合理 |
 
-收益优先模式主要看 DTE、strike 范围、年化收益、单笔净收入、流动性、价差、Sell Put 现金是否够、Covered Call 股票是否够覆盖。它不系统性判断保费是否足够补偿 IV/RV、Delta、事件、跳空、路径压力和组合集中度风险。
+收益优先模式主要看 DTE、strike 范围、年化收益、单笔净收入、流动性、价差、Sell Put 现金是否够、Covered Call 股票是否够覆盖。它不系统性判断保费是否足够补偿 IV/RV 和事件风险。
 
-波动率溢价模式才是“开保险公司”的主逻辑。它系统性看 IV/RV、IV-RV、Delta、事件风险、跳空压力、NAV 占用、集中度、Covered Call 右尾机会成本等，用来判断当前保费是否足够补偿波动率、事件、路径、流动性和组合风险。
+承保模式才是“开保险公司”的主逻辑。它系统性看收益率、单笔净收入、IV/RV、IV-RV、事件风险、流动性、Sell Put 现金覆盖和 Covered Call 股票覆盖，用来判断当前保费是否足够，再按 strike 安全距离和保费边际推荐候选。
 
 完整产品闭环：
 
@@ -31,7 +33,7 @@
 -> 平仓建议 -> 记录结果 -> 收益统计 -> 扫描质量复盘 -> 参数优化建议
 ```
 
-`Sell Put` / `Covered Call` 看当前配置里的策略意图生成开仓候选。`yield_enhancement` 跟随当次 Sell Put 策略语义。`close_advice` 比较特殊：它优先读取 lot 上的开仓策略快照；只有旧仓位没有策略快照时，才 fallback 到当前 symbol 配置或默认策略，并在输出中保留 `strategy_source`。
+`Sell Put` / `Covered Call` 看当前配置里的策略意图生成开仓候选。`yield_enhancement` 当前仍是 legacy runtime key，但开仓语义已经按 Combo Yield 独立策略处理，不继承 Sell Put / Covered Call 的 underwriting gate。`close_advice` 比较特殊：它优先读取 lot 上的开仓策略快照；只有旧仓位没有策略快照时，才 fallback 到当前 symbol 配置或默认策略，并在输出中保留 `strategy_source`。
 
 ## 入口
 
@@ -54,7 +56,7 @@
 
 - 为 `Sell Put` 扫描和筛选候选。
 - 为 `Covered Call` 生成已有持仓的 covered call 候选。
-- 为 `yield_enhancement` 评估 Sell Put 收益增强组合。
+- 为 `yield_enhancement` 评估 Combo Yield 组合。
 - 为 `close_advice` 生成已有仓位的平仓参考。
 
 不做什么：
@@ -317,12 +319,13 @@ om run tick --config config.us.json --accounts lx sy
 ```bash
 ./om research archive pull --remote prod --ssh-target deploy@example --since-days 7
 ./om research archive pull --remote prod --ssh-target deploy@example --since-days 7 --write
+./om research archive pull --remote prod --ssh-target deploy@example --require-replay-evidence --write
 ./om research archive verify --remote prod
 ./om research archive build-datasets --remote prod --market us --write
 ./om research archive prune-remote --remote prod --ssh-target deploy@example --keep-days 3 --keep-count 30
 ```
 
-`archive pull` 默认 dry-run；显式 `--write` 才用 `rsync` 写入本地 `output_shared/research/remote_archive/prod/` 并生成 sync / verify manifest。归档会镜像 `output_runs`、`output_shared/research`、`output_shared/required_data` 和 runtime logs；它不同步 secrets、runtime config、SQLite、trade events 或 broker-facing state。`archive prune-remote` 默认只预览远端 `service cleanup`，`--confirm` 前会复查本地 `inventory.latest.json`，只有待删 run 已在本地 verified manifest 中才会执行远端清理。
+`archive pull` 默认 dry-run；显式 `--write` 才用 `rsync` 写入本地 `output_shared/research/remote_archive/prod/` 并生成 sync / verify manifest。`--require-replay-evidence` 会只选择含候选 CSV、reject log 或 `candidate_filter_trace.jsonl` 的 run，避免 scheduler skip / tick 心跳进入回测样本。归档会镜像 `output_runs`、`output_shared/research`、`output_shared/required_data` 和 runtime logs；它不同步 secrets、runtime config、SQLite、trade events 或 broker-facing state。`archive build-datasets --market us|hk --write` 会按归档 run 的候选/reject 文件名推断市场并过滤样本；不传 `--market` 才会保留所有市场。dataset build 默认会从归档 run 自带的 `required_data/parsed` 生成第一批 scan-time mark；它不是最终 outcome，后续仍要追加路径/到期 mark 后再 `settle`。`archive prune-remote` 默认只预览远端 `service cleanup`，`--confirm` 前会复查本地 `inventory.latest.json`，只有待删 run 已在本地 verified manifest 中才会执行远端清理。
 
 需要落地本地 replay dataset 时使用：
 
@@ -503,60 +506,59 @@ python3 -m src.application.option_intake --config /var/lib/options-monitor/confi
 `sell_put.strategy` / `sell_call.strategy` 支持两种口径：
 
 - `return_first`：收益优先。它是收益筛选器，主要用年化收益、单笔净收入、基础 DTE/strike、流动性、现金或股票覆盖能力筛出“收益条件合格”的候选；它不系统性判断保费是否足够补偿 IV/RV、Delta、事件、跳空、路径压力和组合集中度风险。
-- `short_vol`：波动率溢价。它是承保评估器，先看波动率边际、Delta、事件风险、路径压力、组合集中度和流动性，再把收益率和单笔净收入纳入排序。默认 profile 是 `short_vol`。
+- `insurance_underwriting`：承保评估器。它先过滤收益率、单笔净收入、IV/RV、事件风险、流动性和覆盖能力，再按保费边际、strike 安全距离、净收入和价差排序。默认 profile 是 `insurance_underwriting`。
+
+开仓配置不再接受 `strategy: short_vol`。`short_vol` 仍是 Close Advice、历史仓位和部分 replay 里的持仓 thesis 名称，不作为 Sell Put / Covered Call 的开仓配置值。
 
 `close_advice` 不使用“当前默认策略”直接重判所有历史仓位。它优先使用 lot 上的 `strategy_snapshot`、`yield_enhancement_mode` 或其他开仓策略元数据；只有缺少开仓策略信息时，才 fallback 到当前 symbol 配置或模板默认值。
 
 ### Sell Put
 
-Sell Put 在 `return_first` 下是卖 Put 收益筛选；在 `short_vol` 下是卖下跌保险的承保评估。
+Sell Put 在 `return_first` 下是卖 Put 收益筛选；在 `insurance_underwriting` 下是卖下跌保险的承保评估。
 
-`short_vol` profile 会把 short put 视为 long equity delta + short gamma + short vega 的组合，先确认波动率边际、路径风险和组合容量，再把收益指标纳入排序：
+`insurance_underwriting` profile 会把 short put 视为愿意接货前提下的保险承保，先确认收益、波动率边际、事件风险、流动性和现金覆盖，再把收益指标与 strike 安全距离纳入排序：
 
 - `min_dte` / `max_dte`
 - `min_strike` / `max_strike`
 - `short_vol.min_iv_rv_ratio`
 - `short_vol.min_iv_minus_rv`
-- `short_vol.min_abs_delta` / `short_vol.max_abs_delta`
 - `short_vol.reject_event_risk` / `short_vol.event_source_fail_closed`
-- `short_vol.max_put_sigma_stress_loss_nav_pct`
-- `short_vol.max_put_gap_down_loss_nav_pct`
-- `concentration.max_single_trade_nav_pct`
-- `concentration.max_symbol_nav_pct`
-- `concentration.max_total_short_put_nav_pct`
 - `min_open_interest`
 - `min_volume`
 - `max_spread_ratio`
+- `min_annualized_net_return`
+- `min_net_income`
 
-在 `short_vol` profile 下，收益率和单笔净收入参与排序；风险输入缺失或不可评估时 fail closed。
+在 `insurance_underwriting` profile 下，收益率和单笔净收入是准入条件；通过过滤后的候选会按保费边际、距离 `max_strike` 的安全空间、净收入和价差排序。
 
-候选过滤之后会叠加账户现金维度的 `cash_reserve` 后过滤，以及基于全局 holdings / option positions 的组合集中度后过滤。事件源不可用、expiry 前存在财报等事件、缺少 IV、RV、Delta、NAV、FX、strike、spot 或 multiplier 等关键风险输入时，short-vol 策略会 fail closed。Sell Put 会检查 2σ 下跌和默认 10% gap-down 压力亏损占 NAV 的比例。
+候选过滤之后会叠加账户现金维度的 `cash_reserve` 后过滤。事件源不可用、expiry 前存在财报等事件、缺少 IV/RV、strike、spot 或 multiplier 等关键输入时，承保策略会 fail closed。
 
 ### Covered Call
 
-Covered Call 在 `return_first` 下是已有正股上的卖 Call 收益筛选；在 `short_vol` 下是卖上涨保险的承保评估。
+Covered Call 在 `return_first` 下是已有正股上的卖 Call 收益筛选；在 `insurance_underwriting` 下是卖上涨保险的承保评估。
 
 Covered Call 依赖真实持仓上下文。它在风险结构上和 Sell Put 同属 short vol / short gamma，只是现金、持仓和行权方向不同：
 
 - `shares` / `avg_cost` 来自 holdings
 - 已被 short call 锁定的股票会从可卖数量里扣掉
 - `min_strike_cost_multiplier` 会抬高有效 strike 下限，避免推荐明显低于成本底线的 call
-- 默认同样走 `short_vol` profile，会检查 IV/RV、IV-RV、delta band、事件风险和组合集中度，并输出短 gamma/vega、covered notional 与 gap-up 右尾机会成本字段；右尾机会成本会通过 `path_risk` 进入排序
-- gap-up 右尾机会成本同时是硬预算：默认要求机会成本不超过 NAV 的 2%，且不超过本次 premium 的 3 倍
+- 默认同样走 `insurance_underwriting` profile，会检查收益、IV/RV、IV-RV、事件风险、流动性和持仓覆盖，并输出短 gamma/vega 与 covered notional 等解释字段
 
 `config.yaml` 里使用 `covered_call`；runtime JSON、CSV 和 trace 的内部策略 key 是 `sell_call`。用户可见名称统一为 `Covered Call`。
 
-### Yield Enhancement
+### Combo Yield
 
-`yield_enhancement` 是 Sell Put 上的收益增强 overlay，不是独立主策略。它基于 Sell Put put-universe，配对同 symbol、同到期、同乘数、put strike < call strike 的 long call，寻找“short put 权利金足够支持 long call 成本”的组合。
+`yield_enhancement` 是当前 runtime 里的 legacy key；产品语义是 Combo Yield，和 Sell Put / Covered Call 平行。它配对同 symbol、同到期、同乘数、put strike < call strike 的 short put + long call，寻找“可接受接货义务能够合理融资上行参与”的组合。
 
 要点：
 
 - 依赖 `sell_put.enabled=true`
-- 策略语义跟随 `sell_put.strategy`：`return_first` 走 `income_upside_enhancement`，`short_vol` 走 `vol_convexity_enhancement`
+- put 腿使用 Sell Put 的接货价格边界：`min_strike` 可空，`max_strike` 与 spot 共同形成上界
+- call 腿使用结构价格边界：`call.strike >= max(spot, call.min_strike)`，`call.max_strike` 可选
+- 不继承 Sell Put 的 `insurance_underwriting` RV、event 或 underwriting gate
 - 启用收益增强后会为 long call 侧规划 required data，即使没有启用 Covered Call 扫描
-- 核心约束包括 `funding_mode`、`min_combo_net_credit`、`min_net_credit_annualized`、`max_call_cost_to_put_credit`、`max_combo_spread_ratio`、`scenario_weights` 和 `min_scenario_score`
-- 默认要求扣除 long call 成本和手续费后的净权利金年化不低于 8%；`return_first` 更强调 premium funding、权利金留存和上行弹性，`short_vol` 额外要求 short-vol put universe 通过 IV/RV、delta、事件和路径风险评估
+- 核心约束包括 `funding_mode`、`min_combo_net_credit`、`min_net_credit_annualized`、`max_call_cost_to_put_credit`、`min_net_credit_retention`、`max_combo_spread_ratio` 和 call delta 区间
+- 默认要求扣除 long call 成本和手续费后的净权利金年化不低于 8%
 
 ### Close Advice
 

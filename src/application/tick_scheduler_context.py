@@ -205,9 +205,23 @@ def _write_scheduler_snapshot(request: TickSchedulerRequest, context: TickSchedu
                 },
             }
         )
-        state_repo.write_scheduler_decision(request.base, request.run_id, scheduler_snapshot.to_payload())
-        request.audit_helper.audit("write", "write_scheduler_decision", run_id=request.run_id)
+        payload = scheduler_snapshot.to_payload()
+        if _context_has_scan_to_run(context):
+            state_repo.write_scheduler_decision(request.base, request.run_id, payload)
+            request.audit_helper.audit("write", "write_scheduler_decision", run_id=request.run_id)
+        else:
+            state_repo.write_shared_current_read_model(request.base, "scheduler_decision.current.json", payload)
+            request.audit_helper.audit("write", "write_scheduler_decision_current", run_id=request.run_id)
     except SchemaValidationError as exc:
         request.audit_helper.fail_schema_validation(stage="snapshot_dto", exc=exc, run_id=request.run_id)
     except Exception:
         pass
+
+
+def _context_has_scan_to_run(context: TickSchedulerContext) -> bool:
+    if bool(context.should_run_global):
+        return True
+    for item in context.scan_decision_by_account.values():
+        if isinstance(item, dict) and item.get("should_run") is True:
+            return True
+    return False

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.shadow_replay import build_shadow_replay_dataset
+from src.application.shadow_replay import build_shadow_replay_dataset, mark_shadow_replay_dataset
 
 
 SCHEMA_VERSION = "research_archive.v1"
@@ -28,10 +28,66 @@ from pathlib import Path
 
 runtime = Path(sys.argv[1])
 since_raw = sys.argv[2] if len(sys.argv) > 2 else ""
+require_replay = (sys.argv[3].strip().lower() in {"1", "true", "yes"}) if len(sys.argv) > 3 else False
 since_days = int(since_raw) if since_raw else None
 cutoff = None if since_days is None else time.time() - max(since_days, 0) * 86400
 runs_root = runtime / "output_runs"
 runs = []
+
+def relative_matches(root, patterns):
+    out = []
+    for pattern in patterns:
+        out.extend(str(path.relative_to(root)) for path in root.rglob(pattern) if path.is_file())
+    return sorted(set(out))
+
+def read_json(path):
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+def critical_files(run_dir):
+    candidate_files = relative_matches(run_dir, ("*_candidates.csv", "*_candidates_labeled.csv"))
+    trace_files = relative_matches(run_dir, ("candidate_filter_trace.jsonl",))
+    reject_logs = relative_matches(run_dir, ("*_reject_log.csv", "*_candidates_reject_log.csv"))
+    state_files = relative_matches(run_dir, ("last_run.json", "tick_metrics.json", "scheduler_decision.json"))
+    return {
+        "candidate_files": candidate_files,
+        "trace_files": trace_files,
+        "reject_log_files": reject_logs,
+        "state_files": state_files,
+    }
+
+def ran_scan(run_dir):
+    state = run_dir / "state"
+    tick_metrics = read_json(state / "tick_metrics.json")
+    last_run = read_json(state / "last_run.json")
+    if tick_metrics.get("ran_scan") is True or last_run.get("ran_scan") is True:
+        return True
+    raw_accounts = tick_metrics.get("accounts")
+    if isinstance(raw_accounts, list):
+        return any(isinstance(item, dict) and item.get("ran_scan") is True for item in raw_accounts)
+    if isinstance(raw_accounts, dict):
+        return any(isinstance(item, dict) and item.get("ran_scan") is True for item in raw_accounts.values())
+    return False
+
+def scheduler_summary(run_dir):
+    state = run_dir / "state"
+    tick_metrics = read_json(state / "tick_metrics.json")
+    scheduler_file = read_json(state / "scheduler_decision.json")
+    scheduler = tick_metrics.get("scheduler_decision") if isinstance(tick_metrics.get("scheduler_decision"), dict) else {}
+    if not scheduler:
+        payload = scheduler_file.get("payload") if isinstance(scheduler_file.get("payload"), dict) else {}
+        scheduler = payload.get("decision") if isinstance(payload.get("decision"), dict) else {}
+    return {
+        "should_run_scan": scheduler.get("should_run_scan"),
+        "should_notify": scheduler.get("should_notify"),
+        "reason": scheduler.get("reason"),
+        "next_run_utc": scheduler.get("next_run_utc"),
+        "now_utc": scheduler.get("now_utc"),
+    }
+
 if runs_root.exists() and runs_root.is_dir():
     for item in sorted(runs_root.iterdir(), key=lambda p: (p.stat().st_mtime, p.name), reverse=True):
         try:
@@ -42,12 +98,23 @@ if runs_root.exists() and runs_root.is_dir():
             continue
         if cutoff is not None and st.st_mtime < cutoff:
             continue
-        runs.append({"run_id": item.name, "mtime": st.st_mtime})
+        critical = critical_files(item)
+        has_replay = bool(critical["candidate_files"] or critical["trace_files"] or critical["reject_log_files"])
+        if require_replay and not has_replay:
+            continue
+        runs.append({
+            "run_id": item.name,
+            "mtime": st.st_mtime,
+            "has_replay_evidence": has_replay,
+            "ran_scan": ran_scan(item),
+            "scheduler": scheduler_summary(item),
+            "critical_files": critical,
+        })
 paths = {}
 for rel in ("output_shared/research", "output_shared/required_data", "logs"):
     path = runtime / rel
     paths[rel] = {"exists": path.exists(), "is_dir": path.is_dir()}
-print(json.dumps({"runtime_root": str(runtime), "runs_root": str(runs_root), "runs": runs, "paths": paths}))
+print(json.dumps({"runtime_root": str(runtime), "runs_root": str(runs_root), "require_replay_evidence": require_replay, "runs": runs, "paths": paths}))
 """.strip()
 
 
@@ -101,6 +168,7 @@ def archive_pull(
     remote_runtime_root: str | Path = DEFAULT_REMOTE_RUNTIME_ROOT,
     since_days: int | None = None,
     run_ids: list[str] | tuple[str, ...] | None = None,
+    require_replay_evidence: bool = False,
     include_logs: bool = True,
     write: bool = False,
     rsync_path: str = "rsync",
@@ -114,6 +182,7 @@ def archive_pull(
         source=source,
         since_days=since_days,
         run_ids=run_ids,
+        require_replay_evidence=require_replay_evidence,
         run_cmd=run_cmd,
     )
     rel_dirs = [f"output_runs/{run_id}" for run_id in selected_runs]
@@ -150,6 +219,7 @@ def archive_pull(
             source=source,
             since_days=since_days,
             selected_runs=selected_runs,
+            require_replay_evidence=require_replay_evidence,
             include_logs=include_logs,
             operations=operations,
             verify=verify,
@@ -167,6 +237,7 @@ def archive_pull(
         "archive_root": str(root),
         "source": _source_summary(source),
         "since_days": since_days,
+        "require_replay_evidence": bool(require_replay_evidence),
         "selected_run_ids": selected_runs,
         "include_logs": bool(include_logs),
         "operations": operations,
@@ -220,6 +291,7 @@ def archive_build_datasets(
     market: str | None = None,
     run_ids: list[str] | tuple[str, ...] | None = None,
     latest_scanned: bool = False,
+    mark_from_run_required_data: bool = True,
     write: bool = False,
 ) -> dict[str, Any]:
     base = Path(repo_root).expanduser().resolve()
@@ -227,6 +299,8 @@ def archive_build_datasets(
     inventory = _load_latest_inventory(root) or archive_verify(repo_root=base, remote=remote, archive_root=root)
     runs = [item for item in inventory.get("runs", []) if isinstance(item, dict)]
     selected = _select_verified_runs(runs, run_ids=run_ids, require_replay=True)
+    market_filter = _filter_runs_by_market(selected, archive_root=root, market=market)
+    selected = market_filter["selected"]
     if latest_scanned and selected:
         selected = sorted(selected, key=lambda item: str(item.get("mtime_utc") or ""), reverse=True)[:1]
     ds_root = _resolve_path(dataset_root, base=base) if dataset_root else (
@@ -243,23 +317,39 @@ def archive_build_datasets(
             "dataset_id": dataset_id,
             "dataset_dir": str((ds_root / dataset_id).resolve()),
             "source_run_dir": str((root / "output_runs" / run_id).resolve()),
+            "source_run_required_data_dir": str((root / "output_runs" / run_id / "required_data").resolve()),
+            "mark_from_run_required_data": bool(mark_from_run_required_data),
+            "inferred_market": item.get("inferred_market"),
         }
         plans.append(plan)
         if not write:
             continue
         try:
-            built.append(
-                build_shadow_replay_dataset(
-                    repo_root=base,
-                    runs_root=root / "output_runs",
-                    run_id=run_id,
-                    dataset_root=ds_root,
-                    dataset_id=dataset_id,
-                )
+            manifest = build_shadow_replay_dataset(
+                repo_root=base,
+                runs_root=root / "output_runs",
+                run_id=run_id,
+                dataset_root=ds_root,
+                dataset_id=dataset_id,
             )
+            if mark_from_run_required_data:
+                manifest = {
+                    **manifest,
+                    "post_build_marking": _mark_dataset_from_run_required_data(
+                        repo_root=base,
+                        dataset_dir=Path(str(manifest.get("dataset_dir") or plan["dataset_dir"])),
+                        required_data_dir=root / "output_runs" / run_id / "required_data",
+                        as_of=str(item.get("mtime_utc") or ""),
+                    ),
+                }
+            built.append(manifest)
         except ValueError as exc:
             built.append({"run_id": run_id, "dataset_id": dataset_id, "ok": False, "error": str(exc)})
-    ok = all(bool(item.get("schema_version")) for item in built) if write else True
+    ok = (
+        all(bool(item.get("schema_version")) and _post_build_marking_ok(item) for item in built)
+        if write
+        else True
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "action": "build-datasets",
@@ -267,12 +357,92 @@ def archive_build_datasets(
         "changed": bool(write and built),
         "dry_run": not bool(write),
         "remote": _safe_label(remote or DEFAULT_REMOTE),
+        "mark_from_run_required_data": bool(mark_from_run_required_data),
+        "market_filter": {
+            "requested_market": _normalize_market(market),
+            "selected_run_count": len(selected),
+            "skipped_run_count": len(market_filter["skipped"]),
+            "skipped_runs": market_filter["skipped"],
+        },
         "archive_root": str(root),
         "dataset_root": str(ds_root),
         "selected_run_ids": [item["run_id"] for item in plans],
         "plans": plans,
         "built": built,
     }
+
+
+def _mark_dataset_from_run_required_data(
+    *,
+    repo_root: Path,
+    dataset_dir: Path,
+    required_data_dir: Path,
+    as_of: str,
+) -> dict[str, Any]:
+    required_root = required_data_dir.resolve()
+    base_payload = {
+        "required_data_root": str(required_root),
+        "dataset_dir": str(dataset_dir.resolve()),
+    }
+    if not required_root.exists() or not required_root.is_dir():
+        return {**base_payload, "ok": True, "status": "skipped", "reason": "run_required_data_missing"}
+    if not _has_required_data_csv(required_root):
+        return {**base_payload, "ok": True, "status": "skipped", "reason": "run_required_data_csv_missing"}
+    try:
+        marking = mark_shadow_replay_dataset(
+            dataset=dataset_dir,
+            required_data_root=required_root,
+            as_of=as_of or None,
+            repo_root=repo_root,
+            write=True,
+            replace=False,
+        )
+    except Exception as exc:
+        return {
+            **base_payload,
+            "ok": False,
+            "status": "error",
+            "reason": "mark_from_run_required_data_failed",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    payload = {
+        **base_payload,
+        "ok": True,
+        "status": "marked",
+        "reason": "marked_from_run_required_data",
+        "summary": marking.get("summary") if isinstance(marking.get("summary"), dict) else {},
+    }
+    _annotate_dataset_manifest(dataset_dir, "mark_from_run_required_data", payload)
+    return payload
+
+
+def _has_required_data_csv(required_root: Path) -> bool:
+    parsed = required_root / "parsed"
+    source = parsed if parsed.exists() and parsed.is_dir() else required_root
+    return any(path.is_file() for path in source.glob("*_required_data.csv"))
+
+
+def _annotate_dataset_manifest(dataset_dir: Path, key: str, payload: dict[str, Any]) -> None:
+    manifest_path = dataset_dir / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(manifest, dict):
+        return
+    post_build = manifest.get("post_build")
+    if not isinstance(post_build, dict):
+        post_build = {}
+    post_build[str(key)] = payload
+    manifest["post_build"] = post_build
+    _write_json(manifest_path, manifest)
+
+
+def _post_build_marking_ok(item: dict[str, Any]) -> bool:
+    marking = item.get("post_build_marking")
+    if not isinstance(marking, dict):
+        return True
+    return bool(marking.get("ok"))
 
 
 def archive_prune_remote(
@@ -318,7 +488,7 @@ def archive_prune_remote(
         include_logs=include_logs,
         confirm=False,
     )
-    dry_operation = _run_command(dry_command, run_cmd=run_cmd, timeout=600)
+    dry_operation = _run_command(dry_command, run_cmd=run_cmd, timeout=600, stdout_limit=2_000_000)
     dry_payload = _parse_cli_json(dry_operation.get("stdout"))
     planned_delete_runs = _planned_delete_runs(dry_payload)
     unverified = [run_id for run_id in planned_delete_runs if run_id not in verified_run_ids]
@@ -340,7 +510,7 @@ def archive_prune_remote(
             include_logs=include_logs,
             confirm=True,
         )
-        operations.append(_run_command(confirm_command, run_cmd=run_cmd, timeout=900))
+        operations.append(_run_command(confirm_command, run_cmd=run_cmd, timeout=900, stdout_limit=2_000_000))
     elif confirm and not guard["confirmable"]:
         return {
             "schema_version": SCHEMA_VERSION,
@@ -379,15 +549,25 @@ def _select_source_runs(
     source: dict[str, Any],
     since_days: int | None,
     run_ids: list[str] | tuple[str, ...] | None,
+    require_replay_evidence: bool,
     run_cmd: Callable[..., Any],
 ) -> tuple[list[str], dict[str, Any] | None]:
     explicit = [_safe_run_id(value) for value in (run_ids or []) if str(value or "").strip()]
     if explicit:
         return explicit, None
     if source["kind"] == "local":
-        runs = _source_run_dirs(Path(source["runtime_root"]) / "output_runs", since_days=since_days)
+        runs = _source_run_dirs(
+            Path(source["runtime_root"]) / "output_runs",
+            since_days=since_days,
+            require_replay_evidence=require_replay_evidence,
+        )
         return [item["run_id"] for item in runs], None
-    operation, payload = _remote_inventory(source, since_days=since_days, run_cmd=run_cmd)
+    operation, payload = _remote_inventory(
+        source,
+        since_days=since_days,
+        require_replay_evidence=require_replay_evidence,
+        run_cmd=run_cmd,
+    )
     raw_runs = payload.get("runs") if isinstance(payload, dict) else []
     runs = raw_runs if isinstance(raw_runs, list) else []
     return [str(item.get("run_id")) for item in runs if isinstance(item, dict) and item.get("run_id")], operation
@@ -421,6 +601,7 @@ def _remote_inventory(
     source: dict[str, Any],
     *,
     since_days: int | None,
+    require_replay_evidence: bool,
     run_cmd: Callable[..., Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     remote_command = " ".join(
@@ -430,15 +611,21 @@ def _remote_inventory(
             shlex.quote(REMOTE_INVENTORY_SCRIPT),
             shlex.quote(str(source["runtime_root"])),
             shlex.quote("" if since_days is None else str(max(0, int(since_days)))),
+            shlex.quote("1" if require_replay_evidence else "0"),
         ]
     )
     command = ["ssh", str(source["ssh_target"]), remote_command]
-    operation = _run_command(command, run_cmd=run_cmd, timeout=120)
+    operation = _run_command(command, run_cmd=run_cmd, timeout=120, stdout_limit=2_000_000)
     payload = _parse_json(operation.get("stdout"))
     return operation, payload
 
 
-def _source_run_dirs(runs_root: Path, *, since_days: int | None) -> list[dict[str, Any]]:
+def _source_run_dirs(
+    runs_root: Path,
+    *,
+    since_days: int | None,
+    require_replay_evidence: bool = False,
+) -> list[dict[str, Any]]:
     if not runs_root.exists() or not runs_root.is_dir():
         return []
     cutoff = None
@@ -451,7 +638,18 @@ def _source_run_dirs(runs_root: Path, *, since_days: int | None) -> list[dict[st
         mtime = item.stat().st_mtime
         if cutoff is not None and mtime < cutoff:
             continue
-        out.append({"run_id": item.name, "mtime": mtime})
+        critical = _critical_files(item)
+        has_replay = bool(critical["candidate_files"] or critical["trace_files"] or critical["reject_log_files"])
+        if require_replay_evidence and not has_replay:
+            continue
+        out.append(
+            {
+                "run_id": item.name,
+                "mtime": mtime,
+                "has_replay_evidence": has_replay,
+                "critical_files": critical,
+            }
+        )
     return out
 
 
@@ -469,7 +667,9 @@ def _optional_sync_dir(rel: str) -> bool:
 
 def _rsync_missing_source(operation: dict[str, Any]) -> bool:
     stderr = str(operation.get("stderr") or "").lower()
-    return "no such file or directory" in stderr and "(l)stat" in stderr
+    if "no such file or directory" not in stderr:
+        return False
+    return any(token in stderr for token in ("(l)stat", "change_dir", "link_stat"))
 
 
 def _source_uri(source: dict[str, Any], rel: str) -> str:
@@ -487,6 +687,7 @@ def _sync_manifest(
     source: dict[str, Any],
     since_days: int | None,
     selected_runs: list[str],
+    require_replay_evidence: bool,
     include_logs: bool,
     operations: list[dict[str, Any]],
     verify: dict[str, Any],
@@ -502,6 +703,7 @@ def _sync_manifest(
         "archive_root_display": _display_path(archive_root, base=repo_root),
         "source": _source_summary(source),
         "since_days": since_days,
+        "require_replay_evidence": bool(require_replay_evidence),
         "selected_run_ids": selected_runs,
         "include_logs": bool(include_logs),
         "operation_count": len(operations),
@@ -609,6 +811,128 @@ def _select_verified_runs(
     return selected
 
 
+def _filter_runs_by_market(
+    runs: list[dict[str, Any]],
+    *,
+    archive_root: Path,
+    market: str | None,
+) -> dict[str, Any]:
+    requested = _normalize_market(market)
+    if requested is None:
+        return {"selected": runs, "skipped": []}
+    selected: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for item in runs:
+        run_id = str(item.get("run_id") or "").strip()
+        inferred = _infer_run_market(item, run_dir=archive_root / "output_runs" / run_id)
+        if inferred == requested:
+            selected.append({**item, "inferred_market": inferred})
+            continue
+        skipped.append(
+            {
+                "run_id": run_id,
+                "inferred_market": inferred,
+                "reason": "market_mismatch" if inferred in {"us", "hk"} else "market_unknown_or_mixed",
+            }
+        )
+    return {"selected": selected, "skipped": skipped}
+
+
+def _normalize_market(market: str | None) -> str | None:
+    text = str(market or "").strip().lower()
+    return text if text in {"us", "hk"} else None
+
+
+def _infer_run_market(item: dict[str, Any], *, run_dir: Path) -> str:
+    critical = item.get("critical_files") if isinstance(item.get("critical_files"), dict) else _critical_files(run_dir)
+    file_names: list[str] = []
+    for key in ("candidate_files", "reject_log_files"):
+        raw = critical.get(key) if isinstance(critical, dict) else None
+        if isinstance(raw, list):
+            file_names.extend(str(value).lower() for value in raw)
+    markets: set[str] = set()
+    has_hk = any(".hk_" in name or ".hk-" in name or ".hk." in name for name in file_names)
+    has_us = any(
+        ("_sell_put_candidates" in name or "_sell_call_candidates" in name or "_yield_enhancement" in name)
+        and ".hk_" not in name
+        and ".hk-" not in name
+        and ".hk." not in name
+        for name in file_names
+    )
+    if has_hk:
+        markets.add("hk")
+    if has_us:
+        markets.add("us")
+    raw_trace_files = critical.get("trace_files") if isinstance(critical, dict) else None
+    if isinstance(raw_trace_files, list):
+        markets.update(_infer_markets_from_trace_files(run_dir, raw_trace_files))
+    if len(markets) > 1:
+        return "mixed"
+    if markets:
+        return next(iter(markets))
+    return "unknown"
+
+
+def _infer_markets_from_trace_files(run_dir: Path, trace_files: list[Any]) -> set[str]:
+    markets: set[str] = set()
+    run_root = run_dir.resolve()
+    for raw in trace_files:
+        path = (run_root / str(raw)).resolve()
+        try:
+            path.relative_to(run_root)
+        except ValueError:
+            continue
+        try:
+            if not path.is_file():
+                continue
+            with path.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    text = line.strip()
+                    if not text:
+                        continue
+                    try:
+                        row = json.loads(text)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(row, dict):
+                        continue
+                    market = _infer_market_from_trace_row(row)
+                    if market is not None:
+                        markets.add(market)
+                    if len(markets) > 1:
+                        return markets
+        except OSError:
+            continue
+    return markets
+
+
+def _infer_market_from_trace_row(row: dict[str, Any]) -> str | None:
+    values = [
+        str(row.get("symbol") or "").strip(),
+        str(row.get("underlying_symbol") or "").strip(),
+        str(row.get("contract_symbol") or "").strip(),
+        str(row.get("option_symbol") or "").strip(),
+    ]
+    non_empty = [value.upper() for value in values if value]
+    if not non_empty:
+        return None
+    if any(_looks_like_hk_identifier(value) for value in non_empty):
+        return "hk"
+    if any(_looks_like_us_identifier(value) for value in non_empty):
+        return "us"
+    return None
+
+
+def _looks_like_hk_identifier(value: str) -> bool:
+    return value.endswith(".HK") or value.startswith("HK.") or ".HK_" in value or ".HK-" in value
+
+
+def _looks_like_us_identifier(value: str) -> bool:
+    if _looks_like_hk_identifier(value):
+        return False
+    return any("A" <= char <= "Z" for char in value)
+
+
 def _remote_cleanup_command(
     *,
     ssh_target: str,
@@ -655,7 +979,14 @@ def _planned_delete_runs(payload: dict[str, Any]) -> list[str]:
     return out
 
 
-def _run_command(command: list[str], *, run_cmd: Callable[..., Any], timeout: int) -> dict[str, Any]:
+def _run_command(
+    command: list[str],
+    *,
+    run_cmd: Callable[..., Any],
+    timeout: int,
+    stdout_limit: int | None = 4000,
+    stderr_limit: int | None = 4000,
+) -> dict[str, Any]:
     try:
         proc = run_cmd(command, capture_output=True, text=True, timeout=timeout, check=False)
     except Exception as exc:
@@ -670,9 +1001,15 @@ def _run_command(command: list[str], *, run_cmd: Callable[..., Any], timeout: in
         "command": command,
         "ok": int(getattr(proc, "returncode", 1)) == 0,
         "returncode": int(getattr(proc, "returncode", 1)),
-        "stdout": str(getattr(proc, "stdout", "") or "")[-4000:],
-        "stderr": str(getattr(proc, "stderr", "") or "")[-4000:],
+        "stdout": _limit_text(str(getattr(proc, "stdout", "") or ""), stdout_limit),
+        "stderr": _limit_text(str(getattr(proc, "stderr", "") or ""), stderr_limit),
     }
+
+
+def _limit_text(value: str, limit: int | None) -> str:
+    if limit is None or int(limit) <= 0:
+        return value
+    return value[-int(limit):]
 
 
 def _parse_cli_json(value: Any) -> dict[str, Any]:

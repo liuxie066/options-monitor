@@ -13,7 +13,6 @@ from domain.domain.candidate_defaults import (
 from src.application.opend_market_snapshot_fetching import get_underlier_spot
 from src.application.opend_symbol_chain_fetching import list_option_expirations
 from src.application.yield_enhancement_config import (
-    YIELD_ENHANCEMENT_DEFAULTS,
     derive_yield_enhancement_policy,
 )
 from src.application.strategy_policy import (
@@ -29,7 +28,7 @@ OptionSide = Literal["put", "call"]
 DEFAULT_SELL_CALL_SPOT_FALLBACK_MIN_PCT = 0.03
 DEFAULT_SELL_CALL_STRIKE_BUFFER_PCT = 0.02
 DEFAULT_FETCH_NEAR_BOUND_EXPAND_PCT = 0.20
-DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_MAX_CALL_OTM_PCT = float(YIELD_ENHANCEMENT_DEFAULTS["call"]["max_otm_pct"])
+DEFAULT_COMBO_YIELD_CALL_FETCH_MAX_PCT = 0.40
 
 
 @dataclass(frozen=True)
@@ -223,14 +222,20 @@ def _resolve_put_side_plan(
         max_dte=window.max_dte,
     )
     expirations = filtered[: int(limit_expirations)] if limit_expirations and filtered else filtered
-    min_strike = _safe_float(sell_put_cfg.get("min_strike"))
-    max_strike = _safe_float(sell_put_cfg.get("max_strike"))
+    configured_min_strike = _safe_float(sell_put_cfg.get("min_strike"))
+    configured_max_strike = _safe_float(sell_put_cfg.get("max_strike"))
+    min_strike = configured_min_strike
+    max_strike = configured_max_strike
+    if spot_reference is not None and spot_reference > 0:
+        max_strike = min(value for value in (configured_max_strike, spot_reference) if value is not None)
     planning_reason = f"use configured {source_prefix} near/far bounds"
     source_fields = [f"{source_prefix}.min_strike", f"{source_prefix}.max_strike", f"{source_prefix}.min_dte", f"{source_prefix}.max_dte"]
     if min_strike is None and max_strike is not None:
         min_strike = max_strike * (1.0 - DEFAULT_FETCH_NEAR_BOUND_EXPAND_PCT)
         planning_reason = f"derive {source_prefix} far bound from configured near bound -20%"
         source_fields = source_fields + [f"{source_prefix}.max_strike"]
+    if spot_reference is not None and spot_reference > 0:
+        source_fields = source_fields + ["spot"]
     return OptionSideFetchPlan(
         option_type="put",
         min_dte=window.min_dte,
@@ -261,31 +266,37 @@ def _resolve_sell_call_strike_window(
 ) -> tuple[StrikeWindowPlan, str, list[str]]:
     min_strike = _safe_float(sell_call_cfg.get("min_strike"))
     max_strike = _safe_float(sell_call_cfg.get("max_strike"))
-    if min_strike is not None or max_strike is not None:
+    has_spot = spot_reference is not None and spot_reference > 0
+    if min_strike is not None or max_strike is not None or has_spot:
         base_min = min_strike
+        if has_spot:
+            base_min = max(value for value in (base_min, spot_reference) if value is not None)
         base_max = max_strike
         if base_min is not None and base_max is None:
-            base_max = base_min * (1.0 + DEFAULT_FETCH_NEAR_BOUND_EXPAND_PCT)
+            base_max = base_min * (1.0 + float(fallback_max_pct))
         if base_min is not None and base_max is not None and base_max < base_min:
             base_max = base_min
         fetch_min = base_min
         fetch_max = base_max
-        if fetch_min is not None and spot_reference is not None and spot_reference > 0:
-            fetch_min = max(fetch_min, 0.0)
         if fetch_max is not None:
             fetch_max = fetch_max * (1.0 + DEFAULT_SELL_CALL_STRIKE_BUFFER_PCT)
+        source = f"{source_prefix}.configured_bounds" if min_strike is not None or max_strike is not None else f"{source_prefix}.spot_derived_bounds"
+        reason = f"use configured {source_prefix} near/far bounds" if min_strike is not None or max_strike is not None else f"derive {source_prefix} near/far bounds from spot reference"
+        fields = [f"{source_prefix}.min_strike", f"{source_prefix}.max_strike"] if min_strike is not None or max_strike is not None else ["spot"]
+        if has_spot and "spot" not in fields:
+            fields = fields + ["spot"]
         return (
             StrikeWindowPlan(
                 min_strike=fetch_min,
                 max_strike=fetch_max,
-                source=f"{source_prefix}.configured_bounds",
+                source=source,
                 buffer_applied=(fetch_max is not None and base_max is not None and fetch_max != base_max),
                 buffer_pct=DEFAULT_SELL_CALL_STRIKE_BUFFER_PCT,
                 base_min_strike=base_min,
                 base_max_strike=base_max,
             ),
-            f"use configured {source_prefix} near/far bounds",
-            [f"{source_prefix}.min_strike", f"{source_prefix}.max_strike"],
+            reason,
+            fields,
         )
     if spot_reference is None or spot_reference <= 0:
         return (
@@ -301,24 +312,6 @@ def _resolve_sell_call_strike_window(
             "spot unavailable; no near/far bounds could be derived",
             ["spot"],
         )
-    base_min = spot_reference * (1.0 + float(fallback_min_pct))
-    max_pct = max(float(fallback_max_pct), float(fallback_min_pct))
-    if max_pct <= float(fallback_min_pct):
-        max_pct = float(fallback_min_pct) + 0.05
-    base_max = spot_reference * (1.0 + max_pct)
-    return (
-        StrikeWindowPlan(
-            min_strike=base_min,
-            max_strike=base_max * (1.0 + DEFAULT_SELL_CALL_STRIKE_BUFFER_PCT),
-            source=f"{source_prefix}.spot_derived_bounds",
-            buffer_applied=True,
-            buffer_pct=DEFAULT_SELL_CALL_STRIKE_BUFFER_PCT,
-            base_min_strike=base_min,
-            base_max_strike=base_max,
-        ),
-        f"derive {source_prefix} near/far bounds from spot reference",
-        ["spot"],
-    )
 
 
 def _resolve_call_side_plan(
@@ -364,7 +357,7 @@ def _resolve_call_side_plan(
     )
 
 
-def _resolve_sell_put_yield_enhancement_call_plan(
+def _resolve_combo_yield_call_plan(
     *,
     symbol: str,
     sell_put_cfg: dict,
@@ -380,9 +373,6 @@ def _resolve_sell_put_yield_enhancement_call_plan(
     for key in ("min_dte", "max_dte"):
         if key in sell_put_cfg:
             call_cfg[key] = sell_put_cfg.get(key)
-    default_call_cfg = dict(YIELD_ENHANCEMENT_DEFAULTS["call"])
-    fallback_min_pct = _safe_float(call_cfg.get("min_otm_pct", default_call_cfg.get("min_otm_pct")))
-    fallback_max_pct = _safe_float(call_cfg.get("max_otm_pct", default_call_cfg.get("max_otm_pct")))
     sell_put_window = resolve_candidate_window(
         sell_put_cfg,
         defaults=DEFAULT_SELL_PUT_WINDOW,
@@ -396,16 +386,8 @@ def _resolve_sell_put_yield_enhancement_call_plan(
         defaults=sell_put_window,
         source_prefix="yield_enhancement.call",
         dte_source_prefix="sell_put",
-        fallback_min_pct=(
-            float(fallback_min_pct)
-            if fallback_min_pct is not None
-            else 0.03
-        ),
-        fallback_max_pct=(
-            float(fallback_max_pct)
-            if fallback_max_pct is not None
-            else DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_MAX_CALL_OTM_PCT
-        ),
+        fallback_min_pct=0.0,
+        fallback_max_pct=DEFAULT_COMBO_YIELD_CALL_FETCH_MAX_PCT,
     )
 
 
@@ -556,7 +538,9 @@ def build_required_data_fetch_plan(
         available_expirations = []
 
     side_plans: list[OptionSideFetchPlan] = []
-    if want_put:
+    yield_enhancement_policy = derive_yield_enhancement_policy(resolved_yield_enhancement_cfg, sell_put_cfg)
+    combo_yield_enabled = bool(yield_enhancement_policy.enabled)
+    if want_put or combo_yield_enabled:
         side_plans.append(
             _resolve_put_side_plan(
                 symbol=symbol,
@@ -576,10 +560,9 @@ def build_required_data_fetch_plan(
                 spot_reference=spot_reference,
             )
         )
-    yield_enhancement_policy = derive_yield_enhancement_policy(resolved_yield_enhancement_cfg, sell_put_cfg)
-    if want_put and bool(yield_enhancement_policy.enabled):
+    if combo_yield_enabled:
         side_plans.append(
-            _resolve_sell_put_yield_enhancement_call_plan(
+            _resolve_combo_yield_call_plan(
                 symbol=symbol,
                 sell_put_cfg=sell_put_cfg,
                 yield_enhancement_cfg=resolved_yield_enhancement_cfg,
@@ -602,7 +585,7 @@ def build_required_data_fetch_plan(
             include_realized_volatility=bool(
                 (want_put and sell_put_semantics.scan_requires_rv)
                 or (want_call and sell_call_semantics.scan_requires_rv)
-                or (want_put and yield_enhancement_policy.enabled and yield_enhancement_policy.requires_realized_volatility)
+                or (combo_yield_enabled and yield_enhancement_policy.requires_realized_volatility)
             ),
         ),
     )

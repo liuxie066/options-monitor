@@ -462,6 +462,11 @@ def _fetch_payload_error_reason(payload: dict[str, Any] | None, *, prefix: str) 
     return None
 
 
+def _has_explicit_futu_fetch_source(fetch_cfg: dict[str, Any]) -> bool:
+    raw = fetch_cfg.get("source") if isinstance(fetch_cfg, dict) else None
+    return bool(str(raw or "").strip()) and is_futu_fetch_source(raw)
+
+
 def _build_position_fetch_specs(
     positions: list[dict[str, Any]],
     *,
@@ -588,7 +593,12 @@ def _ensure_required_data_coverage_for_positions(
             symbol_cfg = symbol_cfgs.get(symbol) or {}
             fetch_cfg = symbol_cfg.get("fetch") if isinstance(symbol_cfg, dict) else {}
             fetch_cfg = fetch_cfg if isinstance(fetch_cfg, dict) else {}
-            if not is_futu_fetch_source(fetch_cfg.get("source")):
+            can_refresh = (
+                is_futu_fetch_source(fetch_cfg.get("source"))
+                if missing_keys
+                else _has_explicit_futu_fetch_source(fetch_cfg)
+            )
+            if not can_refresh:
                 for key in missing_keys:
                     near_miss = find_unique_near_miss_expiration(
                         key[2],
@@ -610,26 +620,7 @@ def _ensure_required_data_coverage_for_positions(
             strikes = [v for v in strikes if v is not None]
             host = str(fetch_cfg.get("host") or "127.0.0.1")
             port = safe_int(fetch_cfg.get("port")) or 11111
-            endpoint = (host, int(port))
             try:
-                if external_gateway:
-                    shared_gw = gateway
-                else:
-                    shared_gw = shared_gateways.get(endpoint)
-                if shared_gw is None:
-                    try:
-                        from src.infrastructure.futu_gateway import build_ready_futu_gateway
-
-                        shared_gw = build_ready_futu_gateway(
-                            host=host,
-                            port=port,
-                            is_option_chain_cache_enabled=True,
-                        )
-                        if not external_gateway:
-                            shared_gateways[endpoint] = shared_gw
-                    except Exception:
-                        # Graceful degradation: fall back to per-call gateway built by fetch_symbol.
-                        shared_gw = None
                 payload = fetch_symbol(
                     symbol,
                     limit_expirations=safe_int(fetch_cfg.get("limit_expirations")) or max(len(requested_expirations), 8),
@@ -643,7 +634,7 @@ def _ensure_required_data_coverage_for_positions(
                     chain_cache=True,
                     chain_cache_force_refresh=False,
                     freshness_policy="refresh_missing",
-                    gateway=shared_gw,
+                    gateway=gateway,
                     include_realized_volatility=bool(short_vol_keys.intersection(refresh_keys)),
                     **_typed_opend_fetch_kwargs(config),
                 )
@@ -800,7 +791,13 @@ def _fetch_missing_quotes_via_opend(
                         "quote_key": "|".join(key),
                     },
                 )
-        if not is_futu_fetch_source(fetch_cfg.get("source")):
+        valid_missing_keys = {key for key in missing_keys if all(key)}
+        can_fetch = (
+            is_futu_fetch_source(fetch_cfg.get("source"))
+            if price_refresh_keys.intersection(valid_missing_keys)
+            else _has_explicit_futu_fetch_source(fetch_cfg)
+        )
+        if not can_fetch:
             for key in missing_keys:
                 if all(key) and key in price_refresh_keys:
                     attempted_reasons[key] = "opend_fetch_skipped_non_futu_source"
