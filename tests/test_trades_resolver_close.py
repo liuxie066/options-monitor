@@ -13,6 +13,7 @@ from src.application.trades.resolver import (
     match_close_targets,
     resolve_trade_deal,
 )
+from src.application.trades.lifecycle import resolve_lifecycle_expired_unassigned
 
 
 class FakeRepo:
@@ -390,6 +391,72 @@ def test_resolve_trade_close_apply_keeps_zero_price_option_leg_pending_without_s
     cases = repo.list_trade_lifecycle_cases()
     assert cases[0]["status"] == "waiting_settlement_evidence"
     assert repo.get_record_fields(lot_id)["contracts_open"] == 10
+
+
+def test_confirm_lifecycle_expired_unassigned_records_expire_close(tmp_path) -> None:
+    from domain.domain.option_position_lots import OpenPositionCommand
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="0700.HK",
+            option_type="put",
+            side="short",
+            contracts=2,
+            currency="HKD",
+            strike=440.0,
+            multiplier=100,
+            expiration_ymd="2026-06-05",
+            premium_per_share=0.86,
+            opened_at_ms=1780354364000,
+        ),
+    )
+    lot_id = repo.list_position_lots()[0]["record_id"]
+    option_result = resolve_trade_deal(
+        _deal(
+            deal_id="775828694842258876",
+            symbol="0700.HK",
+            contracts=2,
+            price=0.0,
+            strike=440.0,
+            expiration_ymd="2026-06-05",
+            currency="HKD",
+            trade_time_ms=1780657845000,
+            raw_payload={"deal_id": "775828694842258876", "code": "HK.TCH260605P440000"},
+        ),
+        repo=repo,
+        state={},
+        apply_changes=True,
+    )
+    assert option_result.reason == "waiting_settlement_evidence"
+
+    result = resolve_lifecycle_expired_unassigned(
+        repo,
+        deal_id="775828694842258876",
+        apply_changes=True,
+    )
+
+    assert result.status == "applied"
+    assert result.action == "expire_close"
+    assert result.reason == "expire_close_recorded"
+    assert result.operations[0]["ledger_preflight"]["event_type"] == "expire_close"
+    close_events = [item for item in repo.list_trade_events() if item["event_type"] == "expire_close"]
+    assert len(close_events) == 1
+    assert close_events[0]["target_lot_id"] == lot_id
+    assert close_events[0]["raw_payload"]["close_type"] == "expire_auto_close"
+    assert close_events[0]["raw_payload"]["close_reason"] == "expired_unassigned"
+    assert close_events[0]["raw_payload"]["evidence_ids"]
+    cases = repo.list_trade_lifecycle_cases()
+    assert cases[0]["status"] == "ledger_written"
+    assert cases[0]["decision_type"] == "expire_close"
+    assert cases[0]["target_lot_ids"] == [lot_id]
+    fields = repo.get_record_fields(lot_id)
+    assert fields["status"] == "close"
+    assert fields["contracts_open"] == 0
+    assert fields["close_type"] == "expire_auto_close"
 
 
 def test_resolve_trade_close_retry_failed_routes_early_zero_price_assignment_to_lifecycle_pending(tmp_path) -> None:

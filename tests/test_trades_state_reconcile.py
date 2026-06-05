@@ -225,6 +225,60 @@ def test_reconcile_trade_intake_state_marks_completed_lifecycle_deal_processed(t
     assert processed["diagnostics"]["reconciled_lifecycle_evidence_id"] == "ev_option_close"
 
 
+def test_reconcile_trade_intake_state_marks_expire_close_lifecycle_processed(tmp_path: Path) -> None:
+    state_path = tmp_path / "auto_trade_intake_state.json"
+    write_trade_intake_state(
+        state_path,
+        {
+            "processed_deal_ids": {},
+            "failed_deal_ids": {},
+            "unresolved_deal_ids": {
+                "775828694842258876": {
+                    "status": "unresolved",
+                    "action": "lifecycle",
+                    "account": "lx",
+                    "reason": "waiting_settlement_evidence",
+                    "retryable": True,
+                }
+            },
+        },
+    )
+    repo = FakeRepo(
+        [],
+        lifecycle_cases=[
+            {
+                "case_id": "lc_0700_expire_close",
+                "status": "ledger_written",
+                "decision_type": "expire_close",
+                "account": "lx",
+                "symbol": "0700.HK",
+                "target_lot_ids": ["lot_0700_440p"],
+            }
+        ],
+        lifecycle_evidence=[
+            {
+                "case_id": "lc_0700_expire_close",
+                "evidence_id": "ev_0700_option_zero",
+                "evidence_type": "option_zero_price_close",
+                "source_event_id": "775828694842258876",
+                "account": "lx",
+                "symbol": "0700.HK",
+            }
+        ],
+    )
+
+    out = reconcile_trade_intake_state(state_path=state_path, repo=repo, apply_changes=True)
+
+    assert out["planned_count"] == 1
+    state = load_trade_intake_state(state_path)
+    assert "775828694842258876" not in state["unresolved_deal_ids"]
+    processed = state["processed_deal_ids"]["775828694842258876"]
+    assert processed["status"] == "reconciled"
+    assert processed["reason"] == "lifecycle_case_already_recorded"
+    assert processed["applied_record_ids"] == ["lot_0700_440p"]
+    assert processed["diagnostics"]["reconciled_lifecycle_decision_type"] == "expire_close"
+
+
 def test_reconcile_trade_intake_state_dry_run_keeps_completed_lifecycle_file_unchanged(tmp_path: Path) -> None:
     state_path = tmp_path / "auto_trade_intake_state.json"
     write_trade_intake_state(

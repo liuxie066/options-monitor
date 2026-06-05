@@ -190,6 +190,15 @@ manual trade / trade-intake 会优先使用 runtime root 或 runtime config 路�
 重放已进入 `failed_deal_ids` 的单笔成交时，需要使用显式修复入口：
 `om run trade-intake --config config.us.json --mode apply --confirm --deal-json <payload.json> --retry-failed`。
 该入口只允许配合 `--deal-json` 使用，不会放开已成功处理成交的重复写入。
+对已经进入 `waiting_settlement_evidence` 的 0 价期权生命周期腿，如果人工确认没有股票交割腿、
+属于到期未指派/未行权，先用受控入口写 canonical `expire_close`；默认 dry-run，写入必须显式确认：
+
+```bash
+om option-positions lifecycle confirm-expired --deal-id <deal-id>
+om option-positions lifecycle confirm-expired --deal-id <deal-id> --confirm
+```
+
+如果随后 trade-intake state 仍残留该 deal，再执行 `--reconcile-state` 清理本地 intake 状态。
 如果账本已经通过手工 repair/expire_close 订正，但 trade-intake state 仍残留
 `failed_deal_ids` / `unresolved_deal_ids`，先 dry-run 对账，再显式应用本地 state 修复：
 
@@ -409,7 +418,7 @@ om-agent run --tool candidate_rank_explain --input-json '{"mode":"put","score_we
 - `research shadow-replay mark` 可从 `required_data/parsed/*_required_data.csv` 为本地 dataset 生成 mark path
 - `research shadow-replay settle` 可从可用 mark 推导 mark-to-market outcome，也可在到期日/到期后用 spot/strike 推导到期 outcome
 - `research shadow-replay analyze` 会在已有可用 mark path / outcome facts 时输出路径风险、outcome stats 和按 DTE/Delta/IV/Spread/集中度分桶的 outcome-by-bucket 表现
-- `research shadow-replay parameter-backtest` 用历史 run artifacts 或已有 dataset 做 short-vol 参数反事实回放，比较生产实际结果和 variants，不重建历史期权链、不修改 runtime config
+- `research shadow-replay parameter-backtest` 用历史 run artifacts 或已有 dataset 做 `insurance_underwriting` 参数反事实回放，比较生产实际结果和 variants，不重建历史期权链、不修改 runtime config
 - `research shadow-replay parameter-report` 是用户常用报告入口，会一次写出 JSON + Markdown 候选影响报告；参数仍来自 `--params` 或 `--params-dir`，不会自动生成参数、不修改 runtime config
 - `research archive pull/verify/inventory/build-datasets/prune-remote` 是远端空间有限时的证据归档链路：先把远端 runtime 证据 rsync 到本地 `output_shared/research/remote_archive/<remote>/`，再从 verified archive 生成 Shadow Replay dataset
 - 缺少被拒样本、mark path 或 outcome facts 时返回 `not_ready` / `evidence_incomplete`，防止幸存者偏差

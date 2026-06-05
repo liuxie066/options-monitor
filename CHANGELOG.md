@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.2.214 - 2026-06-05
+
+### Added
+- Added a guarded `option-positions lifecycle confirm-expired` command to confirm pending zero-price option lifecycle cases as expired without assignment or exercise.
+
+### Fixed
+- Fixed trade-intake state reconciliation so completed lifecycle `expire_close` cases clear unresolved zero-price option deals after manual confirmation.
+
 ## 1.2.213 - 2026-06-05
 
 ### Added

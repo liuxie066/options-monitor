@@ -43,6 +43,7 @@ from src.application.positions.workflows import (
 )
 from src.application.positions.inspection import build_lot_event_history, inspect_projection_state
 from src.application.trade_time_format import add_trade_time_beijing
+from src.application.trades.lifecycle import resolve_lifecycle_expired_unassigned
 from src.application.trades.review import replay_trade_events
 from src.application.write_contract import attach_write_contract
 from src.interfaces.cli.ledger_write_safety import add_write_flags as _add_local_write_flags
@@ -269,6 +270,14 @@ def main(argv: list[str] | None = None) -> int:
     p_lifecycle_inspect = lifecycle_sub.add_parser('inspect', help='inspect one lifecycle case with evidence')
     p_lifecycle_inspect.add_argument('--case-id', required=True)
     p_lifecycle_inspect.add_argument('--format', default='json', choices=['json', 'text'])
+    p_lifecycle_confirm_expired = lifecycle_sub.add_parser(
+        'confirm-expired',
+        help='confirm a pending zero-price option lifecycle case expired without assignment/exercise',
+    )
+    p_lifecycle_confirm_expired.add_argument('--case-id', default=None)
+    p_lifecycle_confirm_expired.add_argument('--deal-id', default=None)
+    p_lifecycle_confirm_expired.add_argument('--format', default='json', choices=['json', 'text'])
+    _add_local_write_flags(p_lifecycle_confirm_expired, high_risk=True)
 
     p_store = sub.add_parser('store', help='inspect option-position SQLite store resolution')
     store_sub = p_store.add_subparsers(dest='store_cmd', required=True)
@@ -397,11 +406,19 @@ def main(argv: list[str] | None = None) -> int:
         return int(run_option_positions_auto_close(auto_close_argv))
 
     write_controls: dict[str, dict[str, bool]] = {}
-    if args.cmd in {"add", "buy-close", "assign", "exercise", "void-event", "adjust-lot"}:
+    write_control_key = str(args.cmd)
+    if args.cmd == "lifecycle" and getattr(args, "lifecycle_cmd", None) == "confirm-expired":
+        write_control_key = "lifecycle:confirm-expired"
+        write_controls[write_control_key] = _resolve_write_control(
+            args,
+            command_name="option-positions lifecycle confirm-expired",
+            high_risk=True,
+        )
+    elif args.cmd in {"add", "buy-close", "assign", "exercise", "void-event", "adjust-lot"}:
         write_controls[args.cmd] = _resolve_write_control(args, command_name=f"option-positions {args.cmd}", high_risk=True)
     elif args.cmd == "rebuild":
         write_controls[args.cmd] = _resolve_write_control(args, command_name="option-positions rebuild", high_risk=False)
-    write_cmd = bool(write_controls.get(args.cmd, {}).get("write_requested", False))
+    write_cmd = bool(write_controls.get(write_control_key, {}).get("write_requested", False))
     data_config_path = resolve_position_data_config_path(base=base, data_config=args.data_config)
     if write_cmd:
         guard = _guard_write(
@@ -825,6 +842,44 @@ def main(argv: list[str] | None = None) -> int:
                         f"- {evidence.get('evidence_id')} | {evidence.get('evidence_type')} | "
                         f"source={evidence.get('source_event_id') or '-'}"
                     )
+            return 0
+        if args.lifecycle_cmd == 'confirm-expired':
+            if not str(args.case_id or '').strip() and not str(args.deal_id or '').strip():
+                raise SystemExit("lifecycle confirm-expired requires --case-id or --deal-id")
+            control = write_controls["lifecycle:confirm-expired"]
+            dry_run = not bool(control["write_requested"])
+            result = resolve_lifecycle_expired_unassigned(
+                repo,
+                case_id=args.case_id,
+                deal_id=args.deal_id,
+                apply_changes=not dry_run,
+            )
+            result_payload = {
+                "mode": "dry_run" if dry_run else "applied" if result.status == "applied" else "not_applied",
+                "status": result.status,
+                "action": result.action,
+                "reason": result.reason,
+                "operations": [item.to_payload() for item in result.operations],
+                "diagnostics": dict(result.diagnostics),
+            }
+            payload = attach_write_contract(
+                {"operation": "lifecycle_confirm_expired", **result_payload, "ledger_store": ledger_store},
+                dry_run=dry_run,
+                write_applied=not dry_run and result.status == "applied",
+                rollback_hint="void the created expire_close trade event(s) with option-positions void-event --confirm",
+            )
+            if _json_or_text_format(args) == "json":
+                print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+                return 0
+            prefix = "[DRY_RUN]" if dry_run else "[DONE]" if result.status == "applied" else "[NOT_APPLIED]"
+            print(f"{prefix} lifecycle confirm-expired status={result.status} reason={result.reason}")
+            for operation in result.operations:
+                item = operation.to_payload()
+                result_data = item.get("result") if isinstance(item.get("result"), dict) else {}
+                print(
+                    f"- {item.get('record_id') or '-'} contracts={item.get('contracts_to_close') or '-'} "
+                    f"event_id={result_data.get('event_id') or item.get('event_id') or '-'}"
+                )
             return 0
 
     if args.cmd == 'report':

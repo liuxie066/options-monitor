@@ -1100,6 +1100,99 @@ def test_option_positions_cli_lifecycle_inspect_shows_case_evidence(monkeypatch,
     assert payload["case"]["evidence"][0]["evidence_id"] == "ev_stock_settlement"
 
 
+def test_option_positions_cli_lifecycle_confirm_expired_records_expire_close(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    import src.interfaces.cli.option_positions as cli_mod
+    from domain.domain.option_position_lots import OpenPositionCommand
+
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo.data_config_path = data_config  # type: ignore[attr-defined]
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="0700.HK",
+            option_type="put",
+            side="short",
+            contracts=2,
+            currency="HKD",
+            strike=440.0,
+            multiplier=100,
+            expiration_ymd="2026-06-05",
+            premium_per_share=0.86,
+            opened_at_ms=1780354364000,
+        ),
+    )
+    repo.upsert_trade_lifecycle_case(
+        {
+            "case_id": "lc_0700_expire_pending",
+            "case_key": "富途|lx|0700.HK|put|short|440|2026-06-05",
+            "broker": "富途",
+            "account": "lx",
+            "symbol": "0700.HK",
+            "option_type": "put",
+            "position_side": "short",
+            "strike": 440,
+            "expiration_ymd": "2026-06-05",
+            "contracts": 2,
+            "multiplier": 100,
+            "status": "waiting_settlement_evidence",
+            "decision_type": "needs_review",
+            "target_lot_ids": [],
+            "event_time_ms": 1780657845000,
+        }
+    )
+    repo.upsert_trade_lifecycle_evidence(
+        {
+            "evidence_id": "ev_0700_option_zero",
+            "case_id": "lc_0700_expire_pending",
+            "source_type": "futu_trade_push",
+            "source_event_id": "775828694842258876",
+            "evidence_type": "option_zero_price_close",
+            "account": "lx",
+            "symbol": "0700.HK",
+            "trade_time_ms": 1780657845000,
+            "raw": {"deal_id": "775828694842258876"},
+        }
+    )
+
+    monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "om option-positions",
+            "--data-config",
+            str(data_config),
+            "lifecycle",
+            "confirm-expired",
+            "--deal-id",
+            "775828694842258876",
+            "--confirm",
+            "--format",
+            "json",
+        ],
+    )
+
+    cli_mod.main()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["operation"] == "lifecycle_confirm_expired"
+    assert payload["mode"] == "applied"
+    assert payload["write_applied"] is True
+    assert payload["reason"] == "expire_close_recorded"
+    assert payload["operations"][0]["ledger_preflight"]["event_type"] == "expire_close"
+    assert repo.list_trade_lifecycle_cases()[0]["decision_type"] == "expire_close"
+    events = [item for item in repo.list_trade_events() if item["event_type"] == "expire_close"]
+    assert len(events) == 1
+    assert events[0]["raw_payload"]["evidence_ids"] == ["ev_0700_option_zero"]
+
+
 def test_option_positions_cli_void_event_reports_result(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
     from domain.domain.option_position_lots import OpenPositionCommand
