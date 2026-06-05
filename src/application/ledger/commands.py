@@ -13,6 +13,7 @@ from domain.domain.ledger.position_fields import (
     build_open_adjustment_patch_contract,
     build_position_lot_fields,
     effective_multiplier,
+    strategy_metadata_fields_from_payload,
 )
 from domain.domain.trade_contract_identity import normalize_trade_side
 from src.application.ledger.interventions import (
@@ -1423,7 +1424,9 @@ def _broker_trade_open_command(deal: Any) -> OpenPositionCommand:
 
 def preview_broker_trade_open(deal: Any) -> BrokerTradeOpenPreviewResult:
     command = _broker_trade_open_command(deal)
-    return BrokerTradeOpenPreviewResult(command=command, fields=build_position_lot_fields(command).to_dict())
+    fields = build_position_lot_fields(command).to_dict()
+    fields.update(strategy_metadata_fields_from_payload(getattr(deal, "raw_payload", None)))
+    return BrokerTradeOpenPreviewResult(command=command, fields=fields)
 
 
 def record_normalized_trade_event(repo: Any, deal: Any) -> LedgerWriteResult:

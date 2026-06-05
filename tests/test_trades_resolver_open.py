@@ -4,19 +4,21 @@ from pathlib import Path
 
 import src.application.ledger.repository as ledger_repository
 
+from domain.domain.ledger.position_fields import parse_exp_to_ms
 from src.application.trades.normalizer import NormalizedTradeDeal
 from src.application.trades.resolver import resolve_trade_deal
 
 
 class FakeRepo:
-    def __init__(self) -> None:
+    def __init__(self, records: list[dict] | None = None) -> None:
+        self.records = list(records or [])
         self.created: list[dict] = []
 
     def list_records(self, *, page_size: int = 500) -> list[dict]:
-        return []
+        return list(self.records)
 
     def list_position_lots(self) -> list[dict]:
-        return []
+        return list(self.records)
 
     def list_trade_events(self) -> list[dict]:
         return []
@@ -54,6 +56,39 @@ def _deal(**overrides: object) -> NormalizedTradeDeal:
     return NormalizedTradeDeal(**base)
 
 
+def _position_record(
+    record_id: str,
+    *,
+    symbol: str = "PDD",
+    option_type: str = "put",
+    side: str = "short",
+    strike: float = 80.0,
+    expiration_ymd: str = "2026-07-17",
+    contracts_open: int = 1,
+) -> dict:
+    expiration = parse_exp_to_ms(expiration_ymd)
+    assert expiration is not None
+    return {
+        "record_id": record_id,
+        "fields": {
+            "broker": "富途",
+            "account": "lx",
+            "symbol": symbol,
+            "option_type": option_type,
+            "side": side,
+            "status": "open",
+            "contracts": contracts_open,
+            "contracts_open": contracts_open,
+            "contracts_closed": 0,
+            "strike": strike,
+            "currency": "USD",
+            "multiplier": 100,
+            "expiration": expiration,
+            "opened_at": 100,
+        },
+    }
+
+
 def test_resolve_trade_open_dry_run_returns_fields_preview() -> None:
     result = resolve_trade_deal(_deal(), repo=FakeRepo(), state={}, apply_changes=False)
 
@@ -71,6 +106,61 @@ def test_resolve_trade_long_open_dry_run_returns_long_fields_preview() -> None:
     assert result.action == "open"
     assert result.operations[0]["fields"]["account"] == "lx"
     assert result.operations[0]["fields"]["side"] == "long"
+
+
+def test_resolve_unknown_buy_call_with_companion_put_as_combo_yield_long_call() -> None:
+    repo = FakeRepo([_position_record("lot_pdd_short_put")])
+    deal = _deal(
+        deal_id="deal-pdd-long-call",
+        symbol="PDD",
+        option_type="call",
+        side="buy",
+        position_effect=None,
+        contracts=1,
+        price=0.73,
+        strike=100.0,
+        expiration_ymd="2026-07-17",
+        currency="USD",
+        raw_payload={"deal_id": "deal-pdd-long-call", "code": "US.PDD260717C100000"},
+    )
+
+    result = resolve_trade_deal(deal, repo=repo, state={}, apply_changes=False)
+
+    assert result.status == "dry_run"
+    assert result.action == "open"
+    assert result.diagnostics["position_effect_inference"]["decision"] == "open"
+    fields = result.operations[0]["fields"]
+    assert fields["side"] == "long"
+    assert fields["strategy"] == "combo_yield"
+    assert fields["leg_role"] == "enhancement_call"
+    assert fields["strategy_group_id"] == "combo_yield:lx:PDD:2026-07-17"
+
+
+def test_resolve_unknown_buy_call_without_companion_opens_pending_combo_yield_long_call() -> None:
+    deal = _deal(
+        deal_id="deal-pdd-long-call",
+        symbol="PDD",
+        option_type="call",
+        side="buy",
+        position_effect=None,
+        contracts=1,
+        price=0.73,
+        strike=100.0,
+        expiration_ymd="2026-07-17",
+        currency="USD",
+        raw_payload={"deal_id": "deal-pdd-long-call", "code": "US.PDD260717C100000"},
+    )
+
+    result = resolve_trade_deal(deal, repo=FakeRepo(), state={}, apply_changes=False)
+
+    assert result.status == "dry_run"
+    assert result.action == "open"
+    assert result.diagnostics["position_effect_inference"]["open_reason"] == "buy_call_without_close_target"
+    fields = result.operations[0]["fields"]
+    assert fields["side"] == "long"
+    assert fields["strategy"] == "combo_yield"
+    assert fields["leg_role"] == "enhancement_call"
+    assert fields["strategy_group_id"] == "combo_yield:lx:PDD:2026-07-17"
 
 
 def test_resolve_trade_open_apply_creates_record() -> None:
@@ -112,6 +202,108 @@ def test_resolve_trade_open_apply_uses_ledger_preflight_with_sqlite(tmp_path: Pa
     assert len(lots) == 1
     assert lots[0]["record_id"] == operation["ledger_preflight"]["target_lot_id"]
     assert lots[0]["fields"]["contracts_open"] == 2
+
+
+def test_resolve_unknown_combo_yield_long_call_apply_preserves_strategy_fields(tmp_path: Path) -> None:
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+
+    put_result = resolve_trade_deal(
+        _deal(
+            deal_id="deal-pdd-short-put",
+            symbol="PDD",
+            option_type="put",
+            side="sell",
+            position_effect="open",
+            contracts=1,
+            price=1.5,
+            strike=80.0,
+            expiration_ymd="2026-07-17",
+            currency="USD",
+        ),
+        repo=repo,
+        state={},
+        apply_changes=True,
+    )
+    assert put_result.status == "applied"
+
+    call_result = resolve_trade_deal(
+        _deal(
+            deal_id="deal-pdd-long-call",
+            symbol="PDD",
+            option_type="call",
+            side="buy",
+            position_effect=None,
+            contracts=1,
+            price=0.73,
+            strike=100.0,
+            expiration_ymd="2026-07-17",
+            currency="USD",
+            raw_payload={"deal_id": "deal-pdd-long-call", "code": "US.PDD260717C100000"},
+        ),
+        repo=repo,
+        state={},
+        apply_changes=True,
+    )
+
+    assert call_result.status == "applied"
+    lots = repo.list_position_lots()
+    call_lot = next(item for item in lots if item["fields"]["option_type"] == "call")
+    assert call_lot["fields"]["side"] == "long"
+    assert call_lot["fields"]["strategy"] == "combo_yield"
+    assert call_lot["fields"]["leg_role"] == "enhancement_call"
+    assert call_lot["fields"]["yield_enhancement_mode"] == "income_upside_enhancement"
+    assert call_lot["fields"]["strategy_group_id"] == "combo_yield:lx:PDD:2026-07-17"
+
+
+def test_resolve_sell_put_open_after_long_call_uses_same_combo_yield_group(tmp_path: Path) -> None:
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+
+    call_result = resolve_trade_deal(
+        _deal(
+            deal_id="deal-pdd-long-call",
+            symbol="PDD",
+            option_type="call",
+            side="buy",
+            position_effect=None,
+            contracts=1,
+            price=0.73,
+            strike=100.0,
+            expiration_ymd="2026-07-17",
+            currency="USD",
+            raw_payload={"deal_id": "deal-pdd-long-call", "code": "US.PDD260717C100000"},
+        ),
+        repo=repo,
+        state={},
+        apply_changes=True,
+    )
+    assert call_result.status == "applied"
+
+    put_result = resolve_trade_deal(
+        _deal(
+            deal_id="deal-pdd-short-put",
+            symbol="PDD",
+            option_type="put",
+            side="sell",
+            position_effect="open",
+            contracts=1,
+            price=1.5,
+            strike=80.0,
+            expiration_ymd="2026-07-17",
+            currency="USD",
+        ),
+        repo=repo,
+        state={},
+        apply_changes=True,
+    )
+
+    assert put_result.status == "applied"
+    lots = repo.list_position_lots()
+    call_lot = next(item for item in lots if item["fields"]["option_type"] == "call")
+    put_lot = next(item for item in lots if item["fields"]["option_type"] == "put")
+    assert call_lot["fields"]["strategy_group_id"] == "combo_yield:lx:PDD:2026-07-17"
+    assert put_lot["fields"]["strategy"] == "combo_yield"
+    assert put_lot["fields"]["leg_role"] == "sell_put"
+    assert put_lot["fields"]["strategy_group_id"] == call_lot["fields"]["strategy_group_id"]
 
 
 def test_resolve_trade_open_rejects_duplicate_deal_id() -> None:

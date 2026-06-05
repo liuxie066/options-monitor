@@ -1,8 +1,20 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
+from domain.domain.ledger.position_fields import (
+    effective_contracts_open,
+    effective_expiration_ymd,
+    effective_strike,
+    normalize_account,
+    normalize_option_type,
+    normalize_side,
+    normalize_status,
+)
+from domain.domain.strategy_vocab import STRATEGY_COMBO_YIELD
+from domain.domain.symbol_identity import canonical_symbol
+from src.application.strategy_policy import YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE
 from src.application.ledger.api import (
     BrokerTradeOperation,
     CloseTargetResolution,
@@ -49,6 +61,13 @@ class IntakeResolution:
             "operations": [item.to_payload() for item in self.operations],
             "diagnostics": dict(self.diagnostics),
         }
+
+
+@dataclass(frozen=True)
+class _PositionEffectInference:
+    deal: NormalizedTradeDeal | None
+    reason: str
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
 def _failure(
@@ -230,10 +249,28 @@ def resolve_trade_deal(
         return _failure(status="skipped", action=None, reason="not_option_deal", deal=deal)
     if not deal.symbol or not deal.option_type:
         return _failure(status="skipped", action=None, reason="not_option_deal", deal=deal)
+    position_effect_diagnostics: dict[str, Any] = {}
     if deal.position_effect not in ("open", "close"):
-        return _failure(status="unresolved", action=None, reason="unknown_position_effect", deal=deal)
+        inference = _infer_missing_position_effect(deal, repo=repo)
+        if inference.deal is None:
+            return _failure(
+                status="unresolved",
+                action=None,
+                reason=inference.reason,
+                deal=deal,
+                diagnostics=inference.diagnostics,
+            )
+        deal = inference.deal
+        position_effect_diagnostics = {"position_effect_inference": inference.diagnostics}
 
     if deal.position_effect == "open":
+        combo_enrichment = _enrich_combo_yield_open(deal, repo=repo)
+        if combo_enrichment.deal is not None:
+            deal = combo_enrichment.deal
+            position_effect_diagnostics = {
+                **position_effect_diagnostics,
+                "combo_yield_enrichment": combo_enrichment.diagnostics,
+            }
         if deal.side not in {"sell", "buy"}:
             return _failure(status="unresolved", action="open", reason="unsupported_open_side", deal=deal)
         missing = _required_open_missing(deal)
@@ -262,7 +299,7 @@ def resolve_trade_deal(
                 deal_id=deal.deal_id,
                 account=deal.internal_account,
                 operations=[apply_trade_open_with(repo, deal, persist_trade_event_fn=persist_fn)],
-                diagnostics={},
+                diagnostics=position_effect_diagnostics,
             )
         preview = preview_trade_open(deal)
         return IntakeResolution(
@@ -272,7 +309,7 @@ def resolve_trade_deal(
             deal_id=deal.deal_id,
             account=deal.internal_account,
             operations=[BrokerTradeOperation(action="open", fields=preview.fields)],
-            diagnostics={},
+            diagnostics=position_effect_diagnostics,
         )
 
     missing = _required_close_missing(deal)
@@ -318,7 +355,11 @@ def resolve_trade_deal(
             deal_id=deal.deal_id,
             account=deal.internal_account,
             operations=operations,
-            diagnostics={**close_target_diagnostics, "post_write_projection_verification": verification},
+            diagnostics={
+                **position_effect_diagnostics,
+                **close_target_diagnostics,
+                "post_write_projection_verification": verification,
+            },
         )
 
     operations = preview_trade_close(
@@ -334,8 +375,421 @@ def resolve_trade_deal(
         deal_id=deal.deal_id,
         account=deal.internal_account,
         operations=operations,
-        diagnostics=close_target_diagnostics,
+        diagnostics={**position_effect_diagnostics, **close_target_diagnostics},
     )
+
+
+def _infer_missing_position_effect(
+    deal: NormalizedTradeDeal,
+    *,
+    repo: OptionPositionsRepoLike,
+) -> _PositionEffectInference:
+    base_diagnostics = {
+        "source": "ledger_context",
+        "original_position_effect": deal.position_effect,
+        "side": deal.side,
+        "option_type": deal.option_type,
+    }
+    if deal.side not in {"buy", "sell"}:
+        return _PositionEffectInference(
+            deal=None,
+            reason="unknown_position_effect",
+            diagnostics={**base_diagnostics, "decision": "unsupported_side"},
+        )
+    missing_identity = [
+        key
+        for key, value in {
+            "contracts": deal.contracts,
+            "strike": deal.strike,
+            "expiration_ymd": deal.expiration_ymd,
+        }.items()
+        if value in (None, "")
+    ]
+    if missing_identity:
+        return _PositionEffectInference(
+            deal=None,
+            reason="unknown_position_effect",
+            diagnostics={**base_diagnostics, "decision": "missing_inference_identity", "missing_fields": missing_identity},
+        )
+
+    close_deal = replace(deal, position_effect="close")
+    close_candidate_summary = _close_candidate_summary(repo, close_deal)
+    try:
+        close_target_resolution = resolve_broker_trade_close_targets(repo, deal=close_deal)
+    except LotCloseResolutionError as exc:
+        close_diagnostics = {
+            "close_match_error": exc.code,
+            "close_candidate_summary": close_candidate_summary,
+        }
+        if close_candidate_summary["exact_contract_count"] > 0:
+            return _PositionEffectInference(
+                deal=None,
+                reason=f"unknown_position_effect:{exc.code}",
+                diagnostics={**base_diagnostics, **close_diagnostics, "decision": "close_target_unresolved"},
+            )
+    else:
+        inferred = replace(
+            close_deal,
+            raw_payload=_with_position_effect_inference_payload(
+                close_deal.raw_payload,
+                inferred_effect="close",
+                reason="matched_existing_position_lot",
+            ),
+        )
+        return _PositionEffectInference(
+            deal=inferred,
+            reason="inferred_close",
+            diagnostics={
+                **base_diagnostics,
+                "decision": "close",
+                "close_target_resolution": close_target_resolution.to_dict(),
+            },
+        )
+
+    if deal.side == "buy" and deal.option_type == "call":
+        companion = _combo_yield_companion_short_put(repo, deal)
+        inferred = replace(
+            deal,
+            position_effect="open",
+            raw_payload=_with_combo_yield_long_call_payload(
+                deal.raw_payload,
+                deal=deal,
+                companion=companion,
+                inferred_position_effect=True,
+            ),
+        )
+        return _PositionEffectInference(
+            deal=inferred,
+            reason="inferred_combo_yield_long_call_open",
+            diagnostics={
+                **base_diagnostics,
+                "decision": "open",
+                "open_reason": (
+                    "buy_call_with_companion_short_put"
+                    if companion is not None
+                    else "buy_call_without_close_target"
+                ),
+                "close_candidate_summary": close_candidate_summary,
+                "companion_short_put": companion,
+            },
+        )
+
+    return _PositionEffectInference(
+        deal=None,
+        reason="unknown_position_effect",
+        diagnostics={
+            **base_diagnostics,
+            "decision": "not_inferred",
+            "close_candidate_summary": close_candidate_summary,
+        },
+    )
+
+
+def _with_position_effect_inference_payload(
+    raw_payload: dict[str, Any],
+    *,
+    inferred_effect: str,
+    reason: str,
+) -> dict[str, Any]:
+    payload = dict(raw_payload or {})
+    payload.setdefault(
+        "position_effect_inference",
+        {
+            "source": "ledger_context",
+            "inferred_position_effect": inferred_effect,
+            "reason": reason,
+        },
+    )
+    return payload
+
+
+def _enrich_combo_yield_open(
+    deal: NormalizedTradeDeal,
+    *,
+    repo: OptionPositionsRepoLike,
+) -> _PositionEffectInference:
+    if deal.side == "buy" and deal.option_type == "call":
+        companion = _combo_yield_companion_short_put(repo, deal)
+        return _PositionEffectInference(
+            deal=replace(
+                deal,
+                raw_payload=_with_combo_yield_long_call_payload(
+                    deal.raw_payload,
+                    deal=deal,
+                    companion=companion,
+                    inferred_position_effect=False,
+                ),
+            ),
+            reason="combo_yield_long_call",
+            diagnostics={
+                "decision": "tag_long_call",
+                "companion_short_put": companion,
+                "strategy_group_id": _stable_combo_yield_group_id(deal),
+            },
+        )
+    if deal.side == "sell" and deal.option_type == "put":
+        companion = _combo_yield_companion_long_call(repo, deal)
+        if companion is None:
+            return _PositionEffectInference(deal=None, reason="not_combo_yield_open")
+        return _PositionEffectInference(
+            deal=replace(
+                deal,
+                raw_payload=_with_combo_yield_sell_put_payload(deal.raw_payload, deal=deal, companion=companion),
+            ),
+            reason="combo_yield_sell_put",
+            diagnostics={
+                "decision": "tag_sell_put",
+                "companion_long_call": companion,
+                "strategy_group_id": _stable_combo_yield_group_id(deal),
+            },
+        )
+    return _PositionEffectInference(deal=None, reason="not_combo_yield_open")
+
+
+def _with_combo_yield_long_call_payload(
+    raw_payload: dict[str, Any],
+    *,
+    deal: NormalizedTradeDeal,
+    companion: dict[str, Any] | None,
+    inferred_position_effect: bool,
+) -> dict[str, Any]:
+    payload = dict(raw_payload or {})
+    if inferred_position_effect:
+        payload = _with_position_effect_inference_payload(
+            payload,
+            inferred_effect="open",
+            reason=(
+                "buy_call_with_companion_short_put"
+                if companion is not None
+                else "buy_call_without_close_target"
+            ),
+        )
+    group_id = _stable_combo_yield_group_id(deal)
+    payload.setdefault("strategy", STRATEGY_COMBO_YIELD)
+    payload.setdefault("leg_role", "enhancement_call")
+    payload.setdefault("yield_enhancement_mode", YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE)
+    if group_id:
+        payload.setdefault("strategy_group_id", group_id)
+    if companion is not None:
+        paired_record_id = str(companion.get("record_id") or "").strip()
+        if paired_record_id:
+            payload.setdefault("paired_short_put_record_id", paired_record_id)
+    snapshot = payload.get("strategy_snapshot")
+    if not isinstance(snapshot, dict):
+        payload["strategy_snapshot"] = {
+            "strategy": STRATEGY_COMBO_YIELD,
+            "strategy_source": "trade_intake_inference",
+            "leg_role": "enhancement_call",
+            "yield_enhancement_mode": YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE,
+        }
+        if group_id:
+            payload["strategy_snapshot"]["strategy_group_id"] = group_id
+    return payload
+
+
+def _with_combo_yield_sell_put_payload(
+    raw_payload: dict[str, Any],
+    *,
+    deal: NormalizedTradeDeal,
+    companion: dict[str, Any],
+) -> dict[str, Any]:
+    payload = dict(raw_payload or {})
+    group_id = _stable_combo_yield_group_id(deal)
+    payload.setdefault("strategy", STRATEGY_COMBO_YIELD)
+    payload.setdefault("leg_role", "sell_put")
+    payload.setdefault("yield_enhancement_mode", YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE)
+    if group_id:
+        payload.setdefault("strategy_group_id", group_id)
+    paired_record_id = str(companion.get("record_id") or "").strip()
+    if paired_record_id:
+        payload.setdefault("paired_long_call_record_id", paired_record_id)
+    snapshot = payload.get("strategy_snapshot")
+    if not isinstance(snapshot, dict):
+        payload["strategy_snapshot"] = {
+            "strategy": STRATEGY_COMBO_YIELD,
+            "strategy_source": "trade_intake_inference",
+            "leg_role": "sell_put",
+            "yield_enhancement_mode": YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE,
+        }
+        if group_id:
+            payload["strategy_snapshot"]["strategy_group_id"] = group_id
+    return payload
+
+
+def _stable_combo_yield_group_id(deal: NormalizedTradeDeal) -> str:
+    account = _normalize_account(deal.internal_account)
+    symbol = _canonical_symbol(deal.symbol)
+    expiration_ymd = str(deal.expiration_ymd or "").strip()
+    return f"combo_yield:{account}:{symbol}:{expiration_ymd}"
+
+
+def _combo_yield_companion_short_put(repo: OptionPositionsRepoLike, deal: NormalizedTradeDeal) -> dict[str, Any] | None:
+    account = _normalize_account(deal.internal_account)
+    symbol = _canonical_symbol(deal.symbol)
+    expiration_ymd = str(deal.expiration_ymd or "").strip()
+    matches: list[dict[str, Any]] = []
+    for row in list_close_lot_candidates(repo):
+        record_id, fields = _record_id_and_fields(row)
+        if not fields:
+            continue
+        if _normalize_account(fields.get("account")) != account:
+            continue
+        if _canonical_symbol(fields.get("symbol")) != symbol:
+            continue
+        if _normalize_option_type(fields.get("option_type")) != "put":
+            continue
+        if _normalize_side(fields.get("side")) != "short":
+            continue
+        if _normalize_status(fields.get("status")) != "open":
+            continue
+        if effective_contracts_open(fields) <= 0:
+            continue
+        if str(effective_expiration_ymd(fields) or "") != expiration_ymd:
+            continue
+        matches.append(
+            {
+                "record_id": record_id,
+                "contracts_open": int(effective_contracts_open(fields)),
+                "strike": effective_strike(fields),
+                "expiration_ymd": expiration_ymd,
+                "strategy": str(fields.get("strategy") or "").strip() or None,
+                "leg_role": str(fields.get("leg_role") or "").strip() or None,
+                "strategy_group_id": str(fields.get("strategy_group_id") or "").strip() or None,
+            }
+        )
+    if len(matches) != 1:
+        return None
+    return matches[0]
+
+
+def _combo_yield_companion_long_call(repo: OptionPositionsRepoLike, deal: NormalizedTradeDeal) -> dict[str, Any] | None:
+    account = _normalize_account(deal.internal_account)
+    symbol = _canonical_symbol(deal.symbol)
+    expiration_ymd = str(deal.expiration_ymd or "").strip()
+    matches: list[dict[str, Any]] = []
+    for row in list_close_lot_candidates(repo):
+        record_id, fields = _record_id_and_fields(row)
+        if not fields:
+            continue
+        if _normalize_account(fields.get("account")) != account:
+            continue
+        if _canonical_symbol(fields.get("symbol")) != symbol:
+            continue
+        if _normalize_option_type(fields.get("option_type")) != "call":
+            continue
+        if _normalize_side(fields.get("side")) != "long":
+            continue
+        if _normalize_status(fields.get("status")) != "open":
+            continue
+        if effective_contracts_open(fields) <= 0:
+            continue
+        if str(effective_expiration_ymd(fields) or "") != expiration_ymd:
+            continue
+        matches.append(
+            {
+                "record_id": record_id,
+                "contracts_open": int(effective_contracts_open(fields)),
+                "strike": effective_strike(fields),
+                "expiration_ymd": expiration_ymd,
+                "strategy": str(fields.get("strategy") or "").strip() or None,
+                "leg_role": str(fields.get("leg_role") or "").strip() or None,
+                "strategy_group_id": str(fields.get("strategy_group_id") or "").strip() or None,
+            }
+        )
+    if len(matches) != 1:
+        return None
+    return matches[0]
+
+
+def _close_candidate_summary(repo: OptionPositionsRepoLike, deal: NormalizedTradeDeal) -> dict[str, Any]:
+    account = _normalize_account(deal.internal_account)
+    symbol = _canonical_symbol(deal.symbol)
+    option_type = _normalize_option_type(deal.option_type)
+    target_side = "short" if deal.side == "buy" else "long"
+    expiration_ymd = str(deal.expiration_ymd or "").strip()
+    strike = _safe_float(deal.strike)
+    semantic_count = 0
+    exact_contract_count = 0
+    exact_open_contracts = 0
+    for row in list_close_lot_candidates(repo):
+        _record_id, fields = _record_id_and_fields(row)
+        if not fields:
+            continue
+        if _normalize_account(fields.get("account")) != account:
+            continue
+        if _canonical_symbol(fields.get("symbol")) != symbol:
+            continue
+        if _normalize_option_type(fields.get("option_type")) != option_type:
+            continue
+        if _normalize_side(fields.get("side")) != target_side:
+            continue
+        if _normalize_status(fields.get("status")) != "open":
+            continue
+        open_contracts = effective_contracts_open(fields)
+        if open_contracts <= 0:
+            continue
+        semantic_count += 1
+        if str(effective_expiration_ymd(fields) or "") != expiration_ymd:
+            continue
+        if not _same_optional_float(effective_strike(fields), strike):
+            continue
+        exact_contract_count += 1
+        exact_open_contracts += int(open_contracts)
+    return {
+        "semantic_count": semantic_count,
+        "exact_contract_count": exact_contract_count,
+        "exact_open_contracts": exact_open_contracts,
+        "requested_contracts": int(deal.contracts or 0),
+    }
+
+
+def _record_id_and_fields(row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    record_id = str(row.get("record_id") or row.get("id") or "").strip()
+    fields = row.get("fields")
+    if isinstance(fields, dict):
+        return record_id, dict(fields)
+    return record_id, {}
+
+
+def _normalize_account(value: Any) -> str:
+    try:
+        return normalize_account(value)
+    except Exception:
+        return str(value or "").strip().lower()
+
+
+def _canonical_symbol(value: Any) -> str:
+    return canonical_symbol(value) or str(value or "").strip().upper()
+
+
+def _normalize_option_type(value: Any) -> str:
+    try:
+        return normalize_option_type(value)
+    except Exception:
+        return str(value or "").strip().lower()
+
+
+def _normalize_side(value: Any) -> str:
+    try:
+        return normalize_side(value)
+    except Exception:
+        return str(value or "").strip().lower()
+
+
+def _normalize_status(value: Any) -> str:
+    try:
+        return normalize_status(value)
+    except Exception:
+        return str(value or "").strip().lower()
+
+
+def _same_optional_float(left: Any, right: Any) -> bool:
+    if left is None or right is None:
+        return left is None and right is None
+    try:
+        return abs(float(left) - float(right)) < 1e-9
+    except (TypeError, ValueError):
+        return False
 
 
 def _verify_applied_close_projection(*, repo: OptionPositionsRepoLike, operations: list[BrokerTradeOperation]) -> dict[str, Any]:
@@ -409,6 +863,15 @@ def _safe_int(value: Any) -> int:
         return int(value or 0)
     except Exception:
         return 0
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        if value in (None, ""):
+            return None
+        return float(value)
+    except Exception:
+        return None
 
 
 def _contracts_open(fields: dict[str, Any]) -> int:
