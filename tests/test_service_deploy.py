@@ -84,9 +84,12 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
     assert "OnBootSec=2min" not in tick_timer
     assert str(repo / "om") + " run trade-intake" in intake
     assert "Restart=always" in intake
+    assert "[Install]\nWantedBy=multi-user.target" in intake
+    assert "[Install]\nWantedBy=multi-user.target" not in tick
     assert "OnCalendar=*-*-* 09:00:00 Asia/Shanghai" in auto_close_timer
     assert str(repo / "om") + " option-positions --data-config " + str(runtime / "portfolio.runtime.json") in verify
     assert "verify-projection --mode auto" in verify
+    assert "[Install]\nWantedBy=multi-user.target" not in verify
     assert "OnCalendar=*-*-* 09:30:00 Asia/Shanghai" in verify_timer
     assert profile["service_provider"] == "systemd"
     assert profile["runtime_root"] == str(runtime)
@@ -124,6 +127,7 @@ def test_render_systemd_bundle_can_include_opend_service(tmp_path: Path) -> None
     assert "WorkingDirectory=" + str(opend) in opend_service
     assert "ExecStart=" + str(opend / "FutuOpenD") in opend_service
     assert "Restart=always" in opend_service
+    assert "[Install]\nWantedBy=multi-user.target" in opend_service
     assert "Before=options-monitor-trade-intake.service" in opend_service
     assert "After=network-online.target options-monitor-opend.service" in intake
     assert "Wants=network-online.target options-monitor-opend.service" in intake
@@ -693,6 +697,7 @@ def test_render_systemd_bundle_can_include_feishu_ws_service(tmp_path: Path) -> 
     assert "--audit-db " + str(runtime / "output_shared" / "state" / "inbound_control.sqlite3") in service
     assert "--lock-path " + str(runtime / "locks" / "feishu-ws.lock") in service
     assert "Restart=always" in service
+    assert "[Install]\nWantedBy=multi-user.target" in service
     assert {"name": "options-monitor-feishu-ws.service"} in profile["services"]
     assert profile["restart"]["services"] == [
         "options-monitor-trade-intake.service",
@@ -739,6 +744,7 @@ def test_render_systemd_bundle_can_include_wechat_clawbot_service(tmp_path: Path
     assert "--allowed-senders wechat:user_1" in service
     assert "--lock-path " + str(runtime / "locks" / "wechat-clawbot.lock") in service
     assert "Restart=always" in service
+    assert "[Install]\nWantedBy=multi-user.target" in service
     assert {"name": "options-monitor-wechat-clawbot.service"} in profile["services"]
     assert profile["restart"]["services"] == [
         "options-monitor-trade-intake.service",

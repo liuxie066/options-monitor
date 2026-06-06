@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.229 - 2026-06-06
+
+### Fixed
+- Added `WantedBy=multi-user.target` install sections to restartable systemd services so OpenD, trade-intake, Feishu WS, and WeChat ClawBot can be enabled cleanly and survive host reboots.
+
 ## 1.2.228 - 2026-06-06
 
 ### Fixed
