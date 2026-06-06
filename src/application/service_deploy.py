@@ -10,6 +10,7 @@ from json import JSONDecodeError
 from pathlib import Path
 from typing import Any, Callable, Literal, cast
 
+from src.application.config_yaml import resolve_yaml_assistant_config
 from src.application.platform_profile import default_runtime_root_for_service_target
 from src.application.settings import build_effective_env
 
@@ -97,6 +98,44 @@ def _resolve_feishu_ws_config_key(
     if len(market_values) == 1:
         return market_values[0]
     raise ValueError("feishu_ws_config_key is required when rendering Feishu WS for multiple markets")
+
+
+def _resolve_wechat_clawbot_config_key(
+    value: str | None,
+    *,
+    markets: list[str],
+    include_wechat_clawbot: bool,
+) -> str | None:
+    if not include_wechat_clawbot:
+        return None
+    key = str(value or "").strip().lower()
+    if key:
+        if key not in {"us", "hk"}:
+            raise ValueError("wechat_clawbot_config_key must be us or hk")
+        return key
+    market_values = [market for market in markets if market in {"us", "hk"}]
+    if len(market_values) == 1:
+        return market_values[0]
+    raise ValueError("wechat_clawbot_config_key is required when rendering WeChat ClawBot for multiple markets")
+
+
+def _wechat_clawbot_inbound_config_from_yaml(*, repo_root: Path, config_yaml_path: Path | None) -> dict[str, Any]:
+    if config_yaml_path is None:
+        return {}
+    assistant_cfg, _meta = resolve_yaml_assistant_config(repo_root=repo_root, config_path=config_yaml_path)
+    inbound = assistant_cfg.get("inbound")
+    if not isinstance(inbound, dict):
+        return {}
+    wechat_clawbot = inbound.get("wechat_clawbot")
+    return dict(wechat_clawbot) if isinstance(wechat_clawbot, dict) else {}
+
+
+def _first_text(*values: Any) -> str | None:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return None
 
 
 def default_runtime_root(target: ServiceTarget, *, home: Path | None = None) -> Path:
@@ -323,13 +362,19 @@ def build_service_profile(
     auto_upgrade_enabled: bool = False,
     opend: dict[str, Any] | None = None,
     feishu_ws: dict[str, Any] | None = None,
+    wechat_clawbot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     restartable_services = [
         name
         for name in service_names
         if (
             str(name).endswith(".service")
-            and ("opend" in str(name) or "trade-intake" in str(name) or "feishu-ws" in str(name))
+            and (
+                "opend" in str(name)
+                or "trade-intake" in str(name)
+                or "feishu-ws" in str(name)
+                or "wechat-clawbot" in str(name)
+            )
         )
     ]
     profile: dict[str, Any] = {
@@ -388,6 +433,8 @@ def build_service_profile(
         profile["opend"] = dict(opend)
     if feishu_ws is not None:
         profile["feishu_ws"] = dict(feishu_ws)
+    if wechat_clawbot is not None:
+        profile["wechat_clawbot"] = dict(wechat_clawbot)
     return profile
 
 
@@ -411,6 +458,10 @@ def render_service_bundle(
     opend_executable: str | Path | None = None,
     include_feishu_ws: bool = False,
     feishu_ws_config_key: str | None = None,
+    include_wechat_clawbot: bool = False,
+    wechat_clawbot_config_key: str | None = None,
+    wechat_clawbot_label: str | None = None,
+    wechat_clawbot_allowed_senders: str | None = None,
     include_content: bool = True,
 ) -> dict[str, Any]:
     target_key = normalize_target(target)
@@ -474,6 +525,33 @@ def render_service_bundle(
         feishu_ws_config_key,
         markets=market_values,
         include_feishu_ws=include_feishu_ws,
+    )
+    wechat_clawbot_config_key_value = _resolve_wechat_clawbot_config_key(
+        wechat_clawbot_config_key,
+        markets=market_values,
+        include_wechat_clawbot=include_wechat_clawbot,
+    )
+    wechat_clawbot_cfg = (
+        _wechat_clawbot_inbound_config_from_yaml(repo_root=repo, config_yaml_path=config_yaml_path)
+        if include_wechat_clawbot
+        else {}
+    )
+    wechat_clawbot_label_value = _first_text(wechat_clawbot_label, wechat_clawbot_cfg.get("label")) or "default"
+    wechat_clawbot_state_dir_configured = _first_text(wechat_clawbot_cfg.get("state_dir"))
+    wechat_clawbot_allowed_senders_explicit = bool(_first_text(wechat_clawbot_allowed_senders))
+    wechat_clawbot_allowed_senders_value = _first_text(
+        wechat_clawbot_allowed_senders,
+        wechat_clawbot_cfg.get("allowed_senders"),
+    ) or ""
+    if include_wechat_clawbot and not wechat_clawbot_allowed_senders_value:
+        raise ValueError(
+            "wechat_clawbot_allowed_senders or inbound.wechat_clawbot.allowed_senders is required "
+            "when rendering WeChat ClawBot"
+        )
+    wechat_clawbot_state_dir = (
+        _absolute_path_preserve_symlink(wechat_clawbot_state_dir_configured, base=repo)
+        if wechat_clawbot_state_dir_configured
+        else runtime / "output_shared" / "state" / "channels" / "wechat_clawbot" / wechat_clawbot_label_value
     )
 
     files: list[RenderedServiceFile] = []
@@ -780,6 +858,51 @@ def render_service_bundle(
                 kind="systemd_service",
                 service_name=ws_service,
             )
+
+        if include_wechat_clawbot:
+            assert wechat_clawbot_config_key_value is not None
+            wechat_service = "options-monitor-wechat-clawbot.service"
+            wechat_args = [
+                om,
+                "channel",
+                "wechat-clawbot",
+                "serve",
+                "--label",
+                wechat_clawbot_label_value,
+                "--state-dir",
+                str(wechat_clawbot_state_dir),
+                "--config-key",
+                wechat_clawbot_config_key_value,
+                "--config-path",
+                str(config_by_market.get(wechat_clawbot_config_key_value) or config_by_market[market_values[0]]),
+            ]
+            if assistant_config_path is not None:
+                wechat_args.extend(["--assistant-config", str(assistant_config_path)])
+            wechat_args.extend([
+                "--audit-db",
+                str(inbound_audit_db),
+                "--lock-path",
+                str(lock_root / "wechat-clawbot.lock"),
+            ])
+            if wechat_clawbot_allowed_senders_explicit:
+                wechat_args.extend(["--allowed-senders", wechat_clawbot_allowed_senders_value])
+            add(
+                f"systemd/{wechat_service}",
+                _systemd_unit(
+                    description="Options Monitor WeChat ClawBot inbound",
+                    repo_root=repo,
+                    runtime_root=runtime,
+                    env_file=env_file_path,
+                    deploy_user=systemd_user,
+                    deploy_home=systemd_home,
+                    exec_args=wechat_args,
+                    service_type="simple",
+                    restart="always",
+                ),
+                install_path=f"/etc/systemd/system/{wechat_service}",
+                kind="systemd_service",
+                service_name=wechat_service,
+            )
     else:
         for market in market_values:
             label = f"com.options-monitor.tick-{market}"
@@ -1012,6 +1135,49 @@ def render_service_bundle(
                 service_name=ws_label,
             )
 
+        if include_wechat_clawbot:
+            assert wechat_clawbot_config_key_value is not None
+            wechat_label = "com.options-monitor.wechat-clawbot"
+            wechat_args = [
+                om,
+                "channel",
+                "wechat-clawbot",
+                "serve",
+                "--label",
+                wechat_clawbot_label_value,
+                "--state-dir",
+                str(wechat_clawbot_state_dir),
+                "--config-key",
+                wechat_clawbot_config_key_value,
+                "--config-path",
+                str(config_by_market.get(wechat_clawbot_config_key_value) or config_by_market[market_values[0]]),
+            ]
+            if assistant_config_path is not None:
+                wechat_args.extend(["--assistant-config", str(assistant_config_path)])
+            wechat_args.extend([
+                "--audit-db",
+                str(inbound_audit_db),
+                "--lock-path",
+                str(lock_root / "wechat-clawbot.lock"),
+            ])
+            if wechat_clawbot_allowed_senders_explicit:
+                wechat_args.extend(["--allowed-senders", wechat_clawbot_allowed_senders_value])
+            add(
+                f"launchd/{wechat_label}.plist",
+                _launchd_plist(
+                    label=wechat_label,
+                    repo_root=repo,
+                    runtime_root=runtime,
+                    program_args=wechat_args,
+                    log_root=log_root,
+                    env_file=env_file_path,
+                    keep_alive=True,
+                ),
+                install_path=f"~/Library/LaunchAgents/{wechat_label}.plist",
+                kind="launchd_plist",
+                service_name=wechat_label,
+            )
+
     profile = build_service_profile(
         target=target_key,
         repo_root=repo,
@@ -1039,6 +1205,18 @@ def render_service_bundle(
             "audit_db": str(inbound_audit_db),
             "lock_path": str(lock_root / "feishu-ws.lock"),
         } if include_feishu_ws else None,
+        wechat_clawbot={
+            "enabled": True,
+            "label": wechat_clawbot_label_value,
+            "config_key": wechat_clawbot_config_key_value,
+            "state_dir": str(wechat_clawbot_state_dir),
+            **({"assistant_config_path": str(assistant_config_path)} if assistant_config_path is not None else {}),
+            "audit_db": str(inbound_audit_db),
+            "allowed_senders_configured": bool(wechat_clawbot_allowed_senders_value),
+            "allowed_senders_source": ("render_argument" if wechat_clawbot_allowed_senders_explicit else "config_yaml"),
+            **({"allowed_senders": wechat_clawbot_allowed_senders_value} if wechat_clawbot_allowed_senders_explicit else {}),
+            "lock_path": str(lock_root / "wechat-clawbot.lock"),
+        } if include_wechat_clawbot else None,
     )
     profile_content = json.dumps(profile, ensure_ascii=False, indent=2) + "\n"
     add(
@@ -1094,7 +1272,12 @@ def _install_commands(target: ServiceTarget, *, files: list[RenderedServiceFile]
             Path(item.install_path).name
             for item in files
             if item.kind == "systemd_service"
-            and ("opend" in item.install_path or "trade-intake" in item.install_path or "feishu-ws" in item.install_path)
+            and (
+                "opend" in item.install_path
+                or "trade-intake" in item.install_path
+                or "feishu-ws" in item.install_path
+                or "wechat-clawbot" in item.install_path
+            )
         ]
         return {
             "prepare": mkdirs,
@@ -1268,6 +1451,7 @@ def service_status_from_profile(
     profile: dict[str, Any],
     *,
     include_status: bool = False,
+    include_enabled: bool = False,
     run_cmd: Callable[..., Any] = subprocess.run,
 ) -> dict[str, Any]:
     provider = str(profile.get("service_provider") or profile.get("provider") or "manual").strip().lower()
@@ -1294,7 +1478,13 @@ def service_status_from_profile(
     checked: list[dict[str, Any]] = []
     for service in normalized_services:
         name = str(service.get("name") or "")
-        checked.append({**service, **_check_one_service(provider=provider, name=name, run_cmd=run_cmd)})
+        active = _check_one_service(provider=provider, name=name, run_cmd=run_cmd)
+        checked_service = {**service, **active}
+        if include_enabled:
+            enabled = _check_one_service_enabled(provider=provider, name=name, run_cmd=run_cmd)
+            checked_service["active"] = active
+            checked_service["enabled"] = enabled
+        checked.append(checked_service)
     out["services"] = checked
     return out
 
@@ -1305,6 +1495,14 @@ def _check_one_service(*, provider: str, name: str, run_cmd: Callable[..., Any])
     if provider == "launchd":
         return _run_status_command(["launchctl", "print", f"gui/{os.getuid()}/{name}"], run_cmd=run_cmd)
     return {"status": "skipped", "message": f"service provider does not support command checks: {provider}"}
+
+
+def _check_one_service_enabled(*, provider: str, name: str, run_cmd: Callable[..., Any]) -> dict[str, Any]:
+    if provider == "systemd":
+        return _run_status_command(["systemctl", "is-enabled", name], run_cmd=run_cmd)
+    if provider == "launchd":
+        return {"status": "skipped", "message": "launchd enabled state is managed by installed plist presence"}
+    return {"status": "skipped", "message": f"service provider does not support enabled checks: {provider}"}
 
 
 def _run_status_command(command: list[str], *, run_cmd: Callable[..., Any]) -> dict[str, Any]:

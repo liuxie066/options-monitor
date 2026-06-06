@@ -379,6 +379,9 @@ markets:
 inbound:
   feishu_ws:
     ack_reaction: THUMBSUP
+  wechat_clawbot:
+    allowed_senders: wechat:user_1
+    poll_interval_sec: 0.5
 """,
     )
 
@@ -389,6 +392,11 @@ inbound:
     assert cfg["inbound"]["feishu_ws"]["reply_enabled"] is True
     assert cfg["inbound"]["feishu_ws"]["queue_size"] == 100
     assert cfg["inbound"]["feishu_ws"]["ack_reaction"] == "THUMBSUP"
+    assert cfg["inbound"]["wechat_clawbot"]["label"] == "default"
+    assert cfg["inbound"]["wechat_clawbot"]["allowed_senders"] == "wechat:user_1"
+    assert cfg["inbound"]["wechat_clawbot"]["reply_enabled"] is True
+    assert cfg["inbound"]["wechat_clawbot"]["max_reply_chars"] == 3500
+    assert cfg["inbound"]["wechat_clawbot"]["poll_interval_sec"] == 0.5
 
 
 def test_yaml_assistant_config_unwraps_explicit_system_defaults(tmp_path: Path) -> None:

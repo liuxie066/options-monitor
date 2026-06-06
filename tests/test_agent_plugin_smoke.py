@@ -679,6 +679,73 @@ def test_healthcheck_warns_on_notification_placeholder_values(monkeypatch, tmp_p
     assert any("example Feishu bot credentials" in item for item in out["warnings"])
 
 
+def test_healthcheck_reports_unified_channel_health(monkeypatch, tmp_path: Path) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+    import src.application.agent_tool_handlers as tools
+
+    cfg_path = _write_healthcheck_config(tmp_path)
+    monkeypatch.setattr(
+        tools,
+        "_run_futu_doctor",
+        lambda **kwargs: {
+            "ok": True,
+            "sdk": {"ok": True},
+            "watchdog": {"ok": True},
+        },
+    )
+    assistant_config = tmp_path / "resolved" / "config.assistant.json"
+    assistant_config.parent.mkdir()
+    assistant_config.write_text(
+        json.dumps(
+            {
+                "inbound": {
+                    "wechat_clawbot": {
+                        "label": "ops",
+                        "allowed_senders": "wechat:user_1",
+                    }
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    state_dir = tmp_path / "output_shared" / "state" / "channels" / "wechat_clawbot" / "ops"
+    state_dir.mkdir(parents=True)
+    (state_dir / "state.json").write_text(
+        json.dumps({"bot_token": "bot_secret_1", "base_url": "https://example.invalid"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    profile_path = tmp_path / "service.profile.json"
+    profile_path.write_text(
+        json.dumps(
+            {
+                "service_provider": "systemd",
+                "runtime_root": str(tmp_path),
+                "assistant_config_path": str(assistant_config),
+                "wechat_clawbot": {
+                    "enabled": True,
+                    "label": "ops",
+                    "state_dir": str(state_dir),
+                    "assistant_config_path": str(assistant_config),
+                    "allowed_senders_configured": True,
+                    "allowed_senders_source": "config_yaml",
+                },
+                "services": [{"name": "options-monitor-wechat-clawbot.service"}],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    out = run_tool("healthcheck", {"config_path": str(cfg_path), "profile_path": str(profile_path)})
+
+    checks = {item["name"]: item for item in out["data"]["checks"]}
+    assert checks["channel_health"]["status"] == "ok"
+    assert out["data"]["channel_health"]["wechat_clawbot"]["available"] is True
+    assert out["data"]["channel_health"]["wechat_clawbot"]["allowed_senders_configured"] is True
+    assert "bot_secret_1" not in json.dumps(out, ensure_ascii=False)
+
+
 def test_get_portfolio_context_allows_futu_source_without_explicit_data_config(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
     import src.application.agent_tool_handlers as tools
@@ -1713,6 +1780,63 @@ def test_runtime_status_uses_service_profile_assistant_config_and_env_file(tmp_p
     assert data["environment"]["entries"]["DEEPSEEK_API_KEY"]["configured"] is True
     assert data["environment"]["entries"]["DEEPSEEK_API_KEY"]["source"] == f"env_file:{env_file}"
     assert data["summary"]["env_file_loaded"] is True
+
+
+def test_runtime_status_reports_wechat_clawbot_channel_health(tmp_path: Path) -> None:
+    fixture = _runtime_status_upgrade_fixture(tmp_path)
+    assistant_path = tmp_path / "assistant" / "config.assistant.json"
+    assistant_path.parent.mkdir()
+    assistant_path.write_text(
+        json.dumps(
+            {
+                "inbound": {
+                    "wechat_clawbot": {
+                        "label": "ops",
+                        "allowed_senders": "wechat:user_1",
+                        "reply_enabled": False,
+                    }
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    state_dir = tmp_path / "output_shared" / "state" / "channels" / "wechat_clawbot" / "ops"
+    state_dir.mkdir(parents=True)
+    (state_dir / "state.json").write_text(
+        json.dumps({"bot_token": "bot_secret_1", "base_url": "https://example.invalid"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (tmp_path / "service.profile.json").write_text(
+        json.dumps(
+            {
+                "service_provider": "systemd",
+                "runtime_root": str(tmp_path),
+                "assistant_config_path": str(assistant_path),
+                "wechat_clawbot": {
+                    "enabled": True,
+                    "label": "ops",
+                    "state_dir": str(state_dir),
+                    "assistant_config_path": str(assistant_path),
+                },
+                "services": [{"name": "options-monitor-wechat-clawbot.service"}],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    data, _warnings, _meta = _call_runtime_status_for_upgrade(tmp_path, fixture["cfg_path"], fixture["cfg"])
+
+    health = data["channel_health"]["wechat_clawbot"]
+    assert health["configured"] is True
+    assert health["available"] is True
+    assert health["label"] == "ops"
+    assert health["allowed_senders_configured"] is True
+    assert health["bot_token_configured"] is True
+    assert health["reply_enabled"] is False
+    assert data["summary"]["wechat_clawbot_available"] is True
+    assert "bot_secret_1" not in json.dumps(data, ensure_ascii=False)
 
 
 def test_runtime_status_auto_loads_runtime_service_profile_paths(tmp_path: Path) -> None:

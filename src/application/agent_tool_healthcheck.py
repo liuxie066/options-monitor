@@ -9,6 +9,7 @@ from typing import Any, Callable
 from domain.domain.multi_tick import FEISHU_APP_NOTIFICATION_PROVIDER, normalize_notification_provider
 from src.application.agent_tool_config import repo_base
 from src.application.assistant.audit import default_audit_db_path
+from src.application.channels.status import build_channel_status
 from src.application.environment_status import build_effective_env_with_status
 from src.application.ledger.api import ledger_store_payload
 from src.application.secret_resolver import (
@@ -349,6 +350,20 @@ def run_healthcheck_tool(
     checks.append(feishu_service_check)
     warnings.extend(feishu_service_warnings)
 
+    channel_status = build_channel_status(
+        base=repo_base(),
+        runtime_root=Path(config_path).parent,
+        payload=payload,
+        environ=effective_env.values,
+        mask_path=mask_path,
+        include_service_status=bool(payload.get("include_service_status", False)),
+    )
+    channel_health_raw = channel_status.get("channels")
+    channel_health = channel_health_raw if isinstance(channel_health_raw, dict) else {}
+    channel_health_check, channel_health_warnings = _channel_health_check(channel_status)
+    checks.append(channel_health_check)
+    warnings.extend(channel_health_warnings)
+
     option_positions_bootstrap_status = None
     option_positions_bootstrap_message = None
     if data_config_path.exists() or not data_config_ref:
@@ -647,6 +662,8 @@ def run_healthcheck_tool(
             },
             "environment": environment,
             "account_paths": account_paths,
+            "channel_health": channel_health,
+            "channel_status": channel_status,
             "checks": checks,
             "tools": tools,
             "summary": {
@@ -762,6 +779,33 @@ def _feishu_inbound_check(
             "value": value,
         },
         ["Feishu inbound check warning: " + "; ".join(problems)],
+    )
+
+
+def _channel_health_check(channel_status: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    channels_raw = channel_status.get("channels")
+    channels: dict[str, Any] = channels_raw if isinstance(channels_raw, dict) else {}
+    unavailable = [
+        str(name)
+        for name, raw in channels.items()
+        if isinstance(raw, dict)
+        and (bool(raw.get("profile_enabled")) or bool(raw.get("service_present")))
+        and not bool(raw.get("available"))
+    ]
+    status = "warn" if unavailable else "ok"
+    message = "channel health is readable"
+    warnings: list[str] = []
+    if unavailable:
+        message = "configured channel is not available: " + ", ".join(sorted(unavailable))
+        warnings.append(message)
+    return (
+        {
+            "name": "channel_health",
+            "status": status,
+            "message": message,
+            "value": channel_status,
+        },
+        warnings,
     )
 
 
