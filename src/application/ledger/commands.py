@@ -28,12 +28,14 @@ from src.application.ledger.lot_resolver import (
     LotCloseMatch,
     LotCloseResolutionError,
     LotCloseSelector,
+    find_unique_open_lot,
     load_close_candidate_records,
     resolve_explicit_close_target,
     resolve_fifo_close_lots,
     resolve_fifo_close_targets,
     resolve_unique_close_lot,
     resolve_unique_close_target,
+    summarize_close_candidates,
 )
 from src.application.ledger.maintenance import (
     auto_close_expired_positions,
@@ -1538,6 +1540,54 @@ def resolve_broker_trade_close_targets(repo: Any, *, deal: Any) -> CloseTargetRe
     return resolve_fifo_close_targets(repo, selector, source="broker_trade_close")
 
 
+def summarize_broker_trade_close_candidates(repo: Any, *, deal: Any) -> dict[str, Any]:
+    deal_side = str(getattr(deal, "side", "") or "").strip().lower()
+    target_position_side = "short" if deal_side == "buy" else "long"
+    selector = LotCloseSelector.from_values(
+        broker=getattr(deal, "broker", None) or "富途",
+        account=getattr(deal, "internal_account", None),
+        symbol=getattr(deal, "symbol", None),
+        option_type=getattr(deal, "option_type", None),
+        position_side=target_position_side,
+        strike=getattr(deal, "strike", None),
+        expiration_ymd=getattr(deal, "expiration_ymd", None),
+        contracts_to_close=getattr(deal, "contracts", None) or 0,
+    )
+    return summarize_close_candidates(repo, selector)
+
+
+def find_unique_open_position_lot(
+    repo: Any,
+    *,
+    broker: Any = None,
+    account: Any,
+    symbol: Any,
+    option_type: Any,
+    side: Any,
+    expiration_ymd: Any = None,
+) -> dict[str, Any] | None:
+    candidate = find_unique_open_lot(
+        repo,
+        broker=broker,
+        account=account,
+        symbol=symbol,
+        option_type=option_type,
+        side=side,
+        expiration_ymd=expiration_ymd,
+    )
+    if candidate is None:
+        return None
+    return {
+        "record_id": candidate.record_id,
+        "contracts_open": int(candidate.contracts_open or 0),
+        "strike": candidate.strike,
+        "expiration_ymd": candidate.expiration_ymd,
+        "strategy": str(candidate.raw_fields.get("strategy") or "").strip() or None,
+        "leg_role": str(candidate.raw_fields.get("leg_role") or "").strip() or None,
+        "strategy_group_id": str(candidate.raw_fields.get("strategy_group_id") or "").strip() or None,
+    }
+
+
 def list_close_lot_candidates(repo: Any) -> list[dict[str, Any]]:
     return load_close_candidate_records(repo)
 
@@ -1668,6 +1718,7 @@ __all__ = [
     "LotCloseMatch",
     "LotCloseResolutionError",
     "CloseTargetResolution",
+    "find_unique_open_position_lot",
     "list_close_lot_candidates",
     "list_expiry_close_position_lots",
     "plan_expired_position_closes",
@@ -1700,5 +1751,6 @@ __all__ = [
     "resolve_broker_trade_close_targets",
     "resolve_manual_position_close_lot",
     "resolve_manual_position_close_target",
+    "summarize_broker_trade_close_candidates",
     "verify_position_lot_projection",
 ]

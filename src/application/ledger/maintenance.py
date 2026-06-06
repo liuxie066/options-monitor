@@ -264,6 +264,36 @@ def build_expired_close_decisions(
                 )
             )
             continue
+        if not should_close:
+            eligible_after_ms = int(exp_ms) + int(grace_days) * 86400 * 1000
+            eligible_after_dt = exp_ms_to_datetime(eligible_after_ms)
+            expired_but_waiting = int(exp_ms) <= int(as_of_ms)
+            skip_reason = "grace_period_pending" if expired_but_waiting else "not_expired"
+            reason_prefix = "expired but waiting grace cutoff" if expired_but_waiting else "not expired"
+            decisions.append(
+                ExpiredCloseDecision(
+                    record_id=record_id,
+                    position_id=position_id,
+                    expiration_ms=int(exp_ms),
+                    raw_expiration_ms=raw_exp_ms,
+                    expiration_ymd=exp_ymd,
+                    effective_exp_source=exp_source,
+                    should_close=False,
+                    reason=(
+                        f"{reason_prefix}: exp={exp_ms_to_ymd(exp_ms) or exp_ms} "
+                        f"eligible_after_utc={eligible_after_dt.isoformat() if eligible_after_dt else eligible_after_ms} "
+                        f"grace_days={grace_days} as_of_utc={as_of_dt.isoformat()}"
+                    ),
+                    skip_reason=skip_reason,
+                    contracts_open=contracts_open,
+                    patch=None,
+                    details={
+                        "eligible_after_ms": eligible_after_ms,
+                        "eligible_after_utc": eligible_after_dt.isoformat() if eligible_after_dt else None,
+                    },
+                )
+            )
+            continue
         patch_contract = (
             build_expire_auto_close_patch_contract(
                 fields,
@@ -288,6 +318,7 @@ def build_expired_close_decisions(
                     f"expired: exp={exp_ms_to_ymd(exp_ms) or exp_ms} "
                     f"grace_days={grace_days} as_of_utc={as_of_dt.isoformat()}"
                 ),
+                contracts_open=contracts_open,
                 patch=patch_contract,
             )
         )

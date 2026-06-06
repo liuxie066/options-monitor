@@ -136,6 +136,39 @@ def test_resolve_unknown_buy_call_with_companion_put_as_combo_yield_long_call() 
     assert fields["strategy_group_id"] == "combo_yield:lx:PDD:2026-07-17"
 
 
+def test_combo_yield_group_id_canonicalizes_hk_option_alias() -> None:
+    repo = FakeRepo(
+        [
+            _position_record(
+                "lot_tch_short_put",
+                symbol="0700.HK",
+                strike=440.0,
+                expiration_ymd="2026-06-05",
+            )
+        ]
+    )
+    deal = _deal(
+        deal_id="deal-tch-long-call",
+        symbol="TCH",
+        option_type="call",
+        side="buy",
+        position_effect=None,
+        contracts=1,
+        price=0.73,
+        strike=520.0,
+        expiration_ymd="2026-06-05",
+        currency="HKD",
+        raw_payload={"deal_id": "deal-tch-long-call", "code": "HK.TCH260605C520000"},
+    )
+
+    result = resolve_trade_deal(deal, repo=repo, state={}, apply_changes=False)
+
+    assert result.status == "dry_run"
+    fields = result.operations[0]["fields"]
+    assert fields["strategy"] == "combo_yield"
+    assert fields["strategy_group_id"] == "combo_yield:lx:0700.HK:2026-06-05"
+
+
 def test_resolve_unknown_buy_call_without_companion_opens_pending_combo_yield_long_call() -> None:
     deal = _deal(
         deal_id="deal-pdd-long-call",

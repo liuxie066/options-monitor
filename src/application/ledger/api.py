@@ -9,6 +9,7 @@ from src.application.ledger.commands import (
     LotCloseCandidate,
     LotCloseMatch,
     LotCloseResolutionError,
+    find_unique_open_position_lot,
     list_close_lot_candidates,
     list_expiry_close_position_lots,
     plan_expired_position_closes,
@@ -41,6 +42,7 @@ from src.application.ledger.commands import (
     resolve_broker_trade_close_targets,
     resolve_manual_position_close_lot,
     resolve_manual_position_close_target,
+    summarize_broker_trade_close_candidates,
     verify_position_lot_projection,
 )
 from src.application.ledger.errors import LedgerPreflightError
@@ -98,6 +100,7 @@ __all__ = [
     "format_position_cash_secured",
     "format_position_money",
     "inspect_ledger_stores",
+    "find_unique_open_position_lot",
     "list_close_lot_candidates",
     "list_canonical_position_lot_snapshots",
     "list_expiry_close_position_lots",
@@ -153,6 +156,7 @@ __all__ = [
     "resolve_manual_position_close_target",
     "resolve_position_lot_snapshots",
     "summarize_position_lot_shadow_status",
+    "summarize_broker_trade_close_candidates",
     "trade_event_log",
     "trade_event_projection_preview",
     "verify_position_lot_projection",

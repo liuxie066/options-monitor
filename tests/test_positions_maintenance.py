@@ -96,6 +96,69 @@ def test_position_maintenance_filters_account_and_broker_in_dry_run(monkeypatch,
     assert result["receipt"]["reason"] == "dry_run"
 
 
+def test_position_maintenance_surfaces_grace_pending_expired_positions(monkeypatch, tmp_path: Path) -> None:
+    from src.application.positions import maintenance as mod
+
+    data_config = tmp_path / "data.json"
+    data_config.write_text(json.dumps({"option_positions": {"sqlite_path": str(tmp_path / "pos.sqlite3")}}), encoding="utf-8")
+    report_dir = tmp_path / "reports"
+    fake_repo = object()
+
+    monkeypatch.setattr(mod, "resolve_data_config_path", lambda **_kwargs: data_config)
+    monkeypatch.setattr(mod, "open_position_ledger", lambda _path: fake_repo)
+    monkeypatch.setattr(
+        mod,
+        "_load_expiry_close_position_lots",
+        lambda _repo: [
+            {
+                "record_id": "rec_wait",
+                "fields": {
+                    "broker": "富途",
+                    "account": "lx",
+                    "status": "open",
+                    "contracts": 2,
+                    "contracts_open": 2,
+                    "position_id": "0700_20260605_440P_short",
+                },
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        mod,
+        "plan_expired_position_closes",
+        lambda *_args, **_kwargs: [
+            {
+                "record_id": "rec_wait",
+                "position_id": "0700_20260605_440P_short",
+                "should_close": False,
+                "skip_reason": "grace_period_pending",
+                "expiration_ymd": "2026-06-05",
+                "eligible_after_utc": "2026-06-06T00:00:00+00:00",
+            }
+        ],
+    )
+
+    result = mod.run_expired_position_maintenance_for_account(
+        base=tmp_path,
+        cfg={
+            "portfolio": {"data_config": str(data_config), "broker": "富途"},
+            "option_positions": {"auto_close": {"enabled": True}},
+        },
+        account="lx",
+        broker="富途",
+        report_dir=report_dir,
+        as_of_ms=1780702200000,
+        dry_run=True,
+        send_receipt=False,
+    )
+
+    assert result["candidates_should_close"] == 0
+    assert result["skipped_grace_pending"] == 1
+    assert "skipped_grace_pending: 1" in result["summary_text"]
+    assert "eligible_after=2026-06-06T00:00:00+00:00" in result["summary_text"]
+    assert (report_dir / "auto_close_summary.txt").exists()
+
+
 def test_position_maintenance_external_account_requires_manual_expiry_review(monkeypatch, tmp_path: Path) -> None:
     from domain.domain.option_position_lots import parse_exp_to_ms
     from src.application.positions import maintenance as mod

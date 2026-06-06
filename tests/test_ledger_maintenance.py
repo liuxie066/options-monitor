@@ -135,6 +135,9 @@ def test_build_expired_close_decisions_waits_until_expiration_plus_full_grace_da
     )
 
     assert decisions[0]["should_close"] is False
+    assert decisions[0]["skip_reason"] == "grace_period_pending"
+    assert decisions[0]["eligible_after_utc"] == "2026-05-02T00:00:00+00:00"
+    assert "expired but waiting grace cutoff" in decisions[0]["reason"]
 
 
 def test_build_expired_close_decisions_closes_at_expiration_plus_full_grace_day() -> None:
