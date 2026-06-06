@@ -1,61 +1,29 @@
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from copy import deepcopy
 
-from src.application.account_config import accounts_from_config, list_account_config_views, normalize_accounts
+from src.application.account_config import normalize_accounts
 from src.application.agent_tool_config import load_runtime_config, repo_base, resolve_output_root, write_tools_enabled
-from src.application.agent_tool_contracts import AgentToolError, mask_path
+from src.application.agent_tool_contracts import mask_path
 from src.application.close_advice_runner import run_close_advice
 from src.application.config_loader import load_config as load_runtime_pipeline_config, resolve_watchlist_config
 from src.application.config_validator import validate_config
 from domain.domain.fetch_source import resolve_symbol_fetch_source
-from src.application.futu_portfolio_context import infer_futu_portfolio_settings
-from src.application.notify_symbols import build_notification
-from src.application.positions.inspection import build_lot_event_history, inspect_projection_state
-from domain.domain.ledger.position_fields import normalize_account as _normalize_account
-from src.application.ledger.api import (
-    list_position_rows as _list_position_rows,
-    open_position_ledger,
-    open_position_ledger_from_data_config as resolve_option_positions_repo,
-)
-from src.application.positions.reporting import build_monthly_income_report
 from src.application.pipeline_context import load_option_positions_context, load_portfolio_context
 from src.application.cash_headroom_query import query_sell_put_cash
-from src.application.scan_scheduler import decide as scheduler_decide, read_state as read_scheduler_state
-from src.infrastructure.exchange_rates import get_exchange_rates_or_fetch_latest as _get_exchange_rates_or_fetch_latest_impl
 from src.infrastructure.io_utils import safe_read_csv
-from src.application.agent_tool_healthcheck import run_healthcheck_tool
-from src.application.agent_tool_candidate_rank import candidate_rank_explain_tool
-from src.application.agent_tool_candidate_filter import candidate_filter_explain_tool
-from src.application.agent_tool_close_advice_read import close_advice_read_tool
-from src.application.research import research_tool
-from src.application.agent_tool_notifications import preview_notification_tool
-from src.application.agent_tool_openclaw import openclaw_readiness_tool
-from src.application.agent_tool_runtime_status import runtime_status_tool
-from src.application.assistant.operation_diagnostics import collect_operation_timeline
-from src.application.runtime_logs_cli import collect_runtime_logs
-from src.application.runtime_runs_cli import collect_runtime_runs
 from src.application.agent_tool_operations import (
-    config_validate_tool,
-    option_positions_read_tool,
-    scheduler_status_tool,
-    version_check_tool,
     version_update_tool,
 )
 from src.application.agent_tool_runtime import (
     as_float as _as_float,
     extract_context_symbols as _extract_context_symbols,
-    healthcheck_symbols_for_futu as _healthcheck_symbols_for_futu_impl,
-    mask_account_id as _mask_account_id_impl,
     normalize_broker as _normalize_broker,
-    read_json_object_or_empty as _read_json_object_or_empty_impl,
     resolve_data_config_ref as _resolve_data_config_ref,
     resolve_local_path as _resolve_local_path_impl,
     resolve_public_data_config_path as _resolve_public_data_config_path_impl,
-    run_futu_doctor as _run_futu_doctor_impl,
     symbol_fetch_config_map as _symbol_fetch_config_map,
     validate_runtime_config as _validate_runtime_config_impl,
     write_json_atomic as _write_json_atomic,
@@ -65,7 +33,6 @@ from src.application.agent_tool_scan import (
     close_advice_tool,
     get_close_advice_tool,
     get_portfolio_context_tool,
-    monthly_income_report_tool,
     prepare_close_advice_inputs_tool,
     query_cash_headroom_tool,
     scan_opportunities_tool,
@@ -78,7 +45,7 @@ from src.application.agent_tool_symbols import (
     manage_symbols_tool,
     set_path as _set_path,
 )
-from src.application.version_check import check_version_update, update_local_version
+from src.application.version_check import update_local_version
 
 
 def fetch_symbol_opend(*args: Any, **kwargs: Any) -> Any:
@@ -110,98 +77,14 @@ def _resolve_local_path(value: Any, *, default):
     return _resolve_local_path_impl(value, default=default, repo_base=repo_base)
 
 
-def _read_json_object_or_empty(path):
-    return _read_json_object_or_empty_impl(path)
-
-
-def _mask_account_id(value: Any) -> str:
-    return _mask_account_id_impl(value)
-
-
 def _mask_path_str(value: Any) -> str:
     return mask_path(value) or "..."
-
-
-def _run_futu_doctor(
-    *,
-    host: str,
-    port: int,
-    symbols: list[str],
-    timeout_sec: int,
-    telnet_host: str = "127.0.0.1",
-    telnet_port: int = 22222,
-) -> dict[str, Any]:
-    return _run_futu_doctor_impl(
-        host=host,
-        port=port,
-        symbols=symbols,
-        timeout_sec=timeout_sec,
-        repo_base=repo_base,
-        telnet_host=telnet_host,
-        telnet_port=telnet_port,
-    )
-
-
-def _healthcheck_symbols_for_futu(cfg: dict[str, Any]) -> list[str]:
-    return _healthcheck_symbols_for_futu_impl(cfg, resolve_watchlist_config=resolve_watchlist_config)
-
-
-def _healthcheck_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    return run_healthcheck_tool(
-        payload,
-        load_runtime_config=load_runtime_config,
-        validate_runtime_config=_validate_runtime_config,
-        normalize_accounts=normalize_accounts,
-        accounts_from_config=accounts_from_config,
-        resolve_data_config_ref=_resolve_data_config_ref,
-        resolve_public_data_config_path=_resolve_public_data_config_path,
-        read_json_object_or_empty=_read_json_object_or_empty,
-        mask_path=_mask_path_str,
-        list_account_config_views=list_account_config_views,
-        mask_account_id=_mask_account_id,
-        infer_futu_portfolio_settings=infer_futu_portfolio_settings,
-        load_option_positions_repo=open_position_ledger,
-        run_futu_doctor=_run_futu_doctor,
-        healthcheck_symbols_for_futu=_healthcheck_symbols_for_futu,
-        write_tools_enabled=write_tools_enabled,
-    )
-
-
-def _version_check_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    return version_check_tool(
-        payload,
-        check_version_update=check_version_update,
-        repo_base=repo_base,
-        mask_path=_mask_path_str,
-    )
 
 
 def _version_update_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     return version_update_tool(
         payload,
         update_local_version=update_local_version,
-        repo_base=repo_base,
-        mask_path=_mask_path_str,
-    )
-
-
-def _config_validate_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    return config_validate_tool(
-        payload,
-        load_runtime_config=load_runtime_config,
-        validate_runtime_config=_validate_runtime_config,
-        accounts_from_config=accounts_from_config,
-        resolve_watchlist_config=resolve_watchlist_config,
-        mask_path=_mask_path_str,
-    )
-
-
-def _scheduler_status_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    return scheduler_status_tool(
-        payload,
-        load_runtime_config=load_runtime_config,
-        read_state=read_scheduler_state,
-        decide=scheduler_decide,
         repo_base=repo_base,
         mask_path=_mask_path_str,
     )
@@ -215,40 +98,6 @@ def _query_cash_headroom_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], 
         normalize_broker=_normalize_broker,
         resolve_output_root=resolve_output_root,
         query_sell_put_cash=query_sell_put_cash,
-        repo_base=repo_base,
-        mask_path=_mask_path_str,
-    )
-
-
-def _get_exchange_rates(*, cache_path, log=None):
-    return _get_exchange_rates_or_fetch_latest_impl(cache_path=cache_path, log=log)
-
-
-def _monthly_income_report_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    return monthly_income_report_tool(
-        payload,
-        load_runtime_config=load_runtime_config,
-        resolve_public_data_config_path=_resolve_public_data_config_path,
-        normalize_broker=_normalize_broker,
-        resolve_option_positions_repo=resolve_option_positions_repo,
-        build_monthly_income_report=build_monthly_income_report,
-        get_exchange_rates=_get_exchange_rates,
-        repo_base=repo_base,
-        mask_path=mask_path,
-    )
-
-
-def _option_positions_read_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    return option_positions_read_tool(
-        payload,
-        load_runtime_config=load_runtime_config,
-        resolve_public_data_config_path=_resolve_public_data_config_path,
-        normalize_broker=_normalize_broker,
-        normalize_account=_normalize_account,
-        resolve_option_positions_repo=resolve_option_positions_repo,
-        list_position_rows=_list_position_rows,
-        build_lot_event_history=build_lot_event_history,
-        inspect_projection_state=inspect_projection_state,
         repo_base=repo_base,
         mask_path=_mask_path_str,
     )
@@ -278,23 +127,6 @@ def _scan_opportunities_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], l
         load_config=load_runtime_pipeline_config,
         run_watchlist_pipeline_default=run_watchlist_pipeline_default,
         scan_summary_rows_fn=lambda rows: _scan_summary_rows(rows, as_float=_as_float),
-    )
-
-
-def _candidate_rank_explain_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    return candidate_rank_explain_tool(
-        payload,
-        repo_base=repo_base,
-        resolve_output_root=resolve_output_root,
-        mask_path=mask_path,
-    )
-
-
-def _candidate_filter_explain_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    return candidate_filter_explain_tool(
-        payload,
-        repo_base=repo_base,
-        mask_path=mask_path,
     )
 
 
@@ -337,16 +169,6 @@ def _get_close_advice_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], lis
     )
 
 
-def _close_advice_read_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    return close_advice_read_tool(
-        payload,
-        load_runtime_config=load_runtime_config,
-        resolve_output_root=resolve_output_root,
-        repo_base=repo_base,
-        mask_path=mask_path,
-    )
-
-
 def _manage_symbols_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     return manage_symbols_tool(
         payload,
@@ -361,122 +183,13 @@ def _manage_symbols_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[
     )
 
 
-def _preview_notification_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    return preview_notification_tool(payload, build_notification=build_notification)
-
-
-def _runtime_status_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    return runtime_status_tool(
-        payload,
-        load_runtime_config=load_runtime_config,
-        normalize_accounts=normalize_accounts,
-        accounts_from_config=accounts_from_config,
-        read_json_object_or_empty=_read_json_object_or_empty,
-        repo_base=repo_base,
-        mask_path=mask_path,
-    )
-
-
-def _runtime_runs_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    _reject_removed_payload_alias(payload, alias="openclaw_profile_path", replacement="profile_path")
-    data = collect_runtime_runs(
-        repo_root=repo_base(),
-        runs_root=payload.get("runs_root"),
-        profile_path=payload.get("profile_path"),
-        limit=payload.get("limit") or 10,
-        run_id=payload.get("run_id"),
-        run_dir=payload.get("run_dir"),
-        scanned_only=bool(payload.get("scanned_only")),
-    )
-    return data, [], {"runs_root": mask_path(data.get("runs_root"))}
-
-
-def _runtime_logs_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    _reject_removed_payload_alias(payload, alias="openclaw_profile_path", replacement="profile_path")
-    _reject_removed_payload_alias(payload, alias="file", replacement="log_file")
-    data = collect_runtime_logs(
-        repo_root=repo_base(),
-        runs_root=payload.get("runs_root"),
-        logs_root=payload.get("logs_root"),
-        profile_path=payload.get("profile_path"),
-        run_id=payload.get("run_id"),
-        run_dir=payload.get("run_dir"),
-        kind=str(payload.get("kind") or "all"),
-        lines=int(payload.get("lines") or 50),
-        log_file=payload.get("log_file"),
-    )
-    return data, [], {"runs_root": mask_path(data.get("runs_root")), "logs_root": mask_path(data.get("logs_root"))}
-
-
-def _operation_timeline_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    data = collect_operation_timeline(
-        audit_db=payload.get("audit_db") or payload.get("inbound_audit_db"),
-        channel=payload.get("channel"),
-        sender_id=payload.get("sender_id"),
-        conversation_id=payload.get("conversation_id"),
-        operation_id=payload.get("operation_id"),
-        operation_types=payload.get("operation_types"),
-        statuses=payload.get("statuses"),
-        limit=int(payload.get("limit") or 10),
-        audit_scan_limit=payload.get("audit_scan_limit"),
-    )
-    warnings = [str(item) for item in data.get("warnings", []) if str(item).strip()]
-    return data, warnings, {"audit_db": data.get("audit_db")}
-
-
-def _reject_removed_payload_alias(payload: dict[str, Any], *, alias: str, replacement: str) -> None:
-    if alias in payload and str(payload.get(alias) or "").strip():
-        raise AgentToolError(
-            code="INPUT_ERROR",
-            message=f"{alias} has been removed; use {replacement}",
-        )
-
-
-def _openclaw_readiness_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    return openclaw_readiness_tool(
-        payload,
-        runtime_status_tool_fn=_runtime_status_tool,
-        healthcheck_tool_fn=_healthcheck_tool,
-        load_runtime_config=load_runtime_config,
-        repo_base=repo_base,
-        mask_path=mask_path,
-    )
-
-
-def _research_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    return research_tool(
-        payload,
-        runtime_status_tool_fn=_runtime_status_tool,
-        healthcheck_tool_fn=_healthcheck_tool,
-        load_runtime_config=load_runtime_config,
-        repo_base=repo_base,
-        mask_path=mask_path,
-    )
-
-
 TOOL_HANDLERS = {
-    "healthcheck": _healthcheck_tool,
-    "version_check": _version_check_tool,
     "version_update": _version_update_tool,
-    "config_validate": _config_validate_tool,
-    "scheduler_status": _scheduler_status_tool,
     "query_cash_headroom": _query_cash_headroom_tool,
-    "monthly_income_report": _monthly_income_report_tool,
-    "option_positions_read": _option_positions_read_tool,
     "get_portfolio_context": _get_portfolio_context_tool,
     "scan_opportunities": _scan_opportunities_tool,
-    "candidate_rank_explain": _candidate_rank_explain_tool,
-    "candidate_filter_explain": _candidate_filter_explain_tool,
     "prepare_close_advice_inputs": _prepare_close_advice_inputs_tool,
     "close_advice": _close_advice_tool,
     "get_close_advice": _get_close_advice_tool,
-    "close_advice_read": _close_advice_read_tool,
     "manage_symbols": _manage_symbols_tool,
-    "preview_notification": _preview_notification_tool,
-    "runtime_status": _runtime_status_tool,
-    "runtime_runs": _runtime_runs_tool,
-    "runtime_logs": _runtime_logs_tool,
-    "operation_timeline": _operation_timeline_tool,
-    "openclaw_readiness": _openclaw_readiness_tool,
-    "research": _research_tool,
 }

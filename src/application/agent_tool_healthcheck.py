@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 from domain.domain.multi_tick import FEISHU_APP_NOTIFICATION_PROVIDER, normalize_notification_provider
 from src.application.agent_tool_config import repo_base
+from src.application.agent_tool_registry import AGENT_TOOL_DEFINITIONS, AgentToolDefinition
 from src.application.assistant.audit import default_audit_db_path
 from src.application.channels.status import build_channel_status
 from src.application.environment_status import build_effective_env_with_status
@@ -56,6 +57,25 @@ def _count_evidence_rows(path: Path) -> int:
         return len(_read_countable_json_rows(payload))
     with path.open("r", encoding="utf-8") as fh:
         return sum(1 for line in fh if line.strip())
+
+
+def _agent_tool_mode(definition: AgentToolDefinition, *, write_enabled: bool) -> str:
+    if definition.name == "version_update":
+        return "write_preview_default"
+    if definition.name == "manage_symbols":
+        return "write" if write_enabled else "read_preview_only"
+    if definition.is_pure_read():
+        return "read"
+    if definition.read_only and definition.side_effects:
+        return "read_with_local_cache"
+    return definition.resolved_risk_level()
+
+
+def _agent_tool_availability(*, write_enabled: bool) -> dict[str, dict[str, Any]]:
+    return {
+        definition.name: {"available": True, "mode": _agent_tool_mode(definition, write_enabled=write_enabled)}
+        for definition in AGENT_TOOL_DEFINITIONS
+    }
 
 
 def _candidate_evidence_paths(payload: dict[str, Any], *, keys: tuple[str, ...], report_dir: Path | None, patterns: tuple[str, ...]) -> list[Path]:
@@ -633,26 +653,7 @@ def run_healthcheck_tool(
             },
         }
 
-    tools = {
-        "healthcheck": {"available": True, "mode": "read"},
-        "version_check": {"available": True, "mode": "read"},
-        "version_update": {"available": True, "mode": "write_preview_default"},
-        "config_validate": {"available": True, "mode": "read"},
-        "scheduler_status": {"available": True, "mode": "read"},
-        "scan_opportunities": {"available": True, "mode": "read_with_local_cache"},
-        "query_cash_headroom": {"available": True, "mode": "read_with_local_cache"},
-        "monthly_income_report": {"available": True, "mode": "read"},
-        "option_positions_read": {"available": True, "mode": "read"},
-        "get_portfolio_context": {"available": True, "mode": "read_with_local_cache"},
-        "prepare_close_advice_inputs": {"available": True, "mode": "read_with_local_cache"},
-        "close_advice": {"available": True, "mode": "read_with_local_cache"},
-        "get_close_advice": {"available": True, "mode": "read_with_local_cache"},
-        "manage_symbols": {"available": True, "mode": ("write" if write_tools_enabled() else "read_preview_only")},
-        "preview_notification": {"available": True, "mode": "read"},
-        "runtime_status": {"available": True, "mode": "read"},
-        "openclaw_readiness": {"available": True, "mode": "read"},
-        "research": {"available": True, "mode": "read_default_write_optional"},
-    }
+    tools = _agent_tool_availability(write_enabled=write_tools_enabled())
     critical = [item for item in checks if item["status"] == "error"]
     return (
         {
@@ -666,6 +667,14 @@ def run_healthcheck_tool(
             "channel_status": channel_status,
             "checks": checks,
             "tools": tools,
+            "side_lanes": {
+                "research_shadow_replay": {
+                    "available": True,
+                    "agent_tool": False,
+                    "entrypoint": "./om research ...",
+                    "mode": "offline_evidence_and_replay",
+                }
+            },
             "summary": {
                 "ok": not critical,
                 "critical_count": len(critical),

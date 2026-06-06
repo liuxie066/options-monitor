@@ -234,7 +234,10 @@ def main(argv: list[str] | None = None) -> int:
             )
 
         if args.command == "research":
-            return _print(handle_research_command(args, execute_tool_fn=execute_tool, repo_base_fn=repo_base))
+            return _print(handle_research_command(
+                args,
+                repo_base_fn=repo_base,
+            ))
 
         if args.command in {"scan", "close-advice", "notify"}:
             return _print(handle_operator_command(
