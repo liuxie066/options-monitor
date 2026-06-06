@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from src.application.channels.wechat_clawbot.ilink_client import DEFAULT_ILINK_BASE_URL
+from src.application.channels.wechat_clawbot.state_store import WechatClawbotStateStore
 
 
 DEFAULT_WECHAT_CLAWBOT_LABEL = "default"
@@ -76,18 +76,6 @@ def resolve_wechat_clawbot_state_dir(
     return default_wechat_clawbot_state_root(base) / str(label or DEFAULT_WECHAT_CLAWBOT_LABEL)
 
 
-def _read_json_object(path: Path) -> dict[str, Any]:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError as exc:
-        raise ValueError(f"WeChat ClawBot state file not found: {path}") from exc
-    except Exception as exc:
-        raise ValueError(f"failed to read WeChat ClawBot state file: {type(exc).__name__}: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise ValueError("WeChat ClawBot state file must be a JSON object")
-    return payload
-
-
 def load_wechat_clawbot_state(
     *,
     base: Path,
@@ -95,7 +83,7 @@ def load_wechat_clawbot_state(
     notifications: dict[str, Any] | None = None,
 ) -> WechatClawbotState:
     state_dir = resolve_wechat_clawbot_state_dir(base=base, label=label, notifications=notifications)
-    payload = _read_json_object(state_dir / "state.json")
+    payload = WechatClawbotStateStore(state_dir).load_state()
     bot_token = str(payload.get("bot_token") or "").strip()
     if not bot_token:
         raise ValueError("WeChat ClawBot bot_token is missing; run QR login binding first")
@@ -117,7 +105,7 @@ def load_wechat_clawbot_binding(
 ) -> WechatClawbotBinding:
     resolved = resolve_wechat_clawbot_target(target, notifications=notifications)
     state_dir = resolve_wechat_clawbot_state_dir(base=base, label=resolved.label, notifications=notifications)
-    payload = _read_json_object(state_dir / "bindings.json")
+    payload = WechatClawbotStateStore(state_dir).load_bindings()
     bindings_raw = payload.get("bindings")
     bindings = bindings_raw if isinstance(bindings_raw, dict) else {}
     binding_raw = bindings.get(resolved.binding_name)

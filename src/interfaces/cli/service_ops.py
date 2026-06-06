@@ -61,6 +61,18 @@ def add_service_update_commands(subparsers: Any) -> None:
         help="render the long-running Feishu long-connection inbound service",
     )
     service_render.add_argument("--feishu-ws-config-key", default=None, choices=("us", "hk"))
+    service_render.add_argument(
+        "--include-wechat-clawbot",
+        action="store_true",
+        help="render the long-running WeChat ClawBot inbound polling service",
+    )
+    service_render.add_argument("--wechat-clawbot-config-key", default=None, choices=("us", "hk"))
+    service_render.add_argument("--wechat-clawbot-label", default=None)
+    service_render.add_argument(
+        "--wechat-clawbot-allowed-senders",
+        default=None,
+        help="comma-separated WeChat inbound allowlist, e.g. wechat:<from_user_id>",
+    )
     service_render.add_argument("--output-dir", default=None, help="write rendered files under this directory")
     service_render.add_argument("--no-content", action="store_true", help="omit file contents from JSON output")
     service_preflight_cmd = service_sub.add_parser(
@@ -205,6 +217,10 @@ def handle_service_update_command(
             opend_executable=args.opend_executable,
             include_feishu_ws=bool(args.include_feishu_ws),
             feishu_ws_config_key=args.feishu_ws_config_key,
+            include_wechat_clawbot=bool(args.include_wechat_clawbot),
+            wechat_clawbot_config_key=args.wechat_clawbot_config_key,
+            wechat_clawbot_label=args.wechat_clawbot_label,
+            wechat_clawbot_allowed_senders=args.wechat_clawbot_allowed_senders,
             include_content=(not bool(args.no_content)) or bool(args.output_dir),
         )
         if args.output_dir:

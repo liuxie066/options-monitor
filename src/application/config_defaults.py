@@ -152,6 +152,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 "max_reply_chars": 3500,
                 "ack_reaction": "",
                 "queue_size": 100,
+            },
+            "wechat_clawbot": {
+                "label": "default",
+                "state_dir": "",
+                "allowed_senders": "",
+                "reply_enabled": True,
+                "max_reply_chars": 3500,
+                "poll_interval_sec": 3.0,
+                "timeout_sec": 20,
             }
         },
         "watchdog": {

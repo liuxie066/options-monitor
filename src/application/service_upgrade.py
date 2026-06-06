@@ -385,7 +385,13 @@ def _restart_service_names(profile: dict[str, Any]) -> list[str]:
     for name in names:
         if not name.endswith(".service"):
             continue
-        if not explicit and "opend" not in name and "trade-intake" not in name and "feishu-ws" not in name:
+        if (
+            not explicit
+            and "opend" not in name
+            and "trade-intake" not in name
+            and "feishu-ws" not in name
+            and "wechat-clawbot" not in name
+        ):
             continue
         if name not in out:
             out.append(name)
@@ -678,6 +684,25 @@ def _post_upgrade_service_health(
         if not result.get("ok"):
             failed.append(public)
 
+    if "options-monitor-wechat-clawbot.service" in services:
+        command = _wechat_clawbot_check_command(profile=profile, repo_root=repo_root)
+        env = _child_env_from_profile(profile)
+        result = _run_command(command, cwd=repo_root, run_cmd=run_cmd, env=env, timeout=60)
+        result["operation"] = "post_upgrade_service_health"
+        result["check"] = "wechat-clawbot-check"
+        result["service"] = "options-monitor-wechat-clawbot.service"
+        operations.append(result)
+        public = {
+            "service": "options-monitor-wechat-clawbot.service",
+            "check": "wechat-clawbot-check",
+            "ok": bool(result.get("ok")),
+            "stdout": str(result.get("stdout") or "").strip(),
+            "stderr": str(result.get("stderr") or "").strip(),
+        }
+        checks.append(public)
+        if not result.get("ok"):
+            failed.append(public)
+
     return {
         "ok": not failed,
         "status": "ok" if not failed else "error",
@@ -685,7 +710,7 @@ def _post_upgrade_service_health(
         "services": services,
         "checks": checks,
         "failed_checks": failed,
-        "remediation": _service_health_remediation(failed, profile=profile),
+        "remediation": _service_health_remediation(failed, profile=profile, repo_root=repo_root),
     }
 
 
@@ -721,6 +746,36 @@ def _feishu_ws_check_command(*, profile: dict[str, Any], repo_root: Path) -> lis
         command.extend(["--env-file", str(Path(env_file).expanduser())])
     if _feishu_ws_check_needs_sudo_for_env_file(profile):
         return ["sudo", "-n", *command]
+    return command
+
+
+def _wechat_clawbot_check_command(*, profile: dict[str, Any], repo_root: Path) -> list[str]:
+    wechat = profile.get("wechat_clawbot")
+    payload = wechat if isinstance(wechat, dict) else {}
+    command = [str(repo_root / "om"), "channel", "wechat-clawbot", "serve", "--check"]
+    label = str(payload.get("label") or "").strip()
+    if label:
+        command.extend(["--label", label])
+    state_dir = str(payload.get("state_dir") or "").strip()
+    if state_dir:
+        command.extend(["--state-dir", state_dir])
+    config_key = str(payload.get("config_key") or "").strip()
+    if config_key:
+        command.extend(["--config-key", config_key])
+    config_paths = profile.get("config_paths")
+    if isinstance(config_paths, dict):
+        config_path = str(config_paths.get(config_key) or "").strip()
+        if config_path:
+            command.extend(["--config-path", config_path])
+    assistant_config_path = str(payload.get("assistant_config_path") or "").strip()
+    if assistant_config_path:
+        command.extend(["--assistant-config", assistant_config_path])
+    audit_db = str(payload.get("audit_db") or "").strip()
+    if audit_db:
+        command.extend(["--audit-db", audit_db])
+    allowed_senders = str(payload.get("allowed_senders") or "").strip()
+    if allowed_senders:
+        command.extend(["--allowed-senders", allowed_senders])
     return command
 
 
@@ -777,7 +832,12 @@ def _child_env_from_profile(profile: dict[str, Any]) -> dict[str, str] | None:
     return env
 
 
-def _service_health_remediation(failed_checks: list[dict[str, Any]], *, profile: dict[str, Any] | None = None) -> list[str]:
+def _service_health_remediation(
+    failed_checks: list[dict[str, Any]],
+    *,
+    profile: dict[str, Any] | None = None,
+    repo_root: Path | None = None,
+) -> list[str]:
     services = sorted({str(item.get("service") or "") for item in failed_checks if str(item.get("service") or "").strip()})
     remediation: list[str] = []
     for service_name in services:
@@ -790,6 +850,14 @@ def _service_health_remediation(failed_checks: list[dict[str, Any]], *, profile:
             remediation.append(f"manual_check: sudo -n ./om inbound feishu-ws --check --env-file {shlex.quote(env_file)}")
         else:
             remediation.append("manual_check: source the env file, then run ./om inbound feishu-ws --check")
+    if any(item.get("check") == "wechat-clawbot-check" for item in failed_checks):
+        profile_payload = profile or {}
+        root = repo_root
+        if root is None:
+            raw_root = str(profile_payload.get("repo_root") or "").strip()
+            root = Path(raw_root).expanduser() if raw_root else Path(".")
+        command = _wechat_clawbot_check_command(profile=profile_payload, repo_root=root)
+        remediation.append("manual_check: " + " ".join(shlex.quote(str(part)) for part in command))
     return remediation
 
 

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Callable, cast
 
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.channels.status import build_channel_status
 from src.application.environment_status import build_effective_env_with_status
 from src.application.ledger.api import ledger_store_payload
 from src.application.release_target import compare_versions
@@ -315,6 +316,7 @@ def _merge_service_profile_payload(payload: dict[str, Any], *, profile: dict[str
         "deploy_home",
         "auto_upgrade",
         "feishu_ws",
+        "wechat_clawbot",
     ):
         if key not in merged and key in profile:
             merged[key] = profile[key]
@@ -370,6 +372,7 @@ def _service_profile_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "deploy_home",
         "auto_upgrade",
         "feishu_ws",
+        "wechat_clawbot",
     ):
         if key in payload:
             profile[key] = payload[key]
@@ -502,6 +505,10 @@ def _assistant_config_path_from_runtime_status_payload(
         feishu_ws = payload.get("feishu_ws")
         if isinstance(feishu_ws, dict):
             raw = str(feishu_ws.get("assistant_config_path") or "").strip()
+    if not raw:
+        wechat_clawbot = payload.get("wechat_clawbot")
+        if isinstance(wechat_clawbot, dict):
+            raw = str(wechat_clawbot.get("assistant_config_path") or "").strip()
     if raw:
         return _resolve_assistant_runtime_path(raw, base=base), True
     default_path = runtime_root / "resolved" / "config.assistant.json"
@@ -520,6 +527,10 @@ def _assistant_audit_db_path_from_payload(payload: dict[str, Any], *, base: Path
     feishu_ws = payload.get("feishu_ws")
     if isinstance(feishu_ws, dict):
         raw = str(feishu_ws.get("audit_db") or "").strip()
+    if not raw:
+        wechat_clawbot = payload.get("wechat_clawbot")
+        if isinstance(wechat_clawbot, dict):
+            raw = str(wechat_clawbot.get("audit_db") or "").strip()
     if not raw:
         raw = str(env.get("OM_INBOUND_AUDIT_DB") or "").strip()
     if raw:
@@ -1622,6 +1633,14 @@ def _dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _first_text(*values: Any) -> str | None:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return None
+
+
 def _latest_run_expects_static_notification(latest_run_payload: dict[str, Any] | None) -> bool:
     if latest_run_payload is None:
         return True
@@ -2040,6 +2059,16 @@ def runtime_status_tool(
         payload=payload,
         mask_path=mask_path,
     )
+    channel_status = build_channel_status(
+        base=base,
+        runtime_root=ledger_runtime_root,
+        payload=payload,
+        environ=effective_env.values,
+        mask_path=mask_path,
+        include_service_status=bool(payload.get("include_service_status", False)),
+    )
+    channel_health_raw = channel_status.get("channels")
+    channel_health = channel_health_raw if isinstance(channel_health_raw, dict) else {}
 
     config_authority = _config_authority_payload(
         cfg,
@@ -2088,6 +2117,8 @@ def runtime_status_tool(
         "trigger_context": trigger_context,
         "notification_diagnosis": notification_diagnosis,
         "environment": environment,
+        "channel_status": channel_status,
+        "channel_health": channel_health,
         "account_summary": {},
         "freshness": {},
         "openclaw_profile": profile_meta or {"loaded": False},
@@ -2149,6 +2180,11 @@ def runtime_status_tool(
     data["summary"]["assistant_latest_route"] = assistant_latest.get("route")
     data["summary"]["assistant_latest_intent"] = assistant_latest.get("intent_name")
     data["summary"]["assistant_latest_llm_reason"] = assistant_latest.get("llm_reason")
+    wechat_health = channel_health.get("wechat_clawbot") if isinstance(channel_health.get("wechat_clawbot"), dict) else {}
+    data["summary"]["wechat_clawbot_configured"] = bool(wechat_health.get("configured"))
+    data["summary"]["wechat_clawbot_available"] = bool(wechat_health.get("available"))
+    data["summary"]["wechat_clawbot_allowed_senders_configured"] = bool(wechat_health.get("allowed_senders_configured"))
+    data["summary"]["wechat_clawbot_bot_token_configured"] = bool(wechat_health.get("bot_token_configured"))
     return data, warnings, {"config_path": mask_path(config_path)}
 
 
