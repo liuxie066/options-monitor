@@ -38,10 +38,10 @@ def test_ensure_required_data_uses_read_model_error_to_force_refetch() -> None:
         reason="previous_failed",
     )
 
-    old_fetch = mod.fetch_required_data_opend
+    old_execute = mod.execute_required_data_opend
     called: list[object] = []
     try:
-        mod.fetch_required_data_opend = lambda **kwargs: called.append(kwargs)  # type: ignore[assignment]
+        mod.execute_required_data_opend = lambda **kwargs: (called.append(kwargs) or {"rows": [], "meta": {"status": "ok"}})  # type: ignore[assignment]
         mod.ensure_required_data(
             py="python3",
             base=BASE,
@@ -58,7 +58,7 @@ def test_ensure_required_data_uses_read_model_error_to_force_refetch() -> None:
             fetch_port=11111,
         )
     finally:
-        mod.fetch_required_data_opend = old_fetch  # type: ignore[assignment]
+        mod.execute_required_data_opend = old_execute  # type: ignore[assignment]
 
     assert len(called) == 1
     request = called[0]["request"]
@@ -85,10 +85,10 @@ def test_ensure_required_data_skips_when_read_model_is_ok_and_dte_satisfies() ->
         status="ok",
     )
 
-    old_fetch = mod.fetch_required_data_opend
+    old_execute = mod.execute_required_data_opend
     called: list[object] = []
     try:
-        mod.fetch_required_data_opend = lambda **kwargs: called.append(kwargs)  # type: ignore[assignment]
+        mod.execute_required_data_opend = lambda **kwargs: (called.append(kwargs) or {"rows": [], "meta": {"status": "ok"}})  # type: ignore[assignment]
         mod.ensure_required_data(
             py="python3",
             base=BASE,
@@ -106,7 +106,7 @@ def test_ensure_required_data_skips_when_read_model_is_ok_and_dte_satisfies() ->
             min_dte=5,
         )
     finally:
-        mod.fetch_required_data_opend = old_fetch  # type: ignore[assignment]
+        mod.execute_required_data_opend = old_execute  # type: ignore[assignment]
 
     assert called == []
 
@@ -120,10 +120,10 @@ def test_ensure_required_data_treats_futu_source_as_opend_path() -> None:
     root.mkdir(parents=True, exist_ok=True)
     required, state_dir = _make_dirs(root)
 
-    old_fetch = mod.fetch_required_data_opend
+    old_execute = mod.execute_required_data_opend
     called: list[object] = []
     try:
-        mod.fetch_required_data_opend = lambda **kwargs: called.append(kwargs)  # type: ignore[assignment]
+        mod.execute_required_data_opend = lambda **kwargs: (called.append(kwargs) or {"rows": [], "meta": {"status": "ok"}})  # type: ignore[assignment]
         mod.ensure_required_data(
             py="python3",
             base=BASE,
@@ -140,7 +140,7 @@ def test_ensure_required_data_treats_futu_source_as_opend_path() -> None:
             fetch_port=11111,
         )
     finally:
-        mod.fetch_required_data_opend = old_fetch  # type: ignore[assignment]
+        mod.execute_required_data_opend = old_execute  # type: ignore[assignment]
 
     assert len(called) == 1
     request = called[0]["request"]
@@ -164,7 +164,7 @@ def test_ensure_required_data_does_not_read_raw_fetch_file_on_main_path() -> Non
         encoding="utf-8",
     )
 
-    old_fetch = mod.fetch_required_data_opend
+    old_execute = mod.execute_required_data_opend
     old_read_text = pathlib.Path.read_text
     called: list[object] = []
     raw_touched: list[Path] = []
@@ -176,7 +176,7 @@ def test_ensure_required_data_does_not_read_raw_fetch_file_on_main_path() -> Non
         return old_read_text(self, *args, **kwargs)
 
     try:
-        mod.fetch_required_data_opend = lambda **kwargs: called.append(kwargs)  # type: ignore[assignment]
+        mod.execute_required_data_opend = lambda **kwargs: (called.append(kwargs) or {"rows": [], "meta": {"status": "ok"}})  # type: ignore[assignment]
         pathlib.Path.read_text = _guard_read_text  # type: ignore[assignment]
         mod.ensure_required_data(
             py="python3",
@@ -194,11 +194,68 @@ def test_ensure_required_data_does_not_read_raw_fetch_file_on_main_path() -> Non
             fetch_port=11111,
         )
     finally:
-        mod.fetch_required_data_opend = old_fetch  # type: ignore[assignment]
+        mod.execute_required_data_opend = old_execute  # type: ignore[assignment]
         pathlib.Path.read_text = old_read_text  # type: ignore[assignment]
 
     assert called == []
     assert raw_touched == []
+
+
+def test_ensure_required_data_records_error_when_fetch_payload_reports_error(tmp_path: Path) -> None:
+    from src.application import pipeline_fetch_models as models
+    import src.application.required_data_steps as mod
+
+    required, state_dir = _make_dirs(tmp_path)
+    symbol = "NVDA"
+
+    old_execute = mod.execute_required_data_opend
+    try:
+        def _fake_execute_required_data_opend(**_kwargs):  # type: ignore[no-untyped-def]
+            return {
+                "symbol": symbol,
+                "rows": [
+                    {
+                        "symbol": symbol,
+                        "option_type": "put",
+                        "expiration": "2026-06-19",
+                        "dte": 44,
+                        "contract_symbol": "US.NVDA.2026-06-19.P100",
+                        "strike": 100,
+                        "spot": 120,
+                    }
+                ],
+                "expiration_count": 1,
+                "meta": {"status": "error", "error_code": "RATE_LIMIT", "error": "snapshot rate limited"},
+            }
+
+        mod.execute_required_data_opend = _fake_execute_required_data_opend  # type: ignore[assignment]
+        try:
+            mod.ensure_required_data(
+                py="python3",
+                base=BASE,
+                symbol=symbol,
+                required_data_dir=required,
+                limit_expirations=2,
+                want_put=True,
+                want_call=False,
+                timeout_sec=5,
+                is_scheduled=False,
+                state_dir=state_dir,
+                fetch_source="opend",
+                fetch_host="127.0.0.1",
+                fetch_port=11111,
+            )
+        except RuntimeError as exc:
+            assert "snapshot rate limited" in str(exc)
+        else:
+            raise AssertionError("expected required_data fetch error to propagate")
+    finally:
+        mod.execute_required_data_opend = old_execute  # type: ignore[assignment]
+
+    current = models.read_symbol_fetch_current(state_dir=state_dir, symbol=symbol)
+    assert current is not None
+    assert current["status"] == "error"
+    assert "snapshot rate limited" in current["reason"]
 
 
 def test_fetch_required_data_opend_normalizes_timestamp_explicit_expirations(tmp_path: Path) -> None:
@@ -713,10 +770,14 @@ def test_ensure_required_data_refetches_when_bounds_are_split_across_expirations
 
 
 def main() -> None:
+    from tempfile import TemporaryDirectory
+
     test_ensure_required_data_uses_read_model_error_to_force_refetch()
     test_ensure_required_data_skips_when_read_model_is_ok_and_dte_satisfies()
     test_ensure_required_data_treats_futu_source_as_opend_path()
     test_ensure_required_data_does_not_read_raw_fetch_file_on_main_path()
+    with TemporaryDirectory() as td:
+        test_ensure_required_data_records_error_when_fetch_payload_reports_error(Path(td))
     test_fetch_required_data_opend_normalizes_timestamp_explicit_expirations(Path("."))
     test_fetch_required_data_opend_forwards_side_strike_windows(Path("."))
     test_build_fetch_request_from_spec_applies_opend_fetch_config()

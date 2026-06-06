@@ -221,6 +221,64 @@ def test_watchlist_passes_runtime_config_to_symbol_processor() -> None:
     assert seen == [cfg]
 
 
+def test_watchlist_fetch_stage_preserves_strategy_config_but_skips_scan_output() -> None:
+    from src.application.pipeline_watchlist import run_watchlist_pipeline
+
+    seen: list[tuple[bool, bool, bool]] = []
+    summary_called: list[bool] = []
+
+    def _apply_profiles(item: dict, profiles: dict) -> dict:
+        return dict(item)
+
+    def _process_symbol(*args, **kwargs):
+        item = args[2]
+        seen.append(
+            (
+                bool((item.get("sell_put") or {}).get("enabled")),
+                bool((item.get("sell_call") or {}).get("enabled")),
+                bool(kwargs.get("fetch_only")),
+            )
+        )
+        return [{"symbol": str(item.get("symbol")), "strategy": "sell_put", "candidate_count": 1}]
+
+    def _build_ctx(**kwargs):
+        assert kwargs["want_scan"] is False
+        return ({}, None, None, None)
+
+    cfg = {
+        "symbols": [
+            {"symbol": "NVDA", "sell_put": {"enabled": True}, "sell_call": {"enabled": True}},
+        ],
+        "templates": {},
+        "runtime": {},
+    }
+
+    out = run_watchlist_pipeline(
+        py="python",
+        base=Path("."),
+        cfg=cfg,
+        report_dir=Path("."),
+        is_scheduled=True,
+        top_n=3,
+        symbol_timeout_sec=1,
+        portfolio_timeout_sec=1,
+        want_scan=False,
+        no_context=True,
+        symbols_arg=None,
+        log=lambda _: None,
+        want_fn=lambda name: name == "fetch",
+        apply_profiles_fn=_apply_profiles,
+        process_symbol_fn=_process_symbol,
+        build_pipeline_context_fn=_build_ctx,
+        build_symbols_summary_fn=lambda rows: summary_called.append(True),
+        build_symbols_digest_fn=lambda rows, n: summary_called.append(True),
+    )
+
+    assert out == []
+    assert seen == [(True, True, True)]
+    assert summary_called == []
+
+
 def test_watchlist_pipeline_processes_symbols_in_parallel_when_configured() -> None:
     from src.application.pipeline_watchlist import run_watchlist_pipeline
 

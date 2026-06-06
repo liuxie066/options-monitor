@@ -34,6 +34,7 @@ def _event(
     price: float = 1.0,
     lot_id: str | None = None,
     target_lot_id: str | None = None,
+    target_event_id: str | None = None,
 ) -> TradeEvent:
     return TradeEvent(
         event_id=event_id,
@@ -47,6 +48,7 @@ def _event(
         multiplier=100,
         lot_id=lot_id,
         target_lot_id=target_lot_id,
+        target_event_id=target_event_id,
     )
 
 
@@ -173,6 +175,28 @@ def test_projection_rejects_duplicate_lot_id() -> None:
     assert [item.code for item in result.diagnostics] == ["duplicate_lot_id"]
     assert [item.lot_id for item in result.lots] == ["lot_dup"]
     assert result.lots[0].contracts_open == 3
+
+
+def test_projection_ignores_invalid_void_when_deciding_voided_events() -> None:
+    key = _key(option_type="put", strike=450.0, expiration_ymd="2026-05-28")
+
+    result = project_trade_events(
+        [
+            _event(event_id="open-a", event_type="open", contract_key=key, contracts=1, event_time_ms=1000, lot_id="lot_a"),
+            _event(event_id="open-b", event_type="open", contract_key=key, contracts=1, event_time_ms=2000, lot_id="lot_b"),
+            _event(
+                event_id="open-a",
+                event_type="void",
+                contract_key=key,
+                contracts=0,
+                event_time_ms=3000,
+                target_event_id="open-b",
+            ),
+        ]
+    )
+
+    assert [item.code for item in result.diagnostics] == ["duplicate_event_id"]
+    assert [item.lot_id for item in result.lots] == ["lot_a", "lot_b"]
 
 
 def test_projection_applies_adjust_patch_to_target_lot_state() -> None:

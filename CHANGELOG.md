@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 1.2.223 - 2026-06-06
+
+### Added
+- Added first-class WeChat ClawBot channel support with `./om channel wechat-clawbot` QR login, status, bind, and list commands.
+- Added WeChat ClawBot binding state, iLink client, and notification delivery adapter so WeChat targets can be bound and addressed directly.
+
+### Changed
+- Removed the `notifications -> OpenClaw -> openclaw-weixin` routing chain; WeChat notification configuration now uses `provider=wechat_clawbot` and `channel=wechat_clawbot`.
+- Routed OpenD watchdog and recovery notices through the unified notification delivery adapter and only records alert cooldowns after a confirmed send.
+- Refreshed the dependency graph after the channel, notification, ledger, and trade-intake boundary changes.
+
+### Fixed
+- Fixed report, alert, and risk-capacity handling for missing numeric values and closed short-option positions.
+- Fixed OpenD prefetch/cache diagnostics and watchlist/symbol fetch paths so required-data and pipeline outputs stay consistent after failed or missing upstream reads.
+- Hardened canonical trade-event void handling so invalid legacy-shaped void rows no longer hide active events in projection, review, or position reporting.
+- Fixed lifecycle/manual ledger identity and lifecycle close validation so assignment, exercise, expiration, and manual-open events cannot collide or write mismatched close targets.
+- Fixed trade-intake lifecycle matching, cache invalidation, backfill retries, and `trade_intake.enabled` validation so retryable unresolved deals and disabled listeners behave as configured.
+
 ## 1.2.222 - 2026-06-06
 
 ### Fixed

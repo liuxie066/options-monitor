@@ -27,35 +27,39 @@ def test_validate_config_rejects_empty_notification_target() -> None:
     import src.application.config_validator as mod
 
     cfg = _base_cfg()
-    cfg["notifications"] = {"provider": "openclaw", "channel": "openclaw-weixin", "target": ""}
+    cfg["notifications"] = {"provider": "wechat_clawbot", "target": ""}
 
     try:
         mod.validate_config(cfg)
         raise AssertionError("expected SystemExit")
     except SystemExit as exc:
-        assert "notifications.target must be a non-empty openclaw target string" in str(exc)
+        assert "notifications.target must be a non-empty wechat_clawbot binding string" in str(exc)
 
 
 def test_validate_config_rejects_non_string_notification_target() -> None:
     import src.application.config_validator as mod
 
     cfg = _base_cfg()
-    cfg["notifications"] = {"provider": "openclaw", "channel": "openclaw-weixin", "target": ["ou_x"]}
+    cfg["notifications"] = {"provider": "wechat_clawbot", "target": ["ou_x"]}
 
     try:
         mod.validate_config(cfg)
         raise AssertionError("expected SystemExit")
     except SystemExit as exc:
-        assert "notifications.target must be a non-empty openclaw target string" in str(exc)
+        assert "notifications.target must be a string when configured" in str(exc)
 
 
-def test_validate_config_accepts_valid_openclaw_notification_route() -> None:
+def test_validate_config_rejects_openclaw_notification_route() -> None:
     import src.application.config_validator as mod
 
     cfg = _base_cfg()
     cfg["notifications"] = {"provider": "openclaw", "channel": "openclaw-weixin", "target": "clawbot:test-room"}
 
-    mod.validate_config(cfg)
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "OpenClaw notification routing has been removed" in str(exc)
 
 
 def test_validate_config_rejects_retired_agent_config() -> None:
@@ -322,7 +326,7 @@ def test_validate_config_rejects_empty_wechat_clawbot_target() -> None:
         mod.validate_config(cfg)
         raise AssertionError("expected SystemExit")
     except SystemExit as exc:
-        assert "notifications.target must be a non-empty openclaw target string" in str(exc)
+        assert "notifications.target must be a non-empty wechat_clawbot binding string" in str(exc)
 
 
 def test_validate_config_rejects_unsupported_notification_channel() -> None:
@@ -335,7 +339,47 @@ def test_validate_config_rejects_unsupported_notification_channel() -> None:
         mod.validate_config(cfg)
         raise AssertionError("expected SystemExit")
     except SystemExit as exc:
-        assert "notifications.provider must be one of: openclaw, feishu_app" in str(exc)
+        assert "notifications.provider must be one of: wechat_clawbot, feishu_app" in str(exc)
+
+
+def test_validate_config_rejects_removed_openclaw_channel_with_wechat_provider() -> None:
+    import src.application.config_validator as mod
+
+    cfg = _base_cfg()
+    cfg["notifications"] = {"provider": "wechat_clawbot", "channel": "openclaw-weixin", "target": "wechat:ops"}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "OpenClaw notification routing has been removed" in str(exc)
+        assert "provider=wechat_clawbot" in str(exc)
+
+
+def test_validate_config_rejects_removed_openclaw_transport_channel() -> None:
+    import src.application.config_validator as mod
+
+    cfg = _base_cfg()
+    cfg["notifications"] = {"transport_channel": "openclaw-weixin", "target": "wechat:ops"}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "OpenClaw notification routing has been removed" in str(exc)
+
+
+def test_validate_config_rejects_non_boolean_trade_intake_enabled() -> None:
+    import src.application.config_validator as mod
+
+    cfg = _base_cfg()
+    cfg["trade_intake"] = {"enabled": "false"}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "trade_intake.enabled must be a boolean" in str(exc)
 
 
 def test_validate_config_accepts_option_positions_auto_close_enabled_boolean() -> None:

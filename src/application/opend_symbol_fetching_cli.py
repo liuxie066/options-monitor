@@ -77,6 +77,7 @@ def main() -> None:
 
     opend_metrics_path = (base / "output_shared" / "state" / "opend_metrics.json").resolve()
 
+    had_error = False
     for sym in args.symbols:
         t0 = time.monotonic()
         payload = fetch_symbol_request(
@@ -135,12 +136,20 @@ def main() -> None:
             )
         except Exception:
             pass
+        meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+        status = str((meta or {}).get("status") or "ok").strip().lower()
+        if status in {"error", "fail", "failed"}:
+            had_error = True
         if not args.quiet:
-            print(f"[OK] {sym} source=opend")
+            label = "ERROR" if status in {"error", "fail", "failed"} else "OK"
+            print(f"[{label}] {sym} source=opend")
             print(f"  underlier={payload.get('underlier_code')} spot={payload.get('spot')}")
             print(f"  expirations={payload.get('expiration_count')} rows={len(payload.get('rows') or [])}")
             print(f"  raw={raw_path}")
             print(f"  csv={csv_path}")
+
+    if had_error:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

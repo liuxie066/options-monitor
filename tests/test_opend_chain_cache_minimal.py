@@ -549,3 +549,47 @@ def test_save_outputs_preserves_existing_parsed_csv_on_fetch_error() -> None:
         assert "PDD,put,2026-05-15,100,1.0" in csv_path.read_text(encoding="utf-8")
         raw = json.loads((root / "raw" / "PDD_required_data.json").read_text(encoding="utf-8"))
         assert raw["meta"]["error_code"] == "RATE_LIMIT"
+
+
+def test_save_outputs_preserves_existing_parsed_csv_on_nonempty_fetch_error() -> None:
+    import sys
+    from tempfile import TemporaryDirectory
+
+    base = Path(__file__).resolve().parents[1]
+    if str(base) not in sys.path:
+        sys.path.insert(0, str(base))
+
+    import src.application.opend_symbol_outputs as m
+
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        parsed = root / "parsed"
+        parsed.mkdir(parents=True)
+        csv_path = parsed / "PDD_required_data.csv"
+        csv_path.write_text("symbol,option_type,expiration,strike,mid\nPDD,put,2026-05-15,100,1.0\n", encoding="utf-8")
+
+        m.save_outputs(
+            base,
+            "PDD",
+            {
+                "symbol": "PDD",
+                "rows": [
+                    {
+                        "symbol": "PDD",
+                        "option_type": "put",
+                        "expiration": "2026-05-15",
+                        "dte": 15,
+                        "contract_symbol": "US.PDD.2026-05-15.P100",
+                        "strike": 100,
+                        "spot": 110,
+                    }
+                ],
+                "meta": {"source": "opend", "status": "error", "error_code": "RATE_LIMIT", "error": "snapshot failed"},
+            },
+            output_root=root,
+        )
+
+        assert "PDD,put,2026-05-15,100,1.0" in csv_path.read_text(encoding="utf-8")
+        raw = json.loads((root / "raw" / "PDD_required_data.json").read_text(encoding="utf-8"))
+        assert raw["rows"][0]["contract_symbol"] == "US.PDD.2026-05-15.P100"
+        assert raw["meta"]["error_code"] == "RATE_LIMIT"

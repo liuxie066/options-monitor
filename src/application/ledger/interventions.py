@@ -21,7 +21,7 @@ from domain.domain.trade_contract_identity import (
     normalize_position_effect,
     normalize_trade_side,
 )
-from src.application.ledger.event_codec import stored_trade_event_to_ledger_event
+from src.application.ledger.event_codec import stored_trade_event_to_ledger_event, valid_void_target_event_id
 from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
 from src.application.ledger.repository import (
     require_option_positions_event_write_repo,
@@ -64,9 +64,7 @@ def _void_event_for_target(events: list[dict[str, Any]], target_event_id: str) -
     if not target:
         return None
     for event in events:
-        if str(event.get("position_effect") or "").strip().lower() != "void":
-            continue
-        if str(_event_payload(event).get("void_target_event_id") or "").strip() == target:
+        if valid_void_target_event_id(event) == target:
             return dict(event)
     return None
 
@@ -214,11 +212,11 @@ def _repair_downstream_dependencies(events: list[dict[str, Any]], target: dict[s
     target_lot_record_id = _open_event_lot_record_id(target)
     target_position_side = _event_position_side(target)
     target_sort_key = _event_sort_key(target)
-    voided_event_ids = {
-        str(_event_payload(event).get("void_target_event_id") or "").strip()
-        for event in events
-        if str(event.get("position_effect") or "").strip().lower() == "void"
-    }
+    voided_event_ids: set[str] = set()
+    for event in events:
+        void_target_event_id = valid_void_target_event_id(event)
+        if void_target_event_id:
+            voided_event_ids.add(void_target_event_id)
     out: list[dict[str, Any]] = []
     for event in events:
         event_id = str(event.get("event_id") or "").strip()

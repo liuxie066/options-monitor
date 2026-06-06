@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
-from types import SimpleNamespace
 
 
 def test_normalize_feishu_app_send_output_marks_success_with_message_id() -> None:
@@ -181,73 +181,146 @@ def test_select_notification_delivery_adapter_keeps_feishu_app_provider_on_app_s
     assert adapter.failure_stage == "send_feishu_app_message"
 
 
-def test_select_notification_delivery_adapter_routes_wechat_clawbot_to_openclaw() -> None:
-    from domain.domain import normalize_notify_subprocess_output
+def test_select_notification_delivery_adapter_routes_wechat_clawbot_directly() -> None:
+    from src.application.channels.wechat_clawbot.notification import (
+        normalize_wechat_clawbot_send_output,
+        send_wechat_clawbot_message_process,
+    )
     from src.application.notification_delivery_adapter import (
         select_notification_delivery_adapter,
-    )
-    from src.infrastructure.external_services import (
-        send_openclaw_message_process,
     )
 
     adapter = select_notification_delivery_adapter("wechat_clawbot")
 
-    assert adapter.send_fn is send_openclaw_message_process
-    assert adapter.normalize_fn is normalize_notify_subprocess_output
-    assert adapter.failure_stage == "send_openclaw_message"
+    assert adapter.send_fn is send_wechat_clawbot_message_process
+    assert adapter.normalize_fn is normalize_wechat_clawbot_send_output
+    assert adapter.failure_stage == "send_wechat_clawbot_message"
 
 
-def test_send_openclaw_message_translates_wechat_clawbot_channel(monkeypatch, tmp_path: Path) -> None:
-    from src.infrastructure import external_services as service
-
-    captured: dict[str, object] = {}
-
-    def fake_run_command(cmd, *, cwd, capture_output=False, text=False, timeout_sec=None, env=None):
-        captured["cmd"] = cmd
-        captured["cwd"] = cwd
-        captured["timeout_sec"] = timeout_sec
-        return SimpleNamespace(returncode=0, stdout='{"message_id":"msg_1"}', stderr="")
-
-    monkeypatch.setattr(service, "run_command", fake_run_command)
-
-    out = service.send_openclaw_message(
-        base=tmp_path,
-        channel="wechat_clawbot",
-        target="clawbot:test",
-        message="hello",
-    )
-
-    assert out.returncode == 0
-    assert captured["cwd"] == tmp_path
-    assert captured["timeout_sec"] is None
-    cmd = captured["cmd"]
-    assert cmd[cmd.index("--channel") + 1] == "openclaw-weixin"
-    assert cmd[cmd.index("--target") + 1] == "clawbot:test"
-
-
-def test_send_openclaw_message_process_uses_configured_timeout(monkeypatch, tmp_path: Path) -> None:
-    from src.infrastructure import external_services as service
+def test_send_wechat_clawbot_message_uses_bound_context(tmp_path: Path) -> None:
+    from src.application.channels.wechat_clawbot.notification import send_wechat_clawbot_message
 
     captured: dict[str, object] = {}
 
-    def fake_run_command(cmd, *, cwd, capture_output=False, text=False, timeout_sec=None, env=None):
-        captured["cmd"] = cmd
-        captured["cwd"] = cwd
-        captured["timeout_sec"] = timeout_sec
-        return SimpleNamespace(returncode=0, stdout='{"message_id":"msg_1"}', stderr="")
+    class FakeClient:
+        def __init__(self, *, bot_token: str, base_url: str, timeout: int) -> None:
+            captured["bot_token"] = bot_token
+            captured["base_url"] = base_url
+            captured["timeout"] = timeout
 
-    monkeypatch.setattr(service, "run_command", fake_run_command)
+        def send_text_message(self, **kwargs):  # type: ignore[no-untyped-def]
+            captured.update(kwargs)
+            return {"ret": 0, "data": {"message_id": "msg_1"}}
 
-    out = service.send_openclaw_message_process(
-        base=tmp_path,
-        channel="wechat_clawbot",
-        target="clawbot:test",
-        message="hello",
-        notifications={"send_timeout_sec": 12},
+    state_dir = tmp_path / "wechat"
+    state_dir.mkdir()
+    (state_dir / "state.json").write_text(
+        json.dumps({"bot_token": "bot_1", "base_url": "https://example.invalid"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (state_dir / "bindings.json").write_text(
+        json.dumps(
+            {
+                "bindings": {
+                    "ops": {
+                        "to_user_id": "wx_user_1",
+                        "context_token": "ctx_1",
+                        "group_id": "group_1",
+                    }
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
     )
 
-    assert out.returncode == 0
-    assert captured["timeout_sec"] == 12
+    out = send_wechat_clawbot_message(
+        base=tmp_path,
+        channel="wechat_clawbot",
+        target="ops",
+        message="hello",
+        notifications={"wechat_clawbot_state_dir": str(state_dir), "send_timeout_sec": 12},
+        client_factory=FakeClient,
+    )
+
+    assert out["ok"] is True
+    assert out["message_id"] == "msg_1"
+    assert captured["bot_token"] == "bot_1"
+    assert captured["base_url"] == "https://example.invalid"
+    assert captured["timeout"] == 12
+    assert captured["to_user_id"] == "wx_user_1"
+    assert captured["context_token"] == "ctx_1"
+    assert captured["group_id"] == "group_1"
+    assert captured["text"] == "hello"
+
+
+def test_wechat_clawbot_success_without_upstream_message_id_is_unconfirmed() -> None:
+    from src.application.channels.wechat_clawbot.notification import normalize_wechat_clawbot_send_output
+
+    out = normalize_wechat_clawbot_send_output(
+        send_result={
+            "ok": True,
+            "http_status": 200,
+            "response_json": {"ret": 0},
+            "response_tail": '{"ret":0}',
+            "local_receipt_id": "om-local-1",
+            "message_id": None,
+        }
+    )
+
+    assert out["command_ok"] is True
+    assert out["delivery_confirmed"] is False
+    assert out["ok"] is False
+    assert out["message_id"] is None
+    assert out["local_receipt_id"] == "om-local-1"
+    assert "upstream message_id is missing" in out["message"]
+
+
+def test_send_wechat_clawbot_message_does_not_synthesize_message_id(tmp_path: Path) -> None:
+    from src.application.channels.wechat_clawbot.notification import send_wechat_clawbot_message
+
+    class FakeClient:
+        def __init__(self, *, bot_token: str, base_url: str, timeout: int) -> None:
+            pass
+
+        def send_text_message(self, **_kwargs):  # type: ignore[no-untyped-def]
+            return {"ret": 0}
+
+    state_dir = tmp_path / "wechat"
+    state_dir.mkdir()
+    (state_dir / "state.json").write_text(
+        json.dumps({"bot_token": "bot_1", "base_url": "https://example.invalid"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (state_dir / "bindings.json").write_text(
+        json.dumps({"bindings": {"ops": {"to_user_id": "wx_user_1", "context_token": "ctx_1"}}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    out = send_wechat_clawbot_message(
+        base=tmp_path,
+        channel="wechat_clawbot",
+        target="ops",
+        message="hello",
+        notifications={"wechat_clawbot_state_dir": str(state_dir)},
+        idempotency_key="om-idem-1",
+        client_factory=FakeClient,
+    )
+
+    assert out["ok"] is True
+    assert out["message_id"] is None
+    assert out["local_receipt_id"] == "om-idem-1"
+
+
+def test_select_notification_delivery_adapter_rejects_openclaw_provider() -> None:
+    from src.application.notification_delivery_adapter import select_notification_delivery_adapter
+
+    try:
+        select_notification_delivery_adapter("openclaw")
+        raise AssertionError("expected ValueError")
+    except ValueError as exc:
+        assert "unsupported notification provider" in str(exc)
+        assert "wechat_clawbot" in str(exc)
 
 
 def test_select_notification_delivery_adapter_rejects_unknown_provider() -> None:

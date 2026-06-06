@@ -738,6 +738,7 @@ def _manual_open_ledger_inputs(command: OpenPositionCommand) -> tuple[OpenPositi
     fields = build_position_lot_fields(resolved_command).to_dict()
     contract_key = _contract_key_from_fields(fields)
     trade_side = "sell" if str(resolved_command.side or "").strip().lower() == "short" else "buy"
+    currency = resolve_open_currency(fields.get("symbol"), fields.get("currency"))
     event_id = _manual_open_event_id(
         broker=str(resolved_command.broker),
         account=str(resolved_command.account),
@@ -747,7 +748,9 @@ def _manual_open_ledger_inputs(command: OpenPositionCommand) -> tuple[OpenPositi
         contracts=int(resolved_command.contracts),
         price=float(fields["premium"]),
         strike=effective_strike(fields),
+        multiplier=effective_multiplier(fields),
         expiration_ymd=str(resolved_command.expiration_ymd or "").strip() or None,
+        currency=currency,
         trade_time_ms=event_time_ms,
     )
     event = TradeEvent(
@@ -757,7 +760,7 @@ def _manual_open_ledger_inputs(command: OpenPositionCommand) -> tuple[OpenPositi
         contract_key=contract_key,
         contracts=int(resolved_command.contracts),
         price=float(fields["premium"]),
-        currency=resolve_open_currency(fields.get("symbol"), fields.get("currency")),
+        currency=currency,
         source="cli_manual_open",
         multiplier=float(effective_multiplier(fields) or 100),
         lot_id=f"lot_{event_id}",

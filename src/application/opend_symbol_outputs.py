@@ -91,10 +91,14 @@ def save_outputs(base: Path, symbol: str, payload: dict[str, Any], *, output_roo
 
     atomic_write_text(raw_path, json.dumps(payload, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
 
-    df = pd.DataFrame(payload.get("rows") or [])
     meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
-    if df.empty and str((meta or {}).get("status") or "").lower() == "error" and csv_path.exists() and csv_path.stat().st_size > 0:
+    is_error_payload = str((meta or {}).get("status") or "").lower() in {"error", "fail", "failed"}
+    if is_error_payload and csv_path.exists() and csv_path.stat().st_size > 0:
         return raw_path, csv_path
+
+    df = pd.DataFrame(payload.get("rows") or [])
+    if is_error_payload:
+        df = pd.DataFrame()
 
     if df.empty:
         df_out = pd.DataFrame(columns=REQUIRED_DATA_COLUMNS)

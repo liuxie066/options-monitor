@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 
 def _plan(account_messages: dict[str, str]) -> SimpleNamespace:
-    return SimpleNamespace(channel="openclaw-weixin", target="group://test", account_messages=account_messages)
+    return SimpleNamespace(channel="wechat_clawbot", target="wechat:ops", account_messages=account_messages)
 
 
 def test_execute_per_account_delivery_collects_mixed_success_and_unconfirmed(fake_runlog_factory) -> None:
@@ -122,7 +122,7 @@ def test_execute_per_account_delivery_sends_one_message_per_account_to_same_targ
         return SimpleNamespace(returncode=0, stdout="", stderr="", raw={"http_status": 200, "response_json": {"code": 0, "data": {"message_id": suffix}}})
 
     out = mod.execute_per_account_delivery(
-        delivery_batch=SimpleNamespace(channel="openclaw-weixin", target="ou_same", account_messages={"lx": "msg-lx", "sy": "msg-sy"}),
+        delivery_batch=SimpleNamespace(channel="wechat_clawbot", target="wechat:ops", account_messages={"lx": "msg-lx", "sy": "msg-sy"}),
         run_id="run-4",
         runlog=fake_runlog_factory([]),
         audit_fn=lambda *_args, **_kwargs: None,
@@ -141,7 +141,7 @@ def test_execute_per_account_delivery_sends_one_message_per_account_to_same_targ
     )
 
     assert out.sent_accounts == ["lx", "sy"]
-    assert seen_targets == ["ou_same", "ou_same"]
+    assert seen_targets == ["wechat:ops", "wechat:ops"]
     assert seen_messages == ["msg-lx", "msg-sy"]
 
 

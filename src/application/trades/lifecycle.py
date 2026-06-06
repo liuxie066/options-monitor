@@ -731,6 +731,7 @@ def _stock_settlement_has_lifecycle_context(repo: Any, *, stock_evidence: dict[s
             "option_type": normalize_option_type(fields.get("option_type")),
             "position_side": str(fields.get("side") or "").strip().lower(),
             "strike": effective_strike(fields),
+            "expiration_ymd": expiration_ymd,
             "contracts": contracts,
             "multiplier": int(effective_multiplier(fields) or 100),
         }
@@ -814,6 +815,15 @@ def _stock_matches_lifecycle_close(case: dict[str, Any], stock_evidence: dict[st
     if not expected_side:
         return False
     if side != expected_side:
+        return False
+    expiration_ymd = normalize_contract_expiration(case.get("expiration_ymd"))
+    if not expiration_ymd:
+        return False
+    try:
+        stock_trade_time_ms = int(stock_evidence.get("trade_time_ms") or 0)
+    except Exception:
+        return False
+    if not _trade_time_on_or_after_expiration_ymd(stock_trade_time_ms, expiration_ymd):
         return False
     try:
         expected_qty = int(case.get("contracts") or 0) * int(case.get("multiplier") or 100)

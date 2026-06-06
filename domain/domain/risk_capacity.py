@@ -155,6 +155,9 @@ def compute_short_call_locked_shares(
     open_contracts = _to_nonnegative_int(contracts_open)
     total_contracts = _to_nonnegative_int(contracts_total)
 
+    if open_contracts <= 0:
+        return 0
+
     if locked is not None:
         if total_contracts > 0 and open_contracts < total_contracts:
             locked = float(locked) / float(total_contracts) * float(open_contracts)
@@ -177,6 +180,9 @@ def compute_short_put_cash_secured(
     open_contracts = _to_nonnegative_int(contracts_open)
     total_contracts = _to_nonnegative_int(contracts_total)
     cash_secured = _to_float(cash_secured_amount)
+
+    if open_contracts <= 0:
+        return 0.0
 
     if cash_secured is None:
         strike_v = _to_float(strike)

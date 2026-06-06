@@ -153,8 +153,6 @@ def _attach_runtime_write_diagnostics(
         return out
     if str(out.get("status") or "").strip().lower() != "applied":
         return out
-    if str(out.get("action") or "").strip().lower() != "close":
-        return out
     runtime_root = str((store or {}).get("runtime_root") or "").strip()
     if not runtime_root:
         return out

@@ -129,6 +129,11 @@ def _persist_lifecycle_close_events(
         raise ValueError("lifecycle close event_type must be assignment, exercise, or expire_close")
     if not close_target_resolution.matches:
         raise ValueError(f"{normalized_event_type} requires at least one close target")
+    _assert_lifecycle_resolution_contracts(
+        normalized_event_type,
+        close_target_resolution=close_target_resolution,
+        contracts_to_close=contracts_to_close,
+    )
     writes: list[LifecycleLedgerWrite] = []
     as_of_ms = int(event_time_ms) if event_time_ms is not None else None
     evidence_tuple = tuple(str(item) for item in (evidence_ids or []) if str(item or "").strip())
@@ -190,6 +195,23 @@ def _persist_lifecycle_close_events(
     return writes
 
 
+def _assert_lifecycle_resolution_contracts(
+    event_type: str,
+    *,
+    close_target_resolution: CloseTargetResolution,
+    contracts_to_close: int,
+) -> None:
+    requested = int(contracts_to_close or 0)
+    if requested <= 0:
+        raise ValueError(f"{event_type} requires contracts_to_close > 0")
+    resolved = int(close_target_resolution.contracts_to_close)
+    if requested != resolved:
+        raise ValueError(
+            f"{event_type} contracts_to_close does not match resolved close targets: "
+            f"requested={requested} resolved={resolved}"
+        )
+
+
 def persist_assignment_event(
     repo: Any,
     *,
@@ -201,6 +223,8 @@ def persist_assignment_event(
     stock_settlement: dict[str, Any] | None = None,
     source: str = "option_lifecycle_decision",
 ) -> LifecycleLedgerWrite:
+    if len(close_target_resolution.matches) != 1:
+        raise ValueError(f"expected one assignment target, got {len(close_target_resolution.matches)}")
     writes = persist_assignment_events(
         repo,
         close_target_resolution=close_target_resolution,
@@ -227,6 +251,8 @@ def persist_exercise_event(
     stock_settlement: dict[str, Any] | None = None,
     source: str = "option_lifecycle_decision",
 ) -> LifecycleLedgerWrite:
+    if len(close_target_resolution.matches) != 1:
+        raise ValueError(f"expected one exercise target, got {len(close_target_resolution.matches)}")
     writes = persist_exercise_events(
         repo,
         close_target_resolution=close_target_resolution,

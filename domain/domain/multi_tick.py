@@ -15,27 +15,29 @@ from .engine import (
     filter_notify_candidates as filter_notify_candidates_engine,
 )
 
-OPENCLAW_NOTIFICATION_PROVIDER = 'openclaw'
 FEISHU_APP_NOTIFICATION_PROVIDER = 'feishu_app'
-DEFAULT_NOTIFICATION_PROVIDER = OPENCLAW_NOTIFICATION_PROVIDER
-WECHAT_CLAWBOT_NOTIFICATION_CHANNEL = 'wechat_clawbot'
+WECHAT_CLAWBOT_NOTIFICATION_PROVIDER = 'wechat_clawbot'
+WECHAT_CLAWBOT_NOTIFICATION_CHANNEL = WECHAT_CLAWBOT_NOTIFICATION_PROVIDER
+DEFAULT_NOTIFICATION_PROVIDER = WECHAT_CLAWBOT_NOTIFICATION_PROVIDER
+OPENCLAW_NOTIFICATION_PROVIDER = 'openclaw'
 OPENCLAW_WEIXIN_TRANSPORT_CHANNEL = 'openclaw-weixin'
 SUPPORTED_NOTIFICATION_PROVIDERS = (
-    OPENCLAW_NOTIFICATION_PROVIDER,
+    WECHAT_CLAWBOT_NOTIFICATION_PROVIDER,
     FEISHU_APP_NOTIFICATION_PROVIDER,
 )
 SUPPORTED_NOTIFICATION_CHANNELS = (
-    OPENCLAW_WEIXIN_TRANSPORT_CHANNEL,
     WECHAT_CLAWBOT_NOTIFICATION_CHANNEL,
+    FEISHU_APP_NOTIFICATION_PROVIDER,
 )
-OPENCLAW_NOTIFICATION_CHANNELS = (
+REMOVED_OPENCLAW_NOTIFICATION_CHANNELS = (
     OPENCLAW_WEIXIN_TRANSPORT_CHANNEL,
-    WECHAT_CLAWBOT_NOTIFICATION_CHANNEL,
 )
-OPENCLAW_TRANSPORT_CHANNEL_BY_NOTIFICATION_CHANNEL = {
-    OPENCLAW_WEIXIN_TRANSPORT_CHANNEL: OPENCLAW_WEIXIN_TRANSPORT_CHANNEL,
-    WECHAT_CLAWBOT_NOTIFICATION_CHANNEL: OPENCLAW_WEIXIN_TRANSPORT_CHANNEL,
-}
+OPENCLAW_NOTIFICATION_CHANNELS = REMOVED_OPENCLAW_NOTIFICATION_CHANNELS
+OPENCLAW_TRANSPORT_CHANNEL_BY_NOTIFICATION_CHANNEL: dict[str, str] = {}
+REMOVED_OPENCLAW_NOTIFICATION_VALUES = (
+    OPENCLAW_NOTIFICATION_PROVIDER,
+    OPENCLAW_WEIXIN_TRANSPORT_CHANNEL,
+)
 
 
 def _resolve_watchlist_config(cfg: dict | None) -> list[dict[str, Any]]:
@@ -461,11 +463,21 @@ def resolve_notification_channel_target(
     notifications: Any,
     cli_channel: Any = None,
     cli_target: Any = None,
-    default_channel: str = OPENCLAW_WEIXIN_TRANSPORT_CHANNEL,
+    default_channel: str = WECHAT_CLAWBOT_NOTIFICATION_CHANNEL,
     default_provider: str = DEFAULT_NOTIFICATION_PROVIDER,
 ) -> dict[str, Any]:
     """Resolve channel/target with compat defaults at domain boundary."""
     notif_cfg = notifications if isinstance(notifications, dict) else {}
+    raw_route_values = (
+        cli_channel,
+        notif_cfg.get('provider'),
+        notif_cfg.get('channel'),
+        notif_cfg.get('transport_channel'),
+    )
+    for raw in raw_route_values:
+        value = str(raw or '').strip().lower()
+        if value in REMOVED_OPENCLAW_NOTIFICATION_VALUES:
+            raise ValueError("OpenClaw notification routing has been removed; use provider=wechat_clawbot")
     cli_provider = normalize_notification_provider(cli_channel, default_provider=None)
     cfg_channel_provider = normalize_notification_provider(notif_cfg.get('channel'), default_provider=None)
     provider = normalize_notification_provider(
@@ -475,10 +487,12 @@ def resolve_notification_channel_target(
         or default_provider
     )
     raw_channel = cli_channel or notif_cfg.get('transport_channel') or notif_cfg.get('channel') or default_channel
-    if provider == OPENCLAW_NOTIFICATION_PROVIDER:
-        channel = resolve_openclaw_transport_channel(raw_channel)
-    else:
+    if provider == FEISHU_APP_NOTIFICATION_PROVIDER:
         channel = FEISHU_APP_NOTIFICATION_PROVIDER
+    elif provider == WECHAT_CLAWBOT_NOTIFICATION_PROVIDER:
+        channel = WECHAT_CLAWBOT_NOTIFICATION_CHANNEL
+    else:
+        channel = normalize_notification_channel(raw_channel)
     return {
         'provider': provider,
         'channel': channel,
@@ -488,8 +502,8 @@ def resolve_notification_channel_target(
 
 def normalize_notification_provider(provider: Any, *, default_provider: str | None = DEFAULT_NOTIFICATION_PROVIDER) -> str:
     value = str(provider or default_provider or '').strip().lower()
-    if value in OPENCLAW_NOTIFICATION_CHANNELS or value == OPENCLAW_NOTIFICATION_PROVIDER:
-        return OPENCLAW_NOTIFICATION_PROVIDER
+    if value == WECHAT_CLAWBOT_NOTIFICATION_CHANNEL:
+        return WECHAT_CLAWBOT_NOTIFICATION_PROVIDER
     if value == FEISHU_APP_NOTIFICATION_PROVIDER:
         return FEISHU_APP_NOTIFICATION_PROVIDER
     return value
@@ -514,8 +528,8 @@ def is_openclaw_notification_channel(channel: Any) -> bool:
 
 def resolve_openclaw_transport_channel(channel: Any) -> str:
     value = normalize_notification_channel(channel)
-    if value in OPENCLAW_TRANSPORT_CHANNEL_BY_NOTIFICATION_CHANNEL:
-        return OPENCLAW_TRANSPORT_CHANNEL_BY_NOTIFICATION_CHANNEL[value]
+    if value in OPENCLAW_NOTIFICATION_CHANNELS or value == OPENCLAW_NOTIFICATION_PROVIDER:
+        raise ValueError("OpenClaw notification routing has been removed; use provider=wechat_clawbot")
     return str(channel or '').strip()
 
 
@@ -524,7 +538,7 @@ def resolve_notification_route_from_config(
     config: Any,
     cli_channel: Any = None,
     cli_target: Any = None,
-    default_channel: str = OPENCLAW_WEIXIN_TRANSPORT_CHANNEL,
+    default_channel: str = WECHAT_CLAWBOT_NOTIFICATION_CHANNEL,
     default_provider: str = DEFAULT_NOTIFICATION_PROVIDER,
 ) -> dict[str, Any]:
     """Resolve notification route while centralizing config notifications fallback reads."""

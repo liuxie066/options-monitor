@@ -865,7 +865,7 @@ def test_research_agent_tool_runs_with_local_runtime_artifacts(tmp_path: Path) -
                 "accounts": ["lx"],
                 "symbols": [],
                 "notifications": {
-                    "provider": "openclaw",
+                    "provider": "wechat_clawbot",
                     "channel": "wechat_clawbot",
                     "target": "clawbot:test-room",
                 },

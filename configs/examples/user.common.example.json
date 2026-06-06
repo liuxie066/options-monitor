@@ -19,8 +19,8 @@
     }
   },
   "notifications": {
-    "provider": "openclaw",
-    "channel": "openclaw-weixin",
-    "target": "clawbot_target"
+    "provider": "wechat_clawbot",
+    "channel": "wechat_clawbot",
+    "target": "wechat:ops"
   }
 }

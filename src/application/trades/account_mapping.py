@@ -28,7 +28,7 @@ def resolve_trade_intake_config(
     if mode not in ("dry-run", "apply"):
         raise ValueError("trade_intake.mode must be dry-run or apply")
 
-    enabled = bool(ti.get("enabled", True))
+    enabled = _bool_from_config(ti, "enabled", default=True, section="")
     reconnect_sec = int(ti.get("reconnect_sec", 5) or 5)
     if reconnect_sec <= 0:
         raise ValueError("trade_intake.reconnect_sec must be > 0")
@@ -99,7 +99,8 @@ def resolve_trade_intake_backfill_config(value: Any) -> dict[str, Any]:
 def _bool_from_config(src: dict[str, Any], key: str, *, default: bool, section: str) -> bool:
     value = src.get(key, default)
     if not isinstance(value, bool):
-        raise ValueError(f"trade_intake.{section}.{key} must be a boolean")
+        path = f"trade_intake.{section}.{key}" if section else f"trade_intake.{key}"
+        raise ValueError(f"{path} must be a boolean")
     return bool(value)
 
 
