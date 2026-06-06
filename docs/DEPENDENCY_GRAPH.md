@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 619 (`src`: 342, `domain`: 52, `scripts`: 7, `tests`: 218)
-- Internal import edges: 3319 total, 1524 production/script edges excluding tests
+- Internal import edges: 3321 total, 1525 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -44,7 +44,7 @@ flowchart LR
   scripts -->|1| infrastructure
   scripts -->|2| storage
   storage -->|1| domain
-  tests -->|1210| application
+  tests -->|1211| application
   tests -->|282| domain
   tests -->|2| domain_services
   tests -->|95| infrastructure
@@ -75,7 +75,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 1210 |
+| tests | application | 1211 |
 | tests | domain | 282 |
 | tests | interfaces | 162 |
 | tests | infrastructure | 95 |
@@ -204,9 +204,9 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.application.agent_tool_runtime_status | 18 |
 | src.application.multi_tick.required_data_prefetch | 18 |
 | src.application.tick_notification_flow | 18 |
+| src.application.channels.wechat_clawbot.inbound | 17 |
 | src.application.sell_put_steps | 17 |
 | src.application.assistant.symbol_operations | 16 |
-| src.application.channels.wechat_clawbot.inbound | 16 |
 | src.application.trades.auto_intake | 16 |
 | src.application.account_run | 15 |
 | src.application.ledger.commands | 15 |
