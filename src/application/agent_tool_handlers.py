@@ -35,6 +35,7 @@ from src.application.research import research_tool
 from src.application.agent_tool_notifications import preview_notification_tool
 from src.application.agent_tool_openclaw import openclaw_readiness_tool
 from src.application.agent_tool_runtime_status import runtime_status_tool
+from src.application.assistant.operation_diagnostics import collect_operation_timeline
 from src.application.runtime_logs_cli import collect_runtime_logs
 from src.application.runtime_runs_cli import collect_runtime_runs
 from src.application.agent_tool_operations import (
@@ -382,7 +383,7 @@ def _runtime_runs_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[st
         repo_root=repo_base(),
         runs_root=payload.get("runs_root"),
         profile_path=payload.get("profile_path"),
-        limit=int(payload.get("limit") or 10),
+        limit=payload.get("limit") or 10,
         run_id=payload.get("run_id"),
         run_dir=payload.get("run_dir"),
         scanned_only=bool(payload.get("scanned_only")),
@@ -405,6 +406,22 @@ def _runtime_logs_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[st
         log_file=payload.get("log_file"),
     )
     return data, [], {"runs_root": mask_path(data.get("runs_root")), "logs_root": mask_path(data.get("logs_root"))}
+
+
+def _operation_timeline_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    data = collect_operation_timeline(
+        audit_db=payload.get("audit_db") or payload.get("inbound_audit_db"),
+        channel=payload.get("channel"),
+        sender_id=payload.get("sender_id"),
+        conversation_id=payload.get("conversation_id"),
+        operation_id=payload.get("operation_id"),
+        operation_types=payload.get("operation_types"),
+        statuses=payload.get("statuses"),
+        limit=int(payload.get("limit") or 10),
+        audit_scan_limit=payload.get("audit_scan_limit"),
+    )
+    warnings = [str(item) for item in data.get("warnings", []) if str(item).strip()]
+    return data, warnings, {"audit_db": data.get("audit_db")}
 
 
 def _reject_removed_payload_alias(payload: dict[str, Any], *, alias: str, replacement: str) -> None:
@@ -459,6 +476,7 @@ TOOL_HANDLERS = {
     "runtime_status": _runtime_status_tool,
     "runtime_runs": _runtime_runs_tool,
     "runtime_logs": _runtime_logs_tool,
+    "operation_timeline": _operation_timeline_tool,
     "openclaw_readiness": _openclaw_readiness_tool,
     "research": _research_tool,
 }

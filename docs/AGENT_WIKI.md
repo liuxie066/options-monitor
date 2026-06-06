@@ -24,6 +24,9 @@ Primary entry points:
 | Guarded production tick wrapper | `./om run tick-cron ...` |
 | MacBook Codex online-evidence handoff | `./om research collect ...` or `./om-agent run --tool research ...` |
 
+For the canonical capability boundary, risk classes, Assistant exposure, and
+verification map, see [OM_AGENT_CAPABILITY_MAP.md](OM_AGENT_CAPABILITY_MAP.md).
+
 ## 2. First Five Minutes
 
 When entering an unfamiliar task, gather just enough context:

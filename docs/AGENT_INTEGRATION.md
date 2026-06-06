@@ -8,6 +8,10 @@ It exposes a stable JSON contract intended for local agent usage:
 - `./om-agent spec`
 - `./om-agent run --tool <name> --input-json '<json>'`
 
+Capability boundaries, risk classes, Assistant exposure, and verification
+rules are maintained in [OM_AGENT_CAPABILITY_MAP.md](OM_AGENT_CAPABILITY_MAP.md).
+This document only describes integration contracts and invocation patterns.
+
 也支持：
 
 - `./om-agent run --tool <name> --input-file payload.json`
@@ -121,19 +125,11 @@ OM_FEISHU_BOT_USER_OPEN_ID='ou_xxx'
 OM_FEISHU_BOT_ALLOWED_OPEN_IDS='ou_xxx'
 ```
 
-The first whitelist is intentionally small:
-
-- `runtime_status`
-- `healthcheck`
-- `config_validate`
-- `option_positions_read`
-- `monthly_income_report`
-- `runtime_runs`
-- `runtime_logs`
-- `symbol_list`
-- `pending_operations`
-
-Do not connect Feishu, WeChat, or Hermes to arbitrary shell execution. Gateways should call only `./om assistant handle`. See [INBOUND_CONTROL.md](INBOUND_CONTROL.md).
+The remote capability surface is intentionally smaller than the full
+`om-agent` manifest. Inspect it with `./om assistant capabilities --format json`
+and keep boundary decisions in [OM_AGENT_CAPABILITY_MAP.md](OM_AGENT_CAPABILITY_MAP.md).
+Do not connect Feishu, WeChat, or Hermes to arbitrary shell execution. Gateways
+should call only `./om assistant handle`. See [INBOUND_CONTROL.md](INBOUND_CONTROL.md).
 
 For Feishu event JSON specifically, use the thin adapter:
 
