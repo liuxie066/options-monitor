@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.224 - 2026-06-06
+
+### Fixed
+- Fixed healthcheck `starter_symbols` diagnostics so production watchlists containing example symbols such as `NVDA` no longer warn unless the watchlist is still only starter symbols.
+
 ## 1.2.223 - 2026-06-06
 
 ### Added
