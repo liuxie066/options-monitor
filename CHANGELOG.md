@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.227 - 2026-06-06
+
+### Added
+- Added the read-only `operation_timeline` agent tool to reconstruct Assistant operation timelines from inbound audit rows, pending operations, ledger identities, and observed reply receipts.
+- Added `docs/OM_AGENT_CAPABILITY_MAP.md` as the explicit authority for OM Agent capability boundaries, risk classes, Assistant exposure, and verification paths.
+
+### Changed
+- Updated Agent integration and tool documentation to reference the capability map instead of duplicating remote-control allowlist policy.
+
 ## 1.2.226 - 2026-06-06
 
 ### Added
