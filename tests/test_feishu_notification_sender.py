@@ -307,15 +307,16 @@ def test_wechat_clawbot_client_wraps_sendmessage_payload_in_msg() -> None:
     assert captured["timeout"] == 12
     payload = captured["payload"]
     assert isinstance(payload, dict)
-    assert isinstance(payload["client_id"], str)
-    assert payload["client_id"]
-    assert payload["base_info"] == {"session_id": "", "scene": ""}
+    assert payload["base_info"] == {"channel_version": "1.0.0"}
+    assert isinstance(payload["msg"]["client_id"], str)
+    assert payload["msg"]["client_id"]
     assert payload["msg"] == {
         "message_type": 2,
         "message_state": 2,
         "context_token": "ctx_1",
         "from_user_id": "",
         "to_user_id": "wx_user_1",
+        "client_id": payload["msg"]["client_id"],
         "item_list": [{"type": 1, "text_item": {"text": "hello"}}],
         "group_id": "group_1",
     }
@@ -343,9 +344,18 @@ def test_wechat_clawbot_client_sends_typing_payloads() -> None:
     assert client.get_config(ilink_user_id="user_1", context_token="ctx_1") == {"ret": 0, "typing_ticket": "ticket_1"}
     assert client.send_typing(ilink_user_id="user_1", typing_ticket="ticket_1", status=1) == {"ret": 0}
     assert calls[0]["url"] == "https://example.invalid/ilink/bot/getconfig"
-    assert calls[0]["payload"] == {"ilink_user_id": "user_1", "context_token": "ctx_1"}
+    assert calls[0]["payload"] == {
+        "ilink_user_id": "user_1",
+        "context_token": "ctx_1",
+        "base_info": {"channel_version": "1.0.0"},
+    }
     assert calls[1]["url"] == "https://example.invalid/ilink/bot/sendtyping"
-    assert calls[1]["payload"] == {"ilink_user_id": "user_1", "typing_ticket": "ticket_1", "status": 1}
+    assert calls[1]["payload"] == {
+        "ilink_user_id": "user_1",
+        "typing_ticket": "ticket_1",
+        "status": 1,
+        "base_info": {"channel_version": "1.0.0"},
+    }
     assert calls[1]["headers"]["Authorization"] == "Bearer bot_1"  # type: ignore[index]
 
 
@@ -405,6 +415,49 @@ def test_send_wechat_clawbot_message_does_not_synthesize_message_id(tmp_path: Pa
     assert out["ok"] is True
     assert out["message_id"] is None
     assert out["local_receipt_id"] == "om-idem-1"
+
+
+def test_send_wechat_clawbot_message_accepts_empty_success_response(tmp_path: Path) -> None:
+    from src.application.channels.wechat_clawbot.notification import (
+        normalize_wechat_clawbot_send_output,
+        send_wechat_clawbot_message,
+    )
+
+    class FakeClient:
+        def __init__(self, *, bot_token: str, base_url: str, timeout: int) -> None:
+            del bot_token, base_url, timeout
+
+        def send_text_message(self, **_kwargs):  # type: ignore[no-untyped-def]
+            return {}
+
+    state_dir = tmp_path / "wechat"
+    state_dir.mkdir()
+    (state_dir / "state.json").write_text(
+        json.dumps({"bot_token": "bot_1", "base_url": "https://example.invalid"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (state_dir / "bindings.json").write_text(
+        json.dumps({"bindings": {"ops": {"to_user_id": "wx_user_1", "context_token": "ctx_1"}}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    send_result = send_wechat_clawbot_message(
+        base=tmp_path,
+        channel="wechat_clawbot",
+        target="ops",
+        message="hello",
+        notifications={"wechat_clawbot_state_dir": str(state_dir)},
+        idempotency_key="om-idem-1",
+        client_factory=FakeClient,
+    )
+    normalized = normalize_wechat_clawbot_send_output(send_result=send_result)
+
+    assert send_result["ok"] is True
+    assert send_result["message_id"] is None
+    assert normalized["command_ok"] is True
+    assert normalized["delivery_confirmed"] is False
+    assert normalized["ok"] is False
+    assert "upstream message_id is missing" in normalized["message"]
 
 
 def test_select_notification_delivery_adapter_rejects_openclaw_provider() -> None:

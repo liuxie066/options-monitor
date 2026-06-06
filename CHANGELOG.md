@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.233 - 2026-06-07
+
+### Fixed
+- Corrected WeChat ClawBot `sendmessage` payload shape so `client_id` is inside `msg` and `base_info.channel_version` is sent with iLink POST requests.
+- Treated empty iLink `sendmessage` responses as accepted replies while keeping delivery confirmation false unless an upstream message id is present.
+
 ## 1.2.232 - 2026-06-07
 
 ### Changed

@@ -13,6 +13,7 @@ from uuid import uuid4
 
 DEFAULT_ILINK_BASE_URL = "https://ilinkai.weixin.qq.com"
 HttpJsonFn = Callable[..., dict[str, Any]]
+ILINK_CHANNEL_VERSION = "1.0.0"
 
 
 class WechatClawbotError(RuntimeError):
@@ -103,7 +104,7 @@ class WechatClawbotClient:
         )
 
     def get_updates(self, *, get_updates_buf: str = "") -> dict[str, Any]:
-        payload: dict[str, Any] = {}
+        payload: dict[str, Any] = {"base_info": _base_info()}
         if str(get_updates_buf or "").strip():
             payload["get_updates_buf"] = str(get_updates_buf)
         return self.http_json_fn(
@@ -115,7 +116,7 @@ class WechatClawbotClient:
         )
 
     def get_config(self, *, ilink_user_id: str, context_token: str | None = None) -> dict[str, Any]:
-        payload: dict[str, Any] = {"ilink_user_id": str(ilink_user_id or "")}
+        payload: dict[str, Any] = {"ilink_user_id": str(ilink_user_id or ""), "base_info": _base_info()}
         if str(context_token or "").strip():
             payload["context_token"] = str(context_token or "").strip()
         return self.http_json_fn(
@@ -134,6 +135,7 @@ class WechatClawbotClient:
                 "ilink_user_id": str(ilink_user_id or ""),
                 "typing_ticket": str(typing_ticket or ""),
                 "status": int(status),
+                "base_info": _base_info(),
             },
             headers=self.headers(),
             timeout=self.timeout,
@@ -153,6 +155,7 @@ class WechatClawbotClient:
             "context_token": str(context_token or ""),
             "from_user_id": "",
             "to_user_id": str(to_user_id or ""),
+            "client_id": uuid4().hex,
             "item_list": [
                 {
                     "type": 1,
@@ -166,10 +169,13 @@ class WechatClawbotClient:
             "POST",
             f"{self.base_url}/ilink/bot/sendmessage",
             {
-                "client_id": uuid4().hex,
-                "base_info": {"session_id": "", "scene": ""},
+                "base_info": _base_info(),
                 "msg": msg,
             },
             headers=self.headers(),
             timeout=self.timeout,
         )
+
+
+def _base_info() -> dict[str, str]:
+    return {"channel_version": ILINK_CHANNEL_VERSION}
