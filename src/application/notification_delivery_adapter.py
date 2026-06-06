@@ -9,13 +9,16 @@ from typing import Any, Callable
 
 from domain.domain.multi_tick import (
     FEISHU_APP_NOTIFICATION_PROVIDER,
-    OPENCLAW_NOTIFICATION_PROVIDER,
     SUPPORTED_NOTIFICATION_PROVIDERS,
+    WECHAT_CLAWBOT_NOTIFICATION_PROVIDER,
     normalize_notification_provider,
 )
-from domain.domain.tool_boundary import normalize_notify_subprocess_output, normalize_subprocess_adapter_payload
+from domain.domain.tool_boundary import normalize_subprocess_adapter_payload
+from src.application.channels.wechat_clawbot.notification import (
+    normalize_wechat_clawbot_send_output,
+    send_wechat_clawbot_message_process,
+)
 from src.application.secret_resolver import resolve_feishu_bot_config
-from src.infrastructure.external_services import send_openclaw_message_process
 from src.infrastructure.feishu_bitable import FeishuError
 from src.infrastructure.feishu_bot import send_text_message
 
@@ -240,11 +243,11 @@ def select_notification_delivery_adapter(provider: Any) -> NotificationDeliveryA
             normalize_fn=normalize_feishu_app_send_output,
             failure_stage="send_feishu_app_message",
         )
-    if resolved_provider == OPENCLAW_NOTIFICATION_PROVIDER:
+    if resolved_provider == WECHAT_CLAWBOT_NOTIFICATION_PROVIDER:
         return NotificationDeliveryAdapter(
-            send_fn=send_openclaw_message_process,
-            normalize_fn=normalize_notify_subprocess_output,
-            failure_stage="send_openclaw_message",
+            send_fn=send_wechat_clawbot_message_process,
+            normalize_fn=normalize_wechat_clawbot_send_output,
+            failure_stage="send_wechat_clawbot_message",
         )
     allowed = ", ".join(SUPPORTED_NOTIFICATION_PROVIDERS)
     raise ValueError(f"unsupported notification provider: {provider}; expected one of: {allowed}")

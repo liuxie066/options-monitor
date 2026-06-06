@@ -150,6 +150,16 @@ def _safe_float(value: Any) -> float | None:
         return None
 
 
+def _safe_int(value: Any) -> int | None:
+    parsed = _safe_float(value)
+    if parsed is None:
+        return None
+    try:
+        return int(parsed)
+    except Exception:
+        return None
+
+
 def _safe_bool(value: Any) -> bool:
     try:
         if pd.isna(value):
@@ -186,18 +196,28 @@ def _read_first_float(df: pd.DataFrame, column: str) -> float | None:
     return None
 
 
+def _strike_token(value: Any) -> str:
+    strike = _safe_float(value)
+    if strike is None:
+        return ''
+    return str(int(strike)) if float(strike).is_integer() else str(strike)
+
+
 def _format_top_contract(top: pd.Series, suffix: str) -> str:
-    strike = float(top['strike'])
-    strike_token = int(strike) if strike.is_integer() else strike
-    return f"{top['expiration']} {strike_token}{suffix}"
+    expiration = _safe_text(top.get('expiration'))
+    strike_token = _strike_token(top.get('strike'))
+    if expiration and strike_token:
+        return f"{expiration} {strike_token}{suffix}"
+    return _safe_text(top.get('contract_symbol') or top.get('option_symbol') or top.get('top_contract'))
 
 
 def _format_combo_contract(top: pd.Series) -> str:
-    put_strike = float(top['put_strike'])
-    call_strike = float(top['call_strike'])
-    put_token = int(put_strike) if put_strike.is_integer() else put_strike
-    call_token = int(call_strike) if call_strike.is_integer() else call_strike
-    return f"{top['expiration']} {put_token}P+{call_token}C"
+    expiration = _safe_text(top.get('expiration'))
+    put_token = _strike_token(top.get('put_strike'))
+    call_token = _strike_token(top.get('call_strike'))
+    if expiration and put_token and call_token:
+        return f"{expiration} {put_token}P+{call_token}C"
+    return _safe_text(top.get('combo_contract') or top.get('contract_symbol') or top.get('top_contract'))
 
 
 def _build_ranked_row(
@@ -215,12 +235,12 @@ def _build_ranked_row(
     row['candidate_count'] = len(df)
     row.update({
         'top_contract': _format_top_contract(top, contract_suffix),
-        'expiration': top['expiration'],
-        'strike': float(top['strike']),
-        'dte': int(top['dte']),
-        'net_income': float(top['net_income']),
-        'annualized_return': float(top[annualized_key]),
-        'risk_label': top.get('risk_label', ''),
+        'expiration': _safe_text(top.get('expiration')),
+        'strike': _safe_float(top.get('strike')),
+        'dte': _safe_int(top.get('dte')),
+        'net_income': _safe_float(top.get('net_income')),
+        'annualized_return': _safe_float(top.get(annualized_key)),
+        'risk_label': _safe_text(top.get('risk_label')),
         'delta': _safe_float(top.get('delta')) if 'delta' in top else None,
         'iv': _safe_float(top.get('implied_volatility')) if 'implied_volatility' in top else None,
         'mid': _safe_float(top.get('mid')) if 'mid' in top else None,

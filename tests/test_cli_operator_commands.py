@@ -536,8 +536,8 @@ def _runtime_status_envelope(*, ok: bool = True) -> dict:
                 "status": "sent",
                 "final_reason": "confirmed",
                 "notification_route": {
-                    "provider": "openclaw",
-                    "channel": "openclaw-weixin",
+                    "provider": "wechat_clawbot",
+                    "channel": "wechat_clawbot",
                     "target_configured": True,
                 },
                 "send_attempted_count": 1,
@@ -611,7 +611,7 @@ def test_top_level_status_prints_human_summary(monkeypatch, capsys) -> None:
     assert "options-monitor status" in out
     assert "overall: OK freshness=fresh warnings=0 latest_status=ok" in out
     assert "config: key=us path=.../config.us.json accounts=lx, sy" in out
-    assert "notifications: status=sent reason=confirmed route=openclaw/openclaw-weixin target=yes sent=1 confirmed=1 failed=0" in out
+    assert "notifications: status=sent reason=confirmed route=wechat_clawbot/wechat_clawbot target=yes sent=1 confirmed=1 failed=0" in out
     assert "ledger: status=ok fail_closed=no events=3 lots=2 sqlite=output_shared/state/option_positions.sqlite3" in out
 
 

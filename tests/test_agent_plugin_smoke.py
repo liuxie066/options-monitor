@@ -996,7 +996,6 @@ def test_config_validate_runs_without_opend(monkeypatch, tmp_path: Path) -> None
     cfg_path = tmp_path / "config.us.json"
     cfg = _minimal_cfg()
     cfg["notifications"] = {
-        "provider": "openclaw",
         "channel": "wechat_clawbot",
         "target": "clawbot:test-room",
     }
@@ -1140,7 +1139,6 @@ def test_runtime_status_summarizes_openclaw_runtime_files(tmp_path: Path) -> Non
     cfg_path = tmp_path / "config.us.json"
     cfg = _minimal_cfg()
     cfg["notifications"] = {
-        "provider": "openclaw",
         "channel": "wechat_clawbot",
         "target": "clawbot:test-room",
     }
@@ -1437,7 +1435,7 @@ def _runtime_status_upgrade_fixture(tmp_path: Path, *, target_version: str = "1.
     cfg = {
         "accounts": ["user1"],
         "portfolio": {"data_config": str(data_config)},
-        "notifications": {"provider": "openclaw", "target": "route"},
+        "notifications": {"provider": "wechat_clawbot", "target": "route"},
     }
     cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
     (tmp_path / "output_shared" / "state").mkdir(parents=True)
@@ -1676,7 +1674,7 @@ def test_runtime_status_auto_loads_runtime_service_profile_paths(tmp_path: Path)
     cfg = {
         "accounts": ["user1"],
         "portfolio": {"data_config": str(data_config)},
-        "notifications": {"provider": "openclaw", "target": "route"},
+        "notifications": {"provider": "wechat_clawbot", "target": "route"},
     }
     cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
 
@@ -2473,7 +2471,7 @@ def test_openclaw_readiness_reports_profile_cron_notification_and_next_actions(t
     assert checks["openclaw_cron"]["status"] == "ok"
     assert checks["openclaw_cron"]["value"]["configured_jobs"][0]["found"] is True
     assert checks["notification_route"]["status"] == "ok"
-    assert checks["notification_route"]["value"]["transport_channel"] == "openclaw-weixin"
+    assert checks["notification_route"]["value"]["transport_channel"] == "wechat_clawbot"
     assert data["next_actions"]["safe_next_actions"][0]["action"] == "no_read_only_followup_needed"
 
 

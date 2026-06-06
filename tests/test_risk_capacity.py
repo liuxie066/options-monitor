@@ -71,6 +71,13 @@ def test_short_call_locked_shares_scales_partial_close() -> None:
     assert locked == 500
 
 
+def test_short_call_locked_shares_zero_open_contracts_release_explicit_lock() -> None:
+    assert compute_short_call_locked_shares(
+        contracts_open=0,
+        underlying_share_locked=2000,
+    ) == 0
+
+
 def test_short_put_cash_secured_derives_from_strike_multiplier() -> None:
     cash_secured = compute_short_put_cash_secured(
         contracts_open=1,
@@ -94,3 +101,10 @@ def test_short_put_cash_secured_scales_partial_close_after_deriving() -> None:
     )
 
     assert cash_secured == 10_000.0
+
+
+def test_short_put_cash_secured_zero_open_contracts_release_explicit_cash() -> None:
+    assert compute_short_put_cash_secured(
+        contracts_open=0,
+        cash_secured_amount=40_000,
+    ) == 0.0

@@ -520,7 +520,7 @@ def send_account_message_with_retry(
     normalize_fn: Callable[..., dict[str, Any]],
     safe_data_fn: Callable[[dict[str, Any]], dict[str, Any]],
     failure_fields_builder: Callable[..., dict[str, Any]],
-    failure_stage: str = "send_openclaw_message",
+    failure_stage: str = "send_notification_message",
     sleep_fn: Callable[[float], Any] = sleep,
     max_attempts: int = NOTIFY_SEND_MAX_ATTEMPTS,
     retry_delays_sec: tuple[float, ...] = NOTIFY_SEND_RETRY_DELAYS_SEC,
@@ -740,7 +740,7 @@ def execute_per_account_delivery(
     failure_fields_builder: Callable[..., dict[str, Any]],
     on_failure: Callable[[str], Any] | None = None,
     base,
-    failure_stage: str = "send_openclaw_message",
+    failure_stage: str = "send_notification_message",
     sleep_fn: Callable[[float], Any] = sleep,
 ) -> PerAccountSendExecution:
     sent_accounts: list[str] = []

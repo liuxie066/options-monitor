@@ -25,7 +25,7 @@ def test_build_per_account_delivery_batch_supports_one_account_message() -> None
         }
 
     decision, batch, target = build_per_account_delivery_batch(
-        channel="openclaw-weixin",
+        channel="wechat_clawbot",
         target="user:test",
         account_messages={"sy": "[sy]\nhello"},
         should_notify_window=True,
@@ -56,7 +56,7 @@ def test_build_per_account_delivery_batch_supports_skip_paths() -> None:
         }
 
     decision, batch, target = build_per_account_delivery_batch(
-        channel="openclaw-weixin",
+        channel="wechat_clawbot",
         target="user:test",
         account_messages={"lx": "hello", "sy": "world"},
         no_send=True,
@@ -77,7 +77,7 @@ def test_build_per_account_delivery_batch_builds_delivery_batch() -> None:
             return payload
 
     decision, batch, target = build_per_account_delivery_batch(
-        channel="openclaw-weixin",
+        channel="wechat_clawbot",
         target="user:test",
         account_messages={"lx": "hello"},
         delivery_plan_cls=FakeDeliveryPlan,
@@ -368,7 +368,7 @@ def test_shared_last_run_meta_marks_no_send_as_not_sent() -> None:
 
     meta = build_shared_last_run_meta(
         now_utc="2026-05-12T00:00:00Z",
-        channel="openclaw-weixin",
+        channel="wechat_clawbot",
         target="group://test",
         results=[SimpleNamespace(account="lx")],
         sent_accounts=["lx"],

@@ -11,6 +11,7 @@ from src.application.ledger.api import (
     record_trade_event_void,
     refresh_position_lot_projection,
     trade_event_log,
+    valid_void_target_event_id,
 )
 from src.application.trade_time_format import add_trade_time_beijing
 
@@ -37,12 +38,7 @@ def _projection_diagnostics_by_event(events: list[dict[str, Any]]) -> dict[str, 
 def _voided_event_ids(events: list[dict[str, Any]]) -> set[str]:
     out: set[str] = set()
     for event in events:
-        if str(event.get("position_effect") or "").strip().lower() != "void":
-            continue
-        raw_payload = event.get("raw_payload") or {}
-        if not isinstance(raw_payload, dict):
-            continue
-        target = str(raw_payload.get("void_target_event_id") or "").strip()
+        target = valid_void_target_event_id(event)
         if target:
             out.add(target)
     return out

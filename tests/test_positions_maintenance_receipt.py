@@ -103,7 +103,7 @@ def test_auto_close_receipt_decision_retries_unconfirmed_duplicate() -> None:
 def test_send_auto_close_receipt_skips_without_route(tmp_path: Path) -> None:
     out = send_auto_close_receipt(
         base=tmp_path,
-        config={"notifications": {"provider": "openclaw", "channel": "openclaw-weixin"}},
+        config={"notifications": {"provider": "wechat_clawbot"}},
         receipt_config={},
         dry_run=False,
         result={"mode": "applied", "applied_closed": 1, "candidates_should_close": 1, "errors": []},
@@ -122,7 +122,7 @@ def test_send_auto_close_receipt_uses_existing_route_and_sender(tmp_path: Path) 
 
     out = send_auto_close_receipt(
         base=tmp_path,
-        config={"notifications": {"provider": "openclaw", "channel": "openclaw-weixin", "target": "user:test"}},
+        config={"notifications": {"provider": "wechat_clawbot", "target": "wechat:ops"}},
         receipt_config={},
         dry_run=False,
         result={
@@ -143,7 +143,7 @@ def test_send_auto_close_receipt_uses_existing_route_and_sender(tmp_path: Path) 
     assert out["status"] == "sent"
     assert out["delivery_confirmed"] is True
     assert out["message_id"] == "msg-auto-1"
-    assert calls[0]["target"] == "user:test"
+    assert calls[0]["target"] == "wechat:ops"
     assert "过期自动平仓已写入 option_positions" in calls[0]["message"]
     assert "账户：lx" in calls[0]["message"]
     assert "rec_1 | pos_1 | exp=2026-05-01" in calls[0]["message"]
@@ -188,7 +188,7 @@ def test_send_auto_close_receipt_increments_retry_attempt_count(tmp_path: Path) 
 
     out = send_auto_close_receipt(
         base=tmp_path,
-        config={"notifications": {"provider": "openclaw", "channel": "openclaw-weixin", "target": "user:test"}},
+        config={"notifications": {"provider": "wechat_clawbot", "target": "wechat:ops"}},
         receipt_config={},
         dry_run=False,
         result={"mode": "applied", "applied_closed": 1, "candidates_should_close": 1, "errors": []},

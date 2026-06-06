@@ -180,6 +180,58 @@ def _clean_row_text(value) -> str:
     return str(value or '').strip()
 
 
+def _row_float(value, *, default: float | None = None) -> float | None:
+    try:
+        if value is None or pd.isna(value):
+            return default
+    except Exception:
+        if value is None:
+            return default
+    try:
+        text = str(value).strip() if isinstance(value, str) else value
+        if text == "":
+            return default
+        parsed = float(text)
+        try:
+            if pd.isna(parsed):
+                return default
+        except Exception:
+            pass
+        return parsed
+    except Exception:
+        return default
+
+
+def _row_int(value, *, default: int = 0) -> int:
+    parsed = _row_float(value, default=None)
+    if parsed is None:
+        return default
+    try:
+        return int(parsed)
+    except Exception:
+        return default
+
+
+def _pct_text(value) -> str:
+    parsed = _row_float(value, default=None)
+    return pct(parsed) if parsed is not None else "-"
+
+
+def _num_text(value) -> str:
+    parsed = _row_float(value, default=None)
+    return num(parsed) if parsed is not None else "-"
+
+
+def _dte_text(value) -> str:
+    parsed = _row_float(value, default=None)
+    return "-" if parsed is None else str(int(parsed))
+
+
+def _strike_text(value) -> str:
+    parsed = _row_float(value, default=None)
+    return strike_text(parsed) if parsed is not None else "-"
+
+
 def _event_summary_token(row: pd.Series) -> str:
     if not _truthy_row_value(row.get('event_flag')):
         return ''
@@ -191,9 +243,9 @@ def _event_summary_token(row: pd.Series) -> str:
 
 
 def _build_sell_call_extra_parts(row: pd.Series) -> list[str]:
-    shares_total = int(row.get('shares_total') or 0)
-    shares_locked = int(row.get('shares_locked') or 0)
-    cover_avail = int(row.get('cover_avail') or 0)
+    shares_total = _row_int(row.get('shares_total'), default=0)
+    shares_locked = _row_int(row.get('shares_locked'), default=0)
+    cover_avail = _row_int(row.get('cover_avail'), default=0)
     parts: list[str] = []
     _append_option_quote_parts(parts, row)
     parts.append(f"cover {cover_avail}")
@@ -456,19 +508,19 @@ def top_pick_line(row: pd.Series) -> str:
 
     return (
         f"{row['symbol']} | {row['strategy']} | {row['top_contract'] or '-'} | "
-        f"年化 {pct(row['annualized_return'])} | 净收入 {num(row['net_income'])} | "
-        f"DTE {('-' if pd.isna(row['dte']) else int(row['dte']))} | "
-        f"Strike {strike_text(row['strike'])} | {row['risk_label'] or '-'}"
+        f"年化 {_pct_text(row.get('annualized_return'))} | 净收入 {_num_text(row.get('net_income'))} | "
+        f"DTE {_dte_text(row.get('dte'))} | "
+        f"Strike {_strike_text(row.get('strike'))} | {_clean_row_text(row.get('risk_label')) or '-'}"
         f"{extra}"
     )
 
 
 def classify_alert(row: pd.Series) -> tuple[str | None, str]:
-    if int(row.get('candidate_count', 0) or 0) <= 0:
+    if _row_int(row.get('candidate_count'), default=0) <= 0:
         return None, ''
 
     strategy = row.get('strategy', '')
-    annual = float(row.get('annualized_return', 0) or 0)
+    annual = _row_float(row.get('annualized_return'), default=0.0) or 0.0
 
     strategy = canonical_strategy_id(strategy)
     if strategy == STRATEGY_SELL_PUT:

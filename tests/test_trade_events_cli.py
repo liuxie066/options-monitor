@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest  # pyright: ignore[reportMissingImports]
@@ -35,6 +36,64 @@ def _repo_with_open_event(tmp_path: Path):
     return repo, event_id
 
 
+def _append_canonical_void_event(
+    repo,
+    *,
+    target_event_id: str,
+    event_id: str,
+    event_time_ms: int,
+) -> None:
+    from domain.domain.ledger import TradeEvent
+    from src.application.ledger.event_codec import stored_trade_event_to_ledger_event
+
+    target_payload = next(
+        item
+        for item in repo.list_trade_events()
+        if str(item.get("event_id") or "").strip() == str(target_event_id).strip()
+    )
+    target, diagnostics = stored_trade_event_to_ledger_event(target_payload)
+    assert target is not None
+    assert [item.code for item in diagnostics if item.severity == "error"] == []
+    repo.upsert_trade_event(
+        TradeEvent(
+            event_id=event_id,
+            event_type="void",
+            event_time_ms=event_time_ms,
+            contract_key=target.contract_key,
+            contracts=0,
+            price=0.0,
+            currency=target.currency,
+            source="test",
+            multiplier=target.multiplier,
+            target_event_id=target_event_id,
+            raw_payload={},
+        )
+    )
+
+
+def _insert_invalid_legacy_void_event(
+    repo,
+    *,
+    target_event_id: str,
+    event_id: str,
+    event_time_ms: int,
+) -> None:
+    payload = {
+        "event_id": event_id,
+        "trade_time_ms": event_time_ms,
+        "position_effect": "void",
+        "raw_payload": {"void_target_event_id": target_event_id},
+    }
+    with sqlite3.connect(str(repo.db_path)) as conn:
+        conn.execute(
+            """
+            INSERT INTO trade_events (event_id, event_json, trade_time_ms, created_at_ms, updated_at_ms)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (event_id, json.dumps(payload, ensure_ascii=False), event_time_ms, event_time_ms, event_time_ms),
+        )
+
+
 def test_trade_events_list_text_shows_trade_time_beijing(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.trade_events as cli
 
@@ -45,6 +104,42 @@ def test_trade_events_list_text_shows_trade_time_beijing(monkeypatch, tmp_path: 
 
     out = capsys.readouterr().out
     assert "time 1970-01-01 08:00:01 北京时间" in out
+
+
+def test_trade_events_list_treats_canonical_void_as_voided(monkeypatch, tmp_path: Path, capsys) -> None:
+    import src.interfaces.cli.trade_events as cli
+
+    repo, event_id = _repo_with_open_event(tmp_path)
+    _append_canonical_void_event(
+        repo,
+        target_event_id=event_id,
+        event_id="canonical-void-open",
+        event_time_ms=2000,
+    )
+    monkeypatch.setattr(cli, "resolve_option_positions_repo", lambda **_kwargs: (tmp_path / "data.json", repo))
+
+    assert cli.main(["list", "--status", "voided", "--format", "json"]) == 0
+
+    out = json.loads(capsys.readouterr().out)
+    assert [item["event_id"] for item in out] == [event_id]
+
+
+def test_trade_events_list_ignores_invalid_void_when_filtering_active(monkeypatch, tmp_path: Path, capsys) -> None:
+    import src.interfaces.cli.trade_events as cli
+
+    repo, event_id = _repo_with_open_event(tmp_path)
+    _insert_invalid_legacy_void_event(
+        repo,
+        target_event_id=event_id,
+        event_id="invalid-legacy-void-open",
+        event_time_ms=2000,
+    )
+    monkeypatch.setattr(cli, "resolve_option_positions_repo", lambda **_kwargs: (tmp_path / "data.json", repo))
+
+    assert cli.main(["list", "--status", "active", "--format", "json"]) == 0
+
+    out = json.loads(capsys.readouterr().out)
+    assert [item["event_id"] for item in out] == [event_id]
 
 
 def test_trade_events_show_json_includes_trade_time_beijing(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -131,6 +226,30 @@ def test_trade_events_repair_rejects_second_repair(monkeypatch, tmp_path: Path, 
     assert lots[0]["fields"]["strike"] == 500.0
 
 
+def test_trade_events_repair_rejects_canonical_void_without_legacy_payload(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    import src.interfaces.cli.trade_events as cli
+
+    repo, event_id = _repo_with_open_event(tmp_path)
+    _append_canonical_void_event(
+        repo,
+        target_event_id=event_id,
+        event_id="canonical-void-open",
+        event_time_ms=2000,
+    )
+    monkeypatch.setattr(cli, "resolve_option_positions_repo", lambda **_kwargs: (tmp_path / "data.json", repo))
+
+    assert cli.main(["repair", event_id, "--strike", "500", "--dry-run"]) == 2
+
+    out = capsys.readouterr().out
+    assert "trade event already voided" in out
+    assert "canonical-void-open" in out
+    assert len(repo.list_trade_events()) == 2
+
+
 def test_trade_events_repair_rejects_open_event_with_downstream_close(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.trade_events as cli
 
@@ -153,6 +272,41 @@ def test_trade_events_repair_rejects_open_event_with_downstream_close(monkeypatc
     assert "cannot repair an open event with downstream close/adjust dependencies" in out
     assert "explicit_target" in out
     assert repo.list_position_lots()[0]["fields"]["contracts_open"] == 0
+
+
+def test_trade_events_repair_allows_open_when_downstream_close_was_canonical_voided(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    import src.interfaces.cli.trade_events as cli
+
+    repo, event_id = _repo_with_open_event(tmp_path)
+    lot = repo.list_position_lots()[0]
+    close_result = ledger_manual_trades.persist_manual_close_event(
+        repo,
+        record_id=lot["record_id"],
+        fields=lot["fields"],
+        contracts_to_close=1,
+        close_price=1.2,
+        close_reason="manual_buy_to_close",
+        as_of_ms=2000,
+    )
+    _append_canonical_void_event(
+        repo,
+        target_event_id=str(close_result["event_id"]),
+        event_id="canonical-void-close",
+        event_time_ms=3000,
+    )
+    monkeypatch.setattr(cli, "resolve_option_positions_repo", lambda **_kwargs: (tmp_path / "data.json", repo))
+
+    assert cli.main(["repair", event_id, "--strike", "500", "--dry-run", "--format", "json"]) == 0
+
+    out = json.loads(capsys.readouterr().out)
+    assert out["mode"] == "dry_run"
+    assert out["ledger_preflight"]["status"] == "ok"
+    assert out["repair_event"]["contract_key"]["strike"] == 500.0
+    assert len(repo.list_trade_events()) == 3
 
 
 def test_trade_events_void_dry_run_includes_projection_preview(monkeypatch, tmp_path: Path, capsys) -> None:

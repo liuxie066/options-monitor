@@ -70,6 +70,16 @@ def stored_trade_event_to_ledger_event(item: Any) -> tuple[TradeEvent | None, li
     ]
 
 
+def valid_void_target_event_id(item: Any) -> str | None:
+    event, diagnostics = stored_trade_event_to_ledger_event(item)
+    if event is None or any(diag.severity == "error" for diag in diagnostics):
+        return None
+    if event.event_type != "void":
+        return None
+    target = str(event.target_event_id or "").strip()
+    return target or None
+
+
 def trade_event_payload_dict(item: Any) -> dict[str, Any]:
     if isinstance(item, dict):
         return dict(item)
@@ -218,4 +228,5 @@ __all__ = [
     "trade_event_application_payload",
     "trade_event_payload_dict",
     "trade_event_sort_time_ms",
+    "valid_void_target_event_id",
 ]

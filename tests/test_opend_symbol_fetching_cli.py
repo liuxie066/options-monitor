@@ -202,3 +202,63 @@ def test_cli_normalizes_zero_snapshot_batch_and_negative_fallback_batch(monkeypa
     assert request.snapshot_batch_size == 1
     assert request.snapshot_fallback_max_codes == 100
     assert request.snapshot_fallback_batch_size == 20
+
+
+def test_cli_exits_nonzero_when_fetch_payload_reports_error(monkeypatch) -> None:
+    mod = _mod()
+
+    saved: list[str] = []
+
+    def _fake_fetch_symbol_request(request):
+        return {
+            "symbol": request.symbol,
+            "rows": [],
+            "expiration_count": 0,
+            "meta": {"status": "error", "error_code": "RATE_LIMIT", "error": "rate limited"},
+        }
+
+    monkeypatch.setattr(mod, "fetch_symbol_request", _fake_fetch_symbol_request)
+    monkeypatch.setattr(mod, "save_outputs", lambda _base, symbol, _payload, **_kwargs: saved.append(symbol) or (Path("raw"), Path("csv")))
+    monkeypatch.setattr(mod, "append_metrics_json", lambda *args, **kwargs: None)
+    monkeypatch.setattr("sys.argv", ["prog", "--symbols", "NVDA", "--quiet"])
+
+    try:
+        mod.main()
+    except SystemExit as exc:
+        assert exc.code == 1
+    else:
+        raise AssertionError("expected CLI to exit nonzero for error payload")
+
+    assert saved == ["NVDA"]
+
+
+def test_cli_processes_all_symbols_before_nonzero_exit(monkeypatch) -> None:
+    mod = _mod()
+
+    fetched: list[str] = []
+    saved: list[str] = []
+
+    def _fake_fetch_symbol_request(request):
+        fetched.append(request.symbol)
+        status = "error" if request.symbol == "NVDA" else "ok"
+        return {
+            "symbol": request.symbol,
+            "rows": [],
+            "expiration_count": 0,
+            "meta": {"status": status},
+        }
+
+    monkeypatch.setattr(mod, "fetch_symbol_request", _fake_fetch_symbol_request)
+    monkeypatch.setattr(mod, "save_outputs", lambda _base, symbol, _payload, **_kwargs: saved.append(symbol) or (Path("raw"), Path("csv")))
+    monkeypatch.setattr(mod, "append_metrics_json", lambda *args, **kwargs: None)
+    monkeypatch.setattr("sys.argv", ["prog", "--symbols", "NVDA", "AMD", "--quiet"])
+
+    try:
+        mod.main()
+    except SystemExit as exc:
+        assert exc.code == 1
+    else:
+        raise AssertionError("expected CLI to exit nonzero when any symbol fails")
+
+    assert fetched == ["NVDA", "AMD"]
+    assert saved == ["NVDA", "AMD"]

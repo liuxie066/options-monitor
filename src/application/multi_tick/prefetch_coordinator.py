@@ -274,7 +274,22 @@ class PrefetchCoordinator:
             started_at: float | None = time.monotonic()
         except Exception:
             started_at = None
-        payload = self._dispatch_fn(symbol_cfg)
+        try:
+            payload = self._dispatch_fn(symbol_cfg)
+        except Exception as exc:
+            symbol = str((symbol_cfg or {}).get("symbol") or "").strip()
+            fetch_cfg = _fetch_cfg(symbol_cfg)
+            source, _decision = resolve_symbol_fetch_source(fetch_cfg)
+            payload = normalize_tool_execution_payload(
+                tool_name="required_data_prefetch",
+                symbol=symbol,
+                source=source,
+                limit_exp=_limit_exp(symbol_cfg),
+                status="error",
+                ok=False,
+                message=f"{type(exc).__name__}: {exc}",
+                returncode=None,
+            )
         if isinstance(payload, dict):
             return _annotate_prefetch_payload(
                 payload,

@@ -21,7 +21,6 @@ from src.application.required_data_fetching import (
     RequiredDataFetchRequest,
     build_fetch_request_from_spec,
     execute_required_data_opend,
-    fetch_required_data_opend,
     merge_required_data_payloads,
 )
 from src.application.opend_fetch_config import filter_opend_fetch_kwargs
@@ -145,10 +144,17 @@ def ensure_required_data(
 
     try:
         if fetch_plan is None and len(requests) == 1:
-            fetch_required_data_opend(
+            payload = execute_required_data_opend(
                 base=base,
                 request=requests[0],
             )
+            save_outputs(
+                Path(base),
+                str(sym),
+                payload,
+                output_root=required_data_dir,
+            )
+            _raise_if_fetch_payload_error(symbol=sym, payload=payload)
             merged_payload = load_required_data_payload_from_csv(parsed=parsed, symbol=sym)
         else:
             payloads = [
@@ -159,12 +165,21 @@ def ensure_required_data(
                 for request in requests
             ]
             merged_payload = merge_required_data_payloads(symbol=sym, payloads=payloads)
+            fetch_error_message = _first_fetch_payload_error_message(symbol=sym, payloads=payloads)
+            if fetch_error_message:
+                meta = merged_payload.get("meta") if isinstance(merged_payload, dict) else {}
+                meta = dict(meta) if isinstance(meta, dict) else {}
+                meta["status"] = "error"
+                meta["error"] = fetch_error_message
+                merged_payload["meta"] = meta
             save_outputs(
                 Path(base),
                 str(sym),
                 merged_payload,
                 output_root=required_data_dir,
             )
+            if fetch_error_message:
+                raise RuntimeError(fetch_error_message)
         _write_fetch_plan_debug(
             symbol=sym,
             required_data_dir=required_data_dir,
@@ -189,6 +204,32 @@ def ensure_required_data(
                 reason=str(e),
             )
         raise
+
+
+def _payload_fetch_status(payload: dict[str, object] | object) -> str:
+    meta = payload.get("meta") if isinstance(payload, dict) else {}
+    if not isinstance(meta, dict):
+        return ""
+    return str(meta.get("status") or "").strip().lower()
+
+
+def _payload_fetch_error_message(*, symbol: str, payload: dict[str, object] | object) -> str:
+    meta = payload.get("meta") if isinstance(payload, dict) else {}
+    meta = meta if isinstance(meta, dict) else {}
+    message = str(meta.get("error") or meta.get("message") or meta.get("error_code") or "").strip()
+    return message or f"{symbol} required_data fetch failed"
+
+
+def _raise_if_fetch_payload_error(*, symbol: str, payload: dict[str, object] | object) -> None:
+    if _payload_fetch_status(payload) in {"error", "fail", "failed"}:
+        raise RuntimeError(_payload_fetch_error_message(symbol=symbol, payload=payload))
+
+
+def _first_fetch_payload_error_message(*, symbol: str, payloads: list[dict[str, object]]) -> str | None:
+    for payload in payloads:
+        if _payload_fetch_status(payload) in {"error", "fail", "failed"}:
+            return _payload_fetch_error_message(symbol=symbol, payload=payload)
+    return None
 
 
 def _write_fetch_plan_debug(

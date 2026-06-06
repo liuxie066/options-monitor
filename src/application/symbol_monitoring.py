@@ -37,6 +37,7 @@ class SymbolMonitoringInputs:
     state_dir: Path | None
     is_scheduled: bool
     runtime_config: dict[str, Any] | None = None
+    fetch_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -187,6 +188,9 @@ def run_symbol_monitoring(
         report_dir=inputs.report_dir,
         opend_fetch_config=fetch_request_kwargs,
     )
+
+    if bool(inputs.fetch_only):
+        return []
 
     summary_rows: list[dict[str, Any]] = []
 

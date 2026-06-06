@@ -76,6 +76,75 @@ def test_run_symbol_monitoring_passes_fetch_plan_to_required_data_step(monkeypat
     assert captured["report_dir"] == tmp_path / "reports"
 
 
+def test_run_symbol_monitoring_fetch_only_skips_scans_after_required_data(monkeypatch, tmp_path: Path) -> None:
+    import src.application.symbol_monitoring as mod
+
+    captured_required_data: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        mod,
+        "build_required_data_fetch_plan",
+        lambda **kwargs: {
+            "symbol": kwargs["symbol"],
+            "merged_specs": ["spec"],
+            "side_plans": [],
+            "to_debug_dict": lambda: {"ok": True},
+        },
+    )
+
+    def _scan_should_not_run(**_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("scan should not run in fetch-only mode")
+
+    deps = mod.SymbolMonitoringDependencies(
+        build_converter_fn=lambda **kwargs: object(),
+        apply_prefilters_fn=lambda **kwargs: type(
+            "Prefilters",
+            (),
+            {
+                "want_put": kwargs["want_put"],
+                "want_call": kwargs["want_call"],
+                "sp": kwargs["sp"],
+                "cc": kwargs["cc"],
+                "stock": None,
+            },
+        )(),
+        apply_multiplier_cache_fn=lambda **kwargs: None,
+        ensure_required_data_fn=lambda **kwargs: captured_required_data.update(kwargs),
+        run_sell_put_scan_fn=_scan_should_not_run,
+        empty_sell_put_summary_fn=lambda symbol, symbol_cfg: _scan_should_not_run(),
+        run_sell_call_scan_fn=_scan_should_not_run,
+        empty_sell_call_summary_fn=lambda symbol, symbol_cfg: _scan_should_not_run(),
+    )
+
+    out = mod.run_symbol_monitoring(
+        inputs=mod.SymbolMonitoringInputs(
+            py="python3",
+            base=tmp_path,
+            symbol_cfg={
+                "symbol": "NVDA",
+                "fetch": {"host": "127.0.0.1", "port": 11111, "limit_expirations": 2},
+                "sell_put": {"enabled": True, "min_dte": 10, "max_dte": 30},
+                "sell_call": {"enabled": True, "min_dte": 10, "max_dte": 60},
+            },
+            top_n=3,
+            portfolio_ctx=None,
+            usd_per_cny_exchange_rate=None,
+            cny_per_hkd_exchange_rate=None,
+            timeout_sec=10,
+            required_data_dir=tmp_path / "required_data",
+            report_dir=tmp_path / "reports",
+            state_dir=tmp_path / "state",
+            is_scheduled=False,
+            fetch_only=True,
+        ),
+        deps=deps,
+    )
+
+    assert out == []
+    assert captured_required_data["want_put"] is True
+    assert captured_required_data["want_call"] is True
+
+
 def test_run_symbol_monitoring_uses_runtime_opend_fetch_config(monkeypatch, tmp_path: Path) -> None:
     import src.application.symbol_monitoring as mod
 

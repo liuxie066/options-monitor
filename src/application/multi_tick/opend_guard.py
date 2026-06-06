@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
-from domain.domain import resolve_openclaw_transport_channel
+from src.application.notification_delivery_adapter import normalize_notification_delivery_result, select_notification_delivery_adapter
+from src.application.notification_delivery_route import resolve_notification_delivery_route
 from src.infrastructure.io_utils import read_json, atomic_write_json as write_json, utc_now
 
 
@@ -116,6 +116,7 @@ def should_send_opend_alert(
     burst_window_sec: int = 900,
     burst_max: int = 3,
     scope: str = 'project',
+    record: bool = True,
 ) -> bool:
     p = opend_alert_rl_path(base)
     now = datetime.now(timezone.utc)
@@ -163,12 +164,33 @@ def should_send_opend_alert(
     if recent_count >= max(1, int(burst_max)):
         return False
 
-    m[error_key] = now.isoformat()
-    st['last_sent_utc_by_error'] = m
-    recent.append({'ts': now.isoformat(), 'scope': scope_key, 'error_code': str(error_code), 'family': family})
-    st['recent_sent'] = recent[-200:]
-    write_json(p, st)
+    if record:
+        m[error_key] = now.isoformat()
+        st['last_sent_utc_by_error'] = m
+        recent.append({'ts': now.isoformat(), 'scope': scope_key, 'error_code': str(error_code), 'family': family})
+        st['recent_sent'] = recent[-200:]
+        write_json(p, st)
     return True
+
+
+def _send_notification(base: Path, cfg: dict, *, message: str) -> bool:
+    try:
+        route = resolve_notification_delivery_route(config=cfg)
+        target = str(route.get('target') or '').strip()
+        if not target:
+            return False
+        adapter = select_notification_delivery_adapter(route.get('provider'))
+        send = adapter.send_fn(
+            base=base,
+            channel=str(route.get('channel') or ''),
+            target=target,
+            message=message,
+            notifications=route.get('notifications') if isinstance(route.get('notifications'), dict) else {},
+        )
+        normalized = normalize_notification_delivery_result(send, normalize_fn=adapter.normalize_fn)
+        return bool(normalized.get('delivery_confirmed') or normalized.get('ok'))
+    except Exception:
+        return False
 
 
 def send_opend_alert(base: Path, cfg: dict, *, error_code: str, message_text: str, detail: str = '', no_send: bool = False, skip_consecutive_gate: bool = False) -> bool:
@@ -205,23 +227,17 @@ def send_opend_alert(base: Path, cfg: dict, *, error_code: str, message_text: st
         except Exception:
             pass
 
+    if no_send:
+        return False
+
     if not should_send_opend_alert(
         base,
         str(error_code),
         cooldown_sec=cooldown_sec,
         burst_window_sec=burst_window_sec,
         burst_max=burst_max,
+        record=False,
     ):
-        return False
-
-    if no_send:
-        return False
-
-    notif = cfg.get('notifications') or {}
-    channel = notif.get('channel') or 'openclaw-weixin'
-    transport_channel = resolve_openclaw_transport_channel(channel)
-    target = notif.get('target')
-    if not target:
         return False
 
     msg = (
@@ -233,13 +249,16 @@ def send_opend_alert(base: Path, cfg: dict, *, error_code: str, message_text: st
     if detail:
         msg += f"\ndetail: {detail[:1200]}"
 
-    send = subprocess.run(
-        ['openclaw', 'message', 'send', '--channel', str(transport_channel), '--target', str(target), '--message', msg, '--json'],
-        cwd=str(base),
-        capture_output=True,
-        text=True,
-    )
-    return send.returncode == 0
+    sent = _send_notification(base, cfg, message=msg)
+    if sent:
+        should_send_opend_alert(
+            base,
+            str(error_code),
+            cooldown_sec=cooldown_sec,
+            burst_window_sec=burst_window_sec,
+            burst_max=burst_max,
+        )
+    return sent
 
 
 def send_opend_recovery_notice(base: Path, cfg: dict, *, scope: str = 'project', no_send: bool = False) -> bool:
@@ -273,22 +292,9 @@ def send_opend_recovery_notice(base: Path, cfg: dict, *, scope: str = 'project',
     if no_send:
         return False
 
-    notif = cfg.get('notifications') or {}
-    channel = notif.get('channel') or 'openclaw-weixin'
-    transport_channel = resolve_openclaw_transport_channel(channel)
-    target = notif.get('target')
-    if not target:
-        return False
-
     msg = (
         f"options-monitor OpenD 已恢复\n"
         f"time_utc: {utc_now()}"
     )
 
-    send = subprocess.run(
-        ['openclaw', 'message', 'send', '--channel', str(transport_channel), '--target', str(target), '--message', msg, '--json'],
-        cwd=str(base),
-        capture_output=True,
-        text=True,
-    )
-    return send.returncode == 0
+    return _send_notification(base, cfg, message=msg)

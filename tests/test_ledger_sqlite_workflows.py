@@ -1841,6 +1841,39 @@ def test_persist_manual_open_event_is_idempotent_on_retry(tmp_path: Path) -> Non
     assert len(events) == 1
 
 
+def test_persist_manual_open_event_id_distinguishes_multiplier(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    from domain.domain.option_position_lots import OpenPositionCommand
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    command = OpenPositionCommand(
+        broker="富途",
+        account="sy",
+        symbol="9992.HK",
+        option_type="put",
+        side="short",
+        contracts=1,
+        currency="HKD",
+        strike=145.0,
+        multiplier=100,
+        expiration_ymd="2026-07-30",
+        premium_per_share=6.0,
+        opened_at_ms=1_700_000_000_000,
+    )
+
+    result1 = ledger_manual_trades.persist_manual_open_event(repo, command)
+    result2 = ledger_manual_trades.persist_manual_open_event(repo, replace(command, multiplier=1000))
+
+    assert result1["created"] is True
+    assert result2["created"] is True
+    assert result1["event_id"] != result2["event_id"]
+    events = repo.list_trade_events()
+    assert len(events) == 2
+    lots = repo.list_position_lots()
+    assert sorted(lot["fields"]["multiplier"] for lot in lots) == [100.0, 1000.0]
+
+
 def test_persist_manual_close_event_updates_position_lot(tmp_path: Path) -> None:
     from domain.domain.option_position_lots import OpenPositionCommand
 
@@ -2020,6 +2053,103 @@ def test_persist_manual_close_event_rejects_mismatched_record_id_and_fields(tmp_
             close_reason="manual_buy_to_close",
             as_of_ms=2000,
         )
+
+
+def test_lifecycle_close_rejects_resolution_quantity_mismatch_before_write(tmp_path: Path) -> None:
+    from domain.domain.option_position_lots import OpenPositionCommand
+    from src.application.ledger.lifecycle import persist_expire_close_events
+    from src.application.ledger.lot_resolver import LotCloseSelector, resolve_fifo_close_targets
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="NVDA",
+            option_type="put",
+            side="short",
+            contracts=2,
+            currency="USD",
+            strike=100.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=2.5,
+            opened_at_ms=1000,
+        ),
+    )
+    selector = LotCloseSelector.from_values(
+        broker="富途",
+        account="lx",
+        symbol="NVDA",
+        option_type="put",
+        position_side="short",
+        strike=100.0,
+        expiration_ymd="2026-06-19",
+        contracts_to_close=2,
+    )
+    resolution = resolve_fifo_close_targets(repo, selector, source="test")
+
+    with pytest.raises(ValueError, match="contracts_to_close does not match resolved close targets"):
+        persist_expire_close_events(
+            repo,
+            close_target_resolution=resolution,
+            contracts_to_close=1,
+            event_time_ms=2000,
+            case_id="case-mismatch",
+        )
+
+    assert [item for item in repo.list_trade_events() if item.get("event_type") == "expire_close"] == []
+
+
+def test_single_lifecycle_assignment_rejects_multi_target_resolution_before_write(tmp_path: Path) -> None:
+    from domain.domain.option_position_lots import OpenPositionCommand
+    from src.application.ledger.lifecycle import persist_assignment_event
+    from src.application.ledger.lot_resolver import LotCloseSelector, resolve_fifo_close_targets
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    for opened_at_ms in (1000, 1100):
+        ledger_manual_trades.persist_manual_open_event(
+            repo,
+            OpenPositionCommand(
+                broker="富途",
+                account="lx",
+                symbol="NVDA",
+                option_type="put",
+                side="short",
+                contracts=1,
+                currency="USD",
+                strike=100.0,
+                multiplier=100,
+                expiration_ymd="2026-06-19",
+                premium_per_share=2.5,
+                opened_at_ms=opened_at_ms,
+            ),
+        )
+    selector = LotCloseSelector.from_values(
+        broker="富途",
+        account="lx",
+        symbol="NVDA",
+        option_type="put",
+        position_side="short",
+        strike=100.0,
+        expiration_ymd="2026-06-19",
+        contracts_to_close=2,
+    )
+    resolution = resolve_fifo_close_targets(repo, selector, source="test")
+    assert len(resolution.matches) == 2
+
+    with pytest.raises(ValueError, match="expected one assignment target"):
+        persist_assignment_event(
+            repo,
+            close_target_resolution=resolution,
+            contracts_to_close=2,
+            event_time_ms=2000,
+            case_id="case-multi",
+            stock_settlement={"shares": 200},
+        )
+
+    assert [item for item in repo.list_trade_events() if item.get("event_type") == "assignment"] == []
 
 
 def test_persist_manual_void_event_removes_open_lot_from_projection(tmp_path: Path) -> None:

@@ -47,7 +47,9 @@ def _manual_open_event_id(
     contracts: int,
     price: float,
     strike: float | None,
+    multiplier: float | None,
     expiration_ymd: str | None,
+    currency: str,
     trade_time_ms: int,
 ) -> str:
     key_parts = [
@@ -60,7 +62,9 @@ def _manual_open_event_id(
         str(int(contracts)),
         repr(float(price)),
         repr(float(strike)) if strike is not None else "",
+        repr(float(multiplier)) if multiplier is not None else "",
         str(expiration_ymd or "").strip(),
+        normalize_currency(currency),
         str(int(trade_time_ms)),
     ]
     key_str = "|".join(key_parts)
@@ -230,7 +234,9 @@ def persist_manual_open_event(repo: Any, command: OpenPositionCommand) -> Ledger
         contracts=int(command.contracts),
         price=float(premium_per_share),
         strike=strike,
+        multiplier=effective_multiplier(fields),
         expiration_ymd=expiration_ymd,
+        currency=currency,
         trade_time_ms=trade_time_ms,
     )
     event = TradeEvent(

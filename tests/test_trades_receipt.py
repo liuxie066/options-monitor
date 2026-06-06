@@ -100,7 +100,7 @@ def test_receipt_decision_skips_non_option_deal() -> None:
 def test_send_trade_intake_receipt_skips_without_route(tmp_path: Path) -> None:
     out = send_trade_intake_receipt(
         base=tmp_path,
-        config={"notifications": {"provider": "openclaw", "channel": "openclaw-weixin"}},
+        config={"notifications": {"provider": "wechat_clawbot"}},
         receipt_config={},
         apply_changes=True,
         state={},
@@ -135,7 +135,7 @@ def test_send_trade_intake_receipt_uses_existing_route_and_sender(tmp_path: Path
 
     out = send_trade_intake_receipt(
         base=tmp_path,
-        config={"notifications": {"provider": "openclaw", "channel": "openclaw-weixin", "target": "user:test"}},
+        config={"notifications": {"provider": "wechat_clawbot", "target": "wechat:ops"}},
         receipt_config={},
         apply_changes=True,
         state={},
@@ -149,7 +149,7 @@ def test_send_trade_intake_receipt_uses_existing_route_and_sender(tmp_path: Path
     assert out["status"] == "sent"
     assert out["delivery_confirmed"] is True
     assert out["message_id"] == "msg-1"
-    assert calls[0]["target"] == "user:test"
+    assert calls[0]["target"] == "wechat:ops"
     assert "成交已写入 option_positions" in calls[0]["message"]
     assert "成交时间：2026-05-19 13:08:31 北京时间" in calls[0]["message"]
     assert "deal_id：deal-1" in calls[0]["message"]

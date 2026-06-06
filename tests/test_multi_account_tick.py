@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 
@@ -158,6 +159,67 @@ def test_mark_scanned_accounts_updates_each_ran_account(tmp_path) -> None:
 
     data = json.loads(state.read_text(encoding="utf-8"))
     assert set(data["last_run_utc_by_account"]) == {"lx", "sy"}
+
+
+def test_tick_account_execution_keeps_prefetch_done_after_later_scheduler_skip(monkeypatch, tmp_path) -> None:
+    from src.application import tick_account_execution as mod
+    from src.application.tick_account_execution import TickAccountExecutionRequest
+
+    def fake_run_account_outcomes(**_kwargs):
+        return [
+            SimpleNamespace(
+                result=SimpleNamespace(account="lx"),
+                acct_metrics={"account": "lx"},
+                prefetch_done=True,
+                ran_pipeline=True,
+            ),
+            SimpleNamespace(
+                result=SimpleNamespace(account="sy"),
+                acct_metrics={"account": "sy"},
+                prefetch_done=False,
+                ran_pipeline=False,
+            ),
+        ]
+
+    marked: list[list[str]] = []
+
+    monkeypatch.setattr(mod, "run_account_outcomes", fake_run_account_outcomes)
+    monkeypatch.setattr(mod, "mark_scanned_accounts", lambda **kwargs: marked.append(list(kwargs["accounts"])))
+
+    outcome = mod.run_tick_account_execution(
+        TickAccountExecutionRequest(
+            account_ids=["lx", "sy"],
+            account_workers=1,
+            base=tmp_path,
+            base_cfg={},
+            cfg_path=tmp_path / "config.us.json",
+            vpy=tmp_path / ".venv" / "bin" / "python",
+            markets_to_run=["US"],
+            scheduler_ms=1,
+            scheduler_view={},
+            notify_decision_by_account={},
+            should_run_global=False,
+            reason_global="mixed_account_decisions",
+            run_id="run-1",
+            run_dir=tmp_path / "output_runs" / "run-1",
+            shared_required=tmp_path / "output_runs" / "run-1" / "required_data",
+            accounts_root=tmp_path / "output_accounts",
+            prefetch_done=False,
+            force_mode=False,
+            smoke=False,
+            no_send=True,
+            scan_decision_by_account={},
+            state_path=tmp_path / "scheduler_state.json",
+            scheduler_schedule_key="schedule",
+            runlog=SimpleNamespace(),
+            audit_helper=SimpleNamespace(audit=lambda *_args, **_kwargs: None),
+        )
+    )
+
+    assert outcome.prefetch_done is True
+    assert outcome.ran_any_pipeline is True
+    assert outcome.ran_pipeline_accounts == ["lx"]
+    assert marked == [["lx"]]
 
 
 def test_main_uses_env_runtime_root_for_stateful_tick_flows(monkeypatch, tmp_path) -> None:
