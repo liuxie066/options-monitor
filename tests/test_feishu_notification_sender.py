@@ -278,6 +278,46 @@ def test_send_wechat_clawbot_message_uses_bound_context(tmp_path: Path) -> None:
     assert captured["text"] == "hello"
 
 
+def test_wechat_clawbot_client_wraps_sendmessage_payload_in_msg() -> None:
+    from src.application.channels.wechat_clawbot.ilink_client import WechatClawbotClient
+
+    captured: dict[str, object] = {}
+
+    def fake_http_json(method, url, payload, *, headers, timeout):  # type: ignore[no-untyped-def]
+        captured.update({"method": method, "url": url, "payload": payload, "headers": headers, "timeout": timeout})
+        return {"ret": 0, "data": {"message_id": "msg_1"}}
+
+    client = WechatClawbotClient(
+        bot_token="bot_1",
+        base_url="https://example.invalid",
+        timeout=12,
+        http_json_fn=fake_http_json,
+    )
+
+    out = client.send_text_message(
+        to_user_id="wx_user_1",
+        context_token="ctx_1",
+        text="hello",
+        group_id="group_1",
+    )
+
+    assert out == {"ret": 0, "data": {"message_id": "msg_1"}}
+    assert captured["method"] == "POST"
+    assert captured["url"] == "https://example.invalid/ilink/bot/sendmessage"
+    assert captured["timeout"] == 12
+    assert captured["payload"] == {
+        "msg": {
+            "message_type": 2,
+            "message_state": 2,
+            "context_token": "ctx_1",
+            "to_user_id": "wx_user_1",
+            "item_list": [{"type": 1, "text_item": {"text": "hello"}}],
+            "group_id": "group_1",
+        }
+    }
+    assert captured["headers"]["Authorization"] == "Bearer bot_1"  # type: ignore[index]
+
+
 def test_wechat_clawbot_success_without_upstream_message_id_is_unconfirmed() -> None:
     from src.application.channels.wechat_clawbot.notification import normalize_wechat_clawbot_send_output
 

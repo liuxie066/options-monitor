@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.228 - 2026-06-06
+
+### Fixed
+- Fixed WeChat ClawBot `sendmessage` payloads to wrap message bodies under `msg`, matching the iLink API contract so inbound replies are accepted instead of returning `ret=-2`.
+
 ## 1.2.227 - 2026-06-06
 
 ### Added
