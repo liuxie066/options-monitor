@@ -12,8 +12,16 @@ from typing import Any, Callable, cast
 
 from domain.domain.multi_tick import WECHAT_CLAWBOT_NOTIFICATION_PROVIDER
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response, mask_path
+from src.application.assistant.audit import InboundAuditStore
 from src.application.assistant.contracts import AssistantRequest
 from src.application.assistant.policy import check_sender_allowed
+from src.application.channels.reply_decision import (
+    decide_inbound_reply,
+    inbound_command_id as _inbound_command_id,
+    inbound_message_data as _inbound_message_data,
+    inbound_message_result as _inbound_message_result,
+    permission_denied_message,
+)
 from src.application.channels.service import ChannelService
 from src.application.channels.wechat_clawbot.adapter import build_wechat_clawbot_inbound_channel_service
 from src.application.channels.wechat_clawbot.ilink_client import DEFAULT_ILINK_BASE_URL, WechatClawbotClient
@@ -29,7 +37,6 @@ from src.application.channels.wechat_clawbot.message import (
 )
 from src.application.channels.wechat_clawbot.state import DEFAULT_WECHAT_CLAWBOT_LABEL, resolve_wechat_clawbot_state_dir
 from src.application.channels.wechat_clawbot.state_store import WechatClawbotStateStore
-from src.application.channels.reply_decision import decide_inbound_reply, permission_denied_message
 from src.infrastructure.io_utils import utc_now
 
 
@@ -328,6 +335,7 @@ def poll_wechat_clawbot_once(
                 reply_enabled=reply_enabled,
                 max_reply_chars=max_reply_chars,
             )
+            _record_reply_receipt(inbound=inbound, audit_db=audit_db, reply_status=reply_status)
         finally:
             stop_status = _maybe_stop_typing(message=message, client=client, typing_status=typing_status)
             typing_status = {**typing_status, "stop": stop_status}
@@ -512,13 +520,73 @@ def _maybe_reply(
             "reason": "reply_failed",
             "error": f"{type(exc).__name__}: {exc}",
         }
+    outbound_message_id = _extract_message_id(api_response)
     return {
         "attempted": True,
         "ok": _response_success(api_response),
         "reason": decision.send_reason if _response_success(api_response) else "reply_failed",
-        "message_id": _extract_message_id(api_response),
+        "message_id": outbound_message_id,
+        "outbound_message_id": outbound_message_id,
         "api_response": api_response,
     }
+
+
+def _record_reply_receipt(
+    *,
+    inbound: dict[str, Any],
+    audit_db: str | None,
+    reply_status: dict[str, Any],
+) -> None:
+    if not bool(reply_status.get("attempted")):
+        return
+    data = _inbound_message_data(inbound)
+    if data is None:
+        return
+    command_id = _inbound_command_id(_inbound_message_result(data))
+    if not command_id:
+        return
+    receipt = _reply_receipt_payload(data=data, reply_status=reply_status)
+    if not receipt:
+        return
+    if not bool(reply_status.get("ok")):
+        LOG.warning("WeChat ClawBot reply failed: reason=%s", receipt.get("reason") or "unknown")
+    try:
+        InboundAuditStore(audit_db).merge_response_data(
+            command_id=command_id,
+            data={"reply": receipt},
+        )
+    except Exception:
+        LOG.warning("failed to persist WeChat ClawBot reply receipt to inbound audit", exc_info=True)
+
+
+def _reply_receipt_payload(*, data: dict[str, Any], reply_status: dict[str, Any]) -> dict[str, Any]:
+    request = _dict(data.get("request"))
+    api_response = reply_status.get("api_response")
+    outbound_message_id = _first_text(
+        reply_status.get("outbound_message_id"),
+        reply_status.get("message_id"),
+        _extract_message_id(api_response) if isinstance(api_response, dict) else None,
+    )
+    receipt: dict[str, Any] = {
+        "schema_version": "wechat-clawbot-reply-receipt-v1",
+        "attempted": bool(reply_status.get("attempted")),
+        "ok": bool(reply_status.get("ok")),
+        "reason": _first_text(reply_status.get("reason")),
+        "channel": _first_text(request.get("channel"), "wechat"),
+        "provider": WECHAT_CLAWBOT_NOTIFICATION_PROVIDER,
+        "sender_id": _first_text(request.get("sender_id")),
+        "inbound_message_id": _first_text(request.get("message_id")),
+        "message_id": outbound_message_id,
+        "outbound_message_id": outbound_message_id,
+    }
+    if outbound_message_id and bool(reply_status.get("ok")):
+        receipt["delivery_confirmed"] = True
+    error = _first_text(reply_status.get("error"))
+    if error:
+        receipt["error"] = error
+    if isinstance(api_response, dict):
+        receipt["api_response"] = api_response
+    return {key: value for key, value in receipt.items() if value is not None}
 
 
 def _assistant_settings(*, assistant_config_path: str | None = None) -> Any:

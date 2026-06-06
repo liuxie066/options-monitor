@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 BASE = Path(__file__).resolve().parents[1]
 if str(BASE) not in sys.path:
@@ -102,33 +103,32 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "symbol" in candidate_filter_explain["input_schema"]
 
 
-def test_agent_registry_manifest_and_handlers_stay_in_sync() -> None:
+def test_agent_registry_manifest_and_tool_objects_stay_in_sync() -> None:
     from src.application.tool_execution import build_tool_manifest as build_spec
     from src.application.agent_tools.base import AgentTool
-    from src.application.agent_tool_handlers import TOOL_HANDLERS
     from src.application.agent_tool_registry import AGENT_TOOL_DEFINITIONS, get_tool_definition, tool_names
 
     spec = build_spec()
     manifest_names = [str(x.get("name")) for x in spec.get("tools", [])]
     registry_names = list(tool_names())
-    active_definitions = [
-        definition
-        for definition in AGENT_TOOL_DEFINITIONS
-        if not isinstance(definition, AgentTool) or definition.enabled
-    ]
-    migrated_names = {definition.name for definition in active_definitions if isinstance(definition, AgentTool)}
-    legacy_names = {definition.name for definition in active_definitions if not isinstance(definition, AgentTool)}
+    active_definitions = [definition for definition in AGENT_TOOL_DEFINITIONS if definition.enabled]
+    migrated_names = {definition.name for definition in active_definitions}
     pure_read_names = {definition.name for definition in active_definitions if definition.is_pure_read()}
 
     assert manifest_names == registry_names
-    assert sorted(TOOL_HANDLERS) == sorted(legacy_names)
     assert pure_read_names <= migrated_names
-    assert not pure_read_names & set(TOOL_HANDLERS)
-    assert not any(definition.is_pure_read() for definition in active_definitions if not isinstance(definition, AgentTool))
     assert {
         "healthcheck",
         "config_validate",
         "scheduler_status",
+        "version_update",
+        "manage_symbols",
+        "scan_opportunities",
+        "query_cash_headroom",
+        "get_portfolio_context",
+        "prepare_close_advice_inputs",
+        "close_advice",
+        "get_close_advice",
         "candidate_rank_explain",
         "candidate_filter_explain",
         "monthly_income_report",
@@ -147,6 +147,28 @@ def test_agent_registry_manifest_and_handlers_stay_in_sync() -> None:
         assert isinstance(definition, AgentTool)
         assert callable(definition.call)
     assert '"user1"' not in json.dumps([x.get("examples") for x in spec.get("tools", [])], ensure_ascii=False)
+
+
+def test_agent_registry_collects_domain_tool_modules() -> None:
+    from src.application.agent_tool_registry import AGENT_TOOL_DEFINITIONS, AGENT_TOOL_MODULES
+
+    expected = tuple(
+        definition
+        for module in AGENT_TOOL_MODULES
+        for definition in getattr(module, "TOOLS")
+    )
+
+    assert AGENT_TOOL_DEFINITIONS == expected
+    assert {module.__name__.rsplit(".", 1)[-1] for module in AGENT_TOOL_MODULES} >= {
+        "candidate",
+        "close_advice",
+        "config",
+        "diagnostics",
+        "materialization",
+        "notifications",
+        "positions",
+        "runtime",
+    }
 
 
 def test_pure_read_allowlist_is_derived_from_registry_metadata() -> None:
@@ -168,8 +190,9 @@ def test_pure_read_allowlist_is_derived_from_registry_metadata() -> None:
     assert "research" not in PURE_READ_TOOLS
 
 
-def test_write_request_policy_is_registry_driven() -> None:
-    from src.application.agent_tool_registry import get_tool_definition, tool_write_requested
+def test_write_request_policy_is_tool_permission_driven() -> None:
+    from src.application.agent_tool_registry import get_tool_definition
+    from src.application.agent_tools.permissions import tool_write_requested
 
     version_update = get_tool_definition("version_update")
     manage_symbols = get_tool_definition("manage_symbols")
@@ -193,53 +216,60 @@ def test_write_request_policy_is_registry_driven() -> None:
 
 def test_migrated_agent_tool_executes_through_agent_tool_object(tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
-    from src.application.agent_tool_handlers import TOOL_HANDLERS
 
     runs_root = tmp_path / "output_runs"
     runs_root.mkdir()
 
-    assert "runtime_runs" not in TOOL_HANDLERS
     runs = run_tool("runtime_runs", {"runs_root": str(runs_root), "limit": 1})
     assert runs["ok"] is True
     assert runs["data"]["schema_version"] == "runtime_runs.v1"
     assert runs["data"]["summary"]["limit"] == 1
     assert runs["meta"]["runs_root"] == ".../output_runs"
 
-    assert "runtime_logs" not in TOOL_HANDLERS
     logs = run_tool("runtime_logs", {"runs_root": str(runs_root), "kind": "all", "lines": 1})
     assert logs["ok"] is True
     assert logs["data"]["schema_version"] == "runtime_logs.v1"
     assert logs["data"]["summary"]["lines"] == 1
 
 
-def test_write_gate_uses_registry_write_policy(monkeypatch) -> None:
-    from src.application import agent_tool_handlers
-    from src.application.tool_execution import execute_tool as run_tool
+def test_write_gate_uses_tool_write_policy(monkeypatch, tmp_path: Path) -> None:
+    from dataclasses import replace
 
-    calls: list[tuple[str, dict]] = []
+    import src.application.tool_execution as tool_execution
 
-    def _handler(payload: dict) -> tuple[dict, list[str], dict]:
-        calls.append(("called", dict(payload)))
-        return {"ok": True}, [], {}
+    calls: list[dict[str, Any]] = []
+
+    def _update_local_version(**kwargs: Any) -> dict[str, Any]:
+        calls.append(dict(kwargs))
+        return {
+            "mode": "dry_run" if not kwargs.get("apply") else "applied",
+            "current_version": "1.0.0",
+            "target_version": "1.0.1",
+            "would_change": True,
+            "changed": False,
+            "version_path": tmp_path / "VERSION",
+        }
+
+    ctx = tool_execution.build_default_agent_tool_context()
+    monkeypatch.setattr(
+        tool_execution,
+        "build_default_agent_tool_context",
+        lambda: replace(ctx, repo_base=lambda: tmp_path, update_local_version=_update_local_version),
+    )
 
     monkeypatch.delenv("OM_AGENT_ENABLE_WRITE_TOOLS", raising=False)
-    monkeypatch.setitem(agent_tool_handlers.TOOL_HANDLERS, "version_update", _handler)
-    monkeypatch.setitem(agent_tool_handlers.TOOL_HANDLERS, "manage_symbols", _handler)
 
-    preview = run_tool("version_update", {"bump": "patch", "apply": False})
+    preview = tool_execution.execute_tool("version_update", {"bump": "patch", "apply": False})
     assert preview["ok"] is True
-    assert calls == [("called", {"bump": "patch", "apply": False})]
+    assert len(calls) == 1
+    assert calls[0]["apply"] is False
 
-    blocked_apply = run_tool("version_update", {"bump": "patch", "apply": True})
+    blocked_apply = tool_execution.execute_tool("version_update", {"bump": "patch", "apply": True})
     assert blocked_apply["ok"] is False
     assert blocked_apply["error"]["code"] == "PERMISSION_DENIED"
-    assert calls == [("called", {"bump": "patch", "apply": False})]
+    assert len(calls) == 1
 
-    dry_run = run_tool("manage_symbols", {"config_key": "us", "action": "edit", "dry_run": True})
-    assert dry_run["ok"] is True
-    assert calls[-1] == ("called", {"config_key": "us", "action": "edit", "dry_run": True})
-
-    blocked_write = run_tool("manage_symbols", {"config_key": "us", "action": "edit", "dry_run": False})
+    blocked_write = tool_execution.execute_tool("manage_symbols", {"config_key": "us", "action": "edit", "dry_run": False})
     assert blocked_write["ok"] is False
     assert blocked_write["error"]["code"] == "PERMISSION_DENIED"
 

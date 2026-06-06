@@ -321,13 +321,16 @@ Do not weaken production config validation to make local tests pass. Fix the con
 
 ### Ops Copilot Tools
 
-- Manifest: `src/application/agent_tool_registry.py`
-- Handlers: `src/application/agent_tool_handlers.py`
+- Tool modules: `src/application/agent_tools/<domain>.py`
+- Manifest collector: `src/application/agent_tool_registry.py`
+- Write permission gate: `src/application/agent_tools/permissions.py`
 - Contracts: `src/application/agent_tool_contracts.py`
 - Config helpers: `src/application/agent_tool_config.py`, `src/application/agent_tool_init_local.py`
 - CLI: `src/interfaces/agent/cli.py` -> `./om-agent`
 
-When adding or changing a tool, update manifest, handler, tests, and docs together.
+When adding or changing a tool, put the implementation and manifest metadata in
+the owning `agent_tools` domain module, then update focused tests and docs
+together. Do not reintroduce a central handler switchboard.
 
 ## 7. Import Constraints
 
