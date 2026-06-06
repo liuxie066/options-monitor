@@ -44,8 +44,27 @@ class AgentToolContext:
     build_notification: Callable[..., str]
     collect_operation_timeline: Callable[..., dict[str, Any]]
     check_version_update: Callable[..., dict[str, Any]]
+    update_local_version: Callable[..., dict[str, Any]]
     collect_runtime_runs: Callable[..., dict[str, Any]]
     collect_runtime_logs: Callable[..., dict[str, Any]]
+    load_runtime_pipeline_config: Callable[..., dict[str, Any]]
+    run_watchlist_pipeline_default: Callable[..., Any]
+    query_sell_put_cash: Callable[..., dict[str, Any]]
+    load_portfolio_context: Callable[..., Any]
+    load_option_positions_context: Callable[..., Any]
+    symbol_fetch_config_map: Callable[..., dict[str, Any]]
+    extract_context_symbols: Callable[..., list[str]]
+    resolve_symbol_fetch_source: Callable[..., Any]
+    fetch_symbol_opend: Callable[..., Any]
+    save_required_data_opend: Callable[..., Any]
+    resolve_local_path: Callable[..., Path]
+    run_close_advice: Callable[..., dict[str, Any]]
+    safe_read_csv: Callable[..., Any]
+    as_float: Callable[[Any], float | None]
+    deepcopy_value: Callable[[Any], Any]
+    apply_symbol_mutation: Callable[..., dict[str, Any]]
+    list_symbol_rows: Callable[..., list[dict[str, Any]]]
+    write_json_atomic: Callable[..., Any]
 
 
 @dataclass(frozen=True)
@@ -163,15 +182,27 @@ def build_default_agent_tool_context() -> AgentToolContext:
     from src.application.agent_tool_config import load_runtime_config, repo_base, resolve_output_root, write_tools_enabled
     from src.application.agent_tool_contracts import mask_path
     from src.application.agent_tool_runtime import (
+        as_float as _as_float,
+        extract_context_symbols as _extract_context_symbols,
         healthcheck_symbols_for_futu as _healthcheck_symbols_for_futu_impl,
         mask_account_id as _mask_account_id_impl,
         normalize_broker as _normalize_broker,
         read_json_object_or_empty as _read_json_object_or_empty_impl,
         resolve_data_config_ref as _resolve_data_config_ref,
+        resolve_local_path as _resolve_local_path_impl,
         resolve_public_data_config_path as _resolve_public_data_config_path_impl,
         run_futu_doctor as _run_futu_doctor_impl,
+        symbol_fetch_config_map as _symbol_fetch_config_map_impl,
         validate_runtime_config as _validate_runtime_config_impl,
+        write_json_atomic as _write_json_atomic,
     )
+    from src.application.agent_tool_symbols import (
+        apply_symbol_mutation,
+        list_symbol_rows,
+    )
+    from src.application.cash_headroom_query import query_sell_put_cash
+    from src.application.close_advice_runner import run_close_advice
+    from src.application.config_loader import load_config as load_runtime_pipeline_config
     from src.application.config_loader import resolve_watchlist_config
     from src.application.config_validator import validate_config
     from src.application.futu_portfolio_context import infer_futu_portfolio_settings
@@ -181,6 +212,8 @@ def build_default_agent_tool_context() -> AgentToolContext:
         open_position_ledger_from_data_config as resolve_option_positions_repo,
     )
     from src.application.notify_symbols import build_notification
+    from src.application.pipeline_context import load_option_positions_context, load_portfolio_context
+    from src.application.pipeline_watchlist import run_watchlist_pipeline_default
     from src.application.positions.inspection import build_lot_event_history, inspect_projection_state
     from src.application.positions.reporting import build_monthly_income_report
     from src.application.runtime_logs_cli import collect_runtime_logs
@@ -188,9 +221,11 @@ def build_default_agent_tool_context() -> AgentToolContext:
     from src.application.scan_scheduler import decide as scheduler_decide
     from src.application.scan_scheduler import read_state as read_scheduler_state
     from src.application.assistant.operation_diagnostics import collect_operation_timeline
-    from src.application.version_check import check_version_update
+    from src.application.version_check import check_version_update, update_local_version
+    from domain.domain.fetch_source import resolve_symbol_fetch_source
     from domain.domain.ledger.position_fields import normalize_account
     from src.infrastructure.exchange_rates import get_exchange_rates_or_fetch_latest
+    from src.infrastructure.io_utils import safe_read_csv
 
     def _validate_runtime_config(cfg: dict[str, Any], *, allow_empty_symbols: bool = False) -> list[str]:
         return _validate_runtime_config_impl(
@@ -234,6 +269,22 @@ def build_default_agent_tool_context() -> AgentToolContext:
     def _get_exchange_rates(*, cache_path: Any, log: Any = None) -> Any:
         return get_exchange_rates_or_fetch_latest(cache_path=cache_path, log=log)
 
+    def _symbol_fetch_config_map(cfg: dict[str, Any]) -> dict[str, Any]:
+        return _symbol_fetch_config_map_impl(cfg, resolve_watchlist_config=resolve_watchlist_config)
+
+    def _fetch_symbol_opend(*args: Any, **kwargs: Any) -> Any:
+        from src.application.opend_symbol_fetching import fetch_symbol
+
+        return fetch_symbol(*args, **kwargs)
+
+    def _save_required_data_opend(*args: Any, **kwargs: Any) -> Any:
+        from src.application.opend_symbol_outputs import save_outputs
+
+        return save_outputs(*args, **kwargs)
+
+    def _resolve_local_path(value: Any, *, default: Path) -> Path:
+        return _resolve_local_path_impl(value, default=default, repo_base=repo_base)
+
     return AgentToolContext(
         repo_base=repo_base,
         load_runtime_config=load_runtime_config,
@@ -266,6 +317,25 @@ def build_default_agent_tool_context() -> AgentToolContext:
         build_notification=build_notification,
         collect_operation_timeline=collect_operation_timeline,
         check_version_update=check_version_update,
+        update_local_version=update_local_version,
         collect_runtime_runs=collect_runtime_runs,
         collect_runtime_logs=collect_runtime_logs,
+        load_runtime_pipeline_config=load_runtime_pipeline_config,
+        run_watchlist_pipeline_default=run_watchlist_pipeline_default,
+        query_sell_put_cash=query_sell_put_cash,
+        load_portfolio_context=load_portfolio_context,
+        load_option_positions_context=load_option_positions_context,
+        symbol_fetch_config_map=_symbol_fetch_config_map,
+        extract_context_symbols=_extract_context_symbols,
+        resolve_symbol_fetch_source=resolve_symbol_fetch_source,
+        fetch_symbol_opend=_fetch_symbol_opend,
+        save_required_data_opend=_save_required_data_opend,
+        resolve_local_path=_resolve_local_path,
+        run_close_advice=run_close_advice,
+        safe_read_csv=safe_read_csv,
+        as_float=_as_float,
+        deepcopy_value=deepcopy,
+        apply_symbol_mutation=apply_symbol_mutation,
+        list_symbol_rows=list_symbol_rows,
+        write_json_atomic=_write_json_atomic,
     )

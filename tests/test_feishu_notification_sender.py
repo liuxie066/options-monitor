@@ -305,15 +305,19 @@ def test_wechat_clawbot_client_wraps_sendmessage_payload_in_msg() -> None:
     assert captured["method"] == "POST"
     assert captured["url"] == "https://example.invalid/ilink/bot/sendmessage"
     assert captured["timeout"] == 12
-    assert captured["payload"] == {
-        "msg": {
-            "message_type": 2,
-            "message_state": 2,
-            "context_token": "ctx_1",
-            "to_user_id": "wx_user_1",
-            "item_list": [{"type": 1, "text_item": {"text": "hello"}}],
-            "group_id": "group_1",
-        }
+    payload = captured["payload"]
+    assert isinstance(payload, dict)
+    assert isinstance(payload["client_id"], str)
+    assert payload["client_id"]
+    assert payload["base_info"] == {"session_id": "", "scene": ""}
+    assert payload["msg"] == {
+        "message_type": 2,
+        "message_state": 2,
+        "context_token": "ctx_1",
+        "from_user_id": "",
+        "to_user_id": "wx_user_1",
+        "item_list": [{"type": 1, "text_item": {"text": "hello"}}],
+        "group_id": "group_1",
     }
     assert captured["headers"]["Authorization"] == "Bearer bot_1"  # type: ignore[index]
 

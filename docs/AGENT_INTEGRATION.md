@@ -19,9 +19,10 @@ This document only describes integration contracts and invocation patterns.
 其中 `--input-file` 会覆盖 `--input-json`。
 
 Implementation ownership:
-- Tool manifest source of truth: `src/application/agent_tool_registry.py`
+- Tool implementation source of truth: `src/application/agent_tools/<domain>.py`
+- Tool manifest collector: `src/application/agent_tool_registry.py`
+- Tool write permission gate: `src/application/agent_tools/permissions.py`
 - Tool response contract: `src/application/agent_tool_contracts.py`
-- Tool handlers: `src/application/agent_tool_handlers.py`
 - Runtime config helpers: `src/application/agent_tool_config.py`
 - Runtime config initialization/account mutation helpers: `src/application/agent_tool_init_local.py`
 - Public CLI owner: `src/interfaces/agent/cli.py`
@@ -240,7 +241,8 @@ OM_AGENT_ENABLE_WRITE_TOOLS=true
 当前写操作不是只靠一个开关就能执行。
 
 门禁入口在 `src/application/tool_execution.py`，但“这个 payload 是否请求写入”
-由 `src/application/agent_tool_registry.py` 的工具定义/写入策略决定。执行层不再按
+由 `src/application/agent_tools/<domain>.py` 的工具定义/写入策略决定，并由
+`src/application/agent_tools/permissions.py` 统一执行 env/confirm 门禁。执行层不再按
 具体工具名维护特殊分支。
 
 通常需要两层门禁：

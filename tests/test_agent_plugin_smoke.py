@@ -649,27 +649,22 @@ def test_healthcheck_reports_unified_channel_health(monkeypatch, tmp_path: Path)
 
 def test_get_portfolio_context_allows_futu_source_without_explicit_data_config(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
-    import src.application.agent_tool_handlers as tools
 
     cfg_path = tmp_path / "config.us.json"
     cfg = _minimal_cfg()
     cfg["portfolio"]["account"] = "user1"
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    old_load = tools.load_portfolio_context
-    try:
-        def _fake_load_portfolio_context(**kwargs):  # type: ignore[no-untyped-def]
-            assert str(kwargs["data_config"]).endswith("portfolio.runtime.json")
-            return {
-                "portfolio_source_name": "futu",
-                "cash_by_currency": {"USD": 1000.0},
-                "stocks_by_symbol": {},
-            }
+    def _fake_load_portfolio_context(**kwargs):  # type: ignore[no-untyped-def]
+        assert str(kwargs["data_config"]).endswith("portfolio.runtime.json")
+        return {
+            "portfolio_source_name": "futu",
+            "cash_by_currency": {"USD": 1000.0},
+            "stocks_by_symbol": {},
+        }
 
-        tools.load_portfolio_context = _fake_load_portfolio_context  # type: ignore[assignment]
-        out = run_tool("get_portfolio_context", {"config_path": str(cfg_path), "account": "user1"})
-    finally:
-        tools.load_portfolio_context = old_load  # type: ignore[assignment]
+    _patch_agent_tool_context(monkeypatch, load_portfolio_context=_fake_load_portfolio_context)
+    out = run_tool("get_portfolio_context", {"config_path": str(cfg_path), "account": "user1"})
 
     assert out["ok"] is True
     assert out["data"]["portfolio_source_name"] == "futu"
@@ -950,10 +945,9 @@ def test_version_check_returns_agent_diagnostic(monkeypatch) -> None:
 
 def test_version_update_defaults_to_dry_run(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
-    import src.application.agent_tool_handlers as handlers
 
     (tmp_path / "VERSION").write_text("1.0.0\n", encoding="utf-8")
-    monkeypatch.setattr(handlers, "repo_base", lambda: tmp_path)
+    _patch_agent_tool_context(monkeypatch, repo_base=lambda: tmp_path)
 
     out = run_tool("version_update", {"bump": "patch"})
 
@@ -970,10 +964,9 @@ def test_version_update_defaults_to_dry_run(monkeypatch, tmp_path: Path) -> None
 
 def test_version_update_apply_writes_version(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
-    import src.application.agent_tool_handlers as handlers
 
     (tmp_path / "VERSION").write_text("1.0.0\n", encoding="utf-8")
-    monkeypatch.setattr(handlers, "repo_base", lambda: tmp_path)
+    _patch_agent_tool_context(monkeypatch, repo_base=lambda: tmp_path)
     monkeypatch.setenv("OM_AGENT_ENABLE_WRITE_TOOLS", "true")
 
     out = run_tool("version_update", {"target_version": "1.1.0", "apply": True, "confirm": True})
@@ -988,10 +981,9 @@ def test_version_update_apply_writes_version(monkeypatch, tmp_path: Path) -> Non
 
 def test_version_update_apply_requires_write_gate(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
-    import src.application.agent_tool_handlers as handlers
 
     (tmp_path / "VERSION").write_text("1.0.0\n", encoding="utf-8")
-    monkeypatch.setattr(handlers, "repo_base", lambda: tmp_path)
+    _patch_agent_tool_context(monkeypatch, repo_base=lambda: tmp_path)
 
     blocked = run_tool("version_update", {"target_version": "1.1.0", "apply": True})
     assert blocked["ok"] is False
@@ -1007,10 +999,9 @@ def test_version_update_apply_requires_write_gate(monkeypatch, tmp_path: Path) -
 
 def test_version_update_rejects_removed_version_alias(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
-    import src.application.agent_tool_handlers as handlers
 
     (tmp_path / "VERSION").write_text("1.0.0\n", encoding="utf-8")
-    monkeypatch.setattr(handlers, "repo_base", lambda: tmp_path)
+    _patch_agent_tool_context(monkeypatch, repo_base=lambda: tmp_path)
 
     out = run_tool("version_update", {"version": "1.1.0"})
 
@@ -2598,7 +2589,6 @@ def test_openclaw_readiness_next_actions_preserve_profile_path(tmp_path: Path) -
 
 def test_close_advice_reads_cached_context_and_required_data(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
-    import src.application.agent_tool_handlers as tools
 
     cfg_path = tmp_path / "config.us.json"
     cfg = _minimal_cfg()
@@ -2619,24 +2609,20 @@ def test_close_advice_reads_cached_context_and_required_data(monkeypatch, tmp_pa
     (reports_dir / "close_advice.csv").write_text("account,symbol,tier,tier_label,realized_if_close\n", encoding="utf-8")
     (reports_dir / "close_advice.txt").write_text("", encoding="utf-8")
 
-    old_run = tools.run_close_advice
-    try:
-        def _fake_run_close_advice(**kwargs):  # type: ignore[no-untyped-def]
-            assert kwargs["context_path"] == (state_dir / "option_positions_context.json")
-            assert kwargs["required_data_root"] == required_dir
-            assert kwargs["output_dir"] == (out_root / "reports")
-            return {
-                "enabled": True,
-                "rows": 0,
-                "notify_rows": 0,
-                "csv": str((out_root / "reports" / "close_advice.csv")),
-                "text": str((out_root / "reports" / "close_advice.txt")),
-            }
+    def _fake_run_close_advice(**kwargs):  # type: ignore[no-untyped-def]
+        assert kwargs["context_path"] == (state_dir / "option_positions_context.json")
+        assert kwargs["required_data_root"] == required_dir
+        assert kwargs["output_dir"] == (out_root / "reports")
+        return {
+            "enabled": True,
+            "rows": 0,
+            "notify_rows": 0,
+            "csv": str((out_root / "reports" / "close_advice.csv")),
+            "text": str((out_root / "reports" / "close_advice.txt")),
+        }
 
-        tools.run_close_advice = _fake_run_close_advice  # type: ignore[assignment]
-        out = run_tool("close_advice", {"config_path": str(cfg_path), "output_dir": str(out_root)})
-    finally:
-        tools.run_close_advice = old_run  # type: ignore[assignment]
+    _patch_agent_tool_context(monkeypatch, run_close_advice=_fake_run_close_advice)
+    out = run_tool("close_advice", {"config_path": str(cfg_path), "output_dir": str(out_root)})
 
     assert out["ok"] is True
     assert out["data"]["enabled"] is True
@@ -3032,7 +3018,6 @@ def test_close_advice_requires_cached_inputs(tmp_path: Path) -> None:
 
 def test_prepare_close_advice_inputs_builds_context_and_required_data(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
-    import src.application.agent_tool_handlers as tools
 
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
@@ -3045,47 +3030,42 @@ def test_prepare_close_advice_inputs_builds_context_and_required_data(monkeypatc
     cfg["close_advice"] = {"enabled": True}
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    old_load = tools.load_option_positions_context
-    old_opend = tools.fetch_symbol_opend
-    old_save = tools.save_required_data_opend
-    try:
-        def _fake_load_option_positions_context(**kwargs):  # type: ignore[no-untyped-def]
-            assert kwargs["account"] == "user1"
-            return ({
-                "open_positions_min": [
-                    {"symbol": "NVDA", "option_type": "put", "strike": 100, "expiration": "2026-06-19"},
-                    {"symbol": "NVDA", "option_type": "call", "strike": 120, "expiration": "2026-07-17"},
-                ]
-            }, True)
+    def _fake_load_option_positions_context(**kwargs):  # type: ignore[no-untyped-def]
+        assert kwargs["account"] == "user1"
+        return ({
+            "open_positions_min": [
+                {"symbol": "NVDA", "option_type": "put", "strike": 100, "expiration": "2026-06-19"},
+                {"symbol": "NVDA", "option_type": "call", "strike": 120, "expiration": "2026-07-17"},
+            ]
+        }, True)
 
-        def _fake_fetch_symbol_opend(symbol, **kwargs):  # type: ignore[no-untyped-def]
-            assert symbol == "NVDA"
-            assert kwargs["explicit_expirations"] == ["2026-06-19", "2026-07-17"]
-            assert kwargs["option_types"] == "call,put"
-            assert kwargs["min_strike"] == 100
-            assert kwargs["max_strike"] == 120
-            return {"rows": [{"symbol": "NVDA"}], "expiration_count": 2}
+    def _fake_fetch_symbol_opend(symbol, **kwargs):  # type: ignore[no-untyped-def]
+        assert symbol == "NVDA"
+        assert kwargs["explicit_expirations"] == ["2026-06-19", "2026-07-17"]
+        assert kwargs["option_types"] == "call,put"
+        assert kwargs["min_strike"] == 100
+        assert kwargs["max_strike"] == 120
+        return {"rows": [{"symbol": "NVDA"}], "expiration_count": 2}
 
-        def _fake_save_required_data_opend(base, symbol, payload, *, output_root):  # type: ignore[no-untyped-def]
-            parsed = output_root / "parsed"
-            parsed.mkdir(parents=True, exist_ok=True)
-            csv_path = parsed / f"{symbol}_required_data.csv"
-            csv_path.write_text(
-                "symbol,option_type,expiration,strike\n"
-                "NVDA,put,2026-06-19,100\n"
-                "NVDA,call,2026-07-17,120\n",
-                encoding="utf-8",
-            )
-            return output_root / "raw" / f"{symbol}_required_data.json", csv_path
+    def _fake_save_required_data_opend(base, symbol, payload, *, output_root):  # type: ignore[no-untyped-def]
+        parsed = output_root / "parsed"
+        parsed.mkdir(parents=True, exist_ok=True)
+        csv_path = parsed / f"{symbol}_required_data.csv"
+        csv_path.write_text(
+            "symbol,option_type,expiration,strike\n"
+            "NVDA,put,2026-06-19,100\n"
+            "NVDA,call,2026-07-17,120\n",
+            encoding="utf-8",
+        )
+        return output_root / "raw" / f"{symbol}_required_data.json", csv_path
 
-        tools.load_option_positions_context = _fake_load_option_positions_context  # type: ignore[assignment]
-        tools.fetch_symbol_opend = _fake_fetch_symbol_opend  # type: ignore[assignment]
-        tools.save_required_data_opend = _fake_save_required_data_opend  # type: ignore[assignment]
-        out = run_tool("prepare_close_advice_inputs", {"config_path": str(cfg_path), "output_dir": str(tmp_path / "output_shared" / "agent_tools")})
-    finally:
-        tools.load_option_positions_context = old_load  # type: ignore[assignment]
-        tools.fetch_symbol_opend = old_opend  # type: ignore[assignment]
-        tools.save_required_data_opend = old_save  # type: ignore[assignment]
+    _patch_agent_tool_context(
+        monkeypatch,
+        load_option_positions_context=_fake_load_option_positions_context,
+        fetch_symbol_opend=_fake_fetch_symbol_opend,
+        save_required_data_opend=_fake_save_required_data_opend,
+    )
+    out = run_tool("prepare_close_advice_inputs", {"config_path": str(cfg_path), "output_dir": str(tmp_path / "output_shared" / "agent_tools")})
 
     assert out["ok"] is True
     assert out["data"]["account"] == "user1"
@@ -3098,7 +3078,6 @@ def test_prepare_close_advice_inputs_builds_context_and_required_data(monkeypatc
 
 def test_prepare_close_advice_inputs_reuses_cached_required_data_when_coverage_is_complete(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
-    import src.application.agent_tool_handlers as tools
 
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
@@ -3120,35 +3099,30 @@ def test_prepare_close_advice_inputs_reuses_cached_required_data_when_coverage_i
         encoding="utf-8",
     )
 
-    old_load = tools.load_option_positions_context
-    old_opend = tools.fetch_symbol_opend
-    old_save = tools.save_required_data_opend
-    try:
-        def _fake_load_option_positions_context(**kwargs):  # type: ignore[no-untyped-def]
-            return ({
-                "open_positions_min": [
-                    {"symbol": "NVDA", "option_type": "put", "strike": 100, "expiration": "2026-06-19"},
-                    {"symbol": "NVDA", "option_type": "call", "strike": 120, "expiration": "2026-07-17"},
-                ]
-            }, True)
+    def _fake_load_option_positions_context(**kwargs):  # type: ignore[no-untyped-def]
+        return ({
+            "open_positions_min": [
+                {"symbol": "NVDA", "option_type": "put", "strike": 100, "expiration": "2026-06-19"},
+                {"symbol": "NVDA", "option_type": "call", "strike": 120, "expiration": "2026-07-17"},
+            ]
+        }, True)
 
-        def _fail_fetch_symbol_opend(*args, **kwargs):  # type: ignore[no-untyped-def]
-            raise AssertionError("fetch_symbol_opend should not be called when cached coverage is complete")
+    def _fail_fetch_symbol_opend(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("fetch_symbol_opend should not be called when cached coverage is complete")
 
-        def _fail_save_required_data_opend(*args, **kwargs):  # type: ignore[no-untyped-def]
-            raise AssertionError("save_required_data_opend should not be called when cached coverage is complete")
+    def _fail_save_required_data_opend(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("save_required_data_opend should not be called when cached coverage is complete")
 
-        tools.load_option_positions_context = _fake_load_option_positions_context  # type: ignore[assignment]
-        tools.fetch_symbol_opend = _fail_fetch_symbol_opend  # type: ignore[assignment]
-        tools.save_required_data_opend = _fail_save_required_data_opend  # type: ignore[assignment]
-        out = run_tool(
-            "prepare_close_advice_inputs",
-            {"config_path": str(cfg_path), "output_dir": str(tmp_path / "output_shared" / "agent_tools")},
-        )
-    finally:
-        tools.load_option_positions_context = old_load  # type: ignore[assignment]
-        tools.fetch_symbol_opend = old_opend  # type: ignore[assignment]
-        tools.save_required_data_opend = old_save  # type: ignore[assignment]
+    _patch_agent_tool_context(
+        monkeypatch,
+        load_option_positions_context=_fake_load_option_positions_context,
+        fetch_symbol_opend=_fail_fetch_symbol_opend,
+        save_required_data_opend=_fail_save_required_data_opend,
+    )
+    out = run_tool(
+        "prepare_close_advice_inputs",
+        {"config_path": str(cfg_path), "output_dir": str(tmp_path / "output_shared" / "agent_tools")},
+    )
 
     assert out["ok"] is True
     assert out["data"]["symbols"][0]["position_coverage_ok"] is True
@@ -3158,7 +3132,6 @@ def test_prepare_close_advice_inputs_reuses_cached_required_data_when_coverage_i
 
 def test_prepare_close_advice_inputs_reports_missing_required_expirations(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
-    import src.application.agent_tool_handlers as tools
 
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
@@ -3173,42 +3146,37 @@ def test_prepare_close_advice_inputs_reports_missing_required_expirations(monkey
     cfg["close_advice"] = {"enabled": True}
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    old_load = tools.load_option_positions_context
-    old_opend = tools.fetch_symbol_opend
-    old_save = tools.save_required_data_opend
-    try:
-        def _fake_load_option_positions_context(**kwargs):  # type: ignore[no-untyped-def]
-            return ({
-                "open_positions_min": [
-                    {"symbol": "9992.HK", "option_type": "put", "strike": 135, "expiration": "2026-04-29"},
-                    {"symbol": "9992.HK", "option_type": "call", "strike": 200, "expiration": "2026-06-29"},
-                ]
-            }, True)
+    def _fake_load_option_positions_context(**kwargs):  # type: ignore[no-untyped-def]
+        return ({
+            "open_positions_min": [
+                {"symbol": "9992.HK", "option_type": "put", "strike": 135, "expiration": "2026-04-29"},
+                {"symbol": "9992.HK", "option_type": "call", "strike": 200, "expiration": "2026-06-29"},
+            ]
+        }, True)
 
-        def _fake_fetch_symbol_opend(symbol, **kwargs):  # type: ignore[no-untyped-def]
-            assert symbol == "9992.HK"
-            assert kwargs["explicit_expirations"] == ["2026-04-29", "2026-06-29"]
-            return {"rows": [{"symbol": "9992.HK"}], "expiration_count": 1}
+    def _fake_fetch_symbol_opend(symbol, **kwargs):  # type: ignore[no-untyped-def]
+        assert symbol == "9992.HK"
+        assert kwargs["explicit_expirations"] == ["2026-04-29", "2026-06-29"]
+        return {"rows": [{"symbol": "9992.HK"}], "expiration_count": 1}
 
-        def _fake_save_required_data_opend(base, symbol, payload, *, output_root):  # type: ignore[no-untyped-def]
-            parsed = output_root / "parsed"
-            parsed.mkdir(parents=True, exist_ok=True)
-            csv_path = parsed / f"{symbol}_required_data.csv"
-            csv_path.write_text(
-                "symbol,option_type,expiration,strike\n"
-                "9992.HK,put,2026-05-28,135\n",
-                encoding="utf-8",
-            )
-            return output_root / "raw" / f"{symbol}_required_data.json", csv_path
+    def _fake_save_required_data_opend(base, symbol, payload, *, output_root):  # type: ignore[no-untyped-def]
+        parsed = output_root / "parsed"
+        parsed.mkdir(parents=True, exist_ok=True)
+        csv_path = parsed / f"{symbol}_required_data.csv"
+        csv_path.write_text(
+            "symbol,option_type,expiration,strike\n"
+            "9992.HK,put,2026-05-28,135\n",
+            encoding="utf-8",
+        )
+        return output_root / "raw" / f"{symbol}_required_data.json", csv_path
 
-        tools.load_option_positions_context = _fake_load_option_positions_context  # type: ignore[assignment]
-        tools.fetch_symbol_opend = _fake_fetch_symbol_opend  # type: ignore[assignment]
-        tools.save_required_data_opend = _fake_save_required_data_opend  # type: ignore[assignment]
-        out = run_tool("prepare_close_advice_inputs", {"config_path": str(cfg_path), "output_dir": str(tmp_path / "output_shared" / "agent_tools")})
-    finally:
-        tools.load_option_positions_context = old_load  # type: ignore[assignment]
-        tools.fetch_symbol_opend = old_opend  # type: ignore[assignment]
-        tools.save_required_data_opend = old_save  # type: ignore[assignment]
+    _patch_agent_tool_context(
+        monkeypatch,
+        load_option_positions_context=_fake_load_option_positions_context,
+        fetch_symbol_opend=_fake_fetch_symbol_opend,
+        save_required_data_opend=_fake_save_required_data_opend,
+    )
+    out = run_tool("prepare_close_advice_inputs", {"config_path": str(cfg_path), "output_dir": str(tmp_path / "output_shared" / "agent_tools")})
 
     assert out["ok"] is True
     assert out["data"]["symbols"][0]["missing_expirations"] == ["2026-04-29", "2026-06-29"]
@@ -3219,7 +3187,6 @@ def test_prepare_close_advice_inputs_reports_missing_required_expirations(monkey
 
 def test_prepare_close_advice_inputs_reports_expiration_near_miss_without_silent_rewrite(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
-    import src.application.agent_tool_handlers as tools
 
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
@@ -3233,47 +3200,42 @@ def test_prepare_close_advice_inputs_reports_expiration_near_miss_without_silent
     cfg["close_advice"] = {"enabled": True}
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    old_load = tools.load_option_positions_context
-    old_opend = tools.fetch_symbol_opend
-    old_save = tools.save_required_data_opend
-    try:
-        def _fake_load_option_positions_context(**kwargs):  # type: ignore[no-untyped-def]
-            return ({
-                "open_positions_min": [
-                    {"symbol": "0700.HK", "option_type": "put", "strike": 450, "expiration": "2026-05-27"},
-                ]
-            }, True)
+    def _fake_load_option_positions_context(**kwargs):  # type: ignore[no-untyped-def]
+        return ({
+            "open_positions_min": [
+                {"symbol": "0700.HK", "option_type": "put", "strike": 450, "expiration": "2026-05-27"},
+            ]
+        }, True)
 
-        def _fake_fetch_symbol_opend(symbol, **kwargs):  # type: ignore[no-untyped-def]
-            assert kwargs["chain_cache_force_refresh"] is True
-            return {"rows": [{"symbol": "0700.HK"}], "expiration_count": 1}
+    def _fake_fetch_symbol_opend(symbol, **kwargs):  # type: ignore[no-untyped-def]
+        assert kwargs["chain_cache_force_refresh"] is True
+        return {"rows": [{"symbol": "0700.HK"}], "expiration_count": 1}
 
-        def _fake_save_required_data_opend(base, symbol, payload, *, output_root):  # type: ignore[no-untyped-def]
-            parsed = output_root / "parsed"
-            parsed.mkdir(parents=True, exist_ok=True)
-            csv_path = parsed / f"{symbol}_required_data.csv"
-            csv_path.write_text(
-                "symbol,option_type,expiration,strike\n"
-                "0700.HK,put,2026-05-28,450\n",
-                encoding="utf-8",
-            )
-            return output_root / "raw" / f"{symbol}_required_data.json", csv_path
-
-        tools.load_option_positions_context = _fake_load_option_positions_context  # type: ignore[assignment]
-        tools.fetch_symbol_opend = _fake_fetch_symbol_opend  # type: ignore[assignment]
-        tools.save_required_data_opend = _fake_save_required_data_opend  # type: ignore[assignment]
-        out = run_tool(
-            "prepare_close_advice_inputs",
-            {
-                "config_path": str(cfg_path),
-                "output_dir": str(tmp_path / "output_shared" / "agent_tools"),
-                "force_required_data_refresh": True,
-            },
+    def _fake_save_required_data_opend(base, symbol, payload, *, output_root):  # type: ignore[no-untyped-def]
+        parsed = output_root / "parsed"
+        parsed.mkdir(parents=True, exist_ok=True)
+        csv_path = parsed / f"{symbol}_required_data.csv"
+        csv_path.write_text(
+            "symbol,option_type,expiration,strike\n"
+            "0700.HK,put,2026-05-28,450\n",
+            encoding="utf-8",
         )
-    finally:
-        tools.load_option_positions_context = old_load  # type: ignore[assignment]
-        tools.fetch_symbol_opend = old_opend  # type: ignore[assignment]
-        tools.save_required_data_opend = old_save  # type: ignore[assignment]
+        return output_root / "raw" / f"{symbol}_required_data.json", csv_path
+
+    _patch_agent_tool_context(
+        monkeypatch,
+        load_option_positions_context=_fake_load_option_positions_context,
+        fetch_symbol_opend=_fake_fetch_symbol_opend,
+        save_required_data_opend=_fake_save_required_data_opend,
+    )
+    out = run_tool(
+        "prepare_close_advice_inputs",
+        {
+            "config_path": str(cfg_path),
+            "output_dir": str(tmp_path / "output_shared" / "agent_tools"),
+            "force_required_data_refresh": True,
+        },
+    )
 
     assert out["ok"] is True
     assert out["data"]["symbols"][0]["position_coverage_ok"] is False
@@ -3294,7 +3256,6 @@ def test_prepare_close_advice_inputs_reports_expiration_near_miss_without_silent
 
 def test_prepare_close_advice_inputs_normalizes_timestamp_expirations(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
-    import src.application.agent_tool_handlers as tools
 
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
@@ -3308,43 +3269,38 @@ def test_prepare_close_advice_inputs_normalizes_timestamp_expirations(monkeypatc
     cfg["close_advice"] = {"enabled": True}
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    old_load = tools.load_option_positions_context
-    old_opend = tools.fetch_symbol_opend
-    old_save = tools.save_required_data_opend
-    try:
-        def _fake_load_option_positions_context(**kwargs):  # type: ignore[no-untyped-def]
-            return ({
-                "open_positions_min": [
-                    {"symbol": "FUTU", "option_type": "put", "strike": 120, "expiration": 1777420800000},
-                    {"symbol": "FUTU", "option_type": "call", "strike": 130, "expiration": 1781740800},
-                ]
-            }, True)
+    def _fake_load_option_positions_context(**kwargs):  # type: ignore[no-untyped-def]
+        return ({
+            "open_positions_min": [
+                {"symbol": "FUTU", "option_type": "put", "strike": 120, "expiration": 1777420800000},
+                {"symbol": "FUTU", "option_type": "call", "strike": 130, "expiration": 1781740800},
+            ]
+        }, True)
 
-        def _fake_fetch_symbol_opend(symbol, **kwargs):  # type: ignore[no-untyped-def]
-            assert symbol == "FUTU"
-            assert kwargs["explicit_expirations"] == ["2026-04-29", "2026-06-18"]
-            return {"rows": [{"symbol": "FUTU"}], "expiration_count": 2}
+    def _fake_fetch_symbol_opend(symbol, **kwargs):  # type: ignore[no-untyped-def]
+        assert symbol == "FUTU"
+        assert kwargs["explicit_expirations"] == ["2026-04-29", "2026-06-18"]
+        return {"rows": [{"symbol": "FUTU"}], "expiration_count": 2}
 
-        def _fake_save_required_data_opend(base, symbol, payload, *, output_root):  # type: ignore[no-untyped-def]
-            parsed = output_root / "parsed"
-            parsed.mkdir(parents=True, exist_ok=True)
-            csv_path = parsed / f"{symbol}_required_data.csv"
-            csv_path.write_text(
-                "symbol,option_type,expiration,strike\n"
-                "FUTU,put,2026-04-29,120\n"
-                "FUTU,call,2026-06-18,130\n",
-                encoding="utf-8",
-            )
-            return output_root / "raw" / f"{symbol}_required_data.json", csv_path
+    def _fake_save_required_data_opend(base, symbol, payload, *, output_root):  # type: ignore[no-untyped-def]
+        parsed = output_root / "parsed"
+        parsed.mkdir(parents=True, exist_ok=True)
+        csv_path = parsed / f"{symbol}_required_data.csv"
+        csv_path.write_text(
+            "symbol,option_type,expiration,strike\n"
+            "FUTU,put,2026-04-29,120\n"
+            "FUTU,call,2026-06-18,130\n",
+            encoding="utf-8",
+        )
+        return output_root / "raw" / f"{symbol}_required_data.json", csv_path
 
-        tools.load_option_positions_context = _fake_load_option_positions_context  # type: ignore[assignment]
-        tools.fetch_symbol_opend = _fake_fetch_symbol_opend  # type: ignore[assignment]
-        tools.save_required_data_opend = _fake_save_required_data_opend  # type: ignore[assignment]
-        out = run_tool("prepare_close_advice_inputs", {"config_path": str(cfg_path), "output_dir": str(tmp_path / "output_shared" / "agent_tools")})
-    finally:
-        tools.load_option_positions_context = old_load  # type: ignore[assignment]
-        tools.fetch_symbol_opend = old_opend  # type: ignore[assignment]
-        tools.save_required_data_opend = old_save  # type: ignore[assignment]
+    _patch_agent_tool_context(
+        monkeypatch,
+        load_option_positions_context=_fake_load_option_positions_context,
+        fetch_symbol_opend=_fake_fetch_symbol_opend,
+        save_required_data_opend=_fake_save_required_data_opend,
+    )
+    out = run_tool("prepare_close_advice_inputs", {"config_path": str(cfg_path), "output_dir": str(tmp_path / "output_shared" / "agent_tools")})
 
     assert out["ok"] is True
     assert out["data"]["symbols"][0]["position_coverage_ok"] is True
@@ -3352,7 +3308,6 @@ def test_prepare_close_advice_inputs_normalizes_timestamp_expirations(monkeypatc
 
 def test_prepare_close_advice_inputs_uses_expiration_ymd_for_position_requirements(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
-    import src.application.agent_tool_handlers as tools
 
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
@@ -3366,44 +3321,39 @@ def test_prepare_close_advice_inputs_uses_expiration_ymd_for_position_requiremen
     cfg["close_advice"] = {"enabled": True}
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    old_load = tools.load_option_positions_context
-    old_opend = tools.fetch_symbol_opend
-    old_save = tools.save_required_data_opend
-    try:
-        def _fake_load_option_positions_context(**kwargs):  # type: ignore[no-untyped-def]
-            return ({
-                "open_positions_min": [
-                    {"symbol": "FUTU", "option_type": "put", "strike": 120, "expiration": None, "expiration_ymd": "2026-04-29"},
-                ]
-            }, True)
+    def _fake_load_option_positions_context(**kwargs):  # type: ignore[no-untyped-def]
+        return ({
+            "open_positions_min": [
+                {"symbol": "FUTU", "option_type": "put", "strike": 120, "expiration": None, "expiration_ymd": "2026-04-29"},
+            ]
+        }, True)
 
-        def _fake_fetch_symbol_opend(symbol, **kwargs):  # type: ignore[no-untyped-def]
-            assert symbol == "FUTU"
-            assert kwargs["explicit_expirations"] == ["2026-04-29"]
-            assert kwargs["option_types"] == "put"
-            assert kwargs["min_strike"] == 120
-            assert kwargs["max_strike"] == 120
-            return {"rows": [{"symbol": "FUTU"}], "expiration_count": 1}
+    def _fake_fetch_symbol_opend(symbol, **kwargs):  # type: ignore[no-untyped-def]
+        assert symbol == "FUTU"
+        assert kwargs["explicit_expirations"] == ["2026-04-29"]
+        assert kwargs["option_types"] == "put"
+        assert kwargs["min_strike"] == 120
+        assert kwargs["max_strike"] == 120
+        return {"rows": [{"symbol": "FUTU"}], "expiration_count": 1}
 
-        def _fake_save_required_data_opend(base, symbol, payload, *, output_root):  # type: ignore[no-untyped-def]
-            parsed = output_root / "parsed"
-            parsed.mkdir(parents=True, exist_ok=True)
-            csv_path = parsed / f"{symbol}_required_data.csv"
-            csv_path.write_text(
-                "symbol,option_type,expiration,strike\n"
-                "FUTU,put,2026-04-29,120\n",
-                encoding="utf-8",
-            )
-            return output_root / "raw" / f"{symbol}_required_data.json", csv_path
+    def _fake_save_required_data_opend(base, symbol, payload, *, output_root):  # type: ignore[no-untyped-def]
+        parsed = output_root / "parsed"
+        parsed.mkdir(parents=True, exist_ok=True)
+        csv_path = parsed / f"{symbol}_required_data.csv"
+        csv_path.write_text(
+            "symbol,option_type,expiration,strike\n"
+            "FUTU,put,2026-04-29,120\n",
+            encoding="utf-8",
+        )
+        return output_root / "raw" / f"{symbol}_required_data.json", csv_path
 
-        tools.load_option_positions_context = _fake_load_option_positions_context  # type: ignore[assignment]
-        tools.fetch_symbol_opend = _fake_fetch_symbol_opend  # type: ignore[assignment]
-        tools.save_required_data_opend = _fake_save_required_data_opend  # type: ignore[assignment]
-        out = run_tool("prepare_close_advice_inputs", {"config_path": str(cfg_path), "output_dir": str(tmp_path / "output_shared" / "agent_tools")})
-    finally:
-        tools.load_option_positions_context = old_load  # type: ignore[assignment]
-        tools.fetch_symbol_opend = old_opend  # type: ignore[assignment]
-        tools.save_required_data_opend = old_save  # type: ignore[assignment]
+    _patch_agent_tool_context(
+        monkeypatch,
+        load_option_positions_context=_fake_load_option_positions_context,
+        fetch_symbol_opend=_fake_fetch_symbol_opend,
+        save_required_data_opend=_fake_save_required_data_opend,
+    )
+    out = run_tool("prepare_close_advice_inputs", {"config_path": str(cfg_path), "output_dir": str(tmp_path / "output_shared" / "agent_tools")})
 
     assert out["ok"] is True
     assert out["data"]["symbols"][0]["requested_expirations"] == ["2026-04-29"]
@@ -3427,7 +3377,7 @@ def test_prepare_close_advice_inputs_returns_empty_result_when_context_has_no_po
 
 def test_get_close_advice_runs_prepare_then_render(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
-    import src.application.agent_tool_handlers as tools
+    import src.application.agent_tools.materialization as tools
 
     cfg_path = tmp_path / "config.us.json"
     cfg = _minimal_cfg()
@@ -3438,7 +3388,7 @@ def test_get_close_advice_runs_prepare_then_render(monkeypatch, tmp_path: Path) 
     old_prepare = tools._prepare_close_advice_inputs_tool
     old_close = tools._close_advice_tool
     try:
-        def _fake_prepare(payload):  # type: ignore[no-untyped-def]
+        def _fake_prepare(ctx, payload):  # type: ignore[no-untyped-def]
             calls.append("prepare")
             assert payload["config_path"] == str(cfg_path)
             return (
@@ -3447,7 +3397,7 @@ def test_get_close_advice_runs_prepare_then_render(monkeypatch, tmp_path: Path) 
                 {"required_data_root": ".../required_data"},
             )
 
-        def _fake_close(payload):  # type: ignore[no-untyped-def]
+        def _fake_close(ctx, payload):  # type: ignore[no-untyped-def]
             calls.append("close")
             assert payload["config_path"] == str(cfg_path)
             return (
@@ -3482,41 +3432,28 @@ def test_get_close_advice_runs_prepare_then_render(monkeypatch, tmp_path: Path) 
 
 def test_scan_opportunities_returns_summary_fields(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
-    import src.application.agent_tool_handlers as tools
 
     cfg_path = tmp_path / "config.us.json"
     cfg_path.write_text(json.dumps(_minimal_cfg(), ensure_ascii=False, indent=2), encoding="utf-8")
 
-    old_load_config = None
-    old_run_watchlist_pipeline = None
-    old_apply_profiles = None
-    old_process_symbol = None
-    old_build_pipeline_context = None
-    old_build_symbols_summary = None
-    old_build_symbols_digest = None
     import src.application.config_loader as config_loader
     import src.application.config_profiles as config_profiles
     import src.application.pipeline_symbol as pipeline_symbol
     import src.application.pipeline_context as pipeline_context
     import src.application.pipeline_watchlist as pipeline_watchlist
     import src.application.report_builders as report_builders
-    old_load_config = tools.__dict__.get("load_config")
-    try:
-        monkeypatch.setattr(config_loader, "load_config", lambda **kwargs: _minimal_cfg())
-        monkeypatch.setattr(config_profiles, "apply_profiles", lambda cfg, **kwargs: cfg)
-        monkeypatch.setattr(pipeline_watchlist, "run_watchlist_pipeline", lambda **kwargs: [
-            {"symbol": "NVDA", "account": "user1", "side": "sell_put", "net_income": 320, "annualized_net_return": 0.18, "strike": 100, "expiration": "2026-06-19"},
-            {"symbol": "TSLA", "account": "user1", "side": "sell_call", "net_income": 210, "annualized_net_return": 0.11, "strike": 320, "expiration": "2026-06-26"},
-        ])
-        monkeypatch.setattr(pipeline_symbol, "process_symbol", lambda *args, **kwargs: None)
-        monkeypatch.setattr(pipeline_context, "build_pipeline_context", lambda **kwargs: {})
-        monkeypatch.setattr(report_builders, "build_symbols_summary", lambda *args, **kwargs: None)
-        monkeypatch.setattr(report_builders, "build_symbols_digest", lambda *args, **kwargs: None)
+    monkeypatch.setattr(config_loader, "load_config", lambda **kwargs: _minimal_cfg())
+    monkeypatch.setattr(config_profiles, "apply_profiles", lambda cfg, **kwargs: cfg)
+    monkeypatch.setattr(pipeline_watchlist, "run_watchlist_pipeline", lambda **kwargs: [
+        {"symbol": "NVDA", "account": "user1", "side": "sell_put", "net_income": 320, "annualized_net_return": 0.18, "strike": 100, "expiration": "2026-06-19"},
+        {"symbol": "TSLA", "account": "user1", "side": "sell_call", "net_income": 210, "annualized_net_return": 0.11, "strike": 320, "expiration": "2026-06-26"},
+    ])
+    monkeypatch.setattr(pipeline_symbol, "process_symbol", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pipeline_context, "build_pipeline_context", lambda **kwargs: {})
+    monkeypatch.setattr(report_builders, "build_symbols_summary", lambda *args, **kwargs: None)
+    monkeypatch.setattr(report_builders, "build_symbols_digest", lambda *args, **kwargs: None)
 
-        out = run_tool("scan_opportunities", {"config_path": str(cfg_path), "output_dir": str(tmp_path / "output_shared" / "agent_tools")})
-    finally:
-        if old_load_config is not None:
-            tools.__dict__["load_config"] = old_load_config
+    out = run_tool("scan_opportunities", {"config_path": str(cfg_path), "output_dir": str(tmp_path / "output_shared" / "agent_tools")})
 
     assert out["ok"] is True
     assert out["data"]["summary"]["row_count"] == 2

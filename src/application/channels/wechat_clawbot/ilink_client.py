@@ -8,6 +8,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any, Callable
+from uuid import uuid4
 
 
 DEFAULT_ILINK_BASE_URL = "https://ilinkai.weixin.qq.com"
@@ -150,6 +151,7 @@ class WechatClawbotClient:
             "message_type": 2,
             "message_state": 2,
             "context_token": str(context_token or ""),
+            "from_user_id": "",
             "to_user_id": str(to_user_id or ""),
             "item_list": [
                 {
@@ -163,7 +165,11 @@ class WechatClawbotClient:
         return self.http_json_fn(
             "POST",
             f"{self.base_url}/ilink/bot/sendmessage",
-            {"msg": msg},
+            {
+                "client_id": uuid4().hex,
+                "base_info": {"session_id": "", "scene": ""},
+                "msg": msg,
+            },
             headers=self.headers(),
             timeout=self.timeout,
         )

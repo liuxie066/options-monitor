@@ -8,7 +8,7 @@ from typing import Any, Callable
 
 from domain.domain.multi_tick import FEISHU_APP_NOTIFICATION_PROVIDER, normalize_notification_provider
 from src.application.agent_tool_config import repo_base
-from src.application.agent_tool_registry import AGENT_TOOL_DEFINITIONS, AgentToolDefinition
+from src.application.agent_tool_registry import AGENT_TOOL_DEFINITIONS, AgentToolEntry
 from src.application.assistant.audit import default_audit_db_path
 from src.application.channels.status import build_channel_status
 from src.application.environment_status import build_effective_env_with_status
@@ -59,10 +59,11 @@ def _count_evidence_rows(path: Path) -> int:
         return sum(1 for line in fh if line.strip())
 
 
-def _agent_tool_mode(definition: AgentToolDefinition, *, write_enabled: bool) -> str:
-    if definition.name == "version_update":
+def _agent_tool_mode(definition: AgentToolEntry, *, write_enabled: bool) -> str:
+    capabilities = set(definition.capabilities)
+    if definition.requires_confirm and "release_metadata" in capabilities:
         return "write_preview_default"
-    if definition.name == "manage_symbols":
+    if definition.requires_confirm and "config_write" in capabilities:
         return "write" if write_enabled else "read_preview_only"
     if definition.is_pure_read():
         return "read"
