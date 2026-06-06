@@ -323,6 +323,49 @@ def resolve_fifo_close_targets(
     )
 
 
+def summarize_close_candidates(repo: Any, selector: LotCloseSelector) -> dict[str, Any]:
+    semantic_candidates = _semantic_candidates(repo, selector)
+    exact_candidates = _exact_candidates(semantic_candidates, selector)
+    return {
+        "semantic_count": len(semantic_candidates),
+        "exact_contract_count": len(exact_candidates),
+        "exact_open_contracts": sum(int(row.contracts_open or 0) for row in exact_candidates),
+        "requested_contracts": int(selector.contracts_to_close or 0),
+    }
+
+
+def find_unique_open_lot(
+    repo: Any,
+    *,
+    broker: Any = None,
+    account: Any,
+    symbol: Any,
+    option_type: Any,
+    side: Any,
+    expiration_ymd: Any = None,
+) -> LotCloseCandidate | None:
+    broker_norm = normalize_broker(broker) if broker not in (None, "") else ""
+    account_norm = normalize_account(account)
+    symbol_norm = _canonical_selector_symbol(symbol)
+    option_type_norm = normalize_option_type(option_type)
+    side_norm = normalize_side(side)
+    expiration_norm = _normalize_selector_expiration(expiration_ymd) if expiration_ymd not in (None, "") else ""
+    matches = [
+        row for row in list_close_candidates(repo)
+        if (not broker_norm or row.broker == broker_norm)
+        and row.account == account_norm
+        and row.symbol == symbol_norm
+        and row.option_type == option_type_norm
+        and row.side == side_norm
+        and normalize_status(row.status) == "open"
+        and int(row.contracts_open or 0) > 0
+        and (not expiration_norm or row.expiration_ymd == expiration_norm)
+    ]
+    if len(matches) != 1:
+        return None
+    return matches[0]
+
+
 def resolve_explicit_close_target(
     repo: Any,
     *,

@@ -24,9 +24,9 @@
 规则：
 - 缩进使用 2 个空格；tab 会被拒绝。
 - `market` 必须显式传入 `us` 或 `hk`；不会隐式 fallback 到 `us`。
-- `symbols` 保持字符串列表；每个 symbol 的 `dte`、`strike`、`yield_enhancement` 等配置放在 `markets.<market>.overrides.<symbol>`。
+- `symbols` 保持字符串列表；每个 symbol 的 `dte`、`strike`、`combo_yield` 等配置放在 `markets.<market>.overrides.<symbol>`。
 - Covered Call 在 `config.yaml` 里写 `covered_call`；生成的 runtime JSON、CSV 和 trace 仍使用内部 key `sell_call`。
-- `yield_enhancement` 是 symbol 策略意图，不是全局 feature 开关。
+- `combo_yield` 是 symbol 级 Combo Yield 开仓策略配置，不是全局 feature 开关；历史 `yield_enhancement` 只作为旧配置迁移输入。
 - `close_advice` 是建议功能，可用 `features.close_advice: false` 关闭。
 - Feishu / 交易 / 配置写入权限不放在 `config.yaml`，写入闸门属于 `options-monitor.env`，执行时仍需要命令级 `--apply` / `confirm`。
 

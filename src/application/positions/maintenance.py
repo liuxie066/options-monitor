@@ -141,9 +141,10 @@ def format_auto_close_summary(result: dict[str, Any]) -> str:
     candidates = int(result.get("candidates_should_close") or 0)
     applied = int(result.get("applied_closed") or 0)
     review_required = int(result.get("skipped_review_required") or 0)
+    grace_pending = int(result.get("skipped_grace_pending") or 0)
     skipped_already_closed = int(result.get("skipped_already_closed") or 0)
     errors = list(result.get("errors") or [])
-    if candidates <= 0 and applied <= 0 and review_required <= 0 and not errors:
+    if candidates <= 0 and applied <= 0 and review_required <= 0 and grace_pending <= 0 and not errors:
         return ""
 
     lines = [
@@ -157,6 +158,8 @@ def format_auto_close_summary(result: dict[str, Any]) -> str:
     ]
     if review_required > 0:
         lines.append(f"skipped_review_required: {review_required}")
+    if grace_pending > 0:
+        lines.append(f"skipped_grace_pending: {grace_pending}")
     if skipped_already_closed > 0:
         lines.append(f"skipped_already_closed: {skipped_already_closed}")
     lines.append(f"ERRORS: {len(errors)}")
@@ -193,6 +196,16 @@ def format_auto_close_summary(result: dict[str, Any]) -> str:
             lines.append(
                 f"- {item.get('record_id')} | {item.get('position_id')} | "
                 f"skip={item.get('skip_reason')} | exp={item.get('expiration_ymd') or item.get('expiration_ms')}"
+            )
+    if grace_pending:
+        lines.append("")
+        lines.append("Grace pending:")
+        for item in list(result.get("decision_items") or [])[:50]:
+            if not isinstance(item, dict) or item.get("skip_reason") != "grace_period_pending":
+                continue
+            lines.append(
+                f"- {item.get('record_id')} | {item.get('position_id')} | "
+                f"eligible_after={item.get('eligible_after_utc') or item.get('eligible_after_ms')}"
             )
 
     return "\n".join(lines).strip()
@@ -284,6 +297,7 @@ def run_expired_position_maintenance_for_account(
             "candidates_should_close": 0,
             "applied_closed": 0,
             "skipped_review_required": 0,
+            "skipped_grace_pending": 0,
             "skipped_already_closed": 0,
             "errors": [f"missing_data_config: {data_config}"],
             "applied": [],
@@ -362,6 +376,11 @@ def run_expired_position_maintenance_for_account(
             "lifecycle_stock_settlement_evidence_seen",
         }
     ]
+    skipped_grace_pending = [
+        item
+        for item in decisions
+        if isinstance(item, dict) and item.get("skip_reason") == "grace_period_pending"
+    ]
     result: dict[str, Any] = {
         "mode": "dry_run" if dry_run else "applied",
         "account": normalize_account(account) if account else None,
@@ -375,6 +394,7 @@ def run_expired_position_maintenance_for_account(
         "candidates_should_close": len(to_close),
         "applied_closed": len(applied),
         "skipped_review_required": len(skipped_review_required),
+        "skipped_grace_pending": len(skipped_grace_pending),
         "skipped_already_closed": len(skipped_already_closed),
         "errors": errors,
         "applied": applied,

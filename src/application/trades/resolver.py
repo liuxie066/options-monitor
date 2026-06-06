@@ -3,15 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
-from domain.domain.ledger.position_fields import (
-    effective_contracts_open,
-    effective_expiration_ymd,
-    effective_strike,
-    normalize_account,
-    normalize_option_type,
-    normalize_side,
-    normalize_status,
-)
 from domain.domain.strategy_vocab import STRATEGY_COMBO_YIELD
 from domain.domain.symbol_identity import canonical_symbol
 from src.application.strategy_policy import YIELD_ENHANCEMENT_INCOME_UPSIDE_MODE
@@ -21,9 +12,11 @@ from src.application.ledger.api import (
     LotCloseCandidate as CloseCandidate,
     LotCloseMatch as CloseMatch,
     LotCloseResolutionError,
+    find_unique_open_position_lot,
     list_close_lot_candidates,
     record_normalized_trade_event,
     resolve_broker_trade_close_targets,
+    summarize_broker_trade_close_candidates,
 )
 from src.application.trades.normalizer import NormalizedTradeDeal
 from src.application.trades.lifecycle import LifecycleTradeResolution, resolve_lifecycle_trade_deal
@@ -617,179 +610,38 @@ def _with_combo_yield_sell_put_payload(
 
 
 def _stable_combo_yield_group_id(deal: NormalizedTradeDeal) -> str:
-    account = _normalize_account(deal.internal_account)
-    symbol = _canonical_symbol(deal.symbol)
+    account = str(deal.internal_account or "").strip().lower()
+    symbol = canonical_symbol(deal.symbol) or str(deal.symbol or "").strip().upper()
     expiration_ymd = str(deal.expiration_ymd or "").strip()
     return f"combo_yield:{account}:{symbol}:{expiration_ymd}"
 
 
 def _combo_yield_companion_short_put(repo: OptionPositionsRepoLike, deal: NormalizedTradeDeal) -> dict[str, Any] | None:
-    account = _normalize_account(deal.internal_account)
-    symbol = _canonical_symbol(deal.symbol)
-    expiration_ymd = str(deal.expiration_ymd or "").strip()
-    matches: list[dict[str, Any]] = []
-    for row in list_close_lot_candidates(repo):
-        record_id, fields = _record_id_and_fields(row)
-        if not fields:
-            continue
-        if _normalize_account(fields.get("account")) != account:
-            continue
-        if _canonical_symbol(fields.get("symbol")) != symbol:
-            continue
-        if _normalize_option_type(fields.get("option_type")) != "put":
-            continue
-        if _normalize_side(fields.get("side")) != "short":
-            continue
-        if _normalize_status(fields.get("status")) != "open":
-            continue
-        if effective_contracts_open(fields) <= 0:
-            continue
-        if str(effective_expiration_ymd(fields) or "") != expiration_ymd:
-            continue
-        matches.append(
-            {
-                "record_id": record_id,
-                "contracts_open": int(effective_contracts_open(fields)),
-                "strike": effective_strike(fields),
-                "expiration_ymd": expiration_ymd,
-                "strategy": str(fields.get("strategy") or "").strip() or None,
-                "leg_role": str(fields.get("leg_role") or "").strip() or None,
-                "strategy_group_id": str(fields.get("strategy_group_id") or "").strip() or None,
-            }
-        )
-    if len(matches) != 1:
-        return None
-    return matches[0]
+    return find_unique_open_position_lot(
+        repo,
+        broker=deal.broker,
+        account=deal.internal_account,
+        symbol=deal.symbol,
+        option_type="put",
+        side="short",
+        expiration_ymd=deal.expiration_ymd,
+    )
 
 
 def _combo_yield_companion_long_call(repo: OptionPositionsRepoLike, deal: NormalizedTradeDeal) -> dict[str, Any] | None:
-    account = _normalize_account(deal.internal_account)
-    symbol = _canonical_symbol(deal.symbol)
-    expiration_ymd = str(deal.expiration_ymd or "").strip()
-    matches: list[dict[str, Any]] = []
-    for row in list_close_lot_candidates(repo):
-        record_id, fields = _record_id_and_fields(row)
-        if not fields:
-            continue
-        if _normalize_account(fields.get("account")) != account:
-            continue
-        if _canonical_symbol(fields.get("symbol")) != symbol:
-            continue
-        if _normalize_option_type(fields.get("option_type")) != "call":
-            continue
-        if _normalize_side(fields.get("side")) != "long":
-            continue
-        if _normalize_status(fields.get("status")) != "open":
-            continue
-        if effective_contracts_open(fields) <= 0:
-            continue
-        if str(effective_expiration_ymd(fields) or "") != expiration_ymd:
-            continue
-        matches.append(
-            {
-                "record_id": record_id,
-                "contracts_open": int(effective_contracts_open(fields)),
-                "strike": effective_strike(fields),
-                "expiration_ymd": expiration_ymd,
-                "strategy": str(fields.get("strategy") or "").strip() or None,
-                "leg_role": str(fields.get("leg_role") or "").strip() or None,
-                "strategy_group_id": str(fields.get("strategy_group_id") or "").strip() or None,
-            }
-        )
-    if len(matches) != 1:
-        return None
-    return matches[0]
+    return find_unique_open_position_lot(
+        repo,
+        broker=deal.broker,
+        account=deal.internal_account,
+        symbol=deal.symbol,
+        option_type="call",
+        side="long",
+        expiration_ymd=deal.expiration_ymd,
+    )
 
 
 def _close_candidate_summary(repo: OptionPositionsRepoLike, deal: NormalizedTradeDeal) -> dict[str, Any]:
-    account = _normalize_account(deal.internal_account)
-    symbol = _canonical_symbol(deal.symbol)
-    option_type = _normalize_option_type(deal.option_type)
-    target_side = "short" if deal.side == "buy" else "long"
-    expiration_ymd = str(deal.expiration_ymd or "").strip()
-    strike = _safe_float(deal.strike)
-    semantic_count = 0
-    exact_contract_count = 0
-    exact_open_contracts = 0
-    for row in list_close_lot_candidates(repo):
-        _record_id, fields = _record_id_and_fields(row)
-        if not fields:
-            continue
-        if _normalize_account(fields.get("account")) != account:
-            continue
-        if _canonical_symbol(fields.get("symbol")) != symbol:
-            continue
-        if _normalize_option_type(fields.get("option_type")) != option_type:
-            continue
-        if _normalize_side(fields.get("side")) != target_side:
-            continue
-        if _normalize_status(fields.get("status")) != "open":
-            continue
-        open_contracts = effective_contracts_open(fields)
-        if open_contracts <= 0:
-            continue
-        semantic_count += 1
-        if str(effective_expiration_ymd(fields) or "") != expiration_ymd:
-            continue
-        if not _same_optional_float(effective_strike(fields), strike):
-            continue
-        exact_contract_count += 1
-        exact_open_contracts += int(open_contracts)
-    return {
-        "semantic_count": semantic_count,
-        "exact_contract_count": exact_contract_count,
-        "exact_open_contracts": exact_open_contracts,
-        "requested_contracts": int(deal.contracts or 0),
-    }
-
-
-def _record_id_and_fields(row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    record_id = str(row.get("record_id") or row.get("id") or "").strip()
-    fields = row.get("fields")
-    if isinstance(fields, dict):
-        return record_id, dict(fields)
-    return record_id, {}
-
-
-def _normalize_account(value: Any) -> str:
-    try:
-        return normalize_account(value)
-    except Exception:
-        return str(value or "").strip().lower()
-
-
-def _canonical_symbol(value: Any) -> str:
-    return canonical_symbol(value) or str(value or "").strip().upper()
-
-
-def _normalize_option_type(value: Any) -> str:
-    try:
-        return normalize_option_type(value)
-    except Exception:
-        return str(value or "").strip().lower()
-
-
-def _normalize_side(value: Any) -> str:
-    try:
-        return normalize_side(value)
-    except Exception:
-        return str(value or "").strip().lower()
-
-
-def _normalize_status(value: Any) -> str:
-    try:
-        return normalize_status(value)
-    except Exception:
-        return str(value or "").strip().lower()
-
-
-def _same_optional_float(left: Any, right: Any) -> bool:
-    if left is None or right is None:
-        return left is None and right is None
-    try:
-        return abs(float(left) - float(right)) < 1e-9
-    except (TypeError, ValueError):
-        return False
+    return summarize_broker_trade_close_candidates(repo, deal=deal)
 
 
 def _verify_applied_close_projection(*, repo: OptionPositionsRepoLike, operations: list[BrokerTradeOperation]) -> dict[str, Any]:
@@ -863,15 +715,6 @@ def _safe_int(value: Any) -> int:
         return int(value or 0)
     except Exception:
         return 0
-
-
-def _safe_float(value: Any) -> float | None:
-    try:
-        if value in (None, ""):
-            return None
-        return float(value)
-    except Exception:
-        return None
 
 
 def _contracts_open(fields: dict[str, Any]) -> int:

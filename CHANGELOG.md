@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.221 - 2026-06-06
+
+### Changed
+- Moved expired option auto-close maintenance to 09:00 Beijing time and projection verify to 09:30 Beijing time so the default `grace_days=1` cutoff has passed before scheduled maintenance runs.
+
+### Fixed
+- Surfaced expired-but-waiting lots as `grace_period_pending` in auto-close decisions and maintenance summaries so successful runs no longer look like silent noops before the grace cutoff.
+- Centralized close-lot alias matching helpers so Combo Yield companion-leg detection and close-candidate summaries consistently canonicalize HK option aliases.
+
 ## 1.2.220 - 2026-06-06
 
 ### Fixed
