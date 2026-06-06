@@ -7,7 +7,7 @@
 
 如果你只想跑产品，先看根目录 [README.md](../README.md)。
 
-能力边界、风险等级、Assistant 暴露面和验证方式统一维护在
+Ops Copilot 边界、Inbound 暴露面和验证方式统一维护在
 [OM_AGENT_CAPABILITY_MAP.md](OM_AGENT_CAPABILITY_MAP.md)。这里不再复制能力地图。
 
 ---
@@ -17,14 +17,14 @@
 | 入口 | 面向对象 | 典型用途 |
 |---|---|---|
 | `om` | 人工操作 | 手动跑 pipeline、分阶段运行、命令行查询 |
-| `om-agent` | 程序 / Agent | JSON manifest、结构化 tool 调用 |
+| `om-agent` | 程序 / Ops Copilot | JSON manifest、结构化 tool 调用 |
 
 安装版默认提供全局 `om` / `om-agent` wrapper。源码目录内的 `./om` / `./om-agent` 是 fallback。
 
 一句话：
 
 - `om` 是人类 CLI
-- `om-agent` 是程序化工具入口
+- `om-agent` 是 Ops Copilot 的程序化工具入口
 
 ---
 
@@ -79,18 +79,18 @@ om-agent run --tool runtime_status --env-file /etc/options-monitor/options-monit
 |---|---|
 | `healthcheck` | `om doctor` / `om healthcheck` |
 | `version_check` | `om version` |
-| `version_update` | Agent-only local `VERSION` update helper |
+| `version_update` | Ops Copilot-only local `VERSION` update helper |
 | `config_validate` | `om config validate` |
 | runtime config read | `om config get` |
 | `scheduler_status` | `om scheduler` 的只读判定部分 |
 | `scan_opportunities` | `om scan` / `om scan-pipeline` |
-| `candidate_rank_explain` | Agent-only read existing candidate CSV ranking explanations |
+| `candidate_rank_explain` | Ops Copilot-only read existing candidate CSV ranking explanations |
 | `preview_notification` | `om notify preview` |
 | `runtime_status` | `om status` or raw assistant/runtime artifact summary |
 | `runtime_runs` | `om runs` |
 | `runtime_logs` | `om logs` |
-| `openclaw_readiness` | Agent-only OpenClaw readiness summary |
-| `research` | `om research collect` |
+| `openclaw_readiness` | Ops Copilot-only OpenClaw readiness summary |
+| Research / Shadow Replay | `om research collect` / `om research shadow-replay ...` (not an `om-agent` tool) |
 | `get_close_advice` | `om close-advice` |
 | `query_cash_headroom` | `om sell-put-cash` / `src.application.cash_headroom_query::query_sell_put_cash(...)` |
 | `monthly_income_report` | `om option-positions report monthly-income` |
@@ -105,7 +105,7 @@ om-agent run --tool runtime_status --env-file /etc/options-monitor/options-monit
 
 ### 远程消息入口
 
-`om assistant handle` 是飞书、微信、Hermes 等消息入口调用 OM 的受控入口：
+`om assistant handle` 是飞书、微信、Hermes 等消息入口调用 OM 的受控 Inbound 入口：
 
 ```bash
 om assistant handle --text '收益 <account> <YYYY-MM>' --sender ou_xxx --channel feishu --message-id msg_xxx
@@ -121,8 +121,8 @@ om assistant model check --active
 
 它不是 `om-agent` manifest 里的工具，也不是 shell bridge。`inbound feishu`
 只解析 Feishu 事件 payload，然后进入同一条 sender allowlist、message_id
-幂等、SQLite audit 和工具白名单路径。Assistant command facade 默认开启；
-assistant config 可选择启用 LLM routing/planning。当前可见和可执行能力用
+幂等、SQLite audit 和工具白名单路径。Inbound command facade 默认开启；
+当前 `assistant` config 可选择启用 LLM routing/planning。当前可见和可执行能力用
 `om assistant capabilities` 查看；能力边界以 [OM_AGENT_CAPABILITY_MAP.md](OM_AGENT_CAPABILITY_MAP.md)
 为准。完整远程控制契约见 [INBOUND_CONTROL.md](INBOUND_CONTROL.md)。
 
@@ -483,7 +483,7 @@ om research shadow-replay analyze --dataset output_shared/research/shadow_replay
 ## 5.6 `query_cash_headroom`
 
 用途：
-- Agent 查询 Sell Put 现金占用与余量的标准入口
+- Ops Copilot 查询 Sell Put 现金占用与余量的标准入口
 - 包装 `src.application.cash_headroom_query` 的 `query_sell_put_cash(...)`
 - 返回账户现金、Sell Put 担保占用、剩余可用现金
 - 支持按账户筛选，并按可用汇率折算到 CNY
@@ -496,8 +496,8 @@ om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","accoun
 ```
 
 注意：
-- Agent payload 使用 `broker` 表示券商口径；未传时读取 runtime config 的 `portfolio.broker`
-- Agent 工具输入统一使用 `broker`
+- Ops Copilot payload 使用 `broker` 表示券商口径；未传时读取 runtime config 的 `portfolio.broker`
+- Ops Copilot 工具输入统一使用 `broker`
 - 该工具不会发送通知或写 Feishu；它会把查询产物写到本地 agent 输出目录
 
 ---
@@ -606,7 +606,7 @@ om-agent run --tool close_advice --input-json '{"config_key":"us"}'
 
 用途：
 - 一次性执行 close advice 推荐路径
-- 推荐给 Agent 使用；内部会准备输入并运行 `close_advice`
+- 推荐给 Ops Copilot 使用；内部会准备输入并运行 `close_advice`
 
 示例：
 
@@ -614,7 +614,7 @@ om-agent run --tool close_advice --input-json '{"config_key":"us"}'
 om-agent run --tool get_close_advice --input-json '{"config_key":"us"}'
 ```
 
-这是更推荐的 Agent 入口。
+这是更推荐的 Ops Copilot 入口。
 
 ---
 
@@ -622,7 +622,7 @@ om-agent run --tool get_close_advice --input-json '{"config_key":"us"}'
 
 用途：
 - 只读已有 `close_advice.csv`，按 account/symbol/option type/side/strike/expiration 过滤平仓建议行
-- 给 Assistant 的 `position_exit_analysis` 使用，例如“分析 long call 是不是应该平仓”
+- 给 Inbound 的 `position_exit_analysis` 使用，例如“分析 long call 是不是应该平仓”
 - 不刷新行情、不连接 OpenD、不重新生成 close advice、不写报告
 
 示例：
@@ -719,40 +719,31 @@ om-agent run --tool openclaw_readiness --input-json '{"profile_path":"openclaw.p
 
 ---
 
-## 5.17 `research`
+## 5.17 Research / Shadow Replay
 
 用途：
 - 收集线上运行证据，生成给 MacBook Codex 阅读的 redacted bundle / handoff
 - 诊断 runtime 质量、账本质量、多账户策略影响和策略证据完整性
 - 内嵌与 `om runs` / `om logs` 同源的 run 列表和 audit tail 摘要
 - 可选嵌入 `healthcheck` snapshot，但不取代 `healthcheck` 的 readiness 职责
+- Shadow Replay 基于已有候选、reject、trace、mark、outcome 和归档 run 证据做离线复盘
 - 默认不写文件、不调用在线 AI、不发送通知
+- 这是独立离线侧线，不是 `om-agent` manifest tool
 
 示例：
 
 ```bash
-om-agent run --tool research --input-json '{"config_key":"us","scope":"full","output":"both","write_outputs":false}'
 om research collect --config-key us --scope full --output both --no-write-outputs
 om research collect --config-key us --scope candidate --run-id 20260515T182459Z-474761 --output json --no-write-outputs --shadow-replay-min-sample 30
+om research shadow-replay status --min-sample 30
+om research shadow-replay analyze --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --min-sample 30
 ```
 
 带线上调度证据：
 
 ```bash
-om-agent run --tool research --input-json '{
-  "config_key": "us",
-  "scope": "full",
-  "output": "both",
-  "write_outputs": false,
-  "scheduler_evidence": {
-    "provider": "cron",
-    "job_name": "us-tick",
-    "last_run_id": "20260518T095446Z-2e7d54",
-    "last_triggered_at": "2026-05-18T09:54:46Z",
-    "last_status": "success",
-    "last_exit_code": 0
-  }
-}'
+om research collect --config-key us --scope full --output both --no-write-outputs \
+  --scheduler-evidence-json '{"provider":"cron","job_name":"us-tick","last_run_id":"20260518T095446Z-2e7d54","last_triggered_at":"2026-05-18T09:54:46Z","last_status":"success","last_exit_code":0}'
 ```
 
 Scope：
@@ -761,16 +752,21 @@ Scope：
 - `quality`：runtime freshness、最新 run、调度证据和可选 healthcheck
 - `full`：默认全量证据
 
-写报告需要三层条件：
-- `write_outputs=true`
-- `confirm=true`
-- `OM_AGENT_ENABLE_WRITE_TOOLS=true`
+写 Research 报告需要：
+- `--write-outputs`
+- `--confirm`
+
+Shadow Replay 的 dataset build、mark、settle、run-data-plan 和 archive pull /
+build-datasets 使用各自命令的 `--write`。这些写入只限本地 research/replay
+artifact，不能修改 runtime config、通知、Feishu、ledger/trade state 或
+broker-facing data。
 
 默认写入位置：
 
 ```text
 output_shared/research/
 output_shared/state/current/research.current.json
+output_shared/research/shadow_replay/
 ```
 
 注意：
@@ -835,7 +831,7 @@ runtime:
 
 ## 7. 人工 CLI：版本检查
 
-`om version` 仍然保留为人工 CLI 能力。Agent 使用 `version_check`，二者读取同一个本地 `VERSION` 和远端 `v*` tags。
+`om version` 仍然保留为人工 CLI 能力。Ops Copilot 使用 `version_check`，二者读取同一个本地 `VERSION` 和远端 `v*` tags。
 
 示例：
 
@@ -853,13 +849,13 @@ om version
 ### 数据表字段
 - `market`
 
-Agent 工具输入统一使用 `broker`。数据表里的 `market` 字段不作为工具 payload 字段。
+Ops Copilot 工具输入统一使用 `broker`。数据表里的 `market` 字段不作为工具 payload 字段。
 
 ---
 
 ## 9. 相关文档
 
-- Agent 合同：[`AGENT_INTEGRATION.md`](AGENT_INTEGRATION.md)
+- Ops Copilot 合同：[`AGENT_INTEGRATION.md`](AGENT_INTEGRATION.md)
 - 快速开始：[`GETTING_STARTED.md`](GETTING_STARTED.md)
-- Agent 快速开始：[`AGENT_GETTING_STARTED.md`](AGENT_GETTING_STARTED.md)
+- Ops Copilot 快速开始：[`AGENT_GETTING_STARTED.md`](AGENT_GETTING_STARTED.md)
 - 配置说明：[`../CONFIGURATION_GUIDE.md`](../CONFIGURATION_GUIDE.md)

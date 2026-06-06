@@ -475,7 +475,7 @@ def capability_catalog_text(payload: dict[str, Any] | None = None) -> str:
     non_executable = [item for item in capabilities if not item.get("llm_recognizable")]
 
     lines = [
-        "Assistant capabilities",
+        "Inbound capabilities",
         "",
         "LLM executable read-only capabilities:",
     ]

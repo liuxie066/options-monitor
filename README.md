@@ -40,7 +40,7 @@
 | 入口 | 面向对象 | 适合做什么 |
 |---|---|---|
 | `om` | 人工 CLI | 配置构建、手动运行、持仓维护、只读查询 |
-| `om-agent` | Agent / 程序 | JSON manifest、结构化工具调用、只读诊断 |
+| `om-agent` | Ops Copilot / 程序 | JSON manifest、结构化工具调用、只读诊断 |
 
 源码目录内也可以直接使用 fallback：`./om` / `./om-agent`。
 
@@ -48,7 +48,7 @@
 
 1. 首次启用先完成安装，然后运行 `om setup check`。
 2. 日常人工操作优先 `om`。
-3. Agent 接入、排障和结构化读取优先 `om-agent`。
+3. Ops Copilot 接入、排障和结构化读取优先 `om-agent`。
 
 ## 它做什么，不做什么
 
@@ -376,7 +376,7 @@ om run tick --config config.us.json --accounts lx sy
 ./om sell-put-cash --market 富途 --account sy
 ```
 
-Agent：
+Ops Copilot：
 
 ```bash
 ./om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","account":"lx"}'
@@ -390,7 +390,7 @@ Agent：
 ./om close-advice --config-key us
 ```
 
-推荐的 Agent 一站式入口：
+推荐的 Ops Copilot 一站式入口：
 
 ```bash
 ./om-agent run --tool get_close_advice --input-json '{"config_key":"us"}'
@@ -423,7 +423,7 @@ Agent：
 ./om symbols --config config.us.json rm TCOM --apply
 ```
 
-Agent 只读列出：
+Ops Copilot 只读列出：
 
 ```bash
 ./om-agent run --tool manage_symbols --input-json '{"config_key":"us","action":"list"}'
@@ -630,16 +630,16 @@ Feishu 常见只用于这些场景：
 - 单账户和多账户走同一条 tick 链路
 - 多账户问题先按账户维度排查，不要默认认为是全局 gate
 
-## Agent 使用指南
+## Ops Copilot 使用指南
 
 这个仓库把文档拆成两层：
 
-- [AGENTS.md](AGENTS.md)：给 agent 首先加载的短说明书，记录安全红线、入口层级和模块归属
-- [docs/AGENT_GETTING_STARTED.md](docs/AGENT_GETTING_STARTED.md)：Agent 接入的最短路径
-- [docs/AGENT_WIKI.md](docs/AGENT_WIKI.md)：给 agent 深入执行任务时看的手册，包含工具选择、Research、排障 playbook 和验证矩阵
-- [docs/OM_AGENT_CAPABILITY_MAP.md](docs/OM_AGENT_CAPABILITY_MAP.md)：Agent 能力边界、风险等级、暴露面和验证方式
+- [AGENTS.md](AGENTS.md)：给本地 agent 首先加载的短说明书，记录安全红线、入口层级和模块归属
+- [docs/AGENT_GETTING_STARTED.md](docs/AGENT_GETTING_STARTED.md)：Ops Copilot 接入的最短路径
+- [docs/AGENT_WIKI.md](docs/AGENT_WIKI.md)：给 Ops Copilot 深入执行任务时看的手册，包含工具选择、Research、排障 playbook 和验证矩阵
+- [docs/OM_AGENT_CAPABILITY_MAP.md](docs/OM_AGENT_CAPABILITY_MAP.md)：Ops Copilot 能力边界、Inbound 暴露面和验证方式
 
-安装 Agent 插件：
+安装 Ops Copilot 插件：
 
 ```bash
 bash scripts/install_agent_plugin.sh
@@ -673,16 +673,16 @@ bash scripts/install_agent_plugin.sh
 ./om assistant model current
 ```
 
-只读查询会直接执行；写操作必须先返回预览并等待确认。链路带 sender allowlist、message_id 幂等和 SQLite audit。Assistant command facade 默认开启，例如 `/status`、`/positions sy`、`/income 2026-05`、`分析 long call 是不是应该平仓`、`/model`、`/model use deepseek-default`、`/record-open ...`、`/record-close ...`、`设置 09898 covered call min strike 85`。能力边界和 LLM 可见/可执行范围以 [docs/OM_AGENT_CAPABILITY_MAP.md](docs/OM_AGENT_CAPABILITY_MAP.md) 为准；接飞书、微信或 Hermes 前先看 [docs/INBOUND_CONTROL.md](docs/INBOUND_CONTROL.md)。
+只读查询会直接执行；写操作必须先返回预览并等待确认。链路带 sender allowlist、message_id 幂等和 SQLite audit。Inbound command facade 默认开启，当前 CLI namespace 仍是 `./om assistant ...`，例如 `/status`、`/positions sy`、`/income 2026-05`、`分析 long call 是不是应该平仓`、`/model`、`/model use deepseek-default`、`/record-open ...`、`/record-close ...`、`设置 09898 covered call min strike 85`。Ops Copilot 边界和 Inbound LLM 可见/可执行范围以 [docs/OM_AGENT_CAPABILITY_MAP.md](docs/OM_AGENT_CAPABILITY_MAP.md) 为准；接飞书、微信或 Hermes 前先看 [docs/INBOUND_CONTROL.md](docs/INBOUND_CONTROL.md)。
 
-Research 证据交接：
+Research / Shadow Replay 离线侧线：
 
 ```bash
 ./om research collect --config-key us --scope full --output both --no-write-outputs
-./om-agent run --tool research --input-json '{"config_key":"us","scope":"full","output":"both","write_outputs":false}'
+./om research shadow-replay status --min-sample 30
 ```
 
-`research` 是给 MacBook 上的 Codex 分析线上质量和策略问题的证据打包入口。线上侧只收集 redacted bundle / handoff，不调用在线 AI；run 列表和日志摘要与 `./om runs` / `./om logs` 同源，调度系统状态需要通过 `scheduler_evidence` 或 CLI 的 `--scheduler-evidence-json` 显式传入。
+`research` 和 Shadow Replay 是独立的离线证据/复盘模块，不属于 Ops Copilot core，也不暴露为 `./om-agent` tool。线上侧只收集 redacted bundle / handoff，不调用在线 AI；Shadow Replay 只读已有候选、reject、trace、mark、outcome 和归档 run 证据，显式 `--write` 时也只写本地 replay artifact。run 列表和日志摘要与 `./om runs` / `./om logs` 同源，调度系统状态需要通过 `scheduler_evidence` 或 CLI 的 `--scheduler-evidence-json` 显式传入。
 
 写工具门禁：
 
@@ -768,9 +768,9 @@ README 只记录公开入口和边界。生产 cron id、长驻服务启停和�
 - [RUNBOOK.md](RUNBOOK.md)：运维巡检、定时任务、应急操作
 - [docs/INSTALL.md](docs/INSTALL.md)：安装方式、release 目录布局和 installer 安全契约
 - [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md)：普通用户首次运行路径
-- [docs/AGENT_GETTING_STARTED.md](docs/AGENT_GETTING_STARTED.md)：Agent 快速开始
-- [docs/AGENT_WIKI.md](docs/AGENT_WIKI.md)：Agent 任务手册
-- [docs/AGENT_INTEGRATION.md](docs/AGENT_INTEGRATION.md)：Agent JSON 合同
+- [docs/AGENT_GETTING_STARTED.md](docs/AGENT_GETTING_STARTED.md)：Ops Copilot 快速开始
+- [docs/AGENT_WIKI.md](docs/AGENT_WIKI.md)：Ops Copilot 任务手册
+- [docs/AGENT_INTEGRATION.md](docs/AGENT_INTEGRATION.md)：Ops Copilot JSON 合同
 - [docs/INBOUND_CONTROL.md](docs/INBOUND_CONTROL.md)：飞书、微信、Hermes 等远程消息入口的安全控制层
 - [docs/TOOL_REFERENCE.md](docs/TOOL_REFERENCE.md)：`om-agent` 工具说明
 - [docs/candidate_strategy.md](docs/candidate_strategy.md)：候选生成和策略边界

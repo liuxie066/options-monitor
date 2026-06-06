@@ -13,6 +13,7 @@ from src.application.assistant.renderer import render_pending_operations
 
 OPERATION_TIMELINE_SCHEMA_VERSION = "operation-timeline-v1"
 _TIMELINE_STATUSES = ("previewed", "confirmed", "running", "applied", "cancelled", "expired", "failed")
+_OPERATION_AUDIT_TOOLS = frozenset({"inbound.manual_trade", "inbound.symbols", "inbound.upgrade", "inbound.model"})
 
 
 def collect_pending_operations(
@@ -97,6 +98,7 @@ def collect_operation_timeline(
     try:
         with _connect_existing_sqlite(path) as conn:
             tables = _sqlite_tables(conn)
+            operation_store_missing = "inbound_pending_operations" not in tables
             if "inbound_pending_operations" not in tables:
                 warnings.append("operations_table_missing")
                 operations: list[dict[str, Any]] = []
@@ -126,6 +128,24 @@ def collect_operation_timeline(
         raise inbound_sqlite_error(path, exc) from exc
 
     timelines = [_build_operation_timeline(operation, audit_rows) for operation in operations]
+    existing_operation_ids = {
+        str(item.get("operation_id") or "").strip()
+        for item in operations
+        if str(item.get("operation_id") or "").strip()
+    }
+    remaining_limit = max(0, limit_value - len(timelines))
+    if remaining_limit:
+        timelines.extend(
+            _build_audit_only_timelines(
+                audit_rows,
+                existing_operation_ids=existing_operation_ids,
+                operation_id=operation_id,
+                operation_types=set(operation_type_list),
+                statuses=set(status_list),
+                operation_store_missing=operation_store_missing,
+                limit=remaining_limit,
+            )
+        )
     for item in timelines:
         for warning in item.get("warnings") or []:
             text = str(warning or "").strip()
@@ -184,9 +204,9 @@ def format_operation_timeline(timelines: list[dict[str, Any]], *, filters: dict[
     if warnings:
         lines.append("warnings：" + ",".join(sorted(set(warnings))))
     for item in timelines:
-        identity = item.get("identity") if isinstance(item.get("identity"), dict) else {}
-        operation = item.get("operation") if isinstance(item.get("operation"), dict) else {}
-        outcome = item.get("outcome") if isinstance(item.get("outcome"), dict) else {}
+        identity = _dict(item.get("identity"))
+        operation = _dict(item.get("operation"))
+        outcome = _dict(item.get("outcome"))
         lines.append(
             "- "
             f"{operation.get('created_at') or '-'} "
@@ -209,16 +229,16 @@ def format_operation_timeline(timelines: list[dict[str, Any]], *, filters: dict[
 def format_pending_operations(operations: list[dict[str, Any]], *, filters: dict[str, Any]) -> str:
     scope = _scope_text(filters)
     if not operations:
-        return f"Assistant pending：0 条\nscope：{scope}\n没有待确认操作。"
+        return f"Inbound pending：0 条\nscope：{scope}\n没有待确认操作。"
     rendered = render_pending_operations(operations)
-    return f"Assistant pending：{len(operations)} 条\nscope：{scope}\n{rendered}"
+    return f"Inbound pending：{len(operations)} 条\nscope：{scope}\n{rendered}"
 
 
 def format_recent_audit(rows: list[dict[str, Any]], *, filters: dict[str, Any]) -> str:
     scope = _scope_text(filters)
     if not rows:
-        return f"Assistant audit recent：0 条\nscope：{scope}\n没有匹配的 assistant 审计记录。"
-    lines = [f"Assistant audit recent：{len(rows)} 条", f"scope：{scope}"]
+        return f"Inbound audit recent：0 条\nscope：{scope}\n没有匹配的 inbound 审计记录。"
+    lines = [f"Inbound audit recent：{len(rows)} 条", f"scope：{scope}"]
     for row in rows:
         ok = "ok" if row.get("result_ok") is True else "failed"
         head = (
@@ -247,8 +267,8 @@ def format_recent_audit(rows: list[dict[str, Any]], *, filters: dict[str, Any]) 
 
 def _audit_row_summary(row: dict[str, Any]) -> dict[str, Any]:
     response = _loads(row.get("response_json"))
-    data = response.get("data") if isinstance(response.get("data"), dict) else {}
-    error = response.get("error") if isinstance(response.get("error"), dict) else {}
+    data = _dict(response.get("data"))
+    error = _dict(response.get("error"))
     return {
         "command_id": row.get("command_id"),
         "channel": row.get("channel"),
@@ -396,7 +416,7 @@ def _build_operation_timeline(operation: dict[str, Any], audit_rows: list[dict[s
         for row in related_audit_rows
         if str(row.get("command_id") or "") != command_id and _response_operation_id(row) == operation_id
     ]
-    result = operation.get("result") if isinstance(operation.get("result"), dict) else {}
+    result = _dict(operation.get("result"))
     ledger = _ledger_identity_from_result(result)
     receipt = _receipt_from_audit_rows(related_audit_rows)
     inbound_message_id = _first_text(
@@ -458,6 +478,113 @@ def _build_operation_timeline(operation: dict[str, Any], audit_rows: list[dict[s
     }
 
 
+def _build_audit_only_timelines(
+    audit_rows: list[dict[str, Any]],
+    *,
+    existing_operation_ids: set[str],
+    operation_id: str | None,
+    operation_types: set[str],
+    statuses: set[str],
+    operation_store_missing: bool,
+    limit: int,
+) -> list[dict[str, Any]]:
+    normalized_operation_id = str(operation_id or "").strip()
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in audit_rows:
+        key = _audit_operation_key(row)
+        if not key or key in existing_operation_ids:
+            continue
+        if normalized_operation_id and key != normalized_operation_id:
+            continue
+        row_operation_type = _audit_operation_type(row)
+        if operation_types and row_operation_type not in operation_types:
+            continue
+        row_status = _audit_operation_status(row)
+        if statuses and row_status not in statuses:
+            continue
+        if key not in groups and len(groups) >= limit:
+            continue
+        groups.setdefault(key, []).append(row)
+    out: list[dict[str, Any]] = []
+    for key, rows in groups.items():
+        if len(out) >= limit:
+            break
+        out.append(_build_audit_only_timeline(key, rows, operation_store_missing=operation_store_missing))
+    return out
+
+
+def _build_audit_only_timeline(operation_id: str, rows: list[dict[str, Any]], *, operation_store_missing: bool) -> dict[str, Any]:
+    preview_audit = next((row for row in rows if str(row.get("command_id") or "") == operation_id), None)
+    apply_audits = [row for row in rows if str(row.get("command_id") or "") != operation_id and _response_operation_id(row) == operation_id]
+    operation_type = _first_text(*(_audit_operation_type(row) for row in rows))
+    status = _first_text(*(_audit_operation_status(row) for row in rows)) or "audit_only"
+    ledger = _ledger_identity_from_audit_rows(rows)
+    receipt = _receipt_from_audit_rows(rows)
+    inbound_message_id = _first_text(
+        preview_audit.get("message_id") if isinstance(preview_audit, dict) else None,
+        *(row.get("message_id") for row in rows),
+    )
+    outbound_message_id = _first_text(receipt.get("message_id"), receipt.get("outbound_message_id"))
+    warnings = ["operation_missing"]
+    if operation_store_missing:
+        warnings.append("operation_store_missing")
+    warnings.extend(
+        _timeline_warnings(
+            operation={"status": status, "operation_type": operation_type},
+            preview_audit=preview_audit,
+            apply_audits=apply_audits,
+            ledger=ledger,
+            receipt=receipt,
+            inbound_message_id=inbound_message_id,
+        )
+    )
+    warnings = list(dict.fromkeys(warnings))
+    return {
+        "schema_version": OPERATION_TIMELINE_SCHEMA_VERSION,
+        "identity": {
+            "command_id": operation_id,
+            "operation_id": operation_id,
+            "run_id": None,
+            "ledger_event_id": ledger.get("ledger_event_id"),
+            "record_id": ledger.get("record_id"),
+            "inbound_message_id": inbound_message_id,
+            "outbound_message_id": outbound_message_id,
+            "channel": _first_text(*(row.get("channel") for row in rows)),
+            "sender_id": _first_text(*(row.get("sender_id") for row in rows)),
+            "conversation_id": _first_text(*(row.get("conversation_id") for row in rows)),
+        },
+        "operation": {
+            "operation_id": operation_id,
+            "command_id": operation_id,
+            "operation_type": operation_type,
+            "status": status,
+            "summary": operation_type or "audit_only",
+            "payload_hash": None,
+            "created_at": _first_text(*(row.get("created_at") for row in rows)),
+            "expires_at": None,
+            "confirmed_at": None,
+            "applied_at": _first_text(*(row.get("finished_at") for row in rows if _audit_operation_status(row) == "applied")),
+            "cancelled_at": None,
+            "source": "audit_only",
+        },
+        "audit": {
+            "preview_command_id": operation_id,
+            "preview_message_id": preview_audit.get("message_id") if isinstance(preview_audit, dict) else None,
+            "related_count": len(rows),
+            "apply_count": len(apply_audits),
+            "rows": [_audit_row_summary(row) for row in rows],
+        },
+        "ledger": ledger,
+        "receipt": receipt,
+        "outcome": {
+            "status": status,
+            "ok": False,
+            "warnings": warnings,
+        },
+        "warnings": warnings,
+    }
+
+
 def _audit_row_matches_operation(row: dict[str, Any], *, operation_id: str, command_id: str) -> bool:
     row_command_id = str(row.get("command_id") or "").strip()
     if row_command_id and row_command_id == command_id:
@@ -467,7 +594,7 @@ def _audit_row_matches_operation(row: dict[str, Any], *, operation_id: str, comm
 
 def _response_operation_id(row: dict[str, Any]) -> str | None:
     response = _loads(row.get("response_json"))
-    data = response.get("data") if isinstance(response.get("data"), dict) else {}
+    data = _dict(response.get("data"))
     return _first_text(
         data.get("operation_id"),
         data.get("resolved_operation_id"),
@@ -475,8 +602,53 @@ def _response_operation_id(row: dict[str, Any]) -> str | None:
     )
 
 
+def _audit_operation_key(row: dict[str, Any]) -> str | None:
+    operation_id = _response_operation_id(row)
+    if operation_id:
+        return operation_id
+    reasoning = _loads(row.get("reasoning_json"))
+    safety_class = str(reasoning.get("safety_class") or "").strip()
+    requires_confirmation = bool(reasoning.get("requires_confirmation"))
+    tool_name = str(row.get("tool_name") or "").strip()
+    if requires_confirmation or safety_class.startswith("write_"):
+        return _first_text(row.get("command_id"))
+    if tool_name in _OPERATION_AUDIT_TOOLS and _audit_operation_type(row):
+        return _first_text(row.get("command_id"))
+    return None
+
+
+def _audit_operation_type(row: dict[str, Any]) -> str | None:
+    response = _loads(row.get("response_json"))
+    data = _dict(response.get("data"))
+    operation_type = _first_text(data.get("operation_type"))
+    if operation_type:
+        return operation_type
+    intent_name = str(row.get("intent_name") or "").strip()
+    if intent_name.startswith("manual_trade_"):
+        if intent_name in {"manual_trade_open", "manual_trade_confirm", "manual_trade_update"}:
+            return "manual_open"
+        if intent_name in {"manual_trade_close", "manual_trade_cancel"}:
+            return "manual_close"
+    return None
+
+
+def _audit_operation_status(row: dict[str, Any]) -> str | None:
+    response = _loads(row.get("response_json"))
+    data = _dict(response.get("data"))
+    status = _first_text(data.get("status"))
+    if status:
+        return status
+    reasoning = _loads(row.get("reasoning_json"))
+    safety_class = str(reasoning.get("safety_class") or "").strip()
+    if safety_class == "write_preview":
+        return "previewed"
+    if safety_class == "write_apply":
+        return "applied"
+    return None
+
+
 def _ledger_identity_from_result(result: dict[str, Any]) -> dict[str, Any]:
-    ledger_result = result.get("result") if isinstance(result.get("result"), dict) else {}
+    ledger_result = _dict(result.get("result"))
     out = {
         "ledger_event_id": _first_text(ledger_result.get("event_id"), result.get("event_id")),
         "record_id": _first_text(ledger_result.get("record_id"), result.get("record_id"), result.get("snapshot_lot_id")),
@@ -488,16 +660,32 @@ def _ledger_identity_from_result(result: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _ledger_identity_from_audit_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    for row in rows:
+        response = _loads(row.get("response_json"))
+        data = _dict(response.get("data"))
+        result = _dict(data.get("result"))
+        ledger = _ledger_identity_from_result(result)
+        if ledger.get("present"):
+            return ledger
+    return _ledger_identity_from_result({})
+
+
 def _receipt_from_audit_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     for row in rows:
         response = _loads(row.get("response_json"))
-        data = response.get("data") if isinstance(response.get("data"), dict) else {}
-        receipt = data.get("receipt") if isinstance(data.get("receipt"), dict) else None
-        if receipt is not None:
+        data = _dict(response.get("data"))
+        receipt_raw = data.get("receipt")
+        if isinstance(receipt_raw, dict):
+            receipt = dict(receipt_raw)
             return {"status": "observed", **receipt}
         for key in ("delivery", "reply", "response_delivery"):
-            value = data.get(key)
-            if isinstance(value, dict) and (value.get("message_id") or value.get("delivery_confirmed") is not None):
+            value_raw = data.get(key)
+            if isinstance(value_raw, dict):
+                value = dict(value_raw)
+            else:
+                value = {}
+            if value and (value.get("message_id") or value.get("delivery_confirmed") is not None):
                 return {"status": "observed", **value}
     return {"status": "not_observed", "reason": "receipt_not_in_audit_or_operation_store"}
 
@@ -532,8 +720,8 @@ def _timeline_warnings(
 
 
 def _operation_summary(operation: dict[str, Any]) -> str:
-    payload = operation.get("payload") if isinstance(operation.get("payload"), dict) else {}
-    args = payload.get("arguments") if isinstance(payload.get("arguments"), dict) else {}
+    payload = _dict(operation.get("payload"))
+    args = _dict(payload.get("arguments"))
     operation_type = str(operation.get("operation_type") or "").strip()
     if operation_type == "manual_open":
         return " ".join(
@@ -606,7 +794,11 @@ def _loads(value: Any) -> dict[str, Any]:
         decoded = json.loads(str(value or "{}"))
     except Exception:
         return {}
-    return decoded if isinstance(decoded, dict) else {}
+    return _dict(decoded)
+
+
+def _dict(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
 
 
 def _nested(payload: Any, *keys: str) -> Any:

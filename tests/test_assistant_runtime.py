@@ -278,7 +278,7 @@ def test_assistant_capability_catalog_has_safe_llm_invariants() -> None:
     assert payload["summary"]["llm_executable_count"] == sum(
         1 for item in capabilities if item["llm_executable"]
     )
-    assert payload["capability_text"].startswith("Assistant capabilities")
+    assert payload["capability_text"].startswith("Inbound capabilities")
     assert "usage=" in payload["capability_text"]
     assert "examples=" not in payload["capability_text"]
     assert confirm_targets["record"] == "manual_trade_confirm"

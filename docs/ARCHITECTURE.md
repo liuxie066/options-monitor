@@ -8,7 +8,7 @@ domain rules, external adapters, and local state repositories.
 
 | Layer | Path | Owns |
 |---|---|---|
-| Interfaces | `src/interfaces/` | Human CLI and Agent CLI request/response adaptation |
+| Interfaces | `src/interfaces/` | Human CLI and Ops Copilot CLI request/response adaptation |
 | Application | `src/application/` | Use-case orchestration, config assembly, pipeline execution, notification flow |
 | Domain | `domain/domain/` | Deterministic strategy, scheduler, notification, position, and schema decisions |
 | Infrastructure | `src/infrastructure/` | OpenD/Futu, Feishu, OpenClaw, exchange-rate and subprocess adapters |
@@ -27,7 +27,7 @@ Rules:
 
 `./om` is the human CLI. It forwards to `src.interfaces.cli.main`.
 
-`./om-agent` is the structured Agent CLI. It forwards to
+`./om-agent` is the structured Ops Copilot CLI. It forwards to
 `src.interfaces.agent.cli`, where tool execution is routed through:
 
 ```text
@@ -37,10 +37,35 @@ src.interfaces.agent.cli
 -> src.application.agent_tool_handlers
 ```
 
-## Assistant And Inbound Flow
+## Research And Shadow Replay
 
-Remote chat control intentionally separates channel transport from Assistant
-control:
+Research and Shadow Replay are an independent offline evidence/replay module,
+not part of Ops Copilot core and not a remote chat surface.
+
+```text
+./om research ...
+-> src.interfaces.cli.research
+-> src.application.research
+-> src.application.shadow_replay
+```
+
+`src.application.research` owns redacted evidence collection, deterministic
+checks, handoff rendering, remote archive mirroring, and local research bundle
+writes. `src.application.shadow_replay` owns offline dataset construction,
+mark/outcome lifecycle, status, analyze, and parameter backtest/report logic.
+
+This side lane may read runtime artifacts, candidate/reject/trace evidence,
+required-data snapshots, and archived run outputs. It must not mutate runtime
+config, notification behavior, Feishu/ledger/trade state, broker-facing data,
+or live tick scheduling. Writes are limited to local research/replay artifacts
+behind explicit `./om research ... --write` or `--write-outputs --confirm`
+flags.
+
+## Inbound Flow
+
+Remote chat control intentionally separates channel transport from Inbound
+control. The current CLI namespace remains `./om assistant ...`, and the
+current implementation path remains `src/application/assistant/...`:
 
 ```text
 Feishu / future channels
@@ -49,11 +74,11 @@ Feishu / future channels
 -> src.application.assistant.runtime
 -> src.application.assistant.router
 -> src.application.tool_execution
--> canonical Assistant renderer
+-> canonical Inbound renderer
 ```
 
 `src.application.channels` owns channel capability registration and dispatch, so
-inbound assistant control and outbound notifications are capabilities of the
+Inbound control and outbound notifications are capabilities of the
 same channel model. `src.application.inbound` should stay thin: extract channel
 payloads, enforce channel-specific receive/reply mechanics, and build the
 transport request.
@@ -63,7 +88,7 @@ preview/confirm operations, and user-facing rendering are owned by
 `src.application.assistant`.
 
 LLM providers are optional. They may translate a message into a structured
-read-only Assistant intent, or the explicitly allowed preview-only `symbol_edit`
+read-only Inbound intent, or the explicitly allowed preview-only `symbol_edit`
 intent for monitored-symbol settings. Deterministic OM tools own facts, and
 write actions remain behind preview/confirm gates.
 
@@ -73,14 +98,14 @@ Model selection is a control-plane concern. `config.yaml` may define multiple
 `config.assistant.json`. Runtime, router, perception, reasoning, action, and
 tool execution must not depend on model profiles or choose models per message.
 
-Assistant uses one internal contract ladder. Slash commands enter through the
+Inbound uses one internal contract ladder. Slash commands enter through the
 command parser and never call LLM. In `llm_router` and `agent_loop` modes,
 non-slash natural language enters through the LLM translator first; the
 deterministic parser is a fallback/shadow parser when the LLM is unavailable,
 low-confidence, or provider-failed. In `deterministic` mode, non-slash natural
 language uses the deterministic parser directly.
 When LLM-first and the deterministic shadow parser agree on the same read-only
-intent, Assistant may use the deterministic shadow to fill or correct objective
+intent, Inbound may use the deterministic shadow to fill or correct objective
 slots such as account, month, symbol, status, and limit. The selected source
 remains LLM, and the reconciliation is recorded in perception evidence.
 For preview-write LLM recognition, `symbol_edit` is intentionally narrow: LLM
@@ -88,7 +113,7 @@ may identify covered-call or sell-put monitored-symbol setting changes, but the
 result can only enter the existing `inbound.symbols` preview/pending path.
 Confirm, cancel, apply, manual trade, upgrade, and model mutations remain
 deterministic-only. If the deterministic shadow parser accepts a different
-intent for the same text, Assistant stops and asks for clarification instead of
+intent for the same text, Inbound stops and asks for clarification instead of
 creating a preview.
 
 ```text
@@ -201,7 +226,7 @@ Strategy terminology is centralized in `domain.domain.strategy_vocab`.
 Application and interface code should use it to translate between stable
 internal ids such as `sell_call` and user-facing names such as `Covered Call`.
 Do not scatter display names, aliases, or section labels through notification,
-report, or Agent manifest code.
+report, or Ops Copilot manifest code.
 
 ## Option Positions Flow
 
@@ -297,6 +322,6 @@ When adding code:
 - Put pure business decisions in `domain/domain`.
 - Put use-case orchestration in `src/application`.
 - Put external system adapters in `src/infrastructure`.
-- Put CLI and Agent CLI argument/response adaptation in `src/interfaces`.
+- Put CLI and Ops Copilot CLI argument/response adaptation in `src/interfaces`.
 - Prefer a small facade-preserving move over changing public command behavior.
 - Add or update boundary tests when moving ownership between layers.
