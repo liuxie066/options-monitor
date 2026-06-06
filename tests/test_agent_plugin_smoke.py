@@ -285,6 +285,7 @@ def test_healthcheck_reports_feishu_inbound_audit_ready(monkeypatch, tmp_path: P
 
 
 def test_healthcheck_uses_explicit_env_file_for_feishu_inbound(monkeypatch, tmp_path: Path) -> None:
+    from src.application.assistant.audit import InboundAuditStore
     from src.application.tool_execution import execute_tool as run_tool
     import src.application.agent_tool_handlers as tools
 
@@ -293,9 +294,27 @@ def test_healthcheck_uses_explicit_env_file_for_feishu_inbound(monkeypatch, tmp_
         "OM_FEISHU_BOT_APP_ID",
         "OM_FEISHU_BOT_APP_SECRET",
         "OM_FEISHU_BOT_ALLOWED_OPEN_IDS",
+        "OM_INBOUND_AUDIT_DB",
     ):
         monkeypatch.delenv(name, raising=False)
     cfg_path = _write_healthcheck_config(tmp_path)
+    audit_db = tmp_path / "inbound.sqlite3"
+    InboundAuditStore(audit_db).record_result(
+        {
+            "command_id": "in_healthcheck_env_file",
+            "channel": "feishu",
+            "sender_id": "ou_file",
+            "conversation_id": "feishu:chat_file:ou_file",
+            "message_id": "omsg_file",
+            "raw_text": "状态",
+            "parser": "deterministic",
+            "intent_name": "runtime_status",
+            "tool_name": "runtime_status",
+            "decision": "allowed",
+            "result_ok": True,
+            "response": {"data": {"response_text": "ok"}},
+        }
+    )
     env_file = tmp_path / "options-monitor.env"
     env_file.write_text(
         "\n".join(
@@ -303,6 +322,7 @@ def test_healthcheck_uses_explicit_env_file_for_feishu_inbound(monkeypatch, tmp_
                 "OM_FEISHU_BOT_APP_ID=cli_file",
                 "OM_FEISHU_BOT_APP_SECRET=secret_file",
                 "OM_FEISHU_BOT_ALLOWED_OPEN_IDS=ou_file",
+                f"OM_INBOUND_AUDIT_DB={audit_db}",
             ]
         )
         + "\n",
@@ -320,16 +340,20 @@ def test_healthcheck_uses_explicit_env_file_for_feishu_inbound(monkeypatch, tmp_
 
     out = run_tool(
         "healthcheck",
-        {"config_path": str(cfg_path), "env_file": str(env_file), "audit_db": str(tmp_path / "missing.sqlite3")},
+        {"config_path": str(cfg_path), "env_file": str(env_file)},
     )
     checks = {item["name"]: item for item in out["data"]["checks"]}
     env = out["data"]["environment"]
 
+    assert checks["feishu_inbound"]["status"] == "ok"
+    assert checks["feishu_inbound"]["value"]["audit_db_exists"] is True
+    assert checks["feishu_inbound"]["value"]["latest_event"]["sender_id"] == "ou_file"
     assert checks["feishu_inbound"]["value"]["credentials_configured"] is True
     assert checks["feishu_inbound"]["value"]["allowed_open_ids_count"] == 1
     assert env["env_file"] == ".../options-monitor.env"
     assert env["env_file_loaded"] is True
     assert env["entries"]["OM_FEISHU_BOT_APP_ID"]["source"] == "env_file:.../options-monitor.env"
+    assert env["entries"]["OM_INBOUND_AUDIT_DB"]["source"] == "env_file:.../options-monitor.env"
 
 
 def test_healthcheck_warns_when_feishu_latest_sender_not_allowed(monkeypatch, tmp_path: Path) -> None:

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.225 - 2026-06-06
+
+### Fixed
+- Fixed direct healthcheck calls with `env_file` so Feishu inbound audit DB paths from `OM_INBOUND_AUDIT_DB` are honored without requiring the caller to preload process environment variables.
+
 ## 1.2.224 - 2026-06-06
 
 ### Fixed
