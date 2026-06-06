@@ -121,7 +121,7 @@ class WechatClawbotClient:
         text: str,
         group_id: str | None = None,
     ) -> dict[str, Any]:
-        payload: dict[str, Any] = {
+        msg: dict[str, Any] = {
             "message_type": 2,
             "message_state": 2,
             "context_token": str(context_token or ""),
@@ -134,11 +134,11 @@ class WechatClawbotClient:
             ],
         }
         if str(group_id or "").strip():
-            payload["group_id"] = str(group_id or "").strip()
+            msg["group_id"] = str(group_id or "").strip()
         return self.http_json_fn(
             "POST",
             f"{self.base_url}/ilink/bot/sendmessage",
-            payload,
+            {"msg": msg},
             headers=self.headers(),
             timeout=self.timeout,
         )
