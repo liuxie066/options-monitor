@@ -165,7 +165,39 @@ def test_healthcheck_works_with_explicit_config_path(monkeypatch, tmp_path: Path
     primary = next(item for item in out["data"]["checks"] if item["name"] == "account_primary_paths")
     assert primary["status"] == "ok"
     assert primary["value"]["user1"]["source"] == "futu"
+    assert any(item["name"] == "starter_symbols" and item["status"] == "warn" for item in out["data"]["checks"])
     assert any("starter account label 'user1'" in item for item in out["warnings"])
+
+
+def test_healthcheck_does_not_warn_when_production_watchlist_contains_starter_symbol(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+    import src.application.agent_tool_handlers as tools
+
+    cfg_path = _write_healthcheck_config(tmp_path)
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    msft = dict(cfg["symbols"][0])
+    msft["symbol"] = "MSFT"
+    cfg["symbols"].append(msft)
+    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    monkeypatch.setattr(
+        tools,
+        "_run_futu_doctor",
+        lambda **kwargs: {
+            "ok": True,
+            "sdk": {"ok": True},
+            "watchdog": {"ok": True},
+        },
+    )
+
+    out = run_tool("healthcheck", {"config_path": str(cfg_path)})
+
+    assert out["ok"] is True
+    assert all(item["name"] != "starter_symbols" for item in out["data"]["checks"])
+    assert not any("Replace example starter symbols" in item for item in out["warnings"])
 
 
 def test_healthcheck_reports_candidate_evidence_diagnostic(monkeypatch, tmp_path: Path) -> None:
