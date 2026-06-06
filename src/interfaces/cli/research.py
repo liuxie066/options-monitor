@@ -8,11 +8,11 @@ from typing import Any, Callable
 
 from src.application.agent_tool_config import repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_response
-from src.application.tool_execution import execute_tool
+from src.application.research.facade import run_research_collect
 
 
 def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
-    research = subparsers.add_parser("research", help="collect Research evidence for MacBook Codex")
+    research = subparsers.add_parser("research", help="run Research evidence and Shadow Replay workflows")
     research_sub = research.add_subparsers(dest="research_command", required=True)
     research_collect = research_sub.add_parser("collect", help="collect redacted evidence bundle")
     research_collect.add_argument("--scope", default="full", choices=("ledger", "candidate", "quality", "full"))
@@ -589,14 +589,18 @@ def _parameter_report_summary(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+ResearchCollectFn = Callable[[dict[str, Any]], dict[str, Any]]
+
+
 def handle_research_command(
     args: argparse.Namespace,
     *,
-    execute_tool_fn: Callable[[str, dict[str, Any]], dict[str, Any]] = execute_tool,
+    research_collect_fn: ResearchCollectFn | None = None,
     repo_base_fn: Callable[[], Path] = repo_base,
 ) -> dict[str, Any]:
     if args.research_command == "collect":
-        return execute_tool_fn("research", _research_collect_payload(args))
+        collect = research_collect_fn or (lambda payload: run_research_collect(payload, repo_base_fn=repo_base_fn))
+        return collect(_research_collect_payload(args))
 
     if args.research_command == "handoff":
         from src.application.research.service import render_research_handoff

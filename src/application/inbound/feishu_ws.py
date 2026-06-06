@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, cast
 
 from src.application.assistant.config_loader import load_assistant_config
+from src.application.assistant.audit import InboundAuditStore
 from src.application.assistant.settings import DEFAULT_CONTEXT_WINDOW_MESSAGES, AssistantSettings, LlmTranslatorSettings
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response, mask_path
 from domain.domain.multi_tick import FEISHU_APP_NOTIFICATION_PROVIDER
@@ -156,7 +157,7 @@ def build_feishu_ws_settings(
             default=DEFAULT_FEISHU_WS_QUEUE_SIZE,
         ),
         assistant_mode=assistant_settings.mode,
-        assistant_enabled=assistant_settings.enabled,
+        assistant_enabled=bool(assistant_settings.enabled),
         assistant_context_window_messages=assistant_settings.context_window_messages,
         assistant_default_market_scope=assistant_settings.default_market_scope,
         assistant_llm=assistant_settings.llm,
@@ -222,6 +223,7 @@ def handle_feishu_ws_event(
     )
     reaction_status = _maybe_react(inbound=inbound, settings=settings, reaction_fn=reaction_fn)
     reply_status = _maybe_reply(inbound=inbound, settings=settings, reply_fn=reply_fn)
+    _record_reply_receipt(inbound=inbound, settings=settings, reply_status=reply_status)
     return build_response(
         tool_name="inbound.feishu_ws",
         ok=bool(inbound.get("ok", False)) and bool(reply_status.get("ok", True)),
@@ -407,13 +409,87 @@ def _maybe_reply(
             "reason": "reply_failed",
             "error": f"{type(exc).__name__}: {exc}",
         }
+    outbound_message_id = _reply_api_message_id(api_response)
     return {
         "attempted": True,
         "ok": True,
         "reason": decision.send_reason,
         "message_id": message_id,
+        "outbound_message_id": outbound_message_id,
         "api_response": api_response,
     }
+
+
+def _record_reply_receipt(
+    *,
+    inbound: dict[str, Any],
+    settings: FeishuWsSettings,
+    reply_status: dict[str, Any],
+) -> None:
+    if not bool(reply_status.get("attempted")):
+        return
+    data = _inbound_message_data(inbound)
+    if data is None:
+        return
+    command_id = _inbound_command_id(_inbound_result(data))
+    if not command_id:
+        return
+    receipt = _reply_receipt_payload(data=data, reply_status=reply_status)
+    if not receipt:
+        return
+    try:
+        InboundAuditStore(settings.audit_db).merge_response_data(
+            command_id=command_id,
+            data={"reply": receipt},
+        )
+    except Exception:
+        LOG.warning("failed to persist Feishu WebSocket reply receipt to inbound audit", exc_info=True)
+
+
+def _reply_receipt_payload(*, data: dict[str, Any], reply_status: dict[str, Any]) -> dict[str, Any]:
+    request = _dict(data.get("request"))
+    api_response = reply_status.get("api_response")
+    outbound_message_id = _first_text(reply_status.get("outbound_message_id"), _reply_api_message_id(api_response))
+    receipt: dict[str, Any] = {
+        "schema_version": "feishu-reply-receipt-v1",
+        "attempted": bool(reply_status.get("attempted")),
+        "ok": bool(reply_status.get("ok")),
+        "reason": _first_text(reply_status.get("reason")),
+        "channel": _first_text(request.get("channel"), "feishu"),
+        "provider": FEISHU_APP_NOTIFICATION_PROVIDER,
+        "sender_id": _first_text(request.get("sender_id")),
+        "inbound_message_id": _first_text(reply_status.get("message_id"), request.get("message_id")),
+        "message_id": outbound_message_id,
+        "outbound_message_id": outbound_message_id,
+    }
+    if outbound_message_id and bool(reply_status.get("ok")):
+        receipt["delivery_confirmed"] = True
+    error = _first_text(reply_status.get("error"))
+    if error:
+        receipt["error"] = error
+    if isinstance(api_response, dict):
+        receipt["api_response"] = api_response
+    return {key: value for key, value in receipt.items() if value is not None}
+
+
+def _reply_api_message_id(api_response: Any) -> str | None:
+    response = _dict(api_response)
+    data = _dict(response.get("data"))
+    result = _dict(response.get("result"))
+    return _first_text(
+        response.get("message_id"),
+        response.get("messageId"),
+        response.get("id"),
+        response.get("client_msg_id"),
+        data.get("message_id"),
+        data.get("messageId"),
+        data.get("id"),
+        data.get("client_msg_id"),
+        result.get("message_id"),
+        result.get("messageId"),
+        result.get("id"),
+        result.get("client_msg_id"),
+    )
 
 
 def _message_id_from_inbound_data(data: dict[str, Any]) -> str | None:

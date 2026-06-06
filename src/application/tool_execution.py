@@ -2,38 +2,23 @@ from __future__ import annotations
 
 from typing import Any
 
+from src.application.agent_tools.base import AgentTool, build_default_agent_tool_context
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response
-from src.application.agent_tool_registry import AgentToolDefinition, build_agent_spec, get_tool_definition, write_tools_enabled_from_env
+from src.application.agent_tool_registry import (
+    AgentToolEntry,
+    build_agent_spec,
+    get_tool_definition,
+    tool_write_requested,
+    write_tools_enabled_from_env,
+)
 
 
 def build_tool_manifest() -> dict[str, Any]:
     return build_agent_spec()
 
 
-def _tool_write_requested(definition: AgentToolDefinition, payload: dict[str, Any]) -> bool:
-    name = definition.name
-    if name == "research":
-        return _truthy(payload.get("write_outputs"))
-    if definition.read_only:
-        return False
-    if name == "version_update":
-        return bool(payload.get("apply", False))
-    if name == "manage_symbols":
-        action = str(payload.get("action") or "list").strip().lower()
-        return action != "list" and not bool(payload.get("dry_run", False))
-    if bool(payload.get("dry_run", False)):
-        return False
-    return bool(definition.side_effects or definition.requires_confirm or definition.risk_level != "read_only")
-
-
-def _truthy(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
-
-
-def _write_gate_error(definition: AgentToolDefinition, payload: dict[str, Any]) -> AgentToolError | None:
-    if not _tool_write_requested(definition, payload):
+def _write_gate_error(definition: AgentToolEntry, payload: dict[str, Any]) -> AgentToolError | None:
+    if not tool_write_requested(definition, payload):
         return None
     if not write_tools_enabled_from_env():
         return AgentToolError(
@@ -66,18 +51,20 @@ def execute_tool(tool_name: str, payload: dict[str, Any] | None = None) -> dict[
     if gate_error is not None:
         return build_response(tool_name=name, ok=False, error=build_error_payload(gate_error))
 
-    from src.application.agent_tool_handlers import TOOL_HANDLERS
-
-    handler = TOOL_HANDLERS.get(name)
-    if handler is None:
-        err = AgentToolError(
-            code="INTERNAL_ERROR",
-            message=f"registered tool has no handler: {name}",
-        )
-        return build_response(tool_name=name, ok=False, error=build_error_payload(err))
-
     try:
-        data, warnings, meta = handler(payload_dict)
+        if isinstance(definition, AgentTool):
+            data, warnings, meta = definition.call(build_default_agent_tool_context(), payload_dict)
+        else:
+            from src.application.agent_tool_handlers import TOOL_HANDLERS
+
+            handler = TOOL_HANDLERS.get(name)
+            if handler is None:
+                err = AgentToolError(
+                    code="INTERNAL_ERROR",
+                    message=f"registered tool has no handler: {name}",
+                )
+                return build_response(tool_name=name, ok=False, error=build_error_payload(err))
+            data, warnings, meta = handler(payload_dict)
         return build_response(
             tool_name=name,
             ok=True,

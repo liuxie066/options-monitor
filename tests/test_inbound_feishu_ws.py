@@ -79,6 +79,18 @@ def test_feishu_ws_delegates_to_inbound_and_replies(tmp_path: Path) -> None:
     assert reactions[0]["emoji_type"] == "SMILE"
     assert replies[0]["message_id"] == "msg_1"
     assert replies[0]["text"].startswith("收益统计完成")
+    assert out["data"]["reply"]["outbound_message_id"] == "reply_1"
+
+    with sqlite3.connect(tmp_path / "audit.sqlite3") as conn:
+        response_json = conn.execute("SELECT response_json FROM inbound_command_audit").fetchone()[0]
+    stored = json.loads(response_json)
+    reply_receipt = stored["data"]["reply"]
+    assert reply_receipt["schema_version"] == "feishu-reply-receipt-v1"
+    assert reply_receipt["inbound_message_id"] == "msg_1"
+    assert reply_receipt["message_id"] == "reply_1"
+    assert reply_receipt["outbound_message_id"] == "reply_1"
+    assert reply_receipt["delivery_confirmed"] is True
+    assert reply_receipt["api_response"]["data"]["message_id"] == "reply_1"
 
 
 def test_feishu_ws_routes_inbound_through_channel_service() -> None:

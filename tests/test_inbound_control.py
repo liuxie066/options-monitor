@@ -630,6 +630,117 @@ def test_inbound_manual_trade_preview_and_confirm_open(monkeypatch: pytest.Monke
     assert "receipt_not_observed" in timeline["warnings"]
 
 
+def test_operation_timeline_reports_audit_only_operation_when_store_missing(tmp_path: Path) -> None:
+    from src.application.assistant.audit import InboundAuditStore
+    from src.application.assistant.operation_diagnostics import collect_operation_timeline
+
+    audit_db = tmp_path / "audit_only.sqlite3"
+    store = InboundAuditStore(audit_db)
+    store.record_result(
+        {
+            "command_id": "in_preview",
+            "channel": "feishu",
+            "sender_id": "ou_1",
+            "conversation_id": "feishu:oc_1:ou_1",
+            "message_id": "msg_preview",
+            "raw_text": "记录开仓 sy NVDA short put",
+            "parser": "rule",
+            "intent_name": "manual_trade_open",
+            "tool_name": "inbound.manual_trade",
+            "reasoning": {"safety_class": "write_preview", "requires_confirmation": True},
+            "decision": "executed",
+            "result_ok": True,
+            "response": {
+                "ok": True,
+                "data": {
+                    "operation_id": "in_preview",
+                    "operation_type": "manual_open",
+                    "status": "previewed",
+                    "response_text": "preview",
+                },
+            },
+            "created_at": "2026-06-06T10:00:00+00:00",
+            "finished_at": "2026-06-06T10:00:01+00:00",
+        }
+    )
+    store.record_result(
+        {
+            "command_id": "in_confirm",
+            "channel": "feishu",
+            "sender_id": "ou_1",
+            "conversation_id": "feishu:oc_1:ou_1",
+            "message_id": "msg_confirm",
+            "raw_text": "确认记录",
+            "parser": "rule",
+            "intent_name": "manual_trade_confirm",
+            "tool_name": "inbound.manual_trade",
+            "reasoning": {"safety_class": "write_apply", "requires_confirmation": False},
+            "decision": "executed",
+            "result_ok": True,
+            "response": {
+                "ok": True,
+                "data": {
+                    "operation_id": "in_preview",
+                    "resolved_operation_id": "in_preview",
+                    "operation_type": "manual_open",
+                    "status": "applied",
+                    "result": {"result": {"event_id": "evt_1", "record_id": "lot_evt_1", "created": True}},
+                    "reply": {
+                        "schema_version": "feishu-reply-receipt-v1",
+                        "inbound_message_id": "msg_confirm",
+                        "message_id": "reply_1",
+                        "outbound_message_id": "reply_1",
+                        "delivery_confirmed": True,
+                    },
+                    "response_text": "applied",
+                },
+            },
+            "created_at": "2026-06-06T10:01:00+00:00",
+            "finished_at": "2026-06-06T10:01:01+00:00",
+        }
+    )
+    store.record_result(
+        {
+            "command_id": "in_pending",
+            "channel": "feishu",
+            "sender_id": "ou_1",
+            "conversation_id": "feishu:oc_1:ou_1",
+            "message_id": "msg_pending",
+            "raw_text": "待确认",
+            "parser": "rule",
+            "intent_name": "pending_operations",
+            "tool_name": "inbound.pending",
+            "reasoning": {"safety_class": "read_only", "requires_confirmation": False},
+            "decision": "executed",
+            "result_ok": True,
+            "response": {"ok": True, "data": {"pending_count": 0, "response_text": "none"}},
+            "created_at": "2026-06-06T10:02:00+00:00",
+            "finished_at": "2026-06-06T10:02:01+00:00",
+        }
+    )
+
+    timeline_out = collect_operation_timeline(audit_db=str(audit_db), limit=10)
+
+    assert timeline_out["timeline_count"] == 1
+    assert "operations_table_missing" in timeline_out["warnings"]
+    timeline = timeline_out["timelines"][0]
+    assert timeline["operation"]["source"] == "audit_only"
+    assert timeline["identity"]["operation_id"] == "in_preview"
+    assert timeline["identity"]["ledger_event_id"] == "evt_1"
+    assert timeline["identity"]["record_id"] == "lot_evt_1"
+    assert timeline["identity"]["inbound_message_id"] == "msg_preview"
+    assert timeline["identity"]["outbound_message_id"] == "reply_1"
+    assert timeline["audit"]["related_count"] == 2
+    assert timeline["audit"]["apply_count"] == 1
+    assert timeline["receipt"]["status"] == "observed"
+    assert timeline["receipt"]["message_id"] == "reply_1"
+    assert "operation_store_missing" in timeline["warnings"]
+    assert "operation_missing" in timeline["warnings"]
+    assert "ledger_event_id_missing" not in timeline["warnings"]
+    assert "record_id_missing" not in timeline["warnings"]
+    assert "receipt_not_observed" not in timeline["warnings"]
+
+
 def test_inbound_manual_trade_confirm_rejects_signature_mismatch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import src.application.ledger.repository as ledger_repository
 
@@ -3306,7 +3417,7 @@ def test_assistant_cli_pending_and_audit_diagnostics(monkeypatch: pytest.MonkeyP
     )
     pending_text = capsys.readouterr().out
     assert text_rc == 0
-    assert "Assistant pending：1 条" in pending_text
+    assert "Inbound pending：1 条" in pending_text
     assert f"确认：确认记录 {preview['data']['operation_id']}" in pending_text
 
     audit_rc = cli.main(
@@ -3348,7 +3459,7 @@ def test_assistant_cli_pending_and_audit_diagnostics(monkeypatch: pytest.MonkeyP
     )
     audit_text = capsys.readouterr().out
     assert audit_text_rc == 0
-    assert "Assistant audit recent：1 条" in audit_text
+    assert "Inbound audit recent：1 条" in audit_text
     assert "manual_trade_open" in audit_text
     assert "msg_cli_pending_preview" in audit_text
 

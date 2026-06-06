@@ -1,12 +1,12 @@
-# Agent Handbook — options-monitor
+# Ops Copilot Handbook - options-monitor
 
-> This is the task-driven manual for agents working in `options-monitor`.
+> This is the task-driven manual for Ops Copilot and local coding agents working in `options-monitor`.
 > Keep `AGENTS.md` short enough for prompt prefix use; put detailed execution guidance here.
 
 ## 1. Operating Model
 
 `options-monitor` is an operations-sensitive local monitoring system for options strategies.
-An agent should treat it as production tooling:
+Ops Copilot should treat it as production tooling:
 
 - Inspect before changing.
 - Prefer read-only tools before runtime commands.
@@ -22,9 +22,9 @@ Primary entry points:
 | Human/operator command | `./om` |
 | Runtime tick | `./om run tick ...` |
 | Guarded production tick wrapper | `./om run tick-cron ...` |
-| MacBook Codex online-evidence handoff | `./om research collect ...` or `./om-agent run --tool research ...` |
+| MacBook Codex online-evidence handoff | `./om research collect ...` |
 
-For the canonical capability boundary, risk classes, Assistant exposure, and
+For the canonical capability boundary, risk classes, Inbound exposure, and
 verification map, see [OM_AGENT_CAPABILITY_MAP.md](OM_AGENT_CAPABILITY_MAP.md).
 
 ## 2. First Five Minutes
@@ -65,9 +65,13 @@ Use the lowest-risk tool that can answer the question.
 | Does close advice have inputs? | `prepare_close_advice_inputs`, then `close_advice` or `get_close_advice` | Keeps refresh and recommendation explicit |
 | What evidence should MacBook Codex analyze? | `research` | Builds a redacted evidence bundle and handoff |
 
-## 4. Research Workflow
+## 4. Research / Shadow Replay Workflow
 
-Research is not an online AI product feature. The online/Linux side collects redacted evidence. MacBook Codex reads the handoff and helps diagnose quality issues, ledger problems, and strategy-improvement directions.
+Research and Shadow Replay are an independent offline evidence/replay module.
+They are not Ops Copilot core, not `./om-agent` tools, and not an online AI
+product feature. The online/Linux side collects redacted evidence. MacBook Codex
+reads the handoff and helps diagnose quality issues, ledger problems, and
+strategy-improvement directions.
 
 ### Common Server Command
 
@@ -100,12 +104,6 @@ With a readiness snapshot:
   --no-write-outputs
 ```
 
-Equivalent agent tool:
-
-```bash
-./om-agent run --tool research --input-json '{"config_key":"us","scope":"full","output":"both","write_outputs":false}'
-```
-
 ### Scopes
 
 | Scope | Purpose |
@@ -119,11 +117,13 @@ Research keeps candidate CSVs separate from `*_candidates_reject_log.csv` files.
 
 For strategy tuning, inspect `candidate_evidence.shadow_replay` in the Research bundle. It is an offline readiness and analysis surface only; it cannot mutate scanner config. To compare a concrete parameter hypothesis for user-facing review, use `./om research shadow-replay parameter-report --params <params.json>` or `--params-dir <dir>` against either an existing dataset or a `--profile-path` / date window; it writes paired JSON and Markdown reports. The underlying backtest stays inside `observed_run_universe`: if the requested start date has no scan artifacts, it must report coverage failure instead of reconstructing a historical option chain.
 
-Default runs do not write files. Writing reports requires `write_outputs=true`, `confirm=true`, and `OM_AGENT_ENABLE_WRITE_TOOLS=true`. Default output locations are:
+Default runs do not write files. Writing reports through `./om research collect`
+requires `--write-outputs --confirm`. Default output locations are:
 
 ```text
 output_shared/research/
 output_shared/state/current/research.current.json
+output_shared/research/shadow_replay/
 ```
 
 MacBook SSH pattern:
@@ -319,7 +319,7 @@ Notification text should remain Markdown-friendly and operationally direct. Do n
 
 Do not weaken production config validation to make local tests pass. Fix the config path, test fixture, or validation contract instead.
 
-### Agent Tools
+### Ops Copilot Tools
 
 - Manifest: `src/application/agent_tool_registry.py`
 - Handlers: `src/application/agent_tool_handlers.py`
@@ -391,7 +391,7 @@ Use supported `gh release view --json` fields such as `tagName`, `name`, `url`, 
 
 | Change area | Suggested checks |
 |---|---|
-| Agent manifest/handler | `python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py` |
+| Ops Copilot manifest/handler | `python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py` |
 | Research | `python3 -m pytest tests/test_research.py` |
 | Candidate filter/rank | Candidate engine tests, candidate tool tests, focused trace/replay tests |
 | Tick orchestration | `python3 -m pytest tests/test_multi_tick_*.py tests/test_unified_tick_entrypoint.py` |

@@ -205,6 +205,15 @@ def test_read_tool_allowlist_has_neutral_owner() -> None:
     assert "from src.application.assistant.policy import PURE_READ_TOOLS" not in tool_policy_text
 
 
+def test_agent_write_gate_delegates_to_registry_policy() -> None:
+    tool_execution_text = (ROOT / "src" / "application" / "tool_execution.py").read_text(encoding="utf-8")
+
+    assert "_tool_write_requested" not in tool_execution_text
+    assert 'name == "version_update"' not in tool_execution_text
+    assert 'name == "manage_symbols"' not in tool_execution_text
+    assert "tool_write_requested(definition, payload)" in tool_execution_text
+
+
 def test_assistant_owns_command_catalog_and_interaction_contracts() -> None:
     from src.application.assistant.commands import capability_catalog_text
     from src.application.assistant.commands import capability_specs
@@ -491,8 +500,10 @@ def test_feishu_payload_adapter_public_signature_uses_assistant_naming() -> None
 def test_runtime_status_tool_is_not_owned_by_openclaw_module() -> None:
     openclaw_text = (ROOT / "src" / "application" / "agent_tool_openclaw.py").read_text(encoding="utf-8")
     runtime_text = (ROOT / "src" / "application" / "agent_tool_runtime_status.py").read_text(encoding="utf-8")
+    diagnostics_text = (ROOT / "src" / "application" / "agent_tools" / "diagnostics.py").read_text(encoding="utf-8")
     handlers_text = (ROOT / "src" / "application" / "agent_tool_handlers.py").read_text(encoding="utf-8")
 
     assert "def runtime_status_tool(" not in openclaw_text
     assert "def runtime_status_tool(" in runtime_text
-    assert "from src.application.agent_tool_runtime_status import runtime_status_tool" in handlers_text
+    assert "from src.application.agent_tool_runtime_status import runtime_status_tool" in diagnostics_text
+    assert '"runtime_status"' not in handlers_text

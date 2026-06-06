@@ -1,14 +1,14 @@
-# Agent Getting Started
+# Ops Copilot Getting Started
 
 这份文档只服务一种场景：
 
-> 你要把 `options-monitor` 当作本地 Agent 工具来接入和调用。
+> 你要把 `options-monitor` 当作本地 Ops Copilot 工具来接入和调用。
 
 如果你只是普通使用者，请先看 [GETTING_STARTED.md](GETTING_STARTED.md)。
 
 ---
 
-## 1. 安装 Agent 插件
+## 1. 安装 Ops Copilot 插件
 
 ```bash
 bash scripts/install_agent_plugin.sh
@@ -26,7 +26,7 @@ python3 -m venv .venv
 
 ---
 
-## 2. 查看 Agent 工具清单
+## 2. 查看 Ops Copilot 工具清单
 
 ```bash
 ./om-agent spec
@@ -105,21 +105,16 @@ healthcheck 会额外给出本地 `ledger_store` 和 `option_positions_bootstrap
 
 ---
 
-## 6. 收集 Research 证据
+## 6. 收集 Research / Shadow Replay 证据
 
-如果目标是让 MacBook 上的 Codex 分析线上版本质量、持仓/交易一致性，或多账户策略影响，使用 Research 证据交接：
-
-```bash
-./om-agent run --tool research --input-json '{"config_key":"us","scope":"full","output":"both","write_outputs":false}'
-```
-
-同一个能力也有人工 CLI：
+如果目标是让 MacBook 上的 Codex 分析线上版本质量、持仓/交易一致性，或多账户策略影响，使用独立的 Research / Shadow Replay 侧线：
 
 ```bash
 ./om research collect --config-key us --scope full --output both --no-write-outputs
+./om research shadow-replay status --min-sample 30
 ```
 
-它默认不写文件、不发送通知、不调用在线 AI。线上调度系统的状态需要通过 `scheduler_evidence` 或 `--scheduler-evidence-json` 传入。
+它不属于 `./om-agent` manifest，默认不写文件、不发送通知、不调用在线 AI。线上调度系统的状态需要通过 `scheduler_evidence` 或 `--scheduler-evidence-json` 传入。
 
 ---
 
@@ -133,8 +128,8 @@ healthcheck 会额外给出本地 `ledger_store` 和 `option_positions_bootstrap
 
 ## 8. 下一步看哪里
 
-- Agent 任务手册：[`AGENT_WIKI.md`](AGENT_WIKI.md)
-- Agent JSON 合同：[`AGENT_INTEGRATION.md`](AGENT_INTEGRATION.md)
+- Ops Copilot 任务手册：[`AGENT_WIKI.md`](AGENT_WIKI.md)
+- Ops Copilot JSON 合同：[`AGENT_INTEGRATION.md`](AGENT_INTEGRATION.md)
 - 工具说明：[`TOOL_REFERENCE.md`](TOOL_REFERENCE.md)
 - Linux / Mac 服务化部署：[`DEPLOY_LINUX_MAC.md`](DEPLOY_LINUX_MAC.md)
 - 配置字段说明：[`../CONFIGURATION_GUIDE.md`](../CONFIGURATION_GUIDE.md)

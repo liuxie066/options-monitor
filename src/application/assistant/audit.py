@@ -185,6 +185,40 @@ class InboundAuditStore:
                 (_json(response), utc_now_iso(), normalized_command_id),
             )
 
+    def merge_response_data(self, *, command_id: str, data: dict[str, Any]) -> bool:
+        normalized_command_id = str(command_id or "").strip()
+        if not normalized_command_id or not isinstance(data, dict) or not data:
+            return False
+        if not self.path.exists():
+            return False
+        self._ensure_schema()
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT response_json
+                FROM inbound_command_audit
+                WHERE command_id = ?
+                LIMIT 1
+                """,
+                (normalized_command_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            response = _loads_object(row["response_json"])
+            response_data_raw = response.get("data")
+            response_data: dict[str, Any] = dict(response_data_raw) if isinstance(response_data_raw, dict) else {}
+            response_data.update(data)
+            response["data"] = response_data
+            conn.execute(
+                """
+                UPDATE inbound_command_audit
+                SET response_json = ?
+                WHERE command_id = ?
+                """,
+                (_json(response), normalized_command_id),
+            )
+        return True
+
     def mark_duplicate(self, *, command_id: str, sender_id: str | None = None, decision: str = "idempotent_replay") -> None:
         self._ensure_schema()
         with self._connect() as conn:
@@ -284,6 +318,16 @@ def utc_now_iso() -> str:
 
 def _json(value: Any) -> str:
     return json.dumps(value if value is not None else {}, ensure_ascii=False, sort_keys=True)
+
+
+def _loads_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    try:
+        loaded = json.loads(str(value or "{}"))
+    except Exception:
+        return {}
+    return dict(loaded) if isinstance(loaded, dict) else {}
 
 
 def _optional_str(value: Any) -> str | None:

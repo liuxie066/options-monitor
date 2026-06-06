@@ -1,18 +1,8 @@
 from __future__ import annotations
 
+from src.application.agent_tool_registry import pure_read_tool_names
 
-PURE_READ_TOOLS = frozenset(
-    {
-        "runtime_status",
-        "healthcheck",
-        "option_positions_read",
-        "close_advice_read",
-        "monthly_income_report",
-        "runtime_runs",
-        "runtime_logs",
-        "config_validate",
-    }
-)
+PURE_READ_TOOLS = pure_read_tool_names()
 
 
 __all__ = ["PURE_READ_TOOLS"]

@@ -1,8 +1,10 @@
-# Assistant Control And Inbound Transport
+# Inbound Control And Transport
 
 `./om assistant handle` is the controlled entry point for remote messages from Feishu, WeChat, Hermes, or other gateways.
 
 It is not a shell bridge. Gateways should pass one message into OM and let OM parse, authorize, audit, and execute the request through the existing agent-tool contract.
+The current CLI namespace is `./om assistant ...`, and the current implementation
+path is `src/application/assistant/...`; the product/module name is Inbound.
 
 ## Bot Channel Model
 
@@ -24,16 +26,16 @@ Allowed architecture:
 Feishu / WeChat / Hermes
   -> thin channel adapter
   -> ChannelService inbound dispatch
-  -> Assistant runtime command / optional LLM-first / deterministic fallback routing
-  -> Assistant execution router with sender allowlist, audit, idempotency, and preview/confirm
+  -> Inbound runtime command / optional LLM-first / deterministic fallback routing
+  -> Inbound execution router with sender allowlist, audit, idempotency, and preview/confirm
   -> existing deterministic OM tools
-  -> canonical Assistant renderer
+  -> canonical Inbound renderer
 ```
 
 `src.application.channels` owns channel capability registration and service
 dispatch. `src.application.inbound` owns transport details only: Feishu payload
 extraction, Feishu long-connection receive/reply/reaction behavior, and the
-transport-facing request contract. Assistant parsing, command catalog, LLM
+transport-facing request contract. Inbound parsing, command catalog, LLM
 routing, operation store, audit, policy, and renderer ownership live in
 `src.application.assistant`.
 
@@ -65,9 +67,9 @@ The base deterministic command surface supports:
 
 Read commands use the pure-read whitelist. Admin write operations are separate and must pass sender allowlist, operation gates, preview storage, and explicit confirmation before applying.
 
-## Assistant Command Facade
+## Inbound Command Facade
 
-`Assistant` is the default command facade above the same allowlist, audit, preview/confirm, and tool execution path. It adds slash commands for users who do not want to remember natural-language phrases:
+Inbound is the default command facade above the same allowlist, audit, preview/confirm, and tool execution path. The current CLI namespace remains `./om assistant ...`. It adds slash commands for users who do not want to remember natural-language phrases:
 
 | Command | Intent |
 |---|---|
@@ -91,7 +93,7 @@ Local one-shot testing uses the same command facade:
 ./om assistant handle --text '/positions sy' --format text
 ```
 
-For long-running Feishu WS, `config.assistant.json` controls the facade:
+For long-running Feishu WS, `config.assistant.json` currently controls the Inbound facade:
 
 ```yaml
 assistant:
@@ -101,7 +103,7 @@ assistant:
 
 This still does not enable LLM. Unknown slash commands return clarification; non-slash messages continue through the deterministic inbound parser. Supported modes are `disabled`, `deterministic`, `llm_router`, and `agent_loop`.
 
-By default, `default_market_scope` is intentionally unset. Feishu WS should receive an explicit `--config-key us|hk` or `--config-path` when it is bound to one market. Only set `assistant.default_market_scope: us|hk|all` when that default is an explicit product decision for the assistant.
+By default, `default_market_scope` is intentionally unset. Feishu WS should receive an explicit `--config-key us|hk` or `--config-path` when it is bound to one market. Only set `assistant.default_market_scope: us|hk|all` when that default is an explicit product decision for Inbound.
 
 LLM translation is disabled by default:
 
@@ -317,12 +319,12 @@ Text output for chat replies:
 Feishu Event Subscription long connection
   -> ./om inbound feishu-ws
   -> ./om inbound feishu
-  -> Assistant command facade
-  -> Assistant allowlist/audit/pure-read tools
+  -> Inbound command facade
+  -> Inbound allowlist/audit/pure-read tools
   -> Feishu message reply API
 ```
 
-It still does not expose arbitrary shell execution. It only forwards Feishu text messages received through the authenticated SDK connection into the same assistant control path. OM no longer supports the HTTPS callback receiver as the production Feishu inbound path.
+It still does not expose arbitrary shell execution. It only forwards Feishu text messages received through the authenticated SDK connection into the same Inbound control path. OM no longer supports the HTTPS callback receiver as the production Feishu inbound path.
 
 Required environment values:
 
@@ -335,7 +337,7 @@ export OM_FEISHU_BOT_ALLOWED_OPEN_IDS='ou_xxx'
 
 The same Feishu Bot credentials are used for long-connection event receiving, same-message replies, and proactive OM notifications. There is no fallback to a separate notification app.
 
-Reaction and reply behavior is configured in assistant config under `inbound.feishu_ws`, not in the secret env file. Set `inbound.feishu_ws.ack_reaction` to a Feishu `emoji_type` such as `SMILE` to enable message reactions; leave it empty to disable reaction acknowledgements. Reaction failures are reported in the JSON status for that event but do not fail the inbound command or block the text reply.
+Reaction and reply behavior is configured in the current assistant config under `inbound.feishu_ws`, not in the secret env file. Set `inbound.feishu_ws.ack_reaction` to a Feishu `emoji_type` such as `SMILE` to enable message reactions; leave it empty to disable reaction acknowledgements. Reaction failures are reported in the JSON status for that event but do not fail the inbound command or block the text reply.
 
 Local config check:
 
@@ -385,8 +387,8 @@ WeChat message
   -> ClawBot iLink get_updates
   -> ./om channel wechat-clawbot serve
   -> ChannelService inbound dispatch
-  -> Assistant command facade
-  -> Assistant allowlist/audit/pure-read tools
+  -> Inbound command facade
+  -> Inbound allowlist/audit/pure-read tools
   -> ClawBot same-message reply
 ```
 
@@ -434,7 +436,7 @@ The rendered `options-monitor-wechat-clawbot.service` passes `--lock-path` so on
 
 ## LLM Translator
 
-LLM translation/planning is opt-in and inactive unless `assistant.mode` is `llm_router` or `agent_loop`. In those modes, non-slash natural language is routed LLM-first; deterministic parsing is only fallback/shadow evidence. Slash commands are resolved by the command catalog before LLM and do not call the translator or Planner.
+LLM translation/planning is opt-in and inactive unless `assistant.mode` is `llm_router` or `agent_loop`. In those modes, non-slash natural language is routed LLM-first; deterministic parsing is only fallback/shadow evidence. Slash commands are resolved by the Inbound command catalog before LLM and do not call the translator or Planner.
 
 The current provider adapters use OpenAI Responses API for `openai` and Chat Completions JSON output for `deepseek`. In `llm_router`, they translate natural language into an `om-llm-intent-v1` structured intent. In `agent_loop`, they produce an `om-tool-plan-v1` capability plan. Planner read steps still go through the read whitelist before execution. Planner preview-write steps are converted back into the same operation preview path as deterministic commands, so sender allowlist, operation gates, preview storage, audit, idempotency, and later explicit confirmation still apply. Low-confidence or incomplete requests must return clarification.
 

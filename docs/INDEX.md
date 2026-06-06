@@ -11,13 +11,13 @@
 - [../CONFIGS.md](../CONFIGS.md)：配置来源与 canonical config 约定
 - [../CONFIGURATION_GUIDE.md](../CONFIGURATION_GUIDE.md)：详细配置字段说明
 
-## Agent / LLM Wiki
-- [../AGENTS.md](../AGENTS.md)：Agent 首屏说明书、安全红线、入口层级、模块归属（静态前缀，Prompt Cache 友好）
+## Ops Copilot / Inbound Wiki
+- [../AGENTS.md](../AGENTS.md)：本地 agent 首屏说明书、安全红线、入口层级、模块归属（静态前缀，Prompt Cache 友好）
 - [../CLAUDE.md](../CLAUDE.md)：Claude / OpenClaw 特有补充指令
-- [AGENT_INTEGRATION.md](AGENT_INTEGRATION.md)：Agent 集成合同
-- [AGENT_GETTING_STARTED.md](AGENT_GETTING_STARTED.md)：本地 Agent 工具快速开始
-- [AGENT_WIKI.md](AGENT_WIKI.md)：Agent 任务手册（工具选择、Research、排障 playbook、模块地图、验证矩阵）
-- [OM_AGENT_CAPABILITY_MAP.md](OM_AGENT_CAPABILITY_MAP.md)：OM Agent 能力边界、风险等级、暴露面和验证方式
+- [AGENT_INTEGRATION.md](AGENT_INTEGRATION.md)：Ops Copilot 集成合同
+- [AGENT_GETTING_STARTED.md](AGENT_GETTING_STARTED.md)：本地 Ops Copilot 工具快速开始
+- [AGENT_WIKI.md](AGENT_WIKI.md)：Ops Copilot 任务手册（工具选择、Research / Shadow Replay 侧线、排障 playbook、模块地图、验证矩阵）
+- [OM_AGENT_CAPABILITY_MAP.md](OM_AGENT_CAPABILITY_MAP.md)：OM Ops Copilot 能力边界、Inbound 暴露面和验证方式
 - [TOOL_REFERENCE.md](TOOL_REFERENCE.md)：工具参考
 - [SESSION_SUMMARY.md](SESSION_SUMMARY.md)：Session 间记忆摘要模板
 
@@ -32,7 +32,7 @@
 - [PRODUCT_ARCHITECTURE.md](PRODUCT_ARCHITECTURE.md)：产品域、模块定义、模块依赖和当前实现差距
 - [STRATEGY_ARCHITECTURE.md](STRATEGY_ARCHITECTURE.md)：开仓策略架构、Sell Put / Covered Call / Combo Yield 策略边界
 - [candidate_strategy.md](candidate_strategy.md)：候选筛选与排序规则
-- [SHADOW_REPLAY_RUNBOOK.md](SHADOW_REPLAY_RUNBOOK.md)：Shadow Replay 数据采样、OpenD 补价和复盘操作手册
+- [SHADOW_REPLAY_RUNBOOK.md](SHADOW_REPLAY_RUNBOOK.md)：Research / Shadow Replay 独立离线模块的数据采样、OpenD 补价和复盘操作手册
 - [CLOSE_ADVICE_CONTRACT.md](CLOSE_ADVICE_CONTRACT.md)：平仓建议 exit-state、收益增强组合和渲染契约
 
 ## 安全与约束

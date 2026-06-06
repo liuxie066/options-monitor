@@ -17,7 +17,7 @@ def dumps_json(payload: dict) -> str:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="options-monitor public local agent tools")
+    parser = argparse.ArgumentParser(description="options-monitor public local Ops Copilot tools")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("spec", help="print public tool manifest")
 

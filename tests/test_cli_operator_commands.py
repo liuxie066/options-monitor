@@ -467,7 +467,7 @@ def test_assistant_capabilities_command_renders_capability_catalog(capsys) -> No
     text = capsys.readouterr().out
 
     assert rc == 0
-    assert "Assistant capabilities" in text
+    assert "Inbound capabilities" in text
     assert "LLM executable read-only capabilities" in text
     assert "LLM recognizable but not executable capabilities" in text
     assert "Known capabilities not recognizable by LLM" in text
@@ -648,14 +648,15 @@ def test_top_level_status_forwards_env_file(monkeypatch, capsys, tmp_path: Path)
 
 def test_research_collect_forwards_remote_runtime_selection(monkeypatch, capsys) -> None:
     import src.interfaces.cli.main as cli
+    import src.interfaces.cli.research as research_cli
 
-    calls: list[tuple[str, dict]] = []
+    calls: list[dict] = []
 
-    def _execute_tool(name: str, payload: dict) -> dict:
-        calls.append((name, payload))
-        return {"tool_name": "research", "ok": True, "data": {"status": "ok"}}
+    def _run_research_collect(payload: dict, **kwargs) -> dict:
+        calls.append(payload)
+        return {"tool_name": "research.collect", "ok": True, "data": {"status": "ok"}}
 
-    monkeypatch.setattr(cli, "execute_tool", _execute_tool)
+    monkeypatch.setattr(research_cli, "run_research_collect", _run_research_collect)
 
     rc = cli.main([
         "research",
@@ -697,33 +698,30 @@ def test_research_collect_forwards_remote_runtime_selection(monkeypatch, capsys)
     payload = _read_json_output(capsys)
 
     assert rc == 0
-    assert payload["tool_name"] == "research"
+    assert payload["tool_name"] == "research.collect"
     assert calls == [
-        (
-            "research",
-            {
-                "scope": "full",
-                "config_key": "us",
-                "config_path": "/var/lib/options-monitor/config.us.json",
-                "profile_path": "/var/lib/options-monitor/service.profile.json",
-                "report_dir": "/var/lib/options-monitor/output_shared/reports",
-                "shared_state_dir": "/var/lib/options-monitor/output_shared/state",
-                "accounts_root": "/var/lib/options-monitor/output_accounts",
-                "runs_root": "/var/lib/options-monitor/output_runs",
-                "run_id": "run-1",
-                "runs_limit": 3,
-                "tail_limit": 50,
-                "shadow_replay_min_sample": 20,
-                "mark_paths": ["/var/lib/options-monitor/marks.jsonl"],
-                "outcome_paths": ["/var/lib/options-monitor/outcomes.jsonl"],
-                "max_run_age_minutes": 90,
-                "max_notification_chars": 2000,
-                "output": "json",
-                "include_healthcheck": False,
-                "write_outputs": False,
-                "confirm": False,
-            },
-        )
+        {
+            "scope": "full",
+            "config_key": "us",
+            "config_path": "/var/lib/options-monitor/config.us.json",
+            "profile_path": "/var/lib/options-monitor/service.profile.json",
+            "report_dir": "/var/lib/options-monitor/output_shared/reports",
+            "shared_state_dir": "/var/lib/options-monitor/output_shared/state",
+            "accounts_root": "/var/lib/options-monitor/output_accounts",
+            "runs_root": "/var/lib/options-monitor/output_runs",
+            "run_id": "run-1",
+            "runs_limit": 3,
+            "tail_limit": 50,
+            "shadow_replay_min_sample": 20,
+            "mark_paths": ["/var/lib/options-monitor/marks.jsonl"],
+            "outcome_paths": ["/var/lib/options-monitor/outcomes.jsonl"],
+            "max_run_age_minutes": 90,
+            "max_notification_chars": 2000,
+            "output": "json",
+            "include_healthcheck": False,
+            "write_outputs": False,
+            "confirm": False,
+        }
     ]
 
 

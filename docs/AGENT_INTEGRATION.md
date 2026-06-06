@@ -1,14 +1,14 @@
-# Agent Integration
+# Ops Copilot Integration
 
 The public launcher is `./om-agent`.
 
-It exposes a stable JSON contract intended for local agent usage:
+It exposes a stable JSON contract intended for local Ops Copilot usage:
 
 - `./om-agent add-account --market us|hk --account-label <label> --account-type futu|external_holdings --dry-run`
 - `./om-agent spec`
 - `./om-agent run --tool <name> --input-json '<json>'`
 
-Capability boundaries, risk classes, Assistant exposure, and verification
+Capability boundaries, risk classes, Inbound exposure, and verification
 rules are maintained in [OM_AGENT_CAPABILITY_MAP.md](OM_AGENT_CAPABILITY_MAP.md).
 This document only describes integration contracts and invocation patterns.
 
@@ -76,10 +76,9 @@ Use the launcher as a local command tool. Typical pattern:
 ./om-agent run --tool get_close_advice --input-json '{"config_key":"us"}'
 ./om-agent run --tool prepare_close_advice_inputs --input-json '{"config_key":"us"}'
 ./om-agent run --tool close_advice --input-json '{"config_key":"us"}'
-./om-agent run --tool research --input-json '{"config_key":"us","scope":"full","output":"both","write_outputs":false}'
 ```
 
-Sell Put 现金余量的标准 Agent 工具是 `query_cash_headroom`。它包装
+Sell Put 现金余量的标准 Ops Copilot 工具是 `query_cash_headroom`。它包装
 `src.application.cash_headroom_query` 里的 `query_sell_put_cash(...)`，用于返回账户现金、
 Sell Put 担保占用和剩余可用现金，并支持按账户和币种折算到 CNY。
 
@@ -102,10 +101,13 @@ Use the same launcher contract as Claude Code. For first-pass troubleshooting, p
 ./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
 ```
 
-For MacBook-side Codex diagnosis of online quality or candidate-scan behavior, collect a redacted handoff instead of calling an online AI provider:
+For MacBook-side Codex diagnosis of online quality or candidate-scan behavior,
+use the independent Research / Shadow Replay side lane instead of `om-agent`
+and instead of calling an online AI provider:
 
 ```bash
-./om-agent run --tool research --input-json '{"config_key":"us","scope":"full","output":"both","write_outputs":false}'
+./om research collect --config-key us --scope full --output both --no-write-outputs
+./om research shadow-replay status --min-sample 30
 ```
 
 ## Inbound Remote Messages
@@ -116,7 +118,7 @@ Use `./om assistant handle` when a remote messaging gateway needs to send user t
 ./om assistant handle --text '持仓 sy' --sender ou_xxx --channel feishu --message-id msg_xxx
 ```
 
-This is a controlled message entrypoint, not an `om-agent` tool and not a shell bridge. It performs Assistant command parsing, deterministic parsing, sender allowlist checks, message idempotency, SQLite audit, and then calls an allowlisted tool through the same `execute_tool(...)` path used by `om-agent`. Assistant config may opt into LLM intent translation; translated intents still return into the same allowlist, audit, and renderer path.
+This is a controlled Inbound message entrypoint, not an `om-agent` tool and not a shell bridge. It performs Inbound command parsing, deterministic parsing, sender allowlist checks, message idempotency, SQLite audit, and then calls an allowlisted tool through the same `execute_tool(...)` path used by `om-agent`. The current `./om assistant ...` CLI namespace and `assistant` config keys remain compatibility names. Inbound config may opt into LLM intent translation; translated intents still return into the same allowlist, audit, and renderer path.
 
 Remote channels require:
 
@@ -138,7 +140,7 @@ OM_FEISHU_BOT_ALLOWED_OPEN_IDS='ou_xxx' \
 ./om inbound feishu --input-file feishu_event.json --format text
 ```
 
-It extracts `im.message.receive_v1` text fields and then delegates to the same assistant control path.
+It extracts `im.message.receive_v1` text fields and then delegates to the same Inbound control path.
 
 For the full Feishu loop, run the long-connection service:
 
@@ -147,7 +149,7 @@ For the full Feishu loop, run the long-connection service:
 ./om inbound feishu-ws --config-key us --config-path /var/lib/options-monitor/config.us.json --lock-path /var/lib/options-monitor/locks/feishu-ws.lock
 ```
 
-The long-connection client receives Feishu events through the authenticated SDK connection, delegates text messages to assistant control, optionally adds the configured assistant `inbound.feishu_ws.ack_reaction`, and replies through the Feishu message reply API. Render it as a long-running service with `./om service render --include-feishu-ws ...`; no public callback URL or reverse proxy is required.
+The long-connection client receives Feishu events through the authenticated SDK connection, delegates text messages to Inbound control, optionally adds the configured Inbound `inbound.feishu_ws.ack_reaction`, and replies through the Feishu message reply API. Render it as a long-running service with `./om service render --include-feishu-ws ...`; no public callback URL or reverse proxy is required.
 
 Treat `openclaw_readiness` as OpenClaw-specific. It is safe to call outside OpenClaw, but the
 `openclaw_binary` check may return `warn` when the `openclaw` command is not installed.
@@ -236,6 +238,10 @@ OM_AGENT_ENABLE_WRITE_TOOLS=true
 ## 写操作门禁
 
 当前写操作不是只靠一个开关就能执行。
+
+门禁入口在 `src/application/tool_execution.py`，但“这个 payload 是否请求写入”
+由 `src/application/agent_tool_registry.py` 的工具定义/写入策略决定。执行层不再按
+具体工具名维护特殊分支。
 
 通常需要两层门禁：
 

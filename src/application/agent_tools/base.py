@@ -1,0 +1,271 @@
+from __future__ import annotations
+
+from copy import deepcopy
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable
+
+ToolHandlerResult = tuple[dict[str, Any], list[str], dict[str, Any]]
+ToolHandler = Callable[["AgentToolContext", dict[str, Any]], ToolHandlerResult]
+InputValidator = Callable[[dict[str, Any]], None]
+WriteRequestPredicate = Callable[[dict[str, Any]], bool]
+
+
+@dataclass(frozen=True)
+class AgentToolContext:
+    repo_base: Callable[[], Path]
+    load_runtime_config: Callable[..., tuple[Path, dict[str, Any]]]
+    resolve_output_root: Callable[..., Path]
+    mask_path: Callable[[Any], str | None]
+    validate_runtime_config: Callable[..., list[str]]
+    normalize_accounts: Callable[..., list[str]]
+    accounts_from_config: Callable[..., list[str]]
+    resolve_watchlist_config: Callable[..., list[dict[str, Any]]]
+    resolve_data_config_ref: Callable[..., Any]
+    resolve_public_data_config_path: Callable[..., Any]
+    read_json_object_or_empty: Callable[..., dict[str, Any]]
+    list_account_config_views: Callable[..., Any]
+    mask_account_id: Callable[[Any], str]
+    infer_futu_portfolio_settings: Callable[..., Any]
+    load_option_positions_repo: Callable[..., Any]
+    run_futu_doctor: Callable[..., dict[str, Any]]
+    healthcheck_symbols_for_futu: Callable[..., list[str]]
+    write_tools_enabled: Callable[[], bool]
+    read_scheduler_state: Callable[..., Any]
+    scheduler_decide: Callable[..., Any]
+    normalize_broker: Callable[..., str]
+    normalize_account: Callable[..., str]
+    resolve_option_positions_repo: Callable[..., Any]
+    list_position_rows: Callable[..., Any]
+    build_lot_event_history: Callable[..., Any]
+    inspect_projection_state: Callable[..., Any]
+    build_monthly_income_report: Callable[..., Any]
+    get_exchange_rates: Callable[..., Any]
+    build_notification: Callable[..., str]
+    collect_operation_timeline: Callable[..., dict[str, Any]]
+    check_version_update: Callable[..., dict[str, Any]]
+    collect_runtime_runs: Callable[..., dict[str, Any]]
+    collect_runtime_logs: Callable[..., dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class AgentTool:
+    name: str
+    read_only: bool
+    description: str
+    requires: tuple[str, ...]
+    capabilities: tuple[str, ...]
+    input_schema: dict[str, str]
+    handler: ToolHandler = field(repr=False, compare=False)
+    enabled: bool = True
+    side_effects: tuple[str, ...] = ()
+    risk_level: str | None = None
+    requires_confirm: bool = False
+    requires_env: tuple[str, ...] = ()
+    safe_default_input: dict[str, Any] = field(default_factory=dict)
+    examples: tuple[dict[str, Any], ...] = ()
+    write_request_predicate: WriteRequestPredicate | None = field(default=None, repr=False, compare=False)
+    input_validator: InputValidator | None = field(default=None, repr=False, compare=False)
+
+    def resolved_risk_level(self) -> str:
+        return self.risk_level or ("local_write" if self.side_effects else "read_only")
+
+    def is_pure_read(self) -> bool:
+        return (
+            bool(self.read_only)
+            and self.resolved_risk_level() == "read_only"
+            and not self.side_effects
+            and not self.requires_confirm
+        )
+
+    def is_write_requested(self, payload: dict[str, Any]) -> bool:
+        if self.read_only:
+            return False
+        if self.write_request_predicate is not None:
+            return bool(self.write_request_predicate(payload))
+        if bool(payload.get("dry_run", False)):
+            return False
+        return bool(self.side_effects or self.requires_confirm or self.resolved_risk_level() != "read_only")
+
+    def validate_input(self, payload: dict[str, Any]) -> None:
+        if self.input_validator is not None:
+            self.input_validator(payload)
+
+    def call(self, ctx: AgentToolContext, payload: dict[str, Any]) -> ToolHandlerResult:
+        self.validate_input(payload)
+        return self.handler(ctx, payload)
+
+    def to_manifest(self) -> dict[str, Any]:
+        side_effects = list(self.side_effects)
+        return {
+            "name": self.name,
+            "read_only": self.read_only,
+            "description": self.description,
+            "requires": list(self.requires),
+            "capabilities": list(self.capabilities),
+            "side_effects": side_effects,
+            "input_schema": dict(self.input_schema),
+            "risk_level": self.resolved_risk_level(),
+            "requires_confirm": bool(self.requires_confirm),
+            "requires_env": list(self.requires_env),
+            "safe_default_input": dict(self.safe_default_input),
+            "examples": deepcopy(list(self.examples)),
+        }
+
+
+def build_agent_tool(
+    *,
+    name: str,
+    description: str,
+    requires: tuple[str, ...],
+    capabilities: tuple[str, ...],
+    input_schema: dict[str, str],
+    handler: ToolHandler,
+    enabled: bool = True,
+    pure_read: bool = False,
+    read_only: bool = False,
+    side_effects: tuple[str, ...] = (),
+    risk_level: str | None = "local_write",
+    requires_confirm: bool = False,
+    requires_env: tuple[str, ...] = (),
+    safe_default_input: dict[str, Any] | None = None,
+    examples: tuple[dict[str, Any], ...] = (),
+    write_request_predicate: WriteRequestPredicate | None = None,
+    input_validator: InputValidator | None = None,
+) -> AgentTool:
+    if pure_read:
+        read_only = True
+        side_effects = ()
+        risk_level = "read_only"
+        requires_confirm = False
+    return AgentTool(
+        name=name,
+        read_only=bool(read_only),
+        description=description,
+        requires=requires,
+        capabilities=capabilities,
+        input_schema=input_schema,
+        handler=handler,
+        enabled=bool(enabled),
+        side_effects=side_effects,
+        risk_level=risk_level,
+        requires_confirm=bool(requires_confirm),
+        requires_env=requires_env,
+        safe_default_input=dict(safe_default_input or {}),
+        examples=examples,
+        write_request_predicate=write_request_predicate,
+        input_validator=input_validator,
+    )
+
+
+def build_default_agent_tool_context() -> AgentToolContext:
+    from src.application.account_config import accounts_from_config, list_account_config_views, normalize_accounts
+    from src.application.agent_tool_config import load_runtime_config, repo_base, resolve_output_root, write_tools_enabled
+    from src.application.agent_tool_contracts import mask_path
+    from src.application.agent_tool_runtime import (
+        healthcheck_symbols_for_futu as _healthcheck_symbols_for_futu_impl,
+        mask_account_id as _mask_account_id_impl,
+        normalize_broker as _normalize_broker,
+        read_json_object_or_empty as _read_json_object_or_empty_impl,
+        resolve_data_config_ref as _resolve_data_config_ref,
+        resolve_public_data_config_path as _resolve_public_data_config_path_impl,
+        run_futu_doctor as _run_futu_doctor_impl,
+        validate_runtime_config as _validate_runtime_config_impl,
+    )
+    from src.application.config_loader import resolve_watchlist_config
+    from src.application.config_validator import validate_config
+    from src.application.futu_portfolio_context import infer_futu_portfolio_settings
+    from src.application.ledger.api import (
+        list_position_rows as _list_position_rows,
+        open_position_ledger,
+        open_position_ledger_from_data_config as resolve_option_positions_repo,
+    )
+    from src.application.notify_symbols import build_notification
+    from src.application.positions.inspection import build_lot_event_history, inspect_projection_state
+    from src.application.positions.reporting import build_monthly_income_report
+    from src.application.runtime_logs_cli import collect_runtime_logs
+    from src.application.runtime_runs_cli import collect_runtime_runs
+    from src.application.scan_scheduler import decide as scheduler_decide
+    from src.application.scan_scheduler import read_state as read_scheduler_state
+    from src.application.assistant.operation_diagnostics import collect_operation_timeline
+    from src.application.version_check import check_version_update
+    from domain.domain.ledger.position_fields import normalize_account
+    from src.infrastructure.exchange_rates import get_exchange_rates_or_fetch_latest
+
+    def _validate_runtime_config(cfg: dict[str, Any], *, allow_empty_symbols: bool = False) -> list[str]:
+        return _validate_runtime_config_impl(
+            cfg,
+            allow_empty_symbols=allow_empty_symbols,
+            resolve_watchlist_config=resolve_watchlist_config,
+            validate_config=validate_config,
+        )
+
+    def _resolve_public_data_config_path(payload: dict[str, Any], portfolio_cfg: dict[str, Any]) -> Any:
+        return _resolve_public_data_config_path_impl(payload, portfolio_cfg, repo_base=repo_base)
+
+    def _read_json_object_or_empty(path: Any) -> dict[str, Any]:
+        return _read_json_object_or_empty_impl(path)
+
+    def _mask_account_id(value: Any) -> str:
+        return _mask_account_id_impl(value)
+
+    def _run_futu_doctor(
+        *,
+        host: str,
+        port: int,
+        symbols: list[str],
+        timeout_sec: int,
+        telnet_host: str = "127.0.0.1",
+        telnet_port: int = 22222,
+    ) -> dict[str, Any]:
+        return _run_futu_doctor_impl(
+            host=host,
+            port=port,
+            symbols=symbols,
+            timeout_sec=timeout_sec,
+            repo_base=repo_base,
+            telnet_host=telnet_host,
+            telnet_port=telnet_port,
+        )
+
+    def _healthcheck_symbols_for_futu(cfg: dict[str, Any]) -> list[str]:
+        return _healthcheck_symbols_for_futu_impl(cfg, resolve_watchlist_config=resolve_watchlist_config)
+
+    def _get_exchange_rates(*, cache_path: Any, log: Any = None) -> Any:
+        return get_exchange_rates_or_fetch_latest(cache_path=cache_path, log=log)
+
+    return AgentToolContext(
+        repo_base=repo_base,
+        load_runtime_config=load_runtime_config,
+        resolve_output_root=resolve_output_root,
+        mask_path=mask_path,
+        validate_runtime_config=_validate_runtime_config,
+        normalize_accounts=normalize_accounts,
+        accounts_from_config=accounts_from_config,
+        resolve_watchlist_config=resolve_watchlist_config,
+        resolve_data_config_ref=_resolve_data_config_ref,
+        resolve_public_data_config_path=_resolve_public_data_config_path,
+        read_json_object_or_empty=_read_json_object_or_empty,
+        list_account_config_views=list_account_config_views,
+        mask_account_id=_mask_account_id,
+        infer_futu_portfolio_settings=infer_futu_portfolio_settings,
+        load_option_positions_repo=open_position_ledger,
+        run_futu_doctor=_run_futu_doctor,
+        healthcheck_symbols_for_futu=_healthcheck_symbols_for_futu,
+        write_tools_enabled=write_tools_enabled,
+        read_scheduler_state=read_scheduler_state,
+        scheduler_decide=scheduler_decide,
+        normalize_broker=_normalize_broker,
+        normalize_account=normalize_account,
+        resolve_option_positions_repo=resolve_option_positions_repo,
+        list_position_rows=_list_position_rows,
+        build_lot_event_history=build_lot_event_history,
+        inspect_projection_state=inspect_projection_state,
+        build_monthly_income_report=build_monthly_income_report,
+        get_exchange_rates=_get_exchange_rates,
+        build_notification=build_notification,
+        collect_operation_timeline=collect_operation_timeline,
+        check_version_update=check_version_update,
+        collect_runtime_runs=collect_runtime_runs,
+        collect_runtime_logs=collect_runtime_logs,
+    )

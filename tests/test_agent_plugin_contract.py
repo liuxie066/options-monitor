@@ -35,7 +35,7 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "candidate_filter_explain" in tool_names
     assert "strategy_replay_analyze" not in tool_names
     assert "doctor" not in tool_names
-    assert "research" in tool_names
+    assert "research" not in tool_names
     assert spec["schema_version"] == "1.0"
     assert spec["recommended_flow"] == ["healthcheck", "scan_opportunities", "get_close_advice"]
     get_close_advice = next(item for item in spec["tools"] if item["name"] == "get_close_advice")
@@ -68,10 +68,6 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "operation_id" in operation_timeline["input_schema"]
     assert "operation_types" in operation_timeline["input_schema"]
     assert "audit_scan_limit" in operation_timeline["input_schema"]
-    research = next(item for item in spec["tools"] if item["name"] == "research")
-    assert "runs_root" in research["input_schema"]
-    assert "run_id" in research["input_schema"]
-    assert "report_dir" in research["input_schema"]
     income_report = next(item for item in spec["tools"] if item["name"] == "monthly_income_report")
     assert income_report["risk_level"] == "read_only"
     assert income_report["requires_confirm"] is False
@@ -104,40 +100,148 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert candidate_filter_explain["risk_level"] == "read_only"
     assert candidate_filter_explain["requires_confirm"] is False
     assert "symbol" in candidate_filter_explain["input_schema"]
-    research = next(item for item in spec["tools"] if item["name"] == "research")
-    assert research["read_only"] is False
-    assert research["risk_level"] == "local_write"
-    assert research["requires_confirm"] is True
-    assert research["safe_default_input"] == {
-        "scope": "full",
-        "output": "handoff",
-        "write_outputs": False,
-    }
-    assert "scope" in research["input_schema"]
-    assert "include_healthcheck" in research["input_schema"]
-    assert "data_config" in research["input_schema"]
-    assert "candidate_report_dir" in research["input_schema"]
-    assert "shadow_replay_min_sample" in research["input_schema"]
-    assert "mark_paths" in research["input_schema"]
-    assert "outcome_paths" in research["input_schema"]
-    assert "strategy_min_sample" not in research["input_schema"]
-    assert "strategy_replay_paths" not in research["input_schema"]
-    assert "ai_config" not in research["input_schema"]
-    assert "healthcheck_snapshot" in research["capabilities"]
 
 
 def test_agent_registry_manifest_and_handlers_stay_in_sync() -> None:
     from src.application.tool_execution import build_tool_manifest as build_spec
+    from src.application.agent_tools.base import AgentTool
     from src.application.agent_tool_handlers import TOOL_HANDLERS
-    from src.application.agent_tool_registry import tool_names
+    from src.application.agent_tool_registry import AGENT_TOOL_DEFINITIONS, get_tool_definition, tool_names
 
     spec = build_spec()
     manifest_names = [str(x.get("name")) for x in spec.get("tools", [])]
     registry_names = list(tool_names())
+    active_definitions = [
+        definition
+        for definition in AGENT_TOOL_DEFINITIONS
+        if not isinstance(definition, AgentTool) or definition.enabled
+    ]
+    migrated_names = {definition.name for definition in active_definitions if isinstance(definition, AgentTool)}
+    legacy_names = {definition.name for definition in active_definitions if not isinstance(definition, AgentTool)}
+    pure_read_names = {definition.name for definition in active_definitions if definition.is_pure_read()}
 
     assert manifest_names == registry_names
-    assert sorted(TOOL_HANDLERS) == sorted(registry_names)
+    assert sorted(TOOL_HANDLERS) == sorted(legacy_names)
+    assert pure_read_names <= migrated_names
+    assert not pure_read_names & set(TOOL_HANDLERS)
+    assert not any(definition.is_pure_read() for definition in active_definitions if not isinstance(definition, AgentTool))
+    assert {
+        "healthcheck",
+        "config_validate",
+        "scheduler_status",
+        "candidate_rank_explain",
+        "candidate_filter_explain",
+        "monthly_income_report",
+        "option_positions_read",
+        "close_advice_read",
+        "preview_notification",
+        "runtime_status",
+        "version_check",
+        "runtime_runs",
+        "runtime_logs",
+        "operation_timeline",
+        "openclaw_readiness",
+    } <= migrated_names
+    for name in migrated_names:
+        definition = get_tool_definition(name)
+        assert isinstance(definition, AgentTool)
+        assert callable(definition.call)
     assert '"user1"' not in json.dumps([x.get("examples") for x in spec.get("tools", [])], ensure_ascii=False)
+
+
+def test_pure_read_allowlist_is_derived_from_registry_metadata() -> None:
+    from src.application.agent_tool_registry import AGENT_TOOL_DEFINITIONS, pure_read_tool_names
+    from src.application.tool_allowlist import PURE_READ_TOOLS
+
+    expected = frozenset(definition.name for definition in AGENT_TOOL_DEFINITIONS if definition.is_pure_read())
+
+    assert PURE_READ_TOOLS == expected
+    assert pure_read_tool_names() == expected
+    assert "runtime_status" in PURE_READ_TOOLS
+    assert "version_check" in PURE_READ_TOOLS
+    assert "runtime_runs" in PURE_READ_TOOLS
+    assert "runtime_logs" in PURE_READ_TOOLS
+    assert "candidate_filter_explain" in PURE_READ_TOOLS
+    assert "operation_timeline" in PURE_READ_TOOLS
+    assert "scan_opportunities" not in PURE_READ_TOOLS
+    assert "manage_symbols" not in PURE_READ_TOOLS
+    assert "research" not in PURE_READ_TOOLS
+
+
+def test_write_request_policy_is_registry_driven() -> None:
+    from src.application.agent_tool_registry import get_tool_definition, tool_write_requested
+
+    version_update = get_tool_definition("version_update")
+    manage_symbols = get_tool_definition("manage_symbols")
+    runtime_status = get_tool_definition("runtime_status")
+
+    assert version_update is not None
+    assert version_update.write_request_predicate is not None
+    assert not tool_write_requested(version_update, {"bump": "patch"})
+    assert not tool_write_requested(version_update, {"bump": "patch", "apply": False})
+    assert tool_write_requested(version_update, {"bump": "patch", "apply": True})
+
+    assert manage_symbols is not None
+    assert manage_symbols.write_request_predicate is not None
+    assert not tool_write_requested(manage_symbols, {"action": "list"})
+    assert not tool_write_requested(manage_symbols, {"action": "edit", "dry_run": True})
+    assert tool_write_requested(manage_symbols, {"action": "edit", "dry_run": False})
+
+    assert runtime_status is not None
+    assert not tool_write_requested(runtime_status, {"dry_run": False})
+
+
+def test_migrated_agent_tool_executes_through_agent_tool_object(tmp_path: Path) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+    from src.application.agent_tool_handlers import TOOL_HANDLERS
+
+    runs_root = tmp_path / "output_runs"
+    runs_root.mkdir()
+
+    assert "runtime_runs" not in TOOL_HANDLERS
+    runs = run_tool("runtime_runs", {"runs_root": str(runs_root), "limit": 1})
+    assert runs["ok"] is True
+    assert runs["data"]["schema_version"] == "runtime_runs.v1"
+    assert runs["data"]["summary"]["limit"] == 1
+    assert runs["meta"]["runs_root"] == ".../output_runs"
+
+    assert "runtime_logs" not in TOOL_HANDLERS
+    logs = run_tool("runtime_logs", {"runs_root": str(runs_root), "kind": "all", "lines": 1})
+    assert logs["ok"] is True
+    assert logs["data"]["schema_version"] == "runtime_logs.v1"
+    assert logs["data"]["summary"]["lines"] == 1
+
+
+def test_write_gate_uses_registry_write_policy(monkeypatch) -> None:
+    from src.application import agent_tool_handlers
+    from src.application.tool_execution import execute_tool as run_tool
+
+    calls: list[tuple[str, dict]] = []
+
+    def _handler(payload: dict) -> tuple[dict, list[str], dict]:
+        calls.append(("called", dict(payload)))
+        return {"ok": True}, [], {}
+
+    monkeypatch.delenv("OM_AGENT_ENABLE_WRITE_TOOLS", raising=False)
+    monkeypatch.setitem(agent_tool_handlers.TOOL_HANDLERS, "version_update", _handler)
+    monkeypatch.setitem(agent_tool_handlers.TOOL_HANDLERS, "manage_symbols", _handler)
+
+    preview = run_tool("version_update", {"bump": "patch", "apply": False})
+    assert preview["ok"] is True
+    assert calls == [("called", {"bump": "patch", "apply": False})]
+
+    blocked_apply = run_tool("version_update", {"bump": "patch", "apply": True})
+    assert blocked_apply["ok"] is False
+    assert blocked_apply["error"]["code"] == "PERMISSION_DENIED"
+    assert calls == [("called", {"bump": "patch", "apply": False})]
+
+    dry_run = run_tool("manage_symbols", {"config_key": "us", "action": "edit", "dry_run": True})
+    assert dry_run["ok"] is True
+    assert calls[-1] == ("called", {"config_key": "us", "action": "edit", "dry_run": True})
+
+    blocked_write = run_tool("manage_symbols", {"config_key": "us", "action": "edit", "dry_run": False})
+    assert blocked_write["ok"] is False
+    assert blocked_write["error"]["code"] == "PERMISSION_DENIED"
 
 
 def test_agent_manifest_safe_defaults_do_not_select_market_config() -> None:
@@ -170,6 +274,17 @@ def test_removed_strategy_replay_tool_returns_unknown_tool(monkeypatch) -> None:
     monkeypatch.delenv("OM_AGENT_ENABLE_WRITE_TOOLS", raising=False)
 
     out = run_tool("strategy_replay_analyze", {"rows": []})
+    assert out["ok"] is False
+    assert out["error"]["code"] == "INPUT_ERROR"
+    assert "unknown tool" in out["error"]["message"]
+
+
+def test_research_is_not_an_agent_tool(monkeypatch) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    monkeypatch.delenv("OM_AGENT_ENABLE_WRITE_TOOLS", raising=False)
+
+    out = run_tool("research", {"scope": "full", "write_outputs": False})
     assert out["ok"] is False
     assert out["error"]["code"] == "INPUT_ERROR"
     assert "unknown tool" in out["error"]["message"]
@@ -227,7 +342,7 @@ def test_agent_cli_spec_prints_json_manifest() -> None:
     assert any(str(x.get("name")) == "operation_timeline" for x in payload.get("tools", []))
     assert any(str(x.get("name")) == "candidate_rank_explain" for x in payload.get("tools", []))
     assert not any(str(x.get("name")) == "doctor" for x in payload.get("tools", []))
-    assert any(str(x.get("name")) == "research" for x in payload.get("tools", []))
+    assert not any(str(x.get("name")) == "research" for x in payload.get("tools", []))
     assert any(str(x.get("name")) == "candidate_filter_explain" for x in payload.get("tools", []))
     assert not any(str(x.get("name")) == "strategy_replay_analyze" for x in payload.get("tools", []))
     assert "init_command" not in payload["launcher"]

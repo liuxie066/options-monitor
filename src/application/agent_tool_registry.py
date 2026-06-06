@@ -2,16 +2,33 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
-from domain.domain.strategy_vocab import (
-    STRATEGY_CLOSE_ADVICE,
-    STRATEGY_COVERED_CALL,
-    STRATEGY_SELL_PUT,
-    STRATEGY_YIELD_ENHANCEMENT,
-    strategy_key_help,
-)
 from src.application.agent_tool_config import write_tools_enabled as _write_tools_enabled_from_config
+from src.application.agent_tools.base import AgentTool
+from src.application.agent_tools.candidate import CANDIDATE_FILTER_EXPLAIN_TOOL, CANDIDATE_RANK_EXPLAIN_TOOL
+from src.application.agent_tools.close_advice import CLOSE_ADVICE_READ_TOOL
+from src.application.agent_tools.config import CONFIG_VALIDATE_TOOL, SCHEDULER_STATUS_TOOL
+from src.application.agent_tools.diagnostics import (
+    HEALTHCHECK_TOOL,
+    OPENCLAW_READINESS_TOOL,
+    OPERATION_TIMELINE_TOOL,
+    RUNTIME_STATUS_TOOL,
+)
+from src.application.agent_tools.notifications import PREVIEW_NOTIFICATION_TOOL
+from src.application.agent_tools.positions import MONTHLY_INCOME_REPORT_TOOL, OPTION_POSITIONS_READ_TOOL
+from src.application.agent_tools.runtime import RUNTIME_LOGS_TOOL, RUNTIME_RUNS_TOOL, VERSION_CHECK_TOOL
+
+WriteRequestPredicate = Callable[[dict[str, Any]], bool]
+
+
+def _version_update_write_requested(payload: dict[str, Any]) -> bool:
+    return bool(payload.get("apply", False))
+
+
+def _manage_symbols_write_requested(payload: dict[str, Any]) -> bool:
+    action = str(payload.get("action") or "list").strip().lower()
+    return action != "list" and not bool(payload.get("dry_run", False))
 
 
 @dataclass(frozen=True)
@@ -28,6 +45,27 @@ class AgentToolDefinition:
     requires_env: tuple[str, ...] = ()
     safe_default_input: dict[str, Any] = field(default_factory=dict)
     examples: tuple[dict[str, Any], ...] = ()
+    write_request_predicate: WriteRequestPredicate | None = field(default=None, repr=False, compare=False)
+
+    def resolved_risk_level(self) -> str:
+        return self.risk_level or ("local_write" if self.side_effects else "read_only")
+
+    def is_pure_read(self) -> bool:
+        return (
+            bool(self.read_only)
+            and self.resolved_risk_level() == "read_only"
+            and not self.side_effects
+            and not self.requires_confirm
+        )
+
+    def is_write_requested(self, payload: dict[str, Any]) -> bool:
+        if self.read_only:
+            return False
+        if self.write_request_predicate is not None:
+            return bool(self.write_request_predicate(payload))
+        if bool(payload.get("dry_run", False)):
+            return False
+        return bool(self.side_effects or self.requires_confirm or self.resolved_risk_level() != "read_only")
 
     def to_manifest(self) -> dict[str, Any]:
         side_effects = list(self.side_effects)
@@ -39,7 +77,7 @@ class AgentToolDefinition:
             "capabilities": list(self.capabilities),
             "side_effects": side_effects,
             "input_schema": dict(self.input_schema),
-            "risk_level": self.risk_level or ("local_write" if side_effects else "read_only"),
+            "risk_level": self.resolved_risk_level(),
             "requires_confirm": bool(self.requires_confirm),
             "requires_env": list(self.requires_env),
             "safe_default_input": dict(self.safe_default_input),
@@ -47,47 +85,12 @@ class AgentToolDefinition:
         }
 
 
-AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
-    AgentToolDefinition(
-        name="healthcheck",
-        read_only=True,
-        description="Validate runtime config and summarize local readiness without sending notifications or writing remote data.",
-        requires=("runtime_config", "sqlite_data_config", "opend"),
-        capabilities=("diagnostics", "read_only"),
-        input_schema={
-            "config_key": "us|hk (optional when config_path is set)",
-            "config_path": "absolute or relative JSON config path",
-            "accounts": "optional list[str]",
-            "data_config": "optional explicit data config path",
-            "timeout_sec": "optional int",
-            "opend_telnet_host": "optional OpenD telnet host; defaults to 127.0.0.1",
-            "opend_telnet_port": "optional OpenD telnet port; defaults to 22222",
-            "audit_db": "optional inbound audit SQLite path for Feishu inbound diagnostics",
-            "profile_path": "optional service.profile.json path for Feishu WS service diagnostics",
-            "include_service_status": "optional bool; run local service status checks from profile_path",
-            "candidate_report_dir": "optional directory containing candidate/reject/trace evidence for diagnostic readiness checks",
-            "candidate_paths": "optional list of candidate evidence files",
-            "candidate_reject_log_paths": "optional list of reject-log evidence files",
-            "candidate_trace_paths": "optional list of candidate-filter trace files",
-            "candidate_evidence_min_sample": "optional int; default 5; minimum candidate rows for readiness checks",
-        },
-        risk_level="read_only",
-        safe_default_input={},
-        examples=({"input": {"config_key": "us"}},),
-    ),
-    AgentToolDefinition(
-        name="version_check",
-        read_only=True,
-        description="Check local VERSION against git release tags without running any monitor workflow.",
-        requires=("git_remote",),
-        capabilities=("version_check", "read_only"),
-        input_schema={
-            "remote_name": "optional git remote name; defaults to origin",
-        },
-        risk_level="read_only",
-        safe_default_input={"remote_name": "origin"},
-        examples=({"input": {"remote_name": "origin"}},),
-    ),
+AgentToolEntry = AgentToolDefinition | AgentTool
+
+
+AGENT_TOOL_DEFINITIONS: tuple[AgentToolEntry, ...] = (
+    HEALTHCHECK_TOOL,
+    VERSION_CHECK_TOOL,
     AgentToolDefinition(
         name="version_update",
         read_only=False,
@@ -105,45 +108,14 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
         risk_level="local_write",
         requires_confirm=True,
         safe_default_input={"bump": "patch", "apply": False},
+        write_request_predicate=_version_update_write_requested,
         examples=(
             {"input": {"bump": "patch", "apply": False}},
             {"input": {"target_version": "1.2.3", "apply": True, "confirm": True}},
         ),
     ),
-    AgentToolDefinition(
-        name="config_validate",
-        read_only=True,
-        description="Validate runtime config only, without OpenD checks or pipeline execution.",
-        requires=("runtime_config",),
-        capabilities=("config_validate", "read_only"),
-        input_schema={
-            "config_key": "us|hk (optional when config_path is set)",
-            "config_path": "absolute or relative JSON config path",
-            "allow_empty_symbols": "optional bool for first-time config scaffolds",
-        },
-        risk_level="read_only",
-        safe_default_input={},
-        examples=({"input": {"config_key": "us"}},),
-    ),
-    AgentToolDefinition(
-        name="scheduler_status",
-        read_only=True,
-        description="Return scheduler decision and existing scheduler state without marking scan/notify state or running pipelines.",
-        requires=("runtime_config",),
-        capabilities=("scheduler_status", "read_only"),
-        input_schema={
-            "config_key": "us|hk",
-            "config_path": "optional explicit config path",
-            "state_dir": "optional state dir; defaults to output_shared/state",
-            "state": "optional explicit scheduler state file",
-            "schedule_key": "optional schedule key; defaults to schedule",
-            "account": "optional account label",
-            "force": "optional bool to preview force-mode scheduler decision",
-        },
-        risk_level="read_only",
-        safe_default_input={},
-        examples=({"input": {"config_key": "us", "account": "lx"}},),
-    ),
+    CONFIG_VALIDATE_TOOL,
+    SCHEDULER_STATUS_TOOL,
     AgentToolDefinition(
         name="scan_opportunities",
         read_only=True,
@@ -163,66 +135,8 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
         safe_default_input={"top_n": 5},
         examples=({"input": {"config_key": "us", "top_n": 5}},),
     ),
-    AgentToolDefinition(
-        name="candidate_rank_explain",
-        read_only=True,
-        description="Explain existing candidate CSV ranking scores without running scans, sending notifications, or writing reports.",
-        requires=("local_candidate_reports",),
-        capabilities=("ranking_explain", "read_only"),
-        input_schema={
-            "mode": "optional put|call|all; defaults to all",
-            "top_n": "optional int, max 100; defaults to 10",
-            "report_dir": "optional report dir; defaults to output_shared/reports then output_shared/agent_tools/reports",
-            "output_dir": "optional output root; uses <output_dir>/reports",
-            "run_id": "optional output_runs run id; searches run account report dirs",
-            "run_dir": "optional explicit run dir; searches run account report dirs",
-            "account": "optional account label when run_id/run_dir is supplied",
-            "candidate_path": "optional explicit candidate CSV path",
-            "candidate_paths": "optional list of candidate CSV paths",
-            "score_weights": "optional object: annualized_return, net_income, liquidity, risk_distance, vol_edge, delta_target, concentration, path_risk",
-            "compare_baseline": "optional bool; compare against return-then-income baseline",
-        },
-        risk_level="read_only",
-        safe_default_input={"mode": "all", "top_n": 10},
-        examples=(
-            {"input": {"mode": "put", "top_n": 5}},
-            {"input": {"candidate_path": "output_shared/reports/sell_put_candidates_labeled.csv", "mode": "put"}},
-        ),
-    ),
-    AgentToolDefinition(
-        name="candidate_filter_explain",
-        read_only=True,
-        description="Explain why a symbol was rejected, post-filtered, accepted, or not observed across candidate filter functions from existing trace rows.",
-        requires=("candidate_filter_trace",),
-        capabilities=("candidate_filter_trace", "filter_explain", "read_only"),
-        input_schema={
-            "symbol": "required canonical symbol, for example NVDA or 0700.HK",
-            "account": "optional account label",
-            "function": (
-                "optional "
-                + strategy_key_help(
-                    (
-                        STRATEGY_SELL_PUT,
-                        STRATEGY_COVERED_CALL,
-                        STRATEGY_CLOSE_ADVICE,
-                        STRATEGY_YIELD_ENHANCEMENT,
-                    )
-                )
-                + "|cash_reserve|share_coverage"
-            ),
-            "run_id": "optional output_runs run id; use latest externally when desired",
-            "run_dir": "optional explicit output_runs/<run_id> directory",
-            "report_dir": "optional report dir containing candidate_filter_trace.jsonl",
-            "trace_path": "optional explicit candidate_filter_trace.jsonl path",
-            "trace_paths": "optional list of trace jsonl paths",
-        },
-        risk_level="read_only",
-        safe_default_input={"symbol": "NVDA"},
-        examples=(
-            {"input": {"run_id": "20260514T100000Z", "account": "lx", "symbol": "NVDA"}},
-            {"input": {"trace_path": "output_shared/reports/candidate_filter_trace.jsonl", "symbol": "NVDA"}},
-        ),
-    ),
+    CANDIDATE_RANK_EXPLAIN_TOOL,
+    CANDIDATE_FILTER_EXPLAIN_TOOL,
     AgentToolDefinition(
         name="query_cash_headroom",
         read_only=True,
@@ -246,63 +160,8 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
             {"input": {"config_key": "us", "account": "sy"}},
         ),
     ),
-    AgentToolDefinition(
-        name="monthly_income_report",
-        read_only=True,
-        description=(
-            "Return monthly option income statistics by cashflow, realized PnL, and open-basis attribution "
-            "from local option positions without running market data or notification workflows."
-        ),
-        requires=("runtime_config", "sqlite_data_config"),
-        capabilities=("income_report", "option_positions", "read_only"),
-        input_schema={
-            "config_key": "us|hk",
-            "config_path": "optional explicit config path",
-            "data_config": "optional explicit data config path",
-            "account": "optional account label",
-            "broker": "optional broker name, preferred public field",
-            "month": "optional YYYY-MM filter",
-            "include_rows": "optional bool; include cashflow, realized, open-basis, and premium detail rows",
-        },
-        risk_level="read_only",
-        safe_default_input={},
-        examples=({"input": {"config_key": "us", "account": "lx", "month": "2026-04"}},),
-    ),
-    AgentToolDefinition(
-        name="option_positions_read",
-        read_only=True,
-        description="Read local option position lots, trade events, lot history, or projection inspection state.",
-        requires=("runtime_config", "sqlite_data_config"),
-        capabilities=("option_positions", "read_only", "ledger_diagnostics"),
-        input_schema={
-            "config_key": "us|hk",
-            "config_path": "optional explicit config path",
-            "data_config": "optional explicit data config path",
-            "action": "list|events|history|inspect",
-            "broker": "optional broker name, preferred public field",
-            "account": "optional account label",
-            "status": "list-only open|close|all",
-            "query": "list-only structured PositionQuery: account/status/symbol/option_type/side/strike/expiration/limit",
-            "limit": "optional int, max 500",
-            "exp_within_days": "list-only optional int",
-            "expiration_month": "list-only optional YYYY-MM",
-            "expiration_exact": "list-only optional YYYY-MM-DD",
-            "expiration_before": "list-only optional YYYY-MM-DD inclusive",
-            "expiration_after": "list-only optional YYYY-MM-DD inclusive",
-            "record_id": "history/inspect selector",
-            "symbol": "list/events/inspect selector",
-            "option_type": "list/events/inspect put|call selector",
-            "side": "list-only short|long selector",
-            "strike": "list/events/inspect numeric selector",
-            "exp": "events/inspect YYYY-MM-DD selector",
-        },
-        risk_level="read_only",
-        safe_default_input={"action": "list"},
-        examples=(
-            {"input": {"config_key": "us", "action": "list", "query": {"account": "lx", "status": "open"}}},
-            {"input": {"config_key": "us", "action": "history", "record_id": "rec_xxx"}},
-        ),
-    ),
+    MONTHLY_INCOME_REPORT_TOOL,
+    OPTION_POSITIONS_READ_TOOL,
     AgentToolDefinition(
         name="get_portfolio_context",
         read_only=True,
@@ -383,26 +242,7 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
         safe_default_input={},
         examples=({"input": {"config_key": "us"}},),
     ),
-    AgentToolDefinition(
-        name="close_advice_read",
-        read_only=True,
-        description="Read existing close-advice report rows and filter them without refreshing market data or writing reports.",
-        requires=("local_close_advice_report",),
-        capabilities=("close_advice", "position_exit_analysis", "read_only"),
-        input_schema={
-            "config_key": "us|hk",
-            "config_path": "optional explicit config path",
-            "query": "optional object with account, symbol, option_type, side, strike, expiration, limit",
-            "run_id": "optional output_runs run id",
-            "runs_root": "optional output_runs root",
-            "report_path": "optional explicit close_advice.csv path or containing directory",
-            "csv_path": "optional explicit close_advice.csv path",
-            "output_dir": "optional agent tool output root; uses <output_dir>/reports/close_advice.csv",
-        },
-        risk_level="read_only",
-        safe_default_input={},
-        examples=({"input": {"config_key": "us", "query": {"option_type": "call", "side": "long"}}},),
-    ),
+    CLOSE_ADVICE_READ_TOOL,
     AgentToolDefinition(
         name="manage_symbols",
         read_only=False,
@@ -423,236 +263,33 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
         requires_confirm=True,
         requires_env=("OM_AGENT_ENABLE_WRITE_TOOLS=true for non-dry-run writes",),
         safe_default_input={"action": "list"},
+        write_request_predicate=_manage_symbols_write_requested,
         examples=(
             {"input": {"config_key": "us", "action": "list"}},
             {"input": {"config_key": "us", "action": "add", "symbol": "NVDA", "dry_run": True}},
         ),
     ),
-    AgentToolDefinition(
-        name="preview_notification",
-        read_only=True,
-        description="Build final notification text from alerts/changes without sending it.",
-        requires=("alerts_or_changes_input",),
-        capabilities=("notification_preview", "read_only"),
-        input_schema={
-            "alerts_text": "raw alert markdown text",
-            "changes_text": "raw changes markdown text",
-            "alerts_path": "optional file path when alerts_text omitted",
-            "changes_path": "optional file path when changes_text omitted",
-            "account_label": "optional account label",
-        },
-        risk_level="read_only",
-        safe_default_input={"alerts_text": "", "changes_text": ""},
-        examples=(
-            {
-                "input": {
-                    "alerts_path": "output_shared/reports/symbols_alerts.txt",
-                    "changes_path": "output_shared/reports/symbols_changes.txt",
-                }
-            },
-        ),
-    ),
-    AgentToolDefinition(
-        name="runtime_status",
-        read_only=True,
-        description="Summarize existing OpenClaw/runtime output files without running pipelines or sending notifications.",
-        requires=("runtime_config",),
-        capabilities=("status", "read_only", "openclaw"),
-        input_schema={
-            "config_key": "us|hk",
-            "config_path": "optional explicit config path",
-            "accounts": "optional list[str]",
-            "report_dir": "optional report dir; defaults to output_shared/reports",
-            "state_dir": "optional shared state dir; defaults to output_shared/state",
-            "shared_state_dir": "optional shared state dir; defaults to output_shared/state",
-            "accounts_root": "optional accounts output root; defaults to output_accounts",
-            "runs_root": "optional run history root; defaults to output_runs",
-            "run_id": "optional output_runs run id to inspect instead of the last_run_dir pointer",
-            "run_dir": "optional explicit run directory to inspect instead of the last_run_dir pointer",
-            "max_notification_chars": "optional int, capped at 20000",
-            "max_run_age_minutes": "optional freshness threshold; defaults to 60",
-            "profile_path": "optional OpenClaw profile JSON path",
-            "include_service_status": "optional bool; inspect configured systemd/launchd service status when a service profile is loaded",
-            "trigger_source": "optional outer runner source such as cron or om_direct",
-            "trigger_job_id": "optional outer runner job id",
-            "delivery": "optional outer runner delivery object, e.g. {'mode':'announce'}",
-            "delivery_mode": "optional outer runner delivery mode such as none or announce",
-            "timeoutSeconds": "optional outer runner timeout in seconds",
-        },
-        risk_level="read_only",
-        safe_default_input={},
-        examples=({"input": {"config_key": "us", "max_notification_chars": 2000}},),
-    ),
-    AgentToolDefinition(
-        name="runtime_runs",
-        read_only=True,
-        description="List and inspect local runtime run snapshots from output_runs without running pipelines or sending notifications.",
-        requires=("runtime_artifacts",),
-        capabilities=("runs", "read_only", "runtime_artifacts"),
-        input_schema={
-            "runs_root": "optional run history root; defaults to output_runs",
-            "profile_path": "optional OpenClaw/service profile JSON path",
-            "limit": "optional number of recent runs to return; defaults to 10; <=0 returns all",
-            "run_id": "optional output_runs run id to inspect",
-            "run_dir": "optional explicit run directory to inspect",
-            "scanned_only": "optional bool; only return runs that recorded ran_scan=true",
-        },
-        risk_level="read_only",
-        safe_default_input={"limit": 10},
-        examples=(
-            {"input": {"limit": 10}},
-            {"input": {"run_id": "20260515T182459Z-474761"}},
-        ),
-    ),
-    AgentToolDefinition(
-        name="runtime_logs",
-        read_only=True,
-        description="Tail local runtime run audit files or service logs without running pipelines or sending notifications.",
-        requires=("runtime_artifacts",),
-        capabilities=("logs", "audit_tail", "read_only", "runtime_artifacts"),
-        input_schema={
-            "runs_root": "optional run history root; defaults to output_runs",
-            "logs_root": "optional service log root; defaults to logs or profile runtime_root/logs",
-            "profile_path": "optional OpenClaw/service profile JSON path",
-            "run_id": "optional output_runs run id to inspect",
-            "run_dir": "optional explicit run directory to inspect",
-            "kind": "optional all|audit|tool|tick|service; defaults all",
-            "lines": "optional number of tail lines; defaults 50",
-            "log_file": "optional explicit log file path",
-        },
-        risk_level="read_only",
-        safe_default_input={"kind": "all", "lines": 50},
-        examples=(
-            {"input": {"run_id": "20260515T182459Z-474761", "kind": "tool", "lines": 20}},
-            {"input": {"kind": "service", "lines": 50}},
-        ),
-    ),
-    AgentToolDefinition(
-        name="operation_timeline",
-        read_only=True,
-        description="Read existing inbound audit and pending operation stores to reconstruct recent operator operation timelines without mutating ledger, channel, or tick state.",
-        requires=("inbound_audit_db",),
-        capabilities=("operation_timeline", "assistant_diagnostics", "read_only"),
-        input_schema={
-            "audit_db": "optional inbound audit SQLite path",
-            "inbound_audit_db": "optional alias for audit_db",
-            "channel": "optional channel filter such as feishu",
-            "sender_id": "optional operator sender id filter",
-            "conversation_id": "optional conversation filter",
-            "operation_id": "optional exact pending operation id",
-            "operation_types": "optional list[str] such as manual_open/manual_close",
-            "statuses": "optional list[str] of operation statuses; defaults to operator lifecycle statuses",
-            "limit": "optional number of recent operation timelines to return; defaults to 10",
-            "audit_scan_limit": "optional number of recent audit rows to scan for response/receipt links",
-        },
-        risk_level="read_only",
-        safe_default_input={"limit": 10},
-        examples=(
-            {"input": {"limit": 10}},
-            {"input": {"channel": "feishu", "sender_id": "ou_1", "operation_types": ["manual_open"], "limit": 10}},
-        ),
-    ),
-    AgentToolDefinition(
-        name="openclaw_readiness",
-        read_only=True,
-        description="OpenClaw-oriented readiness summary combining runtime_status, healthcheck, and local openclaw command availability.",
-        requires=("runtime_config",),
-        capabilities=("diagnostics", "read_only", "openclaw"),
-        input_schema={
-            "config_key": "us|hk",
-            "config_path": "optional explicit config path",
-            "accounts": "optional list[str]",
-            "data_config": "optional explicit data config path for healthcheck",
-            "timeout_sec": "optional int for healthcheck OpenD readiness probe",
-            "max_notification_chars": "optional int, forwarded to runtime_status",
-            "max_run_age_minutes": "optional freshness threshold for runtime_status",
-            "profile_path": "optional OpenClaw profile JSON path",
-            "cron_jobs": "optional list of OpenClaw cron jobs with id/name/schedule",
-            "include_cron_status": "optional bool; run read-only openclaw cron list/runs when true",
-            "openclaw_command_timeout_sec": "optional int timeout for read-only openclaw CLI checks",
-            "delivery": "optional outer runner delivery object, forwarded to runtime_status",
-            "delivery_mode": "optional outer runner delivery mode, forwarded to runtime_status",
-            "timeoutSeconds": "optional outer runner timeout in seconds, forwarded to runtime_status",
-        },
-        risk_level="read_only",
-        safe_default_input={},
-        examples=({"input": {"config_key": "us", "timeout_sec": 20}},),
-    ),
-    AgentToolDefinition(
-        name="research",
-        read_only=False,
-        description=(
-            "Research evidence collector: build a redacted bundle for MacBook Codex to diagnose "
-            "ledger quality, candidate-scan evidence, and runtime quality."
-        ),
-        requires=("runtime_config", "runtime_artifacts"),
-        capabilities=(
-            "research_bundle",
-            "ledger_quality",
-            "account_candidate_matrix",
-            "runtime_triage",
-            "runtime_runs",
-            "runtime_logs",
-            "shadow_replay_readiness",
-            "healthcheck_snapshot",
-            "local_report",
-        ),
-        side_effects=("writes_local_research_reports",),
-        input_schema={
-            "scope": "optional ledger|candidate|quality|full; defaults full",
-            "config_key": "us|hk",
-            "config_path": "optional explicit config path",
-            "accounts": "optional list[str]",
-            "profile_path": "optional OpenClaw profile JSON path",
-            "include_healthcheck": "optional bool; include healthcheck readiness snapshot in quality/full scopes; defaults false",
-            "data_config": "optional explicit data config path forwarded to healthcheck when include_healthcheck=true",
-            "timeout_sec": "optional int forwarded to healthcheck when include_healthcheck=true",
-            "scheduler_evidence": "optional online scheduler evidence object with provider/job/status/exit_code/last_run_id/last_triggered_at/stdout_tail/stderr_tail",
-            "output": "optional handoff|json|both; defaults to handoff",
-            "write_outputs": "optional bool; defaults false, true writes research files after write-tool confirmation",
-            "confirm": "required true when write_outputs=true",
-            "research_output_dir": "optional output directory; defaults to output_shared/research",
-            "research_current_dir": "optional current-state directory; defaults to output_shared/state/current",
-            "report_dir": "optional report dir forwarded to runtime_status and candidate evidence",
-            "state_dir": "optional shared state dir forwarded to runtime_status",
-            "shared_state_dir": "optional shared state dir forwarded to runtime_status",
-            "accounts_root": "optional accounts output root forwarded to runtime_status",
-            "runs_root": "optional run history root forwarded to runtime_status and runtime evidence",
-            "run_id": "optional output_runs run id forwarded to runtime_status",
-            "run_dir": "optional explicit run dir forwarded to runtime_status",
-            "runs_limit": "optional number of recent runs included in runtime evidence; default 10, max 50",
-            "candidate_paths": "optional candidate CSV path or list of paths for candidate evidence",
-            "trace_paths": "optional candidate_filter_trace.jsonl path or list of paths for candidate evidence",
-            "reject_log_paths": "optional reject-log CSV path or list of paths for shadow replay rejected universe evidence",
-            "mark_paths": "optional mark_path_snapshots JSONL/CSV path or list of paths for shadow replay lifecycle evidence",
-            "outcome_paths": "optional outcome_facts JSONL/CSV path or list of paths for shadow replay settlement evidence",
-            "candidate_report_dir": "optional report dir containing candidate and trace artifacts",
-            "tail_limit": "optional JSONL tail row limit; default 20, max 200",
-            "ranking_limit": "optional top candidate rows per report included in ranking evidence; default 5, max 20",
-            "shadow_replay_min_sample": "optional minimum candidate universe sample for offline shadow replay readiness; default 30",
-        },
-        risk_level="local_write",
-        requires_confirm=True,
-        safe_default_input={"scope": "full", "output": "handoff", "write_outputs": False},
-        examples=(
-            {"input": {"scope": "full", "config_key": "us"}},
-            {"input": {"scope": "ledger", "config_key": "us"}},
-            {"input": {"scope": "candidate", "config_key": "us"}},
-        ),
-    ),
+    PREVIEW_NOTIFICATION_TOOL,
+    RUNTIME_STATUS_TOOL,
+    RUNTIME_RUNS_TOOL,
+    RUNTIME_LOGS_TOOL,
+    OPERATION_TIMELINE_TOOL,
+    OPENCLAW_READINESS_TOOL,
 )
 
 
-def _registry_by_name() -> dict[str, AgentToolDefinition]:
-    registry: dict[str, AgentToolDefinition] = {}
+def _registry_by_name() -> dict[str, AgentToolEntry]:
+    registry: dict[str, AgentToolEntry] = {}
     for definition in AGENT_TOOL_DEFINITIONS:
+        if isinstance(definition, AgentTool) and not definition.enabled:
+            continue
         if definition.name in registry:
             raise RuntimeError(f"duplicate agent tool definition: {definition.name}")
         registry[definition.name] = definition
     return registry
 
 
-AGENT_TOOL_REGISTRY: dict[str, AgentToolDefinition] = _registry_by_name()
+AGENT_TOOL_REGISTRY: dict[str, AgentToolEntry] = _registry_by_name()
 RECOMMENDED_FLOW: tuple[str, ...] = ("healthcheck", "scan_opportunities", "get_close_advice")
 
 
@@ -661,11 +298,27 @@ def write_tools_enabled_from_env() -> bool:
 
 
 def tool_names() -> tuple[str, ...]:
-    return tuple(definition.name for definition in AGENT_TOOL_DEFINITIONS)
+    return tuple(
+        definition.name
+        for definition in AGENT_TOOL_DEFINITIONS
+        if not isinstance(definition, AgentTool) or definition.enabled
+    )
 
 
-def get_tool_definition(name: str) -> AgentToolDefinition | None:
+def get_tool_definition(name: str) -> AgentToolEntry | None:
     return AGENT_TOOL_REGISTRY.get(str(name or "").strip())
+
+
+def pure_read_tool_names() -> frozenset[str]:
+    return frozenset(
+        definition.name
+        for definition in AGENT_TOOL_DEFINITIONS
+        if (not isinstance(definition, AgentTool) or definition.enabled) and definition.is_pure_read()
+    )
+
+
+def tool_write_requested(definition: AgentToolEntry, payload: dict[str, Any]) -> bool:
+    return definition.is_write_requested(payload)
 
 
 def build_agent_spec(*, write_tools_enabled: bool | None = None) -> dict[str, Any]:
@@ -674,7 +327,7 @@ def build_agent_spec(*, write_tools_enabled: bool | None = None) -> dict[str, An
     return {
         "schema_version": "1.0",
         "name": "options-monitor-local-tools",
-        "description": "Local agent-facing tools for options-monitor. Read-first by default; write tools require explicit enablement and confirmation.",
+        "description": "Local Ops Copilot tools for options-monitor. Read-first by default; write tools require explicit enablement and confirmation.",
         "launcher": {
             "command": ["./om-agent", "run", "--tool", "<tool-name>", "--input-json", "<json>"],
             "add_account_command": ["./om-agent", "add-account", "--market", "us|hk", "--account-label", "<label>", "--account-type", "futu|external_holdings", "--dry-run"],
@@ -691,6 +344,10 @@ def build_agent_spec(*, write_tools_enabled: bool | None = None) -> dict[str, An
             "remote_hosted": False,
             "auto_trade": False,
         },
-        "tools": [definition.to_manifest() for definition in AGENT_TOOL_DEFINITIONS],
+        "tools": [
+            definition.to_manifest()
+            for definition in AGENT_TOOL_DEFINITIONS
+            if not isinstance(definition, AgentTool) or definition.enabled
+        ],
         "recommended_flow": list(RECOMMENDED_FLOW),
     }

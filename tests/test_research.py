@@ -837,25 +837,24 @@ def test_research_rejects_output_paths_outside_repo(tmp_path: Path) -> None:
         raise AssertionError("expected AgentToolError")
 
 
-def test_research_agent_tool_write_outputs_requires_gate(monkeypatch, tmp_path: Path) -> None:
-    from src.application.tool_execution import execute_tool as run_tool
+def test_research_collect_write_outputs_requires_confirm(tmp_path: Path) -> None:
+    from src.application.research.facade import run_research_collect
 
-    monkeypatch.delenv("OM_AGENT_ENABLE_WRITE_TOOLS", raising=False)
-    out = run_tool(
-        "research",
+    out = run_research_collect(
         {
             "config_path": str(tmp_path / "config.us.json"),
             "write_outputs": True,
-            "confirm": True,
+            "confirm": False,
         },
     )
 
     assert out["ok"] is False
-    assert out["error"]["code"] == "PERMISSION_DENIED"
+    assert out["tool_name"] == "research.collect"
+    assert out["error"]["code"] == "CONFIRMATION_REQUIRED"
 
 
-def test_research_agent_tool_runs_with_local_runtime_artifacts(tmp_path: Path) -> None:
-    from src.application.tool_execution import execute_tool as run_tool
+def test_research_collect_runs_with_local_runtime_artifacts(tmp_path: Path) -> None:
+    from src.application.research.facade import run_research_collect
 
     cfg_path = tmp_path / "config.us.json"
     cfg_path.write_text(
@@ -918,8 +917,7 @@ def test_research_agent_tool_runs_with_local_runtime_artifacts(tmp_path: Path) -
         encoding="utf-8",
     )
 
-    out = run_tool(
-        "research",
+    out = run_research_collect(
         {
             "config_path": str(cfg_path),
             "shared_state_dir": str(shared_state_dir),
@@ -938,6 +936,7 @@ def test_research_agent_tool_runs_with_local_runtime_artifacts(tmp_path: Path) -
     )
 
     assert out["ok"] is True
+    assert out["tool_name"] == "research.collect"
     assert out["data"]["schema_version"] == "research.v1"
     assert out["data"]["status"] in {"ok", "warn"}
     assert out["data"]["outputs"]["written"] is False

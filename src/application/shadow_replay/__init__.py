@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Offline replay lifecycle for Research / Shadow Replay side-lane evidence."""
+
 from src.application.shadow_replay.evidence import (
     analyze_shadow_replay_dataset,
     build_shadow_replay_dataset,

@@ -125,9 +125,35 @@ def _write_healthcheck_config(tmp_path: Path) -> Path:
     return cfg_path
 
 
+def _futu_doctor_ok(**kwargs: Any) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "sdk": {"ok": True},
+        "watchdog": {"ok": True},
+    }
+
+
+def _patch_agent_tool_context(monkeypatch, **overrides: Any) -> None:
+    from dataclasses import replace
+
+    import src.application.tool_execution as tool_execution
+
+    ctx = tool_execution.build_default_agent_tool_context()
+    monkeypatch.setattr(
+        tool_execution,
+        "build_default_agent_tool_context",
+        lambda: replace(ctx, **overrides),
+    )
+
+
+def _patch_healthcheck_context(monkeypatch, **overrides: Any) -> None:
+    deps = {"run_futu_doctor": _futu_doctor_ok}
+    deps.update(overrides)
+    _patch_agent_tool_context(monkeypatch, **deps)
+
+
 def test_healthcheck_works_with_explicit_config_path(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
-    import src.application.agent_tool_handlers as tools
 
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
@@ -142,15 +168,7 @@ def test_healthcheck_works_with_explicit_config_path(monkeypatch, tmp_path: Path
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(
-        tools,
-        "_run_futu_doctor",
-        lambda **kwargs: {
-            "ok": True,
-            "sdk": {"ok": True},
-            "watchdog": {"ok": True},
-        },
-    )
+    _patch_healthcheck_context(monkeypatch)
 
     out = run_tool("healthcheck", {"config_path": str(cfg_path)})
 
@@ -160,6 +178,10 @@ def test_healthcheck_works_with_explicit_config_path(monkeypatch, tmp_path: Path
     assert out["data"]["account_paths"]["user1"]["primary"]["ok"] is True
     assert "fallback" not in out["data"]["account_paths"]["user1"]
     assert out["meta"]["config_path"] == ".../config.us.json"
+    assert "runtime_runs" in out["data"]["tools"]
+    assert "candidate_filter_explain" in out["data"]["tools"]
+    assert "research" not in out["data"]["tools"]
+    assert out["data"]["side_lanes"]["research_shadow_replay"]["agent_tool"] is False
     assert any(item["name"] == "opend_readiness" and item["status"] == "ok" for item in out["data"]["checks"])
     assert any(item["name"] == "account_mapping" and item["status"] == "ok" for item in out["data"]["checks"])
     primary = next(item for item in out["data"]["checks"] if item["name"] == "account_primary_paths")
@@ -174,7 +196,6 @@ def test_healthcheck_does_not_warn_when_production_watchlist_contains_starter_sy
     tmp_path: Path,
 ) -> None:
     from src.application.tool_execution import execute_tool as run_tool
-    import src.application.agent_tool_handlers as tools
 
     cfg_path = _write_healthcheck_config(tmp_path)
     cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
@@ -183,15 +204,7 @@ def test_healthcheck_does_not_warn_when_production_watchlist_contains_starter_sy
     cfg["symbols"].append(msft)
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    monkeypatch.setattr(
-        tools,
-        "_run_futu_doctor",
-        lambda **kwargs: {
-            "ok": True,
-            "sdk": {"ok": True},
-            "watchdog": {"ok": True},
-        },
-    )
+    _patch_healthcheck_context(monkeypatch)
 
     out = run_tool("healthcheck", {"config_path": str(cfg_path)})
 
@@ -202,7 +215,6 @@ def test_healthcheck_does_not_warn_when_production_watchlist_contains_starter_sy
 
 def test_healthcheck_reports_candidate_evidence_diagnostic(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
-    import src.application.agent_tool_handlers as tools
 
     cfg_path = _write_healthcheck_config(tmp_path)
     candidate_path = tmp_path / "sell_put_candidates.csv"
@@ -210,15 +222,7 @@ def test_healthcheck_reports_candidate_evidence_diagnostic(monkeypatch, tmp_path
     trace_path = tmp_path / "candidate_filter_trace.jsonl"
     trace_path.write_text('{"symbol":"NVDA","result":"accepted"}\n', encoding="utf-8")
 
-    monkeypatch.setattr(
-        tools,
-        "_run_futu_doctor",
-        lambda **kwargs: {
-            "ok": True,
-            "sdk": {"ok": True},
-            "watchdog": {"ok": True},
-        },
-    )
+    _patch_healthcheck_context(monkeypatch)
 
     out = run_tool(
         "healthcheck",
@@ -241,7 +245,6 @@ def test_healthcheck_reports_candidate_evidence_diagnostic(monkeypatch, tmp_path
 def test_healthcheck_reports_feishu_inbound_audit_ready(monkeypatch, tmp_path: Path) -> None:
     from src.application.assistant.audit import InboundAuditStore
     from src.application.tool_execution import execute_tool as run_tool
-    import src.application.agent_tool_handlers as tools
 
     cfg_path = _write_healthcheck_config(tmp_path)
     audit_db = tmp_path / "inbound.sqlite3"
@@ -264,15 +267,7 @@ def test_healthcheck_reports_feishu_inbound_audit_ready(monkeypatch, tmp_path: P
     monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "cli_1")
     monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "secret_1")
     monkeypatch.setenv("OM_FEISHU_BOT_ALLOWED_OPEN_IDS", "ou_1")
-    monkeypatch.setattr(
-        tools,
-        "_run_futu_doctor",
-        lambda **kwargs: {
-            "ok": True,
-            "sdk": {"ok": True},
-            "watchdog": {"ok": True},
-        },
-    )
+    _patch_healthcheck_context(monkeypatch)
 
     out = run_tool("healthcheck", {"config_path": str(cfg_path), "audit_db": str(audit_db)})
     checks = {item["name"]: item for item in out["data"]["checks"]}
@@ -287,7 +282,6 @@ def test_healthcheck_reports_feishu_inbound_audit_ready(monkeypatch, tmp_path: P
 def test_healthcheck_uses_explicit_env_file_for_feishu_inbound(monkeypatch, tmp_path: Path) -> None:
     from src.application.assistant.audit import InboundAuditStore
     from src.application.tool_execution import execute_tool as run_tool
-    import src.application.agent_tool_handlers as tools
 
     for name in (
         "OM_ENV_FILE",
@@ -328,15 +322,7 @@ def test_healthcheck_uses_explicit_env_file_for_feishu_inbound(monkeypatch, tmp_
         + "\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(
-        tools,
-        "_run_futu_doctor",
-        lambda **kwargs: {
-            "ok": True,
-            "sdk": {"ok": True},
-            "watchdog": {"ok": True},
-        },
-    )
+    _patch_healthcheck_context(monkeypatch)
 
     out = run_tool(
         "healthcheck",
@@ -359,7 +345,6 @@ def test_healthcheck_uses_explicit_env_file_for_feishu_inbound(monkeypatch, tmp_
 def test_healthcheck_warns_when_feishu_latest_sender_not_allowed(monkeypatch, tmp_path: Path) -> None:
     from src.application.assistant.audit import InboundAuditStore
     from src.application.tool_execution import execute_tool as run_tool
-    import src.application.agent_tool_handlers as tools
 
     cfg_path = _write_healthcheck_config(tmp_path)
     audit_db = tmp_path / "inbound.sqlite3"
@@ -382,15 +367,7 @@ def test_healthcheck_warns_when_feishu_latest_sender_not_allowed(monkeypatch, tm
     monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "cli_1")
     monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "secret_1")
     monkeypatch.setenv("OM_FEISHU_BOT_ALLOWED_OPEN_IDS", "ou_2")
-    monkeypatch.setattr(
-        tools,
-        "_run_futu_doctor",
-        lambda **kwargs: {
-            "ok": True,
-            "sdk": {"ok": True},
-            "watchdog": {"ok": True},
-        },
-    )
+    _patch_healthcheck_context(monkeypatch)
 
     out = run_tool("healthcheck", {"config_path": str(cfg_path), "audit_db": str(audit_db)})
     check = next(item for item in out["data"]["checks"] if item["name"] == "feishu_inbound")
@@ -402,7 +379,6 @@ def test_healthcheck_warns_when_feishu_latest_sender_not_allowed(monkeypatch, tm
 
 def test_healthcheck_rejects_placeholder_futu_mapping(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
-    import src.application.agent_tool_handlers as tools
 
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
@@ -415,15 +391,7 @@ def test_healthcheck_rejects_placeholder_futu_mapping(monkeypatch, tmp_path: Pat
     cfg["trade_intake"]["account_mapping"]["futu"] = {"REAL_12345678": "user1"}
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    monkeypatch.setattr(
-        tools,
-        "_run_futu_doctor",
-        lambda **kwargs: {
-            "ok": True,
-            "sdk": {"ok": True},
-            "watchdog": {"ok": True},
-        },
-    )
+    _patch_healthcheck_context(monkeypatch)
 
     out = run_tool("healthcheck", {"config_path": str(cfg_path)})
 
@@ -437,7 +405,6 @@ def test_healthcheck_rejects_placeholder_futu_mapping(monkeypatch, tmp_path: Pat
 
 def test_healthcheck_accepts_futu_auto_source_without_fallback_checks(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
-    import src.application.agent_tool_handlers as tools
 
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
@@ -451,15 +418,7 @@ def test_healthcheck_accepts_futu_auto_source_without_fallback_checks(monkeypatc
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(
-        tools,
-        "_run_futu_doctor",
-        lambda **kwargs: {
-            "ok": True,
-            "sdk": {"ok": True},
-            "watchdog": {"ok": True},
-        },
-    )
+    _patch_healthcheck_context(monkeypatch)
 
     out = run_tool("healthcheck", {"config_path": str(cfg_path)})
 
@@ -475,7 +434,6 @@ def test_healthcheck_accepts_futu_auto_source_without_fallback_checks(monkeypatc
 
 def test_healthcheck_rejects_account_settings_acc_id_missing_from_trade_intake_mapping(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
-    import src.application.agent_tool_handlers as tools
 
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
@@ -488,15 +446,7 @@ def test_healthcheck_rejects_account_settings_acc_id_missing_from_trade_intake_m
     cfg["account_settings"]["user1"]["futu"] = {"account_id": "999999999999999999"}
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    monkeypatch.setattr(
-        tools,
-        "_run_futu_doctor",
-        lambda **kwargs: {
-            "ok": True,
-            "sdk": {"ok": True},
-            "watchdog": {"ok": True},
-        },
-    )
+    _patch_healthcheck_context(monkeypatch)
 
     out = run_tool("healthcheck", {"config_path": str(cfg_path)})
 
@@ -509,7 +459,6 @@ def test_healthcheck_rejects_account_settings_acc_id_missing_from_trade_intake_m
 
 def test_healthcheck_accepts_external_holdings_account_without_futu_mapping(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
-    import src.application.agent_tool_handlers as tools
 
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
@@ -537,15 +486,7 @@ def test_healthcheck_accepts_external_holdings_account_without_futu_mapping(monk
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(
-        tools,
-        "_run_futu_doctor",
-        lambda **kwargs: {
-            "ok": True,
-            "sdk": {"ok": True},
-            "watchdog": {"ok": True},
-        },
-    )
+    _patch_healthcheck_context(monkeypatch)
 
     out = run_tool("healthcheck", {"config_path": str(cfg_path)})
 
@@ -563,7 +504,6 @@ def test_healthcheck_accepts_external_holdings_account_without_futu_mapping(monk
 
 def test_healthcheck_reports_option_positions_repo_load_degraded(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
-    import src.application.agent_tool_handlers as tools
 
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
@@ -577,21 +517,11 @@ def test_healthcheck_reports_option_positions_repo_load_degraded(monkeypatch, tm
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(
-        tools,
-        "_run_futu_doctor",
-        lambda **kwargs: {
-            "ok": True,
-            "sdk": {"ok": True},
-            "watchdog": {"ok": True},
-        },
-    )
-
     class _Repo:
         bootstrap_status = "degraded_option_positions_repo_load_failed"
         bootstrap_message = "option positions repo load failed: sqlite unavailable"
 
-    monkeypatch.setattr(tools, "open_position_ledger", lambda _path: _Repo())
+    _patch_healthcheck_context(monkeypatch, load_option_positions_repo=lambda _path: _Repo())
 
     out = run_tool("healthcheck", {"config_path": str(cfg_path)})
 
@@ -604,7 +534,6 @@ def test_healthcheck_reports_option_positions_repo_load_degraded(monkeypatch, tm
 
 def test_healthcheck_reports_option_positions_bootstrap_ok_for_sqlite_only(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
-    import src.application.agent_tool_handlers as tools
 
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
@@ -618,21 +547,11 @@ def test_healthcheck_reports_option_positions_bootstrap_ok_for_sqlite_only(monke
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(
-        tools,
-        "_run_futu_doctor",
-        lambda **kwargs: {
-            "ok": True,
-            "sdk": {"ok": True},
-            "watchdog": {"ok": True},
-        },
-    )
-
     class _Repo:
         bootstrap_status = "sqlite_only_no_feishu_bootstrap"
         bootstrap_message = "feishu option_positions bootstrap is not used; local trade_events remain source of truth"
 
-    monkeypatch.setattr(tools, "open_position_ledger", lambda _path: _Repo())
+    _patch_healthcheck_context(monkeypatch, load_option_positions_repo=lambda _path: _Repo())
 
     out = run_tool("healthcheck", {"config_path": str(cfg_path)})
 
@@ -643,7 +562,6 @@ def test_healthcheck_reports_option_positions_bootstrap_ok_for_sqlite_only(monke
 
 def test_healthcheck_warns_on_notification_placeholder_values(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
-    import src.application.agent_tool_handlers as tools
 
     cfg_path = tmp_path / "config.us.json"
     data_cfg_path = tmp_path / "portfolio.runtime.json"
@@ -660,15 +578,7 @@ def test_healthcheck_warns_on_notification_placeholder_values(monkeypatch, tmp_p
     }
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    monkeypatch.setattr(
-        tools,
-        "_run_futu_doctor",
-        lambda **kwargs: {
-            "ok": True,
-            "sdk": {"ok": True},
-            "watchdog": {"ok": True},
-        },
-    )
+    _patch_healthcheck_context(monkeypatch)
 
     out = run_tool("healthcheck", {"config_path": str(cfg_path)})
 
@@ -681,18 +591,9 @@ def test_healthcheck_warns_on_notification_placeholder_values(monkeypatch, tmp_p
 
 def test_healthcheck_reports_unified_channel_health(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
-    import src.application.agent_tool_handlers as tools
 
     cfg_path = _write_healthcheck_config(tmp_path)
-    monkeypatch.setattr(
-        tools,
-        "_run_futu_doctor",
-        lambda **kwargs: {
-            "ok": True,
-            "sdk": {"ok": True},
-            "watchdog": {"ok": True},
-        },
-    )
+    _patch_healthcheck_context(monkeypatch)
     assistant_config = tmp_path / "resolved" / "config.assistant.json"
     assistant_config.parent.mkdir()
     assistant_config.write_text(
@@ -900,7 +801,6 @@ def test_spec_exposes_broker_as_public_field() -> None:
 
 def test_monthly_income_report_returns_agent_summary(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
-    import src.application.agent_tool_handlers as tools
     from domain.domain.option_position_lots import OpenPositionCommand, parse_exp_to_ms
 
     def _ms(value: str) -> int:
@@ -956,7 +856,7 @@ def test_monthly_income_report_returns_agent_summary(monkeypatch, tmp_path: Path
         rate_calls.append(kwargs)
         return {"rates": {"USDCNY": 7.2, "HKDCNY": 0.92}}
 
-    monkeypatch.setattr(tools, "_get_exchange_rates", _fake_get_exchange_rates)
+    _patch_agent_tool_context(monkeypatch, get_exchange_rates=_fake_get_exchange_rates)
 
     out = run_tool(
         "monthly_income_report",
@@ -1015,13 +915,14 @@ def test_monthly_income_report_returns_agent_summary(monkeypatch, tmp_path: Path
 
 
 def test_version_check_returns_agent_diagnostic(monkeypatch) -> None:
-    from src.application.tool_execution import execute_tool as run_tool
-    import src.application.agent_tool_handlers as tools
+    from dataclasses import replace
 
-    monkeypatch.setattr(
-        tools,
-        "check_version_update",
-        lambda **kwargs: {
+    import src.application.tool_execution as tool_execution
+
+    ctx = tool_execution.build_default_agent_tool_context()
+
+    def _check_version_update(**kwargs: Any) -> dict[str, Any]:
+        return {
             "ok": True,
             "current_version": "1.0.9",
             "latest_version": "1.0.9",
@@ -1031,10 +932,15 @@ def test_version_check_returns_agent_diagnostic(monkeypatch) -> None:
             "checked_at": "2026-05-05T00:00:00Z",
             "message": "当前已是最新版本 1.0.9",
             "error": None,
-        },
+        }
+
+    monkeypatch.setattr(
+        tool_execution,
+        "build_default_agent_tool_context",
+        lambda: replace(ctx, check_version_update=_check_version_update),
     )
 
-    out = run_tool("version_check", {"remote_name": "origin"})
+    out = tool_execution.execute_tool("version_check", {"remote_name": "origin"})
 
     assert out["ok"] is True
     assert out["warnings"] == []
@@ -2546,7 +2452,6 @@ def test_runtime_logs_rejects_removed_file_alias(tmp_path: Path) -> None:
 
 def test_openclaw_readiness_combines_status_and_healthcheck(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
-    import src.application.agent_tool_handlers as tools
 
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
@@ -2568,15 +2473,7 @@ def test_openclaw_readiness_combines_status_and_healthcheck(monkeypatch, tmp_pat
     (shared_state_dir / "last_run.json").write_text(json.dumps({"status": "ok"}), encoding="utf-8")
     (report_dir / "symbols_notification.txt").write_text("ready\n", encoding="utf-8")
 
-    monkeypatch.setattr(
-        tools,
-        "_run_futu_doctor",
-        lambda **kwargs: {
-            "ok": True,
-            "sdk": {"ok": True},
-            "watchdog": {"ok": True},
-        },
-    )
+    _patch_healthcheck_context(monkeypatch)
 
     out = run_tool(
         "openclaw_readiness",
