@@ -190,6 +190,8 @@ def test_wechat_clawbot_poll_once_routes_inbound_and_replies(tmp_path: Path) -> 
     )
     calls: list[tuple[str, dict]] = []
     replies: list[dict[str, object]] = []
+    typing_calls: list[dict[str, object]] = []
+    events: list[str] = []
 
     class FakeClient:
         def __init__(self, *, bot_token: str, base_url: str, timeout: int) -> None:
@@ -213,7 +215,18 @@ def test_wechat_clawbot_poll_once_routes_inbound_and_replies(tmp_path: Path) -> 
                 ],
             }
 
+        def get_config(self, **kwargs):  # type: ignore[no-untyped-def]
+            events.append("get_config")
+            typing_calls.append({"method": "get_config", **dict(kwargs)})
+            return {"ret": 0, "typing_ticket": "typing_ticket_1"}
+
+        def send_typing(self, **kwargs):  # type: ignore[no-untyped-def]
+            events.append(f"typing:{kwargs.get('status')}")
+            typing_calls.append({"method": "send_typing", **dict(kwargs)})
+            return {"ret": 0}
+
         def send_text_message(self, **kwargs):  # type: ignore[no-untyped-def]
+            events.append("reply")
             replies.append(dict(kwargs))
             return {"ret": 0, "data": {"message_id": "reply_1"}}
 
@@ -241,6 +254,15 @@ def test_wechat_clawbot_poll_once_routes_inbound_and_replies(tmp_path: Path) -> 
     assert replies[0]["context_token"] == "ctx_1"
     assert replies[0]["group_id"] == "group_1"
     assert str(replies[0]["text"]).strip()
+    assert typing_calls == [
+        {"method": "get_config", "ilink_user_id": "user_1", "context_token": "ctx_1"},
+        {"method": "send_typing", "ilink_user_id": "user_1", "typing_ticket": "typing_ticket_1", "status": 1},
+        {"method": "send_typing", "ilink_user_id": "user_1", "typing_ticket": "typing_ticket_1", "status": 2},
+    ]
+    assert events == ["get_config", "typing:1", "reply", "typing:2"]
+    assert out["data"]["results"][0]["typing"]["reason"] == "typing_started"
+    assert out["data"]["results"][0]["typing"]["stop"]["reason"] == "typing_cancelled"
+    assert "typing_ticket" not in out["data"]["results"][0]["typing"]
     state = json.loads((state_dir / "state.json").read_text(encoding="utf-8"))
     assert state["get_updates_buf"] == "buf_2"
 

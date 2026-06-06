@@ -13,6 +13,7 @@ from typing import Any, Callable, cast
 from domain.domain.multi_tick import WECHAT_CLAWBOT_NOTIFICATION_PROVIDER
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response, mask_path
 from src.application.assistant.contracts import AssistantRequest
+from src.application.assistant.policy import check_sender_allowed
 from src.application.channels.service import ChannelService
 from src.application.channels.wechat_clawbot.adapter import build_wechat_clawbot_inbound_channel_service
 from src.application.channels.wechat_clawbot.ilink_client import DEFAULT_ILINK_BASE_URL, WechatClawbotClient
@@ -316,19 +317,25 @@ def poll_wechat_clawbot_once(
             inbound_kwargs["plan_tools_fn"] = plan_tools_fn
         if synthesize_response_fn is not None:
             inbound_kwargs["synthesize_response_fn"] = synthesize_response_fn
-        inbound = service.handle_inbound(WECHAT_CLAWBOT_NOTIFICATION_PROVIDER, message, **inbound_kwargs)
-        data = _dict(inbound.get("data"))
-        reply_status = _maybe_reply(
-            message=message,
-            inbound=inbound,
-            client=client,
-            reply_enabled=reply_enabled,
-            max_reply_chars=max_reply_chars,
-        )
+        typing_status = _maybe_start_typing(message=message, client=client, allowed_senders=allowed_senders)
+        try:
+            inbound = service.handle_inbound(WECHAT_CLAWBOT_NOTIFICATION_PROVIDER, message, **inbound_kwargs)
+            data = _dict(inbound.get("data"))
+            reply_status = _maybe_reply(
+                message=message,
+                inbound=inbound,
+                client=client,
+                reply_enabled=reply_enabled,
+                max_reply_chars=max_reply_chars,
+            )
+        finally:
+            stop_status = _maybe_stop_typing(message=message, client=client, typing_status=typing_status)
+            typing_status = {**typing_status, "stop": stop_status}
         if data.get("kind") == "message":
             processed_count += 1
         if bool(reply_status.get("attempted")) and bool(reply_status.get("ok")):
             reply_count += 1
+        typing_public = {key: value for key, value in typing_status.items() if key != "typing_ticket"}
         results.append(
             {
                 "message_id": message_id(message) or None,
@@ -337,6 +344,7 @@ def poll_wechat_clawbot_once(
                 "ok": bool(inbound.get("ok", False)),
                 "inbound": inbound,
                 "reply": reply_status,
+                "typing": typing_public,
             }
         )
 
@@ -399,6 +407,75 @@ def serve_wechat_clawbot(
             if stop_after_batches is not None and batches >= stop_after_batches:
                 return
             sleep_fn(settings.poll_interval_sec)
+
+
+def _maybe_start_typing(
+    *,
+    message: dict[str, Any],
+    client: WechatClawbotClient,
+    allowed_senders: str | None,
+) -> dict[str, Any]:
+    to_user_id = message_user_id(message)
+    context_token = message_context_token(message)
+    if not to_user_id or not context_token:
+        return {"attempted": False, "ok": True, "reason": "missing_context"}
+    sender_decision = check_sender_allowed(channel="wechat", sender_id=to_user_id, allowed_senders=allowed_senders)
+    if not sender_decision.allowed:
+        return {"attempted": False, "ok": True, "reason": sender_decision.reason}
+    try:
+        config_response = client.get_config(ilink_user_id=to_user_id, context_token=context_token)
+        typing_ticket = extract_first_string(config_response, ("typing_ticket", "typingTicket"))
+        if not typing_ticket:
+            return {
+                "attempted": True,
+                "ok": False,
+                "reason": "missing_typing_ticket",
+            }
+        typing_response = client.send_typing(ilink_user_id=to_user_id, typing_ticket=typing_ticket, status=1)
+    except Exception as exc:
+        return {
+            "attempted": True,
+            "ok": False,
+            "reason": "typing_failed",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    return {
+        "attempted": True,
+        "ok": _response_success(typing_response),
+        "reason": "typing_started" if _response_success(typing_response) else "typing_failed",
+        "typing_ticket": typing_ticket,
+    }
+
+
+def _maybe_stop_typing(
+    *,
+    message: dict[str, Any],
+    client: WechatClawbotClient,
+    typing_status: dict[str, Any],
+) -> dict[str, Any]:
+    if not (typing_status.get("attempted") and typing_status.get("typing_ticket")):
+        return {"attempted": False, "ok": True, "reason": "not_started"}
+    to_user_id = message_user_id(message)
+    if not to_user_id:
+        return {"attempted": False, "ok": True, "reason": "missing_user_id"}
+    try:
+        response = client.send_typing(
+            ilink_user_id=to_user_id,
+            typing_ticket=str(typing_status.get("typing_ticket") or ""),
+            status=2,
+        )
+    except Exception as exc:
+        return {
+            "attempted": True,
+            "ok": False,
+            "reason": "typing_cancel_failed",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    return {
+        "attempted": True,
+        "ok": _response_success(response),
+        "reason": "typing_cancelled" if _response_success(response) else "typing_cancel_failed",
+    }
 
 
 def _maybe_reply(

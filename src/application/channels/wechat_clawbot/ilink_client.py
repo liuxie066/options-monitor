@@ -113,6 +113,31 @@ class WechatClawbotClient:
             timeout=self.timeout,
         )
 
+    def get_config(self, *, ilink_user_id: str, context_token: str | None = None) -> dict[str, Any]:
+        payload: dict[str, Any] = {"ilink_user_id": str(ilink_user_id or "")}
+        if str(context_token or "").strip():
+            payload["context_token"] = str(context_token or "").strip()
+        return self.http_json_fn(
+            "POST",
+            f"{self.base_url}/ilink/bot/getconfig",
+            payload,
+            headers=self.headers(),
+            timeout=self.timeout,
+        )
+
+    def send_typing(self, *, ilink_user_id: str, typing_ticket: str, status: int) -> dict[str, Any]:
+        return self.http_json_fn(
+            "POST",
+            f"{self.base_url}/ilink/bot/sendtyping",
+            {
+                "ilink_user_id": str(ilink_user_id or ""),
+                "typing_ticket": str(typing_ticket or ""),
+                "status": int(status),
+            },
+            headers=self.headers(),
+            timeout=self.timeout,
+        )
+
     def send_text_message(
         self,
         *,
