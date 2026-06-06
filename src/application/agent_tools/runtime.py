@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.agent_tool_operations import version_check_tool
+from src.application.agent_tool_operations import version_check_tool, version_update_tool
 from src.application.agent_tools.base import AgentTool, AgentToolContext, build_agent_tool
 
 
@@ -21,6 +21,22 @@ def _version_check_tool(
         repo_base=ctx.repo_base,
         mask_path=lambda value: _mask_path_str(ctx, value),
     )
+
+
+def _version_update_tool(
+    ctx: AgentToolContext,
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    return version_update_tool(
+        payload,
+        update_local_version=ctx.update_local_version,
+        repo_base=ctx.repo_base,
+        mask_path=lambda value: _mask_path_str(ctx, value),
+    )
+
+
+def _version_update_write_requested(payload: dict[str, Any]) -> bool:
+    return bool(payload.get("apply", False))
 
 
 def _runtime_runs_tool(
@@ -85,6 +101,31 @@ VERSION_CHECK_TOOL = build_agent_tool(
     examples=({"input": {"remote_name": "origin"}},),
 )
 
+VERSION_UPDATE_TOOL = build_agent_tool(
+    name="version_update",
+    description="Preview or update local VERSION. Does not create git tags, commit, push, or run release workflows.",
+    requires=("local_repo",),
+    capabilities=("version_update", "local_write", "release_metadata"),
+    side_effects=("writes_VERSION",),
+    input_schema={
+        "target_version": "optional explicit semver target such as 1.2.3",
+        "bump": "optional major|minor|patch; defaults to patch when no version is provided",
+        "apply": "optional bool; default false previews only",
+        "confirm": "required true when apply=true",
+        "allow_downgrade": "optional bool; default false rejects lower target versions",
+    },
+    handler=_version_update_tool,
+    read_only=False,
+    risk_level="local_write",
+    requires_confirm=True,
+    safe_default_input={"bump": "patch", "apply": False},
+    write_request_predicate=_version_update_write_requested,
+    examples=(
+        {"input": {"bump": "patch", "apply": False}},
+        {"input": {"target_version": "1.2.3", "apply": True, "confirm": True}},
+    ),
+)
+
 RUNTIME_RUNS_TOOL = build_agent_tool(
     name="runtime_runs",
     description=(
@@ -138,9 +179,10 @@ RUNTIME_LOGS_TOOL = build_agent_tool(
 
 TOOLS: tuple[AgentTool, ...] = (
     VERSION_CHECK_TOOL,
+    VERSION_UPDATE_TOOL,
     RUNTIME_RUNS_TOOL,
     RUNTIME_LOGS_TOOL,
 )
 
 
-__all__ = ["RUNTIME_LOGS_TOOL", "RUNTIME_RUNS_TOOL", "TOOLS", "VERSION_CHECK_TOOL"]
+__all__ = ["RUNTIME_LOGS_TOOL", "RUNTIME_RUNS_TOOL", "TOOLS", "VERSION_CHECK_TOOL", "VERSION_UPDATE_TOOL"]

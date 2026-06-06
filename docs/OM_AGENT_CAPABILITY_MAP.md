@@ -138,7 +138,7 @@ Copilot should not use them as default evidence paths.
   Any future policy derivation must handle these separately.
 - `PURE_READ_TOOLS` remains owned by neutral
   `src/application/tool_allowlist.py`, but its value is derived from
-  `agent_tool_registry.AgentToolDefinition.is_pure_read()`: `read_only=true`,
+  `agent_tool_registry` tool metadata via `is_pure_read()`: `read_only=true`,
   resolved `risk_level=read_only`, no `side_effects`, and no confirmation
   requirement.
 - `src/application/assistant/agent_loop.py` has a narrower Inbound planner allowlist
@@ -146,8 +146,8 @@ Copilot should not use them as default evidence paths.
   but it should remain tested against the public capability catalog.
 - Write-request detection is owned by registry metadata/policy. `version_update`
   and `manage_symbols` carry explicit write predicates in their
-  `AgentToolDefinition`; `src/application/tool_execution.py` only calls
-  `tool_write_requested(definition, payload)` before enforcing env/confirm gates.
+  `AgentTool`; `src/application/tool_execution.py` delegates env/confirm gates
+  to `src/application/agent_tools/permissions.py`.
 
 ## Policy Tests To Preserve
 

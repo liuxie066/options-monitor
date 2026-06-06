@@ -34,8 +34,14 @@ Rules:
 src.interfaces.agent.cli
 -> src.application.tool_execution
 -> src.application.agent_tool_registry
--> src.application.agent_tool_handlers
+-> src.application.agent_tools.<domain>.TOOLS
 ```
+
+`src.application.agent_tool_registry` is a collector/manifest adapter. New Ops
+Copilot tools should live in `src/application/agent_tools/` domain modules and
+export `TOOLS`. All Ops Copilot tools execute through `AgentTool.call(ctx,
+payload)`; the legacy `src.application.agent_tool_handlers` switchboard has
+been removed.
 
 ## Research And Shadow Replay
 

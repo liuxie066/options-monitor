@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 619 (`src`: 342, `domain`: 52, `scripts`: 7, `tests`: 218)
-- Internal import edges: 3321 total, 1525 production/script edges excluding tests
+- Python files scanned: 630 (`src`: 353, `domain`: 52, `scripts`: 7, `tests`: 218)
+- Internal import edges: 3345 total, 1563 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -44,11 +44,11 @@ flowchart LR
   scripts -->|1| infrastructure
   scripts -->|2| storage
   storage -->|1| domain
-  tests -->|1211| application
+  tests -->|1196| application
   tests -->|282| domain
   tests -->|2| domain_services
   tests -->|95| infrastructure
-  tests -->|162| interfaces
+  tests -->|163| interfaces
   tests -->|8| scripts
   tests -->|18| storage
 ```
@@ -75,9 +75,9 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 1211 |
+| tests | application | 1196 |
 | tests | domain | 282 |
-| tests | interfaces | 162 |
+| tests | interfaces | 163 |
 | tests | infrastructure | 95 |
 | tests | storage | 18 |
 | tests | scripts | 8 |
@@ -90,15 +90,16 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | from | to | imports |
 |---|---|---|
 | src.application | domain.domain | 114 |
-| src.interfaces | src.application | 89 |
+| src.interfaces | src.application | 88 |
 | src.application | src.infrastructure | 78 |
 | src.application.ledger | domain.domain.ledger | 29 |
 | src.application | domain.storage | 25 |
 | src.application | src.application.settings | 17 |
 | src.application | domain.domain.engine | 16 |
+| src.application.research | src.application | 16 |
 | src.application | src.application.multi_tick | 15 |
 | src.application.ledger | domain.domain | 14 |
-| src.application.inbound | src.application | 12 |
+| src.application.inbound | src.application | 13 |
 | src.application.trades | src.application | 12 |
 | src.application.multi_tick | src.application | 11 |
 | src.application | domain.domain.ledger | 10 |
@@ -112,7 +113,6 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application.positions | domain.storage | 7 |
 | src.application.multi_tick | domain.domain | 6 |
 | src.application.positions | src.infrastructure | 6 |
-| src.application.research | src.application | 6 |
 | src.application.setup | src.application | 5 |
 | src.application.trades | src.application.ledger | 5 |
 | src.application.trades | src.infrastructure | 5 |
@@ -126,12 +126,11 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.interfaces | src.application.trades | 4 |
 | src.application | src.application.trades | 3 |
 | src.interfaces | src.application.positions | 3 |
+| src.interfaces | src.application.research | 3 |
 | domain.domain | domain.domain.ledger | 3 |
-| src.application | src.application.research | 2 |
 | src.application.inbound | src.infrastructure | 2 |
 | src.application.ledger | src.application.settings | 2 |
 | src.application.multi_tick | domain.storage | 2 |
-| src.interfaces | src.application.research | 2 |
 | domain.services | domain.storage | 2 |
 | scripts | src.application | 2 |
 | scripts | domain.storage | 2 |
@@ -142,13 +141,14 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application.multi_tick | domain.services | 1 |
 | src.application | domain.services | 1 |
 | src.application.research | domain.domain.engine | 1 |
+| src.application.research | src.application.ledger | 1 |
 | src.application.research | src.application.settings | 1 |
 | src.application.setup | src.application.settings | 1 |
+| src.application | src.application.research | 1 |
 | src.application | src.application.setup | 1 |
 | src.application.trades | src.application.positions | 1 |
 | src.infrastructure | domain.domain | 1 |
 | src.interfaces | domain.domain | 1 |
-| src.interfaces | src.application.inbound | 1 |
 
 ## Boundary Checks
 
@@ -175,36 +175,36 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 
 | module | incoming imports |
 |---|---|
-| src.application.agent_tool_contracts | 76 |
+| src.application.agent_tool_contracts | 79 |
 | src.infrastructure.io_utils | 41 |
 | domain.domain.ledger.position_fields | 41 |
 | domain.domain.symbol_identity | 31 |
+| src.application.config_loader | 26 |
+| src.application.agent_tool_config | 25 |
 | src.application.settings | 25 |
 | src.application.assistant.contracts | 25 |
-| src.application.config_loader | 24 |
-| src.application.agent_tool_config | 23 |
-| src.application.ledger.api | 22 |
+| src.application.ledger.api | 23 |
 | src.application.runtime_cli_format | 20 |
+| src.application.account_config | 19 |
 | domain.domain.trade_contract_identity | 19 |
 | domain.domain.engine | 18 |
-| src.application.account_config | 18 |
 | domain.storage.repositories | 17 |
-| src.infrastructure.exchange_rates | 15 |
+| src.application.config_validator | 15 |
 
 ### Highest Fan-Out Production Modules
 
 | module | outgoing imports |
 |---|---|
-| src.application.agent_tool_handlers | 37 |
+| src.application.agent_tools.base | 29 |
 | src.application.multi_account_tick | 26 |
 | src.interfaces.cli.main | 22 |
 | src.application.close_advice_runner | 21 |
 | src.application.ledger.queries | 20 |
 | src.application.pipeline_runtime | 20 |
 | src.application.agent_tool_runtime_status | 18 |
+| src.application.channels.wechat_clawbot.inbound | 18 |
 | src.application.multi_tick.required_data_prefetch | 18 |
 | src.application.tick_notification_flow | 18 |
-| src.application.channels.wechat_clawbot.inbound | 17 |
 | src.application.sell_put_steps | 17 |
 | src.application.assistant.symbol_operations | 16 |
 | src.application.trades.auto_intake | 16 |
@@ -214,7 +214,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 ## Reading
 
 - `src.interfaces` is a thin facade by intent. Keep `src.interfaces.cli.main` as the public `om` dispatcher, and keep command-specific application imports in focused `src.interfaces.cli.*_ops` owners.
-- `src.application.agent_tool_handlers` is a large integration switchboard; keep manifest, handlers, and tests synchronized when moving tool ownership.
+- `src.application.agent_tools` owns Ops Copilot tool metadata and execution; keep each domain `TOOLS` module aligned with registry discovery and permission tests.
 - The strongest production dependency remains `src.application -> domain.domain`, which is the intended direction: application orchestration calls deterministic domain policy.
 - `src.application -> src.infrastructure` is also expected, but new external-system access should stay in infrastructure adapters rather than leaking directly into domain code.
 - Keep shared constants and pure config-section helpers in neutral modules rather than importing them across feature owners.

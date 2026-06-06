@@ -119,7 +119,7 @@ Research evidence handoff for MacBook Codex:
 | Runtime status / readiness | `src/application/agent_tool_openclaw.py`, `src/application/healthcheck.py` | Prefer extending read surfaces over adding hidden side effects |
 | Research evidence | `src/application/research/` | Online side collects redacted evidence only; Codex performs analysis locally |
 | Config validation | `src/application/config_validator.py`, `src/application/layered_config.py` | Do not weaken production config checks |
-| Agent tools | `src/application/agent_tool_registry.py`, `src/application/agent_tool_handlers.py` | Manifest, handler, and tests must stay in sync |
+| Agent tools | `src/application/agent_tools/`, `src/application/agent_tool_registry.py` | Tool implementation/metadata live in domain `TOOLS`; registry collects them; write gates live in `agent_tools/permissions.py` |
 | CLI behavior | `src/interfaces/cli/main.py`, `src/interfaces/agent/cli.py` | Preserve public facade behavior where possible |
 
 Business rules live in `domain/domain/`. That layer must not import `src/` or `scripts/`.

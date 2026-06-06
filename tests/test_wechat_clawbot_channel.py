@@ -180,6 +180,7 @@ def test_wechat_clawbot_message_adapter_builds_assistant_request(tmp_path: Path)
 
 def test_wechat_clawbot_poll_once_routes_inbound_and_replies(tmp_path: Path) -> None:
     from src.application.agent_tool_contracts import build_response
+    from src.application.assistant.audit import InboundAuditStore
     from src.application.channels.wechat_clawbot.inbound import poll_wechat_clawbot_once
 
     state_dir = tmp_path / "wechat-state"
@@ -265,6 +266,105 @@ def test_wechat_clawbot_poll_once_routes_inbound_and_replies(tmp_path: Path) -> 
     assert "typing_ticket" not in out["data"]["results"][0]["typing"]
     state = json.loads((state_dir / "state.json").read_text(encoding="utf-8"))
     assert state["get_updates_buf"] == "buf_2"
+    audited = InboundAuditStore(str(tmp_path / "audit.sqlite3")).find_by_message(
+        channel="wechat",
+        message_id="msg_1",
+    )
+    assert audited is not None
+    stored = json.loads(str(audited["response_json"] or "{}"))
+    receipt = stored["data"]["reply"]
+    assert receipt["schema_version"] == "wechat-clawbot-reply-receipt-v1"
+    assert receipt["attempted"] is True
+    assert receipt["ok"] is True
+    assert receipt["reason"] == "sent"
+    assert receipt["provider"] == "wechat_clawbot"
+    assert receipt["sender_id"] == "user_1"
+    assert receipt["inbound_message_id"] == "msg_1"
+    assert receipt["message_id"] == "reply_1"
+    assert receipt["outbound_message_id"] == "reply_1"
+    assert receipt["delivery_confirmed"] is True
+    assert receipt["api_response"] == {"ret": 0, "data": {"message_id": "reply_1"}}
+
+
+def test_wechat_clawbot_poll_once_persists_failed_reply_receipt(tmp_path: Path) -> None:
+    from src.application.agent_tool_contracts import build_response
+    from src.application.assistant.audit import InboundAuditStore
+    from src.application.channels.wechat_clawbot.inbound import poll_wechat_clawbot_once
+
+    state_dir = tmp_path / "wechat-state"
+    state_dir.mkdir()
+    (state_dir / "state.json").write_text(
+        json.dumps({"bot_token": "bot_1", "base_url": "https://example.invalid", "get_updates_buf": "buf_1"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    class FakeClient:
+        def __init__(self, *, bot_token: str, base_url: str, timeout: int) -> None:
+            assert bot_token == "bot_1"
+            assert base_url == "https://example.invalid"
+            del timeout
+
+        def get_updates(self, *, get_updates_buf: str):  # type: ignore[no-untyped-def]
+            assert get_updates_buf == "buf_1"
+            return {
+                "ret": 0,
+                "get_updates_buf": "buf_2",
+                "msgs": [
+                    {
+                        "from_user_id": "user_1",
+                        "group_id": "group_1",
+                        "context_token": "ctx_1",
+                        "message_id": "msg_1",
+                        "item_list": [{"type": 1, "text_item": {"text": "状态"}}],
+                    }
+                ],
+            }
+
+        def get_config(self, **kwargs):  # type: ignore[no-untyped-def]
+            del kwargs
+            return {"ret": 0, "typing_ticket": "typing_ticket_1"}
+
+        def send_typing(self, **kwargs):  # type: ignore[no-untyped-def]
+            del kwargs
+            return {"ret": 0}
+
+        def send_text_message(self, **kwargs):  # type: ignore[no-untyped-def]
+            del kwargs
+            return {"ret": 91, "errmsg": "context expired"}
+
+    def _execute(tool_name: str, payload: dict) -> dict:
+        del payload
+        return build_response(tool_name=tool_name, ok=True, data={"status": "ok"})
+
+    out = poll_wechat_clawbot_once(
+        base=tmp_path,
+        label="ops",
+        state_dir=str(state_dir),
+        config_key="us",
+        audit_db=str(tmp_path / "audit.sqlite3"),
+        allowed_senders="wechat:user_1",
+        client_factory=FakeClient,
+        execute_tool_fn=_execute,
+    )
+
+    assert out["ok"] is False
+    assert out["data"]["processed_count"] == 1
+    assert out["data"]["reply_count"] == 0
+    assert out["data"]["results"][0]["reply"]["reason"] == "reply_failed"
+    audited = InboundAuditStore(str(tmp_path / "audit.sqlite3")).find_by_message(
+        channel="wechat",
+        message_id="msg_1",
+    )
+    assert audited is not None
+    stored = json.loads(str(audited["response_json"] or "{}"))
+    receipt = stored["data"]["reply"]
+    assert receipt["attempted"] is True
+    assert receipt["ok"] is False
+    assert receipt["reason"] == "reply_failed"
+    assert receipt["provider"] == "wechat_clawbot"
+    assert receipt["inbound_message_id"] == "msg_1"
+    assert "delivery_confirmed" not in receipt
+    assert receipt["api_response"] == {"ret": 91, "errmsg": "context expired"}
 
 
 def test_wechat_clawbot_poll_once_stays_silent_for_unauthorized_sender(tmp_path: Path) -> None:

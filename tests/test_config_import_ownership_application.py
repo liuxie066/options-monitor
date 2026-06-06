@@ -4,6 +4,11 @@ import importlib
 import pytest
 
 
+def _agent_tool_context():
+    base_mod = importlib.import_module("src.application.agent_tools.base")
+    return base_mod.build_default_agent_tool_context()
+
+
 def test_config_management_module_is_removed() -> None:
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("src.application.config_management")
@@ -37,19 +42,17 @@ def test_agent_plugin_tools_imports_owner_modules() -> None:
         with pytest.raises(ModuleNotFoundError):
             importlib.import_module(old_module)
 
-    app_tools_mod = importlib.import_module("src.application.agent_tool_handlers")
     app_config_mod = importlib.import_module("src.application.agent_tool_config")
     app_contracts_mod = importlib.import_module("src.application.agent_tool_contracts")
     config_loader_mod = importlib.import_module("src.application.config_loader")
-    validate_mod = importlib.import_module("src.application.config_validator")
+    ctx = _agent_tool_context()
 
-    assert app_tools_mod.write_tools_enabled is app_config_mod.write_tools_enabled
-    assert app_tools_mod.resolve_output_root is app_config_mod.resolve_output_root
-    assert app_tools_mod.repo_base is app_config_mod.repo_base
-    assert app_tools_mod.load_runtime_config is app_config_mod.load_runtime_config
-    assert app_tools_mod.load_runtime_pipeline_config is config_loader_mod.load_config
-    assert app_tools_mod.resolve_watchlist_config is config_loader_mod.resolve_watchlist_config
-    assert app_tools_mod.validate_config is validate_mod.validate_config
+    assert ctx.write_tools_enabled is app_config_mod.write_tools_enabled
+    assert ctx.resolve_output_root is app_config_mod.resolve_output_root
+    assert ctx.repo_base is app_config_mod.repo_base
+    assert ctx.load_runtime_config is app_config_mod.load_runtime_config
+    assert ctx.load_runtime_pipeline_config is config_loader_mod.load_config
+    assert ctx.resolve_watchlist_config is config_loader_mod.resolve_watchlist_config
     assert app_contracts_mod.AgentToolError.__name__ == "AgentToolError"
 
 
@@ -199,12 +202,12 @@ def test_option_positions_inspection_imports_application_owner_module() -> None:
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("scripts.backfill_option_positions_broker")
     cli_mod = importlib.import_module("src.interfaces.cli.option_positions")
-    agent_tools_mod = importlib.import_module("src.application.agent_tool_handlers")
+    ctx = _agent_tool_context()
 
     assert cli_mod.build_lot_event_history is owner_mod.build_lot_event_history
     assert cli_mod.inspect_projection_state is owner_mod.inspect_projection_state
-    assert agent_tools_mod.build_lot_event_history is owner_mod.build_lot_event_history
-    assert agent_tools_mod.inspect_projection_state is owner_mod.inspect_projection_state
+    assert ctx.build_lot_event_history is owner_mod.build_lot_event_history
+    assert ctx.inspect_projection_state is owner_mod.inspect_projection_state
 
 
 def test_portfolio_context_and_cash_query_import_application_owner_modules() -> None:
@@ -226,15 +229,15 @@ def test_portfolio_context_and_cash_query_import_application_owner_modules() -> 
     futu_portfolio_mod = importlib.import_module("src.application.futu_portfolio_context")
     cli_mod = importlib.import_module("src.interfaces.cli.main")
     multi_cash_mod = importlib.import_module("src.application.multi_tick.cash_footer")
-    agent_tools_mod = importlib.import_module("src.application.agent_tool_handlers")
     pipeline_context_mod = importlib.import_module("src.application.pipeline_context")
+    ctx = _agent_tool_context()
 
     assert cash_mod.build_option_positions_context is option_ctx_mod.build_context
     assert portfolio_service_mod.load_holdings_portfolio_context is portfolio_ctx_mod.load_holdings_portfolio_context
     assert cli_mod.query_sell_put_cash is cash_mod.query_sell_put_cash
     assert multi_cash_mod.query_sell_put_cash is cash_mod.query_sell_put_cash
-    assert agent_tools_mod.query_sell_put_cash is cash_mod.query_sell_put_cash
-    assert agent_tools_mod.infer_futu_portfolio_settings is futu_portfolio_mod.infer_futu_portfolio_settings
+    assert ctx.query_sell_put_cash is cash_mod.query_sell_put_cash
+    assert ctx.infer_futu_portfolio_settings is futu_portfolio_mod.infer_futu_portfolio_settings
     assert pipeline_context_mod.fetch_futu_portfolio_context is futu_portfolio_mod.fetch_futu_portfolio_context
     assert pipeline_context_mod.load_account_portfolio_context is portfolio_service_mod.load_account_portfolio_context
 
@@ -262,13 +265,13 @@ def test_exchange_rates_imports_infrastructure_owner_module() -> None:
     infra_mod = importlib.import_module("src.infrastructure.exchange_rates")
     read_model_mod = importlib.import_module("src.application.ledger.read_model")
     reporting_mod = importlib.import_module("src.application.positions.reporting")
-    agent_tools_mod = importlib.import_module("src.application.agent_tool_handlers")
     cash_mod = importlib.import_module("src.application.sell_put_cash")
     notify_mod = importlib.import_module("src.application.notify_symbols")
+    ctx = _agent_tool_context()
 
     assert read_model_mod.get_exchange_rates_or_fetch_latest is infra_mod.get_exchange_rates_or_fetch_latest
     assert reporting_mod.CurrencyConverter is infra_mod.CurrencyConverter
-    assert agent_tools_mod._get_exchange_rates_or_fetch_latest_impl is infra_mod.get_exchange_rates_or_fetch_latest
+    assert callable(ctx.get_exchange_rates)
     assert cash_mod.CurrencyConverter is infra_mod.CurrencyConverter
     assert notify_mod.load_exchange_rate_info is infra_mod.load_exchange_rate_info
 
@@ -460,10 +463,10 @@ def test_close_advice_imports_application_owner_module() -> None:
 
     owner_mod = importlib.import_module("src.application.close_advice_runner")
     account_run_mod = importlib.import_module("src.application.account_run")
-    agent_tools_mod = importlib.import_module("src.application.agent_tool_handlers")
+    ctx = _agent_tool_context()
 
     assert account_run_mod.run_close_advice is owner_mod.run_close_advice
-    assert agent_tools_mod.run_close_advice is owner_mod.run_close_advice
+    assert ctx.run_close_advice is owner_mod.run_close_advice
 
 
 def test_fee_calc_imports_domain_owner_module() -> None:
@@ -550,11 +553,11 @@ def test_notification_modules_import_application_owner_modules() -> None:
     alert_engine_mod = importlib.import_module("src.application.alert_engine")
     notify_mod = importlib.import_module("src.application.notify_symbols")
     pipeline_reporting_mod = importlib.import_module("src.application.pipeline_reporting")
-    agent_tools_mod = importlib.import_module("src.application.agent_tool_handlers")
+    ctx = _agent_tool_context()
 
     assert pipeline_reporting_mod.run_alert_engine is alert_engine_mod.run_alert_engine
     assert pipeline_reporting_mod.build_notification is notify_mod.build_notification
-    assert agent_tools_mod.build_notification is notify_mod.build_notification
+    assert ctx.build_notification is notify_mod.build_notification
 
 
 def test_scan_scheduler_imports_application_owner_module() -> None:
@@ -563,12 +566,12 @@ def test_scan_scheduler_imports_application_owner_module() -> None:
 
     owner_mod = importlib.import_module("src.application.scan_scheduler")
     cli_mod = importlib.import_module("src.interfaces.cli.main")
-    agent_tools_mod = importlib.import_module("src.application.agent_tool_handlers")
     healthcheck_mod = importlib.import_module("src.application.healthcheck_runner")
+    ctx = _agent_tool_context()
 
     assert cli_mod.run_scheduler is owner_mod.run_scheduler
-    assert agent_tools_mod.scheduler_decide is owner_mod.decide
-    assert agent_tools_mod.read_scheduler_state is owner_mod.read_state
+    assert ctx.scheduler_decide is owner_mod.decide
+    assert ctx.read_scheduler_state is owner_mod.read_state
     assert healthcheck_mod.run_scheduler is owner_mod.run_scheduler
 
 

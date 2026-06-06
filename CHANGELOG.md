@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 1.2.232 - 2026-06-07
+
+### Changed
+- Completed the Ops Copilot `AgentTool` architecture migration so all `om-agent` tools now own their metadata, execution handler, validation hook, write policy, and manifest output in domain modules under `src/application/agent_tools/`.
+- Converted the agent registry into a tool-pool assembler that discovers domain `TOOLS`, deduplicates enabled tools, renders the manifest, and derives `PURE_READ_TOOLS` from registry metadata.
+- Centralized Ops Copilot write gating in `agent_tools/permissions.py`, removing tool-name write special cases from the execution layer.
+- Kept Research and Shadow Replay outside the Ops Copilot core tool pool while documenting them as side lanes for offline evidence and strategy-quality evaluation.
+
+### Removed
+- Removed the legacy `agent_tool_handlers.py` switchboard so new Ops Copilot tools no longer require parallel registry and handler edits.
+
+### Fixed
+- Fixed WeChat ClawBot `sendmessage` requests to include the iLink `client_id`, `base_info`, and empty `from_user_id` fields expected by the upstream API.
+- Persisted WeChat ClawBot reply receipts into inbound audit responses for both successful and failed replies so operator timelines can show delivery outcome evidence.
+
 ## 1.2.231 - 2026-06-07
 
 ### Added
