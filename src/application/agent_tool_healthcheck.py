@@ -264,7 +264,8 @@ def run_healthcheck_tool(
         for item in (cfg.get("symbols") or [])
         if isinstance(item, dict)
     }
-    if symbol_names & {"NVDA", "0700.HK"}:
+    starter_symbol_names = {"NVDA", "0700.HK"}
+    if symbol_names and symbol_names <= starter_symbol_names:
         checks.append(
             {
                 "name": "starter_symbols",
