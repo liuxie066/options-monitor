@@ -5,6 +5,10 @@ import src.application.ledger.repository as ledger_repository
 
 from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.ledger.position_fields import effective_expiration_ymd
+from src.application.ledger.api import (
+    find_unique_open_position_lot,
+    summarize_broker_trade_close_candidates,
+)
 from src.application.ledger.writer import persist_trade_event_object
 from src.application.trades.normalizer import NormalizedTradeDeal
 from src.application.trades.resolver import (
@@ -181,6 +185,31 @@ def test_match_close_positions_canonicalizes_candidate_and_deal_symbols() -> Non
     matches = match_close_positions(repo, _deal(symbol="HK.09992", contracts=1))
 
     assert [(m.record_id, m.contracts_to_close) for m in matches] == [("rec-pop", 1)]
+
+
+def test_ledger_close_helpers_canonicalize_aliases_and_summarize_candidates() -> None:
+    raw_alias = _record("rec-pop", 100, 2)
+    raw_alias["fields"]["symbol"] = "POP"
+    repo = FakeRepo([raw_alias])
+
+    candidate = find_unique_open_position_lot(
+        repo,
+        account="lx",
+        symbol="HK.09992",
+        option_type="put",
+        side="short",
+        expiration_ymd="2026-04-29",
+    )
+    summary = summarize_broker_trade_close_candidates(repo, deal=_deal(symbol="HK.09992", contracts=1))
+
+    assert candidate is not None
+    assert candidate["record_id"] == "rec-pop"
+    assert summary == {
+        "semantic_count": 1,
+        "exact_contract_count": 1,
+        "exact_open_contracts": 2,
+        "requested_contracts": 1,
+    }
 
 
 def test_resolve_trade_close_dry_run_builds_patches() -> None:

@@ -84,10 +84,10 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
     assert "OnBootSec=2min" not in tick_timer
     assert str(repo / "om") + " run trade-intake" in intake
     assert "Restart=always" in intake
-    assert "OnCalendar=*-*-* 05:30:00 Asia/Shanghai" in auto_close_timer
+    assert "OnCalendar=*-*-* 09:00:00 Asia/Shanghai" in auto_close_timer
     assert str(repo / "om") + " option-positions --data-config " + str(runtime / "portfolio.runtime.json") in verify
     assert "verify-projection --mode auto" in verify
-    assert "OnCalendar=*-*-* 06:00:00 Asia/Shanghai" in verify_timer
+    assert "OnCalendar=*-*-* 09:30:00 Asia/Shanghai" in verify_timer
     assert profile["service_provider"] == "systemd"
     assert profile["runtime_root"] == str(runtime)
     assert {"name": "options-monitor-tick-us.service"} in profile["services"]
@@ -782,14 +782,14 @@ def test_render_launchd_bundle_uses_launch_agents_and_logs(tmp_path: Path) -> No
     assert "hk" in tick
     assert "<string>com.options-monitor.auto-close-hk</string>" in auto_close
     assert "<key>Hour</key>" in auto_close
-    assert "<integer>5</integer>" in auto_close
+    assert "<integer>9</integer>" in auto_close
     assert "<key>Minute</key>" in auto_close
-    assert "<integer>30</integer>" in auto_close
+    assert "<integer>0</integer>" in auto_close
     assert "<string>com.options-monitor.projection-verify</string>" in verify
     assert "<key>Hour</key>" in verify
-    assert "<integer>6</integer>" in verify
+    assert "<integer>9</integer>" in verify
     assert "<key>Minute</key>" in verify
-    assert "<integer>0</integer>" in verify
+    assert "<integer>30</integer>" in verify
     assert "verify-projection" in verify
     assert profile["service_provider"] == "launchd"
     assert {"name": "com.options-monitor.tick-hk"} in profile["services"]
