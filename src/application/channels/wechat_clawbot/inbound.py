@@ -620,6 +620,8 @@ def _load_store_json(load_fn: Callable[..., dict[str, Any]], *, default: dict[st
 
 
 def _response_success(response: dict[str, Any]) -> bool:
+    if response == {}:
+        return True
     if response.get("ok") is True:
         return True
     for key in ("ret", "errcode", "code"):
