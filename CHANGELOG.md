@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.222 - 2026-06-06
+
+### Fixed
+- Fixed service-drift reconciliation so confirmed upgrades rewrite installed systemd units whose content differs from the current release render and restart changed timers after daemon reload.
+
 ## 1.2.221 - 2026-06-06
 
 ### Changed

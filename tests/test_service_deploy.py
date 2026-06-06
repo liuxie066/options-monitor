@@ -196,6 +196,43 @@ def test_service_drift_detects_missing_projection_verify_timer(tmp_path: Path) -
     assert out["missing_required_units"] == ["options-monitor-projection-verify.timer"]
 
 
+def test_service_drift_detects_mismatched_timer_content(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+    from src.application.service_drift import service_drift
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    systemd_root = tmp_path / "systemd"
+    repo.mkdir()
+    runtime.mkdir()
+    bundle = render_service_bundle(target="systemd", repo_root=repo, runtime_root=runtime, accounts=["lx"], markets=["us"])
+    profile = json.loads({item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"])
+    (runtime / "service.profile.json").write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")
+    _write_systemd_units_from_bundle(bundle, systemd_root)
+    (systemd_root / "options-monitor-auto-close-us.timer").write_text(
+        (systemd_root / "options-monitor-auto-close-us.timer")
+        .read_text(encoding="utf-8")
+        .replace("OnCalendar=*-*-* 09:00:00 Asia/Shanghai", "OnCalendar=*-*-* 05:30:00 Asia/Shanghai"),
+        encoding="utf-8",
+    )
+    (systemd_root / "options-monitor-projection-verify.timer").write_text(
+        (systemd_root / "options-monitor-projection-verify.timer")
+        .read_text(encoding="utf-8")
+        .replace("OnCalendar=*-*-* 09:30:00 Asia/Shanghai", "OnCalendar=*-*-* 06:00:00 Asia/Shanghai"),
+        encoding="utf-8",
+    )
+
+    out = service_drift(repo_root=repo, runtime_root=runtime, systemd_unit_root=systemd_root)
+
+    assert out["summary"]["status"] == "warn"
+    assert out["summary"]["mismatched_count"] == 2
+    assert out["mismatched_units"] == [
+        "options-monitor-auto-close-us.timer",
+        "options-monitor-projection-verify.timer",
+    ]
+    assert f"./om service drift --profile-path {runtime / 'service.profile.json'} --confirm" in out["manual_actions"]
+
+
 def test_service_drift_confirm_writes_missing_timer_and_profile(tmp_path: Path) -> None:
     from src.application.service_deploy import render_service_bundle
     from src.application.service_drift import service_drift
@@ -250,6 +287,53 @@ def test_service_drift_confirm_writes_missing_timer_and_profile(tmp_path: Path) 
     assert ["systemctl", "daemon-reload"] in calls
     assert ["systemctl", "enable", "--now", "options-monitor-projection-verify.timer"] in calls
     assert ["systemctl", "enable", "--now", "options-monitor-projection-verify.service"] not in calls
+
+
+def test_service_drift_confirm_updates_mismatched_timer_content(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+    from src.application.service_drift import service_drift
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    systemd_root = tmp_path / "systemd"
+    repo.mkdir()
+    runtime.mkdir()
+    bundle = render_service_bundle(target="systemd", repo_root=repo, runtime_root=runtime, accounts=["lx"], markets=["us"])
+    profile = json.loads({item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"])
+    (runtime / "service.profile.json").write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")
+    _write_systemd_units_from_bundle(bundle, systemd_root)
+    timer_path = systemd_root / "options-monitor-projection-verify.timer"
+    timer_path.write_text(
+        timer_path.read_text(encoding="utf-8").replace(
+            "OnCalendar=*-*-* 09:30:00 Asia/Shanghai",
+            "OnCalendar=*-*-* 06:00:00 Asia/Shanghai",
+        ),
+        encoding="utf-8",
+    )
+    calls: list[list[str]] = []
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        calls.append(list(command))
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    out = service_drift(
+        repo_root=repo,
+        runtime_root=runtime,
+        systemd_unit_root=systemd_root,
+        confirm=True,
+        run_cmd=_run_cmd,
+    )
+
+    assert out["summary"]["status"] == "ok"
+    assert out["changed"] is True
+    assert out["before"]["mismatched_units"] == ["options-monitor-projection-verify.timer"]
+    assert out["mismatched_units"] == []
+    assert "OnCalendar=*-*-* 09:30:00 Asia/Shanghai" in timer_path.read_text(encoding="utf-8")
+    assert out["applied"]["written_units"] == ["options-monitor-projection-verify.timer"]
+    assert out["applied"]["restarted_timers"] == ["options-monitor-projection-verify.timer"]
+    assert ["systemctl", "daemon-reload"] in calls
+    assert ["systemctl", "restart", "options-monitor-projection-verify.timer"] in calls
+    assert ["systemctl", "enable", "--now", "options-monitor-projection-verify.timer"] not in calls
 
 
 def test_service_drift_confirm_uses_sudo_fallback_for_systemd_permission_errors(monkeypatch, tmp_path: Path) -> None:

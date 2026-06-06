@@ -30,9 +30,10 @@ def service_drift(
 ) -> dict[str, Any]:
     """Compare current-release expected services with profile and installed unit files.
 
-    Dry-run is the default. Confirmed apply only writes missing unit files and the
-    refreshed service profile, then enables missing timers. Long-running services
-    are written when missing but are not enabled or restarted here.
+    Dry-run is the default. Confirmed apply writes missing or changed unit files
+    and the refreshed service profile, then enables missing timers and restarts
+    changed timers. Long-running services are written when missing or changed but
+    are not enabled or restarted here.
     """
 
     initial = _load_profile_and_paths(
@@ -48,7 +49,7 @@ def service_drift(
     changed = False
 
     if confirm and before.get("supported"):
-        apply_result = _apply_missing_service_drift(initial, before=before, operations=operations, run_cmd=run_cmd)
+        apply_result = _apply_service_drift(initial, before=before, operations=operations, run_cmd=run_cmd)
         changed = bool(apply_result.get("changed"))
         apply_errors = [str(item) for item in apply_result.get("errors") or []]
         after = _build_drift(initial)
@@ -543,7 +544,7 @@ def _manual_actions(
     profile_path: Path,
 ) -> list[str]:
     actions: list[str] = []
-    if missing_installed_units:
+    if missing_installed_units or mismatched_units:
         actions.append(f"./om service drift --profile-path {profile_path} --confirm")
     if provider == "systemd":
         long_running = [name for name in missing_installed_units if name.endswith(".service") and ("trade-intake" in name or "feishu-ws" in name)]
@@ -552,7 +553,7 @@ def _manual_actions(
     return actions
 
 
-def _apply_missing_service_drift(
+def _apply_service_drift(
     ctx: dict[str, Any],
     *,
     before: dict[str, Any],
@@ -566,6 +567,7 @@ def _apply_missing_service_drift(
             "errors": [f"confirmed service drift apply is not implemented for provider: {provider}"],
             "written_units": [],
             "enabled_timers": [],
+            "restarted_timers": [],
             "profile_written": False,
         }
     bundle = _expected_bundle_from_profile(
@@ -576,9 +578,11 @@ def _apply_missing_service_drift(
     )
     expected_files = _expected_install_files(bundle, provider=provider)
     missing = set(before.get("missing_installed_units") or [])
+    mismatched = set(before.get("mismatched_units") or [])
+    units_to_write = missing | mismatched
     written_units: list[str] = []
     errors: list[str] = []
-    for name in sorted(missing):
+    for name in sorted(units_to_write):
         item = expected_files.get(name)
         if not item:
             continue
@@ -608,6 +612,7 @@ def _apply_missing_service_drift(
             operations.append({"operation": "write_profile", "path": str(ctx["profile_path"]), "ok": True})
 
     enabled_timers: list[str] = []
+    restarted_timers: list[str] = []
     if written_units:
         result = _run_systemctl(ctx, ["daemon-reload"], run_cmd=run_cmd)
         operations.append(result)
@@ -620,12 +625,20 @@ def _apply_missing_service_drift(
             enabled_timers.append(name)
         else:
             errors.append(f"enable {name}: {result.get('stderr') or result.get('stdout') or result.get('returncode')}")
+    for name in sorted(item for item in mismatched if item.endswith(".timer") and item in written_units):
+        result = _run_systemctl(ctx, ["restart", name], run_cmd=run_cmd)
+        operations.append(result)
+        if result.get("ok"):
+            restarted_timers.append(name)
+        else:
+            errors.append(f"restart {name}: {result.get('stderr') or result.get('stdout') or result.get('returncode')}")
 
     return {
-        "changed": bool(written_units or profile_written or enabled_timers),
+        "changed": bool(written_units or profile_written or enabled_timers or restarted_timers),
         "errors": errors,
         "written_units": written_units,
         "enabled_timers": enabled_timers,
+        "restarted_timers": restarted_timers,
         "profile_written": profile_written,
     }
 

@@ -82,7 +82,7 @@ def add_service_update_commands(subparsers: Any) -> None:
     service_drift_cmd.add_argument("--repo-root", default=None)
     service_drift_cmd.add_argument("--runtime-root", default="/var/lib/options-monitor")
     service_drift_cmd.add_argument("--profile-path", default=None)
-    service_drift_cmd.add_argument("--confirm", action="store_true", help="write missing units/profile and enable missing timers")
+    service_drift_cmd.add_argument("--confirm", action="store_true", help="write missing/changed units and profile, then reload affected timers")
     service_drift_cmd.add_argument("--yes", action="store_true", help="non-interactive confirmation; emits an audit_id")
     service_cleanup_cmd = service_sub.add_parser("cleanup", help="dry-run or clean old releases and selected caches")
     service_cleanup_cmd.add_argument("--repo-root", default=None)
