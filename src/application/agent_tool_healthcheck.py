@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from domain.domain.multi_tick import FEISHU_APP_NOTIFICATION_PROVIDER, normalize_notification_provider
+from src.application.agent_tool_config import repo_base
 from src.application.assistant.audit import default_audit_db_path
 from src.application.environment_status import build_effective_env_with_status
 from src.application.ledger.api import ledger_store_payload
@@ -666,7 +667,7 @@ def _feishu_inbound_check(
     environ: dict[str, str],
 ) -> tuple[dict[str, Any], list[str]]:
     bot_cfg = resolve_feishu_bot_config(environ=environ)
-    audit_path = _audit_db_path(payload)
+    audit_path = _audit_db_path(payload, environ=environ)
     value: dict[str, Any] = {
         "audit_db": mask_path(audit_path),
         "audit_db_exists": audit_path.exists(),
@@ -674,7 +675,13 @@ def _feishu_inbound_check(
         "allowed_open_ids_count": len(bot_cfg.allowed_open_ids),
         "pending_store": {},
     }
-    configured = bool(bot_cfg.credentials_ready or bot_cfg.allowed_open_ids or payload.get("inbound_audit_db") or payload.get("audit_db"))
+    configured = bool(
+        bot_cfg.credentials_ready
+        or bot_cfg.allowed_open_ids
+        or payload.get("inbound_audit_db")
+        or payload.get("audit_db")
+        or environ.get("OM_INBOUND_AUDIT_DB")
+    )
     if not configured and not audit_path.exists():
         return (
             {
@@ -842,10 +849,14 @@ def _feishu_ws_service_check(payload: dict[str, Any], *, mask_path: Callable[[An
     )
 
 
-def _audit_db_path(payload: dict[str, Any]) -> Path:
+def _audit_db_path(payload: dict[str, Any], *, environ: dict[str, str]) -> Path:
     raw = str(payload.get("inbound_audit_db") or payload.get("audit_db") or "").strip()
     if raw:
         return Path(raw).expanduser().resolve()
+    raw = str(environ.get("OM_INBOUND_AUDIT_DB") or "").strip()
+    if raw:
+        path = Path(raw).expanduser()
+        return path if path.is_absolute() else (repo_base() / path).resolve()
     return default_audit_db_path()
 
 
