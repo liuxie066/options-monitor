@@ -69,18 +69,21 @@ def test_opend_alert_family_dedupe_and_burst_limit() -> None:
         assert should_send_opend_alert(base, 'OPEND_NEEDS_PHONE_VERIFY', cooldown_sec=1, burst_window_sec=600, burst_max=2) is False
 
 
-def test_opend_alert_translates_wechat_clawbot_to_openclaw_weixin(monkeypatch) -> None:
+def test_opend_alert_routes_wechat_clawbot_through_delivery_adapter(monkeypatch) -> None:
     _ensure_repo_path()
     from src.application.multi_tick import opend_guard
 
     captured: dict[str, object] = {}
 
-    def fake_run(cmd, *, cwd, capture_output=False, text=False):
-        captured["cmd"] = cmd
-        captured["cwd"] = cwd
-        return SimpleNamespace(returncode=0, stdout='{"message_id":"msg_1"}', stderr="")
+    def fake_send(**kwargs):  # type: ignore[no-untyped-def]
+        captured.update(kwargs)
+        return {"ok": True, "command_ok": True, "delivery_confirmed": True, "message_id": "msg_1"}
 
-    monkeypatch.setattr(opend_guard.subprocess, "run", fake_run)
+    def fake_select(provider):  # type: ignore[no-untyped-def]
+        captured["provider"] = provider
+        return SimpleNamespace(send_fn=fake_send, normalize_fn=lambda **_: {}, failure_stage="send_wechat_clawbot_message")
+
+    monkeypatch.setattr(opend_guard, "select_notification_delivery_adapter", fake_select)
 
     with TemporaryDirectory() as td:
         base = Path(td)
@@ -93,9 +96,121 @@ def test_opend_alert_translates_wechat_clawbot_to_openclaw_weixin(monkeypatch) -
         )
 
     assert ok is True
-    cmd = captured["cmd"]
-    assert cmd[cmd.index("--channel") + 1] == "openclaw-weixin"
-    assert cmd[cmd.index("--target") + 1] == "clawbot:test"
+    assert captured["provider"] == "wechat_clawbot"
+    assert captured["channel"] == "wechat_clawbot"
+    assert captured["target"] == "clawbot:test"
+    assert "options-monitor OpenD 告警" in str(captured["message"])
+
+
+def test_send_opend_alert_no_send_does_not_consume_rate_limit(monkeypatch) -> None:
+    _ensure_repo_path()
+    from src.application.multi_tick import opend_guard
+
+    calls: list[dict[str, object]] = []
+
+    def fake_send(**kwargs):  # type: ignore[no-untyped-def]
+        calls.append(dict(kwargs))
+        return {"ok": True, "command_ok": True, "delivery_confirmed": True, "message_id": "msg_1"}
+
+    def fake_select(provider):  # type: ignore[no-untyped-def]
+        assert provider == "wechat_clawbot"
+        return SimpleNamespace(send_fn=fake_send, normalize_fn=lambda **_: {}, failure_stage="send_wechat_clawbot_message")
+
+    monkeypatch.setattr(opend_guard, "select_notification_delivery_adapter", fake_select)
+
+    with TemporaryDirectory() as td:
+        base = Path(td)
+        cfg = {
+            "notifications": {
+                "provider": "wechat_clawbot",
+                "target": "test_target",
+                "opend_alert_cooldown_sec": 600,
+            }
+        }
+
+        dry_run = opend_guard.send_opend_alert(
+            base,
+            cfg,
+            error_code="OPEND_NEEDS_PHONE_VERIFY",
+            message_text="needs phone",
+            no_send=True,
+            skip_consecutive_gate=True,
+        )
+        assert dry_run is False
+        assert calls == []
+        assert not opend_guard.opend_alert_rl_path(base).exists()
+
+        sent = opend_guard.send_opend_alert(
+            base,
+            cfg,
+            error_code="OPEND_NEEDS_PHONE_VERIFY",
+            message_text="needs phone",
+            skip_consecutive_gate=True,
+        )
+        assert sent is True
+        assert len(calls) == 1
+
+
+def test_send_opend_alert_failed_send_does_not_consume_rate_limit(monkeypatch) -> None:
+    _ensure_repo_path()
+    from src.application.multi_tick import opend_guard
+
+    calls: list[dict[str, object]] = []
+    send_results: list[dict[str, object]] = [
+        {"ok": False, "command_ok": False, "delivery_confirmed": False},
+        {"ok": True, "command_ok": True, "delivery_confirmed": True, "message_id": "msg_2"},
+    ]
+
+    def fake_send(**kwargs):  # type: ignore[no-untyped-def]
+        calls.append(dict(kwargs))
+        return send_results.pop(0)
+
+    def fake_select(provider):  # type: ignore[no-untyped-def]
+        assert provider == "wechat_clawbot"
+        return SimpleNamespace(send_fn=fake_send, normalize_fn=lambda **_: {}, failure_stage="send_wechat_clawbot_message")
+
+    monkeypatch.setattr(opend_guard, "select_notification_delivery_adapter", fake_select)
+
+    with TemporaryDirectory() as td:
+        base = Path(td)
+        cfg = {
+            "notifications": {
+                "provider": "wechat_clawbot",
+                "target": "test_target",
+                "opend_alert_cooldown_sec": 600,
+            }
+        }
+
+        failed = opend_guard.send_opend_alert(
+            base,
+            cfg,
+            error_code="OPEND_NEEDS_PHONE_VERIFY",
+            message_text="needs phone",
+            skip_consecutive_gate=True,
+        )
+        assert failed is False
+        assert len(calls) == 1
+        assert not opend_guard.opend_alert_rl_path(base).exists()
+
+        sent = opend_guard.send_opend_alert(
+            base,
+            cfg,
+            error_code="OPEND_NEEDS_PHONE_VERIFY",
+            message_text="needs phone",
+            skip_consecutive_gate=True,
+        )
+        assert sent is True
+        assert len(calls) == 2
+
+        blocked = opend_guard.send_opend_alert(
+            base,
+            cfg,
+            error_code="OPEND_NEEDS_PHONE_VERIFY",
+            message_text="needs phone",
+            skip_consecutive_gate=True,
+        )
+        assert blocked is False
+        assert len(calls) == 2
 
 
 def test_port_retry_loop_recovers_within_window(monkeypatch) -> None:
@@ -246,23 +361,26 @@ def test_consecutive_threshold_gates_alert() -> None:
 
     calls: list[str] = []
 
-    def fake_run(cmd, *, cwd, capture_output=False, text=False):
+    def fake_send(**kwargs):  # type: ignore[no-untyped-def]
         calls.append("send")
-        return SimpleNamespace(returncode=0, stdout='{"message_id":"msg_1"}', stderr="")
+        return {"ok": True, "command_ok": True, "delivery_confirmed": True, "message_id": "msg_1"}
+
+    def fake_select(provider):  # type: ignore[no-untyped-def]
+        assert provider == "wechat_clawbot"
+        return SimpleNamespace(send_fn=fake_send, normalize_fn=lambda **_: {}, failure_stage="send_wechat_clawbot_message")
 
     with TemporaryDirectory() as td:
         base = Path(td)
         cfg = {
             "notifications": {
-                "provider": "openclaw",
-                "channel": "openclaw-weixin",
+                "provider": "wechat_clawbot",
                 "target": "test_target",
                 "opend_alert_after_consecutive_failures": 3,
                 "opend_alert_cooldown_sec": 1,
             }
         }
 
-        with mock.patch.object(opend_guard.subprocess, "run", fake_run):
+        with mock.patch.object(opend_guard, "select_notification_delivery_adapter", fake_select):
             # First two calls should be gated (below threshold).
             r1 = opend_guard.send_opend_alert(base, cfg, error_code="OPEND_PORT_CLOSED", message_text="test")
             assert r1 is False, "should be gated at count=1"
@@ -282,22 +400,25 @@ def test_consecutive_threshold_skip_gate_sends_immediately() -> None:
 
     calls: list[str] = []
 
-    def fake_run(cmd, *, cwd, capture_output=False, text=False):
+    def fake_send(**kwargs):  # type: ignore[no-untyped-def]
         calls.append("send")
-        return SimpleNamespace(returncode=0, stdout='{"message_id":"msg_1"}', stderr="")
+        return {"ok": True, "command_ok": True, "delivery_confirmed": True, "message_id": "msg_1"}
+
+    def fake_select(provider):  # type: ignore[no-untyped-def]
+        assert provider == "wechat_clawbot"
+        return SimpleNamespace(send_fn=fake_send, normalize_fn=lambda **_: {}, failure_stage="send_wechat_clawbot_message")
 
     with TemporaryDirectory() as td:
         base = Path(td)
         cfg = {
             "notifications": {
-                "provider": "openclaw",
-                "channel": "openclaw-weixin",
+                "provider": "wechat_clawbot",
                 "target": "test_target",
                 "opend_alert_after_consecutive_failures": 3,
                 "opend_alert_cooldown_sec": 1,
             }
         }
-        with mock.patch.object(opend_guard.subprocess, "run", fake_run):
+        with mock.patch.object(opend_guard, "select_notification_delivery_adapter", fake_select):
             r = opend_guard.send_opend_alert(
                 base, cfg,
                 error_code="OPEND_NEEDS_PHONE_VERIFY",
@@ -314,25 +435,28 @@ def test_send_opend_recovery_notice_after_threshold_failures() -> None:
     from src.application.multi_tick import opend_guard
     import unittest.mock as mock
 
-    calls: list[list] = []
+    calls: list[dict[str, object]] = []
 
-    def fake_run(cmd, *, cwd, capture_output=False, text=False):
-        calls.append(list(cmd))
-        return SimpleNamespace(returncode=0, stdout='{"message_id":"msg_1"}', stderr="")
+    def fake_send(**kwargs):  # type: ignore[no-untyped-def]
+        calls.append(dict(kwargs))
+        return {"ok": True, "command_ok": True, "delivery_confirmed": True, "message_id": "msg_1"}
+
+    def fake_select(provider):  # type: ignore[no-untyped-def]
+        assert provider == "wechat_clawbot"
+        return SimpleNamespace(send_fn=fake_send, normalize_fn=lambda **_: {}, failure_stage="send_wechat_clawbot_message")
 
     with TemporaryDirectory() as td:
         base = Path(td)
         cfg = {
             "notifications": {
-                "provider": "openclaw",
-                "channel": "openclaw-weixin",
+                "provider": "wechat_clawbot",
                 "target": "test_target",
                 "opend_alert_after_consecutive_failures": 3,
                 "opend_alert_send_recovery_notice": True,
             }
         }
 
-        with mock.patch.object(opend_guard.subprocess, "run", fake_run):
+        with mock.patch.object(opend_guard, "select_notification_delivery_adapter", fake_select):
             # No failures recorded yet; recovery notice should NOT be sent.
             r = opend_guard.send_opend_recovery_notice(base, cfg)
             assert r is False
@@ -347,8 +471,7 @@ def test_send_opend_recovery_notice_after_threshold_failures() -> None:
             assert r is True
             assert len(calls) == 1
             # Message should indicate recovery.
-            sent_cmd = calls[0]
-            sent_msg = sent_cmd[sent_cmd.index("--message") + 1]
+            sent_msg = str(calls[0]["message"])
             assert "已恢复" in sent_msg
 
             # Counter reset: second recovery sends nothing.
@@ -367,8 +490,7 @@ def test_send_opend_recovery_notice_disabled_by_config() -> None:
         base = Path(td)
         cfg = {
             "notifications": {
-                "provider": "openclaw",
-                "channel": "openclaw-weixin",
+                "provider": "wechat_clawbot",
                 "target": "test_target",
                 "opend_alert_send_recovery_notice": False,
             }
@@ -377,7 +499,7 @@ def test_send_opend_recovery_notice_disabled_by_config() -> None:
             opend_guard.record_opend_failure(base)
 
         calls: list[object] = []
-        with mock.patch.object(opend_guard.subprocess, "run", lambda *a, **k: calls.append(a) or SimpleNamespace(returncode=0, stdout="", stderr="")):
+        with mock.patch.object(opend_guard, "select_notification_delivery_adapter", lambda *_: calls.append("select")):
             r = opend_guard.send_opend_recovery_notice(base, cfg)
         assert r is False
         assert calls == []

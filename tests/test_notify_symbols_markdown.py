@@ -443,6 +443,45 @@ def test_alert_engine_high_priority_orders_by_strategy_then_strength() -> None:
     assert "BABA | yield_enhancement" in high_lines[3]
 
 
+def test_alert_engine_missing_numeric_fields_do_not_abort_alert_build() -> None:
+    from src.application.alert_engine import build_alert_text
+    from src.application.notify_symbols import extract_section
+
+    rows = [
+        {
+            "symbol": "NVDA",
+            "strategy": "sell_put",
+            "candidate_count": 1,
+            "top_contract": "2026-06-19 100P",
+            "annualized_return": pd.NA,
+            "net_income": pd.NA,
+            "dte": pd.NA,
+            "strike": pd.NA,
+            "risk_label": pd.NA,
+        },
+        {
+            "symbol": "AAPL",
+            "strategy": "sell_put",
+            "candidate_count": 1,
+            "top_contract": "2026-06-19 180P",
+            "annualized_return": "",
+            "net_income": "",
+            "dte": "",
+            "strike": "",
+            "risk_label": "",
+        },
+    ]
+
+    alerts = build_alert_text(pd.DataFrame(rows))
+    low_lines = extract_section(alerts, "## 低优先级")
+
+    assert len(low_lines) == 2
+    assert all("年化 -" in line for line in low_lines)
+    assert all("净收入 -" in line for line in low_lines)
+    assert "DTE -" in low_lines[0]
+    assert "Strike -" in low_lines[0]
+
+
 def test_build_notification_keeps_per_strategy_capacity() -> None:
     from src.application.notify_symbols import build_notification
 

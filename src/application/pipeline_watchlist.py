@@ -266,20 +266,18 @@ def run_watchlist_pipeline(
             item_portfolio_ctx = dict(portfolio_ctx) if isinstance(portfolio_ctx, dict) else None
 
             if not want_scan:
-                item_fetch = dict(item)
-                item_fetch['sell_put'] = {'enabled': False}
-                item_fetch['sell_call'] = {'enabled': False}
                 process_symbol_fn(
                     py,
                     base,
-                    item_fetch,
+                    item,
                     top_n,
-                    portfolio_ctx=None,
-                    usd_per_cny_exchange_rate=None,
-                    cny_per_hkd_exchange_rate=None,
+                    portfolio_ctx=item_portfolio_ctx,
+                    usd_per_cny_exchange_rate=usd_per_cny_exchange_rate,
+                    cny_per_hkd_exchange_rate=cny_per_hkd_exchange_rate,
                     timeout_sec=symbol_timeout_sec,
                     is_scheduled=is_scheduled,
                     runtime_config=cfg,
+                    fetch_only=True,
                 )
                 return []
 

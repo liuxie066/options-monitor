@@ -486,11 +486,13 @@ runtime:
 `intake.multiplier_by_symbol`、`intake.default_multiplier_hk`、`intake.default_multiplier_us` 已退休。multiplier 是标的元数据，不属于 US/HK 策略配置；runtime config 只保留 `intake.symbol_aliases` 这类解析辅助字段。
 
 ### 4.6 notifications：推送目标
-- `provider`: 通用投递器，当前主流程使用 `openclaw`
-- `channel`: OpenClaw 传输通道，当前微信 Clawbot 使用 `openclaw-weixin`
-- `target`: OpenClaw 目标字符串
+- `provider`: 通用投递器，当前主流程使用 `wechat_clawbot`
+- `channel`: 投递通道，微信 ClawBot 使用 `wechat_clawbot`
+- `target`: WeChat ClawBot 绑定目标，例如 `wechat:ops` 或绑定名 `ops`
 - `quiet_hours_beijing`: 可选，北京时间免打扰窗口；不需要时直接省略，不要写 `null`
-- `send_timeout_sec`: 可选，OpenClaw 单次发送超时，默认 60 秒，上限 300 秒
+- `send_timeout_sec`: 可选，单次发送超时，默认 60 秒
+- `wechat_clawbot_label`: 可选，绑定状态标签，默认 `default`
+- `wechat_clawbot_state_dir`: 可选，绑定状态目录；默认在 `output_shared/state/channels/wechat_clawbot/<label>`
 - `cash_footer_accounts` / `cash_footer_timeout_sec` / `cash_snapshot_max_age_sec`: 可选，现金摘要账户与查询参数
 - `include_cash_footer`: 兼容旧 `scripts/run_pipeline.py` 的字段；多账户主流程不把它作为开关，主示例不再配置
 - 不再推荐配置 `enabled` / `mode`，当前主流程不读取它们作为行为开关
@@ -500,14 +502,23 @@ runtime:
 ```json
 {
   "notifications": {
-    "provider": "openclaw",
-    "channel": "openclaw-weixin",
-    "target": "clawbot_target"
+    "provider": "wechat_clawbot",
+    "channel": "wechat_clawbot",
+    "target": "wechat:ops"
   }
 }
 ```
 
-说明：旧配置里的 `channel: "wechat_clawbot"` 会继续兼容并转换为 OpenClaw 实际通道名 `openclaw-weixin`。
+说明：`notifications.provider=openclaw` 和 `channel=openclaw-weixin` 已移除，不再通过 OpenClaw 控制微信通知。
+
+绑定入口：
+
+```bash
+./om channel wechat-clawbot qrcode --label default
+./om channel wechat-clawbot qr-status --label default
+./om channel wechat-clawbot bind --label default --name ops --match-text "bind ops"
+./om channel wechat-clawbot list --label default
+```
 
 ### 4.7 schedule：监控时间窗口
 - `timezone`: 业务运行窗口所在市场时区，例如美股 `America/New_York`、港股 `Asia/Hong_Kong`。不要用北京时间伪装市场时间；夏令时 / 冬令时由时区自动换算。

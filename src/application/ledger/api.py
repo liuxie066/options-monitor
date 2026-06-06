@@ -45,6 +45,7 @@ from src.application.ledger.commands import (
     summarize_broker_trade_close_candidates,
     verify_position_lot_projection,
 )
+from src.application.ledger.event_codec import valid_void_target_event_id
 from src.application.ledger.errors import LedgerPreflightError
 from src.application.ledger.queries import (
     PositionLotSnapshot,
@@ -159,5 +160,6 @@ __all__ = [
     "summarize_broker_trade_close_candidates",
     "trade_event_log",
     "trade_event_projection_preview",
+    "valid_void_target_event_id",
     "verify_position_lot_projection",
 ]

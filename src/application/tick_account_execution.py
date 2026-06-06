@@ -185,7 +185,12 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
         max_workers=request.account_workers,
         run_account_fn=_run_account,
     ):
-        prefetch_done = bool(outcome.prefetch_done)
+        prefetch_done = bool(
+            prefetch_done
+            or outcome.prefetch_done
+            or shared_prefetch_state.get("done")
+            or shared_prefetch_state.get("force_done")
+        )
         ran_any_pipeline = bool(ran_any_pipeline or outcome.ran_pipeline)
         if outcome.ran_pipeline:
             ran_pipeline_accounts.append(str(outcome.result.account))

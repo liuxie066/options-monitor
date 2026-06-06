@@ -23,6 +23,7 @@ from src.interfaces.cli.assistant_ops import (
     handle_assistant_command,
     handle_assistant_message,
 )
+from src.interfaces.cli.channel_ops import add_channel_commands, handle_channel_command
 from src.interfaces.cli.inbound_ops import (
     add_inbound_commands,
     build_feishu_ws_settings,
@@ -119,6 +120,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add_research_commands(sub)
 
     add_operator_commands(sub)
+
+    add_channel_commands(sub)
 
     add_event_source_commands(sub)
 
@@ -240,6 +243,9 @@ def main(argv: list[str] | None = None) -> int:
                 run_close_advice_fn=run_close_advice,
                 preview_notification_fn=preview_notification,
             ))
+
+        if args.command == "channel":
+            return _print(handle_channel_command(args, repo_base_fn=repo_base))
 
         if args.command == "event-source":
             return _print(handle_event_source_command(args))

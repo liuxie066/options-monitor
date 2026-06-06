@@ -32,6 +32,7 @@ _EXPORTS: dict[str, str] = {
     'select_scheduler_state_filename': '.multi_tick',
     'SUPPORTED_NOTIFICATION_CHANNELS': '.multi_tick',
     'SUPPORTED_NOTIFICATION_PROVIDERS': '.multi_tick',
+    'WECHAT_CLAWBOT_NOTIFICATION_PROVIDER': '.multi_tick',
     'WECHAT_CLAWBOT_NOTIFICATION_CHANNEL': '.multi_tick',
     'build_account_messages': '.multi_tick_result',
     'build_no_candidate_notification_text': '.multi_tick_result',

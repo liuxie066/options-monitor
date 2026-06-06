@@ -9,14 +9,11 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from domain.domain.fetch_source import is_futu_fetch_source
-from domain.domain.multi_tick import resolve_openclaw_transport_channel
 from src.infrastructure.opend_watchdog import run_watchdog_check
 
 
 DEFAULT_OPEND_HOST = '127.0.0.1'
 DEFAULT_OPEND_PORT = 11111
-DEFAULT_NOTIFICATION_SEND_TIMEOUT_SEC = 60
-MAX_NOTIFICATION_SEND_TIMEOUT_SEC = 300
 
 
 def run_command(
@@ -142,63 +139,6 @@ def run_opend_watchdog(
         success_threshold=int(success_threshold),
     )
     return health.to_payload()
-
-
-def _resolve_notification_send_timeout_sec(
-    notifications: dict[str, Any] | None,
-    *,
-    default: int = DEFAULT_NOTIFICATION_SEND_TIMEOUT_SEC,
-    max_value: int = MAX_NOTIFICATION_SEND_TIMEOUT_SEC,
-) -> int:
-    raw_value = notifications.get('send_timeout_sec') if isinstance(notifications, dict) else None
-    try:
-        timeout_sec = int(raw_value or default)
-    except Exception:
-        timeout_sec = int(default)
-    return max(1, min(int(timeout_sec), int(max_value)))
-
-
-def send_openclaw_message(
-    *,
-    base: Path,
-    channel: str,
-    target: str,
-    message: str,
-    timeout_sec: int | None = None,
-) -> subprocess.CompletedProcess[Any]:
-    transport_channel = resolve_openclaw_transport_channel(channel)
-    cmd = [
-        'openclaw',
-        'message',
-        'send',
-        '--channel',
-        str(transport_channel),
-        '--target',
-        str(target),
-        '--message',
-        str(message),
-        '--json',
-    ]
-    return run_command(cmd, cwd=base, capture_output=True, text=True, timeout_sec=timeout_sec)
-
-
-def send_openclaw_message_process(
-    *,
-    base: Path,
-    channel: str,
-    target: str,
-    message: str,
-    notifications: dict[str, Any] | None = None,
-    idempotency_key: str | None = None,
-) -> subprocess.CompletedProcess[Any]:
-    del idempotency_key
-    return send_openclaw_message(
-        base=base,
-        channel=channel,
-        target=target,
-        message=message,
-        timeout_sec=_resolve_notification_send_timeout_sec(notifications),
-    )
 
 
 def _resolve_watchlist_config(cfg: dict[str, Any] | None) -> list[dict[str, Any]]:

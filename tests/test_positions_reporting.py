@@ -769,6 +769,45 @@ def test_monthly_income_report_excludes_voided_open_event_projection(tmp_path) -
     assert report["warnings"] == []
 
 
+def test_monthly_income_report_ignores_invalid_void_when_filtering_active_events() -> None:
+    report = build_monthly_income_report(
+        [],
+        account="lx",
+        broker="富途",
+        month="2026-04",
+        rates={"rates": {"USDCNY": 7.2}},
+        trade_events=[
+            _trade_event("open-short", side="sell", position_effect="open", price=2.5, trade_date="2026-04-03"),
+            _trade_event(
+                "invalid-void-open",
+                side="",
+                position_effect="void",
+                price=0.0,
+                trade_date="2026-04-04",
+                raw_payload={"void_target_event_id": "open-short"},
+            ),
+        ],
+    )
+
+    assert report["warnings"] == []
+    assert len(report["premium_rows"]) == 1
+    assert report["premium_rows"][0]["event_id"] == "open-short"
+    assert len(report["summary"]) == 1
+    _assert_contains(
+        report["summary"][0],
+        {
+            "month": "2026-04",
+            "account": "lx",
+            "currency": "USD",
+            "premium_received_gross": 250.0,
+            "premium_received_gross_cny": 1800.0,
+            "net_cashflow_gross": 250.0,
+            "premium_contracts": 1,
+            "premium_positions": 1,
+        },
+    )
+
+
 def test_monthly_income_report_excludes_voided_close_event_but_keeps_open_premium(tmp_path) -> None:
     from domain.domain.option_position_lots import OpenPositionCommand
 

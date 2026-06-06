@@ -105,6 +105,51 @@ def test_run_history_backfill_skips_state_duplicate_before_pipeline(tmp_path: Pa
     assert skipped == [{"phase": "backfill_skipped_duplicate", "source": "backfill", "deal_id": "deal-1", "reason": "state:processed_deal_ids"}]
 
 
+def test_run_history_backfill_retries_retryable_unresolved_state(tmp_path: Path) -> None:
+    state_path = tmp_path / "state.json"
+    write_trade_intake_state(
+        state_path,
+        {
+            "processed_deal_ids": {},
+            "failed_deal_ids": {},
+            "unresolved_deal_ids": {
+                "deal-1": {
+                    "status": "unresolved",
+                    "reason": "missing_account_mapping",
+                    "retryable": True,
+                    "attempt_count": 1,
+                }
+            },
+        },
+    )
+    processed: list[dict[str, Any]] = []
+
+    def _history_deals_fn(**_kwargs):
+        return ([{"deal_id": "deal-1"}], {})
+
+    def _process_payload_fn(payload: dict[str, Any], **kwargs):
+        processed.append({"payload": payload, "source": kwargs.get("source")})
+        return {
+            "status": "applied",
+            "action": "open",
+            "reason": "applied_open",
+            "deal_id": payload["deal_id"],
+            "account": "lx",
+        }
+
+    kwargs = _backfill_kwargs(tmp_path)
+    kwargs["state_path"] = state_path
+    out = run_history_backfill(
+        **kwargs,
+        history_deals_fn=_history_deals_fn,
+        process_payload_fn=_process_payload_fn,
+    )
+
+    assert out["applied_count"] == 1
+    assert out["skipped_duplicate_count"] == 0
+    assert processed == [{"payload": {"deal_id": "deal-1"}, "source": "backfill"}]
+
+
 def test_run_history_backfill_marks_ledger_duplicate_processed_without_pipeline(tmp_path: Path) -> None:
     def _history_deals_fn(**_kwargs):
         return ([{"deal_id": "deal-1"}], {})

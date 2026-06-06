@@ -63,7 +63,7 @@ def test_multi_tick_io_and_decision_failure_audit_fields_are_distinguishable() -
     account_run_src = (base / "src" / "application" / "account_run.py").read_text(encoding="utf-8")
     assert "normalize_subprocess_adapter_payload(" in scheduler_src
     assert "normalize_pipeline_subprocess_output(" in account_run_src
-    assert "normalize_notify_subprocess_output" in delivery_adapter_src
+    assert "normalize_wechat_clawbot_send_output" in delivery_adapter_src
     assert "select_notification_delivery_adapter" in notification_flow_src
     assert 'failure_kind="io_error"' in helper_src
     assert 'failure_kind="decision_error"' in audit_src
@@ -113,7 +113,7 @@ def test_multi_tick_notify_unconfirmed_is_not_retried() -> None:
 
     result = helper.send_account_message_with_retry(
         base=Path("/tmp/options-monitor-test"),
-        channel="openclaw-weixin",
+        channel="wechat_clawbot",
         target="user:test",
         account="lx",
         message="hello",
@@ -166,7 +166,7 @@ def test_multi_tick_notify_does_not_retry_when_message_id_exists() -> None:
 
     result = helper.send_account_message_with_retry(
         base=Path("/tmp/options-monitor-test"),
-        channel="openclaw-weixin",
+        channel="wechat_clawbot",
         target="user:test",
         account="lx",
         message="hello",
@@ -206,7 +206,7 @@ def test_multi_tick_notify_unconfirmed_is_not_retried_even_when_explicitly_reque
 
     result = helper.send_account_message_with_retry(
         base=Path("/tmp/options-monitor-test"),
-        channel="openclaw-weixin",
+        channel="wechat_clawbot",
         target="user:test",
         account="lx",
         message="hello",
@@ -251,7 +251,7 @@ def test_multi_tick_notify_failed_send_retries_once_by_default() -> None:
 
     result = helper.send_account_message_with_retry(
         base=Path("/tmp/options-monitor-test"),
-        channel="openclaw-weixin",
+        channel="wechat_clawbot",
         target="user:test",
         account="sy",
         message="hello",

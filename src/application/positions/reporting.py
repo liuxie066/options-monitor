@@ -7,6 +7,8 @@ from zoneinfo import ZoneInfo
 
 from src.infrastructure.feishu_bitable import safe_float
 from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+from domain.domain.ledger import ContractKey, TradeEvent
+from domain.domain.ledger.events import validate_trade_event
 from domain.domain.ledger.position_fields import (
     BUY_TO_CLOSE,
     EXPIRE_AUTO_CLOSE,
@@ -137,12 +139,49 @@ def _event_key(event: dict[str, Any], position_side: str | None = None) -> tuple
 def _voided_event_ids(events: list[dict[str, Any]]) -> set[str]:
     out: set[str] = set()
     for event in events:
-        if str(event.get("position_effect") or "").strip().lower() != "void":
-            continue
-        target = str(_event_payload(event).get("void_target_event_id") or "").strip()
+        target = _valid_void_target_event_id(event)
         if target:
             out.add(target)
     return out
+
+
+def _valid_void_target_event_id(event: dict[str, Any]) -> str | None:
+    if str(event.get("event_type") or "").strip().lower() != "void":
+        return None
+    target = str(event.get("target_event_id") or "").strip()
+    if not target:
+        return None
+    raw_contract_key = event.get("contract_key")
+    if not isinstance(raw_contract_key, dict) or event.get("event_time_ms") in (None, ""):
+        return None
+    try:
+        decoded = TradeEvent(
+            event_id=str(event.get("event_id") or "").strip(),
+            event_type="void",
+            event_time_ms=int(event.get("event_time_ms") or 0),
+            contract_key=ContractKey.from_values(
+                broker=raw_contract_key.get("broker"),
+                account=raw_contract_key.get("account"),
+                underlying_symbol=raw_contract_key.get("underlying_symbol") or raw_contract_key.get("symbol"),
+                option_type=raw_contract_key.get("option_type"),
+                position_side=raw_contract_key.get("position_side") or raw_contract_key.get("side"),
+                strike=raw_contract_key.get("strike"),
+                expiration_ymd=raw_contract_key.get("expiration_ymd") or raw_contract_key.get("expiration"),
+            ),
+            contracts=int(event.get("contracts") or 0),
+            price=float(event.get("price") or 0.0),
+            currency=str(event.get("currency") or ""),
+            source=str(event.get("source") or event.get("source_name") or ""),
+            multiplier=float(event.get("multiplier") or 0.0),
+            fees=float(event.get("fees") or 0.0),
+            target_event_id=target,
+            raw_payload=dict(event.get("raw_payload") or {}),
+        )
+    except Exception:
+        return None
+    if any(item.severity == "error" for item in validate_trade_event(decoded)):
+        return None
+    return target
 
 
 def _active_trade_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:

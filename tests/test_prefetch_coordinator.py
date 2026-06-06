@@ -158,3 +158,36 @@ def test_prefetch_coordinator_can_run_without_early_stops() -> None:
     assert result.errors == 2
     assert result.skipped == 0
     assert result.budget_triggered is False
+
+
+def test_prefetch_coordinator_normalizes_dispatch_exceptions_and_continues() -> None:
+    cfgs = [
+        {"symbol": "AAPL", "fetch": {"source": "futu", "limit_expirations": 8}},
+        {"symbol": "MSFT", "fetch": {"source": "futu", "limit_expirations": 8}},
+    ]
+    dispatched: list[str] = []
+
+    def _dispatch(symbol_cfg: dict[str, Any]) -> dict[str, Any]:
+        symbol = str(symbol_cfg["symbol"])
+        dispatched.append(symbol)
+        if symbol == "AAPL":
+            raise RuntimeError("adapter failed")
+        return _payload(symbol, status="fetched", ok=True, message="fetched")
+
+    result = PrefetchCoordinator(
+        symbol_cfgs=cfgs,
+        max_workers=1,
+        execution_mode="inprocess",
+        fail_budget_consecutive=3,
+        fail_budget_total=5,
+        dispatch_fn=_dispatch,
+    ).run()
+
+    assert dispatched == ["AAPL", "MSFT"]
+    assert result.errors == 1
+    assert result.fetched_ok == 1
+    assert result.completed_count == 2
+    assert result.results["AAPL"] == "RuntimeError: adapter failed"
+    assert result.results["MSFT"] == "fetched"
+    assert result.audit_items[0]["status"] == "error"
+    assert result.audit_items[0]["execution_mode"] == "inprocess"

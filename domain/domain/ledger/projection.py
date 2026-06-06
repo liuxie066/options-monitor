@@ -60,12 +60,8 @@ class ProjectionResult:
 
 def project_trade_events(events: list[TradeEvent]) -> ProjectionResult:
     normalized_events = sorted(events, key=lambda item: (int(item.event_time_ms or 0), item.event_id))
-    voided_event_ids = {event.target_event_id for event in normalized_events if event.event_type == "void" and event.target_event_id}
-    lots_by_id: dict[str, PositionLot] = {}
-    lot_order: list[str] = []
+    validated_events: list[tuple[TradeEvent, list[LedgerDiagnostic]]] = []
     seen_event_ids: set[str] = set()
-    diagnostics: list[LedgerDiagnostic] = []
-
     for event in normalized_events:
         event_diagnostics = validate_trade_event(event)
         if event.event_id in seen_event_ids:
@@ -78,6 +74,20 @@ def project_trade_events(events: list[TradeEvent]) -> ProjectionResult:
                 )
             )
         seen_event_ids.add(event.event_id)
+        validated_events.append((event, event_diagnostics))
+
+    voided_event_ids = {
+        event.target_event_id
+        for event, event_diagnostics in validated_events
+        if event.event_type == "void"
+        and event.target_event_id
+        and not any(item.severity == "error" for item in event_diagnostics)
+    }
+    lots_by_id: dict[str, PositionLot] = {}
+    lot_order: list[str] = []
+    diagnostics: list[LedgerDiagnostic] = []
+
+    for event, event_diagnostics in validated_events:
         if event.event_type == "void":
             diagnostics.extend(event_diagnostics)
             continue

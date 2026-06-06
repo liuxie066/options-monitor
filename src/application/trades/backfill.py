@@ -8,6 +8,7 @@ from typing import Any, Callable
 from src.application.trades.history_backfill import fetch_opend_history_deals
 from src.application.trades.state import (
     append_trade_intake_audit,
+    is_retryable_unresolved_deal,
     load_trade_intake_state,
     lookup_deal_state_entry,
     upsert_deal_state,
@@ -213,6 +214,8 @@ def run_history_backfill(
 
 
 def _state_duplicate_reason(state: dict[str, Any], deal_id: str) -> str | None:
+    if is_retryable_unresolved_deal(state, deal_id):
+        return None
     entry = lookup_deal_state_entry(state, deal_id)
     if entry is None:
         return None

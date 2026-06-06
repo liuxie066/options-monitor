@@ -11,9 +11,7 @@ from src.application.agent_tool_runtime_status import _merge_openclaw_profile, _
 from src.application.notification_delivery_route import resolve_notification_delivery_route
 from domain.domain.multi_tick import (
     FEISHU_APP_NOTIFICATION_PROVIDER,
-    OPENCLAW_NOTIFICATION_PROVIDER,
     is_supported_notification_provider,
-    resolve_openclaw_transport_channel,
 )
 
 
@@ -173,21 +171,16 @@ def _notification_route_check(cfg: dict[str, Any], *, openclaw_path: str | None)
             "message": message,
             "value": {"configured": True, "provider": provider, "channel": channel, "target_configured": False},
         }
-    transport_channel = resolve_openclaw_transport_channel(channel) if provider == OPENCLAW_NOTIFICATION_PROVIDER else channel
-    status = "ok"
-    message = "notification route configured"
-    if provider == OPENCLAW_NOTIFICATION_PROVIDER and not openclaw_path:
-        status = "warn"
-        message = "openclaw notification provider is configured but openclaw command is not on PATH"
+    del openclaw_path
     return {
         "name": "notification_route",
-        "status": status,
-        "message": message,
+        "status": "ok",
+        "message": "notification route configured",
         "value": {
             "configured": True,
             "provider": provider,
             "channel": channel,
-            "transport_channel": transport_channel,
+            "transport_channel": channel,
             "target_configured": True,
         },
     }
