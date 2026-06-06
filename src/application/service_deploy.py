@@ -266,6 +266,8 @@ def _systemd_unit(
         lines.append(f"Restart={restart}")
         lines.append("RestartSec=10")
     lines.extend(["StandardOutput=journal", "StandardError=journal", ""])
+    if restart:
+        lines.extend(["[Install]", "WantedBy=multi-user.target", ""])
     return "\n".join(lines)
 
 
