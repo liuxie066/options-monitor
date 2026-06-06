@@ -514,10 +514,98 @@ runtime:
 绑定入口：
 
 ```bash
+./om channel wechat-clawbot connect --label default --name ops
+./om channel wechat-clawbot list --label default
+```
+
+`connect` 会生成二维码并等待扫码确认；如果上游返回二维码图片或链接，会在状态目录写出 `login_qrcode.*`
+方便远端打开或下载查看。扫码成功后，它会提示你向目标微信会话发送一条绑定文本，成功后输出可写入
+`notifications.target` 的目标值，例如 `wechat:default:ops`。
+
+入站控制试运行入口：
+
+```bash
+./om channel wechat-clawbot poll-once \
+  --label default \
+  --config-key us \
+  --allowed-senders "wechat:<from_user_id>"
+```
+
+`poll-once` 会读取一次 iLink updates，把文本消息交给 Assistant control，并默认用同一个 ClawBot
+上下文回复原消息。它是长驻 daemon 前的可验证入口；远端运行前必须显式配置 `--allowed-senders`
+或在 `config.yaml` 的 `inbound.wechat_clawbot.allowed_senders` 中声明 allowlist，
+不要把未授权微信用户接入 Assistant 写操作预览/确认路径。
+
+统一通道状态入口：
+
+```bash
+./om channel status \
+  --runtime-root /var/lib/options-monitor \
+  --profile-path /var/lib/options-monitor/service.profile.json \
+  --env-file /etc/options-monitor/options-monitor.env
+```
+
+`channel status` 会同时汇总 Feishu 与 WeChat ClawBot 的配置、service profile、allowlist 是否配置、
+绑定状态和可用性；输出只返回布尔状态和脱敏路径，不返回 ClawBot `bot_token` 或 allowlist 明文。
+
+远端长驻入口：
+
+```bash
+./om channel wechat-clawbot serve --check \
+  --label default \
+  --state-dir /var/lib/options-monitor/output_shared/state/channels/wechat_clawbot/default \
+  --config-key us \
+  --config-path /var/lib/options-monitor/config.us.json \
+  --assistant-config /var/lib/options-monitor/resolved/config.assistant.json \
+  --audit-db /var/lib/options-monitor/output_shared/state/inbound_control.sqlite3 \
+  --allowed-senders "wechat:<from_user_id>"
+
+./om channel wechat-clawbot serve \
+  --label default \
+  --state-dir /var/lib/options-monitor/output_shared/state/channels/wechat_clawbot/default \
+  --config-key us \
+  --config-path /var/lib/options-monitor/config.us.json \
+  --assistant-config /var/lib/options-monitor/resolved/config.assistant.json \
+  --audit-db /var/lib/options-monitor/output_shared/state/inbound_control.sqlite3 \
+  --allowed-senders "wechat:<from_user_id>" \
+  --lock-path /var/lib/options-monitor/locks/wechat-clawbot.lock
+```
+
+systemd/launchd 渲染入口：
+
+```bash
+./om service render \
+  --target systemd \
+  --runtime-root /var/lib/options-monitor \
+  --config-yaml /var/lib/options-monitor/config.yaml \
+  --config-us /var/lib/options-monitor/config.us.json \
+  --config-hk /var/lib/options-monitor/config.hk.json \
+  --include-wechat-clawbot
+```
+
+推荐把长驻服务的微信入站行为写入 `config.yaml`，再生成 `config.assistant.json`：
+
+```yaml
+inbound:
+  wechat_clawbot:
+    label: default
+    allowed_senders: "wechat:<from_user_id>"
+    reply_enabled: true
+    max_reply_chars: 3500
+    poll_interval_sec: 3.0
+    timeout_sec: 20
+```
+
+如果需要临时覆盖 allowlist，可以在 `service render` 时传
+`--wechat-clawbot-allowed-senders "wechat:<from_user_id>"`；没有通配默认值。来自 `config.yaml`
+的 allowlist 不会在 `service.profile.json` 中重复明文保存，profile 只记录是否已配置和来源。
+
+底层排障入口：
+
+```bash
 ./om channel wechat-clawbot qrcode --label default
 ./om channel wechat-clawbot qr-status --label default
 ./om channel wechat-clawbot bind --label default --name ops --match-text "bind ops"
-./om channel wechat-clawbot list --label default
 ```
 
 ### 4.7 schedule：监控时间窗口

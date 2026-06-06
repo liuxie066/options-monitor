@@ -144,7 +144,8 @@ def _load_profile_and_paths(
 
 
 def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
-    profile = _profile_with_discovered_managed_services(ctx["profile"], ctx=ctx)
+    original_profile = ctx["profile"]
+    profile = _profile_with_discovered_managed_services(original_profile, ctx=ctx)
     ctx["profile"] = profile
     provider = str(ctx["provider"] or "").strip().lower()
     if provider not in {"systemd", "launchd"}:
@@ -204,7 +205,7 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
         for unit in required_units
         if unit in set(missing_profile_units) or unit in set(missing_installed_units)
     )
-    profile_content_changed = _profile_content_changed(profile, bundle)
+    profile_content_changed = _profile_content_changed(profile, bundle) or profile != original_profile
     manual_actions = _manual_actions(
         provider=provider,
         missing_installed_units=missing_installed_units,
@@ -253,10 +254,13 @@ def _profile_with_discovered_managed_services(profile: dict[str, Any], *, ctx: d
     discovered = []
     opend_unit = Path(ctx["systemd_unit_root"]) / "options-monitor-opend.service"
     feishu_unit = Path(ctx["systemd_unit_root"]) / "options-monitor-feishu-ws.service"
+    wechat_unit = Path(ctx["systemd_unit_root"]) / "options-monitor-wechat-clawbot.service"
     if "options-monitor-opend.service" not in services and opend_unit.exists():
         discovered.append("options-monitor-opend.service")
     if "options-monitor-feishu-ws.service" not in services and feishu_unit.exists():
         discovered.append("options-monitor-feishu-ws.service")
+    if "options-monitor-wechat-clawbot.service" not in services and wechat_unit.exists():
+        discovered.append("options-monitor-wechat-clawbot.service")
     if not discovered:
         return profile
     out = dict(profile)
@@ -274,6 +278,11 @@ def _profile_with_discovered_managed_services(profile: dict[str, Any], *, ctx: d
         next_feishu_ws = dict(feishu_ws) if isinstance(feishu_ws, dict) else {}
         next_feishu_ws.setdefault("enabled", True)
         out["feishu_ws"] = next_feishu_ws
+    if "options-monitor-wechat-clawbot.service" in discovered:
+        wechat_clawbot = out.get("wechat_clawbot")
+        next_wechat_clawbot = dict(wechat_clawbot) if isinstance(wechat_clawbot, dict) else {}
+        next_wechat_clawbot.setdefault("enabled", True)
+        out["wechat_clawbot"] = next_wechat_clawbot
     return out
 
 
@@ -290,6 +299,8 @@ def _expected_bundle_from_profile(
     opend = opend_raw if isinstance(opend_raw, dict) else {}
     feishu_ws_raw = profile.get("feishu_ws")
     feishu_ws = feishu_ws_raw if isinstance(feishu_ws_raw, dict) else {}
+    wechat_clawbot_raw = profile.get("wechat_clawbot")
+    wechat_clawbot = wechat_clawbot_raw if isinstance(wechat_clawbot_raw, dict) else {}
     services = _service_names_from_profile(profile)
     include_auto_upgrade = bool(
         isinstance(profile.get("auto_upgrade"), dict)
@@ -302,6 +313,11 @@ def _expected_bundle_from_profile(
         or "options-monitor-feishu-ws.service" in services
         or "com.options-monitor.feishu-ws" in services
     )
+    include_wechat_clawbot = bool(
+        wechat_clawbot.get("enabled")
+        or "options-monitor-wechat-clawbot.service" in services
+        or "com.options-monitor.wechat-clawbot" in services
+    )
     include_opend = bool(
         opend.get("enabled")
         or "options-monitor-opend.service" in services
@@ -311,6 +327,17 @@ def _expected_bundle_from_profile(
     feishu_ws_config_key = str(feishu_ws.get("config_key") or "").strip() or None
     if include_feishu_ws and feishu_ws_config_key is None and len([market for market in market_values if market in {"us", "hk"}]) != 1:
         include_feishu_ws = False
+    wechat_clawbot_config_key = str(wechat_clawbot.get("config_key") or "").strip() or None
+    wechat_clawbot_allowed_senders = str(wechat_clawbot.get("allowed_senders") or "").strip() or None
+    wechat_clawbot_allowed_senders_configured = bool(
+        wechat_clawbot_allowed_senders
+        or wechat_clawbot.get("allowed_senders_configured")
+        or str(wechat_clawbot.get("allowed_senders_source") or "").strip() == "config_yaml"
+    )
+    if include_wechat_clawbot and wechat_clawbot_config_key is None and len([market for market in market_values if market in {"us", "hk"}]) != 1:
+        include_wechat_clawbot = False
+    if include_wechat_clawbot and not wechat_clawbot_allowed_senders_configured:
+        include_wechat_clawbot = False
     return render_service_bundle(
         target=provider,
         repo_root=repo_root,
@@ -329,6 +356,10 @@ def _expected_bundle_from_profile(
         opend_executable=opend.get("executable"),
         include_feishu_ws=include_feishu_ws,
         feishu_ws_config_key=feishu_ws_config_key,
+        include_wechat_clawbot=include_wechat_clawbot,
+        wechat_clawbot_config_key=wechat_clawbot_config_key,
+        wechat_clawbot_label=str(wechat_clawbot.get("label") or "default"),
+        wechat_clawbot_allowed_senders=wechat_clawbot_allowed_senders,
         include_content=True,
     )
 
@@ -472,6 +503,7 @@ def _profile_content_changed(profile: dict[str, Any], bundle: dict[str, Any]) ->
         "auto_upgrade",
         "opend",
         "feishu_ws",
+        "wechat_clawbot",
         "restart",
     )
     return {key: profile.get(key) for key in keys if key in profile or key in expected} != {
@@ -547,7 +579,12 @@ def _manual_actions(
     if missing_installed_units or mismatched_units:
         actions.append(f"./om service drift --profile-path {profile_path} --confirm")
     if provider == "systemd":
-        long_running = [name for name in missing_installed_units if name.endswith(".service") and ("trade-intake" in name or "feishu-ws" in name)]
+        long_running = [
+            name
+            for name in missing_installed_units
+            if name.endswith(".service")
+            and ("trade-intake" in name or "feishu-ws" in name or "wechat-clawbot" in name)
+        ]
         actions.extend(f"manual_enable_long_running_service: sudo systemctl enable --now {name}" for name in long_running)
         actions.extend(f"manual_review_unit_content: sudo systemctl cat {name}" for name in mismatched_units)
     return actions

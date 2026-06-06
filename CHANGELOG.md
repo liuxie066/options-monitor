@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 1.2.226 - 2026-06-06
+
+### Added
+- Added `./om channel wechat-clawbot connect` as a guided QR login and target binding flow for first-class WeChat ClawBot notification setup.
+- Added `./om channel wechat-clawbot poll-once` to process one WeChat ClawBot inbound batch through Assistant control and reply through the same ClawBot channel.
+- Added `./om channel wechat-clawbot serve` plus `serve --check` for long-running WeChat ClawBot inbound control, using the same channel receive/reply path and explicit sender allowlist.
+- Added `./om service render --include-wechat-clawbot` to generate systemd/launchd WeChat ClawBot inbound services with profile, lock-path, upgrade restart, and post-upgrade health-check support.
+- Added a first-class message channel registry, inbound channel service dispatch, and WeChat ClawBot state store so channel capabilities and channel state are no longer embedded in notification, inbound, or binding flow code.
+- Added `./om channel status` plus shared `healthcheck` / `runtime_status` channel health output for Feishu and WeChat ClawBot.
+
+### Changed
+- WeChat ClawBot service profiles now record YAML-sourced sender allowlists as configured/source metadata instead of duplicating the allowlist text in `service.profile.json`.
+- Unified Feishu and WeChat inbound reply decisions so permission-denied, disabled replies, empty responses, and truncation behavior share the same channel decision path.
+- Expanded channel health and service upgrade diagnostics to report WeChat cursor, bot-token readiness, allowlist configuration, service active/enabled status, drift discovery, and precise `serve --check` remediation commands.
+- Improved WeChat ClawBot binding UX with QR artifact open commands, list-time `wechat:<from_user_id>` sender hints, and connect command templates when `serve --check` finds a missing bot token.
+
 ## 1.2.225 - 2026-06-06
 
 ### Fixed

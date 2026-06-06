@@ -12,7 +12,18 @@ from typing import Any, Callable, Mapping, cast
 from src.application.assistant.config_loader import load_assistant_config
 from src.application.assistant.settings import DEFAULT_CONTEXT_WINDOW_MESSAGES, AssistantSettings, LlmTranslatorSettings
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response, mask_path
-from src.application.inbound.feishu import handle_feishu_payload
+from domain.domain.multi_tick import FEISHU_APP_NOTIFICATION_PROVIDER
+from src.application.channels.feishu import build_feishu_inbound_channel_service
+from src.application.channels.service import ChannelService
+from src.application.channels.reply_decision import (
+    decide_inbound_reply,
+    inbound_command_id as _inbound_command_id,
+    inbound_error_code as _inbound_error_code,
+    inbound_message_data as _inbound_message_data,
+    inbound_message_result as _inbound_result,
+    permission_denied_message as _permission_denied_message,
+    permission_denied_should_stay_silent as _permission_denied_should_stay_silent,
+)
 from src.application.secret_resolver import (
     DEFAULT_FEISHU_BOT_APP_ID_ENV,
     DEFAULT_FEISHU_BOT_APP_SECRET_ENV,
@@ -187,6 +198,7 @@ def handle_feishu_ws_event(
     settings: FeishuWsSettings,
     reply_fn: ReplyFn = reply_text_message,
     reaction_fn: ReactionFn = add_message_reaction,
+    channel_service: ChannelService | None = None,
     execute_tool_fn: ExecuteToolFn | None = None,
     plan_tools_fn: Callable[..., Any] | None = None,
     synthesize_response_fn: Callable[..., Any] | None = None,
@@ -198,7 +210,9 @@ def handle_feishu_ws_event(
         inbound_kwargs["plan_tools_fn"] = plan_tools_fn
     if synthesize_response_fn is not None:
         inbound_kwargs["synthesize_response_fn"] = synthesize_response_fn
-    inbound = handle_feishu_payload(
+    service = channel_service or build_feishu_inbound_channel_service()
+    inbound = service.handle_inbound(
+        FEISHU_APP_NOTIFICATION_PROVIDER,
         payload,
         config_key=settings.config_key,
         config_path=settings.config_path,
@@ -362,35 +376,27 @@ def _maybe_reply(
     settings: FeishuWsSettings,
     reply_fn: ReplyFn,
 ) -> dict[str, Any]:
-    data = _inbound_message_data(inbound)
-    if data is None:
-        return {"attempted": False, "ok": True, "reason": "not_message"}
-
-    inbound_result = _inbound_result(data)
-    if _inbound_error_code(inbound_result) == "PERMISSION_DENIED":
-        if _permission_denied_should_stay_silent(inbound_result):
-            return {"attempted": False, "ok": True, "reason": "permission_denied"}
-    if not settings.reply_enabled:
-        return {"attempted": False, "ok": True, "reason": "reply_disabled"}
-
-    response_text = _trim_reply(str(data.get("response_text") or ""), max_chars=settings.max_reply_chars)
-    if not response_text and _inbound_error_code(inbound_result) == "PERMISSION_DENIED":
-        response_text = _trim_reply(_permission_denied_message(inbound_result), max_chars=settings.max_reply_chars)
-    if not response_text:
-        return {"attempted": False, "ok": True, "reason": "empty_response"}
+    decision = decide_inbound_reply(
+        inbound,
+        reply_enabled=settings.reply_enabled,
+        max_reply_chars=settings.max_reply_chars,
+        permission_denied_message_fn=_permission_denied_message,
+    )
+    if not decision.should_send:
+        return decision.status
     if not (settings.app_id and settings.app_secret):
         return {"attempted": True, "ok": False, "reason": "missing_app_credentials"}
 
-    message_id = _message_id_from_inbound_data(data)
+    message_id = _message_id_from_inbound_data(decision.data)
     if not message_id:
         return {"attempted": True, "ok": False, "reason": "missing_message_id"}
-    command_id = _inbound_command_id(inbound_result)
+    command_id = _inbound_command_id(decision.inbound_result)
     try:
         api_response = reply_fn(
             app_id=settings.app_id,
             app_secret=settings.app_secret,
             message_id=message_id,
-            text=response_text,
+            text=decision.text,
             uuid=command_id,
             reply_in_thread=settings.reply_in_thread,
         )
@@ -404,21 +410,10 @@ def _maybe_reply(
     return {
         "attempted": True,
         "ok": True,
-        "reason": "permission_denied_sent" if _inbound_error_code(inbound_result) == "PERMISSION_DENIED" else "sent",
+        "reason": decision.send_reason,
         "message_id": message_id,
         "api_response": api_response,
     }
-
-
-def _inbound_message_data(inbound: dict[str, Any]) -> dict[str, Any] | None:
-    data_raw = inbound.get("data")
-    data = cast(dict[str, Any], data_raw) if isinstance(data_raw, dict) else {}
-    return data if data.get("kind") == "message" else None
-
-
-def _inbound_result(data: dict[str, Any]) -> dict[str, Any]:
-    inbound_result_raw = data.get("inbound_result")
-    return cast(dict[str, Any], inbound_result_raw) if isinstance(inbound_result_raw, dict) else {}
 
 
 def _message_id_from_inbound_data(data: dict[str, Any]) -> str | None:
@@ -436,46 +431,6 @@ def _event_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "event_type": _first_text(header.get("event_type"), event.get("type")),
         "message_id": _first_text(message.get("message_id")),
     }
-
-
-def _inbound_error_code(inbound_result: dict[str, Any]) -> str | None:
-    error_raw = inbound_result.get("error")
-    error = cast(dict[str, Any], error_raw) if isinstance(error_raw, dict) else {}
-    return _first_text(error.get("code"))
-
-
-def _inbound_command_id(inbound_result: dict[str, Any]) -> str | None:
-    data_raw = inbound_result.get("data")
-    data = cast(dict[str, Any], data_raw) if isinstance(data_raw, dict) else {}
-    return _first_text(data.get("command_id"))
-
-
-def _permission_denied_should_stay_silent(inbound_result: dict[str, Any]) -> bool:
-    error_raw = inbound_result.get("error")
-    error = cast(dict[str, Any], error_raw) if isinstance(error_raw, dict) else {}
-    details_raw = error.get("details")
-    details = cast(dict[str, Any], details_raw) if isinstance(details_raw, dict) else {}
-    reason = str(details.get("reason") or "").strip()
-    message = str(error.get("message") or "").strip()
-    return reason in {"sender_not_allowed", "missing_sender"} or message in {
-        "sender is not allowed to use assistant control",
-        "sender is not allowed to use inbound control",
-    }
-
-
-def _permission_denied_message(inbound_result: dict[str, Any]) -> str:
-    error_raw = inbound_result.get("error")
-    error = cast(dict[str, Any], error_raw) if isinstance(error_raw, dict) else {}
-    message = str(error.get("message") or "写入权限未开启").strip()
-    hint = str(error.get("hint") or "").strip()
-    return f"{message}{(' ' + hint) if hint else ''}".strip()
-
-
-def _trim_reply(value: str, *, max_chars: int) -> str:
-    text = str(value or "").strip()
-    if max_chars <= 0 or len(text) <= max_chars:
-        return text
-    return text[: max(0, max_chars - 20)].rstrip() + "\n...(truncated)"
 
 
 def _dict(value: Any) -> dict[str, Any]:

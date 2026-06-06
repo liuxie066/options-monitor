@@ -81,6 +81,54 @@ def test_feishu_ws_delegates_to_inbound_and_replies(tmp_path: Path) -> None:
     assert replies[0]["text"].startswith("收益统计完成")
 
 
+def test_feishu_ws_routes_inbound_through_channel_service() -> None:
+    inbound_calls: list[dict[str, Any]] = []
+    replies: list[dict[str, Any]] = []
+
+    class FakeChannelService:
+        def handle_inbound(self, channel: str, payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+            inbound_calls.append({"channel": channel, "payload": payload, "kwargs": kwargs})
+            return build_response(
+                tool_name="inbound.feishu",
+                ok=True,
+                data={
+                    "kind": "message",
+                    "request": {"message_id": "msg_1"},
+                    "response_text": "channel service reply",
+                    "inbound_result": build_response(
+                        tool_name="assistant.handle",
+                        ok=True,
+                        data={"command_id": "cmd_1", "response_text": "channel service reply"},
+                    ),
+                },
+            )
+
+    def _reply(**kwargs: Any) -> dict[str, Any]:
+        replies.append(dict(kwargs))
+        return {"code": 0, "data": {"message_id": "reply_1"}}
+
+    out = handle_feishu_ws_event(
+        _message_payload(),
+        settings=FeishuWsSettings(
+            config_key="us",
+            allowed_senders="feishu:ou_1",
+            app_id="app_1",
+            app_secret="secret_1",
+            reply_enabled=True,
+        ),
+        reply_fn=_reply,
+        channel_service=FakeChannelService(),  # type: ignore[arg-type]
+    )
+
+    assert out["ok"] is True
+    assert inbound_calls[0]["channel"] == "feishu_app"
+    assert inbound_calls[0]["payload"]["event"]["message"]["message_id"] == "msg_1"
+    assert inbound_calls[0]["kwargs"]["config_key"] == "us"
+    assert inbound_calls[0]["kwargs"]["allowed_senders"] == "feishu:ou_1"
+    assert replies[0]["text"] == "channel service reply"
+    assert replies[0]["uuid"] == "cmd_1"
+
+
 def test_feishu_ws_can_route_through_assistant(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
     assistant_config_path = tmp_path / "config.assistant.json"

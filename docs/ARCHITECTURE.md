@@ -44,6 +44,7 @@ control:
 
 ```text
 Feishu / future channels
+-> src.application.channels.ChannelService
 -> src.application.inbound.feishu(_ws)
 -> src.application.assistant.runtime
 -> src.application.assistant.router
@@ -51,8 +52,11 @@ Feishu / future channels
 -> canonical Assistant renderer
 ```
 
-`src.application.inbound` should stay thin: extract channel payloads, enforce
-channel-specific receive/reply mechanics, and build the transport request.
+`src.application.channels` owns channel capability registration and dispatch, so
+inbound assistant control and outbound notifications are capabilities of the
+same channel model. `src.application.inbound` should stay thin: extract channel
+payloads, enforce channel-specific receive/reply mechanics, and build the
+transport request.
 Command parsing, optional LLM-first natural-language routing, deterministic
 fallback parsing, bounded agent-loop tracing, sender allowlist checks, SQLite audit,
 preview/confirm operations, and user-facing rendering are owned by

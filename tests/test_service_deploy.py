@@ -419,6 +419,43 @@ def test_service_drift_discovers_installed_feishu_ws_as_managed_service(tmp_path
     ]
 
 
+def test_service_drift_discovers_installed_wechat_clawbot_as_managed_service(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+    from src.application.service_drift import service_drift
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    systemd_root = tmp_path / "systemd"
+    repo.mkdir()
+    runtime.mkdir()
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        accounts=["lx"],
+        markets=["us"],
+        include_wechat_clawbot=True,
+        wechat_clawbot_label="ops",
+        wechat_clawbot_allowed_senders="wechat:user_1",
+    )
+    profile = json.loads({item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"])
+    profile["services"] = [item for item in profile["services"] if item["name"] != "options-monitor-wechat-clawbot.service"]
+    (runtime / "service.profile.json").write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")
+    _write_systemd_units_from_bundle(bundle, systemd_root)
+
+    out = service_drift(repo_root=repo, runtime_root=runtime, systemd_unit_root=systemd_root, confirm=True)
+    refreshed = json.loads((runtime / "service.profile.json").read_text(encoding="utf-8"))
+
+    assert "options-monitor-wechat-clawbot.service" in out["expected_services"]
+    assert {"name": "options-monitor-wechat-clawbot.service"} in refreshed["services"]
+    assert refreshed["wechat_clawbot"]["enabled"] is True
+    assert refreshed["wechat_clawbot"]["label"] == "ops"
+    assert refreshed["restart"]["services"] == [
+        "options-monitor-trade-intake.service",
+        "options-monitor-wechat-clawbot.service",
+    ]
+
+
 def test_service_drift_preserves_profile_opend_service(tmp_path: Path) -> None:
     from src.application.service_deploy import render_service_bundle
     from src.application.service_drift import service_drift
@@ -666,6 +703,115 @@ def test_render_systemd_bundle_can_include_feishu_ws_service(tmp_path: Path) -> 
     assert profile["feishu_ws"]["assistant_config_path"] == str(runtime / "resolved" / "config.assistant.json")
     assert profile["feishu_ws"]["lock_path"] == str(runtime / "locks" / "feishu-ws.lock")
     assert "systemctl enable --now options-monitor-feishu-ws.service" in bundle["commands"]["enable"]
+
+
+def test_render_systemd_bundle_can_include_wechat_clawbot_service(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    repo.mkdir()
+    runtime.mkdir()
+    config_yaml = runtime / "config.yaml"
+    config_yaml.write_text("accounts: {}\nmarkets: {}\n", encoding="utf-8")
+
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        markets=["us"],
+        config_yaml=config_yaml,
+        include_wechat_clawbot=True,
+        wechat_clawbot_label="ops",
+        wechat_clawbot_allowed_senders="wechat:user_1",
+    )
+
+    files = {item["relative_path"]: item for item in bundle["files"]}
+    service = files["systemd/options-monitor-wechat-clawbot.service"]["content"]
+    profile = json.loads(files["service.profile.json"]["content"])
+
+    assert str(repo / "om") + " channel wechat-clawbot serve" in service
+    assert "--label ops" in service
+    assert "--state-dir " + str(runtime / "output_shared" / "state" / "channels" / "wechat_clawbot" / "ops") in service
+    assert "--config-path " + str(repo / "config.us.json") in service
+    assert "--assistant-config " + str(runtime / "resolved" / "config.assistant.json") in service
+    assert "--audit-db " + str(runtime / "output_shared" / "state" / "inbound_control.sqlite3") in service
+    assert "--allowed-senders wechat:user_1" in service
+    assert "--lock-path " + str(runtime / "locks" / "wechat-clawbot.lock") in service
+    assert "Restart=always" in service
+    assert {"name": "options-monitor-wechat-clawbot.service"} in profile["services"]
+    assert profile["restart"]["services"] == [
+        "options-monitor-trade-intake.service",
+        "options-monitor-wechat-clawbot.service",
+    ]
+    assert profile["wechat_clawbot"]["enabled"] is True
+    assert profile["wechat_clawbot"]["label"] == "ops"
+    assert profile["wechat_clawbot"]["config_key"] == "us"
+    assert profile["wechat_clawbot"]["allowed_senders"] == "wechat:user_1"
+    assert profile["wechat_clawbot"]["allowed_senders_configured"] is True
+    assert profile["wechat_clawbot"]["allowed_senders_source"] == "render_argument"
+    assert profile["wechat_clawbot"]["assistant_config_path"] == str(runtime / "resolved" / "config.assistant.json")
+    assert profile["wechat_clawbot"]["lock_path"] == str(runtime / "locks" / "wechat-clawbot.lock")
+    assert "systemctl enable --now options-monitor-wechat-clawbot.service" in bundle["commands"]["enable"]
+
+
+def test_render_wechat_clawbot_requires_explicit_allowed_senders(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    with pytest.raises(ValueError, match="wechat_clawbot_allowed_senders"):
+        render_service_bundle(
+            target="systemd",
+            repo_root=repo,
+            runtime_root=tmp_path / "runtime",
+            markets=["us"],
+            include_wechat_clawbot=True,
+        )
+
+
+def test_render_wechat_clawbot_can_use_yaml_inbound_allowlist(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    repo.mkdir()
+    runtime.mkdir()
+    config_yaml = runtime / "config.yaml"
+    config_yaml.write_text(
+        """\
+accounts: {}
+markets: {}
+inbound:
+  wechat_clawbot:
+    label: ops
+    allowed_senders: wechat:user_1
+""",
+        encoding="utf-8",
+    )
+
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        markets=["us"],
+        config_yaml=config_yaml,
+        include_wechat_clawbot=True,
+    )
+
+    files = {item["relative_path"]: item for item in bundle["files"]}
+    service = files["systemd/options-monitor-wechat-clawbot.service"]["content"]
+    profile = json.loads(files["service.profile.json"]["content"])
+
+    assert "--label ops" in service
+    assert "--assistant-config " + str(runtime / "resolved" / "config.assistant.json") in service
+    assert "--allowed-senders" not in service
+    assert profile["wechat_clawbot"]["label"] == "ops"
+    assert profile["wechat_clawbot"]["allowed_senders_configured"] is True
+    assert profile["wechat_clawbot"]["allowed_senders_source"] == "config_yaml"
+    assert "allowed_senders" not in profile["wechat_clawbot"]
+    assert profile["wechat_clawbot"]["assistant_config_path"] == str(runtime / "resolved" / "config.assistant.json")
 
 
 def test_render_systemd_auto_upgrade_preserves_symlink_repo_root(tmp_path: Path) -> None:
@@ -992,6 +1138,37 @@ def test_service_status_from_profile_checks_provider_with_injected_runner() -> N
     assert calls == [["systemctl", "is-active", "options-monitor-trade-intake.service"]]
 
 
+def test_service_status_from_profile_can_check_systemd_enabled_state() -> None:
+    from src.application.service_deploy import service_status_from_profile
+
+    calls: list[list[str]] = []
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        calls.append(list(command))
+        if list(command)[1] == "is-enabled":
+            return subprocess.CompletedProcess(command, 0, stdout="enabled\n", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="active\n", stderr="")
+
+    out = service_status_from_profile(
+        {
+            "service_provider": "systemd",
+            "services": [{"name": "options-monitor-wechat-clawbot.service"}],
+        },
+        include_status=True,
+        include_enabled=True,
+        run_cmd=_run_cmd,
+    )
+
+    service = out["services"][0]
+    assert service["status"] == "ok"
+    assert service["active"]["stdout"] == "active"
+    assert service["enabled"]["stdout"] == "enabled"
+    assert calls == [
+        ["systemctl", "is-active", "options-monitor-wechat-clawbot.service"],
+        ["systemctl", "is-enabled", "options-monitor-wechat-clawbot.service"],
+    ]
+
+
 def test_service_upgrade_dry_run_and_confirm_switches_current_symlink(monkeypatch, tmp_path: Path) -> None:
     from src.application.service_upgrade import service_upgrade
 
@@ -1231,6 +1408,67 @@ def test_post_upgrade_service_health_reports_feishu_ws_check_failure(tmp_path: P
     assert out["status"] == "error"
     assert out["failed_checks"][0]["check"] == "feishu-ws-check"
     assert "manual_check: source the env file, then run ./om inbound feishu-ws --check" in out["remediation"]
+
+
+def test_post_upgrade_service_health_reports_precise_wechat_check_failure(tmp_path: Path) -> None:
+    from src.application.service_upgrade import _post_upgrade_service_health
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    state_dir = tmp_path / "wechat-state"
+    audit_db = tmp_path / "inbound.sqlite3"
+    assistant_config = tmp_path / "config.assistant.json"
+    config_path = tmp_path / "config.us.json"
+    profile = {
+        "service_provider": "systemd",
+        "config_paths": {"us": str(config_path)},
+        "wechat_clawbot": {
+            "enabled": True,
+            "label": "ops",
+            "state_dir": str(state_dir),
+            "config_key": "us",
+            "assistant_config_path": str(assistant_config),
+            "audit_db": str(audit_db),
+            "allowed_senders": "wechat:user_1",
+        },
+        "services": [{"name": "options-monitor-wechat-clawbot.service"}],
+    }
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        if list(command)[:4] == [str(repo / "om"), "channel", "wechat-clawbot", "serve"]:
+            return subprocess.CompletedProcess(command, 2, stdout="", stderr="missing bot_token\n")
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    out = _post_upgrade_service_health(profile=profile, repo_root=repo, run_cmd=_run_cmd, operations=[])
+
+    assert out["ok"] is False
+    assert out["failed_checks"][0]["check"] == "wechat-clawbot-check"
+    assert (
+        "manual_check: "
+        + " ".join(
+            [
+                str(repo / "om"),
+                "channel",
+                "wechat-clawbot",
+                "serve",
+                "--check",
+                "--label",
+                "ops",
+                "--state-dir",
+                str(state_dir),
+                "--config-key",
+                "us",
+                "--config-path",
+                str(config_path),
+                "--assistant-config",
+                str(assistant_config),
+                "--audit-db",
+                str(audit_db),
+                "--allowed-senders",
+                "wechat:user_1",
+            ]
+        )
+    ) in out["remediation"]
 
 
 def test_post_upgrade_feishu_ws_check_preserves_systemd_loaded_env(monkeypatch, tmp_path: Path) -> None:

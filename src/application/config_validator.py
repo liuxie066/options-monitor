@@ -239,6 +239,19 @@ def _validate_inbound_config(cfg: dict) -> None:
                     validate_positive_integer(feishu_ws.get(key), f'inbound.feishu_ws.{key}')
             if 'ack_reaction' in feishu_ws and feishu_ws.get('ack_reaction') is not None and not isinstance(feishu_ws.get('ack_reaction'), str):
                 die('inbound.feishu_ws.ack_reaction must be a string')
+        wechat_clawbot = inbound.get('wechat_clawbot') or {}
+        if wechat_clawbot and not isinstance(wechat_clawbot, dict):
+            die('inbound.wechat_clawbot must be an object')
+        if isinstance(wechat_clawbot, dict):
+            for key in ('label', 'state_dir', 'allowed_senders'):
+                if key in wechat_clawbot and wechat_clawbot.get(key) is not None and not isinstance(wechat_clawbot.get(key), str):
+                    die(f'inbound.wechat_clawbot.{key} must be a string')
+            if 'reply_enabled' in wechat_clawbot and wechat_clawbot.get('reply_enabled') is not None and not isinstance(wechat_clawbot.get('reply_enabled'), bool):
+                die('inbound.wechat_clawbot.reply_enabled must be a boolean')
+            for key in ('max_reply_chars', 'timeout_sec'):
+                if key in wechat_clawbot and wechat_clawbot.get(key) is not None:
+                    validate_positive_integer(wechat_clawbot.get(key), f'inbound.wechat_clawbot.{key}')
+            _validate_optional_non_negative_number(wechat_clawbot, 'poll_interval_sec', 'inbound.wechat_clawbot')
 
 
 def _validate_assistant_config(cfg: dict) -> None:

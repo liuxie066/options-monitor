@@ -5,6 +5,15 @@ from typing import Any
 
 
 @dataclass(frozen=True)
+class ChannelCapabilities:
+    outbound: bool = False
+    inbound: bool = False
+    reply: bool = False
+    bind: bool = False
+    health: bool = False
+
+
+@dataclass(frozen=True)
 class IncomingChannelMessage:
     channel: str
     sender_id: str

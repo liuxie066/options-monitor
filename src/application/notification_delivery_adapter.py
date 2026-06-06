@@ -10,10 +10,12 @@ from typing import Any, Callable
 from domain.domain.multi_tick import (
     FEISHU_APP_NOTIFICATION_PROVIDER,
     SUPPORTED_NOTIFICATION_PROVIDERS,
-    WECHAT_CLAWBOT_NOTIFICATION_PROVIDER,
     normalize_notification_provider,
 )
 from domain.domain.tool_boundary import normalize_subprocess_adapter_payload
+from src.application.channels.feishu import build_feishu_channel_adapter
+from src.application.channels.service import ChannelRegistry
+from src.application.channels.wechat_clawbot.adapter import build_wechat_clawbot_channel_adapter
 from src.application.channels.wechat_clawbot.notification import (
     normalize_wechat_clawbot_send_output,
     send_wechat_clawbot_message_process,
@@ -235,19 +237,34 @@ def send_feishu_app_message_process(
     return SimpleNamespace(returncode=int(normalized.get("returncode") or 0), stdout=stdout, stderr=stderr, raw=send_result)
 
 
+def build_notification_channel_registry() -> ChannelRegistry:
+    return ChannelRegistry(
+        (
+            build_feishu_channel_adapter(
+                send_fn=send_feishu_app_message_process,
+                normalize_fn=normalize_feishu_app_send_output,
+                failure_stage="send_feishu_app_message",
+            ),
+            build_wechat_clawbot_channel_adapter(
+                send_fn=send_wechat_clawbot_message_process,
+                normalize_fn=normalize_wechat_clawbot_send_output,
+                failure_stage="send_wechat_clawbot_message",
+            ),
+        )
+    )
+
+
 def select_notification_delivery_adapter(provider: Any) -> NotificationDeliveryAdapter:
     resolved_provider = normalize_notification_provider(provider)
-    if resolved_provider == FEISHU_APP_NOTIFICATION_PROVIDER:
-        return NotificationDeliveryAdapter(
-            send_fn=send_feishu_app_message_process,
-            normalize_fn=normalize_feishu_app_send_output,
-            failure_stage="send_feishu_app_message",
-        )
-    if resolved_provider == WECHAT_CLAWBOT_NOTIFICATION_PROVIDER:
-        return NotificationDeliveryAdapter(
-            send_fn=send_wechat_clawbot_message_process,
-            normalize_fn=normalize_wechat_clawbot_send_output,
-            failure_stage="send_wechat_clawbot_message",
-        )
-    allowed = ", ".join(SUPPORTED_NOTIFICATION_PROVIDERS)
-    raise ValueError(f"unsupported notification provider: {provider}; expected one of: {allowed}")
+    try:
+        channel_adapter = build_notification_channel_registry().require(resolved_provider)
+    except ValueError as exc:
+        allowed = ", ".join(SUPPORTED_NOTIFICATION_PROVIDERS)
+        raise ValueError(f"unsupported notification provider: {provider}; expected one of: {allowed}") from exc
+    if channel_adapter.send_fn is None or channel_adapter.normalize_fn is None:
+        raise ValueError(f"notification channel is missing outbound send support: {resolved_provider}")
+    return NotificationDeliveryAdapter(
+        send_fn=channel_adapter.send_fn,
+        normalize_fn=channel_adapter.normalize_fn,
+        failure_stage=channel_adapter.failure_stage,
+    )

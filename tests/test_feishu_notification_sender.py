@@ -181,6 +181,30 @@ def test_select_notification_delivery_adapter_keeps_feishu_app_provider_on_app_s
     assert adapter.failure_stage == "send_feishu_app_message"
 
 
+def test_notification_channel_registry_exposes_channel_capabilities() -> None:
+    from src.application.notification_delivery_adapter import build_notification_channel_registry
+
+    registry = build_notification_channel_registry()
+    feishu = registry.require("feishu_app")
+    wechat = registry.require("wechat_clawbot")
+
+    assert feishu.capabilities.outbound is True
+    assert feishu.capabilities.inbound is True
+    assert feishu.capabilities.reply is True
+    assert feishu.inbound_fn is not None
+    inbound = feishu.inbound_fn({"header": {"event_type": "im.message.message_read_v1"}, "event": {}})
+    assert inbound["ok"] is True
+    assert inbound["data"]["kind"] == "ignored_event"
+    assert wechat.capabilities.outbound is True
+    assert wechat.capabilities.bind is True
+    assert wechat.capabilities.inbound is True
+    assert wechat.capabilities.reply is True
+    assert wechat.inbound_fn is not None
+    wechat_inbound = wechat.inbound_fn({"message_id": "msg_1"})
+    assert wechat_inbound["ok"] is True
+    assert wechat_inbound["data"]["kind"] == "ignored_message"
+
+
 def test_select_notification_delivery_adapter_routes_wechat_clawbot_directly() -> None:
     from src.application.channels.wechat_clawbot.notification import (
         normalize_wechat_clawbot_send_output,

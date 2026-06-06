@@ -12,7 +12,9 @@ OM treats a messaging integration as one bot channel with three operations:
 - `reply`: OM responds to the original inbound message.
 - `send`: OM proactively sends notifications, receipts, and alerts.
 
-Feishu is the first concrete bot channel. Its receive/reply/send paths use the same `OM_FEISHU_BOT_*` configuration, so user messages, automatic replies, and proactive notifications stay in the same Feishu Bot identity. Future WeChat support should add a separate adapter with the same channel semantics instead of adding another notification-only path.
+Feishu is the first concrete bot channel. Its receive/reply/send paths use the same `OM_FEISHU_BOT_*` configuration, so user messages, automatic replies, and proactive notifications stay in the same Feishu Bot identity. The implementation registers these directions as channel capabilities under `src.application.channels`; Feishu WS receives events through `ChannelService.handle_inbound`, while proactive notifications use the same channel registry for outbound delivery.
+
+WeChat ClawBot is a separate bot channel. Its adapter supports proactive `send`, target `bind`, one-batch `receive/reply` through `./om channel wechat-clawbot poll-once`, and long-running receive/reply through `./om channel wechat-clawbot serve`. The daemon wraps the same poll-once service path instead of adding another notification-only or assistant-only path.
 
 ## Boundary
 
@@ -20,17 +22,20 @@ Allowed architecture:
 
 ```text
 Feishu / WeChat / Hermes
-  -> thin inbound transport adapter
+  -> thin channel adapter
+  -> ChannelService inbound dispatch
   -> Assistant runtime command / optional LLM-first / deterministic fallback routing
   -> Assistant execution router with sender allowlist, audit, idempotency, and preview/confirm
   -> existing deterministic OM tools
   -> canonical Assistant renderer
 ```
 
-`src.application.inbound` owns channel transport only: Feishu payload extraction,
-Feishu long-connection receive/reply/reaction behavior, and the transport-facing
-request contract. Assistant parsing, command catalog, LLM routing, operation
-store, audit, policy, and renderer ownership live in `src.application.assistant`.
+`src.application.channels` owns channel capability registration and service
+dispatch. `src.application.inbound` owns transport details only: Feishu payload
+extraction, Feishu long-connection receive/reply/reaction behavior, and the
+transport-facing request contract. Assistant parsing, command catalog, LLM
+routing, operation store, audit, policy, and renderer ownership live in
+`src.application.assistant`.
 
 Disallowed architecture:
 
@@ -370,6 +375,62 @@ Supported Feishu events:
 - `im.message.receive_v1` with text content
 
 Only subscribe this event for the OM Bot in Feishu Open Platform. Install `requirements/server.txt` on hosts that run `feishu-ws`, because long connection uses the `lark-oapi` server dependency set.
+
+## WeChat ClawBot Polling
+
+`./om channel wechat-clawbot serve` is the long-running WeChat ClawBot polling client for the full WeChat loop:
+
+```text
+WeChat message
+  -> ClawBot iLink get_updates
+  -> ./om channel wechat-clawbot serve
+  -> ChannelService inbound dispatch
+  -> Assistant command facade
+  -> Assistant allowlist/audit/pure-read tools
+  -> ClawBot same-message reply
+```
+
+Check the server configuration before starting the daemon:
+
+```bash
+./om channel wechat-clawbot serve --check \
+  --label default \
+  --state-dir /var/lib/options-monitor/output_shared/state/channels/wechat_clawbot/default \
+  --config-key us \
+  --config-path /var/lib/options-monitor/config.us.json \
+  --assistant-config /var/lib/options-monitor/resolved/config.assistant.json \
+  --audit-db /var/lib/options-monitor/output_shared/state/inbound_control.sqlite3 \
+  --allowed-senders "wechat:<from_user_id>"
+```
+
+Run it directly on the server:
+
+```bash
+./om channel wechat-clawbot serve \
+  --label default \
+  --state-dir /var/lib/options-monitor/output_shared/state/channels/wechat_clawbot/default \
+  --config-key us \
+  --config-path /var/lib/options-monitor/config.us.json \
+  --assistant-config /var/lib/options-monitor/resolved/config.assistant.json \
+  --audit-db /var/lib/options-monitor/output_shared/state/inbound_control.sqlite3 \
+  --allowed-senders "wechat:<from_user_id>" \
+  --lock-path /var/lib/options-monitor/locks/wechat-clawbot.lock
+```
+
+For Linux systemd rendering:
+
+```bash
+./om service render \
+  --target systemd \
+  --runtime-root /var/lib/options-monitor \
+  --config-yaml /var/lib/options-monitor/config.yaml \
+  --config-us /var/lib/options-monitor/config.us.json \
+  --config-hk /var/lib/options-monitor/config.hk.json \
+  --include-wechat-clawbot \
+  --output-dir /tmp/options-monitor-service
+```
+
+The rendered `options-monitor-wechat-clawbot.service` passes `--lock-path` so only one poller consumes a ClawBot state directory. Configure `inbound.wechat_clawbot.allowed_senders` in `config.yaml`, or pass `--wechat-clawbot-allowed-senders` as an explicit render-time override. There is no wildcard default. Use `./om channel status --runtime-root <runtime> --profile-path <runtime>/service.profile.json` for the unified Feishu + WeChat channel read surface; it reports configured/available booleans and redacted paths, not ClawBot tokens or allowlist text. When the allowlist comes from `config.yaml`, `service.profile.json` records only `allowed_senders_configured/source`.
 
 ## LLM Translator
 
