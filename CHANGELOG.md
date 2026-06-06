@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.230 - 2026-06-07
+
+### Added
+- Added WeChat ClawBot typing indicator support for inbound assistant replies, using iLink `getconfig` / `sendtyping` before processing and cancelling typing after replies complete.
+
 ## 1.2.229 - 2026-06-06
 
 ### Fixed
