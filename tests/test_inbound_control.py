@@ -538,6 +538,7 @@ def test_inbound_request_reports_unwritable_audit_db(tmp_path: Path) -> None:
 
 def test_inbound_manual_trade_preview_and_confirm_open(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import src.application.ledger.repository as ledger_repository
+    from src.application.tool_execution import execute_tool as run_tool
 
     _enable_inbound_trade_write(monkeypatch)
     cfg_path, sqlite_path = _write_inbound_runtime_config(tmp_path)
@@ -607,6 +608,26 @@ def test_inbound_manual_trade_preview_and_confirm_open(monkeypatch: pytest.Monke
         "operation_id": None,
         "operation_resolution": "latest_pending",
     }
+    timeline_out = run_tool("operation_timeline", {"audit_db": str(audit_db), "operation_id": operation_id})
+    assert timeline_out["ok"] is True
+    assert timeline_out["data"]["schema_version"] == "operation-timeline-v1"
+    assert timeline_out["data"]["timeline_count"] == 1
+    timeline = timeline_out["data"]["timelines"][0]
+    identity = timeline["identity"]
+    assert identity["command_id"] == operation_id
+    assert identity["operation_id"] == operation_id
+    assert identity["inbound_message_id"] == "msg_open_preview"
+    assert identity["channel"] == "feishu"
+    assert identity["sender_id"] == "ou_1"
+    assert identity["ledger_event_id"]
+    assert identity["record_id"]
+    assert timeline["operation"]["status"] == "applied"
+    assert timeline["audit"]["apply_count"] == 1
+    assert timeline["ledger"]["present"] is True
+    assert "ledger_event_id_missing" not in timeline["warnings"]
+    assert "record_id_missing" not in timeline["warnings"]
+    assert "apply_audit_missing" not in timeline["warnings"]
+    assert "receipt_not_observed" in timeline["warnings"]
 
 
 def test_inbound_manual_trade_confirm_rejects_signature_mismatch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

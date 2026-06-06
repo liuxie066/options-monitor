@@ -28,6 +28,7 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "runtime_status" in tool_names
     assert "runtime_runs" in tool_names
     assert "runtime_logs" in tool_names
+    assert "operation_timeline" in tool_names
     assert "openclaw_readiness" in tool_names
     assert "version_update" in tool_names
     assert "candidate_rank_explain" in tool_names
@@ -60,6 +61,13 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "lines" in runtime_logs["input_schema"]
     assert "log_file" in runtime_logs["input_schema"]
     assert "file" not in runtime_logs["input_schema"]
+    operation_timeline = next(item for item in spec["tools"] if item["name"] == "operation_timeline")
+    assert operation_timeline["risk_level"] == "read_only"
+    assert operation_timeline["requires_confirm"] is False
+    assert operation_timeline["safe_default_input"] == {"limit": 10}
+    assert "operation_id" in operation_timeline["input_schema"]
+    assert "operation_types" in operation_timeline["input_schema"]
+    assert "audit_scan_limit" in operation_timeline["input_schema"]
     research = next(item for item in spec["tools"] if item["name"] == "research")
     assert "runs_root" in research["input_schema"]
     assert "run_id" in research["input_schema"]
@@ -216,6 +224,7 @@ def test_agent_cli_spec_prints_json_manifest() -> None:
     assert any(str(x.get("name")) == "config_validate" for x in payload.get("tools", []))
     assert any(str(x.get("name")) == "runtime_runs" for x in payload.get("tools", []))
     assert any(str(x.get("name")) == "runtime_logs" for x in payload.get("tools", []))
+    assert any(str(x.get("name")) == "operation_timeline" for x in payload.get("tools", []))
     assert any(str(x.get("name")) == "candidate_rank_explain" for x in payload.get("tools", []))
     assert not any(str(x.get("name")) == "doctor" for x in payload.get("tools", []))
     assert any(str(x.get("name")) == "research" for x in payload.get("tools", []))
