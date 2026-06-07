@@ -1944,7 +1944,11 @@ def test_assistant_runtime_agent_loop_executes_planned_cashflow_detail(tmp_path:
             {"account": "lx", "config_key": "us", "include_rows": True, "month": "2026-06"},
         )
     ]
-    assert out["data"]["response_text"].startswith("lx 2026-06 净现金流明细")
+    text = out["data"]["response_text"]
+    assert text.startswith("收益统计完成（OM 本地账本）：")
+    assert "组成明细：" in text
+    assert "现金流 0700.HK 卖出开仓 1张 | 净现金流 HKD 1200 | lx" in text
+    assert "分析\nlx 2026-06 净现金流明细" in text
     agent_loop = out["meta"]["assistant"]["llm"]["agent_loop"]
     assert agent_loop["planner"] == "llm_tool_plan"
     assert agent_loop["max_steps"] == 3
@@ -1958,8 +1962,8 @@ def test_assistant_runtime_agent_loop_executes_planned_cashflow_detail(tmp_path:
     }
     assert agent_loop["final_response"] == {
         "status": "synthesized",
-        "reason": "LLM synthesized the response from tool observations",
-        "canonical_renderer_required": False,
+        "reason": "canonical facts rendered first; LLM added verified analysis",
+        "canonical_renderer_required": True,
         "llm_may_summarize": True,
     }
 
@@ -2452,7 +2456,7 @@ def test_assistant_runtime_agent_loop_answer_guard_rewrites_contradictory_income
 
     assert out["ok"] is True
     assert calls == [("monthly_income_report", {"config_key": "us", "include_rows": True})]
-    assert synthesis_observation_counts == [1, 2]
+    assert synthesis_observation_counts == [2, 3]
     text = out["data"]["response_text"]
     assert "OM 本地账本现有记录" in text
     assert "2026-05 至 2026-06" in text
@@ -2464,7 +2468,7 @@ def test_assistant_runtime_agent_loop_answer_guard_rewrites_contradictory_income
     agent_loop = out["meta"]["assistant"]["llm"]["agent_loop"]
     assert agent_loop["final_response"]["status"] == "synthesized"
     synthesis = out["data"]["action"]["result"]["data"]["synthesis"]
-    assert synthesis["reason"] == "synthesized_after_answer_guard"
+    assert synthesis["reason"] == "grounded_renderer_with_analysis"
     assert synthesis["answer_guard"]["status"] == "failed_then_rewritten"
     assert synthesis["answer_guard"]["violations"][0]["type"] == "contradicts_query_coverage"
     coverage = out["data"]["action"]["result"]["data"]["synthesis_observations"][0]["data"]["coverage"]
@@ -2473,7 +2477,7 @@ def test_assistant_runtime_agent_loop_answer_guard_rewrites_contradictory_income
     assert coverage["complete_for_query_scope"] is True
 
 
-def test_assistant_runtime_agent_loop_answer_guard_rewrites_wrong_income_contract_quantity(tmp_path: Path) -> None:
+def test_assistant_runtime_agent_loop_grounded_income_falls_back_from_wrong_contract_quantity(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
     synthesis_observation_counts: list[int] = []
 
@@ -2519,6 +2523,8 @@ def test_assistant_runtime_agent_loop_answer_guard_rewrites_wrong_income_contrac
                         "premium": 0.86,
                         "close_price": 0.0,
                         "multiplier": 100,
+                        "strike": 440.0,
+                        "expiration_ymd": "2026-06-05",
                         "realized_gross": 172.0,
                         "close_type": "expire_auto_close",
                     }
@@ -2533,6 +2539,8 @@ def test_assistant_runtime_agent_loop_answer_guard_rewrites_wrong_income_contrac
                         "contracts": 2,
                         "premium": 0.86,
                         "multiplier": 100,
+                        "strike": 440.0,
+                        "expiration_ymd": "2026-06-05",
                         "premium_received_gross": 172.0,
                     }
                 ],
@@ -2548,6 +2556,8 @@ def test_assistant_runtime_agent_loop_answer_guard_rewrites_wrong_income_contrac
                         "currency": "HKD",
                         "contracts": 2,
                         "price": 0.86,
+                        "strike": 440.0,
+                        "expiration_ymd": "2026-06-05",
                         "net_cashflow_gross": 172.0,
                     }
                 ],
@@ -2602,14 +2612,8 @@ def test_assistant_runtime_agent_loop_answer_guard_rewrites_wrong_income_contrac
         _conversation_context: dict[str, Any] | None,
     ) -> LlmSynthesisResult:
         synthesis_observation_counts.append(len(observations))
-        if observations[-1]["tool_name"] != "assistant.answer_guard":
-            return LlmSynthesisResult(
-                response_text="sy 在 0700.HK 上卖出一手 put 到期作废，实现盈亏 172 HKD。",
-                trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
-            )
-        assert observations[-1]["data"]["violations"][0]["type"] == "contradicts_contract_quantity"
         return LlmSynthesisResult(
-            response_text="sy 在 0700.HK 上卖出 2张 put 到期作废，实现盈亏 172 HKD。",
+            response_text="sy 在 0700.HK 上卖出一手 put 到期作废，实现盈亏 172 HKD。",
             trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
         )
 
@@ -2633,13 +2637,131 @@ def test_assistant_runtime_agent_loop_answer_guard_rewrites_wrong_income_contrac
 
     assert out["ok"] is True
     assert calls == [("monthly_income_report", {"config_key": "us", "include_rows": True, "month": "2026-06"})]
-    assert synthesis_observation_counts == [1, 2]
+    assert synthesis_observation_counts == [2, 3]
     text = out["data"]["response_text"]
-    assert "2张 put" in text
+    assert "0700.HK Put 440P @ 2026-06-05 到期作废 2张" in text
     assert "一手 put" not in text
     synthesis = out["data"]["action"]["result"]["data"]["synthesis"]
-    assert synthesis["reason"] == "synthesized_after_answer_guard"
+    assert synthesis["reason"] == "grounded_renderer"
+    assert synthesis["answer_guard"]["status"] == "failed_then_fallback"
     assert synthesis["answer_guard"]["violations"][0]["type"] == "contradicts_contract_quantity"
+    assert synthesis["answer_guard"]["retry_violations"][0]["type"] == "contradicts_contract_quantity"
+
+
+def test_assistant_runtime_agent_loop_grounded_income_returns_facts_when_llm_unavailable(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "filters": {"account": "sy", "broker": "富途", "month": "2026-06"},
+                "return_summary": [
+                    {
+                        "month": "2026-06",
+                        "account": "sy",
+                        "cash_secured_cny": 451822.63,
+                        "net_income_cny": 9180.45,
+                        "premium_income_cny": 149.13,
+                        "realized_pnl_cny": 6196.03,
+                        "net_return_rate": 0.020319,
+                    }
+                ],
+                "realized_rows": [
+                    {
+                        "month": "2026-06",
+                        "account": "sy",
+                        "symbol": "0700.HK",
+                        "option_type": "put",
+                        "currency": "HKD",
+                        "contracts_closed": 2,
+                        "strike": 440.0,
+                        "expiration_ymd": "2026-06-05",
+                        "realized_gross": 172.0,
+                        "close_type": "expire_auto_close",
+                    }
+                ],
+                "cashflow_rows": [],
+                "row_count": 1,
+                "realized_row_count": 1,
+            },
+        )
+
+    def _plan(
+        _text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="查询 2026-06 收益组成",
+                response_mode="synthesis",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="monthly_income_report",
+                        arguments={"month": "2026-06", "include_rows": True},
+                        purpose="收益组成明细",
+                    ),
+                ),
+            ),
+            trace={
+                "enabled": True,
+                "attempted": True,
+                "reason": "accepted",
+                "provider": "openai",
+                "base_url": "",
+                "model": "gpt-5.2",
+                "api_key_env": "OM_LLM_API_KEY",
+                "confidence_min": 0.75,
+                "timeout_seconds": 20,
+                "max_output_tokens": 512,
+                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+            },
+        )
+
+    def _synthesize(
+        _question: str,
+        _settings: AssistantSettings,
+        _plan: PlannerPlan,
+        _observations: list[dict[str, Any]],
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmSynthesisResult:
+        return LlmSynthesisResult(
+            response_text=None,
+            trace={"attempted": False, "reason": "disabled", "schema_version": "om-tool-plan-synthesis-v1"},
+            error=AgentToolError(code="LLM_UNAVAILABLE", message="LLM synthesis unavailable."),
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="6月收益的组成",
+            sender_id="local",
+            message_id="msg_agent_loop_income_grounded_unavailable",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+        synthesize_response_fn=_synthesize,
+        now_fn=lambda: date(2026, 6, 7),
+    )
+
+    assert out["ok"] is True
+    assert calls == [("monthly_income_report", {"config_key": "us", "include_rows": True, "month": "2026-06"})]
+    text = out["data"]["response_text"]
+    assert "LLM 生成不可用" not in text
+    assert "0700.HK Put 440P @ 2026-06-05 到期作废 2张" in text
+    synthesis = out["data"]["action"]["result"]["data"]["synthesis"]
+    assert synthesis["reason"] == "grounded_renderer"
+    assert synthesis["fallback"] == "canonical_facts"
+    assert synthesis["error_code"] == "LLM_UNAVAILABLE"
 
 
 def test_assistant_runtime_agent_loop_rejects_disallowed_plan_tool(tmp_path: Path) -> None:

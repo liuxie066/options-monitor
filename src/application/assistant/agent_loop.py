@@ -1180,6 +1180,59 @@ def _build_final_response(
                 "schema_version": TOOL_PLAN_SYNTHESIS_SCHEMA_VERSION,
             },
         )
+    if _grounded_income_response_required(plan) and synthesis_observations:
+        fact_text = _canonical_response(plan.steps[0], synthesis_observations[0])
+        if fact_text:
+            synthesizer = synthesize_response_fn or synthesize_tool_plan_response
+            grounded_observations = _with_grounded_facts_observation(synthesis_observations, fact_text)
+            synthesis = synthesizer(question, settings, plan, grounded_observations, conversation_context)
+            if synthesis.response_text:
+                guard = _verify_answer_guard(synthesis.response_text, observations=synthesis_observations)
+                if not guard["violations"]:
+                    return LlmSynthesisResult(
+                        response_text=_combine_grounded_response(fact_text, synthesis.response_text),
+                        trace={
+                            **dict(synthesis.trace),
+                            "reason": "grounded_renderer_with_analysis",
+                            "grounded_facts": True,
+                            "answer_guard": {"status": "passed"},
+                        },
+                        error=synthesis.error,
+                    )
+                retry_observations = _with_answer_guard_feedback(grounded_observations, guard)
+                retry = synthesizer(question, settings, plan, retry_observations, conversation_context)
+                if retry.response_text:
+                    retry_guard = _verify_answer_guard(retry.response_text, observations=synthesis_observations)
+                    if not retry_guard["violations"]:
+                        return LlmSynthesisResult(
+                            response_text=_combine_grounded_response(fact_text, retry.response_text),
+                            trace={
+                                **dict(retry.trace),
+                                "reason": "grounded_renderer_with_analysis",
+                                "grounded_facts": True,
+                                "answer_guard": {
+                                    "status": "failed_then_rewritten",
+                                    "violations": guard["violations"],
+                                },
+                            },
+                            error=retry.error,
+                        )
+                    guard = {
+                        "violations": guard["violations"],
+                        "retry_violations": retry_guard["violations"],
+                    }
+            trace = {
+                **dict(synthesis.trace),
+                "attempted": bool(synthesis.trace.get("attempted", False)),
+                "reason": "grounded_renderer",
+                "grounded_facts": True,
+                "schema_version": TOOL_PLAN_SYNTHESIS_SCHEMA_VERSION,
+                "fallback": "canonical_facts",
+                "error_code": synthesis.error.code if synthesis.error else None,
+            }
+            if "guard" in locals():
+                trace["answer_guard"] = {"status": "failed_then_fallback", **guard}
+            return LlmSynthesisResult(response_text=fact_text, trace=trace)
     if plan.response_mode == "canonical" and len(plan.steps) == 1 and synthesis_observations:
         text = _canonical_response(plan.steps[0], synthesis_observations[0])
         if text:
@@ -1261,6 +1314,20 @@ def _final_response_payload(synthesis: LlmSynthesisResult) -> dict[str, Any]:
             canonical_renderer_required=True,
             llm_may_summarize=False,
         ).public_payload()
+    if reason == "grounded_renderer_with_analysis":
+        return FinalResponsePlan(
+            status="synthesized",
+            reason="canonical facts rendered first; LLM added verified analysis",
+            canonical_renderer_required=True,
+            llm_may_summarize=True,
+        ).public_payload()
+    if reason == "grounded_renderer":
+        return FinalResponsePlan(
+            status="rendered",
+            reason="canonical facts rendered after analysis was unavailable or unsafe",
+            canonical_renderer_required=True,
+            llm_may_summarize=True,
+        ).public_payload()
     if reason in {"synthesized", "synthesized_after_answer_guard"}:
         return FinalResponsePlan(
             status="synthesized",
@@ -1296,6 +1363,44 @@ def _canonical_response(step: PlannerPlanStep, observation: dict[str, Any]) -> s
         intent=PerceptionResult(intent_name=intent_name, arguments=dict(step.arguments), source="agent_loop_plan"),
         tool_result=build_response(tool_name=step.tool_name, ok=True, data=data),
     )
+
+
+def _grounded_income_response_required(plan: PlannerPlan) -> bool:
+    if len(plan.steps) != 1:
+        return False
+    step = plan.steps[0]
+    return step.tool_name == "monthly_income_report" and step.arguments.get("include_rows") is True
+
+
+def _with_grounded_facts_observation(observations: list[dict[str, Any]], fact_text: str) -> list[dict[str, Any]]:
+    return [
+        *observations,
+        {
+            "index": len(observations) + 1,
+            "tool_name": "assistant.grounded_facts",
+            "payload": {},
+            "ok": True,
+            "error": None,
+            "data": {
+                "canonical_response": fact_text,
+                "analysis_instruction": (
+                    "The canonical_response is the factual answer block and will be sent first. "
+                    "Return only a concise analysis block in Chinese. Do not repeat the factual rows, "
+                    "and do not restate or alter accounts, symbols, dates, contract quantities, currencies, or amounts."
+                ),
+            },
+        },
+    ]
+
+
+def _combine_grounded_response(fact_text: str, analysis_text: str) -> str:
+    facts = str(fact_text or "").strip()
+    analysis = str(analysis_text or "").strip()
+    if not analysis:
+        return facts
+    if analysis.startswith("分析"):
+        return f"{facts}\n\n{analysis}".strip()
+    return f"{facts}\n\n分析\n{analysis}".strip()
 
 
 def _fallback_response(
@@ -1758,7 +1863,7 @@ Rules:
 - Resolve relative dates using context.temporal_context.current_date in Asia/Shanghai. For a month without a year such as "6月", use the current_date year.
 - For monthly income summary questions, use monthly_income_report with account/month when available.
 - For combined/all-account return questions, include required_capabilities=["combined_account_return"] and use monthly_income_report without account.
-- For cashflow detail, net cashflow composition, net inflow source, "明细", "组成", "构成", "来源", or "由什么组成", use monthly_income_report with include_rows=true.
+- For cashflow detail, net cashflow composition, net inflow source, "明细", "组成", "构成", "来源", or "由什么组成", use monthly_income_report with include_rows=true; the system will render factual rows first and LLM may only add analysis.
 - For all-history, cumulative, or total net cashflow questions, omit month so monthly_income_report reads all OM local ledger months.
 - For multiple explicit months, either call monthly_income_report once per month with matching arguments, or omit month and synthesize from all available rows; never duplicate one month while claiming another.
 - For "记录开仓", "记录平仓", Futu 成交提醒, 成功卖出/买入 option fills, use manual_trade_open or manual_trade_close with raw_text set to the original user message.
@@ -1766,7 +1871,7 @@ Rules:
 - For model switch requests, use model_use. For immediate software upgrade requests, use upgrade_now.
 - response_mode is a top-level plan field only. Never include response_mode inside any step.arguments.
 - Use response_mode=canonical only for direct status/summary/list queries that do not require explanation, comparison, or composition.
-- Use response_mode=synthesis for analysis, detail, comparison, why/how, or composition questions.
+- Use response_mode=synthesis for analysis, comparison, why/how, or composition questions. For monthly_income_report include_rows=true, synthesis is analysis-only because canonical facts are rendered by the system.
 - If there is no safe plan, or required slots are missing and the capability cannot safely handle them, return steps=[] instead of guessing.
 """
 
@@ -1786,6 +1891,7 @@ def _planner_tool_manifest() -> list[dict[str, Any]]:
         semantics: dict[str, Any] = {}
         if name == "monthly_income_report":
             notes.append("Set include_rows=true for cashflow details, composition, source, 明细, 组成, 构成, 来源, or 由什么组成.")
+            notes.append("When include_rows=true, canonical factual rows are rendered by the system; synthesis should only add analysis.")
             notes.append("Data comes from OM local ledger, not broker realtime cash statements.")
             notes.append("If month is omitted, the tool reads all months currently available in the OM local ledger.")
             notes.append("If account is omitted, the tool reads all ledger accounts available for the selected broker/config.")
@@ -1935,6 +2041,7 @@ Rules:
 - For monthly_income_report, "历史以来", "累计", and "总净现金流" mean the OM local ledger coverage returned by the tool.
 - Do not claim missing months/accounts when observation.coverage includes them or complete_for_query_scope=true.
 - For monthly_income_report detail rows, contract quantity must come from contracts or contracts_closed. Do not infer one row as one contract; if contracts/contracts_closed=2, say 2张/2手, never 一手.
+- If observations include assistant.grounded_facts, canonical_response is already the factual answer block. Return only a concise analysis block; do not repeat, restate, or alter factual rows, amounts, contract quantities, accounts, dates, symbols, or currencies.
 """
 
 _SYNTHESIS_JSON_SCHEMA = {
