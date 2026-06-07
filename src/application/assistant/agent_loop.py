@@ -1397,6 +1397,26 @@ def _verify_answer_guard(response_text: str, *, observations: list[dict[str, Any
                 "evidence": f"cashflow_row_count={facts['cashflow_row_count']}",
             }
         )
+    for fact in facts["contract_facts"]:
+        expected_contracts = _safe_float(fact.get("contracts"))
+        if expected_contracts is None or expected_contracts == 1:
+            continue
+        for segment in _answer_guard_segments(text):
+            if not _segment_matches_contract_fact(segment, fact):
+                continue
+            if _contains_singular_contract_claim(segment):
+                violations.append(
+                    {
+                        "type": "contradicts_contract_quantity",
+                        "claim": "一手/1张",
+                        "evidence": (
+                            f"{fact.get('account') or '-'} {fact.get('symbol') or '-'} "
+                            f"{fact.get('option_type') or '-'} expected contracts={_format_contract_count(expected_contracts)} "
+                            f"from {fact.get('row_type') or 'monthly_income_report'}."
+                        ),
+                    }
+                )
+                break
     return {"facts": facts, "violations": violations}
 
 
@@ -1414,7 +1434,9 @@ def _with_answer_guard_feedback(observations: list[dict[str, Any]], guard: dict[
                 "rewrite_instruction": (
                     "Your previous response contradicted tool observations. Rewrite using only observations. "
                     "When monthly_income_report query_scope.month=all_available, answer over the OM local ledger coverage. "
-                    "Do not claim missing months/accounts unless coverage or diagnostics explicitly says so."
+                    "Do not claim missing months/accounts unless coverage or diagnostics explicitly says so. "
+                    "For monthly_income_report detail rows, use contracts/contracts_closed as the trade quantity; "
+                    "do not treat one row or one lot as one contract."
                 ),
             },
         },
@@ -1427,6 +1449,7 @@ def _answer_guard_facts(observations: list[dict[str, Any]]) -> dict[str, Any]:
     all_tools_ok = True
     complete_for_query_scope = False
     cashflow_row_count = 0
+    contract_facts: list[dict[str, Any]] = []
     for item in observations:
         if not bool(item.get("ok", False)):
             all_tools_ok = False
@@ -1450,13 +1473,89 @@ def _answer_guard_facts(observations: list[dict[str, Any]]) -> dict[str, Any]:
             cashflow_row_count = max(cashflow_row_count, int(count or 0))
         except Exception:
             pass
+        if str(item.get("tool_name") or "") == "monthly_income_report":
+            contract_facts.extend(_monthly_income_contract_facts(data))
     return {
         "months": sorted(months),
         "accounts": sorted(accounts),
         "all_tools_ok": all_tools_ok,
         "complete_for_query_scope": complete_for_query_scope,
         "cashflow_row_count": cashflow_row_count,
+        "contract_facts": contract_facts,
     }
+
+
+def _monthly_income_contract_facts(data: dict[str, Any]) -> list[dict[str, Any]]:
+    facts: list[dict[str, Any]] = []
+    for row_type, rows_key, quantity_key in (
+        ("cashflow_rows", "cashflow_rows", "contracts"),
+        ("premium_rows", "premium_rows", "contracts"),
+        ("realized_rows", "realized_rows", "contracts_closed"),
+    ):
+        rows = data.get(rows_key)
+        if not isinstance(rows, list):
+            continue
+        for row_raw in rows:
+            if not isinstance(row_raw, dict):
+                continue
+            contracts = _safe_float(row_raw.get(quantity_key))
+            if contracts is None or contracts <= 0:
+                continue
+            facts.append(
+                {
+                    "row_type": row_type,
+                    "quantity_field": quantity_key,
+                    "contracts": contracts,
+                    "month": row_raw.get("month"),
+                    "account": row_raw.get("account"),
+                    "symbol": row_raw.get("symbol"),
+                    "option_type": row_raw.get("option_type"),
+                    "trade_action": row_raw.get("trade_action"),
+                    "close_type": row_raw.get("close_type"),
+                    "realized_gross": row_raw.get("realized_gross"),
+                    "net_cashflow_gross": row_raw.get("net_cashflow_gross"),
+                    "premium_received_gross": row_raw.get("premium_received_gross"),
+                    "currency": row_raw.get("currency"),
+                }
+            )
+    return facts
+
+
+def _answer_guard_segments(text: str) -> list[str]:
+    return [segment for segment in re.split(r"[\n。！？!?]+", str(text or "")) if segment.strip()]
+
+
+def _segment_matches_contract_fact(segment: str, fact: dict[str, Any]) -> bool:
+    compact = re.sub(r"\s+", "", str(segment or "").lower())
+    if not compact:
+        return False
+    account = str(fact.get("account") or "").strip().lower()
+    if account and account not in compact:
+        return False
+    symbol = str(fact.get("symbol") or "").strip().lower()
+    if symbol:
+        symbol_tokens = {symbol, symbol.replace(".", "")}
+        if "." in symbol:
+            symbol_tokens.add(symbol.split(".", 1)[0])
+        if not any(token and token in compact for token in symbol_tokens):
+            return False
+    option_type = str(fact.get("option_type") or "").strip().lower()
+    if option_type == "put" and not any(token in compact for token in ("put", "沽", "认沽")):
+        return False
+    if option_type == "call" and not any(token in compact for token in ("call", "购", "认购")):
+        return False
+    return True
+
+
+def _contains_singular_contract_claim(segment: str) -> bool:
+    compact = re.sub(r"\s+", "", str(segment or "").lower())
+    return bool(re.search(r"(^|[^\d])1(手|张)", compact) or "一手" in compact or "一张" in compact)
+
+
+def _format_contract_count(value: float) -> str:
+    if value.is_integer():
+        return str(int(value))
+    return str(value)
 
 
 def _safe_float(value: Any) -> float | None:
@@ -1835,6 +1934,7 @@ Rules:
 - Mention the data scope when relevant, for example OM 本地账本.
 - For monthly_income_report, "历史以来", "累计", and "总净现金流" mean the OM local ledger coverage returned by the tool.
 - Do not claim missing months/accounts when observation.coverage includes them or complete_for_query_scope=true.
+- For monthly_income_report detail rows, contract quantity must come from contracts or contracts_closed. Do not infer one row as one contract; if contracts/contracts_closed=2, say 2张/2手, never 一手.
 """
 
 _SYNTHESIS_JSON_SCHEMA = {

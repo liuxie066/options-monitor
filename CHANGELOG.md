@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.234 - 2026-06-07
+
+### Fixed
+- Added an assistant answer guard for monthly income detail rows so LLM synthesis cannot report a multi-contract option row as one contract when `contracts` or `contracts_closed` shows a larger quantity.
+
 ## 1.2.233 - 2026-06-07
 
 ### Fixed
