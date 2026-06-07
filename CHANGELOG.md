@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.235 - 2026-06-07
+
+### Changed
+- Changed assistant monthly income detail replies to render deterministic ledger facts before optional LLM analysis so contracts, amounts, accounts, symbols, dates, and currencies stay grounded in `monthly_income_report`.
+- Added monthly income detail rendering for realized and cashflow rows, including option strike, expiration, close type, contract count, and original-currency amounts.
+
+### Fixed
+- Preserved option strike and expiration fields in monthly income detail rows so assistant replies can identify contracts such as `0700.HK Put 440P @ 2026-06-05` without LLM inference.
+
 ## 1.2.234 - 2026-06-07
 
 ### Fixed

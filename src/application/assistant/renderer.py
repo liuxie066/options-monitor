@@ -100,6 +100,7 @@ def _pending_operation_label(operation_type: str) -> str:
 
 
 def _render_monthly_income(data: dict[str, Any]) -> str:
+    detail_lines = _monthly_income_detail_lines(data)
     combined_return_summary = data.get("combined_return_summary")
     if isinstance(combined_return_summary, list) and combined_return_summary:
         combined_rows = [row for row in combined_return_summary if isinstance(row, dict) and _return_row_is_calculable(row)]
@@ -123,6 +124,9 @@ def _render_monthly_income(data: dict[str, Any]) -> str:
                         f"- {row.get('account') or '-'}：净现金流 {_cny_with_original(row.get('net_income_cny'), _dict(row.get('net_income_by_ccy')))}"
                         f" | 现金流率 {_pct(row.get('net_return_rate'))}"
                     )
+            if detail_lines:
+                lines.append("")
+                lines.extend(detail_lines)
             lines.append("")
             lines.append("口径：合并现金流率=sum(净现金流CNY)/sum(当前现金担保CNY)，不是账户收益率平均值。")
             return "\n".join(lines)
@@ -143,6 +147,9 @@ def _render_monthly_income(data: dict[str, Any]) -> str:
             recovery_note = _monthly_income_long_option_recovery_note(data, row)
             if recovery_note:
                 long_option_recovery_notes.append(recovery_note)
+        if detail_lines:
+            lines.append("")
+            lines.extend(detail_lines)
         lines.append("")
         lines.append("口径：现金流率=净现金流/当前现金担保，不是账户总资产收益率。")
         if long_option_recovery_notes:
@@ -165,7 +172,95 @@ def _render_monthly_income(data: dict[str, Any]) -> str:
             f"realized={row.get('realized_pnl_gross', 0)} "
             f"open_basis={row.get('open_basis_lifecycle_pnl_gross', 0)}"
         )
+    if detail_lines:
+        lines.append("")
+        lines.extend(detail_lines)
     return "\n".join(lines)
+
+
+def _monthly_income_detail_lines(data: dict[str, Any]) -> list[str]:
+    detail_items: list[str] = []
+    for row_raw in _list(data.get("realized_rows"))[:8]:
+        row = _dict(row_raw)
+        if not row:
+            continue
+        detail_items.append(
+            "- 已实现 "
+            f"{_monthly_income_contract_label(row)} "
+            f"{_monthly_income_close_label(row.get('close_type'))} "
+            f"{_contracts_text(row.get('contracts_closed'))}"
+            f" | 实现 {_ccy_amount(row.get('currency'), row.get('realized_gross') if row.get('realized_gross') is not None else row.get('realized_pnl_gross'))}"
+            f" | {row.get('account') or '-'}"
+        )
+    for row_raw in _list(data.get("cashflow_rows"))[:8]:
+        row = _dict(row_raw)
+        if not row:
+            continue
+        detail_items.append(
+            "- 现金流 "
+            f"{_monthly_income_contract_label(row)} "
+            f"{_monthly_income_trade_action_label(row.get('trade_action'))} "
+            f"{_contracts_text(row.get('contracts'))}"
+            f" | 净现金流 {_ccy_amount(row.get('currency'), row.get('net_cashflow_gross'))}"
+            f" | {row.get('account') or '-'}"
+        )
+    if not detail_items:
+        return []
+    realized_count = len(_list(data.get("realized_rows")))
+    cashflow_count = len(_list(data.get("cashflow_rows")))
+    total_count = realized_count + cashflow_count
+    lines = ["组成明细：", *detail_items[:12]]
+    if total_count > len(detail_items[:12]):
+        lines.append(f"- 其余 {total_count - len(detail_items[:12])} 条明细已省略。")
+    return lines
+
+
+def _monthly_income_contract_label(row: dict[str, Any]) -> str:
+    symbol = _value(row.get("symbol"))
+    option_type_raw = str(row.get("option_type") or "").strip().lower()
+    option_type = {"put": "Put", "call": "Call"}.get(option_type_raw, _value(row.get("option_type")))
+    strike = _num(row.get("strike"))
+    suffix = {"put": "P", "call": "C"}.get(option_type_raw, "")
+    parts = [symbol, option_type]
+    if strike != "-" and suffix:
+        parts.append(f"{strike}{suffix}")
+    expiration = _value(row.get("expiration_ymd") or row.get("expiration"))
+    if expiration != "-":
+        parts.append(f"@ {expiration}")
+    return " ".join(part for part in parts if part and part != "-") or "-"
+
+
+def _monthly_income_close_label(value: Any) -> str:
+    key = str(value or "").strip().lower()
+    return {
+        "expire_auto_close": "到期作废",
+        "buy_to_close": "买回平仓",
+        "sell_to_close": "卖出平仓",
+        "assignment": "指派平仓",
+        "exercise": "行权平仓",
+    }.get(key, key or "平仓")
+
+
+def _monthly_income_trade_action_label(value: Any) -> str:
+    key = str(value or "").strip().lower()
+    return {
+        "sell_open": "卖出开仓",
+        "buy_open": "买入开仓",
+        "buy_close": "买回平仓",
+        "sell_close": "卖出平仓",
+        "expire": "到期作废",
+    }.get(key, key or "交易")
+
+
+def _contracts_text(value: Any) -> str:
+    text = _num(value)
+    return f"{text}张" if text != "-" else ""
+
+
+def _ccy_amount(currency: Any, amount: Any) -> str:
+    currency_text = str(currency or "").strip().upper() or "-"
+    value = _num(amount)
+    return f"{currency_text} {value}" if value != "-" else f"{currency_text} -"
 
 
 def _monthly_income_return_row_lines(row: dict[str, Any]) -> list[str]:
