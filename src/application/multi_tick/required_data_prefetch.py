@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import json
 from pathlib import Path
 import time
 from typing import Any, Iterator
@@ -25,15 +26,24 @@ from src.application.multi_tick.prefetch_coordinator import PrefetchCoordinatorR
 from src.application.opend_fetch_config import resolve_opend_batch_config, resolve_opend_fetch_config
 from src.application.opend_symbol_fetching import fetch_symbol
 from src.application.opend_symbol_outputs import save_outputs
-from src.application.required_data_coverage import required_data_frame_covers_strategy_bounds
+from src.application.required_data_coverage import required_data_frame_covers_fetch_plan
 from src.application.required_data_observability import (
     summarize_prefetch_fetch_metrics,
     summarize_required_data_prefetch_run,
+)
+from src.application.required_data_planning import (
+    RequiredDataFetchPlanBundle,
+    _merge_same_side_plans as _merge_required_data_side_plans,
+    build_required_data_fetch_plan,
 )
 from src.application.required_data_prefetch_planning import (
     build_prefetch_budget_plan,
     build_prefetch_symbol_plan,
     strategy_prefetch_kwargs as _strategy_prefetch_kwargs,
+)
+from src.application.yield_enhancement_config import (
+    derive_yield_enhancement_policy,
+    resolve_yield_enhancement_cfg,
 )
 from src.infrastructure.futu_gateway_pool import ThreadLocalFutuGatewayPool
 from src.infrastructure.io_utils import has_shared_required_data as _has_shared_required_data, safe_read_csv
@@ -99,6 +109,138 @@ def _resolve_opend_fetch_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _build_prefetch_fetch_plan(
+    symbol_cfg: dict[str, Any],
+    *,
+    base: Path,
+    shared_required: Path,
+    opend_fetch_cfg: dict[str, Any],
+) -> RequiredDataFetchPlanBundle:
+    source_cfgs = symbol_cfg.get("_prefetch_source_symbol_cfgs")
+    if isinstance(source_cfgs, list) and len(source_cfgs) > 1:
+        bundles = [
+            _build_single_prefetch_fetch_plan(
+                item,
+                base=base,
+                shared_required=shared_required,
+                opend_fetch_cfg=opend_fetch_cfg,
+            )
+            for item in source_cfgs
+            if isinstance(item, dict)
+        ]
+        if bundles:
+            spot_reference = next(
+                (bundle.spot_reference for bundle in bundles if bundle.spot_reference is not None),
+                None,
+            )
+            return RequiredDataFetchPlanBundle(
+                symbol=str(symbol_cfg.get("symbol") or bundles[0].symbol),
+                spot_reference=spot_reference,
+                side_plans=_merge_required_data_side_plans([
+                    side_plan
+                    for bundle in bundles
+                    for side_plan in bundle.side_plans
+                ]),
+                merged_specs=[
+                    spec
+                    for bundle in bundles
+                    for spec in bundle.merged_specs
+                ],
+            )
+    return _build_single_prefetch_fetch_plan(
+        symbol_cfg,
+        base=base,
+        shared_required=shared_required,
+        opend_fetch_cfg=opend_fetch_cfg,
+    )
+
+
+def _build_single_prefetch_fetch_plan(
+    symbol_cfg: dict[str, Any],
+    *,
+    base: Path,
+    shared_required: Path,
+    opend_fetch_cfg: dict[str, Any],
+) -> RequiredDataFetchPlanBundle:
+    symbol = str(symbol_cfg.get("symbol") or "").strip()
+    fetch_cfg = _as_dict(symbol_cfg.get("fetch"))
+    limit_exp = int(fetch_cfg.get("limit_expirations") or 8)
+    sell_put_cfg = _as_dict(symbol_cfg.get("sell_put"))
+    sell_call_cfg = _as_dict(symbol_cfg.get("sell_call"))
+    yield_enhancement_cfg = resolve_yield_enhancement_cfg(symbol_cfg)
+    yield_policy = derive_yield_enhancement_policy(yield_enhancement_cfg, sell_put_cfg)
+    want_put = bool(sell_put_cfg.get("enabled", False))
+    want_call = bool(sell_call_cfg.get("enabled", False))
+    want_yield_enhancement = bool(want_put and yield_policy.enabled)
+    snapshot_cfg = _as_dict(opend_fetch_cfg.get("market_snapshot"))
+    expiration_cfg = _as_dict(opend_fetch_cfg.get("option_expiration"))
+    return build_required_data_fetch_plan(
+        base=base,
+        required_data_dir=shared_required,
+        symbol=symbol,
+        limit_expirations=limit_exp,
+        want_put=bool(want_put or want_yield_enhancement),
+        want_call=want_call,
+        sell_put_cfg=sell_put_cfg,
+        sell_call_cfg=sell_call_cfg,
+        yield_enhancement_cfg=yield_enhancement_cfg,
+        symbol_cfg=symbol_cfg,
+        fetch_host=str(fetch_cfg.get("host") or "127.0.0.1"),
+        fetch_port=_to_int(fetch_cfg.get("port") or 11111, 11111),
+        snapshot_max_wait_sec=float(snapshot_cfg.get("max_wait_sec") or 30.0),
+        snapshot_window_sec=float(snapshot_cfg.get("window_sec") or 30.0),
+        snapshot_max_calls=int(snapshot_cfg.get("max_calls") or 60),
+        expiration_max_wait_sec=float(expiration_cfg.get("max_wait_sec") or 30.0),
+        expiration_window_sec=float(expiration_cfg.get("window_sec") or 30.0),
+        expiration_max_calls=int(expiration_cfg.get("max_calls") or 60),
+    )
+
+
+def _prefetch_fetch_kwargs_from_plan(fetch_plan: RequiredDataFetchPlanBundle | None) -> dict[str, Any]:
+    if fetch_plan is None or not fetch_plan.side_plans:
+        return {
+            "option_types": "put,call",
+            "min_dte": None,
+            "max_dte": None,
+            "side_strike_windows": None,
+            "explicit_expirations": None,
+            "spot_override": None,
+            "include_realized_volatility": False,
+        }
+
+    option_types: list[str] = []
+    min_dtes: list[int] = []
+    max_dtes: list[int] = []
+    expirations: list[str] = []
+    side_strike_windows: dict[str, dict[str, float | None]] = {}
+    for side_plan in fetch_plan.side_plans:
+        option_type = str(side_plan.option_type)
+        if option_type not in option_types:
+            option_types.append(option_type)
+        if side_plan.min_dte is not None:
+            min_dtes.append(int(side_plan.min_dte))
+        if side_plan.max_dte is not None:
+            max_dtes.append(int(side_plan.max_dte))
+        for expiration in side_plan.explicit_expirations:
+            exp = str(expiration)
+            if exp and exp not in expirations:
+                expirations.append(exp)
+        side_strike_windows[option_type] = {
+            "min_strike": side_plan.strike_window.min_strike,
+            "max_strike": side_plan.strike_window.max_strike,
+        }
+
+    return {
+        "option_types": ",".join([side for side in ("put", "call") if side in set(option_types)]) or "put,call",
+        "min_dte": min(min_dtes) if min_dtes else None,
+        "max_dte": max(max_dtes) if max_dtes else None,
+        "side_strike_windows": side_strike_windows or None,
+        "explicit_expirations": expirations or None,
+        "spot_override": fetch_plan.spot_reference,
+        "include_realized_volatility": any(bool(spec.include_realized_volatility) for spec in fetch_plan.merged_specs),
+    }
+
+
 def _fetch_one_inprocess(
     symbol_cfg: dict[str, Any],
     *,
@@ -106,6 +248,7 @@ def _fetch_one_inprocess(
     shared_required: Path,
     opend_fetch_cfg: dict[str, Any],
     batch_cfg: Any,
+    fetch_plan: RequiredDataFetchPlanBundle | None = None,
 ) -> dict[str, Any]:
     symbol = str(symbol_cfg.get('symbol')).strip()
     if not symbol:
@@ -132,7 +275,7 @@ def _fetch_one_inprocess(
     limit_exp = int(fetch_cfg.get('limit_expirations') or symbol_cfg.get('fetch', {}).get('limit_expirations', 8) or 8)
     host = str(fetch_cfg.get('host') or '127.0.0.1')
     port = _to_int(fetch_cfg.get('port') or 11111, 11111)
-    strategy_kwargs = _strategy_prefetch_kwargs(symbol_cfg, enabled=True)
+    fetch_kwargs = _prefetch_fetch_kwargs_from_plan(fetch_plan)
     try:
         gateway = _gateway_pool.get_gateway(host=host, port=port, chain_cache=True)
         payload0 = fetch_symbol(
@@ -140,13 +283,13 @@ def _fetch_one_inprocess(
             limit_expirations=limit_exp,
             host=host,
             port=port,
+            spot_override=fetch_kwargs.get("spot_override"),
             base_dir=base,
-            option_types=str(strategy_kwargs["option_types"]),
-            min_strike=strategy_kwargs.get("min_strike"),
-            max_strike=strategy_kwargs.get("max_strike"),
-            side_strike_windows=strategy_kwargs.get("side_strike_windows"),
-            min_dte=strategy_kwargs.get("min_dte"),
-            max_dte=strategy_kwargs.get("max_dte"),
+            option_types=str(fetch_kwargs["option_types"]),
+            side_strike_windows=fetch_kwargs.get("side_strike_windows"),
+            min_dte=fetch_kwargs.get("min_dte"),
+            max_dte=fetch_kwargs.get("max_dte"),
+            explicit_expirations=fetch_kwargs.get("explicit_expirations"),
             chain_cache=True,
             chain_cache_force_refresh=False,
             freshness_policy='cache_first',
@@ -163,7 +306,7 @@ def _fetch_one_inprocess(
             expiration_max_wait_sec=float(opend_fetch_cfg['option_expiration']['max_wait_sec']),
             expiration_window_sec=float(opend_fetch_cfg['option_expiration']['window_sec']),
             expiration_max_calls=int(opend_fetch_cfg['option_expiration']['max_calls']),
-            include_realized_volatility=bool(strategy_kwargs.get("include_realized_volatility")),
+            include_realized_volatility=bool(fetch_kwargs.get("include_realized_volatility")),
         )
         _gateway_pool.mark_success()
         save_outputs(base, symbol, payload0, output_root=shared_required)
@@ -313,6 +456,30 @@ def _prefetch_required_data_unlocked(
     raw_dir.mkdir(parents=True, exist_ok=True)
     parsed_dir.mkdir(parents=True, exist_ok=True)
 
+    process_root = (repo_root or base).resolve()
+    exec_service = ToolExecutionService(base=base)
+    opend_fetch_cfg = _resolve_opend_fetch_cfg(cfg)
+    batch_cfg = resolve_opend_batch_config(cfg)
+    execution_mode = _resolve_execution_mode(cfg)
+    option_chain_fetch_cfg = opend_fetch_cfg["option_chain"]
+    snapshot_fetch_cfg = opend_fetch_cfg["market_snapshot"]
+    expiration_fetch_cfg = opend_fetch_cfg["option_expiration"]
+    fetch_plan_cache: dict[int, RequiredDataFetchPlanBundle] = {}
+
+    def _get_fetch_plan(symbol_cfg: dict[str, Any]) -> RequiredDataFetchPlanBundle:
+        cache_key = id(symbol_cfg)
+        cached = fetch_plan_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        fetch_plan = _build_prefetch_fetch_plan(
+            symbol_cfg,
+            base=base,
+            shared_required=shared_required,
+            opend_fetch_cfg=opend_fetch_cfg,
+        )
+        fetch_plan_cache[cache_key] = fetch_plan
+        return fetch_plan
+
     def _need_fetch(symbol_cfg: dict[str, Any]) -> bool:
         symbol = str(symbol_cfg.get('symbol')).strip()
         if not symbol:
@@ -323,28 +490,13 @@ def _prefetch_required_data_unlocked(
             cached_df = _load_cached_required_data_frame(symbol, shared_required)
             if cached_df is None:
                 return True
-            strategy_kwargs = _strategy_prefetch_kwargs(symbol_cfg, enabled=True)
-            return not required_data_frame_covers_strategy_bounds(
+            fetch_plan = _get_fetch_plan(symbol_cfg)
+            return not required_data_frame_covers_fetch_plan(
                 df=cached_df,
-                option_types=str(strategy_kwargs["option_types"]),
-                min_dte=strategy_kwargs.get("min_dte"),
-                max_dte=strategy_kwargs.get("max_dte"),
-                min_strike=strategy_kwargs.get("min_strike"),
-                max_strike=strategy_kwargs.get("max_strike"),
-                side_strike_windows=strategy_kwargs.get("side_strike_windows"),
-                require_realized_volatility=bool(strategy_kwargs.get("include_realized_volatility")),
+                fetch_plan=fetch_plan,
             )
         except Exception:
             return True
-
-    process_root = (repo_root or base).resolve()
-    exec_service = ToolExecutionService(base=base)
-    opend_fetch_cfg = _resolve_opend_fetch_cfg(cfg)
-    batch_cfg = resolve_opend_batch_config(cfg)
-    execution_mode = _resolve_execution_mode(cfg)
-    option_chain_fetch_cfg = opend_fetch_cfg["option_chain"]
-    snapshot_fetch_cfg = opend_fetch_cfg["market_snapshot"]
-    expiration_fetch_cfg = opend_fetch_cfg["option_expiration"]
 
     def _fetch_one(symbol_cfg: dict[str, Any]) -> dict[str, Any]:
         symbol = str(symbol_cfg.get('symbol')).strip()
@@ -374,8 +526,9 @@ def _prefetch_required_data_unlocked(
         fetch_cfg = (symbol_cfg.get('fetch') or {}) if isinstance(symbol_cfg, dict) else {}
         src, _decision = resolve_symbol_fetch_source(fetch_cfg)
         limit_exp = int(fetch_cfg.get('limit_expirations') or symbol_cfg.get('fetch', {}).get('limit_expirations', 8) or 8)
-        strategy_kwargs = _strategy_prefetch_kwargs(symbol_cfg, enabled=True)
-        opt_types = str(strategy_kwargs["option_types"])
+        fetch_plan = _get_fetch_plan(symbol_cfg)
+        fetch_kwargs = _prefetch_fetch_kwargs_from_plan(fetch_plan)
+        opt_types = str(fetch_kwargs["option_types"])
 
         cmd = [
             str(vpy), '-m', 'src.application.opend_symbol_fetching_cli',
@@ -400,15 +553,17 @@ def _prefetch_required_data_unlocked(
             '--expiration-max-wait-sec', str(expiration_fetch_cfg["max_wait_sec"]),
             '--quiet',
         ]
-        if strategy_kwargs.get("min_dte") is not None:
-            cmd.extend(['--min-dte', str(strategy_kwargs["min_dte"])])
-        if strategy_kwargs.get("max_dte") is not None:
-            cmd.extend(['--max-dte', str(strategy_kwargs["max_dte"])])
-        if strategy_kwargs.get("min_strike") is not None:
-            cmd.extend(['--min-strike', str(strategy_kwargs["min_strike"])])
-        if strategy_kwargs.get("max_strike") is not None:
-            cmd.extend(['--max-strike', str(strategy_kwargs["max_strike"])])
-        if strategy_kwargs.get("include_realized_volatility"):
+        if fetch_kwargs.get("spot_override") is not None:
+            cmd.extend(['--spot', str(fetch_kwargs["spot_override"])])
+        if fetch_kwargs.get("min_dte") is not None:
+            cmd.extend(['--min-dte', str(fetch_kwargs["min_dte"])])
+        if fetch_kwargs.get("max_dte") is not None:
+            cmd.extend(['--max-dte', str(fetch_kwargs["max_dte"])])
+        if fetch_kwargs.get("side_strike_windows"):
+            cmd.extend(['--side-strike-windows-json', json.dumps(fetch_kwargs["side_strike_windows"])])
+        if fetch_kwargs.get("explicit_expirations"):
+            cmd.extend(['--explicit-expirations', *[str(exp) for exp in fetch_kwargs["explicit_expirations"]]])
+        if fetch_kwargs.get("include_realized_volatility"):
             cmd.append('--include-realized-volatility')
 
         payload = exec_service.execute(
@@ -499,6 +654,7 @@ def _prefetch_required_data_unlocked(
             shared_required=shared_required,
             opend_fetch_cfg=opend_fetch_cfg,
             batch_cfg=batch_cfg,
+            fetch_plan=_get_fetch_plan(symbol_cfg),
         )
 
     wave_results: list[PrefetchCoordinatorResult] = []

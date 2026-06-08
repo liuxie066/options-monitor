@@ -155,6 +155,60 @@ def test_fetch_plan_coverage_requires_each_requested_expiration(tmp_path: Path) 
     assert required_data_csv_covers_fetch_plan(parsed=parsed, fetch_plan=fetch_plan) is False
 
 
+def test_fetch_plan_coverage_rejects_bounded_range_missing_lower_edge(tmp_path: Path) -> None:
+    from src.application.required_data_coverage import required_data_csv_covers_fetch_plan
+    from src.application.required_data_planning import (
+        OptionSideFetchPlan,
+        RequiredDataFetchPlanBundle,
+        RequiredDataFetchSpec,
+        StrikeWindowPlan,
+    )
+
+    parsed = _write_required_data_csv(
+        tmp_path / "parsed" / "0700.HK_required_data.csv",
+        [
+            {"option_type": "call", "expiration": "2026-06-29", "dte": 21, "strike": 550},
+            {"option_type": "call", "expiration": "2026-06-29", "dte": 21, "strike": 600},
+            {"option_type": "call", "expiration": "2026-06-29", "dte": 21, "strike": 670},
+        ],
+    )
+    side_plan = OptionSideFetchPlan(
+        option_type="call",
+        min_dte=20,
+        max_dte=90,
+        explicit_expirations=["2026-06-29"],
+        strike_window=StrikeWindowPlan(
+            min_strike=444.8,
+            max_strike=673.2,
+            source="test",
+            base_min_strike=444.8,
+            base_max_strike=673.2,
+        ),
+        planning_reason="test",
+    )
+    fetch_plan = RequiredDataFetchPlanBundle(
+        symbol="0700.HK",
+        spot_reference=444.8,
+        side_plans=[side_plan],
+        merged_specs=[
+            RequiredDataFetchSpec(
+                symbol="0700.HK",
+                limit_expirations=1,
+                host="127.0.0.1",
+                port=11111,
+                option_types=("call",),
+                explicit_expirations=["2026-06-29"],
+                min_dte=20,
+                max_dte=90,
+                side_strike_windows={"call": {"min_strike": 444.8, "max_strike": 673.2}},
+                side_plans=[side_plan],
+            )
+        ],
+    )
+
+    assert required_data_csv_covers_fetch_plan(parsed=parsed, fetch_plan=fetch_plan) is False
+
+
 def test_fetch_plan_coverage_requires_rv_for_short_vol_spec(tmp_path: Path) -> None:
     from src.application.required_data_coverage import required_data_csv_covers_fetch_plan
     from src.application.required_data_planning import (
