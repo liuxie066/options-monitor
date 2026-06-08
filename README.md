@@ -30,7 +30,7 @@
 
 ```text
 扫描机会 -> 生成建议 -> 人工决策 -> 记录开仓 -> 持仓监控
--> 平仓建议 -> 记录结果 -> 收益统计 -> 扫描质量复盘 -> 参数优化建议
+-> 平仓建议 -> 记录结果 -> 收益统计 -> 扫描质量复盘 -> 人工策略复盘证据
 ```
 
 `Sell Put` / `Covered Call` 看当前配置里的策略意图生成开仓候选。`combo_yield` 按 Combo Yield 独立策略处理，不继承 Sell Put / Covered Call 的 underwriting gate。`close_advice` 比较特殊：它优先读取 lot 上的开仓策略快照；只有旧仓位没有策略快照时，才 fallback 到当前 symbol 配置或默认策略，并在输出中保留 `strategy_source`。
@@ -306,7 +306,7 @@ om run tick --config config.us.json --accounts lx sy
 ./om research collect --config-key us --scope candidate --run-id <run-id> --output json --no-write-outputs --shadow-replay-min-sample 30
 ```
 
-`research` 的 candidate evidence 会读取已有候选 CSV、reject log 和 `candidate_filter_trace.jsonl`，输出 `candidate_evidence.shadow_replay` readiness。它不改 runtime config、不写交易状态、不发通知；缺少被拒样本、mark path 或 outcome facts 时会明确标记 `not_ready` / `evidence_incomplete`，避免只用最终候选造成幸存者偏差。Shadow Replay 的 `decision_quality` 使用 [Opportunity Quality](docs/OPPORTUNITY_QUALITY.md) 口径，先判断 accept/reject 是否合理，再把参数建议限制为 dry-run-only 假设。
+`research` 的 candidate evidence 会读取已有候选 CSV、reject log 和 `candidate_filter_trace.jsonl`，输出 `candidate_evidence.shadow_replay` readiness。它不改 runtime config、不写交易状态、不发通知；缺少被拒样本、mark path 或 outcome facts 时会明确标记 `not_ready` / `evidence_incomplete`，避免只用最终候选造成幸存者偏差。Shadow Replay 的 `decision_quality` 和 `review_readiness` 使用 [Opportunity Quality](docs/OPPORTUNITY_QUALITY.md) 口径，先判断 accept/reject 的证据是否足够支持人工复盘；它不预测股价，也不自动给出最优参数。
 
 如果已有路径和结果证据，可显式传入：
 
@@ -338,8 +338,8 @@ om run tick --config config.us.json --accounts lx sy
 ./om research shadow-replay run-data-plan --min-sample 30 --min-mark-points 2
 ./om research shadow-replay run-data-plan --profile-path /var/lib/options-monitor/service.profile.json --min-sample 30 --min-mark-points 2
 ./om research shadow-replay run-data-plan --min-sample 30 --min-mark-points 2 --source local --write
-./om research shadow-replay parameter-backtest --profile-path /var/lib/options-monitor/service.profile.json --start-date 2026-06-01 --end-date 2026-06-02 --account lx --market hk --params params.json --min-sample 30
-./om research shadow-replay parameter-backtest --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --params params.json --format markdown --output backtest.md
+./om research shadow-replay candidate-impact --profile-path /var/lib/options-monitor/service.profile.json --start-date 2026-06-01 --end-date 2026-06-02 --account lx --market hk --params params.json --min-sample 30
+./om research shadow-replay candidate-impact --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --params params.json --format markdown --output candidate-impact.md
 ./om research shadow-replay collect-marks --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --source local --required-data-root output_shared/required_data --write
 ./om research shadow-replay collect-marks --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --source opend --required-data-root output_shared/required_data --opend-host 127.0.0.1 --opend-port 11111 --write
 ./om research shadow-replay mark --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --required-data-root output_shared/required_data --write
@@ -353,7 +353,7 @@ om run tick --config config.us.json --accounts lx sy
 
 `run-data-plan` 是独立的低频数据维护入口，不挂 tick 主链路。默认 dry-run，只展示会执行哪些 `data_plan` 动作且不写 receipt；显式 `--write` 才会执行 `collect_marks` / `settle`，并写本地 receipt 到 `output_shared/research/shadow_replay/receipts/`。它不接受 `analyze` 作为执行动作；人工复盘仍从 `analyze` 命令进入。`--source opend --write` 需要人工显式选择，会刷新本地 required-data cache 后追加当前采样点。
 
-`parameter-backtest` 是只读的参数反事实回放入口，用历史扫描 artifacts 或已落地 dataset 比较 `production_observed` 与参数 variants。它只在 `observed_run_universe` 内评估，不用 OpenD 事后重建当时没有保存的期权链；如果 `--start-date` 对应日期没有扫描 artifacts，会返回 `strict_backtest_allowed=false` 和 coverage reason。参数文件只允许调整 `insurance_underwriting` 的 `min_iv_rv_ratio`、`min_iv_minus_rv`、`min_abs_delta`、`max_abs_delta`、`min_dte`、`max_dte`、`min_annualized_return`；历史 `short_vol` 样本会映射到当前承保参数口径。事件、spread、流动性、集中度、合约身份和交易状态仍是不可调安全边界。缺少 mark/outcome 时结果会标为 `filter_only` 或 `path_only`，不能作为生产参数变更结论。
+`candidate-impact` 是只读的候选影响对比入口，用历史扫描 artifacts 或已落地 dataset 比较 `production_observed` 与阈值 variants 会新增/移除哪些候选。旧 `parameter-backtest` 命令保留为兼容入口。它只在 `observed_run_universe` 内评估，不用 OpenD 事后重建当时没有保存的期权链；如果 `--start-date` 对应日期没有扫描 artifacts，会返回 `strict_backtest_allowed=false` 和 coverage reason。参数文件只允许调整 `insurance_underwriting` 的 `min_iv_rv_ratio`、`min_iv_minus_rv`、`min_abs_delta`、`max_abs_delta`、`min_dte`、`max_dte`、`min_annualized_return`；历史 `short_vol` 样本会映射到当前承保参数口径。事件、spread、流动性、集中度、合约身份和交易状态仍是不可调安全边界。缺少 mark/outcome 时结果会标为 `filter_only` 或 `path_only`，只能说明候选集合变化，不能作为生产参数变更结论。
 
 `collect-marks` 是复盘数据采样入口：`--source local` 使用本地 `required_data` 当前报价；`--source opend --write` 会先按 dataset 中的 symbol / option type / expiration 从 OpenD 拉当前报价写入本地 required_data cache，再把这一刻的 mark 追加到 replay dataset，并维护本地 OpenD 限流状态和 option-chain cache。不带 `--write` 的 OpenD 预览使用临时目录，不持久化这些文件。OpenD 只能补当前/未来采样点，不能事后恢复过去未保存的 option mark，所以需要在 dataset 建好后持续采样。
 
@@ -680,9 +680,10 @@ Research / Shadow Replay 离线侧线：
 ```bash
 ./om research collect --config-key us --scope full --output both --no-write-outputs
 ./om research shadow-replay status --min-sample 30
+./om research shadow-replay candidate-impact-report --params <params.json> --market us --start-date <YYYY-MM-DD> --account lx --min-sample 30
 ```
 
-`research` 和 Shadow Replay 是独立的离线证据/复盘模块，不属于 Ops Copilot core，也不暴露为 `./om-agent` tool。线上侧只收集 redacted bundle / handoff，不调用在线 AI；Shadow Replay 只读已有候选、reject、trace、mark、outcome 和归档 run 证据，显式 `--write` 时也只写本地 replay artifact。run 列表和日志摘要与 `./om runs` / `./om logs` 同源，调度系统状态需要通过 `scheduler_evidence` 或 CLI 的 `--scheduler-evidence-json` 显式传入。
+`research` 和 Shadow Replay 是独立的离线证据/复盘模块，不属于 Ops Copilot core，也不暴露为 `./om-agent` tool。线上侧只收集 redacted bundle / handoff，不调用在线 AI；Shadow Replay 只读已有候选、reject、trace、mark、outcome 和归档 run 证据，显式 `--write` 时也只写本地 replay artifact。`review_readiness` 用来判断是否可以人工复盘，`candidate-impact` / `candidate-impact-report` 用来比较显式阈值 variants 会新增/移除哪些候选；旧 `parameter-backtest` / `parameter-report` 仅作为兼容入口。它不会自动产出最优参数，也不能修改 runtime config、交易状态或通知。run 列表和日志摘要与 `./om runs` / `./om logs` 同源，调度系统状态需要通过 `scheduler_evidence` 或 CLI 的 `--scheduler-evidence-json` 显式传入。
 
 写工具门禁：
 

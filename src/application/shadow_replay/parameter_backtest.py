@@ -45,6 +45,7 @@ from src.application.shadow_replay.parameter_sets import (
 from src.application.shadow_replay.settlement import is_usable_mark
 
 
+CANDIDATE_IMPACT_SCHEMA_VERSION = "shadow_replay_candidate_impact.v1"
 PARAMETER_BACKTEST_SCHEMA_VERSION = "shadow_replay_parameter_backtest.v1"
 ACCEPTED_STATUSES = {"accepted", "notified"}
 REJECTED_STATUSES = {"rejected", "post_filtered", "ranked_below"}
@@ -57,6 +58,38 @@ PARAMETER_FIELD_MAP = {
     "max_dte": "dte",
     "min_annualized_return": "annualized_return",
 }
+
+
+def run_shadow_replay_candidate_impact(
+    *,
+    repo_root: str | Path,
+    params: str | Path | dict[str, Any] | ParameterSet,
+    dataset: str | Path | None = None,
+    runs_root: str | Path | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    accounts: list[str] | tuple[str, ...] | None = None,
+    market: str | None = None,
+    min_sample: int = 30,
+    output_format: str = "json",
+    output: str | Path | None = None,
+) -> dict[str, Any]:
+    """Compare candidate-set impact for explicit threshold variants."""
+
+    return _run_shadow_replay_candidate_impact(
+        repo_root=repo_root,
+        params=params,
+        dataset=dataset,
+        runs_root=runs_root,
+        start_date=start_date,
+        end_date=end_date,
+        accounts=accounts,
+        market=market,
+        min_sample=min_sample,
+        output_format=output_format,
+        output=output,
+        schema_version=CANDIDATE_IMPACT_SCHEMA_VERSION,
+    )
 
 
 def run_shadow_replay_parameter_backtest(
@@ -73,7 +106,40 @@ def run_shadow_replay_parameter_backtest(
     output_format: str = "json",
     output: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Run a read-only counterfactual parameter backtest over observed replay evidence."""
+    """Compatibility wrapper for the legacy parameter-backtest entrypoint."""
+
+    return _run_shadow_replay_candidate_impact(
+        repo_root=repo_root,
+        params=params,
+        dataset=dataset,
+        runs_root=runs_root,
+        start_date=start_date,
+        end_date=end_date,
+        accounts=accounts,
+        market=market,
+        min_sample=min_sample,
+        output_format=output_format,
+        output=output,
+        schema_version=PARAMETER_BACKTEST_SCHEMA_VERSION,
+    )
+
+
+def _run_shadow_replay_candidate_impact(
+    *,
+    repo_root: str | Path,
+    params: str | Path | dict[str, Any] | ParameterSet,
+    dataset: str | Path | None,
+    runs_root: str | Path | None,
+    start_date: str | None,
+    end_date: str | None,
+    accounts: list[str] | tuple[str, ...] | None,
+    market: str | None,
+    min_sample: int,
+    output_format: str,
+    output: str | Path | None,
+    schema_version: str,
+) -> dict[str, Any]:
+    """Run a read-only candidate-impact comparison over observed replay evidence."""
 
     base = Path(repo_root).expanduser().resolve()
     parameter_set = load_parameter_set(params)
@@ -158,7 +224,7 @@ def run_shadow_replay_parameter_backtest(
         candidate_impact=candidate_impact,
     )
     result: dict[str, Any] = {
-        "schema_version": PARAMETER_BACKTEST_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "generated_at_utc": utc_now(),
         "data_mode": data_mode,
         "universe_scope": "observed_run_universe",

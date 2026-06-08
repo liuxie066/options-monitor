@@ -11,8 +11,43 @@ from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.research.facade import run_research_collect
 
 
+def _add_candidate_impact_args(parser: Any) -> None:
+    parser.add_argument("--params", required=True, help="parameter variant JSON file")
+    parser.add_argument("--dataset", default=None, help="existing shadow replay dataset directory")
+    parser.add_argument("--runs-root", default=None)
+    parser.add_argument("--profile-path", default=None)
+    parser.add_argument("--runtime-root", default=None)
+    parser.add_argument("--start-date", default=None, help="YYYY-MM-DD, required for strict date-window checks")
+    parser.add_argument("--end-date", default=None, help="YYYY-MM-DD; defaults to start-date when omitted by caller")
+    parser.add_argument("--account", dest="accounts", action="append", default=None)
+    parser.add_argument("--market", choices=("hk", "us"), default=None)
+    parser.add_argument("--min-sample", type=int, default=30)
+    parser.add_argument("--format", dest="output_format", choices=("json", "markdown"), default="json")
+    parser.add_argument("--output", default=None)
+
+
+def _add_candidate_impact_report_args(parser: Any) -> None:
+    parser.add_argument("--params", default=None, help="parameter variant JSON file")
+    parser.add_argument(
+        "--params-dir",
+        default=None,
+        help="directory containing params.<market>.json; used when --params is omitted",
+    )
+    parser.add_argument("--dataset", default=None, help="existing shadow replay dataset directory")
+    parser.add_argument("--runs-root", default=None)
+    parser.add_argument("--profile-path", default=None)
+    parser.add_argument("--runtime-root", default=None)
+    parser.add_argument("--start-date", default=None, help="YYYY-MM-DD, required for strict date-window checks")
+    parser.add_argument("--end-date", default=None, help="YYYY-MM-DD; defaults to start-date when omitted by caller")
+    parser.add_argument("--account", dest="accounts", action="append", default=None)
+    parser.add_argument("--market", choices=("hk", "us"), required=True)
+    parser.add_argument("--min-sample", type=int, default=30)
+    parser.add_argument("--output-dir", default=None)
+    parser.add_argument("--report-id", default=None)
+
+
 def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
-    research = subparsers.add_parser("research", help="run Research evidence and Shadow Replay workflows")
+    research = subparsers.add_parser("research", help="run offline Research evidence and Shadow Replay readiness workflows")
     research_sub = research.add_subparsers(dest="research_command", required=True)
     research_collect = research_sub.add_parser("collect", help="collect redacted evidence bundle")
     research_collect.add_argument("--scope", default="full", choices=("ledger", "candidate", "quality", "full"))
@@ -153,43 +188,26 @@ def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
     shadow_analyze.add_argument("--dataset", required=True)
     shadow_analyze.add_argument("--min-sample", type=int, default=30)
     shadow_analyze.add_argument("--output", default=None)
+    shadow_impact = research_shadow_sub.add_parser(
+        "candidate-impact",
+        help="compare observed candidate impact for explicit threshold variants",
+    )
+    _add_candidate_impact_args(shadow_impact)
     shadow_backtest = research_shadow_sub.add_parser(
         "parameter-backtest",
-        help="compare production observations with counterfactual parameter variants",
+        help="compatibility alias for candidate-impact",
     )
-    shadow_backtest.add_argument("--params", required=True, help="parameter variant JSON file")
-    shadow_backtest.add_argument("--dataset", default=None, help="existing shadow replay dataset directory")
-    shadow_backtest.add_argument("--runs-root", default=None)
-    shadow_backtest.add_argument("--profile-path", default=None)
-    shadow_backtest.add_argument("--runtime-root", default=None)
-    shadow_backtest.add_argument("--start-date", default=None, help="YYYY-MM-DD, required for strict date-window checks")
-    shadow_backtest.add_argument("--end-date", default=None, help="YYYY-MM-DD; defaults to start-date when omitted by caller")
-    shadow_backtest.add_argument("--account", dest="accounts", action="append", default=None)
-    shadow_backtest.add_argument("--market", choices=("hk", "us"), default=None)
-    shadow_backtest.add_argument("--min-sample", type=int, default=30)
-    shadow_backtest.add_argument("--format", dest="output_format", choices=("json", "markdown"), default="json")
-    shadow_backtest.add_argument("--output", default=None)
+    _add_candidate_impact_args(shadow_backtest)
+    shadow_impact_report = research_shadow_sub.add_parser(
+        "candidate-impact-report",
+        help="write paired JSON and Markdown candidate-impact reports",
+    )
+    _add_candidate_impact_report_args(shadow_impact_report)
     shadow_report = research_shadow_sub.add_parser(
         "parameter-report",
-        help="write paired JSON and Markdown parameter candidate-impact reports",
+        help="compatibility alias for candidate-impact-report",
     )
-    shadow_report.add_argument("--params", default=None, help="parameter variant JSON file")
-    shadow_report.add_argument(
-        "--params-dir",
-        default=None,
-        help="directory containing params.<market>.json; used when --params is omitted",
-    )
-    shadow_report.add_argument("--dataset", default=None, help="existing shadow replay dataset directory")
-    shadow_report.add_argument("--runs-root", default=None)
-    shadow_report.add_argument("--profile-path", default=None)
-    shadow_report.add_argument("--runtime-root", default=None)
-    shadow_report.add_argument("--start-date", default=None, help="YYYY-MM-DD, required for strict date-window checks")
-    shadow_report.add_argument("--end-date", default=None, help="YYYY-MM-DD; defaults to start-date when omitted by caller")
-    shadow_report.add_argument("--account", dest="accounts", action="append", default=None)
-    shadow_report.add_argument("--market", choices=("hk", "us"), required=True)
-    shadow_report.add_argument("--min-sample", type=int, default=30)
-    shadow_report.add_argument("--output-dir", default=None)
-    shadow_report.add_argument("--report-id", default=None)
+    _add_candidate_impact_report_args(shadow_report)
     for command_name, help_text in (
         ("status", "summarize local shadow replay dataset readiness"),
         ("list", "list local shadow replay datasets and next actions"),
@@ -545,11 +563,12 @@ def _parameter_report_id(args: argparse.Namespace) -> str:
     raw = str(getattr(args, "report_id", "") or "").strip()
     if raw:
         return raw
+    prefix = "candidate-impact-report" if args.shadow_replay_command == "candidate-impact-report" else "parameter-report"
     market = str(args.market or "all").lower()
     start = str(getattr(args, "start_date", "") or "").strip() or "dataset"
     end = str(getattr(args, "end_date", "") or "").strip() or start
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return f"parameter-report-{market}-{start}-to-{end}-{stamp}"
+    return f"{prefix}-{market}-{start}-to-{end}-{stamp}"
 
 
 def _parameter_report_params_path(args: argparse.Namespace, *, runtime_root: Path | None, base: Path) -> Path:
@@ -569,10 +588,13 @@ def _parameter_report_params_path(args: argparse.Namespace, *, runtime_root: Pat
     else:
         raise AgentToolError(
             code="INPUT_ERROR",
-            message="parameter-report requires --params or --params-dir when no runtime-root default params file is available",
+            message=(
+                "candidate-impact-report/parameter-report requires --params or --params-dir "
+                "when no runtime-root default params file is available"
+            ),
         )
     if not path.exists():
-        raise AgentToolError(code="INPUT_ERROR", message=f"parameter params file not found: {path}")
+        raise AgentToolError(code="INPUT_ERROR", message=f"candidate-impact params file not found: {path}")
     return path
 
 
@@ -683,6 +705,7 @@ def handle_research_command(
         build_shadow_replay_dataset,
         collect_shadow_replay_marks,
         mark_shadow_replay_dataset,
+        run_shadow_replay_candidate_impact,
         run_shadow_replay_data_plan,
         run_shadow_replay_parameter_backtest,
         settle_shadow_replay_dataset,
@@ -726,10 +749,15 @@ def handle_research_command(
         data = analyze_shadow_replay_dataset(dataset=args.dataset, min_sample=args.min_sample, output=args.output)
         return build_response(tool_name="research.shadow-replay.analyze", ok=True, data=data)
 
-    if args.shadow_replay_command == "parameter-backtest":
+    if args.shadow_replay_command in {"candidate-impact", "parameter-backtest"}:
         runs_root = _shadow_replay_runs_root(args, profile=profile, runtime_root=runtime_root, base=base)
+        run_candidate_impact = (
+            run_shadow_replay_candidate_impact
+            if args.shadow_replay_command == "candidate-impact"
+            else run_shadow_replay_parameter_backtest
+        )
         try:
-            data = run_shadow_replay_parameter_backtest(
+            data = run_candidate_impact(
                 repo_root=base,
                 params=args.params,
                 dataset=args.dataset,
@@ -744,9 +772,9 @@ def handle_research_command(
             )
         except ValueError as exc:
             raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
-        return build_response(tool_name="research.shadow-replay.parameter-backtest", ok=True, data=data)
+        return build_response(tool_name=f"research.shadow-replay.{args.shadow_replay_command}", ok=True, data=data)
 
-    if args.shadow_replay_command == "parameter-report":
+    if args.shadow_replay_command in {"candidate-impact-report", "parameter-report"}:
         runs_root = _shadow_replay_runs_root(args, profile=profile, runtime_root=runtime_root, base=base)
         params_path = _parameter_report_params_path(args, runtime_root=runtime_root, base=base)
         output_root = _shadow_replay_backtest_root(args.output_dir, runtime_root=runtime_root, base=base)
@@ -755,8 +783,10 @@ def handle_research_command(
         market = str(args.market).lower()
         json_output = output_dir / f"result.{market}.json"
         markdown_output = output_dir / f"result.{market}.md"
+        is_candidate_report = args.shadow_replay_command == "candidate-impact-report"
+        run_candidate_impact = run_shadow_replay_candidate_impact if is_candidate_report else run_shadow_replay_parameter_backtest
         try:
-            result = run_shadow_replay_parameter_backtest(
+            result = run_candidate_impact(
                 repo_root=base,
                 params=params_path,
                 dataset=args.dataset,
@@ -769,7 +799,7 @@ def handle_research_command(
                 output_format="json",
                 output=json_output,
             )
-            run_shadow_replay_parameter_backtest(
+            run_candidate_impact(
                 repo_root=base,
                 params=params_path,
                 dataset=args.dataset,
@@ -785,7 +815,11 @@ def handle_research_command(
         except ValueError as exc:
             raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
         data = {
-            "schema_version": "shadow_replay_parameter_report.v1",
+            "schema_version": (
+                "shadow_replay_candidate_impact_report.v1"
+                if is_candidate_report
+                else "shadow_replay_parameter_report.v1"
+            ),
             "market": market,
             "params_path": str(params_path),
             "output_dir": str(output_dir),
@@ -793,7 +827,7 @@ def handle_research_command(
             "markdown_output": str(markdown_output),
             "backtest": _parameter_report_summary(result),
         }
-        return build_response(tool_name="research.shadow-replay.parameter-report", ok=True, data=data)
+        return build_response(tool_name=f"research.shadow-replay.{args.shadow_replay_command}", ok=True, data=data)
 
     if args.shadow_replay_command in {"status", "list"}:
         dataset_root = _shadow_replay_dataset_root(args.dataset_root, runtime_root=runtime_root, base=base)

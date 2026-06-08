@@ -58,7 +58,7 @@ not part of Ops Copilot core and not a remote chat surface.
 `src.application.research` owns redacted evidence collection, deterministic
 checks, handoff rendering, remote archive mirroring, and local research bundle
 writes. `src.application.shadow_replay` owns offline dataset construction,
-mark/outcome lifecycle, status, analyze, and parameter backtest/report logic.
+mark/outcome lifecycle, status, analyze, and candidate-impact report logic.
 
 This side lane may read runtime artifacts, candidate/reject/trace evidence,
 required-data snapshots, and archived run outputs. It must not mutate runtime

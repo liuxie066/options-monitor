@@ -76,6 +76,7 @@ def summarize_shadow_replay_readiness(
         "insurance_metrics": analysis["insurance_metrics"],
         "outcome_by_bucket": analysis["outcome_by_bucket"],
         "decision_quality": analysis["decision_quality"],
+        "review_readiness": analysis["review_readiness"],
         "parameter_advice_gate": analysis["parameter_advice_gate"],
         "recommendations": analysis["recommendations"],
         "safety": safety_payload(writes_local_dataset=False),

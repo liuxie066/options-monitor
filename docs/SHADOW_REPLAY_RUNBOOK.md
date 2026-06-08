@@ -17,17 +17,17 @@ Shadow Replay 的目标不是重新跑一次扫描，而是把某次扫描当时
 
 ## Opportunity Quality
 
-Shadow Replay 的分析结论使用 [Opportunity Quality](OPPORTUNITY_QUALITY.md) 口径。它不把单次 PnL 直接等同于好机会或坏机会，而是先按 `insurance_underwriting` / `return_first` 策略口径判断当时 accept/reject 是否合理，再把参数建议限制为人工审查的 dry-run-only 假设。历史 `short_vol` 样本会归入当前承保口径。
+Shadow Replay 的分析结论使用 [Opportunity Quality](OPPORTUNITY_QUALITY.md) 口径。它不把单次 PnL 直接等同于好机会或坏机会，而是先按 `insurance_underwriting` / `return_first` 策略口径判断当时 accept/reject 的证据是否足够支持人工复盘。历史 `short_vol` 样本会归入当前承保口径。
 
-`decision_quality` 标签包括 `good_accept`、`bad_accept`、`good_reject`、`bad_reject` 和 `inconclusive`。样本不足、缺少 outcome、缺少策略口径或关键字段不足时必须输出 `inconclusive`，不能生成参数建议。`parameter_advice_gate` 只判断是否具备进入参数讨论的资格，不输出具体参数数值。
+`decision_quality` 标签包括 `good_accept`、`bad_accept`、`good_reject`、`bad_reject` 和 `inconclusive`。样本不足、缺少 outcome、缺少策略口径或关键字段不足时必须输出 `inconclusive`，不能生成策略结论。`review_readiness` 是新的人工策略复盘 readiness 入口；现有 `parameter_advice_gate` 字段保留为兼容字段，不输出具体参数数值。
 
-`parameter_advice_gate.status=ready_for_parameter_review` 只表示可以人工讨论参数假设；仍然不能自动改配置。常见 blocker 的处理口径：
+`review_readiness.status=ready_for_manual_strategy_review` 只表示可以进入人工策略复盘；仍然不能自动改配置。旧 `parameter_advice_gate.status=ready_for_parameter_review` 与它兼容映射。常见 blocker 的处理口径：
 
 | blocker | 含义 | 处理 |
 |---|---|---|
 | `sample_size_below_min_sample` | 样本数低于人工评审阈值 | 继续积累样本或显式降低本次人工评审阈值 |
 | `strategy_profile_breakdown_missing` | 样本缺少 `insurance_underwriting` / `return_first` 等策略口径 | 先修证据字段，不做参数结论 |
-| `bad_decision_signal_missing` | 没有可解释的坏接受或坏拒绝信号 | 暂不需要参数讨论，继续观察 |
+| `bad_decision_signal_missing` | 没有可解释的坏接受或坏拒绝信号 | 暂不需要策略调整讨论，继续观察 |
 | `inconclusive_rate_too_high` | `inconclusive` 比例过高 | 补 mark / outcome / 策略口径，再复盘 |
 
 ## 执行模型
@@ -41,9 +41,9 @@ Shadow Replay 的分析结论使用 [Opportunity Quality](OPPORTUNITY_QUALITY.md
 3. 样本足够后运行 `analyze`，人工评审分桶表现。
 4. 人工决定是否调整策略参数；replay 不自动修改 runtime config。
 
-## 参数回测
+## 候选影响对比
 
-`parameter-backtest` 用已有扫描证据做参数反事实回放，用来回答“如果当时承保参数换成这一组，会新增/移除哪些候选”。它不是重新扫描市场，也不会用 OpenD 事后恢复当时没有保存的期权链。
+`candidate-impact` 用已有扫描证据做候选影响对比，用来回答“如果当时承保参数换成这一组，会新增/移除哪些候选”。旧 `parameter-backtest` 命令保留为兼容入口。它不是重新扫描市场，也不会用 OpenD 事后恢复当时没有保存的期权链；它也不判断哪组参数最优。
 
 ```bash
 cat > params.json <<'JSON'
@@ -65,7 +65,7 @@ cat > params.json <<'JSON'
 }
 JSON
 
-./om research shadow-replay parameter-backtest \
+./om research shadow-replay candidate-impact \
   --profile-path /var/lib/options-monitor/service.profile.json \
   --start-date 2026-06-01 \
   --end-date 2026-06-02 \
@@ -75,10 +75,10 @@ JSON
   --min-sample 30
 ```
 
-用户常用入口是 `parameter-report`：它复用同一套回测逻辑，一次写出 JSON 和 Markdown，不自动生成参数、不修改 runtime config、不发送通知。
+用户常用入口是 `candidate-impact-report`：它复用同一套对比逻辑，一次写出 JSON 和 Markdown，不自动生成参数、不修改 runtime config、不发送通知。旧 `parameter-report` 命令保留为兼容入口。
 
 ```bash
-./om research shadow-replay parameter-report \
+./om research shadow-replay candidate-impact-report \
   --runtime-root /var/lib/options-monitor \
   --start-date 2026-06-03 \
   --end-date 2026-06-03 \
@@ -89,16 +89,16 @@ JSON
   --min-sample 30
 ```
 
-`parameter-report` 默认写入 `output_shared/research/shadow_replay/backtests/parameter-report-<market>-<date-window>-<timestamp>/result.<market>.json|md`；也可以用 `--output-dir` 指定精确目录。
+`candidate-impact-report` 默认写入 `output_shared/research/shadow_replay/backtests/candidate-impact-report-<market>-<date-window>-<timestamp>/result.<market>.json|md`；旧 `parameter-report` 默认目录仍保留 `parameter-report-*` 前缀。也可以用 `--output-dir` 指定精确目录。
 
 也可以对已建立的 dataset 回测，并输出 Markdown 报告：
 
 ```bash
-./om research shadow-replay parameter-backtest \
+./om research shadow-replay candidate-impact \
   --dataset output_shared/research/shadow_replay/datasets/<dataset-id> \
   --params params.json \
   --format markdown \
-  --output backtest.md
+  --output candidate-impact.md
 ```
 
 参数文件只允许调整 `insurance_underwriting` 的 `min_iv_rv_ratio`、`min_iv_minus_rv`、`min_abs_delta`、`max_abs_delta`、`min_dte`、`max_dte`、`min_annualized_return`。历史 `short_vol` 样本会映射到当前承保参数口径。事件风险、spread、流动性、集中度、合约身份、交易状态和通知都不是可调参数；如果 variant 触碰这些安全边界，结果会保留拒绝原因而不是放行。
@@ -306,7 +306,7 @@ DATASET_ID=us-<run-id>
 |---|---|---|
 | `not_ready / candidate_universe_missing` | 没有候选全集 | 重新指定 `run-id` / `run-dir` / candidate path |
 | `not_ready / candidate_snapshot_count_below_min_sample` | 样本数不足 | 多积累 run 或降低人工评审阈值 |
-| `not_ready / parameter_fields_missing` | 参数回测候选缺少实际可调字段，不能可靠判断参数组 | 让新扫描 trace/reject evidence 写入 `dte`、`delta/abs_delta`、`iv_rv_ratio`、`iv_minus_rv` 后重跑 |
+| `not_ready / parameter_fields_missing` | 候选影响对比样本缺少实际可调字段，不能可靠比较 variants | 让新扫描 trace/reject evidence 写入 `dte`、`delta/abs_delta`、`iv_rv_ratio`、`iv_minus_rv` 后重跑 |
 | `evidence_incomplete / rejected_universe_missing` | 只有最终候选，缺被拒样本 | 检查 `candidate_filter_trace.jsonl` / reject log |
 | `ready_for_sampling / mark_path_snapshots_missing` | 没有路径采样 | 跑 `collect-marks --source local` 或 `--source opend` |
 | `ready_for_sampling / usable_mark_path_snapshots_missing` | 有 mark 但没有可用报价 | 检查 bid/ask/mid/spot，必要时用 OpenD 重新采样 |

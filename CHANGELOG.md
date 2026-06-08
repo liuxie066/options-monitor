@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.2.241 - 2026-06-08
+
+### Changed
+- Reframed Research / Shadow Replay around offline evidence readiness, manual strategy review, and candidate-impact comparison instead of automatic parameter optimization.
+- Added `candidate-impact` and `candidate-impact-report` as the preferred Shadow Replay commands while preserving the older `parameter-backtest` and `parameter-report` compatibility entries.
+- Added `review_readiness` to Shadow Replay analysis/readiness output while preserving the legacy `parameter_advice_gate` compatibility field.
+- Updated README-style operator docs and tool references to document candidate-impact usage, data-readiness boundaries, and the no-production-mutation safety contract.
+
 ## 1.2.240 - 2026-06-08
 
 ### Fixed

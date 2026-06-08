@@ -115,7 +115,7 @@ With a readiness snapshot:
 
 Research keeps candidate CSVs separate from `*_candidates_reject_log.csv` files. Reject logs remain available as rejection evidence, but they must not inflate candidate row counts.
 
-For strategy tuning, inspect `candidate_evidence.shadow_replay` in the Research bundle. It is an offline readiness and analysis surface only; it cannot mutate scanner config. To compare a concrete parameter hypothesis for user-facing review, use `./om research shadow-replay parameter-report --params <params.json>` or `--params-dir <dir>` against either an existing dataset or a `--profile-path` / date window; it writes paired JSON and Markdown reports. The underlying backtest stays inside `observed_run_universe`: if the requested start date has no scan artifacts, it must report coverage failure instead of reconstructing a historical option chain.
+For offline strategy evidence review, inspect `candidate_evidence.shadow_replay` in the Research bundle, especially `review_readiness`. It is a readiness and analysis surface only; it cannot mutate scanner config. To compare how a concrete threshold hypothesis would change the observed candidate set, use `./om research shadow-replay candidate-impact-report --params <params.json>` or `--params-dir <dir>` against either an existing dataset or a `--profile-path` / date window; it writes paired JSON and Markdown candidate-impact reports. The older `parameter-report` command remains a compatibility entry. The underlying comparison stays inside `observed_run_universe`: if the requested start date has no scan artifacts, it must report coverage failure instead of reconstructing a historical option chain.
 
 Default runs do not write files. Writing reports through `./om research collect`
 requires `--write-outputs --confirm`. Default output locations are:
@@ -188,13 +188,13 @@ def rank_candidate_rows(rows: list[dict[str, Any]], *, mode: StrategyMode | str)
 
 For "why did this symbol/account not get a candidate", start from `candidate_filter_explain` and trace artifacts, not from final candidate CSV alone.
 
-For strategy tuning, collect a candidate-scoped Research bundle first:
+For offline strategy evidence review, collect a candidate-scoped Research bundle first:
 
 ```bash
 ./om research collect --config-key us --scope candidate --run-id <run-id> --output json --no-write-outputs --shadow-replay-min-sample 30
 ```
 
-Treat the shadow replay payload as offline evidence. If it lacks rejected samples, mark path snapshots, or outcome facts, it is not ready for strategy recommendations and must not mutate production scanner config, Feishu, trade state, or notifications.
+Treat the shadow replay payload as offline evidence. If it lacks rejected samples, mark path snapshots, or outcome facts, it is not ready for manual strategy review and must not mutate production scanner config, Feishu, trade state, or notifications.
 
 When remote storage is constrained, use `./om research archive pull --remote prod --ssh-target <host> --require-replay-evidence` first. The default local archive is `output_shared/research/remote_archive/prod/`; `pull` is dry-run unless `--write` is passed. `--require-replay-evidence` filters out scheduler skip / tick heartbeat directories and selects only runs with candidate CSV, reject log, or `candidate_filter_trace.jsonl`. After `./om research archive verify --remote prod`, use `./om research archive build-datasets --remote prod --market us --write` to create local Shadow Replay datasets; `--market` filters archived runs by inferred candidate/reject file market. Dataset build writes an initial scan-time mark from archived run `required_data/parsed` when present, but final outcome evidence still requires later path/expiry marks and `settle`. Only use `archive prune-remote --confirm` after the local `inventory.latest.json` proves every planned remote `output_runs` deletion has been verified locally.
 

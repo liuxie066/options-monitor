@@ -1,7 +1,7 @@
-# Strategy Optimization First Steps
+# Strategy Evidence First Steps
 
-> Purpose: make strategy improvement evidence-driven before changing live scanner behavior.
-> These steps are intentionally ordered so production config authority comes first, per-run evidence comes second, and offline learning comes third.
+> Historical note: this document records the evidence-first implementation path.
+> Current product boundary is narrower: Research / Shadow Replay provides offline evidence readiness, data lifecycle, and candidate-impact comparison. It is not a Strategy Lab, does not predict stock prices, and does not generate optimal production parameters.
 
 ## P0. Runtime Config Authority
 
@@ -73,7 +73,7 @@
   - `mark_path_snapshots.jsonl`: later price/IV/Delta/PnL path observations
   - `outcome_facts.jsonl`: close, expiry, assignment, and counterfactual outcome facts
 - `research shadow-replay collect-marks --dataset <dataset-dir> --source local|opend --write` is the repeatable data-sampling entry. `local` reads existing required-data cache; `opend --write` refreshes current quotes from OpenD into local required-data before appending the mark, and may update local OpenD rate-limit state / option-chain cache. OpenD preview without `--write` uses temporary paths. OpenD cannot reconstruct past option marks that were not collected.
-- `research shadow-replay status` / `list` is the read-only dataset dashboard. It reports candidate/rejected coverage, latest mark time, usable mark count, usable mark point count, stale mark age, outcome count, and the next lifecycle action before any strategy recommendation is considered. Its `data_plan` contains only executable data-maintenance actions (`collect_marks` / `settle`); `review_queue` contains datasets that are ready for explicit manual `analyze`.
+- `research shadow-replay status` / `list` is the read-only dataset dashboard. It reports candidate/rejected coverage, latest mark time, usable mark count, usable mark point count, stale mark age, outcome count, and the next lifecycle action before any manual review is considered. Its `data_plan` contains only executable data-maintenance actions (`collect_marks` / `settle`); `review_queue` contains datasets that are ready for explicit manual `analyze`.
 - `research shadow-replay run-data-plan` consumes the dashboard `data_plan`. It is dry-run by default with no receipt write; with `--write` it executes local evidence maintenance actions (`collect_marks` / `settle`) and writes a local receipt. It does not execute `analyze`, and remains outside tick, notifications, trade state, broker actions, and runtime config mutation.
 - `research shadow-replay mark --dataset <dataset-dir> --required-data-root output_shared/required_data --write` generates local mark path snapshots from required-data CSV quotes. Missing quotes are preserved as `missing_quote` rows and do not count as usable mark evidence; expiry spot-only marks can still support expiration settlement.
 - `research shadow-replay settle --dataset <dataset-dir> --write` derives mark-to-market outcomes when price/PnL marks exist, and derives expiration outcomes such as `expired_worthless`, `assigned_at_expiry`, and `called_away_at_expiry` from spot/strike when the final mark is at or after expiration.
@@ -86,7 +86,7 @@
 - Mark generation reads existing required-data CSV quotes and writes only the local replay dataset when `--write` is explicit; OpenD mark collection also writes local required-data cache plus OpenD cache/rate-limit state for the sampled symbols.
 - Defaults to `--no-write-outputs`; explicit Research output writes remain local bundle/handoff files only.
 - Does not mutate scanner defaults, live config, trade state, Feishu, broker state, or notification output.
-- Shadow recommendations remain advisory and require human review when samples, rejected samples, mark paths, and outcomes are sufficient.
+- Shadow Replay output remains evidence-only and requires human review when samples, rejected samples, mark paths, and outcomes are sufficient.
 - If Research only sees final candidate CSVs, it must flag survivorship-bias risk instead of emitting strategy conclusions.
 
 ### Acceptance
@@ -97,5 +97,5 @@
 - Required-data marks can be generated for accepted and rejected samples, while missing quotes remain evidence gaps.
 - Expiration settlement can produce outcome facts from spot/strike without a live option mid when the mark is at or after expiration.
 - Outcome analysis reports bucket-level PnL/win-rate by DTE, Delta, IV/RV, spread, and concentration so filter/ranking changes can be reviewed against accepted and rejected samples.
-- Missing rejected samples, mark path snapshots, or outcome facts produce `not_ready` / `evidence_incomplete`, not a strategy recommendation.
+- Missing rejected samples, mark path snapshots, or outcome facts produce `not_ready` / `evidence_incomplete`, not a strategy conclusion.
 - Tests cover the survivorship-bias guard: final candidate CSVs alone are evidence-incomplete.

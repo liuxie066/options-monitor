@@ -32,7 +32,7 @@
 - [PRODUCT_ARCHITECTURE.md](PRODUCT_ARCHITECTURE.md)：产品域、模块定义、模块依赖和当前实现差距
 - [STRATEGY_ARCHITECTURE.md](STRATEGY_ARCHITECTURE.md)：开仓策略架构、Sell Put / Covered Call / Combo Yield 策略边界
 - [candidate_strategy.md](candidate_strategy.md)：候选筛选与排序规则
-- [SHADOW_REPLAY_RUNBOOK.md](SHADOW_REPLAY_RUNBOOK.md)：Research / Shadow Replay 独立离线模块的数据采样、OpenD 补价和复盘操作手册
+- [SHADOW_REPLAY_RUNBOOK.md](SHADOW_REPLAY_RUNBOOK.md)：Research / Shadow Replay 独立离线模块的数据采样、OpenD 补价、review readiness 和 candidate-impact 对比操作手册
 - [CLOSE_ADVICE_CONTRACT.md](CLOSE_ADVICE_CONTRACT.md)：平仓建议 exit-state、收益增强组合和渲染契约
 
 ## 安全与约束

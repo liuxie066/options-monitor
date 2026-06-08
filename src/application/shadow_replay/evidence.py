@@ -16,7 +16,10 @@ from src.application.shadow_replay.capture import build_shadow_replay_dataset
 from src.application.shadow_replay.collection import collect_shadow_replay_marks
 from src.application.shadow_replay.data_plan import run_shadow_replay_data_plan
 from src.application.shadow_replay.marking import mark_shadow_replay_dataset
-from src.application.shadow_replay.parameter_backtest import run_shadow_replay_parameter_backtest
+from src.application.shadow_replay.parameter_backtest import (
+    run_shadow_replay_candidate_impact,
+    run_shadow_replay_parameter_backtest,
+)
 from src.application.shadow_replay.readiness import summarize_shadow_replay_readiness
 from src.application.shadow_replay.settlement import settle_shadow_replay_dataset
 from src.application.shadow_replay.status import shadow_replay_dataset_status
@@ -26,6 +29,7 @@ __all__ = [
     "build_shadow_replay_dataset",
     "collect_shadow_replay_marks",
     "mark_shadow_replay_dataset",
+    "run_shadow_replay_candidate_impact",
     "run_shadow_replay_data_plan",
     "run_shadow_replay_parameter_backtest",
     "settle_shadow_replay_dataset",

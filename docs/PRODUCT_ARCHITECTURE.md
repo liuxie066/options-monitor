@@ -235,7 +235,7 @@ output_runs / required_data / candidate trace / reject logs / marks / outcomes
 边界：
 
 - 研究与复盘只产出建议和证据，不直接修改生产配置。
-- 参数建议必须基于 replay / trace / outcome 证据，而不是只看最终候选 CSV。
+- 参数假设讨论必须基于 replay / trace / outcome 证据，而不是只看最终候选 CSV；Shadow Replay 只提供候选影响和复盘证据，不直接产出最优参数。
 - 在线生产监控和离线策略研究保持分离。
 
 主要实现位置：

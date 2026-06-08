@@ -112,9 +112,10 @@ healthcheck 会额外给出本地 `ledger_store` 和 `option_positions_bootstrap
 ```bash
 ./om research collect --config-key us --scope full --output both --no-write-outputs
 ./om research shadow-replay status --min-sample 30
+./om research shadow-replay candidate-impact-report --params <params.json> --market us --start-date <YYYY-MM-DD> --account lx --min-sample 30
 ```
 
-它不属于 `./om-agent` manifest，默认不写文件、不发送通知、不调用在线 AI。线上调度系统的状态需要通过 `scheduler_evidence` 或 `--scheduler-evidence-json` 传入。
+它不属于 `./om-agent` manifest，默认不写文件、不发送通知、不调用在线 AI。Shadow Replay 只做离线证据 readiness、路径/outcome 复盘和 candidate-impact 对比；旧 `parameter-report` / `parameter-backtest` 仍是兼容入口，但推荐使用 `candidate-impact-report` / `candidate-impact`。输出不能自动生成最优参数，也不能修改 runtime config、交易状态或通知。线上调度系统的状态需要通过 `scheduler_evidence` 或 `--scheduler-evidence-json` 传入。
 
 ---
 
