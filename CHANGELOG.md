@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.240 - 2026-06-08
+
+### Fixed
+- Made required-data prefetch reuse the spot-aware fetch plan so Combo Yield call coverage is consistent across accounts in the same tick run.
+- Tightened required-data coverage checks so a cached bounded strike range must cover both requested edges instead of only containing several strikes inside the range.
+
 ## 1.2.239 - 2026-06-08
 
 ### Changed
