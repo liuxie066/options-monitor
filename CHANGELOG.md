@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.236 - 2026-06-08
+
+### Fixed
+- Confirmed successful WeChat ClawBot sends with the local idempotency receipt when iLink accepts a message but does not return an upstream `message_id`, preventing false `SEND_UNCONFIRMED` multi-account notification failures.
+
 ## 1.2.235 - 2026-06-07
 
 ### Changed
