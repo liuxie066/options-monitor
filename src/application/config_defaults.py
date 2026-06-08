@@ -225,7 +225,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
                     "limit_expirations": 10,
                 },
                 "use": ["put_base", "call_base"],
-                "sell_put": {"enabled": True, "min_dte": 20, "max_dte": 60},
+                "sell_put": {"enabled": True, "min_dte": 7, "max_dte": 60},
                 "combo_yield": {
                     "enabled": False,
                     "objective": "premium_funded_long_call",
@@ -243,7 +243,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
                         "max_delta": 0.45,
                     },
                 },
-                "sell_call": {"enabled": False, "min_dte": 20, "max_dte": 60},
+                "sell_call": {"enabled": False, "min_dte": 7, "max_dte": 60},
             },
         },
         "hk": {
@@ -275,7 +275,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
                     "limit_expirations": 8,
                 },
                 "use": ["put_base", "call_base"],
-                "sell_put": {"enabled": True, "min_dte": 20, "max_dte": 90},
+                "sell_put": {"enabled": True, "min_dte": 7, "max_dte": 90},
                 "combo_yield": {
                     "enabled": False,
                     "objective": "premium_funded_long_call",
@@ -293,7 +293,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
                         "max_delta": 0.45,
                     },
                 },
-                "sell_call": {"enabled": False, "min_dte": 20, "max_dte": 90},
+                "sell_call": {"enabled": False, "min_dte": 7, "max_dte": 90},
             },
         },
     },

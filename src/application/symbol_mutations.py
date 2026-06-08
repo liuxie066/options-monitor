@@ -228,7 +228,7 @@ def _symbols_rows(cfg: dict[str, Any]) -> list[dict[str, Any]]:
 def _strategy_defaults(*, enabled: bool) -> dict[str, Any]:
     if not enabled:
         return {"enabled": False}
-    return {"enabled": True, "min_dte": 20, "max_dte": 45}
+    return {"enabled": True, "min_dte": 7, "max_dte": 45}
 
 
 def _ensure_enabled_strategy_defaults(entry: dict[str, Any], key: str) -> list[str]:
@@ -236,7 +236,7 @@ def _ensure_enabled_strategy_defaults(entry: dict[str, Any], key: str) -> list[s
     if not isinstance(strategy, dict) or strategy.get("enabled") is not True:
         return []
     changed: list[str] = []
-    for name, value in (("min_dte", 20), ("max_dte", 45)):
+    for name, value in (("min_dte", 7), ("max_dte", 45)):
         if strategy.get(name) is None:
             strategy[name] = value
             changed.append(f"{key}.{name}")

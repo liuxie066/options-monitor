@@ -244,7 +244,7 @@
         ],
         "sell_put": {
           "enabled": true,
-          "min_dte": 20,
+          "min_dte": 7,
           "max_dte": 60
         },
         "combo_yield": {
@@ -266,7 +266,7 @@
         },
         "sell_call": {
           "enabled": false,
-          "min_dte": 20,
+          "min_dte": 7,
           "max_dte": 60
         }
       }
@@ -320,7 +320,7 @@
         ],
         "sell_put": {
           "enabled": true,
-          "min_dte": 20,
+          "min_dte": 7,
           "max_dte": 90
         },
         "combo_yield": {
@@ -342,7 +342,7 @@
         },
         "sell_call": {
           "enabled": false,
-          "min_dte": 20,
+          "min_dte": 7,
           "max_dte": 90
         }
       }

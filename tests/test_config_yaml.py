@@ -115,7 +115,7 @@ def test_yaml_config_resolves_user_overrides_and_defaults(tmp_path: Path) -> Non
     assert "assistant" not in cfg
     assert "inbound" not in cfg
     assert cfg["symbols"][0]["symbol"] == "NVDA"
-    assert cfg["symbols"][0]["sell_put"]["min_dte"] == 20
+    assert cfg["symbols"][0]["sell_put"]["min_dte"] == 7
     futu = cfg["symbols"][1]
     assert futu["symbol"] == "FUTU"
     assert futu["sell_put"]["min_dte"] == 20
