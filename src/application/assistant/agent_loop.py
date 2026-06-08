@@ -319,7 +319,8 @@ def execute_tool_plan(
     validate_tool_plan(plan, allow_preview=False)
     tool_events: list[dict[str, Any]] = []
     observations: list[dict[str, Any]] = []
-    synthesis_observations: list[dict[str, Any]] = []
+    fact_observations: list[dict[str, Any]] = []
+    llm_observations: list[dict[str, Any]] = []
     tool_results: list[dict[str, Any]] = []
     ok = True
     error_payload: dict[str, Any] | None = None
@@ -361,7 +362,10 @@ def execute_tool_plan(
         observations.append(
             build_tool_observation(index=index, tool_name=step.tool_name, payload=payload, result=result).public_payload()
         )
-        synthesis_observations.append(
+        fact_observations.append(
+            build_fact_observation(index=index, tool_name=step.tool_name, payload=payload, result=result)
+        )
+        llm_observations.append(
             build_synthesis_observation(index=index, tool_name=step.tool_name, payload=payload, result=result)
         )
         error = result.get("error") if isinstance(result, dict) else None
@@ -380,18 +384,18 @@ def execute_tool_plan(
             error_payload = dict(error) if isinstance(error, dict) else {"code": "TOOL_FAILED", "message": "tool call failed"}
             break
 
-    capability_status = _assess_plan_capabilities(plan, synthesis_observations) if ok else {"required": [], "satisfied": [], "gaps": []}
+    capability_status = _assess_plan_capabilities(plan, fact_observations) if ok else {"required": [], "satisfied": [], "gaps": []}
     if capability_status["required"]:
-        synthesis_observations.append(
-            {
-                "index": len(synthesis_observations) + 1,
-                "tool_name": "assistant.capability_check",
-                "payload": {},
-                "ok": not bool(capability_status["gaps"]),
-                "error": None,
-                "data": {"capability_status": capability_status},
-            }
-        )
+        capability_observation = {
+            "index": len(llm_observations) + 1,
+            "tool_name": "assistant.capability_check",
+            "payload": {},
+            "ok": not bool(capability_status["gaps"]),
+            "error": None,
+            "data": {"capability_status": capability_status},
+        }
+        fact_observations.append(capability_observation)
+        llm_observations.append(capability_observation)
         tool_events.append(
             {
                 "phase": "assess_capabilities",
@@ -405,7 +409,8 @@ def execute_tool_plan(
         question=question,
         settings=settings,
         plan=plan,
-        synthesis_observations=synthesis_observations,
+        fact_observations=fact_observations,
+        llm_observations=llm_observations,
         conversation_context=conversation_context,
         synthesize_response_fn=synthesize_response_fn,
         ok=ok,
@@ -415,7 +420,7 @@ def execute_tool_plan(
         "response_text": synthesis.response_text or "",
         "plan": plan.public_payload(),
         "observations": observations,
-        "synthesis_observations": synthesis_observations,
+        "synthesis_observations": llm_observations,
         "tool_events": tool_events,
         "tool_calls_used": len(observations),
         "writes_allowed": False,
@@ -1167,6 +1172,21 @@ def build_synthesis_observation(*, index: int, tool_name: str, payload: dict[str
     return item
 
 
+def build_fact_observation(*, index: int, tool_name: str, payload: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    error = result.get("error") if isinstance(result, dict) else None
+    data = result.get("data") if isinstance(result, dict) else None
+    item: dict[str, Any] = {
+        "index": int(index),
+        "tool_name": str(tool_name or ""),
+        "payload": _safe_tool_payload(payload),
+        "ok": bool(result.get("ok", False)) if isinstance(result, dict) else False,
+        "error": dict(error) if isinstance(error, dict) else None,
+    }
+    if isinstance(data, dict):
+        item["data"] = _fact_data(tool_name, data)
+    return item
+
+
 def tool_plan_json_schema() -> dict[str, Any]:
     return {
         "type": "object",
@@ -1227,7 +1247,8 @@ def _build_final_response(
     question: str,
     settings: AssistantSettings,
     plan: PlannerPlan,
-    synthesis_observations: list[dict[str, Any]],
+    fact_observations: list[dict[str, Any]],
+    llm_observations: list[dict[str, Any]],
     conversation_context: dict[str, Any] | None,
     synthesize_response_fn: AgentLoopSynthesizeFn | None,
     ok: bool,
@@ -1235,10 +1256,10 @@ def _build_final_response(
 ) -> LlmSynthesisResult:
     if not ok:
         return LlmSynthesisResult(
-            response_text=_fallback_response(plan=plan, observations=synthesis_observations, error_payload=error_payload),
+            response_text=_fallback_response(plan=plan, observations=llm_observations, error_payload=error_payload),
             trace={"attempted": False, "reason": "tool_error", "schema_version": TOOL_PLAN_SYNTHESIS_SCHEMA_VERSION},
         )
-    capability_gap = _capability_gap_response(synthesis_observations)
+    capability_gap = _capability_gap_response(fact_observations)
     if capability_gap:
         return LlmSynthesisResult(
             response_text=capability_gap,
@@ -1248,14 +1269,14 @@ def _build_final_response(
                 "schema_version": TOOL_PLAN_SYNTHESIS_SCHEMA_VERSION,
             },
         )
-    if _grounded_income_response_required(plan) and synthesis_observations:
-        fact_text = _canonical_response(plan.steps[0], synthesis_observations[0])
+    if _grounded_income_response_required(plan) and fact_observations:
+        fact_text = _canonical_response(plan.steps[0], _first_tool_observation(plan.steps[0], fact_observations))
         if fact_text:
             synthesizer = synthesize_response_fn or synthesize_tool_plan_response
-            grounded_observations = _with_grounded_facts_observation(synthesis_observations, fact_text)
+            grounded_observations = _with_grounded_facts_observation(llm_observations, fact_text)
             synthesis = synthesizer(question, settings, plan, grounded_observations, conversation_context)
             if synthesis.response_text:
-                guard = _verify_answer_guard(synthesis.response_text, observations=synthesis_observations)
+                guard = _verify_answer_guard(synthesis.response_text, observations=fact_observations)
                 if not guard["violations"]:
                     return LlmSynthesisResult(
                         response_text=_combine_grounded_response(fact_text, synthesis.response_text),
@@ -1270,7 +1291,7 @@ def _build_final_response(
                 retry_observations = _with_answer_guard_feedback(grounded_observations, guard)
                 retry = synthesizer(question, settings, plan, retry_observations, conversation_context)
                 if retry.response_text:
-                    retry_guard = _verify_answer_guard(retry.response_text, observations=synthesis_observations)
+                    retry_guard = _verify_answer_guard(retry.response_text, observations=fact_observations)
                     if not retry_guard["violations"]:
                         return LlmSynthesisResult(
                             response_text=_combine_grounded_response(fact_text, retry.response_text),
@@ -1301,27 +1322,27 @@ def _build_final_response(
             if "guard" in locals():
                 trace["answer_guard"] = {"status": "failed_then_fallback", **guard}
             return LlmSynthesisResult(response_text=fact_text, trace=trace)
-    if plan.response_mode == "canonical" and len(plan.steps) == 1 and synthesis_observations:
-        text = _canonical_response(plan.steps[0], synthesis_observations[0])
+    if plan.response_mode == "canonical" and len(plan.steps) == 1 and fact_observations:
+        text = _canonical_response(plan.steps[0], _first_tool_observation(plan.steps[0], fact_observations))
         if text:
             return LlmSynthesisResult(
                 response_text=text,
                 trace={"attempted": False, "reason": "canonical_renderer", "schema_version": TOOL_PLAN_SYNTHESIS_SCHEMA_VERSION},
             )
     synthesizer = synthesize_response_fn or synthesize_tool_plan_response
-    synthesis = synthesizer(question, settings, plan, synthesis_observations, conversation_context)
+    synthesis = synthesizer(question, settings, plan, llm_observations, conversation_context)
     if synthesis.response_text:
-        guard = _verify_answer_guard(synthesis.response_text, observations=synthesis_observations)
+        guard = _verify_answer_guard(synthesis.response_text, observations=fact_observations)
         if not guard["violations"]:
             return LlmSynthesisResult(
                 response_text=synthesis.response_text,
                 trace={**dict(synthesis.trace), "answer_guard": {"status": "passed"}},
                 error=synthesis.error,
             )
-        retry_observations = _with_answer_guard_feedback(synthesis_observations, guard)
+        retry_observations = _with_answer_guard_feedback(llm_observations, guard)
         retry = synthesizer(question, settings, plan, retry_observations, conversation_context)
         if retry.response_text:
-            retry_guard = _verify_answer_guard(retry.response_text, observations=synthesis_observations)
+            retry_guard = _verify_answer_guard(retry.response_text, observations=fact_observations)
             if not retry_guard["violations"]:
                 return LlmSynthesisResult(
                     response_text=retry.response_text,
@@ -1339,8 +1360,8 @@ def _build_final_response(
                 "violations": guard["violations"],
                 "retry_violations": retry_guard["violations"],
             }
-    if len(plan.steps) == 1 and synthesis_observations:
-        text = _canonical_response(plan.steps[0], synthesis_observations[0])
+    if len(plan.steps) == 1 and fact_observations:
+        text = _canonical_response(plan.steps[0], _first_tool_observation(plan.steps[0], fact_observations))
         if text:
             trace = {
                 **dict(synthesis.trace),
@@ -1356,7 +1377,7 @@ def _build_final_response(
                 error=synthesis.error,
             )
     return LlmSynthesisResult(
-        response_text=_fallback_response(plan=plan, observations=synthesis_observations, error_payload=error_payload),
+        response_text=_fallback_response(plan=plan, observations=llm_observations, error_payload=error_payload),
         trace={
             **dict(synthesis.trace),
             "fallback": "structured_observation_summary",
@@ -1416,6 +1437,13 @@ def _final_response_payload(synthesis: LlmSynthesisResult) -> dict[str, Any]:
         canonical_renderer_required=False,
         llm_may_summarize=False,
     ).public_payload()
+
+
+def _first_tool_observation(step: PlannerPlanStep, observations: list[dict[str, Any]]) -> dict[str, Any]:
+    for observation in observations:
+        if str(observation.get("tool_name") or "") == step.tool_name:
+            return observation
+    return {}
 
 
 def _canonical_response(step: PlannerPlanStep, observation: dict[str, Any]) -> str:
@@ -2173,6 +2201,16 @@ def _llm_trace(
             "pending_count": len(pending) if isinstance(pending, list) else 0,
         }
     return payload
+
+
+def _fact_data(tool_name: str, data: dict[str, Any]) -> dict[str, Any]:
+    out = dict(data)
+    if tool_name == "monthly_income_report":
+        coverage = _monthly_income_coverage(data)
+        out.setdefault("data_scope", "OM 本地账本")
+        out.setdefault("query_scope", coverage.get("query_scope"))
+        out.setdefault("coverage", coverage.get("coverage"))
+    return out
 
 
 def _synthesis_data(tool_name: str, data: dict[str, Any]) -> dict[str, Any]:
