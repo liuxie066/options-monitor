@@ -144,7 +144,7 @@ def test_feishu_ws_routes_inbound_through_channel_service() -> None:
 def test_feishu_ws_can_route_through_assistant(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
     assistant_config_path = tmp_path / "config.assistant.json"
-    assistant_config_path.write_text(json.dumps({"assistant": {"mode": "deterministic"}}), encoding="utf-8")
+    assistant_config_path.write_text(json.dumps({"assistant": {"enabled": True, "planner": {"enabled": False}}}), encoding="utf-8")
 
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         calls.append((tool_name, payload))
@@ -182,7 +182,8 @@ def test_feishu_ws_agent_loop_routes_cashflow_detail_plan(tmp_path: Path) -> Non
         json.dumps(
             {
                 "assistant": {
-                    "mode": "agent_loop",
+                    "enabled": True,
+                    "planner": {"enabled": True},
                     "llm": {"provider": "openai", "model": "gpt-5.2", "api_key_env": "OM_LLM_API_KEY"},
                 }
             }
@@ -561,6 +562,7 @@ def test_feishu_ws_settings_reads_behavior_from_assistant_config(tmp_path: Path)
     assert settings.queue_size == 5
     assert settings.assistant_mode == "agent_loop"
     assert settings.assistant_enabled is True
+    assert settings.assistant_planner_enabled is True
     assert settings.assistant_context_window_messages == 9
     assert settings.assistant_llm.enabled is True
     assert settings.assistant_llm.provider == "openai"
@@ -584,8 +586,9 @@ def test_feishu_ws_settings_enables_command_runtime_by_default(tmp_path: Path) -
         },
     )
 
-    assert settings.assistant_mode == "deterministic"
+    assert settings.assistant_mode == "agent_loop"
     assert settings.assistant_enabled is True
+    assert settings.assistant_planner_enabled is True
     assert settings.assistant_llm.enabled is False
 
 

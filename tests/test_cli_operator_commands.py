@@ -299,7 +299,9 @@ markets:
     accounts: [lx]
     symbols: [NVDA]
 assistant:
-  mode: llm_router
+  enabled: true
+  planner:
+    enabled: true
   active_model: openai-default
   models:
     openai-default:
@@ -334,7 +336,9 @@ markets:
     accounts: [lx]
     symbols: [NVDA]
 assistant:
-  mode: deterministic
+  enabled: true
+  planner:
+    enabled: false
 """,
         encoding="utf-8",
     )
@@ -377,7 +381,9 @@ markets:
     accounts: [lx]
     symbols: [NVDA]
 assistant:
-  mode: llm_router
+  enabled: true
+  planner:
+    enabled: true
   active_model: openai-default
   models:
     openai-default:

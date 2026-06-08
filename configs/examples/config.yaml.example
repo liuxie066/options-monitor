@@ -31,8 +31,10 @@ markets:
       - "9992.HK"
 
 assistant:
-  mode: deterministic
+  enabled: true
   context_window_messages: 8
+  planner:
+    enabled: true
   active_model: deepseek-default
   models:
     deepseek-default:

@@ -9,15 +9,19 @@ from typing import Any
 from src.application.assistant import AssistantSettings, LlmTranslatorSettings, PerceptionEngine, handle_assistant_message
 from src.application.assistant.agent_loop import (
     AGENT_LOOP_SCHEMA_VERSION,
+    AGENT_LOOP_PREVIEW_CAPABILITIES,
+    AGENT_LOOP_READ_TOOLS,
     TOOL_PLAN_SCHEMA_VERSION,
     LlmSynthesisResult,
     LlmPlannerResult,
     PlannerPlan,
     PlannerPlanStep,
+    _planner_tool_manifest,
     build_tool_observation,
     plan_read_only_tools,
     run_read_only_agent_loop,
     tool_plan_json_schema,
+    validate_tool_plan,
 )
 from src.application.assistant.commands import (
     capability_catalog_payload,
@@ -28,6 +32,8 @@ from src.application.assistant.commands import (
     llm_recognizable_specs,
     operation_specs,
     operation_target_intents,
+    planner_preview_specs,
+    planner_read_specs,
 )
 from src.application.assistant.command_parser import parse_assistant_command
 from src.application.assistant.conversation_context import build_conversation_context
@@ -36,6 +42,7 @@ from src.application.assistant.llm_intent_schema import LLM_INTENT_SCHEMA_VERSIO
 from src.application.assistant.llm_common import provider_api_kind, provider_endpoint_url, supported_llm_providers
 from src.application.assistant.llm_reply import LlmReplyResult, generate_general_reply
 from src.application.assistant.llm_translator import LlmTranslationResult, parse_llm_translation_payload, translate_inbound_intent
+from src.application.assistant.settings import PlannerSettings
 from src.application.assistant.tool_policy import DEFAULT_TOOL_POLICY
 from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.assistant.audit import InboundAuditStore
@@ -322,6 +329,62 @@ def test_assistant_capability_catalog_has_safe_llm_invariants() -> None:
             )
 
 
+def test_agent_loop_planner_preview_capabilities_are_exactly_bounded() -> None:
+    expected = {
+        "manual_trade_open",
+        "manual_trade_close",
+        "manual_trade_update",
+        "symbol_edit",
+        "model_use",
+        "upgrade_now",
+    }
+
+    assert {spec.intent_name for spec in planner_preview_specs()} == expected
+    assert AGENT_LOOP_PREVIEW_CAPABILITIES == expected
+
+
+def test_agent_loop_planner_catalog_matches_registry_backed_manifest() -> None:
+    manifest_names = {tool["name"] for tool in _planner_tool_manifest()}
+
+    assert {str(spec.tool_name) for spec in planner_read_specs()} == AGENT_LOOP_READ_TOOLS
+    assert manifest_names == AGENT_LOOP_READ_TOOLS | AGENT_LOOP_PREVIEW_CAPABILITIES
+
+
+def test_agent_loop_planner_manifest_hides_system_scoped_arguments() -> None:
+    explicit_forbidden = {
+        "audit_db",
+        "config_key",
+        "config_path",
+        "data_config",
+        "delivery",
+        "delivery_mode",
+        "env_file",
+        "file",
+        "include_service_status",
+        "log_file",
+        "max_notification_chars",
+        "max_run_age_minutes",
+        "opend_telnet_host",
+        "opend_telnet_port",
+        "timeout_sec",
+        "timeoutSeconds",
+        "trigger_job_id",
+        "trigger_source",
+    }
+
+    for tool in _planner_tool_manifest():
+        for argument in tool["input_schema"]:
+            normalized = str(argument).replace("-", "_").lower()
+            assert argument not in explicit_forbidden
+            assert normalized not in explicit_forbidden
+            assert normalized not in {"file", "host", "port"}
+            assert not normalized.startswith(("audit", "config", "env", "timeout", "trigger"))
+            assert not normalized.endswith(
+                ("_path", "_paths", "_root", "_roots", "_dir", "_dirs", "_file", "_host", "_port")
+            )
+            assert "_path_" not in normalized
+
+
 def test_assistant_deterministic_parser_supports_productized_read_aliases() -> None:
     from src.application.assistant.parser import parse_inbound_text
 
@@ -406,7 +469,7 @@ def test_assistant_runtime_executes_slash_command_through_inbound_router(tmp_pat
         "langgraph": assistant_meta["langgraph"],
     } == {
         "enabled": True,
-        "mode": "deterministic",
+        "mode": "agent_loop",
         "route": "command",
         "llm": {
             "enabled": False,
@@ -421,7 +484,7 @@ def test_assistant_runtime_executes_slash_command_through_inbound_router(tmp_pat
             "max_output_tokens": 512,
         },
         "context": {"provided": False},
-        "langgraph": "disabled",
+        "langgraph": "optional",
     }
     assert assistant_meta["perception_trace"]["decision"] == "command_selected"
     assert assistant_meta["perception_trace"]["selected_source"] == "command"
@@ -505,7 +568,7 @@ def test_assistant_runtime_keeps_deterministic_fallback(tmp_path: Path) -> None:
     assert calls == [("runtime_status", {"config_key": "us"})]
     assert out["data"]["perception"]["source"] == "deterministic"
     assert out["meta"]["assistant"]["route"] == "deterministic"
-    assert out["meta"]["assistant"]["llm"]["reason"] == "not_needed"
+    assert out["meta"]["assistant"]["llm"]["reason"] == "disabled"
 
 
 def test_assistant_runtime_requires_config_scope_for_runtime_status(tmp_path: Path) -> None:
@@ -589,28 +652,28 @@ def test_assistant_runtime_records_deterministic_perception_trace_in_audit(tmp_p
     assert out["ok"] is True
     assert calls == [("runtime_status", {"config_key": "us"})]
     perception_trace = out["meta"]["assistant"]["perception_trace"]
-    assert perception_trace["decision"] == "deterministic_selected"
+    assert perception_trace["decision"] == "deterministic_fallback_selected"
     assert perception_trace["selected_source"] == "deterministic"
     assert perception_trace["selected_perception"]["intent_name"] == "runtime_status"
     assert perception_trace["conflict"] is False
-    assert perception_trace["candidates"] == [
-        {
-            "source": "deterministic",
-            "status": "accepted",
-            "perception": {
-                "schema_version": PERCEPTION_RESULT_SCHEMA_VERSION,
-                "intent_name": "runtime_status",
-                "arguments": {},
-                "source": "deterministic",
-                "confidence": 1.0,
-                "evidence": {},
-            },
+    assert perception_trace["candidates"][0]["source"] == "agent_loop"
+    assert perception_trace["candidates"][0]["status"] == "skipped"
+    assert perception_trace["candidates"][0]["reason"] == "disabled"
+    assert perception_trace["candidates"][1] == {
+        "source": "deterministic",
+        "status": "accepted",
+        "perception": {
+            "schema_version": PERCEPTION_RESULT_SCHEMA_VERSION,
             "intent_name": "runtime_status",
-            "perception_source": "deterministic",
+            "arguments": {},
+            "source": "deterministic",
             "confidence": 1.0,
+            "evidence": {},
         },
-        {"source": "llm", "status": "skipped", "reason": "deterministic_selected"},
-    ]
+        "intent_name": "runtime_status",
+        "perception_source": "deterministic",
+        "confidence": 1.0,
+    }
 
     recent = InboundAuditStore(audit_db).list_recent(limit=1)
     assert len(recent) == 1
@@ -621,7 +684,7 @@ def test_assistant_runtime_records_deterministic_perception_trace_in_audit(tmp_p
     assert decision["route"] == "deterministic"
     assert decision["selected_source"] == "deterministic"
     assert decision["selected_intent_name"] == "runtime_status"
-    assert decision["perception_decision"] == "deterministic_selected"
+    assert decision["perception_decision"] == "deterministic_fallback_selected"
     assert decision["execution_contract"]["read_only"] is True
     assert decision["execution_contract"]["direct_writes_allowed"] is False
     assert audited_response["meta"]["assistant"]["decision"] == decision
@@ -643,7 +706,7 @@ def test_assistant_runtime_falls_back_to_deterministic_when_llm_unavailable(tmp_
         ),
         execute_tool_fn=_execute,
         settings=AssistantSettings(
-            mode="llm_router",
+            mode="agent_loop",
             llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
     )
@@ -656,7 +719,7 @@ def test_assistant_runtime_falls_back_to_deterministic_when_llm_unavailable(tmp_
     perception_trace = out["meta"]["assistant"]["perception_trace"]
     assert perception_trace["decision"] == "deterministic_fallback_selected"
     assert perception_trace["selected_source"] == "deterministic"
-    assert perception_trace["candidates"][0]["source"] == "llm"
+    assert perception_trace["candidates"][0]["source"] == "agent_loop"
     assert perception_trace["candidates"][0]["status"] == "rejected"
     assert perception_trace["candidates"][0]["reason"] == "missing_api_key"
     assert perception_trace["candidates"][0]["error_code"] == "LLM_UNAVAILABLE"
@@ -667,7 +730,7 @@ def test_assistant_runtime_falls_back_to_deterministic_when_llm_unavailable(tmp_
 
 def test_assistant_runtime_falls_back_to_deterministic_preview_when_llm_rejects_write_intent(tmp_path: Path) -> None:
     settings = AssistantSettings(
-        mode="llm_router",
+        mode="agent_loop",
         llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
     )
     text = "记录开仓 sy NVDA 1张 put 100 2026-06-19 premium 1.2"
@@ -712,7 +775,7 @@ def test_assistant_runtime_falls_back_to_deterministic_preview_when_llm_rejects_
     trace = engine.trace.public_payload()
     assert trace["decision"] == "deterministic_fallback_selected"
     assert trace["selected_source"] == "deterministic"
-    assert trace["candidates"][0]["source"] == "llm"
+    assert trace["candidates"][0]["source"] == "agent_loop"
     assert trace["candidates"][0]["status"] == "rejected"
     assert trace["candidates"][0]["error_code"] == "PERMISSION_DENIED"
     assert trace["candidates"][0]["error"]["details"]["llm_rejected_reason"] == "known_non_executable_intent"
@@ -826,7 +889,7 @@ def test_assistant_runtime_does_not_fallback_for_unknown_llm_permission_denial(t
         ),
         execute_tool_fn=_execute,
         settings=AssistantSettings(
-            mode="llm_router",
+            mode="agent_loop",
             llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         translate_intent_fn=_translate,
@@ -835,11 +898,11 @@ def test_assistant_runtime_does_not_fallback_for_unknown_llm_permission_denial(t
     assert out["ok"] is False
     assert out["error"]["code"] == "PERMISSION_DENIED"
     assert out["error"]["details"]["llm_rejected_reason"] == "unknown_intent"
-    assert out["meta"]["assistant"]["route"] == "llm"
+    assert out["meta"]["assistant"]["route"] == "agent_loop"
     perception_trace = out["meta"]["assistant"]["perception_trace"]
     assert perception_trace["decision"] == "llm_error"
     assert perception_trace["selected_source"] is None
-    assert perception_trace["candidates"][0]["source"] == "llm"
+    assert perception_trace["candidates"][0]["source"] == "agent_loop"
     assert perception_trace["candidates"][0]["error_code"] == "PERMISSION_DENIED"
     assert perception_trace["candidates"][1]["source"] == "deterministic"
     assert perception_trace["candidates"][1]["status"] == "accepted"
@@ -880,7 +943,7 @@ def test_assistant_runtime_does_not_fallback_for_mismatched_known_llm_denial(tmp
         ),
         execute_tool_fn=_execute,
         settings=AssistantSettings(
-            mode="llm_router",
+            mode="agent_loop",
             llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         translate_intent_fn=_translate,
@@ -890,11 +953,11 @@ def test_assistant_runtime_does_not_fallback_for_mismatched_known_llm_denial(tmp
     assert out["error"]["code"] == "PERMISSION_DENIED"
     assert out["error"]["details"]["intent_name"] == "manual_trade_open"
     assert out["error"]["details"]["llm_rejected_reason"] == "known_non_executable_intent"
-    assert out["meta"]["assistant"]["route"] == "llm"
+    assert out["meta"]["assistant"]["route"] == "agent_loop"
     perception_trace = out["meta"]["assistant"]["perception_trace"]
     assert perception_trace["decision"] == "llm_error"
     assert perception_trace["selected_source"] is None
-    assert perception_trace["candidates"][0]["source"] == "llm"
+    assert perception_trace["candidates"][0]["source"] == "agent_loop"
     assert perception_trace["candidates"][0]["error_code"] == "PERMISSION_DENIED"
     assert perception_trace["candidates"][1]["source"] == "deterministic"
     assert perception_trace["candidates"][1]["status"] == "accepted"
@@ -934,7 +997,7 @@ def test_assistant_runtime_unknown_slash_command_does_not_call_llm(tmp_path: Pat
             audit_db=str(tmp_path / "inbound.sqlite3"),
         ),
         settings=AssistantSettings(
-            mode="llm_router",
+            mode="agent_loop",
             llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         translate_intent_fn=_translate,
@@ -964,7 +1027,30 @@ def test_assistant_runtime_keeps_llm_disabled_for_unrecognized_text(tmp_path: Pa
     assert out["meta"]["assistant"]["llm"]["reason"] == "disabled"
 
 
-def test_assistant_runtime_llm_router_tries_llm_before_deterministic_alias(tmp_path: Path) -> None:
+def test_assistant_runtime_skips_agent_loop_when_planner_is_disabled(tmp_path: Path) -> None:
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="查一下",
+            sender_id="local",
+            message_id="msg_planner_disabled_unknown_text",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        settings=AssistantSettings(
+            mode="agent_loop",
+            planner=PlannerSettings(enabled=False),
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+    )
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "NEEDS_CLARIFICATION"
+    assert out["meta"]["assistant"]["route"] == "deterministic"
+    assert out["meta"]["assistant"]["planner"]["enabled"] is False
+    assert out["meta"]["assistant"]["llm"]["attempted"] is False
+    assert out["meta"]["assistant"]["llm"]["reason"] == "planner_disabled"
+
+
+def test_assistant_runtime_agent_loop_tries_translator_before_deterministic_alias(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
     translated: list[str] = []
 
@@ -1006,7 +1092,7 @@ def test_assistant_runtime_llm_router_tries_llm_before_deterministic_alias(tmp_p
         ),
         execute_tool_fn=_execute,
         settings=AssistantSettings(
-            mode="llm_router",
+            mode="agent_loop",
             llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         translate_intent_fn=_translate,
@@ -1016,11 +1102,11 @@ def test_assistant_runtime_llm_router_tries_llm_before_deterministic_alias(tmp_p
     assert out["ok"] is True
     assert calls == [("runtime_status", {"config_key": "us"})]
     assert out["data"]["perception"]["source"] == "llm"
-    assert out["meta"]["assistant"]["route"] == "llm"
+    assert out["meta"]["assistant"]["route"] == "agent_loop"
     perception_trace = out["meta"]["assistant"]["perception_trace"]
-    assert perception_trace["decision"] == "llm_selected"
-    assert perception_trace["selected_source"] == "llm"
-    assert perception_trace["candidates"][0]["source"] == "llm"
+    assert perception_trace["decision"] == "agent_loop_selected"
+    assert perception_trace["selected_source"] == "agent_loop"
+    assert perception_trace["candidates"][0]["source"] == "agent_loop"
     assert perception_trace["candidates"][0]["status"] == "accepted"
     assert perception_trace["candidates"][0]["intent_name"] == "runtime_status"
     assert perception_trace["candidates"][1]["source"] == "deterministic"
@@ -1065,7 +1151,7 @@ def test_assistant_runtime_rejects_llm_preview_write_conflict_with_deterministic
         ),
         execute_tool_fn=_execute,
         settings=AssistantSettings(
-            mode="llm_router",
+            mode="agent_loop",
             llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         translate_intent_fn=_translate,
@@ -1074,12 +1160,12 @@ def test_assistant_runtime_rejects_llm_preview_write_conflict_with_deterministic
     assert out["ok"] is False
     assert out["error"]["code"] == "NEEDS_CLARIFICATION"
     assert calls == []
-    assert out["meta"]["assistant"]["route"] == "llm"
+    assert out["meta"]["assistant"]["route"] == "agent_loop"
     perception_trace = out["meta"]["assistant"]["perception_trace"]
     assert perception_trace["decision"] == "llm_conflict_needs_clarification"
     assert perception_trace["selected_source"] is None
     assert perception_trace["conflict"] is True
-    assert perception_trace["candidates"][0]["source"] == "llm"
+    assert perception_trace["candidates"][0]["source"] == "agent_loop"
     assert perception_trace["candidates"][0]["intent_name"] == "symbol_edit"
     assert perception_trace["candidates"][1]["source"] == "deterministic"
     assert perception_trace["candidates"][1]["intent_name"] == "manual_trade_update"
@@ -1163,7 +1249,7 @@ def test_assistant_runtime_uses_llm_reply_for_non_business_text_after_low_confid
         ),
         execute_tool_fn=_execute,
         settings=AssistantSettings(
-            mode="llm_router",
+            mode="agent_loop",
             llm=LlmTranslatorSettings(
                 enabled=True,
                 provider="deepseek",
@@ -1227,7 +1313,7 @@ def test_assistant_runtime_does_not_use_llm_reply_for_write_like_text(tmp_path: 
             audit_db=str(tmp_path / "inbound.sqlite3"),
         ),
         settings=AssistantSettings(
-            mode="llm_router",
+            mode="agent_loop",
             llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         translate_intent_fn=_translate,
@@ -1342,23 +1428,23 @@ def test_assistant_runtime_routes_valid_llm_translation_through_inbound_router(t
     assert out["ok"] is True
     assert calls == [("monthly_income_report", {"config_key": "us", "month": "2026-05"})]
     assert out["data"]["perception"]["source"] == "llm"
-    assert out["meta"]["assistant"]["route"] == "llm"
+    assert out["meta"]["assistant"]["route"] == "agent_loop"
     assert out["meta"]["assistant"]["llm"]["schema_version"] == LLM_INTENT_SCHEMA_VERSION
     perception_trace = out["meta"]["assistant"]["perception_trace"]
-    assert perception_trace["decision"] == "llm_selected"
-    assert perception_trace["selected_source"] == "llm"
+    assert perception_trace["decision"] == "agent_loop_selected"
+    assert perception_trace["selected_source"] == "agent_loop"
     assert perception_trace["selected_perception"]["intent_name"] == "monthly_income_report"
-    assert perception_trace["candidates"][0]["source"] == "llm"
+    assert perception_trace["candidates"][0]["source"] == "agent_loop"
     assert perception_trace["candidates"][0]["status"] == "accepted"
     assert perception_trace["candidates"][0]["intent_name"] == "monthly_income_report"
     assert perception_trace["candidates"][1]["source"] == "deterministic"
     assert perception_trace["candidates"][1]["status"] == "rejected"
     assert perception_trace["candidates"][1]["error_code"] == "NEEDS_CLARIFICATION"
     decision = out["meta"]["assistant"]["decision"]
-    assert decision["route"] == "llm"
-    assert decision["selected_source"] == "llm"
+    assert decision["route"] == "agent_loop"
+    assert decision["selected_source"] == "agent_loop"
     assert decision["selected_intent_name"] == "monthly_income_report"
-    assert decision["perception_decision"] == "llm_selected"
+    assert decision["perception_decision"] == "agent_loop_selected"
     assert decision["llm"] == {"attempted": True, "reason": "accepted", "provider": "openai", "model": "gpt-5.2"}
     assert decision["execution_contract"]["read_only"] is True
     assert decision["execution_contract"]["llm_allowed"] is True
@@ -1416,7 +1502,7 @@ def test_assistant_runtime_reconciles_missing_llm_read_slots_from_shadow_parser(
         ),
         execute_tool_fn=_execute,
         settings=AssistantSettings(
-            mode="llm_router",
+            mode="agent_loop",
             llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         translate_intent_fn=_translate,
@@ -1432,7 +1518,7 @@ def test_assistant_runtime_reconciles_missing_llm_read_slots_from_shadow_parser(
         "filled": {"month": "2026-06"},
         "overridden": {},
     }
-    assert out["meta"]["assistant"]["perception_trace"]["selected_source"] == "llm"
+    assert out["meta"]["assistant"]["perception_trace"]["selected_source"] == "agent_loop"
 
 
 def test_assistant_runtime_reconciles_stale_llm_month_from_shadow_parser(tmp_path: Path) -> None:
@@ -1481,7 +1567,7 @@ def test_assistant_runtime_reconciles_stale_llm_month_from_shadow_parser(tmp_pat
         ),
         execute_tool_fn=_execute,
         settings=AssistantSettings(
-            mode="llm_router",
+            mode="agent_loop",
             llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         translate_intent_fn=_translate,
@@ -1556,13 +1642,13 @@ def test_assistant_runtime_routes_core_read_only_llm_intents(tmp_path: Path) -> 
             ),
             execute_tool_fn=_execute,
             settings=AssistantSettings(
-                mode="llm_router",
+                mode="agent_loop",
                 llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
             ),
             translate_intent_fn=_translate,
         )
         assert out["ok"] is True
-        assert out["meta"]["assistant"]["route"] == "llm"
+        assert out["meta"]["assistant"]["route"] == "agent_loop"
         assert calls[-1] == expected_call
 
 
@@ -1688,7 +1774,7 @@ def test_assistant_runtime_settings_from_runtime_config() -> None:
     settings = AssistantSettings.from_runtime_config(
         {
             "assistant": {
-                "mode": "llm_router",
+                    "mode": "llm_router",
                 "context_window_messages": 12,
                 "default_market_scope": "all",
                 "llm": {
@@ -1705,7 +1791,7 @@ def test_assistant_runtime_settings_from_runtime_config() -> None:
     )
 
     assert settings.enabled is True
-    assert settings.mode == "llm_router"
+    assert settings.mode == "agent_loop"
     assert settings.context_window_messages == 12
     assert settings.default_market_scope == "all"
     assert settings.llm.public_payload() == {
@@ -3146,6 +3232,56 @@ def test_plan_read_only_tools_hoists_misplaced_response_mode_argument() -> None:
     assert result.trace["reason"] == "accepted"
 
 
+def test_tool_plan_rejects_system_scoped_argument_families() -> None:
+    cases = [
+        ("runtime_status", {"state_dir": "/tmp/state"}, ["state_dir"]),
+        ("runtime_status", {"timeoutSeconds": 5}, ["timeoutSeconds"]),
+        ("healthcheck", {"opend_telnet_host": "127.0.0.1"}, ["opend_telnet_host"]),
+        ("healthcheck", {"candidate_trace_paths": ["/tmp/trace.jsonl"]}, ["candidate_trace_paths"]),
+        ("symbol_edit", {"symbol": "NVDA", "set": {"config_path": "/tmp/config.yaml"}}, ["set.config_path"]),
+        (
+            "manual_trade_update",
+            {"operation_id": "in_1", "updates": {"audit_db": "/tmp/inbound.sqlite3"}},
+            ["updates.audit_db"],
+        ),
+        (
+            "manual_trade_update",
+            {
+                "operation_id": "in_1",
+                "updates": {
+                    "fills": [
+                        {
+                            "service_status": "active",
+                        }
+                    ],
+                },
+            },
+            ["updates.fills[0].service_status"],
+        ),
+    ]
+
+    for tool_name, arguments, expected_banned in cases:
+        plan = PlannerPlan(
+            goal="unsafe system argument",
+            steps=(
+                PlannerPlanStep(
+                    id="step_1",
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    purpose="attempt to pass system scoped argument",
+                ),
+            ),
+        )
+        try:
+            validate_tool_plan(plan)
+        except AgentToolError as err:
+            assert err.code == "PERMISSION_DENIED"
+            assert err.details["tool_name"] == tool_name
+            assert err.details["banned_arguments"] == expected_banned
+        else:
+            raise AssertionError(f"{tool_name} should reject {arguments}")
+
+
 def test_agent_loop_income_cashflow_eval_plan_guard() -> None:
     cases = [
         {
@@ -3562,7 +3698,7 @@ def test_assistant_runtime_rejects_llm_injected_write_intent_even_with_custom_tr
 
     assert out["ok"] is False
     assert out["error"]["code"] == "PERMISSION_DENIED"
-    assert "preview-only symbol settings" in out["error"]["hint"]
+    assert "explicitly allowed preview capabilities" in out["error"]["hint"]
     assert out["meta"]["assistant"]["route"] == "agent_loop"
     perception_trace = out["meta"]["assistant"]["perception_trace"]
     assert perception_trace["decision"] == "llm_denied_by_policy"

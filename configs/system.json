@@ -140,8 +140,11 @@
       "opend_alert_send_recovery_notice": true
     },
     "assistant": {
-      "mode": "deterministic",
+      "enabled": true,
       "context_window_messages": 8,
+      "planner": {
+        "enabled": true
+      },
       "llm": {
         "provider": "",
         "base_url": "",

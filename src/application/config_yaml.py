@@ -686,8 +686,11 @@ def _assistant_config_from_runtime_defaults(cfg: dict[str, Any]) -> dict[str, An
     if isinstance(assistant, dict):
         return deepcopy(assistant)
     return {
-        "mode": "deterministic",
+        "enabled": True,
         "context_window_messages": 8,
+        "planner": {
+            "enabled": True,
+        },
         "llm": {
             "provider": "",
             "base_url": "",

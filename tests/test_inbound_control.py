@@ -143,7 +143,9 @@ def _write_assistant_model_config(tmp_path: Path) -> tuple[Path, Path]:
     config_yaml.write_text(
         """
 assistant:
-  mode: llm_router
+  enabled: true
+  planner:
+    enabled: true
   active_model: openai-default
   models:
     openai-default:
@@ -161,7 +163,8 @@ assistant:
         json.dumps(
             {
                 "assistant": {
-                    "mode": "llm_router",
+                    "enabled": True,
+                    "planner": {"enabled": True},
                     "llm": {
                         "provider": "openai",
                         "base_url": "https://api.openai.com/v1",
@@ -1879,7 +1882,6 @@ def test_inbound_llm_symbol_edit_creates_preview_only(monkeypatch: pytest.Monkey
         ),
         allowed_senders="feishu:ou_1",
         settings=AssistantSettings(
-            mode="llm_router",
             llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         translate_intent_fn=_translate,
@@ -1904,7 +1906,7 @@ def test_inbound_llm_symbol_edit_creates_preview_only(monkeypatch: pytest.Monkey
     assert json.loads(cfg_path.read_text(encoding="utf-8")) == before
 
     assistant_meta = out["meta"]["assistant"]
-    assert assistant_meta["route"] == "llm"
+    assert assistant_meta["route"] == "agent_loop"
     assert assistant_meta["decision"]["execution_contract"] == {
         "read_only": False,
         "risk_level": "preview_write",
@@ -1917,7 +1919,7 @@ def test_inbound_llm_symbol_edit_creates_preview_only(monkeypatch: pytest.Monkey
         "preview_confirm_required": True,
         "canonical_renderer_required": True,
     }
-    assert assistant_meta["perception_trace"]["decision"] == "llm_selected"
+    assert assistant_meta["perception_trace"]["decision"] == "agent_loop_selected"
 
 
 def test_inbound_symbol_write_uses_symbol_market_over_default_us_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -3063,7 +3065,8 @@ def test_feishu_payload_adapter_assistant_reads_assistant_config(monkeypatch: py
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
     assistant_config_path = tmp_path / "config.assistant.json"
     assistant_config_path.write_text(json.dumps({"assistant": {
-        "mode": "llm_router",
+        "enabled": True,
+        "planner": {"enabled": True},
         "context_window_messages": 7,
         "default_market_scope": "us",
         "llm": {
@@ -3115,6 +3118,7 @@ def test_feishu_payload_adapter_assistant_reads_assistant_config(monkeypatch: py
     assert len(seen) == 1
     settings = seen[0]["kwargs"]["settings"]
     assert settings.enabled is True
+    assert settings.planner.enabled is True
     assert settings.context_window_messages == 7
     assert settings.llm.enabled is True
     assert settings.llm.provider == "openai"
@@ -3133,7 +3137,7 @@ def test_feishu_payload_adapter_defaults_to_assistant_from_assistant_config(monk
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
     assistant_config_path = tmp_path / "config.assistant.json"
     assistant_config_path.write_text(
-        json.dumps({"assistant": {"mode": "deterministic", "context_window_messages": 5, "llm": {}}}, ensure_ascii=False),
+        json.dumps({"assistant": {"enabled": True, "planner": {"enabled": False}, "context_window_messages": 5, "llm": {}}}, ensure_ascii=False),
         encoding="utf-8",
     )
     payload = {
@@ -3174,6 +3178,7 @@ def test_feishu_payload_adapter_defaults_to_assistant_from_assistant_config(monk
     assert len(seen) == 1
     settings = seen[0]["kwargs"]["settings"]
     assert settings.enabled is True
+    assert settings.planner.enabled is False
     assert settings.context_window_messages == 5
 
 
@@ -3252,7 +3257,8 @@ def test_assistant_cli_handle_loads_settings_from_config(monkeypatch, capsys, tm
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
     assistant_config_path = tmp_path / "config.assistant.json"
     assistant_config_path.write_text(json.dumps({"assistant": {
-        "mode": "llm_router",
+        "enabled": True,
+        "planner": {"enabled": True},
         "context_window_messages": 6,
         "default_market_scope": "us",
         "llm": {
@@ -3308,7 +3314,7 @@ def test_assistant_cli_handle_loads_settings_from_config(monkeypatch, capsys, tm
     assert settings.llm.max_output_tokens == 771
 
 
-def test_assistant_cli_handle_uses_deterministic_config(monkeypatch, capsys, tmp_path: Path) -> None:
+def test_assistant_cli_handle_uses_planner_disabled_config(monkeypatch, capsys, tmp_path: Path) -> None:
     import src.interfaces.cli.main as cli
 
     cfg = _runtime_cfg(str(tmp_path / "portfolio.runtime.json"))
@@ -3316,7 +3322,7 @@ def test_assistant_cli_handle_uses_deterministic_config(monkeypatch, capsys, tmp
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
     assistant_config_path = tmp_path / "config.assistant.json"
     assistant_config_path.write_text(
-        json.dumps({"assistant": {"mode": "deterministic", "context_window_messages": 4, "llm": {}}}, ensure_ascii=False),
+        json.dumps({"assistant": {"enabled": True, "planner": {"enabled": False}, "context_window_messages": 4, "llm": {}}}, ensure_ascii=False),
         encoding="utf-8",
     )
     seen = []
@@ -3352,6 +3358,7 @@ def test_assistant_cli_handle_uses_deterministic_config(monkeypatch, capsys, tmp
     assert len(seen) == 1
     settings = seen[0]["settings"]
     assert settings.enabled is True
+    assert settings.planner.enabled is False
     assert settings.context_window_messages == 4
 
 

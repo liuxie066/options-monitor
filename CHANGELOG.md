@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 1.2.237 - 2026-06-08
+
+### Changed
+- Upgraded OM Copilot to a single AgentLoop planner path with bounded perception, deterministic understanding, registry-backed read tools, and approved preview-only write capabilities.
+- Replaced active assistant product modes with `assistant.enabled` and `assistant.planner.enabled`, keeping `assistant.mode` as legacy metadata only.
+- Added an inbound capability catalog and planner manifest guardrails without introducing a parallel ToolRegistry control plane.
+- Clarified the conceptual AgentSession and AgentLoop architecture in docs so Copilot boundaries are fixed around perception, understanding, planning, and action.
+
+### Fixed
+- Aligned the planner-facing catalog with the real manifest so planner reads only expose registry-backed read tools and preview capabilities remain explicit.
+- Hardened planner validation to reject banned system, path, config, audit, service, host, port, timeout, and environment arguments recursively inside nested payloads.
+
 ## 1.2.236 - 2026-06-08
 
 ### Fixed
