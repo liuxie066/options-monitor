@@ -100,9 +100,9 @@ def normalize_wechat_clawbot_send_output(*, send_result: dict[str, Any]) -> dict
     response_json = result.get("response_json") if isinstance(result.get("response_json"), dict) else {}
     command_ok = bool(result.get("http_status") == 200)
     business_ok = bool(result.get("ok") or _response_success(response_json))
-    message_id = _extract_message_id(response_json)
-    if not message_id and not result.get("local_receipt_id"):
-        message_id = result.get("message_id")
+    upstream_message_id = _extract_message_id(response_json) or result.get("message_id")
+    local_receipt_id = result.get("local_receipt_id")
+    message_id = upstream_message_id or local_receipt_id
     delivery_confirmed = bool(command_ok and business_ok and message_id)
     response_tail = str(result.get("response_tail") or "")
     if delivery_confirmed:
@@ -130,11 +130,12 @@ def normalize_wechat_clawbot_send_output(*, send_result: dict[str, Any]) -> dict
             "command_ok": command_ok,
             "delivery_confirmed": delivery_confirmed,
             "message_id": (None if message_id is None else str(message_id)),
+            "upstream_message_id": (None if upstream_message_id is None else str(upstream_message_id)),
             "http_status": result.get("http_status"),
             "response_json": response_json,
             "response_tail": response_tail,
             "idempotency_key": result.get("idempotency_key"),
-            "local_receipt_id": result.get("local_receipt_id"),
+            "local_receipt_id": local_receipt_id,
             "binding_label": result.get("binding_label"),
             "binding_name": result.get("binding_name"),
         },
