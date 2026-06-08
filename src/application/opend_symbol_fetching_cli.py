@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime
+import json
 from pathlib import Path
 import time
 
@@ -32,6 +33,8 @@ def main() -> None:
     ap.add_argument("--option-types", default="put,call", help="Comma-separated option types to include: put,call (default: put,call)")
     ap.add_argument("--min-strike", type=float, default=None)
     ap.add_argument("--max-strike", type=float, default=None)
+    ap.add_argument("--side-strike-windows-json", default=None)
+    ap.add_argument("--explicit-expirations", nargs="*", default=None)
     ap.add_argument("--min-dte", type=int, default=None, help="Only pick expirations with DTE >= min_dte before applying limit-expirations")
     ap.add_argument("--max-dte", type=int, default=None, help="Only pick expirations with DTE <= max_dte before applying limit-expirations")
     ap.add_argument("--host", default="127.0.0.1")
@@ -62,6 +65,13 @@ def main() -> None:
     opt_types = {s.strip().lower() for s in str(args.option_types or "").split(",") if s.strip()}
     want_put = ("put" in opt_types) if opt_types else True
     want_call = ("call" in opt_types) if opt_types else True
+    side_strike_windows = None
+    if args.side_strike_windows_json:
+        try:
+            parsed_windows = json.loads(str(args.side_strike_windows_json))
+            side_strike_windows = parsed_windows if isinstance(parsed_windows, dict) else None
+        except Exception:
+            side_strike_windows = None
 
     base = resolve_runtime_root(repo_root=REPO_ROOT).runtime_root
     output_root = Path(args.output_root).resolve() if args.output_root else None
@@ -93,8 +103,10 @@ def main() -> None:
                 option_types=("put,call" if (want_put and want_call) else ("put" if want_put else "call")),
                 min_strike=args.min_strike,
                 max_strike=args.max_strike,
+                side_strike_windows=side_strike_windows,
                 min_dte=args.min_dte,
                 max_dte=args.max_dte,
+                explicit_expirations=list(args.explicit_expirations or []) or None,
                 retry_max_attempts=int(args.retry_max_attempts),
                 retry_time_budget_sec=float(args.retry_time_budget_sec),
                 retry_base_delay_sec=float(args.retry_base_delay_sec),

@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 631 (`src`: 354, `domain`: 52, `scripts`: 7, `tests`: 218)
-- Internal import edges: 3351 total, 1564 production/script edges excluding tests
+- Internal import edges: 3357 total, 1566 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -44,7 +44,7 @@ flowchart LR
   scripts -->|1| infrastructure
   scripts -->|2| storage
   storage -->|1| domain
-  tests -->|1201| application
+  tests -->|1205| application
   tests -->|282| domain
   tests -->|2| domain_services
   tests -->|95| infrastructure
@@ -75,7 +75,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 1201 |
+| tests | application | 1205 |
 | tests | domain | 282 |
 | tests | interfaces | 163 |
 | tests | infrastructure | 95 |
@@ -100,8 +100,8 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | src.application | src.application.multi_tick | 15 |
 | src.application.ledger | domain.domain | 14 |
 | src.application.inbound | src.application | 13 |
+| src.application.multi_tick | src.application | 13 |
 | src.application.trades | src.application | 12 |
-| src.application.multi_tick | src.application | 11 |
 | src.application | domain.domain.ledger | 10 |
 | src.application.trades | domain.domain | 10 |
 | src.application | src.application.ledger | 9 |
@@ -200,10 +200,10 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.interfaces.cli.main | 22 |
 | src.application.close_advice_runner | 21 |
 | src.application.ledger.queries | 20 |
+| src.application.multi_tick.required_data_prefetch | 20 |
 | src.application.pipeline_runtime | 20 |
 | src.application.agent_tool_runtime_status | 18 |
 | src.application.channels.wechat_clawbot.inbound | 18 |
-| src.application.multi_tick.required_data_prefetch | 18 |
 | src.application.tick_notification_flow | 18 |
 | src.application.sell_put_steps | 17 |
 | src.application.assistant.symbol_operations | 16 |

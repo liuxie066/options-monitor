@@ -62,6 +62,10 @@ def load_required_data_payload_from_csv(*, parsed: Path, symbol: str) -> dict[st
 
 def required_data_csv_covers_fetch_plan(*, parsed: Path, fetch_plan: RequiredDataFetchPlanBundle) -> bool:
     df = _read_required_data_csv(parsed)
+    return required_data_frame_covers_fetch_plan(df=df, fetch_plan=fetch_plan)
+
+
+def required_data_frame_covers_fetch_plan(*, df: pd.DataFrame, fetch_plan: RequiredDataFetchPlanBundle) -> bool:
     if df.empty:
         return False
     if any(bool(spec.include_realized_volatility) for spec in fetch_plan.merged_specs) and not _has_realized_volatility(df):
@@ -251,7 +255,39 @@ def _strikes_cover_bounds(*, strikes: pd.Series, base_min: float | None, base_ma
     ]
 
     if base_min is not None and base_max is not None and float(base_max) > float(base_min):
-        return len(in_bounds) >= 3
+        return _strikes_cover_bounded_edges(
+            unique_strikes=unique_strikes,
+            base_min=float(base_min),
+            base_max=float(base_max),
+        )
     if base_min is not None or base_max is not None:
         return len(in_bounds) >= 1
     return len(unique_strikes) >= 1
+
+
+def _strikes_cover_bounded_edges(*, unique_strikes: list[float], base_min: float, base_max: float) -> bool:
+    tolerance = _strike_edge_tolerance(
+        unique_strikes=unique_strikes,
+        base_min=base_min,
+        base_max=base_max,
+    )
+    nearest_lower_gap = min(abs(strike - base_min) for strike in unique_strikes)
+    nearest_upper_gap = min(abs(strike - base_max) for strike in unique_strikes)
+    return nearest_lower_gap <= tolerance and nearest_upper_gap <= tolerance
+
+
+def _strike_edge_tolerance(*, unique_strikes: list[float], base_min: float, base_max: float) -> float:
+    width = max(0.0, float(base_max) - float(base_min))
+    gaps = [
+        abs(float(right) - float(left))
+        for left, right in zip(unique_strikes, unique_strikes[1:])
+        if abs(float(right) - float(left)) > 0
+    ]
+    if gaps:
+        step = min(gaps)
+        if width > 0:
+            return max(1e-9, min(float(step), width * 0.25))
+        return max(1e-9, float(step))
+    if width > 0:
+        return max(1e-9, width * 0.05)
+    return max(1e-9, abs(float(base_min)) * 0.005)
