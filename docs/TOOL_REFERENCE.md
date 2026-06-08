@@ -426,12 +426,12 @@ om-agent run --tool candidate_rank_explain --input-json '{"mode":"put","score_we
 - `research shadow-replay collect-marks` 是数据采样入口，可从本地 required-data cache 或显式 OpenD 当前报价追加 mark path
 - `research shadow-replay mark` 可从 `required_data/parsed/*_required_data.csv` 为本地 dataset 生成 mark path
 - `research shadow-replay settle` 可从可用 mark 推导 mark-to-market outcome，也可在到期日/到期后用 spot/strike 推导到期 outcome
-- `research shadow-replay analyze` 会在已有可用 mark path / outcome facts 时输出路径风险、outcome stats 和按 DTE/Delta/IV/Spread/集中度分桶的 outcome-by-bucket 表现
-- `research shadow-replay parameter-backtest` 用历史 run artifacts 或已有 dataset 做 `insurance_underwriting` 参数反事实回放，比较生产实际结果和 variants，不重建历史期权链、不修改 runtime config
-- `research shadow-replay parameter-report` 是用户常用报告入口，会一次写出 JSON + Markdown 候选影响报告；参数仍来自 `--params` 或 `--params-dir`，不会自动生成参数、不修改 runtime config
+- `research shadow-replay analyze` 会在已有可用 mark path / outcome facts 时输出路径风险、outcome stats、review_readiness 和按 DTE/Delta/IV/Spread/集中度分桶的 outcome-by-bucket 表现
+- `research shadow-replay candidate-impact` 用历史 run artifacts 或已有 dataset 做 `insurance_underwriting` 候选影响对比，比较 production observed 与阈值 variants 会新增/移除哪些候选，不重建历史期权链、不修改 runtime config；旧 `parameter-backtest` 保留为兼容入口
+- `research shadow-replay candidate-impact-report` 是用户常用报告入口，会一次写出 JSON + Markdown 候选影响报告；参数仍来自 `--params` 或 `--params-dir`，不会自动生成参数、不修改 runtime config；旧 `parameter-report` 保留为兼容入口
 - `research archive pull/verify/inventory/build-datasets/prune-remote` 是远端空间有限时的证据归档链路：先把远端 runtime 证据 rsync 到本地 `output_shared/research/remote_archive/<remote>/`，再从 verified archive 生成 Shadow Replay dataset
 - 缺少被拒样本、mark path 或 outcome facts 时返回 `not_ready` / `evidence_incomplete`，防止幸存者偏差
-- 只输出人工评审用建议，不自动改配置
+- 只输出人工复盘证据和候选影响对比，不自动改配置
 
 示例：
 
@@ -454,9 +454,9 @@ om research shadow-replay run-data-plan --min-sample 30 --min-mark-points 2
 om research shadow-replay run-data-plan --profile-path /var/lib/options-monitor/service.profile.json --min-sample 30 --min-mark-points 2
 om research shadow-replay run-data-plan --min-sample 30 --min-mark-points 2 --source local --write
 om research shadow-replay run-data-plan --min-sample 30 --min-mark-points 2 --source opend --write --max-datasets 3
-om research shadow-replay parameter-backtest --profile-path /var/lib/options-monitor/service.profile.json --start-date 2026-06-01 --end-date 2026-06-02 --account lx --market hk --params params.json --min-sample 30
-om research shadow-replay parameter-report --runtime-root /var/lib/options-monitor --start-date 2026-06-03 --end-date 2026-06-03 --account lx --account sy --market us --params-dir /var/lib/options-monitor/output_shared/research/shadow_replay/backtests/<params-dir> --min-sample 30
-om research shadow-replay parameter-backtest --dataset output_shared/research/shadow_replay/datasets/us-20260515 --params params.json --format markdown --output backtest.md
+om research shadow-replay candidate-impact --profile-path /var/lib/options-monitor/service.profile.json --start-date 2026-06-01 --end-date 2026-06-02 --account lx --market hk --params params.json --min-sample 30
+om research shadow-replay candidate-impact-report --runtime-root /var/lib/options-monitor --start-date 2026-06-03 --end-date 2026-06-03 --account lx --account sy --market us --params-dir /var/lib/options-monitor/output_shared/research/shadow_replay/backtests/<params-dir> --min-sample 30
+om research shadow-replay candidate-impact --dataset output_shared/research/shadow_replay/datasets/us-20260515 --params params.json --format markdown --output candidate-impact.md
 om research shadow-replay collect-marks --dataset output_shared/research/shadow_replay/datasets/us-20260515 --source local --required-data-root output_shared/required_data --write
 om research shadow-replay collect-marks --dataset output_shared/research/shadow_replay/datasets/us-20260515 --source opend --required-data-root output_shared/required_data --opend-host 127.0.0.1 --opend-port 11111 --write
 om research shadow-replay mark --dataset output_shared/research/shadow_replay/datasets/us-20260515 --required-data-root output_shared/required_data --write
@@ -727,6 +727,7 @@ om-agent run --tool openclaw_readiness --input-json '{"profile_path":"openclaw.p
 - 内嵌与 `om runs` / `om logs` 同源的 run 列表和 audit tail 摘要
 - 可选嵌入 `healthcheck` snapshot，但不取代 `healthcheck` 的 readiness 职责
 - Shadow Replay 基于已有候选、reject、trace、mark、outcome 和归档 run 证据做离线复盘
+- `review_readiness` 判断是否具备人工策略复盘条件；`candidate-impact` / `candidate-impact-report` 比较显式阈值 variants 对候选集合的影响
 - 默认不写文件、不调用在线 AI、不发送通知
 - 这是独立离线侧线，不是 `om-agent` manifest tool
 
@@ -736,6 +737,7 @@ om-agent run --tool openclaw_readiness --input-json '{"profile_path":"openclaw.p
 om research collect --config-key us --scope full --output both --no-write-outputs
 om research collect --config-key us --scope candidate --run-id 20260515T182459Z-474761 --output json --no-write-outputs --shadow-replay-min-sample 30
 om research shadow-replay status --min-sample 30
+om research shadow-replay candidate-impact-report --params params.json --market us --start-date 2026-06-03 --account lx --min-sample 30
 om research shadow-replay analyze --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --min-sample 30
 ```
 
@@ -774,6 +776,8 @@ output_shared/research/shadow_replay/
 - `scheduler_evidence` 来自线上调度系统；尽量提供 `last_run_id` 和 `last_triggered_at`，否则本地 runtime 文件不能完整证明线上 cron 是否按时触发。
 - `include_healthcheck=true` 只在 `quality` / `full` scope 下有意义。
 - `--shadow-replay-min-sample` 只影响 Research bundle 里的 `candidate_evidence.shadow_replay` 样本充足性判断，不会改生产策略参数。
+- 旧 `parameter-backtest` / `parameter-report` 只作为兼容入口；新文档和人工操作优先使用 `candidate-impact` / `candidate-impact-report`。
+- Candidate-impact 报告只能说明 observed run universe 内候选集合变化，不能自动生成最优参数，也不能修改 runtime config、交易状态或通知。
 
 ---
 
