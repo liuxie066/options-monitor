@@ -359,7 +359,7 @@ def test_wechat_clawbot_client_sends_typing_payloads() -> None:
     assert calls[1]["headers"]["Authorization"] == "Bearer bot_1"  # type: ignore[index]
 
 
-def test_wechat_clawbot_success_without_upstream_message_id_is_unconfirmed() -> None:
+def test_wechat_clawbot_success_without_upstream_message_id_uses_local_receipt() -> None:
     from src.application.channels.wechat_clawbot.notification import normalize_wechat_clawbot_send_output
 
     out = normalize_wechat_clawbot_send_output(
@@ -374,11 +374,12 @@ def test_wechat_clawbot_success_without_upstream_message_id_is_unconfirmed() -> 
     )
 
     assert out["command_ok"] is True
-    assert out["delivery_confirmed"] is False
-    assert out["ok"] is False
-    assert out["message_id"] is None
+    assert out["delivery_confirmed"] is True
+    assert out["ok"] is True
+    assert out["message_id"] == "om-local-1"
+    assert out["upstream_message_id"] is None
     assert out["local_receipt_id"] == "om-local-1"
-    assert "upstream message_id is missing" in out["message"]
+    assert out["message"] == "message_id=om-local-1"
 
 
 def test_send_wechat_clawbot_message_does_not_synthesize_message_id(tmp_path: Path) -> None:
@@ -455,9 +456,11 @@ def test_send_wechat_clawbot_message_accepts_empty_success_response(tmp_path: Pa
     assert send_result["ok"] is True
     assert send_result["message_id"] is None
     assert normalized["command_ok"] is True
-    assert normalized["delivery_confirmed"] is False
-    assert normalized["ok"] is False
-    assert "upstream message_id is missing" in normalized["message"]
+    assert normalized["delivery_confirmed"] is True
+    assert normalized["ok"] is True
+    assert normalized["message_id"] == "om-idem-1"
+    assert normalized["upstream_message_id"] is None
+    assert normalized["message"] == "message_id=om-idem-1"
 
 
 def test_select_notification_delivery_adapter_rejects_openclaw_provider() -> None:
