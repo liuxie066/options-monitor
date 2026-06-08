@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import pkgutil
 from types import ModuleType
+from typing import Any
 
 import src.application.agent_tools as agent_tools_package
 from src.application.agent_tools.base import AgentTool

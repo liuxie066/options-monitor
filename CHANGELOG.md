@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.238 - 2026-06-08
+
+### Fixed
+- Restored the missing `Any` import in the agent tool registry so the published Copilot tool manifest module passes static undefined-name checks.
+
 ## 1.2.237 - 2026-06-08
 
 ### Changed
