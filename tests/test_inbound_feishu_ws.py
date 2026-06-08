@@ -469,9 +469,12 @@ def test_feishu_ws_replies_when_allowed_sender_hits_write_gate(monkeypatch, tmp_
 def test_feishu_ws_settings_uses_unified_bot_config_without_callback_secrets(tmp_path: Path) -> None:
     config_path = tmp_path / "config.us.json"
     config_path.write_text("{}", encoding="utf-8")
+    assistant_config_path = tmp_path / "config.assistant.json"
+    assistant_config_path.write_text("{}", encoding="utf-8")
 
     settings = build_feishu_ws_settings(
         config_path=str(config_path),
+        assistant_config_path=str(assistant_config_path),
         environ={
             "OM_FEISHU_BOT_APP_ID": "bot_app",
             "OM_FEISHU_BOT_APP_SECRET": "bot_secret",
