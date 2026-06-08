@@ -313,6 +313,15 @@ Override it with:
 export OM_INBOUND_AUDIT_DB=/var/lib/options-monitor/state/inbound_control.sqlite3
 ```
 
+For a repo-local runtime root, keep the env value relative to the runtime root:
+
+```bash
+export OM_INBOUND_AUDIT_DB=output_shared/state/inbound_control.sqlite3
+```
+
+Use the absolute `/var/lib/options-monitor/...` form only when that host's
+runtime root really is `/var/lib/options-monitor`.
+
 When `--message-id` is supplied, assistant control treats `(channel, message_id)` as idempotent. A repeated message returns the stored response and does not execute the tool again.
 
 The audit table records:

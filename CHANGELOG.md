@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.239 - 2026-06-08
+
+### Changed
+- Clarified that repo-local Assistant inbound audit DB overrides should use the runtime-root-relative `output_shared/state/inbound_control.sqlite3` path, while `/var/lib/options-monitor/...` remains a server runtime-root path.
+
 ## 1.2.238 - 2026-06-08
 
 ### Fixed
