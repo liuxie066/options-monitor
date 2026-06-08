@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.242 - 2026-06-09
+
+### Fixed
+- Separated AgentLoop fact observations from compressed LLM observations so deterministic assistant renderers and answer guards use untruncated tool data.
+- Fixed canonical monthly income replies so all-account annualized basis days are rendered from the full `monthly_income_report` result even when the LLM observation view is clipped.
+
 ## 1.2.241 - 2026-06-08
 
 ### Changed
