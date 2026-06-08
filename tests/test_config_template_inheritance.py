@@ -73,7 +73,7 @@ def test_edit_symbol_entry_can_ensure_call_base_for_covered_call() -> None:
 
     assert summary.changed_paths == ["sell_call.enabled", "sell_call.min_strike", "sell_call.min_dte", "sell_call.max_dte", "use"]
     assert cfg["symbols"][0]["use"] == ["put_base", "call_base"]
-    assert cfg["symbols"][0]["sell_call"] == {"enabled": True, "min_strike": 6.5, "min_dte": 20, "max_dte": 45}
+    assert cfg["symbols"][0]["sell_call"] == {"enabled": True, "min_strike": 6.5, "min_dte": 7, "max_dte": 45}
     validate_config(cfg)
 
 

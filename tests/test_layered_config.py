@@ -71,7 +71,7 @@ def test_layered_config_builds_minimal_us_user_config(tmp_path: Path) -> None:
     assert "market" not in cfg["symbols"][0]
     assert cfg["symbols"][0]["fetch"]["source"] == "futu"
     assert cfg["symbols"][0]["fetch"]["limit_expirations"] == 10
-    assert cfg["symbols"][0]["sell_put"]["min_dte"] == 20
+    assert cfg["symbols"][0]["sell_put"]["min_dte"] == 7
     assert cfg["symbols"][0]["sell_put"]["max_strike"] == 160
     assert cfg["symbols"][0]["combo_yield"]["enabled"] is True
     assert cfg.get("notifications", {}).get("channel") is None
