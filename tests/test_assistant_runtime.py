@@ -2266,6 +2266,128 @@ def test_assistant_runtime_agent_loop_reports_unsatisfied_combined_income_capabi
     }
 
 
+def test_assistant_runtime_agent_loop_canonical_income_uses_untruncated_fact_observation(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "combined_return_summary": [
+                    {
+                        "month": "2026-06",
+                        "account": "all",
+                        "account_scope": "all",
+                        "accounts": ["lx", "sy"],
+                        "cash_secured_by_ccy": {"HKD": 443000.0, "USD": 65490.0},
+                        "cash_secured_cny": 829217.820821,
+                        "net_income_by_ccy": {"HKD": 11567.0, "USD": 302.0},
+                        "net_income_cny": 12081.879898,
+                        "premium_income_by_ccy": {"HKD": 1580.0, "USD": 428.0},
+                        "premium_income_cny": 4278.902834,
+                        "realized_pnl_by_ccy": {"HKD": 8785.0, "USD": 360.0},
+                        "realized_pnl_cny": 10063.916083,
+                        "net_return_rate": 0.01457,
+                        "premium_return_rate": 0.00516,
+                        "realized_return_rate": 0.012137,
+                        "net_return_rate_by_ccy": {"HKD": 0.026111, "USD": 0.004611},
+                        "premium_return_rate_by_ccy": {"HKD": 0.003567, "USD": 0.006535},
+                        "realized_return_rate_by_ccy": {"HKD": 0.019831, "USD": 0.005497},
+                        "annualized_net_return_rate": 0.664756,
+                        "annualized_premium_return_rate": 0.235425,
+                        "annualized_realized_return_rate": 0.553751,
+                        "annualized_basis_days": 8,
+                        "return_basis": "combined_current_cash_secured",
+                        "calculation_method": "sum(net_cashflow_cny) / sum(current_open_cash_secured_cny)",
+                    }
+                ],
+                "return_summary": [
+                    {
+                        "month": "2026-06",
+                        "account": "lx",
+                        "cash_secured_cny": 335342.681298,
+                        "net_income_by_ccy": {"HKD": 39.0, "USD": 302.0},
+                        "net_income_cny": 2086.38862,
+                        "net_return_rate": 0.006222,
+                    },
+                    {
+                        "month": "2026-06",
+                        "account": "sy",
+                        "cash_secured_cny": 493875.139523,
+                        "net_income_by_ccy": {"HKD": 11528.0},
+                        "net_income_cny": 9995.491278,
+                        "net_return_rate": 0.020239,
+                    },
+                ],
+                "filters": {"account": None, "broker": "富途", "month": "2026-06"},
+                "row_count": 9,
+                "premium_row_count": 8,
+            },
+        )
+
+    def _plan(
+        text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        assert text == "6月收益"
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="查询全部账户 2026-06 合并收益",
+                response_mode="canonical",
+                required_capabilities=("combined_account_return",),
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="monthly_income_report",
+                        arguments={"month": "2026-06"},
+                        purpose="读取全账户6月收益",
+                    ),
+                ),
+            ),
+            trace={
+                "enabled": True,
+                "attempted": True,
+                "reason": "accepted",
+                "provider": "openai",
+                "base_url": "",
+                "model": "gpt-5.2",
+                "api_key_env": "OM_LLM_API_KEY",
+                "confidence_min": 0.75,
+                "timeout_seconds": 20,
+                "max_output_tokens": 512,
+                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+            },
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="6月收益",
+            sender_id="local",
+            message_id="msg_agent_loop_combined_income_canonical",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+        now_fn=lambda: date(2026, 6, 8),
+    )
+
+    assert out["ok"] is True
+    assert calls == [("monthly_income_report", {"config_key": "us", "month": "2026-06"})]
+    assert "年化：66.48%（按净现金流，8 天）" in out["data"]["response_text"]
+    assert "按净现金流，0 天" not in out["data"]["response_text"]
+    compact_row = out["data"]["action"]["result"]["data"]["synthesis_observations"][0]["data"]["combined_return_summary"][0]
+    assert compact_row["..."] == "truncated"
+    assert "annualized_basis_days" not in compact_row
+
+
 def test_assistant_runtime_agent_loop_uses_canonical_fallback_when_synthesis_unavailable(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
 
