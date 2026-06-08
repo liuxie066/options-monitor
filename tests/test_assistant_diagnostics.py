@@ -7,8 +7,8 @@ from typing import Any
 import pytest
 
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.assistant.agent_loop import TOOL_PLAN_SCHEMA_VERSION, tool_plan_json_schema
 from src.application.assistant.diagnostics import check_llm_translator
-from src.application.assistant.llm_intent_schema import llm_intent_json_schema
 
 
 def _assistant_config(*, llm: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -16,9 +16,10 @@ def _assistant_config(*, llm: dict[str, Any] | None = None) -> dict[str, Any]:
     enabled = bool(llm_cfg.pop("enabled", False))
     return {
         "assistant": {
-            "mode": "llm_router" if enabled else "deterministic",
+            "enabled": True,
             "context_window_messages": 8,
             "default_market_scope": "us",
+            "planner": {"enabled": enabled},
             "llm": llm_cfg,
         },
     }
@@ -79,7 +80,7 @@ def test_llm_check_rejects_invalid_assistant_config(tmp_path: Path) -> None:
 
     assert exc.value.code == "CONFIG_ERROR"
     assert "assistant config validation failed" in exc.value.message
-    assert exc.value.details["error"] == "assistant.mode must be one of: disabled, deterministic, llm_router, agent_loop"
+    assert exc.value.details["error"] == "assistant.mode legacy modes are retired; use assistant.enabled and assistant.planner.enabled"
 
 
 def test_llm_check_rejects_business_runtime_config_as_assistant_config(tmp_path: Path) -> None:
@@ -197,17 +198,25 @@ def test_llm_check_live_probe_uses_read_only_structured_translation(tmp_path: Pa
 
     def _create_response(**kwargs: Any) -> dict[str, Any]:
         calls.append(kwargs)
-        assert kwargs["json_schema"] == llm_intent_json_schema()
+        assert kwargs["json_schema"] == tool_plan_json_schema()
         return {
             "output_text": json.dumps(
-                    {
-                        "schema_version": "om-llm-intent-v1",
-                        "intent": "runtime_status",
-                        "arguments": {},
-                        "confidence": 0.91,
-                    }
-                )
-            }
+                {
+                    "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+                    "goal": "check runtime status",
+                    "response_mode": "canonical",
+                    "required_capabilities": [],
+                    "steps": [
+                        {
+                            "id": "status",
+                            "tool_name": "runtime_status",
+                            "arguments": {},
+                            "purpose": "read runtime status",
+                        }
+                    ],
+                }
+            )
+        }
 
     out = check_llm_translator(
         repo_root=tmp_path,
@@ -224,4 +233,4 @@ def test_llm_check_live_probe_uses_read_only_structured_translation(tmp_path: Pa
     assert calls[0]["api_key"] == "sk-test"
     checks = {item["name"]: item for item in out["checks"]}
     assert checks["live_probe"]["status"] == "ok"
-    assert checks["live_probe"]["value"]["intent"]["intent_name"] == "runtime_status"
+    assert checks["live_probe"]["value"]["plan"]["steps"][0]["tool_name"] == "runtime_status"

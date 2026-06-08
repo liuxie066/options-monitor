@@ -260,9 +260,17 @@ def _validate_assistant_config(cfg: dict) -> None:
         assistant = {}
     if not isinstance(assistant, dict):
         die('assistant must be an object')
-    mode = str(assistant.get('mode') or 'deterministic').strip().lower()
-    if mode not in {'disabled', 'deterministic', 'llm_router', 'agent_loop'}:
-        die('assistant.mode must be one of: disabled, deterministic, llm_router, agent_loop')
+    if 'enabled' in assistant and assistant.get('enabled') is not None and not isinstance(assistant.get('enabled'), bool):
+        die('assistant.enabled must be a boolean')
+    if 'mode' in assistant and assistant.get('mode') is not None:
+        mode = str(assistant.get('mode') or '').strip().lower()
+        if mode not in {'disabled', 'agent_loop'}:
+            die('assistant.mode legacy modes are retired; use assistant.enabled and assistant.planner.enabled')
+    planner = assistant.get('planner') or {}
+    if planner and not isinstance(planner, dict):
+        die('assistant.planner must be an object')
+    if isinstance(planner, dict) and 'enabled' in planner and planner.get('enabled') is not None and not isinstance(planner.get('enabled'), bool):
+        die('assistant.planner.enabled must be a boolean')
     if 'context_window_messages' in assistant and assistant.get('context_window_messages') is not None:
         validate_non_negative_integer(assistant.get('context_window_messages'), 'assistant.context_window_messages')
         if int(assistant.get('context_window_messages')) > 20:
@@ -276,12 +284,12 @@ def _validate_assistant_config(cfg: dict) -> None:
     if not isinstance(llm, dict):
         die('assistant.llm must be an object')
     if 'enabled' in llm:
-        die('assistant.llm.enabled is retired; use assistant.mode')
+        die('assistant.llm.enabled is retired; use assistant.planner.enabled')
     _validate_llm_config(
         llm,
         path='assistant.llm',
-        enabled=mode in {'llm_router', 'agent_loop'},
-        required_reason='assistant.mode uses LLM',
+        enabled=False,
+        required_reason='assistant planner uses LLM',
     )
 
     if 'agent' in cfg:

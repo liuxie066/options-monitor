@@ -149,7 +149,7 @@ def test_assistant_config_rejects_business_runtime_shape() -> None:
                 "accounts": ["lx"],
                 "portfolio": {"broker": "富途"},
                 "symbols": [{"symbol": "NVDA"}],
-                "assistant": {"mode": "deterministic"},
+                "assistant": {"enabled": True, "planner": {"enabled": True}},
             }
         )
 
@@ -259,7 +259,6 @@ def test_assistant_runtime_delegates_perception() -> None:
     forbidden_runtime_tokens = (
         "parse_assistant_command",
         "parse_inbound_text",
-        "translate_inbound_intent",
         "run_read_only_agent_loop",
         "generate_general_reply",
         "build_conversation_context",
@@ -270,6 +269,7 @@ def test_assistant_runtime_delegates_perception() -> None:
 
     for token in forbidden_runtime_tokens:
         assert token in perception_text
+    assert "translate_inbound_intent" not in perception_text
 
 
 def test_assistant_router_uses_perception_reasoning_action_observation_chain() -> None:

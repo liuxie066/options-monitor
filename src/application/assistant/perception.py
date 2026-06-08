@@ -8,11 +8,11 @@ from src.application.agent_tool_contracts import AgentToolError
 from src.application.assistant.agent_loop import AgentLoopPlanFn, run_read_only_agent_loop
 from src.application.assistant.audit import InboundAuditStore
 from src.application.assistant.command_parser import parse_assistant_command
-from src.application.assistant.commands import is_llm_planner_preview_spec, spec_by_intent
+from src.application.assistant.capability_catalog import is_llm_planner_preview_spec, spec_by_intent
 from src.application.assistant.contracts import AssistantRequest, PerceptionResult
 from src.application.assistant.conversation_context import build_conversation_context, context_trace
 from src.application.assistant.llm_reply import LlmReplyResult, generate_general_reply
-from src.application.assistant.llm_translator import LlmTranslationResult, skipped_llm_trace, translate_inbound_intent
+from src.application.assistant.llm_translator import LlmTranslationResult, skipped_llm_trace
 from src.application.assistant.parser import parse_inbound_text
 from src.application.assistant.perception_trace import (
     PerceptionTrace,
@@ -140,14 +140,12 @@ class PerceptionEngine:
     def _initial_route(self, text: str) -> str:
         if looks_like_command(text):
             return "command"
-        if self._settings.mode == "agent_loop":
+        if self._settings.planner_enabled:
             return "agent_loop"
-        if self._settings.mode == "llm_router":
-            return "llm"
         return "deterministic"
 
     def _llm_first_enabled(self) -> bool:
-        return self._settings.mode in {"llm_router", "agent_loop"}
+        return self._settings.planner_enabled
 
     def _perceive_deterministic_first(self, text: str, parser_now_fn: Callable[[], date] | None) -> PerceptionResult:
         try:
@@ -348,17 +346,18 @@ class PerceptionEngine:
             selected_perception=None,
             candidates=[
                 deterministic_candidate,
-                skipped_candidate(
-                    "agent_loop" if self._settings.mode == "agent_loop" else "llm",
-                    str(self.llm_trace.get("reason") or "not_available"),
-                ),
+                skipped_candidate("agent_loop", str(self.llm_trace.get("reason") or "not_available")),
             ],
         )
         raise err
 
     def _conversation_context(self) -> dict[str, Any] | None:
-        llm_mode = self._settings.mode in {"llm_router", "agent_loop"}
-        if not llm_mode and self._translate_intent_fn is None:
+        if (
+            not self._settings.planner_enabled
+            and self._translate_intent_fn is None
+            and self._plan_tools_fn is None
+            and self._generate_reply_fn is None
+        ):
             return None
         try:
             self.last_conversation_context = build_conversation_context(
@@ -402,26 +401,26 @@ class PerceptionEngine:
         conversation_context: dict[str, Any] | None,
         now_fn: Callable[[], date] | None,
     ) -> LlmTranslationResult:
-        if self._settings.mode == "agent_loop":
-            loop_result = run_read_only_agent_loop(
-                text,
-                settings=self._settings,
-                conversation_context=conversation_context,
-                translate_intent_fn=self._translate_intent_fn,
-                plan_tools_fn=self._plan_tools_fn,
-                now_fn=now_fn,
+        if not self._settings.planner_enabled and self._plan_tools_fn is None:
+            llm_result = LlmTranslationResult(
+                intent=None,
+                trace=skipped_llm_trace(self._settings.llm, reason="planner_disabled"),
             )
-            self.llm_trace = dict(loop_result.trace)
-            return loop_result.translation
-        if self._translate_intent_fn is not None:
-            llm_result = self._translate_intent_fn(text, self._settings, conversation_context)
-        else:
-            llm_result = translate_inbound_intent(text, settings=self._settings.llm, conversation_context=conversation_context)
-        self.llm_trace = dict(llm_result.trace)
-        return llm_result
+            self.llm_trace = dict(llm_result.trace)
+            return llm_result
+        loop_result = run_read_only_agent_loop(
+            text,
+            settings=self._settings,
+            conversation_context=conversation_context,
+            translate_intent_fn=self._translate_intent_fn,
+            plan_tools_fn=self._plan_tools_fn,
+            now_fn=now_fn,
+        )
+        self.llm_trace = dict(loop_result.trace)
+        return loop_result.translation
 
     def _llm_source(self) -> str:
-        return "agent_loop" if self._settings.mode == "agent_loop" else "llm"
+        return "agent_loop"
 
     def _handle_llm_perception(
         self,
@@ -430,7 +429,7 @@ class PerceptionEngine:
         *,
         llm_first: bool = False,
     ) -> PerceptionResult:
-        self.route = "agent_loop" if self._settings.mode == "agent_loop" else "llm"
+        self.route = "agent_loop"
         if llm_first:
             perception = _reconcile_llm_read_perception(perception, deterministic_candidate)
         llm_candidate = accepted_candidate(self.route, perception)
@@ -469,7 +468,7 @@ class PerceptionEngine:
         deterministic_candidate: Any,
         conversation_context: dict[str, Any] | None,
     ) -> PerceptionResult:
-        llm_source = "agent_loop" if self._settings.mode == "agent_loop" else "llm"
+        llm_source = "agent_loop"
         llm_error_candidate = error_candidate(llm_source, llm_error, reason=str(self.llm_trace.get("reason") or ""))
         reply_result = self._maybe_generate_general_reply(
             text,
@@ -564,7 +563,7 @@ def ensure_llm_perception_allowed(perception: PerceptionResult) -> None:
         raise AgentToolError(
             code="PERMISSION_DENIED",
             message=f"LLM is not allowed to route intent: {perception.intent_name}",
-            hint="LLM translator is restricted to read-only capabilities plus explicitly allowed preview-only symbol settings; agent_loop plans may create approved previews, but confirm/apply operations require deterministic commands.",
+            hint="AgentLoop planning is restricted to read-only capabilities plus explicitly allowed preview capabilities; confirm/apply operations require deterministic commands.",
             details={"intent_name": perception.intent_name},
         )
 
@@ -580,8 +579,8 @@ def _llm_preview_conflict_error(perception: PerceptionResult, deterministic_cand
         return None
     return AgentToolError(
         code="NEEDS_CLARIFICATION",
-        message="这句话同时像监控配置修改和其他操作，请确认要修改监控配置，还是处理交易/确认等其他事项。",
-        hint="如果是监控配置，请明确写：设置 <symbol> covered call min strike <价格>；如果是交易记录修改，请使用记录相关说法。",
+        message="这句话同时像写入预览和其他操作，请确认要创建哪一种预览，或改成只读查询。",
+        hint="写入预览只能创建待确认操作；确认、取消和应用必须使用明确的确认/取消命令。",
         details={
             "llm_intent_name": perception.intent_name,
             "deterministic_intent_name": deterministic_perception.intent_name,
@@ -590,15 +589,7 @@ def _llm_preview_conflict_error(perception: PerceptionResult, deterministic_cand
 
 
 def _is_llm_preview_perception_allowed(spec: Any) -> bool:
-    return bool(
-        spec.intent_name == "symbol_edit"
-        and not spec.read_only
-        and spec.risk_level == "preview_write"
-        and spec.operation_action == "preview"
-        and spec.operation_target == "symbol"
-        and spec.tool_name == "inbound.symbols"
-        and spec.supported
-    )
+    return bool(is_llm_planner_preview_spec(spec))
 
 
 def _reconcile_llm_read_perception(perception: PerceptionResult, deterministic_candidate: Any) -> PerceptionResult:

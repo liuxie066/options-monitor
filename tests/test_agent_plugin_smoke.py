@@ -1586,7 +1586,7 @@ def test_runtime_status_does_not_report_llm_endpoint_when_llm_disabled(tmp_path:
 
     data, _warnings, _meta = _call_runtime_status_for_upgrade(tmp_path, fixture["cfg_path"], fixture["cfg"])
 
-    assert data["assistant_runtime"]["config"]["mode"] == "deterministic"
+    assert data["assistant_runtime"]["config"]["mode"] == "agent_loop"
     assert data["assistant_runtime"]["llm"]["enabled"] is False
     assert data["assistant_runtime"]["llm"]["provider"] == ""
     assert data["assistant_runtime"]["llm"]["endpoint_url"] is None

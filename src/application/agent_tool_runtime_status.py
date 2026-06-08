@@ -480,6 +480,7 @@ def _assistant_runtime_summary(
             "loaded": bool(cfg),
             "mode": settings.mode,
             "enabled": bool(settings.enabled),
+            "planner": settings.planner.public_payload(),
             "context_window_messages": int(settings.context_window_messages),
             "default_market_scope": settings.default_market_scope,
         },
@@ -2175,6 +2176,8 @@ def runtime_status_tool(
     assistant_audit_summary = assistant_runtime.get("audit") if isinstance(assistant_runtime.get("audit"), dict) else {}
     assistant_latest = assistant_audit_summary.get("latest") if isinstance(assistant_audit_summary.get("latest"), dict) else {}
     data["summary"]["assistant_mode"] = assistant_config_summary.get("mode")
+    assistant_planner = assistant_config_summary.get("planner") if isinstance(assistant_config_summary.get("planner"), dict) else {}
+    data["summary"]["assistant_planner_enabled"] = bool(assistant_planner.get("enabled"))
     data["summary"]["assistant_llm_enabled"] = bool(assistant_llm_summary.get("enabled"))
     data["summary"]["assistant_llm_provider"] = assistant_llm_summary.get("provider")
     data["summary"]["assistant_latest_route"] = assistant_latest.get("route")

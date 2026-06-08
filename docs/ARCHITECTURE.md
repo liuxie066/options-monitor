@@ -77,10 +77,14 @@ current implementation path remains `src/application/assistant/...`:
 Feishu / future channels
 -> src.application.channels.ChannelService
 -> src.application.inbound.feishu(_ws)
--> src.application.assistant.runtime
--> src.application.assistant.router
--> src.application.tool_execution
--> canonical Inbound renderer
+-> AgentSession (conceptual session boundary)
+-> AgentLoop
+   -> Perceive
+   -> Understand
+   -> Decide
+   -> Act
+   -> Observe
+-> channel reply
 ```
 
 `src.application.channels` owns channel capability registration and dispatch, so
@@ -88,15 +92,26 @@ Inbound control and outbound notifications are capabilities of the
 same channel model. `src.application.inbound` should stay thin: extract channel
 payloads, enforce channel-specific receive/reply mechanics, and build the
 transport request.
+`AgentSession` is not a separate runtime layer or required class name in the
+current code. It is the conceptual boundary carried by `AssistantRequest`, the
+audit row, conversation context, and pending-operation store before `AgentLoop`
+perceives the message.
 Command parsing, optional LLM-first natural-language routing, deterministic
 fallback parsing, bounded agent-loop tracing, sender allowlist checks, SQLite audit,
 preview/confirm operations, and user-facing rendering are owned by
 `src.application.assistant`.
 
+The current implementation path still contains files named `runtime.py`,
+`router.py`, `perception.py`, `reasoning.py`, `action.py`, and
+`observation.py`; those are implementation handles inside one Agent loop, not
+separate product runtime layers. `assistant.mode` is a legacy compatibility
+field only; the active product path is controlled by `assistant.enabled` and
+`assistant.planner.enabled`.
+
 LLM providers are optional. They may translate a message into a structured
-read-only Inbound intent, or the explicitly allowed preview-only `symbol_edit`
-intent for monitored-symbol settings. Deterministic OM tools own facts, and
-write actions remain behind preview/confirm gates.
+Inbound intent or, in `agent_loop`, plan bounded read tools plus exactly one
+approved preview-write capability. Deterministic OM tools own facts, and write
+actions remain behind preview/confirm gates.
 
 Model selection is a control-plane concern. `config.yaml` may define multiple
 `assistant.models` profiles and an `assistant.active_model`, but
@@ -104,37 +119,36 @@ Model selection is a control-plane concern. `config.yaml` may define multiple
 `config.assistant.json`. Runtime, router, perception, reasoning, action, and
 tool execution must not depend on model profiles or choose models per message.
 
-Inbound uses one internal contract ladder. Slash commands enter through the
-command parser and never call LLM. In `llm_router` and `agent_loop` modes,
-non-slash natural language enters through the LLM translator first; the
-deterministic parser is a fallback/shadow parser when the LLM is unavailable,
-low-confidence, or provider-failed. In `deterministic` mode, non-slash natural
-language uses the deterministic parser directly.
-When LLM-first and the deterministic shadow parser agree on the same read-only
-intent, Inbound may use the deterministic shadow to fill or correct objective
-slots such as account, month, symbol, status, and limit. The selected source
-remains LLM, and the reconciliation is recorded in perception evidence.
-For preview-write LLM recognition, `symbol_edit` is intentionally narrow: LLM
-may identify covered-call or sell-put monitored-symbol setting changes, but the
-result can only enter the existing `inbound.symbols` preview/pending path.
-Confirm, cancel, apply, manual trade, upgrade, and model mutations remain
-deterministic-only. If the deterministic shadow parser accepts a different
-intent for the same text, Inbound stops and asks for clarification instead of
-creating a preview.
+Inbound uses one internal Agent-loop contract. Slash commands enter through the
+command parser and never call LLM. Non-slash natural language enters the
+AgentLoop `Understand` step, where the Planner may use an LLM when
+`assistant.planner.enabled` is true. The deterministic parser remains an
+internal safety component: command-first handling, fallback, shadow evidence,
+slot repair for objective fields such as account/month/symbol/status/limit, and
+explicit confirm/cancel/apply authority.
+The AgentLoop Planner may plan read tools or exactly one preview capability from
+`manual_trade_open`, `manual_trade_close`, `manual_trade_update`, `symbol_edit`,
+`model_use`, or `upgrade_now`. Any preview-write result can only enter an
+existing pending-operation path. Confirm, cancel, apply, notifications, direct
+config writes, ledger/trade writes, and service operations remain outside model
+authority. If the deterministic shadow parser accepts a different intent for
+the same text, Inbound stops and asks for clarification instead of creating a
+preview.
 
 ```text
-command parser / LLM translator / deterministic parser
--> PerceptionResult (om-perception-result-v1; what the user appears to want)
--> ReasoningResolution (om-reasoning-resolution-v1; support, safety, and action choice)
--> ActionResult (om-action-result-v1; executed tool/operation/local response result)
--> ObservationResponse (om-observation-response-v1; user-facing reply)
+Perceive   -> AssistantRequest / channel context
+Understand -> PerceptionResult or internal tool_plan
+Decide     -> ReasoningResolution / permission decision
+Act        -> ActionResult / ToolResult / PendingOperation
+Observe    -> ObservationResponse / audited reply
 ```
 
 The command parser, deterministic parser, and LLM translator must only emit
-`PerceptionResult`. Tool-name selection, config-scoped payload construction,
-capability support, safety class validation, and confirmation requirements are
-owned by `src.application.assistant.reasoning`. Execution is owned by
-`src.application.assistant.action`, and response shaping is owned by
+`PerceptionResult` or a bounded Planner `tool_plan`. Tool-name selection,
+config-scoped payload construction, capability support, safety class
+validation, and confirmation requirements are owned by
+`src.application.assistant.reasoning` and planner validation. Execution is owned
+by `src.application.assistant.action`, and response shaping is owned by
 `src.application.assistant.observation`.
 
 ## Runtime Tick Flow

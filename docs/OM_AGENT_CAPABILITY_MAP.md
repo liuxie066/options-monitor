@@ -28,6 +28,11 @@ Rules:
   artifacts, tests, git state, or explicit tool output.
 - LLM may classify intent, choose evidence paths, plan bounded tool calls, and
   summarize observations. LLM is not a factual source.
+- For analytical answers, use the Data Analysis-style boundary: LLM plans the
+  analysis and may interpret results, while deterministic tools, controlled
+  analysis artifacts, and renderers own calculations and user-visible facts.
+  Do not add natural-language parser or regex guards as the primary way to make
+  LLM-generated accounting facts safe.
 - Intelligence means knowing what to inspect first, what not to touch, and how
   to verify. It does not mean broader execution freedom.
 - Writes to config, notification channels, Feishu, ledger/trade state,
@@ -37,12 +42,80 @@ Rules:
   Copilot capabilities. Ops Copilot may recommend those paths only when the user
   explicitly asks to refresh evidence or evaluate strategy quality.
 
+## Agent Loop Boundary
+
+OM Copilot should be reasoned about as one bounded Agent loop, not as multiple
+runtime layers:
+
+```text
+Channel input
+-> AgentSession (conceptual session boundary)
+-> AgentLoop
+   -> Perceive
+   -> Understand
+   -> Decide
+   -> Act
+   -> Observe
+-> Reply
+```
+
+This names the authority path:
+
+- `AgentSession` is a conceptual session boundary, not a separate runtime layer
+  or required class name. It owns the inbound request, sender/channel/conversation
+  scope, audit identity, recent context, and pending-operation context.
+- `Perceive` normalizes the channel message into the current request context.
+- `Understand` may use slash commands, deterministic parsing as a safety
+  component, or the AgentLoop Planner. It only describes intent or proposes a
+  bounded plan; it does not execute tools.
+- `Decide` owns permission, safety class, capability support, config-scope
+  injection, and preview/confirm boundaries. Its conceptual decisions are
+  `allow`, `preview`, `ask`, `deny`, or `defer`.
+- `Act` executes read/local tools or creates a `PendingOperation` for approved
+  preview writes. It does not let LLM-originated plans confirm, cancel, or apply
+  writes.
+- `Observe` renders deterministic facts, records audit evidence, and builds the
+  user-facing reply.
+
+Current implementation names map to this loop rather than replacing it:
+
+| Agent concept | Current implementation handle |
+|---|---|
+| `AgentSession` | `AssistantRequest`, audit row, conversation context, pending operation store |
+| `Understand` output | `PerceptionResult`, or an internal `tool_plan` produced by `agent_loop` |
+| `Decide` output | `ReasoningResolution`, planner validation, tool/operation policy checks |
+| `Act` output | `ActionResult`, `execute_tool(...)`, or operation preview handlers |
+| `Observe` output | `ObservationResponse`, canonical renderer, audit payloads |
+
+Do not add a second `ToolRegistry` module. The registry authority is split by
+surface: `src/application/agent_tool_registry.py` remains the `./om-agent` tool
+manifest collector, and `src/application/assistant/capability_catalog.py` is the
+Inbound capability catalog. AgentLoop read tools are derived from the existing
+tool registry plus planner-visible capability metadata; preview-write authority
+comes from capability metadata. Future implementation work should keep
+consolidating metadata into those existing authorities instead of adding another
+runtime layer or parallel tool control plane.
+
+LLM authority is deliberately narrow:
+
+- LLM may classify intent, select read evidence paths, plan bounded read tools,
+  request clarification, and synthesize observations.
+- In `agent_loop`, LLM may initiate exactly one approved preview-write
+  capability: `manual_trade_open`, `manual_trade_close`,
+  `manual_trade_update`, `symbol_edit`, `model_use`, or `upgrade_now`.
+- LLM-originated preview-write plans only create `PendingOperation` records
+  through existing deterministic operation handlers.
+- LLM must never confirm, cancel, apply, send notifications, write config, write
+  ledger/trade state, operate services, or bypass pending-operation gates.
+- Explicit confirm/cancel/apply remains deterministic-only and must be bound to
+  an existing pending operation plus the existing sender/env/HMAC/TTL gates.
+
 ## Surfaces
 
 | Surface | Purpose | Default capability boundary | LLM role |
 |---|---|---|---|
 | `./om-agent` | Current local structured JSON facade for Ops Copilot deterministic tools | Ops Copilot reads plus selected compatibility helpers; write modes require `OM_AGENT_ENABLE_WRITE_TOOLS=true` and payload confirmation where applicable | None inside tool execution; external agent may plan calls |
-| `./om assistant handle` | Current CLI namespace for Inbound remote messages through Feishu, WeChat, or future channels | Inbound catalog only; no arbitrary shell, no direct full `om-agent` manifest exposure | May recognize allowed intents; only read-only capabilities are executable by LLM |
+| `./om assistant handle` | Current CLI namespace for Inbound remote messages through Feishu, WeChat, or future channels | Inbound catalog only; no arbitrary shell, no direct full `om-agent` manifest exposure | May recognize allowed intents; read/local tools are directly executable, while approved preview-write capabilities may only create pending previews |
 
 Related OM surfaces outside Ops Copilot:
 
@@ -74,17 +147,17 @@ Related OM surfaces outside Ops Copilot:
 | Candidate filter explanation | `./om-agent run --tool candidate_filter_explain` | `candidate_filter_explain` | `candidate_filter_trace.jsonl` | None | Core Read | Map symbol/account question to trace filters | `./om-agent run --tool candidate_filter_explain --input-json '{"symbol":"NVDA"}'` | Local `om-agent`; not default Inbound |
 | Candidate ranking explanation | `./om-agent run --tool candidate_rank_explain` | `candidate_rank_explain` | Existing candidate CSV/report artifacts | None | Core Read | Compare ranking policy against observed rows | `./om-agent run --tool candidate_rank_explain --input-json '{"mode":"put","top_n":5}'` | Local `om-agent`; not default Inbound |
 | Position read | `./om-agent run --tool option_positions_read`, `/positions` | `option_positions_read` | SQLite option-position store, trade events, projection inspection | None | Core Read | Build query filters; explain missing data explicitly | `./om-agent run --tool option_positions_read --input-json '{"config_key":"us","action":"list","account":"lx","status":"open"}'` | `om-agent`, Inbound |
-| Monthly income | `./om-agent run --tool monthly_income_report`, `/income` | `monthly_income_report` | Local option positions and income attribution | None | Core Read | Parse account/month; summarize rows | `./om-agent run --tool monthly_income_report --input-json '{"config_key":"us","account":"lx"}'` | `om-agent`, Inbound |
+| Monthly income | `./om-agent run --tool monthly_income_report`, `/income` | `monthly_income_report` | Local option positions and income attribution; target analytical answers use an artifact derived from `include_rows=true` | None | Core Read | Plan account/month/detail scope and interpretation angle; deterministic artifact/renderer owns amounts, rows, counts, dates, symbols, and currencies | `./om-agent run --tool monthly_income_report --input-json '{"config_key":"us","account":"lx"}'` | `om-agent`, Inbound |
 | Close-advice read | `./om-agent run --tool close_advice_read` | `close_advice_read` | Existing close-advice report | None | Core Read | Prefer read path for "should I close" unless refresh is requested | `./om-agent run --tool close_advice_read --input-json '{"config_key":"us"}'` | `om-agent`, Inbound as `position_exit_analysis` |
 | Notification preview | `./om-agent run --tool preview_notification` | `preview_notification` | Provided alert/change text or files | None | Core Read | Explain rendered notification shape without sending | `./om-agent run --tool preview_notification --input-json '{"alerts_text":"","changes_text":""}'` | Local `om-agent`; no real send |
 | Version check | `./om-agent run --tool version_check` | `version_check` | Local `VERSION`, git release tags | None | Core Read | Use before release planning | `./om-agent run --tool version_check --input-json '{"remote_name":"origin"}'` | Local `om-agent`, Codex/operator |
 | Symbol list | `./om assistant handle`, `/symbols` | `inbound.symbols` read path | Runtime/current assistant config symbol settings | None | Core Read | Recognize list intent only | `./om assistant capabilities --format json` | Inbound only |
 | Pending previews | `./om assistant handle`, `/pending` | `inbound.pending` | Inbound operation store/audit | None | Core Read | Show pending state before confirm/cancel | `./om assistant capabilities --format json` | Inbound only |
-| Model list | `./om assistant handle`, `/model list` | `inbound.model` read path | Inbound model profile config | None | Core Read | None; LLM must not route this intent | `./om assistant capabilities --format json` | Inbound deterministic command only |
-| Symbol config preview | Inbound natural language or slash commands; local dry-run | `inbound.symbols`, `manage_symbols` dry-run/list | Runtime config / `config.yaml` authoring source | Preview/pending operation; local dry-run may write nothing | Preview Write | LLM may recognize narrow `symbol_edit`; deterministic reasoning owns preview | Inbound pending state, config validation after apply | Inbound preview; local `om-agent` dry-run |
-| Manual trade preview | Inbound deterministic commands | `inbound.manual_trade` preview paths | User-provided trade text, ledger validation, config/account context | Pending operation/audit only | Preview Write | LLM must not execute; deterministic parser/commands only | Pending preview and validation warnings | Inbound deterministic command only |
-| Model switch preview | Inbound deterministic command | `inbound.model` preview path | Current assistant model profiles in config | Pending operation/audit only | Preview Write | None; LLM must not route model mutation | Pending preview; model check after confirm | Inbound deterministic command only |
-| Upgrade preview | Inbound deterministic command | `inbound.upgrade` preview path | Release metadata and service/runtime context | Pending operation/audit only | Preview/Admin | None; LLM must not route upgrade | Pending preview; upgrade verify after confirm | Inbound deterministic command only |
+| Model list | `./om assistant handle`, `/model list` | `inbound.model` read path | Inbound model profile config | None | Core Read | Not planner-routed; deterministic command only | `./om assistant capabilities --format json` | Inbound deterministic command only |
+| Symbol config preview | Inbound natural language or slash commands; local dry-run | `inbound.symbols`, `manage_symbols` dry-run/list | Runtime config / `config.yaml` authoring source | Preview/pending operation; local dry-run may write nothing | Preview Write | AgentLoop Planner may create a pending `symbol_edit` preview; no confirm/apply | Inbound pending state, config validation after apply | Inbound preview; local `om-agent` dry-run |
+| Manual trade preview | Inbound natural language or deterministic commands | `inbound.manual_trade` preview paths | User-provided trade text, ledger validation, config/account context | Pending operation/audit only | Preview Write | AgentLoop Planner may create pending `manual_trade_open` / `manual_trade_close` / `manual_trade_update` previews; deterministic operation handler owns parsing and validation | Pending preview and validation warnings | Inbound preview only |
+| Model switch preview | Inbound natural language or deterministic command | `inbound.model` preview path | Current assistant model profiles in config | Pending operation/audit only | Preview Write | AgentLoop Planner may create a pending `model_use` preview; no config write | Pending preview; model check after confirm | Inbound preview only |
+| Upgrade preview | Inbound natural language or deterministic command | `inbound.upgrade` preview path | Release metadata and service/runtime context | Pending operation/audit only | Preview/Admin | AgentLoop Planner may create a pending `upgrade_now` admin preview; no upgrade/apply | Pending preview; upgrade verify after confirm | Inbound preview only |
 | Local VERSION update | `./om-agent run --tool version_update` | `version_update` | `VERSION`, semver rules | Writes `VERSION` only when `apply=true` | Confirm Write / local repo write | Plan release metadata; not execute without request | `git diff`, release check | Local Codex/operator |
 | Symbol config apply | Inbound confirm or `manage_symbols` non-dry-run | `inbound.symbols` confirm path, `manage_symbols` | Pending preview, config source | Writes `config.yaml` / runtime config where configured | Confirm Write | None at apply time | `config_validate`, `git diff`, pending cleared | Inbound confirm or local operator |
 | Manual trade apply/cancel | Inbound confirm/cancel | `inbound.manual_trade` confirm/cancel paths | Pending preview, ledger validation | Writes trade/ledger state on confirm | Confirm Write | None at apply time | `option_positions_read action=inspect`, audit | Inbound confirm only |
@@ -144,6 +217,10 @@ Copilot should not use them as default evidence paths.
 - `src/application/assistant/agent_loop.py` has a narrower Inbound planner allowlist
   than the full pure-read manifest. That is intentional for remote LLM planning,
   but it should remain tested against the public capability catalog.
+- `assistant.mode` is a legacy compatibility field only. The active product
+  controls are `assistant.enabled` and `assistant.planner.enabled`. The design
+  target is one conceptual `AgentSession` boundary + `AgentLoop` with
+  deterministic parsing and optional model planning inside `Understand`.
 - Write-request detection is owned by registry metadata/policy. `version_update`
   and `manage_symbols` carry explicit write predicates in their
   `AgentTool`; `src/application/tool_execution.py` delegates env/confirm gates
