@@ -22,9 +22,9 @@ DEFAULT_EVENT_RISK_CONFIG = {
     "mode": "warn",
 }
 
-DEFAULT_SELL_PUT_WINDOW = CandidateWindowDefaults(min_dte=20, max_dte=60)
-DEFAULT_SELL_CALL_WINDOW = CandidateWindowDefaults(min_dte=20, max_dte=60)
-DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_WINDOW = CandidateWindowDefaults(min_dte=20, max_dte=90)
+DEFAULT_SELL_PUT_WINDOW = CandidateWindowDefaults(min_dte=7, max_dte=60)
+DEFAULT_SELL_CALL_WINDOW = CandidateWindowDefaults(min_dte=7, max_dte=60)
+DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_WINDOW = CandidateWindowDefaults(min_dte=7, max_dte=90)
 DEFAULT_CANDIDATE_LIQUIDITY = CandidateLiquidityDefaults()
 DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_LIQUIDITY = CandidateLiquidityDefaults(
     min_open_interest=100.0,
