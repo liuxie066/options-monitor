@@ -144,6 +144,7 @@ def test_shadow_replay_builds_universe_and_analyzes_closed_replay(tmp_path: Path
     assert readiness["evidence_checks"]["survivorship_bias_risk"] == "low"
     assert readiness["insurance_metrics"]["by_status"]["accepted"]["premium_to_capital"] == pytest.approx(120 / 10000)
     assert readiness["outcome_by_bucket"]["dte"]["30-44"]["win_count"] == 1
+    assert readiness["review_readiness"]["status"] == analysis["review_readiness"]["status"]
     assert readiness["parameter_advice_gate"]["status"] == analysis["parameter_advice_gate"]["status"]
     assert readiness["decision_quality"]["by_strategy_profile"]["insurance_underwriting"]["good_accept"] == 1
     assert readiness["safety"]["writes_runtime_config"] is False
@@ -332,10 +333,22 @@ def test_shadow_replay_decision_quality_is_not_pnl_only() -> None:
         "good_reject": 1,
     }
     assert analysis["decision_quality"]["summary"]["parameter_advice_allowed"] is True
+    assert analysis["decision_quality"]["summary"]["manual_strategy_review_ready"] is True
+    assert analysis["decision_quality"]["summary"]["review_readiness_status"] == "ready_for_manual_strategy_review"
+    assert analysis["summary"]["manual_strategy_review_ready"] is True
+    assert analysis["summary"]["review_readiness_status"] == "ready_for_manual_strategy_review"
     assert analysis["summary"]["decision_quality_status"] == "ready_for_parameter_review"
     assert analysis["summary"]["bad_decision_count"] == 2
     assert analysis["summary"]["inconclusive_count"] == 0
     assert analysis["summary"]["parameter_advice_allowed"] is True
+    assert analysis["review_readiness"]["status"] == "ready_for_manual_strategy_review"
+    assert analysis["review_readiness"]["manual_strategy_review_ready"] is True
+    assert analysis["review_readiness"]["compatibility"] == {
+        "legacy_field": "parameter_advice_gate",
+        "legacy_status": "ready_for_parameter_review",
+        "legacy_allowed_field": "parameter_advice_allowed",
+        "legacy_allowed": True,
+    }
     assert analysis["parameter_advice_gate"] == {
         "status": "ready_for_parameter_review",
         "parameter_advice_allowed": True,
@@ -394,7 +407,14 @@ def test_shadow_replay_decision_quality_requires_sample_floor() -> None:
     assert quality["summary"]["parameter_advice_allowed"] is False
     assert quality["samples"][0]["reasons"] == ["sample_size_below_min_sample"]
     assert analysis["summary"]["decision_quality_status"] == "not_ready_for_parameter_review"
+    assert analysis["summary"]["review_readiness_status"] == "not_ready_for_manual_strategy_review"
+    assert analysis["summary"]["manual_strategy_review_ready"] is False
     assert analysis["summary"]["parameter_advice_allowed"] is False
+    assert analysis["review_readiness"]["blockers"] == [
+        "sample_size_below_min_sample",
+        "bad_decision_signal_missing",
+        "inconclusive_rate_too_high",
+    ]
     assert analysis["parameter_advice_gate"]["blockers"] == [
         "sample_size_below_min_sample",
         "bad_decision_signal_missing",

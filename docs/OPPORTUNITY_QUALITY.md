@@ -1,16 +1,16 @@
 # Opportunity Quality
 
-Opportunity Quality 是 Shadow Replay、扫描质量复盘和参数建议共用的判定口径。它回答的不是“这张合约后来赚没赚钱”，而是“系统当时接受或拒绝这张机会是否合理”。
+Opportunity Quality 是 Shadow Replay 和扫描质量复盘共用的判定口径。它回答的不是“这张合约后来赚没赚钱”，而是“系统当时接受或拒绝这张机会是否有足够证据支持”。
 
 ## 目标
 
 Shadow Replay 的目标是离线评估扫描质量：
 
 ```text
-扫描证据 -> 路径证据 -> 结果证据 -> 决策质量标签 -> 参数假设
+扫描证据 -> 路径证据 -> 结果证据 -> 决策质量标签 -> 人工复盘证据
 ```
 
-它不重新扫描、不自动调参、不修改 runtime config、不写交易状态、不发送通知。参数建议只能作为可审查假设输出，不能直接执行。
+它不重新扫描、不自动调参、不修改 runtime config、不写交易状态、不发送通知。任何策略调整都只能作为人工复盘后的外部决策，不能由 Shadow Replay 直接执行。
 
 ## 分层
 
@@ -19,7 +19,7 @@ Shadow Replay 的目标是离线评估扫描质量：
 | 事前质量 | 判断开仓当时的收益是否补偿策略所要求的风险 |
 | 事后路径 | 判断后续路径和结果是否验证或否定当时判断 |
 | 决策质量 | 判断系统当时 accept/reject 是否合理 |
-| 参数假设 | 在证据充分时提出可审查、dry-run-only 的参数调整方向 |
+| 候选影响 | 在证据充分时比较参数假设会新增/移除哪些候选 |
 
 ## 策略口径
 
@@ -55,25 +55,25 @@ Shadow Replay 的目标是离线评估扫描质量：
 
 标签不能只由 PnL 决定。
 
-## 参数建议规则
+## 复盘使用规则
 
-参数建议只能从决策质量标签派生：
+决策质量标签只能作为人工复盘信号：
 
-- `bad_accept` 多：优先考虑收紧风险阈值。
-- `bad_reject` 多：考虑放宽过严阈值。
-- `good_reject` 多：拒绝规则有效，不应因为错过表面收益而放宽。
-- `inconclusive` 多：先补数据，不建议调参。
+- `bad_accept` 多：优先检查风险阈值是否过松。
+- `bad_reject` 多：检查是否存在过严过滤，但不能直接推导最优放宽幅度。
+- `good_reject` 多：拒绝规则可能有效，不应因为错过表面收益而直接放宽。
+- `inconclusive` 多：先补数据，不讨论策略调整。
 
-Shadow Replay 先输出 `parameter_advice_gate`，只判断当前证据是否允许进入参数讨论阶段。它不会输出具体参数数值，也不会修改配置。
+Shadow Replay 输出中的 `review_readiness` 判断当前证据是否允许进入人工策略复盘阶段。现有 `parameter_advice_gate` 是兼容字段，语义映射到同一组 blocker；两者都不会输出具体参数数值，也不会修改配置。
 
-每条参数建议至少包含：
+如果人工复盘要比较某组参数假设，报告至少应包含：
 
 - `strategy_profile`
 - 样本量
 - 触发标签
 - 涉及参数
-- 建议方向
-- 预期改善
+- 候选新增/移除影响
+- 预期风险
 - 代价
 - 置信度
 - `shadow_dry_run_only=true`
@@ -84,4 +84,4 @@ Shadow Replay 先输出 `parameter_advice_gate`，只判断当前证据是否允
 2. `insurance_underwriting` 候选最终亏损，但风险在预算内且保费补偿合理，不自动标 `bad_accept`。
 3. rejected 候选后来赚钱，但当时事件风险不可评估，不能标 `bad_reject`。
 4. `return_first` 样本不能用 `insurance_underwriting` 的 IV/RV 失败直接判坏。
-5. 样本不足时只能输出 `inconclusive`，不能生成参数建议。
+5. 样本不足时只能输出 `inconclusive`，不能生成策略调整结论。

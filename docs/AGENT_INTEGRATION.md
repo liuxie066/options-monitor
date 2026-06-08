@@ -109,7 +109,16 @@ and instead of calling an online AI provider:
 ```bash
 ./om research collect --config-key us --scope full --output both --no-write-outputs
 ./om research shadow-replay status --min-sample 30
+./om research shadow-replay candidate-impact-report --params <params.json> --market us --start-date <YYYY-MM-DD> --account lx --min-sample 30
 ```
+
+Research / Shadow Replay remains an offline evidence side lane. Use
+`review_readiness` to decide whether evidence is ready for manual strategy
+review, and use `candidate-impact` / `candidate-impact-report` to compare how
+explicit threshold variants would change the observed candidate set. The older
+`parameter-backtest` / `parameter-report` commands are compatibility aliases.
+This workflow must not call online AI providers, mutate runtime config, write
+trade state, or send notifications.
 
 ## Inbound Remote Messages
 

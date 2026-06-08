@@ -81,6 +81,7 @@ def analyze_rows(
     quality = decision_quality(candidate_snapshots, mark_snapshots, outcome_facts, min_sample=sample_floor)
     quality_summary = quality["summary"]
     advice_gate = parameter_advice_gate(quality)
+    review_readiness = review_readiness_gate(quality, advice_gate=advice_gate)
     checks.update(
         {
             "has_instrument_identity": bool(advice_gate["has_instrument_identity"]),
@@ -113,6 +114,8 @@ def analyze_rows(
             "ranked_below_count": status_counts.get("ranked_below", 0),
             "counterfactual_candidate_count": rejected_count,
             "evidence_level": _evidence_level(candidate_snapshots, filter_decisions, mark_snapshots, outcome_facts),
+            "review_readiness_status": review_readiness["status"],
+            "manual_strategy_review_ready": review_readiness["manual_strategy_review_ready"],
             "decision_quality_status": advice_gate["status"],
             "bad_decision_count": quality_summary["bad_decision_count"],
             "inconclusive_count": quality_summary["inconclusive_count"],
@@ -133,6 +136,7 @@ def analyze_rows(
         "insurance_metrics": insurance_metrics(candidate_snapshots, mark_snapshots, outcome_facts),
         "outcome_by_bucket": outcome_bucket_stats(candidate_snapshots, outcome_facts),
         "decision_quality": quality,
+        "review_readiness": review_readiness,
         "parameter_advice_gate": advice_gate,
         "recommendations": [recommendation],
     }
@@ -336,7 +340,11 @@ def decision_quality(
         "by_strategy_profile": {profile: dict(sorted(counts.items())) for profile, counts in sorted(by_strategy_profile.items())},
         "samples": samples,
     }
-    result["summary"]["parameter_advice_allowed"] = parameter_advice_gate(result)["parameter_advice_allowed"]
+    advice_gate = parameter_advice_gate(result)
+    review_readiness = review_readiness_gate(result, advice_gate=advice_gate)
+    result["summary"]["parameter_advice_allowed"] = advice_gate["parameter_advice_allowed"]
+    result["summary"]["review_readiness_status"] = review_readiness["status"]
+    result["summary"]["manual_strategy_review_ready"] = review_readiness["manual_strategy_review_ready"]
     return result
 
 
@@ -425,6 +433,52 @@ def parameter_advice_gate(quality: dict[str, Any]) -> dict[str, Any]:
         "inconclusive_rate": inconclusive_rate,
         "inconclusive_too_high": inconclusive_too_high,
         "blockers": blockers,
+    }
+
+
+def review_readiness_gate(
+    quality: dict[str, Any],
+    *,
+    advice_gate: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Compatibility-safe review-readiness view over the legacy advice gate."""
+
+    gate = advice_gate if isinstance(advice_gate, dict) else parameter_advice_gate(quality)
+    ready = bool(gate.get("parameter_advice_allowed"))
+    return {
+        "status": "ready_for_manual_strategy_review" if ready else "not_ready_for_manual_strategy_review",
+        "manual_strategy_review_ready": ready,
+        "review_scope": "offline_strategy_evidence_review",
+        "shadow_dry_run_only": bool(gate.get("shadow_dry_run_only", True)),
+        "sample_count": int(gate.get("sample_count") or 0),
+        "min_sample": int(gate.get("min_sample") or 0),
+        "sample_floor_met": bool(gate.get("sample_floor_met")),
+        "candidate_universe_missing": bool(gate.get("candidate_universe_missing")),
+        "strategy_profiles": list(gate.get("strategy_profiles") or []),
+        "has_strategy_profile_breakdown": bool(gate.get("has_strategy_profile_breakdown")),
+        "instrument_identity_ready_count": int(gate.get("instrument_identity_ready_count") or 0),
+        "instrument_identity_missing_count": int(gate.get("instrument_identity_missing_count") or 0),
+        "strategy_profile_ready_count": int(gate.get("strategy_profile_ready_count") or 0),
+        "strategy_profile_missing_count": int(gate.get("strategy_profile_missing_count") or 0),
+        "trace_only_evidence": bool(gate.get("trace_only_evidence")),
+        "usable_mark_ready_count": int(gate.get("usable_mark_ready_count") or 0),
+        "usable_mark_missing_count": int(gate.get("usable_mark_missing_count") or 0),
+        "outcome_ready_count": int(gate.get("outcome_ready_count") or 0),
+        "outcome_missing_count": int(gate.get("outcome_missing_count") or 0),
+        "bad_accept_count": int(gate.get("bad_accept_count") or 0),
+        "bad_reject_count": int(gate.get("bad_reject_count") or 0),
+        "bad_decision_count": int(gate.get("bad_decision_count") or 0),
+        "has_bad_decision_signal": bool(gate.get("has_bad_decision_signal")),
+        "inconclusive_count": int(gate.get("inconclusive_count") or 0),
+        "inconclusive_rate": gate.get("inconclusive_rate"),
+        "inconclusive_too_high": bool(gate.get("inconclusive_too_high")),
+        "blockers": list(gate.get("blockers") or []),
+        "compatibility": {
+            "legacy_field": "parameter_advice_gate",
+            "legacy_status": gate.get("status"),
+            "legacy_allowed_field": "parameter_advice_allowed",
+            "legacy_allowed": ready,
+        },
     }
 
 

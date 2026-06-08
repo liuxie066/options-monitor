@@ -122,7 +122,7 @@ Related OM surfaces outside Ops Copilot:
 | Surface | Why it is out of core | Default owner |
 |---|---|---|
 | `./om` human/operator CLI | Full operator workflows include live runs, report generation, release, and controlled writes | Human operator / Codex when explicitly requested |
-| Research / Shadow Replay | Offline evidence collection, replay, and parameter-quality evaluation | Research / Strategy Lab workflow |
+| Research / Shadow Replay | Offline evidence collection, replay readiness, and candidate-impact comparison | Research evidence workflow |
 | Codex in repo | Development, tests, git, release, and code changes | Local development workflow |
 
 ## Risk Classes
@@ -174,7 +174,7 @@ Copilot should not use them as default evidence paths.
 |---|---|---|---|
 | Local report/cache generation | `scan_opportunities`, `query_cash_headroom`, `get_portfolio_context`, `prepare_close_advice_inputs`, `close_advice`, `get_close_advice` | Refresh market-derived local reports or caches | Use only when the user explicitly asks to refresh/generate evidence; prefer existing read artifacts first |
 | Research evidence collection | `./om research collect` | Build redacted evidence bundle / handoff | Out of core; suggest only for offline quality analysis |
-| Shadow Replay / parameter evaluation | `./om research shadow-replay ...` | Evaluate candidate quality, replay outcomes, and dry-run-only parameter hypotheses | Out of core; belongs to Research / Strategy Lab, not operations copilot |
+| Shadow Replay / evidence review | `./om research shadow-replay ...` | Evaluate evidence readiness, replay outcomes, and candidate impact for explicit threshold variants | Out of core; belongs to offline Research, not operations copilot |
 | Test and release workflow | `pytest`, `scripts/release_check.py`, git commands, GitHub release workflow | Validate and publish code changes | Codex/operator-only; Ops Copilot may plan gates but does not own release execution |
 | Live tick / notifications | `om run tick`, `om run tick-cron`, notification delivery adapters | Run production scan/report/notification workflows | Operator-only; Ops Copilot should recommend read-only preflight first |
 | Service install/start/stop | `om service ...`, systemd/launchd commands | Modify or operate production services | Operator-only; require explicit human request and dry-run/preflight first |
@@ -191,7 +191,7 @@ Copilot should not use them as default evidence paths.
 | "Should I close this position?" | `close_advice_read` | User explicitly asks to refresh market data | Answer references existing close-advice rows or says no fresh row exists |
 | "Preview a config/symbol/trade/model change" | Inbound preview command or local dry-run | User confirms exact pending operation | Preview includes diff/normalized fields and risk before apply |
 | "Release / push / upgrade" | `git status`, `version_check`, tests/release check | User explicitly asks to commit, push, release, or apply upgrade | Release gate passes and final state is verified |
-| "Analyze strategy quality or tune parameters" | Out-of-core Research / Shadow Replay workflow | User approves offline analysis workflow | Recommendations cite replay/evidence and do not mutate production config |
+| "Analyze strategy evidence or compare candidate impact" | Out-of-core Research / Shadow Replay workflow | User approves offline analysis workflow | Output cites replay/evidence and does not mutate production config |
 
 ## Current Implementation Notes
 
@@ -200,8 +200,9 @@ Copilot should not use them as default evidence paths.
   helpers for compatibility. The Ops Copilot boundary in this document is
   narrower than the raw manifest.
 - Research and Shadow Replay form an independent offline evidence/replay module
-  under `./om research ...`. They are used to evaluate strategy quality and
-  dry-run-only parameter hypotheses. They are not Inbound core and are not
+  under `./om research ...`. They are used to evaluate evidence readiness,
+  replay outcomes, and candidate impact for explicit threshold variants. They are
+  not Inbound core and are not
   `om-agent` tools.
 - `healthcheck.tools` is derived from the same `om-agent` registry used by
   `./om-agent spec`; Research/Shadow Replay is reported separately as a
