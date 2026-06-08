@@ -153,13 +153,10 @@ def _normalize_legacy_agent_config(raw: dict[str, Any] | None, *, warnings: list
 
     legacy_llm_enabled = llm_cfg.get("enabled") if isinstance(llm_cfg.get("enabled"), bool) else None
     legacy_runtime_enabled = runtime_cfg.get("enabled") if isinstance(runtime_cfg.get("enabled"), bool) else None
-    if "mode" not in assistant_cfg:
-        if legacy_runtime_enabled is False:
-            assistant_cfg["mode"] = "disabled"
-        elif legacy_llm_enabled is True:
-            assistant_cfg["mode"] = "llm_router"
-        elif legacy_runtime_enabled is True:
-            assistant_cfg["mode"] = "deterministic"
+    if "enabled" not in assistant_cfg and legacy_runtime_enabled is not None:
+        assistant_cfg["enabled"] = bool(legacy_runtime_enabled)
+    if "planner" not in assistant_cfg and legacy_llm_enabled is not None:
+        assistant_cfg["planner"] = {"enabled": bool(legacy_llm_enabled)}
 
     if "context_window_messages" not in assistant_cfg and "context_window_messages" in runtime_cfg:
         assistant_cfg["context_window_messages"] = deepcopy(runtime_cfg["context_window_messages"])

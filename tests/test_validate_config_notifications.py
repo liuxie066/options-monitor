@@ -129,7 +129,7 @@ def test_validate_config_rejects_invalid_assistant_llm_config() -> None:
         mod.validate_config(cfg)
         raise AssertionError("expected SystemExit")
     except SystemExit as exc:
-        assert "assistant.llm.enabled is retired; use assistant.mode" in str(exc)
+        assert "assistant.llm.enabled is retired; use assistant.planner.enabled" in str(exc)
 
     cfg = _base_cfg()
     cfg["assistant"] = {"llm": {"provider": ["openai"]}}
@@ -213,7 +213,7 @@ def test_validate_config_rejects_invalid_assistant_llm_config() -> None:
         assert "assistant.llm.provider must be one of: openai, deepseek" in str(exc)
 
 
-def test_validate_config_requires_complete_assistant_llm_when_mode_uses_llm() -> None:
+def test_validate_config_retires_legacy_assistant_modes_and_accepts_planner_config() -> None:
     import src.application.config_validator as mod
 
     cfg = _base_cfg()
@@ -223,29 +223,48 @@ def test_validate_config_requires_complete_assistant_llm_when_mode_uses_llm() ->
         mod.validate_config(cfg)
         raise AssertionError("expected SystemExit")
     except SystemExit as exc:
-        assert "assistant.llm.provider is required when assistant.mode uses LLM" in str(exc)
+        assert "assistant.mode legacy modes are retired; use assistant.enabled and assistant.planner.enabled" in str(exc)
 
     cfg = _base_cfg()
-    cfg["assistant"] = {"mode": "llm_router", "llm": {"provider": "openai", "model": "", "api_key_env": "OM_LLM_API_KEY"}}
+    cfg["assistant"] = {"mode": "deterministic"}
 
     try:
         mod.validate_config(cfg)
         raise AssertionError("expected SystemExit")
     except SystemExit as exc:
-        assert "assistant.llm.model is required when assistant.mode uses LLM" in str(exc)
+        assert "assistant.mode legacy modes are retired; use assistant.enabled and assistant.planner.enabled" in str(exc)
 
     cfg = _base_cfg()
-    cfg["assistant"] = {"mode": "llm_router", "llm": {"provider": "openai", "model": "gpt-5.2", "api_key_env": ""}}
+    cfg["assistant"] = {"enabled": "yes"}
 
     try:
         mod.validate_config(cfg)
         raise AssertionError("expected SystemExit")
     except SystemExit as exc:
-        assert "assistant.llm.api_key_env is required when assistant.mode uses LLM" in str(exc)
+        assert "assistant.enabled must be a boolean" in str(exc)
+
+    cfg = _base_cfg()
+    cfg["assistant"] = {"planner": "enabled"}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "assistant.planner must be an object" in str(exc)
+
+    cfg = _base_cfg()
+    cfg["assistant"] = {"planner": {"enabled": "yes"}}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "assistant.planner.enabled must be a boolean" in str(exc)
 
     cfg = _base_cfg()
     cfg["assistant"] = {
-        "mode": "llm_router",
+        "enabled": True,
+        "planner": {"enabled": True},
         "llm": {
             "provider": "openai",
             "base_url": "https://llm.example/v1",
@@ -259,7 +278,8 @@ def test_validate_config_requires_complete_assistant_llm_when_mode_uses_llm() ->
 
     cfg = _base_cfg()
     cfg["assistant"] = {
-        "mode": "llm_router",
+        "enabled": True,
+        "planner": {"enabled": True},
         "llm": {
             "provider": "deepseek",
             "base_url": "https://api.deepseek.com",

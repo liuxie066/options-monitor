@@ -26,11 +26,20 @@ Allowed architecture:
 Feishu / WeChat / Hermes
   -> thin channel adapter
   -> ChannelService inbound dispatch
-  -> Inbound runtime command / optional LLM-first / deterministic fallback routing
-  -> Inbound execution router with sender allowlist, audit, idempotency, and preview/confirm
-  -> existing deterministic OM tools
-  -> canonical Inbound renderer
+  -> AgentSession (conceptual session boundary)
+  -> AgentLoop
+       -> Perceive
+       -> Understand
+       -> Decide
+       -> Act
+       -> Observe
+  -> channel reply
 ```
+
+`AgentSession` is a conceptual boundary, not a separate runtime layer or a
+required class name. In the current implementation it is carried by
+`AssistantRequest`, audit identity, conversation context, and pending-operation
+state before control enters `AgentLoop`.
 
 `src.application.channels` owns channel capability registration and service
 dispatch. `src.application.inbound` owns transport details only: Feishu payload
@@ -38,6 +47,24 @@ extraction, Feishu long-connection receive/reply/reaction behavior, and the
 transport-facing request contract. Inbound parsing, command catalog, LLM
 routing, operation store, audit, policy, and renderer ownership live in
 `src.application.assistant`.
+
+The current code still uses compatibility names such as `AssistantRequest`,
+`PerceptionResult`, `ReasoningResolution`, `ActionResult`, and
+`ObservationResponse`. Treat them as implementation handles inside the same
+Agent loop, not as separate runtime layers. `assistant.mode` is a legacy
+compatibility field only; the active product controls are `assistant.enabled`
+and `assistant.planner.enabled`.
+
+The authority split is:
+
+- `Understand` may parse commands, use deterministic parsing as a safety
+  component, or ask the AgentLoop Planner for a bounded plan.
+- `Decide` owns sender checks, capability support, policy, risk class, and
+  whether the next action is `allow`, `preview`, `ask`, `deny`, or `defer`.
+- `Act` may execute read/local tools or create a `PendingOperation`.
+- LLM-originated plans may never confirm, cancel, apply, send notifications,
+  write config, write ledger/trade state, operate services, or bypass pending
+  operation gates.
 
 Disallowed architecture:
 
@@ -97,11 +124,16 @@ For long-running Feishu WS, `config.assistant.json` currently controls the Inbou
 
 ```yaml
 assistant:
-  mode: deterministic
+  enabled: true
+  planner:
+    enabled: false
   context_window_messages: 8
 ```
 
-This still does not enable LLM. Unknown slash commands return clarification; non-slash messages continue through the deterministic inbound parser. Supported modes are `disabled`, `deterministic`, `llm_router`, and `agent_loop`.
+This keeps OM Copilot enabled while disabling model planning. Unknown slash
+commands return clarification; non-slash messages continue through the
+deterministic parser inside the AgentLoop. Supported active states are
+`assistant.enabled=true|false` and `assistant.planner.enabled=true|false`.
 
 By default, `default_market_scope` is intentionally unset. Feishu WS should receive an explicit `--config-key us|hk` or `--config-path` when it is bound to one market. Only set `assistant.default_market_scope: us|hk|all` when that default is an explicit product decision for Inbound.
 
@@ -109,7 +141,9 @@ LLM translation is disabled by default:
 
 ```yaml
 assistant:
-  mode: deterministic
+  enabled: true
+  planner:
+    enabled: false
   context_window_messages: 8
   active_model: deepseek-default
   models:
@@ -123,7 +157,17 @@ assistant:
       max_output_tokens: 512
 ```
 
-When `assistant.mode` is `llm_router` or `agent_loop`, non-slash natural language is LLM-first. Slash commands remain command-first and never call LLM. In `llm_router`, OM asks the translator for an `om-llm-intent-v1` JSON intent; that legacy intent schema stays read-only, with `symbol_edit` as the only preview-write exception for monitored-symbol setting changes. In `agent_loop`, OM asks the Planner for a bounded capability plan: it may plan pure-read tools directly, or exactly one preview-write capability such as `manual_trade_open`, `manual_trade_close`, `manual_trade_update`, `symbol_edit`, `model_use`, or `upgrade_now`. Preview-write plans create pending previews through the existing operation handlers only; they cannot confirm, cancel, apply, notify externally, write the ledger, or write config directly. The deterministic parser stays as fallback/shadow evidence when the LLM is unavailable, provider-failed, or returns a clarification, and remains the authority for slash commands plus explicit confirm/cancel commands.
+When `assistant.planner.enabled` is true, non-slash natural language enters the
+AgentLoop Planner. Slash commands remain command-first and never call LLM. The
+Planner may plan pure-read tools directly, or exactly one preview-write
+capability such as `manual_trade_open`, `manual_trade_close`,
+`manual_trade_update`, `symbol_edit`, `model_use`, or `upgrade_now`.
+Preview-write plans create pending previews through the existing operation
+handlers only; they cannot confirm, cancel, apply, notify externally, write the
+ledger, write config directly, operate services, or send proactive messages.
+The deterministic parser stays as fallback/shadow evidence when the model is
+unavailable, provider-failed, or returns a clarification, and remains the
+authority for slash commands plus explicit confirm/cancel/apply commands.
 
 The command surface authority is `src/application/assistant/commands.py`. Slash command metadata, the LLM intent surface, and inbound help text should use that catalog instead of maintaining separate command lists.
 
@@ -139,7 +183,9 @@ Supported providers:
 - `openai`: uses OpenAI Responses API. Leave `base_url` empty for `https://api.openai.com/v1/responses`, or set a full Responses-compatible base URL.
 - `deepseek`: uses DeepSeek's OpenAI-compatible Chat Completions API. Leave `base_url` empty or set `https://api.deepseek.com`; OM calls `/chat/completions` and requests `response_format: {"type":"json_object"}`.
 
-To enable it, set the API key in the local env file or deployment env file, then switch `assistant.mode` and choose `assistant.active_model` in `config.yaml`:
+To enable it, set the API key in the local env file or deployment env file, then
+enable `assistant.planner.enabled` and choose `assistant.active_model` in
+`config.yaml`:
 
 ```bash
 OM_LLM_API_KEY='sk-...'
@@ -147,7 +193,9 @@ OM_LLM_API_KEY='sk-...'
 
 ```yaml
 assistant:
-  mode: llm_router
+  enabled: true
+  planner:
+    enabled: true
   context_window_messages: 8
   active_model: openai-default
   models:
@@ -169,7 +217,9 @@ DEEPSEEK_API_KEY='sk-...'
 
 ```yaml
 assistant:
-  mode: llm_router
+  enabled: true
+  planner:
+    enabled: true
   context_window_messages: 8
   active_model: deepseek-default
   models:
@@ -217,7 +267,15 @@ Check the translator control plane before enabling it in Feishu:
 ./om assistant llm-check --live
 ```
 
-`assistant commands` renders the slash-command help surface. `assistant capabilities` renders the full assistant capability catalog used by the LLM routing manifest: read-only capabilities are executable by legacy LLM routing, `symbol_edit` is recognizable but preview-only, and other write/confirm/upgrade capabilities are visible but non-executable in `om-llm-intent-v1`. `agent_loop` has a separate Planner manifest for read tools plus approved preview-write capabilities; confirm/cancel/apply capabilities are intentionally absent from that manifest. The default LLM check validates `config.assistant.json`, the effective env file, redacted API-key presence, the resolved provider endpoint URL, and the current capability routing surface. `--live` sends one read-only structured translation probe to the configured provider.
+`assistant commands` renders the slash-command help surface. `assistant
+capabilities` renders the full assistant capability catalog used by the
+AgentLoop Planner manifest: read-only capabilities are executable, approved
+preview-write capabilities may create pending previews, and confirm/cancel/apply
+capabilities are intentionally absent from the Planner manifest. The default
+LLM check validates `config.assistant.json`, the effective env file, redacted
+API-key presence, the resolved provider endpoint URL, and the current capability
+routing surface. `--live` sends one read-only structured planning probe to the
+configured provider.
 
 ## Sender Allowlist
 
@@ -436,11 +494,62 @@ The rendered `options-monitor-wechat-clawbot.service` passes `--lock-path` so on
 
 ## LLM Translator
 
-LLM translation/planning is opt-in and inactive unless `assistant.mode` is `llm_router` or `agent_loop`. In those modes, non-slash natural language is routed LLM-first; deterministic parsing is only fallback/shadow evidence. Slash commands are resolved by the Inbound command catalog before LLM and do not call the translator or Planner.
+LLM planning is opt-in and inactive unless `assistant.enabled` and
+`assistant.planner.enabled` are both true. In that state, non-slash natural
+language is routed through the AgentLoop Planner first; deterministic parsing is
+fallback/shadow evidence and the authority for command/confirm/cancel/apply
+messages. Slash commands are resolved by the Inbound command catalog before LLM
+and do not call the Planner.
 
-The current provider adapters use OpenAI Responses API for `openai` and Chat Completions JSON output for `deepseek`. In `llm_router`, they translate natural language into an `om-llm-intent-v1` structured intent. In `agent_loop`, they produce an `om-tool-plan-v1` capability plan. Planner read steps still go through the read whitelist before execution. Planner preview-write steps are converted back into the same operation preview path as deterministic commands, so sender allowlist, operation gates, preview storage, audit, idempotency, and later explicit confirmation still apply. Low-confidence or incomplete requests must return clarification.
+The current provider adapters use OpenAI Responses API for `openai` and Chat
+Completions JSON output for `deepseek`. They produce an `om-tool-plan-v1`
+capability plan for the AgentLoop. Planner read steps still go through the read
+whitelist before execution. Planner preview-write steps are converted back into
+the same operation preview path as deterministic commands, so sender allowlist,
+operation gates, preview storage, audit, idempotency, and later explicit
+confirmation still apply. Low-confidence or incomplete requests must return
+clarification.
 
-`agent_loop` is the bounded Planner lane. It may plan read tools or one preview-write operation, but deterministic execution, factual rendering, preview storage, confirm/apply, and audit ownership remain outside the loop. If a write-like request such as a Futu fill alert is planned as a read query, OM rejects the plan instead of silently returning nearby holdings or income data.
+`agent_loop` is the current bounded Planner lane inside the Agent loop. It may plan read tools or one preview-write operation, but deterministic execution, factual rendering, preview storage, confirm/apply, and audit ownership remain outside model authority. If a write-like request such as a Futu fill alert is planned as a read query, OM rejects the plan instead of silently returning nearby holdings or income data.
+
+### Data Analysis-style Analytical Answers
+
+For analytical questions such as `6月收益的组成`, `分析 lx 6月净现金流明细`, or `历史以来总的净现金流`, Inbound should follow a Data Analysis-style contract:
+
+```text
+user question
+-> LLM plans the analysis and required OM tools
+-> deterministic OM tools fetch ledger/runtime evidence
+-> a controlled analyzer computes an analysis artifact
+-> deterministic renderer writes factual tables and rows from the artifact
+-> LLM may add a concise interpretation based on artifact references only
+```
+
+The design goal is to preserve LLM intelligence without making the LLM a factual source. The LLM may choose what to inspect, which dimensions to compare, and what explanation angle is useful. It must not be the component that writes accounting facts such as amount, currency, contract count, account, symbol, expiration, close type, or date.
+
+For income and cashflow analysis, the controlled artifact is the authority. It should contain the evidence needed for the final answer, for example:
+
+- `data_scope`: source, account scope, month scope, coverage, warnings.
+- `facts_table`: user-facing rows derived from `monthly_income_report(include_rows=true)`.
+- `totals_by_account`: net cashflow, realized PnL, premium, and cash-secured denominator when available.
+- `totals_by_source`: open premium, close/exercise/assignment/expiry realized PnL, long-option recovery, and other cashflow buckets when available.
+- `reconciliation_notes`: why net cashflow differs from realized PnL, which data is missing, and which conclusions are unsupported.
+
+Final answer rules:
+
+- No natural-language character matching should be used to validate amounts or row facts after the LLM has written them.
+- User-visible fact rows, amounts, contract counts, accounts, symbols, dates, currencies, and close types must be rendered from the artifact, not from free-form LLM text.
+- LLM interpretation may reference artifact row ids, bucket names, and computed metrics, but it must not restate or recalculate detailed ledger facts.
+- If the artifact cannot support the requested answer, the response should say which capability or evidence is missing instead of returning a nearby summary.
+- Existing grounded rendering is only a safety baseline. Future implementation work for income analysis should move toward `tool evidence -> analysis artifact -> deterministic factual rendering -> optional LLM interpretation`, not toward more parser or regex guards.
+
+Acceptance criteria for this design:
+
+- A detail/composition question returns a factual table before any interpretation.
+- A known multi-contract row cannot be shown as one contract because the renderer reads the artifact quantity.
+- A known amount cannot drift because the LLM never owns amount rendering.
+- If LLM synthesis is unavailable, the artifact-backed factual answer is still useful.
+- If LLM synthesis is available, it improves analysis selection and explanation, not accounting fact generation.
 
 ## Write Actions
 
@@ -458,6 +567,12 @@ Write actions use:
 ```text
 request -> preview -> command_id -> explicit confirmation -> re-validate -> execute -> receipt
 ```
+
+The preview may be initiated by a deterministic slash/natural-language command
+or by an approved `agent_loop` Planner preview capability. Confirmation is not
+planner-visible: it must come from a deterministic confirm command, match an
+existing pending operation, and pass the configured sender, env, HMAC, TTL, and
+operation-family gates.
 
 Supported write commands:
 

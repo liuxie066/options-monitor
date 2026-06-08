@@ -73,7 +73,7 @@ def handle_assistant_message(
     )
 
     router_execute_tool_fn = execute_tool_fn
-    if runtime_settings.mode == "agent_loop":
+    if runtime_settings.planner_enabled:
         router_execute_tool_fn = _agent_loop_execute_tool_fn(
             execute_tool_fn=execute_tool_fn,
             request=request,
@@ -262,10 +262,11 @@ def _with_assistant_meta(
     assistant_meta = {
         "enabled": bool(settings.enabled),
         "mode": settings.mode,
+        "planner": settings.planner.public_payload(),
         "route": route,
         "llm": llm_meta,
         "context": dict(context_meta) if isinstance(context_meta, dict) else {"provided": False},
-        "langgraph": "optional" if settings.mode == "agent_loop" else "disabled",
+        "langgraph": "optional" if settings.planner_enabled else "disabled",
     }
     if perception_trace is not None:
         assistant_meta["perception_trace"] = perception_trace.public_payload()

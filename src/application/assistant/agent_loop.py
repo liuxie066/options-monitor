@@ -9,10 +9,11 @@ from zoneinfo import ZoneInfo
 
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response
 from src.application.agent_tool_registry import get_tool_definition
-from src.application.assistant.commands import (
+from src.application.assistant.capability_catalog import (
     ACCOUNT_VALUES,
     is_llm_planner_preview_spec,
-    llm_planner_preview_specs,
+    planner_preview_specs,
+    planner_read_specs,
     spec_by_intent,
 )
 from src.application.assistant.contracts import AssistantRequest, PerceptionResult, ToolCall
@@ -26,7 +27,7 @@ from src.application.assistant.llm_common import (
     strip_json_code_fence,
     unsupported_llm_provider_error,
 )
-from src.application.assistant.llm_translator import LlmTranslationResult, translate_inbound_intent
+from src.application.assistant.llm_translator import LlmTranslationResult
 from src.application.assistant.parser import extract_month_filter
 from src.application.assistant.renderer import render_inbound_text
 from src.application.assistant.settings import AssistantSettings
@@ -43,35 +44,70 @@ TOOL_PLAN_SYNTHESIS_SCHEMA_VERSION = "om-tool-plan-synthesis-v1"
 INTERNAL_TOOL_PLAN_NAME = "assistant.tool_plan"
 MAX_TOOL_PLAN_STEPS = 3
 AGENT_LOOP_READ_TOOLS = frozenset(
-    {
-        "monthly_income_report",
-        "option_positions_read",
-        "runtime_status",
-        "runtime_runs",
-        "runtime_logs",
-        "close_advice_read",
-    }
+    str(spec.tool_name)
+    for spec in planner_read_specs()
+    if spec.tool_name is not None and get_tool_definition(str(spec.tool_name)) is not None
 )
-AGENT_LOOP_PREVIEW_CAPABILITIES = frozenset(spec.intent_name for spec in llm_planner_preview_specs())
+AGENT_LOOP_PREVIEW_CAPABILITIES = frozenset(spec.intent_name for spec in planner_preview_specs())
 AGENT_LOOP_ALLOWED_TOOLS = AGENT_LOOP_READ_TOOLS | AGENT_LOOP_PREVIEW_CAPABILITIES
 _COMMAND_SPECS_BY_INTENT = spec_by_intent()
 _BANNED_PLAN_ARGUMENTS = frozenset(
     {
         "audit_db",
+        "accounts_root",
+        "candidate_paths",
+        "candidate_reject_log_paths",
+        "candidate_report_dir",
+        "candidate_trace_paths",
         "config_key",
         "config_path",
         "csv_path",
         "data_config",
+        "delivery",
+        "delivery_mode",
         "env_file",
         "file",
+        "include_service_status",
         "log_file",
+        "logs_root",
+        "max_notification_chars",
+        "max_run_age_minutes",
+        "opend_telnet_host",
+        "opend_telnet_port",
         "output_dir",
         "profile_path",
+        "report_dir",
         "report_path",
         "run_dir",
         "runs_root",
+        "shared_state_dir",
+        "state_dir",
+        "timeout_sec",
+        "timeoutSeconds",
+        "trigger_job_id",
+        "trigger_source",
     }
 )
+_BANNED_PLAN_ARGUMENT_PREFIXES = ("audit", "config", "delivery", "env", "service", "system", "trigger")
+_BANNED_PLAN_ARGUMENT_EXACT = frozenset(
+    {
+        "dir",
+        "dirs",
+        "file",
+        "files",
+        "host",
+        "path",
+        "paths",
+        "port",
+        "root",
+        "roots",
+        "service",
+        "services",
+        "system",
+    }
+)
+_BANNED_PLAN_ARGUMENT_SUFFIXES = ("_path", "_paths", "_root", "_roots", "_dir", "_dirs", "_file", "_host", "_port")
+_BANNED_PLAN_ARGUMENT_CONTAINS = ("_path_",)
 _CONFIG_SCOPED_PLAN_TOOLS = frozenset(
     {
         "monthly_income_report",
@@ -396,14 +432,6 @@ def execute_tool_plan(
     )
 
 
-def _default_translate(
-    text: str,
-    settings: AssistantSettings,
-    conversation_context: dict[str, Any] | None,
-) -> LlmTranslationResult:
-    return translate_inbound_intent(text, settings=settings.llm, conversation_context=conversation_context)
-
-
 def plan_read_only_tools(
     text: str,
     settings: AssistantSettings,
@@ -424,7 +452,7 @@ def plan_read_only_tools(
             error=AgentToolError(
                 code="LLM_UNAVAILABLE",
                 message="LLM planner is enabled but not fully configured.",
-                hint="Set assistant.llm.provider, assistant.llm.model, and assistant.llm.api_key_env, or use assistant.mode=deterministic.",
+                hint="Set assistant.llm.provider, assistant.llm.model, and assistant.llm.api_key_env, or disable assistant.planner.enabled.",
                 details={"missing": missing},
             ),
         )
@@ -718,7 +746,7 @@ def validate_tool_plan(plan: PlannerPlan, *, question: str | None = None, allow_
                 details={"allowed_tools": sorted(AGENT_LOOP_ALLOWED_TOOLS), "tool_name": step.tool_name},
             )
         kinds.append(step_kind)
-        banned = sorted(key for key in step.arguments if str(key) in _BANNED_PLAN_ARGUMENTS)
+        banned = sorted(_banned_plan_argument_paths(step.arguments))
         if banned:
             raise AgentToolError(
                 code="PERMISSION_DENIED",
@@ -727,7 +755,6 @@ def validate_tool_plan(plan: PlannerPlan, *, question: str | None = None, allow_
                 details={"tool_name": step.tool_name, "banned_arguments": banned},
             )
         allowed_args = _allowed_plan_arguments(step.tool_name)
-        allowed_args.difference_update(_BANNED_PLAN_ARGUMENTS)
         extra = sorted(str(key) for key in step.arguments if allowed_args and str(key) not in allowed_args)
         if extra:
             raise AgentToolError(
@@ -782,14 +809,55 @@ def _single_preview_step(plan: PlannerPlan) -> PlannerPlanStep | None:
 def _allowed_plan_arguments(tool_name: str) -> set[str]:
     if tool_name in AGENT_LOOP_READ_TOOLS:
         definition = get_tool_definition(tool_name)
-        return set(definition.input_schema) if definition is not None else set()
+        return _filter_plan_arguments(definition.input_schema) if definition is not None else set()
     spec = _COMMAND_SPECS_BY_INTENT.get(tool_name)
     if spec is None or not is_llm_planner_preview_spec(spec):
         return set()
-    allowed = set(spec.arguments)
+    allowed = _filter_plan_arguments(spec.arguments)
     if tool_name in {"manual_trade_open", "manual_trade_close"}:
         allowed.add("account")
     return allowed
+
+
+def _filter_plan_arguments(arguments: Any) -> set[str]:
+    return {str(arg) for arg in arguments if not _is_banned_plan_argument(str(arg))}
+
+
+def _banned_plan_argument_paths(value: Any, *, prefix: str = "") -> list[str]:
+    if isinstance(value, dict):
+        hits: list[str] = []
+        for raw_key, item in value.items():
+            key = str(raw_key)
+            path = f"{prefix}.{key}" if prefix else key
+            if _is_banned_plan_argument(key):
+                hits.append(path)
+            hits.extend(_banned_plan_argument_paths(item, prefix=path))
+        return hits
+    if isinstance(value, list):
+        hits = []
+        for index, item in enumerate(value):
+            path = f"{prefix}[{index}]" if prefix else f"[{index}]"
+            hits.extend(_banned_plan_argument_paths(item, prefix=path))
+        return hits
+    return []
+
+
+def _is_banned_plan_argument(argument: str) -> bool:
+    name = str(argument or "").strip()
+    if not name:
+        return False
+    normalized = re.sub(r"(?<!^)(?=[A-Z])", "_", name).replace("-", "_").lower()
+    if name in _BANNED_PLAN_ARGUMENTS or normalized in _BANNED_PLAN_ARGUMENTS:
+        return True
+    if normalized in _BANNED_PLAN_ARGUMENT_EXACT:
+        return True
+    if normalized.startswith("timeout"):
+        return True
+    if normalized.startswith(_BANNED_PLAN_ARGUMENT_PREFIXES):
+        return True
+    if normalized.endswith(_BANNED_PLAN_ARGUMENT_SUFFIXES):
+        return True
+    return any(token in normalized for token in _BANNED_PLAN_ARGUMENT_CONTAINS)
 
 
 def _question_requests_preview_operation(question: str) -> bool:
@@ -1859,7 +1927,7 @@ Rules:
 - Fill required_capabilities with the user's required answer capabilities from the tool manifest. Use [] only when the request needs no special capability beyond the planned tool call.
 - Preview-write capabilities only create a pending preview. They never apply writes, confirm pending operations, notify users externally, or mutate config/ledger directly.
 - Never plan confirm/cancel/apply actions. Confirm/cancel must be handled by deterministic user commands bound to a pending operation.
-- Do not include system-scoped or path arguments such as config_key, config_path, data_config, output_dir, report_path, run_dir, or audit_db. The system injects those.
+- Do not include system-scoped, path, config, audit, host, port, timeout, service, delivery, or trigger arguments such as config_key, config_path, data_config, output_dir, report_path, run_dir, logs_root, state_dir, opend_telnet_host, timeout_sec, or audit_db. The system injects those.
 - Resolve relative dates using context.temporal_context.current_date in Asia/Shanghai. For a month without a year such as "6月", use the current_date year.
 - For monthly income summary questions, use monthly_income_report with account/month when available.
 - For combined/all-account return questions, include required_capabilities=["combined_account_return"] and use monthly_income_report without account.
@@ -1885,7 +1953,7 @@ def _planner_tool_manifest() -> list[dict[str, Any]]:
         input_schema = {
             key: value
             for key, value in definition.input_schema.items()
-            if key not in _BANNED_PLAN_ARGUMENTS
+            if not _is_banned_plan_argument(str(key))
         }
         notes: list[str] = []
         semantics: dict[str, Any] = {}
@@ -1930,7 +1998,7 @@ def _planner_tool_manifest() -> list[dict[str, Any]]:
         if semantics:
             item["semantics"] = semantics
         tools.append(item)
-    for spec in llm_planner_preview_specs():
+    for spec in planner_preview_specs():
         item = {
             "name": spec.intent_name,
             "description": spec.summary,

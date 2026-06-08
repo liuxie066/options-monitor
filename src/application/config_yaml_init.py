@@ -109,8 +109,11 @@ def _starter_yaml_payload(
             },
         },
         "assistant": {
-            "mode": "deterministic",
+            "enabled": True,
             "context_window_messages": 8,
+            "planner": {
+                "enabled": True,
+            },
             "active_model": "deepseek-default",
             "models": {
                 "deepseek-default": {

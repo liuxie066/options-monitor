@@ -133,8 +133,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "opend_alert_send_recovery_notice": True,
         },
         "assistant": {
-            "mode": "deterministic",
+            "enabled": True,
             "context_window_messages": 8,
+            "planner": {
+                "enabled": True,
+            },
             "llm": {
                 "provider": "",
                 "base_url": "",

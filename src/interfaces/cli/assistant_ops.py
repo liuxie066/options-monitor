@@ -62,6 +62,7 @@ def _assistant_settings_for_cli(
             enabled=configured.enabled if force_enabled is None else bool(force_enabled),
             context_window_messages=configured.context_window_messages,
             default_market_scope=configured.default_market_scope,
+            planner=configured.planner,
             llm=configured.llm,
         )
     return AssistantSettings(enabled=True if force_enabled is None else bool(force_enabled))
@@ -261,8 +262,9 @@ def _check_assistant_model_profile(
         )
     runtime_cfg = {
         "assistant": {
-            "mode": "llm_router",
+            "enabled": True,
             "context_window_messages": 8,
+            "planner": {"enabled": True},
             "llm": profile.llm_config(),
         }
     }

@@ -6,13 +6,14 @@ from typing import Any, Callable
 from src.application.assistant.commands import llm_capability_manifest
 from src.application.assistant.config_loader import load_assistant_config
 from src.application.assistant.llm_common import (
+    CreateStructuredResponseFn,
     is_supported_llm_provider,
     normalize_llm_provider,
     provider_api_kind,
     provider_endpoint_url,
     supported_llm_providers,
 )
-from src.application.assistant.llm_translator import CreateStructuredResponseFn, translate_inbound_intent
+from src.application.assistant.agent_loop import plan_read_only_tools
 from src.application.assistant.settings import AssistantSettings, LlmTranslatorSettings
 from src.application.settings import build_effective_env
 from src.infrastructure.openai_chat_completions import resolve_chat_completions_url
@@ -52,7 +53,7 @@ def check_llm_translator(
     manifest = llm_capability_manifest()
 
     live_probe = _live_probe_check(
-        settings=settings,
+        runtime_settings=runtime_settings,
         effective_env=effective_env.values,
         live=bool(live),
         live_text=live_text,
@@ -109,14 +110,14 @@ def _append_assistant_config_check(checks: list[dict[str, Any]], *, cfg: dict[st
         checks.append({
             "name": "assistant_config",
             "status": "warn",
-            "message": "config.assistant.json not found; using deterministic assistant defaults",
+            "message": "config.assistant.json not found; using default AgentLoop settings",
         })
         return True
-    if settings.mode not in {"deterministic", "llm_router", "agent_loop", "disabled"}:
+    if settings.mode not in {"agent_loop", "disabled"}:
         checks.append({
             "name": "assistant_config",
             "status": "error",
-            "message": "assistant.mode is invalid",
+            "message": "assistant mode compatibility field is invalid",
         })
         return False
     checks.append({
@@ -132,7 +133,7 @@ def _config_checks(settings: LlmTranslatorSettings, *, effective_env: Any) -> li
     checks.append({
         "name": "enabled",
         "status": "ok" if settings.enabled else "warn",
-        "message": "assistant mode uses LLM" if settings.enabled else "assistant mode is deterministic; LLM is inactive",
+        "message": "assistant planner uses LLM" if settings.enabled else "assistant planner is disabled; LLM is inactive",
     })
     checks.append(_provider_check(settings.provider, required=settings.enabled))
     checks.append(_required_text_check("model", settings.model, required=settings.enabled))
@@ -186,7 +187,7 @@ def _provider_check(value: str, *, required: bool) -> dict[str, Any]:
             return {
                 "name": "provider",
                 "status": "skipped",
-                "message": "assistant.llm.provider is not set because LLM is disabled",
+                "message": "assistant.llm.provider is not set because planner LLM is disabled",
             }
         return {
             "name": "provider",
@@ -215,7 +216,7 @@ def _required_text_check(name: str, value: str, *, expected: str | None = None, 
             return {
                 "name": name,
                 "status": "skipped",
-                "message": f"assistant.llm.{name} is not set because LLM is disabled",
+                "message": f"assistant.llm.{name} is not set because planner LLM is disabled",
             }
         return {
             "name": name,
@@ -254,7 +255,7 @@ def _base_url_message(settings: LlmTranslatorSettings) -> str:
 
 def _live_probe_check(
     *,
-    settings: LlmTranslatorSettings,
+    runtime_settings: AssistantSettings,
     effective_env: dict[str, str],
     live: bool,
     live_text: str,
@@ -264,11 +265,12 @@ def _live_probe_check(
         return {
             "name": "live_probe",
             "status": "skipped",
-            "message": "provider call skipped; pass --live to run a read-only translation probe",
+            "message": "provider call skipped; pass --live to run a read-only planner probe",
         }
-    result = translate_inbound_intent(
+    result = plan_read_only_tools(
         str(live_text or DEFAULT_LIVE_PROBE_TEXT),
-        settings=settings,
+        runtime_settings,
+        conversation_context=None,
         environ=effective_env,
         create_response_fn=create_response_fn,
     )
@@ -284,11 +286,11 @@ def _live_probe_check(
         }
     return {
         "name": "live_probe",
-        "status": "ok" if result.intent is not None else "error",
-        "message": "provider returned a valid read-only intent" if result.intent is not None else "provider did not return an intent",
+        "status": "ok" if result.plan is not None else "error",
+        "message": "provider returned a valid planner plan" if result.plan is not None else "provider did not return a planner plan",
         "value": {
             "trace": dict(result.trace),
-            "intent": result.intent.public_payload() if result.intent is not None else None,
+            "plan": result.plan.public_payload() if result.plan is not None else None,
         },
     }
 

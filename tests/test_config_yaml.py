@@ -43,9 +43,11 @@ features:
   close_advice: false
 
 assistant:
-  mode: deterministic
+  enabled: true
   context_window_messages: 6
   default_market_scope: us
+  planner:
+    enabled: true
   llm:
     provider: ""
     base_url: ""
@@ -387,7 +389,8 @@ inbound:
 
     cfg, _meta = resolve_yaml_assistant_config(repo_root=REPO_ROOT, config_path=config_path)
 
-    assert cfg["assistant"]["mode"] == "deterministic"
+    assert cfg["assistant"]["enabled"] is True
+    assert cfg["assistant"]["planner"]["enabled"] is True
     assert cfg["assistant"]["llm"]["api_key_env"] == "OM_LLM_API_KEY"
     assert cfg["inbound"]["feishu_ws"]["reply_enabled"] is True
     assert cfg["inbound"]["feishu_ws"]["queue_size"] == 100
@@ -419,7 +422,8 @@ markets:
             {
                 "defaults": {
                     "assistant": {
-                        "mode": "deterministic",
+                        "enabled": True,
+                        "planner": {"enabled": True},
                         "context_window_messages": 3,
                         "default_market_scope": "hk",
                         "llm": {"provider": "openai"},
@@ -438,7 +442,8 @@ markets:
         system_config_path=system_path,
     )
 
-    assert cfg["assistant"]["mode"] == "deterministic"
+    assert cfg["assistant"]["enabled"] is True
+    assert cfg["assistant"]["planner"]["enabled"] is True
     assert cfg["assistant"]["context_window_messages"] == 3
     assert cfg["assistant"]["default_market_scope"] == "hk"
     assert cfg["assistant"]["llm"]["provider"] == "openai"
@@ -469,7 +474,9 @@ markets:
     accounts: [lx]
     symbols: [FUTU]
 assistant:
-  mode: llm_router
+  enabled: true
+  planner:
+    enabled: true
   active_model: deepseek-default
   models:
     deepseek-default:
@@ -511,7 +518,9 @@ markets:
     accounts: [lx]
     symbols: [FUTU]
 assistant:
-  mode: llm_router
+  enabled: true
+  planner:
+    enabled: true
   active_model: missing
   models:
     deepseek-default:
@@ -538,7 +547,9 @@ markets:
     accounts: [lx]
     symbols: [FUTU]
 assistant:
-  mode: llm_router
+  enabled: true
+  planner:
+    enabled: true
   active_model: unsafe
   models:
     unsafe:
@@ -577,7 +588,8 @@ def test_config_init_writes_starter_yaml_and_runtime_configs(tmp_path: Path) -> 
     assert (runtime_dir / "config.hk.json").exists()
     payload = yaml.safe_load(output_path.read_text(encoding="utf-8"))
     assert payload["accounts"]["lx"]["futu_account_id"] == "12345678"
-    assert payload["assistant"]["mode"] == "deterministic"
+    assert payload["assistant"]["enabled"] is True
+    assert payload["assistant"]["planner"]["enabled"] is True
     assert payload["assistant"]["context_window_messages"] == 8
     assert "default_market_scope" not in payload["assistant"]
     assert payload["assistant"]["active_model"] == "deepseek-default"
@@ -593,7 +605,8 @@ def test_config_init_writes_starter_yaml_and_runtime_configs(tmp_path: Path) -> 
     assert "assistant" not in us_cfg
     assert "inbound" not in us_cfg
     assert hk_cfg[GENERATED_KEY]["market"] == "hk"
-    assert assistant_cfg["assistant"]["mode"] == "deterministic"
+    assert assistant_cfg["assistant"]["enabled"] is True
+    assert assistant_cfg["assistant"]["planner"]["enabled"] is True
     assert assistant_cfg["assistant"]["context_window_messages"] == 8
     assert "default_market_scope" not in assistant_cfg["assistant"]
     assert "active_model" not in assistant_cfg["assistant"]
@@ -867,7 +880,8 @@ def test_config_migrate_yaml_preview_generates_valid_yaml(tmp_path: Path) -> Non
     payload = yaml.safe_load(out["yaml"])
     assert payload["accounts"]["lx"]["futu_account_id"] == "REAL_12345678"
     assert "agent" not in payload
-    assert payload["assistant"]["mode"] == "llm_router"
+    assert payload["assistant"]["enabled"] is True
+    assert payload["assistant"]["planner"]["enabled"] is True
     assert payload["assistant"]["context_window_messages"] == 6
     assert payload["assistant"]["llm"] == {
         "provider": "deepseek",
@@ -890,7 +904,8 @@ def test_config_migrate_yaml_preview_generates_valid_yaml(tmp_path: Path) -> Non
     cfg, _meta = resolve_yaml_runtime_config(repo_root=REPO_ROOT, market="us", config_path=migrated_path)
     validate_config(json.loads(json.dumps(cfg)))
     assistant_cfg, _meta = resolve_yaml_assistant_config(repo_root=REPO_ROOT, config_path=migrated_path)
-    assert assistant_cfg["assistant"]["mode"] == "llm_router"
+    assert assistant_cfg["assistant"]["enabled"] is True
+    assert assistant_cfg["assistant"]["planner"]["enabled"] is True
     assert "enabled" not in assistant_cfg["assistant"]["llm"]
 
 
