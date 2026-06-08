@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 import time
 
@@ -17,6 +18,19 @@ class _Gateway:
 
     def close(self) -> None:
         self.close_calls += 1
+
+
+def _patch_0700_plan_discovery(monkeypatch, expirations: list[str] | None = None) -> None:
+    import src.application.opend_utils as opend_utils
+    import src.application.required_data_planning as planning
+
+    monkeypatch.setattr(planning, "get_underlier_spot", lambda *args, **kwargs: 444.8)
+    monkeypatch.setattr(
+        planning,
+        "list_option_expirations",
+        lambda *args, **kwargs: list(expirations or ["2026-06-29"]),
+    )
+    monkeypatch.setattr(opend_utils, "get_trading_date", lambda market: date(2026, 6, 8))
 
 
 def test_prefetch_required_data_inprocess_reuses_gateways(tmp_path: Path, monkeypatch) -> None:
@@ -340,6 +354,65 @@ def test_inprocess_prefetch_passes_strategy_bounds_to_fetch_symbol(tmp_path: Pat
     assert captured["include_realized_volatility"] is False
 
 
+def test_inprocess_prefetch_uses_spot_aware_plan_for_combo_yield_call_floor(tmp_path: Path, monkeypatch) -> None:
+    _patch_0700_plan_discovery(monkeypatch)
+    watchlist = [
+        {
+            "symbol": "0700.HK",
+            "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 8},
+            "sell_put": {
+                "enabled": True,
+                "strategy": "return_first",
+                "min_dte": 20,
+                "max_dte": 90,
+                "max_strike": 450,
+            },
+            "sell_call": {"enabled": True, "min_dte": 20, "max_dte": 90, "min_strike": 550},
+            "combo_yield": {"enabled": True},
+        }
+    ]
+    captured: dict[str, object] = {}
+
+    def fake_build_ready_futu_gateway(**kwargs):
+        return _Gateway()
+
+    def fake_fetch_symbol(symbol: str, **kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {
+            "symbol": symbol,
+            "rows": [
+                {"symbol": symbol, "option_type": "put", "expiration": "2026-06-29", "dte": 21, "strike": 360},
+                {"symbol": symbol, "option_type": "put", "expiration": "2026-06-29", "dte": 21, "strike": 450},
+                {"symbol": symbol, "option_type": "call", "expiration": "2026-06-29", "dte": 21, "strike": 450},
+                {"symbol": symbol, "option_type": "call", "expiration": "2026-06-29", "dte": 21, "strike": 500},
+                {"symbol": symbol, "option_type": "call", "expiration": "2026-06-29", "dte": 21, "strike": 670},
+            ],
+            "meta": {"status": "ok", "error": "", "source": "opend"},
+        }
+
+    monkeypatch.setattr("src.infrastructure.futu_gateway.build_ready_futu_gateway", fake_build_ready_futu_gateway)
+    monkeypatch.setattr(mod, "resolve_watchlist_config", lambda cfg: watchlist)
+    monkeypatch.setattr(mod, "fetch_symbol", fake_fetch_symbol)
+    monkeypatch.setattr(mod, "save_outputs", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mod, "adapt_opend_tool_payload", lambda payload: {"source_name": "opend", "payload": payload})
+    monkeypatch.setattr(mod.state_repo, "append_source_snapshot_event", lambda *args, **kwargs: None)
+
+    result = mod.prefetch_required_data(
+        vpy=tmp_path / "python",
+        base=tmp_path,
+        cfg={"runtime": {"prefetch": {"execution_mode": "inprocess", "max_workers": 1}}},
+        shared_required=tmp_path / "shared_required",
+    )
+
+    assert result["fetched_ok"] == 1
+    side_strike_windows = captured["side_strike_windows"]
+    assert isinstance(side_strike_windows, dict)
+    assert side_strike_windows["call"]["min_strike"] == 444.8
+    assert side_strike_windows["call"]["min_strike"] < 500
+    assert side_strike_windows["call"]["max_strike"] > 670
+    assert captured["spot_override"] == 444.8
+
+
 def test_prefetch_dedupes_same_run_symbol_and_merges_strategy_bounds(tmp_path: Path, monkeypatch) -> None:
     watchlist = [
         {
@@ -416,6 +489,120 @@ def test_prefetch_dedupes_same_run_symbol_and_merges_strategy_bounds(tmp_path: P
     assert result["fetch_metrics"]["expiration_opend_calls"] == 1
     assert result["run_fetch_summary"]["opend_calls"]["total"] == 4
     assert result["run_fetch_summary"]["bottleneck"] == "option_chain_rate_gate"
+
+
+def test_prefetch_shared_required_data_candidate_universe_stable_for_same_account_configs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_0700_plan_discovery(monkeypatch)
+    shared_required = tmp_path / "shared_required"
+    watchlist = [
+        {
+            "symbol": "0700.HK",
+            "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 8},
+            "sell_put": {
+                "enabled": True,
+                "strategy": "return_first",
+                "min_dte": 20,
+                "max_dte": 90,
+                "max_strike": 450,
+            },
+            "sell_call": {"enabled": True, "min_dte": 20, "max_dte": 90, "min_strike": 550},
+            "combo_yield": {"enabled": True},
+        }
+    ]
+    fetch_calls: list[str] = []
+
+    def fake_build_ready_futu_gateway(**kwargs):
+        return _Gateway()
+
+    def fake_fetch_symbol(symbol: str, **kwargs: object) -> dict[str, object]:
+        fetch_calls.append(symbol)
+        return {
+            "symbol": symbol,
+            "expiration_count": 1,
+            "expirations": ["2026-06-29"],
+            "rows": [
+                {
+                    "symbol": symbol,
+                    "option_type": "put",
+                    "expiration": "2026-06-29",
+                    "dte": 21,
+                    "contract_symbol": "HK.TCH260629P360000",
+                    "strike": 360,
+                    "spot": 444.8,
+                },
+                {
+                    "symbol": symbol,
+                    "option_type": "put",
+                    "expiration": "2026-06-29",
+                    "dte": 21,
+                    "contract_symbol": "HK.TCH260629P450000",
+                    "strike": 450,
+                    "spot": 444.8,
+                },
+                {
+                    "symbol": symbol,
+                    "option_type": "call",
+                    "expiration": "2026-06-29",
+                    "dte": 21,
+                    "contract_symbol": "HK.TCH260629C450000",
+                    "strike": 450,
+                    "spot": 444.8,
+                },
+                {
+                    "symbol": symbol,
+                    "option_type": "call",
+                    "expiration": "2026-06-29",
+                    "dte": 21,
+                    "contract_symbol": "HK.TCH260629C500000",
+                    "strike": 500,
+                    "spot": 444.8,
+                },
+                {
+                    "symbol": symbol,
+                    "option_type": "call",
+                    "expiration": "2026-06-29",
+                    "dte": 21,
+                    "contract_symbol": "HK.TCH260629C670000",
+                    "strike": 670,
+                    "spot": 444.8,
+                },
+            ],
+            "meta": {"status": "ok", "error": "", "source": "opend"},
+        }
+
+    monkeypatch.setattr("src.infrastructure.futu_gateway.build_ready_futu_gateway", fake_build_ready_futu_gateway)
+    monkeypatch.setattr(mod, "resolve_watchlist_config", lambda cfg: watchlist)
+    monkeypatch.setattr(mod, "fetch_symbol", fake_fetch_symbol)
+    monkeypatch.setattr(mod, "adapt_opend_tool_payload", lambda payload: {"source_name": "opend", "payload": payload})
+    monkeypatch.setattr(mod.state_repo, "append_source_snapshot_event", lambda *args, **kwargs: None)
+
+    first = mod.prefetch_required_data(
+        vpy=tmp_path / "python",
+        base=tmp_path,
+        cfg={"runtime": {"prefetch": {"execution_mode": "inprocess", "max_workers": 1}}},
+        shared_required=shared_required,
+    )
+    import pandas as pd
+
+    parsed = shared_required / "parsed" / "0700.HK_required_data.csv"
+    first_universe = set(pd.read_csv(parsed)["contract_symbol"].dropna().astype(str).tolist())
+
+    second = mod.prefetch_required_data(
+        vpy=tmp_path / "python",
+        base=tmp_path,
+        cfg={"runtime": {"prefetch": {"execution_mode": "inprocess", "max_workers": 1}}},
+        shared_required=shared_required,
+    )
+    second_universe = set(pd.read_csv(parsed)["contract_symbol"].dropna().astype(str).tolist())
+
+    assert first["fetched_ok"] == 1
+    assert second["cached"] == 1
+    assert fetch_calls == ["0700.HK"]
+    assert first_universe == second_universe
+    assert "HK.TCH260629C500000" in second_universe
 
 
 def test_inprocess_prefetch_executes_budgeted_waves_with_safe_option_chain_limit(tmp_path: Path, monkeypatch) -> None:

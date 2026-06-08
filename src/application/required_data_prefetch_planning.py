@@ -218,6 +218,7 @@ def merge_prefetch_symbol_configs(symbol_cfgs: list[dict[str, Any]]) -> dict[str
     merged["_prefetch_strategy_kwargs"] = _merge_strategy_prefetch_kwargs(
         [strategy_prefetch_kwargs(item, enabled=True) for item in items]
     )
+    merged["_prefetch_source_symbol_cfgs"] = [deepcopy(item) for item in items]
     merged["_prefetch_requested_count"] = len(items)
     return merged
 
