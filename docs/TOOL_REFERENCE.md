@@ -719,7 +719,9 @@ om-agent run --tool openclaw_readiness --input-json '{"profile_path":"openclaw.p
 
 ---
 
-## 5.17 Research / Shadow Replay
+## 5.17 Research / Shadow Replay / Strategy Lab
+
+产品分层：Research 是证据基础设施，Shadow Replay 是反事实复盘引擎，Strategy Lab 是策略进化产品入口。Strategy Lab 会按 strategy domain adapter 区分 Sell Put、Covered Call 和 Combo Yield；统一的是证据和实验 workflow，分开的是决策单元、目标函数、可调参数、硬约束和 proposal target。Combo Yield 必须按 group-level decision instance 评估，不能被拆成独立单腿参数实验。当前 Strategy Lab 已提供 update、readiness、experiment、proposal 和 llm-context 入口；`update` 默认 dry-run，显式 `--build-dataset --write` 时从 latest scanned run 构建本地 replay dataset，显式 `--write` 时才执行本地 mark / settle data-plan。完整模块设计和安全边界见 [STRATEGY_LAB_DESIGN.md](STRATEGY_LAB_DESIGN.md)。
 
 用途：
 - 收集线上运行证据，生成给 MacBook Codex 阅读的 redacted bundle / handoff
@@ -728,6 +730,12 @@ om-agent run --tool openclaw_readiness --input-json '{"profile_path":"openclaw.p
 - 可选嵌入 `healthcheck` snapshot，但不取代 `healthcheck` 的 readiness 职责
 - Shadow Replay 基于已有候选、reject、trace、mark、outcome 和归档 run 证据做离线复盘
 - `review_readiness` 判断是否具备人工策略复盘条件；`candidate-impact` / `candidate-impact-report` 比较显式阈值 variants 对候选集合的影响
+- Strategy Lab update 默认 dry-run 汇总 Shadow Replay status / data-plan；显式 `--build-dataset --write` 才从 latest scanned run 构建本地 replay dataset，显式 `--write` 才执行本地 collect / settle 维护动作
+- Strategy Lab readiness 把 replay dataset 归一成 `decision_instance`，按 Sell Put / Covered Call / Combo Yield 输出 domain readiness 和 blocker
+- Strategy Lab experiment 自动生成 Sell Put / Covered Call 受控 hypotheses，复用 candidate-impact evaluator，并输出 observed-universe scorecard；Combo Yield 输出独立的 group-level observed-universe experiment
+- Strategy Lab proposal 从 experiment artifact 生成 advisory-only proposal 和 Markdown；Sell Put / Covered Call 只有 `closed_replay` gate 通过才输出 dry-run patch，Combo Yield 只输出 group advisory，不应用生产配置
+- Strategy Lab llm-context 从 experiment / proposal artifact 生成脱敏本地 LLM 上下文，不调用在线 AI，不应用 patch
+- Combo Yield 第一版输出 group evidence readiness、组合级 variants 和 group scorecard，不输出单腿化参数 patch
 - 默认不写文件、不调用在线 AI、不发送通知
 - 这是独立离线侧线，不是 `om-agent` manifest tool
 
@@ -739,6 +747,14 @@ om research collect --config-key us --scope candidate --run-id 20260515T182459Z-
 om research shadow-replay status --min-sample 30
 om research shadow-replay candidate-impact-report --params params.json --market us --start-date 2026-06-03 --account lx --min-sample 30
 om research shadow-replay analyze --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --min-sample 30
+om research strategy-lab update --latest
+om research strategy-lab update --latest --build-dataset --write
+om research strategy-lab readiness --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --min-sample 30
+om research strategy-lab readiness --market us --account lx --start-date 2026-06-03 --end-date 2026-06-03 --min-sample 30
+om research strategy-lab experiment --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --min-sample 30 --auto
+om research strategy-lab experiment --market us --account lx --start-date 2026-06-03 --end-date 2026-06-03 --min-sample 30 --auto
+om research strategy-lab proposal --experiment output_shared/research/strategy_lab/experiment.json --markdown-output output_shared/research/strategy_lab/proposal.md
+om research strategy-lab llm-context --experiment output_shared/research/strategy_lab/experiment.json --proposal output_shared/research/strategy_lab/proposal.json --output output_shared/research/strategy_lab/llm_context.json
 ```
 
 带线上调度证据：
@@ -769,6 +785,7 @@ broker-facing data。
 output_shared/research/
 output_shared/state/current/research.current.json
 output_shared/research/shadow_replay/
+output_shared/research/strategy_lab/
 ```
 
 注意：
@@ -778,6 +795,13 @@ output_shared/research/shadow_replay/
 - `--shadow-replay-min-sample` 只影响 Research bundle 里的 `candidate_evidence.shadow_replay` 样本充足性判断，不会改生产策略参数。
 - 旧 `parameter-backtest` / `parameter-report` 只作为兼容入口；新文档和人工操作优先使用 `candidate-impact` / `candidate-impact-report`。
 - Candidate-impact 报告只能说明 observed run universe 内候选集合变化，不能自动生成最优参数，也不能修改 runtime config、交易状态或通知。
+- `strategy-lab update` 默认 dry-run；显式 `--build-dataset --write` 时只从 latest scanned run 构建本地 replay dataset，显式 `--write` 时只执行已有 Shadow Replay `collect_marks` / `settle` data-plan 和本地 receipt，不会执行 analyze、生成参数建议或修改生产状态。
+- `strategy-lab readiness` 支持已有 dataset 输入，也支持通过 `--start-date` / `--end-date` / `--market` / `--account` 聚合 scanned-run window；显式 `--output` 只写本地 JSON artifact，不会采样 mark、settle outcome 或生成生产参数 patch。
+- `strategy-lab experiment` 支持已有 dataset 输入，也支持通过 `--start-date` / `--end-date` / `--market` / `--account` 聚合 scanned-run window；它生成的 scorecard 只用于人工复盘，不是生产参数建议；Combo Yield 结果位于 `group_experiments.combo_yield`。
+- `strategy-lab proposal` 接收 experiment JSON 文件或包含 `experiment.json` 的目录；显式 `--output` / `--markdown-output` 只写本地 artifact，不会应用 patch。`filter_only` / `path_only` 只返回 evidence gap；Combo Yield 结果通过 `group_advisory` 表达，不生成单腿 patch。
+- `strategy-lab llm-context` 接收 experiment JSON、proposal JSON 或对应目录；显式 `--output` 只写本地脱敏 JSON，不会调用在线 AI，不会应用 dry-run patch。
+- Sell Put / Covered Call 可以在第一阶段复用单腿 candidate-impact；Covered Call 缺少持仓覆盖或 cost-basis 证据时不能输出生产参数建议。
+- Combo Yield 必须有 `strategy_group_id`、`leg_role`、同组 legs 和组合 metrics 才能进入组合 optimizer；证据不足时只输出 blocker 和下一步数据需求。
 
 ---
 

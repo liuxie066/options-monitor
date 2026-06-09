@@ -43,22 +43,39 @@ export `TOOLS`. All Ops Copilot tools execute through `AgentTool.call(ctx,
 payload)`; the legacy `src.application.agent_tool_handlers` switchboard has
 been removed.
 
-## Research And Shadow Replay
+## Research, Shadow Replay, And Strategy Lab
 
 Research and Shadow Replay are an independent offline evidence/replay module,
-not part of Ops Copilot core and not a remote chat surface.
+not part of Ops Copilot core and not a remote chat surface. Strategy Lab is
+the strategy-evolution product surface above that offline module; its current
+implemented surfaces are evidence update, read-only decision-instance
+readiness, experiments, advisory proposals, and redacted local LLM context.
 
 ```text
 ./om research ...
 -> src.interfaces.cli.research
 -> src.application.research
 -> src.application.shadow_replay
+-> src.application.strategy_lab
 ```
 
 `src.application.research` owns redacted evidence collection, deterministic
 checks, handoff rendering, remote archive mirroring, and local research bundle
 writes. `src.application.shadow_replay` owns offline dataset construction,
 mark/outcome lifecycle, status, analyze, and candidate-impact report logic.
+`src.application.strategy_lab` currently owns dataset evidence loading,
+decision-instance normalization, domain adapters, controlled hypothesis
+generation, Strategy Lab readiness, experiment workflow, and observed-universe
+scorecards while reusing Shadow Replay for counterfactual evaluation. It also
+owns advisory proposal generation and redacted LLM context generation.
+Its update facade wraps Shadow Replay status / data-plan so dataset mark and
+settle maintenance has one Strategy Lab entry point without adding a new write
+path.
+The shared core owns the workflow only. Sell Put, Covered Call, and Combo
+Yield keep separate decision units, objective metrics, tunable parameters,
+hard constraints, and proposal targets inside strategy-domain adapters.
+Combo Yield is group-level only and must not be optimized through the
+single-leg candidate-impact parameter model.
 
 This side lane may read runtime artifacts, candidate/reject/trace evidence,
 required-data snapshots, and archived run outputs. It must not mutate runtime
@@ -66,6 +83,14 @@ config, notification behavior, Feishu/ledger/trade state, broker-facing data,
 or live tick scheduling. Writes are limited to local research/replay artifacts
 behind explicit `./om research ... --write` or `--write-outputs --confirm`
 flags.
+
+Product boundary:
+
+```text
+Research = evidence infrastructure
+Shadow Replay = counterfactual replay engine
+Strategy Lab = strategy evolution product surface
+```
 
 ## Inbound Flow
 

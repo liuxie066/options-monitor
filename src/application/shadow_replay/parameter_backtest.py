@@ -124,6 +124,72 @@ def run_shadow_replay_parameter_backtest(
     )
 
 
+def load_shadow_replay_observed_evidence(
+    *,
+    repo_root: str | Path,
+    dataset: str | Path | None = None,
+    runs_root: str | Path | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    accounts: list[str] | tuple[str, ...] | None = None,
+    market: str | None = None,
+) -> dict[str, Any]:
+    """Load observed replay evidence from a dataset or scanned-run window."""
+
+    base = Path(repo_root).expanduser().resolve()
+    account_filter = _account_filter(accounts)
+    market_filter = text(market).lower() or None
+    if dataset is not None and str(dataset).strip():
+        evidence = _load_dataset_evidence(dataset, base=base)
+        coverage = _dataset_coverage(evidence=evidence, dataset=dataset)
+    else:
+        start = _parse_date_arg(start_date, label="start_date") if start_date else None
+        end = _parse_date_arg(end_date, label="end_date") if end_date else None
+        if start and end and start > end:
+            raise ValueError("start_date cannot be after end_date")
+        evidence, coverage = _load_run_window_evidence(
+            base=base,
+            runs_root=runs_root,
+            start=start,
+            end=end,
+        )
+    candidate_snapshots = _filter_candidates(
+        evidence["candidate_snapshots"],
+        accounts=account_filter,
+        market=market_filter,
+    )
+    filter_decisions = _filter_candidates(
+        evidence["filter_decisions"],
+        accounts=account_filter,
+        market=market_filter,
+    )
+    mark_snapshots = _filter_replay_observations(
+        evidence["mark_snapshots"],
+        scoped_candidates=candidate_snapshots,
+        accounts=account_filter,
+        market=market_filter,
+    )
+    outcome_facts = _filter_replay_observations(
+        evidence["outcome_facts"],
+        scoped_candidates=candidate_snapshots,
+        accounts=account_filter,
+        market=market_filter,
+    )
+    return {
+        "candidate_snapshots": candidate_snapshots,
+        "filter_decisions": filter_decisions,
+        "mark_snapshots": mark_snapshots,
+        "outcome_facts": outcome_facts,
+        "source": evidence.get("source") or {},
+        "coverage": coverage,
+        "filters": {
+            "accounts": sorted(account_filter) if account_filter else [],
+            "market": market_filter,
+            "market_filter_applied": bool(market_filter),
+        },
+    }
+
+
 def _run_shadow_replay_candidate_impact(
     *,
     repo_root: str | Path,
@@ -150,31 +216,18 @@ def _run_shadow_replay_candidate_impact(
     if format_norm not in {"json", "markdown"}:
         raise ValueError("output_format must be json or markdown")
 
-    if dataset is not None and str(dataset).strip():
-        evidence = _load_dataset_evidence(dataset, base=base)
-        coverage = _dataset_coverage(evidence=evidence, dataset=dataset)
-    else:
-        start = _parse_date_arg(start_date, label="start_date") if start_date else None
-        end = _parse_date_arg(end_date, label="end_date") if end_date else None
-        if start and end and start > end:
-            raise ValueError("start_date cannot be after end_date")
-        evidence, coverage = _load_run_window_evidence(
-            base=base,
-            runs_root=runs_root,
-            start=start,
-            end=end,
-        )
-
-    candidate_snapshots = _filter_candidates(
-        evidence["candidate_snapshots"],
-        accounts=account_filter,
-        market=market_filter,
+    evidence = load_shadow_replay_observed_evidence(
+        repo_root=base,
+        dataset=dataset,
+        runs_root=runs_root,
+        start_date=start_date,
+        end_date=end_date,
+        accounts=accounts,
+        market=market,
     )
-    filter_decisions = _filter_candidates(
-        evidence["filter_decisions"],
-        accounts=account_filter,
-        market=market_filter,
-    )
+    coverage = evidence["coverage"]
+    candidate_snapshots = evidence["candidate_snapshots"]
+    filter_decisions = evidence["filter_decisions"]
     mark_snapshots = evidence["mark_snapshots"]
     outcome_facts = evidence["outcome_facts"]
     scoped_candidates = [
@@ -695,6 +748,32 @@ def _filter_candidates(
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for row in rows:
+        account = text(row.get("account")).lower()
+        if accounts and account and account not in accounts:
+            continue
+        if market and not _market_matches(row, market):
+            continue
+        out.append(row)
+    return out
+
+
+def _filter_replay_observations(
+    rows: list[dict[str, Any]],
+    *,
+    scoped_candidates: list[dict[str, Any]],
+    accounts: set[str],
+    market: str | None,
+) -> list[dict[str, Any]]:
+    if not accounts and not market:
+        return list(rows)
+    scoped_keys = {instrument_key(row) for row in scoped_candidates if instrument_key(row)}
+    if not scoped_keys:
+        return []
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        key = instrument_key(row)
+        if not key or key not in scoped_keys:
+            continue
         account = text(row.get("account")).lower()
         if accounts and account and account not in accounts:
             continue
