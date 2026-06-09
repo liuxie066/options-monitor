@@ -102,17 +102,34 @@ Use the same launcher contract as Claude Code. For first-pass troubleshooting, p
 ./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
 ```
 
-For MacBook-side Codex diagnosis of online quality or candidate-scan behavior,
-use the independent Research / Shadow Replay side lane instead of `om-agent`
-and instead of calling an online AI provider:
+For MacBook-side Codex diagnosis of online quality, candidate-scan behavior,
+or Strategy Lab analysis, use the independent Research / Shadow Replay side
+lane instead of `om-agent` and instead of calling an online AI provider:
 
 ```bash
 ./om research collect --config-key us --scope full --output both --no-write-outputs
 ./om research shadow-replay status --min-sample 30
 ./om research shadow-replay candidate-impact-report --params <params.json> --market us --start-date <YYYY-MM-DD> --account lx --min-sample 30
+./om research strategy-lab update --latest
+./om research strategy-lab update --latest --build-dataset --write
+./om research strategy-lab readiness --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --min-sample 30
+./om research strategy-lab readiness --market us --account lx --start-date <YYYY-MM-DD> --end-date <YYYY-MM-DD> --min-sample 30
+./om research strategy-lab experiment --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --min-sample 30 --auto
+./om research strategy-lab experiment --market us --account lx --start-date <YYYY-MM-DD> --end-date <YYYY-MM-DD> --min-sample 30 --auto
+./om research strategy-lab proposal --experiment output_shared/research/strategy_lab/experiment.json --markdown-output output_shared/research/strategy_lab/proposal.md
+./om research strategy-lab llm-context --experiment output_shared/research/strategy_lab/experiment.json --proposal output_shared/research/strategy_lab/proposal.json --output output_shared/research/strategy_lab/llm_context.json
 ```
 
-Research / Shadow Replay remains an offline evidence side lane. Use
+Research / Shadow Replay remains an offline evidence side lane. Strategy Lab is
+the product layer above it for evidence update, decision-instance readiness,
+hypotheses, scorecards, advisory dry-run proposals, and redacted local LLM
+context. Readiness and experiments can read an existing dataset or aggregate a
+scanned-run window by date, market, and account. Its `update` command is dry-run by default; `--build-dataset --write`
+only builds a local replay dataset from the latest scanned run, and `--write`
+only wraps local Shadow Replay collect/settle data-plan. It separates Sell
+Put, Covered Call, and Combo Yield through strategy-domain adapters; Combo
+Yield must remain group-level and must not use the single-leg parameter model.
+Use
 `review_readiness` to decide whether evidence is ready for manual strategy
 review, and use `candidate-impact` / `candidate-impact-report` to compare how
 explicit threshold variants would change the observed candidate set. The older

@@ -214,34 +214,44 @@ Feishu / Inbound
 
 ### 5. 研究与复盘
 
-定义：读取历史运行证据，评估策略质量、参数假设和 replay readiness。
+定义：读取历史运行证据，形成可复盘 dataset，并在证据足够时评估策略质量、参数假设和策略进化建议。
 
 包含模块：
 
 - Research Archive
 - Shadow Replay
-- Strategy Quality Analysis
-- Parameter Advice Gate
+- Strategy Lab
+- Strategy Quality / Readiness Gates
 
 证据链路：
 
 ```text
 output_runs / required_data / candidate trace / reject logs / marks / outcomes
-  -> dataset
-  -> analysis
-  -> advisory evidence
+  -> Research archive / evidence bundle
+  -> Shadow Replay dataset
+  -> readiness / candidate-impact
+  -> Strategy Lab readiness / experiment / scorecard / proposal
+  -> human review / shadow rollout / manual promotion
 ```
 
 边界：
 
 - 研究与复盘只产出建议和证据，不直接修改生产配置。
-- 参数假设讨论必须基于 replay / trace / outcome 证据，而不是只看最终候选 CSV；Shadow Replay 只提供候选影响和复盘证据，不直接产出最优参数。
+- 参数假设讨论必须基于 replay / trace / outcome 证据，而不是只看最终候选 CSV。
+- Research 是证据基础设施；Shadow Replay 是反事实复盘引擎；Strategy Lab 是策略进化产品入口。
+- Shadow Replay 只提供候选影响和复盘证据；Strategy Lab 当前提供 evidence update facade、decision-instance readiness、hypotheses、candidate-impact experiment、Combo Yield group experiment、轻量 scorecard、advisory-only dry-run proposal 和脱敏 LLM context。
+- Strategy Lab 以策略域适配器组织 Sell Put、Covered Call 和 Combo Yield；实验对象是 `decision_instance`，不是单一 candidate row。
+- Strategy Lab 统一证据、实验、scorecard 和 proposal workflow；每个策略域独立定义决策单元、目标函数、参数空间、硬约束、scorecard 指标和 dry-run patch target。
+- Sell Put / Covered Call 第一阶段可复用单腿 candidate-impact；Combo Yield 必须按 group-level payoff 和 legs 评估，第一阶段输出 observed-universe group optimizer，不输出单腿化参数 patch。
+- Strategy Lab 不能声称绝对最优，只能在当前 observed universe、目标函数、安全约束和样本下给出评分最高的候选建议。
 - 在线生产监控和离线策略研究保持分离。
 
 主要实现位置：
 
 - `src/application/research/`
 - `src/application/shadow_replay/`
+- `src/application/strategy_lab/`（update / readiness / hypotheses / experiment / proposal / llm-context 已落地；`update --build-dataset --write` 可从 latest scanned run 构建本地 replay dataset；readiness / experiment 支持 dataset 或 date / market / account run-window 输入）
+- `docs/STRATEGY_LAB_DESIGN.md`
 - `docs/SHADOW_REPLAY_RUNBOOK.md`
 - `docs/OPPORTUNITY_QUALITY.md`
 

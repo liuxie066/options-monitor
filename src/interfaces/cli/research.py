@@ -155,6 +155,101 @@ def add_research_commands(subparsers: Any) -> argparse.ArgumentParser:
     archive_prune.add_argument("--keep-count", type=int, default=30)
     archive_prune.add_argument("--no-logs", action="store_true")
     archive_prune.add_argument("--confirm", action="store_true")
+    research_strategy_lab = research_sub.add_parser(
+        "strategy-lab",
+        help="run offline Strategy Lab readiness and experiment workflows",
+    )
+    research_strategy_lab_sub = research_strategy_lab.add_subparsers(dest="strategy_lab_command", required=True)
+    strategy_lab_update = research_strategy_lab_sub.add_parser(
+        "update",
+        help="dry-run or execute Strategy Lab evidence lifecycle maintenance",
+    )
+    strategy_lab_update.add_argument("--latest", action="store_true")
+    strategy_lab_update.add_argument(
+        "--build-dataset",
+        action="store_true",
+        help="build a local replay dataset from the latest scanned run before running the data plan; writes only with --write",
+    )
+    strategy_lab_update.add_argument(
+        "--runs-root",
+        default=None,
+        help="runs root for --build-dataset; defaults to profile/runtime output_runs",
+    )
+    strategy_lab_update.add_argument("--dataset-root", default=None)
+    strategy_lab_update.add_argument("--dataset-id", default=None)
+    strategy_lab_update.add_argument("--profile-path", default=None)
+    strategy_lab_update.add_argument("--runtime-root", default=None)
+    strategy_lab_update.add_argument("--required-data-root", default=None)
+    strategy_lab_update.add_argument("--min-sample", type=int, default=30)
+    strategy_lab_update.add_argument("--min-mark-points", type=int, default=2)
+    strategy_lab_update.add_argument("--mark-stale-hours", type=int, default=24)
+    strategy_lab_update.add_argument(
+        "--action",
+        dest="actions",
+        action="append",
+        choices=("collect_marks", "settle"),
+        default=None,
+        help="enabled data maintenance action; repeatable; default collect_marks + settle",
+    )
+    strategy_lab_update.add_argument("--max-datasets", type=int, default=None)
+    strategy_lab_update.add_argument("--source", default="local", choices=("local", "opend"))
+    strategy_lab_update.add_argument("--write", action="store_true")
+    strategy_lab_update.add_argument("--output", default=None)
+    strategy_lab_update.add_argument("--receipt-output", default=None)
+    strategy_lab_update.add_argument("--receipt-dir", default=None)
+    strategy_lab_update.add_argument("--settle-after-collect", action="store_true")
+    strategy_lab_update.add_argument("--opend-host", default="127.0.0.1")
+    strategy_lab_update.add_argument("--opend-port", type=int, default=11111)
+    strategy_lab_update.add_argument("--limit-expirations", type=int, default=8)
+    strategy_lab_update.add_argument("--max-symbols", type=int, default=None)
+    strategy_lab_update.add_argument("--no-chain-cache", action="store_true")
+    strategy_lab_update.add_argument("--chain-cache-force-refresh", action="store_true")
+    strategy_lab_update.add_argument("--include-realized-volatility", action="store_true")
+    strategy_lab_readiness = research_strategy_lab_sub.add_parser(
+        "readiness",
+        help="analyze Strategy Lab decision-instance readiness for a replay dataset",
+    )
+    strategy_lab_readiness.add_argument("--dataset", default=None)
+    strategy_lab_readiness.add_argument("--runs-root", default=None)
+    strategy_lab_readiness.add_argument("--profile-path", default=None)
+    strategy_lab_readiness.add_argument("--runtime-root", default=None)
+    strategy_lab_readiness.add_argument("--start-date", default=None)
+    strategy_lab_readiness.add_argument("--end-date", default=None)
+    strategy_lab_readiness.add_argument("--account", dest="accounts", action="append", default=None)
+    strategy_lab_readiness.add_argument("--market", choices=("hk", "us"), default=None)
+    strategy_lab_readiness.add_argument("--min-sample", type=int, default=30)
+    strategy_lab_readiness.add_argument("--output", default=None)
+    strategy_lab_experiment = research_strategy_lab_sub.add_parser(
+        "experiment",
+        help="run a read-only Strategy Lab hypothesis and candidate-impact experiment",
+    )
+    strategy_lab_experiment.add_argument("--dataset", default=None)
+    strategy_lab_experiment.add_argument("--runs-root", default=None)
+    strategy_lab_experiment.add_argument("--profile-path", default=None)
+    strategy_lab_experiment.add_argument("--runtime-root", default=None)
+    strategy_lab_experiment.add_argument("--start-date", default=None)
+    strategy_lab_experiment.add_argument("--end-date", default=None)
+    strategy_lab_experiment.add_argument("--account", dest="accounts", action="append", default=None)
+    strategy_lab_experiment.add_argument("--market", choices=("hk", "us"), default=None)
+    strategy_lab_experiment.add_argument("--min-sample", type=int, default=30)
+    strategy_lab_experiment.add_argument("--auto", action="store_true")
+    strategy_lab_experiment.add_argument("--output", default=None)
+    strategy_lab_proposal = research_strategy_lab_sub.add_parser(
+        "proposal",
+        help="build an advisory-only Strategy Lab dry-run proposal from an experiment",
+    )
+    strategy_lab_proposal.add_argument("--experiment", required=True)
+    strategy_lab_proposal.add_argument("--output", default=None)
+    strategy_lab_proposal.add_argument("--markdown-output", default=None)
+    strategy_lab_llm_context = research_strategy_lab_sub.add_parser(
+        "llm-context",
+        help="build redacted local LLM context from Strategy Lab artifacts without calling online AI",
+    )
+    strategy_lab_llm_context.add_argument("--experiment", default=None)
+    strategy_lab_llm_context.add_argument("--proposal", default=None)
+    strategy_lab_llm_context.add_argument("--output", default=None)
+    strategy_lab_llm_context.add_argument("--max-rows", type=int, default=8)
+    strategy_lab_llm_context.add_argument("--max-samples", type=int, default=5)
     research_shadow = research_sub.add_parser("shadow-replay", help="build or analyze offline shadow replay datasets")
     research_shadow_sub = research_shadow.add_subparsers(dest="shadow_replay_command", required=True)
     shadow_build = research_shadow_sub.add_parser(
@@ -559,6 +654,19 @@ def _shadow_replay_backtest_root(
     return (base / "output_shared" / "research" / "shadow_replay" / "backtests").resolve()
 
 
+def _has_strategy_lab_input_scope(args: argparse.Namespace) -> bool:
+    return any(
+        (
+            bool(str(getattr(args, "dataset", "") or "").strip()),
+            bool(str(getattr(args, "runs_root", "") or "").strip()),
+            bool(str(getattr(args, "start_date", "") or "").strip()),
+            bool(str(getattr(args, "end_date", "") or "").strip()),
+            bool(getattr(args, "accounts", None)),
+            bool(str(getattr(args, "market", "") or "").strip()),
+        )
+    )
+
+
 def _parameter_report_id(args: argparse.Namespace) -> str:
     raw = str(getattr(args, "report_id", "") or "").strip()
     if raw:
@@ -696,6 +804,139 @@ def handle_research_command(
             )
             return build_response(tool_name="research.archive.prune-remote", ok=bool(data.get("ok")), data=data)
         raise AgentToolError(code="INPUT_ERROR", message=f"unsupported research archive command: {args.archive_command}")
+
+    if args.research_command == "strategy-lab":
+        from src.application.strategy_lab import (
+            analyze_strategy_lab_readiness,
+            build_strategy_lab_llm_context,
+            build_strategy_lab_proposal,
+            run_strategy_lab_experiment,
+            run_strategy_lab_update,
+        )
+
+        if args.strategy_lab_command == "update":
+            if not bool(args.write) and (args.receipt_output or args.receipt_dir):
+                raise AgentToolError(
+                    code="INPUT_ERROR",
+                    message="--receipt-output and --receipt-dir require --write for strategy-lab update",
+                )
+            base = repo_base_fn()
+            profile = _shadow_replay_profile(args, base=base)
+            runtime_root = _shadow_replay_runtime_root(args, profile=profile, base=base)
+            dataset_root = _shadow_replay_dataset_root(args.dataset_root, runtime_root=runtime_root, base=base)
+            runs_root = _shadow_replay_runs_root(args, profile=profile, runtime_root=runtime_root, base=base)
+            required_data_root = _shadow_replay_required_data_root(
+                args.required_data_root,
+                runtime_root=runtime_root,
+                base=base,
+            )
+            receipt_dir = (
+                _shadow_replay_receipt_dir(args.receipt_dir, runtime_root=runtime_root, base=base)
+                if bool(args.write)
+                else None
+            )
+            try:
+                data = run_strategy_lab_update(
+                    repo_root=base,
+                    dataset_root=dataset_root,
+                    required_data_root=required_data_root,
+                    source=args.source,
+                    min_sample=args.min_sample,
+                    min_mark_points=args.min_mark_points,
+                    mark_stale_hours=args.mark_stale_hours,
+                    actions=args.actions,
+                    latest=bool(args.latest),
+                    max_datasets=args.max_datasets,
+                    build_dataset=bool(args.build_dataset),
+                    runs_root=runs_root,
+                    dataset_id=args.dataset_id,
+                    write=bool(args.write),
+                    output=args.output,
+                    receipt_output=args.receipt_output,
+                    receipt_dir=receipt_dir,
+                    settle_after_collect=bool(args.settle_after_collect),
+                    opend_host=args.opend_host,
+                    opend_port=args.opend_port,
+                    limit_expirations=args.limit_expirations,
+                    chain_cache=not bool(args.no_chain_cache),
+                    chain_cache_force_refresh=bool(args.chain_cache_force_refresh),
+                    include_realized_volatility=bool(args.include_realized_volatility),
+                    max_symbols=args.max_symbols,
+                )
+            except ValueError as exc:
+                raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
+            return build_response(tool_name="research.strategy-lab.update", ok=True, data=data)
+        if args.strategy_lab_command == "readiness":
+            if not _has_strategy_lab_input_scope(args):
+                raise AgentToolError(
+                    code="INPUT_ERROR",
+                    message="strategy-lab readiness requires --dataset or a run-window selector",
+                )
+            base = repo_base_fn()
+            profile = _shadow_replay_profile(args, base=base)
+            runtime_root = _shadow_replay_runtime_root(args, profile=profile, base=base)
+            runs_root = _shadow_replay_runs_root(args, profile=profile, runtime_root=runtime_root, base=base)
+            try:
+                data = analyze_strategy_lab_readiness(
+                    repo_root=base,
+                    dataset=args.dataset,
+                    runs_root=runs_root,
+                    start_date=args.start_date,
+                    end_date=args.end_date or args.start_date,
+                    accounts=args.accounts,
+                    market=args.market,
+                    min_sample=args.min_sample,
+                    output=args.output,
+                )
+            except ValueError as exc:
+                raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
+            return build_response(tool_name="research.strategy-lab.readiness", ok=True, data=data)
+        if args.strategy_lab_command == "experiment":
+            if not _has_strategy_lab_input_scope(args):
+                raise AgentToolError(
+                    code="INPUT_ERROR",
+                    message="strategy-lab experiment requires --dataset or a run-window selector",
+                )
+            base = repo_base_fn()
+            profile = _shadow_replay_profile(args, base=base)
+            runtime_root = _shadow_replay_runtime_root(args, profile=profile, base=base)
+            runs_root = _shadow_replay_runs_root(args, profile=profile, runtime_root=runtime_root, base=base)
+            try:
+                data = run_strategy_lab_experiment(
+                    repo_root=base,
+                    dataset=args.dataset,
+                    runs_root=runs_root,
+                    start_date=args.start_date,
+                    end_date=args.end_date or args.start_date,
+                    accounts=args.accounts,
+                    market=args.market,
+                    min_sample=args.min_sample,
+                    output=args.output,
+                    auto=bool(args.auto),
+                )
+            except ValueError as exc:
+                raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
+            return build_response(tool_name="research.strategy-lab.experiment", ok=True, data=data)
+        if args.strategy_lab_command == "proposal":
+            data = build_strategy_lab_proposal(
+                experiment=args.experiment,
+                output=args.output,
+                markdown_output=args.markdown_output,
+            )
+            return build_response(tool_name="research.strategy-lab.proposal", ok=True, data=data)
+        if args.strategy_lab_command == "llm-context":
+            data = build_strategy_lab_llm_context(
+                experiment=args.experiment,
+                proposal=args.proposal,
+                output=args.output,
+                max_rows=args.max_rows,
+                max_samples=args.max_samples,
+            )
+            return build_response(tool_name="research.strategy-lab.llm-context", ok=True, data=data)
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message=f"unsupported research strategy-lab command: {args.strategy_lab_command}",
+        )
 
     if args.research_command != "shadow-replay":
         raise AgentToolError(code="INPUT_ERROR", message=f"unsupported research command: {args.research_command}")

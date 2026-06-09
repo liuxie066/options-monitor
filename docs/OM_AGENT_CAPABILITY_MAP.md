@@ -122,7 +122,7 @@ Related OM surfaces outside Ops Copilot:
 | Surface | Why it is out of core | Default owner |
 |---|---|---|
 | `./om` human/operator CLI | Full operator workflows include live runs, report generation, release, and controlled writes | Human operator / Codex when explicitly requested |
-| Research / Shadow Replay | Offline evidence collection, replay readiness, and candidate-impact comparison | Research evidence workflow |
+| Research / Shadow Replay / Strategy Lab | Offline evidence collection, replay readiness, candidate-impact comparison, Strategy Lab update / decision readiness / experiment / advisory proposal / llm-context, and strategy-family adapters | Research evidence workflow |
 | Codex in repo | Development, tests, git, release, and code changes | Local development workflow |
 
 ## Risk Classes
@@ -175,6 +175,11 @@ Copilot should not use them as default evidence paths.
 | Local report/cache generation | `scan_opportunities`, `query_cash_headroom`, `get_portfolio_context`, `prepare_close_advice_inputs`, `close_advice`, `get_close_advice` | Refresh market-derived local reports or caches | Use only when the user explicitly asks to refresh/generate evidence; prefer existing read artifacts first |
 | Research evidence collection | `./om research collect` | Build redacted evidence bundle / handoff | Out of core; suggest only for offline quality analysis |
 | Shadow Replay / evidence review | `./om research shadow-replay ...` | Evaluate evidence readiness, replay outcomes, and candidate impact for explicit threshold variants | Out of core; belongs to offline Research, not operations copilot |
+| Strategy Lab update | `./om research strategy-lab update --latest`; `./om research strategy-lab update --latest --build-dataset --write` | Dry-run status/data-plan, explicitly build latest local replay dataset, or execute local replay mark/settle data-plan as Strategy Lab evidence lifecycle maintenance | Out of core; offline strategy lab surface; `--build-dataset --write` / `--write` still write only local replay artifacts |
+| Strategy Lab readiness | `./om research strategy-lab readiness --dataset <dataset>`; `./om research strategy-lab readiness --market us --account lx --start-date <date>` | Normalize replay dataset or scanned-run window evidence into Sell Put / Covered Call / Combo Yield decision-instance readiness | Out of core; read-only offline strategy lab surface |
+| Strategy Lab experiment | `./om research strategy-lab experiment --dataset <dataset> --auto`; `./om research strategy-lab experiment --market us --account lx --start-date <date> --auto` | Generate controlled Sell Put / Covered Call hypotheses from dataset or scanned-run window, reuse candidate-impact, run Combo Yield group experiment, and output observed-universe scorecards | Out of core; read-only offline strategy lab surface |
+| Strategy Lab proposal | `./om research strategy-lab proposal --experiment <experiment-json>` | Build advisory-only dry-run proposal artifacts from an experiment | Out of core; read-only offline strategy lab surface |
+| Strategy Lab LLM context | `./om research strategy-lab llm-context --experiment <experiment-json>` | Build redacted local context for LLM-assisted analysis without calling online AI or applying patches | Out of core; read-only offline strategy lab surface |
 | Test and release workflow | `pytest`, `scripts/release_check.py`, git commands, GitHub release workflow | Validate and publish code changes | Codex/operator-only; Ops Copilot may plan gates but does not own release execution |
 | Live tick / notifications | `om run tick`, `om run tick-cron`, notification delivery adapters | Run production scan/report/notification workflows | Operator-only; Ops Copilot should recommend read-only preflight first |
 | Service install/start/stop | `om service ...`, systemd/launchd commands | Modify or operate production services | Operator-only; require explicit human request and dry-run/preflight first |
@@ -199,11 +204,15 @@ Copilot should not use them as default evidence paths.
   read tools, selected local report/cache helpers, and selected local write
   helpers for compatibility. The Ops Copilot boundary in this document is
   narrower than the raw manifest.
-- Research and Shadow Replay form an independent offline evidence/replay module
-  under `./om research ...`. They are used to evaluate evidence readiness,
-  replay outcomes, and candidate impact for explicit threshold variants. They are
-  not Inbound core and are not
-  `om-agent` tools.
+- Research, Shadow Replay, and Strategy Lab form an independent
+  offline evidence/replay module under `./om research ...`. They are used to
+  evaluate evidence readiness, replay outcomes, candidate impact for explicit
+  threshold variants, evidence lifecycle data-plans, decision-instance
+  readiness, experiments, and advisory-only strategy-evolution proposals, plus
+  redacted local LLM context. Strategy Lab keeps Sell Put, Covered Call, and Combo Yield in separate
+  strategy-domain adapters; Combo Yield uses a group-level observed-universe
+  optimizer and never emits a single-leg production patch. They are not
+  Inbound core and are not `om-agent` tools.
 - `healthcheck.tools` is derived from the same `om-agent` registry used by
   `./om-agent spec`; Research/Shadow Replay is reported separately as a
   non-Ops-Copilot side lane.
