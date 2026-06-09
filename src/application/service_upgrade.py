@@ -1770,9 +1770,12 @@ def _compact_service_health(raw: Any, *, profile: dict[str, Any]) -> dict[str, A
 
 def _compact_upgrade_status(status: dict[str, Any]) -> dict[str, Any]:
     if not status:
-        return {"available": False}
+        return {"available": False, "has_status_record": False, "last_status": None}
     return {
+        # Legacy field: this means upgrade_status.json exists, not that a newer release is available.
         "available": True,
+        "has_status_record": True,
+        "last_status": status.get("status"),
         "ok": bool(status.get("ok")),
         "status": status.get("status"),
         "current_version": status.get("current_version"),
