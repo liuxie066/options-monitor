@@ -4,6 +4,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
+from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
@@ -1933,8 +1934,9 @@ def _month_label_cn(month: str) -> str:
 def _inject_system_fields(arguments: dict[str, Any], *, request: AssistantRequest, tool_name: str) -> dict[str, Any]:
     payload = dict(arguments or {})
     if tool_name in _CONFIG_SCOPED_PLAN_TOOLS:
-        if request.config_path:
-            payload["config_path"] = request.config_path
+        config_path = _config_path_for_tool_payload(tool_name=tool_name, payload=payload, default=request.config_path)
+        if config_path:
+            payload["config_path"] = config_path
         elif request.config_key:
             payload["config_key"] = _config_key_for_tool_payload(tool_name=tool_name, payload=payload, default=request.config_key)
     if tool_name == "option_positions_read":
@@ -1947,15 +1949,36 @@ def _inject_system_fields(arguments: dict[str, Any], *, request: AssistantReques
     return payload
 
 
+def _config_path_for_tool_payload(*, tool_name: str, payload: dict[str, Any], default: str | None) -> str | None:
+    if not default:
+        return None
+    if tool_name != "symbol_config_read":
+        return default
+    market_key = _market_config_key(payload.get("symbol"))
+    if market_key is None:
+        return default
+    path = Path(str(default))
+    if path.name not in {"config.us.json", "config.hk.json"}:
+        return default
+    return str(path.with_name(f"config.{market_key}.json"))
+
+
 def _config_key_for_tool_payload(*, tool_name: str, payload: dict[str, Any], default: str) -> str:
     if tool_name != "symbol_config_read":
         return default
-    market = str(symbol_market(payload.get("symbol")) or "").strip().upper()
+    market_key = _market_config_key(payload.get("symbol"))
+    if market_key is not None:
+        return market_key
+    return default
+
+
+def _market_config_key(symbol: Any) -> str | None:
+    market = str(symbol_market(symbol) or "").strip().upper()
     if market == "HK":
         return "hk"
     if market == "US":
         return "us"
-    return default
+    return None
 
 
 def _planner_input_text(text: str, *, conversation_context: dict[str, Any] | None) -> str:
