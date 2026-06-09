@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 1.2.243 - 2026-06-09
+
+### Added
+- Added the Strategy Lab MVP workflow for offline hypotheses, evidence readiness, proposal/update review, and Combo Yield optimization experiments.
+- Added the read-only `symbol_config_read` agent tool and LLM `symbol_config_query` path for current monitored-symbol strategy config questions.
+
+### Changed
+- Split assistant natural-language handling so slash commands stay in `command_parser.py`, deterministic code only handles pending/write-preview commands, and natural-language read requests use planner tool manifests.
+- Updated inbound assistant docs and tests to document slash-command read surfaces, planner-backed config reads, and explicit missing-capability responses.
+
+### Removed
+- Removed the legacy `src/application/assistant/parser.py` monolith and added architecture guards to prevent it from returning.
+
 ## 1.2.242 - 2026-06-09
 
 ### Fixed
