@@ -109,7 +109,7 @@ update evidence -> run experiment -> review proposal
 ./om research strategy-lab proposal --experiment <experiment-json>
 ```
 
-这些入口只读取已有 Shadow Replay dataset 或显式写本地 research artifact。`update --build-dataset --write` 可以从 latest scanned run 构建本地 replay dataset；`update --write` 可以代理本地 mark / settle data-plan；`readiness` 把 candidate / leg / group evidence 归一成 `decision_instance`，并输出 Strategy Lab 能走到哪一层；`experiment` 生成受控单腿参数 hypotheses，复用 Shadow Replay candidate-impact 做反事实评估，并输出轻量 scorecard；`proposal` 从 experiment artifact 生成 advisory-only dry-run patch 和 Markdown。它们不会采样 mark、settle outcome、应用生产 patch 或修改任何生产状态，除非 operator 对 `update` 显式传入 `--write`，且写入仍只限本地 replay artifact。
+这些入口只读取已有 Shadow Replay dataset 或显式写本地 research artifact。`update --build-dataset --write` 可以从 latest scanned run 构建本地 replay dataset；未显式传 `--dataset-id` 时，dataset id 默认使用 latest run id，目标 dataset 已存在就跳过，避免覆盖之后积累的 mark path / outcome evidence。`update --write` 可以代理本地 mark / settle data-plan；`readiness` 把 candidate / leg / group evidence 归一成 `decision_instance`，并输出 Strategy Lab 能走到哪一层；`experiment` 生成受控单腿参数 hypotheses，复用 Shadow Replay candidate-impact 做反事实评估，并输出轻量 scorecard；`proposal` 从 experiment artifact 生成 advisory-only dry-run patch 和 Markdown。它们不会采样 mark、settle outcome、应用生产 patch 或修改任何生产状态，除非 operator 对 `update` 显式传入 `--write`，且写入仍只限本地 replay artifact。
 
 内部 pipeline 不被删除：
 
@@ -691,7 +691,9 @@ artifact 命名必须能区分策略域：
 ./om research strategy-lab update --max-datasets 3 --source opend --write
 ```
 
-当前 `update` 复用 Shadow Replay latest scanned run build、`status` / `run-data-plan`。默认 dry-run，只返回会执行的 dataset build 或 `collect_marks` / `settle` 本地数据维护动作、ready queue 和 next action。显式 `--build-dataset --write` 时先从 latest scanned run 写本地 replay dataset，再进入 data-plan；显式 `--write` 时才执行已有 Shadow Replay data-plan，并可写本地 receipt；`--source opend --write` 仍只允许写 required-data cache、OpenD cache/rate-limit state、Shadow Replay dataset 和 receipt。它不执行 `analyze`，不生成参数建议，不修改 runtime config、交易状态、通知、Feishu 或 broker-facing state。
+当前 `update` 复用 Shadow Replay latest scanned run build、`status` / `run-data-plan`。默认 dry-run，只返回会执行的 dataset build 或 `collect_marks` / `settle` 本地数据维护动作、ready queue 和 next action。显式 `--build-dataset --write` 时先从 latest scanned run 写本地 replay dataset，再进入 data-plan；未显式传 `--dataset-id` 时默认使用 latest run id 作为 dataset id，已存在则返回 `dataset_build_reason=dataset_already_exists` 并跳过，不覆盖已有路径数据。显式 `--write` 时才执行已有 Shadow Replay data-plan，并可写本地 receipt；`--source opend --write` 仍只允许写 required-data cache、OpenD cache/rate-limit state、Shadow Replay dataset 和 receipt。它不执行 `analyze`，不生成参数建议，不修改 runtime config、交易状态、通知、Feishu 或 broker-facing state。
+
+远端持续记录由 `./om service render --include-strategy-lab-recorder` 显式生成，默认不启用。它把 `update` 拆成三个低频 timer：latest-run dataset build、mark sampler、outcome settler。这个 recorder 只是 evidence lifecycle 的服务化入口，不是 experiment runner，也不会应用 proposal。
 
 ### `readiness`
 

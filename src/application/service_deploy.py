@@ -29,6 +29,15 @@ PROJECTION_VERIFY_SYSTEMD_CALENDAR = "*-*-* 09:30:00 Asia/Shanghai"
 PROJECTION_VERIFY_LAUNCHD_CALENDAR = {"Hour": 9, "Minute": 30}
 AUTO_UPGRADE_SYSTEMD_CALENDAR = "*-*-* 06:10:00 Asia/Shanghai"
 AUTO_UPGRADE_LAUNCHD_CALENDAR = {"Hour": 6, "Minute": 10}
+STRATEGY_LAB_BUILD_INTERVAL_SYSTEMD = "30min"
+STRATEGY_LAB_SAMPLE_INTERVAL_SYSTEMD = "2h"
+STRATEGY_LAB_SETTLE_SYSTEMD_CALENDAR = "*-*-* 07:20:00 Asia/Shanghai"
+STRATEGY_LAB_BUILD_INTERVAL_SECONDS = 1800
+STRATEGY_LAB_SAMPLE_INTERVAL_SECONDS = 7200
+STRATEGY_LAB_SETTLE_LAUNCHD_CALENDAR = {"Hour": 7, "Minute": 20}
+DEFAULT_STRATEGY_LAB_RECORDER_SOURCE = "opend"
+DEFAULT_STRATEGY_LAB_RECORDER_MAX_DATASETS = 5
+DEFAULT_STRATEGY_LAB_RECORDER_MARK_STALE_HOURS = 2
 DEFAULT_OPEND_EXECUTABLE = "FutuOpenD"
 
 
@@ -79,6 +88,13 @@ def normalize_accounts(values: list[str] | tuple[str, ...] | None) -> list[str]:
         if account and account not in out:
             out.append(account)
     return out or list(DEFAULT_ACCOUNTS)
+
+
+def normalize_strategy_lab_recorder_source(value: str | None) -> str:
+    source = str(value or DEFAULT_STRATEGY_LAB_RECORDER_SOURCE).strip().lower()
+    if source not in {"local", "opend"}:
+        raise ValueError("strategy_lab_recorder_source must be local or opend")
+    return source
 
 
 def _resolve_feishu_ws_config_key(
@@ -365,6 +381,7 @@ def build_service_profile(
     opend: dict[str, Any] | None = None,
     feishu_ws: dict[str, Any] | None = None,
     wechat_clawbot: dict[str, Any] | None = None,
+    strategy_lab_recorder: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     restartable_services = [
         name
@@ -437,6 +454,8 @@ def build_service_profile(
         profile["feishu_ws"] = dict(feishu_ws)
     if wechat_clawbot is not None:
         profile["wechat_clawbot"] = dict(wechat_clawbot)
+    if strategy_lab_recorder is not None:
+        profile["strategy_lab_recorder"] = dict(strategy_lab_recorder)
     return profile
 
 
@@ -464,6 +483,10 @@ def render_service_bundle(
     wechat_clawbot_config_key: str | None = None,
     wechat_clawbot_label: str | None = None,
     wechat_clawbot_allowed_senders: str | None = None,
+    include_strategy_lab_recorder: bool = False,
+    strategy_lab_recorder_source: str | None = DEFAULT_STRATEGY_LAB_RECORDER_SOURCE,
+    strategy_lab_recorder_max_datasets: int = DEFAULT_STRATEGY_LAB_RECORDER_MAX_DATASETS,
+    strategy_lab_recorder_mark_stale_hours: int = DEFAULT_STRATEGY_LAB_RECORDER_MARK_STALE_HOURS,
     include_content: bool = True,
 ) -> dict[str, Any]:
     target_key = normalize_target(target)
@@ -492,6 +515,9 @@ def render_service_bundle(
         opend_executable_path = raw_opend_executable if raw_opend_executable.is_absolute() else opend_root_path / raw_opend_executable
     account_values = normalize_accounts(accounts)
     market_values = normalize_markets(markets)
+    recorder_source = normalize_strategy_lab_recorder_source(strategy_lab_recorder_source)
+    recorder_max_datasets = max(1, int(strategy_lab_recorder_max_datasets))
+    recorder_mark_stale_hours = max(1, int(strategy_lab_recorder_mark_stale_hours))
     config_default_root = runtime if include_auto_upgrade else None
     config_by_market = {
         market: _config_path_for_market(
@@ -782,6 +808,155 @@ def render_service_bundle(
             kind="systemd_timer",
             service_name=status_timer,
         )
+        if include_strategy_lab_recorder:
+            profile_path = str(runtime / "service.profile.json")
+            recorder_build_service = "options-monitor-strategy-lab-build.service"
+            recorder_build_timer = "options-monitor-strategy-lab-build.timer"
+            recorder_build_args = [
+                om,
+                "research",
+                "strategy-lab",
+                "update",
+                "--latest",
+                "--profile-path",
+                profile_path,
+                "--build-dataset",
+                "--write",
+                "--source",
+                "local",
+                "--settle-after-collect",
+                "--min-sample",
+                "30",
+                "--min-mark-points",
+                "2",
+                "--mark-stale-hours",
+                str(recorder_mark_stale_hours),
+                "--max-datasets",
+                "1",
+            ]
+            add(
+                f"systemd/{recorder_build_service}",
+                _systemd_unit(
+                    description="Options Monitor Strategy Lab latest-run dataset recorder",
+                    repo_root=repo,
+                    runtime_root=runtime,
+                    env_file=env_file_path,
+                    deploy_user=systemd_user,
+                    deploy_home=systemd_home,
+                    exec_args=recorder_build_args,
+                ),
+                install_path=f"/etc/systemd/system/{recorder_build_service}",
+                kind="systemd_service",
+                service_name=recorder_build_service,
+            )
+            add(
+                f"systemd/{recorder_build_timer}",
+                _systemd_timer(
+                    description="Options Monitor Strategy Lab latest-run dataset recorder timer",
+                    unit_name=recorder_build_service,
+                    interval=STRATEGY_LAB_BUILD_INTERVAL_SYSTEMD,
+                ),
+                install_path=f"/etc/systemd/system/{recorder_build_timer}",
+                kind="systemd_timer",
+                service_name=recorder_build_timer,
+            )
+
+            recorder_sample_service = "options-monitor-strategy-lab-sample.service"
+            recorder_sample_timer = "options-monitor-strategy-lab-sample.timer"
+            recorder_sample_args = [
+                om,
+                "research",
+                "strategy-lab",
+                "update",
+                "--profile-path",
+                profile_path,
+                "--source",
+                recorder_source,
+                "--write",
+                "--max-datasets",
+                str(recorder_max_datasets),
+                "--settle-after-collect",
+                "--min-sample",
+                "30",
+                "--min-mark-points",
+                "2",
+                "--mark-stale-hours",
+                str(recorder_mark_stale_hours),
+            ]
+            add(
+                f"systemd/{recorder_sample_service}",
+                _systemd_unit(
+                    description="Options Monitor Strategy Lab mark sampler",
+                    repo_root=repo,
+                    runtime_root=runtime,
+                    env_file=env_file_path,
+                    deploy_user=systemd_user,
+                    deploy_home=systemd_home,
+                    exec_args=recorder_sample_args,
+                    after=[opend_service] if include_opend and recorder_source == "opend" else None,
+                    wants=[opend_service] if include_opend and recorder_source == "opend" else None,
+                ),
+                install_path=f"/etc/systemd/system/{recorder_sample_service}",
+                kind="systemd_service",
+                service_name=recorder_sample_service,
+            )
+            add(
+                f"systemd/{recorder_sample_timer}",
+                _systemd_timer(
+                    description="Options Monitor Strategy Lab mark sampler timer",
+                    unit_name=recorder_sample_service,
+                    interval=STRATEGY_LAB_SAMPLE_INTERVAL_SYSTEMD,
+                ),
+                install_path=f"/etc/systemd/system/{recorder_sample_timer}",
+                kind="systemd_timer",
+                service_name=recorder_sample_timer,
+            )
+
+            recorder_settle_service = "options-monitor-strategy-lab-settle.service"
+            recorder_settle_timer = "options-monitor-strategy-lab-settle.timer"
+            recorder_settle_args = [
+                om,
+                "research",
+                "strategy-lab",
+                "update",
+                "--profile-path",
+                profile_path,
+                "--write",
+                "--action",
+                "settle",
+                "--max-datasets",
+                str(recorder_max_datasets),
+                "--min-sample",
+                "30",
+                "--min-mark-points",
+                "2",
+            ]
+            add(
+                f"systemd/{recorder_settle_service}",
+                _systemd_unit(
+                    description="Options Monitor Strategy Lab outcome settler",
+                    repo_root=repo,
+                    runtime_root=runtime,
+                    env_file=env_file_path,
+                    deploy_user=systemd_user,
+                    deploy_home=systemd_home,
+                    exec_args=recorder_settle_args,
+                ),
+                install_path=f"/etc/systemd/system/{recorder_settle_service}",
+                kind="systemd_service",
+                service_name=recorder_settle_service,
+            )
+            add(
+                f"systemd/{recorder_settle_timer}",
+                _systemd_timer(
+                    description="Options Monitor Strategy Lab outcome settler timer",
+                    unit_name=recorder_settle_service,
+                    calendar=STRATEGY_LAB_SETTLE_SYSTEMD_CALENDAR,
+                ),
+                install_path=f"/etc/systemd/system/{recorder_settle_timer}",
+                kind="systemd_timer",
+                service_name=recorder_settle_timer,
+            )
         if include_auto_upgrade:
             upgrade_service = "options-monitor-upgrade.service"
             upgrade_timer = "options-monitor-upgrade.timer"
@@ -1072,6 +1247,117 @@ def render_service_bundle(
             kind="launchd_plist",
             service_name=status_label,
         )
+        if include_strategy_lab_recorder:
+            profile_path = str(runtime / "service.profile.json")
+            recorder_build_label = "com.options-monitor.strategy-lab-build"
+            recorder_build_args = [
+                om,
+                "research",
+                "strategy-lab",
+                "update",
+                "--latest",
+                "--profile-path",
+                profile_path,
+                "--build-dataset",
+                "--write",
+                "--source",
+                "local",
+                "--settle-after-collect",
+                "--min-sample",
+                "30",
+                "--min-mark-points",
+                "2",
+                "--mark-stale-hours",
+                str(recorder_mark_stale_hours),
+                "--max-datasets",
+                "1",
+            ]
+            add(
+                f"launchd/{recorder_build_label}.plist",
+                _launchd_plist(
+                    label=recorder_build_label,
+                    repo_root=repo,
+                    runtime_root=runtime,
+                    program_args=recorder_build_args,
+                    log_root=log_root,
+                    env_file=env_file_path,
+                    start_interval=STRATEGY_LAB_BUILD_INTERVAL_SECONDS,
+                ),
+                install_path=f"~/Library/LaunchAgents/{recorder_build_label}.plist",
+                kind="launchd_plist",
+                service_name=recorder_build_label,
+            )
+
+            recorder_sample_label = "com.options-monitor.strategy-lab-sample"
+            recorder_sample_args = [
+                om,
+                "research",
+                "strategy-lab",
+                "update",
+                "--profile-path",
+                profile_path,
+                "--source",
+                recorder_source,
+                "--write",
+                "--max-datasets",
+                str(recorder_max_datasets),
+                "--settle-after-collect",
+                "--min-sample",
+                "30",
+                "--min-mark-points",
+                "2",
+                "--mark-stale-hours",
+                str(recorder_mark_stale_hours),
+            ]
+            add(
+                f"launchd/{recorder_sample_label}.plist",
+                _launchd_plist(
+                    label=recorder_sample_label,
+                    repo_root=repo,
+                    runtime_root=runtime,
+                    program_args=recorder_sample_args,
+                    log_root=log_root,
+                    env_file=env_file_path,
+                    start_interval=STRATEGY_LAB_SAMPLE_INTERVAL_SECONDS,
+                ),
+                install_path=f"~/Library/LaunchAgents/{recorder_sample_label}.plist",
+                kind="launchd_plist",
+                service_name=recorder_sample_label,
+            )
+
+            recorder_settle_label = "com.options-monitor.strategy-lab-settle"
+            recorder_settle_args = [
+                om,
+                "research",
+                "strategy-lab",
+                "update",
+                "--profile-path",
+                profile_path,
+                "--write",
+                "--action",
+                "settle",
+                "--max-datasets",
+                str(recorder_max_datasets),
+                "--min-sample",
+                "30",
+                "--min-mark-points",
+                "2",
+            ]
+            add(
+                f"launchd/{recorder_settle_label}.plist",
+                _launchd_plist(
+                    label=recorder_settle_label,
+                    repo_root=repo,
+                    runtime_root=runtime,
+                    program_args=recorder_settle_args,
+                    log_root=log_root,
+                    env_file=env_file_path,
+                    start_calendar_interval=STRATEGY_LAB_SETTLE_LAUNCHD_CALENDAR,
+                ),
+                install_path=f"~/Library/LaunchAgents/{recorder_settle_label}.plist",
+                kind="launchd_plist",
+                service_name=recorder_settle_label,
+            )
         if include_auto_upgrade:
             upgrade_label = "com.options-monitor.upgrade"
             upgrade_args = [
@@ -1219,6 +1505,15 @@ def render_service_bundle(
             **({"allowed_senders": wechat_clawbot_allowed_senders_value} if wechat_clawbot_allowed_senders_explicit else {}),
             "lock_path": str(lock_root / "wechat-clawbot.lock"),
         } if include_wechat_clawbot else None,
+        strategy_lab_recorder={
+            "enabled": True,
+            "source": recorder_source,
+            "max_datasets": recorder_max_datasets,
+            "mark_stale_hours": recorder_mark_stale_hours,
+            "build_interval": STRATEGY_LAB_BUILD_INTERVAL_SYSTEMD if target_key == "systemd" else STRATEGY_LAB_BUILD_INTERVAL_SECONDS,
+            "sample_interval": STRATEGY_LAB_SAMPLE_INTERVAL_SYSTEMD if target_key == "systemd" else STRATEGY_LAB_SAMPLE_INTERVAL_SECONDS,
+            "settle_schedule_beijing": "07:20",
+        } if include_strategy_lab_recorder else None,
     )
     profile_content = json.dumps(profile, ensure_ascii=False, indent=2) + "\n"
     add(

@@ -4,7 +4,8 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from src.application.shadow_replay import build_shadow_replay_dataset, run_shadow_replay_data_plan
-from src.application.shadow_replay.common import resolve_output_path, text, utc_now, write_json
+from src.application.shadow_replay.capture import latest_shadow_replay_run_dir
+from src.application.shadow_replay.common import dataset_output_dir, resolve_optional, resolve_output_path, text, utc_now, write_json
 
 
 UPDATE_SCHEMA_VERSION = "strategy_lab_update.v1"
@@ -135,21 +136,61 @@ def _build_latest_dataset(
             "reason": "not_requested",
             "source": "latest_scanned_run",
         }
+    base = Path(repo_root).expanduser().resolve()
+    explicit_dataset_id = text(dataset_id) or None
+    selected_dataset_id = explicit_dataset_id
+    latest_selection: dict[str, Any] | None = None
+    if selected_dataset_id is None:
+        run_dir, latest_selection = latest_shadow_replay_run_dir(
+            repo_root=base,
+            runs_root=resolve_optional(runs_root, base=base),
+        )
+        if run_dir is None:
+            if write:
+                raise ValueError("latest scanned run with shadow replay evidence not found")
+            return {
+                "requested": True,
+                "executed": False,
+                "reason": "latest_scanned_run_not_found",
+                "source": "latest_scanned_run",
+                "source_selection": latest_selection,
+                "dataset_id": None,
+                "dataset_id_source": "latest_run_id",
+                "dataset_root": str(dataset_root) if dataset_root is not None and text(dataset_root) else None,
+                "runs_root": str(runs_root) if runs_root is not None and text(runs_root) else None,
+            }
+        selected_dataset_id = run_dir.name
+    target = _dataset_target_dir(repo_root=base, dataset_root=dataset_root, dataset_id=selected_dataset_id)
+    if explicit_dataset_id is None and target.exists():
+        return {
+            "requested": True,
+            "executed": False,
+            "reason": "dataset_already_exists",
+            "source": "latest_scanned_run",
+            "dataset_id": selected_dataset_id,
+            "dataset_id_source": "latest_run_id",
+            "dataset_dir": str(target),
+            "source_selection": latest_selection,
+            "dataset_root": str(dataset_root) if dataset_root is not None and text(dataset_root) else None,
+            "runs_root": str(runs_root) if runs_root is not None and text(runs_root) else None,
+        }
     if not write:
         return {
             "requested": True,
             "executed": False,
             "reason": "requires_write",
             "source": "latest_scanned_run",
-            "dataset_id": text(dataset_id) or None,
+            "dataset_id": selected_dataset_id,
+            "dataset_id_source": "explicit" if explicit_dataset_id else "latest_run_id",
             "dataset_root": str(dataset_root) if dataset_root is not None and text(dataset_root) else None,
             "runs_root": str(runs_root) if runs_root is not None and text(runs_root) else None,
+            **({"source_selection": latest_selection} if latest_selection is not None else {}),
         }
     manifest = build_shadow_replay_dataset(
-        repo_root=repo_root,
+        repo_root=base,
         runs_root=runs_root,
         dataset_root=dataset_root,
-        dataset_id=dataset_id,
+        dataset_id=selected_dataset_id,
         latest_scanned_run=True,
     )
     return {
@@ -158,11 +199,19 @@ def _build_latest_dataset(
         "reason": "built_latest_scanned_run",
         "source": "latest_scanned_run",
         "dataset_id": manifest.get("dataset_id"),
+        "dataset_id_source": "explicit" if explicit_dataset_id else "latest_run_id",
         "dataset_dir": manifest.get("dataset_dir"),
         "source_selection": (manifest.get("source") or {}).get("latest_scanned_run_selection"),
         "manifest_summary": manifest.get("summary") or {},
         "manifest_safety": manifest.get("safety") or {},
     }
+
+
+def _dataset_target_dir(*, repo_root: Path, dataset_root: str | Path | None, dataset_id: str) -> Path:
+    root = resolve_optional(dataset_root, base=repo_root)
+    if root is not None:
+        return (root / dataset_id).resolve()
+    return dataset_output_dir(None, dataset_id=dataset_id, base=repo_root)
 
 
 def _summary(
@@ -186,6 +235,7 @@ def _summary(
         "latest": bool(latest),
         "dataset_build_requested": build_requested,
         "dataset_built": build_executed,
+        "dataset_build_reason": dataset_build.get("reason"),
         "built_dataset_id": dataset_build.get("dataset_id") if build_executed else None,
         "dataset_count": status_summary.get("dataset_count"),
         "data_plan_action_count": plan_summary.get("plan_action_count"),

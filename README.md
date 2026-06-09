@@ -142,6 +142,22 @@ om service render \
   --opend-root /home/liuxie/apps/futu-opend/current
 ```
 
+需要远端持续记录 Strategy Lab / Shadow Replay 证据时，额外传：
+
+```bash
+om service render \
+  --target systemd \
+  --runtime-root /var/lib/options-monitor \
+  --config-yaml /var/lib/options-monitor/config.yaml \
+  --config-us /var/lib/options-monitor/config.us.json \
+  --config-hk /var/lib/options-monitor/config.hk.json \
+  --include-opend \
+  --include-strategy-lab-recorder \
+  --strategy-lab-recorder-source opend
+```
+
+这个 recorder 是显式 opt-in。它生成独立 timer：幂等构建 latest scanned run 的 Shadow Replay dataset、定期采样 mark path、每日尝试 settle outcome。它只写本地 replay dataset、required-data / OpenD cache / rate-limit state 和 receipt，不发通知、不运行 experiment/proposal、不修改 runtime config、交易状态、Feishu 或 broker-facing state。
+
 生成的 runtime config 会记录 `_generated` 指纹。`config.yaml` 更新后需要重新
 `config build --source yaml`。`run tick` / `run tick-cron` 会在陈旧 runtime config 上提前失败并给出重建命令。
 
@@ -744,6 +760,7 @@ README 只记录公开入口和边界。生产 cron id、长驻服务启停和�
 | 任务 | 推荐入口 | 运行方式 | 主要副作用 |
 |---|---|---|---|
 | 期权监控 / 扫描通知 | `./om run tick-cron --market hk --accounts lx sy --timeout 600` / `./om run tick-cron --market us --accounts lx sy --timeout 600` | cron 每 10 分钟唤醒，代码内判断业务窗口 | 写本地报告和运行状态，并按通知策略发送扫描/建议消息 |
+| Strategy Lab 证据记录 | `./om service render --include-strategy-lab-recorder ...` 生成的 `options-monitor-strategy-lab-*.timer` | 独立低频 timer | 写本地 Shadow Replay dataset、mark path、outcome facts、required-data cache 和 receipt；不发通知、不改生产配置 |
 | 调度状态检查 | `./om-agent run --tool scheduler_status --input-json '{"config_key":"us","account":"lx"}'` | 定时或人工检查 | 只读 |
 | 自动交易监听 / 入账 | `python3 -m src.application.trades.auto_intake --config config.us.json --mode apply --yes` | 长驻进程 | 写本地 `option_positions`、intake state/status，并按 receipt 配置发送回执 |
 | 过期自动平仓 | `./om option-positions auto-close-expired --config config.hk.json --accounts lx sy --confirm` | 低频定时或人工触发 | 写本地 `option_positions`、运行状态，并按 receipt 配置发送任务级回执 |
@@ -770,6 +787,7 @@ README 只记录公开入口和边界。生产 cron id、长驻服务启停和�
 | `./om run tick --config ... --no-send` | 是 | 可能 | 否 |
 | `./om run tick --config ...` | 是 | 可能 | 是 |
 | `./om run tick-cron --market ...` | 是 | 可能 | 是 |
+| `./om research strategy-lab update --write ...` | 是 | 否 | 否 |
 | `python3 -m src.application.trades.auto_intake --mode apply --yes` | 是 | 否 | 是，默认发送入账回执 |
 | `python3 -m src.application.option_intake --config ... --confirm` | 是 | 否 | 否 |
 | `./om option-positions auto-close-expired --confirm` | 是 | 否 | 是，默认发送过期自动平仓回执 |

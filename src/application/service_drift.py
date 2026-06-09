@@ -301,6 +301,8 @@ def _expected_bundle_from_profile(
     feishu_ws = feishu_ws_raw if isinstance(feishu_ws_raw, dict) else {}
     wechat_clawbot_raw = profile.get("wechat_clawbot")
     wechat_clawbot = wechat_clawbot_raw if isinstance(wechat_clawbot_raw, dict) else {}
+    strategy_lab_recorder_raw = profile.get("strategy_lab_recorder")
+    strategy_lab_recorder = strategy_lab_recorder_raw if isinstance(strategy_lab_recorder_raw, dict) else {}
     services = _service_names_from_profile(profile)
     include_auto_upgrade = bool(
         isinstance(profile.get("auto_upgrade"), dict)
@@ -322,6 +324,15 @@ def _expected_bundle_from_profile(
         opend.get("enabled")
         or "options-monitor-opend.service" in services
         or "com.options-monitor.opend" in services
+    )
+    include_strategy_lab_recorder = bool(
+        strategy_lab_recorder.get("enabled")
+        or "options-monitor-strategy-lab-build.timer" in services
+        or "options-monitor-strategy-lab-sample.timer" in services
+        or "options-monitor-strategy-lab-settle.timer" in services
+        or "com.options-monitor.strategy-lab-build" in services
+        or "com.options-monitor.strategy-lab-sample" in services
+        or "com.options-monitor.strategy-lab-settle" in services
     )
     market_values = _profile_markets(profile)
     feishu_ws_config_key = str(feishu_ws.get("config_key") or "").strip() or None
@@ -360,6 +371,10 @@ def _expected_bundle_from_profile(
         wechat_clawbot_config_key=wechat_clawbot_config_key,
         wechat_clawbot_label=str(wechat_clawbot.get("label") or "default"),
         wechat_clawbot_allowed_senders=wechat_clawbot_allowed_senders,
+        include_strategy_lab_recorder=include_strategy_lab_recorder,
+        strategy_lab_recorder_source=str(strategy_lab_recorder.get("source") or "opend"),
+        strategy_lab_recorder_max_datasets=int(strategy_lab_recorder.get("max_datasets") or 5),
+        strategy_lab_recorder_mark_stale_hours=int(strategy_lab_recorder.get("mark_stale_hours") or 2),
         include_content=True,
     )
 
@@ -504,6 +519,7 @@ def _profile_content_changed(profile: dict[str, Any], bundle: dict[str, Any]) ->
         "opend",
         "feishu_ws",
         "wechat_clawbot",
+        "strategy_lab_recorder",
         "restart",
     )
     return {key: profile.get(key) for key in keys if key in profile or key in expected} != {

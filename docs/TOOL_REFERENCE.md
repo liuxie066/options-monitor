@@ -735,6 +735,7 @@ om-agent run --tool openclaw_readiness --input-json '{"profile_path":"openclaw.p
 - Strategy Lab experiment 自动生成 Sell Put / Covered Call 受控 hypotheses，复用 candidate-impact evaluator，并输出 observed-universe scorecard；Combo Yield 输出独立的 group-level observed-universe experiment
 - Strategy Lab proposal 从 experiment artifact 生成 advisory-only proposal 和 Markdown；Sell Put / Covered Call 只有 `closed_replay` gate 通过才输出 dry-run patch，Combo Yield 只输出 group advisory，不应用生产配置
 - Strategy Lab llm-context 从 experiment / proposal artifact 生成脱敏本地 LLM 上下文，不调用在线 AI，不应用 patch
+- `service render --include-strategy-lab-recorder` 是远端持续记录证据的 opt-in 部署入口，会生成 latest-run dataset build、mark sampler 和 outcome settler timers
 - Combo Yield 第一版输出 group evidence readiness、组合级 variants 和 group scorecard，不输出单腿化参数 patch
 - 默认不写文件、不调用在线 AI、不发送通知
 - 这是独立离线侧线，不是 `om-agent` manifest tool
@@ -755,6 +756,7 @@ om research strategy-lab experiment --dataset output_shared/research/shadow_repl
 om research strategy-lab experiment --market us --account lx --start-date 2026-06-03 --end-date 2026-06-03 --min-sample 30 --auto
 om research strategy-lab proposal --experiment output_shared/research/strategy_lab/experiment.json --markdown-output output_shared/research/strategy_lab/proposal.md
 om research strategy-lab llm-context --experiment output_shared/research/strategy_lab/experiment.json --proposal output_shared/research/strategy_lab/proposal.json --output output_shared/research/strategy_lab/llm_context.json
+om service render --target systemd --include-strategy-lab-recorder --strategy-lab-recorder-source opend
 ```
 
 带线上调度证据：
@@ -779,6 +781,13 @@ build-datasets 使用各自命令的 `--write`。这些写入只限本地 resear
 artifact，不能修改 runtime config、通知、Feishu、ledger/trade state 或
 broker-facing data。
 
+Strategy Lab recorder 是同一条本地 artifact 写入路径的服务化封装：
+
+- latest-run build timer 默认用 scanned run id 作为 dataset id；目标 dataset 已存在时跳过，避免覆盖后续 mark path。
+- mark sampler timer 默认每 2 小时维护最近 dataset，`--strategy-lab-recorder-source opend` 需要可用 OpenD。
+- outcome settler timer 默认每天北京时间 07:20 维护 `outcome_facts.jsonl`。
+- recorder opt-in 会写入 `service.profile.json.strategy_lab_recorder`，让 upgrade/service drift reconcile 保留这些 timer；默认 `service render` 不启用。
+
 默认写入位置：
 
 ```text
@@ -796,6 +805,7 @@ output_shared/research/strategy_lab/
 - 旧 `parameter-backtest` / `parameter-report` 只作为兼容入口；新文档和人工操作优先使用 `candidate-impact` / `candidate-impact-report`。
 - Candidate-impact 报告只能说明 observed run universe 内候选集合变化，不能自动生成最优参数，也不能修改 runtime config、交易状态或通知。
 - `strategy-lab update` 默认 dry-run；显式 `--build-dataset --write` 时只从 latest scanned run 构建本地 replay dataset，显式 `--write` 时只执行已有 Shadow Replay `collect_marks` / `settle` data-plan 和本地 receipt，不会执行 analyze、生成参数建议或修改生产状态。
+- 未显式传 `--dataset-id` 时，`strategy-lab update --latest --build-dataset --write` 默认使用 latest scanned run id 作为 dataset id；同名 dataset 已存在时返回 `dataset_build_reason=dataset_already_exists` 并跳过构建。
 - `strategy-lab readiness` 支持已有 dataset 输入，也支持通过 `--start-date` / `--end-date` / `--market` / `--account` 聚合 scanned-run window；显式 `--output` 只写本地 JSON artifact，不会采样 mark、settle outcome 或生成生产参数 patch。
 - `strategy-lab experiment` 支持已有 dataset 输入，也支持通过 `--start-date` / `--end-date` / `--market` / `--account` 聚合 scanned-run window；它生成的 scorecard 只用于人工复盘，不是生产参数建议；Combo Yield 结果位于 `group_experiments.combo_yield`。
 - `strategy-lab proposal` 接收 experiment JSON 文件或包含 `experiment.json` 的目录；显式 `--output` / `--markdown-output` 只写本地 artifact，不会应用 patch。`filter_only` / `path_only` 只返回 evidence gap；Combo Yield 结果通过 `group_advisory` 表达，不生成单腿 patch。

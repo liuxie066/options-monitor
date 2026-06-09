@@ -548,6 +548,96 @@ def test_render_systemd_bundle_can_include_auto_upgrade_timer(tmp_path: Path) ->
     assert profile["config_paths"]["us"] == str(runtime / "config.us.json")
 
 
+def test_render_systemd_bundle_can_include_strategy_lab_recorder_timers(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    repo = tmp_path / "current"
+    runtime = tmp_path / "runtime"
+    repo.mkdir()
+
+    default_bundle = render_service_bundle(target="systemd", repo_root=repo, runtime_root=runtime, markets=["us"])
+    default_files = {item["relative_path"]: item for item in default_bundle["files"]}
+    assert "systemd/options-monitor-strategy-lab-build.service" not in default_files
+
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        markets=["us"],
+        include_opend=True,
+        include_strategy_lab_recorder=True,
+        strategy_lab_recorder_source="opend",
+        strategy_lab_recorder_max_datasets=3,
+        strategy_lab_recorder_mark_stale_hours=2,
+    )
+
+    files = {item["relative_path"]: item for item in bundle["files"]}
+    build_service = files["systemd/options-monitor-strategy-lab-build.service"]["content"]
+    build_timer = files["systemd/options-monitor-strategy-lab-build.timer"]["content"]
+    sample_service = files["systemd/options-monitor-strategy-lab-sample.service"]["content"]
+    sample_timer = files["systemd/options-monitor-strategy-lab-sample.timer"]["content"]
+    settle_service = files["systemd/options-monitor-strategy-lab-settle.service"]["content"]
+    settle_timer = files["systemd/options-monitor-strategy-lab-settle.timer"]["content"]
+    profile = json.loads(files["service.profile.json"]["content"])
+
+    assert str(repo / "om") + " research strategy-lab update --latest" in build_service
+    assert "--profile-path " + str(runtime / "service.profile.json") in build_service
+    assert "--build-dataset --write --source local" in build_service
+    assert "--max-datasets 1" in build_service
+    assert "OnUnitActiveSec=30min" in build_timer
+    assert str(repo / "om") + " research strategy-lab update --profile-path" in sample_service
+    assert "--source opend --write --max-datasets 3" in sample_service
+    assert "After=network-online.target options-monitor-opend.service" in sample_service
+    assert "OnUnitActiveSec=2h" in sample_timer
+    assert "--write --action settle --max-datasets 3" in settle_service
+    assert "OnCalendar=*-*-* 07:20:00 Asia/Shanghai" in settle_timer
+    assert {"name": "options-monitor-strategy-lab-build.timer"} in profile["services"]
+    assert {"name": "options-monitor-strategy-lab-sample.timer"} in profile["services"]
+    assert {"name": "options-monitor-strategy-lab-settle.timer"} in profile["services"]
+    assert profile["strategy_lab_recorder"] == {
+        "enabled": True,
+        "source": "opend",
+        "max_datasets": 3,
+        "mark_stale_hours": 2,
+        "build_interval": "30min",
+        "sample_interval": "2h",
+        "settle_schedule_beijing": "07:20",
+    }
+
+
+def test_service_drift_preserves_strategy_lab_recorder_opt_in(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+    from src.application.service_drift import service_drift
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    systemd_root = tmp_path / "systemd"
+    repo.mkdir()
+    runtime.mkdir()
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        accounts=["lx"],
+        markets=["us"],
+        include_strategy_lab_recorder=True,
+        strategy_lab_recorder_source="local",
+        strategy_lab_recorder_max_datasets=2,
+        strategy_lab_recorder_mark_stale_hours=4,
+    )
+    profile = json.loads({item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"])
+    (runtime / "service.profile.json").write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")
+    _write_systemd_units_from_bundle(bundle, systemd_root)
+
+    out = service_drift(repo_root=repo, runtime_root=runtime, systemd_unit_root=systemd_root)
+
+    assert out["summary"]["status"] == "ok"
+    assert "options-monitor-strategy-lab-build.timer" in out["expected_services"]
+    assert "options-monitor-strategy-lab-sample.timer" in out["expected_services"]
+    assert "options-monitor-strategy-lab-settle.timer" in out["expected_services"]
+    assert out["mismatched_units"] == []
+
+
 def test_service_upgrade_verify_returns_compact_read_only_summary(tmp_path: Path) -> None:
     from src.application.service_upgrade import service_upgrade_verify, write_upgrade_status
 

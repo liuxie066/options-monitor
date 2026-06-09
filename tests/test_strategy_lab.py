@@ -684,6 +684,50 @@ def test_strategy_lab_update_build_dataset_dry_run_does_not_write(tmp_path: Path
     assert result["safety"]["writes_shadow_replay_dataset_build"] is False
 
 
+def test_strategy_lab_update_latest_build_is_idempotent_by_run_id(tmp_path: Path) -> None:
+    from src.application.strategy_lab import run_strategy_lab_update
+
+    runs_root = _write_latest_scanned_run(tmp_path / "output_runs")
+    dataset_root = tmp_path / "output_shared" / "research" / "shadow_replay" / "datasets"
+
+    first = run_strategy_lab_update(
+        repo_root=tmp_path,
+        dataset_root=dataset_root,
+        runs_root=runs_root,
+        build_dataset=True,
+        latest=True,
+        write=True,
+        max_datasets=0,
+        min_sample=1,
+    )
+    dataset = dataset_root / "run-evidence"
+    mark_path = dataset / "mark_path_snapshots.jsonl"
+    mark_path.write_text(
+        json.dumps({"contract_symbol": "NVDA260619P00100000", "mark_at": "2026-06-03", "option_mid": 1.1}) + "\n",
+        encoding="utf-8",
+    )
+
+    second = run_strategy_lab_update(
+        repo_root=tmp_path,
+        dataset_root=dataset_root,
+        runs_root=runs_root,
+        build_dataset=True,
+        latest=True,
+        write=True,
+        max_datasets=0,
+        min_sample=1,
+    )
+
+    assert first["summary"]["dataset_built"] is True
+    assert first["summary"]["built_dataset_id"] == "run-evidence"
+    assert first["shadow_replay"]["dataset_build"]["dataset_id_source"] == "latest_run_id"
+    assert second["summary"]["dataset_built"] is False
+    assert second["summary"]["dataset_build_reason"] == "dataset_already_exists"
+    assert second["shadow_replay"]["dataset_build"]["dataset_id"] == "run-evidence"
+    assert second["shadow_replay"]["dataset_build"]["executed"] is False
+    assert json.loads(mark_path.read_text(encoding="utf-8"))["option_mid"] == 1.1
+
+
 def test_strategy_lab_experiment_supports_run_window_scope(tmp_path: Path) -> None:
     from src.application.strategy_lab import run_strategy_lab_experiment
 
