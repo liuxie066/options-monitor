@@ -2,6 +2,18 @@
 
 Shadow Replay 的目标不是重新跑一次扫描，而是把某次扫描当时的候选全集保存下来，之后持续采样这些合约的价格路径，最后比较 accepted / rejected / post-filtered 样本的路径风险和结果。
 
+当前产品分层固定为：
+
+```text
+Research = 证据基础设施
+Shadow Replay = 反事实复盘引擎
+Strategy Lab = 策略进化产品入口
+```
+
+因此，本文是底层复盘引擎手册。面向策略参数自我进化的上层 PRD 和技术方案见 [Strategy Lab Design](STRATEGY_LAB_DESIGN.md)。Strategy Lab 当前已提供 update、只读 readiness、experiment、advisory proposal 和 llm-context 入口；Shadow Replay 继续作为它的反事实 evaluator 和 dataset / mark / outcome 生命周期引擎，而不是被删除。`strategy-lab update` 现在包装本文的 latest scanned run dataset build、status / run-data-plan：默认 dry-run，显式 `--build-dataset --write` 才构建本地 dataset，显式 `--write` 才执行本地 collect / settle。
+
+Strategy Lab 会按 strategy domain adapter 区分 Sell Put、Covered Call 和 Combo Yield。统一的是 evidence / readiness / experiment / scorecard / proposal workflow；分开的是决策单元、目标函数、参数空间、硬约束和 proposal target。Sell Put / Covered Call 可以先复用单腿 candidate-impact；Combo Yield 必须按 `strategy_group_id` / legs 形成 group-level decision instance，不能被拆成彼此独立的单腿参数实验。
+
 核心原则：复盘需要时间路径。OpenD 可以在采样时提供当前报价，但不能在几天后恢复当时没有保存的历史 option mark。要避免数据不够，必须在 dataset 建好后持续收集 mark。
 
 ## 数据模型

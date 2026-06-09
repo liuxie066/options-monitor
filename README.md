@@ -298,6 +298,32 @@ om run tick --config config.us.json --accounts lx sy
 
 适合回答这些问题：
 
+- 这个 symbol 在某次 run 里是否被观察到。
+- 它被哪个函数、stage 或 rule 过滤。
+- 同一 symbol 在不同账户之间为什么结果不同。
+- 需要补 trace、reject log 还是候选 CSV，才能继续诊断。
+
+### Strategy Lab 策略进化设计
+
+Strategy Lab 是正在落地的策略进化产品入口，定位在 Research / Shadow Replay 之上。固定分层是：`Research = 证据基础设施`，`Shadow Replay = 反事实复盘引擎`，`Strategy Lab = 策略进化产品入口`。
+
+目标用户链路会收敛成 `update evidence -> run experiment -> review proposal`。它以 strategy domain adapters 区分 Sell Put、Covered Call 和 Combo Yield，实验对象是 `decision_instance`，不是单一 candidate row。统一的是证据、实验、scorecard 和 proposal workflow；分开的是真正的决策单元、目标函数、可调参数、硬约束和 proposal target。它可以生成参数 hypotheses、复用 candidate-impact 做反事实评估、产出 scorecard 和 dry-run proposal，但不能自动修改 runtime config、交易状态或通知，也不能让 LLM 绕过 readiness gate。当前设计和实现状态见 [docs/STRATEGY_LAB_DESIGN.md](docs/STRATEGY_LAB_DESIGN.md)。
+
+第一批可执行入口是 update、readiness、experiment、proposal 和 llm-context。除 `update --build-dataset --write` / `update --write` 会写本地 replay artifact 或代理执行本地 replay data-plan 外，其他入口只读已有 evidence 或显式写本地 artifact：
+
+```bash
+./om research strategy-lab readiness --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --min-sample 30
+./om research strategy-lab update --latest
+./om research strategy-lab update --latest --build-dataset --write
+./om research strategy-lab experiment --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --min-sample 30 --auto
+./om research strategy-lab readiness --market us --account lx --start-date <YYYY-MM-DD> --end-date <YYYY-MM-DD> --min-sample 30
+./om research strategy-lab experiment --market us --account lx --start-date <YYYY-MM-DD> --end-date <YYYY-MM-DD> --min-sample 30 --auto
+./om research strategy-lab proposal --experiment output_shared/research/strategy_lab/experiment.json --markdown-output output_shared/research/strategy_lab/proposal.md
+./om research strategy-lab llm-context --experiment output_shared/research/strategy_lab/experiment.json --proposal output_shared/research/strategy_lab/proposal.json --output output_shared/research/strategy_lab/llm_context.json
+```
+
+它读取已有 Shadow Replay dataset 或 scanned-run window，生成 Sell Put / Covered Call / Combo Yield 的 `decision_instance` readiness。`update` 会汇总 Shadow Replay status / data-plan，默认 dry-run；显式 `--build-dataset --write` 时先从 latest scanned run 构建本地 dataset，显式 `--write` 时才执行本地 collect / settle 维护动作；`experiment` 可读取已有 dataset，也可按 start/end date、market、account 直接聚合 scanned-run window，自动生成 Sell Put / Covered Call 的受控单腿参数 variants，复用 Shadow Replay candidate-impact 评估候选影响，并输出 observed-universe scorecard；Combo Yield 走 `group_experiments.combo_yield` 的组合级 observed-universe optimizer，按 `strategy_group_id` 聚合 legs，输出组合 metrics、variants 和 group scorecard，但不生成单腿化生产 patch；`proposal` 会从 experiment artifact 生成 advisory-only proposal 和 Markdown，Sell Put / Covered Call 只有 `closed_replay` gate 通过才输出 dry-run patch，Combo Yield 只输出 group advisory；`llm-context` 会生成脱敏本地 LLM context，不调用在线 AI，也不能应用 patch。
+
 ### 离线 Shadow Replay 证据
 
 需要做策略参数、过滤规则或排序质量分析时，先收集现有 run/report 证据，不重跑扫描、不改配置：
@@ -675,15 +701,23 @@ bash scripts/install_agent_plugin.sh
 
 只读查询会直接执行；写操作必须先返回预览并等待确认。链路带 sender allowlist、message_id 幂等和 SQLite audit。Inbound command facade 默认开启，当前 CLI namespace 仍是 `./om assistant ...`，例如 `/status`、`/positions sy`、`/income 2026-05`、`分析 long call 是不是应该平仓`、`/model`、`/model use deepseek-default`、`/record-open ...`、`/record-close ...`、`设置 09898 covered call min strike 85`。Ops Copilot 边界和 Inbound LLM 可见/可执行范围以 [docs/OM_AGENT_CAPABILITY_MAP.md](docs/OM_AGENT_CAPABILITY_MAP.md) 为准；接飞书、微信或 Hermes 前先看 [docs/INBOUND_CONTROL.md](docs/INBOUND_CONTROL.md)。
 
-Research / Shadow Replay 离线侧线：
+Research / Shadow Replay / Strategy Lab 离线侧线：
 
 ```bash
 ./om research collect --config-key us --scope full --output both --no-write-outputs
 ./om research shadow-replay status --min-sample 30
 ./om research shadow-replay candidate-impact-report --params <params.json> --market us --start-date <YYYY-MM-DD> --account lx --min-sample 30
+./om research strategy-lab update --latest
+./om research strategy-lab update --latest --build-dataset --write
+./om research strategy-lab readiness --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --min-sample 30
+./om research strategy-lab readiness --market us --account lx --start-date <YYYY-MM-DD> --end-date <YYYY-MM-DD> --min-sample 30
+./om research strategy-lab experiment --dataset output_shared/research/shadow_replay/datasets/<dataset-id> --min-sample 30 --auto
+./om research strategy-lab experiment --market us --account lx --start-date <YYYY-MM-DD> --end-date <YYYY-MM-DD> --min-sample 30 --auto
+./om research strategy-lab proposal --experiment output_shared/research/strategy_lab/experiment.json --markdown-output output_shared/research/strategy_lab/proposal.md
+./om research strategy-lab llm-context --experiment output_shared/research/strategy_lab/experiment.json --proposal output_shared/research/strategy_lab/proposal.json --output output_shared/research/strategy_lab/llm_context.json
 ```
 
-`research` 和 Shadow Replay 是独立的离线证据/复盘模块，不属于 Ops Copilot core，也不暴露为 `./om-agent` tool。线上侧只收集 redacted bundle / handoff，不调用在线 AI；Shadow Replay 只读已有候选、reject、trace、mark、outcome 和归档 run 证据，显式 `--write` 时也只写本地 replay artifact。`review_readiness` 用来判断是否可以人工复盘，`candidate-impact` / `candidate-impact-report` 用来比较显式阈值 variants 会新增/移除哪些候选；旧 `parameter-backtest` / `parameter-report` 仅作为兼容入口。它不会自动产出最优参数，也不能修改 runtime config、交易状态或通知。run 列表和日志摘要与 `./om runs` / `./om logs` 同源，调度系统状态需要通过 `scheduler_evidence` 或 CLI 的 `--scheduler-evidence-json` 显式传入。
+`research` 和 Shadow Replay 是独立的离线证据/复盘模块，不属于 Ops Copilot core，也不暴露为 `./om-agent` tool。线上侧只收集 redacted bundle / handoff，不调用在线 AI；Shadow Replay 只读已有候选、reject、trace、mark、outcome 和归档 run 证据，显式 `--write` 时也只写本地 replay artifact。`review_readiness` 用来判断是否可以人工复盘，`candidate-impact` / `candidate-impact-report` 用来比较显式阈值 variants 会新增/移除哪些候选；旧 `parameter-backtest` / `parameter-report` 仅作为兼容入口。Strategy Lab 是上层产品入口，当前已提供 `update`、`readiness`、`experiment`、`proposal` 和 `llm-context`。Strategy Lab 不会自动产出生产参数，也不能修改 runtime config、交易状态或通知；`experiment` 对 Sell Put / Covered Call 使用单腿 candidate-impact，对 Combo Yield 使用组合级 observed-universe optimizer；`update --build-dataset --write` 只从 latest scanned run 构建本地 replay dataset，`update --write` 只代理本地 replay dataset mark / settle data-plan，`llm-context` 只生成脱敏本地上下文，不调用在线 AI。run 列表和日志摘要与 `./om runs` / `./om logs` 同源，调度系统状态需要通过 `scheduler_evidence` 或 CLI 的 `--scheduler-evidence-json` 显式传入。
 
 写工具门禁：
 
