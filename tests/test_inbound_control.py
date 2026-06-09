@@ -10,16 +10,18 @@ import pytest
 
 from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.assistant.commands import command_specs
+from src.application.assistant.command_parser import parse_assistant_command
 from src.application.assistant.contracts import (
     AssistantRequest,
     PERCEPTION_RESULT_SCHEMA_VERSION,
     REASONING_RESOLUTION_SCHEMA_VERSION,
+    PerceptionResult,
     ToolCall,
 )
 from src.application.assistant.llm_intent_schema import LLM_INTENT_SCHEMA_VERSION
 from src.application.assistant.llm_translator import LlmTranslationResult, parse_llm_translation_payload
 from src.application.inbound.feishu import feishu_payload_to_inbound_request, handle_feishu_payload
-from src.application.assistant.parser import parse_inbound_text
+from src.application.assistant.deterministic_commands import parse_deterministic_text
 from src.application.assistant.policy import PURE_READ_TOOLS, check_sender_allowed, enforce_tool_allowed
 from src.application.assistant.renderer import render_inbound_text
 from src.application.assistant.router import handle_assistant_request
@@ -109,6 +111,10 @@ def _runtime_cfg(data_config_ref: str, *, market: str = "us") -> dict:
     }
 
 
+def _read_intent(intent_name: str, arguments: dict[str, Any] | None = None) -> PerceptionResult:
+    return PerceptionResult(intent_name=intent_name, arguments=dict(arguments or {}), source="test")
+
+
 def _enable_inbound_trade_write(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OM_INBOUND_OPERATIONS_ENABLED", "1")
     monkeypatch.setenv("OM_INBOUND_TRADE_WRITE_ENABLED", "1")
@@ -185,21 +191,36 @@ assistant:
     return config_yaml, assistant_config
 
 
-def test_inbound_parser_maps_core_read_only_commands() -> None:
-    assert parse_inbound_text("状态").intent_name == "runtime_status"
-    assert parse_inbound_text("健康检查").intent_name == "healthcheck"
-    assert parse_inbound_text("待确认").intent_name == "pending_operations"
-    assert parse_inbound_text("pending").intent_name == "pending_operations"
+def test_inbound_command_surface_maps_core_read_only_commands() -> None:
+    assert parse_assistant_command("/status").intent_name == "runtime_status"
+    assert parse_assistant_command("/health").intent_name == "healthcheck"
+    assert parse_deterministic_text("待确认").intent_name == "pending_operations"
+    assert parse_deterministic_text("pending").intent_name == "pending_operations"
 
-    positions = parse_inbound_text("持仓 sy")
+    for text in (
+        "状态",
+        "持仓 sy",
+        "收益 本月",
+        "日志 20260515T182459Z-474761",
+        "查看监控标的",
+        "现在泡泡玛特 sell put的max strike是多少？",
+    ):
+        try:
+            parse_deterministic_text(text)
+        except AgentToolError as err:
+            assert err.code == "NEEDS_CLARIFICATION"
+        else:
+            raise AssertionError(f"{text} should not be routed by deterministic read parsing")
+
+    positions = parse_assistant_command("/positions sy")
     assert positions.intent_name == "position_query"
     assert positions.arguments == {"account": "sy", "status": "open", "limit": 50}
 
-    all_positions = parse_inbound_text("持仓")
+    all_positions = parse_assistant_command("/positions")
     assert all_positions.intent_name == "position_query"
     assert all_positions.arguments == {"status": "open", "limit": 50}
 
-    may_positions = parse_inbound_text("sy 5月到期的持仓", now_fn=lambda: date(2026, 5, 19))
+    may_positions = parse_assistant_command("/positions sy 5月", now_fn=lambda: date(2026, 5, 19))
     assert may_positions.intent_name == "position_query"
     assert may_positions.arguments == {
         "account": "sy",
@@ -207,7 +228,7 @@ def test_inbound_parser_maps_core_read_only_commands() -> None:
         "expiration": {"month": "2026-05"},
         "limit": 50,
     }
-    may_positions_without_account = parse_inbound_text("5月到期的持仓", now_fn=lambda: date(2026, 5, 19))
+    may_positions_without_account = parse_assistant_command("/positions 5月", now_fn=lambda: date(2026, 5, 19))
     assert may_positions_without_account.intent_name == "position_query"
     assert may_positions_without_account.arguments == {
         "status": "open",
@@ -215,32 +236,32 @@ def test_inbound_parser_maps_core_read_only_commands() -> None:
         "limit": 50,
     }
 
-    income = parse_inbound_text("收益 sy 本月", now_fn=lambda: date(2026, 5, 19))
+    income = parse_assistant_command("/income sy 本月", now_fn=lambda: date(2026, 5, 19))
     assert income.intent_name == "monthly_income_report"
     assert income.arguments == {"account": "sy", "month": "2026-05"}
 
-    all_income = parse_inbound_text("收益 本月", now_fn=lambda: date(2026, 5, 19))
+    all_income = parse_assistant_command("/income 本月", now_fn=lambda: date(2026, 5, 19))
     assert all_income.intent_name == "monthly_income_report"
     assert all_income.arguments == {"month": "2026-05"}
 
-    last_month = parse_inbound_text("收益 lx 上月", now_fn=lambda: date(2026, 1, 3))
+    last_month = parse_assistant_command("/income lx 上月", now_fn=lambda: date(2026, 1, 3))
     assert last_month.arguments == {"account": "lx", "month": "2025-12"}
 
-    june_income = parse_inbound_text("6月sy的收益", now_fn=lambda: date(2026, 6, 1))
+    june_income = parse_assistant_command("/income sy 6月", now_fn=lambda: date(2026, 6, 1))
     assert june_income.intent_name == "monthly_income_report"
     assert june_income.arguments == {"account": "sy", "month": "2026-06"}
 
-    june_income_year = parse_inbound_text("收益 sy 2026年6月", now_fn=lambda: date(2026, 6, 1))
+    june_income_year = parse_assistant_command("/income sy 2026年6月", now_fn=lambda: date(2026, 6, 1))
     assert june_income_year.arguments == {"account": "sy", "month": "2026-06"}
 
-    logs = parse_inbound_text("日志 20260515T182459Z-474761")
+    logs = parse_assistant_command("/logs 20260515T182459Z-474761")
     assert logs.intent_name == "runtime_logs"
     assert logs.arguments["run_id"] == "20260515T182459Z-474761"
 
 
 def test_inbound_parser_requires_clarification_for_unknown_command() -> None:
     with pytest.raises(AgentToolError) as exc:
-        parse_inbound_text("查一下")
+        parse_deterministic_text("查一下")
 
     assert exc.value.code == "NEEDS_CLARIFICATION"
     assert "没有识别" in exc.value.message
@@ -346,7 +367,7 @@ def test_inbound_read_tool_requires_config_scope(tmp_path: Path) -> None:
 
     out = handle_assistant_request(
         AssistantRequest(
-            text="状态",
+            text="/status",
             sender_id="local",
             channel="local",
             message_id="msg_missing_config_scope",
@@ -398,7 +419,36 @@ def test_inbound_exit_analysis_routes_to_close_advice_read(tmp_path: Path) -> No
             },
         )
 
-    out = handle_assistant_request(
+    def _translate(
+        text: str,
+        _settings: AssistantSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> LlmTranslationResult:
+        assert text == "分析 long call 是不是应该平仓"
+        assert conversation_context is not None
+        return LlmTranslationResult(
+            intent=PerceptionResult(
+                intent_name="position_exit_analysis",
+                arguments={"status": "open", "option_type": "call", "side": "long", "limit": 50},
+                source="llm",
+                confidence=0.93,
+            ),
+            trace={
+                "enabled": True,
+                "attempted": True,
+                "reason": "accepted",
+                "provider": "openai",
+                "base_url": "",
+                "model": "gpt-5.2",
+                "api_key_env": "OM_LLM_API_KEY",
+                "confidence_min": 0.75,
+                "timeout_seconds": 20,
+                "max_output_tokens": 512,
+                "schema_version": LLM_INTENT_SCHEMA_VERSION,
+            },
+        )
+
+    out = handle_assistant_message(
         AssistantRequest(
             text="分析 long call 是不是应该平仓",
             sender_id="local",
@@ -409,6 +459,10 @@ def test_inbound_exit_analysis_routes_to_close_advice_read(tmp_path: Path) -> No
         ),
         execute_tool_fn=_execute_tool,
         allowed_senders="local:local",
+        settings=AssistantSettings(
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        translate_intent_fn=_translate,
     )
 
     assert out["ok"] is True
@@ -440,83 +494,150 @@ def test_command_catalog_read_tool_names_match_inbound_policy() -> None:
 
 
 def test_inbound_parser_maps_manual_trade_and_symbol_operations() -> None:
-    open_intent = parse_inbound_text("记录开仓 sy 0700.HK short put strike 450 exp 2026-05-28 6张 premium 2.35 multiplier 100")
+    open_intent = parse_deterministic_text("记录开仓 sy 0700.HK short put strike 450 exp 2026-05-28 6张 premium 2.35 multiplier 100")
     assert open_intent.intent_name == "manual_trade_open"
     assert open_intent.arguments == {
         "raw_text": "记录开仓 sy 0700.HK short put strike 450 exp 2026-05-28 6张 premium 2.35 multiplier 100",
         "account": "sy",
     }
 
-    close_intent = parse_inbound_text("记录平仓 sy 0700.HK short put strike 450 exp 2026-05-28 2张 close 1.2")
+    close_intent = parse_deterministic_text("记录平仓 sy 0700.HK short put strike 450 exp 2026-05-28 2张 close 1.2")
     assert close_intent.intent_name == "manual_trade_close"
     assert close_intent.arguments == {
         "raw_text": "记录平仓 sy 0700.HK short put strike 450 exp 2026-05-28 2张 close 1.2",
         "account": "sy",
     }
 
-    assert parse_inbound_text("确认记录 in_abc123").arguments == {
+    assert parse_deterministic_text("确认记录 in_abc123").arguments == {
         "operation_id": "in_abc123",
         "operation_resolution": "explicit",
     }
-    english_confirm = parse_inbound_text("confirm trade in_abc123")
+    english_confirm = parse_deterministic_text("confirm trade in_abc123")
     assert english_confirm.intent_name == "manual_trade_confirm"
     assert english_confirm.arguments == {
         "operation_id": "in_abc123",
         "operation_resolution": "explicit",
     }
-    assert parse_inbound_text("确认记录").arguments == {
+    assert parse_deterministic_text("确认记录").arguments == {
         "operation_id": None,
         "operation_resolution": "latest_pending",
     }
-    assert parse_inbound_text("取消记录 in_abc123").intent_name == "manual_trade_cancel"
-    assert parse_inbound_text("取消交易 in_abc123").intent_name == "manual_trade_cancel"
-    trade_update = parse_inbound_text("premium 改成 2.75")
+    assert parse_deterministic_text("取消记录 in_abc123").intent_name == "manual_trade_cancel"
+    assert parse_deterministic_text("取消交易 in_abc123").intent_name == "manual_trade_cancel"
+    trade_update = parse_deterministic_text("premium 改成 2.75")
     assert trade_update.intent_name == "manual_trade_update"
     assert trade_update.arguments == {
         "operation_id": None,
         "operation_resolution": "latest_pending",
         "updates": {"premium_per_share": 2.75},
     }
-    trade_update_with_id = parse_inbound_text("合约数改成2 in_abc123")
+    trade_update_with_id = parse_deterministic_text("合约数改成2 in_abc123")
     assert trade_update_with_id.arguments == {
         "operation_id": "in_abc123",
         "operation_resolution": "explicit",
         "updates": {"contracts": 2},
     }
     with pytest.raises(AgentToolError) as decimal_contracts:
-        parse_inbound_text("合约数改成1.9")
+        parse_deterministic_text("合约数改成1.9")
     assert decimal_contracts.value.code == "INPUT_ERROR"
     assert "整数参数不能写小数" in decimal_contracts.value.message
 
-    assert parse_inbound_text("查看监控标的").intent_name == "symbol_list"
-    symbol_add = parse_inbound_text("增加监控标的 700 put")
+    assert parse_assistant_command("/symbols").intent_name == "symbol_list"
+    symbol_add = parse_deterministic_text("增加监控标的 700 put")
     assert symbol_add.intent_name == "symbol_add"
     assert symbol_add.arguments == {"symbol": "700", "sell_put_enabled": True, "sell_call_enabled": False}
-    symbol_edit = parse_inbound_text("修改监控标的 HK.00700 sell_put.max_strike=480")
+    symbol_edit = parse_deterministic_text("修改监控标的 HK.00700 sell_put.max_strike=480")
     assert symbol_edit.intent_name == "symbol_edit"
     assert symbol_edit.arguments == {"symbol": "HK.00700", "set": {"sell_put.max_strike": 480}}
-    covered_call_edit = parse_inbound_text("配置标的，为tigr做covered call的设置，min strike=6.5")
+    covered_call_edit = parse_deterministic_text("配置标的，为tigr做covered call的设置，min strike=6.5")
     assert covered_call_edit.intent_name == "symbol_edit"
     assert covered_call_edit.arguments == {
         "symbol": "tigr",
         "set": {"sell_call.enabled": True, "sell_call.min_strike": 6.5},
         "ensure_use": ["call_base"],
     }
-    covered_call_setting = parse_inbound_text("设置 09898 covered call min strike 85")
+    covered_call_setting = parse_deterministic_text("设置 09898 covered call min strike 85")
     assert covered_call_setting.intent_name == "symbol_edit"
     assert covered_call_setting.arguments == {
         "symbol": "09898",
         "set": {"sell_call.enabled": True, "sell_call.min_strike": 85.0},
         "ensure_use": ["call_base"],
     }
-    assert parse_inbound_text("删除监控标的 腾讯").arguments == {"symbol": "腾讯"}
-    assert parse_inbound_text("确认监控 in_abc123").intent_name == "symbol_confirm"
-    assert parse_inbound_text("cancel monitor in_abc123").intent_name == "symbol_cancel"
-    upgrade = parse_inbound_text("立即升级到 v1.2.111")
+    assert parse_deterministic_text("删除监控标的 腾讯").arguments == {"symbol": "腾讯"}
+    assert parse_deterministic_text("确认监控 in_abc123").intent_name == "symbol_confirm"
+    assert parse_deterministic_text("cancel monitor in_abc123").intent_name == "symbol_cancel"
+    upgrade = parse_deterministic_text("立即升级到 v1.2.111")
     assert upgrade.intent_name == "upgrade_now"
     assert upgrade.arguments == {"target_version": "1.2.111"}
-    assert parse_inbound_text("确认升级 in_abc123").intent_name == "upgrade_confirm"
-    assert parse_inbound_text("取消升级").intent_name == "upgrade_cancel"
+    assert parse_deterministic_text("确认升级 in_abc123").intent_name == "upgrade_confirm"
+    assert parse_deterministic_text("取消升级").intent_name == "upgrade_cancel"
+
+
+def test_inbound_symbol_config_query_executes_read_only_tool_via_llm(tmp_path: Path) -> None:
+    data_cfg_path = tmp_path / "portfolio.runtime.json"
+    data_cfg_path.write_text(json.dumps({"option_positions": {}}, ensure_ascii=False), encoding="utf-8")
+    cfg = _runtime_cfg(str(data_cfg_path), market="hk")
+    cfg["symbols"] = [
+        {
+            "symbol": "9992.HK",
+            "fetch": {"source": "futu", "limit_expirations": 8},
+            "use": ["put_base"],
+            "sell_put": {"enabled": True, "min_dte": 20, "max_dte": 90, "max_strike": 145},
+            "sell_call": {"enabled": False},
+        }
+    ]
+    cfg_path = tmp_path / "config.hk.json"
+    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _translate(
+        text: str,
+        runtime_settings: AssistantSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> LlmTranslationResult:
+        assert text == "现在泡泡玛特 sell put的max strike是多少？"
+        assert conversation_context is not None
+        return parse_llm_translation_payload(
+            {
+                "schema_version": LLM_INTENT_SCHEMA_VERSION,
+                "intent": "symbol_config_query",
+                "arguments": {"symbol": "泡泡玛特", "strategy": "sell_put", "field": "max_strike"},
+                "confidence": 0.96,
+            },
+            settings=runtime_settings.llm,
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="现在泡泡玛特 sell put的max strike是多少？",
+            sender_id="local",
+            channel="local",
+            message_id="msg_symbol_config_read",
+            config_path=str(cfg_path),
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        allowed_senders="local:local",
+        settings=AssistantSettings(
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        translate_intent_fn=_translate,
+    )
+
+    assert out["ok"] is True
+    assert out["tool_name"] == "symbol_config_read"
+    assert out["data"]["perception"]["intent_name"] == "symbol_config_query"
+    assert out["data"]["reasoning"]["tool_call"] == {
+        "tool_name": "symbol_config_read",
+        "payload": {
+            "config_path": str(cfg_path),
+            "symbol": "泡泡玛特",
+            "strategy": "sell_put",
+            "field": "max_strike",
+        },
+    }
+    assert "operation_type" not in out["data"]
+    assert "9992.HK" in out["data"]["response_text"]
+    assert "sell_put.max_strike" in out["data"]["response_text"]
+    assert "145" in out["data"]["response_text"]
 
 
 def test_inbound_request_reports_unwritable_audit_db(tmp_path: Path) -> None:
@@ -1779,7 +1900,7 @@ def test_inbound_symbol_add_edit_remove_preview_and_confirm(monkeypatch: pytest.
     audit_db = tmp_path / "inbound.sqlite3"
 
     listed = handle_assistant_request(
-        AssistantRequest(text="查看监控标的", sender_id="ou_1", channel="feishu", message_id="msg_symbol_list", config_path=str(cfg_path), audit_db=str(audit_db)),
+        AssistantRequest(text="/symbols", sender_id="ou_1", channel="feishu", message_id="msg_symbol_list", config_path=str(cfg_path), audit_db=str(audit_db)),
         allowed_senders="feishu:ou_1",
     )
     assert listed["ok"] is True
@@ -2094,7 +2215,7 @@ def test_inbound_handle_executes_read_only_tool_and_replays_duplicate_message(tm
         )
 
     request = AssistantRequest(
-        text="收益 sy 2026-05",
+        text="/income sy 2026-05",
         sender_id="ou_1",
         channel="feishu",
         message_id="msg_1",
@@ -2130,7 +2251,7 @@ def test_inbound_handle_executes_read_only_tool_and_replays_duplicate_message(tm
         "schema_version": PERCEPTION_RESULT_SCHEMA_VERSION,
         "intent_name": "monthly_income_report",
         "arguments": {"account": "sy", "month": "2026-05"},
-        "source": "deterministic",
+        "source": "command",
         "confidence": 1.0,
         "evidence": {},
     }
@@ -2162,7 +2283,7 @@ def test_inbound_handle_omits_account_filter_when_account_not_provided(tmp_path:
 
     income = handle_assistant_request(
         AssistantRequest(
-            text="收益 2026-05",
+            text="/income 2026-05",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_income",
@@ -2174,7 +2295,7 @@ def test_inbound_handle_omits_account_filter_when_account_not_provided(tmp_path:
     )
     positions = handle_assistant_request(
         AssistantRequest(
-            text="持仓",
+            text="/positions",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_positions",
@@ -2206,7 +2327,7 @@ def test_inbound_handle_omits_account_filter_when_account_not_provided(tmp_path:
         "schema_version": PERCEPTION_RESULT_SCHEMA_VERSION,
         "intent_name": "position_query",
         "arguments": {"status": "open", "limit": 50},
-        "source": "deterministic",
+        "source": "command",
         "confidence": 1.0,
         "evidence": {},
     }
@@ -2238,7 +2359,7 @@ def test_inbound_handle_without_message_id_generates_fresh_command_id(tmp_path: 
         return build_response(tool_name=tool_name, ok=True, data={"status": "ok"})
 
     request = AssistantRequest(
-        text="状态",
+        text="/status",
         sender_id="local",
         channel="local",
         config_key="us",
@@ -2274,7 +2395,7 @@ def test_inbound_audit_schema_uses_perception_reasoning_action_observation(tmp_p
 
     out = handle_assistant_request(
         AssistantRequest(
-            text="状态",
+            text="/status",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_audit_schema",
@@ -2294,7 +2415,7 @@ def test_inbound_audit_schema_uses_perception_reasoning_action_observation(tmp_p
 
 
 def test_inbound_monthly_income_renderer_prefers_return_summary() -> None:
-    intent = parse_inbound_text("收益 lx 2026-05")
+    intent = _read_intent("monthly_income_report", {"account": "lx", "month": "2026-05"})
     text = render_inbound_text(
         intent=intent,
         tool_result=build_response(
@@ -2332,7 +2453,7 @@ def test_inbound_monthly_income_renderer_prefers_return_summary() -> None:
 
 
 def test_inbound_monthly_income_renderer_prefers_combined_return_summary() -> None:
-    intent = parse_inbound_text("收益 2026-05")
+    intent = _read_intent("monthly_income_report", {"month": "2026-05"})
     text = render_inbound_text(
         intent=intent,
         tool_result=build_response(
@@ -2388,7 +2509,7 @@ def test_inbound_monthly_income_renderer_prefers_combined_return_summary() -> No
 
 
 def test_inbound_monthly_income_renderer_flags_long_option_cash_recovery() -> None:
-    intent = parse_inbound_text("收益 sy 2026-06")
+    intent = _read_intent("monthly_income_report", {"account": "sy", "month": "2026-06"})
     text = render_inbound_text(
         intent=intent,
         tool_result=build_response(
@@ -2433,7 +2554,7 @@ def test_inbound_monthly_income_renderer_flags_long_option_cash_recovery() -> No
 
 
 def test_inbound_monthly_income_renderer_does_not_cap_return_summary_rows() -> None:
-    intent = parse_inbound_text("收益")
+    intent = _read_intent("monthly_income_report")
     rows = []
     for idx in range(5):
         month = f"2026-0{idx + 1}"
@@ -2467,7 +2588,7 @@ def test_inbound_monthly_income_renderer_does_not_cap_return_summary_rows() -> N
 
 
 def test_inbound_monthly_income_renderer_explains_incomplete_summary() -> None:
-    intent = parse_inbound_text("收益 sy 2026-05")
+    intent = _read_intent("monthly_income_report", {"account": "sy", "month": "2026-05"})
     text = render_inbound_text(
         intent=intent,
         tool_result=build_response(
@@ -2511,7 +2632,7 @@ def test_inbound_monthly_income_renderer_explains_incomplete_summary() -> None:
 
 
 def test_inbound_monthly_income_renderer_shows_original_currency_when_rates_missing() -> None:
-    intent = parse_inbound_text("收益 lx 2026-05")
+    intent = _read_intent("monthly_income_report", {"account": "lx", "month": "2026-05"})
     text = render_inbound_text(
         intent=intent,
         tool_result=build_response(
@@ -2567,7 +2688,7 @@ def test_inbound_monthly_income_renderer_shows_original_currency_when_rates_miss
 
 
 def test_inbound_renderer_summarizes_position_rows() -> None:
-    intent = parse_inbound_text("持仓 sy")
+    intent = parse_assistant_command("/positions sy")
     text = render_inbound_text(
         intent=intent,
         tool_result=build_response(
@@ -2604,7 +2725,7 @@ def test_inbound_renderer_summarizes_position_rows() -> None:
     assert "数据源：OM 本地 SQLite position_lots" in text
 
     all_accounts = render_inbound_text(
-        intent=parse_inbound_text("持仓"),
+        intent=parse_assistant_command("/positions"),
         tool_result=build_response(
             tool_name="option_positions_read",
             ok=True,
@@ -2629,7 +2750,7 @@ def test_inbound_renderer_does_not_cap_position_rows() -> None:
     ]
 
     text = render_inbound_text(
-        intent=parse_inbound_text("持仓 sy"),
+        intent=parse_assistant_command("/positions sy"),
         tool_result=build_response(
             tool_name="option_positions_read",
             ok=True,
@@ -2644,7 +2765,7 @@ def test_inbound_renderer_does_not_cap_position_rows() -> None:
 
 
 def test_inbound_renderer_explains_empty_positions() -> None:
-    intent = parse_inbound_text("持仓 lx")
+    intent = parse_assistant_command("/positions lx")
     text = render_inbound_text(
         intent=intent,
         tool_result=build_response(
@@ -2658,7 +2779,7 @@ def test_inbound_renderer_explains_empty_positions() -> None:
 
 
 def test_inbound_renderer_summarizes_runtime_status() -> None:
-    intent = parse_inbound_text("状态")
+    intent = parse_assistant_command("/status")
     text = render_inbound_text(
         intent=intent,
         tool_result=build_response(
@@ -2705,7 +2826,7 @@ def test_inbound_renderer_summarizes_runtime_status() -> None:
 
 
 def test_inbound_renderer_runtime_status_uses_tool_ok_and_shared_last_run() -> None:
-    intent = parse_inbound_text("状态")
+    intent = parse_assistant_command("/status")
     text = render_inbound_text(
         intent=intent,
         tool_result=build_response(
@@ -2742,7 +2863,7 @@ def test_inbound_renderer_runtime_status_uses_tool_ok_and_shared_last_run() -> N
 
 
 def test_inbound_renderer_status_summary_prioritizes_auto_close_failure() -> None:
-    intent = parse_inbound_text("状态")
+    intent = parse_assistant_command("/status")
     text = render_inbound_text(
         intent=intent,
         tool_result=build_response(
@@ -2776,7 +2897,7 @@ def test_inbound_renderer_status_summary_prioritizes_auto_close_failure() -> Non
 
 
 def test_inbound_renderer_shows_service_upgrade_failure_details() -> None:
-    intent = parse_inbound_text("状态")
+    intent = parse_assistant_command("/status")
     text = render_inbound_text(
         intent=intent,
         tool_result=build_response(
@@ -2818,7 +2939,7 @@ def test_inbound_renderer_shows_service_upgrade_failure_details() -> None:
 
 def test_inbound_renderer_summarizes_healthcheck_and_config() -> None:
     health_text = render_inbound_text(
-        intent=parse_inbound_text("健康检查"),
+        intent=parse_assistant_command("/health"),
         tool_result=build_response(
             tool_name="healthcheck",
             ok=True,
@@ -2832,7 +2953,7 @@ def test_inbound_renderer_summarizes_healthcheck_and_config() -> None:
         ),
     )
     config_text = render_inbound_text(
-        intent=parse_inbound_text("配置检查"),
+        intent=parse_assistant_command("/config"),
         tool_result=build_response(
             tool_name="config_validate",
             ok=True,
@@ -2855,7 +2976,7 @@ def test_inbound_renderer_summarizes_healthcheck_and_config() -> None:
 
 def test_inbound_renderer_summarizes_runs_and_logs() -> None:
     runs_text = render_inbound_text(
-        intent=parse_inbound_text("最近运行"),
+        intent=parse_assistant_command("/runs"),
         tool_result=build_response(
             tool_name="runtime_runs",
             ok=True,
@@ -2876,7 +2997,7 @@ def test_inbound_renderer_summarizes_runs_and_logs() -> None:
         ),
     )
     logs_text = render_inbound_text(
-        intent=parse_inbound_text("日志 run-1"),
+        intent=parse_assistant_command("/logs run-1"),
         tool_result=build_response(
             tool_name="runtime_logs",
             ok=True,
@@ -2929,7 +3050,7 @@ def test_inbound_audit_keeps_monthly_income_diagnostics(tmp_path: Path) -> None:
 
     out = handle_assistant_request(
         AssistantRequest(
-            text="收益 sy 2026-05",
+            text="/income sy 2026-05",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_diag",
@@ -2957,12 +3078,12 @@ def test_inbound_duplicate_message_from_other_sender_is_denied_and_marked(tmp_pa
         return build_response(tool_name=tool_name, ok=True, data={"summary": []})
 
     first = handle_assistant_request(
-        AssistantRequest(text="收益 sy", sender_id="ou_1", channel="feishu", message_id="msg_1", config_key="us", audit_db=str(audit_db)),
+        AssistantRequest(text="/income sy", sender_id="ou_1", channel="feishu", message_id="msg_1", config_key="us", audit_db=str(audit_db)),
         execute_tool_fn=_execute_tool,
         allowed_senders="feishu:ou_1,feishu:ou_2",
     )
     second = handle_assistant_request(
-        AssistantRequest(text="收益 sy", sender_id="ou_2", channel="feishu", message_id="msg_1", config_key="us", audit_db=str(audit_db)),
+        AssistantRequest(text="/income sy", sender_id="ou_2", channel="feishu", message_id="msg_1", config_key="us", audit_db=str(audit_db)),
         execute_tool_fn=_execute_tool,
         allowed_senders="feishu:ou_1,feishu:ou_2",
     )
@@ -2989,7 +3110,7 @@ def test_inbound_handle_denies_unknown_remote_sender_and_audits(tmp_path: Path) 
 
     out = handle_assistant_request(
         AssistantRequest(
-            text="持仓 sy",
+            text="/positions sy",
             sender_id="ou_bad",
             channel="feishu",
             message_id="msg_bad",
@@ -3019,7 +3140,7 @@ def test_feishu_payload_adapter_extracts_text_message_and_calls_inbound(tmp_path
                 "message_id": "om_1",
                 "chat_id": "oc_1",
                 "message_type": "text",
-                "content": json.dumps({"text": '<at user_id="bot">Bot</at> 收益 sy 2026-05'}, ensure_ascii=False),
+                "content": json.dumps({"text": '<at user_id="bot">Bot</at> /income sy 2026-05'}, ensure_ascii=False),
             },
         },
     }
@@ -3035,7 +3156,7 @@ def test_feishu_payload_adapter_extracts_text_message_and_calls_inbound(tmp_path
 
     request = feishu_payload_to_inbound_request(payload, audit_db=str(tmp_path / "audit.sqlite3"))
     assert request == AssistantRequest(
-        text="收益 sy 2026-05",
+        text="/income sy 2026-05",
         sender_id="ou_1",
         channel="feishu",
         message_id="om_1",

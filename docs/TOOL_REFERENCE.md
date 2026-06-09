@@ -108,7 +108,7 @@ om-agent run --tool runtime_status --env-file /etc/options-monitor/options-monit
 `om assistant handle` 是飞书、微信、Hermes 等消息入口调用 OM 的受控 Inbound 入口：
 
 ```bash
-om assistant handle --text '收益 <account> <YYYY-MM>' --sender ou_xxx --channel feishu --message-id msg_xxx
+om assistant handle --text '/income <account> <YYYY-MM>' --sender ou_xxx --channel feishu --message-id msg_xxx
 om inbound feishu --input-file feishu_event.json --format text
 om inbound feishu-ws --check
 om assistant capabilities

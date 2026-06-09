@@ -11,9 +11,9 @@ from src.application.assistant.command_parser import parse_assistant_command
 from src.application.assistant.capability_catalog import is_llm_planner_preview_spec, spec_by_intent
 from src.application.assistant.contracts import AssistantRequest, PerceptionResult
 from src.application.assistant.conversation_context import build_conversation_context, context_trace
+from src.application.assistant.deterministic_commands import parse_deterministic_text
 from src.application.assistant.llm_reply import LlmReplyResult, generate_general_reply
 from src.application.assistant.llm_translator import LlmTranslationResult, skipped_llm_trace
-from src.application.assistant.parser import parse_inbound_text
 from src.application.assistant.perception_trace import (
     PerceptionTrace,
     accepted_candidate,
@@ -22,6 +22,7 @@ from src.application.assistant.perception_trace import (
     skipped_candidate,
 )
 from src.application.assistant.settings import AssistantSettings
+from src.application.assistant.time_filters import extract_month_filter
 
 TranslateIntentFn = Callable[[str, AssistantSettings, dict[str, Any] | None], LlmTranslationResult]
 GenerateReplyFn = Callable[[str, AssistantSettings, dict[str, Any] | None], LlmReplyResult]
@@ -149,7 +150,7 @@ class PerceptionEngine:
 
     def _perceive_deterministic_first(self, text: str, parser_now_fn: Callable[[], date] | None) -> PerceptionResult:
         try:
-            deterministic_perception = parse_inbound_text(text, now_fn=parser_now_fn)
+            deterministic_perception = parse_deterministic_text(text, now_fn=parser_now_fn)
             self.trace = build_perception_trace(
                 decision="deterministic_selected",
                 selected_source="deterministic",
@@ -184,7 +185,13 @@ class PerceptionEngine:
         if "context" not in self.llm_trace:
             self.llm_trace["context"] = context_trace(conversation_context)
         if llm_result.intent is not None:
-            return self._handle_llm_perception(llm_result.intent, deterministic_candidate, llm_first=True)
+            return self._handle_llm_perception(
+                llm_result.intent,
+                deterministic_candidate,
+                llm_first=True,
+                text=text,
+                now_fn=parser_now_fn,
+            )
         if llm_result.error is not None:
             return self._handle_llm_first_error(
                 text,
@@ -217,7 +224,7 @@ class PerceptionEngine:
         parser_now_fn: Callable[[], date] | None,
     ) -> tuple[Any, PerceptionResult | None, AgentToolError | None]:
         try:
-            perception = parse_inbound_text(text, now_fn=parser_now_fn)
+            perception = parse_deterministic_text(text, now_fn=parser_now_fn)
         except AgentToolError as err:
             return error_candidate("deterministic", err), None, err
         return accepted_candidate("deterministic", perception), perception, None
@@ -337,7 +344,12 @@ class PerceptionEngine:
         if "context" not in self.llm_trace:
             self.llm_trace["context"] = context_trace(conversation_context)
         if llm_result.intent is not None:
-            return self._handle_llm_perception(llm_result.intent, deterministic_candidate)
+            return self._handle_llm_perception(
+                llm_result.intent,
+                deterministic_candidate,
+                text=text,
+                now_fn=parser_now_fn,
+            )
         if llm_result.error is not None:
             return self._handle_llm_error(text, llm_result.error, deterministic_candidate, conversation_context)
         self.trace = build_perception_trace(
@@ -428,10 +440,17 @@ class PerceptionEngine:
         deterministic_candidate: Any,
         *,
         llm_first: bool = False,
+        text: str = "",
+        now_fn: Callable[[], date] | None = None,
     ) -> PerceptionResult:
         self.route = "agent_loop"
         if llm_first:
-            perception = _reconcile_llm_read_perception(perception, deterministic_candidate)
+            perception = _reconcile_llm_read_perception(
+                perception,
+                deterministic_candidate,
+                text=text,
+                today=now_fn() if now_fn is not None else date.today(),
+            )
         llm_candidate = accepted_candidate(self.route, perception)
         candidates = [llm_candidate, deterministic_candidate] if llm_first else [deterministic_candidate, llm_candidate]
         try:
@@ -592,22 +611,28 @@ def _is_llm_preview_perception_allowed(spec: Any) -> bool:
     return bool(is_llm_planner_preview_spec(spec))
 
 
-def _reconcile_llm_read_perception(perception: PerceptionResult, deterministic_candidate: Any) -> PerceptionResult:
+def _reconcile_llm_read_perception(
+    perception: PerceptionResult,
+    deterministic_candidate: Any,
+    *,
+    text: str,
+    today: date,
+) -> PerceptionResult:
     deterministic_perception = getattr(deterministic_candidate, "perception", None)
     if not isinstance(deterministic_perception, PerceptionResult):
-        return perception
+        return _reconcile_month_slot_from_text(perception, text=text, today=today)
     if deterministic_perception.intent_name != perception.intent_name:
-        return perception
+        return _reconcile_month_slot_from_text(perception, text=text, today=today)
     spec = _COMMAND_SPECS_BY_INTENT.get(perception.intent_name)
     if spec is None or not spec.read_only:
-        return perception
+        return _reconcile_month_slot_from_text(perception, text=text, today=today)
 
     merged, changes = _merge_argument_slots(
         llm_arguments=dict(perception.arguments or {}),
         deterministic_arguments=dict(deterministic_perception.arguments or {}),
     )
     if not changes:
-        return perception
+        return _reconcile_month_slot_from_text(perception, text=text, today=today)
     evidence = dict(perception.evidence or {})
     evidence["argument_reconciliation"] = {
         "source": "deterministic_shadow",
@@ -617,6 +642,32 @@ def _reconcile_llm_read_perception(perception: PerceptionResult, deterministic_c
     return PerceptionResult(
         intent_name=perception.intent_name,
         arguments=merged,
+        source=perception.source,
+        confidence=perception.confidence,
+        evidence=evidence,
+    )
+
+
+def _reconcile_month_slot_from_text(perception: PerceptionResult, *, text: str, today: date) -> PerceptionResult:
+    if perception.intent_name != "monthly_income_report":
+        return perception
+    month = extract_month_filter(text, today=today)
+    if not month:
+        return perception
+    arguments = dict(perception.arguments or {})
+    current = arguments.get("month")
+    if current == month:
+        return perception
+    arguments["month"] = month
+    evidence = dict(perception.evidence or {})
+    evidence["argument_reconciliation"] = {
+        "source": "text_month_filter",
+        "filled": {"month": month} if _is_empty_slot(current) else {},
+        "overridden": {} if _is_empty_slot(current) else {"month": {"llm": current, "text": month}},
+    }
+    return PerceptionResult(
+        intent_name=perception.intent_name,
+        arguments=arguments,
         source=perception.source,
         confidence=perception.confidence,
         evidence=evidence,

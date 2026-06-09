@@ -690,7 +690,7 @@ bash scripts/install_agent_plugin.sh
 受控远程消息入口：
 
 ```bash
-./om assistant handle --text '持仓 sy' --sender local --channel local --message-id local-1
+./om assistant handle --text '/positions sy' --sender local --channel local --message-id local-1
 ./om inbound feishu --input-file feishu_event.json --format text
 ./om inbound feishu-ws --check
 ./om assistant commands --format text
@@ -699,7 +699,7 @@ bash scripts/install_agent_plugin.sh
 ./om assistant model current
 ```
 
-只读查询会直接执行；写操作必须先返回预览并等待确认。链路带 sender allowlist、message_id 幂等和 SQLite audit。Inbound command facade 默认开启，当前 CLI namespace 仍是 `./om assistant ...`，例如 `/status`、`/positions sy`、`/income 2026-05`、`分析 long call 是不是应该平仓`、`/model`、`/model use deepseek-default`、`/record-open ...`、`/record-close ...`、`设置 09898 covered call min strike 85`。Ops Copilot 边界和 Inbound LLM 可见/可执行范围以 [docs/OM_AGENT_CAPABILITY_MAP.md](docs/OM_AGENT_CAPABILITY_MAP.md) 为准；接飞书、微信或 Hermes 前先看 [docs/INBOUND_CONTROL.md](docs/INBOUND_CONTROL.md)。
+Slash 只读查询会直接执行；自然语言只读请求在 planner 开启时由 LLM 规划到只读工具；写操作必须先返回预览并等待确认。链路带 sender allowlist、message_id 幂等和 SQLite audit。Inbound command facade 默认开启，当前 CLI namespace 仍是 `./om assistant ...`，例如 `/status`、`/positions sy`、`/income 2026-05`、`分析 long call 是不是应该平仓`、`/model`、`/model use deepseek-default`、`/record-open ...`、`/record-close ...`、`设置 09898 covered call min strike 85`。Ops Copilot 边界和 Inbound LLM 可见/可执行范围以 [docs/OM_AGENT_CAPABILITY_MAP.md](docs/OM_AGENT_CAPABILITY_MAP.md) 为准；接飞书、微信或 Hermes 前先看 [docs/INBOUND_CONTROL.md](docs/INBOUND_CONTROL.md)。
 
 Research / Shadow Replay / Strategy Lab 离线侧线：
 

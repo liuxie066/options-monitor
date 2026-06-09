@@ -14,9 +14,9 @@ from src.application.assistant.contracts import (
     PerceptionResult,
     ReasoningResolution,
 )
+from src.application.assistant.deterministic_commands import parse_deterministic_text
 from src.application.assistant.observation import build_observation
 from src.application.assistant.operation_store import InboundOperationStore
-from src.application.assistant.parser import parse_inbound_text
 from src.application.assistant.policy import enforce_sender_allowed
 from src.application.assistant.reasoning import resolve_reasoning
 from src.application.assistant.renderer import render_inbound_text
@@ -138,7 +138,7 @@ def _parse_perception(
 ) -> PerceptionResult:
     if parse_perception_fn is not None:
         return parse_perception_fn(text, now_fn)
-    return parse_inbound_text(text, now_fn=now_fn)
+    return parse_deterministic_text(text, now_fn=now_fn)
 
 
 def _success_response(

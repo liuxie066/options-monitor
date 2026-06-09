@@ -142,10 +142,10 @@ trade state, or send notifications.
 Use `./om assistant handle` when a remote messaging gateway needs to send user text into OM:
 
 ```bash
-./om assistant handle --text '持仓 sy' --sender ou_xxx --channel feishu --message-id msg_xxx
+./om assistant handle --text '/positions sy' --sender ou_xxx --channel feishu --message-id msg_xxx
 ```
 
-This is a controlled Inbound message entrypoint, not an `om-agent` tool and not a shell bridge. It performs Inbound command parsing, deterministic parsing or bounded AgentLoop planning, sender allowlist checks, message idempotency, SQLite audit, and then calls an allowlisted tool or creates a pending preview through the existing operation path. The current `./om assistant ...` CLI namespace and `assistant` config keys remain compatibility names. Inbound config may opt into LLM intent translation/planning; translated intents and plans still return into the same allowlist, audit, pending-operation, and renderer path. LLM-originated plans may read or initiate approved previews only; confirm/cancel/apply remains deterministic-only.
+This is a controlled Inbound message entrypoint, not an `om-agent` tool and not a shell bridge. It performs Inbound slash-command parsing, deterministic operation-alias handling or bounded AgentLoop planning, sender allowlist checks, message idempotency, SQLite audit, and then calls an allowlisted tool or creates a pending preview through the existing operation path. The current `./om assistant ...` CLI namespace and `assistant` config keys remain compatibility names. Inbound config may opt into LLM intent translation/planning; translated intents and plans still return into the same allowlist, audit, pending-operation, and renderer path. LLM-originated plans may read or initiate approved previews only; confirm/cancel/apply remains deterministic-only.
 
 Remote channels require:
 
