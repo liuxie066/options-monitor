@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.245 - 2026-06-09
+
+### Fixed
+- Fixed assistant symbol-config queries so HK aliases such as `泡泡玛特` / `9992.HK` use the HK runtime config even when the product entry has a US default market scope.
+
 ## 1.2.244 - 2026-06-09
 
 ### Fixed
