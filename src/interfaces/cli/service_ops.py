@@ -73,6 +73,19 @@ def add_service_update_commands(subparsers: Any) -> None:
         default=None,
         help="comma-separated WeChat inbound allowlist, e.g. wechat:<from_user_id>",
     )
+    service_render.add_argument(
+        "--include-strategy-lab-recorder",
+        action="store_true",
+        help="render opt-in Strategy Lab dataset build, mark sampling, and settlement timers",
+    )
+    service_render.add_argument(
+        "--strategy-lab-recorder-source",
+        default="opend",
+        choices=("local", "opend"),
+        help="mark sampling source for Strategy Lab recorder timers",
+    )
+    service_render.add_argument("--strategy-lab-recorder-max-datasets", type=int, default=5)
+    service_render.add_argument("--strategy-lab-recorder-mark-stale-hours", type=int, default=2)
     service_render.add_argument("--output-dir", default=None, help="write rendered files under this directory")
     service_render.add_argument("--no-content", action="store_true", help="omit file contents from JSON output")
     service_preflight_cmd = service_sub.add_parser(
@@ -221,6 +234,10 @@ def handle_service_update_command(
             wechat_clawbot_config_key=args.wechat_clawbot_config_key,
             wechat_clawbot_label=args.wechat_clawbot_label,
             wechat_clawbot_allowed_senders=args.wechat_clawbot_allowed_senders,
+            include_strategy_lab_recorder=bool(args.include_strategy_lab_recorder),
+            strategy_lab_recorder_source=args.strategy_lab_recorder_source,
+            strategy_lab_recorder_max_datasets=args.strategy_lab_recorder_max_datasets,
+            strategy_lab_recorder_mark_stale_hours=args.strategy_lab_recorder_mark_stale_hours,
             include_content=(not bool(args.no_content)) or bool(args.output_dir),
         )
         if args.output_dir:

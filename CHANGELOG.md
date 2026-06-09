@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.247 - 2026-06-10
+
+### Added
+- Added opt-in Strategy Lab recorder service timers for remote latest-run dataset builds, mark sampling, and outcome settlement.
+
+### Changed
+- Made Strategy Lab latest-run dataset builds idempotent by default so existing replay datasets keep accumulated mark paths and outcome facts.
+- Documented the remote Strategy Lab recorder deployment path, local artifact write boundaries, and upgrade-preserved service drift behavior.
+
 ## 1.2.246 - 2026-06-09
 
 ### Fixed

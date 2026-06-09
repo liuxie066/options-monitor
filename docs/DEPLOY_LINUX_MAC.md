@@ -130,6 +130,34 @@ cd "$REPO"
 
 升级切换 release 后还会做一次 service drift reconcile：以当前 release 的 `service render` 结果为期望状态，对比 `$RUNTIME/service.profile.json` 和 systemd unit 文件。缺失 unit 会被写入 `/etc/systemd/system/`，缺失 timer 会执行 `systemctl enable --now`。随后升级流程会用 reconcile 后的 profile 重启长期运行的 trade-intake / Feishu WS，并执行服务 active/enabled 检查；Feishu WS 还会运行 `./om inbound feishu-ws --check`，避免长驻进程继续使用旧 release、旧 config 或不可用 env。
 
+如果要让远端持续积累 Strategy Lab / Shadow Replay 复盘数据，额外显式开启 recorder：
+
+```bash
+./om service render \
+  --target systemd \
+  --repo-root "$REPO" \
+  --runtime-root "$RUNTIME" \
+  --env-file "$ENV_FILE" \
+  --deploy-user "$DEPLOY_USER" \
+  --markets us hk \
+  --accounts lx sy \
+  --config-yaml "$RUNTIME/config.yaml" \
+  --config-us "$RUNTIME/config.us.json" \
+  --config-hk "$RUNTIME/config.hk.json" \
+  --include-strategy-lab-recorder \
+  --strategy-lab-recorder-source opend \
+  --strategy-lab-recorder-max-datasets 5 \
+  --output-dir /tmp/options-monitor-service
+```
+
+这个开关会生成三类独立 timer：
+
+- `options-monitor-strategy-lab-build.timer`：每 30 分钟幂等构建 latest scanned run 对应的 Shadow Replay dataset；dataset id 默认使用 run id，已存在就跳过，不覆盖已有 mark path。
+- `options-monitor-strategy-lab-sample.timer`：每 2 小时对最近 dataset 执行 mark path 采样和本地 data-plan 维护。`--strategy-lab-recorder-source opend` 要求 OpenD 已可用；如果同一次 render 也包含 `--include-opend`，systemd unit 会声明对 `options-monitor-opend.service` 的依赖。
+- `options-monitor-strategy-lab-settle.timer`：每天北京时间 07:20 尝试 settle outcome facts。
+
+recorder 只写 `$RUNTIME`/repo 下的本地 research artifact、Shadow Replay dataset、required-data / OpenD cache / rate-limit state 和 receipt。它不发通知，不运行 experiment/proposal，不调用在线 AI，不修改 runtime config、交易状态、Feishu 或 broker-facing state。升级时 `service.profile.json` 会保留 `strategy_lab_recorder` opt-in，service drift reconcile 会继续渲染这些 timer；不传该开关则默认不启用。
+
 传入 `--deploy-user "$DEPLOY_USER"` 后，渲染出的 systemd unit 会包含：
 
 ```ini
@@ -264,6 +292,26 @@ cd "$REPO"
 
 launchd 不读取 shell profile。渲染器会把 `OM_ENV_FILE=$ENV_FILE` 写入 plist，CLI 启动后再从该 env file 读取 Feishu Bot、holdings 和 inbound audit 配置。
 
+Mac 上同样可以显式开启 Strategy Lab recorder：
+
+```bash
+./om service render \
+  --target launchd \
+  --repo-root "$REPO" \
+  --runtime-root "$RUNTIME" \
+  --env-file "$ENV_FILE" \
+  --markets us hk \
+  --accounts lx sy \
+  --config-yaml "$RUNTIME/config.yaml" \
+  --config-us "$RUNTIME/config.us.json" \
+  --config-hk "$RUNTIME/config.hk.json" \
+  --include-strategy-lab-recorder \
+  --strategy-lab-recorder-source opend \
+  --output-dir /tmp/options-monitor-service
+```
+
+launchd 没有 systemd 的 `After=` / `Wants=` 关系；使用 `opend` source 时，需要先确认 OpenD 已经在同一台机器上稳定运行。
+
 安装：
 
 ```bash
@@ -278,6 +326,14 @@ launchctl bootstrap "gui/$UID" "$HOME/Library/LaunchAgents/com.options-monitor.p
 launchctl bootstrap "gui/$UID" "$HOME/Library/LaunchAgents/com.options-monitor.runtime-status.plist"
 launchctl bootstrap "gui/$UID" "$HOME/Library/LaunchAgents/com.options-monitor.trade-intake.plist"
 launchctl bootstrap "gui/$UID" "$HOME/Library/LaunchAgents/com.options-monitor.feishu-ws.plist"
+```
+
+如果本次 render 开启了 Strategy Lab recorder，再额外加载：
+
+```bash
+launchctl bootstrap "gui/$UID" "$HOME/Library/LaunchAgents/com.options-monitor.strategy-lab-build.plist"
+launchctl bootstrap "gui/$UID" "$HOME/Library/LaunchAgents/com.options-monitor.strategy-lab-sample.plist"
+launchctl bootstrap "gui/$UID" "$HOME/Library/LaunchAgents/com.options-monitor.strategy-lab-settle.plist"
 ```
 
 launchd 的日历时间按 Mac 本机时区执行；要等价于北京时间 09:00 / 09:30，Mac 的系统时区需要设为中国标准时间或等价时区。
