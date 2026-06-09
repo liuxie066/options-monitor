@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from datetime import date
 
-from src.application.assistant.parser import parse_inbound_text
 from src.application.assistant.contracts import AssistantRequest, PerceptionResult
+from src.application.assistant.position_query import parse_position_query_text, position_query_intent_arguments
 from src.application.assistant.reasoning import resolve_reasoning
 from src.application.ledger.read_model import list_position_rows
 
@@ -59,8 +59,13 @@ class _Repo:
         ]
 
 
+def _position_intent(text: str, *, today: date, intent_name: str = "position_query") -> PerceptionResult:
+    query = parse_position_query_text(text, today=today)
+    return PerceptionResult(intent_name=intent_name, arguments=position_query_intent_arguments(query))
+
+
 def test_position_query_parser_preserves_expiration_month_constraint() -> None:
-    intent = parse_inbound_text("sy 5月到期的持仓", now_fn=lambda: date(2026, 5, 19))
+    intent = _position_intent("sy 5月到期的持仓", today=date(2026, 5, 19))
 
     assert intent.intent_name == "position_query"
     assert intent.arguments == {
@@ -72,7 +77,7 @@ def test_position_query_parser_preserves_expiration_month_constraint() -> None:
 
 
 def test_position_query_parser_preserves_month_without_account() -> None:
-    intent = parse_inbound_text("5月到期的持仓", now_fn=lambda: date(2026, 5, 19))
+    intent = _position_intent("5月到期的持仓", today=date(2026, 5, 19))
 
     assert intent.intent_name == "position_query"
     assert intent.arguments == {
@@ -83,7 +88,7 @@ def test_position_query_parser_preserves_month_without_account() -> None:
 
 
 def test_position_query_reasoning_preserves_query_constraints() -> None:
-    perception = parse_inbound_text("0700 5月 call 持仓", now_fn=lambda: date(2026, 5, 19))
+    perception = _position_intent("0700 5月 call 持仓", today=date(2026, 5, 19))
     resolution = resolve_reasoning(
         perception,
         request=AssistantRequest(text="0700 5月 call 持仓", sender_id="local", config_key="hk"),
@@ -133,8 +138,12 @@ def test_reasoning_routes_exit_analysis_to_close_advice_read() -> None:
     }
 
 
-def test_parser_does_not_downgrade_exit_analysis_to_position_query() -> None:
-    perception = parse_inbound_text("泡泡玛特 long call 的持仓应该止盈吗", now_fn=lambda: date(2026, 5, 29))
+def test_exit_analysis_does_not_downgrade_to_position_query() -> None:
+    perception = _position_intent(
+        "泡泡玛特 long call 的持仓应该止盈吗",
+        today=date(2026, 5, 29),
+        intent_name="position_exit_analysis",
+    )
     resolution = resolve_reasoning(
         perception,
         request=AssistantRequest(text="泡泡玛特 long call 的持仓应该止盈吗", sender_id="local", config_key="hk"),
@@ -160,7 +169,7 @@ def test_parser_does_not_downgrade_exit_analysis_to_position_query() -> None:
 
 
 def test_position_query_parser_keeps_symbol_type_and_month_constraints() -> None:
-    intent = parse_inbound_text("0700 5月 call 持仓", now_fn=lambda: date(2026, 5, 19))
+    intent = _position_intent("0700 5月 call 持仓", today=date(2026, 5, 19))
 
     assert intent.arguments == {
         "status": "open",
@@ -172,7 +181,7 @@ def test_position_query_parser_keeps_symbol_type_and_month_constraints() -> None
 
 
 def test_position_query_parser_does_not_treat_year_month_as_symbol() -> None:
-    intent = parse_inbound_text("lx 2026-05 到期 put 持仓", now_fn=lambda: date(2026, 5, 19))
+    intent = _position_intent("lx 2026-05 到期 put 持仓", today=date(2026, 5, 19))
 
     assert intent.arguments == {
         "account": "lx",

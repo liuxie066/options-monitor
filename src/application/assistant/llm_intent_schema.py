@@ -164,6 +164,8 @@ def _reject_extra_arguments(intent_name: str, arguments: dict[str, Any]) -> None
 def _normalize_arguments(intent_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     if intent_name in {"help", "runtime_status", "healthcheck", "config_validate", "symbol_list", "pending_operations"}:
         return {}
+    if intent_name == "symbol_config_query":
+        return _normalize_symbol_config_query_arguments(arguments)
     if intent_name in {"position_query", "position_exit_analysis"}:
         return PositionQuery.from_payload(arguments).to_payload()
     if intent_name == "monthly_income_report":
@@ -232,6 +234,18 @@ def _normalize_symbol_edit_arguments(arguments: dict[str, Any]) -> dict[str, Any
     out: dict[str, Any] = {"symbol": symbol, "set": normalized_sets}
     if ensure_use:
         out["ensure_use"] = ensure_use
+    return out
+
+
+def _normalize_symbol_config_query_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    symbol = str(arguments.get("symbol") or "").strip()
+    if not symbol:
+        raise AgentToolError(code="NEEDS_CLARIFICATION", message="LLM symbol_config_query intent requires symbol")
+    out: dict[str, Any] = {"symbol": symbol}
+    for key in ("strategy", "field"):
+        value = str(arguments.get(key) or "").strip()
+        if value:
+            out[key] = value
     return out
 
 

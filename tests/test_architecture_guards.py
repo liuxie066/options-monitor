@@ -171,6 +171,7 @@ def test_llm_intent_surface_keeps_executable_read_only_and_preview_limited() -> 
     assert set(json_schema["properties"]["intent"]["enum"]) == recognizable_names
     assert allowed_names <= recognizable_names
     assert "position_exit_analysis" in allowed_names
+    assert "symbol_config_query" in allowed_names
     assert "symbol_edit" in recognizable_names
     assert "symbol_edit" not in allowed_names
     assert not any(name.endswith(("_confirm", "_cancel")) for name in recognizable_names)
@@ -258,7 +259,7 @@ def test_assistant_runtime_delegates_perception() -> None:
     assert "PerceptionEngine(" in runtime_text
     forbidden_runtime_tokens = (
         "parse_assistant_command",
-        "parse_inbound_text",
+        "parse_deterministic_text",
         "run_read_only_agent_loop",
         "generate_general_reply",
         "build_conversation_context",
@@ -333,7 +334,7 @@ def test_perception_producers_do_not_plan_or_execute_tools() -> None:
     )
     checked = [
         ROOT / "src" / "application" / "assistant" / "command_parser.py",
-        ROOT / "src" / "application" / "assistant" / "parser.py",
+        ROOT / "src" / "application" / "assistant" / "deterministic_commands.py",
         ROOT / "src" / "application" / "assistant" / "llm_intent_schema.py",
         ROOT / "src" / "application" / "assistant" / "llm_translator.py",
     ]
@@ -348,6 +349,7 @@ def test_perception_producers_do_not_plan_or_execute_tools() -> None:
 
 
 def test_legacy_assistant_frame_and_tool_plan_are_removed() -> None:
+    assert not (ROOT / "src" / "application" / "assistant" / "parser.py").exists()
     assert not (ROOT / "src" / "application" / "assistant" / "frame_planner.py").exists()
     assert not (ROOT / "src" / "application" / "assistant" / "intent_arbitrator.py").exists()
     assert not (ROOT / "src" / "application" / "assistant" / "intent_arbitration.py").exists()
@@ -433,7 +435,7 @@ def test_inbound_package_exposes_transport_only() -> None:
 
     root_text = (ROOT / "src" / "application" / "inbound" / "__init__.py").read_text(encoding="utf-8")
     assert "handle_assistant_request" not in root_text
-    assert "parse_inbound_text" not in root_text
+    assert "parse_deterministic_text" not in root_text
     assert "render_inbound_text" not in root_text
     assert "AssistantRequest" not in root_text
 
@@ -449,7 +451,7 @@ def test_inbound_transport_does_not_import_assistant_control_plane_details() -> 
         "src.application.assistant.reasoning",
         "src.application.assistant.llm_reply",
         "src.application.assistant.llm_translator",
-        "src.application.assistant.parser",
+        "src.application.assistant.deterministic_commands",
         "src.application.assistant.router",
     )
     offenders: list[str] = []

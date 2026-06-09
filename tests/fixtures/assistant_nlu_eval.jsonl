@@ -3,7 +3,7 @@
 {"id":"remote_20260526_symbol_covered_call_no_prefix","text":"为tigr做covered call的设置，min strike=6.5","expected_source":"deterministic","expected_safety_class":"write_preview","expected_intent":"symbol_edit","expected_args_subset":{"symbol":"tigr","set":{"sell_call.enabled":true,"sell_call.min_strike":6.5},"ensure_use":["call_base"]},"must_not_intent":"manual_trade_update"}
 {"id":"remote_20260524_upgrade_confirm","text":"确认升级","expected_source":"deterministic","expected_safety_class":"write_apply","expected_intent":"upgrade_confirm","expected_args_subset":{"operation_id":null,"operation_resolution":"latest_pending"}}
 {"id":"remote_20260524_upgrade_now","text":"立即升级","expected_source":"deterministic","expected_safety_class":"admin_preview","expected_intent":"upgrade_now"}
-{"id":"remote_20260523_positions","text":"持仓","expected_source":"deterministic","expected_safety_class":"read","expected_intent":"position_query","expected_args_subset":{"status":"open"}}
+{"id":"remote_20260523_positions","text":"/positions","expected_source":"command","expected_safety_class":"read","expected_intent":"position_query","expected_args_subset":{"status":"open"}}
 {"id":"remote_20260523_income_command","text":"/income","expected_source":"command","expected_safety_class":"read","expected_intent":"monthly_income_report"}
 {"id":"remote_20260523_upgrade_confirm","text":"确认升级","expected_source":"deterministic","expected_safety_class":"write_apply","expected_intent":"upgrade_confirm","expected_args_subset":{"operation_id":null,"operation_resolution":"latest_pending"}}
 {"id":"remote_20260523_upgrade_now","text":"立即升级","expected_source":"deterministic","expected_safety_class":"admin_preview","expected_intent":"upgrade_now"}

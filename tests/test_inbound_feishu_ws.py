@@ -20,7 +20,7 @@ from src.application.inbound.feishu_ws import (
 from src.infrastructure.feishu_ws_client import feishu_event_model_to_payload
 
 
-def _message_payload(*, sender: str = "ou_1", text: str = "收益 sy 2026-05") -> dict[str, Any]:
+def _message_payload(*, sender: str = "ou_1", text: str = "/income sy 2026-05") -> dict[str, Any]:
     return {
         "schema": "2.0",
         "header": {"event_id": "evt_1", "event_type": "im.message.receive_v1"},
@@ -379,7 +379,7 @@ def test_feishu_ws_reaction_failure_does_not_fail_inbound_or_reply(tmp_path: Pat
         raise RuntimeError("no permission")
 
     out = handle_feishu_ws_event(
-        _message_payload(text="状态"),
+        _message_payload(text="/status"),
         settings=FeishuWsSettings(
             config_key="us",
             allowed_senders="feishu:ou_1",
@@ -630,7 +630,7 @@ def test_feishu_ws_serve_uses_background_worker(tmp_path: Path) -> None:
         return {"code": 0}
 
     def _start_client(**kwargs: Any) -> None:
-        kwargs["on_event"](_message_payload(text="状态"))
+        kwargs["on_event"](_message_payload(text="/status"))
 
     serve_feishu_ws(
         FeishuWsSettings(
