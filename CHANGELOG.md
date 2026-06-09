@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.246 - 2026-06-09
+
+### Fixed
+- Fixed assistant symbol-config queries for service requests that pass a standard runtime `config_path`, switching `config.us.json` / `config.hk.json` to the symbol's market before reading monitored-symbol config.
+
 ## 1.2.245 - 2026-06-09
 
 ### Fixed

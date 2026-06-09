@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from domain.domain.symbol_identity import symbol_market
@@ -272,14 +273,24 @@ def _base_payload(request: AssistantRequest) -> dict[str, Any]:
 
 
 def _base_payload_for_symbol_config(request: AssistantRequest, *, symbol: str) -> dict[str, Any]:
+    market_key = _market_config_key(symbol)
     if request.config_path:
+        path = Path(str(request.config_path))
+        if market_key is not None and path.name in {"config.us.json", "config.hk.json"}:
+            return {"config_path": str(path.with_name(f"config.{market_key}.json"))}
         return {"config_path": request.config_path}
+    if market_key is not None:
+        return {"config_key": market_key}
+    return _base_payload(request)
+
+
+def _market_config_key(symbol: Any) -> str | None:
     market = str(symbol_market(symbol) or "").strip().upper()
     if market == "HK":
-        return {"config_key": "hk"}
+        return "hk"
     if market == "US":
-        return {"config_key": "us"}
-    return _base_payload(request)
+        return "us"
+    return None
 
 
 __all__ = ["CONFIG_SCOPED_INTENTS", "resolve_reasoning"]
