@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from domain.domain.symbol_identity import symbol_market
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.assistant.commands import spec_by_intent
 from src.application.assistant.contracts import (
@@ -157,7 +158,7 @@ def _tool_payload_from_perception(
         if not symbol:
             raise AgentToolError(code="NEEDS_CLARIFICATION", message="需要指定要查询的标的。")
         payload = {
-            **base,
+            **_base_payload_for_symbol_config(request, symbol=symbol),
             "symbol": symbol,
         }
         for key in ("strategy", "field"):
@@ -268,6 +269,17 @@ def _base_payload(request: AssistantRequest) -> dict[str, Any]:
     elif request.config_key:
         payload["config_key"] = request.config_key
     return payload
+
+
+def _base_payload_for_symbol_config(request: AssistantRequest, *, symbol: str) -> dict[str, Any]:
+    if request.config_path:
+        return {"config_path": request.config_path}
+    market = str(symbol_market(symbol) or "").strip().upper()
+    if market == "HK":
+        return {"config_key": "hk"}
+    if market == "US":
+        return {"config_key": "us"}
+    return _base_payload(request)
 
 
 __all__ = ["CONFIG_SCOPED_INTENTS", "resolve_reasoning"]
