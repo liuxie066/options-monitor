@@ -7,6 +7,7 @@ from datetime import date, datetime
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
+from domain.domain.symbol_identity import symbol_market
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response
 from src.application.agent_tool_registry import get_tool_definition
 from src.application.assistant.capability_catalog import (
@@ -1935,7 +1936,7 @@ def _inject_system_fields(arguments: dict[str, Any], *, request: AssistantReques
         if request.config_path:
             payload["config_path"] = request.config_path
         elif request.config_key:
-            payload["config_key"] = request.config_key
+            payload["config_key"] = _config_key_for_tool_payload(tool_name=tool_name, payload=payload, default=request.config_key)
     if tool_name == "option_positions_read":
         payload.setdefault("action", "list")
     if tool_name == "runtime_runs":
@@ -1944,6 +1945,17 @@ def _inject_system_fields(arguments: dict[str, Any], *, request: AssistantReques
         payload.setdefault("kind", "all")
         payload.setdefault("lines", 50)
     return payload
+
+
+def _config_key_for_tool_payload(*, tool_name: str, payload: dict[str, Any], default: str) -> str:
+    if tool_name != "symbol_config_read":
+        return default
+    market = str(symbol_market(payload.get("symbol")) or "").strip().upper()
+    if market == "HK":
+        return "hk"
+    if market == "US":
+        return "us"
+    return default
 
 
 def _planner_input_text(text: str, *, conversation_context: dict[str, Any] | None) -> str:

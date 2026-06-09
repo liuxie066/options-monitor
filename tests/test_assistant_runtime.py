@@ -1622,7 +1622,7 @@ def test_assistant_runtime_routes_core_read_only_llm_intents(tmp_path: Path) -> 
                 source="llm",
                 confidence=0.92,
             ),
-            ("symbol_config_read", {"config_key": "us", "symbol": "泡泡玛特", "strategy": "sell_put", "field": "max_strike"}),
+            ("symbol_config_read", {"config_key": "hk", "symbol": "泡泡玛特", "strategy": "sell_put", "field": "max_strike"}),
         ),
     ]
 
@@ -2248,7 +2248,7 @@ def test_assistant_runtime_agent_loop_injects_config_for_symbol_config_read(tmp_
             text="现在泡泡玛特 sell put的max strike是多少？",
             sender_id="local",
             message_id="msg_agent_loop_symbol_config_read",
-            config_key="hk",
+            config_key="us",
             audit_db=str(tmp_path / "inbound.sqlite3"),
         ),
         execute_tool_fn=_execute,
