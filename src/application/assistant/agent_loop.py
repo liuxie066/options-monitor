@@ -1801,9 +1801,25 @@ def _assess_plan_capabilities(plan: PlannerPlan, observations: list[dict[str, An
                 satisfied.append(capability)
             else:
                 gaps.append(capability)
+        elif _observations_have_tool_capability(observations, capability):
+            satisfied.append(capability)
         else:
             gaps.append(capability)
     return {"required": required, "satisfied": satisfied, "gaps": gaps}
+
+
+def _observations_have_tool_capability(observations: list[dict[str, Any]], capability: str) -> bool:
+    required = str(capability or "").strip()
+    if not required:
+        return False
+    for item in observations:
+        if not bool(item.get("ok", False)):
+            continue
+        tool_name = str(item.get("tool_name") or "")
+        definition = get_tool_definition(tool_name)
+        if definition is not None and required in definition.capabilities:
+            return True
+    return False
 
 
 def _observations_have_monthly_income_report_result(observations: list[dict[str, Any]]) -> bool:
@@ -2019,6 +2035,28 @@ def _planner_tool_manifest() -> list[dict[str, Any]]:
                     "For 历史以来, 累计, or 总净现金流, answer over the OM local ledger coverage returned by the tool.",
                     "Do not claim missing history solely because coverage contains only some months.",
                     "Do not claim an account is missing if coverage.accounts includes it.",
+                ],
+            }
+        if name == "option_positions_read":
+            notes.append("Use for current option position list/detail requests, including 持仓明细, 持仓明晰, 持仓详情, 当前仓位, or current positions.")
+            notes.append("For ordinary position list/detail requests, required_capabilities should be [] because option_positions_read itself provides option_positions/read_only.")
+            notes.append("Use action=list for current lots; use action=history or action=inspect only when the user explicitly asks for event history, projection, repair, or ledger diagnostics.")
+            semantics = {
+                "data_source": "local option position ledger",
+                "answer_capabilities": {
+                    "option_positions": "successful option_positions_read observations provide option position rows",
+                    "read_only": "option_positions_read is registry-declared read-only",
+                    "ledger_diagnostics": "history or inspect actions provide ledger diagnostic context when explicitly requested",
+                },
+                "scope_semantics": {
+                    "status omitted": "open option positions",
+                    "account omitted": "all available accounts for the selected config",
+                    "detail words": "明细, 明晰, 详情, and current positions are ordinary list/detail reads",
+                },
+                "not_promised": [
+                    "broker realtime statement outside the local OM ledger",
+                    "profit or return calculations; use monthly_income_report for income questions",
+                    "close advice; use close_advice_read for should-close or take-profit analysis",
                 ],
             }
         if name == "symbol_config_read":

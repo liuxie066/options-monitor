@@ -87,6 +87,16 @@ def test_position_query_parser_preserves_month_without_account() -> None:
     }
 
 
+def test_position_query_parser_treats_detail_synonyms_as_plain_open_list() -> None:
+    for text in ("持仓明细", "持仓明晰", "持仓详情", "当前持仓明细"):
+        intent = _position_intent(text, today=date(2026, 6, 9))
+
+        assert intent.arguments == {
+            "status": "open",
+            "limit": 50,
+        }
+
+
 def test_position_query_reasoning_preserves_query_constraints() -> None:
     perception = _position_intent("0700 5月 call 持仓", today=date(2026, 5, 19))
     resolution = resolve_reasoning(
