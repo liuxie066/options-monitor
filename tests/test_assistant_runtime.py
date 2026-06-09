@@ -357,6 +357,12 @@ def test_agent_loop_planner_catalog_matches_registry_backed_manifest() -> None:
     assert "strategy" in symbol_config["input_schema"]
     assert "config_path" not in symbol_config["input_schema"]
     assert "current monitored-symbol config" in " ".join(symbol_config["planner_notes"])
+    position_read = next(tool for tool in _planner_tool_manifest() if tool["name"] == "option_positions_read")
+    position_notes = " ".join(position_read["planner_notes"])
+    assert "持仓明细" in position_notes
+    assert "持仓明晰" in position_notes
+    assert "required_capabilities should be []" in position_notes
+    assert position_read["semantics"]["answer_capabilities"]["option_positions"]
 
 
 def test_agent_loop_planner_manifest_hides_system_scoped_arguments() -> None:
@@ -2267,6 +2273,115 @@ def test_assistant_runtime_agent_loop_injects_config_for_symbol_config_read(tmp_
         "symbol": "泡泡玛特",
         "strategy": "sell_put",
         "field": "max_strike",
+    }
+
+
+def test_assistant_runtime_agent_loop_satisfies_position_read_tool_capabilities(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "summary": {"account": "all", "status": "open", "row_count": 1},
+                "rows": [
+                    {
+                        "record_id": "lot_1",
+                        "account": "lx",
+                        "symbol": "NVDA",
+                        "status": "open",
+                        "option_type": "put",
+                        "side": "short",
+                        "strike": 100,
+                        "expiration": "2026-06-19",
+                    }
+                ],
+                "row_count": 1,
+            },
+        )
+
+    def _plan(
+        text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        assert text == "持仓明晰"
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="读取当前持仓明细",
+                response_mode="synthesis",
+                required_capabilities=("option_positions", "read_only"),
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="option_positions_read",
+                        arguments={"action": "list", "query": {"status": "open"}},
+                        purpose="读取 open 期权持仓明细",
+                    ),
+                ),
+            ),
+            trace={
+                "enabled": True,
+                "attempted": True,
+                "reason": "accepted",
+                "provider": "openai",
+                "base_url": "",
+                "model": "gpt-5.2",
+                "api_key_env": "OM_LLM_API_KEY",
+                "confidence_min": 0.75,
+                "timeout_seconds": 20,
+                "max_output_tokens": 512,
+                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+            },
+        )
+
+    def _synthesize(
+        question: str,
+        _settings: AssistantSettings,
+        plan: PlannerPlan,
+        observations: list[dict[str, Any]],
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmSynthesisResult:
+        assert question == "持仓明晰"
+        assert plan.required_capabilities == ("option_positions", "read_only")
+        assert observations[-1]["tool_name"] == "assistant.capability_check"
+        assert observations[-1]["data"]["capability_status"] == {
+            "required": ["option_positions", "read_only"],
+            "satisfied": ["option_positions", "read_only"],
+            "gaps": [],
+        }
+        return LlmSynthesisResult(
+            response_text="当前 open 期权持仓：1 条。NVDA Put 2026-06-19 100P。",
+            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="持仓明晰",
+            sender_id="local",
+            message_id="msg_agent_loop_position_capability",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+        synthesize_response_fn=_synthesize,
+    )
+
+    assert out["ok"] is True
+    assert calls == [("option_positions_read", {"action": "list", "config_key": "us", "query": {"status": "open"}})]
+    assert "当前只能部分满足" not in out["data"]["response_text"]
+    tool_plan_data = out["data"]["action"]["result"]["data"]
+    assert tool_plan_data["capability_status"] == {
+        "required": ["option_positions", "read_only"],
+        "satisfied": ["option_positions", "read_only"],
+        "gaps": [],
     }
 
 
