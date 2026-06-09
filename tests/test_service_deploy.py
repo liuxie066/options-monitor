@@ -549,7 +549,7 @@ def test_render_systemd_bundle_can_include_auto_upgrade_timer(tmp_path: Path) ->
 
 
 def test_service_upgrade_verify_returns_compact_read_only_summary(tmp_path: Path) -> None:
-    from src.application.service_upgrade import service_upgrade_verify
+    from src.application.service_upgrade import service_upgrade_verify, write_upgrade_status
 
     releases = tmp_path / "releases"
     release = releases / "1.2.3"
@@ -636,7 +636,28 @@ def test_service_upgrade_verify_returns_compact_read_only_summary(tmp_path: Path
     assert out["event_source"]["providers"] == ["futu", "yfinance"]
     assert out["event_source"]["markets"]["us"]["chain"] == ["futu", "yfinance"]
     assert out["services"]["status"] == "unknown"
-    assert out["upgrade"] == {"available": False}
+    assert out["upgrade"] == {"available": False, "has_status_record": False, "last_status": None}
+
+    write_upgrade_status(
+        runtime_root=runtime,
+        payload={
+            "ok": True,
+            "status": "upgraded",
+            "current_version": "1.2.2",
+            "target_version": "1.2.3",
+            "release_tag": "v1.2.3",
+            "updated_at": "2026-06-09T00:00:00Z",
+            "symlink_switched": True,
+            "config_rebuilt": True,
+        },
+    )
+
+    with_status = service_upgrade_verify(repo_root=current, runtime_root=runtime, check_latest=False)
+    assert with_status["version"]["upgrade_available"] is None
+    assert with_status["upgrade"]["available"] is True
+    assert with_status["upgrade"]["has_status_record"] is True
+    assert with_status["upgrade"]["last_status"] == "upgraded"
+    assert with_status["upgrade"]["status"] == "upgraded"
 
 
 def test_render_systemd_bundle_records_yaml_authoring_source(tmp_path: Path) -> None:
