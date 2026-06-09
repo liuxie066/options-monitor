@@ -9,7 +9,7 @@ import pytest
 
 from src.application.assistant.command_parser import parse_assistant_command
 from src.application.assistant.contracts import AssistantRequest, PerceptionResult
-from src.application.assistant.parser import parse_inbound_text
+from src.application.assistant.deterministic_commands import parse_deterministic_text
 from src.application.assistant.perception_trace import accepted_candidate, build_perception_trace, skipped_candidate
 from src.application.assistant.reasoning import resolve_reasoning
 
@@ -30,7 +30,7 @@ def _parse(text: str) -> PerceptionResult:
     command_intent = parse_assistant_command(text, now_fn=lambda: date(2026, 5, 26))
     if command_intent is not None:
         return command_intent
-    return parse_inbound_text(text, now_fn=lambda: date(2026, 5, 26))
+    return parse_deterministic_text(text, now_fn=lambda: date(2026, 5, 26))
 
 
 def _trace_eval_case(perception: PerceptionResult) -> dict[str, Any]:

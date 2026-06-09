@@ -72,6 +72,8 @@ ARGUMENT_JSON_SCHEMA: dict[str, dict[str, Any]] = {
     "limit": {"type": ["integer", "null"]},
     "lines": {"type": ["integer", "null"]},
     "model_profile": {"type": ["string", "null"]},
+    "strategy": {"type": ["string", "null"]},
+    "field": {"type": ["string", "null"]},
     "set": {
         "type": ["object", "null"],
         "additionalProperties": {"type": ["string", "number", "integer", "boolean", "null"]},
@@ -119,6 +121,15 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         display_name="配置检查",
         examples=("配置检查", "/config-check"),
         summary="validate runtime config",
+    ),
+    AssistantCommandSpec(
+        intent_name="symbol_config_query",
+        tool_name="symbol_config_read",
+        commands=(),
+        display_name="标的配置",
+        arguments=("symbol", "strategy", "field"),
+        examples=("现在泡泡玛特 sell put 的 max strike 是多少", "查询 9992.HK sell_put.max_strike"),
+        summary="read current monitored-symbol strategy config for a symbol",
     ),
     AssistantCommandSpec(
         intent_name="position_query",

@@ -197,6 +197,7 @@ def test_assistant_command_catalog_drives_llm_allowed_surface() -> None:
 
     assert set(schema["shape"]["intent"]) == llm_recognizable
     assert "runtime_status" in llm_executable
+    assert "symbol_config_query" in llm_executable
     assert "position_exit_analysis" in llm_recognizable
     assert "position_exit_analysis" in llm_executable
     assert "manual_trade_open" in llm_denied
@@ -209,6 +210,8 @@ def test_assistant_command_catalog_drives_llm_allowed_surface() -> None:
     assert payload["summary"]["command_count"] == len(command_specs())
     assert payload["summary"]["capability_count"] == len(command_specs())
     assert capabilities["runtime_status"]["display_name"] == "状态"
+    assert capabilities["symbol_config_query"]["tool_name"] == "symbol_config_read"
+    assert capabilities["symbol_config_query"]["llm_executable"] is True
     assert capabilities["position_exit_analysis"]["supported"] is True
     assert capabilities["position_exit_analysis"]["llm_recognizable"] is True
     assert capabilities["position_exit_analysis"]["llm_executable"] is True
@@ -241,6 +244,7 @@ def test_llm_capability_manifest_lists_known_but_non_executable_operations() -> 
     assert "runtime_status" in manifest["llm_executable_intents"]
     assert "tool_plan" not in capabilities
     assert capabilities["runtime_status"]["llm_executable"] is True
+    assert capabilities["symbol_config_query"]["llm_executable"] is True
     assert capabilities["manual_trade_open"]["llm_executable"] is False
     assert capabilities["manual_trade_close"]["llm_executable"] is False
     assert capabilities["manual_trade_update"]["llm_executable"] is False
@@ -348,6 +352,11 @@ def test_agent_loop_planner_catalog_matches_registry_backed_manifest() -> None:
 
     assert {str(spec.tool_name) for spec in planner_read_specs()} == AGENT_LOOP_READ_TOOLS
     assert manifest_names == AGENT_LOOP_READ_TOOLS | AGENT_LOOP_PREVIEW_CAPABILITIES
+    symbol_config = next(tool for tool in _planner_tool_manifest() if tool["name"] == "symbol_config_read")
+    assert "symbol" in symbol_config["input_schema"]
+    assert "strategy" in symbol_config["input_schema"]
+    assert "config_path" not in symbol_config["input_schema"]
+    assert "current monitored-symbol config" in " ".join(symbol_config["planner_notes"])
 
 
 def test_agent_loop_planner_manifest_hides_system_scoped_arguments() -> None:
@@ -385,27 +394,26 @@ def test_agent_loop_planner_manifest_hides_system_scoped_arguments() -> None:
             assert "_path_" not in normalized
 
 
-def test_assistant_deterministic_parser_supports_productized_read_aliases() -> None:
-    from src.application.assistant.parser import parse_inbound_text
+def test_assistant_deterministic_commands_exclude_read_aliases() -> None:
+    from src.application.assistant.deterministic_commands import parse_deterministic_text
 
-    assert parse_inbound_text("我能做什么").intent_name == "help"
-    assert parse_inbound_text("有哪些功能").intent_name == "help"
-    assert parse_inbound_text("自检").intent_name == "healthcheck"
-    assert parse_inbound_text("配置是否正常").intent_name == "config_validate"
-    assert parse_inbound_text("config").intent_name == "config_validate"
-    assert parse_inbound_text("positions").arguments == {"status": "open", "limit": 50}
-    assert parse_inbound_text("income").arguments == {}
-    assert parse_inbound_text("runs").arguments == {"limit": 10}
-    assert parse_inbound_text("最近任务").intent_name == "runtime_runs"
-    assert parse_inbound_text("symbols").intent_name == "symbol_list"
-    assert parse_inbound_text("监控标的有哪些").intent_name == "symbol_list"
-    assert parse_inbound_text("pending").intent_name == "pending_operations"
+    assert parse_deterministic_text("我能做什么").intent_name == "help"
+    assert parse_deterministic_text("有哪些功能").intent_name == "help"
+    assert parse_deterministic_text("pending").intent_name == "pending_operations"
+
+    for text in ("自检", "配置是否正常", "config", "positions", "income", "runs", "最近任务", "symbols", "监控标的有哪些"):
+        try:
+            parse_deterministic_text(text)
+        except AgentToolError as err:
+            assert err.code == "NEEDS_CLARIFICATION"
+            assert "/status" in str(err.hint)
+        else:
+            raise AssertionError(f"{text} should use slash command or assistant planner")
 
     try:
-        parse_inbound_text("查一下")
+        parse_deterministic_text("查一下")
     except AgentToolError as err:
-        assert "监控标的" in str(err.hint)
-        assert "日志 <run_id>" in str(err.hint)
+        assert "/positions" in str(err.hint)
     else:
         raise AssertionError("unknown input should request clarification")
 
@@ -546,7 +554,7 @@ def test_assistant_runtime_does_not_overwrite_original_audit_on_duplicate_replay
     assert audited["meta"]["assistant"]["route"] == "command"
 
 
-def test_assistant_runtime_keeps_deterministic_fallback(tmp_path: Path) -> None:
+def test_assistant_runtime_does_not_deterministically_fallback_for_read_text(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
 
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -564,11 +572,10 @@ def test_assistant_runtime_keeps_deterministic_fallback(tmp_path: Path) -> None:
         execute_tool_fn=_execute,
     )
 
-    assert out["ok"] is True
-    assert calls == [("runtime_status", {"config_key": "us"})]
-    assert out["data"]["perception"]["source"] == "deterministic"
-    assert out["meta"]["assistant"]["route"] == "deterministic"
-    assert out["meta"]["assistant"]["llm"]["reason"] == "disabled"
+    assert out["ok"] is False
+    assert out["error"]["code"] == "NEEDS_CLARIFICATION"
+    assert "/status" in out["error"]["hint"]
+    assert calls == []
 
 
 def test_assistant_runtime_requires_config_scope_for_runtime_status(tmp_path: Path) -> None:
@@ -580,7 +587,7 @@ def test_assistant_runtime_requires_config_scope_for_runtime_status(tmp_path: Pa
 
     out = handle_assistant_message(
         AssistantRequest(
-            text="状态",
+            text="/status",
             sender_id="local",
             message_id="msg_status_missing_config",
             audit_db=str(tmp_path / "inbound.sqlite3"),
@@ -630,7 +637,7 @@ def test_agent_loop_mode_does_not_mark_deterministic_command_as_loop_tool_use(tm
     assert perception_trace["candidates"][-1] == {"source": "llm", "status": "skipped", "reason": "command_selected"}
 
 
-def test_assistant_runtime_records_deterministic_perception_trace_in_audit(tmp_path: Path) -> None:
+def test_assistant_runtime_records_deterministic_pending_trace_in_audit(tmp_path: Path) -> None:
     audit_db = tmp_path / "inbound.sqlite3"
     calls: list[tuple[str, dict[str, Any]]] = []
 
@@ -640,7 +647,7 @@ def test_assistant_runtime_records_deterministic_perception_trace_in_audit(tmp_p
 
     out = handle_assistant_message(
         AssistantRequest(
-            text="状态",
+            text="待确认",
             sender_id="local",
             message_id="msg_deterministic_perception_trace",
             config_key="us",
@@ -650,11 +657,11 @@ def test_assistant_runtime_records_deterministic_perception_trace_in_audit(tmp_p
     )
 
     assert out["ok"] is True
-    assert calls == [("runtime_status", {"config_key": "us"})]
+    assert calls == []
     perception_trace = out["meta"]["assistant"]["perception_trace"]
     assert perception_trace["decision"] == "deterministic_fallback_selected"
     assert perception_trace["selected_source"] == "deterministic"
-    assert perception_trace["selected_perception"]["intent_name"] == "runtime_status"
+    assert perception_trace["selected_perception"]["intent_name"] == "pending_operations"
     assert perception_trace["conflict"] is False
     assert perception_trace["candidates"][0]["source"] == "agent_loop"
     assert perception_trace["candidates"][0]["status"] == "skipped"
@@ -664,13 +671,13 @@ def test_assistant_runtime_records_deterministic_perception_trace_in_audit(tmp_p
         "status": "accepted",
         "perception": {
             "schema_version": PERCEPTION_RESULT_SCHEMA_VERSION,
-            "intent_name": "runtime_status",
+            "intent_name": "pending_operations",
             "arguments": {},
             "source": "deterministic",
             "confidence": 1.0,
             "evidence": {},
         },
-        "intent_name": "runtime_status",
+        "intent_name": "pending_operations",
         "perception_source": "deterministic",
         "confidence": 1.0,
     }
@@ -683,7 +690,7 @@ def test_assistant_runtime_records_deterministic_perception_trace_in_audit(tmp_p
     assert decision["schema_version"] == ASSISTANT_DECISION_SCHEMA_VERSION
     assert decision["route"] == "deterministic"
     assert decision["selected_source"] == "deterministic"
-    assert decision["selected_intent_name"] == "runtime_status"
+    assert decision["selected_intent_name"] == "pending_operations"
     assert decision["perception_decision"] == "deterministic_fallback_selected"
     assert decision["execution_contract"]["read_only"] is True
     assert decision["execution_contract"]["direct_writes_allowed"] is False
@@ -905,8 +912,8 @@ def test_assistant_runtime_does_not_fallback_for_unknown_llm_permission_denial(t
     assert perception_trace["candidates"][0]["source"] == "agent_loop"
     assert perception_trace["candidates"][0]["error_code"] == "PERMISSION_DENIED"
     assert perception_trace["candidates"][1]["source"] == "deterministic"
-    assert perception_trace["candidates"][1]["status"] == "accepted"
-    assert perception_trace["candidates"][1]["intent_name"] == "runtime_status"
+    assert perception_trace["candidates"][1]["status"] == "rejected"
+    assert perception_trace["candidates"][1]["error_code"] == "NEEDS_CLARIFICATION"
     assert calls == []
 
 
@@ -960,8 +967,8 @@ def test_assistant_runtime_does_not_fallback_for_mismatched_known_llm_denial(tmp
     assert perception_trace["candidates"][0]["source"] == "agent_loop"
     assert perception_trace["candidates"][0]["error_code"] == "PERMISSION_DENIED"
     assert perception_trace["candidates"][1]["source"] == "deterministic"
-    assert perception_trace["candidates"][1]["status"] == "accepted"
-    assert perception_trace["candidates"][1]["intent_name"] == "runtime_status"
+    assert perception_trace["candidates"][1]["status"] == "rejected"
+    assert perception_trace["candidates"][1]["error_code"] == "NEEDS_CLARIFICATION"
     assert calls == []
 
 
@@ -1050,7 +1057,7 @@ def test_assistant_runtime_skips_agent_loop_when_planner_is_disabled(tmp_path: P
     assert out["meta"]["assistant"]["llm"]["reason"] == "planner_disabled"
 
 
-def test_assistant_runtime_agent_loop_tries_translator_before_deterministic_alias(tmp_path: Path) -> None:
+def test_assistant_runtime_agent_loop_routes_read_text_without_deterministic_alias(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
     translated: list[str] = []
 
@@ -1110,8 +1117,8 @@ def test_assistant_runtime_agent_loop_tries_translator_before_deterministic_alia
     assert perception_trace["candidates"][0]["status"] == "accepted"
     assert perception_trace["candidates"][0]["intent_name"] == "runtime_status"
     assert perception_trace["candidates"][1]["source"] == "deterministic"
-    assert perception_trace["candidates"][1]["status"] == "accepted"
-    assert perception_trace["candidates"][1]["intent_name"] == "runtime_status"
+    assert perception_trace["candidates"][1]["status"] == "rejected"
+    assert perception_trace["candidates"][1]["error_code"] == "NEEDS_CLARIFICATION"
 
 
 def test_assistant_runtime_rejects_llm_preview_write_conflict_with_deterministic_intent(tmp_path: Path) -> None:
@@ -1423,6 +1430,7 @@ def test_assistant_runtime_routes_valid_llm_translation_through_inbound_router(t
             ),
         ),
         translate_intent_fn=_translate,
+        now_fn=lambda: date(2026, 5, 20),
     )
 
     assert out["ok"] is True
@@ -1456,7 +1464,7 @@ def test_assistant_runtime_routes_valid_llm_translation_through_inbound_router(t
     }
 
 
-def test_assistant_runtime_reconciles_missing_llm_read_slots_from_shadow_parser(tmp_path: Path) -> None:
+def test_assistant_runtime_reconciles_missing_llm_month_from_text_filter(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
 
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1514,14 +1522,14 @@ def test_assistant_runtime_reconciles_missing_llm_read_slots_from_shadow_parser(
     assert out["data"]["perception"]["source"] == "llm"
     assert out["data"]["perception"]["arguments"] == {"account": "sy", "month": "2026-06"}
     assert out["data"]["perception"]["evidence"]["argument_reconciliation"] == {
-        "source": "deterministic_shadow",
+        "source": "text_month_filter",
         "filled": {"month": "2026-06"},
         "overridden": {},
     }
     assert out["meta"]["assistant"]["perception_trace"]["selected_source"] == "agent_loop"
 
 
-def test_assistant_runtime_reconciles_stale_llm_month_from_shadow_parser(tmp_path: Path) -> None:
+def test_assistant_runtime_reconciles_stale_llm_month_from_text_filter(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
 
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1578,9 +1586,9 @@ def test_assistant_runtime_reconciles_stale_llm_month_from_shadow_parser(tmp_pat
     assert calls == [("monthly_income_report", {"config_key": "us", "account": "sy", "month": "2026-06"})]
     assert out["data"]["perception"]["arguments"] == {"account": "sy", "month": "2026-06"}
     assert out["data"]["perception"]["evidence"]["argument_reconciliation"] == {
-        "source": "deterministic_shadow",
+        "source": "text_month_filter",
         "filled": {},
-        "overridden": {"month": {"llm": "2026-05", "deterministic": "2026-06"}},
+        "overridden": {"month": {"llm": "2026-05", "text": "2026-06"}},
     }
 
 
@@ -1600,6 +1608,16 @@ def test_assistant_runtime_routes_core_read_only_llm_intents(tmp_path: Path) -> 
         ("帮我看系统有没有红灯", PerceptionResult(intent_name="healthcheck", arguments={}, source="llm", confidence=0.92), ("healthcheck", {"config_key": "us"})),
         ("看看设置是否靠谱", PerceptionResult(intent_name="config_validate", arguments={}, source="llm", confidence=0.92), ("config_validate", {"config_key": "us"})),
         ("过去跑过几次", PerceptionResult(intent_name="runtime_runs", arguments={"limit": 3}, source="llm", confidence=0.92), ("runtime_runs", {"limit": 3})),
+        (
+            "现在泡泡玛特 sell put的max strike是多少？",
+            PerceptionResult(
+                intent_name="symbol_config_query",
+                arguments={"symbol": "泡泡玛特", "strategy": "sell_put", "field": "max_strike"},
+                source="llm",
+                confidence=0.92,
+            ),
+            ("symbol_config_read", {"config_key": "us", "symbol": "泡泡玛特", "strategy": "sell_put", "field": "max_strike"}),
+        ),
     ]
 
     calls: list[tuple[str, dict[str, Any]]] = []
@@ -1646,6 +1664,7 @@ def test_assistant_runtime_routes_core_read_only_llm_intents(tmp_path: Path) -> 
                 llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
             ),
             translate_intent_fn=_translate,
+            now_fn=lambda: date(2026, 5, 20),
         )
         assert out["ok"] is True
         assert out["meta"]["assistant"]["route"] == "agent_loop"
@@ -2162,6 +2181,92 @@ def test_assistant_runtime_agent_loop_satisfies_single_account_return_capability
         "reason": "LLM synthesized the response from tool observations",
         "canonical_renderer_required": False,
         "llm_may_summarize": True,
+    }
+
+
+def test_assistant_runtime_agent_loop_injects_config_for_symbol_config_read(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "schema_version": "symbol_config_read.v1",
+                "symbol": "泡泡玛特",
+                "canonical_symbol": "9992.HK",
+                "found": True,
+                "strategy": "sell_put",
+                "field": "max_strike",
+                "path": "sell_put.max_strike",
+                "value": 145,
+            },
+        )
+
+    def _plan(
+        _text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="查询泡泡玛特 sell put max strike",
+                response_mode="canonical",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="symbol_config_read",
+                        arguments={"symbol": "泡泡玛特", "strategy": "sell_put", "field": "max_strike"},
+                        purpose="读取当前监控标的配置",
+                    ),
+                ),
+            ),
+            trace={
+                "enabled": True,
+                "attempted": True,
+                "reason": "accepted",
+                "provider": "openai",
+                "base_url": "",
+                "model": "gpt-5.2",
+                "api_key_env": "OM_LLM_API_KEY",
+                "confidence_min": 0.75,
+                "timeout_seconds": 20,
+                "max_output_tokens": 512,
+                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+            },
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="现在泡泡玛特 sell put的max strike是多少？",
+            sender_id="local",
+            message_id="msg_agent_loop_symbol_config_read",
+            config_key="hk",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+    )
+
+    assert out["ok"] is True
+    assert calls == [
+        (
+            "symbol_config_read",
+            {"config_key": "hk", "symbol": "泡泡玛特", "strategy": "sell_put", "field": "max_strike"},
+        )
+    ]
+    assert out["data"]["response_text"] == "9992.HK sell_put.max_strike = 145。"
+    agent_loop = out["meta"]["assistant"]["llm"]["agent_loop"]
+    assert agent_loop["observations"][0]["payload"] == {
+        "config_key": "hk",
+        "symbol": "泡泡玛特",
+        "strategy": "sell_put",
+        "field": "max_strike",
     }
 
 
@@ -3307,6 +3412,10 @@ def test_plan_read_only_tools_treats_empty_steps_as_no_plan() -> None:
     assert result.plan is None
     assert result.error is not None
     assert result.error.code == "NEEDS_CLARIFICATION"
+    assert "缺少可安全执行的只读工具或必填信息" in result.error.message
+    assert result.error.hint is not None
+    assert "不会降级到弱相关查询" in result.error.hint
+    assert result.error.details == {"missing_capability": "read_tool_or_required_slots", "weak_downgrade_allowed": False}
     assert result.trace["reason"] == "no_plan"
     assert result.trace["error_code"] == "NEEDS_CLARIFICATION"
 
@@ -3861,6 +3970,21 @@ def test_llm_intent_schema_accepts_strict_read_only_payload() -> None:
     assert result.trace["reason"] == "accepted"
     assert result.trace["schema_version"] == LLM_INTENT_SCHEMA_VERSION
 
+    symbol_config = parse_llm_translation_payload(
+        {
+            "schema_version": LLM_INTENT_SCHEMA_VERSION,
+            "intent": "symbol_config_query",
+            "arguments": {"symbol": "泡泡玛特", "strategy": "sell_put", "field": "max_strike"},
+            "confidence": 0.91,
+        },
+        settings=LlmTranslatorSettings(enabled=True, confidence_min=0.75),
+    )
+
+    assert symbol_config.error is None
+    assert symbol_config.intent is not None
+    assert symbol_config.intent.intent_name == "symbol_config_query"
+    assert symbol_config.intent.arguments == {"symbol": "泡泡玛特", "strategy": "sell_put", "field": "max_strike"}
+
 
 def test_llm_intent_schema_ignores_null_argument_slots_from_provider() -> None:
     result = parse_llm_translation_payload(
@@ -4035,8 +4159,10 @@ def test_llm_intent_schema_documents_allowed_surface() -> None:
     assert capabilities["symbol_edit"]["llm_recognizable"] is True
     assert capabilities["symbol_edit"]["llm_executable"] is False
     assert capabilities["symbol_edit"]["risk_level"] == "preview_write"
+    assert capabilities["symbol_config_query"]["llm_executable"] is True
     assert capabilities["upgrade_now"]["risk_level"] == "preview_admin"
     assert schema["argument_keys"]["runtime_logs"] == ["kind", "lines", "run_id"]
+    assert schema["argument_keys"]["symbol_config_query"] == ["field", "strategy", "symbol"]
     assert schema["argument_keys"]["symbol_edit"] == ["ensure_use", "set", "symbol"]
 
     json_schema = llm_intent_json_schema()
@@ -4057,6 +4183,8 @@ def test_llm_intent_schema_documents_allowed_surface() -> None:
         "kind",
         "limit",
         "lines",
+        "strategy",
+        "field",
         "set",
         "ensure_use",
     }

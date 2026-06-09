@@ -74,25 +74,31 @@ Feishu / WeChat / Hermes
   -> arbitrary ./om command
 ```
 
-## First Supported Commands
+## Supported Read Commands And Planner Reads
 
-The base deterministic command surface supports:
+Slash commands are the deterministic read surface. They do not call LLM:
 
 | Pattern | Tool |
 |---|---|
-| `状态` | `runtime_status` |
-| `健康检查` | `healthcheck` |
-| `配置检查` | `config_validate` |
-| `持仓` | `option_positions_read` for all accounts, open positions |
-| `持仓 [账户]` | `option_positions_read` for one account |
-| `持仓 [到期月份/到期日/标的/类型/方向]` | `option_positions_read` with structured filters |
-| `收益` | `monthly_income_report` for all accounts/months |
-| `收益 [账户]` | `monthly_income_report` for one account |
-| `收益 [账户] [YYYY-MM|6月|本月|上月]` | `monthly_income_report` with month filter |
-| `最近运行` | `runtime_runs` |
-| `日志 <run_id>` | `runtime_logs` |
+| `/status` | `runtime_status` |
+| `/health` | `healthcheck` |
+| `/config-check` | `config_validate` |
+| `/positions [lx|sy|all] [到期月份/到期日/标的/类型/方向]` | `option_positions_read` |
+| `/income [lx|sy] [YYYY-MM|6月|本月|上月]` | `monthly_income_report` |
+| `/runs [limit]` | `runtime_runs` |
+| `/logs <run_id>` | `runtime_logs` |
+| `/symbols` | monitored symbols |
 
-Read commands use the pure-read whitelist. Admin write operations are separate and must pass sender allowlist, operation gates, preview storage, and explicit confirmation before applying.
+Natural-language read requests are planner territory when
+`assistant.planner.enabled=true`. For example, `状态`, `持仓 sy`, `这个月赚了多少`,
+`分析 long call 是不是应该平仓`, and `现在泡泡玛特 sell put 的 max strike 是多少`
+must be translated into bounded read-only capabilities such as
+`runtime_status`, `option_positions_read`, `monthly_income_report`,
+`close_advice_read`, or `symbol_config_read`. If a needed read tool or required
+slot is missing, Inbound should ask for the missing capability/field instead of
+falling back to a weakly related query.
+
+Read tools use the pure-read whitelist. Admin write operations are separate and must pass sender allowlist, operation gates, preview storage, and explicit confirmation before applying.
 
 ## Inbound Command Facade
 
@@ -131,9 +137,11 @@ assistant:
 ```
 
 This keeps OM Copilot enabled while disabling model planning. Unknown slash
-commands return clarification; non-slash messages continue through the
-deterministic parser inside the AgentLoop. Supported active states are
-`assistant.enabled=true|false` and `assistant.planner.enabled=true|false`.
+commands return clarification; non-slash messages are limited to local helper
+aliases, pending-operation aliases, and explicit preview/confirm/cancel
+phrases. Natural-language read requests return clarification unless planner
+routing is enabled. Supported active states are `assistant.enabled=true|false`
+and `assistant.planner.enabled=true|false`.
 
 By default, `default_market_scope` is intentionally unset. Feishu WS should receive an explicit `--config-key us|hk` or `--config-path` when it is bound to one market. Only set `assistant.default_market_scope: us|hk|all` when that default is an explicit product decision for Inbound.
 
@@ -165,9 +173,11 @@ capability such as `manual_trade_open`, `manual_trade_close`,
 Preview-write plans create pending previews through the existing operation
 handlers only; they cannot confirm, cancel, apply, notify externally, write the
 ledger, write config directly, operate services, or send proactive messages.
-The deterministic parser stays as fallback/shadow evidence when the model is
-unavailable, provider-failed, or returns a clarification, and remains the
-authority for slash commands plus explicit confirm/cancel/apply commands.
+Deterministic command aliases stay as fallback/shadow evidence for local helper
+messages, pending operations, and preview/confirm/cancel phrases. Slash commands
+remain command-first. Natural-language read queries should be handled by the
+Planner or rejected with clarification; they should not be recovered through
+keyword fallback.
 
 The command surface authority is `src/application/assistant/commands.py`. Slash command metadata, the LLM intent surface, and inbound help text should use that catalog instead of maintaining separate command lists.
 
@@ -349,7 +359,7 @@ The audit table records:
 Local test:
 
 ```bash
-./om assistant handle --text '持仓 sy' --sender local --channel local --message-id local-1
+./om assistant handle --text '/positions sy' --sender local --channel local --message-id local-1
 ```
 
 Feishu message call:
@@ -357,7 +367,7 @@ Feishu message call:
 ```bash
 OM_FEISHU_BOT_ALLOWED_OPEN_IDS='ou_xxx' \
 ./om assistant handle \
-  --text '收益 <account> <YYYY-MM>' \
+  --text '/income <account> <YYYY-MM>' \
   --sender ou_xxx \
   --channel feishu \
   --message-id '${FEISHU_MESSAGE_ID}'
@@ -375,7 +385,7 @@ This adapter only extracts Feishu `im.message.receive_v1` text-message fields an
 Text output for chat replies:
 
 ```bash
-./om assistant handle --text '状态' --format text
+./om assistant handle --text '/status' --format text
 ```
 
 ## Feishu Long Connection

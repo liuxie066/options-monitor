@@ -21,6 +21,7 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "version_check" in tool_names
     assert "config_validate" in tool_names
     assert "scheduler_status" in tool_names
+    assert "symbol_config_read" in tool_names
     assert "prepare_close_advice_inputs" in tool_names
     assert "close_advice" in tool_names
     assert "get_close_advice" in tool_names
@@ -81,6 +82,11 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert config_validate["risk_level"] == "read_only"
     scheduler_status = next(item for item in spec["tools"] if item["name"] == "scheduler_status")
     assert scheduler_status["side_effects"] == []
+    symbol_config_read = next(item for item in spec["tools"] if item["name"] == "symbol_config_read")
+    assert symbol_config_read["risk_level"] == "read_only"
+    assert symbol_config_read["requires_confirm"] is False
+    assert "symbol" in symbol_config_read["input_schema"]
+    assert "field" in symbol_config_read["input_schema"]
     version_check = next(item for item in spec["tools"] if item["name"] == "version_check")
     assert version_check["safe_default_input"]["remote_name"] == "origin"
     version_update = next(item for item in spec["tools"] if item["name"] == "version_update")
@@ -183,6 +189,7 @@ def test_pure_read_allowlist_is_derived_from_registry_metadata() -> None:
     assert "version_check" in PURE_READ_TOOLS
     assert "runtime_runs" in PURE_READ_TOOLS
     assert "runtime_logs" in PURE_READ_TOOLS
+    assert "symbol_config_read" in PURE_READ_TOOLS
     assert "candidate_filter_explain" in PURE_READ_TOOLS
     assert "operation_timeline" in PURE_READ_TOOLS
     assert "scan_opportunities" not in PURE_READ_TOOLS

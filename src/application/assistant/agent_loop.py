@@ -28,9 +28,9 @@ from src.application.assistant.llm_common import (
     unsupported_llm_provider_error,
 )
 from src.application.assistant.llm_translator import LlmTranslationResult
-from src.application.assistant.parser import extract_month_filter
 from src.application.assistant.renderer import render_inbound_text
 from src.application.assistant.settings import AssistantSettings
+from src.application.assistant.time_filters import extract_month_filter
 from src.application.assistant.tool_policy import DEFAULT_TOOL_POLICY
 from src.infrastructure.openai_chat_completions import (
     OpenAIChatCompletionsError,
@@ -114,6 +114,7 @@ _CONFIG_SCOPED_PLAN_TOOLS = frozenset(
         "option_positions_read",
         "runtime_status",
         "close_advice_read",
+        "symbol_config_read",
     }
 )
 
@@ -884,6 +885,8 @@ def _question_requests_preview_operation(question: str) -> bool:
     if any(token in compact for token in high_confidence_tokens):
         return True
     symbol_setting_tokens = ("coveredcall", "sellcall", "sellput", "minstrike", "maxstrike", "min_strike", "max_strike")
+    if any(token in compact for token in ("是多少", "多少", "是什么", "当前", "现在", "目前", "查询", "查看")):
+        return False
     if ("设置" in compact or "修改监控" in compact or "配置标的" in compact) and any(token in compact for token in symbol_setting_tokens):
         return True
     return "立即升级" in compact or "切换模型" in compact or "使用模型" in compact
@@ -970,6 +973,8 @@ def _safe_tool_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "lines",
         "query",
         "symbol",
+        "strategy",
+        "field",
         "option_type",
         "side",
         "strike",
@@ -1963,7 +1968,8 @@ Rules:
 - For all-history, cumulative, or total net cashflow questions, omit month so monthly_income_report reads all OM local ledger months.
 - For multiple explicit months, either call monthly_income_report once per month with matching arguments, or omit month and synthesize from all available rows; never duplicate one month while claiming another.
 - For "记录开仓", "记录平仓", Futu 成交提醒, 成功卖出/买入 option fills, use manual_trade_open or manual_trade_close with raw_text set to the original user message.
-- For monitored-symbol setting requests such as covered call min strike, use symbol_edit.
+- For current monitored-symbol config questions such as "max strike 是多少", "当前配置", or "查询 sell_put.max_strike", use symbol_config_read with symbol plus optional strategy/field.
+- For monitored-symbol setting changes such as covered call min strike 85, use symbol_edit. Do not use symbol_edit for questions about the current value.
 - For model switch requests, use model_use. For immediate software upgrade requests, use upgrade_now.
 - response_mode is a top-level plan field only. Never include response_mode inside any step.arguments.
 - Use response_mode=canonical only for direct status/summary/list queries that do not require explanation, comparison, or composition.
@@ -2014,6 +2020,17 @@ def _planner_tool_manifest() -> list[dict[str, Any]]:
                     "Do not claim missing history solely because coverage contains only some months.",
                     "Do not claim an account is missing if coverage.accounts includes it.",
                 ],
+            }
+        if name == "symbol_config_read":
+            notes.append("Use for current monitored-symbol config questions, for example sell_put.max_strike, covered_call.min_strike, or enabled state.")
+            notes.append("symbol is required; strategy can be sell_put, sell_call/covered_call, or combo_yield; field can be enabled, min_strike, max_strike, min_dte, or max_dte.")
+            notes.append("Do not use this for setting changes; use the symbol_edit preview capability for changes.")
+            semantics = {
+                "data_source": "selected runtime config",
+                "answer_capabilities": {
+                    "symbol_config_read": "reads current monitored-symbol strategy config without mutating config",
+                },
+                "missing_behavior": "If symbol, strategy, or field is not configured, return the missing reason instead of planning a weakly related tool.",
             }
         item = {
             "name": name,
@@ -2306,6 +2323,7 @@ def _tool_name_for_intent(intent_name: str) -> str | None:
         "runtime_status": "runtime_status",
         "runtime_runs": "runtime_runs",
         "runtime_logs": "runtime_logs",
+        "symbol_config_query": "symbol_config_read",
     }.get(str(intent_name or ""))
 
 
@@ -2317,6 +2335,7 @@ def _intent_name_for_tool(tool_name: str) -> str | None:
         "runtime_status": "runtime_status",
         "runtime_runs": "runtime_runs",
         "runtime_logs": "runtime_logs",
+        "symbol_config_read": "symbol_config_query",
     }.get(str(tool_name or ""))
 
 
@@ -2340,8 +2359,9 @@ def _clip_mapping(value: dict[str, Any], *, limit: int = 12) -> dict[str, Any]:
 def _no_tool_plan_error() -> AgentToolError:
     return AgentToolError(
         code="NEEDS_CLARIFICATION",
-        message="没有识别出可安全执行的能力计划。",
-        hint="请明确要查收益、持仓、运行状态、最近任务、日志、平仓建议，或要创建哪类写入预览。",
+        message="缺少可安全执行的只读工具或必填信息，无法完成这个请求。",
+        hint="我不会降级到弱相关查询；请明确要查的对象、字段、账户、run_id，或说明需要新增哪类只读能力。",
+        details={"missing_capability": "read_tool_or_required_slots", "weak_downgrade_allowed": False},
     )
 
 

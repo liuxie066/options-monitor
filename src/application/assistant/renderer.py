@@ -52,6 +52,8 @@ def render_inbound_text(*, intent: PerceptionResult | None, tool_result: dict[st
         return _render_healthcheck(data, tool_result)
     if name == "config_validate":
         return _render_config_validate(data, tool_result)
+    if name == "symbol_config_query":
+        return _render_symbol_config(data)
     return "查询完成。"
 
 
@@ -97,6 +99,52 @@ def _pending_operation_label(operation_type: str) -> str:
         "upgrade_now": "立即升级",
         "model_use": "模型切换",
     }.get(operation_type, operation_type or "待确认操作")
+
+
+def _render_symbol_config(data: dict[str, Any]) -> str:
+    symbol = _value(data.get("canonical_symbol") or data.get("symbol"))
+    if data.get("missing_reason") or data.get("found") is False:
+        message = str(data.get("message") or "").strip()
+        if message:
+            return message
+        reason = _value(data.get("missing_reason"))
+        return f"{symbol or '该标的'} 当前配置不可确认：{reason}。"
+
+    path = _value(data.get("path"))
+    if path and "value" in data:
+        return f"{symbol} {path} = {_format_config_value(data.get('value'))}。"
+
+    strategy = _value(data.get("strategy"))
+    strategy_config = data.get("strategy_config")
+    if strategy and isinstance(strategy_config, dict):
+        return f"{symbol} {strategy} 当前配置：{_format_config_mapping(strategy_config)}。"
+
+    strategies = data.get("strategies")
+    if isinstance(strategies, dict) and strategies:
+        lines = [f"{symbol} 当前策略配置："]
+        for name, cfg in strategies.items():
+            if isinstance(cfg, dict):
+                lines.append(f"- {name}: {_format_config_mapping(cfg)}")
+        return "\n".join(lines)
+
+    return f"{symbol} 当前没有可展示的策略配置。"
+
+
+def _format_config_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return "null"
+    return str(value)
+
+
+def _format_config_mapping(value: dict[str, Any]) -> str:
+    if not value:
+        return "{}"
+    parts = [f"{key}={_format_config_value(item)}" for key, item in value.items() if isinstance(item, (str, int, float, bool)) or item is None]
+    if not parts:
+        return "{...}"
+    return ", ".join(parts)
 
 
 def _render_monthly_income(data: dict[str, Any]) -> str:

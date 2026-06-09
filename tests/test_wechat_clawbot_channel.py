@@ -206,13 +206,13 @@ def test_wechat_clawbot_poll_once_routes_inbound_and_replies(tmp_path: Path) -> 
                 "ret": 0,
                 "get_updates_buf": "buf_2",
                 "msgs": [
-                    {
-                        "from_user_id": "user_1",
-                        "group_id": "group_1",
-                        "context_token": "ctx_1",
-                        "message_id": "msg_1",
-                        "item_list": [{"type": 1, "text_item": {"text": "状态"}}],
-                    }
+                        {
+                            "from_user_id": "user_1",
+                            "group_id": "group_1",
+                            "context_token": "ctx_1",
+                            "message_id": "msg_1",
+                            "item_list": [{"type": 1, "text_item": {"text": "/status"}}],
+                        }
                 ],
             }
 
@@ -310,13 +310,13 @@ def test_wechat_clawbot_poll_once_persists_failed_reply_receipt(tmp_path: Path) 
                 "ret": 0,
                 "get_updates_buf": "buf_2",
                 "msgs": [
-                    {
-                        "from_user_id": "user_1",
-                        "group_id": "group_1",
-                        "context_token": "ctx_1",
-                        "message_id": "msg_1",
-                        "item_list": [{"type": 1, "text_item": {"text": "状态"}}],
-                    }
+                        {
+                            "from_user_id": "user_1",
+                            "group_id": "group_1",
+                            "context_token": "ctx_1",
+                            "message_id": "msg_1",
+                            "item_list": [{"type": 1, "text_item": {"text": "/status"}}],
+                        }
                 ],
             }
 
@@ -396,7 +396,7 @@ def test_wechat_clawbot_poll_once_accepts_empty_sendmessage_response(tmp_path: P
                         "group_id": "group_1",
                         "context_token": "ctx_1",
                         "message_id": "msg_1",
-                        "item_list": [{"type": 1, "text_item": {"text": "状态"}}],
+                        "item_list": [{"type": 1, "text_item": {"text": "/status"}}],
                     }
                 ],
             }

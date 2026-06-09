@@ -3558,6 +3558,40 @@ def test_manage_symbols_list_and_dry_run_add(monkeypatch, tmp_path: Path) -> Non
     assert [x["symbol"] for x in current["symbols"]] == ["NVDA"]
 
 
+def test_symbol_config_read_resolves_alias_and_reports_missing_field(tmp_path: Path) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    cfg = _minimal_cfg(market="hk")
+    cfg["symbols"][0]["symbol"] = "9992.HK"
+    cfg["symbols"][0]["sell_put"]["max_strike"] = 145
+    cfg_path = tmp_path / "config.hk.json"
+    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    out = run_tool(
+        "symbol_config_read",
+        {"config_path": str(cfg_path), "symbol": "泡泡玛特", "strategy": "sell_put", "field": "max_strike"},
+    )
+
+    assert out["ok"] is True
+    assert out["data"]["found"] is True
+    assert out["data"]["symbol"] == "泡泡玛特"
+    assert out["data"]["canonical_symbol"] == "9992.HK"
+    assert out["data"]["strategy"] == "sell_put"
+    assert out["data"]["path"] == "sell_put.max_strike"
+    assert out["data"]["value"] == 145
+    assert out["meta"]["config_path"].endswith("config.hk.json")
+
+    missing = run_tool(
+        "symbol_config_read",
+        {"config_path": str(cfg_path), "symbol": "泡泡玛特", "strategy": "sell_put", "field": "min_delta"},
+    )
+
+    assert missing["ok"] is True
+    assert missing["data"]["found"] is False
+    assert missing["data"]["missing_reason"] == "field_not_configured"
+    assert "sell_put.min_delta" in missing["data"]["message"]
+
+
 def test_manage_symbols_write_requires_gate_and_confirm(tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 

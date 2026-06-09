@@ -41,7 +41,7 @@ class AssistantRequest:
 
 @dataclass(frozen=True)
 class PerceptionResult:
-    """Canonical perception output from command, deterministic parser, or LLM.
+    """Canonical perception output from command, deterministic command aliases, or LLM.
 
     Perception only describes what the user appears to want. It must not choose
     tools, downgrade unsupported requests to nearby capabilities, or apply write
