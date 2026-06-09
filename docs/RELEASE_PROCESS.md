@@ -117,7 +117,7 @@ python3 -m pytest tests/test_config_yaml.py tests/test_layered_config.py
   --no-check-latest
 ```
 
-`update verify` 汇总当前 symlink、版本、runtime config freshness、事件源配置、最近 upgrade status 和长期 service health；`--no-check-latest` 会跳过 git tag 查询，适合 release 已确认后快速复核远端状态。
+`update verify` 汇总当前 symlink、版本、runtime config freshness、事件源配置、最近 upgrade status 和长期 service health；`--no-check-latest` 会跳过 git tag 查询，适合 release 已确认后快速复核远端状态。`upgrade.status` / `upgrade.last_status` 表示最近一次升级结果，`upgrade.has_status_record` 表示是否存在 `upgrade_status.json`；是否有新版本只看 `version.upgrade_available`。
 
 升级默认 dry-run：
 
