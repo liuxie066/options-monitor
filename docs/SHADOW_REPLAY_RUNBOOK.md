@@ -10,7 +10,7 @@ Shadow Replay = 反事实复盘引擎
 Strategy Lab = 策略进化产品入口
 ```
 
-因此，本文是底层复盘引擎手册。面向策略参数自我进化的上层 PRD 和技术方案见 [Strategy Lab Design](STRATEGY_LAB_DESIGN.md)。Strategy Lab 当前已提供 update、只读 readiness、experiment、advisory proposal 和 llm-context 入口；Shadow Replay 继续作为它的反事实 evaluator 和 dataset / mark / outcome 生命周期引擎，而不是被删除。`strategy-lab update` 现在包装本文的 latest scanned run dataset build、status / run-data-plan：默认 dry-run，显式 `--build-dataset --write` 才构建本地 dataset，显式 `--write` 才执行本地 collect / settle。
+因此，本文是底层复盘引擎手册。面向策略参数自我进化的上层 PRD 和技术方案见 [Strategy Lab Design](STRATEGY_LAB_DESIGN.md)。Strategy Lab 当前已提供 update、只读 readiness、experiment、advisory proposal 和 llm-context 入口；Shadow Replay 继续作为它的反事实 evaluator 和 dataset / mark / outcome 生命周期引擎，而不是被删除。`strategy-lab update` 现在包装本文的 latest scanned run dataset build、status / run-data-plan：默认 dry-run，显式 `--build-dataset --write` 才构建本地 dataset，显式 `--write` 才执行本地 collect / settle。远端持续记录通过 `./om service render --include-strategy-lab-recorder` 显式启用，生成低频 timer 维护 dataset、mark path 和 outcome facts；默认部署不会开启。
 
 Strategy Lab 会按 strategy domain adapter 区分 Sell Put、Covered Call 和 Combo Yield。统一的是 evidence / readiness / experiment / scorecard / proposal workflow；分开的是决策单元、目标函数、参数空间、硬约束和 proposal target。Sell Put / Covered Call 可以先复用单腿 candidate-impact；Combo Yield 必须按 `strategy_group_id` / legs 形成 group-level decision instance，不能被拆成彼此独立的单腿参数实验。
 
@@ -52,6 +52,18 @@ Shadow Replay 的分析结论使用 [Opportunity Quality](OPPORTUNITY_QUALITY.md
 2. 在盘中、收盘后、到期日或固定间隔，运行 `collect-marks` 采样一次。
 3. 样本足够后运行 `analyze`，人工评审分桶表现。
 4. 人工决定是否调整策略参数；replay 不自动修改 runtime config。
+
+远端部署时，推荐用 Strategy Lab recorder 代替手工调度这些维护动作：
+
+```bash
+./om service render \
+  --target systemd \
+  --runtime-root /var/lib/options-monitor \
+  --include-strategy-lab-recorder \
+  --strategy-lab-recorder-source opend
+```
+
+生成的 build timer 默认按 latest scanned run id 幂等构建 dataset；sample timer 采样 mark path；settle timer 维护 `outcome_facts.jsonl`。这些 timer 只写本地 replay artifact、required-data / OpenD cache / rate-limit state 和 receipt，不运行 Strategy Lab experiment/proposal，也不改生产配置、交易状态或通知。
 
 ## 候选影响对比
 
