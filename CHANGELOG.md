@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.244 - 2026-06-09
+
+### Fixed
+- Fixed Assistant AgentLoop capability validation so successful registry-backed position reads satisfy generic tool capabilities such as `option_positions` and `read_only` instead of being reported as missing.
+- Clarified planner guidance and tests for position detail phrases such as `持仓明细`, `持仓明晰`, and `持仓详情` so they route to ordinary read-only position list/detail queries.
+
 ## 1.2.243 - 2026-06-09
 
 ### Added
