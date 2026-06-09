@@ -2249,6 +2249,7 @@ def test_assistant_runtime_agent_loop_injects_config_for_symbol_config_read(tmp_
             sender_id="local",
             message_id="msg_agent_loop_symbol_config_read",
             config_key="us",
+            config_path=str(tmp_path / "config.us.json"),
             audit_db=str(tmp_path / "inbound.sqlite3"),
         ),
         execute_tool_fn=_execute,
@@ -2263,17 +2264,99 @@ def test_assistant_runtime_agent_loop_injects_config_for_symbol_config_read(tmp_
     assert calls == [
         (
             "symbol_config_read",
-            {"config_key": "hk", "symbol": "泡泡玛特", "strategy": "sell_put", "field": "max_strike"},
+            {
+                "config_path": str(tmp_path / "config.hk.json"),
+                "symbol": "泡泡玛特",
+                "strategy": "sell_put",
+                "field": "max_strike",
+            },
         )
     ]
     assert out["data"]["response_text"] == "9992.HK sell_put.max_strike = 145。"
     agent_loop = out["meta"]["assistant"]["llm"]["agent_loop"]
     assert agent_loop["observations"][0]["payload"] == {
-        "config_key": "hk",
         "symbol": "泡泡玛特",
         "strategy": "sell_put",
         "field": "max_strike",
     }
+
+
+def test_assistant_runtime_llm_intent_routes_symbol_config_to_market_sibling_config_path(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "schema_version": "symbol_config_read.v1",
+                "symbol": "泡泡玛特",
+                "canonical_symbol": "9992.HK",
+                "found": True,
+                "strategy": "sell_put",
+                "field": "max_strike",
+                "path": "sell_put.max_strike",
+                "value": 145,
+            },
+        )
+
+    def _translate(
+        _text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmTranslationResult:
+        return LlmTranslationResult(
+            intent=PerceptionResult(
+                intent_name="symbol_config_query",
+                arguments={"symbol": "泡泡玛特", "strategy": "sell_put", "field": "max_strike"},
+                source="llm",
+                confidence=0.92,
+            ),
+            trace={
+                "enabled": True,
+                "attempted": True,
+                "reason": "accepted",
+                "provider": "openai",
+                "base_url": "",
+                "model": "gpt-5.2",
+                "api_key_env": "OM_LLM_API_KEY",
+                "confidence_min": 0.75,
+                "timeout_seconds": 20,
+                "max_output_tokens": 512,
+            },
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="现在泡泡玛特 sell put的max strike是多少？",
+            sender_id="local",
+            message_id="msg_llm_symbol_config_path",
+            config_key="us",
+            config_path=str(tmp_path / "config.us.json"),
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        translate_intent_fn=_translate,
+    )
+
+    assert out["ok"] is True
+    assert calls == [
+        (
+            "symbol_config_read",
+            {
+                "config_path": str(tmp_path / "config.hk.json"),
+                "symbol": "泡泡玛特",
+                "strategy": "sell_put",
+                "field": "max_strike",
+            },
+        )
+    ]
+    assert out["data"]["response_text"] == "9992.HK sell_put.max_strike = 145。"
 
 
 def test_assistant_runtime_agent_loop_satisfies_position_read_tool_capabilities(tmp_path: Path) -> None:
