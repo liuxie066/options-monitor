@@ -216,6 +216,66 @@ def test_position_query_read_model_filters_month_symbol_and_option_type() -> Non
     assert [row["record_id"] for row in rows] == ["lot-0700-call-may"]
 
 
+def test_position_query_read_model_sorts_by_expiration_before_limit() -> None:
+    class _UnsortedRepo:
+        def list_position_lots(self) -> list[dict]:
+            return [
+                {
+                    "record_id": "lot-jul",
+                    "fields": {
+                        "broker": "富途",
+                        "account": "sy",
+                        "symbol": "PDD",
+                        "option_type": "put",
+                        "side": "short",
+                        "status": "open",
+                        "strike": 80,
+                        "expiration_ymd": "2026-07-17",
+                        "contracts": 1,
+                        "contracts_open": 1,
+                    },
+                },
+                {
+                    "record_id": "lot-jun",
+                    "fields": {
+                        "broker": "富途",
+                        "account": "lx",
+                        "symbol": "FUTU",
+                        "option_type": "put",
+                        "side": "short",
+                        "status": "open",
+                        "strike": 110,
+                        "expiration_ymd": "2026-06-12",
+                        "contracts": 1,
+                        "contracts_open": 1,
+                    },
+                },
+                {
+                    "record_id": "lot-no-exp",
+                    "fields": {
+                        "broker": "富途",
+                        "account": "lx",
+                        "symbol": "MSFT",
+                        "option_type": "call",
+                        "side": "long",
+                        "status": "open",
+                        "strike": 500,
+                        "contracts": 1,
+                        "contracts_open": 1,
+                    },
+                },
+            ]
+
+    rows = list_position_rows(
+        _UnsortedRepo(),
+        broker="富途",
+        status="open",
+        limit=2,
+    )
+
+    assert [row["record_id"] for row in rows] == ["lot-jun", "lot-jul"]
+
+
 def test_position_query_read_model_filters_closed_positions() -> None:
     rows = list_position_rows(
         _Repo(),
