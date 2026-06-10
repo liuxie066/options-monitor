@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -1047,7 +1048,7 @@ def test_sell_put_steps_yield_enhancement_return_first_runs_put_universe(tmp_pat
     assert calls[1]["min_net_income"] == 0.0
 
 
-def test_sell_put_steps_combo_yield_put_universe_is_not_cash_filtered(
+def test_sell_put_steps_combo_yield_put_universe_is_retained_but_pairs_are_cash_filtered(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -1134,17 +1135,35 @@ def test_sell_put_steps_combo_yield_put_universe_is_not_cash_filtered(
         report_dir=report_dir,
         timeout_sec=10,
         is_scheduled=True,
-        exchange_rate_converter=CurrencyConverter(ExchangeRates()),
+        exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
         portfolio_ctx={"cash_by_currency": {"CNY": 1000}},
     )
 
     filtered_sell_put = pd.read_csv(report_dir / "aapl_sell_put_candidates_labeled.csv")
+    retained_universe = pd.read_csv(report_dir / "aapl_combo_yield_put_universe_labeled.csv")
     assert [row["strategy"] for row in out] == ["sell_put", "combo_yield"]
     assert filtered_sell_put.empty
-    assert len(enrich_calls) == 1
+    assert len(retained_universe) == 1
+    assert "cash_required_cny" not in retained_universe.columns
+    assert len(enrich_calls) == 2
     assert enrich_calls[0].name == "aapl_sell_put_candidates_labeled.csv"
-    assert len(captured_pairs_input["df"]) == 1
-    assert "cash_required_cny" not in captured_pairs_input["df"].columns
+    assert enrich_calls[1].name == "aapl_combo_yield_put_universe_cash_filtered.csv"
+    assert captured_pairs_input["df"].empty
+    assert "cash_required_cny" in captured_pairs_input["df"].columns
+
+    trace_rows = [
+        json.loads(line)
+        for line in (report_dir / "candidate_filter_trace.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    combo_cash_rows = [
+        row
+        for row in trace_rows
+        if row["function"] == "cash_reserve" and row.get("strategy_family") == "combo_yield"
+    ]
+    assert combo_cash_rows
+    assert combo_cash_rows[0]["rule"] == "base_cny_cash_insufficient"
+    assert combo_cash_rows[0]["evidence_path"] == "aapl_combo_yield_put_universe_cash_filtered.csv"
 
 
 def test_sell_put_steps_combo_yield_put_universe_skips_underwriting_gate_for_insurance(
@@ -1232,8 +1251,8 @@ def test_sell_put_steps_combo_yield_put_universe_skips_underwriting_gate_for_ins
         report_dir=report_dir,
         timeout_sec=10,
         is_scheduled=True,
-        exchange_rate_converter=CurrencyConverter(ExchangeRates()),
-        portfolio_ctx={"cash_by_currency": {"CNY": 100000}},
+        exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
+        portfolio_ctx={"cash_by_currency": {"USD": 100000}},
     )
 
     assert "aapl_combo_yield_put_universe_labeled.csv" not in underwriting_gate_paths
@@ -1321,8 +1340,8 @@ def test_sell_put_steps_combo_yield_put_universe_skips_underwriting_gate_for_ret
         report_dir=report_dir,
         timeout_sec=10,
         is_scheduled=True,
-        exchange_rate_converter=CurrencyConverter(ExchangeRates()),
-        portfolio_ctx={"cash_by_currency": {"CNY": 100000}},
+        exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
+        portfolio_ctx={"cash_by_currency": {"USD": 100000}},
     )
 
     assert "aapl_combo_yield_put_universe_labeled.csv" not in underwriting_gate_paths

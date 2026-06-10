@@ -83,6 +83,7 @@ RULE_LABELS = {
     "hard_capacity_put": "Put 资金容量不足",
     "hard_capacity_call": "Call 覆盖能力不足",
     "combo_yield_put_universe_empty": "Put 候选为空",
+    "combo_yield_put_cash_filtered": "Put 现金不足",
     "combo_yield_no_pair": "没有可配对 Call",
     "combo_yield_no_recommended_pair": "没有推荐组合",
     "yield_enhancement_put_universe_empty": "Put 候选为空",

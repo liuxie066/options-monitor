@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.253 - 2026-06-11
+
+### Fixed
+- Fixed Combo Yield cash protection so the sell-put leg is cash-gated before pair selection while preserving the unfiltered put universe for planning and diagnostics.
+- Added Combo Yield cash-filter trace/report labeling for candidates blocked by insufficient put cash headroom.
+
 ## 1.2.252 - 2026-06-10
 
 ### Fixed
