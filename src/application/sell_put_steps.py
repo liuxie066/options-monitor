@@ -356,6 +356,8 @@ def run_sell_put_scan_and_summarize(
         yield_window=yield_window,
         liquidity=liquidity,
         event_risk=event_risk,
+        exchange_rate_converter=exchange_rate_converter,
+        portfolio_ctx=portfolio_ctx,
         top_n=top_n,
         is_scheduled=bool(is_scheduled),
         run_put_scan_fn=run_sell_put_scan,
@@ -363,6 +365,7 @@ def run_sell_put_scan_and_summarize(
         find_pairs_fn=find_sell_put_yield_enhancement_pairs,
         select_pairs_fn=select_best_yield_enhancement_pairs,
         attach_calls_fn=attach_best_linked_calls,
+        cash_filter_put_candidates_fn=_enrich_and_filter_sell_put_cash,
     )
 
     if not is_scheduled:

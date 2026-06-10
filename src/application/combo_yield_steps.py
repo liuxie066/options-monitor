@@ -29,6 +29,7 @@ from src.application.yield_enhancement_config import (
     wants_yield_enhancement_inline,
     wants_yield_enhancement_separate,
 )
+from src.infrastructure.exchange_rates import CurrencyConverter
 from src.infrastructure.io_utils import safe_read_csv
 
 
@@ -76,6 +77,8 @@ def run_combo_yield_scan_and_summarize(
     yield_window: CandidateWindowDefaults,
     liquidity: CandidateLiquidityDefaults,
     event_risk: dict[str, Any],
+    exchange_rate_converter: CurrencyConverter,
+    portfolio_ctx: dict[str, Any] | None,
     top_n: int,
     is_scheduled: bool,
     run_put_scan_fn: Callable[..., Any] = run_sell_put_scan,
@@ -84,6 +87,7 @@ def run_combo_yield_scan_and_summarize(
     select_pairs_fn: Callable[[pd.DataFrame], pd.DataFrame] = select_best_yield_enhancement_pairs,
     attach_calls_fn: Callable[..., pd.DataFrame] = attach_best_linked_calls,
     render_alerts_fn: Callable[..., str] = render_yield_enhancement_alerts,
+    cash_filter_put_candidates_fn: Callable[..., pd.DataFrame] | None = None,
 ) -> tuple[ComboYieldResult, dict[str, Any] | None]:
     """Run the Combo Yield scan and return an optional summary row."""
 
@@ -94,6 +98,9 @@ def run_combo_yield_scan_and_summarize(
     symbol_yield_put_universe = (report_dir / f"{symbol_lower}_combo_yield_put_universe.csv").resolve()
     symbol_yield_put_universe_labeled = (
         report_dir / f"{symbol_lower}_combo_yield_put_universe_labeled.csv"
+    ).resolve()
+    symbol_yield_put_universe_cash_filtered = (
+        report_dir / f"{symbol_lower}_combo_yield_put_universe_cash_filtered.csv"
     ).resolve()
 
     run_put_scan_fn(
@@ -117,9 +124,20 @@ def run_combo_yield_scan_and_summarize(
     )
     label_put_candidates_fn(base, symbol_yield_put_universe, symbol_yield_put_universe_labeled)
     df_yield_put_universe = safe_read_csv(symbol_yield_put_universe_labeled)
+    df_yield_put_candidates_for_pairs = df_yield_put_universe
+    if cash_filter_put_candidates_fn is not None and not df_yield_put_universe.empty:
+        df_yield_put_candidates_for_pairs = cash_filter_put_candidates_fn(
+            df_labeled=df_yield_put_universe.copy(),
+            symbol=symbol,
+            portfolio_ctx=portfolio_ctx,
+            exchange_rate_converter=exchange_rate_converter,
+            out_path=symbol_yield_put_universe_cash_filtered,
+            strategy_family=COMBO_YIELD_FAMILY,
+            strategy_profile=yield_enhancement_policy.mode,
+        )
 
     raw_yield_pairs_df = find_pairs_fn(
-        df_candidates=df_yield_put_universe,
+        df_candidates=df_yield_put_candidates_for_pairs,
         symbol=symbol,
         input_root=required_data_dir,
         yield_enhancement_cfg=yield_enhancement_cfg,
@@ -132,6 +150,9 @@ def run_combo_yield_scan_and_summarize(
     scope = infer_trace_scope_from_path(result.candidates_path)
     if df_yield_put_universe.empty:
         yield_rule = "combo_yield_put_universe_empty"
+        yield_status = "post_filtered"
+    elif df_yield_put_candidates_for_pairs.empty:
+        yield_rule = "combo_yield_put_cash_filtered"
         yield_status = "post_filtered"
     elif raw_yield_pairs_df.empty:
         yield_rule = "combo_yield_no_pair"
