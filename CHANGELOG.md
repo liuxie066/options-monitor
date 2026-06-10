@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.249 - 2026-06-10
+
+### Fixed
+- Fixed Sell Put and Covered Call summaries to preserve upstream scanner ordering so notification top picks respect account cash, covered-share capacity, strategy weights, and underwriting ranking instead of being re-ranked with the default candidate engine.
+
 ## 1.2.248 - 2026-06-10
 
 ### Fixed

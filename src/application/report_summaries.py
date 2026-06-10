@@ -11,7 +11,7 @@ from typing import Any
 
 import pandas as pd
 
-from domain.domain.engine import rank_candidate_rows, rank_yield_enhancement_rows
+from domain.domain.engine import rank_yield_enhancement_rows
 from domain.domain.strategy_vocab import STRATEGY_COMBO_YIELD
 from domain.domain.symbol_identity import symbol_currency
 
@@ -252,11 +252,10 @@ def _build_ranked_row(
     return row
 
 
-def _rank_top(df: pd.DataFrame, *, mode: str) -> pd.Series | None:
-    ranked = rank_candidate_rows(df.to_dict('records'), mode=mode)
-    if not ranked:
+def _first_top(df: pd.DataFrame) -> pd.Series | None:
+    if df.empty:
         return None
-    return pd.Series(ranked[0])
+    return df.iloc[0]
 
 
 def _sell_put_extras(df: pd.DataFrame, top: pd.Series) -> dict[str, Any]:
@@ -317,7 +316,7 @@ def summarize_sell_put(df: pd.DataFrame, symbol: str, *, symbol_cfg: dict | None
     if df.empty:
         return row
 
-    top = _rank_top(df, mode='put')
+    top = _first_top(df)
     if top is None:
         row['candidate_count'] = len(df)
         return row
@@ -340,7 +339,7 @@ def summarize_sell_call(df: pd.DataFrame, symbol: str, *, symbol_cfg: dict | Non
     if df.empty:
         return row
 
-    top = _rank_top(df, mode='call')
+    top = _first_top(df)
     if top is None:
         row['candidate_count'] = len(df)
         return row
