@@ -10,6 +10,43 @@ from src.application.symbol_calibration import calibrate_symbol
 from src.application.yield_enhancement_config import resolve_yield_enhancement_cfg
 
 
+_CONFIG_VALIDATE_OUTPUT_CONTRACT: dict[str, Any] = {
+    "schema_version": "config_validate.output.v1",
+    "canonical_renderer": "config_validate",
+    "source_label": "OM runtime config validator",
+    "guard_profile": "config_status",
+    "primary_rows": "warnings",
+    "fact_fields": [
+        "config_key",
+        "config_path",
+        "account_count",
+        "accounts[]",
+        "symbol_count",
+        "warnings[]",
+    ],
+}
+
+_SYMBOL_CONFIG_OUTPUT_CONTRACT: dict[str, Any] = {
+    "schema_version": "symbol_config_read.output.v1",
+    "canonical_renderer": "symbol_config",
+    "source_label": "OM runtime symbol config",
+    "guard_profile": "config_value",
+    "primary_rows": "strategies",
+    "fact_fields": [
+        "symbol",
+        "canonical_symbol",
+        "found",
+        "missing_reason",
+        "strategy",
+        "field",
+        "path",
+        "value",
+        "strategy_config",
+        "strategies",
+    ],
+}
+
+
 def _mask_path_str(ctx: AgentToolContext, value: Any) -> str:
     return ctx.mask_path(value) or "..."
 
@@ -235,6 +272,7 @@ CONFIG_VALIDATE_TOOL = build_agent_tool(
     pure_read=True,
     safe_default_input={},
     examples=({"input": {"config_key": "us"}},),
+    output_contract=_CONFIG_VALIDATE_OUTPUT_CONTRACT,
 )
 
 SCHEDULER_STATUS_TOOL = build_agent_tool(
@@ -276,6 +314,7 @@ SYMBOL_CONFIG_READ_TOOL = build_agent_tool(
         {"input": {"config_key": "hk", "symbol": "泡泡玛特", "strategy": "sell_put", "field": "max_strike"}},
         {"input": {"config_key": "us", "symbol": "NVDA", "strategy": "sell_call"}},
     ),
+    output_contract=_SYMBOL_CONFIG_OUTPUT_CONTRACT,
 )
 
 MANAGE_SYMBOLS_TOOL = build_agent_tool(

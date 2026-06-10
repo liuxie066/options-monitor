@@ -155,6 +155,44 @@ def test_agent_registry_manifest_and_tool_objects_stay_in_sync() -> None:
     assert '"user1"' not in json.dumps([x.get("examples") for x in spec.get("tools", [])], ensure_ascii=False)
 
 
+def test_agent_tool_output_contracts_advertise_canonical_renderers() -> None:
+    from src.application.agent_tool_registry import get_tool_definition
+    from src.application.tool_execution import build_tool_manifest as build_spec
+
+    spec = build_spec()
+    tools = {str(item.get("name")): item for item in spec.get("tools", [])}
+
+    assert tools["monthly_income_report"]["output_contract"] == {
+        "schema_version": "monthly_income_report.output",
+        "payload_dependent": True,
+    }
+    assert tools["option_positions_read"]["output_contract"] == {
+        "schema_version": "option_positions_read.output",
+        "payload_dependent": True,
+    }
+    assert tools["runtime_status"]["output_contract"]["canonical_renderer"] == "runtime_status"
+    assert tools["healthcheck"]["output_contract"]["canonical_renderer"] == "healthcheck"
+    assert tools["runtime_runs"]["output_contract"]["canonical_renderer"] == "runtime_runs"
+    assert tools["runtime_logs"]["output_contract"]["canonical_renderer"] == "runtime_logs"
+    assert tools["config_validate"]["output_contract"]["canonical_renderer"] == "config_validate"
+    assert tools["symbol_config_read"]["output_contract"]["canonical_renderer"] == "symbol_config"
+    assert tools["close_advice_read"]["output_contract"]["canonical_renderer"] == "position_exit_analysis"
+
+    positions = get_tool_definition("option_positions_read")
+    assert positions is not None
+    positions_contract = positions.resolve_output_contract({"action": "list"})
+    assert positions_contract["canonical_renderer"] == "position_rows"
+    assert positions_contract["stable_order"] == "expiration_asc_missing_last"
+    assert "rows[].contracts_open" in positions_contract["fact_fields"]
+
+    income = get_tool_definition("monthly_income_report")
+    assert income is not None
+    detail_contract = income.resolve_output_contract({"include_rows": True})
+    assert detail_contract["canonical_renderer"] == "monthly_income"
+    assert detail_contract["guard_profile"] == "income_rows"
+    assert "cashflow_rows[].contracts" in detail_contract["fact_fields"]
+
+
 def test_agent_registry_collects_domain_tool_modules() -> None:
     from src.application.agent_tool_registry import AGENT_TOOL_DEFINITIONS, AGENT_TOOL_MODULES
 
