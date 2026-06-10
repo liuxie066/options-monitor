@@ -9,6 +9,7 @@
 - Be transparent: state assumptions, blockers, and risk before acting on unclear or dangerous steps.
 - Split complex work into short steps. Keep unrelated cleanup out of the change.
 - When designing solutions, follow parsimony: if it is not necessary, do not add new entities, layers, states, tools, config keys, or workflows.
+- When fixing bugs, prefer root-cause fixes at the owning boundary over tactical patches that only mask symptoms; if a short-term patch is unavoidable, state the tradeoff and the follow-up needed to remove it.
 - Prefer evidence from source, config, tests, and runtime artifacts over guesses from file names.
 - Preserve user changes in a dirty worktree. Never reset or revert unrelated files unless explicitly asked.
 
