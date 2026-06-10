@@ -30,7 +30,7 @@ from src.application.assistant.llm_common import (
     unsupported_llm_provider_error,
 )
 from src.application.assistant.llm_translator import LlmTranslationResult
-from src.application.assistant.renderer import render_inbound_text
+from src.application.assistant.renderer import render_canonical_tool_result, render_inbound_text
 from src.application.assistant.settings import AssistantSettings
 from src.application.assistant.time_filters import extract_month_filter
 from src.application.assistant.tool_policy import DEFAULT_TOOL_POLICY
@@ -1167,6 +1167,7 @@ def _month_filter_number(raw: str) -> int | None:
 def build_synthesis_observation(*, index: int, tool_name: str, payload: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
     error = result.get("error") if isinstance(result, dict) else None
     data = result.get("data") if isinstance(result, dict) else None
+    output_contract = _output_contract_for_tool(tool_name, payload)
     item: dict[str, Any] = {
         "index": int(index),
         "tool_name": str(tool_name or ""),
@@ -1174,6 +1175,8 @@ def build_synthesis_observation(*, index: int, tool_name: str, payload: dict[str
         "ok": bool(result.get("ok", False)) if isinstance(result, dict) else False,
         "error": dict(error) if isinstance(error, dict) else None,
     }
+    if output_contract:
+        item["output_contract"] = output_contract
     if isinstance(data, dict):
         item["data"] = _synthesis_data(tool_name, data)
     return item
@@ -1182,6 +1185,7 @@ def build_synthesis_observation(*, index: int, tool_name: str, payload: dict[str
 def build_fact_observation(*, index: int, tool_name: str, payload: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
     error = result.get("error") if isinstance(result, dict) else None
     data = result.get("data") if isinstance(result, dict) else None
+    output_contract = _output_contract_for_tool(tool_name, payload)
     item: dict[str, Any] = {
         "index": int(index),
         "tool_name": str(tool_name or ""),
@@ -1189,6 +1193,8 @@ def build_fact_observation(*, index: int, tool_name: str, payload: dict[str, Any
         "ok": bool(result.get("ok", False)) if isinstance(result, dict) else False,
         "error": dict(error) if isinstance(error, dict) else None,
     }
+    if output_contract:
+        item["output_contract"] = output_contract
     if isinstance(data, dict):
         item["data"] = _fact_data(tool_name, data)
     return item
@@ -1459,12 +1465,19 @@ def _canonical_response(step: PlannerPlanStep, observation: dict[str, Any]) -> s
     data = observation.get("data")
     if not isinstance(data, dict):
         return ""
+    tool_result = build_response(tool_name=step.tool_name, ok=True, data=data)
+    output_contract = _contract_from_observation(observation) or _output_contract_for_step(step)
+    renderer_key = str(output_contract.get("canonical_renderer") or "").strip()
+    if renderer_key:
+        rendered = render_canonical_tool_result(renderer_key=renderer_key, data=data, tool_result=tool_result)
+        if rendered:
+            return rendered
     intent_name = _intent_name_for_tool(step.tool_name)
     if not intent_name:
         return ""
     return render_inbound_text(
         intent=PerceptionResult(intent_name=intent_name, arguments=dict(step.arguments), source="agent_loop_plan"),
-        tool_result=build_response(tool_name=step.tool_name, ok=True, data=data),
+        tool_result=tool_result,
     )
 
 
@@ -1480,6 +1493,23 @@ def _answer_policy_for_step(step: PlannerPlanStep) -> str:
     if definition is None:
         return "default"
     return definition.resolve_answer_policy(dict(step.arguments))
+
+
+def _output_contract_for_step(step: PlannerPlanStep) -> dict[str, Any]:
+    return _output_contract_for_tool(step.tool_name, dict(step.arguments))
+
+
+def _output_contract_for_tool(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+    definition = get_tool_definition(str(tool_name or ""))
+    if definition is None:
+        return {}
+    contract = definition.resolve_output_contract(dict(payload or {}))
+    return contract if isinstance(contract, dict) else {}
+
+
+def _contract_from_observation(observation: dict[str, Any]) -> dict[str, Any]:
+    contract = observation.get("output_contract")
+    return dict(contract) if isinstance(contract, dict) else {}
 
 
 def _with_grounded_facts_observation(observations: list[dict[str, Any]], fact_text: str) -> list[dict[str, Any]]:
@@ -1671,6 +1701,8 @@ def _answer_guard_facts(observations: list[dict[str, Any]]) -> dict[str, Any]:
         data = item.get("data") if isinstance(item.get("data"), dict) else {}
         if not isinstance(data, dict):
             continue
+        contract = item.get("output_contract") if isinstance(item.get("output_contract"), dict) else {}
+        guard_profile = str(contract.get("guard_profile") or "").strip()
         coverage = data.get("coverage") if isinstance(data.get("coverage"), dict) else {}
         for month in coverage.get("months") or []:
             if str(month).strip():
@@ -1688,9 +1720,9 @@ def _answer_guard_facts(observations: list[dict[str, Any]]) -> dict[str, Any]:
             cashflow_row_count = max(cashflow_row_count, int(count or 0))
         except Exception:
             pass
-        if str(item.get("tool_name") or "") == "monthly_income_report":
+        if guard_profile in {"income_summary", "income_rows"} or str(item.get("tool_name") or "") == "monthly_income_report":
             contract_facts.extend(_monthly_income_contract_facts(data))
-        if str(item.get("tool_name") or "") == "option_positions_read":
+        if guard_profile == "position_rows" or str(item.get("tool_name") or "") == "option_positions_read":
             contract_facts.extend(_position_contract_facts(data))
     return {
         "months": sorted(months),
