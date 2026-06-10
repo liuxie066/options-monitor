@@ -576,6 +576,157 @@ def test_resolve_trade_close_retry_failed_routes_early_zero_price_assignment_to_
     assert repo.get_record_fields(lot_id)["contracts_open"] == 1
 
 
+def test_resolve_trade_lifecycle_option_first_records_early_assignment_before_expiration(tmp_path) -> None:
+    from domain.domain.option_position_lots import OpenPositionCommand
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="FUTU",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=117.45,
+            multiplier=100,
+            expiration_ymd="2026-06-18",
+            premium_per_share=5.2,
+            opened_at_ms=1779129615891,
+        ),
+    )
+    lot_id = repo.list_position_lots()[0]["record_id"]
+
+    option_result = resolve_trade_deal(
+        _deal(
+            deal_id="6182783325760874067",
+            order_id="FH1CA6D913A3AE8000",
+            symbol="FUTU",
+            contracts=1,
+            price=0.0,
+            strike=117.45,
+            expiration_ymd="2026-06-18",
+            currency="USD",
+            trade_time_ms=1781025088633,
+            raw_payload={"deal_id": "6182783325760874067", "code": "US.FUTU260618P117450"},
+        ),
+        repo=repo,
+        state={},
+        apply_changes=True,
+    )
+
+    assert option_result.status == "unresolved"
+    assert option_result.reason == "waiting_settlement_evidence"
+
+    stock_result = resolve_trade_deal(
+        _deal(
+            deal_id="8433576313500456302",
+            order_id="FH1CA6D9142E648000",
+            symbol="FUTU",
+            option_type=None,
+            side="buy",
+            position_effect=None,
+            contracts=100,
+            price=117.45,
+            strike=None,
+            multiplier=None,
+            expiration_ymd=None,
+            currency="USD",
+            trade_time_ms=1781025089183,
+            raw_payload={"deal_id": "8433576313500456302", "code": "US.FUTU"},
+        ),
+        repo=repo,
+        state={},
+        apply_changes=True,
+    )
+
+    assert stock_result.status == "applied"
+    assert stock_result.action == "assignment"
+    assert stock_result.reason == "assignment_recorded"
+    assignment_events = [item for item in repo.list_trade_events() if item.get("event_type") == "assignment"]
+    assert len(assignment_events) == 1
+    assert assignment_events[0]["raw_payload"]["record_id"] == lot_id
+    assert assignment_events[0]["raw_payload"]["stock_settlement"]["source_event_id"] == "8433576313500456302"
+    assert assignment_events[0]["raw_payload"]["stock_settlement"]["shares"] == 100
+    assert assignment_events[0]["raw_payload"]["stock_settlement"]["price"] == 117.45
+    assert repo.get_record_fields(lot_id)["contracts_open"] == 0
+    assert repo.get_record_fields(lot_id)["close_type"] == "assignment"
+
+
+def test_resolve_trade_lifecycle_stock_first_records_early_assignment_before_expiration(tmp_path) -> None:
+    from domain.domain.option_position_lots import OpenPositionCommand
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="FUTU",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=117.45,
+            multiplier=100,
+            expiration_ymd="2026-06-18",
+            premium_per_share=5.2,
+            opened_at_ms=1779129615891,
+        ),
+    )
+
+    stock_result = resolve_trade_deal(
+        _deal(
+            deal_id="8433576313500456302",
+            order_id="FH1CA6D9142E648000",
+            symbol="FUTU",
+            option_type=None,
+            side="buy",
+            position_effect=None,
+            contracts=100,
+            price=117.45,
+            strike=None,
+            multiplier=None,
+            expiration_ymd=None,
+            currency="USD",
+            trade_time_ms=1781025089183,
+            raw_payload={"deal_id": "8433576313500456302", "code": "US.FUTU"},
+        ),
+        repo=repo,
+        state={},
+        apply_changes=True,
+    )
+
+    assert stock_result.status == "unresolved"
+    assert stock_result.reason == "stock_settlement_waiting_option_leg"
+
+    option_result = resolve_trade_deal(
+        _deal(
+            deal_id="6182783325760874067",
+            order_id="FH1CA6D913A3AE8000",
+            symbol="FUTU",
+            contracts=1,
+            price=0.0,
+            strike=117.45,
+            expiration_ymd="2026-06-18",
+            currency="USD",
+            trade_time_ms=1781025088633,
+            raw_payload={"deal_id": "6182783325760874067", "code": "US.FUTU260618P117450"},
+        ),
+        repo=repo,
+        state={},
+        apply_changes=True,
+    )
+
+    assert option_result.status == "applied"
+    assert option_result.action == "assignment"
+    assignment_events = [item for item in repo.list_trade_events() if item.get("event_type") == "assignment"]
+    assert len(assignment_events) == 1
+    assert assignment_events[0]["raw_payload"]["stock_settlement"]["source_event_id"] == "8433576313500456302"
+
+
 def test_resolve_trade_lifecycle_option_first_stock_settlement_records_assignment(tmp_path) -> None:
     from domain.domain.option_position_lots import OpenPositionCommand
 

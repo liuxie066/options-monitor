@@ -125,6 +125,55 @@ def test_reconcile_trade_intake_state_marks_ledger_recorded_failed_deal_processe
     assert processed["diagnostics"]["reconciled_ledger_event_type"] == "expire_close"
 
 
+def test_reconcile_trade_intake_state_uses_lifecycle_stock_settlement_source_event(tmp_path: Path) -> None:
+    state_path = tmp_path / "auto_trade_intake_state.json"
+    write_trade_intake_state(
+        state_path,
+        {
+            "processed_deal_ids": {},
+            "failed_deal_ids": {},
+            "unresolved_deal_ids": {
+                "8433576313500456302": {
+                    "status": "unresolved",
+                    "action": "lifecycle",
+                    "account": "lx",
+                    "reason": "stock_settlement_waiting_option_leg",
+                    "retryable": True,
+                }
+            },
+        },
+    )
+    repo = FakeRepo(
+        [
+            {
+                "event_id": "assignment-lot-futu-1",
+                "event_type": "assignment",
+                "account": "lx",
+                "position_effect": "close",
+                "target_lot_id": "lot-futu-1",
+                "raw_payload": {
+                    "record_id": "lot-futu-1",
+                    "stock_settlement": {
+                        "source_event_id": "8433576313500456302",
+                        "side": "buy",
+                        "shares": 100,
+                        "price": 117.45,
+                    },
+                },
+            }
+        ]
+    )
+
+    out = reconcile_trade_intake_state(state_path=state_path, repo=repo, apply_changes=True)
+
+    assert out["planned_count"] == 1
+    state = load_trade_intake_state(state_path)
+    assert "8433576313500456302" not in state["unresolved_deal_ids"]
+    processed = state["processed_deal_ids"]["8433576313500456302"]
+    assert processed["reason"] == "ledger_event_already_recorded"
+    assert processed["applied_record_ids"] == ["lot-futu-1"]
+
+
 def test_reconcile_trade_intake_state_marks_ignored_non_option_unresolved_deal_processed(tmp_path: Path) -> None:
     state_path = tmp_path / "auto_trade_intake_state.json"
     audit_path = tmp_path / "auto_trade_intake_audit.jsonl"

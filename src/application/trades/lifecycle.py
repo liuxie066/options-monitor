@@ -31,6 +31,7 @@ from src.application.trades.normalizer import NormalizedTradeDeal
 ASSIGNMENT_WAITING_STATUS = "waiting_settlement_evidence"
 PENDING_STATUSES = {"pending", ASSIGNMENT_WAITING_STATUS, "needs_review"}
 FINAL_STATUSES = {"ledger_written"}
+EARLY_LIFECYCLE_STOCK_OPTION_WINDOW_MS = 5 * 60 * 1000
 
 
 @dataclass(frozen=True)
@@ -689,11 +690,36 @@ def _find_matching_option_case(
     return None
 
 
+def _find_contract_related_option_case(
+    repo: Any,
+    *,
+    stock_evidence: dict[str, Any],
+    statuses: set[str] | None = None,
+) -> dict[str, Any] | None:
+    list_fn = getattr(repo, "list_trade_lifecycle_cases", None)
+    if not callable(list_fn):
+        return None
+    allowed_statuses = set(statuses or (PENDING_STATUSES | FINAL_STATUSES))
+    rows = list_fn()
+    for row in rows:
+        if str(row.get("status") or "").strip().lower() not in allowed_statuses:
+            continue
+        if normalize_account(row.get("account")) != normalize_account(stock_evidence.get("account")):
+            continue
+        if canonical_contract_symbol(row.get("symbol")) != canonical_contract_symbol(stock_evidence.get("symbol")):
+            continue
+        if _stock_matches_lifecycle_contract_terms(row, stock_evidence, strict_price=True):
+            return dict(row)
+    return None
+
+
 def _stock_settlement_has_lifecycle_context(repo: Any, *, stock_evidence: dict[str, Any]) -> bool:
     if _find_matching_option_case(repo, stock_evidence=stock_evidence) is not None:
         return True
     if _find_matching_option_case(repo, stock_evidence=stock_evidence, statuses=FINAL_STATUSES) is not None:
         return True
+    if _find_contract_related_option_case(repo, stock_evidence=stock_evidence) is not None:
+        return False
     list_lots = getattr(repo, "list_position_lots", None)
     if not callable(list_lots):
         return False
@@ -720,11 +746,6 @@ def _stock_settlement_has_lifecycle_context(repo: Any, *, stock_evidence: dict[s
         if contracts <= 0:
             continue
         expiration_ymd = effective_expiration_ymd(fields)
-        if not _trade_time_on_or_after_expiration_ymd(
-            int(stock_evidence.get("trade_time_ms") or 0),
-            expiration_ymd,
-        ):
-            continue
         case = {
             "account": normalize_account(fields.get("account")),
             "symbol": canonical_contract_symbol(fields.get("symbol")),
@@ -735,7 +756,7 @@ def _stock_settlement_has_lifecycle_context(repo: Any, *, stock_evidence: dict[s
             "contracts": contracts,
             "multiplier": int(effective_multiplier(fields) or 100),
         }
-        if _stock_matches_lifecycle_close(case, stock_evidence):
+        if _stock_matches_lifecycle_open_lot_context(case, stock_evidence):
             return True
     return False
 
@@ -808,6 +829,37 @@ def _expected_stock_side_for_lifecycle(case: dict[str, Any]) -> str:
 
 
 def _stock_matches_lifecycle_close(case: dict[str, Any], stock_evidence: dict[str, Any] | None) -> bool:
+    if not _stock_matches_lifecycle_contract_terms(case, stock_evidence, strict_price=False):
+        return False
+    stock_trade_time_ms = _stock_trade_time_ms(stock_evidence)
+    expiration_ymd = normalize_contract_expiration(case.get("expiration_ymd"))
+    if not expiration_ymd:
+        return False
+    if _trade_time_on_or_after_expiration_ymd(stock_trade_time_ms, expiration_ymd):
+        return True
+    if not _stock_trade_near_option_event(case, stock_trade_time_ms):
+        return False
+    return _stock_matches_lifecycle_contract_terms(case, stock_evidence, strict_price=True)
+
+
+def _stock_matches_lifecycle_open_lot_context(case: dict[str, Any], stock_evidence: dict[str, Any] | None) -> bool:
+    if not _stock_matches_lifecycle_contract_terms(case, stock_evidence, strict_price=True):
+        return False
+    stock_trade_time_ms = _stock_trade_time_ms(stock_evidence)
+    expiration_ymd = normalize_contract_expiration(case.get("expiration_ymd"))
+    if not expiration_ymd:
+        return False
+    if _trade_time_on_or_after_expiration_ymd(stock_trade_time_ms, expiration_ymd):
+        return True
+    return stock_trade_time_ms > 0
+
+
+def _stock_matches_lifecycle_contract_terms(
+    case: dict[str, Any],
+    stock_evidence: dict[str, Any] | None,
+    *,
+    strict_price: bool,
+) -> bool:
     if not isinstance(stock_evidence, dict):
         return False
     side = str(stock_evidence.get("side") or "").strip().lower()
@@ -815,15 +867,6 @@ def _stock_matches_lifecycle_close(case: dict[str, Any], stock_evidence: dict[st
     if not expected_side:
         return False
     if side != expected_side:
-        return False
-    expiration_ymd = normalize_contract_expiration(case.get("expiration_ymd"))
-    if not expiration_ymd:
-        return False
-    try:
-        stock_trade_time_ms = int(stock_evidence.get("trade_time_ms") or 0)
-    except Exception:
-        return False
-    if not _trade_time_on_or_after_expiration_ymd(stock_trade_time_ms, expiration_ymd):
         return False
     try:
         expected_qty = int(case.get("contracts") or 0) * int(case.get("multiplier") or 100)
@@ -837,8 +880,42 @@ def _stock_matches_lifecycle_close(case: dict[str, Any], stock_evidence: dict[st
         price = float(stock_evidence.get("stock_price"))
     except Exception:
         return False
-    tolerance = max(0.01, abs(strike) * 0.001)
+    tolerance = 0.01 if strict_price else max(0.01, abs(strike) * 0.001)
     return abs(price - strike) <= tolerance
+
+
+def _stock_trade_time_ms(stock_evidence: dict[str, Any] | None) -> int:
+    if not isinstance(stock_evidence, dict):
+        return 0
+    try:
+        return int(stock_evidence.get("trade_time_ms") or 0)
+    except Exception:
+        return 0
+
+
+def _stock_trade_near_option_event(case: dict[str, Any], stock_trade_time_ms: int) -> bool:
+    if stock_trade_time_ms <= 0:
+        return False
+    option_trade_time_ms = _lifecycle_case_event_time_ms(case)
+    if option_trade_time_ms <= 0:
+        return False
+    return abs(stock_trade_time_ms - option_trade_time_ms) <= EARLY_LIFECYCLE_STOCK_OPTION_WINDOW_MS
+
+
+def _lifecycle_case_event_time_ms(case: dict[str, Any]) -> int:
+    for raw in (case.get("event_time_ms"),):
+        try:
+            value = int(raw or 0)
+        except Exception:
+            value = 0
+        if value > 0:
+            return value
+    raw_payload = case.get("raw") if isinstance(case.get("raw"), dict) else {}
+    option_deal = raw_payload.get("option_deal") if isinstance(raw_payload.get("option_deal"), dict) else {}
+    try:
+        return int(option_deal.get("trade_time_ms") or 0)
+    except Exception:
+        return 0
 
 
 def _is_stock_settlement_leg(deal: NormalizedTradeDeal) -> bool:

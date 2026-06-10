@@ -274,6 +274,11 @@ def _deal_ids_from_ledger_event(event: dict[str, Any]) -> set[str]:
         value = str(raw_payload.get(key) or "").strip()
         if value:
             out.add(value)
+    stock_settlement = raw_payload.get("stock_settlement")
+    if isinstance(stock_settlement, dict):
+        value = str(stock_settlement.get("source_event_id") or "").strip()
+        if value:
+            out.add(value)
     return out
 
 

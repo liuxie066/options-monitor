@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.250 - 2026-06-10
+
+### Fixed
+- Fixed early assignment intake so a zero-price option lifecycle close can match the same-account stock settlement leg before expiration when the stock side, quantity, strike price, and event time window strongly agree.
+- Included lifecycle stock settlement source deal ids in trade backfill and state reconciliation so assignment stock legs are recognized as already recorded after the ledger event is written.
+
 ## 1.2.249 - 2026-06-10
 
 ### Fixed

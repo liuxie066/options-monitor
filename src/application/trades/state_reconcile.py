@@ -198,6 +198,9 @@ def _deal_ids_from_ledger_event(event: dict[str, Any]) -> list[str]:
         raw_payload.get("deal_id"),
         raw_payload.get("futu_deal_id"),
     ]
+    stock_settlement = raw_payload.get("stock_settlement")
+    if isinstance(stock_settlement, dict):
+        values.append(stock_settlement.get("source_event_id"))
     out = _normalize_deal_ids([str(item) for item in values if item not in (None, "")])
     event_id = str(event.get("event_id") or "").strip()
     for token in event_id.replace(":", "-").split("-"):
