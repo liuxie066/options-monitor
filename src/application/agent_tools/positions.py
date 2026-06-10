@@ -47,6 +47,19 @@ def _option_positions_read_tool(
     )
 
 
+def _monthly_income_answer_policy(payload: dict[str, Any]) -> str:
+    if payload.get("include_rows") is True:
+        return "facts_then_analysis"
+    return "default"
+
+
+def _option_positions_answer_policy(payload: dict[str, Any]) -> str:
+    action = str(payload.get("action") or "list").strip().lower()
+    if action == "list":
+        return "facts_then_analysis"
+    return "default"
+
+
 MONTHLY_INCOME_REPORT_TOOL = build_agent_tool(
     name="monthly_income_report",
     description=(
@@ -68,6 +81,8 @@ MONTHLY_INCOME_REPORT_TOOL = build_agent_tool(
     pure_read=True,
     safe_default_input={},
     examples=({"input": {"config_key": "us", "account": "lx", "month": "2026-04"}},),
+    answer_policy="payload_dependent",
+    answer_policy_resolver=_monthly_income_answer_policy,
 )
 
 OPTION_POSITIONS_READ_TOOL = build_agent_tool(
@@ -104,6 +119,8 @@ OPTION_POSITIONS_READ_TOOL = build_agent_tool(
         {"input": {"config_key": "us", "action": "list", "query": {"account": "lx", "status": "open"}}},
         {"input": {"config_key": "us", "action": "history", "record_id": "rec_xxx"}},
     ),
+    answer_policy="payload_dependent",
+    answer_policy_resolver=_option_positions_answer_policy,
 )
 
 TOOLS: tuple[AgentTool, ...] = (

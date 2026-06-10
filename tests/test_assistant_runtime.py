@@ -2379,6 +2379,8 @@ def test_assistant_runtime_agent_loop_satisfies_position_read_tool_capabilities(
                         "side": "short",
                         "strike": 100,
                         "expiration": "2026-06-19",
+                        "expiration_ymd": "2026-06-19",
+                        "contracts_open": 1,
                     }
                 ],
                 "row_count": 1,
@@ -2429,14 +2431,16 @@ def test_assistant_runtime_agent_loop_satisfies_position_read_tool_capabilities(
     ) -> LlmSynthesisResult:
         assert question == "持仓明晰"
         assert plan.required_capabilities == ("option_positions", "read_only")
-        assert observations[-1]["tool_name"] == "assistant.capability_check"
-        assert observations[-1]["data"]["capability_status"] == {
+        assert observations[1]["tool_name"] == "assistant.capability_check"
+        assert observations[1]["data"]["capability_status"] == {
             "required": ["option_positions", "read_only"],
             "satisfied": ["option_positions", "read_only"],
             "gaps": [],
         }
+        assert observations[-1]["tool_name"] == "assistant.grounded_facts"
+        assert "NVDA short put 100 exp 2026-06-19 open 1" in observations[-1]["data"]["canonical_response"]
         return LlmSynthesisResult(
-            response_text="当前 open 期权持仓：1 条。NVDA Put 2026-06-19 100P。",
+            response_text="当前 open 期权持仓共 1 条。",
             trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
         )
 
@@ -2460,12 +2464,128 @@ def test_assistant_runtime_agent_loop_satisfies_position_read_tool_capabilities(
     assert out["ok"] is True
     assert calls == [("option_positions_read", {"action": "list", "config_key": "us", "query": {"status": "open"}})]
     assert "当前只能部分满足" not in out["data"]["response_text"]
+    assert out["data"]["response_text"].startswith("全部账户 · open · 期权持仓：1 条")
+    assert "- NVDA short put 100 exp 2026-06-19 open 1" in out["data"]["response_text"]
+    assert "分析\n当前 open 期权持仓共 1 条。" in out["data"]["response_text"]
     tool_plan_data = out["data"]["action"]["result"]["data"]
     assert tool_plan_data["capability_status"] == {
         "required": ["option_positions", "read_only"],
         "satisfied": ["option_positions", "read_only"],
         "gaps": [],
     }
+    assert tool_plan_data["synthesis"]["reason"] == "grounded_renderer_with_analysis"
+    assert tool_plan_data["final_response"] == {
+        "status": "synthesized",
+        "reason": "canonical facts rendered first; LLM added verified analysis",
+        "canonical_renderer_required": True,
+        "llm_may_summarize": True,
+    }
+
+
+def test_assistant_runtime_agent_loop_grounded_positions_fall_back_from_wrong_contract_quantity(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+    synthesis_observation_counts: list[int] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "summary": {"account": "all", "status": "open", "row_count": 1},
+                "filters": {"query": {"status": "open"}},
+                "rows": [
+                    {
+                        "record_id": "lot_1",
+                        "account": "lx",
+                        "symbol": "NVDA",
+                        "status": "open",
+                        "option_type": "put",
+                        "side": "short",
+                        "strike": 100,
+                        "expiration_ymd": "2026-06-19",
+                        "contracts_open": 2,
+                    }
+                ],
+                "row_count": 1,
+            },
+        )
+
+    def _plan(
+        _text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="分析当前持仓",
+                response_mode="synthesis",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="option_positions_read",
+                        arguments={"action": "list", "query": {"status": "open"}},
+                        purpose="读取 open 期权持仓并分析",
+                    ),
+                ),
+            ),
+            trace={
+                "enabled": True,
+                "attempted": True,
+                "reason": "accepted",
+                "provider": "openai",
+                "base_url": "",
+                "model": "gpt-5.2",
+                "api_key_env": "OM_LLM_API_KEY",
+                "confidence_min": 0.75,
+                "timeout_seconds": 20,
+                "max_output_tokens": 512,
+                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+            },
+        )
+
+    def _synthesize(
+        _question: str,
+        _settings: AssistantSettings,
+        _plan: PlannerPlan,
+        observations: list[dict[str, Any]],
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmSynthesisResult:
+        synthesis_observation_counts.append(len(observations))
+        return LlmSynthesisResult(
+            response_text="lx 的 NVDA 一张 put 当前 open。",
+            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="分析当前持仓",
+            sender_id="local",
+            message_id="msg_agent_loop_position_contract_guard",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+        synthesize_response_fn=_synthesize,
+    )
+
+    assert out["ok"] is True
+    assert calls == [("option_positions_read", {"action": "list", "config_key": "us", "query": {"status": "open"}})]
+    assert synthesis_observation_counts == [2, 3]
+    text = out["data"]["response_text"]
+    assert "- NVDA short put 100 exp 2026-06-19 open 2" in text
+    assert "一张 put" not in text
+    tool_plan_data = out["data"]["action"]["result"]["data"]
+    synthesis = tool_plan_data["synthesis"]
+    assert synthesis["reason"] == "grounded_renderer"
+    assert synthesis["answer_guard"]["status"] == "failed_then_fallback"
+    assert synthesis["answer_guard"]["violations"][0]["type"] == "contradicts_contract_quantity"
+    assert synthesis["answer_guard"]["retry_violations"][0]["type"] == "contradicts_contract_quantity"
 
 
 def test_assistant_runtime_agent_loop_reports_unsatisfied_combined_income_capability(tmp_path: Path) -> None:

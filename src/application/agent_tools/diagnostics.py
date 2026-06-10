@@ -113,6 +113,7 @@ HEALTHCHECK_TOOL = build_agent_tool(
     pure_read=True,
     safe_default_input={},
     examples=({"input": {"config_key": "us"}},),
+    answer_policy="facts_then_analysis",
 )
 
 RUNTIME_STATUS_TOOL = build_agent_tool(
@@ -145,6 +146,7 @@ RUNTIME_STATUS_TOOL = build_agent_tool(
     pure_read=True,
     safe_default_input={},
     examples=({"input": {"config_key": "us", "max_notification_chars": 2000}},),
+    answer_policy="facts_then_analysis",
 )
 
 OPERATION_TIMELINE_TOOL = build_agent_tool(
