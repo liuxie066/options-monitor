@@ -546,6 +546,8 @@ user question
 
 The design goal is to preserve LLM intelligence without making the LLM a factual source. The LLM may choose what to inspect, which dimensions to compare, and what explanation angle is useful. It must not be the component that writes accounting facts such as amount, currency, contract count, account, symbol, expiration, close type, or date.
 
+Canonical factual rendering is declared by the tool definition through `output_contract.canonical_renderer`. `agent_loop` may use this contract to select the deterministic renderer, but it should not own tool-name special cases for ledger/runtime fact rows. When a tool has payload-dependent factual output, use an `output_contract_resolver` so the concrete contract travels with the observation.
+
 For income and cashflow analysis, the controlled artifact is the authority. It should contain the evidence needed for the final answer, for example:
 
 - `data_scope`: source, account scope, month scope, coverage, warnings.

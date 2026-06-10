@@ -7,6 +7,40 @@ from src.application.agent_tool_operations import version_check_tool, version_up
 from src.application.agent_tools.base import AgentTool, AgentToolContext, build_agent_tool
 
 
+_RUNTIME_RUNS_OUTPUT_CONTRACT: dict[str, Any] = {
+    "schema_version": "runtime_runs.output.v1",
+    "canonical_renderer": "runtime_runs",
+    "source_label": "OM 本地 output_runs",
+    "guard_profile": "runtime_artifacts",
+    "primary_rows": "runs",
+    "fact_fields": [
+        "summary.limit",
+        "summary.total_runs",
+        "runs[].run_id",
+        "runs[].status",
+        "runs[].started_at",
+        "runs[].path",
+    ],
+}
+
+_RUNTIME_LOGS_OUTPUT_CONTRACT: dict[str, Any] = {
+    "schema_version": "runtime_logs.output.v1",
+    "canonical_renderer": "runtime_logs",
+    "source_label": "OM 本地 runtime logs",
+    "guard_profile": "runtime_artifacts",
+    "primary_rows": "files",
+    "fact_fields": [
+        "summary.kind",
+        "summary.lines",
+        "summary.existing_file_count",
+        "selected_run.run_id",
+        "files[].path",
+        "files[].exists",
+        "files[].tail_line_count",
+    ],
+}
+
+
 def _mask_path_str(ctx: AgentToolContext, value: Any) -> str:
     return ctx.mask_path(value) or "..."
 
@@ -149,6 +183,7 @@ RUNTIME_RUNS_TOOL = build_agent_tool(
         {"input": {"limit": 10}},
         {"input": {"run_id": "20260515T182459Z-474761"}},
     ),
+    output_contract=_RUNTIME_RUNS_OUTPUT_CONTRACT,
 )
 
 RUNTIME_LOGS_TOOL = build_agent_tool(
@@ -175,6 +210,7 @@ RUNTIME_LOGS_TOOL = build_agent_tool(
         {"input": {"run_id": "20260515T182459Z-474761", "kind": "tool", "lines": 20}},
         {"input": {"kind": "service", "lines": 50}},
     ),
+    output_contract=_RUNTIME_LOGS_OUTPUT_CONTRACT,
 )
 
 TOOLS: tuple[AgentTool, ...] = (

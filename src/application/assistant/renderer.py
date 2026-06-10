@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any, Callable, cast
 
 from src.application.assistant.commands import command_help_text
 from src.application.assistant.contracts import PerceptionResult
@@ -8,6 +8,12 @@ from src.application.assistant.contracts import PerceptionResult
 
 HELP_TEXT = command_help_text()
 SMALL_TALK_TEXT = "你好。我可以处理 /help 中列出的 OM 能力。发送“你能做什么”或 /help 查看完整菜单。"
+
+
+def render_canonical_tool_result(*, renderer_key: str, data: dict[str, Any], tool_result: dict[str, Any]) -> str:
+    key = str(renderer_key or "").strip()
+    renderer = _CANONICAL_RENDERERS.get(key)
+    return renderer(data, tool_result) if renderer is not None else ""
 
 
 def render_inbound_text(*, intent: PerceptionResult | None, tool_result: dict[str, Any] | None, error: dict[str, Any] | None = None) -> str:
@@ -36,24 +42,21 @@ def render_inbound_text(*, intent: PerceptionResult | None, tool_result: dict[st
     name = intent.intent_name if intent else str(tool_result.get("tool_name") or "")
     data_raw = tool_result.get("data")
     data = cast(dict[str, Any], data_raw) if isinstance(data_raw, dict) else {}
-    if name == "monthly_income_report":
-        return _render_monthly_income(data)
-    if name == "position_query":
-        return _render_positions(data)
-    if name == "position_exit_analysis":
-        return _render_position_exit_analysis(data)
-    if name == "runtime_runs":
-        return _render_runs(data)
-    if name == "runtime_logs":
-        return _render_logs(data)
-    if name == "runtime_status":
-        return _render_runtime_status(data, tool_result)
-    if name == "healthcheck":
-        return _render_healthcheck(data, tool_result)
-    if name == "config_validate":
-        return _render_config_validate(data, tool_result)
-    if name == "symbol_config_query":
-        return _render_symbol_config(data)
+    renderer_key = {
+        "monthly_income_report": "monthly_income",
+        "position_query": "position_rows",
+        "position_exit_analysis": "position_exit_analysis",
+        "runtime_runs": "runtime_runs",
+        "runtime_logs": "runtime_logs",
+        "runtime_status": "runtime_status",
+        "healthcheck": "healthcheck",
+        "config_validate": "config_validate",
+        "symbol_config_query": "symbol_config",
+    }.get(name)
+    if renderer_key:
+        rendered = render_canonical_tool_result(renderer_key=renderer_key, data=data, tool_result=tool_result)
+        if rendered:
+            return rendered
     return "查询完成。"
 
 
@@ -1121,3 +1124,18 @@ def _num(value: Any) -> str:
     if number.is_integer():
         return str(int(number))
     return f"{number:.4f}".rstrip("0").rstrip(".")
+
+
+_CanonicalRenderer = Callable[[dict[str, Any], dict[str, Any]], str]
+
+_CANONICAL_RENDERERS: dict[str, _CanonicalRenderer] = {
+    "monthly_income": lambda data, _tool_result: _render_monthly_income(data),
+    "position_rows": lambda data, _tool_result: _render_positions(data),
+    "position_exit_analysis": lambda data, _tool_result: _render_position_exit_analysis(data),
+    "runtime_runs": lambda data, _tool_result: _render_runs(data),
+    "runtime_logs": lambda data, _tool_result: _render_logs(data),
+    "runtime_status": _render_runtime_status,
+    "healthcheck": _render_healthcheck,
+    "config_validate": _render_config_validate,
+    "symbol_config": lambda data, _tool_result: _render_symbol_config(data),
+}

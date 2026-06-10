@@ -10,6 +10,7 @@ ToolHandler = Callable[["AgentToolContext", dict[str, Any]], ToolHandlerResult]
 InputValidator = Callable[[dict[str, Any]], None]
 WriteRequestPredicate = Callable[[dict[str, Any]], bool]
 AnswerPolicyResolver = Callable[[dict[str, Any]], str | None]
+OutputContractResolver = Callable[[dict[str, Any]], dict[str, Any] | None]
 
 
 @dataclass(frozen=True)
@@ -88,6 +89,8 @@ class AgentTool:
     input_validator: InputValidator | None = field(default=None, repr=False, compare=False)
     answer_policy: str = "default"
     answer_policy_resolver: AnswerPolicyResolver | None = field(default=None, repr=False, compare=False)
+    output_contract: dict[str, Any] = field(default_factory=dict)
+    output_contract_resolver: OutputContractResolver | None = field(default=None, repr=False, compare=False)
 
     def resolved_risk_level(self) -> str:
         return self.risk_level or ("local_write" if self.side_effects else "read_only")
@@ -124,6 +127,13 @@ class AgentTool:
                 return str(resolved)
         return self.answer_policy
 
+    def resolve_output_contract(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self.output_contract_resolver is not None:
+            resolved = self.output_contract_resolver(payload)
+            if isinstance(resolved, dict) and resolved:
+                return deepcopy(resolved)
+        return deepcopy(self.output_contract)
+
     def to_manifest(self) -> dict[str, Any]:
         side_effects = list(self.side_effects)
         return {
@@ -140,6 +150,7 @@ class AgentTool:
             "safe_default_input": dict(self.safe_default_input),
             "examples": deepcopy(list(self.examples)),
             "answer_policy": self.answer_policy,
+            "output_contract": deepcopy(self.output_contract),
         }
 
 
@@ -164,6 +175,8 @@ def build_agent_tool(
     input_validator: InputValidator | None = None,
     answer_policy: str = "default",
     answer_policy_resolver: AnswerPolicyResolver | None = None,
+    output_contract: dict[str, Any] | None = None,
+    output_contract_resolver: OutputContractResolver | None = None,
 ) -> AgentTool:
     if pure_read:
         read_only = True
@@ -189,6 +202,8 @@ def build_agent_tool(
         input_validator=input_validator,
         answer_policy=answer_policy,
         answer_policy_resolver=answer_policy_resolver,
+        output_contract=deepcopy(output_contract or {}),
+        output_contract_resolver=output_contract_resolver,
     )
 
 

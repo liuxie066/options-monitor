@@ -5,6 +5,33 @@ from typing import Any
 from src.application.agent_tools.base import AgentTool, AgentToolContext, build_agent_tool
 
 
+_CLOSE_ADVICE_READ_OUTPUT_CONTRACT: dict[str, Any] = {
+    "schema_version": "close_advice_read.output.v1",
+    "canonical_renderer": "position_exit_analysis",
+    "source_label": "OM 本地 Close Advice 报告",
+    "guard_profile": "position_exit_analysis",
+    "primary_rows": "rows",
+    "row_count_field": "row_count",
+    "fact_fields": [
+        "query",
+        "source.run_id",
+        "source.paths[]",
+        "rows[].account",
+        "rows[].symbol",
+        "rows[].side",
+        "rows[].option_type",
+        "rows[].expiration",
+        "rows[].expiration_ymd",
+        "rows[].strike",
+        "rows[].close_action",
+        "rows[].tier_label",
+        "rows[].evaluation_status",
+        "rows[].quote_status",
+        "rows[].reason",
+    ],
+}
+
+
 def _close_advice_read_tool(
     ctx: AgentToolContext,
     payload: dict[str, Any],
@@ -39,6 +66,7 @@ CLOSE_ADVICE_READ_TOOL = build_agent_tool(
     pure_read=True,
     safe_default_input={},
     examples=({"input": {"config_key": "us", "query": {"option_type": "call", "side": "long"}}},),
+    output_contract=_CLOSE_ADVICE_READ_OUTPUT_CONTRACT,
 )
 
 TOOLS: tuple[AgentTool, ...] = (CLOSE_ADVICE_READ_TOOL,)

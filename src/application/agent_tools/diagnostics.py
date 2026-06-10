@@ -5,6 +5,42 @@ from typing import Any
 from src.application.agent_tools.base import AgentTool, AgentToolContext, build_agent_tool
 
 
+_HEALTHCHECK_OUTPUT_CONTRACT: dict[str, Any] = {
+    "schema_version": "healthcheck.output.v1",
+    "canonical_renderer": "healthcheck",
+    "source_label": "OM 本地健康检查",
+    "guard_profile": "status_summary",
+    "primary_rows": "checks",
+    "fact_fields": [
+        "summary.ok",
+        "summary.critical_count",
+        "summary.warning_count",
+        "checks[].name",
+        "checks[].status",
+        "checks[].message",
+    ],
+}
+
+_RUNTIME_STATUS_OUTPUT_CONTRACT: dict[str, Any] = {
+    "schema_version": "runtime_status.output.v1",
+    "canonical_renderer": "runtime_status",
+    "source_label": "OM 本地 runtime_status",
+    "guard_profile": "status_summary",
+    "primary_rows": "summary",
+    "fact_fields": [
+        "summary.ok",
+        "summary.latest_status",
+        "summary.ledger_status",
+        "summary.ledger_position_lot_count",
+        "summary.ledger_trade_event_count",
+        "summary.projection_verify_ok",
+        "summary.warning_count",
+        "latest_run.path",
+        "latest_scanned_run.path",
+    ],
+}
+
+
 def _mask_path_str(ctx: AgentToolContext, value: Any) -> str:
     return ctx.mask_path(value) or "..."
 
@@ -114,6 +150,7 @@ HEALTHCHECK_TOOL = build_agent_tool(
     safe_default_input={},
     examples=({"input": {"config_key": "us"}},),
     answer_policy="facts_then_analysis",
+    output_contract=_HEALTHCHECK_OUTPUT_CONTRACT,
 )
 
 RUNTIME_STATUS_TOOL = build_agent_tool(
@@ -147,6 +184,7 @@ RUNTIME_STATUS_TOOL = build_agent_tool(
     safe_default_input={},
     examples=({"input": {"config_key": "us", "max_notification_chars": 2000}},),
     answer_policy="facts_then_analysis",
+    output_contract=_RUNTIME_STATUS_OUTPUT_CONTRACT,
 )
 
 OPERATION_TIMELINE_TOOL = build_agent_tool(
