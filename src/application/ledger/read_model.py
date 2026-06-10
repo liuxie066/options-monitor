@@ -323,6 +323,7 @@ def list_position_rows(
                 "note": view.get("note"),
             }
         )
+    rows.sort(key=_position_row_sort_key)
     return rows[: max(limit, 1)]
 
 
@@ -334,6 +335,22 @@ def _parse_filter_date(value: Any) -> date | None:
         return date.fromisoformat(text[:10])
     except ValueError:
         return None
+
+
+def _position_row_sort_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    expiration_date = _parse_filter_date(row.get("expiration_ymd")) or expiration_timestamp_to_date(row.get("expiration"))
+    strike = safe_float(row.get("strike"))
+    return (
+        expiration_date is None,
+        expiration_date or date.max,
+        str(row.get("account") or ""),
+        str(row.get("symbol") or ""),
+        str(row.get("side") or ""),
+        str(row.get("option_type") or ""),
+        strike is None,
+        strike if strike is not None else float("inf"),
+        str(row.get("record_id") or ""),
+    )
 
 
 def build_position_monthly_income_report(
