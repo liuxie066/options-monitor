@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.248 - 2026-06-10
+
+### Fixed
+- Fixed option position list reads to sort by expiration before applying the result limit, so all-account open position replies return near expirations first instead of SQLite insertion order.
+
 ## 1.2.247 - 2026-06-10
 
 ### Added
