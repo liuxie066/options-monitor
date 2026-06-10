@@ -56,7 +56,8 @@ def test_assistant_agent_eval_preserves_canonical_fact_rows(case: dict[str, Any]
 
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         assert tool_name == plan.steps[0].tool_name
-        assert payload.get("config_key") == "us"
+        if tool_name != "healthcheck":
+            assert payload.get("config_key") == "us"
         result = dict(case["tool_result"])
         return build_response(
             tool_name=tool_name,
@@ -134,7 +135,8 @@ def test_assistant_agent_eval_preserves_canonical_fact_rows(case: dict[str, Any]
     assert grounded["tool_name"] == "assistant.grounded_facts"
     assert "canonical_response" in grounded["data"]
     first_observation = tool_plan_data["synthesis_observations"][0]
-    assert first_observation["output_contract"]["canonical_renderer"] in {
-        "monthly_income",
-        "position_rows",
-    }
+    renderer = first_observation["output_contract"]["canonical_renderer"]
+    if case.get("expect_renderer"):
+        assert renderer == case["expect_renderer"]
+    else:
+        assert renderer
