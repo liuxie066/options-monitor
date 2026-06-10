@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.252 - 2026-06-10
+
+### Fixed
+- Fixed Assistant factual answers so tool-owned fact rows are rendered before LLM analysis for diagnostics, positions, close advice, config, and runtime tools.
+- Drove Assistant factual rendering policy from agent tool contracts and expanded eval coverage for facts-then-analysis responses.
+
 ## 1.2.251 - 2026-06-10
 
 ### Fixed
