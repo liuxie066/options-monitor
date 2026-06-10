@@ -66,6 +66,7 @@ CLOSE_ADVICE_READ_TOOL = build_agent_tool(
     pure_read=True,
     safe_default_input={},
     examples=({"input": {"config_key": "us", "query": {"option_type": "call", "side": "long"}}},),
+    answer_policy="facts_then_analysis",
     output_contract=_CLOSE_ADVICE_READ_OUTPUT_CONTRACT,
 )
 
