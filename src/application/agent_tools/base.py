@@ -9,6 +9,7 @@ ToolHandlerResult = tuple[dict[str, Any], list[str], dict[str, Any]]
 ToolHandler = Callable[["AgentToolContext", dict[str, Any]], ToolHandlerResult]
 InputValidator = Callable[[dict[str, Any]], None]
 WriteRequestPredicate = Callable[[dict[str, Any]], bool]
+AnswerPolicyResolver = Callable[[dict[str, Any]], str | None]
 
 
 @dataclass(frozen=True)
@@ -85,6 +86,8 @@ class AgentTool:
     examples: tuple[dict[str, Any], ...] = ()
     write_request_predicate: WriteRequestPredicate | None = field(default=None, repr=False, compare=False)
     input_validator: InputValidator | None = field(default=None, repr=False, compare=False)
+    answer_policy: str = "default"
+    answer_policy_resolver: AnswerPolicyResolver | None = field(default=None, repr=False, compare=False)
 
     def resolved_risk_level(self) -> str:
         return self.risk_level or ("local_write" if self.side_effects else "read_only")
@@ -114,6 +117,13 @@ class AgentTool:
         self.validate_input(payload)
         return self.handler(ctx, payload)
 
+    def resolve_answer_policy(self, payload: dict[str, Any]) -> str:
+        if self.answer_policy_resolver is not None:
+            resolved = self.answer_policy_resolver(payload)
+            if resolved:
+                return str(resolved)
+        return self.answer_policy
+
     def to_manifest(self) -> dict[str, Any]:
         side_effects = list(self.side_effects)
         return {
@@ -129,6 +139,7 @@ class AgentTool:
             "requires_env": list(self.requires_env),
             "safe_default_input": dict(self.safe_default_input),
             "examples": deepcopy(list(self.examples)),
+            "answer_policy": self.answer_policy,
         }
 
 
@@ -151,6 +162,8 @@ def build_agent_tool(
     examples: tuple[dict[str, Any], ...] = (),
     write_request_predicate: WriteRequestPredicate | None = None,
     input_validator: InputValidator | None = None,
+    answer_policy: str = "default",
+    answer_policy_resolver: AnswerPolicyResolver | None = None,
 ) -> AgentTool:
     if pure_read:
         read_only = True
@@ -174,6 +187,8 @@ def build_agent_tool(
         examples=examples,
         write_request_predicate=write_request_predicate,
         input_validator=input_validator,
+        answer_policy=answer_policy,
+        answer_policy_resolver=answer_policy_resolver,
     )
 
 

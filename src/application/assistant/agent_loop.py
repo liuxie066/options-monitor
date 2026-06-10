@@ -1276,7 +1276,7 @@ def _build_final_response(
                 "schema_version": TOOL_PLAN_SYNTHESIS_SCHEMA_VERSION,
             },
         )
-    if _grounded_income_response_required(plan) and fact_observations:
+    if _grounded_facts_response_required(plan) and fact_observations:
         fact_text = _canonical_response(plan.steps[0], _first_tool_observation(plan.steps[0], fact_observations))
         if fact_text:
             synthesizer = synthesize_response_fn or synthesize_tool_plan_response
@@ -1468,11 +1468,18 @@ def _canonical_response(step: PlannerPlanStep, observation: dict[str, Any]) -> s
     )
 
 
-def _grounded_income_response_required(plan: PlannerPlan) -> bool:
+def _grounded_facts_response_required(plan: PlannerPlan) -> bool:
     if len(plan.steps) != 1:
         return False
     step = plan.steps[0]
-    return step.tool_name == "monthly_income_report" and step.arguments.get("include_rows") is True
+    return plan.response_mode == "synthesis" and _answer_policy_for_step(step) == "facts_then_analysis"
+
+
+def _answer_policy_for_step(step: PlannerPlanStep) -> str:
+    definition = get_tool_definition(step.tool_name)
+    if definition is None:
+        return "default"
+    return definition.resolve_answer_policy(dict(step.arguments))
 
 
 def _with_grounded_facts_observation(observations: list[dict[str, Any]], fact_text: str) -> list[dict[str, Any]]:
@@ -1643,8 +1650,8 @@ def _with_answer_guard_feedback(observations: list[dict[str, Any]], guard: dict[
                     "Your previous response contradicted tool observations. Rewrite using only observations. "
                     "When monthly_income_report query_scope.month=all_available, answer over the OM local ledger coverage. "
                     "Do not claim missing months/accounts unless coverage or diagnostics explicitly says so. "
-                    "For monthly_income_report detail rows, use contracts/contracts_closed as the trade quantity; "
-                    "do not treat one row or one lot as one contract."
+                    "For factual rows, use contracts/contracts_open/contracts_closed as the trade quantity; "
+                    "do not treat one row or one lot as one contract, and do not alter symbols, dates, strikes, or accounts."
                 ),
             },
         },
@@ -1683,6 +1690,8 @@ def _answer_guard_facts(observations: list[dict[str, Any]]) -> dict[str, Any]:
             pass
         if str(item.get("tool_name") or "") == "monthly_income_report":
             contract_facts.extend(_monthly_income_contract_facts(data))
+        if str(item.get("tool_name") or "") == "option_positions_read":
+            contract_facts.extend(_position_contract_facts(data))
     return {
         "months": sorted(months),
         "accounts": sorted(accounts),
@@ -1726,6 +1735,36 @@ def _monthly_income_contract_facts(data: dict[str, Any]) -> list[dict[str, Any]]
                     "currency": row_raw.get("currency"),
                 }
             )
+    return facts
+
+
+def _position_contract_facts(data: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = data.get("rows")
+    if not isinstance(rows, list):
+        rows = data.get("positions")
+    if not isinstance(rows, list):
+        return []
+    facts: list[dict[str, Any]] = []
+    for row_raw in rows:
+        if not isinstance(row_raw, dict):
+            continue
+        contracts = _safe_float(row_raw.get("contracts_open") if row_raw.get("contracts_open") is not None else row_raw.get("contracts"))
+        if contracts is None or contracts <= 0:
+            continue
+        facts.append(
+            {
+                "row_type": "option_positions_read.rows",
+                "quantity_field": "contracts_open",
+                "contracts": contracts,
+                "account": row_raw.get("account"),
+                "symbol": row_raw.get("symbol"),
+                "option_type": row_raw.get("option_type"),
+                "side": row_raw.get("side"),
+                "strike": row_raw.get("strike"),
+                "expiration_ymd": row_raw.get("expiration_ymd"),
+                "expiration": row_raw.get("expiration"),
+            }
+        )
     return facts
 
 
@@ -2076,6 +2115,7 @@ def _planner_tool_manifest() -> list[dict[str, Any]]:
             notes.append("Use for current option position list/detail requests, including 持仓明细, 持仓明晰, 持仓详情, 当前仓位, or current positions.")
             notes.append("For ordinary position list/detail requests, required_capabilities should be [] because option_positions_read itself provides option_positions/read_only.")
             notes.append("Use action=list for current lots; use action=history or action=inspect only when the user explicitly asks for event history, projection, repair, or ledger diagnostics.")
+            notes.append("For action=list, canonical factual rows are rendered by the system; synthesis should only add analysis and must not reorder, omit, or restate rows.")
             semantics = {
                 "data_source": "local option position ledger",
                 "answer_capabilities": {
