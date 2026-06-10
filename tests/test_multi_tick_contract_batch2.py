@@ -138,7 +138,7 @@ def test_multi_tick_notify_unconfirmed_is_not_retried() -> None:
     assert [e["status"] for e in runlog.events] == ["error"]
 
 
-def test_multi_tick_notify_does_not_retry_when_message_id_exists() -> None:
+def test_multi_tick_notify_does_not_confirm_when_message_id_exists_without_delivery_confirmation() -> None:
     helper = importlib.import_module("src.application.scheduled_notification")
 
     send_calls: list[dict] = []
@@ -180,13 +180,14 @@ def test_multi_tick_notify_does_not_retry_when_message_id_exists() -> None:
         sleep_fn=lambda seconds: sleeps.append(seconds),
     )
 
-    assert result["ok"] is True
+    assert result["ok"] is False
+    assert result["error_code"] == "SEND_UNCONFIRMED"
     assert result["attempts"] == 1
     assert len(send_calls) == 1
     assert sleeps == []
-    assert [e["action"] for e in audit_events] == ["send_start", "send_done"]
-    assert audit_events[-1]["status"] == "ok"
-    assert audit_events[-1]["extra"]["delivery_confirmed"] is True
+    assert [e["action"] for e in audit_events] == ["send_start", "send_fail"]
+    assert audit_events[-1]["status"] == "unconfirmed"
+    assert audit_events[-1]["extra"]["delivery_confirmed"] is False
     assert audit_events[-1]["extra"]["message_id"] == "lx-1"
     assert send_calls[0]["idempotency_key"].startswith("om-")
 
