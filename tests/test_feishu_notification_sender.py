@@ -382,6 +382,29 @@ def test_wechat_clawbot_success_without_upstream_message_id_uses_local_receipt()
     assert out["message"] == "message_id=om-local-1"
 
 
+def test_wechat_clawbot_business_failure_with_local_receipt_is_not_confirmed() -> None:
+    from src.application.channels.wechat_clawbot.notification import normalize_wechat_clawbot_send_output
+
+    out = normalize_wechat_clawbot_send_output(
+        send_result={
+            "ok": False,
+            "http_status": 200,
+            "response_json": {"ret": -2},
+            "response_tail": '{"ret": -2}',
+            "local_receipt_id": "om-local-1",
+            "message_id": None,
+        }
+    )
+
+    assert out["command_ok"] is True
+    assert out["delivery_confirmed"] is False
+    assert out["ok"] is False
+    assert out["message_id"] == "om-local-1"
+    assert out["upstream_message_id"] is None
+    assert out["local_receipt_id"] == "om-local-1"
+    assert "ret" in out["message"]
+
+
 def test_send_wechat_clawbot_message_does_not_synthesize_message_id(tmp_path: Path) -> None:
     from src.application.channels.wechat_clawbot.notification import send_wechat_clawbot_message
 

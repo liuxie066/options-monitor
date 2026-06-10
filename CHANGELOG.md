@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.251 - 2026-06-10
+
+### Fixed
+- Fixed WeChat ClawBot notification accounting so local receipts or successful command execution no longer mark a business-level send failure such as `ret:-2` as delivered.
+
 ## 1.2.250 - 2026-06-10
 
 ### Fixed

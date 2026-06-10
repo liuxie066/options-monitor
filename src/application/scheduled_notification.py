@@ -472,13 +472,8 @@ def _should_retry_send(*, error_code: str | None, attempt: int, attempts: int, m
 
 
 def _confirmed_from_send_tool(send_tool_dto: dict[str, Any], message_id: Any) -> bool:
-    if not message_id:
-        return False
-    return bool(
-        send_tool_dto.get("delivery_confirmed")
-        or send_tool_dto.get("ok")
-        or send_tool_dto.get("command_ok")
-    )
+    del message_id
+    return bool(send_tool_dto.get("delivery_confirmed"))
 
 
 def build_notify_failure_summary_message(
