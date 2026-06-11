@@ -1,7 +1,7 @@
 # Session Summary Template
 
-> Use this template at the end of every session to generate a handoff summary.
-> Save to `memory/sessions/YYYYmmdd-HHMMSS_summary.md` for the next session to load.
+> Use this template only when an explicit handoff is needed.
+> Keep the summary in the conversation or in the user-requested handoff location; do not save it to project memory by default.
 
 ## 1. Changes Made
 
@@ -60,7 +60,7 @@ Key commands executed this session:
 **At session end:**
 ```
 请根据 docs/SESSION_SUMMARY.md 模板生成本次 session 的 summary，
-保存到 memory/sessions/<timestamp>_summary.md
+直接在回复中输出，或保存到我指定的位置
 ```
 
 **At next session start:**
