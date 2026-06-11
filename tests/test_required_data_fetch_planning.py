@@ -39,6 +39,60 @@ def test_sell_call_min_strike_builds_configured_bounds_plan(monkeypatch, tmp_pat
     assert plan.merged_specs[0].include_realized_volatility is False
 
 
+def test_fetch_plan_prefers_live_spot_over_existing_required_data(monkeypatch, tmp_path: Path) -> None:
+    import src.application.required_data_planning as mod
+
+    required_data_dir = tmp_path / "required_data"
+    parsed = required_data_dir / "parsed" / "NVDA_required_data.csv"
+    parsed.parent.mkdir(parents=True, exist_ok=True)
+    parsed.write_text("option_type,expiration,dte,strike,spot\nput,2026-06-19,30,80,80.15\n", encoding="utf-8")
+    monkeypatch.setattr(mod, "list_option_expirations", lambda *args, **kwargs: ["2026-06-19"])
+    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: 79.8)
+
+    plan = mod.build_required_data_fetch_plan(
+        base=tmp_path,
+        required_data_dir=required_data_dir,
+        symbol="NVDA",
+        limit_expirations=1,
+        want_put=True,
+        want_call=False,
+        sell_put_cfg={"enabled": True, "max_strike": 80},
+        sell_call_cfg={"enabled": False},
+        fetch_host="127.0.0.1",
+        fetch_port=11111,
+    )
+
+    assert plan.spot_reference == 79.8
+    assert plan.side_plans[0].strike_window.max_strike == 79.8
+
+
+def test_fetch_plan_falls_back_to_existing_spot_when_live_spot_missing(monkeypatch, tmp_path: Path) -> None:
+    import src.application.required_data_planning as mod
+
+    required_data_dir = tmp_path / "required_data"
+    parsed = required_data_dir / "parsed" / "NVDA_required_data.csv"
+    parsed.parent.mkdir(parents=True, exist_ok=True)
+    parsed.write_text("option_type,expiration,dte,strike,spot\nput,2026-06-19,30,80,80.15\n", encoding="utf-8")
+    monkeypatch.setattr(mod, "list_option_expirations", lambda *args, **kwargs: ["2026-06-19"])
+    monkeypatch.setattr(mod, "get_underlier_spot", lambda *args, **kwargs: None)
+
+    plan = mod.build_required_data_fetch_plan(
+        base=tmp_path,
+        required_data_dir=required_data_dir,
+        symbol="NVDA",
+        limit_expirations=1,
+        want_put=True,
+        want_call=False,
+        sell_put_cfg={"enabled": True, "max_strike": 80},
+        sell_call_cfg={"enabled": False},
+        fetch_host="127.0.0.1",
+        fetch_port=11111,
+    )
+
+    assert plan.spot_reference == 80.15
+    assert plan.side_plans[0].strike_window.max_strike == 80.0
+
+
 def test_sell_put_underwriting_fetch_plan_requires_realized_volatility(monkeypatch, tmp_path: Path) -> None:
     import src.application.required_data_planning as mod
 

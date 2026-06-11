@@ -162,11 +162,8 @@ def _resolve_spot_reference(
     snapshot_window_sec: float = 30.0,
     snapshot_max_calls: int = 60,
 ) -> float | None:
-    existing = _load_existing_spot(required_data_dir=required_data_dir, symbol=symbol)
-    if existing is not None and existing > 0:
-        return existing
     try:
-        return get_underlier_spot(
+        fresh = get_underlier_spot(
             symbol,
             host=host,
             port=port,
@@ -175,8 +172,14 @@ def _resolve_spot_reference(
             snapshot_window_sec=snapshot_window_sec,
             snapshot_max_calls=snapshot_max_calls,
         )
+        if fresh is not None and fresh > 0:
+            return fresh
     except Exception:
-        return None
+        pass
+    existing = _load_existing_spot(required_data_dir=required_data_dir, symbol=symbol)
+    if existing is not None and existing > 0:
+        return existing
+    return None
 
 
 def _filter_expirations_by_dte(*, symbol: str, available_expirations: list[str], min_dte: int | None, max_dte: int | None) -> list[str]:

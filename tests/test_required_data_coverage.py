@@ -101,6 +101,71 @@ def test_strategy_bounds_coverage_requires_rv_when_requested(tmp_path: Path) -> 
     ) is True
 
 
+def test_fetch_plan_coverage_requires_spot_reference_match(tmp_path: Path) -> None:
+    from src.application.required_data_coverage import required_data_csv_covers_fetch_plan
+    from src.application.required_data_planning import (
+        OptionSideFetchPlan,
+        RequiredDataFetchPlanBundle,
+        RequiredDataFetchSpec,
+        StrikeWindowPlan,
+    )
+
+    side_plan = OptionSideFetchPlan(
+        option_type="put",
+        min_dte=20,
+        max_dte=60,
+        explicit_expirations=["2026-06-19"],
+        strike_window=StrikeWindowPlan(
+            min_strike=80,
+            max_strike=100,
+            source="test",
+            base_min_strike=80,
+            base_max_strike=100,
+        ),
+        planning_reason="test",
+    )
+    fetch_plan = RequiredDataFetchPlanBundle(
+        symbol="NVDA",
+        spot_reference=100.0,
+        side_plans=[side_plan],
+        merged_specs=[
+            RequiredDataFetchSpec(
+                symbol="NVDA",
+                limit_expirations=1,
+                host="127.0.0.1",
+                port=11111,
+                option_types=("put",),
+                explicit_expirations=["2026-06-19"],
+                min_dte=20,
+                max_dte=60,
+                side_strike_windows={"put": {"min_strike": 80, "max_strike": 100}},
+                side_plans=[side_plan],
+            )
+        ],
+    )
+    parsed = _write_required_data_csv(
+        tmp_path / "parsed" / "NVDA_required_data.csv",
+        [
+            {"option_type": "put", "expiration": "2026-06-19", "dte": 30, "strike": 80, "spot": 100.0},
+            {"option_type": "put", "expiration": "2026-06-19", "dte": 30, "strike": 90, "spot": 100.0},
+            {"option_type": "put", "expiration": "2026-06-19", "dte": 30, "strike": 100, "spot": 100.0},
+        ],
+    )
+
+    assert required_data_csv_covers_fetch_plan(parsed=parsed, fetch_plan=fetch_plan) is True
+
+    parsed = _write_required_data_csv(
+        tmp_path / "parsed" / "NVDA_required_data.csv",
+        [
+            {"option_type": "put", "expiration": "2026-06-19", "dte": 30, "strike": 80, "spot": 99.5},
+            {"option_type": "put", "expiration": "2026-06-19", "dte": 30, "strike": 90, "spot": 99.5},
+            {"option_type": "put", "expiration": "2026-06-19", "dte": 30, "strike": 100, "spot": 99.5},
+        ],
+    )
+
+    assert required_data_csv_covers_fetch_plan(parsed=parsed, fetch_plan=fetch_plan) is False
+
+
 def test_fetch_plan_coverage_requires_each_requested_expiration(tmp_path: Path) -> None:
     from src.application.required_data_coverage import required_data_csv_covers_fetch_plan
     from src.application.required_data_planning import (
