@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pandas as pd
 
 
@@ -378,6 +380,76 @@ def test_notify_symbols_markdown_yield_enhancement_layout() -> None:
     assert "建议挂单=卖3.000/买1.500" in out
     assert "卖1.453/买1.500" not in out
     assert "目标价" not in out
+
+
+def test_yield_enhancement_notification_ignores_option_contract_display_name(tmp_path) -> None:
+    from domain.domain import normalize_processor_row
+    from src.application.alert_engine import _load_symbol_display_map, build_alert_text
+    from src.application.notify_symbols import build_notification
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    (state_dir / "portfolio_context.json").write_text(
+        json.dumps(
+            {
+                "stocks_by_symbol": {
+                    "PDD": {"symbol": "PDD", "name": "PDD 260626 91.00C"},
+                    "0700.HK": {"symbol": "0700.HK", "name": "腾讯"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "config.us.json").write_text(
+        json.dumps(
+            {
+                "intake": {
+                    "symbol_aliases": {
+                        "PDD 260626 91.00C": "PDD",
+                        "拼多多": "PDD",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    display_map = _load_symbol_display_map(tmp_path, state_dir=state_dir)
+    assert display_map == {"0700.HK": "腾讯", "PDD": "拼多多"}
+
+    row = normalize_processor_row(
+        {
+            "symbol": "PDD",
+            "strategy": "yield_enhancement",
+            "candidate_count": 1,
+            "top_contract": "2026-06-26 78P+88C",
+            "annualized_return": 0.41,
+            "net_income": 128.34,
+            "dte": 15,
+            "strike": 78.0,
+            "risk_label": "激进",
+            "option_ccy": "USD",
+            "mid": 1.283,
+            "put_bid": 1.68,
+            "put_strike": 78.0,
+            "call_strike": 88.0,
+            "call_ask": 0.35,
+            "call_delta": 0.12,
+            "call_candidate_count": 1,
+            "net_credit": 128.34,
+            "scenario_score": 1.78,
+            "expected_move": 6.27,
+            "expected_move_iv": 0.3892,
+        }
+    )
+    alerts = build_alert_text(
+        pd.DataFrame([row]),
+        symbol_display_map={"PDD": "PDD 260626 91.00C"},
+    )
+    out = build_notification("", alerts, account_label="LX", render_style="compact")
+
+    assert "PDD 260626 91.00C" not in alerts
+    assert "PDD 260626 91.00C" not in out
+    assert "💎 组合收益 PDD 78P+88C @ 06-26" in out
 
 
 def test_alert_engine_high_priority_orders_by_strategy_then_strength() -> None:
