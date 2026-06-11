@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.255 - 2026-06-12
+
+### Added
+- Added local assistant user profile context so LLM replies can incorporate operator-specific preferences without relying on prompt-only state.
+
+### Fixed
+- Fixed required-data spot planning so opening scans prefer a live underlier spot and refresh cached required data when its spot no longer matches the current spot reference.
+- Fixed alert symbol normalization so broker option display names no longer pollute alert output.
+
 ## 1.2.254 - 2026-06-11
 
 ### Fixed

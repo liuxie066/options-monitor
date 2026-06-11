@@ -68,6 +68,8 @@ def required_data_csv_covers_fetch_plan(*, parsed: Path, fetch_plan: RequiredDat
 def required_data_frame_covers_fetch_plan(*, df: pd.DataFrame, fetch_plan: RequiredDataFetchPlanBundle) -> bool:
     if df.empty:
         return False
+    if not _spot_reference_matches_frame(df=df, spot_reference=fetch_plan.spot_reference):
+        return False
     if any(bool(spec.include_realized_volatility) for spec in fetch_plan.merged_specs) and not _has_realized_volatility(df):
         return False
     for side_plan in fetch_plan.side_plans:
@@ -183,6 +185,21 @@ def required_data_frame_covers_strategy_bounds(
         ):
             return False
     return True
+
+
+def _spot_reference_matches_frame(*, df: pd.DataFrame, spot_reference: float | None) -> bool:
+    expected = _safe_float(spot_reference)
+    if expected is None or expected <= 0:
+        return True
+    if "spot" not in df.columns:
+        return False
+    values = pd.to_numeric(df["spot"], errors="coerce")
+    if values.empty or values.isna().any():
+        return False
+    if (values <= 0).any():
+        return False
+    tolerance = max(1e-6, abs(float(expected)) * 1e-6)
+    return bool((values - float(expected)).abs().le(tolerance).all())
 
 
 def _has_realized_volatility(df: pd.DataFrame) -> bool:
