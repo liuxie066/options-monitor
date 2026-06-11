@@ -34,6 +34,7 @@ from src.application.assistant.renderer import render_canonical_tool_result, ren
 from src.application.assistant.settings import AssistantSettings
 from src.application.assistant.time_filters import extract_month_filter
 from src.application.assistant.tool_policy import DEFAULT_TOOL_POLICY
+from src.application.assistant.user_profile import user_profile_trace
 from src.infrastructure.openai_chat_completions import (
     OpenAIChatCompletionsError,
     extract_chat_completion_text,
@@ -2067,6 +2068,9 @@ def _planner_input_text(text: str, *, conversation_context: dict[str, Any] | Non
             "last_successful_read": conversation_context.get("last_successful_read")
             if isinstance(conversation_context.get("last_successful_read"), dict)
             else None,
+            "user_profile": conversation_context.get("user_profile")
+            if isinstance(conversation_context.get("user_profile"), dict)
+            else {"provided": False},
         }
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
@@ -2281,6 +2285,9 @@ def _synthesis_input_text(
     if isinstance(conversation_context, dict):
         payload["context"] = {
             "window_messages": int(conversation_context.get("window_messages") or 0),
+            "user_profile": conversation_context.get("user_profile")
+            if isinstance(conversation_context.get("user_profile"), dict)
+            else {"provided": False},
         }
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
@@ -2361,6 +2368,9 @@ def _llm_trace(
             "window_messages": int(conversation_context.get("window_messages") or 0) if isinstance(conversation_context, dict) else 0,
             "recent_count": len(recent) if isinstance(recent, list) else 0,
             "pending_count": len(pending) if isinstance(pending, list) else 0,
+            "user_profile": user_profile_trace(
+                conversation_context.get("user_profile") if isinstance(conversation_context, dict) else None
+            ),
         }
     return payload
 

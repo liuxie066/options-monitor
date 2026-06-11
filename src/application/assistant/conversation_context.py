@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from src.application.assistant.audit import InboundAuditStore
 from src.application.assistant.operation_store import InboundOperationStore
 from src.application.assistant.contracts import AssistantRequest
+from src.application.assistant.user_profile import load_user_profile_context, user_profile_trace
 from src.application.tool_allowlist import PURE_READ_TOOLS
 
 
@@ -14,6 +16,7 @@ def build_conversation_context(
     audit_store: InboundAuditStore,
     max_messages: int,
     max_pending: int = 5,
+    user_profile_path: str | Path | None = None,
 ) -> dict[str, Any]:
     window = max(0, min(int(max_messages or 0), 20))
     pending_limit = max(0, min(int(max_pending or 0), 10))
@@ -58,6 +61,7 @@ def build_conversation_context(
         "recent_messages": recent_messages,
         "last_successful_read": _last_successful_read(recent_messages),
         "pending_operations": pending_operations,
+        "user_profile": load_user_profile_context(user_profile_path),
     }
 
 
@@ -71,6 +75,9 @@ def context_trace(context: dict[str, Any] | None) -> dict[str, Any]:
         "window_messages": int(context.get("window_messages") or 0),
         "recent_count": len(recent) if isinstance(recent, list) else 0,
         "pending_count": len(pending) if isinstance(pending, list) else 0,
+        "user_profile": user_profile_trace(
+            context.get("user_profile") if isinstance(context.get("user_profile"), dict) else None
+        ),
     }
 
 

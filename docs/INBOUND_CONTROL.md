@@ -268,6 +268,8 @@ The same model surface is available in chat through one slash command namespace:
 
 When LLM translation runs, OM sends a bounded same-conversation context window to the translator: recent inbound audit rows plus current pending operation summaries. Sender and conversation identifiers are used locally to select the window, but are not sent to the provider. `assistant.context_window_messages` controls the recent-message window and is capped at 20; this context is only used for intent translation, not execution.
 
+If repo-local `user.md` exists, OM Copilot also includes it as `context.user_profile`. This file is a manually maintained, hint-only user profile for stable collaboration preferences such as language, operator role, response style, and safety preferences. The current user message still wins over profile hints, and the profile must not be treated as market, ledger, broker, or config fact. `user.md` is ignored by git and should not contain secrets, credentials, webhook URLs, private keys, or account identifiers; obvious secret-like lines are redacted before provider calls.
+
 Check the translator control plane before enabling it in Feishu:
 
 ```bash
