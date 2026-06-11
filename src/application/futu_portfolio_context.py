@@ -1,13 +1,16 @@
 from __future__ import annotations
 
-import re
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from domain.domain.fetch_source import is_futu_fetch_source, normalize_fetch_source
 from src.infrastructure.futu_gateway import build_ready_futu_gateway
 from domain.domain.ledger.position_fields import normalize_account, normalize_currency
-from domain.domain.symbol_identity import canonical_symbol, symbol_currency
+from domain.domain.symbol_identity import (
+    canonical_symbol,
+    looks_like_option_contract_label,
+    symbol_currency,
+)
 from src.application.account_config import resolve_trade_intake_futu_account_ids as _resolve_trade_intake_futu_account_ids
 
 
@@ -15,8 +18,6 @@ _DEFAULT_TRD_ENV = "REAL"
 _VALID_TRD_ENVS = {"REAL", "SIMULATE"}
 _LONG_POSITION_SIDE = "LONG"
 _NON_STOCK_SEC_TYPES = {"DRVT", "FUTURE", "IDX", "NONE", "N/A"}
-# Futu option code shape e.g. US.AAPL250117C00175000 — used as fallback when sec_type is absent.
-_OPTION_CODE_PATTERN = re.compile(r"\d{6}[CP]\d{6,}")
 _FUTU_CASH_FIELDS_BY_CCY = {
     "HKD": ("hk_cash",),
     "USD": ("us_cash",),
@@ -62,16 +63,22 @@ def _is_long_position(row: Mapping[str, Any]) -> bool:
 
 
 def _looks_like_option_code(code: Any) -> bool:
-    if not code:
-        return False
-    return bool(_OPTION_CODE_PATTERN.search(str(code)))
+    return looks_like_option_contract_label(code)
+
+
+def _row_looks_like_option_position(row: Mapping[str, Any]) -> bool:
+    for key in ("code", "symbol", "stock_code", "asset_id", "stock_name", "name", "asset_name"):
+        if _looks_like_option_code(row.get(key)):
+            return True
+    return False
 
 
 def _is_stock_position(row: Mapping[str, Any]) -> bool:
+    if _row_looks_like_option_position(row):
+        return False
     sec_type = _pick(row, "sec_type", "secType", "security_type")
     if sec_type in (None, ""):
-        code = _pick(row, "code", "symbol", "stock_code", "asset_id")
-        return not _looks_like_option_code(code)
+        return True
     return str(sec_type).strip().upper() not in _NON_STOCK_SEC_TYPES
 
 

@@ -9,6 +9,10 @@ from typing import Any
 OPTION_CODE_RE = re.compile(
     r"^(?P<market>[A-Z]{2})\.(?P<root>[A-Z]+)(?P<yy>\d{2})(?P<mm>\d{2})(?P<dd>\d{2})(?P<cp>[CP])(?P<strike>\d+)$"
 )
+OPTION_COMPACT_RE = re.compile(r"\d{6}[CP]\d{5,}")
+OPTION_DISPLAY_RE = re.compile(
+    r"(?:^|\s)(?:[A-Z][A-Z0-9.\-]*\s+)?\d{6}\s+\d+(?:\.\d+)?\s*[CP](?:\s|$)"
+)
 _US_SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9\.-]{0,10}$")
 _UNDERLIER_ALIAS_FALLBACKS = {
     "TCH": "0700.HK",
@@ -87,6 +91,18 @@ def _display_name_candidates(raw: str) -> list[str]:
             out.append(prefix)
 
     return list(dict.fromkeys(out))
+
+
+def looks_like_option_contract_label(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    upper = text.upper()
+    return bool(
+        OPTION_CODE_RE.match(upper)
+        or OPTION_COMPACT_RE.search(upper)
+        or OPTION_DISPLAY_RE.search(upper)
+    )
 
 
 def _identity_from_canonical(*, raw: str, candidate: str, source_kind: str) -> SymbolIdentity | None:

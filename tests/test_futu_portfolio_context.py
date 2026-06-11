@@ -257,6 +257,8 @@ def test_build_futu_portfolio_context_excludes_short_positions_and_options() -> 
             {"code": "US.AAPL", "qty": 100, "cost_price": 180, "currency": "USD", "position_side": "SHORT", "sec_type": "STOCK"},
             {"code": "US.TSLA", "qty": 50, "cost_price": 200, "currency": "USD", "sec_type": "DRVT"},
             {"code": "US.AAPL250117C00175000", "qty": 1, "cost_price": 5, "currency": "USD"},
+            {"code": "US.PDD", "qty": 1, "cost_price": 1.2, "currency": "USD", "stock_name": "PDD 260626 91.00C"},
+            {"symbol": "PDD", "qty": 1, "cost_price": 1.2, "currency": "USD", "name": "PDD 260626 91.00C"},
         ],
         account="lx",
         market="富途",
