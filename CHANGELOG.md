@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.254 - 2026-06-11
+
+### Fixed
+- Fixed runtime status so systemd-injected service environment files that are intentionally unreadable by the app user no longer degrade OM status with an `ENV_FILE` warning when the required environment is already present.
+
 ## 1.2.253 - 2026-06-11
 
 ### Fixed

@@ -1679,6 +1679,64 @@ def test_runtime_status_uses_service_profile_assistant_config_and_env_file(tmp_p
     assert data["summary"]["env_file_loaded"] is True
 
 
+def test_runtime_status_ignores_unreadable_profile_env_file_when_env_is_injected(monkeypatch, tmp_path: Path) -> None:
+    fixture = _runtime_status_upgrade_fixture(tmp_path)
+    assistant_path = tmp_path / "assistant" / "config.assistant.json"
+    assistant_path.parent.mkdir()
+    assistant_path.write_text(
+        json.dumps(
+            {
+                "assistant": {
+                    "mode": "agent_loop",
+                    "llm": {
+                        "provider": "deepseek",
+                        "base_url": "https://api.deepseek.com",
+                        "model": "deepseek-v4-flash",
+                        "api_key_env": "DEEPSEEK_API_KEY",
+                    },
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    env_file = tmp_path / "options-monitor.env"
+    env_file.write_text("DEEPSEEK_API_KEY=sk-profile\n", encoding="utf-8")
+    (tmp_path / "service.profile.json").write_text(
+        json.dumps(
+            {
+                "service_provider": "systemd",
+                "runtime_root": str(tmp_path),
+                "env_file": str(env_file),
+                "assistant_config_path": str(assistant_path),
+                "services": [{"name": "options-monitor-wechat-clawbot.service"}],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-systemd")
+
+    original_read_text = Path.read_text
+
+    def _read_text(self: Path, *args: Any, **kwargs: Any) -> str:
+        if self == env_file:
+            raise PermissionError("Permission denied")
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _read_text)
+
+    data, warnings, _meta = _call_runtime_status_for_upgrade(tmp_path, fixture["cfg_path"], fixture["cfg"])
+
+    assert not any("failed to read env file" in item for item in warnings)
+    assert "ENV_FILE" not in data["summary"]["warning_codes"]
+    assert data["environment"]["warnings"] == []
+    assert data["environment"]["env_file_loaded"] is False
+    assert data["environment"]["entries"]["DEEPSEEK_API_KEY"]["configured"] is True
+    assert data["environment"]["entries"]["DEEPSEEK_API_KEY"]["source"] == "process_env"
+    assert data["assistant_runtime"]["llm"]["api_key_configured"] is True
+
+
 def test_runtime_status_reports_wechat_clawbot_channel_health(tmp_path: Path) -> None:
     fixture = _runtime_status_upgrade_fixture(tmp_path)
     assistant_path = tmp_path / "assistant" / "config.assistant.json"

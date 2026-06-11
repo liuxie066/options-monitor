@@ -39,6 +39,15 @@ PROFILE_TRIGGER_KEYS = (
     "timeoutSeconds",
 )
 DEFAULT_PROFILE_NAMES = ("openclaw.profile.json", ".openclaw-profile.json")
+SERVICE_INJECTED_ENV_SENTINELS = (
+    "DEEPSEEK_API_KEY",
+    "OM_LLM_API_KEY",
+    "OM_FEISHU_APP_ID",
+    "OM_FEISHU_APP_SECRET",
+    "OM_FEISHU_BOT_APP_ID",
+    "OM_FEISHU_BOT_APP_SECRET",
+    "OM_INBOUND_OPERATION_HMAC_KEY",
+)
 
 
 def _resolve_under_base(value: Any, *, base: Path, default: Path) -> Path:
@@ -58,6 +67,26 @@ def _relative_path(path: Path, *, base: Path) -> str:
     except ValueError:
         name = resolved.name
         return f".../{name}" if name else "..."
+
+
+def _is_env_file_permission_warning(message: str) -> bool:
+    return "failed to read env file:" in message and "Permission denied" in message
+
+
+def _has_service_injected_env(effective_env: Any) -> bool:
+    for key in SERVICE_INJECTED_ENV_SENTINELS:
+        value = str(effective_env.get(key) or "").strip()
+        source = effective_env.source_of(key)
+        if value and source is not None and source.source == "process_env":
+            return True
+    return False
+
+
+def _runtime_status_env_file_warnings(effective_env: Any) -> list[str]:
+    items = [str(item) for item in effective_env.warnings]
+    if not items or not _has_service_injected_env(effective_env):
+        return items
+    return [item for item in items if not _is_env_file_permission_warning(item)]
 
 
 def _mtime_utc(path: Path) -> str:
@@ -2051,8 +2080,10 @@ def runtime_status_tool(
         env_file=env_file_path,
         mask_path=mask_path,
     )
-    if effective_env.warnings:
-        warnings.extend(str(item) for item in effective_env.warnings)
+    env_file_warnings = _runtime_status_env_file_warnings(effective_env)
+    environment["warnings"] = env_file_warnings
+    if env_file_warnings:
+        warnings.extend(env_file_warnings)
         warning_codes.append("ENV_FILE")
     assistant_runtime = _assistant_runtime_summary(
         base=base,
