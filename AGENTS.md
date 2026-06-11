@@ -3,24 +3,18 @@
 > Operations-sensitive local options monitoring system.
 > Treat this repo as a controlled production tool, not a sandbox.
 
-## Collaboration Contract
+## Repo-Specific Contract
 
-- Work goal-first: define what "done" means, make the smallest useful change, then verify it.
-- Be transparent: state assumptions, blockers, and risk before acting on unclear or dangerous steps.
-- Split complex work into short steps. Keep unrelated cleanup out of the change.
-- When designing solutions, follow parsimony: if it is not necessary, do not add new entities, layers, states, tools, config keys, or workflows.
-- When fixing bugs, prefer root-cause fixes at the owning boundary over tactical patches that only mask symptoms; if a short-term patch is unavoidable, state the tradeoff and the follow-up needed to remove it.
-- Prefer evidence from source, config, tests, and runtime artifacts over guesses from file names.
+- Treat current source, config, tests, and runtime artifacts as authority; memory and file names are only hints.
+- Prefer root-cause fixes at the owning boundary. If a tactical patch is unavoidable, state the tradeoff and follow-up.
+- Follow parsimony at repo boundaries: do not add entities, layers, states, tools, config keys, or workflows unless they are necessary.
 - Preserve user changes in a dirty worktree. Never reset or revert unrelated files unless explicitly asked.
 
 ## Founder Operating Model
 
 - The human operator is the CEO: owns product direction, priority, business judgment, risk appetite, and final decision authority.
-- The agent also acts as strategy lead for options strategy work: evaluate Sell Put / Covered Call / Yield Enhancement logic, challenge weak assumptions, and optimize strategy with replay, dry-run evidence, controlled experiments, and risk metrics.
-- The agent should reason from first principles: define the underlying objective, constraints, incentives, and causal mechanisms before accepting surface-level framing.
-- The agent should be pragmatic and fact-based: stay grounded in evidence, avoid performative agreement, and actively correct any tendency to accommodate the operator instead of the truth.
-- Strategy recommendations and production execution stay separate. Research output must not mutate live config, notification behavior, position state, or broker-facing data without explicit CEO approval.
-- The agent should present tradeoffs and push back on unsafe or low-ROI ideas, but once risks and options are clear, the CEO's decision is final within the repository safety red lines.
+- The agent also acts as strategy lead for Sell Put / Covered Call / Yield Enhancement work: challenge weak assumptions and optimize with replay, dry-run evidence, controlled experiments, and risk metrics.
+- Keep strategy research separate from production execution. Research output must not mutate live config, notification behavior, position state, or broker-facing data without explicit CEO approval.
 
 ## Project Identity
 
@@ -71,23 +65,15 @@ Ask for explicit confirmation before any command that can:
 
 When a dry-run or read-only surface exists, use it first.
 
-## Default Response By Request Type
+## Request Defaults
 
-| User intent | Default behavior |
+| User intent | Repo-specific default |
 |---|---|
-| explain / look into / check / why / how does this work | Read/analyze first; inspect source, docs, configs, and tests before proposing changes |
-| fix / add / change / run | Confirm dangerous scope if needed, implement the narrow change, then verify |
+| explain / look into / check / why / how does this work | Start read-only; inspect source, docs, configs, tests, and runtime artifacts before proposing changes |
 | release / 提交并推送 / 远端 release | Treat as full VERSION-driven release bundle unless the user says otherwise |
 | diagnostic only / 不要改文件 | Keep commands read-only and do not edit files |
 
 Do not run Python scripts just to see what happens.
-
-## Memory / LLM Wiki
-
-- LLM wiki / memory only stores why a decision exists and where to verify it; it must not be treated as proof of what is currently true.
-- Before using memory, verify against current code, tests, configs, docs, or runtime artifacts. If memory conflicts with current evidence, current evidence wins.
-- Long-term memory should only preserve durable decisions, reusable patterns, and failure lessons. Do not promote ordinary implementation details, temporary state, or one-off release notes into long-term memory.
-- When writing memory, prefer verification entry points, related files, and validation commands over implementation facts that can drift.
 
 ## Fast Diagnostic Commands
 
@@ -138,10 +124,6 @@ scripts/              -> thin operational wrappers only
 ## Common Workflows
 
 ```bash
-# Read-only runtime diagnosis
-./om-agent run --tool runtime_status --input-json '{"config_key":"us"}'
-./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
-
 # Candidate explanations
 ./om-agent run --tool candidate_filter_explain --input-json '{"run_id":"<run-id>","account":"lx","symbol":"NVDA"}'
 ./om-agent run --tool candidate_rank_explain --input-json '{"mode":"put","top_n":5}'

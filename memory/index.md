@@ -1,17 +1,13 @@
 # Memory Index
 
-This is a navigation layer over the project-level LLM wiki. It links durable entries by topic and does not replace the entry text.
+This is a navigation layer over archived project memory. It links older durable entries by topic and does not replace the entry text.
 
-Use it at the start of architecture, reliability, release, or module-boundary work. If an entry conflicts with code, tests, runtime evidence, `AGENTS.md`, or `docs/ARCHITECTURE.md`, verify the current source before acting.
+Use it only when a task needs historical context or prior decisions. If an entry conflicts with code, tests, runtime evidence, `AGENTS.md`, or `docs/ARCHITECTURE.md`, verify the current source before acting.
 
 ## Governance
 
-- [Memory workflow](README.md)
-- [Memory update log](log.md)
-- Templates:
-  - [Decision](templates/decision.md)
-  - [Pattern](templates/pattern.md)
-  - [Failure](templates/failure.md)
+- [Archived memory policy](README.md)
+- [Historical memory update log](log.md)
 
 ## Ledger, Positions, And Trades
 
@@ -120,7 +116,3 @@ Decisions:
 Failures:
 
 - [Semver dataclass ordering](failures/2026-04-27-semver-dataclass-ordering.md)
-
-## Session Handoffs
-
-Session handoffs live in `memory/sessions/` and are short-term context only. Promote durable lessons into `decisions`, `patterns`, or `failures` before treating them as reusable knowledge.
