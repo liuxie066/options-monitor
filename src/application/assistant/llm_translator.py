@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from src.application.assistant.commands import llm_capability_prompt
+from src.application.assistant.user_profile import user_profile_trace
 from src.application.assistant.llm_intent_schema import inbound_intent_from_llm_payload, llm_intent_json_schema, llm_intent_schema
 from src.application.assistant.llm_common import (
     CreateStructuredResponseFn,
@@ -231,12 +232,14 @@ def _provider_input_text(text: str, *, conversation_context: dict[str, Any] | No
 def _provider_context(conversation_context: dict[str, Any]) -> dict[str, Any]:
     recent = conversation_context.get("recent_messages")
     pending = conversation_context.get("pending_operations")
+    user_profile = conversation_context.get("user_profile")
     return {
         "window_messages": int(conversation_context.get("window_messages") or 0),
         "semantics": conversation_context.get("semantics") if isinstance(conversation_context.get("semantics"), dict) else {},
         "last_successful_read": conversation_context.get("last_successful_read")
         if isinstance(conversation_context.get("last_successful_read"), dict)
         else None,
+        "user_profile": dict(user_profile) if isinstance(user_profile, dict) else {"provided": False},
         "recent_messages": list(recent) if isinstance(recent, list) else [],
         "pending_operations": [_pending_operation_provider_item(item) for item in pending if isinstance(item, dict)]
         if isinstance(pending, list)
@@ -265,6 +268,9 @@ def _context_trace(conversation_context: dict[str, Any] | None) -> dict[str, Any
         "window_messages": int(conversation_context.get("window_messages") or 0),
         "recent_count": len(recent) if isinstance(recent, list) else 0,
         "pending_count": len(pending) if isinstance(pending, list) else 0,
+        "user_profile": user_profile_trace(
+            conversation_context.get("user_profile") if isinstance(conversation_context.get("user_profile"), dict) else None
+        ),
     }
 
 
