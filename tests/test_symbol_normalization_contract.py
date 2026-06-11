@@ -11,6 +11,7 @@ import src.application.ledger.repository as ledger_repository
 import src.application.ledger.writer as ledger_writer
 from src.application.trades.normalizer import NormalizedTradeDeal
 from src.application.trades.normalizer import normalize_trade_deal
+from domain.domain.symbol_identity import looks_like_option_contract_label
 from src.application.symbol_mutations import normalize_symbol as normalize_config_symbol
 
 
@@ -96,3 +97,12 @@ def test_ledger_trade_event_rejects_missing_broker_trade_time(tmp_path: Path) ->
         ledger_writer.persist_trade_event(repo, deal)
 
     assert repo.list_trade_events() == []
+
+
+def test_symbol_identity_detects_option_contract_labels() -> None:
+    assert looks_like_option_contract_label("US.PDD260626C91000")
+    assert looks_like_option_contract_label("PDD260626C91000")
+    assert looks_like_option_contract_label("PDD 260626 91.00C")
+    assert looks_like_option_contract_label("260626 91P")
+    assert not looks_like_option_contract_label("PDD")
+    assert not looks_like_option_contract_label("PDD Holdings")

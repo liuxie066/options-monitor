@@ -27,9 +27,16 @@ from domain.domain.strategy_vocab import (
     STRATEGY_YIELD_ENHANCEMENT,
     canonical_strategy_id,
 )
+from domain.domain.symbol_identity import looks_like_option_contract_label
 from src.application.report_formatting import num, pct, strike_text
 
 YIELD_ENHANCEMENT_NOTIFICATION_HIGH = '已按组合收益筛出推荐 Call，可作为 Combo Yield 组合方案。'
+
+
+def _valid_symbol_display_name(name: str) -> bool:
+    n = str(name or '').strip()
+    return bool(n) and not looks_like_option_contract_label(n)
+
 
 def _load_symbol_display_map(base: Path, *, state_dir: Path | None = None) -> dict[str, str]:
     """Best-effort load display name mapping.
@@ -55,7 +62,7 @@ def _load_symbol_display_map(base: Path, *, state_dir: Path | None = None) -> di
                             continue
                         name = str(info.get('name') or '').strip()
                         code = str(sym).strip().upper()
-                        if name and code:
+                        if code and _valid_symbol_display_name(name):
                             m[code] = name
     except Exception:
         pass
@@ -69,7 +76,7 @@ def _load_symbol_display_map(base: Path, *, state_dir: Path | None = None) -> di
             for name, code in (aliases or {}).items():
                 n = str(name or '').strip()
                 c = str(code or '').strip().upper()
-                if not n or not c:
+                if not c or not _valid_symbol_display_name(n):
                     continue
                 prev = m.get(c)
                 if (prev is None) or (len(n) < len(prev)):
@@ -82,7 +89,10 @@ def _load_symbol_display_map(base: Path, *, state_dir: Path | None = None) -> di
 
 def _disp_symbol(symbol: str, mp: dict[str, str]) -> str:
     s = str(symbol or '').strip().upper()
-    return mp.get(s) or str(symbol or '').strip()
+    display = str(mp.get(s) or '').strip()
+    if _valid_symbol_display_name(display):
+        return display
+    return str(symbol or '').strip()
 
 
 # Alert priority policy (keep it simple):
