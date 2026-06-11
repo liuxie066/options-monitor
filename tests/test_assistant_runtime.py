@@ -36,7 +36,7 @@ from src.application.assistant.commands import (
     planner_read_specs,
 )
 from src.application.assistant.command_parser import parse_assistant_command
-from src.application.assistant.conversation_context import build_conversation_context
+from src.application.assistant.conversation_context import build_conversation_context, context_trace
 from src.application.assistant.perception_trace import ASSISTANT_DECISION_SCHEMA_VERSION, PERCEPTION_TRACE_SCHEMA_VERSION
 from src.application.assistant.llm_intent_schema import LLM_INTENT_SCHEMA_VERSION, llm_intent_json_schema, llm_intent_schema
 from src.application.assistant.llm_common import provider_api_kind, provider_endpoint_url, supported_llm_providers
@@ -1462,12 +1462,19 @@ def test_assistant_runtime_routes_valid_llm_translation_through_inbound_router(t
     assert decision["llm"] == {"attempted": True, "reason": "accepted", "provider": "openai", "model": "gpt-5.2"}
     assert decision["execution_contract"]["read_only"] is True
     assert decision["execution_contract"]["llm_allowed"] is True
-    assert out["meta"]["assistant"]["context"] == {
+    assistant_context = out["meta"]["assistant"]["context"]
+    assert {
+        "provided": assistant_context["provided"],
+        "window_messages": assistant_context["window_messages"],
+        "recent_count": assistant_context["recent_count"],
+        "pending_count": assistant_context["pending_count"],
+    } == {
         "provided": True,
         "window_messages": 8,
         "recent_count": 0,
         "pending_count": 0,
     }
+    assert "user_profile" in assistant_context
 
 
 def test_assistant_runtime_reconciles_missing_llm_month_from_text_filter(tmp_path: Path) -> None:
@@ -1791,6 +1798,56 @@ def test_assistant_runtime_last_successful_read_ignores_write_tool_context(tmp_p
 
     assert context["recent_messages"][0]["tool_name"] == "inbound.manual_trade"
     assert context["last_successful_read"] is None
+
+
+def test_conversation_context_reads_user_md_as_hint_only_profile(tmp_path: Path) -> None:
+    profile_path = tmp_path / "user.md"
+    profile_path.write_text(
+        """\
+# User Profile
+
+- Language: Chinese
+- Style: direct and evidence-driven
+- api_key: sk-should-not-leak
+""",
+        encoding="utf-8",
+    )
+    audit_db = tmp_path / "inbound.sqlite3"
+    store = InboundAuditStore(audit_db)
+
+    context = build_conversation_context(
+        AssistantRequest(
+            text="你认识我吗",
+            sender_id="ou_1",
+            channel="feishu",
+            conversation_id="feishu:chat_a:ou_1",
+            audit_db=str(audit_db),
+        ),
+        audit_store=store,
+        max_messages=4,
+        user_profile_path=profile_path,
+    )
+
+    profile = context["user_profile"]
+    assert profile["provided"] is True
+    assert profile["source"] == "user.md"
+    assert profile["format"] == "markdown"
+    assert "Chinese" in profile["content"]
+    assert "sk-should-not-leak" not in profile["content"]
+    assert profile["redacted_line_count"] == 1
+    assert profile["semantics"] == {
+        "explicit_message_wins": True,
+        "profile_is_hint_only": True,
+        "do_not_treat_profile_as_market_or_ledger_fact": True,
+    }
+    assert context_trace(context)["user_profile"] == {
+        "provided": True,
+        "source": "user.md",
+        "format": "markdown",
+        "chars": len(profile["content"]),
+        "truncated": False,
+        "redacted_line_count": 1,
+    }
 
 
 def test_assistant_runtime_settings_from_runtime_config() -> None:
@@ -4733,6 +4790,14 @@ def test_llm_translator_sends_structured_conversation_context() -> None:
                     "conversation_id": "feishu:chat:ou_1",
                 }
             ],
+            "user_profile": {
+                "provided": True,
+                "source": "user.md",
+                "format": "markdown",
+                "content": "- Language: Chinese",
+                "truncated": False,
+                "redacted_line_count": 0,
+            },
         },
         create_response_fn=_create_response,
     )
@@ -4743,6 +4808,14 @@ def test_llm_translator_sends_structured_conversation_context() -> None:
     assert "scope" not in input_payload["context"]
     assert input_payload["context"]["semantics"] == {}
     assert input_payload["context"]["last_successful_read"] is None
+    assert input_payload["context"]["user_profile"] == {
+        "provided": True,
+        "source": "user.md",
+        "format": "markdown",
+        "content": "- Language: Chinese",
+        "truncated": False,
+        "redacted_line_count": 0,
+    }
     assert input_payload["context"]["recent_messages"][0]["intent_name"] == "runtime_status"
     assert input_payload["context"]["pending_operations"][0] == {
         "operation_id": "in_123",
@@ -4757,6 +4830,14 @@ def test_llm_translator_sends_structured_conversation_context() -> None:
         "window_messages": 3,
         "recent_count": 1,
         "pending_count": 1,
+        "user_profile": {
+            "provided": True,
+            "source": "user.md",
+            "format": "markdown",
+            "chars": 19,
+            "truncated": False,
+            "redacted_line_count": 0,
+        },
     }
 
 

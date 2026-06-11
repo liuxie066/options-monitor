@@ -14,6 +14,7 @@ from src.application.assistant.llm_common import (
     strip_json_code_fence,
     unsupported_llm_provider_error,
 )
+from src.application.assistant.user_profile import user_profile_trace
 from src.application.assistant.settings import LlmTranslatorSettings
 from src.application.agent_tool_contracts import AgentToolError
 from src.infrastructure.openai_chat_completions import (
@@ -116,7 +117,13 @@ def generate_general_reply(
     except (OpenAIResponsesError, OpenAIChatCompletionsError) as err:
         return LlmReplyResult(
             response_text=None,
-            trace=_trace(settings, attempted=True, reason="provider_error", error_code="LLM_PROVIDER_ERROR"),
+            trace=_trace(
+                settings,
+                attempted=True,
+                reason="provider_error",
+                error_code="LLM_PROVIDER_ERROR",
+                conversation_context=conversation_context,
+            ),
             error=AgentToolError(
                 code="LLM_PROVIDER_ERROR",
                 message=str(err),
@@ -126,7 +133,13 @@ def generate_general_reply(
     except Exception as err:
         return LlmReplyResult(
             response_text=None,
-            trace=_trace(settings, attempted=True, reason="provider_error", error_code="LLM_PROVIDER_ERROR"),
+            trace=_trace(
+                settings,
+                attempted=True,
+                reason="provider_error",
+                error_code="LLM_PROVIDER_ERROR",
+                conversation_context=conversation_context,
+            ),
             error=AgentToolError(
                 code="LLM_PROVIDER_ERROR",
                 message=f"LLM reply provider failed: {type(err).__name__}: {err}",
@@ -138,7 +151,13 @@ def generate_general_reply(
     if not reply:
         return LlmReplyResult(
             response_text=None,
-            trace=_trace(settings, attempted=True, reason="invalid_provider_output", error_code="LLM_PROVIDER_ERROR"),
+            trace=_trace(
+                settings,
+                attempted=True,
+                reason="invalid_provider_output",
+                error_code="LLM_PROVIDER_ERROR",
+                conversation_context=conversation_context,
+            ),
             error=AgentToolError(
                 code="LLM_PROVIDER_ERROR",
                 message="LLM reply returned invalid JSON.",
@@ -147,7 +166,13 @@ def generate_general_reply(
         )
     return LlmReplyResult(
         response_text=reply,
-        trace=_trace(settings, attempted=True, reason="general_reply", schema_version="om-llm-reply-v1"),
+        trace=_trace(
+            settings,
+            attempted=True,
+            reason="general_reply",
+            schema_version="om-llm-reply-v1",
+            conversation_context=conversation_context,
+        ),
     )
 
 
@@ -167,6 +192,9 @@ def _provider_input_text(
     if isinstance(conversation_context, dict):
         payload["context"] = {
             "window_messages": int(conversation_context.get("window_messages") or 0),
+            "user_profile": conversation_context.get("user_profile")
+            if isinstance(conversation_context.get("user_profile"), dict)
+            else {"provided": False},
         }
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
@@ -195,6 +223,7 @@ def _trace(
     missing: list[str] | None = None,
     error_code: str | None = None,
     schema_version: str | None = None,
+    conversation_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "enabled": bool(settings.enabled),
@@ -217,4 +246,11 @@ def _trace(
         payload["error_code"] = str(error_code)
     if schema_version:
         payload["schema_version"] = str(schema_version)
+    if conversation_context is not None:
+        payload["context"] = {
+            "provided": isinstance(conversation_context, dict),
+            "user_profile": user_profile_trace(
+                conversation_context.get("user_profile") if isinstance(conversation_context, dict) else None
+            ),
+        }
     return payload
