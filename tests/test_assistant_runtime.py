@@ -535,6 +535,76 @@ def test_assistant_runtime_executes_slash_command_through_inbound_router(tmp_pat
     assert audited["meta"]["assistant"]["decision"] == assistant_meta["decision"]
 
 
+def test_assistant_runtime_executes_assigned_stock_slash_command(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "action": "assigned-stock",
+                "filters": {
+                    "account": "lx",
+                    "symbol": "NVDA",
+                    "status": "open",
+                    "refresh_quotes": True,
+                },
+                "rows": [
+                    {
+                        "stock_lot_id": "assigned-stock-assign_1",
+                        "account": "lx",
+                        "symbol": "NVDA",
+                        "currency": "USD",
+                        "status": "open",
+                        "shares_remaining": 100,
+                        "stock_cost_per_share": 100,
+                        "remaining_stock_cost_basis": 10000,
+                        "spot": 98,
+                        "quote_status": "fresh",
+                        "assigned_stock_unrealized_pnl": -200,
+                        "assigned_stock_realized_pnl": 0,
+                        "assignment_lifecycle_pnl": 50,
+                    }
+                ],
+                "row_count": 1,
+                "quote_refresh": {"status": "ok", "quote_source": "opend_realtime"},
+            },
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="/assigned-stock lx NVDA",
+            sender_id="local",
+            message_id="msg_assigned_stock",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+    )
+
+    assert out["ok"] is True
+    assert calls == [
+        (
+            "option_positions_read",
+            {
+                "config_key": "us",
+                "action": "assigned-stock",
+                "refresh_quotes": True,
+                "account": "lx",
+                "symbol": "NVDA",
+                "status": "open",
+            },
+        )
+    ]
+    text = out["data"]["response_text"]
+    assert "lx · open · 指派正股 · NVDA：1 条" in text
+    assert "正股浮盈亏 USD -200" in text
+    assert "spot USD 98" in text
+    assert "正股成本按真实交割价记录" in text
+
+
 def test_assistant_runtime_does_not_overwrite_original_audit_on_duplicate_replay(tmp_path: Path) -> None:
     audit_db = tmp_path / "inbound.sqlite3"
 
@@ -2537,6 +2607,131 @@ def test_assistant_runtime_agent_loop_satisfies_position_read_tool_capabilities(
         "canonical_renderer_required": True,
         "llm_may_summarize": True,
     }
+
+
+def test_assistant_runtime_agent_loop_routes_assigned_stock_holding_pnl(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "action": "assigned-stock",
+                "filters": {
+                    "account": "lx",
+                    "status": "open",
+                    "refresh_quotes": True,
+                },
+                "rows": [
+                    {
+                        "stock_lot_id": "assigned-stock-assign_1",
+                        "account": "lx",
+                        "symbol": "NVDA",
+                        "currency": "USD",
+                        "status": "open",
+                        "shares_remaining": 100,
+                        "stock_cost_per_share": 100,
+                        "remaining_stock_cost_basis": 10000,
+                        "spot": 98,
+                        "quote_status": "fresh",
+                        "assigned_stock_unrealized_pnl": -200,
+                        "assigned_stock_realized_pnl": 0,
+                        "assignment_lifecycle_pnl": 50,
+                    }
+                ],
+                "row_count": 1,
+                "quote_refresh": {"status": "ok", "quote_source": "opend_realtime"},
+            },
+        )
+
+    def _plan(
+        text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        assert text == "查看 lx 指派正股持仓盈亏"
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="查看 lx 指派正股持仓盈亏",
+                response_mode="synthesis",
+                required_capabilities=("assigned_stock_positions", "read_only"),
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="option_positions_read",
+                        arguments={"action": "assigned-stock", "account": "lx", "status": "open", "refresh_quotes": True},
+                        purpose="读取指派正股持仓盈亏",
+                    ),
+                ),
+            ),
+            trace={
+                "enabled": True,
+                "attempted": True,
+                "reason": "accepted",
+                "provider": "openai",
+                "base_url": "",
+                "model": "gpt-5.2",
+                "api_key_env": "OM_LLM_API_KEY",
+                "confidence_min": 0.75,
+                "timeout_seconds": 20,
+                "max_output_tokens": 512,
+                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+            },
+        )
+
+    def _synthesize(
+        question: str,
+        _settings: AssistantSettings,
+        plan: PlannerPlan,
+        observations: list[dict[str, Any]],
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmSynthesisResult:
+        assert question == "查看 lx 指派正股持仓盈亏"
+        assert plan.required_capabilities == ("assigned_stock_positions", "read_only")
+        assert observations[-1]["tool_name"] == "assistant.grounded_facts"
+        assert "正股浮盈亏 USD -200" in observations[-1]["data"]["canonical_response"]
+        return LlmSynthesisResult(
+            response_text="当前 spot 已刷新，正股自身浮亏为 200 美元。",
+            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="查看 lx 指派正股持仓盈亏",
+            sender_id="local",
+            message_id="msg_agent_loop_assigned_stock_pnl",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+        synthesize_response_fn=_synthesize,
+    )
+
+    assert out["ok"] is True
+    assert calls == [
+        (
+            "option_positions_read",
+            {"action": "assigned-stock", "account": "lx", "status": "open", "refresh_quotes": True, "config_key": "us"},
+        )
+    ]
+    text = out["data"]["response_text"]
+    assert text.startswith("lx · open · 指派正股：1 条")
+    assert "正股浮盈亏 USD -200" in text
+    assert "分析\n当前 spot 已刷新" in text
+    tool_plan_data = out["data"]["action"]["result"]["data"]
+    assert tool_plan_data["capability_status"] == {
+        "required": ["assigned_stock_positions", "read_only"],
+        "satisfied": ["assigned_stock_positions", "read_only"],
+        "gaps": [],
+    }
+    assert tool_plan_data["final_response"]["reason"] == "canonical facts rendered first; LLM added verified analysis"
 
 
 def test_assistant_runtime_agent_loop_grounded_positions_fall_back_from_wrong_contract_quantity(tmp_path: Path) -> None:
@@ -4547,8 +4742,11 @@ def test_llm_intent_schema_documents_allowed_surface() -> None:
     assert json_schema["properties"]["arguments"]["additionalProperties"] is False
     assert set(json_schema["properties"]["arguments"]["required"]) == {
         "account",
+        "assigned_stock_status",
         "status",
         "symbol",
+        "stock_lot_id",
+        "refresh_quotes",
         "option_type",
         "side",
         "strike",

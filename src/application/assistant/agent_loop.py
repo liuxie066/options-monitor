@@ -968,6 +968,9 @@ def _safe_tool_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "config_key",
         "account",
         "status",
+        "assigned_stock_status",
+        "stock_lot_id",
+        "refresh_quotes",
         "month",
         "include_rows",
         "run_id",
@@ -1957,6 +1960,21 @@ def _observations_have_cashflow_detail(observations: list[dict[str, Any]]) -> bo
     return False
 
 
+def _observations_have_assigned_stock_positions(observations: list[dict[str, Any]]) -> bool:
+    for item in observations:
+        if str(item.get("tool_name") or "") != "option_positions_read" or not bool(item.get("ok", False)):
+            continue
+        data = item.get("data")
+        if not isinstance(data, dict):
+            continue
+        if str(data.get("action") or "").strip().lower() == "assigned-stock":
+            return True
+        filters = data.get("filters")
+        if isinstance(filters, dict) and filters.get("refresh_quotes") is not None and isinstance(data.get("rows"), list):
+            return True
+    return False
+
+
 def _monthly_income_observations(observations: list[dict[str, Any]]):
     for item in observations:
         if str(item.get("tool_name") or "") == "monthly_income_report" and bool(item.get("ok", False)):
@@ -1969,6 +1987,8 @@ _MONTHLY_INCOME_CAPABILITY_CHECKS = {
     "all_accounts_breakdown": _observations_have_all_accounts_breakdown,
     "combined_account_return": _observations_have_combined_account_return,
     "cashflow_detail": _observations_have_cashflow_detail,
+    "assigned_stock_positions": _observations_have_assigned_stock_positions,
+    "assigned_stock_pnl": _observations_have_assigned_stock_positions,
 }
 
 
@@ -2091,6 +2111,7 @@ Rules:
 - For monthly income summary questions, use monthly_income_report with account/month when available.
 - For combined/all-account return questions, include required_capabilities=["combined_account_return"] and use monthly_income_report without account.
 - For cashflow detail, net cashflow composition, net inflow source, "明细", "组成", "构成", "来源", or "由什么组成", use monthly_income_report with include_rows=true; the system will render factual rows first and LLM may only add analysis.
+- For assigned stock / 被指派正股 / 指派正股 holding PnL, floating PnL, spot, cost basis, or lifecycle PnL questions, use option_positions_read with action="assigned-stock", status="open" unless the user asks all/closed, and refresh_quotes=true for current holding PnL.
 - For all-history, cumulative, or total net cashflow questions, omit month so monthly_income_report reads all OM local ledger months.
 - For multiple explicit months, either call monthly_income_report once per month with matching arguments, or omit month and synthesize from all available rows; never duplicate one month while claiming another.
 - For "记录开仓", "记录平仓", Futu 成交提醒, 成功卖出/买入 option fills, use manual_trade_open or manual_trade_close with raw_text set to the original user message.
@@ -2149,24 +2170,27 @@ def _planner_tool_manifest() -> list[dict[str, Any]]:
             }
         if name == "option_positions_read":
             notes.append("Use for current option position list/detail requests, including 持仓明细, 持仓明晰, 持仓详情, 当前仓位, or current positions.")
+            notes.append("For assigned stock / 被指派正股 / 指派正股 holding PnL, use action=assigned-stock with status=open by default and refresh_quotes=true when the user asks current 盈亏, spot, 浮盈亏, or 持仓盈亏.")
             notes.append("For ordinary position list/detail requests, required_capabilities should be [] because option_positions_read itself provides option_positions/read_only.")
             notes.append("Use action=list for current lots; use action=history or action=inspect only when the user explicitly asks for event history, projection, repair, or ledger diagnostics.")
-            notes.append("For action=list, canonical factual rows are rendered by the system; synthesis should only add analysis and must not reorder, omit, or restate rows.")
+            notes.append("For action=list or action=assigned-stock, canonical factual rows are rendered by the system; synthesis should only add analysis and must not reorder, omit, or restate rows.")
             semantics = {
                 "data_source": "local option position ledger",
                 "answer_capabilities": {
                     "option_positions": "successful option_positions_read observations provide option position rows",
+                    "assigned_stock_positions": "action=assigned-stock provides Sell Put assignment stock lots, cost basis, spot status, realized/unrealized stock PnL, and lifecycle PnL",
                     "read_only": "option_positions_read is registry-declared read-only",
                     "ledger_diagnostics": "history or inspect actions provide ledger diagnostic context when explicitly requested",
                 },
                 "scope_semantics": {
                     "status omitted": "open option positions",
+                    "assigned-stock status omitted": "use open assigned-stock lots for holding PnL unless the user asks all/closed",
                     "account omitted": "all available accounts for the selected config",
                     "detail words": "明细, 明晰, 详情, and current positions are ordinary list/detail reads",
                 },
                 "not_promised": [
                     "broker realtime statement outside the local OM ledger",
-                    "profit or return calculations; use monthly_income_report for income questions",
+                    "ordinary option profit or return calculations; use monthly_income_report for monthly income questions",
                     "close advice; use close_advice_read for should-close or take-profit analysis",
                 ],
             }
@@ -2415,6 +2439,13 @@ def _synthesis_data(tool_name: str, data: dict[str, Any]) -> dict[str, Any]:
             "summary": _clip_mapping(data.get("summary"), limit=16) if isinstance(data.get("summary"), dict) else data.get("summary"),
             "rows": _clip_list(data.get("rows"), limit=20),
             "row_count": data.get("row_count"),
+            "filters": dict(data.get("filters") or {}) if isinstance(data.get("filters"), dict) else {},
+            "quote_refresh": _clip_mapping(data.get("quote_refresh"), limit=16)
+            if isinstance(data.get("quote_refresh"), dict)
+            else data.get("quote_refresh"),
+            "assigned_stock_sale_rows": _clip_list(data.get("assigned_stock_sale_rows"), limit=20),
+            "assigned_stock_review_rows": _clip_list(data.get("assigned_stock_review_rows"), limit=20),
+            "warnings": _clip_list(data.get("warnings"), limit=8),
         }
     return _clip_mapping(data, limit=20)
 
@@ -2474,6 +2505,7 @@ def _tool_name_for_intent(intent_name: str) -> str | None:
     return {
         "monthly_income_report": "monthly_income_report",
         "position_query": "option_positions_read",
+        "assigned_stock_position_query": "option_positions_read",
         "position_exit_analysis": "close_advice_read",
         "runtime_status": "runtime_status",
         "runtime_runs": "runtime_runs",

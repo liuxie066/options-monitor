@@ -51,7 +51,10 @@ LOG_KIND_VALUES = ("all", "tool", "state")
 ARGUMENT_JSON_SCHEMA: dict[str, dict[str, Any]] = {
     "account": {"type": ["string", "null"], "enum": [*ACCOUNT_VALUES, None]},
     "status": {"type": ["string", "null"], "enum": [*POSITION_STATUS_VALUES, None]},
+    "assigned_stock_status": {"type": ["string", "null"], "enum": ["open", "partially_sold", "closed", "all", None]},
     "symbol": {"type": ["string", "null"]},
+    "stock_lot_id": {"type": ["string", "null"]},
+    "refresh_quotes": {"type": ["boolean", "null"]},
     "option_type": {"type": ["string", "null"], "enum": ["put", "call", None]},
     "side": {"type": ["string", "null"], "enum": ["short", "long", None]},
     "strike": {"type": ["number", "null"]},
@@ -139,6 +142,20 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         arguments=("account", "status", "symbol", "option_type", "side", "strike", "expiration", "limit"),
         examples=("持仓", "持仓 [账户]", "持仓 [到期月份/到期日/标的/类型/方向]", "/positions [lx|sy|all]"),
         summary="list option positions",
+    ),
+    AssistantCommandSpec(
+        intent_name="assigned_stock_position_query",
+        tool_name="option_positions_read",
+        commands=("/assigned-stock",),
+        display_name="指派正股",
+        arguments=("account", "symbol", "assigned_stock_status", "stock_lot_id", "refresh_quotes"),
+        examples=(
+            "指派正股持仓盈亏",
+            "查看 lx 被指派正股浮盈亏",
+            "NVDA 指派正股盈亏",
+            "/assigned-stock [lx|sy|all] [symbol] [open|partially_sold|closed|all]",
+        ),
+        summary="show assigned stock lots from Sell Put assignment, including cost basis, realtime spot, and holding PnL",
     ),
     AssistantCommandSpec(
         intent_name="position_exit_analysis",

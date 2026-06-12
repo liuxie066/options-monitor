@@ -168,6 +168,20 @@ def _normalize_arguments(intent_name: str, arguments: dict[str, Any]) -> dict[st
         return _normalize_symbol_config_query_arguments(arguments)
     if intent_name in {"position_query", "position_exit_analysis"}:
         return PositionQuery.from_payload(arguments).to_payload()
+    if intent_name == "assigned_stock_position_query":
+        out: dict[str, Any] = {"assigned_stock_status": _optional_assigned_stock_status(arguments.get("assigned_stock_status")) or "open"}
+        account = _optional_account(arguments.get("account"))
+        symbol = str(arguments.get("symbol") or "").strip().upper()
+        stock_lot_id = str(arguments.get("stock_lot_id") or "").strip()
+        refresh_quotes = arguments.get("refresh_quotes")
+        if account:
+            out["account"] = account
+        if symbol:
+            out["symbol"] = symbol
+        if stock_lot_id:
+            out["stock_lot_id"] = stock_lot_id
+        out["refresh_quotes"] = True if refresh_quotes is None else bool(refresh_quotes)
+        return out
     if intent_name == "monthly_income_report":
         out = {}
         account = _optional_account(arguments.get("account"))
@@ -313,6 +327,24 @@ def _optional_account(raw: Any) -> str | None:
         return None
     if value not in _ACCOUNT_VALUES:
         raise AgentToolError(code="INPUT_ERROR", message="LLM account must be lx or sy")
+    return value
+
+
+def _optional_assigned_stock_status(raw: Any) -> str | None:
+    value = str(raw or "").strip().lower()
+    if not value:
+        return None
+    aliases = {
+        "partial": "partially_sold",
+        "partially-sold": "partially_sold",
+        "close": "closed",
+    }
+    value = aliases.get(value, value)
+    if value not in {"open", "partially_sold", "closed", "all"}:
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message="LLM assigned_stock_status must be open, partially_sold, closed, or all",
+        )
     return value
 
 
