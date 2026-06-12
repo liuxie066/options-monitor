@@ -36,7 +36,7 @@ def resolve_cli_write_control(args: argparse.Namespace, *, command_name: str, hi
         high_risk=high_risk,
     )
     if control["confirmation_required"]:
-        raise SystemExit(f"{command_name} writes trade_events; use --confirm or --yes to apply")
+        raise SystemExit(f"{command_name} writes local ledger state; use --confirm or --yes to apply")
     return control
 
 

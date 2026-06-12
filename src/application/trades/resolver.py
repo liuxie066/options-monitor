@@ -22,8 +22,10 @@ from src.application.trades.normalizer import NormalizedTradeDeal
 from src.application.trades.lifecycle import LifecycleTradeResolution, resolve_lifecycle_trade_deal
 from src.application.trades.state import is_failed_deal, is_retryable_unresolved_deal, lookup_deal_state
 from src.application.trades.workflows import (
+    BrokerAssignedStockSaleMatchError,
     apply_trade_close_with,
     apply_trade_open_with,
+    execute_broker_assigned_stock_sale,
     preview_trade_close,
     preview_trade_open,
 )
@@ -92,6 +94,94 @@ def _from_lifecycle_resolution(deal: NormalizedTradeDeal, result: LifecycleTrade
         account=deal.internal_account,
         operations=list(result.operations),
         diagnostics=dict(result.diagnostics),
+    )
+
+
+def _assigned_stock_sale_operation(out: dict[str, Any]) -> BrokerTradeOperation:
+    sale_event = dict(out.get("sale_event") or {})
+    stock_lot_id = str(sale_event.get("target_stock_lot_id") or "").strip() or None
+    stock_event_id = str(sale_event.get("stock_event_id") or "").strip() or None
+    raw_result = out.get("result") if isinstance(out.get("result"), dict) else None
+    result = None
+    if raw_result is not None:
+        result = {
+            "event_id": stock_event_id,
+            "record_id": stock_lot_id,
+            **dict(raw_result),
+        }
+    return BrokerTradeOperation(
+        action="assigned_stock_sale",
+        record_id=stock_lot_id,
+        fields=sale_event,
+        matched_by="assigned_stock_lot",
+        event_id=stock_event_id,
+        result=result,
+        details={
+            "write_model": out.get("write_model"),
+            "mode": out.get("mode"),
+        },
+    )
+
+
+def _resolve_broker_assigned_stock_sale(
+    deal: NormalizedTradeDeal,
+    *,
+    repo: OptionPositionsRepoLike,
+    apply_changes: bool,
+) -> IntakeResolution | None:
+    if str(deal.side or "").strip().lower() != "sell":
+        return None
+    try:
+        out = execute_broker_assigned_stock_sale(repo, deal, dry_run=not apply_changes)
+    except BrokerAssignedStockSaleMatchError as exc:
+        if exc.code in {"no_match", "unsupported_deal"}:
+            return None
+        reason_by_code = {
+            "missing_required_fields": "assigned_stock_sale_missing_required_fields",
+            "no_safe_match": "assigned_stock_sale_no_safe_match",
+            "ambiguous_match": "ambiguous_assigned_stock_sale",
+        }
+        reason = reason_by_code.get(exc.code, f"assigned_stock_sale_{exc.code}")
+        return _failure(
+            status="unresolved",
+            action="assigned_stock_sale",
+            reason=reason,
+            deal=deal,
+            diagnostics=dict(exc.diagnostics),
+        )
+    except ValueError as exc:
+        return _failure(
+            status="failed",
+            action="assigned_stock_sale",
+            reason="assigned_stock_sale_failed",
+            deal=deal,
+            diagnostics={"error": str(exc)},
+        )
+
+    status = "applied" if apply_changes else "dry_run"
+    reason = "applied_assigned_stock_sale" if apply_changes else "preview_assigned_stock_sale"
+    operation = _assigned_stock_sale_operation(out)
+    diagnostics = {
+        "assigned_stock_sale": {
+            "mode": out.get("mode"),
+            "write_model": out.get("write_model"),
+            "sale_event": out.get("sale_event"),
+            "stock_lot_before": out.get("stock_lot_before"),
+            "stock_lot_after": out.get("stock_lot_after"),
+            "match": out.get("match"),
+            "review_rows": out.get("review_rows"),
+            "result": out.get("result"),
+            "idempotent_duplicate": out.get("idempotent_duplicate"),
+        }
+    }
+    return IntakeResolution(
+        status=status,
+        action="assigned_stock_sale",
+        reason=reason,
+        deal_id=deal.deal_id,
+        account=deal.internal_account,
+        operations=[operation],
+        diagnostics=diagnostics,
     )
 
 
@@ -239,6 +329,9 @@ def resolve_trade_deal(
     if lifecycle_result is not None and lifecycle_result.handled:
         return _from_lifecycle_resolution(deal, lifecycle_result)
     if deal.symbol and not deal.option_type:
+        assigned_stock_sale = _resolve_broker_assigned_stock_sale(deal, repo=repo, apply_changes=apply_changes)
+        if assigned_stock_sale is not None:
+            return assigned_stock_sale
         return _failure(status="skipped", action=None, reason="not_option_deal", deal=deal)
     if not deal.symbol or not deal.option_type:
         return _failure(status="skipped", action=None, reason="not_option_deal", deal=deal)

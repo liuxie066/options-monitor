@@ -352,6 +352,9 @@ def monthly_income_report_tool(
         warnings.append("exchange_rate cache unavailable; *_cny fields may be null")
 
     trade_events = trade_event_log(repo)
+    list_assigned_stock_events = getattr(repo, "list_assigned_stock_events", None)
+    raw_assigned_stock_events = list_assigned_stock_events() if callable(list_assigned_stock_events) else None
+    assigned_stock_events = raw_assigned_stock_events if isinstance(raw_assigned_stock_events, list) else None
     report = build_monthly_income_report(
         list_canonical_position_lot_snapshots(repo, base=repo_base()),
         account=account,
@@ -359,6 +362,7 @@ def monthly_income_report_tool(
         month=month,
         rates=rates,
         trade_events=trade_events,
+        assigned_stock_events=assigned_stock_events,
     )
     report_warnings = [str(item) for item in (report.get("warnings") or []) if str(item).strip()]
     warnings.extend(report_warnings)
@@ -381,7 +385,17 @@ def monthly_income_report_tool(
     if include_rows:
         data["rows"] = rows
         data["premium_rows"] = premium_rows
-        for key in ("cashflow_rows", "realized_rows", "open_basis_rows", "enhancement_rows"):
+        for key in (
+            "cashflow_rows",
+            "stock_settlement_rows",
+            "assignment_lifecycle_rows",
+            "assigned_stock_lots",
+            "assigned_stock_sale_rows",
+            "assigned_stock_review_rows",
+            "realized_rows",
+            "open_basis_rows",
+            "enhancement_rows",
+        ):
             value = report.get(key)
             data[key] = value if isinstance(value, list) else []
 

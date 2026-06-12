@@ -1062,9 +1062,11 @@ def test_scheduler_status_reads_decision_without_writing_state(tmp_path: Path) -
     assert not state_path.exists()
 
 
-def test_option_positions_read_lists_events_history_and_inspect(tmp_path: Path) -> None:
+def test_option_positions_read_lists_events_history_and_inspect(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
     from domain.domain.option_position_lots import OpenPositionCommand, parse_exp_to_ms
+    from src.application.ledger.commands import record_manual_assignment
+    from src.application.positions.assigned_stock_quotes import AssignedStockQuoteRefreshResult
 
     def _ms(value: str) -> int:
         out = parse_exp_to_ms(value)
@@ -1151,6 +1153,123 @@ def test_option_positions_read_lists_events_history_and_inspect(tmp_path: Path) 
     assert inspected["ok"] is True
     assert inspected["data"]["matched_record_ids"] == [record_id]
     assert inspected["meta"]["data_config"] == ".../portfolio.runtime.json"
+
+    record_manual_assignment(
+        repo,
+        record_id=record_id,
+        contracts_to_close=1,
+        stock_side="buy",
+        stock_qty=100,
+        stock_price=100.0,
+        as_of_ms=_ms("2026-05-15"),
+    )
+    assignment_event = [item for item in repo.list_trade_events() if item.get("event_type") == "assignment"][0]
+    stock_lot_id = f"assigned-stock-{assignment_event['event_id']}"
+
+    assigned_stock = run_tool(
+        "option_positions_read",
+        {
+            "config_path": str(cfg_path),
+            "action": "assigned-stock",
+            "account": "user1",
+            "symbol": "NVDA",
+            "quote_snapshots": [{"symbol": "NVDA", "spot": 98.0, "quote_time_ms": _ms("2026-05-16")}],
+        },
+    )
+
+    assert assigned_stock["ok"] is True
+    assert assigned_stock["data"]["row_count"] == 1
+    assigned_stock_row = assigned_stock["data"]["rows"][0]
+    assert assigned_stock_row["stock_lot_id"] == stock_lot_id
+    assert assigned_stock_row["stock_cost_per_share"] == 100.0
+    assert assigned_stock_row["assigned_stock_unrealized_pnl"] == -200.0
+    assert assigned_stock_row["option_premium_attribution"] == 250.0
+    assert assigned_stock_row["assignment_lifecycle_pnl"] == 50.0
+
+    quote_refresh_calls: list[dict[str, Any]] = []
+
+    def _refresh_assigned_stock_quotes(rows: list[dict[str, Any]], **kwargs: Any) -> AssignedStockQuoteRefreshResult:
+        quote_refresh_calls.append({"rows": rows, **kwargs})
+        return AssignedStockQuoteRefreshResult(
+            quote_snapshots=[
+                {
+                    "symbol": "NVDA",
+                    "spot": 99.0,
+                    "quote_time_ms": _ms("2026-05-17"),
+                    "quote_source": "opend_realtime",
+                    "quote_status": "fresh",
+                }
+            ],
+            diagnostics={
+                "enabled": True,
+                "status": "ok",
+                "quote_source": "opend_realtime",
+                "requested_symbols": ["NVDA"],
+                "refreshed_symbols": ["NVDA"],
+                "missing_symbols": [],
+                "errors": [],
+                "quote_count": 1,
+            },
+            warnings=[],
+        )
+
+    _patch_agent_tool_context(monkeypatch, refresh_assigned_stock_quotes=_refresh_assigned_stock_quotes)
+
+    refreshed_assigned_stock = run_tool(
+        "option_positions_read",
+        {
+            "config_path": str(cfg_path),
+            "action": "assigned-stock",
+            "account": "user1",
+            "symbol": "NVDA",
+            "refresh_quotes": True,
+        },
+    )
+
+    assert refreshed_assigned_stock["ok"] is True
+    assert quote_refresh_calls[0]["account"] == "user1"
+    assert quote_refresh_calls[0]["rows"][0]["stock_lot_id"] == stock_lot_id
+    refreshed_row = refreshed_assigned_stock["data"]["rows"][0]
+    assert refreshed_row["spot"] == 99.0
+    assert refreshed_row["quote_source"] == "opend_realtime"
+    assert refreshed_row["assigned_stock_unrealized_pnl"] == -100.0
+    assert refreshed_row["assignment_lifecycle_pnl"] == 150.0
+    assert refreshed_assigned_stock["data"]["quote_refresh"]["status"] == "ok"
+
+    skipped_historical_refresh = run_tool(
+        "option_positions_read",
+        {
+            "config_path": str(cfg_path),
+            "action": "assigned-stock",
+            "account": "user1",
+            "symbol": "NVDA",
+            "refresh_quotes": True,
+            "as_of_ms": _ms("2026-05-16"),
+        },
+    )
+
+    assert skipped_historical_refresh["ok"] is True
+    assert len(quote_refresh_calls) == 1
+    assert skipped_historical_refresh["data"]["quote_refresh"]["status"] == "skipped_historical_as_of"
+    assert skipped_historical_refresh["warnings"] == [
+        "refresh_quotes ignored because as_of_ms was provided; historical as-of requires supplied quote_snapshots"
+    ]
+
+    skipped_no_match_refresh = run_tool(
+        "option_positions_read",
+        {
+            "config_path": str(cfg_path),
+            "action": "assigned-stock",
+            "account": "user1",
+            "symbol": "MSFT",
+            "refresh_quotes": True,
+        },
+    )
+
+    assert skipped_no_match_refresh["ok"] is True
+    assert len(quote_refresh_calls) == 1
+    assert skipped_no_match_refresh["data"]["row_count"] == 0
+    assert skipped_no_match_refresh["data"]["quote_refresh"]["status"] == "skipped_no_matching_assigned_stock"
 
 
 def test_runtime_status_summarizes_openclaw_runtime_files(tmp_path: Path) -> None:

@@ -375,7 +375,10 @@ def test_monthly_income_return_summary_outputs_each_account_when_account_filter_
     assert combined["net_income_cny"] == 1716.0
     assert combined["premium_income_cny"] == 1716.0
     assert combined["net_return_rate"] == round(1716.0 / 90400.0, 6)
-    assert combined["calculation_method"] == "sum(net_cashflow_cny) / sum(current_open_cash_secured_cny)"
+    assert (
+        combined["calculation_method"]
+        == "sum(income_cashflow_ex_assignment_stock_cny) / sum(current_open_cash_secured_cny)"
+    )
 
 
 def test_monthly_income_return_summary_warns_when_exchange_rate_missing() -> None:
@@ -1063,6 +1066,361 @@ def test_monthly_income_report_event_cashflow_and_realized_are_separate_across_m
             "realized_gross": 150.0,
         },
     )
+
+
+def test_monthly_income_report_assignment_includes_stock_settlement_cashflow() -> None:
+    events = [
+        _trade_event("open-short", side="sell", position_effect="open", price=2.5, trade_date="2026-04-03"),
+        _trade_event(
+            "assign-short-put",
+            side="buy",
+            position_effect="close",
+            price=0.0,
+            trade_date="2026-05-01",
+            raw_payload={
+                "close_type": "assignment",
+                "stock_settlement": {"side": "buy", "shares": 100, "price": 100.0},
+            },
+        ),
+    ]
+
+    april = build_monthly_income_report([], account="lx", broker="富途", month="2026-04", trade_events=events)
+    may = build_monthly_income_report(
+        [],
+        account="lx",
+        broker="富途",
+        month="2026-05",
+        rates={"USDCNY": 7.2},
+        trade_events=events,
+    )
+
+    _assert_contains(
+        april["summary"][0],
+        {
+            "net_cashflow_gross": 250.0,
+            "realized_pnl_gross": 0.0,
+            "open_basis_lifecycle_pnl_gross": 250.0,
+            "premium_received_gross": 250.0,
+        },
+    )
+    _assert_contains(
+        may["summary"][0],
+        {
+            "net_cashflow_gross": -10000.0,
+            "cash_out_gross": 10000.0,
+            "realized_pnl_gross": 250.0,
+            "realized_short_pnl_gross": 250.0,
+            "assignment_stock_net_cashflow_gross": -10000.0,
+            "assignment_stock_cash_out_gross": 10000.0,
+            "assignment_stock_shares_bought": 100,
+            "assignment_stock_shares_sold": 0,
+            "premium_received_gross": 0.0,
+        },
+    )
+    assert may["rows"][0]["close_type"] == "assignment"
+    assert may["rows"][0]["realized_gross"] == 250.0
+    assert may["return_summary"][0]["net_income_by_ccy"] == {"USD": 0.0}
+    assert may["return_summary"][0]["net_income_cny"] == 0.0
+    assert may["return_summary"][0]["realized_pnl_by_ccy"] == {"USD": 250.0}
+    assert may["return_summary"][0]["realized_pnl_cny"] == 1800.0
+    assert may["stock_settlement_rows"] == [
+        {
+            "event_id": "assign-short-put",
+            "event_at": _ms("2026-05-01"),
+            "month": "2026-05",
+            "account": "lx",
+            "broker": "富途",
+            "symbol": "NVDA",
+            "option_type": "put",
+            "position_side": "short",
+            "trade_action": "assignment_stock_buy",
+            "currency": "USD",
+            "contracts": 1,
+            "shares": 100,
+            "price": 100.0,
+            "fees": 0.0,
+            "multiplier": 100,
+            "strike": 100.0,
+            "expiration_ymd": "2026-06-19",
+            "cash_in_gross": 0.0,
+            "cash_out_gross": 10000.0,
+            "net_cashflow_gross": -10000.0,
+            "strategy": "",
+            "leg_role": "",
+            "strategy_group_id": "",
+            "close_type": "assignment",
+        }
+    ]
+    assert [row["trade_action"] for row in may["cashflow_rows"]] == [
+        "assignment_option_close",
+        "assignment_stock_buy",
+    ]
+
+
+def test_monthly_income_report_assignment_lifecycle_marks_open_assigned_stock() -> None:
+    events = [
+        _trade_event("open-short", side="sell", position_effect="open", price=2.5, trade_date="2026-04-03"),
+        _trade_event(
+            "assign-short-put",
+            side="buy",
+            position_effect="close",
+            price=0.0,
+            trade_date="2026-05-01",
+            raw_payload={
+                "close_type": "assignment",
+                "stock_settlement": {"side": "buy", "shares": 100, "price": 100.0},
+            },
+        ),
+    ]
+
+    report = build_monthly_income_report(
+        [],
+        account="lx",
+        broker="富途",
+        month="2026-05",
+        trade_events=events,
+        quote_snapshots=[
+            {
+                "symbol": "NVDA",
+                "spot": 98.0,
+                "quote_time_ms": _ms("2026-05-02"),
+                "quote_source": "manual_snapshot",
+                "quote_status": "fresh",
+            }
+        ],
+        as_of_ms=_ms("2026-05-02"),
+    )
+
+    assert report["assigned_stock_review_rows"] == []
+    row = report["assignment_lifecycle_rows"][0]
+    _assert_contains(
+        row,
+        {
+            "stock_lot_id": "assigned-stock-assign-short-put",
+            "status": "open",
+            "review_status": "ready",
+            "shares_opened": 100,
+            "shares_remaining": 100,
+            "assignment_price": 100.0,
+            "stock_cost_per_share": 100.0,
+            "stock_cost_basis_total": 10000.0,
+            "remaining_stock_cost_basis": 10000.0,
+            "spot": 98.0,
+            "quote_status": "fresh",
+            "remaining_market_value": 9800.0,
+            "assigned_stock_unrealized_pnl": -200.0,
+            "assigned_stock_realized_pnl": 0.0,
+            "option_premium_attribution": 250.0,
+            "assignment_lifecycle_pnl": 50.0,
+        },
+    )
+    assert "effective_cost_per_share" not in row
+
+
+def test_monthly_income_report_assignment_lifecycle_marks_sold_assigned_stock() -> None:
+    events = [
+        _trade_event("open-short", side="sell", position_effect="open", price=2.5, trade_date="2026-04-03"),
+        _trade_event(
+            "assign-short-put",
+            side="buy",
+            position_effect="close",
+            price=0.0,
+            trade_date="2026-05-01",
+            raw_payload={
+                "close_type": "assignment",
+                "stock_settlement": {"side": "buy", "shares": 100, "price": 100.0},
+            },
+        ),
+    ]
+
+    report = build_monthly_income_report(
+        [],
+        account="lx",
+        broker="富途",
+        month="2026-06",
+        trade_events=events,
+        assigned_stock_events=[
+            {
+                "event_type": "sale",
+                "stock_event_id": "sale-1",
+                "target_stock_lot_id": "assigned-stock-assign-short-put",
+                "account": "lx",
+                "broker": "富途",
+                "symbol": "NVDA",
+                "side": "sell",
+                "shares": 100,
+                "price": 105.0,
+                "currency": "USD",
+                "fees": 0.0,
+                "trade_time_ms": _ms("2026-06-01"),
+                "source": "manual",
+            }
+        ],
+    )
+
+    assert report["assigned_stock_review_rows"] == []
+    row = report["assignment_lifecycle_rows"][0]
+    _assert_contains(
+        row,
+        {
+            "stock_lot_id": "assigned-stock-assign-short-put",
+            "status": "closed",
+            "review_status": "ready",
+            "shares_opened": 100,
+            "shares_remaining": 0,
+            "shares_sold": 100,
+            "stock_cost_per_share": 100.0,
+            "assigned_stock_realized_pnl": 500.0,
+            "assigned_stock_unrealized_pnl": None,
+            "option_premium_attribution": 250.0,
+            "assignment_lifecycle_pnl": 750.0,
+            "quote_status": "not_required",
+        },
+    )
+    assert report["assigned_stock_sale_rows"] == [
+        {
+            "stock_event_id": "sale-1",
+            "stock_lot_id": "assigned-stock-assign-short-put",
+            "source_assignment_event_id": "assign-short-put",
+            "account": "lx",
+            "broker": "富途",
+            "symbol": "NVDA",
+            "currency": "USD",
+            "month": "2026-06",
+            "event_at": _ms("2026-06-01"),
+            "shares": 100,
+            "price": 105.0,
+            "fees": 0.0,
+            "cash_in_gross": 10500.0,
+            "stock_sale_cash_in_net": 10500.0,
+            "stock_cost_basis_sold": 10000.0,
+            "assigned_stock_realized_pnl": 500.0,
+            "source": "manual",
+            "source_deal_id": None,
+        }
+    ]
+
+
+def test_monthly_income_report_assignment_lifecycle_filters_assigned_stock_sales_by_account() -> None:
+    events = [
+        _trade_event("open-short", side="sell", position_effect="open", price=2.5, trade_date="2026-04-03"),
+        _trade_event(
+            "assign-short-put",
+            side="buy",
+            position_effect="close",
+            price=0.0,
+            trade_date="2026-05-01",
+            raw_payload={
+                "close_type": "assignment",
+                "stock_settlement": {"side": "buy", "shares": 100, "price": 100.0},
+            },
+        ),
+    ]
+
+    report = build_monthly_income_report(
+        [],
+        account="lx",
+        broker="富途",
+        month="2026-05",
+        trade_events=events,
+        assigned_stock_events=[
+            {
+                "event_type": "sale",
+                "stock_event_id": "sale-other-account",
+                "target_stock_lot_id": "assigned-stock-other-account",
+                "account": "sy",
+                "broker": "富途",
+                "symbol": "NVDA",
+                "side": "sell",
+                "shares": 100,
+                "price": 105.0,
+                "currency": "USD",
+                "trade_time_ms": _ms("2026-05-03"),
+            }
+        ],
+        quote_snapshots=[{"symbol": "NVDA", "spot": 98.0}],
+    )
+
+    assert report["assigned_stock_sale_rows"] == []
+    assert report["assigned_stock_review_rows"] == []
+
+
+def test_monthly_income_report_assignment_lifecycle_missing_quote_is_incomplete() -> None:
+    events = [
+        _trade_event("open-short", side="sell", position_effect="open", price=2.5, trade_date="2026-04-03"),
+        _trade_event(
+            "assign-short-put",
+            side="buy",
+            position_effect="close",
+            price=0.0,
+            trade_date="2026-05-01",
+            raw_payload={
+                "close_type": "assignment",
+                "stock_settlement": {"side": "buy", "shares": 100, "price": 100.0},
+            },
+        ),
+    ]
+
+    report = build_monthly_income_report([], account="lx", broker="富途", month="2026-05", trade_events=events)
+
+    row = report["assignment_lifecycle_rows"][0]
+    assert row["review_status"] == "missing_quote"
+    assert row["quote_status"] == "missing_quote"
+    assert row["assigned_stock_unrealized_pnl"] is None
+    assert row["assignment_lifecycle_pnl"] is None
+    assert report["assigned_stock_review_rows"][0]["status"] == "missing_quote"
+
+
+def test_monthly_income_report_assignment_lifecycle_missing_stock_settlement_requires_review() -> None:
+    events = [
+        _trade_event("open-short", side="sell", position_effect="open", price=2.5, trade_date="2026-04-03"),
+        _trade_event(
+            "assign-short-put",
+            side="buy",
+            position_effect="close",
+            price=0.0,
+            trade_date="2026-05-01",
+            raw_payload={"close_type": "assignment"},
+        ),
+    ]
+
+    report = build_monthly_income_report([], account="lx", broker="富途", month="2026-05", trade_events=events)
+
+    assert report["assigned_stock_lots"] == []
+    assert report["assignment_lifecycle_rows"] == []
+    assert report["assigned_stock_review_rows"][0]["status"] == "missing_stock_settlement"
+
+
+def test_monthly_income_report_assignment_lifecycle_holdings_gap_does_not_auto_close_lot() -> None:
+    events = [
+        _trade_event("open-short", side="sell", position_effect="open", price=2.5, trade_date="2026-04-03"),
+        _trade_event(
+            "assign-short-put",
+            side="buy",
+            position_effect="close",
+            price=0.0,
+            trade_date="2026-05-01",
+            raw_payload={
+                "close_type": "assignment",
+                "stock_settlement": {"side": "buy", "shares": 100, "price": 100.0},
+            },
+        ),
+    ]
+
+    report = build_monthly_income_report(
+        [],
+        account="lx",
+        broker="富途",
+        month="2026-05",
+        trade_events=events,
+        quote_snapshots=[{"symbol": "NVDA", "spot": 98.0}],
+        assigned_stock_holdings=[{"account": "lx", "broker": "富途", "symbol": "NVDA", "currency": "USD", "shares": 0}],
+    )
+
+    row = report["assignment_lifecycle_rows"][0]
+    assert row["status"] == "open"
+    assert row["shares_remaining"] == 100
+    assert report["assigned_stock_review_rows"][0]["status"] == "missing_stock_sale"
 
 
 def test_monthly_income_return_summary_handles_realized_month_without_new_open() -> None:

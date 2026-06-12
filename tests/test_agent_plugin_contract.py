@@ -78,6 +78,11 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert option_positions_read["risk_level"] == "read_only"
     assert option_positions_read["safe_default_input"]["action"] == "list"
     assert "history" in option_positions_read["input_schema"]["action"]
+    assert "assigned-stock" in option_positions_read["input_schema"]["action"]
+    assert "quote_snapshots" in option_positions_read["input_schema"]
+    assert "refresh_quotes" in option_positions_read["input_schema"]
+    assert "opend_host" in option_positions_read["input_schema"]
+    assert "opend_port" in option_positions_read["input_schema"]
     config_validate = next(item for item in spec["tools"] if item["name"] == "config_validate")
     assert config_validate["risk_level"] == "read_only"
     scheduler_status = next(item for item in spec["tools"] if item["name"] == "scheduler_status")
@@ -184,6 +189,9 @@ def test_agent_tool_output_contracts_advertise_canonical_renderers() -> None:
     assert positions_contract["canonical_renderer"] == "position_rows"
     assert positions_contract["stable_order"] == "expiration_asc_missing_last"
     assert "rows[].contracts_open" in positions_contract["fact_fields"]
+    assigned_stock_contract = positions.resolve_output_contract({"action": "assigned-stock"})
+    assert assigned_stock_contract["canonical_renderer"] == "assigned_stock_lifecycle"
+    assert "rows[].assignment_lifecycle_pnl" in assigned_stock_contract["fact_fields"]
 
     income = get_tool_definition("monthly_income_report")
     assert income is not None

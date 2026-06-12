@@ -2,11 +2,17 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+import hashlib
+import json
 from typing import Any
 
 from domain.domain.ledger.position_fields import (
     OpenPositionCommand,
     effective_expiration_ymd,
+    normalize_account,
+    normalize_broker,
+    normalize_currency,
+    norm_symbol,
 )
 from src.application.ledger.api import (
     LotCloseResolutionError,
@@ -22,6 +28,7 @@ from src.application.ledger.api import (
     record_manual_position_open,
     resolve_manual_position_close_target,
 )
+from src.application.positions.reporting import build_monthly_income_report
 
 
 def _ms_to_iso(value: int | None) -> str:
@@ -55,6 +62,378 @@ def _manual_open_record_id(result: dict[str, Any]) -> str:
     if not event_id:
         return ""
     return f"lot_{event_id}"
+
+
+def _list_repo_trade_events(repo: Any) -> list[dict[str, Any]]:
+    list_trade_events = getattr(repo, "list_trade_events", None)
+    rows = list_trade_events() if callable(list_trade_events) else []
+    return rows if isinstance(rows, list) else []
+
+
+def _list_repo_assigned_stock_events(repo: Any) -> list[dict[str, Any]]:
+    list_events = getattr(repo, "list_assigned_stock_events", None)
+    rows = list_events() if callable(list_events) else []
+    return rows if isinstance(rows, list) else []
+
+
+def _assigned_stock_report(
+    repo: Any,
+    *,
+    account: str | None = None,
+    broker: str | None = None,
+    assigned_stock_events: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return build_monthly_income_report(
+        [],
+        account=account,
+        broker=broker,
+        trade_events=_list_repo_trade_events(repo),
+        assigned_stock_events=assigned_stock_events
+        if assigned_stock_events is not None
+        else _list_repo_assigned_stock_events(repo),
+    )
+
+
+def _assigned_stock_sale_event_id(payload: dict[str, Any]) -> str:
+    source_deal_id = str(payload.get("source_deal_id") or "").strip()
+    if source_deal_id:
+        return f"assigned-stock-sale-{source_deal_id}"
+    stable = {
+        key: payload.get(key)
+        for key in (
+            "target_stock_lot_id",
+            "account",
+            "broker",
+            "symbol",
+            "currency",
+            "shares",
+            "price",
+            "fees",
+            "trade_time_ms",
+            "source",
+        )
+    }
+    digest = hashlib.sha256(json.dumps(stable, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+    return f"assigned-stock-sale-manual-{digest}"
+
+
+def _find_assigned_stock_lot(report: dict[str, Any], stock_lot_id: str) -> dict[str, Any] | None:
+    for row in report.get("assigned_stock_lots") or []:
+        if isinstance(row, dict) and str(row.get("stock_lot_id") or "") == stock_lot_id:
+            return dict(row)
+    return None
+
+
+def _build_assigned_stock_sale_event(
+    lot: dict[str, Any],
+    *,
+    target_stock_lot_id: str,
+    shares: int,
+    price: float,
+    fees: float,
+    trade_time_ms: int,
+    account: str | None,
+    broker: str | None,
+    symbol: str | None,
+    currency: str | None,
+    source_deal_id: str | None,
+    source: str,
+) -> dict[str, Any]:
+    payload = {
+        "event_type": "sale",
+        "target_stock_lot_id": target_stock_lot_id,
+        "account": normalize_account(account) or lot.get("account"),
+        "broker": normalize_broker(broker) or lot.get("broker"),
+        "symbol": norm_symbol(symbol or lot.get("symbol") or ""),
+        "side": "sell",
+        "shares": int(shares),
+        "price": float(price),
+        "currency": normalize_currency(currency) or lot.get("currency"),
+        "fees": float(fees or 0.0),
+        "trade_time_ms": int(trade_time_ms),
+        "source": str(source or "").strip() or "manual",
+        "source_deal_id": str(source_deal_id or "").strip() or None,
+    }
+    payload["stock_event_id"] = _assigned_stock_sale_event_id(payload)
+    return payload
+
+
+def _build_manual_assigned_stock_sale_event(
+    lot: dict[str, Any],
+    *,
+    target_stock_lot_id: str,
+    shares: int,
+    price: float,
+    fees: float,
+    trade_time_ms: int,
+    account: str | None,
+    broker: str | None,
+    symbol: str | None,
+    currency: str | None,
+    source_deal_id: str | None,
+) -> dict[str, Any]:
+    return _build_assigned_stock_sale_event(
+        lot,
+        target_stock_lot_id=target_stock_lot_id,
+        shares=shares,
+        price=price,
+        fees=fees,
+        trade_time_ms=trade_time_ms,
+        account=account,
+        broker=broker,
+        symbol=symbol,
+        currency=currency,
+        source_deal_id=source_deal_id,
+        source="manual",
+    )
+
+
+class BrokerAssignedStockSaleMatchError(ValueError):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        diagnostics: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = str(code)
+        self.diagnostics = dict(diagnostics or {})
+
+
+def _stock_sale_deal_fee(deal: Any) -> tuple[float, str | None]:
+    raw = getattr(deal, "raw_payload", None)
+    payload = raw if isinstance(raw, dict) else {}
+    aggregate_keys = ("fees", "fee", "total_fee", "total_fees", "charges")
+    component_keys = ("commission", "platform_fee", "system_fee", "settlement_fee", "trading_fee", "sec_fee", "reg_fee")
+    for key in aggregate_keys:
+        if payload.get(key) in (None, ""):
+            continue
+        try:
+            return abs(float(payload[key])), key
+        except Exception:
+            continue
+    total = 0.0
+    used: list[str] = []
+    for key in component_keys:
+        if payload.get(key) in (None, ""):
+            continue
+        try:
+            total += abs(float(payload[key]))
+            used.append(key)
+        except Exception:
+            continue
+    return (total, ",".join(used) if used else None)
+
+
+def _safe_positive_int(value: Any) -> int | None:
+    try:
+        out = int(value)
+    except Exception:
+        return None
+    return out if out > 0 else None
+
+
+def _safe_non_negative_float(value: Any) -> float | None:
+    try:
+        out = float(value)
+    except Exception:
+        return None
+    return out if out >= 0 else None
+
+
+def _assigned_stock_candidate_summary(lot: dict[str, Any], *, reject_reasons: list[str] | None = None) -> dict[str, Any]:
+    return {
+        "stock_lot_id": lot.get("stock_lot_id"),
+        "account": lot.get("account"),
+        "broker": lot.get("broker"),
+        "symbol": lot.get("symbol"),
+        "currency": lot.get("currency"),
+        "opened_at_ms": lot.get("opened_at_ms"),
+        "shares_remaining": lot.get("shares_remaining"),
+        "status": lot.get("status"),
+        "reject_reasons": list(reject_reasons or []),
+    }
+
+
+def _broker_assigned_stock_sale_match(repo: Any, deal: Any) -> dict[str, Any]:
+    account = normalize_account(getattr(deal, "internal_account", None))
+    broker = normalize_broker(getattr(deal, "broker", None))
+    symbol = norm_symbol(getattr(deal, "symbol", None) or "")
+    currency = normalize_currency(getattr(deal, "currency", None))
+    selector = {
+        "account": account,
+        "broker": broker,
+        "symbol": symbol,
+        "currency": currency,
+        "source_deal_id": str(getattr(deal, "deal_id", None) or "").strip() or None,
+    }
+    missing_identity = [key for key in ("account", "broker", "symbol") if not selector.get(key)]
+    if missing_identity:
+        raise BrokerAssignedStockSaleMatchError(
+            "missing_required_fields",
+            "assigned stock sale requires account, broker, and symbol",
+            diagnostics={"selector": selector, "missing_fields": missing_identity},
+        )
+
+    existing_events = _list_repo_assigned_stock_events(repo)
+    before_report = _assigned_stock_report(repo, account=account, broker=broker, assigned_stock_events=existing_events)
+    source_deal_id = str(getattr(deal, "deal_id", None) or "").strip()
+    existing_by_source = next(
+        (
+            event
+            for event in existing_events
+            if isinstance(event, dict)
+            and str(event.get("source_deal_id") or "").strip()
+            and str(event.get("source_deal_id") or "").strip() == source_deal_id
+        ),
+        None,
+    )
+    if existing_by_source is not None:
+        target_stock_lot_id = str(existing_by_source.get("target_stock_lot_id") or "").strip()
+        lot = _find_assigned_stock_lot(before_report, target_stock_lot_id)
+        if lot is None:
+            raise BrokerAssignedStockSaleMatchError(
+                "source_conflict",
+                "existing assigned stock sale event targets a missing assigned stock lot",
+                diagnostics={"selector": selector, "existing_event": dict(existing_by_source)},
+            )
+        shares = _safe_positive_int(getattr(deal, "contracts", None))
+        price = _safe_non_negative_float(getattr(deal, "price", None))
+        trade_time_ms = _safe_positive_int(getattr(deal, "trade_time_ms", None))
+        required = {
+            "deal_id": source_deal_id or None,
+            "currency": currency,
+            "shares": shares,
+            "price": price,
+            "trade_time_ms": trade_time_ms,
+        }
+        missing = [key for key, value in required.items() if value in (None, "")]
+        if missing:
+            raise BrokerAssignedStockSaleMatchError(
+                "missing_required_fields",
+                "assigned stock sale duplicate has missing required fields",
+                diagnostics={"selector": selector, "missing_fields": missing, "existing_event": dict(existing_by_source)},
+            )
+        fees, fee_source = _stock_sale_deal_fee(deal)
+        return {
+            "lot": lot,
+            "existing_events": existing_events,
+            "before_report": before_report,
+            "selector": selector,
+            "shares": int(shares or 0),
+            "price": float(price or 0.0),
+            "fees": float(fees or 0.0),
+            "fee_source": fee_source,
+            "trade_time_ms": int(trade_time_ms or 0),
+            "source_deal_id": source_deal_id,
+            "diagnostics": {
+                "selector": selector,
+                "matched_stock_lot_id": lot.get("stock_lot_id"),
+                "existing_stock_event_id": existing_by_source.get("stock_event_id") or existing_by_source.get("event_id"),
+                "idempotent_candidate": True,
+                "fee_source": fee_source,
+            },
+        }
+
+    identity_candidates: list[dict[str, Any]] = []
+    for row in before_report.get("assigned_stock_lots") or []:
+        if not isinstance(row, dict):
+            continue
+        if int(row.get("shares_remaining") or 0) <= 0:
+            continue
+        if normalize_account(row.get("account")) != account:
+            continue
+        if normalize_broker(row.get("broker")) != broker:
+            continue
+        if norm_symbol(row.get("symbol") or "") != symbol:
+            continue
+        if currency and (normalize_currency(row.get("currency")) or "") != currency:
+            continue
+        identity_candidates.append(dict(row))
+
+    if not identity_candidates:
+        raise BrokerAssignedStockSaleMatchError(
+            "no_match",
+            "no open assigned stock lot matches this stock sale identity",
+            diagnostics={"selector": selector},
+        )
+
+    shares = _safe_positive_int(getattr(deal, "contracts", None))
+    price = _safe_non_negative_float(getattr(deal, "price", None))
+    trade_time_ms = _safe_positive_int(getattr(deal, "trade_time_ms", None))
+    required = {
+        "deal_id": source_deal_id or None,
+        "currency": currency,
+        "shares": shares,
+        "price": price,
+        "trade_time_ms": trade_time_ms,
+    }
+    missing = [key for key, value in required.items() if value in (None, "")]
+    if missing:
+        raise BrokerAssignedStockSaleMatchError(
+            "missing_required_fields",
+            "assigned stock sale has matching lot candidates but missing required fields",
+            diagnostics={
+                "selector": selector,
+                "missing_fields": missing,
+                "candidate_count": len(identity_candidates),
+                "candidates": [_assigned_stock_candidate_summary(item) for item in identity_candidates],
+            },
+        )
+
+    viable: list[dict[str, Any]] = []
+    candidate_summaries: list[dict[str, Any]] = []
+    for lot in identity_candidates:
+        reject_reasons: list[str] = []
+        if int(lot.get("shares_remaining") or 0) < int(shares or 0):
+            reject_reasons.append("insufficient_shares_remaining")
+        try:
+            opened_at_ms = int(lot.get("opened_at_ms") or 0)
+        except Exception:
+            opened_at_ms = 0
+        if opened_at_ms <= 0 or int(trade_time_ms or 0) < opened_at_ms:
+            reject_reasons.append("trade_time_before_lot_open")
+        candidate_summaries.append(_assigned_stock_candidate_summary(lot, reject_reasons=reject_reasons))
+        if not reject_reasons:
+            viable.append(lot)
+
+    diagnostics = {
+        "selector": selector,
+        "candidate_count": len(identity_candidates),
+        "candidates": candidate_summaries,
+        "shares": shares,
+        "price": price,
+        "trade_time_ms": trade_time_ms,
+    }
+    if not viable:
+        raise BrokerAssignedStockSaleMatchError(
+            "no_safe_match",
+            "assigned stock sale has candidate lots but no safe unique match",
+            diagnostics=diagnostics,
+        )
+    if len(viable) > 1:
+        raise BrokerAssignedStockSaleMatchError(
+            "ambiguous_match",
+            "assigned stock sale matched multiple open assigned stock lots",
+            diagnostics=diagnostics | {"viable_count": len(viable)},
+        )
+
+    lot = viable[0]
+    fees, fee_source = _stock_sale_deal_fee(deal)
+    return {
+        "lot": lot,
+        "existing_events": existing_events,
+        "before_report": before_report,
+        "selector": selector,
+        "shares": int(shares or 0),
+        "price": float(price or 0.0),
+        "fees": float(fees or 0.0),
+        "fee_source": fee_source,
+        "trade_time_ms": int(trade_time_ms or 0),
+        "source_deal_id": source_deal_id,
+        "diagnostics": diagnostics | {"matched_stock_lot_id": lot.get("stock_lot_id"), "fee_source": fee_source},
+    }
 
 
 @dataclass(frozen=True)
@@ -435,6 +814,185 @@ def execute_manual_exercise(
         result=result,
         payload=out,
         native_event=None,
+    )
+
+
+def _execute_assigned_stock_sale(
+    repo: Any,
+    *,
+    target_stock_lot_id: str,
+    shares: int,
+    price: float,
+    fees: float = 0.0,
+    trade_time_ms: int,
+    account: str | None = None,
+    broker: str | None = None,
+    symbol: str | None = None,
+    currency: str | None = None,
+    source_deal_id: str | None = None,
+    source: str,
+    existing_events: list[dict[str, Any]] | None = None,
+    before_report: dict[str, Any] | None = None,
+    match_diagnostics: dict[str, Any] | None = None,
+    dry_run: bool,
+) -> dict[str, Any]:
+    stock_lot_id = str(target_stock_lot_id or "").strip()
+    if not stock_lot_id:
+        raise ValueError("assigned stock sale requires target_stock_lot_id")
+    if int(shares or 0) <= 0:
+        raise ValueError("assigned stock sale requires shares > 0")
+    if float(price) < 0:
+        raise ValueError("assigned stock sale requires price >= 0")
+    if float(fees or 0.0) < 0:
+        raise ValueError("assigned stock sale requires fees >= 0")
+    if int(trade_time_ms or 0) <= 0:
+        raise ValueError("assigned stock sale requires trade_time_ms > 0")
+
+    existing_events = list(existing_events if existing_events is not None else _list_repo_assigned_stock_events(repo))
+    before_report = (
+        dict(before_report)
+        if isinstance(before_report, dict)
+        else _assigned_stock_report(repo, account=account, broker=broker, assigned_stock_events=existing_events)
+    )
+    before_lot = _find_assigned_stock_lot(before_report, stock_lot_id)
+    if before_lot is None:
+        raise ValueError(f"assigned stock lot not found: {stock_lot_id}")
+    sale_event = _build_assigned_stock_sale_event(
+        before_lot,
+        target_stock_lot_id=stock_lot_id,
+        shares=int(shares),
+        price=float(price),
+        fees=float(fees or 0.0),
+        trade_time_ms=int(trade_time_ms),
+        account=account,
+        broker=broker,
+        symbol=symbol,
+        currency=currency,
+        source_deal_id=source_deal_id,
+        source=source,
+    )
+    existing_same = next(
+        (
+            event
+            for event in existing_events
+            if isinstance(event, dict)
+            and str(event.get("stock_event_id") or event.get("event_id") or "") == str(sale_event.get("stock_event_id") or "")
+        ),
+        None,
+    )
+    if existing_same is not None:
+        existing_json = json.dumps(dict(existing_same), ensure_ascii=False, sort_keys=True)
+        candidate_json = json.dumps(dict(sale_event), ensure_ascii=False, sort_keys=True)
+        if existing_json != candidate_json:
+            raise ValueError(f"assigned stock sale conflict for stock_event_id={sale_event.get('stock_event_id')}")
+        after_events = list(existing_events)
+    else:
+        after_events = [*existing_events, sale_event]
+    after_report = _assigned_stock_report(repo, account=account, broker=broker, assigned_stock_events=after_events)
+    stock_event_id = str(sale_event.get("stock_event_id") or "")
+    candidate_reviews = [
+        row
+        for row in (after_report.get("assigned_stock_review_rows") or [])
+        if isinstance(row, dict) and str(row.get("stock_event_id") or "") == stock_event_id
+    ]
+    if candidate_reviews:
+        status = str(candidate_reviews[0].get("status") or "manual_review_required")
+        raise ValueError(f"assigned stock sale validation failed: {status}")
+    after_lot = _find_assigned_stock_lot(after_report, stock_lot_id)
+    payload = {
+        "mode": "dry_run",
+        "write_model": "assigned_stock_events",
+        "sale_event": sale_event,
+        "stock_lot_before": before_lot,
+        "stock_lot_after": after_lot,
+        "review_rows": candidate_reviews,
+        "match": dict(match_diagnostics or {}),
+    }
+    if dry_run:
+        return payload
+    upsert = getattr(repo, "upsert_assigned_stock_event", None)
+    if not callable(upsert):
+        raise ValueError("repo does not support assigned stock event writes")
+    created = bool(upsert(sale_event))
+    result = {"stock_event_id": stock_event_id, "created": created}
+    return _apply_result_payload(
+        repo,
+        record_id=stock_lot_id,
+        result=result,
+        payload=payload | {"mode": "applied", "result": result, "idempotent_duplicate": not created},
+        native_event=None,
+    )
+
+
+def execute_manual_assigned_stock_sale(
+    repo: Any,
+    *,
+    target_stock_lot_id: str,
+    shares: int,
+    price: float,
+    fees: float = 0.0,
+    trade_time_ms: int,
+    account: str | None = None,
+    broker: str | None = None,
+    symbol: str | None = None,
+    currency: str | None = None,
+    source_deal_id: str | None = None,
+    dry_run: bool,
+) -> dict[str, Any]:
+    return _execute_assigned_stock_sale(
+        repo,
+        target_stock_lot_id=target_stock_lot_id,
+        shares=shares,
+        price=price,
+        fees=fees,
+        trade_time_ms=trade_time_ms,
+        account=account,
+        broker=broker,
+        symbol=symbol,
+        currency=currency,
+        source_deal_id=source_deal_id,
+        source="manual",
+        dry_run=dry_run,
+    )
+
+
+def execute_broker_assigned_stock_sale(
+    repo: Any,
+    deal: Any,
+    *,
+    dry_run: bool,
+) -> dict[str, Any]:
+    if getattr(deal, "option_type", None):
+        raise BrokerAssignedStockSaleMatchError(
+            "unsupported_deal",
+            "assigned stock broker sale intake only handles stock deals",
+            diagnostics={"option_type": getattr(deal, "option_type", None)},
+        )
+    if str(getattr(deal, "side", "") or "").strip().lower() != "sell":
+        raise BrokerAssignedStockSaleMatchError(
+            "unsupported_deal",
+            "assigned stock broker sale intake only handles stock sell deals",
+            diagnostics={"side": getattr(deal, "side", None)},
+        )
+    match = _broker_assigned_stock_sale_match(repo, deal)
+    lot = dict(match["lot"])
+    return _execute_assigned_stock_sale(
+        repo,
+        target_stock_lot_id=str(lot.get("stock_lot_id") or ""),
+        shares=int(match["shares"]),
+        price=float(match["price"]),
+        fees=float(match["fees"]),
+        trade_time_ms=int(match["trade_time_ms"]),
+        account=getattr(deal, "internal_account", None),
+        broker=getattr(deal, "broker", None),
+        symbol=getattr(deal, "symbol", None),
+        currency=getattr(deal, "currency", None),
+        source_deal_id=str(match["source_deal_id"]),
+        source="broker",
+        existing_events=list(match.get("existing_events") or []),
+        before_report=dict(match.get("before_report") or {}),
+        match_diagnostics=dict(match.get("diagnostics") or {}),
+        dry_run=dry_run,
     )
 
 

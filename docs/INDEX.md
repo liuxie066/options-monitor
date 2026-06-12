@@ -31,6 +31,7 @@
 ## 业务规则
 - [PRODUCT_ARCHITECTURE.md](PRODUCT_ARCHITECTURE.md)：产品域、模块定义、模块依赖和当前实现差距
 - [STRATEGY_ARCHITECTURE.md](STRATEGY_ARCHITECTURE.md)：开仓策略架构、Sell Put / Covered Call / Combo Yield 策略边界
+- [ASSIGNED_STOCK_RETURN_DESIGN.md](ASSIGNED_STOCK_RETURN_DESIGN.md)：Sell Put 被指派后正股成本、实时 spot、历史数据和收益统计口径设计
 - [STRATEGY_LAB_DESIGN.md](STRATEGY_LAB_DESIGN.md)：Strategy Lab 策略进化实验室的 PRD、架构、技术方案和安全边界
 - [candidate_strategy.md](candidate_strategy.md)：候选筛选与排序规则
 - [SHADOW_REPLAY_RUNBOOK.md](SHADOW_REPLAY_RUNBOOK.md)：Research / Shadow Replay 独立离线模块的数据采样、OpenD 补价、review readiness 和 candidate-impact 对比操作手册

@@ -1676,6 +1676,145 @@ def test_option_positions_cli_report_monthly_income_json(monkeypatch, tmp_path: 
     assert payload["return_summary"][0]["premium_return_rate"] == round(1800.0 / 72000.0, 6)
 
 
+def test_option_positions_cli_assigned_stock_sale_records_independent_event(monkeypatch, tmp_path: Path, capsys) -> None:
+    import src.interfaces.cli.option_positions as cli_mod
+    import src.application.ledger.read_model as read_model
+    from domain.domain.option_position_lots import OpenPositionCommand
+    from src.application.ledger.commands import record_manual_assignment
+
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo.data_config_path = data_config  # type: ignore[attr-defined]
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="NVDA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=2.5,
+            opened_at_ms=1000,
+        ),
+    )
+    lot = repo.list_position_lots()[0]
+    record_manual_assignment(
+        repo,
+        record_id=lot["record_id"],
+        contracts_to_close=1,
+        stock_side="buy",
+        stock_qty=100,
+        stock_price=100.0,
+        as_of_ms=2000,
+    )
+    assignment_event = [item for item in repo.list_trade_events() if item.get("event_type") == "assignment"][0]
+    stock_lot_id = f"assigned-stock-{assignment_event['event_id']}"
+
+    monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
+    monkeypatch.setattr(read_model, "get_exchange_rates_or_fetch_latest", lambda **_kwargs: {"rates": {"USDCNY": 7.2}})
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "om option-positions",
+            "--data-config",
+            str(data_config),
+            "assigned-stock-sale",
+            "--target-stock-lot-id",
+            stock_lot_id,
+            "--account",
+            "lx",
+            "--symbol",
+            "NVDA",
+            "--currency",
+            "USD",
+            "--shares",
+            "100",
+            "--price",
+            "105",
+            "--trade-time-ms",
+            "3000",
+            "--format",
+            "json",
+        ],
+    )
+
+    cli_mod.main()
+
+    dry_run_payload = json.loads(capsys.readouterr().out)
+    assert dry_run_payload["operation"] == "manual_assigned_stock_sale"
+    assert dry_run_payload["write_model"] == "assigned_stock_events"
+    assert dry_run_payload["write_applied"] is False
+    assert repo.list_assigned_stock_events() == []
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "om option-positions",
+            "--data-config",
+            str(data_config),
+            "assigned-stock-sale",
+            "--target-stock-lot-id",
+            stock_lot_id,
+            "--account",
+            "lx",
+            "--symbol",
+            "NVDA",
+            "--currency",
+            "USD",
+            "--shares",
+            "100",
+            "--price",
+            "105",
+            "--trade-time-ms",
+            "3000",
+            "--confirm",
+            "--format",
+            "json",
+        ],
+    )
+
+    cli_mod.main()
+
+    applied_payload = json.loads(capsys.readouterr().out)
+    assert applied_payload["write_applied"] is True
+    assert applied_payload["result"]["created"] is True
+    assert len(repo.list_assigned_stock_events()) == 1
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "om option-positions",
+            "--data-config",
+            str(data_config),
+            "report",
+            "monthly-income",
+            "--broker",
+            "富途",
+            "--account",
+            "lx",
+            "--format",
+            "json",
+        ],
+    )
+
+    cli_mod.main()
+
+    report = json.loads(capsys.readouterr().out)
+    lifecycle = [row for row in report["assignment_lifecycle_rows"] if row["stock_lot_id"] == stock_lot_id][0]
+    assert lifecycle["status"] == "closed"
+    assert lifecycle["assigned_stock_realized_pnl"] == 500.0
+    assert lifecycle["option_premium_attribution"] == 250.0
+    assert lifecycle["assignment_lifecycle_pnl"] == 750.0
+
+
 def test_option_positions_cli_report_monthly_income_text(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
     import src.application.ledger.read_model as read_model
@@ -1712,4 +1851,4 @@ def test_option_positions_cli_report_monthly_income_text(monkeypatch, tmp_path: 
     out = capsys.readouterr().out
     assert "# Position Lots Monthly Income" in out
     assert "filters: month=2026-04 | account=lx | broker=富途" in out
-    assert "| - | - | - | - | - | - | - | 0 | 0 | 0 | 0 |" in out
+    assert "| - | - | - | - | - | - | - | - | 0 | 0 | 0 | 0 | 0 |" in out

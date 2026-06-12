@@ -2780,7 +2780,7 @@ def test_assistant_runtime_agent_loop_canonical_income_uses_untruncated_fact_obs
                         "annualized_realized_return_rate": 0.553751,
                         "annualized_basis_days": 8,
                         "return_basis": "combined_current_cash_secured",
-                        "calculation_method": "sum(net_cashflow_cny) / sum(current_open_cash_secured_cny)",
+                        "calculation_method": "sum(income_cashflow_ex_assignment_stock_cny) / sum(current_open_cash_secured_cny)",
                     }
                 ],
                 "return_summary": [

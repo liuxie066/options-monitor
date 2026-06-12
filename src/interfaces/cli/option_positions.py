@@ -36,6 +36,7 @@ from src.application.positions.workflows import (
     ManualCloseMatchError,
     execute_manual_adjust,
     execute_manual_assignment,
+    execute_manual_assigned_stock_sale,
     execute_manual_close,
     execute_manual_exercise,
     execute_manual_open,
@@ -244,6 +245,24 @@ def main(argv: list[str] | None = None) -> int:
     p_exercise.add_argument('--format', default='text', choices=['text', 'json'])
     _add_local_write_flags(p_exercise, high_risk=True)
 
+    p_assigned_stock_sale = sub.add_parser(
+        'assigned-stock-sale',
+        help='record a sale of stock created by a Sell Put assignment',
+    )
+    _add_runtime_root_arg(p_assigned_stock_sale)
+    p_assigned_stock_sale.add_argument('--target-stock-lot-id', required=True)
+    p_assigned_stock_sale.add_argument('--broker', default='富途')
+    p_assigned_stock_sale.add_argument('--account', default=None)
+    p_assigned_stock_sale.add_argument('--symbol', default=None)
+    p_assigned_stock_sale.add_argument('--currency', default=None, choices=['USD', 'HKD', 'CNY'])
+    p_assigned_stock_sale.add_argument('--shares', type=int, required=True)
+    p_assigned_stock_sale.add_argument('--price', type=float, required=True)
+    p_assigned_stock_sale.add_argument('--fees', type=float, default=0.0)
+    p_assigned_stock_sale.add_argument('--trade-time-ms', type=int, required=True)
+    p_assigned_stock_sale.add_argument('--source-deal-id', default=None)
+    p_assigned_stock_sale.add_argument('--format', default='text', choices=['text', 'json'])
+    _add_local_write_flags(p_assigned_stock_sale, high_risk=True)
+
     p_events = sub.add_parser('events', help='list canonical trade events')
     _add_runtime_root_arg(p_events)
     p_events.add_argument('--broker', default=None)
@@ -430,7 +449,7 @@ def main(argv: list[str] | None = None) -> int:
             command_name="option-positions lifecycle confirm-expired",
             high_risk=True,
         )
-    elif args.cmd in {"add", "buy-close", "assign", "exercise", "void-event", "adjust-lot"}:
+    elif args.cmd in {"add", "buy-close", "assign", "exercise", "assigned-stock-sale", "void-event", "adjust-lot"}:
         write_controls[args.cmd] = _resolve_write_control(args, command_name=f"option-positions {args.cmd}", high_risk=True)
     elif args.cmd == "rebuild":
         write_controls[args.cmd] = _resolve_write_control(args, command_name="option-positions rebuild", high_risk=False)
@@ -669,6 +688,47 @@ def main(argv: list[str] | None = None) -> int:
             if isinstance(item, dict) and isinstance(item.get("result"), dict) and (item.get("result") or {}).get("event_id")
         ]
         print(f"[DONE] exercise contracts={int(args.contracts)} events={len(event_ids)} event_ids={','.join(event_ids)}")
+        return 0
+
+    if args.cmd == 'assigned-stock-sale':
+        control = write_controls["assigned-stock-sale"]
+        dry_run = not bool(control["write_requested"])
+        try:
+            out = execute_manual_assigned_stock_sale(
+                repo,
+                target_stock_lot_id=args.target_stock_lot_id,
+                shares=int(args.shares),
+                price=float(args.price),
+                fees=float(args.fees or 0.0),
+                trade_time_ms=int(args.trade_time_ms),
+                account=args.account,
+                broker=args.broker,
+                symbol=args.symbol,
+                currency=args.currency,
+                source_deal_id=args.source_deal_id,
+                dry_run=dry_run,
+            )
+        except ValueError as e:
+            raise SystemExit(str(e))
+        payload = attach_write_contract(
+            {"operation": "manual_assigned_stock_sale", **out, "ledger_store": ledger_store},
+            dry_run=dry_run,
+            write_applied=not dry_run,
+            rollback_hint="record a future assigned stock repair/void event; do not edit assigned_stock_lots directly",
+        )
+        if _json_or_text_format(args) == "json":
+            print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+            return 0
+        if dry_run:
+            print("[DRY_RUN] assigned stock sale:")
+            print(json.dumps(out.get("sale_event") or {}, ensure_ascii=False, indent=2))
+            return 0
+        result = out.get("result") if isinstance(out.get("result"), dict) else {}
+        print(
+            "[DONE] assigned-stock-sale "
+            f"stock_event_id={result.get('stock_event_id')} "
+            f"created={result.get('created')}"
+        )
         return 0
 
     if args.cmd == 'events':

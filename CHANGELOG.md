@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 1.2.256 - 2026-06-12
+
+### Added
+- Added assigned-stock lifecycle reporting for Sell Put assignments, including true stock cost basis, realized/unrealized assigned-stock PnL, lifecycle PnL, review rows, and explicit double-counting guards.
+- Added `option_positions_read action=assigned-stock` with opt-in realtime spot refresh for open assigned-stock lots.
+- Added manual and broker stock-sale intake for assigned-stock lots, with dry-run/confirm safety, source deal id idempotency, and ambiguous-lot review handling.
+
+### Changed
+- Excluded assignment stock settlement principal cashflow from return-summary net income while preserving it in cashflow diagnostics.
+- Documented assigned-stock return accounting, quote refresh semantics, and broker stock-sale source boundaries.
+
 ## 1.2.255 - 2026-06-12
 
 ### Added

@@ -7,6 +7,7 @@ from typing import Any, Callable, cast
 
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.ledger.api import ledger_store_payload
+from src.application.positions.reporting import build_monthly_income_report
 from src.application.trade_time_format import add_trade_time_beijing
 
 
@@ -43,6 +44,48 @@ def _optional_text(value: Any) -> str | None:
 
 def _dict(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
+
+
+def _bool_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value in (None, ""):
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _quote_snapshot_rows(value: Any) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [dict(item) for item in value if isinstance(item, dict)]
+    if isinstance(value, dict):
+        rows: list[dict[str, Any]] = []
+        for key, item in value.items():
+            if isinstance(item, dict):
+                row = dict(item)
+                row.setdefault("symbol", key)
+                rows.append(row)
+            else:
+                rows.append({"symbol": key, "spot": item})
+        return rows
+    return []
+
+
+def _assigned_stock_row_matches(
+    row: dict[str, Any],
+    *,
+    symbol: str | None,
+    stock_lot_id: str | None,
+    status: str | None,
+) -> bool:
+    if symbol and str(row.get("symbol") or "").strip().upper() != symbol:
+        return False
+    if stock_lot_id and str(row.get("stock_lot_id") or "") != stock_lot_id:
+        return False
+    if status and str(row.get("status") or "").strip().lower() != status:
+        return False
+    return True
 
 
 def _resolve_local_path(value: Any, *, base: Path, default: Path) -> Path:
@@ -282,6 +325,142 @@ def _events_action(
     }
 
 
+def _assigned_stock_action(
+    repo: Any,
+    payload: dict[str, Any],
+    *,
+    cfg: dict[str, Any],
+    repo_base: Callable[[], Path],
+    normalize_broker: Callable[[Any], str],
+    normalize_account: Callable[[Any], str],
+    refresh_assigned_stock_quotes: Callable[..., Any],
+) -> dict[str, Any]:
+    list_trade_events = getattr(repo, "list_trade_events", None)
+    raw_trade_events = list_trade_events() if callable(list_trade_events) else []
+    trade_events = raw_trade_events if isinstance(raw_trade_events, list) else []
+    list_assigned_stock_events = getattr(repo, "list_assigned_stock_events", None)
+    raw_assigned_stock_events = list_assigned_stock_events() if callable(list_assigned_stock_events) else []
+    assigned_stock_events = raw_assigned_stock_events if isinstance(raw_assigned_stock_events, list) else []
+
+    broker = _optional_text(payload.get("broker"))
+    broker = normalize_broker(broker) if broker else None
+    account = normalize_account(payload.get("account")) if payload.get("account") else None
+    symbol = _optional_text(payload.get("symbol"))
+    symbol = symbol.upper() if symbol else None
+    stock_lot_id = _optional_text(payload.get("stock_lot_id") or payload.get("target_stock_lot_id"))
+    status = _optional_text(payload.get("status"))
+    status = status.lower() if status else None
+    if status == "all":
+        status = None
+    quote_snapshots = payload.get("quote_snapshots")
+    as_of_ms = _optional_int(payload.get("as_of_ms")) if payload.get("as_of_ms") not in (None, "") else None
+    refresh_quotes = _bool_flag(payload.get("refresh_quotes"))
+
+    report = build_monthly_income_report(
+        [],
+        account=account,
+        broker=broker,
+        trade_events=trade_events,
+        assigned_stock_events=assigned_stock_events,
+        quote_snapshots=quote_snapshots,
+        as_of_ms=as_of_ms,
+    )
+    selected_report_rows = [
+        row
+        for row in (report.get("assignment_lifecycle_rows") or [])
+        if isinstance(row, dict)
+        and _assigned_stock_row_matches(row, symbol=symbol, stock_lot_id=stock_lot_id, status=status)
+    ]
+    quote_refresh: dict[str, Any] = {"enabled": False}
+    quote_refresh_warnings: list[str] = []
+    if refresh_quotes:
+        if as_of_ms is not None:
+            quote_refresh = {
+                "enabled": False,
+                "status": "skipped_historical_as_of",
+                "reason": "historical as-of queries require supplied quote_snapshots or saved marks",
+            }
+            quote_refresh_warnings.append(
+                "refresh_quotes ignored because as_of_ms was provided; historical as-of requires supplied quote_snapshots"
+            )
+        elif not selected_report_rows:
+            quote_refresh = {
+                "enabled": False,
+                "status": "skipped_no_matching_assigned_stock",
+                "reason": "no assigned-stock row matched the query filters",
+            }
+        else:
+            try:
+                port_value = payload.get("opend_port") or payload.get("port")
+                refresh = refresh_assigned_stock_quotes(
+                    selected_report_rows,
+                    cfg=cfg,
+                    account=account,
+                    host=_optional_text(payload.get("opend_host") or payload.get("host")),
+                    port=_optional_int(port_value) if port_value not in (None, "") else None,
+                    base_dir=repo_base(),
+                )
+            except Exception as exc:
+                quote_refresh = {
+                    "enabled": True,
+                    "status": "source_error",
+                    "quote_source": "opend_realtime",
+                    "errors": [{"error_code": type(exc).__name__, "message": str(exc)}],
+                }
+                quote_refresh_warnings.append(f"assigned stock quote refresh failed: {type(exc).__name__}: {exc}")
+            else:
+                quote_refresh = dict(getattr(refresh, "diagnostics", {}) or {})
+                quote_refresh.setdefault("enabled", True)
+                quote_refresh_warnings.extend(
+                    str(item) for item in (getattr(refresh, "warnings", []) or []) if str(item).strip()
+                )
+                refreshed_snapshots = list(getattr(refresh, "quote_snapshots", []) or [])
+                if refreshed_snapshots:
+                    quote_snapshots = [*_quote_snapshot_rows(payload.get("quote_snapshots")), *refreshed_snapshots]
+                    report = build_monthly_income_report(
+                        [],
+                        account=account,
+                        broker=broker,
+                        trade_events=trade_events,
+                        assigned_stock_events=assigned_stock_events,
+                        quote_snapshots=quote_snapshots,
+                        as_of_ms=as_of_ms,
+                    )
+                    selected_report_rows = [
+                        row
+                        for row in (report.get("assignment_lifecycle_rows") or [])
+                        if isinstance(row, dict)
+                        and _assigned_stock_row_matches(
+                            row,
+                            symbol=symbol,
+                            stock_lot_id=stock_lot_id,
+                            status=status,
+                        )
+                    ]
+    rows: list[dict[str, Any]] = []
+    for row in selected_report_rows:
+        rows.append(row)
+    return {
+        "action": "assigned-stock",
+        "rows": rows,
+        "row_count": len(rows),
+        "assigned_stock_lots": rows,
+        "assigned_stock_sale_rows": report.get("assigned_stock_sale_rows") or [],
+        "assigned_stock_review_rows": report.get("assigned_stock_review_rows") or [],
+        "filters": {
+            "broker": broker,
+            "account": account,
+            "symbol": symbol,
+            "stock_lot_id": stock_lot_id,
+            "status": status,
+            "as_of_ms": as_of_ms,
+            "refresh_quotes": refresh_quotes,
+        },
+        "quote_refresh": quote_refresh,
+        "warnings": quote_refresh_warnings,
+    }
+
+
 def option_positions_read_tool(
     payload: dict[str, Any],
     *,
@@ -289,6 +468,7 @@ def option_positions_read_tool(
     resolve_public_data_config_path: Callable[[dict[str, Any], dict[str, Any]], Path],
     normalize_broker: Callable[[Any], str],
     normalize_account: Callable[[Any], str],
+    refresh_assigned_stock_quotes: Callable[..., Any],
     resolve_option_positions_repo: Callable[..., tuple[Path, Any]],
     list_position_rows: Callable[..., list[dict[str, Any]]],
     build_lot_event_history: Callable[..., list[dict[str, Any]]],
@@ -297,7 +477,7 @@ def option_positions_read_tool(
     mask_path: Callable[[Any], str],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     action = str(payload.get("action") or "list").strip().lower()
-    if action not in {"list", "events", "history", "inspect"}:
+    if action not in {"list", "events", "history", "inspect", "assigned-stock"}:
         raise AgentToolError(code="INPUT_ERROR", message=f"unsupported option_positions_read action: {action}")
 
     config_path, cfg = load_runtime_config(config_key=payload.get("config_key"), config_path=payload.get("config_path"))
@@ -386,6 +566,16 @@ def option_positions_read_tool(
     elif action == "events":
         event_data = _events_action(repo, payload, normalize_broker=normalize_broker, normalize_account=normalize_account)
         data = {"action": action, **event_data}
+    elif action == "assigned-stock":
+        data = _assigned_stock_action(
+            repo,
+            payload,
+            cfg=cfg,
+            repo_base=repo_base,
+            normalize_broker=normalize_broker,
+            normalize_account=normalize_account,
+            refresh_assigned_stock_quotes=refresh_assigned_stock_quotes,
+        )
     elif action == "history":
         record_id = _optional_text(payload.get("record_id"))
         if not record_id:
@@ -413,6 +603,10 @@ def option_positions_read_tool(
             raise AgentToolError(code="INPUT_ERROR", message="inspect requires at least one selector")
         inspected = inspect_projection_state(repo, base=repo_base(), **selectors)
         data = {"action": action, **inspected}
+
+    data_warnings = data.get("warnings")
+    if isinstance(data_warnings, list):
+        warnings.extend(str(item) for item in data_warnings if str(item).strip())
 
     data["bootstrap"] = {
         "status": bootstrap_status,
