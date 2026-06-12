@@ -352,6 +352,10 @@ def _assigned_stock_action(
     status = status.lower() if status else None
     if status == "all":
         status = None
+    elif status in {"close", "closed_sold", "sold"}:
+        status = "closed"
+    elif status in {"partial", "partially-sold"}:
+        status = "partially_sold"
     quote_snapshots = payload.get("quote_snapshots")
     as_of_ms = _optional_int(payload.get("as_of_ms")) if payload.get("as_of_ms") not in (None, "") else None
     refresh_quotes = _bool_flag(payload.get("refresh_quotes"))

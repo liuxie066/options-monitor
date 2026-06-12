@@ -57,6 +57,8 @@ def parse_assistant_command(text: str, *, now_fn: Callable[[], date] | None = No
         return _intent("config_validate")
     if command in _COMMANDS["position_query"]:
         return _parse_positions(command, args, today=today)
+    if command in _COMMANDS["assigned_stock_position_query"]:
+        return _parse_assigned_stock(command, args)
     if command in _COMMANDS["monthly_income_report"]:
         return _parse_income(command, args, today=today)
     if command in _COMMANDS["runtime_runs"]:
@@ -121,6 +123,51 @@ def _parse_positions(command: str, args: list[str], *, today: date) -> Perceptio
     raw = "持仓" if not args else f"持仓 {' '.join(args)}"
     query = parse_position_query_text(raw, today=today)
     return _intent("position_query", position_query_intent_arguments(query))
+
+
+def _parse_assigned_stock(command: str, args: list[str]) -> PerceptionResult:
+    account: str | None = None
+    status: str = "open"
+    symbol: str | None = None
+    stock_lot_id: str | None = None
+    refresh_quotes = True
+    for arg in args:
+        normalized = arg.lower()
+        if normalized in _ACCOUNTS:
+            if account is not None and account != normalized:
+                raise _bad_arg(command, arg, "只能指定一个账号：lx 或 sy。")
+            account = normalized
+        elif normalized in {"all", "全部"}:
+            status = "all"
+        elif normalized in {"open", "持仓", "未卖出"}:
+            status = "open"
+        elif normalized in {"partially_sold", "partial", "partially-sold", "部分卖出"}:
+            status = "partially_sold"
+        elif normalized in {"closed", "close", "已卖出", "已关闭"}:
+            status = "closed"
+        elif normalized in {"no-refresh", "no_refresh", "offline"}:
+            refresh_quotes = False
+        elif normalized.startswith("stock_lot_id="):
+            stock_lot_id = arg.split("=", 1)[1].strip() or None
+        elif symbol is None:
+            symbol = arg.upper()
+        else:
+            raise _bad_arg(
+                command,
+                arg,
+                "支持：/assigned-stock [lx|sy|all] [symbol] [open|partially_sold|closed|all] [no-refresh]。",
+            )
+    payload: dict[str, object] = {
+        "assigned_stock_status": status,
+        "refresh_quotes": refresh_quotes,
+    }
+    if account:
+        payload["account"] = account
+    if symbol:
+        payload["symbol"] = symbol
+    if stock_lot_id:
+        payload["stock_lot_id"] = stock_lot_id
+    return _intent("assigned_stock_position_query", payload)
 
 
 def _parse_manual_trade_preview_command(
