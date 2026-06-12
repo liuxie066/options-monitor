@@ -83,8 +83,18 @@ def _assigned_stock_row_matches(
         return False
     if stock_lot_id and str(row.get("stock_lot_id") or "") != stock_lot_id:
         return False
-    if status and str(row.get("status") or "").strip().lower() != status:
-        return False
+    if status:
+        row_status = str(row.get("status") or "").strip().lower()
+        if status == "open":
+            try:
+                shares_remaining = float(row.get("shares_remaining"))
+            except Exception:
+                shares_remaining = None
+            if shares_remaining is not None:
+                return shares_remaining > 0
+            return row_status in {"open", "partially_sold"}
+        if row_status != status:
+            return False
     return True
 
 

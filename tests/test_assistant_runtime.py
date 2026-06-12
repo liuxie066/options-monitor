@@ -42,6 +42,7 @@ from src.application.assistant.llm_intent_schema import LLM_INTENT_SCHEMA_VERSIO
 from src.application.assistant.llm_common import provider_api_kind, provider_endpoint_url, supported_llm_providers
 from src.application.assistant.llm_reply import LlmReplyResult, generate_general_reply
 from src.application.assistant.llm_translator import LlmTranslationResult, parse_llm_translation_payload, translate_inbound_intent
+from src.application.assistant.renderer import render_canonical_tool_result
 from src.application.assistant.settings import PlannerSettings
 from src.application.assistant.tool_policy import DEFAULT_TOOL_POLICY
 from src.application.agent_tool_contracts import AgentToolError, build_response
@@ -603,6 +604,64 @@ def test_assistant_runtime_executes_assigned_stock_slash_command(tmp_path: Path)
     assert "正股浮盈亏 USD -200" in text
     assert "spot USD 98" in text
     assert "正股成本按真实交割价记录" in text
+
+
+def test_assistant_runtime_renders_assigned_stock_receipt_readably() -> None:
+    text = render_canonical_tool_result(
+        renderer_key="assigned_stock_lifecycle",
+        data={
+            "action": "assigned-stock",
+            "filters": {"account": "lx", "status": "open", "refresh_quotes": True},
+            "rows": [
+                {
+                    "stock_lot_id": "assigned-stock-0700",
+                    "account": "lx",
+                    "symbol": "0700.HK",
+                    "currency": "HKD",
+                    "status": "open",
+                    "shares_remaining": 200,
+                    "shares_sold": 0,
+                    "stock_cost_per_share": 450,
+                    "remaining_stock_cost_basis": 90000,
+                    "remaining_market_value": 92720,
+                    "spot": 463.6,
+                    "quote_status": "fresh",
+                    "assigned_stock_unrealized_pnl": 2720,
+                    "assigned_stock_realized_pnl": 0,
+                    "assignment_lifecycle_pnl": 4065,
+                },
+                {
+                    "stock_lot_id": "assigned-stock-futu",
+                    "account": "lx",
+                    "symbol": "FUTU",
+                    "currency": "USD",
+                    "status": "open",
+                    "shares_remaining": 100,
+                    "shares_sold": 0,
+                    "stock_cost_per_share": 120,
+                    "remaining_stock_cost_basis": 12000,
+                    "remaining_market_value": 9794,
+                    "spot": 97.94,
+                    "quote_status": "fresh",
+                    "assigned_stock_unrealized_pnl": -2206,
+                    "assigned_stock_realized_pnl": 0,
+                    "assignment_lifecycle_pnl": -1846,
+                },
+            ],
+            "quote_refresh": {"status": "ok", "quote_source": "opend_realtime"},
+        },
+        tool_result={"ok": True},
+    )
+
+    assert text.startswith("lx · open · 指派正股：2 条")
+    assert "1. lx 0700.HK · open · 剩余 200 股" in text
+    assert "   持仓：成本 HKD 450/股，成本基数 HKD 90,000" in text
+    assert "   行情：spot HKD 463.6，quote=fresh" in text
+    assert "   盈亏：正股浮盈亏 HKD 2,720，正股已实现 HKD 0，生命周期PnL HKD 4,065" in text
+    assert "   lot：assigned-stock-0700" in text
+    assert "汇总（按币种）：" in text
+    assert "- HKD · 1 条：剩余成本 HKD 90,000，市值 HKD 92,720，正股浮盈亏 HKD 2,720" in text
+    assert "- USD · 1 条：剩余成本 USD 12,000，市值 USD 9,794，正股浮盈亏 USD -2,206" in text
 
 
 def test_assistant_runtime_does_not_overwrite_original_audit_on_duplicate_replay(tmp_path: Path) -> None:
