@@ -85,19 +85,20 @@ def print_monthly_income(report: dict[str, Any], *, include_rows: bool = False) 
 
     print("")
     print(
-        "| month | account | currency | net_cashflow_gross | realized_pnl_gross | "
+        "| month | account | currency | net_cashflow_gross | assignment_stock_net_cashflow_gross | realized_pnl_gross | "
         "open_basis_lifecycle_pnl_gross | premium_received_gross | realized_gross | closed_contracts | "
         "premium_contracts | positions | premium_positions |"
     )
-    print("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+    print("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     summary = report.get("summary") or []
     if not summary:
-        print("| - | - | - | - | - | - | - | - | 0 | 0 | 0 | 0 |")
+        print("| - | - | - | - | - | - | - | - | 0 | 0 | 0 | 0 | 0 |")
     else:
         for row in summary:
             print(
                 f"| {row.get('month')} | {row.get('account')} | {row.get('currency')} | "
                 f"{format_position_money(row.get('net_cashflow_gross'), row.get('currency') or '')} | "
+                f"{format_position_money(row.get('assignment_stock_net_cashflow_gross'), row.get('currency') or '')} | "
                 f"{format_position_money(row.get('realized_pnl_gross'), row.get('currency') or '')} | "
                 f"{format_position_money(row.get('open_basis_lifecycle_pnl_gross'), row.get('currency') or '')} | "
                 f"{format_position_money(row.get('premium_received_gross'), row.get('currency') or '')} | "
@@ -140,6 +141,65 @@ def print_monthly_income(report: dict[str, Any], *, include_rows: bool = False) 
                     f"| {row.get('month')} | {row.get('account')} | {row.get('symbol')} | {ccy} | "
                     f"{row.get('contracts')} | {row.get('premium')} | {row.get('multiplier')} | "
                     f"{format_position_money(row.get('premium_received_gross'), ccy)} | {row.get('record_id')} |"
+                )
+
+        stock_settlement_rows = report.get("stock_settlement_rows") or []
+        if stock_settlement_rows:
+            print("")
+            print("## Assignment Stock Settlement Details")
+            print("")
+            print(
+                "| month | account | symbol | stock_side | currency | shares | price | "
+                "cash_in_gross | cash_out_gross | net_cashflow_gross | event_id |"
+            )
+            print("|---|---|---|---|---:|---:|---:|---:|---:|---:|---|")
+            for row in stock_settlement_rows:
+                ccy = row.get("currency") or ""
+                print(
+                    f"| {row.get('month')} | {row.get('account')} | {row.get('symbol')} | "
+                    f"{str(row.get('trade_action') or '').replace('assignment_stock_', '')} | {ccy} | "
+                    f"{row.get('shares')} | {row.get('price')} | "
+                    f"{format_position_money(row.get('cash_in_gross'), ccy)} | "
+                    f"{format_position_money(row.get('cash_out_gross'), ccy)} | "
+                    f"{format_position_money(row.get('net_cashflow_gross'), ccy)} | {row.get('event_id')} |"
+                )
+
+        assignment_lifecycle_rows = report.get("assignment_lifecycle_rows") or []
+        if assignment_lifecycle_rows:
+            print("")
+            print("## Assignment Stock Lifecycle")
+            print("")
+            print(
+                "| month | account | symbol | status | review_status | currency | shares_remaining | "
+                "stock_cost_per_share | spot | stock_unrealized_pnl | stock_realized_pnl | "
+                "option_premium_attribution | assignment_lifecycle_pnl | quote_status | stock_lot_id |"
+            )
+            print("|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|")
+            for row in assignment_lifecycle_rows:
+                ccy = row.get("currency") or ""
+                print(
+                    f"| {row.get('opened_month') or row.get('month')} | {row.get('account')} | {row.get('symbol')} | "
+                    f"{row.get('status')} | {row.get('review_status')} | {ccy} | "
+                    f"{row.get('shares_remaining')} | {row.get('stock_cost_per_share')} | {row.get('spot')} | "
+                    f"{format_position_money(row.get('assigned_stock_unrealized_pnl'), ccy)} | "
+                    f"{format_position_money(row.get('assigned_stock_realized_pnl'), ccy)} | "
+                    f"{format_position_money(row.get('option_premium_attribution'), ccy)} | "
+                    f"{format_position_money(row.get('assignment_lifecycle_pnl'), ccy)} | "
+                    f"{row.get('quote_status')} | {row.get('stock_lot_id')} |"
+                )
+
+        assigned_stock_review_rows = report.get("assigned_stock_review_rows") or []
+        if assigned_stock_review_rows:
+            print("")
+            print("## Assignment Stock Review")
+            print("")
+            print("| status | month | account | symbol | stock_lot_id | event_id | message |")
+            print("|---|---|---|---|---|---|---|")
+            for row in assigned_stock_review_rows:
+                print(
+                    f"| {row.get('status')} | {row.get('month') or '-'} | {row.get('account') or '-'} | "
+                    f"{row.get('symbol') or '-'} | {row.get('stock_lot_id') or '-'} | "
+                    f"{row.get('event_id') or row.get('stock_event_id') or '-'} | {row.get('message') or '-'} |"
                 )
 
         cashflow_rows = report.get("cashflow_rows") or []

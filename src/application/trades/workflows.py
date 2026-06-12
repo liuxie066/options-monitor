@@ -10,6 +10,10 @@ from src.application.ledger.api import (
     record_broker_trade_close,
     record_broker_trade_open,
 )
+from src.application.positions.workflows import (
+    BrokerAssignedStockSaleMatchError,
+    execute_broker_assigned_stock_sale as _execute_position_broker_assigned_stock_sale,
+)
 from src.application.trades.normalizer import NormalizedTradeDeal
 
 
@@ -51,3 +55,12 @@ def apply_trade_close_with(
         persist_trade_event_fn=persist_trade_event_fn,
         close_target_resolution=close_target_resolution,
     )
+
+
+def execute_broker_assigned_stock_sale(
+    repo: Any,
+    deal: NormalizedTradeDeal,
+    *,
+    dry_run: bool,
+) -> dict[str, Any]:
+    return _execute_position_broker_assigned_stock_sale(repo, deal, dry_run=dry_run)

@@ -29,6 +29,11 @@ class OptionPositionsEventWriteRepo(OptionPositionsReadRepo, Protocol):
     ) -> int: ...
 
 
+class AssignedStockEventRepo(Protocol):
+    def list_assigned_stock_events(self, *, conn: sqlite3.Connection | None = None) -> list[dict[str, Any]]: ...
+    def upsert_assigned_stock_event(self, event: dict[str, Any], *, conn: sqlite3.Connection | None = None) -> bool: ...
+
+
 def _load_data_config(data_config: Path) -> dict[str, Any]:
     if not data_config.exists():
         return {}
@@ -152,6 +157,23 @@ class SQLiteOptionPositionsRepository:
             _add_column_if_missing(conn, "position_lots", "multiplier", "REAL")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_position_lots_expiration ON position_lots(expiration, record_id)"
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS assigned_stock_events (
+                  stock_event_id TEXT PRIMARY KEY,
+                  event_json TEXT NOT NULL,
+                  trade_time_ms INTEGER NOT NULL,
+                  created_at_ms INTEGER NOT NULL,
+                  updated_at_ms INTEGER NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_assigned_stock_events_trade_time
+                ON assigned_stock_events(trade_time_ms, stock_event_id)
+                """
             )
             conn.execute(
                 """
@@ -312,6 +334,61 @@ class SQLiteOptionPositionsRepository:
             item = json.loads(str(row["event_json"]) or "{}")
             if isinstance(item, dict):
                 out.append(trade_event_application_payload(item))
+        return out
+
+    def upsert_assigned_stock_event(self, event: dict[str, Any], *, conn: sqlite3.Connection | None = None) -> bool:
+        if not isinstance(event, dict):
+            raise TypeError("assigned stock event must be a JSON object")
+        stock_event_id = str(event.get("stock_event_id") or event.get("event_id") or "").strip()
+        if not stock_event_id:
+            raise ValueError("assigned stock event requires stock_event_id")
+        try:
+            trade_time_ms = int(event.get("trade_time_ms") or event.get("event_time_ms") or 0)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("assigned stock event requires numeric trade_time_ms") from exc
+        if trade_time_ms <= 0:
+            raise ValueError("assigned stock event requires trade_time_ms > 0")
+        payload = dict(event)
+        payload["stock_event_id"] = stock_event_id
+        payload["trade_time_ms"] = trade_time_ms
+        event_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        ts = int(now_ms())
+        with self._optional_conn(conn, commit=True) as active_conn:
+            existing = active_conn.execute(
+                "SELECT event_json FROM assigned_stock_events WHERE stock_event_id = ?",
+                (stock_event_id,),
+            ).fetchone()
+            if existing is not None:
+                existing_json = str(existing["event_json"] or "")
+                if existing_json != event_json:
+                    raise ValueError(f"assigned stock event conflict for stock_event_id={stock_event_id}")
+                return False
+            active_conn.execute(
+                """
+                INSERT INTO assigned_stock_events (
+                  stock_event_id, event_json, trade_time_ms, created_at_ms, updated_at_ms
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (stock_event_id, event_json, trade_time_ms, ts, ts),
+            )
+        return True
+
+    def list_assigned_stock_events(self, *, conn: sqlite3.Connection | None = None) -> list[dict[str, Any]]:
+        if not self._table_exists("assigned_stock_events"):
+            return []
+        with self._optional_conn(conn) as active_conn:
+            rows = active_conn.execute(
+                """
+                SELECT event_json
+                FROM assigned_stock_events
+                ORDER BY trade_time_ms ASC, stock_event_id ASC
+                """
+            ).fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            item = json.loads(str(row["event_json"]) or "{}")
+            if isinstance(item, dict):
+                out.append(item)
         return out
 
     def replace_position_lots(

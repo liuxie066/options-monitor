@@ -40,6 +40,14 @@ _MONTHLY_INCOME_DETAIL_OUTPUT_CONTRACT: dict[str, Any] = {
         "cashflow_rows[].contracts",
         "cashflow_rows[].currency",
         "cashflow_rows[].net_cashflow_gross",
+        "assignment_lifecycle_rows[].stock_lot_id",
+        "assignment_lifecycle_rows[].stock_cost_per_share",
+        "assignment_lifecycle_rows[].assigned_stock_unrealized_pnl",
+        "assignment_lifecycle_rows[].assigned_stock_realized_pnl",
+        "assignment_lifecycle_rows[].option_premium_attribution",
+        "assignment_lifecycle_rows[].assignment_lifecycle_pnl",
+        "assignment_lifecycle_rows[].quote_status",
+        "assigned_stock_review_rows[].status",
         "realized_rows[].contracts_closed",
         "realized_rows[].realized_gross",
         "premium_rows[].contracts",
@@ -64,6 +72,29 @@ _OPTION_POSITIONS_LIST_OUTPUT_CONTRACT: dict[str, Any] = {
         "rows[].expiration_ymd",
         "rows[].contracts_open",
         "rows[].status",
+    ],
+}
+
+_OPTION_POSITIONS_ASSIGNED_STOCK_OUTPUT_CONTRACT: dict[str, Any] = {
+    "schema_version": "option_positions_read.assigned_stock_output.v1",
+    "canonical_renderer": "assigned_stock_lifecycle",
+    "source_label": "OM 本地 SQLite assigned_stock_events + trade_events",
+    "guard_profile": "position_rows",
+    "primary_rows": "rows",
+    "row_count_field": "row_count",
+    "fact_fields": [
+        "rows[].stock_lot_id",
+        "rows[].account",
+        "rows[].symbol",
+        "rows[].status",
+        "rows[].shares_remaining",
+        "rows[].stock_cost_per_share",
+        "rows[].assigned_stock_unrealized_pnl",
+        "rows[].assigned_stock_realized_pnl",
+        "rows[].option_premium_attribution",
+        "rows[].assignment_lifecycle_pnl",
+        "rows[].quote_status",
+        "assigned_stock_review_rows[].status",
     ],
 }
 
@@ -99,6 +130,7 @@ def _option_positions_read_tool(
         resolve_public_data_config_path=ctx.resolve_public_data_config_path,
         normalize_broker=ctx.normalize_broker,
         normalize_account=ctx.normalize_account,
+        refresh_assigned_stock_quotes=ctx.refresh_assigned_stock_quotes,
         resolve_option_positions_repo=ctx.resolve_option_positions_repo,
         list_position_rows=ctx.list_position_rows,
         build_lot_event_history=ctx.build_lot_event_history,
@@ -131,6 +163,8 @@ def _option_positions_output_contract(payload: dict[str, Any]) -> dict[str, Any]
     action = str(payload.get("action") or "list").strip().lower()
     if action == "list":
         return _OPTION_POSITIONS_LIST_OUTPUT_CONTRACT
+    if action == "assigned-stock":
+        return _OPTION_POSITIONS_ASSIGNED_STOCK_OUTPUT_CONTRACT
     return None
 
 
@@ -170,7 +204,7 @@ OPTION_POSITIONS_READ_TOOL = build_agent_tool(
         "config_key": "us|hk",
         "config_path": "optional explicit config path",
         "data_config": "optional explicit data config path",
-        "action": "list|events|history|inspect",
+        "action": "list|events|history|inspect|assigned-stock",
         "broker": "optional broker name, preferred public field",
         "account": "optional account label",
         "status": "list-only open|close|all",
@@ -187,6 +221,12 @@ OPTION_POSITIONS_READ_TOOL = build_agent_tool(
         "side": "list-only short|long selector",
         "strike": "list/events/inspect numeric selector",
         "exp": "events/inspect YYYY-MM-DD selector",
+        "stock_lot_id": "assigned-stock selector",
+        "quote_snapshots": "assigned-stock optional quote snapshot list/dict",
+        "refresh_quotes": "assigned-stock optional bool; explicitly fetch realtime OpenD spot for open assigned-stock lots",
+        "opend_host": "assigned-stock refresh_quotes optional OpenD host override",
+        "opend_port": "assigned-stock refresh_quotes optional OpenD port override",
+        "as_of_ms": "assigned-stock optional as-of timestamp for quote snapshot selection",
     },
     handler=_option_positions_read_tool,
     pure_read=True,

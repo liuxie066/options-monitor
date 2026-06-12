@@ -195,6 +195,11 @@ om multiplier-cache seed --runtime-root /var/lib/options-monitor --symbol 0883.H
 manual trade / trade-intake 会优先使用 runtime root 或 runtime config 路径推导出的
 `output_shared/state/multiplier_cache.json`，cache miss 时再按场景实时向 OpenD 刷新；
 `trade-intake --mode apply` 会写交易事件并可能发送回执，必须同时带 `--confirm` 或非交互用的 `--yes`。
+当入站成交是股票卖出（`option_type=null`, `side=sell`）且能唯一匹配开放的 Sell Put
+assigned-stock lot 时，trade-intake 会返回 `action=assigned_stock_sale`，只写本地
+`assigned_stock_events`，并用券商 `deal_id` 作为 `source_deal_id` 幂等。没有匹配
+assigned-stock lot 的普通股票卖出仍返回 `skipped/not_option_deal`；多个候选 lot 或
+数量/时间无法安全匹配时返回 unresolved，需要人工指定目标 lot。
 重放已进入 `failed_deal_ids` 的单笔成交时，需要使用显式修复入口：
 `om run trade-intake --config config.us.json --mode apply --confirm --deal-json <payload.json> --retry-failed`。
 该入口只允许配合 `--deal-json` 使用，不会放开已成功处理成交的重复写入。
@@ -526,6 +531,9 @@ om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","accoun
   字段包括 `cash_secured_by_ccy`、`cash_secured_cny`、`net_income_cny`、
   `premium_income_cny`、`net_return_rate`、`premium_return_rate`、
   `annualized_*_return_rate` 和 `annualized_basis_days`。
+  `net_income_*` 会排除 Sell Put assignment 形成的正股交割本金现金流；
+  这类本金流出仍保留在 `summary.net_cashflow_gross` 和
+  `assignment_stock_net_cashflow_gross` 中。
   `return_basis=current_cash_secured` 表示这不是账户总资产收益率。
   如果缺少汇率，相关 CNY 和收益率字段为 `null`，并在 `warnings` 中说明。
 - `combined_return_summary`：当未指定 `account` 时按 `month` 输出全账户合并收益摘要。
@@ -533,6 +541,13 @@ om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","accoun
 - `diagnostics`：按 `month + account` 输出收益统计诊断，包括匹配到的
   `trade_events`、position lots、已平仓行、premium 行、现金担保可用性和
   `missing_fields`。入站 `收益` 命令会用它解释“暂无可计算收益”或数据不完整的原因。
+- `include_rows=true` 时，若存在 Sell Put assignment 的 `stock_settlement`，
+  额外返回 `stock_settlement_rows`、`assigned_stock_lots`、
+  `assignment_lifecycle_rows`、`assigned_stock_sale_rows` 和
+  `assigned_stock_review_rows`。其中 `assignment_lifecycle_pnl` 是组合口径：
+  option premium attribution + assigned stock realized/unrealized PnL；正股成本
+  `stock_cost_per_share` 仍按真实交割价记录，不扣除权利金。缺 spot 时
+  `quote_status=missing_quote`，浮盈亏和 lifecycle PnL 为 `null`。
 
 示例：
 
@@ -549,17 +564,29 @@ om-agent run --tool monthly_income_report --input-json '{"config_key":"us","acco
 - `action=events`：读取 canonical trade events
 - `action=history`：读取单个 lot 的事件链
 - `action=inspect`：读取投影诊断状态
+- `action=assigned-stock`：读取 Sell Put 被指派后形成的正股 lot、已记录 sale events、
+  lifecycle PnL 和 review rows。默认只消费本地账本和可选 `quote_snapshots`，
+  不主动连接 OpenD；只有显式传 `refresh_quotes=true` 时，才通过 OpenD
+  获取开放 assigned-stock lot 的实时 spot，并返回 `quote_refresh` 诊断。
+  指定 `as_of_ms` 的历史查询不会使用实时 spot 回填，只会使用传入的
+  `quote_snapshots` 或返回 `missing_quote`。
 
 示例：
 
 ```bash
 om-agent run --tool option_positions_read --input-json '{"config_key":"us","action":"list","account":"lx","status":"open"}'
 om-agent run --tool option_positions_read --input-json '{"config_key":"us","action":"history","record_id":"rec_xxx"}'
+om-agent run --tool option_positions_read --input-json '{"config_key":"us","action":"assigned-stock","account":"lx"}'
+om-agent run --tool option_positions_read --input-json '{"config_key":"us","action":"assigned-stock","account":"lx","refresh_quotes":true}'
+om option-positions assigned-stock-sale --target-stock-lot-id assigned-stock-assign_xxx --shares 100 --price 105 --trade-time-ms 1780000000000 --dry-run
 ```
 
 注意：
 - 这个工具只开放读和诊断动作
 - `add` / `buy-close` / `void-event` / `adjust-lot` / `rebuild` 不在此工具中开放
+- 被指派正股卖出的事实来源可以是 trade-intake 的 broker stock sell 自动匹配，
+  也可以是 `om option-positions assigned-stock-sale` 的人工确认写入；两者都写
+  `assigned_stock_events`，不写 canonical option `trade_events`
 
 ---
 

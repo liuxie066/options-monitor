@@ -29,6 +29,7 @@ class AgentToolContext:
     list_account_config_views: Callable[..., Any]
     mask_account_id: Callable[[Any], str]
     infer_futu_portfolio_settings: Callable[..., Any]
+    refresh_assigned_stock_quotes: Callable[..., Any]
     load_option_positions_repo: Callable[..., Any]
     run_futu_doctor: Callable[..., dict[str, Any]]
     healthcheck_symbols_for_futu: Callable[..., list[str]]
@@ -245,6 +246,7 @@ def build_default_agent_tool_context() -> AgentToolContext:
     from src.application.pipeline_context import load_option_positions_context, load_portfolio_context
     from src.application.pipeline_watchlist import run_watchlist_pipeline_default
     from src.application.positions.inspection import build_lot_event_history, inspect_projection_state
+    from src.application.positions.assigned_stock_quotes import refresh_assigned_stock_quote_snapshots
     from src.application.positions.reporting import build_monthly_income_report
     from src.application.runtime_logs_cli import collect_runtime_logs
     from src.application.runtime_runs_cli import collect_runtime_runs
@@ -330,6 +332,7 @@ def build_default_agent_tool_context() -> AgentToolContext:
         list_account_config_views=list_account_config_views,
         mask_account_id=_mask_account_id,
         infer_futu_portfolio_settings=infer_futu_portfolio_settings,
+        refresh_assigned_stock_quotes=refresh_assigned_stock_quote_snapshots,
         load_option_positions_repo=open_position_ledger,
         run_futu_doctor=_run_futu_doctor,
         healthcheck_symbols_for_futu=_healthcheck_symbols_for_futu,
