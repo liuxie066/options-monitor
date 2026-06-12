@@ -607,10 +607,11 @@ def _render_assigned_stock_lifecycle(data: dict[str, Any]) -> str:
         return "\n".join(lines)
 
     lines = [f"{scope}：{len(rows)} 条"]
-    for row_raw in rows:
+    for idx, row_raw in enumerate(rows, start=1):
         row = _dict(row_raw)
         currency = _value(row.get("currency"))
         shares_remaining = _num(row.get("shares_remaining"))
+        shares_sold = _num(row.get("shares_sold"))
         cost = _money(row.get("stock_cost_per_share"), currency)
         basis = _money(row.get("remaining_stock_cost_basis"), currency)
         spot = _money(row.get("spot"), currency)
@@ -618,16 +619,25 @@ def _render_assigned_stock_lifecycle(data: dict[str, Any]) -> str:
         realized = _money(row.get("assigned_stock_realized_pnl"), currency)
         lifecycle = _money(row.get("assignment_lifecycle_pnl"), currency)
         quote_status = _value(row.get("quote_status"))
-        lines.append(
-            "- "
-            f"{_value(row.get('account'))} {_value(row.get('symbol'))} "
-            f"{_value(row.get('status'))} "
-            f"剩余 {shares_remaining} 股 | 成本 {cost} | spot {spot} "
-            f"| 正股浮盈亏 {unrealized} | 正股已实现 {realized} | 生命周期PnL {lifecycle} "
-            f"| quote={quote_status} | lot={_value(row.get('stock_lot_id'))}"
+        row_status = _value(row.get("status"))
+        title = (
+            f"{idx}. {_value(row.get('account'))} {_value(row.get('symbol'))} "
+            f"· {row_status} · 剩余 {shares_remaining} 股"
         )
+        if shares_sold != "-" and shares_sold != "0":
+            title += f"，已卖 {shares_sold} 股"
+        lines.append(title)
         if basis != "-":
-            lines.append(f"  成本基数：{basis}")
+            lines.append(f"   持仓：成本 {cost}/股，成本基数 {basis}")
+        else:
+            lines.append(f"   持仓：成本 {cost}/股")
+        lines.append(f"   行情：spot {spot}，quote={quote_status}")
+        lines.append(f"   盈亏：正股浮盈亏 {unrealized}，正股已实现 {realized}，生命周期PnL {lifecycle}")
+        lines.append(f"   lot：{_value(row.get('stock_lot_id'))}")
+    summary_lines = _assigned_stock_summary_lines(rows)
+    if summary_lines:
+        lines.append("汇总（按币种）：")
+        lines.extend(summary_lines)
     review_notes: list[str] = []
     for item in _list(data.get("assigned_stock_review_rows"))[:5]:
         row = _dict(item)
@@ -647,6 +657,51 @@ def _render_assigned_stock_lifecycle(data: dict[str, Any]) -> str:
     lines.append("口径：正股成本按真实交割价记录，不扣除 Sell Put 权利金；生命周期PnL 才包含权利金归因。")
     lines.append("数据源：OM 本地 SQLite assigned_stock_events + trade_events")
     return "\n".join(lines)
+
+
+def _assigned_stock_summary_lines(rows: list[Any]) -> list[str]:
+    if len(rows) <= 1:
+        return []
+    grouped: dict[str, dict[str, float]] = {}
+    counts: dict[str, int] = {}
+    fields = {
+        "remaining_stock_cost_basis": "剩余成本",
+        "remaining_market_value": "市值",
+        "assigned_stock_unrealized_pnl": "正股浮盈亏",
+        "assigned_stock_realized_pnl": "正股已实现",
+        "assignment_lifecycle_pnl": "生命周期PnL",
+    }
+    for row_raw in rows:
+        row = _dict(row_raw)
+        currency = _value(row.get("currency"))
+        if currency == "-":
+            currency = ""
+        bucket = grouped.setdefault(currency, {})
+        counts[currency] = counts.get(currency, 0) + 1
+        for field in fields:
+            value = row.get(field)
+            if value is None:
+                continue
+            try:
+                amount = float(value)
+            except Exception:
+                continue
+            bucket[field] = bucket.get(field, 0.0) + amount
+    lines: list[str] = []
+    for currency in sorted(grouped):
+        bucket = grouped[currency]
+        if not bucket:
+            continue
+        parts = [
+            f"{fields[field]} {_money(bucket[field], currency)}"
+            for field in fields
+            if field in bucket
+        ]
+        if not parts:
+            continue
+        prefix = _value(currency) if currency else "未标币种"
+        lines.append(f"- {prefix} · {counts.get(currency, 0)} 条：" + "，".join(parts))
+    return lines
 
 
 def _render_position_exit_analysis(data: dict[str, Any]) -> str:

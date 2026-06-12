@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.2.258 - 2026-06-13
+
+### Changed
+- Improved assigned-stock assistant receipts with numbered lot rows and per-currency summaries.
+
+### Fixed
+- Fixed `/assigned-stock` open assigned-stock reads to include partially sold lots that still have remaining shares, so partial stock sales stay visible in holding PnL.
+
 ## 1.2.257 - 2026-06-12
 
 ### Added

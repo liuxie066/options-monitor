@@ -1272,6 +1272,118 @@ def test_option_positions_read_lists_events_history_and_inspect(monkeypatch, tmp
     assert skipped_no_match_refresh["data"]["quote_refresh"]["status"] == "skipped_no_matching_assigned_stock"
 
 
+def test_option_positions_read_open_assigned_stock_includes_partially_sold(monkeypatch, tmp_path: Path) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+    from domain.domain.option_position_lots import OpenPositionCommand, parse_exp_to_ms
+    from src.application.ledger.commands import record_manual_assignment
+    from src.application.positions.workflows import execute_manual_assigned_stock_sale
+
+    def _ms(value: str) -> int:
+        out = parse_exp_to_ms(value)
+        assert out is not None
+        return out
+
+    sqlite_path = tmp_path / "output_shared" / "state" / "option_positions.sqlite3"
+    data_cfg_path = tmp_path / "portfolio.runtime.json"
+    data_cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    data_cfg_path.write_text(
+        json.dumps({"option_positions": {"sqlite_path": str(sqlite_path)}}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    cfg_path = tmp_path / "config.us.json"
+    cfg_path.write_text(
+        json.dumps(_public_cfg_with_futu(str(data_cfg_path)), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(sqlite_path)
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="user1",
+            symbol="NVDA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=2.5,
+            opened_at_ms=_ms("2026-04-03"),
+        ),
+    )
+    lot = repo.list_position_lots()[0]
+    record_manual_assignment(
+        repo,
+        record_id=str(lot["record_id"]),
+        contracts_to_close=1,
+        stock_side="buy",
+        stock_qty=100,
+        stock_price=100.0,
+        as_of_ms=_ms("2026-05-15"),
+    )
+    assignment_event = [item for item in repo.list_trade_events() if item.get("event_type") == "assignment"][0]
+    stock_lot_id = f"assigned-stock-{assignment_event['event_id']}"
+    execute_manual_assigned_stock_sale(
+        repo,
+        target_stock_lot_id=stock_lot_id,
+        account="user1",
+        broker="富途",
+        symbol="NVDA",
+        currency="USD",
+        shares=40,
+        price=105.0,
+        trade_time_ms=_ms("2026-06-01"),
+        dry_run=False,
+    )
+
+    quote_snapshots = [{"symbol": "NVDA", "spot": 98.0, "quote_time_ms": _ms("2026-06-02")}]
+    open_rows = run_tool(
+        "option_positions_read",
+        {
+            "config_path": str(cfg_path),
+            "action": "assigned-stock",
+            "account": "user1",
+            "status": "open",
+            "quote_snapshots": quote_snapshots,
+        },
+    )
+    partially_sold_rows = run_tool(
+        "option_positions_read",
+        {
+            "config_path": str(cfg_path),
+            "action": "assigned-stock",
+            "account": "user1",
+            "status": "partially_sold",
+            "quote_snapshots": quote_snapshots,
+        },
+    )
+    closed_rows = run_tool(
+        "option_positions_read",
+        {
+            "config_path": str(cfg_path),
+            "action": "assigned-stock",
+            "account": "user1",
+            "status": "closed",
+            "quote_snapshots": quote_snapshots,
+        },
+    )
+
+    assert open_rows["ok"] is True
+    assert open_rows["data"]["row_count"] == 1
+    open_row = open_rows["data"]["rows"][0]
+    assert open_row["stock_lot_id"] == stock_lot_id
+    assert open_row["status"] == "partially_sold"
+    assert open_row["shares_remaining"] == 60
+    assert open_row["shares_sold"] == 40
+    assert partially_sold_rows["ok"] is True
+    assert partially_sold_rows["data"]["row_count"] == 1
+    assert closed_rows["ok"] is True
+    assert closed_rows["data"]["row_count"] == 0
+
+
 def test_runtime_status_summarizes_openclaw_runtime_files(tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
