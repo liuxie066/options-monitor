@@ -570,6 +570,13 @@ om-agent run --tool monthly_income_report --input-json '{"config_key":"us","acco
   获取开放 assigned-stock lot 的实时 spot，并返回 `quote_refresh` 诊断。
   指定 `as_of_ms` 的历史查询不会使用实时 spot 回填，只会使用传入的
   `quote_snapshots` 或返回 `missing_quote`。
+- Inbound 用户入口：`/assigned-stock [lx|sy|all] [symbol] [open|partially_sold|closed|all]`。
+  自然语言的“指派正股持仓盈亏 / 被指派正股浮盈亏 / assigned stock PnL”也应路由到
+  `action=assigned-stock`。当前持仓盈亏默认使用 `refresh_quotes=true` 获取实时
+  spot；若取价失败，响应必须展示 `quote_refresh` / `quote_status`，不能编造浮盈亏。
+- 口径：`assigned_stock_unrealized_pnl` 和 `assigned_stock_realized_pnl` 是正股自身
+  PnL，不含 Sell Put 权利金；`assignment_lifecycle_pnl` 才包含权利金归因。
+  `stock_cost_per_share` 按真实交割价记录，不扣除权利金。
 
 示例：
 

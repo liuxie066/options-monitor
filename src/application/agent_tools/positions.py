@@ -148,7 +148,7 @@ def _monthly_income_answer_policy(payload: dict[str, Any]) -> str:
 
 def _option_positions_answer_policy(payload: dict[str, Any]) -> str:
     action = str(payload.get("action") or "list").strip().lower()
-    if action == "list":
+    if action in {"list", "assigned-stock"}:
         return "facts_then_analysis"
     return "default"
 

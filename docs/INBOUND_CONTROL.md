@@ -84,6 +84,7 @@ Slash commands are the deterministic read surface. They do not call LLM:
 | `/health` | `healthcheck` |
 | `/config-check` | `config_validate` |
 | `/positions [lx|sy|all] [到期月份/到期日/标的/类型/方向]` | `option_positions_read` |
+| `/assigned-stock [lx|sy|all] [symbol] [open|partially_sold|closed|all]` | `option_positions_read action=assigned-stock` |
 | `/income [lx|sy] [YYYY-MM|6月|本月|上月]` | `monthly_income_report` |
 | `/runs [limit]` | `runtime_runs` |
 | `/logs <run_id>` | `runtime_logs` |
@@ -91,12 +92,17 @@ Slash commands are the deterministic read surface. They do not call LLM:
 
 Natural-language read requests are planner territory when
 `assistant.planner.enabled=true`. For example, `状态`, `持仓 sy`, `这个月赚了多少`,
-`分析 long call 是不是应该平仓`, and `现在泡泡玛特 sell put 的 max strike 是多少`
+`指派正股持仓盈亏`, `分析 long call 是不是应该平仓`, and `现在泡泡玛特 sell put 的 max strike 是多少`
 must be translated into bounded read-only capabilities such as
 `runtime_status`, `option_positions_read`, `monthly_income_report`,
 `close_advice_read`, or `symbol_config_read`. If a needed read tool or required
 slot is missing, Inbound should ask for the missing capability/field instead of
 falling back to a weakly related query.
+
+Assigned-stock holding PnL requests are not ordinary `/income` questions. They
+use `option_positions_read action=assigned-stock`; current holding PnL also sets
+`refresh_quotes=true` so spot comes from the configured read-only OpenD quote
+adapter when available. Missing quote data must be reported explicitly.
 
 Read tools use the pure-read whitelist. Admin write operations are separate and must pass sender allowlist, operation gates, preview storage, and explicit confirmation before applying.
 

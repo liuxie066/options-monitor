@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.2.257 - 2026-06-12
+
+### Added
+- Added `/assigned-stock` inbound read command for Sell Put assigned-stock lots, including spot, stock cost basis, realized/unrealized stock PnL, and lifecycle PnL.
+
+### Fixed
+- Fixed assistant planning and canonical rendering so "指派正股持仓盈亏" routes to `option_positions_read action=assigned-stock` with realtime quote refresh instead of ordinary option positions or monthly income.
+
 ## 1.2.256 - 2026-06-12
 
 ### Added

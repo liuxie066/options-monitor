@@ -45,6 +45,7 @@ def render_inbound_text(*, intent: PerceptionResult | None, tool_result: dict[st
     renderer_key = {
         "monthly_income_report": "monthly_income",
         "position_query": "position_rows",
+        "assigned_stock_position_query": "assigned_stock_lifecycle",
         "position_exit_analysis": "position_exit_analysis",
         "runtime_runs": "runtime_runs",
         "runtime_logs": "runtime_logs",
@@ -583,6 +584,68 @@ def _render_positions(data: dict[str, Any]) -> str:
     if bootstrap_status.startswith("degraded"):
         lines.append("账本提示：" + _value(bootstrap.get("message") or bootstrap_status))
     lines.append("数据源：OM 本地 SQLite position_lots")
+    return "\n".join(lines)
+
+
+def _render_assigned_stock_lifecycle(data: dict[str, Any]) -> str:
+    rows = _list(data.get("rows") or data.get("assigned_stock_lots"))
+    filters = _dict(data.get("filters"))
+    account = _value(filters.get("account") or "all")
+    status = _value(filters.get("status") or "open")
+    symbol = _value(filters.get("symbol"))
+    scope_parts = [account if account != "-" else "全部账户", status, "指派正股"]
+    if symbol != "-":
+        scope_parts.append(symbol)
+    scope = " · ".join(scope_parts)
+    quote_refresh = _dict(data.get("quote_refresh"))
+    if not rows:
+        lines = [f"{scope}：0 条。"]
+        refresh_status = str(quote_refresh.get("status") or "").strip()
+        if refresh_status:
+            lines.append(f"报价刷新：{refresh_status}")
+        lines.append("数据源：OM 本地 SQLite assigned_stock_events + trade_events")
+        return "\n".join(lines)
+
+    lines = [f"{scope}：{len(rows)} 条"]
+    for row_raw in rows:
+        row = _dict(row_raw)
+        currency = _value(row.get("currency"))
+        shares_remaining = _num(row.get("shares_remaining"))
+        cost = _money(row.get("stock_cost_per_share"), currency)
+        basis = _money(row.get("remaining_stock_cost_basis"), currency)
+        spot = _money(row.get("spot"), currency)
+        unrealized = _money(row.get("assigned_stock_unrealized_pnl"), currency)
+        realized = _money(row.get("assigned_stock_realized_pnl"), currency)
+        lifecycle = _money(row.get("assignment_lifecycle_pnl"), currency)
+        quote_status = _value(row.get("quote_status"))
+        lines.append(
+            "- "
+            f"{_value(row.get('account'))} {_value(row.get('symbol'))} "
+            f"{_value(row.get('status'))} "
+            f"剩余 {shares_remaining} 股 | 成本 {cost} | spot {spot} "
+            f"| 正股浮盈亏 {unrealized} | 正股已实现 {realized} | 生命周期PnL {lifecycle} "
+            f"| quote={quote_status} | lot={_value(row.get('stock_lot_id'))}"
+        )
+        if basis != "-":
+            lines.append(f"  成本基数：{basis}")
+    review_notes: list[str] = []
+    for item in _list(data.get("assigned_stock_review_rows"))[:5]:
+        row = _dict(item)
+        note = f"{_value(row.get('symbol'))} {_value(row.get('status'))}: {_value(row.get('message'))}"
+        if note.strip():
+            review_notes.append(note)
+    if review_notes:
+        lines.append("检查提示：")
+        lines.extend(f"- {note}" for note in review_notes)
+    refresh_status = str(quote_refresh.get("status") or "").strip()
+    if refresh_status:
+        source = _value(quote_refresh.get("quote_source"))
+        lines.append(f"报价刷新：{refresh_status} source={source}")
+    warnings = [str(item).strip() for item in _list(data.get("warnings")) if str(item).strip()]
+    if warnings:
+        lines.append("提示：" + "；".join(warnings[:3]))
+    lines.append("口径：正股成本按真实交割价记录，不扣除 Sell Put 权利金；生命周期PnL 才包含权利金归因。")
+    lines.append("数据源：OM 本地 SQLite assigned_stock_events + trade_events")
     return "\n".join(lines)
 
 
@@ -1126,11 +1189,26 @@ def _num(value: Any) -> str:
     return f"{number:.4f}".rstrip("0").rstrip(".")
 
 
+def _money(value: Any, currency: Any) -> str:
+    if value is None:
+        return "-"
+    ccy = _value(currency)
+    if ccy == "-":
+        ccy = ""
+    try:
+        amount = float(value)
+    except Exception:
+        return _value(value)
+    text = f"{amount:,.2f}".rstrip("0").rstrip(".")
+    return f"{ccy} {text}" if ccy else text
+
+
 _CanonicalRenderer = Callable[[dict[str, Any], dict[str, Any]], str]
 
 _CANONICAL_RENDERERS: dict[str, _CanonicalRenderer] = {
     "monthly_income": lambda data, _tool_result: _render_monthly_income(data),
     "position_rows": lambda data, _tool_result: _render_positions(data),
+    "assigned_stock_lifecycle": lambda data, _tool_result: _render_assigned_stock_lifecycle(data),
     "position_exit_analysis": lambda data, _tool_result: _render_position_exit_analysis(data),
     "runtime_runs": lambda data, _tool_result: _render_runs(data),
     "runtime_logs": lambda data, _tool_result: _render_logs(data),

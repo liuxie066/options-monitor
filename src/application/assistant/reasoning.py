@@ -24,6 +24,7 @@ CONFIG_SCOPED_INTENTS = frozenset(
         "config_validate",
         "symbol_config_query",
         "position_query",
+        "assigned_stock_position_query",
         "position_exit_analysis",
         "monthly_income_report",
         "symbol_list",
@@ -174,6 +175,24 @@ def _tool_payload_from_perception(
             "action": "list",
             "query": query,
         }
+    if intent_name == "assigned_stock_position_query":
+        status = str(arguments.get("assigned_stock_status") or arguments.get("status") or "open").strip().lower()
+        if status == "all":
+            status = ""
+        payload = {
+            **base,
+            "action": "assigned-stock",
+            "refresh_quotes": arguments.get("refresh_quotes") is not False,
+        }
+        if arguments.get("account"):
+            payload["account"] = arguments["account"]
+        if arguments.get("symbol"):
+            payload["symbol"] = arguments["symbol"]
+        if arguments.get("stock_lot_id"):
+            payload["stock_lot_id"] = arguments["stock_lot_id"]
+        if status:
+            payload["status"] = status
+        return payload
     if intent_name == "position_exit_analysis":
         query = PositionQuery.from_payload(arguments).to_payload()
         payload = {
