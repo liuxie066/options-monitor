@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.266 - 2026-06-13
+
+### Fixed
+- Fixed inbound upgrade confirmation receipts to recover current and target versions from payload, release tags, and nested version-check data instead of showing `-` when preview fields are incomplete.
+- Fixed inbound upgrade final receipts to preserve the Feishu reply target through the running worker state and retry transient reply failures before recording `final_receipt`.
+
 ## 1.2.265 - 2026-06-13
 
 ### Added

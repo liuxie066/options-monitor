@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -34,6 +35,7 @@ UpgradeWorkerLauncher = Callable[[str, Path], dict[str, Any]]
 ReplyFn = Callable[..., dict[str, Any]]
 UPGRADE_WORKER_LAUNCHER: UpgradeWorkerLauncher | None = None
 _DEFAULT_RUNTIME_ROOT = Path("/var/lib/options-monitor")
+_FINAL_RECEIPT_RETRY_DELAYS_SECONDS = (1.0, 3.0)
 
 
 def handle_upgrade_operation(
@@ -331,11 +333,13 @@ def run_confirmed_upgrade_operation(
         raise AgentToolError(code="INTERNAL_ERROR", message="pending upgrade operation payload hash mismatch; refusing to upgrade", details=failed)
     verify_operation_signature(operation)
 
+    receipt_target = _receipt_target_from_operation(operation, payload)
     running = {
         "operation_id": operation_id,
         "status": "running",
         "task_status": "running",
         "worker_pid": os.getpid(),
+        "receipt_target": receipt_target,
     }
     if not store.mark_running(operation_id, result=running):
         current = store.get(operation_id) or {}
@@ -347,7 +351,6 @@ def run_confirmed_upgrade_operation(
         )
 
     preview = operation.get("preview") if isinstance(operation.get("preview"), dict) else _preview_operation(payload)
-    receipt_target = _receipt_target_from_operation(operation, payload)
     try:
         result = _apply_operation(payload)
     except AgentToolError as exc:
@@ -511,17 +514,41 @@ def _send_final_receipt(
     if not (bot.app_id and bot.app_secret):
         return {"attempted": True, "ok": False, "reason": "missing_app_credentials"}
     text = render_upgrade_response(status=status, operation_id=operation_id, payload=payload, preview=preview, result=result)
-    try:
-        api_response = reply_fn(
-            app_id=bot.app_id,
-            app_secret=bot.app_secret,
-            message_id=message_id,
-            text=text,
-            uuid=f"{operation_id}:upgrade-final",
-        )
-    except Exception as exc:
-        return {"attempted": True, "ok": False, "reason": "reply_failed", "message_id": message_id, "error": f"{type(exc).__name__}: {exc}"}
-    return {"attempted": True, "ok": True, "reason": "sent", "message_id": message_id, "api_response": api_response}
+    failures: list[dict[str, Any]] = []
+    max_attempts = len(_FINAL_RECEIPT_RETRY_DELAYS_SECONDS) + 1
+    for attempt in range(1, max_attempts + 1):
+        try:
+            api_response = reply_fn(
+                app_id=bot.app_id,
+                app_secret=bot.app_secret,
+                message_id=message_id,
+                text=text,
+                uuid=f"{operation_id}:upgrade-final",
+            )
+        except Exception as exc:
+            failures.append({"attempt": attempt, "error": f"{type(exc).__name__}: {exc}"})
+            if attempt < max_attempts:
+                time.sleep(_FINAL_RECEIPT_RETRY_DELAYS_SECONDS[attempt - 1])
+            continue
+        return {
+            "attempted": True,
+            "ok": True,
+            "reason": "sent",
+            "message_id": message_id,
+            "attempts": attempt,
+            **({"previous_errors": failures} if failures else {}),
+            "api_response": api_response,
+        }
+    last_error = failures[-1]["error"] if failures else "unknown reply failure"
+    return {
+        "attempted": True,
+        "ok": False,
+        "reason": "reply_failed",
+        "message_id": message_id,
+        "attempts": len(failures),
+        "error": last_error,
+        "errors": failures,
+    }
 
 
 def _upgrade_defaults(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -551,7 +578,11 @@ def _upgrade_summary(result: dict[str, Any]) -> dict[str, Any]:
     return {
         "status": result.get("status"),
         "current_version": result.get("current_version"),
-        "target_version": result.get("target_version") or result.get("latest_version"),
+        "target_version": (
+            result.get("target_version")
+            or result.get("latest_version")
+            or _version_from_release_tag(result.get("release_tag"))
+        ),
         "release_tag": result.get("release_tag"),
         "changed": bool(result.get("changed", False)),
         "planned_operations_count": len(result.get("planned_operations") or []),
@@ -648,8 +679,7 @@ def render_upgrade_response(
     result: dict[str, Any] | None = None,
     expires_at: str = "",
 ) -> str:
-    del payload
-    data = _upgrade_response_data(preview=preview, result=result)
+    data = _upgrade_response_data(payload=payload, preview=preview, result=result)
     summary = _upgrade_summary(data)
     current = summary.get("current_version") or "-"
     target = summary.get("target_version") or "-"
@@ -726,21 +756,77 @@ def render_upgrade_response(
     return f"升级操作进度：{user_facing_operation_status(status)}\ncommand_id: {operation_id}"
 
 
-def _upgrade_response_data(*, preview: dict[str, Any] | None, result: dict[str, Any] | None) -> dict[str, Any]:
+def _upgrade_response_data(
+    *,
+    payload: dict[str, Any] | None,
+    preview: dict[str, Any] | None,
+    result: dict[str, Any] | None,
+) -> dict[str, Any]:
     data: dict[str, Any] = {}
     if isinstance(preview, dict):
         upgrade = preview.get("upgrade")
         if isinstance(upgrade, dict):
-            data.update(upgrade)
+            _upgrade_response_merge(data, upgrade)
         preview_summary = preview.get("summary")
         if isinstance(preview_summary, dict):
             for key, value in preview_summary.items():
-                data.setdefault(key, value)
+                _upgrade_response_setdefault(data, key, value)
     if isinstance(result, dict):
-        for key, value in result.items():
-            if _upgrade_response_has_value(value) or key not in data:
-                data[key] = value
+        nested_result = result.get("result")
+        if isinstance(nested_result, dict):
+            _upgrade_response_merge(data, nested_result)
+        _upgrade_response_merge(data, result)
+    _upgrade_response_apply_payload_fallbacks(data, payload)
+    _upgrade_response_apply_version_check_fallbacks(data)
+    target = _version_from_release_tag(data.get("release_tag"))
+    if target:
+        _upgrade_response_setdefault(data, "target_version", target)
     return data
+
+
+def _upgrade_response_merge(data: dict[str, Any], source: dict[str, Any]) -> None:
+    for key, value in source.items():
+        if _upgrade_response_has_value(value) or key not in data:
+            data[key] = value
+
+
+def _upgrade_response_setdefault(data: dict[str, Any], key: str, value: Any) -> None:
+    if _upgrade_response_has_value(value) and not _upgrade_response_has_value(data.get(key)):
+        data[key] = value
+
+
+def _upgrade_response_apply_payload_fallbacks(data: dict[str, Any], payload: dict[str, Any] | None) -> None:
+    if not isinstance(payload, dict):
+        return
+    args = payload.get("arguments")
+    if not isinstance(args, dict):
+        return
+    for key in ("target_version", "release_tag", "target_source"):
+        _upgrade_response_setdefault(data, key, args.get(key))
+
+
+def _upgrade_response_apply_version_check_fallbacks(data: dict[str, Any]) -> None:
+    version_check = data.get("version_check")
+    if not isinstance(version_check, dict):
+        return
+    _upgrade_response_setdefault(data, "current_version", version_check.get("current_version"))
+    _upgrade_response_setdefault(
+        data,
+        "target_version",
+        version_check.get("target_version") or version_check.get("latest_version"),
+    )
+    _upgrade_response_setdefault(data, "release_tag", version_check.get("release_tag"))
+
+
+def _version_from_release_tag(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.startswith("refs/tags/"):
+        text = text.rsplit("/", 1)[-1]
+    if text.lower().startswith("v"):
+        text = text[1:]
+    return text or None
 
 
 def _upgrade_response_has_value(value: Any) -> bool:
