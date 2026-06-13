@@ -1077,6 +1077,10 @@ def _normalize_tool_plan(plan: PlannerPlan, *, question: str, today: date) -> Pl
             if detail_requested and response_mode != "synthesis":
                 response_mode = "synthesis"
                 changed = True
+        if step.tool_name == "option_positions_read" and _tool_plan_step_action(arguments) == "assigned-stock":
+            if response_mode != "synthesis":
+                response_mode = "synthesis"
+                changed = True
         if arguments == step.arguments:
             steps.append(step)
         else:
@@ -1090,6 +1094,10 @@ def _normalize_tool_plan(plan: PlannerPlan, *, question: str, today: date) -> Pl
         required_capabilities=plan.required_capabilities,
         schema_version=plan.schema_version,
     )
+
+
+def _tool_plan_step_action(arguments: dict[str, Any]) -> str:
+    return str(arguments.get("action") or "").strip().lower()
 
 
 def _question_requests_income_detail(question: str) -> bool:
@@ -2111,7 +2119,7 @@ Rules:
 - For monthly income summary questions, use monthly_income_report with account/month when available.
 - For combined/all-account return questions, include required_capabilities=["combined_account_return"] and use monthly_income_report without account.
 - For cashflow detail, net cashflow composition, net inflow source, "明细", "组成", "构成", "来源", or "由什么组成", use monthly_income_report with include_rows=true; the system will render factual rows first and LLM may only add analysis.
-- For assigned stock / 被指派正股 / 指派正股 holding PnL, floating PnL, spot, cost basis, or lifecycle PnL questions, use option_positions_read with action="assigned-stock", status="open" unless the user asks all/closed, and refresh_quotes=true for current holding PnL.
+- For assigned stock / 被指派正股 / 指派正股 holding PnL, floating PnL, spot, cost basis, or lifecycle PnL questions, use option_positions_read with action="assigned-stock", status="open" unless the user asks all/closed, refresh_quotes=true for current holding PnL, and response_mode=synthesis.
 - For all-history, cumulative, or total net cashflow questions, omit month so monthly_income_report reads all OM local ledger months.
 - For multiple explicit months, either call monthly_income_report once per month with matching arguments, or omit month and synthesize from all available rows; never duplicate one month while claiming another.
 - For "记录开仓", "记录平仓", Futu 成交提醒, 成功卖出/买入 option fills, use manual_trade_open or manual_trade_close with raw_text set to the original user message.

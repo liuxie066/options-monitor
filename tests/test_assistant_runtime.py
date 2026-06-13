@@ -658,7 +658,8 @@ def test_assistant_runtime_renders_assigned_stock_receipt_readably() -> None:
     assert "   持仓：成本 HKD 450/股，成本基数 HKD 90,000" in text
     assert "   行情：spot HKD 463.6，quote=fresh" in text
     assert "   盈亏：正股浮盈亏 HKD 2,720，正股已实现 HKD 0，生命周期PnL HKD 4,065" in text
-    assert "   lot：assigned-stock-0700" in text
+    assert "lot：" not in text
+    assert "assigned-stock-0700" not in text
     assert "汇总（按币种）：" in text
     assert "- HKD · 1 条：剩余成本 HKD 90,000，市值 HKD 92,720，正股浮盈亏 HKD 2,720" in text
     assert "- USD · 1 条：剩余成本 USD 12,000，市值 USD 9,794，正股浮盈亏 USD -2,206" in text
@@ -2714,7 +2715,7 @@ def test_assistant_runtime_agent_loop_routes_assigned_stock_holding_pnl(tmp_path
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="查看 lx 指派正股持仓盈亏",
-                response_mode="synthesis",
+                response_mode="canonical",
                 required_capabilities=("assigned_stock_positions", "read_only"),
                 steps=(
                     PlannerPlanStep(
@@ -2748,6 +2749,7 @@ def test_assistant_runtime_agent_loop_routes_assigned_stock_holding_pnl(tmp_path
         _conversation_context: dict[str, Any] | None,
     ) -> LlmSynthesisResult:
         assert question == "查看 lx 指派正股持仓盈亏"
+        assert plan.response_mode == "synthesis"
         assert plan.required_capabilities == ("assigned_stock_positions", "read_only")
         assert observations[-1]["tool_name"] == "assistant.grounded_facts"
         assert "正股浮盈亏 USD -200" in observations[-1]["data"]["canonical_response"]
@@ -2790,6 +2792,7 @@ def test_assistant_runtime_agent_loop_routes_assigned_stock_holding_pnl(tmp_path
         "satisfied": ["assigned_stock_positions", "read_only"],
         "gaps": [],
     }
+    assert tool_plan_data["plan"]["response_mode"] == "synthesis"
     assert tool_plan_data["final_response"]["reason"] == "canonical facts rendered first; LLM added verified analysis"
 
 
