@@ -547,38 +547,42 @@ For analytical questions such as `6月收益的组成`, `分析 lx 6月净现金
 user question
 -> LLM plans the analysis and required OM tools
 -> deterministic OM tools fetch ledger/runtime evidence
--> a controlled analyzer computes an analysis artifact
--> deterministic renderer writes factual tables and rows from the artifact
--> LLM may add a concise interpretation based on artifact references only
+-> AgentLoop builds an internal evidence bundle from tool observations
+-> LLM composes the user-facing answer from that evidence
+-> answer guard checks the response against tool facts
+-> deterministic provenance is appended
+-> deterministic renderer is used only as fallback when composition is unavailable or unsafe
 ```
 
 The design goal is to preserve LLM intelligence without making the LLM a factual source. The LLM may choose what to inspect, which dimensions to compare, and what explanation angle is useful. It must not be the component that writes accounting facts such as amount, currency, contract count, account, symbol, expiration, close type, or date.
 
-Canonical factual rendering is declared by the tool definition through `output_contract.canonical_renderer`. `agent_loop` may use this contract to select the deterministic renderer, but it should not own tool-name special cases for ledger/runtime fact rows. When a tool has payload-dependent factual output, use an `output_contract_resolver` so the concrete contract travels with the observation.
+Canonical factual rendering is declared by the tool definition through `output_contract.canonical_renderer`. `agent_loop` uses this contract to build fallback evidence and deterministic provenance; it is not a user-visible `canonical` mode. When a tool has payload-dependent factual output, use an `output_contract_resolver` so the concrete contract travels with the observation.
 
-For income and cashflow analysis, the controlled artifact is the authority. It should contain the evidence needed for the final answer, for example:
+For income, cashflow, positions, and assigned-stock analysis, the evidence bundle is the authority. It should contain the evidence needed for the final answer, for example:
 
 - `data_scope`: source, account scope, month scope, coverage, warnings.
-- `facts_table`: user-facing rows derived from `monthly_income_report(include_rows=true)`.
+- `fallback_renderer_text`: deterministic fallback text derived from the tool contract.
+- `provenance_lines`: deterministic data-source and accounting-policy footer.
 - `totals_by_account`: net cashflow, realized PnL, premium, and cash-secured denominator when available.
 - `totals_by_source`: open premium, close/exercise/assignment/expiry realized PnL, long-option recovery, and other cashflow buckets when available.
 - `reconciliation_notes`: why net cashflow differs from realized PnL, which data is missing, and which conclusions are unsupported.
 
 Final answer rules:
 
-- No natural-language character matching should be used to validate amounts or row facts after the LLM has written them.
-- User-visible fact rows, amounts, contract counts, accounts, symbols, dates, currencies, and close types must be rendered from the artifact, not from free-form LLM text.
-- LLM interpretation may reference artifact row ids, bucket names, and computed metrics, but it must not restate or recalculate detailed ledger facts.
+- Do not expose `canonical` / `synthesis` as product modes. There is one Agent answer path.
+- User-visible amounts, contract counts, accounts, symbols, dates, currencies, and close types must come from tool observations.
+- LLM output is accepted only after answer-guard checks. For assigned-stock, unsupported currency amounts, share/count claims, or percentage claims trigger rewrite/fallback.
+- Internal ids such as `stock_lot_id`, `record_id`, `event_id`, and `source_deal_id` are evidence/audit fields, not default user-facing text.
 - If the artifact cannot support the requested answer, the response should say which capability or evidence is missing instead of returning a nearby summary.
-- Existing grounded rendering is only a safety baseline. Future implementation work for income analysis should move toward `tool evidence -> analysis artifact -> deterministic factual rendering -> optional LLM interpretation`, not toward more parser or regex guards.
+- Existing deterministic renderers remain safety fallback and audit evidence.
 
 Acceptance criteria for this design:
 
-- A detail/composition question returns a factual table before any interpretation.
-- A known multi-contract row cannot be shown as one contract because the renderer reads the artifact quantity.
-- A known amount cannot drift because the LLM never owns amount rendering.
-- If LLM synthesis is unavailable, the artifact-backed factual answer is still useful.
-- If LLM synthesis is available, it improves analysis selection and explanation, not accounting fact generation.
+- A direct assigned-stock holding PnL question returns a concise Agent-composed answer, not a forced facts/analysis split.
+- A known multi-contract row cannot be shown as one contract; guard rewrites or falls back.
+- A known assigned-stock amount cannot drift; unsupported LLM amounts trigger rewrite or fallback.
+- If LLM composition is unavailable, the deterministic renderer fallback is still useful.
+- Every composed financial answer carries deterministic provenance when the tool contract provides it.
 
 ## Write Actions
 

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.264 - 2026-06-13
+
+### Changed
+- Reworked AgentLoop financial answers to use a single guarded Agent Composer path: tools provide evidence, the LLM writes the user-facing response, deterministic provenance is appended, and canonical renderers remain fallback.
+- Updated assigned-stock holding PnL natural-language answers to use concise Agent-composed summaries without exposing internal lot ids or forcing a facts/analysis split.
+
+### Fixed
+- Added assigned-stock answer guard coverage so unsupported LLM currency amounts, share/count claims, or percentage claims trigger rewrite/fallback instead of reaching users.
+
 ## 1.2.263 - 2026-06-13
 
 ### Changed

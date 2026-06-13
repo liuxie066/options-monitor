@@ -279,13 +279,14 @@ def test_feishu_ws_agent_loop_routes_cashflow_detail_plan(tmp_path: Path) -> Non
             {"account": "lx", "config_key": "us", "include_rows": True, "month": "2026-06"},
         )
     ]
-    assert replies[0]["text"].startswith("收益统计完成（OM 本地账本）：")
-    assert "组成明细：" in replies[0]["text"]
-    assert "分析\nlx 2026-06 净现金流明细" in replies[0]["text"]
+    assert replies[0]["text"].startswith("lx 2026-06 净现金流明细")
+    assert "- 0700.HK sell_open HKD 1,200" in replies[0]["text"]
+    assert "数据来源：OM 本地账本" in replies[0]["text"]
+    assert "\n\n分析\n" not in replies[0]["text"]
     assert inbound_result["meta"]["assistant"]["route"] == "agent_loop"
     final_response = inbound_result["meta"]["assistant"]["llm"]["agent_loop"]["final_response"]
     assert final_response["status"] == "synthesized"
-    assert final_response["canonical_renderer_required"] is True
+    assert final_response["canonical_renderer_required"] is False
 
 
 def test_feishu_ws_agent_loop_degrades_when_conversation_context_fails(

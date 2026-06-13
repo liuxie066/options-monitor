@@ -577,9 +577,10 @@ om-agent run --tool monthly_income_report --input-json '{"config_key":"us","acco
 - 口径：`assigned_stock_unrealized_pnl` 和 `assigned_stock_realized_pnl` 是正股自身
   PnL，不含 Sell Put 权利金；`assignment_lifecycle_pnl` 才包含权利金归因。
   `stock_cost_per_share` 按真实交割价记录，不扣除权利金。
-- 用户回执：canonical facts 先展示按币种汇总，再展示每个 assigned-stock lot 的
-  单行明细。正常 `fresh` 报价不逐行重复展示；缺价或异常 quote 状态必须在明细、
-  `检查提示` 或 `quote_refresh` 中显式出现。
+- 用户回执：自然语言入口由 Agent Composer 基于工具证据生成简洁摘要，并由系统追加
+  deterministic 数据来源/口径；deterministic assigned-stock renderer 作为 LLM 不可用
+  或 answer guard 不通过时的 fallback。正常 `fresh` 报价不逐行重复展示；缺价或异常
+  quote 状态必须在回答、fallback 明细、`检查提示` 或 provenance 中显式出现。
 
 示例：
 

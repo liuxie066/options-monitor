@@ -49,7 +49,7 @@ def _plan_from_case(case: dict[str, Any]) -> PlannerPlan:
 
 
 @pytest.mark.parametrize("case", _load_cases(), ids=lambda item: str(item["id"]))
-def test_assistant_agent_eval_preserves_canonical_fact_rows(case: dict[str, Any], tmp_path: Path) -> None:
+def test_assistant_agent_eval_uses_guarded_answer_evidence(case: dict[str, Any], tmp_path: Path) -> None:
     plan = _plan_from_case(case)
     synthesis_responses = [str(item) for item in case.get("synthesis_responses") or ()]
     observed_synthesis_inputs: list[list[dict[str, Any]]] = []
@@ -131,9 +131,10 @@ def test_assistant_agent_eval_preserves_canonical_fact_rows(case: dict[str, Any]
     tool_plan_data = out["data"]["action"]["result"]["data"]
     assert tool_plan_data["synthesis"]["reason"] == case["expect_reason"]
     assert observed_synthesis_inputs
-    grounded = observed_synthesis_inputs[0][-1]
-    assert grounded["tool_name"] == "assistant.grounded_facts"
-    assert "canonical_response" in grounded["data"]
+    evidence = observed_synthesis_inputs[0][-1]
+    assert evidence["tool_name"] == "assistant.answer_evidence"
+    assert "fallback_renderer_text" in evidence["data"]
+    assert "provenance_lines" in evidence["data"]
     first_observation = tool_plan_data["synthesis_observations"][0]
     renderer = first_observation["output_contract"]["canonical_renderer"]
     if case.get("expect_renderer"):
