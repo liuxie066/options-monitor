@@ -1302,6 +1302,10 @@ def test_inbound_upgrade_preview_and_confirm(monkeypatch: pytest.MonkeyPatch, tm
     assert confirmed["data"]["operation_id"] == operation_id
     assert confirmed["data"]["operation_resolution"] == "latest_pending"
     assert "已收到升级确认" in confirmed["data"]["response_text"]
+    assert "当前版本：1.2.110" in confirmed["data"]["response_text"]
+    assert "目标版本：1.2.111" in confirmed["data"]["response_text"]
+    assert "当前版本：-" not in confirmed["data"]["response_text"]
+    assert "目标版本：-" not in confirmed["data"]["response_text"]
     assert confirmed["data"]["reasoning"]["tool_call"]["tool_name"] == "inbound.upgrade"
     assert confirmed["data"]["reasoning"]["safety_class"] == "write_apply"
     assert confirmed["data"]["reasoning"]["requires_confirmation"] is False

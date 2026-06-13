@@ -1030,6 +1030,7 @@ def _normalize_tool_plan(plan: PlannerPlan, *, question: str, today: date) -> Pl
     detail_requested = _question_requests_income_detail(question)
     all_history_requested = _question_requests_all_income_history(question)
     all_accounts_requested = _question_requests_all_accounts(question)
+    analysis_requested = _question_requests_interpretive_analysis(question)
     response_mode = plan.response_mode
     changed = False
     steps: list[PlannerPlanStep] = []
@@ -1078,8 +1079,11 @@ def _normalize_tool_plan(plan: PlannerPlan, *, question: str, today: date) -> Pl
                 response_mode = "synthesis"
                 changed = True
         if step.tool_name == "option_positions_read" and _tool_plan_step_action(arguments) == "assigned-stock":
-            if response_mode != "synthesis":
+            if analysis_requested and response_mode != "synthesis":
                 response_mode = "synthesis"
+                changed = True
+            elif not analysis_requested and len(plan.steps) == 1 and response_mode != "canonical":
+                response_mode = "canonical"
                 changed = True
         if arguments == step.arguments:
             steps.append(step)
@@ -1103,6 +1107,36 @@ def _tool_plan_step_action(arguments: dict[str, Any]) -> str:
 def _question_requests_income_detail(question: str) -> bool:
     text = str(question or "")
     return any(token in text for token in ("明细", "组成", "构成", "来源", "由什么组成"))
+
+
+def _question_requests_interpretive_analysis(question: str) -> bool:
+    text = str(question or "").strip().lower()
+    if not text:
+        return False
+    tokens = (
+        "分析",
+        "怎么看",
+        "看法",
+        "建议",
+        "风险",
+        "原因",
+        "为什么",
+        "怎么处理",
+        "怎么办",
+        "要不要",
+        "该不该",
+        "是否应该",
+        "评估",
+        "判断",
+        "compare",
+        "analysis",
+        "analyze",
+        "advise",
+        "recommend",
+        "risk",
+        "why",
+    )
+    return any(token in text for token in tokens)
 
 
 def _question_requests_all_income_history(question: str) -> bool:
@@ -2119,7 +2153,7 @@ Rules:
 - For monthly income summary questions, use monthly_income_report with account/month when available.
 - For combined/all-account return questions, include required_capabilities=["combined_account_return"] and use monthly_income_report without account.
 - For cashflow detail, net cashflow composition, net inflow source, "明细", "组成", "构成", "来源", or "由什么组成", use monthly_income_report with include_rows=true; the system will render factual rows first and LLM may only add analysis.
-- For assigned stock / 被指派正股 / 指派正股 holding PnL, floating PnL, spot, cost basis, or lifecycle PnL questions, use option_positions_read with action="assigned-stock", status="open" unless the user asks all/closed, refresh_quotes=true for current holding PnL, and response_mode=synthesis.
+- For assigned stock / 被指派正股 / 指派正股 holding PnL, floating PnL, spot, cost basis, or lifecycle PnL questions, use option_positions_read with action="assigned-stock", status="open" unless the user asks all/closed, refresh_quotes=true for current holding PnL. Use response_mode=canonical for direct 查看/查询/list questions; use response_mode=synthesis only when the user asks for analysis, advice, risk, why/how, comparison, or what to do.
 - For all-history, cumulative, or total net cashflow questions, omit month so monthly_income_report reads all OM local ledger months.
 - For multiple explicit months, either call monthly_income_report once per month with matching arguments, or omit month and synthesize from all available rows; never duplicate one month while claiming another.
 - For "记录开仓", "记录平仓", Futu 成交提醒, 成功卖出/买入 option fills, use manual_trade_open or manual_trade_close with raw_text set to the original user message.
@@ -2178,7 +2212,7 @@ def _planner_tool_manifest() -> list[dict[str, Any]]:
             }
         if name == "option_positions_read":
             notes.append("Use for current option position list/detail requests, including 持仓明细, 持仓明晰, 持仓详情, 当前仓位, or current positions.")
-            notes.append("For assigned stock / 被指派正股 / 指派正股 holding PnL, use action=assigned-stock with status=open by default and refresh_quotes=true when the user asks current 盈亏, spot, 浮盈亏, or 持仓盈亏.")
+            notes.append("For assigned stock / 被指派正股 / 指派正股 holding PnL, use action=assigned-stock with status=open by default and refresh_quotes=true when the user asks current 盈亏, spot, 浮盈亏, or 持仓盈亏; direct 查看/查询 should stay canonical, and synthesis is only for analysis/advice/risk/why/how questions.")
             notes.append("For ordinary position list/detail requests, required_capabilities should be [] because option_positions_read itself provides option_positions/read_only.")
             notes.append("Use action=list for current lots; use action=history or action=inspect only when the user explicitly asks for event history, projection, repair, or ledger diagnostics.")
             notes.append("For action=list or action=assigned-stock, canonical factual rows are rendered by the system; synthesis should only add analysis and must not reorder, omit, or restate rows.")
