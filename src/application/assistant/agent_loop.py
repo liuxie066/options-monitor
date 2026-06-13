@@ -239,6 +239,21 @@ class FinalResponsePlan:
         }
 
 
+@dataclass(frozen=True)
+class AnswerEvidence:
+    """Internal evidence package used by the Agent composer.
+
+    The deterministic renderer remains the fallback/evidence source. The LLM
+    owns user-facing expression only when the answer guard accepts it.
+    """
+
+    enabled: bool
+    observations: tuple[dict[str, Any], ...] = ()
+    fallback_text: str = ""
+    provenance_lines: tuple[str, ...] = ()
+    trace: dict[str, Any] | None = None
+
+
 AgentLoopTranslateFn = Callable[[str, AssistantSettings, dict[str, Any] | None], LlmTranslationResult]
 AgentLoopPlanFn = Callable[[str, AssistantSettings, dict[str, Any] | None], LlmPlannerResult]
 AgentLoopSynthesizeFn = Callable[
@@ -1030,7 +1045,6 @@ def _normalize_tool_plan(plan: PlannerPlan, *, question: str, today: date) -> Pl
     detail_requested = _question_requests_income_detail(question)
     all_history_requested = _question_requests_all_income_history(question)
     all_accounts_requested = _question_requests_all_accounts(question)
-    analysis_requested = _question_requests_interpretive_analysis(question)
     response_mode = plan.response_mode
     changed = False
     steps: list[PlannerPlanStep] = []
@@ -1079,11 +1093,8 @@ def _normalize_tool_plan(plan: PlannerPlan, *, question: str, today: date) -> Pl
                 response_mode = "synthesis"
                 changed = True
         if step.tool_name == "option_positions_read" and _tool_plan_step_action(arguments) == "assigned-stock":
-            if analysis_requested and response_mode != "synthesis":
+            if response_mode != "synthesis":
                 response_mode = "synthesis"
-                changed = True
-            elif not analysis_requested and len(plan.steps) == 1 and response_mode != "canonical":
-                response_mode = "canonical"
                 changed = True
         if arguments == step.arguments:
             steps.append(step)
@@ -1107,36 +1118,6 @@ def _tool_plan_step_action(arguments: dict[str, Any]) -> str:
 def _question_requests_income_detail(question: str) -> bool:
     text = str(question or "")
     return any(token in text for token in ("明细", "组成", "构成", "来源", "由什么组成"))
-
-
-def _question_requests_interpretive_analysis(question: str) -> bool:
-    text = str(question or "").strip().lower()
-    if not text:
-        return False
-    tokens = (
-        "分析",
-        "怎么看",
-        "看法",
-        "建议",
-        "风险",
-        "原因",
-        "为什么",
-        "怎么处理",
-        "怎么办",
-        "要不要",
-        "该不该",
-        "是否应该",
-        "评估",
-        "判断",
-        "compare",
-        "analysis",
-        "analyze",
-        "advise",
-        "recommend",
-        "risk",
-        "why",
-    )
-    return any(token in text for token in tokens)
 
 
 def _question_requests_all_income_history(question: str) -> bool:
@@ -1328,6 +1309,18 @@ def _build_final_response(
                 "schema_version": TOOL_PLAN_SYNTHESIS_SCHEMA_VERSION,
             },
         )
+    evidence = _build_answer_evidence(plan=plan, fact_observations=fact_observations, llm_observations=llm_observations)
+    if _agent_composer_required(plan, evidence=evidence):
+        return _compose_agent_response(
+            question=question,
+            settings=settings,
+            plan=plan,
+            evidence=evidence,
+            fact_observations=fact_observations,
+            conversation_context=conversation_context,
+            synthesize_response_fn=synthesize_response_fn,
+            error_payload=error_payload,
+        )
     if _grounded_facts_response_required(plan) and fact_observations:
         fact_text = _canonical_response(plan.steps[0], _first_tool_observation(plan.steps[0], fact_observations))
         if fact_text:
@@ -1446,8 +1439,148 @@ def _build_final_response(
     )
 
 
+def _build_answer_evidence(
+    *,
+    plan: PlannerPlan,
+    fact_observations: list[dict[str, Any]],
+    llm_observations: list[dict[str, Any]],
+) -> AnswerEvidence:
+    if len(plan.steps) != 1 or not fact_observations:
+        return AnswerEvidence(enabled=False)
+    step = plan.steps[0]
+    observation = _first_tool_observation(step, fact_observations)
+    if not observation or not bool(observation.get("ok", False)):
+        return AnswerEvidence(enabled=False)
+    output_contract = _contract_from_observation(observation) or _output_contract_for_step(step)
+    if not output_contract:
+        return AnswerEvidence(enabled=False)
+    fallback_text = _canonical_response(step, observation)
+    provenance_lines = _provenance_lines_for_observation(step, observation, output_contract=output_contract)
+    if not fallback_text and not provenance_lines:
+        return AnswerEvidence(enabled=False)
+    evidence_observation = _answer_evidence_observation(
+        observations=llm_observations,
+        fallback_text=fallback_text,
+        provenance_lines=provenance_lines,
+        output_contract=output_contract,
+        step=step,
+    )
+    return AnswerEvidence(
+        enabled=True,
+        observations=tuple([*llm_observations, evidence_observation]),
+        fallback_text=fallback_text,
+        provenance_lines=tuple(provenance_lines),
+        trace={
+            "output_contract": {
+                "schema_version": output_contract.get("schema_version"),
+                "canonical_renderer": output_contract.get("canonical_renderer"),
+                "source_label": output_contract.get("source_label"),
+                "guard_profile": output_contract.get("guard_profile"),
+            },
+            "fallback_renderer": bool(fallback_text),
+            "provenance_lines": len(provenance_lines),
+        },
+    )
+
+
+def _agent_composer_required(plan: PlannerPlan, *, evidence: AnswerEvidence) -> bool:
+    if not evidence.enabled or len(plan.steps) != 1:
+        return False
+    step = plan.steps[0]
+    if _answer_policy_for_step(step) == "facts_then_analysis":
+        return True
+    return plan.response_mode == "synthesis"
+
+
+def _compose_agent_response(
+    *,
+    question: str,
+    settings: AssistantSettings,
+    plan: PlannerPlan,
+    evidence: AnswerEvidence,
+    fact_observations: list[dict[str, Any]],
+    conversation_context: dict[str, Any] | None,
+    synthesize_response_fn: AgentLoopSynthesizeFn | None,
+    error_payload: dict[str, Any] | None,
+) -> LlmSynthesisResult:
+    synthesizer = synthesize_response_fn or synthesize_tool_plan_response
+    observations = [dict(item) for item in evidence.observations]
+    synthesis = synthesizer(question, settings, plan, observations, conversation_context)
+    if synthesis.response_text:
+        guard = _verify_answer_guard(synthesis.response_text, observations=fact_observations)
+        if not guard["violations"]:
+            return LlmSynthesisResult(
+                response_text=_append_provenance(synthesis.response_text, evidence.provenance_lines),
+                trace={
+                    **dict(synthesis.trace),
+                    "reason": "agent_composed_response",
+                    "answer_guard": {"status": "passed"},
+                    "answer_evidence": dict(evidence.trace or {}),
+                    "provenance_appended": bool(evidence.provenance_lines),
+                },
+                error=synthesis.error,
+            )
+        retry_observations = _with_answer_guard_feedback(observations, guard)
+        retry = synthesizer(question, settings, plan, retry_observations, conversation_context)
+        if retry.response_text:
+            retry_guard = _verify_answer_guard(retry.response_text, observations=fact_observations)
+            if not retry_guard["violations"]:
+                return LlmSynthesisResult(
+                    response_text=_append_provenance(retry.response_text, evidence.provenance_lines),
+                    trace={
+                        **dict(retry.trace),
+                        "reason": "agent_composed_response",
+                        "answer_guard": {
+                            "status": "failed_then_rewritten",
+                            "violations": guard["violations"],
+                        },
+                        "answer_evidence": dict(evidence.trace or {}),
+                        "provenance_appended": bool(evidence.provenance_lines),
+                    },
+                    error=retry.error,
+                )
+            guard = {
+                "violations": guard["violations"],
+                "retry_violations": retry_guard["violations"],
+            }
+    fallback_text = evidence.fallback_text or _fallback_response(
+        plan=plan,
+        observations=observations,
+        error_payload=error_payload,
+    )
+    trace = {
+        **dict(synthesis.trace),
+        "attempted": bool(synthesis.trace.get("attempted", False)),
+        "reason": "agent_renderer_fallback",
+        "fallback": "canonical_renderer" if evidence.fallback_text else "structured_observation_summary",
+        "error_code": synthesis.error.code if synthesis.error else None,
+        "answer_evidence": dict(evidence.trace or {}),
+    }
+    if "guard" in locals():
+        trace["answer_guard"] = {"status": "failed_then_fallback", **guard}
+    return LlmSynthesisResult(
+        response_text=_append_provenance(fallback_text, evidence.provenance_lines),
+        trace=trace,
+        error=synthesis.error,
+    )
+
+
 def _final_response_payload(synthesis: LlmSynthesisResult) -> dict[str, Any]:
     reason = str(synthesis.trace.get("reason") or "")
+    if reason == "agent_composed_response":
+        return FinalResponsePlan(
+            status="synthesized",
+            reason="LLM composed the response from guarded tool evidence",
+            canonical_renderer_required=False,
+            llm_may_summarize=True,
+        ).public_payload()
+    if reason == "agent_renderer_fallback":
+        return FinalResponsePlan(
+            status="rendered",
+            reason="deterministic fallback renderer used after agent composition was unavailable or unsafe",
+            canonical_renderer_required=True,
+            llm_may_summarize=True,
+        ).public_payload()
     if reason == "canonical_renderer":
         return FinalResponsePlan(
             status="rendered",
@@ -1556,6 +1689,95 @@ def _output_contract_for_tool(tool_name: str, payload: dict[str, Any]) -> dict[s
 def _contract_from_observation(observation: dict[str, Any]) -> dict[str, Any]:
     contract = observation.get("output_contract")
     return dict(contract) if isinstance(contract, dict) else {}
+
+
+def _answer_evidence_observation(
+    *,
+    observations: list[dict[str, Any]],
+    fallback_text: str,
+    provenance_lines: list[str],
+    output_contract: dict[str, Any],
+    step: PlannerPlanStep,
+) -> dict[str, Any]:
+    renderer_key = str(output_contract.get("canonical_renderer") or "").strip()
+    instruction = (
+        "Answer the user naturally in Chinese using only the tool observations. "
+        "Do not expose internal ids such as stock_lot_id, record_id, event_id, or source_deal_id. "
+        "Do not use a forced 事实/分析 split. "
+        "For direct summary questions, prefer a short synthesis; for detail/list questions, include compact rows only when useful. "
+        "Do not append 数据来源 or 口径 lines; the system appends deterministic provenance. "
+        "If quote_status or quote_refresh reports missing_quote, say the affected symbol cannot compute realtime floating PnL."
+    )
+    return {
+        "index": len(observations) + 1,
+        "tool_name": "assistant.answer_evidence",
+        "payload": {},
+        "ok": True,
+        "error": None,
+        "data": {
+            "renderer_key": renderer_key,
+            "tool_name": step.tool_name,
+            "fallback_renderer_text": fallback_text,
+            "provenance_lines": list(provenance_lines),
+            "composition_instruction": instruction,
+        },
+    }
+
+
+def _provenance_lines_for_observation(
+    step: PlannerPlanStep,
+    observation: dict[str, Any],
+    *,
+    output_contract: dict[str, Any],
+) -> list[str]:
+    data = observation.get("data") if isinstance(observation.get("data"), dict) else {}
+    source_label = str(output_contract.get("source_label") or "").strip()
+    lines: list[str] = []
+    if source_label:
+        source_line = f"数据来源：{source_label}"
+        quote_refresh = data.get("quote_refresh") if isinstance(data, dict) else None
+        if step.tool_name == "option_positions_read" and _tool_plan_step_action(step.arguments) == "assigned-stock":
+            quote = quote_refresh if isinstance(quote_refresh, dict) else {}
+            quote_source = str(quote.get("quote_source") or "").strip()
+            quote_status = str(quote.get("status") or "").strip()
+            if quote_source:
+                source_line += f"；spot={quote_source}"
+            if quote_status:
+                source_line += f"（{quote_status}）"
+        lines.append(source_line)
+    policy_line = _accounting_policy_line(step, data)
+    if policy_line:
+        lines.append(policy_line)
+    return lines
+
+
+def _accounting_policy_line(step: PlannerPlanStep, data: dict[str, Any]) -> str:
+    if step.tool_name == "option_positions_read" and _tool_plan_step_action(step.arguments) == "assigned-stock":
+        return "口径：正股成本按真实交割价记录，不扣除 Sell Put 权利金；生命周期PnL 才包含权利金归因。"
+    if step.tool_name == "monthly_income_report":
+        if isinstance(data.get("combined_return_summary"), list) and data.get("combined_return_summary"):
+            return "口径：合并现金流率=sum(净现金流CNY)/sum(当前现金担保CNY)，不是账户收益率平均值。"
+        return "口径：现金流率=净现金流/当前现金担保，不是账户总资产收益率。"
+    return ""
+
+
+def _append_provenance(response_text: str, provenance_lines: tuple[str, ...]) -> str:
+    text = str(response_text or "").strip()
+    additions: list[str] = []
+    for raw_line in provenance_lines:
+        line = str(raw_line or "").strip()
+        if not line:
+            continue
+        if line in text:
+            continue
+        if line.startswith("数据来源：") and ("数据来源：" in text or "数据源：" in text):
+            continue
+        if line.startswith("口径：") and "口径：" in text:
+            continue
+        additions.append(line)
+    if not additions:
+        return text
+    return f"{text}\n\n" + "\n".join(additions) if text else "\n".join(additions)
 
 
 def _with_grounded_facts_observation(observations: list[dict[str, Any]], fact_text: str) -> list[dict[str, Any]]:
@@ -1708,6 +1930,7 @@ def _verify_answer_guard(response_text: str, *, observations: list[dict[str, Any
                     }
                 )
                 break
+    violations.extend(_unsupported_assigned_stock_numeric_claims(text, observations=observations))
     return {"facts": facts, "violations": violations}
 
 
@@ -1844,6 +2067,134 @@ def _position_contract_facts(data: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     return facts
+
+
+_CURRENCY_NUMERIC_CLAIM_RE = re.compile(r"\b(?:USD|HKD|CNY)\s*([-+]?\d[\d,]*(?:\.\d+)?)", re.IGNORECASE)
+_UNIT_NUMERIC_CLAIM_RE = re.compile(r"(?<![\w.])([-+]?\d[\d,]*(?:\.\d+)?)\s*(股|条|笔|张)")
+_PERCENT_NUMERIC_CLAIM_RE = re.compile(r"(?<![\w.])([-+]?\d[\d,]*(?:\.\d+)?)\s*%")
+
+
+def _unsupported_assigned_stock_numeric_claims(
+    response_text: str,
+    *,
+    observations: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    allowed_values = _assigned_stock_allowed_numeric_values(observations)
+    if not allowed_values:
+        return []
+    violations: list[dict[str, Any]] = []
+    for raw in _CURRENCY_NUMERIC_CLAIM_RE.findall(response_text):
+        value = _parse_claim_number(raw)
+        if value is not None and not _numeric_value_allowed(value, allowed_values):
+            violations.append(
+                {
+                    "type": "unsupported_assigned_stock_number",
+                    "claim": raw,
+                    "evidence": "number is not present in assigned-stock tool rows or currency totals",
+                }
+            )
+    for raw, unit in _UNIT_NUMERIC_CLAIM_RE.findall(response_text):
+        value = _parse_claim_number(raw)
+        if value is not None and not _numeric_value_allowed(value, allowed_values):
+            violations.append(
+                {
+                    "type": "unsupported_assigned_stock_number",
+                    "claim": f"{raw}{unit}",
+                    "evidence": "number is not present in assigned-stock tool rows, counts, or share quantities",
+                }
+            )
+    for raw in _PERCENT_NUMERIC_CLAIM_RE.findall(response_text):
+        violations.append(
+            {
+                "type": "unsupported_assigned_stock_percent",
+                "claim": f"{raw}%",
+                "evidence": "assigned-stock tool output does not provide percentage return facts",
+            }
+        )
+    return violations[:5]
+
+
+def _assigned_stock_allowed_numeric_values(observations: list[dict[str, Any]]) -> list[float]:
+    values: list[float] = []
+    numeric_fields = (
+        "shares_remaining",
+        "shares_sold",
+        "stock_cost_per_share",
+        "remaining_stock_cost_basis",
+        "remaining_market_value",
+        "spot",
+        "assigned_stock_unrealized_pnl",
+        "assigned_stock_realized_pnl",
+        "option_premium_attribution",
+        "assignment_lifecycle_pnl",
+    )
+    summed_fields = (
+        "remaining_stock_cost_basis",
+        "remaining_market_value",
+        "assigned_stock_unrealized_pnl",
+        "assigned_stock_realized_pnl",
+        "option_premium_attribution",
+        "assignment_lifecycle_pnl",
+    )
+    for item in observations:
+        if str(item.get("tool_name") or "") != "option_positions_read":
+            continue
+        data = item.get("data") if isinstance(item.get("data"), dict) else {}
+        if str(data.get("action") or "").strip().lower() != "assigned-stock":
+            contract = item.get("output_contract") if isinstance(item.get("output_contract"), dict) else {}
+            if str(contract.get("canonical_renderer") or "") != "assigned_stock_lifecycle":
+                continue
+        rows = data.get("rows") or data.get("assigned_stock_lots")
+        if not isinstance(rows, list):
+            continue
+        _append_numeric_value(values, data.get("row_count"))
+        _append_numeric_value(values, len(rows))
+        counts_by_symbol: dict[str, int] = {}
+        counts_by_currency: dict[str, int] = {}
+        sums_by_currency: dict[str, dict[str, float]] = {}
+        for row_raw in rows:
+            if not isinstance(row_raw, dict):
+                continue
+            symbol = str(row_raw.get("symbol") or "").strip()
+            currency = str(row_raw.get("currency") or "").strip().upper()
+            if symbol:
+                counts_by_symbol[symbol] = counts_by_symbol.get(symbol, 0) + 1
+            if currency:
+                counts_by_currency[currency] = counts_by_currency.get(currency, 0) + 1
+            for field in numeric_fields:
+                _append_numeric_value(values, row_raw.get(field))
+            bucket = sums_by_currency.setdefault(currency, {})
+            for field in summed_fields:
+                amount = _safe_float(row_raw.get(field))
+                if amount is not None:
+                    bucket[field] = bucket.get(field, 0.0) + amount
+        for count in [*counts_by_symbol.values(), *counts_by_currency.values()]:
+            _append_numeric_value(values, count)
+        for bucket in sums_by_currency.values():
+            for amount in bucket.values():
+                _append_numeric_value(values, amount)
+    return values
+
+
+def _append_numeric_value(values: list[float], value: Any) -> None:
+    number = _safe_float(value)
+    if number is not None:
+        values.append(number)
+
+
+def _parse_claim_number(raw: str) -> float | None:
+    try:
+        return float(str(raw or "").replace(",", ""))
+    except Exception:
+        return None
+
+
+def _numeric_value_allowed(value: float, allowed_values: list[float]) -> bool:
+    for allowed in allowed_values:
+        tolerance = max(0.01, abs(allowed) * 0.00001)
+        if abs(value - allowed) <= tolerance:
+            return True
+    return False
 
 
 def _answer_guard_segments(text: str) -> list[str]:
@@ -2152,8 +2503,8 @@ Rules:
 - Resolve relative dates using context.temporal_context.current_date in Asia/Shanghai. For a month without a year such as "6月", use the current_date year.
 - For monthly income summary questions, use monthly_income_report with account/month when available.
 - For combined/all-account return questions, include required_capabilities=["combined_account_return"] and use monthly_income_report without account.
-- For cashflow detail, net cashflow composition, net inflow source, "明细", "组成", "构成", "来源", or "由什么组成", use monthly_income_report with include_rows=true; the system will render factual rows first and LLM may only add analysis.
-- For assigned stock / 被指派正股 / 指派正股 holding PnL, floating PnL, spot, cost basis, or lifecycle PnL questions, use option_positions_read with action="assigned-stock", status="open" unless the user asks all/closed, refresh_quotes=true for current holding PnL. Use response_mode=canonical for direct 查看/查询/list questions; use response_mode=synthesis only when the user asks for analysis, advice, risk, why/how, comparison, or what to do.
+- For cashflow detail, net cashflow composition, net inflow source, "明细", "组成", "构成", "来源", or "由什么组成", use monthly_income_report with include_rows=true; the Agent composer will write the final user response from tool evidence.
+- For assigned stock / 被指派正股 / 指派正股 holding PnL, floating PnL, spot, cost basis, or lifecycle PnL questions, use option_positions_read with action="assigned-stock", status="open" unless the user asks all/closed, refresh_quotes=true for current holding PnL. Use response_mode=synthesis so the Agent composer can summarize the holding PnL from tool evidence.
 - For all-history, cumulative, or total net cashflow questions, omit month so monthly_income_report reads all OM local ledger months.
 - For multiple explicit months, either call monthly_income_report once per month with matching arguments, or omit month and synthesize from all available rows; never duplicate one month while claiming another.
 - For "记录开仓", "记录平仓", Futu 成交提醒, 成功卖出/买入 option fills, use manual_trade_open or manual_trade_close with raw_text set to the original user message.
@@ -2161,8 +2512,8 @@ Rules:
 - For monitored-symbol setting changes such as covered call min strike 85, use symbol_edit. Do not use symbol_edit for questions about the current value.
 - For model switch requests, use model_use. For immediate software upgrade requests, use upgrade_now.
 - response_mode is a top-level plan field only. Never include response_mode inside any step.arguments.
-- Use response_mode=canonical only for direct status/summary/list queries that do not require explanation, comparison, or composition.
-- Use response_mode=synthesis for analysis, comparison, why/how, or composition questions. For monthly_income_report include_rows=true, synthesis is analysis-only because canonical facts are rendered by the system.
+- response_mode is an internal compatibility field, not a user-visible mode. Prefer response_mode=synthesis for financial answers that should be composed from tool evidence; deterministic renderers remain fallback.
+- Use response_mode=canonical only for narrow status/config lookups where a direct deterministic value is the whole answer.
 - If there is no safe plan, or required slots are missing and the capability cannot safely handle them, return steps=[] instead of guessing.
 """
 
@@ -2212,10 +2563,10 @@ def _planner_tool_manifest() -> list[dict[str, Any]]:
             }
         if name == "option_positions_read":
             notes.append("Use for current option position list/detail requests, including 持仓明细, 持仓明晰, 持仓详情, 当前仓位, or current positions.")
-            notes.append("For assigned stock / 被指派正股 / 指派正股 holding PnL, use action=assigned-stock with status=open by default and refresh_quotes=true when the user asks current 盈亏, spot, 浮盈亏, or 持仓盈亏; direct 查看/查询 should stay canonical, and synthesis is only for analysis/advice/risk/why/how questions.")
+            notes.append("For assigned stock / 被指派正股 / 指派正股 holding PnL, use action=assigned-stock with status=open by default and refresh_quotes=true when the user asks current 盈亏, spot, 浮盈亏, or 持仓盈亏; use synthesis so the Agent composer can answer from tool evidence.")
             notes.append("For ordinary position list/detail requests, required_capabilities should be [] because option_positions_read itself provides option_positions/read_only.")
             notes.append("Use action=list for current lots; use action=history or action=inspect only when the user explicitly asks for event history, projection, repair, or ledger diagnostics.")
-            notes.append("For action=list or action=assigned-stock, canonical factual rows are rendered by the system; synthesis should only add analysis and must not reorder, omit, or restate rows.")
+            notes.append("For action=list or action=assigned-stock, tool rows are evidence; deterministic renderers are fallback/provenance, not the default user-visible mode.")
             semantics = {
                 "data_source": "local option position ledger",
                 "answer_capabilities": {
@@ -2368,7 +2719,10 @@ Rules:
 - If observation.capability_status has gaps, say the request is only partially satisfied and name the gap; do not present a nearby result as complete.
 - Do not downgrade a detail/composition question into a nearby summary.
 - Keep Chinese output concise and Markdown-friendly.
-- Mention the data scope when relevant, for example OM 本地账本.
+- Do not force a 事实/分析 section split. Write one natural answer; use compact bullets only when the user asked for details or the rows are necessary.
+- Do not expose internal ids such as stock_lot_id, record_id, event_id, source_deal_id, or position_key.
+- If observations include assistant.answer_evidence, follow its composition_instruction. Do not append 数据来源 or 口径; the system appends deterministic provenance.
+- Mention the data scope only when it changes the answer; do not duplicate deterministic provenance.
 - For monthly_income_report, "历史以来", "累计", and "总净现金流" mean the OM local ledger coverage returned by the tool.
 - Do not claim missing months/accounts when observation.coverage includes them or complete_for_query_scope=true.
 - For monthly_income_report detail rows, contract quantity must come from contracts or contracts_closed. Do not infer one row as one contract; if contracts/contracts_closed=2, say 2张/2手, never 一手.
@@ -2479,14 +2833,14 @@ def _synthesis_data(tool_name: str, data: dict[str, Any]) -> dict[str, Any]:
     if tool_name == "option_positions_read":
         return {
             "summary": _clip_mapping(data.get("summary"), limit=16) if isinstance(data.get("summary"), dict) else data.get("summary"),
-            "rows": _clip_list(data.get("rows"), limit=20),
+            "rows": _strip_internal_identifiers(_clip_list(data.get("rows"), limit=20)),
             "row_count": data.get("row_count"),
             "filters": dict(data.get("filters") or {}) if isinstance(data.get("filters"), dict) else {},
             "quote_refresh": _clip_mapping(data.get("quote_refresh"), limit=16)
             if isinstance(data.get("quote_refresh"), dict)
             else data.get("quote_refresh"),
-            "assigned_stock_sale_rows": _clip_list(data.get("assigned_stock_sale_rows"), limit=20),
-            "assigned_stock_review_rows": _clip_list(data.get("assigned_stock_review_rows"), limit=20),
+            "assigned_stock_sale_rows": _strip_internal_identifiers(_clip_list(data.get("assigned_stock_sale_rows"), limit=20)),
+            "assigned_stock_review_rows": _strip_internal_identifiers(_clip_list(data.get("assigned_stock_review_rows"), limit=20)),
             "warnings": _clip_list(data.get("warnings"), limit=8),
         }
     return _clip_mapping(data, limit=20)
@@ -2541,6 +2895,32 @@ def _clip_list(value: Any, *, limit: int) -> list[Any]:
         else:
             out.append({"type": type(item).__name__})
     return out
+
+
+_INTERNAL_SYNTHESIS_KEYS = frozenset(
+    {
+        "record_id",
+        "lot_id",
+        "stock_lot_id",
+        "stock_event_id",
+        "event_id",
+        "source_deal_id",
+        "source_option_lot_id",
+        "position_key",
+    }
+)
+
+
+def _strip_internal_identifiers(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_strip_internal_identifiers(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            str(key): _strip_internal_identifiers(item)
+            for key, item in value.items()
+            if str(key) not in _INTERNAL_SYNTHESIS_KEYS
+        }
+    return value
 
 
 def _tool_name_for_intent(intent_name: str) -> str | None:
