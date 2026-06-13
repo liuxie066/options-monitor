@@ -43,6 +43,7 @@ def render_inbound_text(*, intent: PerceptionResult | None, tool_result: dict[st
     data_raw = tool_result.get("data")
     data = cast(dict[str, Any], data_raw) if isinstance(data_raw, dict) else {}
     renderer_key = {
+        "analysis_query": "analysis_result",
         "monthly_income_report": "monthly_income",
         "position_query": "position_rows",
         "assigned_stock_position_query": "assigned_stock_lifecycle",
@@ -132,6 +133,33 @@ def _render_symbol_config(data: dict[str, Any]) -> str:
         return "\n".join(lines)
 
     return f"{symbol} 当前没有可展示的策略配置。"
+
+
+def _render_analysis_result(data: dict[str, Any]) -> str:
+    fallback = str(data.get("fallback_text") or "").strip()
+    if fallback:
+        return fallback
+    columns = [str(item) for item in data.get("columns") or [] if str(item).strip()]
+    rows = [item for item in data.get("rows") or [] if isinstance(item, dict)]
+    if not columns:
+        return "分析查询完成：0 行。\n数据来源：OM read-only analysis workspace"
+    lines = [f"分析查询结果：{len(rows)} 行"]
+    lines.append("| " + " | ".join(columns) + " |")
+    lines.append("| " + " | ".join("---" for _ in columns) + " |")
+    for row in rows[:12]:
+        lines.append("| " + " | ".join(_analysis_cell(row.get(column)) for column in columns) + " |")
+    if len(rows) > 12:
+        lines.append(f"其余 {len(rows) - 12} 行已省略。")
+    lines.append("数据来源：OM read-only analysis workspace")
+    return "\n".join(lines)
+
+
+def _analysis_cell(value: Any) -> str:
+    if value is None:
+        return "-"
+    if isinstance(value, float):
+        return f"{value:,.6f}".rstrip("0").rstrip(".")
+    return str(value).replace("|", "\\|")
 
 
 def _format_config_value(value: Any) -> str:
@@ -1303,6 +1331,7 @@ def _money(value: Any, currency: Any) -> str:
 _CanonicalRenderer = Callable[[dict[str, Any], dict[str, Any]], str]
 
 _CANONICAL_RENDERERS: dict[str, _CanonicalRenderer] = {
+    "analysis_result": lambda data, _tool_result: _render_analysis_result(data),
     "monthly_income": lambda data, _tool_result: _render_monthly_income(data),
     "position_rows": lambda data, _tool_result: _render_positions(data),
     "assigned_stock_lifecycle": lambda data, _tool_result: _render_assigned_stock_lifecycle(data),
