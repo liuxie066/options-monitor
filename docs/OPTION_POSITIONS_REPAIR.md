@@ -4,14 +4,13 @@
 
 > 本地 `option_positions` / `position_lots` 发现错账后，应该怎么安全修。
 
-如果你现在问的是“线上升级后怎么从旧方案迁到新方案”，先看：
-
-- `docs/OPTION_POSITIONS_MIGRATION.md`
-
 适用前提：
 - canonical model 仍然是 `trade_events -> projection -> position_lots`
 - 不直接手改 SQLite 行
 - Feishu `option_positions` 已退休，不是修账入口
+
+如果问题来自旧环境升级、多库并行或历史 Feishu 表，先用 `store inspect`
+确认当前 active SQLite；旧表只能作为人工历史证据，不能重新接成运行时事实源。
 
 ---
 
@@ -129,12 +128,14 @@
 ```bash
 ./om option-positions history --record-id <record_id>
 ./om option-positions list --broker 富途 --account lx --status all
+./om option-positions verify-projection
 ./om option-positions report monthly-income --broker 富途 --account lx --month 2026-04
 ```
 
 你要确认三件事：
 - 事件链符合预期
 - 当前 lot 状态符合预期
+- replay projection 与当前 `position_lots` 一致
 - 月收益 / premium 收入没有被错误污染
 
 ---
