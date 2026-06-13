@@ -618,17 +618,17 @@ def test_assistant_runtime_renders_assigned_stock_receipt_readably() -> None:
                     "account": "lx",
                     "symbol": "0700.HK",
                     "currency": "HKD",
-                    "status": "open",
-                    "shares_remaining": 200,
-                    "shares_sold": 0,
+                    "status": "partially_sold",
+                    "shares_remaining": 400,
+                    "shares_sold": 200,
                     "stock_cost_per_share": 450,
-                    "remaining_stock_cost_basis": 90000,
-                    "remaining_market_value": 92720,
+                    "remaining_stock_cost_basis": 180000,
+                    "remaining_market_value": 185440,
                     "spot": 463.6,
                     "quote_status": "fresh",
-                    "assigned_stock_unrealized_pnl": 2720,
-                    "assigned_stock_realized_pnl": 0,
-                    "assignment_lifecycle_pnl": 4065,
+                    "assigned_stock_unrealized_pnl": 5440,
+                    "assigned_stock_realized_pnl": 4720,
+                    "assignment_lifecycle_pnl": 14252,
                 },
                 {
                     "stock_lot_id": "assigned-stock-futu",
@@ -654,15 +654,66 @@ def test_assistant_runtime_renders_assigned_stock_receipt_readably() -> None:
     )
 
     assert text.startswith("lx · open · 指派正股：2 条")
-    assert "1. lx 0700.HK · open · 剩余 200 股" in text
-    assert "   持仓：成本 HKD 450/股，成本基数 HKD 90,000" in text
-    assert "   行情：spot HKD 463.6，quote=fresh" in text
-    assert "   盈亏：正股浮盈亏 HKD 2,720，正股已实现 HKD 0，生命周期PnL HKD 4,065" in text
+    assert text.index("汇总（按币种）：") < text.index("明细：")
+    assert (
+        "1. 0700.HK · partially_sold · 剩余 400 股，已卖 200 股 · 成本 HKD 450/股 · "
+        "spot HKD 463.6 · 正股浮盈亏 HKD 5,440 · 正股已实现 HKD 4,720 · 生命周期PnL HKD 14,252"
+    ) in text
+    assert (
+        "2. FUTU · open · 剩余 100 股 · 成本 USD 120/股 · "
+        "spot USD 97.94 · 正股浮盈亏 USD -2,206 · 生命周期PnL USD -1,846"
+    ) in text
+    assert "   持仓：" not in text
+    assert "   行情：" not in text
+    assert "   盈亏：" not in text
+    assert "quote=fresh" not in text
     assert "lot：" not in text
     assert "assigned-stock-0700" not in text
-    assert "汇总（按币种）：" in text
-    assert "- HKD · 1 条：剩余成本 HKD 90,000，市值 HKD 92,720，正股浮盈亏 HKD 2,720" in text
+    assert "- HKD · 1 条：剩余成本 HKD 180,000，市值 HKD 185,440，正股浮盈亏 HKD 5,440" in text
     assert "- USD · 1 条：剩余成本 USD 12,000，市值 USD 9,794，正股浮盈亏 USD -2,206" in text
+    assert "报价刷新：ok source=opend_realtime" in text
+
+
+def test_assistant_runtime_renders_assigned_stock_missing_quote_explicitly() -> None:
+    text = render_canonical_tool_result(
+        renderer_key="assigned_stock_lifecycle",
+        data={
+            "action": "assigned-stock",
+            "filters": {"account": "lx", "status": "open", "refresh_quotes": True},
+            "rows": [
+                {
+                    "stock_lot_id": "assigned-stock-futu",
+                    "account": "lx",
+                    "symbol": "FUTU",
+                    "currency": "USD",
+                    "status": "open",
+                    "shares_remaining": 100,
+                    "shares_sold": 0,
+                    "stock_cost_per_share": 120,
+                    "remaining_stock_cost_basis": 12000,
+                    "spot": None,
+                    "quote_status": "missing_quote",
+                    "assigned_stock_unrealized_pnl": None,
+                    "assigned_stock_realized_pnl": 0,
+                    "assignment_lifecycle_pnl": None,
+                }
+            ],
+            "assigned_stock_review_rows": [
+                {"symbol": "FUTU", "status": "missing_quote", "message": "open assigned stock lot has no usable as-of quote"}
+            ],
+            "quote_refresh": {"status": "missing_quote", "quote_source": "opend_realtime"},
+            "warnings": ["assigned stock quote refresh missing: FUTU"],
+        },
+        tool_result={"ok": True},
+    )
+
+    assert text.startswith("lx · open · 指派正股：1 条")
+    assert "1. FUTU · open · 剩余 100 股 · 成本 USD 120/股 · spot - · quote=missing_quote" in text
+    assert "正股浮盈亏 -" in text
+    assert "检查提示：" in text
+    assert "- FUTU missing_quote: open assigned stock lot has no usable as-of quote" in text
+    assert "报价刷新：missing_quote source=opend_realtime" in text
+    assert "提示：assigned stock quote refresh missing: FUTU" in text
 
 
 def test_assistant_runtime_does_not_overwrite_original_audit_on_duplicate_replay(tmp_path: Path) -> None:

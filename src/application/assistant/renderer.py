@@ -607,36 +607,14 @@ def _render_assigned_stock_lifecycle(data: dict[str, Any]) -> str:
         return "\n".join(lines)
 
     lines = [f"{scope}：{len(rows)} 条"]
-    for idx, row_raw in enumerate(rows, start=1):
-        row = _dict(row_raw)
-        currency = _value(row.get("currency"))
-        shares_remaining = _num(row.get("shares_remaining"))
-        shares_sold = _num(row.get("shares_sold"))
-        cost = _money(row.get("stock_cost_per_share"), currency)
-        basis = _money(row.get("remaining_stock_cost_basis"), currency)
-        spot = _money(row.get("spot"), currency)
-        unrealized = _money(row.get("assigned_stock_unrealized_pnl"), currency)
-        realized = _money(row.get("assigned_stock_realized_pnl"), currency)
-        lifecycle = _money(row.get("assignment_lifecycle_pnl"), currency)
-        quote_status = _value(row.get("quote_status"))
-        row_status = _value(row.get("status"))
-        title = (
-            f"{idx}. {_value(row.get('account'))} {_value(row.get('symbol'))} "
-            f"· {row_status} · 剩余 {shares_remaining} 股"
-        )
-        if shares_sold != "-" and shares_sold != "0":
-            title += f"，已卖 {shares_sold} 股"
-        lines.append(title)
-        if basis != "-":
-            lines.append(f"   持仓：成本 {cost}/股，成本基数 {basis}")
-        else:
-            lines.append(f"   持仓：成本 {cost}/股")
-        lines.append(f"   行情：spot {spot}，quote={quote_status}")
-        lines.append(f"   盈亏：正股浮盈亏 {unrealized}，正股已实现 {realized}，生命周期PnL {lifecycle}")
     summary_lines = _assigned_stock_summary_lines(rows)
     if summary_lines:
         lines.append("汇总（按币种）：")
         lines.extend(summary_lines)
+    lines.append("明细：")
+    show_account = _assigned_stock_should_show_account(rows, account)
+    for idx, row_raw in enumerate(rows, start=1):
+        lines.append(_assigned_stock_detail_line(idx, row_raw, show_account=show_account))
     review_notes: list[str] = []
     for item in _list(data.get("assigned_stock_review_rows"))[:5]:
         row = _dict(item)
@@ -656,6 +634,62 @@ def _render_assigned_stock_lifecycle(data: dict[str, Any]) -> str:
     lines.append("口径：正股成本按真实交割价记录，不扣除 Sell Put 权利金；生命周期PnL 才包含权利金归因。")
     lines.append("数据源：OM 本地 SQLite assigned_stock_events + trade_events")
     return "\n".join(lines)
+
+
+def _assigned_stock_should_show_account(rows: list[Any], account_filter: str) -> bool:
+    normalized_filter = str(account_filter or "").strip().lower()
+    if normalized_filter in {"", "-", "all", "全部账户"}:
+        return True
+    accounts: set[str] = set()
+    for row_raw in rows:
+        account = _value(_dict(row_raw).get("account"))
+        if account != "-":
+            accounts.add(account)
+    return len(accounts) > 1
+
+
+def _assigned_stock_detail_line(idx: int, row_raw: Any, *, show_account: bool) -> str:
+    row = _dict(row_raw)
+    currency = _value(row.get("currency"))
+    symbol = _value(row.get("symbol"))
+    account = _value(row.get("account"))
+    label = f"{account} {symbol}" if show_account and account != "-" else symbol
+    row_status = _value(row.get("status"))
+    shares_remaining = _num(row.get("shares_remaining"))
+    shares_sold = _num(row.get("shares_sold"))
+    cost = _money(row.get("stock_cost_per_share"), currency)
+    spot = _money(row.get("spot"), currency)
+    unrealized = _money(row.get("assigned_stock_unrealized_pnl"), currency)
+    realized = _money(row.get("assigned_stock_realized_pnl"), currency)
+    lifecycle = _money(row.get("assignment_lifecycle_pnl"), currency)
+
+    holding = f"剩余 {shares_remaining} 股"
+    if shares_sold not in {"-", "0"}:
+        holding += f"，已卖 {shares_sold} 股"
+
+    parts = [
+        f"{idx}. {label}",
+        row_status,
+        holding,
+        f"成本 {cost}/股",
+        f"spot {spot}",
+    ]
+    quote_status = _value(row.get("quote_status"))
+    if _assigned_stock_should_show_quote_status(row=row, spot_text=spot, quote_status=quote_status):
+        parts.append(f"quote={quote_status}")
+    parts.append(f"正股浮盈亏 {unrealized}")
+    if not _is_zero_number(row.get("assigned_stock_realized_pnl")):
+        parts.append(f"正股已实现 {realized}")
+    parts.append(f"生命周期PnL {lifecycle}")
+    return " · ".join(parts)
+
+
+def _assigned_stock_should_show_quote_status(*, row: dict[str, Any], spot_text: str, quote_status: str) -> bool:
+    normalized = quote_status.strip().lower()
+    if normalized not in {"", "-", "fresh", "not_required"}:
+        return True
+    row_status = _value(row.get("status")).lower()
+    return spot_text == "-" and row_status in {"open", "partially_sold"}
 
 
 def _assigned_stock_summary_lines(rows: list[Any]) -> list[str]:
@@ -701,6 +735,15 @@ def _assigned_stock_summary_lines(rows: list[Any]) -> list[str]:
         prefix = _value(currency) if currency else "未标币种"
         lines.append(f"- {prefix} · {counts.get(currency, 0)} 条：" + "，".join(parts))
     return lines
+
+
+def _is_zero_number(value: Any) -> bool:
+    if value is None:
+        return True
+    try:
+        return abs(float(value)) < 1e-9
+    except Exception:
+        return False
 
 
 def _render_position_exit_analysis(data: dict[str, Any]) -> str:
