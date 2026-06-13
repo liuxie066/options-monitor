@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.261 - 2026-06-13
+
+### Changed
+- Simplified assigned-stock assistant receipts by showing per-currency summaries before one-line lot details, suppressing normal `fresh` quote noise, and keeping missing quote diagnostics explicit.
+
 ## 1.2.260 - 2026-06-13
 
 ### Fixed
