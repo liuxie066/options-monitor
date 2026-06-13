@@ -40,4 +40,4 @@ This repo no longer maintains a manual memory-ingest workflow.
 - Prefer updating current docs, tests, or runtime read surfaces when a behavior or boundary changes.
 - If a future task explicitly asks to preserve historical context, handle it as a one-off documentation change with current evidence and user approval.
 
-Old entry templates were archived under `memory/_archive/templates/` for reference only.
+Obsolete manual-ingest templates were removed when the active wiki workflow was retired.

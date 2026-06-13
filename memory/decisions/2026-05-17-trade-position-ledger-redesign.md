@@ -223,7 +223,7 @@ v2 进入隔离废弃状态，不再作为默认系统的一部分：
 
 - `tests/test_option_positions_v2.py` 重命名为 `tests/test_option_positions_legacy_v2.py`，测试语义从“v2 正常路径”改为“legacy v2 quarantine diagnostics”。
 - `domain/domain/option_positions_v2.py`、`domain/storage/repositories/option_positions_v2_repo.py`、`src/application/option_positions_v2_service.py` 均标注为 legacy quarantine / migration diagnostics。
-- `docs/OPTION_POSITIONS_MIGRATION.md` 增加 `Legacy v2 quarantine` 边界：`output_shared/state/option_positions_v2/` 只能用于历史对照和迁移核对，不能用于风控、target resolver、facade fallback 或默认维护命令。
+- 当时的迁移说明增加 `Legacy v2 quarantine` 边界：`output_shared/state/option_positions_v2/` 只能用于历史对照和迁移核对，不能用于风控、target resolver、facade fallback 或默认维护命令。
 - `docs/TRADE_POSITION_LEDGER_REDESIGN.md` 更新当前状态：canonical state 固定为 `trade_events -> position_lots`，v2 只保留为短期 legacy quarantine，物理删除等待迁移窗口结束。
 - 结构性测试继续约束默认 `src/application` / `src/interfaces` 不得 import `option_positions_v2_service` 或 `load_option_positions_v2_records`。
 
