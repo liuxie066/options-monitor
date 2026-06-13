@@ -54,6 +54,15 @@ def _bool_flag(value: Any) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _optional_path(value: Any) -> Path | None:
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return Path(text).expanduser()
+
+
 def _quote_snapshot_rows(value: Any) -> list[dict[str, Any]]:
     if value is None:
         return []
@@ -341,6 +350,7 @@ def _assigned_stock_action(
     *,
     cfg: dict[str, Any],
     repo_base: Callable[[], Path],
+    quote_state_base_dir: Path | None,
     normalize_broker: Callable[[Any], str],
     normalize_account: Callable[[Any], str],
     refresh_assigned_stock_quotes: Callable[..., Any],
@@ -413,6 +423,7 @@ def _assigned_stock_action(
                     host=_optional_text(payload.get("opend_host") or payload.get("host")),
                     port=_optional_int(port_value) if port_value not in (None, "") else None,
                     base_dir=repo_base(),
+                    state_base_dir=quote_state_base_dir,
                 )
             except Exception as exc:
                 quote_refresh = {
@@ -586,6 +597,7 @@ def option_positions_read_tool(
             payload,
             cfg=cfg,
             repo_base=repo_base,
+            quote_state_base_dir=_optional_path(ledger_store.get("runtime_root")),
             normalize_broker=normalize_broker,
             normalize_account=normalize_account,
             refresh_assigned_stock_quotes=refresh_assigned_stock_quotes,

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.260 - 2026-06-13
+
+### Fixed
+- Fixed assigned-stock realtime spot refresh to write OpenD snapshot limiter state under the active runtime root instead of the release code directory, preventing permission-denied `missing_quote` results after production upgrades.
+
 ## 1.2.259 - 2026-06-13
 
 ### Changed
