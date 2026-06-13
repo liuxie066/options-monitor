@@ -543,29 +543,42 @@ clarification.
 
 `agent_loop` is the current bounded Planner lane inside the Agent loop. It may plan read tools or one preview-write operation, but deterministic execution, factual rendering, preview storage, confirm/apply, and audit ownership remain outside model authority. If a write-like request such as a Futu fill alert is planned as a read query, OM rejects the plan instead of silently returning nearby holdings or income data.
 
-### Data Analysis-style Analytical Answers
+### Agent Analytical Answers
 
-For analytical questions such as `6月收益的组成`, `分析 lx 6月净现金流明细`, or `历史以来总的净现金流`, Inbound should follow a Data Analysis-style contract:
+For analytical questions such as `6月收益的组成`, `分析 lx 6月净现金流明细`,
+`对比 lx 和 sy 的账户收益`, `指派正股和期权收益有什么关系`, or `为什么某个标的
+没有出现在候选里`, Inbound follows one Agent answer contract:
 
 ```text
 user question
--> LLM plans the analysis and required OM tools
--> deterministic OM tools fetch ledger/runtime evidence
+-> LLM plans the task and required OM tools
+-> read-only OM tools fetch ledger/runtime/config/strategy evidence
+-> optional Tool OS query builds a task-shaped result table
 -> AgentLoop builds an internal evidence bundle from tool observations
 -> LLM composes the user-facing answer from that evidence
--> answer guard checks the response against tool facts
+-> answer guard checks the response against tool facts and query cells
 -> deterministic provenance is appended
--> deterministic renderer is used only as fallback when composition is unavailable or unsafe
+-> task-shaped fallback is used when composition is unavailable or unsafe
 ```
 
-The design goal is to preserve LLM intelligence without making the LLM a factual source. The LLM may choose what to inspect, which dimensions to compare, and what explanation angle is useful. It must not be the component that writes accounting facts such as amount, currency, contract count, account, symbol, expiration, close type, or date.
+The design goal is to preserve LLM intelligence without making the LLM a factual source. The LLM may choose what to inspect, which dimensions to compare, and what explanation angle is useful. It must not be the component that invents accounting facts such as amount, currency, contract count, account, symbol, expiration, close type, or date.
 
 Canonical factual rendering is declared by the tool definition through `output_contract.canonical_renderer`. `agent_loop` uses this contract to build fallback evidence and deterministic provenance; it is not a user-visible `canonical` mode. When a tool has payload-dependent factual output, use an `output_contract_resolver` so the concrete contract travels with the observation.
+
+For open-ended analytical tasks, the preferred path is Tool OS v1:
+
+- `analysis_catalog` exposes the whitelisted read-only views and fields.
+- `analysis_query` runs SELECT-only SQL over those views and returns
+  `columns`, `rows`, `cell_refs`, coverage, and a compact deterministic table.
+- The first views cover monthly income summaries/details, assigned-stock
+  lifecycle, position lots, trade events, and monitored-symbol strategy config.
+- Future candidate-filter, close-advice, and runtime views should extend the
+  same catalog/query surface instead of adding narrow answer APIs.
 
 For income, cashflow, positions, and assigned-stock analysis, the evidence bundle is the authority. It should contain the evidence needed for the final answer, for example:
 
 - `data_scope`: source, account scope, month scope, coverage, warnings.
-- `fallback_renderer_text`: deterministic fallback text derived from the tool contract.
+- `fallback_renderer_text`: deterministic fallback text derived from the tool contract or Tool OS query result.
 - `provenance_lines`: deterministic data-source and accounting-policy footer.
 - `totals_by_account`: net cashflow, realized PnL, premium, and cash-secured denominator when available.
 - `totals_by_source`: open premium, close/exercise/assignment/expiry realized PnL, long-option recovery, and other cashflow buckets when available.
@@ -578,14 +591,16 @@ Final answer rules:
 - LLM output is accepted only after answer-guard checks. For assigned-stock, unsupported currency amounts, share/count claims, or percentage claims trigger rewrite/fallback.
 - Internal ids such as `stock_lot_id`, `record_id`, `event_id`, and `source_deal_id` are evidence/audit fields, not default user-facing text.
 - If the artifact cannot support the requested answer, the response should say which capability or evidence is missing instead of returning a nearby summary.
-- Existing deterministic renderers remain safety fallback and audit evidence.
+- Existing deterministic renderers remain safety fallback and audit evidence for their own tool results.
+- If an `analysis_query` result exists, fallback must preserve the user's task shape by rendering that query table. A comparison question falls back to a comparison table, not to a raw monthly income report.
 
 Acceptance criteria for this design:
 
 - A direct assigned-stock holding PnL question returns a concise Agent-composed answer, not a forced facts/analysis split.
 - A known multi-contract row cannot be shown as one contract; guard rewrites or falls back.
 - A known assigned-stock amount cannot drift; unsupported LLM amounts trigger rewrite or fallback.
-- If LLM composition is unavailable, the deterministic renderer fallback is still useful.
+- If LLM composition is unavailable, analytical questions still return the Tool OS result table with source/provenance.
+- The question `对比 lx 和 sy 的账户收益，有什么不同？` returns per-month account differences, higher account, difference, and rate difference when the ledger evidence supports it.
 - Every composed financial answer carries deterministic provenance when the tool contract provides it.
 
 ## Write Actions

@@ -3551,6 +3551,167 @@ def test_assistant_runtime_agent_loop_uses_canonical_fallback_when_synthesis_una
     assert out["data"]["action"]["result"]["data"]["synthesis"]["error_code"] == "LLM_UNAVAILABLE"
 
 
+def test_assistant_runtime_agent_loop_analysis_query_uses_task_shaped_fallback(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        if tool_name == "analysis_catalog":
+            return build_response(
+                tool_name=tool_name,
+                ok=True,
+                data={
+                    "views": {
+                        "monthly_income_return_summary": {
+                            "fields": ["month", "account", "net_income_cny", "net_return_rate"]
+                        }
+                    }
+                },
+            )
+        if tool_name == "analysis_query":
+            return build_response(
+                tool_name=tool_name,
+                ok=True,
+                data={
+                    "source_label": "OM read-only analysis workspace",
+                    "query": {"sql": payload["sql"], "limit": 20},
+                    "columns": [
+                        "month",
+                        "lx_income_cny",
+                        "sy_income_cny",
+                        "higher_account",
+                        "income_diff_cny",
+                    ],
+                    "rows": [
+                        {
+                            "month": "2026-05",
+                            "lx_income_cny": 35842.0,
+                            "sy_income_cny": 23973.0,
+                            "higher_account": "lx",
+                            "income_diff_cny": 11869.0,
+                        }
+                    ],
+                    "row_count": 1,
+                    "truncated": False,
+                    "views_used": ["monthly_income_return_summary"],
+                    "cell_refs": {
+                        "r1.lx_income_cny": {"row": 1, "column": "lx_income_cny", "value": 35842.0},
+                        "r1.sy_income_cny": {"row": 1, "column": "sy_income_cny", "value": 23973.0},
+                        "r1.income_diff_cny": {"row": 1, "column": "income_diff_cny", "value": 11869.0},
+                    },
+                    "fallback_text": (
+                        "分析查询结果：1 行\n"
+                        "| month | lx_income_cny | sy_income_cny | higher_account | income_diff_cny |\n"
+                        "| --- | --- | --- | --- | --- |\n"
+                        "| 2026-05 | 35842 | 23973 | lx | 11869 |\n"
+                        "数据来源：OM read-only analysis workspace"
+                    ),
+                },
+            )
+        raise AssertionError(tool_name)
+
+    def _plan(
+        text: str,
+        settings: AssistantSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        assert text == "对比lx和sy的账户收益，有什么不同？"
+        assert settings.mode == "agent_loop"
+        assert conversation_context is not None
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="对比 lx 和 sy 的账户收益",
+                response_mode="synthesis",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="analysis_catalog",
+                        arguments={},
+                        purpose="确认收益分析视图",
+                    ),
+                    PlannerPlanStep(
+                        id="step_2",
+                        tool_name="analysis_query",
+                        arguments={
+                            "sql": (
+                                "select month, "
+                                "sum(case when account = 'lx' then net_income_cny else 0 end) as lx_income_cny, "
+                                "sum(case when account = 'sy' then net_income_cny else 0 end) as sy_income_cny, "
+                                "'lx' as higher_account, 11869 as income_diff_cny "
+                                "from monthly_income_return_summary group by month"
+                            ),
+                            "limit": 20,
+                        },
+                        purpose="按月份比较 lx 和 sy 的净现金流",
+                    ),
+                ),
+            ),
+            trace={
+                "enabled": True,
+                "attempted": True,
+                "reason": "accepted",
+                "provider": "openai",
+                "model": "gpt-5.2",
+                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+            },
+        )
+
+    def _synthesize(
+        _question: str,
+        _settings: AssistantSettings,
+        _plan: PlannerPlan,
+        _observations: list[dict[str, Any]],
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmSynthesisResult:
+        return LlmSynthesisResult(
+            response_text="",
+            trace={"attempted": True, "reason": "unavailable", "schema_version": "om-tool-plan-synthesis-v1"},
+            error=AgentToolError(code="LLM_UNAVAILABLE", message="LLM synthesis unavailable."),
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="对比lx和sy的账户收益，有什么不同？",
+            sender_id="local",
+            message_id="msg_agent_loop_analysis_fallback",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+        synthesize_response_fn=_synthesize,
+    )
+
+    assert out["ok"] is True
+    assert calls == [
+        ("analysis_catalog", {"config_key": "us"}),
+        (
+            "analysis_query",
+            {
+                "config_key": "us",
+                "sql": (
+                    "select month, "
+                    "sum(case when account = 'lx' then net_income_cny else 0 end) as lx_income_cny, "
+                    "sum(case when account = 'sy' then net_income_cny else 0 end) as sy_income_cny, "
+                    "'lx' as higher_account, 11869 as income_diff_cny "
+                    "from monthly_income_return_summary group by month"
+                ),
+                "limit": 20,
+            },
+        ),
+    ]
+    assert "分析查询结果：1 行" in out["data"]["response_text"]
+    assert "| 2026-05 | 35842 | 23973 | lx | 11869 |" in out["data"]["response_text"]
+    assert "收益统计完成（OM 本地账本）" not in out["data"]["response_text"]
+    synthesis = out["data"]["action"]["result"]["data"]["synthesis"]
+    assert synthesis["reason"] == "analysis_result_fallback"
+    assert synthesis["fallback"] == "analysis_result_renderer"
+
+
 def test_assistant_runtime_agent_loop_answer_guard_rewrites_contradictory_income_synthesis(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
     synthesis_observation_counts: list[int] = []
@@ -5134,10 +5295,14 @@ def test_llm_intent_schema_documents_allowed_surface() -> None:
         "kind",
         "limit",
         "lines",
+        "query",
         "strategy",
         "field",
+        "sql",
         "set",
         "ensure_use",
+        "view",
+        "views",
     }
 
 

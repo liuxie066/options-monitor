@@ -150,6 +150,98 @@ should normally return one concise answer, then append source and accounting
 policy lines when they are useful. Debug detail belongs in audit/operator
 surfaces, not in normal chat replies.
 
+## OM Tool OS v1
+
+The next Agent increment is a general Tool OS layer, not another
+business-specific answer tool. The design follows the useful Claude Code
+pattern: the model chooses tools and explains results, while the host owns
+permission checks, data authority, execution boundaries, and verification.
+
+This explicitly rejects a narrow tool such as `account_income_compare` as the
+main solution. That tool would answer one question shape, but it would not help
+with assigned-stock lifecycle, position lots, candidate filters, runtime
+diagnostics, strategy config, or future cross-domain questions. OM needs a
+generic read-only analysis workspace that can answer many task shapes from the
+same audited data sources.
+
+Tool OS v1 has these layers:
+
+| Layer | Responsibility | First implementation |
+|---|---|---|
+| Tool discovery | Tell the planner what safe tools exist and what each tool is for | Existing registry plus new `analysis_catalog` command spec |
+| Data catalog | Expose named business views and field descriptions | `analysis_catalog` |
+| Read/query | Let the Agent slice, group, rank, compare, and join read-only data | `analysis_query` with SELECT-only SQL over whitelisted views |
+| Compute | Derive totals, differences, rates, rankings, and trends | SQLite aggregate expressions; no arbitrary Python in v1 |
+| Evidence | Preserve result rows, columns, cell refs, source labels, coverage, and warnings | `analysis_query` output contract and EvidenceBundle extraction |
+| Compose | Let the LLM write the user-facing answer from query evidence | Existing AgentLoop synthesis path |
+| Verify | Reject unsupported amounts, accounts, symbols, dates, counts, and statuses | Answer guard reads Tool OS result cells |
+| Fallback | Keep task shape if synthesis is unavailable or unsafe | Render the analysis result table, not an unrelated raw report |
+
+The expanded design considered these possible tool families:
+
+| Candidate | Benefit | Pruning decision |
+|---|---|---|
+| Narrow business answer APIs such as `account_income_compare` | Fast to implement for one question | Rejected as the primary path because each new question shape would require another API |
+| Arbitrary Python/dataframe execution | Maximum analytical flexibility | Rejected for v1 because it creates a larger permission and resource surface |
+| Read-only SQL over audited business views | Flexible enough for comparisons, grouping, ranking, and joins | Accepted as v1 compute surface |
+| Dedicated write/apply tools | Needed for future autonomous workflows | Deferred; v1 is pure read and keeps existing preview/confirm write gates |
+| Candidate-filter, close-advice, runtime-event views | Useful for broader Agent diagnosis | Deferred as additive catalog views after the v1 contract is proven |
+
+The final v1 scope is therefore intentionally small but general:
+
+- one catalog tool,
+- one SELECT-only query tool,
+- whitelisted business views,
+- bounded output rows,
+- result cells promoted into answer evidence,
+- LLM composition when available,
+- deterministic task-shaped table fallback when composition is unavailable or unsafe.
+
+The first whitelisted views should cover more than income:
+
+- `monthly_income_summary`
+- `monthly_income_return_summary`
+- `monthly_income_combined_return_summary`
+- `monthly_income_cashflow_rows`
+- `monthly_income_realized_rows`
+- `monthly_income_premium_rows`
+- `assigned_stock_lifecycle`
+- `assigned_stock_sales`
+- `assigned_stock_review`
+- `position_lots`
+- `trade_events`
+- `symbol_strategy_config`
+
+Additional views such as candidate-filter traces, close-advice rows, and runtime
+event snapshots can be added later through the same catalog/query contract.
+
+The SQL surface is intentionally small:
+
+- Only one statement is accepted.
+- Only `SELECT` or `WITH` queries are accepted.
+- The SQLite authorizer rejects inserts, updates, deletes, DDL, `ATTACH`,
+  `DETACH`, `PRAGMA`, and reads from non-whitelisted tables.
+- The tool enforces a row cap and reports truncation.
+- The tool output contains `cell_refs` such as `r1.net_income_cny`, so the
+  final answer can cite and verify dynamic query results without creating a
+  one-off output contract for every possible question.
+
+The fallback rule changes for analytical questions. If the user asks "有什么不
+同", "对比", "排名", "趋势", "组成", or "为什么", and `analysis_query`
+succeeds, fallback must preserve that task shape:
+
+```text
+user: 对比 lx 和 sy 的账户收益，有什么不同？
+-> analysis_query returns rows grouped by month/account with diff columns
+-> LLM synthesis succeeds: concise comparison + source
+-> LLM synthesis fails or guard rejects it: render the query result table +
+   conservative one-line conclusion + source
+```
+
+It must not fall back to a nearby raw monthly income report. Raw canonical
+renderers remain audit and safety surfaces for the original business tools, but
+Tool OS result tables are the product fallback for Tool OS analytical tasks.
+
 ## Target Architecture
 
 ```text

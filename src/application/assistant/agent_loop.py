@@ -118,6 +118,8 @@ _BANNED_PLAN_ARGUMENT_SUFFIXES = ("_path", "_paths", "_root", "_roots", "_dir", 
 _BANNED_PLAN_ARGUMENT_CONTAINS = ("_path_",)
 _CONFIG_SCOPED_PLAN_TOOLS = frozenset(
     {
+        "analysis_catalog",
+        "analysis_query",
         "monthly_income_report",
         "option_positions_read",
         "runtime_status",
@@ -1291,7 +1293,10 @@ def _safe_tool_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "kind",
         "limit",
         "lines",
+        "sql",
         "query",
+        "view",
+        "views",
         "symbol",
         "strategy",
         "field",
@@ -1729,6 +1734,21 @@ def _build_final_response(
                 trace=trace,
                 error=synthesis.error,
             )
+    analysis_fallback = _analysis_query_fallback_response(fact_observations)
+    if analysis_fallback:
+        trace = {
+            **dict(synthesis.trace),
+            "reason": "analysis_result_fallback",
+            "fallback": "analysis_result_renderer",
+            "error_code": synthesis.error.code if synthesis.error else None,
+        }
+        if "guard" in locals():
+            trace["answer_guard"] = {"status": "failed_then_fallback", **guard}
+        return LlmSynthesisResult(
+            response_text=analysis_fallback,
+            trace=trace,
+            error=synthesis.error,
+        )
     return LlmSynthesisResult(
         response_text=_fallback_response(plan=plan, observations=llm_observations, error_payload=error_payload),
         trace={
@@ -1897,6 +1917,13 @@ def _final_response_payload(synthesis: LlmSynthesisResult) -> dict[str, Any]:
             canonical_renderer_required=True,
             llm_may_summarize=False,
         ).public_payload()
+    if reason == "analysis_result_fallback":
+        return FinalResponsePlan(
+            status="rendered",
+            reason="analysis result renderer used after synthesis was unavailable or unsafe",
+            canonical_renderer_required=True,
+            llm_may_summarize=True,
+        ).public_payload()
     if reason == "grounded_renderer_with_analysis":
         return FinalResponsePlan(
             status="synthesized",
@@ -1960,6 +1987,25 @@ def _canonical_response(step: PlannerPlanStep, observation: dict[str, Any]) -> s
         intent=PerceptionResult(intent_name=intent_name, arguments=dict(step.arguments), source="agent_loop_plan"),
         tool_result=tool_result,
     )
+
+
+def _analysis_query_fallback_response(observations: list[dict[str, Any]]) -> str:
+    for observation in reversed(observations):
+        if str(observation.get("tool_name") or "") != "analysis_query":
+            continue
+        if not bool(observation.get("ok", False)):
+            continue
+        payload = observation.get("payload") if isinstance(observation.get("payload"), dict) else {}
+        step = PlannerPlanStep(
+            id="analysis_fallback",
+            tool_name="analysis_query",
+            arguments=dict(payload),
+            purpose="render analysis query result as task-shaped fallback",
+        )
+        rendered = _canonical_response(step, observation)
+        if rendered:
+            return rendered
+    return ""
 
 
 def _grounded_facts_response_required(plan: PlannerPlan) -> bool:
@@ -2818,6 +2864,7 @@ Rules:
 - For multiple explicit months, either call monthly_income_report once per month with matching arguments, or omit month and synthesize from all available rows; never duplicate one month while claiming another.
 - For "记录开仓", "记录平仓", Futu 成交提醒, 成功卖出/买入 option fills, use manual_trade_open or manual_trade_close with raw_text set to the original user message.
 - For current monitored-symbol config questions such as "max strike 是多少", "当前配置", or "查询 sell_put.max_strike", use symbol_config_read with symbol plus optional strategy/field.
+- For open-ended analytical questions such as 对比, 有什么不同, 排名, 趋势, 组成, 来源, 按账户/月份/标的汇总, or cross-domain questions across income/positions/trades/assigned stock/config, prefer analysis_query over narrow business renderers. Use analysis_catalog first only when fields/views are unknown.
 - For monitored-symbol setting changes such as covered call min strike 85, use symbol_edit. Do not use symbol_edit for questions about the current value.
 - For model switch requests, use model_use. For immediate software upgrade requests, use upgrade_now.
 - response_mode is a top-level plan field only. Never include response_mode inside any step.arguments.
@@ -2868,6 +2915,45 @@ def _planner_tool_manifest() -> list[dict[str, Any]]:
                     "For 历史以来, 累计, or 总净现金流, answer over the OM local ledger coverage returned by the tool.",
                     "Do not claim missing history solely because coverage contains only some months.",
                     "Do not claim an account is missing if coverage.accounts includes it.",
+                ],
+            }
+        if name == "analysis_catalog":
+            notes.append("Use when the user asks what data/fields can be analyzed, or before analysis_query if view names are unknown.")
+            notes.append("This is a pure-read catalog; it does not answer the business question by itself.")
+            semantics = {
+                "data_source": "OM Tool OS catalog",
+                "answer_capabilities": {
+                    "analysis_catalog": "lists whitelisted read-only views and SQL rules",
+                    "read_only": "catalog only; no ledger mutation",
+                },
+                "scope_semantics": {
+                    "view omitted": "return all available analysis views",
+                },
+            }
+        if name == "analysis_query":
+            notes.append("Use for open-ended analysis: 对比, 有什么不同, 排名, 趋势, 组成, 来源, 按账户/月份/标的汇总, 差额, 收益率差.")
+            notes.append("Generate one SELECT or WITH query over analysis_catalog views; never include writes, PRAGMA, ATTACH, paths, config, or system arguments.")
+            notes.append("For lx vs sy income comparison, query monthly_income_return_summary by month/account and compute differences in SQL when useful.")
+            notes.append("Tool result rows/cell_refs are evidence; if synthesis fails, the analysis_result renderer preserves the task-shaped table.")
+            semantics = {
+                "data_source": "OM read-only analysis workspace backed by local ledger/config/runtime read tools",
+                "answer_capabilities": {
+                    "analysis_query": "comparison, ranking, breakdown, trend, grouping, and cross-domain read-only analysis",
+                    "read_only": "SELECT-only in-memory SQLite over whitelisted views",
+                },
+                "scope_semantics": {
+                    "account/month omitted": "materialize available local OM ledger coverage, then SQL can filter/group rows",
+                    "limit": "caps returned rows; tool reports truncation",
+                },
+                "not_promised": [
+                    "arbitrary Python execution",
+                    "database writes",
+                    "broker realtime statement outside existing read tools",
+                ],
+                "answer_rules": [
+                    "Use SQL result rows as the source for user-visible amounts, accounts, symbols, dates, quantities, and statuses.",
+                    "Do not expose internal canonical/synthesis mode names.",
+                    "If a requested comparison is unsupported by available rows, say what data is missing instead of returning a nearby raw report.",
                 ],
             }
         if name == "option_positions_read":
@@ -3111,10 +3197,24 @@ def _fact_data(tool_name: str, data: dict[str, Any]) -> dict[str, Any]:
         out.setdefault("data_scope", "OM 本地账本")
         out.setdefault("query_scope", coverage.get("query_scope"))
         out.setdefault("coverage", coverage.get("coverage"))
+    if tool_name == "analysis_query":
+        out.setdefault("data_scope", "OM read-only analysis workspace")
     return out
 
 
 def _synthesis_data(tool_name: str, data: dict[str, Any]) -> dict[str, Any]:
+    if tool_name == "analysis_query":
+        return {
+            "source_label": data.get("source_label") or "OM read-only analysis workspace",
+            "query": dict(data.get("query") or {}) if isinstance(data.get("query"), dict) else {},
+            "columns": list(data.get("columns") or []),
+            "rows": _clip_list(data.get("rows"), limit=30),
+            "row_count": data.get("row_count"),
+            "truncated": bool(data.get("truncated", False)),
+            "views_used": list(data.get("views_used") or []),
+            "cell_refs": _clip_mapping(data.get("cell_refs"), limit=120) if isinstance(data.get("cell_refs"), dict) else {},
+            "fallback_text": data.get("fallback_text"),
+        }
     if tool_name == "monthly_income_report":
         coverage = _monthly_income_coverage(data)
         out = {
@@ -3242,6 +3342,8 @@ def _tool_name_for_intent(intent_name: str) -> str | None:
         "runtime_runs": "runtime_runs",
         "runtime_logs": "runtime_logs",
         "symbol_config_query": "symbol_config_read",
+        "analysis_catalog": "analysis_catalog",
+        "analysis_query": "analysis_query",
     }.get(str(intent_name or ""))
 
 
@@ -3254,6 +3356,8 @@ def _intent_name_for_tool(tool_name: str) -> str | None:
         "runtime_runs": "runtime_runs",
         "runtime_logs": "runtime_logs",
         "symbol_config_read": "symbol_config_query",
+        "analysis_catalog": "analysis_catalog",
+        "analysis_query": "analysis_query",
     }.get(str(tool_name or ""))
 
 

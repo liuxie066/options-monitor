@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.267 - 2026-06-14
+
+### Added
+- Added Tool OS v1 read-only analysis tools: `analysis_catalog` and `analysis_query` for flexible SELECT-only comparisons, rankings, trends, breakdowns, and cross-domain OM analysis over whitelisted ledger/config views.
+
+### Changed
+- Updated AgentLoop planning, evidence extraction, answer verification, and fallback rendering so open-ended analytical questions can be composed by the LLM from query evidence while preserving task-shaped table fallback when synthesis is unavailable or unsafe.
+- Documented the expanded-and-pruned Agent Tool OS design, including why narrow one-off answer tools such as account income comparison are not the primary path.
+
 ## 1.2.266 - 2026-06-13
 
 ### Fixed

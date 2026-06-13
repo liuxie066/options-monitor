@@ -160,6 +160,16 @@ def build_evidence_bundle(
                         source_path=source_path,
                     )
                 )
+        if str(contract.get("canonical_renderer") or "") == "analysis_result":
+            for fact in _analysis_result_facts(
+                data=data,
+                tool_name=tool_name,
+                source_label=source_label,
+                starting_index=len(facts),
+            ):
+                if len(facts) >= MAX_FACTS_PER_BUNDLE:
+                    break
+                facts.append(fact)
 
     scope = scope_accumulator.public_payload()
     deduped_missing = _dedupe_records(missing_data)
@@ -397,6 +407,48 @@ def _merge_context(context: dict[str, Any], row: dict[str, Any]) -> dict[str, An
     return merged
 
 
+def _analysis_result_facts(
+    *,
+    data: dict[str, Any],
+    tool_name: str,
+    source_label: str,
+    starting_index: int,
+) -> list[EvidenceFact]:
+    rows = data.get("rows")
+    if not isinstance(rows, list):
+        return []
+    facts: list[EvidenceFact] = []
+    index = int(starting_index)
+    for row_index, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            continue
+        context = _merge_context({}, row)
+        for column, value in row.items():
+            if isinstance(value, (dict, list)):
+                continue
+            if value is None or value == "":
+                continue
+            index += 1
+            path = f"rows[].{column}"
+            facts.append(
+                EvidenceFact(
+                    fact_id=f"fact_{index:04d}",
+                    path=path,
+                    value=value,
+                    unit=_infer_unit(path, value),
+                    currency=_inferred_currency(path, context),
+                    account=_context_str(context, "account"),
+                    symbol=_context_str(context, "symbol"),
+                    as_of=_context_as_of(context),
+                    freshness=_infer_freshness(path, value, context),
+                    source_tool=tool_name,
+                    source_label=source_label,
+                    source_path=f"rows[{row_index - 1}].{column}",
+                )
+            )
+    return facts
+
+
 def _infer_unit(path: str, value: Any) -> str:
     name = path.rsplit(".", 1)[-1].lower()
     if name in {"account"}:
@@ -405,6 +457,8 @@ def _infer_unit(path: str, value: Any) -> str:
         return "symbol"
     if name == "currency":
         return "currency_code"
+    if name.endswith(("_cny", "_usd", "_hkd")) or name in {"cny", "usd", "hkd"}:
+        return "currency"
     if "percent" in name or "rate" in name:
         return "percent"
     if "contract" in name:
@@ -415,7 +469,23 @@ def _infer_unit(path: str, value: Any) -> str:
         return "date"
     if "status" in name:
         return "status"
-    amount_tokens = ("pnl", "cashflow", "income", "premium", "basis", "cost", "price", "spot", "strike", "gross", "market_value")
+    amount_tokens = (
+        "pnl",
+        "cashflow",
+        "income",
+        "premium",
+        "basis",
+        "cost",
+        "price",
+        "spot",
+        "strike",
+        "gross",
+        "market_value",
+        "amount",
+        "diff",
+        "delta",
+        "difference",
+    )
     if any(token in name for token in amount_tokens):
         return "currency"
     if isinstance(value, bool):

@@ -601,7 +601,54 @@ om option-positions assigned-stock-sale --target-stock-lot-id assigned-stock-ass
 
 ---
 
-## 5.9 `get_portfolio_context`
+## 5.9 `analysis_catalog` / `analysis_query`
+
+用途：
+- Tool OS v1 的通用只读分析工作台。
+- `analysis_catalog` 返回可查询 view、字段说明、示例和只读 SQL 边界。
+- `analysis_query` 在内存 SQLite 中执行单条 SELECT/CTE，只能读取白名单 view，
+  用于对比、排名、趋势、组成、分组、差额、收益率差等开放式问题。
+- 这是通用工具，不是收益专用 API。首批 view 覆盖收益、现金流、已实现明细、
+  指派正股生命周期、position lots、trade events 和监控标的策略配置。
+
+关键约束：
+- 只允许单条 `SELECT` 或 `WITH ... SELECT`。
+- 禁止 `INSERT`、`UPDATE`、`DELETE`、DDL、`ATTACH`、`DETACH`、`PRAGMA`、
+  `VACUUM` 等非只读操作。
+- SQLite authorizer 会拒绝非白名单表读取。
+- SQL 函数走白名单，例如 `sum`、`avg`、`count`、`min`、`max`、`round`、
+  `coalesce`、`substr`、`lower`、`upper` 等；不允许 `load_extension` 等越界函数。
+- 工具会限制用户可见输出行数，并返回 `truncated=true|false`；内部读取源数据时使用
+  更高的物化上限，避免把分析源数据误截断到展示上限。
+- 输出包含 `columns`、`rows`、`cell_refs`、`views_used`、`source_label` 和
+  `fallback_text`。`cell_refs` 是 answer guard 校验动态查询结果的证据。
+- 如果 LLM synthesis 不可用或 answer guard 认为不安全，Agent fallback 必须展示
+  `analysis_query` 的任务形表格，而不是附近业务工具的原始长报告。
+
+首批 view：
+- `monthly_income_summary`
+- `monthly_income_return_summary`
+- `monthly_income_combined_return_summary`
+- `monthly_income_cashflow_rows`
+- `monthly_income_realized_rows`
+- `monthly_income_premium_rows`
+- `assigned_stock_lifecycle`
+- `assigned_stock_sales`
+- `assigned_stock_review`
+- `position_lots`
+- `trade_events`
+- `symbol_strategy_config`
+
+示例：
+
+```bash
+om-agent run --tool analysis_catalog --input-json '{"config_key":"us"}'
+om-agent run --tool analysis_query --input-json '{"config_key":"us","sql":"select month, account, net_income_cny, net_return_rate from monthly_income_return_summary order by month, account","limit":50}'
+```
+
+---
+
+## 5.10 `get_portfolio_context`
 
 用途：
 - 获取账户持仓 / 现金 context
@@ -614,7 +661,7 @@ om-agent run --tool get_portfolio_context --input-json '{"config_key":"us","acco
 
 ---
 
-## 5.10 `prepare_close_advice_inputs`
+## 5.11 `prepare_close_advice_inputs`
 
 用途：
 - 预先刷新 close advice 依赖的本地输入

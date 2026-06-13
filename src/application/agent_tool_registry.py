@@ -16,6 +16,7 @@ _PREFERRED_MODULE_ORDER: tuple[str, ...] = (
     "diagnostics",
     "runtime",
     "config",
+    "analysis",
     "materialization",
     "candidate",
     "positions",
