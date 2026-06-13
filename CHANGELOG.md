@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.2.259 - 2026-06-13
+
+### Changed
+- Simplified assigned-stock assistant receipts by hiding internal stock lot ids from default user-facing replies.
+
+### Fixed
+- Fixed assigned-stock holding PnL answers so natural-language queries use facts-first rendering with LLM analysis instead of falling back to canonical-only responses when the planner chooses canonical mode.
+
 ## 1.2.258 - 2026-06-13
 
 ### Changed

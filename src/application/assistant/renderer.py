@@ -633,7 +633,6 @@ def _render_assigned_stock_lifecycle(data: dict[str, Any]) -> str:
             lines.append(f"   持仓：成本 {cost}/股")
         lines.append(f"   行情：spot {spot}，quote={quote_status}")
         lines.append(f"   盈亏：正股浮盈亏 {unrealized}，正股已实现 {realized}，生命周期PnL {lifecycle}")
-        lines.append(f"   lot：{_value(row.get('stock_lot_id'))}")
     summary_lines = _assigned_stock_summary_lines(rows)
     if summary_lines:
         lines.append("汇总（按币种）：")
