@@ -18,9 +18,11 @@ _IGNORED_SYMBOL_TOKENS = {
     "API",
     "CNY",
     "HKD",
+    "HK",
     "LLM",
     "OM",
     "PNL",
+    "US",
     "USD",
 }
 _STATUS_CUE_TOKENS = ("状态", "status", "quote", "行情", "预览", "确认", "取消", "写入")

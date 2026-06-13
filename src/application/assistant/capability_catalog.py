@@ -77,6 +77,14 @@ ARGUMENT_JSON_SCHEMA: dict[str, dict[str, Any]] = {
     "model_profile": {"type": ["string", "null"]},
     "strategy": {"type": ["string", "null"]},
     "field": {"type": ["string", "null"]},
+    "view": {"type": ["string", "null"]},
+    "views": {
+        "type": ["array", "null"],
+        "items": {"type": "string"},
+        "maxItems": 16,
+    },
+    "sql": {"type": ["string", "null"]},
+    "query": {"type": ["string", "null"]},
     "set": {
         "type": ["object", "null"],
         "additionalProperties": {"type": ["string", "number", "integer", "boolean", "null"]},
@@ -133,6 +141,31 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         arguments=("symbol", "strategy", "field"),
         examples=("现在泡泡玛特 sell put 的 max strike 是多少", "查询 9992.HK sell_put.max_strike"),
         summary="read current monitored-symbol strategy config for a symbol",
+    ),
+    AssistantCommandSpec(
+        intent_name="analysis_catalog",
+        tool_name="analysis_catalog",
+        commands=(),
+        display_name="分析目录",
+        arguments=("view", "views"),
+        examples=("有哪些数据可以分析", "收益和指派正股能查询哪些字段"),
+        summary="inspect Tool OS read-only analysis views and SQL rules",
+    ),
+    AssistantCommandSpec(
+        intent_name="analysis_query",
+        tool_name="analysis_query",
+        commands=(),
+        display_name="通用分析",
+        arguments=("sql", "query", "limit", "account", "month"),
+        examples=(
+            "对比 lx 和 sy 的账户收益，有什么不同？",
+            "指派正股浮盈亏按账户汇总",
+            "按标的统计已实现收益",
+        ),
+        summary=(
+            "run SELECT-only queries over whitelisted OM analysis views for comparisons, rankings, trends, "
+            "breakdowns, and cross-domain analytical answers"
+        ),
     ),
     AssistantCommandSpec(
         intent_name="position_query",
