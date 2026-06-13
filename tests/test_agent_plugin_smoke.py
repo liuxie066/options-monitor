@@ -1228,6 +1228,8 @@ def test_option_positions_read_lists_events_history_and_inspect(monkeypatch, tmp
 
     assert refreshed_assigned_stock["ok"] is True
     assert quote_refresh_calls[0]["account"] == "user1"
+    assert Path(quote_refresh_calls[0]["base_dir"]).resolve() == BASE.resolve()
+    assert Path(quote_refresh_calls[0]["state_base_dir"]).resolve() == tmp_path.resolve()
     assert quote_refresh_calls[0]["rows"][0]["stock_lot_id"] == stock_lot_id
     refreshed_row = refreshed_assigned_stock["data"]["rows"][0]
     assert refreshed_row["spot"] == 99.0
