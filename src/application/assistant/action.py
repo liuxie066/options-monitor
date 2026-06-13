@@ -10,6 +10,7 @@ from src.application.assistant.operation_store import InboundOperationStore
 from src.application.assistant.policy import enforce_tool_allowed
 from src.application.assistant.renderer import HELP_TEXT, SMALL_TALK_TEXT, render_pending_operations
 from src.application.assistant.symbol_operations import handle_symbol_operation
+from src.application.assistant.tool_policy import INTERNAL_TOOL_PLAN_NAME
 from src.application.assistant.upgrade_operations import handle_upgrade_operation
 from src.application.tool_execution import execute_tool
 
@@ -95,7 +96,10 @@ def perform_action(
             response_text=str(data.get("response_text") or ""),
         )
     tool_decision = enforce_tool_allowed(call)
-    tool_result = execute_tool_fn(call.tool_name, call.payload)
+    payload = dict(call.payload)
+    if call.tool_name == INTERNAL_TOOL_PLAN_NAME:
+        payload["_command_id"] = command_id
+    tool_result = execute_tool_fn(call.tool_name, payload)
     data = dict(tool_result.get("data") or {}) if isinstance(tool_result.get("data"), dict) else {}
     return ActionResult(
         executed=True,

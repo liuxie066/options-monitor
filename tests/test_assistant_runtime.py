@@ -4154,6 +4154,23 @@ def test_assistant_runtime_agent_loop_plans_manual_trade_open_preview(monkeypatc
     assert out["data"]["perception"]["source"] == "agent_loop_plan"
     assert out["data"]["reasoning"]["action_kind"] == "operation"
     assert out["data"]["reasoning"]["safety_class"] == "write_preview"
+    permission_request = out["data"]["permission_request"]
+    assert permission_request["schema_version"] == "om-agent-permission-request-v1"
+    assert permission_request["operation_id"] == out["data"]["operation_id"]
+    assert permission_request["operation_type"] == "manual_open"
+    assert permission_request["risk_class"] == "preview_write"
+    assert permission_request["safety_class"] == "write_preview"
+    assert permission_request["confirm_required"] is True
+    assert permission_request["apply_allowed"] is False
+    assert permission_request["scope"] == {
+        "channel": "local",
+        "sender": "local",
+        "conversation": "local:local",
+        "config_key": None,
+    }
+    assert "sy 0700.HK" in permission_request["target_summary"]
+    assert permission_request["confirm_hint"].startswith("/confirm trade ")
+    assert permission_request["cancel_hint"].startswith("/cancel trade ")
     args = out["data"]["payload"]["arguments"]
     assert args["account"] == "sy"
     assert args["symbol"] == "0700.HK"

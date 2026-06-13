@@ -31,6 +31,7 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "runtime_runs" in tool_names
     assert "runtime_logs" in tool_names
     assert "operation_timeline" in tool_names
+    assert "assistant_trace" in tool_names
     assert "openclaw_readiness" in tool_names
     assert "version_update" in tool_names
     assert "candidate_rank_explain" in tool_names
@@ -70,6 +71,13 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "operation_id" in operation_timeline["input_schema"]
     assert "operation_types" in operation_timeline["input_schema"]
     assert "audit_scan_limit" in operation_timeline["input_schema"]
+    assistant_trace = next(item for item in spec["tools"] if item["name"] == "assistant_trace")
+    assert assistant_trace["risk_level"] == "read_only"
+    assert assistant_trace["requires_confirm"] is False
+    assert assistant_trace["safe_default_input"] == {"limit": 10}
+    assert "session_id" in assistant_trace["input_schema"]
+    assert "command_id" in assistant_trace["input_schema"]
+    assert "include_snapshot" in assistant_trace["input_schema"]
     income_report = next(item for item in spec["tools"] if item["name"] == "monthly_income_report")
     assert income_report["risk_level"] == "read_only"
     assert income_report["requires_confirm"] is False
@@ -151,6 +159,7 @@ def test_agent_registry_manifest_and_tool_objects_stay_in_sync() -> None:
         "runtime_runs",
         "runtime_logs",
         "operation_timeline",
+        "assistant_trace",
         "openclaw_readiness",
     } <= migrated_names
     for name in migrated_names:
@@ -179,6 +188,7 @@ def test_agent_tool_output_contracts_advertise_canonical_renderers() -> None:
     assert tools["healthcheck"]["output_contract"]["canonical_renderer"] == "healthcheck"
     assert tools["runtime_runs"]["output_contract"]["canonical_renderer"] == "runtime_runs"
     assert tools["runtime_logs"]["output_contract"]["canonical_renderer"] == "runtime_logs"
+    assert tools["assistant_trace"]["output_contract"]["canonical_renderer"] == "assistant_trace"
     assert tools["config_validate"]["output_contract"]["canonical_renderer"] == "config_validate"
     assert tools["symbol_config_read"]["output_contract"]["canonical_renderer"] == "symbol_config"
     assert tools["close_advice_read"]["output_contract"]["canonical_renderer"] == "position_exit_analysis"
@@ -238,6 +248,7 @@ def test_pure_read_allowlist_is_derived_from_registry_metadata() -> None:
     assert "symbol_config_read" in PURE_READ_TOOLS
     assert "candidate_filter_explain" in PURE_READ_TOOLS
     assert "operation_timeline" in PURE_READ_TOOLS
+    assert "assistant_trace" in PURE_READ_TOOLS
     assert "scan_opportunities" not in PURE_READ_TOOLS
     assert "manage_symbols" not in PURE_READ_TOOLS
     assert "research" not in PURE_READ_TOOLS

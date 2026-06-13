@@ -7,6 +7,9 @@ runtime artifacts. Current public names such as `./om-agent`,
 `./om assistant ...`, and `src/application/assistant/...` remain compatibility
 facades and implementation paths.
 
+The implementation roadmap for turning this bounded copilot into a fuller Agent
+is tracked in [OM_AGENT_COMPLETION_DESIGN.md](OM_AGENT_COMPLETION_DESIGN.md).
+
 Verified entry points for this snapshot:
 
 - `./om-agent spec`
@@ -49,21 +52,26 @@ runtime layers:
 
 ```text
 Channel input
--> AgentSession (conceptual session boundary)
+-> AgentSession / AgentSessionSnapshot
 -> AgentLoop
    -> Perceive
    -> Understand
+   -> Plan
    -> Decide
    -> Act
    -> Observe
+   -> Verify / Replan
+   -> Compose / Verify Answer
 -> Reply
 ```
 
 This names the authority path:
 
-- `AgentSession` is a conceptual session boundary, not a separate runtime layer
-  or required class name. It owns the inbound request, sender/channel/conversation
-  scope, audit identity, recent context, and pending-operation context.
+- `AgentSession` is the task boundary, currently represented by
+  `AssistantRequest`, `AgentSessionSnapshot`, durable `agent_sessions` trace,
+  sender/channel/conversation scope, audit identity, recent context, and
+  pending-operation context. It is not a separate runtime service or a second
+  pending-operation store.
 - `Perceive` normalizes the channel message into the current request context.
 - `Understand` may use slash commands, deterministic parsing as a safety
   component, or the AgentLoop Planner. It only describes intent or proposes a
@@ -81,7 +89,7 @@ Current implementation names map to this loop rather than replacing it:
 
 | Agent concept | Current implementation handle |
 |---|---|
-| `AgentSession` | `AssistantRequest`, audit row, conversation context, pending operation store |
+| `AgentSession` | `AssistantRequest`, `AgentSessionSnapshot`, inbound audit row, durable `agent_sessions` trace table, conversation context, pending operation store |
 | `Understand` output | `PerceptionResult`, or an internal `tool_plan` produced by `agent_loop` |
 | `Decide` output | `ReasoningResolution`, planner validation, tool/operation policy checks |
 | `Act` output | `ActionResult`, `execute_tool(...)`, or operation preview handlers |
@@ -144,6 +152,7 @@ Related OM surfaces outside Ops Copilot:
 | Scheduler diagnosis | `./om-agent run --tool scheduler_status` | `scheduler_status` | Runtime config, scheduler state | None | Core Read | Use after runtime status when skip/timing is suspected | `./om-agent run --tool scheduler_status --input-json '{"config_key":"us","account":"lx"}'` | Local `om-agent`; not default Inbound |
 | Run history | `./om-agent run --tool runtime_runs`, `/runs` | `runtime_runs` | `output_runs` snapshots | None | Core Read | Find relevant run before deeper log or candidate evidence | `./om-agent run --tool runtime_runs --input-json '{"limit":10}'` | `om-agent`, Inbound |
 | Runtime logs | `./om-agent run --tool runtime_logs`, `/logs` | `runtime_logs` | Run audit/tool/tick/service logs | None | Core Read | Choose log scope and line count after identifying run | `./om-agent run --tool runtime_logs --input-json '{"kind":"all","lines":50}'` | `om-agent`, Inbound |
+| Assistant trace | `./om-agent run --tool assistant_trace` | `assistant_trace` | Inbound SQLite `agent_sessions` snapshots and audit path metadata | None | Core Read | None inside tool execution; external operator may inspect Agent decisions | `./om-agent run --tool assistant_trace --input-json '{"limit":10}'` | Local `om-agent`; not default Inbound |
 | Candidate filter explanation | `./om-agent run --tool candidate_filter_explain` | `candidate_filter_explain` | `candidate_filter_trace.jsonl` | None | Core Read | Map symbol/account question to trace filters | `./om-agent run --tool candidate_filter_explain --input-json '{"symbol":"NVDA"}'` | Local `om-agent`; not default Inbound |
 | Candidate ranking explanation | `./om-agent run --tool candidate_rank_explain` | `candidate_rank_explain` | Existing candidate CSV/report artifacts | None | Core Read | Compare ranking policy against observed rows | `./om-agent run --tool candidate_rank_explain --input-json '{"mode":"put","top_n":5}'` | Local `om-agent`; not default Inbound |
 | Position read | `./om-agent run --tool option_positions_read`, `/positions` | `option_positions_read` | SQLite option-position store, trade events, projection inspection | None | Core Read | Build query filters; explain missing data explicitly | `./om-agent run --tool option_positions_read --input-json '{"config_key":"us","action":"list","account":"lx","status":"open"}'` | `om-agent`, Inbound |
@@ -230,9 +239,10 @@ Copilot should not use them as default evidence paths.
   than the full pure-read manifest. That is intentional for remote LLM planning,
   but it should remain tested against the public capability catalog.
 - `assistant.mode` is a legacy compatibility field only. The active product
-  controls are `assistant.enabled` and `assistant.planner.enabled`. The design
-  target is one conceptual `AgentSession` boundary + `AgentLoop` with
-  deterministic parsing and optional model planning inside `Understand`.
+  controls are `assistant.enabled` and `assistant.planner.enabled`. The runtime
+  target is one `AgentSession` boundary + `AgentLoop` with deterministic parsing,
+  optional model planning inside `Understand`, and durable operator trace in
+  `agent_sessions`.
 - Write-request detection is owned by registry metadata/policy. `version_update`
   and `manage_symbols` carry explicit write predicates in their
   `AgentTool`; `src/application/tool_execution.py` delegates env/confirm gates
