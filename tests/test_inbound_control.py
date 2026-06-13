@@ -1335,6 +1335,189 @@ def test_inbound_upgrade_preview_and_confirm(monkeypatch: pytest.MonkeyPatch, tm
     assert str(calls[-1]["runtime_root"]) == str(tmp_path / "runtime")
 
 
+def test_inbound_upgrade_confirm_receipt_uses_payload_and_version_check_fallbacks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from src.application.assistant import upgrade_operations
+    from src.application.assistant.operation_signature import hash_operation_payload
+    from src.application.assistant.operation_store import InboundOperationStore
+
+    _enable_inbound_upgrade_write(monkeypatch)
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    audit_db = tmp_path / "inbound.sqlite3"
+
+    monkeypatch.setattr(
+        upgrade_operations,
+        "service_upgrade_check",
+        lambda **kwargs: {
+            "ok": True,
+            "repo_root": str(kwargs["repo_root"]),
+            "repo_root_resolved": str(kwargs["repo_root"]),
+            "repo_root_resolution": {"status": "input"},
+            "runtime_root": str(kwargs["runtime_root"]),
+            "current_version": "1.2.110",
+            "latest_version": "1.2.111",
+            "release_tag": "v1.2.111",
+            "upgrade_available": True,
+            "version_check": {"ok": True},
+        },
+    )
+    monkeypatch.setattr(
+        upgrade_operations,
+        "UPGRADE_WORKER_LAUNCHER",
+        lambda operation_id, audit_db: {"launcher": "test", "operation_id": operation_id},
+    )
+
+    preview = handle_assistant_request(
+        AssistantRequest(
+            text="立即升级",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_upgrade_preview",
+            conversation_id="feishu:chat_a:ou_1",
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+    operation_id = preview["data"]["operation_id"]
+    payload = preview["data"]["payload"]
+    assert payload["arguments"]["target_version"] == "1.2.111"
+
+    InboundOperationStore(audit_db).update_preview(
+        operation_id,
+        payload_hash=hash_operation_payload(payload),
+        payload=payload,
+        preview={
+            "upgrade": {
+                "status": "dry_run",
+                "version_check": {
+                    "current_version": "1.2.110",
+                    "latest_version": "1.2.999",
+                    "release_tag": "v1.2.999",
+                },
+            }
+        },
+    )
+
+    confirmed = handle_assistant_request(
+        AssistantRequest(
+            text=f"确认升级 {operation_id}",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_upgrade_confirm",
+            conversation_id="feishu:chat_a:ou_1",
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    response_text = confirmed["data"]["response_text"]
+    assert confirmed["ok"] is True
+    assert "当前版本：1.2.110" in response_text
+    assert "目标版本：1.2.111" in response_text
+    assert "目标版本：1.2.999" not in response_text
+    assert "当前版本：-" not in response_text
+    assert "目标版本：-" not in response_text
+
+
+def test_inbound_upgrade_worker_retries_final_receipt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from src.application.assistant import upgrade_operations
+
+    _enable_inbound_upgrade_write(monkeypatch)
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "cli_test_app")
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "cli_test_secret")
+    audit_db = tmp_path / "inbound.sqlite3"
+    sleeps: list[float] = []
+    reply_attempts: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        upgrade_operations,
+        "service_upgrade_check",
+        lambda **kwargs: {
+            "ok": True,
+            "repo_root": str(kwargs["repo_root"]),
+            "repo_root_resolved": str(kwargs["repo_root"]),
+            "repo_root_resolution": {"status": "input"},
+            "runtime_root": str(kwargs["runtime_root"]),
+            "current_version": "1.2.110",
+            "latest_version": "1.2.111",
+            "release_tag": "v1.2.111",
+            "upgrade_available": True,
+            "version_check": {"ok": True},
+        },
+    )
+    monkeypatch.setattr(
+        upgrade_operations,
+        "service_upgrade",
+        lambda **kwargs: {
+            "ok": True,
+            "status": "upgraded",
+            "changed": True,
+            "current_version": "1.2.110",
+            "target_version": kwargs.get("target_version") or "1.2.111",
+            "release_tag": "v1.2.111",
+            "repo_root": str(kwargs["repo_root"]),
+            "runtime_root": str(kwargs["runtime_root"]),
+        },
+    )
+    monkeypatch.setattr(
+        upgrade_operations,
+        "UPGRADE_WORKER_LAUNCHER",
+        lambda operation_id, audit_db: {"launcher": "test", "operation_id": operation_id},
+    )
+    monkeypatch.setattr(upgrade_operations.time, "sleep", lambda seconds: sleeps.append(float(seconds)))
+
+    preview = handle_assistant_request(
+        AssistantRequest(
+            text="立即升级",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_upgrade_preview",
+            conversation_id="feishu:chat_a:ou_1",
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+    operation_id = preview["data"]["operation_id"]
+    confirmed = handle_assistant_request(
+        AssistantRequest(
+            text=f"确认升级 {operation_id}",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_upgrade_confirm",
+            conversation_id="feishu:chat_a:ou_1",
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+    assert confirmed["ok"] is True
+
+    def _reply_fn(**kwargs):  # type: ignore[no-untyped-def]
+        reply_attempts.append(dict(kwargs))
+        if len(reply_attempts) == 1:
+            raise RuntimeError("temporary feishu reply failure")
+        return {"ok": True, "message_id": "reply_final"}
+
+    worker = upgrade_operations.run_confirmed_upgrade_operation(
+        operation_id=operation_id,
+        audit_db=audit_db,
+        reply_fn=_reply_fn,
+    )
+
+    final_receipt = worker["data"]["result"]["final_receipt"]
+    assert worker["ok"] is True
+    assert final_receipt["ok"] is True
+    assert final_receipt["attempts"] == 2
+    assert final_receipt["previous_errors"][0]["error"] == "RuntimeError: temporary feishu reply failure"
+    assert sleeps == [1.0]
+    assert len(reply_attempts) == 2
+    assert reply_attempts[-1]["message_id"] == "msg_upgrade_confirm"
+    assert reply_attempts[-1]["uuid"] == f"{operation_id}:upgrade-final"
+    assert "升级执行完成" in str(reply_attempts[-1]["text"])
+
+
 def test_inbound_upgrade_returns_no_upgrade_without_pending_operation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from src.application.assistant import upgrade_operations
 
