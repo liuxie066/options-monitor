@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.2.263 - 2026-06-13
+
+### Changed
+- Kept direct assigned-stock holding PnL queries factual-only, reserving LLM analysis blocks for explicit analysis, advice, risk, why/how, or what-to-do requests.
+
+### Fixed
+- Fixed upgrade confirmation receipts to preserve current and target version values from the upgrade preview instead of showing `-` when the background worker launch result has no version fields.
+
 ## 1.2.262 - 2026-06-13
 
 ### Changed
