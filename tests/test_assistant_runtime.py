@@ -2263,8 +2263,10 @@ def test_assistant_runtime_agent_loop_executes_planned_cashflow_detail(tmp_path:
         assert plan.response_mode == "synthesis"
         assert conversation_context is not None
         assert observations[0]["data"]["cashflow_rows"][0]["symbol"] == "0700.HK"
+        assert observations[-1]["tool_name"] == "assistant.answer_evidence"
+        assert observations[-1]["data"]["renderer_key"] == "monthly_income"
         return LlmSynthesisResult(
-            response_text="lx 2026-06 净现金流明细\n- 0700.HK sell_open 流入 HKD 1,200\n口径：OM 本地账本 cashflow_rows。",
+            response_text="lx 2026-06 净现金流明细\n- 0700.HK sell_open 流入 HKD 1,200",
             trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
         )
 
@@ -2294,10 +2296,11 @@ def test_assistant_runtime_agent_loop_executes_planned_cashflow_detail(tmp_path:
         )
     ]
     text = out["data"]["response_text"]
-    assert text.startswith("收益统计完成（OM 本地账本）：")
-    assert "组成明细：" in text
-    assert "现金流 0700.HK 卖出开仓 1张 | 净现金流 HKD 1200 | lx" in text
-    assert "分析\nlx 2026-06 净现金流明细" in text
+    assert text.startswith("lx 2026-06 净现金流明细")
+    assert "- 0700.HK sell_open 流入 HKD 1,200" in text
+    assert "数据来源：OM 本地账本" in text
+    assert "口径：现金流率=净现金流/当前现金担保，不是账户总资产收益率。" in text
+    assert "\n\n分析\n" not in text
     agent_loop = out["meta"]["assistant"]["llm"]["agent_loop"]
     assert agent_loop["planner"] == "llm_tool_plan"
     assert agent_loop["max_steps"] == 3
@@ -2311,8 +2314,8 @@ def test_assistant_runtime_agent_loop_executes_planned_cashflow_detail(tmp_path:
     }
     assert agent_loop["final_response"] == {
         "status": "synthesized",
-        "reason": "canonical facts rendered first; LLM added verified analysis",
-        "canonical_renderer_required": True,
+        "reason": "LLM composed the response from guarded tool evidence",
+        "canonical_renderer_required": False,
         "llm_may_summarize": True,
     }
 
@@ -2413,6 +2416,7 @@ def test_assistant_runtime_agent_loop_satisfies_single_account_return_capability
     assert out["ok"] is True
     assert calls == [("monthly_income_report", {"account": "lx", "config_key": "us", "month": "2026-06"})]
     assert out["data"]["response_text"].startswith("lx 2026-06 收益")
+    assert "数据来源：OM 本地账本" in out["data"]["response_text"]
     tool_plan_data = out["data"]["action"]["result"]["data"]
     assert tool_plan_data["capability_status"] == {
         "required": ["account_return"],
@@ -2422,7 +2426,7 @@ def test_assistant_runtime_agent_loop_satisfies_single_account_return_capability
     agent_loop = out["meta"]["assistant"]["llm"]["agent_loop"]
     assert agent_loop["final_response"] == {
         "status": "synthesized",
-        "reason": "LLM synthesized the response from tool observations",
+        "reason": "LLM composed the response from guarded tool evidence",
         "canonical_renderer_required": False,
         "llm_may_summarize": True,
     }
@@ -2675,8 +2679,9 @@ def test_assistant_runtime_agent_loop_satisfies_position_read_tool_capabilities(
             "satisfied": ["option_positions", "read_only"],
             "gaps": [],
         }
-        assert observations[-1]["tool_name"] == "assistant.grounded_facts"
-        assert "NVDA short put 100 exp 2026-06-19 open 1" in observations[-1]["data"]["canonical_response"]
+        assert observations[-1]["tool_name"] == "assistant.answer_evidence"
+        assert "NVDA short put 100 exp 2026-06-19 open 1" in observations[-1]["data"]["fallback_renderer_text"]
+        assert "record_id" not in json.dumps(observations[0]["data"], ensure_ascii=False)
         return LlmSynthesisResult(
             response_text="当前 open 期权持仓共 1 条。",
             trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
@@ -2702,20 +2707,20 @@ def test_assistant_runtime_agent_loop_satisfies_position_read_tool_capabilities(
     assert out["ok"] is True
     assert calls == [("option_positions_read", {"action": "list", "config_key": "us", "query": {"status": "open"}})]
     assert "当前只能部分满足" not in out["data"]["response_text"]
-    assert out["data"]["response_text"].startswith("全部账户 · open · 期权持仓：1 条")
-    assert "- NVDA short put 100 exp 2026-06-19 open 1" in out["data"]["response_text"]
-    assert "分析\n当前 open 期权持仓共 1 条。" in out["data"]["response_text"]
+    assert out["data"]["response_text"].startswith("当前 open 期权持仓共 1 条。")
+    assert "数据来源：OM 本地 SQLite position_lots" in out["data"]["response_text"]
+    assert "\n\n分析\n" not in out["data"]["response_text"]
     tool_plan_data = out["data"]["action"]["result"]["data"]
     assert tool_plan_data["capability_status"] == {
         "required": ["option_positions", "read_only"],
         "satisfied": ["option_positions", "read_only"],
         "gaps": [],
     }
-    assert tool_plan_data["synthesis"]["reason"] == "grounded_renderer_with_analysis"
+    assert tool_plan_data["synthesis"]["reason"] == "agent_composed_response"
     assert tool_plan_data["final_response"] == {
         "status": "synthesized",
-        "reason": "canonical facts rendered first; LLM added verified analysis",
-        "canonical_renderer_required": True,
+        "reason": "LLM composed the response from guarded tool evidence",
+        "canonical_renderer_required": False,
         "llm_may_summarize": True,
     }
 
@@ -2799,7 +2804,14 @@ def test_assistant_runtime_agent_loop_routes_assigned_stock_holding_pnl(tmp_path
         observations: list[dict[str, Any]],
         _conversation_context: dict[str, Any] | None,
     ) -> LlmSynthesisResult:
-        pytest.fail(f"direct assigned-stock reads should not call synthesis: {question} {plan} {observations}")
+        assert question == "查看 lx 指派正股持仓盈亏"
+        assert plan.response_mode == "synthesis"
+        assert observations[-1]["tool_name"] == "assistant.answer_evidence"
+        assert "stock_lot_id" not in json.dumps(observations[0]["data"], ensure_ascii=False)
+        return LlmSynthesisResult(
+            response_text="lx 当前有 1 笔指派正股持仓：NVDA 剩余 100 股，spot USD 98，正股浮盈亏 USD -200，生命周期PnL USD 50。",
+            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+        )
 
     out = handle_assistant_message(
         AssistantRequest(
@@ -2826,8 +2838,10 @@ def test_assistant_runtime_agent_loop_routes_assigned_stock_holding_pnl(tmp_path
         )
     ]
     text = out["data"]["response_text"]
-    assert text.startswith("lx · open · 指派正股：1 条")
+    assert text.startswith("lx 当前有 1 笔指派正股持仓")
     assert "正股浮盈亏 USD -200" in text
+    assert "数据来源：OM 本地 SQLite assigned_stock_events + trade_events；spot=opend_realtime（ok）" in text
+    assert "口径：正股成本按真实交割价记录" in text
     assert "\n\n分析\n" not in text
     tool_plan_data = out["data"]["action"]["result"]["data"]
     assert tool_plan_data["capability_status"] == {
@@ -2835,8 +2849,8 @@ def test_assistant_runtime_agent_loop_routes_assigned_stock_holding_pnl(tmp_path
         "satisfied": ["assigned_stock_positions", "read_only"],
         "gaps": [],
     }
-    assert tool_plan_data["plan"]["response_mode"] == "canonical"
-    assert tool_plan_data["final_response"]["reason"] == "canonical renderer produced the factual response"
+    assert tool_plan_data["plan"]["response_mode"] == "synthesis"
+    assert tool_plan_data["final_response"]["reason"] == "LLM composed the response from guarded tool evidence"
 
 
 def test_assistant_runtime_agent_loop_analyzes_assigned_stock_when_requested(tmp_path: Path) -> None:
@@ -2921,8 +2935,8 @@ def test_assistant_runtime_agent_loop_analyzes_assigned_stock_when_requested(tmp
         assert question == "分析 lx 指派正股持仓盈亏"
         assert plan.response_mode == "synthesis"
         assert plan.required_capabilities == ("assigned_stock_positions", "read_only")
-        assert observations[-1]["tool_name"] == "assistant.grounded_facts"
-        assert "正股浮盈亏 USD -200" in observations[-1]["data"]["canonical_response"]
+        assert observations[-1]["tool_name"] == "assistant.answer_evidence"
+        assert "正股浮盈亏 USD -200" in observations[-1]["data"]["fallback_renderer_text"]
         return LlmSynthesisResult(
             response_text="正股自身仍是浮亏，但生命周期PnL仍为正，下一步应重点看是否继续持有正股或卖 covered call。",
             trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
@@ -2953,12 +2967,132 @@ def test_assistant_runtime_agent_loop_analyzes_assigned_stock_when_requested(tmp
         )
     ]
     text = out["data"]["response_text"]
-    assert text.startswith("lx · open · 指派正股：1 条")
-    assert "正股浮盈亏 USD -200" in text
-    assert "分析\n正股自身仍是浮亏" in text
+    assert text.startswith("正股自身仍是浮亏")
+    assert "数据来源：OM 本地 SQLite assigned_stock_events + trade_events；spot=opend_realtime（ok）" in text
+    assert "\n\n分析\n" not in text
     tool_plan_data = out["data"]["action"]["result"]["data"]
     assert tool_plan_data["plan"]["response_mode"] == "synthesis"
-    assert tool_plan_data["final_response"]["reason"] == "canonical facts rendered first; LLM added verified analysis"
+    assert tool_plan_data["final_response"]["reason"] == "LLM composed the response from guarded tool evidence"
+
+
+def test_assistant_runtime_agent_loop_assigned_stock_falls_back_from_invented_amount(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+    synthesis_observation_counts: list[int] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "action": "assigned-stock",
+                "filters": {
+                    "account": "lx",
+                    "status": "open",
+                    "refresh_quotes": True,
+                },
+                "rows": [
+                    {
+                        "stock_lot_id": "assigned-stock-assign_1",
+                        "account": "lx",
+                        "symbol": "NVDA",
+                        "currency": "USD",
+                        "status": "open",
+                        "shares_remaining": 100,
+                        "stock_cost_per_share": 100,
+                        "remaining_stock_cost_basis": 10000,
+                        "spot": 98,
+                        "quote_status": "fresh",
+                        "assigned_stock_unrealized_pnl": -200,
+                        "assigned_stock_realized_pnl": 0,
+                        "assignment_lifecycle_pnl": 50,
+                    }
+                ],
+                "row_count": 1,
+                "quote_refresh": {"status": "ok", "quote_source": "opend_realtime"},
+            },
+        )
+
+    def _plan(
+        _text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="查看 lx 指派正股持仓盈亏",
+                response_mode="synthesis",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="option_positions_read",
+                        arguments={"action": "assigned-stock", "account": "lx", "status": "open", "refresh_quotes": True},
+                        purpose="读取指派正股持仓盈亏",
+                    ),
+                ),
+            ),
+            trace={
+                "enabled": True,
+                "attempted": True,
+                "reason": "accepted",
+                "provider": "openai",
+                "base_url": "",
+                "model": "gpt-5.2",
+                "api_key_env": "OM_LLM_API_KEY",
+                "confidence_min": 0.75,
+                "timeout_seconds": 20,
+                "max_output_tokens": 512,
+                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+            },
+        )
+
+    def _synthesize(
+        _question: str,
+        _settings: AssistantSettings,
+        _plan: PlannerPlan,
+        observations: list[dict[str, Any]],
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmSynthesisResult:
+        synthesis_observation_counts.append(len(observations))
+        return LlmSynthesisResult(
+            response_text="lx 当前有 1 笔 NVDA 指派正股，正股浮盈亏 USD -999。",
+            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="查看 lx 指派正股持仓盈亏",
+            sender_id="local",
+            message_id="msg_agent_loop_assigned_stock_amount_guard",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+        synthesize_response_fn=_synthesize,
+    )
+
+    assert out["ok"] is True
+    assert calls == [
+        (
+            "option_positions_read",
+            {"action": "assigned-stock", "account": "lx", "status": "open", "refresh_quotes": True, "config_key": "us"},
+        )
+    ]
+    assert synthesis_observation_counts == [2, 3]
+    text = out["data"]["response_text"]
+    assert text.startswith("lx · open · 指派正股：1 条")
+    assert "正股浮盈亏 USD -200" in text
+    assert "USD -999" not in text
+    synthesis = out["data"]["action"]["result"]["data"]["synthesis"]
+    assert synthesis["reason"] == "agent_renderer_fallback"
+    assert synthesis["answer_guard"]["status"] == "failed_then_fallback"
+    assert synthesis["answer_guard"]["violations"][0]["type"] == "unsupported_assigned_stock_number"
+    assert synthesis["answer_guard"]["retry_violations"][0]["type"] == "unsupported_assigned_stock_number"
 
 
 def test_assistant_runtime_agent_loop_grounded_positions_fall_back_from_wrong_contract_quantity(tmp_path: Path) -> None:
@@ -3061,7 +3195,7 @@ def test_assistant_runtime_agent_loop_grounded_positions_fall_back_from_wrong_co
     assert "一张 put" not in text
     tool_plan_data = out["data"]["action"]["result"]["data"]
     synthesis = tool_plan_data["synthesis"]
-    assert synthesis["reason"] == "grounded_renderer"
+    assert synthesis["reason"] == "agent_renderer_fallback"
     assert synthesis["answer_guard"]["status"] == "failed_then_fallback"
     assert synthesis["answer_guard"]["violations"][0]["type"] == "contradicts_contract_quantity"
     assert synthesis["answer_guard"]["retry_violations"][0]["type"] == "contradicts_contract_quantity"
@@ -3409,9 +3543,9 @@ def test_assistant_runtime_agent_loop_uses_canonical_fallback_when_synthesis_una
     agent_loop = out["meta"]["assistant"]["llm"]["agent_loop"]
     assert agent_loop["final_response"] == {
         "status": "rendered",
-        "reason": "canonical renderer used after synthesis was unavailable",
+        "reason": "deterministic fallback renderer used after agent composition was unavailable or unsafe",
         "canonical_renderer_required": True,
-        "llm_may_summarize": False,
+        "llm_may_summarize": True,
     }
     assert out["data"]["action"]["result"]["data"]["synthesis"]["fallback"] == "canonical_renderer"
     assert out["data"]["action"]["result"]["data"]["synthesis"]["error_code"] == "LLM_UNAVAILABLE"
@@ -3578,7 +3712,7 @@ def test_assistant_runtime_agent_loop_answer_guard_rewrites_contradictory_income
     agent_loop = out["meta"]["assistant"]["llm"]["agent_loop"]
     assert agent_loop["final_response"]["status"] == "synthesized"
     synthesis = out["data"]["action"]["result"]["data"]["synthesis"]
-    assert synthesis["reason"] == "grounded_renderer_with_analysis"
+    assert synthesis["reason"] == "agent_composed_response"
     assert synthesis["answer_guard"]["status"] == "failed_then_rewritten"
     assert synthesis["answer_guard"]["violations"][0]["type"] == "contradicts_query_coverage"
     coverage = out["data"]["action"]["result"]["data"]["synthesis_observations"][0]["data"]["coverage"]
@@ -3752,7 +3886,7 @@ def test_assistant_runtime_agent_loop_grounded_income_falls_back_from_wrong_cont
     assert "0700.HK Put 440P @ 2026-06-05 到期作废 2张" in text
     assert "一手 put" not in text
     synthesis = out["data"]["action"]["result"]["data"]["synthesis"]
-    assert synthesis["reason"] == "grounded_renderer"
+    assert synthesis["reason"] == "agent_renderer_fallback"
     assert synthesis["answer_guard"]["status"] == "failed_then_fallback"
     assert synthesis["answer_guard"]["violations"][0]["type"] == "contradicts_contract_quantity"
     assert synthesis["answer_guard"]["retry_violations"][0]["type"] == "contradicts_contract_quantity"
@@ -3869,8 +4003,8 @@ def test_assistant_runtime_agent_loop_grounded_income_returns_facts_when_llm_una
     assert "LLM 生成不可用" not in text
     assert "0700.HK Put 440P @ 2026-06-05 到期作废 2张" in text
     synthesis = out["data"]["action"]["result"]["data"]["synthesis"]
-    assert synthesis["reason"] == "grounded_renderer"
-    assert synthesis["fallback"] == "canonical_facts"
+    assert synthesis["reason"] == "agent_renderer_fallback"
+    assert synthesis["fallback"] == "canonical_renderer"
     assert synthesis["error_code"] == "LLM_UNAVAILABLE"
 
 

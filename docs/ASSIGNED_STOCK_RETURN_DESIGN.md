@@ -384,7 +384,8 @@ lifecycle_pnl =
 - `monthly_income_report(include_rows=true)` 可以新增 `assignment_lifecycle_rows`，但不能改变既有字段含义。
 - 新增只读查询能力 `option_positions_read action=assigned-stock`，专门回答被指派正股 lot、spot、浮盈亏、卖出和 lifecycle PnL；`refresh_quotes=true` 是显式实时估值开关。
 - Inbound `/income` 默认不把 `assignment_stock_net_cashflow_gross=-10000` 解释为亏损；用户问“被指派股票收益”“接货后盈亏”“assigned stock”时才调用 assignment lifecycle 口径。
-- LLM synthesis 只能解释 deterministic rows，不能自己合成 spot、卖出价或 missing sale。
+- 自然语言入口由 Agent Composer 基于工具 evidence 表达；LLM 不能自己合成 spot、卖出价、
+  missing sale、金额或股数。若 guard 不通过，回退到 deterministic renderer。
 
 ## 8. 历史数据处理
 
