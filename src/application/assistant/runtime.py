@@ -23,6 +23,7 @@ from src.application.assistant.commands import spec_by_intent
 from src.application.assistant.contracts import AssistantRequest, PerceptionResult, ToolCall
 from src.application.assistant.audit import InboundAuditStore
 from src.application.assistant.router import ExecuteToolFn, handle_assistant_request
+from src.application.assistant.session_store import AgentSessionStore
 from src.application.tool_execution import execute_tool
 
 _COMMAND_SPECS_BY_INTENT = spec_by_intent()
@@ -78,6 +79,7 @@ def handle_assistant_message(
             execute_tool_fn=execute_tool_fn,
             request=request,
             settings=runtime_settings,
+            plan_tools_fn=plan_tools_fn,
             conversation_context_fn=lambda: perception_engine.last_conversation_context,
             synthesize_response_fn=synthesize_response_fn,
             tool_events=agent_loop_tool_events,
@@ -103,6 +105,7 @@ def handle_assistant_message(
         llm_trace=llm_trace,
         perception_trace=perception_engine.trace,
     )
+    _persist_agent_session(store=store, request=request, response=response)
     _update_audit_response(store=store, response=response)
     return response
 
@@ -131,6 +134,7 @@ def _agent_loop_execute_tool_fn(
     execute_tool_fn: ExecuteToolFn,
     request: AssistantRequest,
     settings: AssistantSettings,
+    plan_tools_fn: AgentLoopPlanFn | None,
     conversation_context_fn: Callable[[], dict[str, Any] | None],
     synthesize_response_fn: AgentLoopSynthesizeFn | None,
     tool_events: list[dict[str, Any]],
@@ -145,9 +149,11 @@ def _agent_loop_execute_tool_fn(
                 question=str((payload or {}).get("question") or request.text),
                 request=request,
                 plan_payload=dict((payload or {}).get("plan") or {}),
+                command_id=str((payload or {}).get("_command_id") or "").strip() or None,
                 settings=settings,
                 conversation_context=conversation_context_fn(),
                 execute_tool_fn=execute_tool_fn,
+                plan_tools_fn=plan_tools_fn,
                 synthesize_response_fn=synthesize_response_fn,
             )
             data = result.get("data") if isinstance(result, dict) else {}
@@ -245,6 +251,36 @@ def _update_audit_response(*, store: InboundAuditStore, response: dict[str, Any]
     if not command_id:
         return
     store.update_response(command_id=str(command_id), response=response)
+
+
+def _persist_agent_session(*, store: InboundAuditStore, request: AssistantRequest, response: dict[str, Any]) -> None:
+    meta = response.get("meta")
+    if isinstance(meta, dict) and bool(meta.get("idempotent_replay")):
+        return
+    data = response.get("data") if isinstance(response.get("data"), dict) else {}
+    command_id = data.get("command_id")
+    session = _agent_session_payload_from_response(data)
+    if not session:
+        return
+    try:
+        AgentSessionStore(store.path).upsert_snapshot(
+            snapshot=session,
+            command_id=str(command_id or ""),
+            request=request,
+            response=response,
+        )
+    except Exception as exc:
+        meta = response.setdefault("meta", {})
+        if isinstance(meta, dict):
+            meta["agent_session_store_warning"] = f"{type(exc).__name__}: {exc}"
+
+
+def _agent_session_payload_from_response(data: dict[str, Any]) -> dict[str, Any] | None:
+    action = data.get("action") if isinstance(data.get("action"), dict) else {}
+    result = action.get("result") if isinstance(action.get("result"), dict) else {}
+    result_data = result.get("data") if isinstance(result.get("data"), dict) else {}
+    session = result_data.get("agent_session") if isinstance(result_data.get("agent_session"), dict) else None
+    return dict(session) if isinstance(session, dict) else None
 
 
 def _with_assistant_meta(

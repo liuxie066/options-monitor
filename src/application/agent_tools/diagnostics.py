@@ -40,6 +40,25 @@ _RUNTIME_STATUS_OUTPUT_CONTRACT: dict[str, Any] = {
     ],
 }
 
+_ASSISTANT_TRACE_OUTPUT_CONTRACT: dict[str, Any] = {
+    "schema_version": "assistant_trace.output.v1",
+    "canonical_renderer": "assistant_trace",
+    "source_label": "OM inbound audit agent_sessions",
+    "guard_profile": "diagnostic_trace",
+    "primary_rows": "traces",
+    "row_count_field": "trace_count",
+    "fact_fields": [
+        "traces[].identity.session_id",
+        "traces[].identity.command_id",
+        "traces[].task.goal",
+        "traces[].task.state",
+        "traces[].evidence.fact_count",
+        "traces[].evidence.missing_data_count",
+        "traces[].answer.response_status",
+        "traces[].answer.synthesis_reason",
+    ],
+}
+
 
 def _mask_path_str(ctx: AgentToolContext, value: Any) -> str:
     return ctx.mask_path(value) or "..."
@@ -102,6 +121,25 @@ def _operation_timeline_tool(
         statuses=payload.get("statuses"),
         limit=int(payload.get("limit") or 10),
         audit_scan_limit=payload.get("audit_scan_limit"),
+    )
+    warnings = [str(item) for item in data.get("warnings", []) if str(item).strip()]
+    return data, warnings, {"audit_db": data.get("audit_db")}
+
+
+def _assistant_trace_tool(
+    ctx: AgentToolContext,
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    data = ctx.collect_assistant_trace(
+        audit_db=payload.get("audit_db") or payload.get("inbound_audit_db"),
+        session_id=payload.get("session_id"),
+        command_id=payload.get("command_id"),
+        channel=payload.get("channel"),
+        sender_id=payload.get("sender_id"),
+        conversation_id=payload.get("conversation_id"),
+        message_id=payload.get("message_id"),
+        limit=int(payload.get("limit") or 10),
+        include_snapshot=bool(payload.get("include_snapshot", False)),
     )
     warnings = [str(item) for item in data.get("warnings", []) if str(item).strip()]
     return data, warnings, {"audit_db": data.get("audit_db")}
@@ -216,6 +254,37 @@ OPERATION_TIMELINE_TOOL = build_agent_tool(
     ),
 )
 
+ASSISTANT_TRACE_TOOL = build_agent_tool(
+    name="assistant_trace",
+    description=(
+        "Read durable AgentSession snapshots from inbound SQLite to explain recent Agent plans, tool calls, "
+        "evidence counts, answer guard/fallback decisions, and permission state."
+    ),
+    requires=("inbound_audit_db",),
+    capabilities=("assistant_trace", "assistant_diagnostics", "read_only"),
+    input_schema={
+        "audit_db": "optional inbound audit SQLite path",
+        "inbound_audit_db": "optional alias for audit_db",
+        "session_id": "optional exact AgentSession id",
+        "command_id": "optional exact inbound command id",
+        "channel": "optional channel filter such as feishu",
+        "sender_id": "optional operator sender id filter",
+        "conversation_id": "optional conversation filter",
+        "message_id": "optional inbound message id filter",
+        "limit": "optional number of recent Agent sessions to return; defaults to 10",
+        "include_snapshot": "optional bool; include compact raw AgentSession snapshot for deep debugging",
+    },
+    handler=_assistant_trace_tool,
+    pure_read=True,
+    safe_default_input={"limit": 10},
+    examples=(
+        {"input": {"limit": 10}},
+        {"input": {"channel": "feishu", "sender_id": "ou_1", "limit": 5}},
+        {"input": {"command_id": "in_abc"}},
+    ),
+    output_contract=_ASSISTANT_TRACE_OUTPUT_CONTRACT,
+)
+
 OPENCLAW_READINESS_TOOL = build_agent_tool(
     name="openclaw_readiness",
     description="OpenClaw-oriented readiness summary combining runtime_status, healthcheck, and local openclaw command availability.",
@@ -247,11 +316,13 @@ TOOLS: tuple[AgentTool, ...] = (
     HEALTHCHECK_TOOL,
     RUNTIME_STATUS_TOOL,
     OPERATION_TIMELINE_TOOL,
+    ASSISTANT_TRACE_TOOL,
     OPENCLAW_READINESS_TOOL,
 )
 
 
 __all__ = [
+    "ASSISTANT_TRACE_TOOL",
     "HEALTHCHECK_TOOL",
     "OPENCLAW_READINESS_TOOL",
     "OPERATION_TIMELINE_TOOL",

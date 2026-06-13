@@ -18,6 +18,7 @@ from src.application.assistant.operation_policy import enforce_trade_write_allow
 from src.application.assistant.operation_signature import hash_operation_payload
 from src.application.assistant.operation_store import InboundOperationStore
 from src.application.assistant.operation_status_text import operation_candidate_hint, operation_candidate_summary_lines
+from src.application.assistant.permission_request import build_permission_request
 from src.application.ledger.api import open_position_ledger_from_runtime_config
 from src.application.positions.workflows import (
     ManualCloseMatchError,
@@ -250,6 +251,7 @@ def _update_operation(*, operation_id: str | None, updates: dict[str, Any], requ
     text = render_manual_trade_response("updated", operation_id, payload, preview=preview, expires_at=str(updated.get("expires_at") or ""))
     if patch:
         text += "\n" + _format_patch_summary(patch)
+    permission_request = build_permission_request(operation=updated, request=request)
     return build_response(
         tool_name="inbound.manual_trade",
         ok=True,
@@ -264,6 +266,7 @@ def _update_operation(*, operation_id: str | None, updates: dict[str, Any], requ
             "payload": payload,
             "preview": preview,
             "expires_at": updated.get("expires_at"),
+            "permission_request": permission_request,
             "response_text": text,
         },
         meta={"audit_db": mask_path(store.path)},

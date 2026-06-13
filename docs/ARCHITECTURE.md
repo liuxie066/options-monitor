@@ -102,13 +102,16 @@ current implementation path remains `src/application/assistant/...`:
 Feishu / future channels
 -> src.application.channels.ChannelService
 -> src.application.inbound.feishu(_ws)
--> AgentSession (conceptual session boundary)
+-> AgentSession / AgentSessionSnapshot
 -> AgentLoop
    -> Perceive
    -> Understand
+   -> Plan
    -> Decide
    -> Act
    -> Observe
+   -> Verify / Replan
+   -> Compose / Verify Answer
 -> channel reply
 ```
 
@@ -117,10 +120,11 @@ Inbound control and outbound notifications are capabilities of the
 same channel model. `src.application.inbound` should stay thin: extract channel
 payloads, enforce channel-specific receive/reply mechanics, and build the
 transport request.
-`AgentSession` is not a separate runtime layer or required class name in the
-current code. It is the conceptual boundary carried by `AssistantRequest`, the
-audit row, conversation context, and pending-operation store before `AgentLoop`
-perceives the message.
+`AgentSession` is the Agent task boundary, currently represented by
+`AssistantRequest`, `AgentSessionSnapshot`, the audit row, conversation context,
+pending-operation store, and durable operator trace in the inbound SQLite
+`agent_sessions` table. It is not a separate runtime service or a second
+pending-operation store.
 Command parsing, optional LLM-first natural-language routing, deterministic
 fallback parsing, bounded agent-loop tracing, sender allowlist checks, SQLite audit,
 preview/confirm operations, and user-facing rendering are owned by

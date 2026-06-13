@@ -668,6 +668,10 @@ def _operation_summary(operation: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def operation_summary(operation: dict[str, Any]) -> dict[str, Any]:
+    return _operation_summary(operation)
+
+
 def _operation_summary_text(operation_type: str, operation: dict[str, Any]) -> str:
     payload = operation.get("payload")
     payload_map = payload if isinstance(payload, dict) else {}

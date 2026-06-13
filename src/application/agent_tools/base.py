@@ -46,6 +46,7 @@ class AgentToolContext:
     get_exchange_rates: Callable[..., Any]
     build_notification: Callable[..., str]
     collect_operation_timeline: Callable[..., dict[str, Any]]
+    collect_assistant_trace: Callable[..., dict[str, Any]]
     check_version_update: Callable[..., dict[str, Any]]
     update_local_version: Callable[..., dict[str, Any]]
     collect_runtime_runs: Callable[..., dict[str, Any]]
@@ -253,6 +254,7 @@ def build_default_agent_tool_context() -> AgentToolContext:
     from src.application.scan_scheduler import decide as scheduler_decide
     from src.application.scan_scheduler import read_state as read_scheduler_state
     from src.application.assistant.operation_diagnostics import collect_operation_timeline
+    from src.application.assistant.session_store import collect_assistant_trace
     from src.application.version_check import check_version_update, update_local_version
     from domain.domain.fetch_source import resolve_symbol_fetch_source
     from domain.domain.ledger.position_fields import normalize_account
@@ -349,6 +351,7 @@ def build_default_agent_tool_context() -> AgentToolContext:
         get_exchange_rates=_get_exchange_rates,
         build_notification=build_notification,
         collect_operation_timeline=collect_operation_timeline,
+        collect_assistant_trace=collect_assistant_trace,
         check_version_update=check_version_update,
         update_local_version=update_local_version,
         collect_runtime_runs=collect_runtime_runs,

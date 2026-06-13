@@ -30,9 +30,11 @@ trade_events
 - `realized_rows`：option lot 平仓、到期、指派或行权的 option 侧已实现收益。
 - `stock_settlement_rows` / `assignment_stock_*`：assignment event 里记录的正股交割现金流。
 
-这些字段能表达“发生了指派交割”，但还不能完整表达“接货后的正股 lot、实时浮盈亏、后续卖出后的生命周期收益”。
+这些字段表达“发生了指派交割”。接货后的正股 lot、实时浮盈亏、后续卖出后的生命周期收益由
+`assigned_stock_lots` / `assigned_stock_events` 和查询时的 quote snapshot
+派生。
 
-首版范围只覆盖 Sell Put 被指派后买入正股。Short Call 被指派卖出正股、普通股票交易账本、分红和税务口径不进入本设计的首版实现。
+当前范围只覆盖 Sell Put 被指派后买入正股。Short Call 被指派卖出正股、普通股票交易账本、分红和税务口径不进入本设计的当前实现。
 
 ## 3. 核心设计原则
 
@@ -130,9 +132,9 @@ assignment_lifecycle_pnl =
 
 ### 4.2 Assigned Stock Lot
 
-新增派生读模型 `assigned_stock_lots`，由 assignment event 和后续 assigned stock sale events 重建。
+当前派生读模型 `assigned_stock_lots` 由 assignment event 和后续 assigned stock sale events 重建。
 
-建议字段：
+核心字段：
 
 | 字段 | 语义 |
 |---|---|
@@ -158,7 +160,7 @@ assignment_lifecycle_pnl =
 
 `assigned_stock_sale` 不进入 canonical option `TradeEvent` 枚举。当前 option ledger 是 option-contract-centric，强行把股票卖出塞进 `trade_events` 会把边界扩大成通用股票账本。
 
-首版建议新增独立投影/事实边界：
+当前独立投影/事实边界：
 
 ```text
 trade_events
@@ -180,7 +182,7 @@ assigned_stock_events
 
 被指派正股卖出需要记录。否则系统只能展示“仍持有时按 spot 的浮动收益”，无法确认真实已实现生命周期收益。
 
-建议新增独立 stock sale fact，不把它伪装成 option close，也不写入 canonical option `trade_events`：
+独立 stock sale fact 不伪装成 option close，也不写入 canonical option `trade_events`：
 
 ```json
 {
@@ -201,7 +203,7 @@ assigned_stock_events
 }
 ```
 
-部分卖出按 lot 级显式 `target_stock_lot_id` 关闭。为了避免误配，首版手工录入必须显式指定目标 lot；broker intake 可以支持严格 FIFO，但必须输出匹配证据和剩余股数变化。
+部分卖出按 lot 级显式 `target_stock_lot_id` 关闭。为了避免误配，当前手工录入必须显式指定目标 lot；broker intake 可以在唯一匹配开放 lot 时自动归属，并必须输出匹配证据和剩余股数变化。
 
 ### 4.5 幂等和目标匹配
 
@@ -214,7 +216,7 @@ assigned_stock_events
 - 时间：`trade_time_ms >= assigned_stock_lot.opened_at_ms`。
 - 状态：closed lot 不能再写 sale；void/repair 必须指向确定 stock event。
 
-首版手工入口不做模糊匹配。若用户只输入 symbol 和 shares，系统只能返回候选 lot 让用户确认，不能自动猜。
+当前手工入口不做模糊匹配。若用户只输入 symbol 和 shares，系统只能返回候选 lot 让用户确认，不能自动猜。
 
 ## 5. 数据来源
 
@@ -297,9 +299,9 @@ broker holdings、external holdings 或 Feishu holdings 只能作为 reconciliat
 
 ## 7. 收益统计口径
 
-### 7.1 报表应明确拆分
+### 7.1 报表明确拆分
 
-建议在收益查询里新增或派生以下区块：
+收益查询按以下区块派生：
 
 - Option income：short put open premium、buy close、expire、assignment option close。
 - Assignment stock lots：被指派形成的正股 lot、真实正股成本、剩余股数、spot、浮动收益。
@@ -360,13 +362,13 @@ lifecycle_pnl =
 
 现有 `monthly_income_report` 可以继续保留当前 option cashflow / realized / open-basis 口径。
 
-被指派正股收益建议作为新口径加入，而不是改写已有字段含义：
+被指派正股收益作为组合口径加入，不改写已有字段含义：
 
 - `assignment_stock_net_cashflow_gross` 继续表示交割现金流。
 - `premium_received_gross` 继续表示 short open 权利金。
-- 新增 assignment lifecycle 字段时，必须标明它是组合口径，已经包含 option premium 与 stock PnL 两部分。
+- assignment lifecycle 字段必须标明它是组合口径，已经包含 option premium 与 stock PnL 两部分。
 
-建议字段命名：
+字段命名：
 
 | 字段 | 语义 |
 |---|---|
@@ -378,11 +380,11 @@ lifecycle_pnl =
 
 ### 7.5 查询入口
 
-首版建议保留 `monthly_income_report` 当前语义，避免破坏已有 `/income` 和报表调用方：
+当前保留 `monthly_income_report` 既有语义，避免破坏 `/income` 和报表调用方：
 
 - `monthly_income_report` 默认输出现有 option income / cashflow / realized / open-basis 口径。
-- `monthly_income_report(include_rows=true)` 可以新增 `assignment_lifecycle_rows`，但不能改变既有字段含义。
-- 新增只读查询能力 `option_positions_read action=assigned-stock`，专门回答被指派正股 lot、spot、浮盈亏、卖出和 lifecycle PnL；`refresh_quotes=true` 是显式实时估值开关。
+- `monthly_income_report(include_rows=true)` 输出 `assignment_lifecycle_rows`，但不改变既有字段含义。
+- 只读查询能力 `option_positions_read action=assigned-stock` 专门回答被指派正股 lot、spot、浮盈亏、卖出和 lifecycle PnL；`refresh_quotes=true` 是显式实时估值开关。
 - Inbound `/income` 默认不把 `assignment_stock_net_cashflow_gross=-10000` 解释为亏损；用户问“被指派股票收益”“接货后盈亏”“assigned stock”时才调用 assignment lifecycle 口径。
 - 自然语言入口由 Agent Composer 基于工具 evidence 表达；LLM 不能自己合成 spot、卖出价、
   missing sale、金额或股数。若 guard 不通过，回退到 deterministic renderer。
@@ -445,15 +447,15 @@ lifecycle_pnl =
 
 任何非 `ready` 状态都不能输出完整 lifecycle PnL。可以输出已知事实、缺失字段和下一步建议。
 
-## 9. 首版实施计划
+## 9. 当前已落地能力
 
-1. 只读设计和 schema：定义 `assigned_stock_lots` projection、独立 `assigned_stock_events` payload、组合收益字段和 double-counting guard。
-2. Assignment projection：从现有 assignment events 派生 assigned stock lots，先只读输出。
-3. Review diagnostics：扫描缺 settlement、缺 sale、缺 quote 和 holdings conflict，输出结构化 review 状态。
-4. Quote snapshot：收益查询时实时获取 spot，输出 quote status；缺 quote fail open for facts、fail closed for mark PnL。
-5. Manual sale entry：支持用户录入被指派正股卖出，必须 dry-run / confirm，并要求显式目标 stock lot。
-6. Broker sale intake：接入 broker stock sell deal source，并用 source deal id 幂等；自动匹配必须输出证据。
-7. Monthly income integration：保留既有字段语义，在 `include_rows=true` 或新工具里输出 assignment lifecycle rows。
+1. `assigned_stock_lots` 由 assignment event 和 `assigned_stock_events` 重建。
+2. `assigned_stock_events` 记录被指派正股 sale fact，保留 source id 幂等和目标 lot 校验。
+3. `option_positions_read action=assigned-stock` 返回 lot、spot、浮盈亏、已实现正股盈亏和 lifecycle PnL。
+4. `refresh_quotes=true` 显式获取开放 assigned-stock lot 的实时 spot；历史 `as_of_ms` 不用实时 spot 回填。
+5. `om option-positions assigned-stock-sale` 支持人工录入 sale，默认 dry-run / confirm，并要求显式目标 stock lot。
+6. Broker stock sell intake 可以在唯一匹配开放 assigned-stock lot 时写入 sale fact；无法安全归属时等待人工确认。
+7. `monthly_income_report(include_rows=true)` 保留既有字段语义，并输出 assignment lifecycle rows。
 
 ## 10. 验收用例
 

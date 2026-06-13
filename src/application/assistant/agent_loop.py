@@ -18,7 +18,9 @@ from src.application.assistant.capability_catalog import (
     planner_read_specs,
     spec_by_intent,
 )
+from src.application.assistant.answer_verifier import verify_response_against_evidence
 from src.application.assistant.contracts import AssistantRequest, PerceptionResult, ToolCall
+from src.application.assistant.evidence import build_evidence_bundle
 from src.application.assistant.llm_common import (
     CreateStructuredResponseFn,
     is_supported_llm_provider,
@@ -31,6 +33,7 @@ from src.application.assistant.llm_common import (
 )
 from src.application.assistant.llm_translator import LlmTranslationResult
 from src.application.assistant.renderer import render_canonical_tool_result, render_inbound_text
+from src.application.assistant.session import build_agent_session_snapshot
 from src.application.assistant.settings import AssistantSettings
 from src.application.assistant.time_filters import extract_month_filter
 from src.application.assistant.tool_policy import DEFAULT_TOOL_POLICY
@@ -46,6 +49,8 @@ TOOL_PLAN_SCHEMA_VERSION = "om-tool-plan-v1"
 TOOL_PLAN_SYNTHESIS_SCHEMA_VERSION = "om-tool-plan-synthesis-v1"
 INTERNAL_TOOL_PLAN_NAME = "assistant.tool_plan"
 MAX_TOOL_PLAN_STEPS = 3
+MAX_AGENT_LOOP_ITERATIONS = 3
+MAX_AGENT_LOOP_TOOL_CALLS = 5
 AGENT_LOOP_READ_TOOLS = frozenset(
     str(spec.tool_name)
     for spec in planner_read_specs()
@@ -328,14 +333,17 @@ def execute_tool_plan(
     question: str,
     request: AssistantRequest,
     plan_payload: dict[str, Any],
+    command_id: str | None = None,
     settings: AssistantSettings,
     conversation_context: dict[str, Any] | None,
     execute_tool_fn: Callable[[str, dict[str, Any]], dict[str, Any]],
+    plan_tools_fn: AgentLoopPlanFn | None = None,
     synthesize_response_fn: AgentLoopSynthesizeFn | None = None,
 ) -> dict[str, Any]:
     plan = parse_tool_plan_payload(plan_payload)
     plan = _normalize_tool_plan(plan, question=question, today=_planner_today(None))
     validate_tool_plan(plan, allow_preview=False)
+    plan_revisions: list[dict[str, Any]] = [_plan_revision_payload(1, plan=plan, reason="initial bounded plan")]
     tool_events: list[dict[str, Any]] = []
     observations: list[dict[str, Any]] = []
     fact_observations: list[dict[str, Any]] = []
@@ -343,15 +351,152 @@ def execute_tool_plan(
     tool_results: list[dict[str, Any]] = []
     ok = True
     error_payload: dict[str, Any] | None = None
+    capability_status: dict[str, Any] = {"required": [], "satisfied": [], "gaps": []}
+    evidence_gaps: list[dict[str, Any]] = []
+    iteration = 1
 
-    for index, step in enumerate(plan.steps, start=1):
+    while True:
+        ok, error_payload = _execute_read_plan_steps(
+            request=request,
+            plan=plan,
+            execute_tool_fn=execute_tool_fn,
+            tool_events=tool_events,
+            observations=observations,
+            fact_observations=fact_observations,
+            llm_observations=llm_observations,
+            tool_results=tool_results,
+            ok=ok,
+            error_payload=error_payload,
+        )
+        capability_status = _append_capability_observation(
+            plan=plan,
+            fact_observations=fact_observations,
+            llm_observations=llm_observations,
+            tool_events=tool_events,
+            ok=ok,
+        )
+        evidence_bundle = build_evidence_bundle(
+            question=question,
+            plan=plan.public_payload(),
+            observations=fact_observations,
+        )
+        evidence_gaps = _assess_evidence_gaps(plan=plan, evidence_bundle=evidence_bundle)
+        if not _should_replan_read_only(
+            ok=ok,
+            plan_tools_fn=plan_tools_fn,
+            evidence_gaps=evidence_gaps,
+            iteration=iteration,
+            tool_call_count=len(observations),
+        ):
+            break
+        next_plan = _plan_followup_read_steps(
+            question=question,
+            settings=settings,
+            conversation_context=conversation_context,
+            plan_tools_fn=plan_tools_fn,
+            evidence_gaps=evidence_gaps,
+            prior_plan=plan,
+            revision=len(plan_revisions) + 1,
+            tool_events=tool_events,
+        )
+        if next_plan is None:
+            break
+        plan = next_plan
+        plan_revisions.append(_plan_revision_payload(len(plan_revisions) + 1, plan=plan, reason="follow-up evidence-gap plan"))
+        iteration += 1
+
+    synthesis = _build_final_response(
+        question=question,
+        settings=settings,
+        plan=plan,
+        evidence_bundle=evidence_bundle,
+        fact_observations=fact_observations,
+        llm_observations=llm_observations,
+        conversation_context=conversation_context,
+        synthesize_response_fn=synthesize_response_fn,
+        ok=ok,
+        error_payload=error_payload,
+    )
+    final_response_payload = _final_response_payload(synthesis)
+    agent_session = build_agent_session_snapshot(
+        request=request,
+        command_id=command_id,
+        question=question,
+        plan=plan.public_payload(),
+        plan_revisions=plan_revisions,
+        tool_events=tool_events,
+        observations=observations,
+        evidence_bundle=evidence_bundle,
+        final_response=final_response_payload,
+        synthesis_trace=dict(synthesis.trace),
+        ok=ok,
+    )
+    data = {
+        "response_text": synthesis.response_text or "",
+        "plan": plan.public_payload(),
+        "observations": observations,
+        "synthesis_observations": llm_observations,
+        "evidence_bundle": evidence_bundle.public_payload(),
+        "agent_session": agent_session.public_payload(),
+        "tool_events": tool_events,
+        "tool_calls_used": len(observations),
+        "writes_allowed": False,
+        "final_response": final_response_payload,
+        "synthesis": dict(synthesis.trace),
+        "tool_results": tool_results,
+        "capability_status": capability_status,
+        "evidence_gaps": evidence_gaps,
+        "plan_revisions": plan_revisions,
+    }
+    return build_response(
+        tool_name=INTERNAL_TOOL_PLAN_NAME,
+        ok=ok,
+        data=data,
+        error=error_payload if not ok else None,
+    )
+
+
+def _execute_read_plan_steps(
+    *,
+    request: AssistantRequest,
+    plan: PlannerPlan,
+    execute_tool_fn: Callable[[str, dict[str, Any]], dict[str, Any]],
+    tool_events: list[dict[str, Any]],
+    observations: list[dict[str, Any]],
+    fact_observations: list[dict[str, Any]],
+    llm_observations: list[dict[str, Any]],
+    tool_results: list[dict[str, Any]],
+    ok: bool,
+    error_payload: dict[str, Any] | None,
+) -> tuple[bool, dict[str, Any] | None]:
+    if not ok:
+        return ok, error_payload
+    for step in plan.steps:
+        if len(observations) >= MAX_AGENT_LOOP_TOOL_CALLS:
+            error = AgentToolError(
+                code="TOOL_BUDGET_EXHAUSTED",
+                message=f"Agent loop 工具调用预算已用完（最多 {MAX_AGENT_LOOP_TOOL_CALLS} 次），未执行完整计划。",
+                hint="请缩小问题范围，或拆分为更小的查询。",
+                details={
+                    "max_tool_calls": MAX_AGENT_LOOP_TOOL_CALLS,
+                    "skipped_tool_name": step.tool_name,
+                    "calls_used": len(observations),
+                },
+            )
+            tool_events.append(
+                {
+                    "phase": "tool_budget_exhausted",
+                    "max_tool_calls": MAX_AGENT_LOOP_TOOL_CALLS,
+                    "skipped_tool_name": step.tool_name,
+                }
+            )
+            return False, build_error_payload(error)
+        index = len(observations) + 1
         payload = _inject_system_fields(step.arguments, request=request, tool_name=step.tool_name)
         call = ToolCall(tool_name=step.tool_name, payload=payload)
         try:
             decision = DEFAULT_TOOL_POLICY.authorize_read_tool(call, source="agent_loop")
         except AgentToolError as err:
-            ok = False
-            error_payload = build_error_payload(err)
             tool_events.append(
                 {
                     "phase": "authorize_tool",
@@ -360,7 +505,7 @@ def execute_tool_plan(
                     "error_code": err.code,
                 }
             )
-            break
+            return False, build_error_payload(err)
         tool_events.append(
             {
                 "phase": "authorize_tool",
@@ -399,10 +544,18 @@ def execute_tool_plan(
             }
         )
         if not step_ok:
-            ok = False
-            error_payload = dict(error) if isinstance(error, dict) else {"code": "TOOL_FAILED", "message": "tool call failed"}
-            break
+            return False, dict(error) if isinstance(error, dict) else {"code": "TOOL_FAILED", "message": "tool call failed"}
+    return ok, error_payload
 
+
+def _append_capability_observation(
+    *,
+    plan: PlannerPlan,
+    fact_observations: list[dict[str, Any]],
+    llm_observations: list[dict[str, Any]],
+    tool_events: list[dict[str, Any]],
+    ok: bool,
+) -> dict[str, Any]:
     capability_status = _assess_plan_capabilities(plan, fact_observations) if ok else {"required": [], "satisfied": [], "gaps": []}
     if capability_status["required"]:
         capability_observation = {
@@ -423,37 +576,183 @@ def execute_tool_plan(
                 "gaps": list(capability_status["gaps"]),
             }
         )
+    return capability_status
 
-    synthesis = _build_final_response(
-        question=question,
-        settings=settings,
-        plan=plan,
-        fact_observations=fact_observations,
-        llm_observations=llm_observations,
-        conversation_context=conversation_context,
-        synthesize_response_fn=synthesize_response_fn,
-        ok=ok,
-        error_payload=error_payload,
+
+def _should_replan_read_only(
+    *,
+    ok: bool,
+    plan_tools_fn: AgentLoopPlanFn | None,
+    evidence_gaps: list[dict[str, Any]],
+    iteration: int,
+    tool_call_count: int,
+) -> bool:
+    return (
+        ok
+        and plan_tools_fn is not None
+        and bool(evidence_gaps)
+        and iteration < MAX_AGENT_LOOP_ITERATIONS
+        and tool_call_count < MAX_AGENT_LOOP_TOOL_CALLS
     )
-    data = {
-        "response_text": synthesis.response_text or "",
-        "plan": plan.public_payload(),
-        "observations": observations,
-        "synthesis_observations": llm_observations,
-        "tool_events": tool_events,
-        "tool_calls_used": len(observations),
-        "writes_allowed": False,
-        "final_response": _final_response_payload(synthesis),
-        "synthesis": dict(synthesis.trace),
-        "tool_results": tool_results,
-        "capability_status": capability_status,
+
+
+def _plan_followup_read_steps(
+    *,
+    question: str,
+    settings: AssistantSettings,
+    conversation_context: dict[str, Any] | None,
+    plan_tools_fn: AgentLoopPlanFn | None,
+    evidence_gaps: list[dict[str, Any]],
+    prior_plan: PlannerPlan,
+    revision: int,
+    tool_events: list[dict[str, Any]],
+) -> PlannerPlan | None:
+    if plan_tools_fn is None:
+        return None
+    context = dict(conversation_context or {})
+    context["agent_loop_followup"] = {
+        "revision": revision,
+        "prior_plan": prior_plan.public_payload(),
+        "evidence_gaps": [dict(item) for item in evidence_gaps],
+        "instruction": "Plan only read-only follow-up steps that directly close recoverable evidence gaps.",
     }
-    return build_response(
-        tool_name=INTERNAL_TOOL_PLAN_NAME,
-        ok=ok,
-        data=data,
-        error=error_payload if not ok else None,
+    plan_result = plan_tools_fn(question, settings, context)
+    if plan_result.error is not None:
+        tool_events.append(
+            {
+                "phase": "replan",
+                "status": "failed",
+                "error_code": plan_result.error.code,
+            }
+        )
+        return None
+    if plan_result.plan is None or not plan_result.plan.steps:
+        tool_events.append({"phase": "replan", "status": "no_followup_plan"})
+        return None
+    try:
+        next_plan = _normalize_tool_plan(plan_result.plan, question=question, today=_planner_today_from_context(context))
+        validate_tool_plan(next_plan, question=question, allow_preview=False)
+    except AgentToolError as err:
+        tool_events.append(
+            {
+                "phase": "replan",
+                "status": "invalid",
+                "error_code": err.code,
+            }
+        )
+        return None
+    gap_rejection = _followup_gap_rejection(next_plan, evidence_gaps=evidence_gaps)
+    if gap_rejection:
+        tool_events.append(
+            {
+                "phase": "replan",
+                "status": "unrelated_to_gap",
+                "reason": gap_rejection,
+                "evidence_gaps": [dict(item) for item in evidence_gaps],
+                "steps": [step.public_payload() for step in next_plan.steps],
+            }
+        )
+        return None
+    if next_plan.public_payload() == prior_plan.public_payload():
+        tool_events.append({"phase": "replan", "status": "duplicate_plan"})
+        return None
+    tool_events.append(
+        {
+            "phase": "replan",
+            "status": "planned",
+            "revision": revision,
+            "evidence_gaps": [dict(item) for item in evidence_gaps],
+            "steps": [step.public_payload() for step in next_plan.steps],
+        }
     )
+    return next_plan
+
+
+def _followup_gap_rejection(plan: PlannerPlan, *, evidence_gaps: list[dict[str, Any]]) -> str:
+    quote_gaps = [
+        gap
+        for gap in evidence_gaps
+        if isinstance(gap, dict)
+        and str(gap.get("kind") or "") == "recoverable_missing_quote"
+        and str(gap.get("recoverable_by") or "") == "refresh_quotes"
+    ]
+    if not quote_gaps:
+        return ""
+    for gap in quote_gaps:
+        if any(_step_closes_quote_gap(step, gap=gap) for step in plan.steps):
+            continue
+        return "follow-up plan did not include assigned-stock quote refresh for the recoverable missing quote gap"
+    return ""
+
+
+def _step_closes_quote_gap(step: PlannerPlanStep, *, gap: dict[str, Any]) -> bool:
+    if step.tool_name != str(gap.get("suggested_tool") or "option_positions_read"):
+        return False
+    if _tool_plan_step_action(step.arguments) != "assigned-stock":
+        return False
+    if step.arguments.get("refresh_quotes") is not True:
+        return False
+    gap_accounts = {str(item).strip() for item in gap.get("accounts") or [] if str(item).strip()}
+    step_account = str(step.arguments.get("account") or "").strip()
+    if gap_accounts and step_account and step_account not in gap_accounts:
+        return False
+    gap_symbols = {str(item).strip().upper() for item in gap.get("symbols") or [] if str(item).strip()}
+    step_symbol = str(step.arguments.get("symbol") or "").strip().upper()
+    if gap_symbols and step_symbol and step_symbol not in gap_symbols:
+        return False
+    return True
+
+
+def _assess_evidence_gaps(*, plan: PlannerPlan, evidence_bundle: Any) -> list[dict[str, Any]]:
+    payload = evidence_bundle.public_payload() if hasattr(evidence_bundle, "public_payload") else {}
+    missing_data = payload.get("missing_data") if isinstance(payload, dict) else []
+    if not isinstance(missing_data, list):
+        return []
+    gaps: list[dict[str, Any]] = []
+    needs_assigned_stock_quote_refresh = any(
+        step.tool_name == "option_positions_read"
+        and _tool_plan_step_action(step.arguments) == "assigned-stock"
+        and step.arguments.get("refresh_quotes") is not True
+        for step in plan.steps
+    )
+    if needs_assigned_stock_quote_refresh:
+        quote_records = [
+            item
+            for item in missing_data
+            if isinstance(item, dict) and str(item.get("recoverable_by") or "") == "refresh_quotes"
+        ]
+        if quote_records:
+            symbols: set[str] = set()
+            accounts: set[str] = set()
+            for record in quote_records:
+                if str(record.get("symbol") or "").strip():
+                    symbols.add(str(record.get("symbol")))
+                for symbol in record.get("symbols") or []:
+                    if str(symbol).strip():
+                        symbols.add(str(symbol))
+                if str(record.get("account") or "").strip():
+                    accounts.add(str(record.get("account")))
+            gaps.append(
+                {
+                    "kind": "recoverable_missing_quote",
+                    "recoverable_by": "refresh_quotes",
+                    "suggested_tool": "option_positions_read",
+                    "suggested_arguments": {"action": "assigned-stock", "refresh_quotes": True},
+                    "symbols": sorted(symbols),
+                    "accounts": sorted(accounts),
+                    "reason": "assigned-stock quote dependent facts are missing and the executed plan did not request quote refresh",
+                }
+            )
+    return gaps
+
+
+def _plan_revision_payload(revision: int, *, plan: PlannerPlan, reason: str) -> dict[str, Any]:
+    return {
+        "revision": int(revision),
+        "source": "agent_loop",
+        "reason": reason,
+        "plan": plan.public_payload(),
+    }
 
 
 def plan_read_only_tools(
@@ -1287,6 +1586,7 @@ def _build_final_response(
     question: str,
     settings: AssistantSettings,
     plan: PlannerPlan,
+    evidence_bundle: Any | None = None,
     fact_observations: list[dict[str, Any]],
     llm_observations: list[dict[str, Any]],
     conversation_context: dict[str, Any] | None,
@@ -1316,6 +1616,7 @@ def _build_final_response(
             settings=settings,
             plan=plan,
             evidence=evidence,
+            evidence_bundle=evidence_bundle,
             fact_observations=fact_observations,
             conversation_context=conversation_context,
             synthesize_response_fn=synthesize_response_fn,
@@ -1328,7 +1629,7 @@ def _build_final_response(
             grounded_observations = _with_grounded_facts_observation(llm_observations, fact_text)
             synthesis = synthesizer(question, settings, plan, grounded_observations, conversation_context)
             if synthesis.response_text:
-                guard = _verify_answer_guard(synthesis.response_text, observations=fact_observations)
+                guard = _verify_answer_guard(synthesis.response_text, observations=fact_observations, evidence_bundle=evidence_bundle)
                 if not guard["violations"]:
                     return LlmSynthesisResult(
                         response_text=_combine_grounded_response(fact_text, synthesis.response_text),
@@ -1343,7 +1644,7 @@ def _build_final_response(
                 retry_observations = _with_answer_guard_feedback(grounded_observations, guard)
                 retry = synthesizer(question, settings, plan, retry_observations, conversation_context)
                 if retry.response_text:
-                    retry_guard = _verify_answer_guard(retry.response_text, observations=fact_observations)
+                    retry_guard = _verify_answer_guard(retry.response_text, observations=fact_observations, evidence_bundle=evidence_bundle)
                     if not retry_guard["violations"]:
                         return LlmSynthesisResult(
                             response_text=_combine_grounded_response(fact_text, retry.response_text),
@@ -1384,7 +1685,7 @@ def _build_final_response(
     synthesizer = synthesize_response_fn or synthesize_tool_plan_response
     synthesis = synthesizer(question, settings, plan, llm_observations, conversation_context)
     if synthesis.response_text:
-        guard = _verify_answer_guard(synthesis.response_text, observations=fact_observations)
+        guard = _verify_answer_guard(synthesis.response_text, observations=fact_observations, evidence_bundle=evidence_bundle)
         if not guard["violations"]:
             return LlmSynthesisResult(
                 response_text=synthesis.response_text,
@@ -1394,7 +1695,7 @@ def _build_final_response(
         retry_observations = _with_answer_guard_feedback(llm_observations, guard)
         retry = synthesizer(question, settings, plan, retry_observations, conversation_context)
         if retry.response_text:
-            retry_guard = _verify_answer_guard(retry.response_text, observations=fact_observations)
+            retry_guard = _verify_answer_guard(retry.response_text, observations=fact_observations, evidence_bundle=evidence_bundle)
             if not retry_guard["violations"]:
                 return LlmSynthesisResult(
                     response_text=retry.response_text,
@@ -1498,6 +1799,7 @@ def _compose_agent_response(
     settings: AssistantSettings,
     plan: PlannerPlan,
     evidence: AnswerEvidence,
+    evidence_bundle: Any | None,
     fact_observations: list[dict[str, Any]],
     conversation_context: dict[str, Any] | None,
     synthesize_response_fn: AgentLoopSynthesizeFn | None,
@@ -1507,7 +1809,7 @@ def _compose_agent_response(
     observations = [dict(item) for item in evidence.observations]
     synthesis = synthesizer(question, settings, plan, observations, conversation_context)
     if synthesis.response_text:
-        guard = _verify_answer_guard(synthesis.response_text, observations=fact_observations)
+        guard = _verify_answer_guard(synthesis.response_text, observations=fact_observations, evidence_bundle=evidence_bundle)
         if not guard["violations"]:
             return LlmSynthesisResult(
                 response_text=_append_provenance(synthesis.response_text, evidence.provenance_lines),
@@ -1523,7 +1825,7 @@ def _compose_agent_response(
         retry_observations = _with_answer_guard_feedback(observations, guard)
         retry = synthesizer(question, settings, plan, retry_observations, conversation_context)
         if retry.response_text:
-            retry_guard = _verify_answer_guard(retry.response_text, observations=fact_observations)
+            retry_guard = _verify_answer_guard(retry.response_text, observations=fact_observations, evidence_bundle=evidence_bundle)
             if not retry_guard["violations"]:
                 return LlmSynthesisResult(
                     response_text=_append_provenance(retry.response_text, evidence.provenance_lines),
@@ -1632,7 +1934,7 @@ def _final_response_payload(synthesis: LlmSynthesisResult) -> dict[str, Any]:
 
 
 def _first_tool_observation(step: PlannerPlanStep, observations: list[dict[str, Any]]) -> dict[str, Any]:
-    for observation in observations:
+    for observation in reversed(observations):
         if str(observation.get("tool_name") or "") == step.tool_name:
             return observation
     return {}
@@ -1834,7 +2136,12 @@ def _fallback_response(
     return "\n".join(lines)
 
 
-def _verify_answer_guard(response_text: str, *, observations: list[dict[str, Any]]) -> dict[str, Any]:
+def _verify_answer_guard(
+    response_text: str,
+    *,
+    observations: list[dict[str, Any]],
+    evidence_bundle: Any | None = None,
+) -> dict[str, Any]:
     text = str(response_text or "")
     compact = re.sub(r"\s+", "", text.lower())
     facts = _answer_guard_facts(observations)
@@ -1931,7 +2238,9 @@ def _verify_answer_guard(response_text: str, *, observations: list[dict[str, Any
                 )
                 break
     violations.extend(_unsupported_assigned_stock_numeric_claims(text, observations=observations))
-    return {"facts": facts, "violations": violations}
+    contract_verification = verify_response_against_evidence(text, evidence_bundle=evidence_bundle)
+    violations.extend(contract_verification.violations)
+    return {"facts": facts, "contract_verifier": contract_verification.public_payload(), "violations": violations}
 
 
 def _with_answer_guard_feedback(observations: list[dict[str, Any]], guard: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2386,7 +2695,7 @@ _MONTHLY_INCOME_CAPABILITY_CHECKS = {
 
 
 def _capability_gap_response(observations: list[dict[str, Any]]) -> str:
-    for item in observations:
+    for item in reversed(observations):
         if str(item.get("tool_name") or "") != "assistant.capability_check":
             continue
         data = item.get("data") if isinstance(item.get("data"), dict) else {}

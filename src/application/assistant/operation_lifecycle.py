@@ -9,6 +9,7 @@ from src.application.assistant.contracts import AssistantRequest
 from src.application.assistant.operation_signature import hash_operation_payload, verify_operation_signature
 from src.application.assistant.operation_status_text import cannot_repeat_message
 from src.application.assistant.operation_store import InboundOperationStore, operation_is_expired
+from src.application.assistant.permission_request import build_permission_request
 
 
 CandidateHintFn = Callable[[str, Any], str]
@@ -148,6 +149,7 @@ def build_previewed_operation_response(
         preview=preview,
         ttl_seconds=ttl_seconds,
     )
+    permission_request = build_permission_request(operation=operation, request=request)
     return build_response(
         tool_name=tool_name,
         ok=True,
@@ -159,6 +161,7 @@ def build_previewed_operation_response(
             "payload": payload,
             "preview": preview,
             "expires_at": operation.get("expires_at"),
+            "permission_request": permission_request,
             "response_text": response_text(operation),
         },
         meta={"audit_db": mask_path(store.path)},
