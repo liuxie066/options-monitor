@@ -60,6 +60,49 @@ def test_refresh_assigned_stock_quote_snapshots_reuses_gateway(monkeypatch, tmp_
     assert result.warnings == []
 
 
+def test_refresh_assigned_stock_quote_snapshots_separates_alias_and_state_base_dirs(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.positions.assigned_stock_quotes as mod
+
+    alias_base_dir = tmp_path / "repo"
+    state_base_dir = tmp_path / "runtime"
+    calls: list[dict[str, Any]] = []
+
+    class _Gateway:
+        def close(self) -> None:
+            return None
+
+    class _Underlier:
+        code = "US.NVDA"
+
+    def _normalize_underlier(symbol: str, *, base_dir: Path) -> _Underlier:
+        calls.append({"stage": "normalize", "symbol": symbol, "base_dir": base_dir})
+        return _Underlier()
+
+    def _get_spot_opend(_gateway: Any, code: str, **kwargs: Any) -> float:
+        calls.append({"stage": "snapshot", "code": code, "base_dir": kwargs.get("base_dir")})
+        return 101.0
+
+    monkeypatch.setattr(mod, "build_ready_futu_gateway", lambda **_kwargs: _Gateway())
+    monkeypatch.setattr(mod, "normalize_underlier", _normalize_underlier)
+    monkeypatch.setattr(mod, "get_spot_opend", _get_spot_opend)
+
+    result = mod.refresh_assigned_stock_quote_snapshots(
+        [{"symbol": "NVDA", "shares_remaining": 100}],
+        cfg={},
+        base_dir=alias_base_dir,
+        state_base_dir=state_base_dir,
+    )
+
+    assert result.diagnostics["status"] == "ok"
+    assert calls == [
+        {"stage": "normalize", "symbol": "NVDA", "base_dir": alias_base_dir},
+        {"stage": "snapshot", "code": "US.NVDA", "base_dir": state_base_dir},
+    ]
+
+
 def test_refresh_assigned_stock_quote_snapshots_degrades_when_price_missing(monkeypatch, tmp_path: Path) -> None:
     import src.application.positions.assigned_stock_quotes as mod
 

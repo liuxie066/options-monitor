@@ -61,6 +61,7 @@ def refresh_assigned_stock_quote_snapshots(
     host: str | None = None,
     port: int | None = None,
     base_dir: Path | None = None,
+    state_base_dir: Path | None = None,
     now_ms: Callable[[], int] = _now_ms,
 ) -> AssignedStockQuoteRefreshResult:
     """Fetch realtime stock spot snapshots for open assigned-stock lots.
@@ -89,6 +90,7 @@ def refresh_assigned_stock_quote_snapshots(
     except Exception:
         effective_port = 11111
     effective_base_dir = Path(base_dir) if base_dir is not None else Path(__file__).resolve().parents[3]
+    effective_state_base_dir = Path(state_base_dir) if state_base_dir is not None else effective_base_dir
     limits = resolve_opend_fetch_limits(dict(cfg) if isinstance(cfg, Mapping) else None).market_snapshot
     diagnostics["host"] = effective_host
     diagnostics["port"] = effective_port
@@ -122,7 +124,7 @@ def refresh_assigned_stock_quote_snapshots(
                 spot = get_spot_opend(
                     gateway,
                     underlier.code,
-                    base_dir=effective_base_dir,
+                    base_dir=effective_state_base_dir,
                     snapshot_max_wait_sec=limits.max_wait_sec,
                     snapshot_window_sec=limits.window_sec,
                     snapshot_max_calls=limits.max_calls,
