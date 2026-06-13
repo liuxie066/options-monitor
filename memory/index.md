@@ -13,7 +13,6 @@ Use it only when a task needs historical context or prior decisions. If an entry
 
 Decisions:
 
-- [Option positions SQLite primary](decisions/2026-04-22-option-positions-sqlite-primary.md)
 - [Option positions canonical model](decisions/2026-04-27-option-positions-canonical-model.md)
 - [Option positions baseline events verifications](decisions/2026-05-09-option-positions-baseline-events-verifications.md)
 - [Trade position ledger redesign](decisions/2026-05-17-trade-position-ledger-redesign.md)
@@ -38,7 +37,6 @@ Decisions:
 
 Patterns:
 
-- [Primary with backup repository](patterns/2026-04-22-primary-with-backup-repository.md)
 - [Canonical preflight uses event codec](patterns/2026-05-17-canonical-preflight-uses-event-codec.md)
 
 Failures:

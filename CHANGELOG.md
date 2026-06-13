@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.262 - 2026-06-13
+
+### Changed
+- Removed obsolete option-position migration docs and archived memory templates, and redirected operators to the current canonical ledger repair flow.
+- Removed historical Feishu backup/bootstrap memory entries that were superseded by the local `trade_events -> position_lots` ledger boundary.
+
 ## 1.2.261 - 2026-06-13
 
 ### Changed

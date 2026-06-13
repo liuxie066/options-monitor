@@ -14,4 +14,9 @@ This file records historical changes to the archived project memory tree.
 
 - Retired the active LLM wiki / manual ingest workflow.
 - Reframed `memory/` as archived reference material only.
-- Archived old entry templates under `memory/_archive/templates/`.
+- Archived old entry templates before their later removal.
+
+## 2026-06-13
+
+- Removed obsolete manual-ingest templates after the workflow was retired.
+- Removed historical Feishu backup/bootstrap memory entries superseded by the canonical local ledger boundary.
