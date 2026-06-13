@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 1.2.265 - 2026-06-13
+
+### Added
+- Added durable AgentSession snapshots, assistant trace diagnostics, evidence bundles, permission-request metadata, and an Agent completion design document for the unified assistant loop.
+
+### Changed
+- Expanded AgentLoop read planning to support bounded evidence-gap follow-up plans, answer verification, and source-backed session traces.
+- Refreshed Agent architecture/control-plane docs and dependency graph output to match the current Agent loop implementation.
+
+### Fixed
+- Fixed `assistant_trace` so read-only trace queries do not create missing AgentSession tables.
+- Fixed message-less local Agent sessions so repeated local requests no longer overwrite prior session traces.
+- Fixed AgentLoop budget exhaustion to return an explicit `TOOL_BUDGET_EXHAUSTED` error instead of producing a successful partial answer.
+- Fixed AgentLoop follow-up planning so recoverable missing-quote replans must directly close the evidence gap.
+
 ## 1.2.264 - 2026-06-13
 
 ### Changed

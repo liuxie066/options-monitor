@@ -26,20 +26,24 @@ Allowed architecture:
 Feishu / WeChat / Hermes
   -> thin channel adapter
   -> ChannelService inbound dispatch
-  -> AgentSession (conceptual session boundary)
+  -> AgentSession / AgentSessionSnapshot
   -> AgentLoop
        -> Perceive
        -> Understand
+       -> Plan
        -> Decide
        -> Act
        -> Observe
+       -> Verify / Replan
+       -> Compose / Verify Answer
   -> channel reply
 ```
 
-`AgentSession` is a conceptual boundary, not a separate runtime layer or a
-required class name. In the current implementation it is carried by
-`AssistantRequest`, audit identity, conversation context, and pending-operation
-state before control enters `AgentLoop`.
+`AgentSession` is the task boundary for one inbound/local Agent turn. In the
+current implementation it is represented by `AssistantRequest`,
+`AgentSessionSnapshot`, audit identity, conversation context, pending-operation
+state, and durable operator trace in the inbound SQLite `agent_sessions` table.
+It is not a second runtime service or a second pending-operation store.
 
 `src.application.channels` owns channel capability registration and service
 dispatch. `src.application.inbound` owns transport details only: Feishu payload
@@ -48,12 +52,12 @@ transport-facing request contract. Inbound parsing, command catalog, LLM
 routing, operation store, audit, policy, and renderer ownership live in
 `src.application.assistant`.
 
-The current code still uses compatibility names such as `AssistantRequest`,
-`PerceptionResult`, `ReasoningResolution`, `ActionResult`, and
-`ObservationResponse`. Treat them as implementation handles inside the same
-Agent loop, not as separate runtime layers. `assistant.mode` is a legacy
-compatibility field only; the active product controls are `assistant.enabled`
-and `assistant.planner.enabled`.
+The current code still uses names such as `AssistantRequest`,
+`PerceptionResult`, `ReasoningResolution`, `ActionResult`,
+`ObservationResponse`, and `AgentSessionSnapshot`. Treat them as
+implementation handles inside the same Agent loop, not as separate runtime
+layers. `assistant.mode` is a legacy compatibility field only; the active
+product controls are `assistant.enabled` and `assistant.planner.enabled`.
 
 The authority split is:
 

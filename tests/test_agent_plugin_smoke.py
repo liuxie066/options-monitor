@@ -1814,6 +1814,18 @@ def test_runtime_status_reports_assistant_llm_and_latest_agent_route(monkeypatch
     assert data["summary"]["assistant_latest_route"] == "agent_loop"
 
 
+def test_assistant_trace_agent_tool_reports_missing_store(tmp_path: Path) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    out = run_tool("assistant_trace", {"audit_db": str(tmp_path / "missing.sqlite3"), "limit": 5})
+
+    assert out["ok"] is True
+    assert out["data"]["schema_version"] == "om-assistant-trace-v1"
+    assert out["data"]["trace_count"] == 0
+    assert out["warnings"] == ["audit_db_missing"]
+    assert "没有匹配的 Agent session" in out["data"]["response_text"]
+
+
 def test_runtime_status_does_not_report_llm_endpoint_when_llm_disabled(tmp_path: Path) -> None:
     fixture = _runtime_status_upgrade_fixture(tmp_path)
 
