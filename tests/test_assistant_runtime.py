@@ -3712,6 +3712,25 @@ def test_assistant_runtime_agent_loop_analysis_query_uses_task_shaped_fallback(t
     assert synthesis["fallback"] == "analysis_result_renderer"
 
 
+def test_agent_loop_analysis_query_manifest_exposes_view_fields_and_template() -> None:
+    manifest = _planner_tool_manifest()
+    analysis_tool = next(item for item in manifest if item["name"] == "analysis_query")
+    semantics = analysis_tool["semantics"]
+
+    income_view = semantics["analysis_views"]["monthly_income_return_summary"]
+    assert "net_income_cny" in income_view["fields"]
+    assert "net_return_rate" in income_view["fields"]
+    assert "net_cashflow" not in income_view["fields"]
+
+    template = semantics["query_templates"]["lx_sy_income_comparison"]
+    assert "net_income_cny" in template
+    assert "net_return_rate" in template
+    assert "net_cashflow" not in template
+
+    notes = "\n".join(analysis_tool["planner_notes"])
+    assert "Do not invent columns" in notes
+
+
 def test_assistant_runtime_agent_loop_answer_guard_rewrites_contradictory_income_synthesis(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
     synthesis_observation_counts: list[int] = []

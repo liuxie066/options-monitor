@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from domain.domain.symbol_identity import symbol_market
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response
 from src.application.agent_tool_registry import get_tool_definition
+from src.application.agent_tools.analysis import VIEW_SPECS as ANALYSIS_VIEW_SPECS
 from src.application.assistant.capability_catalog import (
     ACCOUNT_VALUES,
     is_llm_planner_preview_spec,
@@ -2865,6 +2866,7 @@ Rules:
 - For "记录开仓", "记录平仓", Futu 成交提醒, 成功卖出/买入 option fills, use manual_trade_open or manual_trade_close with raw_text set to the original user message.
 - For current monitored-symbol config questions such as "max strike 是多少", "当前配置", or "查询 sell_put.max_strike", use symbol_config_read with symbol plus optional strategy/field.
 - For open-ended analytical questions such as 对比, 有什么不同, 排名, 趋势, 组成, 来源, 按账户/月份/标的汇总, or cross-domain questions across income/positions/trades/assigned stock/config, prefer analysis_query over narrow business renderers. Use analysis_catalog first only when fields/views are unknown.
+- For analysis_query, use only columns listed in the tool manifest analysis_views. Never invent SQL columns. If the needed fields are not clear from the manifest, plan analysis_catalog before analysis_query.
 - For monitored-symbol setting changes such as covered call min strike 85, use symbol_edit. Do not use symbol_edit for questions about the current value.
 - For model switch requests, use model_use. For immediate software upgrade requests, use upgrade_now.
 - response_mode is a top-level plan field only. Never include response_mode inside any step.arguments.
@@ -2933,10 +2935,26 @@ def _planner_tool_manifest() -> list[dict[str, Any]]:
         if name == "analysis_query":
             notes.append("Use for open-ended analysis: 对比, 有什么不同, 排名, 趋势, 组成, 来源, 按账户/月份/标的汇总, 差额, 收益率差.")
             notes.append("Generate one SELECT or WITH query over analysis_catalog views; never include writes, PRAGMA, ATTACH, paths, config, or system arguments.")
-            notes.append("For lx vs sy income comparison, query monthly_income_return_summary by month/account and compute differences in SQL when useful.")
+            notes.append("Use only the columns listed in semantics.analysis_views. Do not invent columns such as net_cashflow, total_return, return_rate, or open_basis_pnl unless they are listed.")
+            notes.append("For lx vs sy income comparison, query monthly_income_return_summary columns month, account, net_income_cny, net_return_rate, realized_pnl_cny, premium_income_cny, and compute differences in SQL when useful.")
             notes.append("Tool result rows/cell_refs are evidence; if synthesis fails, the analysis_result renderer preserves the task-shaped table.")
             semantics = {
                 "data_source": "OM read-only analysis workspace backed by local ledger/config/runtime read tools",
+                "analysis_views": _analysis_views_for_planner_manifest(),
+                "query_templates": {
+                    "lx_sy_income_comparison": (
+                        "select month, "
+                        "round(sum(case when account = 'lx' then net_income_cny else 0 end), 2) as lx_income_cny, "
+                        "round(sum(case when account = 'sy' then net_income_cny else 0 end), 2) as sy_income_cny, "
+                        "case when sum(case when account = 'lx' then net_income_cny else 0 end) >= "
+                        "sum(case when account = 'sy' then net_income_cny else 0 end) then 'lx' else 'sy' end as higher_account, "
+                        "round(abs(sum(case when account = 'lx' then net_income_cny else 0 end) - "
+                        "sum(case when account = 'sy' then net_income_cny else 0 end)), 2) as income_diff_cny, "
+                        "round(sum(case when account = 'lx' then net_return_rate else 0 end) - "
+                        "sum(case when account = 'sy' then net_return_rate else 0 end), 6) as return_rate_diff "
+                        "from monthly_income_return_summary where account in ('lx','sy') group by month order by month"
+                    ),
+                },
                 "answer_capabilities": {
                     "analysis_query": "comparison, ranking, breakdown, trend, grouping, and cross-domain read-only analysis",
                     "read_only": "SELECT-only in-memory SQLite over whitelisted views",
@@ -3018,6 +3036,16 @@ def _planner_tool_manifest() -> list[dict[str, Any]]:
         }
         tools.append(item)
     return tools
+
+
+def _analysis_views_for_planner_manifest() -> dict[str, dict[str, Any]]:
+    return {
+        name: {
+            "description": str(spec.get("description") or ""),
+            "fields": [str(field) for field in spec.get("fields") or []],
+        }
+        for name, spec in ANALYSIS_VIEW_SPECS.items()
+    }
 
 
 def _planner_preview_input_schema(intent_name: str) -> dict[str, Any]:

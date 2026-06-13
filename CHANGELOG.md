@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.268 - 2026-06-14
+
+### Fixed
+- Fixed AgentLoop analysis planning so `analysis_query` exposes whitelisted view fields and query templates to the planner, preventing LLM-generated SQL from inventing nonexistent income columns such as `net_cashflow` or `return_rate`.
+
 ## 1.2.267 - 2026-06-14
 
 ### Added
