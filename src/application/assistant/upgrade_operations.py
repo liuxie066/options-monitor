@@ -649,8 +649,7 @@ def render_upgrade_response(
     expires_at: str = "",
 ) -> str:
     del payload
-    source = result if result is not None else ((preview or {}).get("upgrade") if isinstance(preview, dict) else {})
-    data = source if isinstance(source, dict) else {}
+    data = _upgrade_response_data(preview=preview, result=result)
     summary = _upgrade_summary(data)
     current = summary.get("current_version") or "-"
     target = summary.get("target_version") or "-"
@@ -725,6 +724,27 @@ def render_upgrade_response(
             ]
         )
     return f"升级操作进度：{user_facing_operation_status(status)}\ncommand_id: {operation_id}"
+
+
+def _upgrade_response_data(*, preview: dict[str, Any] | None, result: dict[str, Any] | None) -> dict[str, Any]:
+    data: dict[str, Any] = {}
+    if isinstance(preview, dict):
+        upgrade = preview.get("upgrade")
+        if isinstance(upgrade, dict):
+            data.update(upgrade)
+        preview_summary = preview.get("summary")
+        if isinstance(preview_summary, dict):
+            for key, value in preview_summary.items():
+                data.setdefault(key, value)
+    if isinstance(result, dict):
+        for key, value in result.items():
+            if _upgrade_response_has_value(value) or key not in data:
+                data[key] = value
+    return data
+
+
+def _upgrade_response_has_value(value: Any) -> bool:
+    return value is not None and value != "" and value != [] and value != {}
 
 
 def _optional_text(value: Any) -> str | None:
