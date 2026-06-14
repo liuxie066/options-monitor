@@ -435,6 +435,11 @@ _DISPLAY_HOOKS = {
     "freshness",
     "missing_data",
     "coverage",
+    "receipt",
+    "confirmation_guard",
+    "operation_readback",
+    "operation_identity",
+    "final_status",
     "answer_guard",
     "final_response",
 }

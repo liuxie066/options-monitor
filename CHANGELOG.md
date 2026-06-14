@@ -1,6 +1,18 @@
 # Changelog
 
-## Unreleased
+## 1.2.286 - 2026-06-15
+
+### Added
+- Added AgentLoop preview receipt postchecks and receipt hook results so manual-trade preview traces verify operation
+  identity, permission request schema, and confirmation guard state.
+- Persisted AgentLoop preview sessions into assistant trace storage so pending manual-trade previews can be audited by
+  operation id without exposing raw trade-alert text.
+- Added deterministic operation readback sessions so confirmed manual-trade operations update assistant trace from
+  pending preview to final applied/cancelled status with postcheck hooks.
+
+### Changed
+- Updated the Agent reliability P0-P2 design notes to mark preview receipt/session trace and confirm/apply readback as
+  landed in the shared trace model.
 
 ## 1.2.285 - 2026-06-15
 

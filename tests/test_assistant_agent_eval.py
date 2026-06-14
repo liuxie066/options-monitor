@@ -470,6 +470,14 @@ def _run_planner_preview_case(case: dict[str, Any], *, tmp_path: Path, monkeypat
     assert step["precheck"]["status"] == "pass"
     assert agent_loop["preview_receipt"]["confirm_required"] is True
     assert agent_loop["preview_receipt"]["apply_allowed"] is False
+    assert step["postcheck"]["status"] == "pass"
+    postcheck_statuses = {item["name"]: item["status"] for item in step["postcheck"]["checks"]}
+    assert postcheck_statuses["receipt"] == "pass"
+    assert postcheck_statuses["confirmation_guard"] == "pass"
+    assert any(
+        item["hook"] == "receipt" and item["stage"] == "post_tool" and item["status"] == "pass"
+        for item in step["hook_results"]
+    )
     if sqlite_path.exists():
         with sqlite3.connect(sqlite_path) as conn:
             has_trade_events = conn.execute(
