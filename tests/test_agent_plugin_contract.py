@@ -202,6 +202,8 @@ def test_agent_tool_output_contracts_advertise_canonical_renderers() -> None:
     assigned_stock_contract = positions.resolve_output_contract({"action": "assigned-stock"})
     assert assigned_stock_contract["canonical_renderer"] == "assigned_stock_lifecycle"
     assert "rows[].assignment_lifecycle_pnl" in assigned_stock_contract["fact_fields"]
+    assert "rows[].quote_status" in assigned_stock_contract["freshness_fields"]
+    assert "quote_refresh.missing_symbols" in assigned_stock_contract["missing_data_fields"]
 
     income = get_tool_definition("monthly_income_report")
     assert income is not None
@@ -209,6 +211,34 @@ def test_agent_tool_output_contracts_advertise_canonical_renderers() -> None:
     assert detail_contract["canonical_renderer"] == "monthly_income"
     assert detail_contract["guard_profile"] == "income_rows"
     assert "cashflow_rows[].contracts" in detail_contract["fact_fields"]
+
+
+def test_agent_tool_manifest_exposes_p1_annotations_and_evidence_contract() -> None:
+    from src.application.tool_execution import build_tool_manifest as build_spec
+
+    spec = build_spec()
+    tools = {str(item.get("name")): item for item in spec.get("tools", [])}
+
+    runtime_status = tools["runtime_status"]
+    assert runtime_status["annotations"] == {
+        "read_only": True,
+        "destructive": False,
+        "idempotent": True,
+        "open_world": False,
+    }
+    assert runtime_status["input_schema_version"] == "om-tool-input-v1"
+    assert runtime_status["output_schema"] == {}
+    assert runtime_status["evidence_contract"]["source_label"] == "OM 本地 runtime_status"
+    assert runtime_status["evidence_contract"]["canonical_renderer"] == "runtime_status"
+    assert "output_contract" in runtime_status["verifiers"]
+    assert "numeric" in runtime_status["verifiers"]
+
+    monthly_income = tools["monthly_income_report"]
+    assert monthly_income["evidence_contract"] == {
+        "schema_version": "monthly_income_report.output",
+        "payload_dependent": True,
+    }
+    assert monthly_income["verifiers"] == ["schema", "output_contract"]
 
 
 def test_agent_registry_collects_domain_tool_modules() -> None:

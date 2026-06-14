@@ -19,7 +19,9 @@ class AgentSessionSnapshot:
     task_state: str
     plan_revisions: tuple[dict[str, Any], ...]
     tool_transcript: tuple[dict[str, Any], ...]
+    task_contract: dict[str, Any]
     evidence_bundle: dict[str, Any]
+    coverage: dict[str, Any]
     permission_state: dict[str, Any]
     answer_trace: dict[str, Any]
     audit_ref: dict[str, Any]
@@ -34,7 +36,9 @@ class AgentSessionSnapshot:
             "task_state": self.task_state,
             "plan_revisions": [dict(item) for item in self.plan_revisions],
             "tool_transcript": [dict(item) for item in self.tool_transcript],
+            "task_contract": dict(self.task_contract),
             "evidence_bundle": dict(self.evidence_bundle),
+            "coverage": dict(self.coverage),
             "permission_state": dict(self.permission_state),
             "answer_trace": dict(self.answer_trace),
             "audit_ref": dict(self.audit_ref),
@@ -50,7 +54,9 @@ def build_agent_session_snapshot(
     plan_revisions: list[dict[str, Any]] | None = None,
     tool_events: list[dict[str, Any]],
     observations: list[dict[str, Any]],
+    task_contract: dict[str, Any] | None = None,
     evidence_bundle: EvidenceBundle,
+    coverage: dict[str, Any] | None = None,
     final_response: dict[str, Any],
     synthesis_trace: dict[str, Any],
     ok: bool,
@@ -79,7 +85,9 @@ def build_agent_session_snapshot(
         task_state=_task_state(ok=ok, final_response=final_response),
         plan_revisions=revisions,
         tool_transcript=tuple(_tool_transcript(tool_events=tool_events, observations=observations)),
+        task_contract=dict(task_contract or {}),
         evidence_bundle=evidence_bundle.trace_payload(),
+        coverage=dict(coverage or {}),
         permission_state={
             "writes_allowed": False,
             "preview_operations_allowed": True,
@@ -127,27 +135,56 @@ def _task_state(*, ok: bool, final_response: dict[str, Any]) -> str:
 
 def _tool_transcript(*, tool_events: list[dict[str, Any]], observations: list[dict[str, Any]]) -> list[dict[str, Any]]:
     authorize_by_tool: dict[str, dict[str, Any]] = {}
+    result_by_tool: dict[str, dict[str, Any]] = {}
     for event in tool_events:
-        if not isinstance(event, dict) or event.get("phase") != "authorize_tool":
+        if not isinstance(event, dict):
             continue
-        tool_name = str(event.get("tool_name") or "")
-        if tool_name:
-            authorize_by_tool[tool_name] = dict(event)
+        if event.get("phase") == "authorize_tool":
+            tool_name = str(event.get("tool_name") or "")
+            if tool_name:
+                authorize_by_tool[tool_name] = dict(event)
+        elif event.get("phase") == "observe_tool_result":
+            tool_name = str(event.get("tool_name") or "")
+            if tool_name:
+                result_by_tool[tool_name] = dict(event)
     transcript: list[dict[str, Any]] = []
     for observation in observations:
         if not isinstance(observation, dict):
             continue
         tool_name = str(observation.get("tool_name") or "")
         authorization = authorize_by_tool.get(tool_name, {})
+        action_policy = authorization.get("action_policy")
+        if not isinstance(action_policy, dict):
+            action_policy = authorization.get("decision")
+        if not isinstance(action_policy, dict):
+            action_policy = {}
+        action_safety = authorization.get("action_safety")
+        if not isinstance(action_safety, dict):
+            action_safety = {}
+        result_event = result_by_tool.get(tool_name, {})
+        precheck = authorization.get("precheck")
+        postcheck = result_event.get("postcheck")
+        evidence_summary = result_event.get("evidence_summary")
+        authorization_hooks = authorization.get("hook_results") if isinstance(authorization.get("hook_results"), list) else []
+        result_hooks = result_event.get("hook_results") if isinstance(result_event.get("hook_results"), list) else []
+        hook_results = [
+            dict(item)
+            for item in [*authorization_hooks, *result_hooks]
+            if isinstance(item, dict)
+        ]
         transcript.append(
             {
                 "index": observation.get("index"),
                 "tool_name": tool_name,
                 "payload": dict(observation.get("payload") or {}) if isinstance(observation.get("payload"), dict) else {},
                 "authorized": bool(authorization.get("allowed", True)),
-                "authorization_reason": (authorization.get("decision") or {}).get("reason")
-                if isinstance(authorization.get("decision"), dict)
-                else authorization.get("reason"),
+                "authorization_reason": action_policy.get("reason") or authorization.get("reason"),
+                "action_policy": dict(action_policy),
+                "action_safety": dict(action_safety),
+                "precheck": dict(precheck) if isinstance(precheck, dict) else {},
+                "postcheck": dict(postcheck) if isinstance(postcheck, dict) else {},
+                "hook_results": hook_results,
+                "evidence_summary": dict(evidence_summary) if isinstance(evidence_summary, dict) else {},
                 "ok": bool(observation.get("ok", False)),
                 "error_code": observation.get("error_code"),
                 "summary": dict(observation.get("summary") or {}) if isinstance(observation.get("summary"), dict) else {},

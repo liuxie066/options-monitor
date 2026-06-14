@@ -7,7 +7,7 @@ from src.application.assistant.agent_loop import (
     AgentLoopPlanFn,
     AgentLoopSynthesizeFn,
     INTERNAL_TOOL_PLAN_NAME,
-    build_tool_observation,
+    ToolExecutor,
     execute_tool_plan,
 )
 from src.application.assistant.perception_trace import (
@@ -17,10 +17,9 @@ from src.application.assistant.perception_trace import (
 from src.application.assistant.perception import GenerateReplyFn, PerceptionEngine, TranslateIntentFn
 from src.application.assistant.llm_translator import skipped_llm_trace
 from src.application.assistant.settings import AssistantSettings
-from src.application.assistant.tool_policy import DEFAULT_TOOL_POLICY
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.assistant.commands import spec_by_intent
-from src.application.assistant.contracts import AssistantRequest, PerceptionResult, ToolCall
+from src.application.assistant.contracts import AssistantRequest, PerceptionResult
 from src.application.assistant.audit import InboundAuditStore
 from src.application.assistant.router import ExecuteToolFn, handle_assistant_request
 from src.application.assistant.session_store import AgentSessionStore
@@ -98,6 +97,7 @@ def handle_assistant_message(
     llm_trace = perception_engine.llm_trace
     if agent_loop_tool_events:
         llm_trace = _merge_agent_loop_tool_events(llm_trace, agent_loop_tool_events, agent_loop_observations)
+    llm_trace = _merge_agent_loop_preview_receipt(llm_trace, response)
     response = _with_assistant_meta(
         response,
         route=perception_engine.route,
@@ -165,47 +165,23 @@ def _agent_loop_execute_tool_fn(
                 if isinstance(final_response, dict):
                     tool_events.append({"phase": "final_response", **dict(final_response)})
             return result
-        call = ToolCall(tool_name=tool_name, payload=dict(payload or {}))
-        try:
-            decision = DEFAULT_TOOL_POLICY.authorize_read_tool(call, source="agent_loop")
-        except AgentToolError as err:
-            tool_events.append(
-                {
-                    "phase": "authorize_tool",
-                    "tool_name": tool_name,
-                    "allowed": False,
-                    "error_code": err.code,
-                }
-            )
-            raise
-        tool_events.append(
-            {
-                "phase": "authorize_tool",
-                "tool_name": tool_name,
-                "allowed": True,
-                "decision": decision.public_payload(),
-            }
+        outcome = ToolExecutor(execute_tool_fn=execute_tool_fn, source="agent_loop").execute_read_tool(
+            request=request,
+            task_contract=None,
+            index=len(observations) + 1,
+            tool_name=tool_name,
+            payload=dict(payload or {}),
         )
-        result = execute_tool_fn(tool_name, dict(payload or {}))
-        observations.append(
-            build_tool_observation(
-                index=len(observations) + 1,
-                tool_name=tool_name,
-                payload=dict(payload or {}),
-                result=result,
-            ).public_payload()
-        )
-        error = result.get("error") if isinstance(result, dict) else None
-        error_code = error.get("code") if isinstance(error, dict) else None
-        tool_events.append(
-            {
-                "phase": "observe_tool_result",
-                "tool_name": tool_name,
-                "ok": bool(result.get("ok", False)) if isinstance(result, dict) else False,
-                "error_code": str(error_code) if error_code else None,
-            }
-        )
-        return result
+        tool_events.append(outcome.authorization_event)
+        if not outcome.allowed:
+            if outcome.error is not None:
+                raise outcome.error
+            raise AgentToolError(code="PERMISSION_DENIED", message=f"{tool_name} is not allowed through action policy")
+        if outcome.observation is not None:
+            observations.append(outcome.observation)
+        if outcome.result_event is not None:
+            tool_events.append(outcome.result_event)
+        return outcome.result_payload or {}
 
     return _execute
 
@@ -239,6 +215,55 @@ def _merge_agent_loop_tool_events(
             }
         )
     loop["final_response"] = final_response
+    merged["agent_loop"] = loop
+    return merged
+
+
+def _merge_agent_loop_preview_receipt(llm_trace: dict[str, Any], response: dict[str, Any]) -> dict[str, Any]:
+    data = response.get("data") if isinstance(response.get("data"), dict) else {}
+    perception = data.get("perception") if isinstance(data.get("perception"), dict) else {}
+    if perception.get("source") != "agent_loop_plan":
+        return llm_trace
+    permission_request = data.get("permission_request") if isinstance(data.get("permission_request"), dict) else None
+    if permission_request is None:
+        return llm_trace
+    receipt = {
+        "schema_version": "om-agent-preview-receipt-v1",
+        "status": str(data.get("status") or "previewed"),
+        "operation_id": str(data.get("operation_id") or permission_request.get("operation_id") or ""),
+        "operation_type": str(permission_request.get("operation_type") or ""),
+        "permission_request_schema": str(permission_request.get("schema_version") or ""),
+        "risk_class": str(permission_request.get("risk_class") or ""),
+        "safety_class": str(permission_request.get("safety_class") or ""),
+        "confirm_required": bool(permission_request.get("confirm_required")),
+        "apply_allowed": bool(permission_request.get("apply_allowed")),
+        "handler_tool": str(response.get("tool_name") or ""),
+        "receipt_source": "permission_request",
+    }
+    if permission_request.get("target_summary"):
+        receipt["target_summary"] = str(permission_request.get("target_summary") or "")
+
+    merged: dict[str, Any] = dict(llm_trace or {})
+    loop_raw = merged.get("agent_loop")
+    loop: dict[str, Any] = dict(loop_raw) if isinstance(loop_raw, dict) else {}
+    if not loop:
+        return llm_trace
+    loop["preview_receipt"] = receipt
+    steps: list[Any] = list(loop.get("steps") or [])
+    selected_intent = str(perception.get("intent_name") or "")
+    attached = False
+    updated_steps: list[Any] = []
+    for raw_step in steps:
+        step = dict(raw_step) if isinstance(raw_step, dict) else raw_step
+        if isinstance(step, dict) and not attached:
+            if step.get("intent_name") == selected_intent or step.get("tool_name") == selected_intent:
+                step["preview_receipt"] = receipt
+                attached = True
+        updated_steps.append(step)
+    if not attached and len(updated_steps) == 1 and isinstance(updated_steps[0], dict):
+        updated_steps[0]["preview_receipt"] = receipt
+    if updated_steps:
+        loop["steps"] = updated_steps
     merged["agent_loop"] = loop
     return merged
 

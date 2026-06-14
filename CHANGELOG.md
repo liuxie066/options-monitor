@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 1.2.272 - 2026-06-15
+
+### Added
+- Added the Agent reliability P0-P2 design document and the first implementation slice for TaskContract, action policy/safety checks, coverage verification, verifier hooks, evidence bundles, and compact assistant traces.
+- Added read-only upgrade operation status evidence to `analysis_query`, backed by operation timeline audit data.
+
+### Changed
+- Expanded AgentLoop evidence handling so LLM synthesis is guarded by task coverage, answer shape checks, and deterministic fallback without exposing internal SQL or tool ids.
+- Updated dependency graph output for the new assistant reliability modules.
+
+### Fixed
+- Fixed account income comparisons so coverage only passes with same-period, same-currency comparable metrics for all requested accounts.
+- Fixed upgrade diagnostics so conflicting operation/outcome statuses and missing audit artifacts are surfaced as explicit evidence gaps instead of being summarized as successful upgrades.
+
 ## 1.2.271 - 2026-06-14
 
 ### Fixed

@@ -269,6 +269,25 @@ QUOTE_FRESHNESS_FIELDS: tuple[str, ...] = (
 )
 
 
+UPGRADE_OPERATION_STATUS_FIELDS: tuple[str, ...] = (
+    "command_id",
+    "operation_id",
+    "operation_type",
+    "operation_status",
+    "current_version",
+    "target_version",
+    "release_tag",
+    "receipt_status",
+    "outcome_status",
+    "warning_codes",
+    "created_at",
+    "confirmed_at",
+    "applied_at",
+    "cancelled_at",
+    "source",
+)
+
+
 def _field_meta(
     type_name: str,
     *,
@@ -790,6 +809,17 @@ VIEW_SPECS: dict[str, dict[str, Any]] = _build_view_specs({
         "recommended_filters": ("symbol", "market", "quote_status", "account"),
         "safe_join_keys": ("account", "symbol"),
     },
+    "upgrade_operation_status": {
+        "description": "upgrade operation status and receipt diagnostics derived from inbound operation timeline",
+        "fields": UPGRADE_OPERATION_STATUS_FIELDS,
+        "row_grain": "command_id + operation_id",
+        "primary_keys": ("command_id", "operation_id"),
+        "source_tools": ("operation_timeline",),
+        "semantic_source": "inbound operation timeline audit",
+        "freshness": "operation_audit_snapshot",
+        "recommended_filters": ("command_id", "operation_id", "operation_status", "receipt_status"),
+        "safe_join_keys": ("command_id", "operation_id"),
+    },
     "position_lots": {
         "description": "canonical option position lots from local SQLite projection",
         "fields": (
@@ -891,6 +921,7 @@ _ARTIFACT_SOURCE_VIEWS: set[str] = {
     "runtime_tick_status",
 }
 _QUOTE_SOURCE_VIEWS: set[str] = {"quote_freshness"}
+_OPERATION_SOURCE_VIEWS: set[str] = {"upgrade_operation_status"}
 
 
 _ANALYSIS_OUTPUT_CONTRACT: dict[str, Any] = {
@@ -973,7 +1004,8 @@ def _analysis_catalog_tool(
 def _catalog_field_types(specs: dict[str, dict[str, Any]]) -> dict[str, dict[str, str]]:
     out: dict[str, dict[str, str]] = {}
     for view_name, spec in specs.items():
-        field_semantics = spec.get("field_semantics") if isinstance(spec.get("field_semantics"), dict) else {}
+        raw_field_semantics = spec.get("field_semantics")
+        field_semantics: dict[Any, Any] = raw_field_semantics if isinstance(raw_field_semantics, dict) else {}
         out[view_name] = {
             str(field): str(meta.get("type") or "text")
             for field, meta in field_semantics.items()
@@ -985,7 +1017,8 @@ def _catalog_field_types(specs: dict[str, dict[str, Any]]) -> dict[str, dict[str
 def _catalog_aggregation_policies(specs: dict[str, dict[str, Any]]) -> dict[str, dict[str, str]]:
     out: dict[str, dict[str, str]] = {}
     for view_name, spec in specs.items():
-        field_semantics = spec.get("field_semantics") if isinstance(spec.get("field_semantics"), dict) else {}
+        raw_field_semantics = spec.get("field_semantics")
+        field_semantics: dict[Any, Any] = raw_field_semantics if isinstance(raw_field_semantics, dict) else {}
         out[view_name] = {
             str(field): str(meta.get("aggregation") or "none")
             for field, meta in field_semantics.items()
@@ -1132,6 +1165,7 @@ def _materialize_views(
     candidate_rows: list[dict[str, Any]] = []
     close_advice_rows: list[dict[str, Any]] = []
     runtime_rows: list[dict[str, Any]] = []
+    upgrade_operation_rows: list[dict[str, Any]] = []
 
     if requested & (_MONTHLY_SOURCE_VIEWS | _QUOTE_SOURCE_VIEWS):
         monthly_data, monthly_warnings, _monthly_meta = monthly_income_report_tool(
@@ -1225,6 +1259,10 @@ def _materialize_views(
         runtime_rows, runtime_warnings = _runtime_tick_status_rows(ctx, payload)
         warnings.extend(runtime_warnings)
 
+    if requested & _OPERATION_SOURCE_VIEWS:
+        upgrade_operation_rows, upgrade_warnings = _upgrade_operation_status_rows(ctx, payload)
+        warnings.extend(upgrade_warnings)
+
     open_option_exposure_rows = _open_option_exposure_rows(position_data.get("rows"))
     quote_rows = _quote_freshness_rows(
         assignment_rows=monthly_data.get("assignment_lifecycle_rows"),
@@ -1267,6 +1305,7 @@ def _materialize_views(
         "close_advice_snapshot": _normalize_rows(close_advice_rows),
         "runtime_tick_status": _normalize_rows(runtime_rows),
         "quote_freshness": _normalize_rows(quote_rows),
+        "upgrade_operation_status": _normalize_rows(upgrade_operation_rows),
         "position_lots": _normalize_rows(position_data.get("rows")),
         "trade_events": _normalize_rows(event_data.get("rows")),
         "symbol_strategy_config": _normalize_rows(symbol_rows),
@@ -2026,6 +2065,164 @@ def _market_from_symbol(symbol: Any) -> str:
     return ""
 
 
+def _upgrade_operation_status_rows(ctx: AgentToolContext, payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
+    try:
+        data = ctx.collect_operation_timeline(
+            audit_db=payload.get("audit_db") or payload.get("inbound_audit_db"),
+            channel=payload.get("channel"),
+            sender_id=payload.get("sender_id"),
+            conversation_id=payload.get("conversation_id"),
+            operation_id=_operation_id_filter(payload),
+            operation_types=["upgrade_now"],
+            statuses=payload.get("statuses"),
+            limit=_bounded_operation_limit(payload.get("operation_limit") or payload.get("timeline_limit") or payload.get("limit")),
+            audit_scan_limit=payload.get("audit_scan_limit"),
+        )
+    except AgentToolError as exc:
+        return [], [f"upgrade_operation_status unavailable: {exc.message}"]
+    if not isinstance(data, dict):
+        return [], ["upgrade_operation_status unavailable: operation_timeline returned no data"]
+    timelines = data.get("timelines")
+    rows = [
+        row
+        for item in (timelines if isinstance(timelines, list) else [])
+        if isinstance(item, dict)
+        for row in [_upgrade_operation_status_row(item)]
+        if row
+    ]
+    warnings = [
+        f"upgrade_operation_status missing: {warning}"
+        for warning in data.get("warnings", [])
+        if str(warning or "").strip() in {"audit_db_missing", "operations_table_missing", "audit_table_missing"}
+    ]
+    if not rows:
+        warnings.append("upgrade_operation_status empty: operation_timeline returned no upgrade rows")
+    return rows, warnings
+
+
+def _operation_id_filter(payload: dict[str, Any]) -> str | None:
+    explicit = _first_nonempty_text(payload.get("operation_id"), payload.get("command_id"))
+    if explicit:
+        return explicit
+    sql = str(payload.get("sql") or payload.get("query") or "")
+    match = re.search(r"(?is)\b(?:operation_id|command_id)\s*=\s*(['\"])([^'\"]+)\1", sql)
+    if match:
+        return match.group(2).strip() or None
+    return None
+
+
+def _bounded_operation_limit(value: Any) -> int:
+    try:
+        limit = int(value)
+    except Exception:
+        limit = 10
+    return max(1, min(limit, 50))
+
+
+def _upgrade_operation_status_row(timeline: dict[str, Any]) -> dict[str, Any] | None:
+    raw_identity = timeline.get("identity")
+    raw_operation = timeline.get("operation")
+    raw_receipt = timeline.get("receipt")
+    raw_outcome = timeline.get("outcome")
+    identity: dict[str, Any] = raw_identity if isinstance(raw_identity, dict) else {}
+    operation: dict[str, Any] = raw_operation if isinstance(raw_operation, dict) else {}
+    receipt: dict[str, Any] = raw_receipt if isinstance(raw_receipt, dict) else {}
+    outcome: dict[str, Any] = raw_outcome if isinstance(raw_outcome, dict) else {}
+    operation_type = str(operation.get("operation_type") or "").strip()
+    if operation_type and "upgrade" not in operation_type:
+        return None
+    warning_codes = _timeline_warning_codes(timeline)
+    row = {
+        "command_id": _first_nonempty_text(identity.get("command_id"), operation.get("command_id")),
+        "operation_id": _first_nonempty_text(identity.get("operation_id"), operation.get("operation_id")),
+        "operation_type": operation_type or None,
+        "operation_status": _first_nonempty_text(operation.get("status"), outcome.get("status")),
+        "current_version": _first_nonempty_text(
+            operation.get("current_version"),
+            _upgrade_version_from_audit_rows(timeline, "current_version"),
+        ),
+        "target_version": _first_nonempty_text(
+            operation.get("target_version"),
+            _upgrade_version_from_audit_rows(timeline, "target_version"),
+        ),
+        "release_tag": _first_nonempty_text(
+            operation.get("release_tag"),
+            _upgrade_version_from_audit_rows(timeline, "release_tag"),
+        ),
+        "receipt_status": _first_nonempty_text(receipt.get("status")) or ("not_observed" if "receipt_not_observed" in warning_codes else None),
+        "outcome_status": _first_nonempty_text(outcome.get("status")),
+        "warning_codes": warning_codes,
+        "created_at": operation.get("created_at"),
+        "confirmed_at": operation.get("confirmed_at"),
+        "applied_at": operation.get("applied_at"),
+        "cancelled_at": operation.get("cancelled_at"),
+        "source": "operation_timeline",
+    }
+    return {field: row.get(field) for field in UPGRADE_OPERATION_STATUS_FIELDS}
+
+
+def _timeline_warning_codes(timeline: dict[str, Any]) -> list[str]:
+    raw_outcome = timeline.get("outcome")
+    outcome: dict[str, Any] = raw_outcome if isinstance(raw_outcome, dict) else {}
+    values: list[Any] = []
+    for raw in (timeline.get("warnings"), outcome.get("warnings")):
+        if isinstance(raw, (list, tuple, set)):
+            values.extend(raw)
+        elif raw:
+            values.append(raw)
+    return sorted({str(value).strip() for value in values if str(value).strip()})
+
+
+def _upgrade_version_from_audit_rows(timeline: dict[str, Any], field: str) -> str | None:
+    raw_audit = timeline.get("audit")
+    audit: dict[str, Any] = raw_audit if isinstance(raw_audit, dict) else {}
+    raw_rows = audit.get("rows")
+    rows: list[Any] = raw_rows if isinstance(raw_rows, list) else []
+    candidates: list[Any] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        tool_payload = row.get("tool_payload") if isinstance(row.get("tool_payload"), dict) else {}
+        reasoning = row.get("reasoning") if isinstance(row.get("reasoning"), dict) else {}
+        action = row.get("action") if isinstance(row.get("action"), dict) else {}
+        candidates.extend(
+            [
+                _nested_value(tool_payload, ("arguments", field)),
+                _nested_value(tool_payload, ("payload", "arguments", field)),
+                _nested_value(reasoning, ("arguments", field)),
+                _nested_value(reasoning, ("tool_call", "payload", field)),
+                _nested_value(reasoning, ("tool_call", "payload", "arguments", field)),
+                _nested_value(action, ("tool_call", "payload", field)),
+                _nested_value(action, ("tool_call", "payload", "arguments", field)),
+            ]
+        )
+        if field == "target_version":
+            candidates.extend(
+                [
+                    _nested_value(tool_payload, ("arguments", "latest_version")),
+                    _nested_value(reasoning, ("arguments", "latest_version")),
+                ]
+            )
+    return _first_nonempty_text(*candidates)
+
+
+def _nested_value(payload: Any, path: tuple[str, ...]) -> Any:
+    cur = payload
+    for key in path:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(key)
+    return cur
+
+
+def _first_nonempty_text(*values: Any) -> str | None:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return None
+
+
 def _position_identity(row: dict[str, Any]) -> str:
     parts = [
         row.get("account"),
@@ -2171,6 +2368,7 @@ def _query_diagnostics(
             "close_advice_snapshot",
             "runtime_tick_status",
             "quote_freshness",
+            "upgrade_operation_status",
         }:
             continue
         if view_name in warning_views:
@@ -2197,6 +2395,7 @@ def _diagnostic_records_from_warnings(
             "close_advice_snapshot",
             "runtime_tick_status",
             "quote_freshness",
+            "upgrade_operation_status",
         ):
             if lower.startswith(candidate):
                 view_name = candidate
@@ -2211,6 +2410,9 @@ def _diagnostic_records_from_warnings(
         elif " empty:" in f" {lower}" or lower.endswith(" empty"):
             status = "empty_artifact"
             boundary = "diagnostic source had no rows"
+        elif any(marker in lower for marker in ("audit_db_missing", "operations_table_missing", "audit_table_missing")):
+            status = "artifact_missing"
+            boundary = "diagnostic artifact missing"
         elif "unavailable:" in lower:
             status = "diagnostic_missing"
             boundary = "runtime diagnostic source unavailable"
@@ -2245,6 +2447,8 @@ def _diagnostic_records_from_rows(*, view_name: str, rows: list[dict[str, Any]])
         return _runtime_diagnostic_records(rows)
     if view_name == "quote_freshness":
         return _quote_diagnostic_records(rows)
+    if view_name == "upgrade_operation_status":
+        return _upgrade_diagnostic_records(rows)
     return []
 
 
@@ -2351,6 +2555,70 @@ def _quote_diagnostic_records(rows: list[dict[str, Any]]) -> list[dict[str, Any]
     ]
 
 
+def _upgrade_diagnostic_records(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    operation_statuses = _row_status_values(rows, "operation_status")
+    outcome_statuses = _row_status_values(rows, "outcome_status")
+    receipt_statuses = _row_status_values(rows, "receipt_status")
+    warning_codes = {
+        str(code or "").strip().lower()
+        for row in rows
+        if isinstance(row, dict)
+        for code in _jsonish_list(row.get("warning_codes"))
+    }
+    conflict_reasons = _upgrade_status_conflict_reasons(rows)
+    missing: list[dict[str, Any]] = []
+    if any(isinstance(row, dict) and "current_version" in row and not str(row.get("current_version") or "").strip() for row in rows):
+        missing.append(
+            {
+                "kind": "current_version_missing",
+                "impact": "cannot display or verify current version",
+                "recoverable_by": "operation_timeline",
+            }
+        )
+    if any(isinstance(row, dict) and "target_version" in row and not str(row.get("target_version") or "").strip() for row in rows):
+        missing.append(
+            {
+                "kind": "target_version_missing",
+                "impact": "cannot display or verify target version",
+                "recoverable_by": "operation_timeline",
+            }
+        )
+    if receipt_statuses & {"missing", "not_observed", "failed", "error"} or "receipt_not_observed" in warning_codes:
+        missing.append(
+            {
+                "kind": "receipt_not_observed",
+                "impact": "cannot prove final upgrade receipt delivery from operation status evidence",
+                "recoverable_by": "operation_timeline",
+            }
+        )
+    diagnostic_status = "conflicting_evidence" if conflict_reasons else "observed_operation_status"
+    answer_boundary = "conflicting_upgrade_operation_evidence_only" if conflict_reasons else "upgrade_operation_status_evidence_only"
+    all_statuses = operation_statuses | outcome_statuses | receipt_statuses
+    record: dict[str, Any] = {
+        "view": "upgrade_operation_status",
+        "status": diagnostic_status,
+        "severity": "warning" if conflict_reasons or missing or all_statuses & {"failed", "error"} else "info",
+        "command_ids": _sorted_unique_row_values(rows, "command_id"),
+        "operation_ids": _sorted_unique_row_values(rows, "operation_id"),
+        "operation_statuses": sorted(operation_statuses),
+        "receipt_statuses": sorted(receipt_statuses),
+        "summary": _upgrade_diagnostic_summary(
+            missing=missing,
+            operation_statuses=operation_statuses,
+            outcome_statuses=outcome_statuses,
+            receipt_statuses=receipt_statuses,
+            conflict_reasons=conflict_reasons,
+        ),
+        "answer_boundary": answer_boundary,
+        "missing_data": missing,
+    }
+    if outcome_statuses:
+        record["outcome_statuses"] = sorted(outcome_statuses)
+    if conflict_reasons:
+        record["conflicts"] = conflict_reasons
+    return [record]
+
+
 def _diagnostic_warning_summary(*, view_name: str, warning: str, status: str) -> str:
     if status == "read_error":
         return f"{view_name} diagnostic source could not be read"
@@ -2391,6 +2659,62 @@ def _quote_diagnostic_summary(*, has_gap: bool) -> str:
     if has_gap:
         return "quote freshness rows indicate stale or missing quote data"
     return "quote freshness rows were observed"
+
+
+def _upgrade_diagnostic_summary(
+    *,
+    missing: list[dict[str, Any]],
+    operation_statuses: set[str],
+    outcome_statuses: set[str],
+    receipt_statuses: set[str],
+    conflict_reasons: list[str],
+) -> str:
+    parts: list[str] = []
+    if operation_statuses:
+        parts.append("operation_status=" + ",".join(sorted(operation_statuses)[:5]))
+    if outcome_statuses:
+        parts.append("outcome_status=" + ",".join(sorted(outcome_statuses)[:5]))
+    if receipt_statuses:
+        parts.append("receipt_status=" + ",".join(sorted(receipt_statuses)[:5]))
+    if conflict_reasons:
+        parts.append("conflict=" + ",".join(conflict_reasons[:5]))
+    if missing:
+        parts.append("missing=" + ",".join(str(item.get("kind") or "") for item in missing[:5]))
+    suffix = f" ({'; '.join(parts)})" if parts else ""
+    prefix = "upgrade operation evidence is conflicting" if conflict_reasons else "upgrade operation status rows were observed"
+    return f"{prefix}{suffix}"
+
+
+def _row_status_values(rows: list[dict[str, Any]], field: str) -> set[str]:
+    return {
+        str(row.get(field) or "").strip().lower()
+        for row in rows
+        if isinstance(row, dict) and str(row.get(field) or "").strip()
+    }
+
+
+def _upgrade_status_conflict_reasons(rows: list[dict[str, Any]]) -> list[str]:
+    reasons: set[str] = set()
+    success_statuses = {"applied", "success", "succeeded", "completed", "ok", "observed", "delivered", "sent"}
+    failure_statuses = {"failed", "failure", "error", "cancelled", "canceled", "rejected"}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        statuses = {
+            "operation_status": str(row.get("operation_status") or "").strip().lower(),
+            "outcome_status": str(row.get("outcome_status") or "").strip().lower(),
+            "receipt_status": str(row.get("receipt_status") or "").strip().lower(),
+        }
+        present = {key: value for key, value in statuses.items() if value}
+        if not present:
+            continue
+        has_success = any(value in success_statuses for value in present.values())
+        has_failure = any(value in failure_statuses for value in present.values())
+        if has_success and has_failure:
+            reasons.add(
+                ",".join(f"{key}={value}" for key, value in present.items() if value in success_statuses | failure_statuses)
+            )
+    return sorted(reasons)
 
 
 def _jsonish_list(value: Any) -> list[Any]:

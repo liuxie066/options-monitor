@@ -82,6 +82,15 @@ _OPTION_POSITIONS_ASSIGNED_STOCK_OUTPUT_CONTRACT: dict[str, Any] = {
     "guard_profile": "position_rows",
     "primary_rows": "rows",
     "row_count_field": "row_count",
+    "freshness_fields": [
+        "rows[].quote_status",
+        "quote_refresh.status",
+        "quote_refresh.quote_source",
+    ],
+    "missing_data_fields": [
+        "quote_refresh.missing_symbols",
+        "rows[].quote_status",
+    ],
     "fact_fields": [
         "rows[].stock_lot_id",
         "rows[].account",

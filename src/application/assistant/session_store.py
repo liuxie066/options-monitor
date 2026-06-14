@@ -318,24 +318,210 @@ def format_assistant_trace(traces: list[dict[str, Any]], *, filters: dict[str, A
             "- "
             f"{task.get('updated_at') or '-'} "
             f"{task.get('state') or '-'} "
-            f"session={identity.get('session_id') or '-'} "
             f"command={identity.get('command_id') or '-'}"
         )
         goal = str(task.get("goal") or "").strip()
-        if goal:
-            lines.append(f"  goal: {_clip(goal, 180)}")
-        lines.append(
-            "  "
-            f"plan_revisions={plan.get('revision_count', 0)} "
-            f"tools={len(trace.get('tools') or [])} "
-            f"facts={evidence.get('fact_count', 0)} "
-            f"missing={evidence.get('missing_data_count', 0)} "
-            f"conflicts={evidence.get('conflict_count', 0)}"
-        )
-        answer_reason = _first_text(answer.get("synthesis_reason"), answer.get("response_reason"), answer.get("fallback"))
-        if answer_reason:
-            lines.append(f"  answer: {answer.get('response_status') or '-'} reason={answer_reason}")
+        lines.append(f"  任务：{_clip(goal, 180) if goal else '-'}")
+        lines.append(f"  工具：{_trace_tools_text(trace.get('tools'))}")
+        lines.append(f"  证据：{_trace_evidence_text(evidence)}")
+        lines.append(f"  缺口：{_trace_gap_text(evidence)}")
+        lines.append(f"  校验：{_trace_verification_text(trace)}")
+        lines.append(f"  最终：{_trace_final_text(answer)}")
     return "\n".join(lines)
+
+
+def _trace_tools_text(value: Any) -> str:
+    tools = [item for item in value or [] if isinstance(item, dict)] if isinstance(value, list) else []
+    if not tools:
+        return "无工具调用"
+    parts: list[str] = []
+    for tool in tools[:3]:
+        label = _tool_display_label(tool)
+        status = _tool_status_label(tool)
+        row_count = _tool_row_count(tool)
+        row_suffix = f"，{row_count} 行" if row_count is not None else ""
+        parts.append(f"{label}（{status}{row_suffix}）")
+    if len(tools) > 3:
+        parts.append(f"另 {len(tools) - 3} 个工具")
+    return "；".join(parts)
+
+
+def _tool_display_label(tool: dict[str, Any]) -> str:
+    evidence = tool.get("evidence_summary") if isinstance(tool.get("evidence_summary"), dict) else {}
+    renderer = str(evidence.get("canonical_renderer") or "").strip()
+    labels = {
+        "analysis_result": "读取分析证据",
+        "assigned_stock_lifecycle": "读取指派正股持仓",
+        "monthly_income": "读取收益账本",
+        "position_rows": "读取期权持仓",
+        "position_exit_analysis": "读取平仓建议",
+        "runtime_status": "读取 runtime 状态",
+        "runtime_runs": "读取运行记录",
+        "runtime_logs": "读取运行日志",
+        "healthcheck": "读取健康检查",
+        "assistant_trace": "读取 Agent trace",
+        "config_validate": "读取配置校验",
+        "symbol_config": "读取标的配置",
+    }
+    if renderer in labels:
+        return labels[renderer]
+    source = str(evidence.get("source_label") or "").strip()
+    if source:
+        return "读取" + _clip(source, 48)
+    return "读取工具证据"
+
+
+def _tool_status_label(tool: dict[str, Any]) -> str:
+    if tool.get("authorized") is False:
+        return "denied"
+    if tool.get("ok") is True:
+        return "ok"
+    error = str(tool.get("error_code") or "").strip()
+    return f"error:{error}" if error else "unknown"
+
+
+def _tool_row_count(tool: dict[str, Any]) -> int | None:
+    evidence = tool.get("evidence_summary") if isinstance(tool.get("evidence_summary"), dict) else {}
+    value = evidence.get("row_count")
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def _trace_evidence_text(evidence: dict[str, Any]) -> str:
+    parts = [
+        f"facts={_safe_int(evidence.get('fact_count'))}",
+        f"diagnostics={_safe_int(evidence.get('diagnostic_count'))}",
+    ]
+    sources = _string_list(evidence.get("sources"))
+    if sources:
+        parts.append("sources=" + "、".join(_clip(item, 36) for item in sources[:3]))
+    return "，".join(parts)
+
+
+def _trace_gap_text(evidence: dict[str, Any]) -> str:
+    parts: list[str] = []
+    missing = _safe_int(evidence.get("missing_data_count"))
+    conflicts = _safe_int(evidence.get("conflict_count"))
+    if missing:
+        parts.append(f"missing={missing}")
+    if conflicts:
+        parts.append(f"conflicts={conflicts}")
+    domains = _string_list(evidence.get("diagnostic_domains"))
+    if domains:
+        parts.append("诊断域=" + "、".join(_clip(item, 32) for item in domains[:4]))
+    return "无" if not parts else "，".join(parts)
+
+
+def _trace_verification_text(trace: dict[str, Any]) -> str:
+    hooks = _trace_hook_results(trace)
+    if not hooks:
+        return "无 hook 记录"
+    notable = [item for item in hooks if str(item.get("status") or "") not in {"", "pass"}]
+    selected = notable or [item for item in hooks if str(item.get("hook") or "") in _DISPLAY_HOOKS]
+    if not selected:
+        selected = hooks
+    return "，".join(_hook_result_label(item) for item in selected[:6])
+
+
+_DISPLAY_HOOKS = {
+    "action_policy",
+    "action_safety",
+    "scope_guard",
+    "planner_argument_guard",
+    "freshness",
+    "missing_data",
+    "coverage",
+    "answer_guard",
+    "final_response",
+}
+
+
+def _trace_hook_results(trace: dict[str, Any]) -> list[dict[str, Any]]:
+    hooks: list[dict[str, Any]] = []
+    tools = trace.get("tools") if isinstance(trace.get("tools"), list) else []
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        for item in tool.get("hook_results") or []:
+            if isinstance(item, dict):
+                hooks.append(item)
+    answer = trace.get("answer") if isinstance(trace.get("answer"), dict) else {}
+    for item in answer.get("hook_results") or []:
+        if isinstance(item, dict):
+            hooks.append(item)
+    return hooks
+
+
+def _hook_result_label(item: dict[str, Any]) -> str:
+    stage = _stage_label(item.get("stage"))
+    hook = str(item.get("hook") or "hook").strip()
+    status = str(item.get("status") or "unknown").strip()
+    code = str(item.get("code") or "").strip()
+    suffix = f"/{code}" if code and code not in {status, "ok"} else ""
+    return f"{stage}/{hook}={status}{suffix}"
+
+
+def _stage_label(value: Any) -> str:
+    text = str(value or "").strip()
+    return {
+        "pre_tool": "pre",
+        "post_tool": "post",
+        "answer": "answer",
+    }.get(text, text or "hook")
+
+
+def _trace_final_text(answer: dict[str, Any]) -> str:
+    route = _trace_final_route(answer)
+    reason = _friendly_final_reason(answer)
+    return f"{route}（{reason}）" if reason else route
+
+
+def _trace_final_route(answer: dict[str, Any]) -> str:
+    guard = answer.get("answer_guard") if isinstance(answer.get("answer_guard"), dict) else {}
+    guard_status = str(guard.get("status") or "").strip()
+    response_status = str(answer.get("response_status") or "").strip()
+    synthesis_reason = str(answer.get("synthesis_reason") or "").strip()
+    fallback = str(answer.get("fallback") or "").strip()
+    if response_status in {"needs_clarification", "clarify"}:
+        return "ask"
+    if response_status in {"pending_permission", "preview"}:
+        return "preview"
+    if guard_status == "failed_then_rewritten":
+        return "rewrite->pass"
+    if guard_status == "failed_then_fallback" or fallback or "fallback" in synthesis_reason:
+        return "fallback"
+    if response_status in {"synthesized", "rendered"}:
+        return "pass"
+    if response_status:
+        return response_status
+    return "unknown"
+
+
+def _friendly_final_reason(answer: dict[str, Any]) -> str:
+    guard = answer.get("answer_guard") if isinstance(answer.get("answer_guard"), dict) else {}
+    guard_status = str(guard.get("status") or "").strip()
+    synthesis_reason = str(answer.get("synthesis_reason") or "").strip()
+    fallback = str(answer.get("fallback") or "").strip()
+    response_reason = str(answer.get("response_reason") or "").strip()
+    if guard_status == "failed_then_rewritten":
+        return "重写后通过证据校验"
+    if guard_status == "failed_then_fallback":
+        return "证据校验失败后使用保底回答"
+    if fallback == "task_contract" or synthesis_reason == "task_contract_fallback":
+        return "使用任务形状保底"
+    if fallback == "analysis_result_renderer" or synthesis_reason == "analysis_result_fallback":
+        return "使用分析结果保底"
+    if fallback == "canonical_renderer" or synthesis_reason in {"agent_renderer_fallback", "canonical_renderer_fallback"}:
+        return "使用确定性 renderer"
+    if synthesis_reason in {"agent_composed_response", "synthesized", "synthesized_after_answer_guard"}:
+        return "LLM 回答通过证据校验"
+    if response_reason:
+        return _clip(response_reason, 80)
+    return _clip(synthesis_reason, 80)
 
 
 def _trace_from_row(row: dict[str, Any], *, include_snapshot: bool) -> dict[str, Any]:
@@ -371,11 +557,13 @@ def _trace_from_row(row: dict[str, Any], *, include_snapshot: bool) -> dict[str,
         "evidence": {
             "fact_count": int(row.get("fact_count") or 0),
             "dataset_count": int(row.get("dataset_count") or 0),
+            "diagnostic_count": int(evidence.get("diagnostic_count") or 0),
             "missing_data_count": int(row.get("missing_data_count") or 0),
             "conflict_count": int(row.get("conflict_count") or 0),
             "sources": list(evidence.get("sources") or []),
             "tools": list(evidence.get("tools") or []),
             "guard_profiles": list(evidence.get("guard_profiles") or []),
+            "diagnostic_domains": list(evidence.get("diagnostic_domains") or []),
         },
         "answer": {
             "response_status": row.get("response_status") or final_response.get("status"),
@@ -383,6 +571,7 @@ def _trace_from_row(row: dict[str, Any], *, include_snapshot: bool) -> dict[str,
             "synthesis_reason": synthesis.get("reason"),
             "fallback": synthesis.get("fallback"),
             "answer_guard": synthesis.get("answer_guard") if isinstance(synthesis.get("answer_guard"), dict) else None,
+            "hook_results": _compact_hook_results(final_response.get("hook_results") or synthesis.get("hook_results")),
             "response_text_chars": len(str(row.get("response_text") or "")),
         },
         "permission_state": permission_state,
@@ -434,12 +623,74 @@ def _compact_tools(value: Any) -> list[dict[str, Any]]:
                 "payload": dict(item.get("payload") or {}) if isinstance(item.get("payload"), dict) else {},
                 "authorized": bool(item.get("authorized", False)),
                 "authorization_reason": item.get("authorization_reason"),
+                "action_policy": dict(item.get("action_policy") or {}) if isinstance(item.get("action_policy"), dict) else {},
+                "action_safety": _compact_action_safety(item.get("action_safety")),
+                "precheck": _compact_tool_check(item.get("precheck")),
+                "postcheck": _compact_tool_check(item.get("postcheck")),
+                "hook_results": _compact_hook_results(item.get("hook_results")),
+                "evidence_summary": _compact_evidence_summary(item.get("evidence_summary")),
                 "ok": bool(item.get("ok", False)),
                 "error_code": item.get("error_code"),
                 "summary": dict(item.get("summary") or {}) if isinstance(item.get("summary"), dict) else {},
             }
         )
     return out
+
+
+def _compact_hook_results(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    out: list[dict[str, Any]] = []
+    allowed = {"schema_version", "hook", "stage", "status", "code", "impact", "recoverable", "recoverable_by"}
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        out.append({key: item.get(key) for key in sorted(allowed) if key in item})
+    return out
+
+
+def _compact_action_safety(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    allowed = {
+        "schema_version",
+        "status",
+        "code",
+        "requested_effect",
+        "proposed_tool",
+        "proposed_effect",
+        "route",
+        "reason",
+    }
+    return {key: value.get(key) for key in sorted(allowed) if key in value}
+
+
+def _compact_tool_check(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        "schema_version": value.get("schema_version"),
+        "stage": value.get("stage"),
+        "status": value.get("status"),
+        "tool_name": value.get("tool_name"),
+        "output_contract_present": value.get("output_contract_present"),
+    }
+
+
+def _compact_evidence_summary(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    allowed = {
+        "tool_name",
+        "source_label",
+        "canonical_renderer",
+        "guard_profile",
+        "primary_rows",
+        "row_count",
+        "fact_field_count",
+        "missing_data_count",
+    }
+    return {key: value.get(key) for key in sorted(allowed) if key in value}
 
 
 def _session_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -486,6 +737,12 @@ def _safe_int(value: Any) -> int:
         return int(value or 0)
     except Exception:
         return 0
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
 
 
 def _bounded_limit(value: Any) -> int:
