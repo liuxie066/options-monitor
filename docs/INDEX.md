@@ -19,6 +19,7 @@
 - [AGENT_WIKI.md](AGENT_WIKI.md)：Ops Copilot 任务手册（工具选择、Research / Shadow Replay 侧线、排障 playbook、模块地图、验证矩阵）
 - [OM_AGENT_CAPABILITY_MAP.md](OM_AGENT_CAPABILITY_MAP.md)：OM Ops Copilot 能力边界、Inbound 暴露面和验证方式
 - [OM_AGENT_COMPLETION_DESIGN.md](OM_AGENT_COMPLETION_DESIGN.md)：从当前 Ops Copilot 演进到完整受控 Agent 的实施设计
+- [AGENT_RELIABILITY_P0_P2_DESIGN.md](AGENT_RELIABILITY_P0_P2_DESIGN.md)：Agent 可靠性 P0-P2 路线图，覆盖 TaskContract、ActionPolicy、验证管线、trace 和 eval
 - [SQLITE_TOOL_OS_EXPANSION_DESIGN.md](SQLITE_TOOL_OS_EXPANSION_DESIGN.md)：SQLite Tool OS 下一阶段扩展方案，包括语义 catalog、业务 view、query preflight、多轮只读查询和 evidence v2
 - [TOOL_REFERENCE.md](TOOL_REFERENCE.md)：工具参考
 - [SESSION_SUMMARY.md](SESSION_SUMMARY.md)：显式 handoff 时使用的摘要模板

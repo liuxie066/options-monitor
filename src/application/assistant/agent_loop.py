@@ -19,8 +19,11 @@ from src.application.assistant.capability_catalog import (
     planner_read_specs,
     spec_by_intent,
 )
-from src.application.assistant.answer_verifier import verify_response_against_evidence
+from src.application.assistant.action_safety import assess_action_safety
+from src.application.assistant.answer_verifier import verify_response_against_evidence, verify_response_shape
+from src.application.assistant.action_policy import decide_tool_action_policy
 from src.application.assistant.contracts import AssistantRequest, PerceptionResult, ToolCall
+from src.application.assistant.coverage_verifier import CoverageResult, verify_coverage
 from src.application.assistant.evidence import build_evidence_bundle
 from src.application.assistant.llm_common import (
     CreateStructuredResponseFn,
@@ -36,6 +39,12 @@ from src.application.assistant.llm_translator import LlmTranslationResult
 from src.application.assistant.renderer import render_canonical_tool_result, render_inbound_text
 from src.application.assistant.session import build_agent_session_snapshot
 from src.application.assistant.settings import AssistantSettings
+from src.application.assistant.task_contract import build_task_contract
+from src.application.assistant.verifier_hooks import (
+    hook_results_from_answer_trace,
+    hook_results_from_coverage,
+    hook_results_from_tool_check,
+)
 from src.application.assistant.time_filters import extract_month_filter
 from src.application.assistant.tool_policy import DEFAULT_TOOL_POLICY
 from src.application.assistant.user_profile import user_profile_trace
@@ -49,6 +58,7 @@ AGENT_LOOP_SCHEMA_VERSION = "om-agent-loop-v1"
 TOOL_PLAN_SCHEMA_VERSION = "om-tool-plan-v1"
 TOOL_PLAN_SYNTHESIS_SCHEMA_VERSION = "om-tool-plan-synthesis-v1"
 FOLLOWUP_DECISION_SCHEMA_VERSION = "om-agent-loop-followup-decision-v1"
+TOOL_CHECK_SCHEMA_VERSION = "om-agent-tool-check-v1"
 INTERNAL_TOOL_PLAN_NAME = "assistant.tool_plan"
 MAX_TOOL_PLAN_STEPS = 3
 MAX_AGENT_LOOP_ITERATIONS = 3
@@ -147,6 +157,11 @@ class AgentLoopStep:
     tool_name: str | None = None
     arguments: dict[str, Any] | None = None
     purpose: str | None = None
+    action_policy: dict[str, Any] | None = None
+    action_safety: dict[str, Any] | None = None
+    precheck: dict[str, Any] | None = None
+    hook_results: tuple[dict[str, Any], ...] = ()
+    preview_receipt: dict[str, Any] | None = None
 
     def public_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -159,6 +174,16 @@ class AgentLoopStep:
         }
         if self.purpose:
             payload["purpose"] = self.purpose
+        if self.action_policy is not None:
+            payload["action_policy"] = dict(self.action_policy)
+        if self.action_safety is not None:
+            payload["action_safety"] = dict(self.action_safety)
+        if self.precheck is not None:
+            payload["precheck"] = dict(self.precheck)
+        if self.hook_results:
+            payload["hook_results"] = [dict(item) for item in self.hook_results]
+        if self.preview_receipt is not None:
+            payload["preview_receipt"] = dict(self.preview_receipt)
         return payload
 
 
@@ -230,6 +255,177 @@ class ToolObservation:
             "error_code": self.error_code,
             "summary": dict(self.summary),
         }
+
+
+@dataclass(frozen=True)
+class ToolExecutionOutcome:
+    authorization_event: dict[str, Any]
+    result_event: dict[str, Any] | None
+    result_payload: dict[str, Any] | None
+    tool_result: dict[str, Any] | None
+    observation: dict[str, Any] | None
+    fact_observation: dict[str, Any] | None
+    synthesis_observation: dict[str, Any] | None
+    precheck: dict[str, Any]
+    postcheck: dict[str, Any] | None
+    allowed: bool
+    ok: bool
+    error: AgentToolError | None
+    error_payload: dict[str, Any] | None
+
+
+class ToolExecutor:
+    def __init__(
+        self,
+        *,
+        execute_tool_fn: Callable[[str, dict[str, Any]], dict[str, Any]],
+        source: str = "agent_loop",
+    ) -> None:
+        self._execute_tool_fn = execute_tool_fn
+        self._source = source
+
+    def execute_read_tool(
+        self,
+        *,
+        request: AssistantRequest,
+        task_contract: dict[str, Any] | None,
+        index: int,
+        tool_name: str,
+        payload: dict[str, Any],
+        plan_arguments: dict[str, Any] | None = None,
+    ) -> ToolExecutionOutcome:
+        call = ToolCall(tool_name=tool_name, payload=dict(payload or {}))
+        action_policy = decide_tool_action_policy(
+            call=call,
+            request=request,
+            task_contract=task_contract,
+            source=self._source,
+            tool_policy=DEFAULT_TOOL_POLICY,
+        )
+        action_policy_payload = action_policy.public_payload()
+        authorization_event = {
+            "phase": "authorize_tool",
+            "tool_name": tool_name,
+            "allowed": bool(action_policy.allowed),
+            "decision": action_policy_payload,
+            "action_policy": action_policy_payload,
+        }
+        action_safety = assess_action_safety(
+            question=request.text,
+            task_contract=task_contract,
+            tool_name=tool_name,
+            payload=payload,
+            action_policy=action_policy_payload,
+            source=self._source,
+        )
+        action_safety_payload = action_safety.public_payload()
+        authorization_event["action_safety"] = action_safety_payload
+        precheck = _pre_tool_check(
+            tool_name=tool_name,
+            payload=payload,
+            plan_arguments=plan_arguments,
+            task_contract=task_contract,
+            action_policy=action_policy_payload,
+            action_safety=action_safety_payload,
+        )
+        authorization_event["precheck"] = precheck
+        authorization_event["hook_results"] = hook_results_from_tool_check(precheck)
+        if not action_policy.allowed:
+            error = action_policy.error or AgentToolError(
+                code="PERMISSION_DENIED",
+                message=action_policy.denied_reason or f"{tool_name} is not allowed through action policy",
+            )
+            authorization_event["allowed"] = False
+            authorization_event["error_code"] = error.code
+            return ToolExecutionOutcome(
+                authorization_event=authorization_event,
+                result_event=None,
+                result_payload=None,
+                tool_result=None,
+                observation=None,
+                fact_observation=None,
+                synthesis_observation=None,
+                precheck=precheck,
+                postcheck=None,
+                allowed=False,
+                ok=False,
+                error=error,
+                error_payload=build_error_payload(error),
+            )
+        if precheck.get("status") == "fail":
+            error = AgentToolError(
+                code="PRE_TOOL_CHECK_FAILED",
+                message="tool call failed pre-tool safety checks",
+                details={"tool_name": tool_name, "precheck": precheck},
+            )
+            authorization_event["allowed"] = False
+            authorization_event["error_code"] = error.code
+            return ToolExecutionOutcome(
+                authorization_event=authorization_event,
+                result_event=None,
+                result_payload=None,
+                tool_result=None,
+                observation=None,
+                fact_observation=None,
+                synthesis_observation=None,
+                precheck=precheck,
+                postcheck=None,
+                allowed=False,
+                ok=False,
+                error=error,
+                error_payload=build_error_payload(error),
+            )
+
+        result = self._execute_tool_fn(tool_name, dict(payload or {}))
+        error_payload = result.get("error") if isinstance(result, dict) else None
+        error_code = error_payload.get("code") if isinstance(error_payload, dict) else None
+        step_ok = bool(result.get("ok", False)) if isinstance(result, dict) else False
+        postcheck = _post_tool_check(tool_name=tool_name, payload=payload, result=result)
+        evidence_summary = _tool_evidence_summary(tool_name=tool_name, payload=payload, result=result)
+        postcheck_hooks = hook_results_from_tool_check(postcheck)
+        tool_error = None
+        if not step_ok:
+            tool_error = AgentToolError(
+                code=str(error_code or "TOOL_FAILED"),
+                message=str(error_payload.get("message") if isinstance(error_payload, dict) else "tool call failed"),
+                details=dict(error_payload.get("details") or {})
+                if isinstance(error_payload, dict) and isinstance(error_payload.get("details"), dict)
+                else {},
+            )
+        return ToolExecutionOutcome(
+            authorization_event=authorization_event,
+            result_event={
+                "phase": "observe_tool_result",
+                "tool_name": tool_name,
+                "ok": step_ok,
+                "error_code": str(error_code) if error_code else None,
+                "postcheck": postcheck,
+                "hook_results": postcheck_hooks,
+                "evidence_summary": evidence_summary,
+            },
+            result_payload=result,
+            tool_result={
+                "index": index,
+                "tool_name": tool_name,
+                "ok": step_ok,
+                "error": error_payload if isinstance(error_payload, dict) else None,
+            },
+            observation=build_tool_observation(index=index, tool_name=tool_name, payload=payload, result=result).public_payload(),
+            fact_observation=build_fact_observation(index=index, tool_name=tool_name, payload=payload, result=result),
+            synthesis_observation=build_synthesis_observation(index=index, tool_name=tool_name, payload=payload, result=result),
+            precheck=precheck,
+            postcheck=postcheck,
+            allowed=True,
+            ok=step_ok,
+            error=tool_error,
+            error_payload=(
+                dict(error_payload)
+                if isinstance(error_payload, dict)
+                else {"code": "TOOL_FAILED", "message": "tool call failed"}
+            )
+            if not step_ok
+            else None,
+        )
 
 
 @dataclass(frozen=True)
@@ -332,6 +528,200 @@ def build_tool_observation(*, index: int, tool_name: str, payload: dict[str, Any
     )
 
 
+def _pre_tool_check(
+    *,
+    tool_name: str,
+    payload: dict[str, Any],
+    plan_arguments: dict[str, Any] | None = None,
+    task_contract: dict[str, Any] | None = None,
+    action_policy: dict[str, Any],
+    action_safety: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    planner_banned = sorted(_banned_plan_argument_paths(plan_arguments)) if plan_arguments is not None else []
+    action_status = "pass" if action_policy.get("allowed") else "deny"
+    safety_payload = action_safety if isinstance(action_safety, dict) else {}
+    safety_status = str(safety_payload.get("status") or "not_applicable")
+    safety_check_status = "pass" if safety_status in {"allow", "allow_followup", "allow_preview"} else safety_status
+    planner_status = "fail" if planner_banned else ("pass" if plan_arguments is not None else "not_applicable")
+    write_status = "pass" if str(action_policy.get("allowed_effect") or "") in {"read", "none", "preview"} else "fail"
+    scope_status, scope_reason = _scope_guard_status(payload=payload, task_contract=task_contract)
+    status = "pass"
+    if action_status == "deny":
+        status = "deny"
+    if (
+        planner_status == "fail"
+        or write_status == "fail"
+        or scope_status == "fail"
+        or safety_check_status in {"deny", "ask", "suspicious", "fail"}
+    ):
+        status = "fail"
+    return {
+        "schema_version": TOOL_CHECK_SCHEMA_VERSION,
+        "stage": "pre_tool",
+        "status": status,
+        "checks": [
+            {"name": "action_policy", "status": action_status},
+            {
+                "name": "action_safety",
+                "status": safety_check_status,
+                "code": safety_payload.get("code"),
+                "route": safety_payload.get("route"),
+            },
+            {"name": "planner_argument_guard", "status": planner_status},
+            {"name": "scope_guard", "status": scope_status, "reason": scope_reason},
+            {"name": "write_guard", "status": write_status},
+        ],
+        "tool_name": str(tool_name or ""),
+        "payload_keys": sorted(str(key) for key in (payload or {}).keys()),
+        "banned_arguments": planner_banned,
+        "action_safety": dict(safety_payload) if safety_payload else {},
+    }
+
+
+def _scope_guard_status(*, payload: dict[str, Any], task_contract: dict[str, Any] | None) -> tuple[str, str | None]:
+    scope = task_contract.get("scope") if isinstance(task_contract, dict) else None
+    requested = [str(item).strip().lower() for item in (scope or {}).get("requested_accounts") or [] if str(item).strip()]
+    if not requested:
+        return "not_applicable", None
+    provided = _payload_accounts(payload)
+    if not provided:
+        return "not_applicable", None
+    out_of_scope = sorted(account for account in provided if account not in requested)
+    if out_of_scope:
+        return "fail", "account_out_of_task_scope:" + ",".join(out_of_scope)
+    return "pass", None
+
+
+def _payload_accounts(payload: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    account = payload.get("account") if isinstance(payload, dict) else None
+    accounts = payload.get("accounts") if isinstance(payload, dict) else None
+    if isinstance(account, str):
+        values.append(account)
+    elif isinstance(account, list):
+        values.extend(str(item) for item in account)
+    if isinstance(accounts, str):
+        values.append(accounts)
+    elif isinstance(accounts, list):
+        values.extend(str(item) for item in accounts)
+    return _unique_strings([str(value).strip().lower() for value in values if str(value).strip()])
+
+
+def _post_tool_check(*, tool_name: str, payload: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    output_contract = _output_contract_for_tool(tool_name, payload)
+    ok = bool(result.get("ok", False)) if isinstance(result, dict) else False
+    evidence_summary = _tool_evidence_summary(tool_name=tool_name, payload=payload, result=result)
+    data = result.get("data") if isinstance(result, dict) else None
+    contract_status, missing_contract_fields = _evidence_contract_status(output_contract)
+    freshness_status = _freshness_check_status(output_contract=output_contract, data=data)
+    missing_data_count = _tool_missing_data_count(data)
+    missing_data_status = "warning" if missing_data_count else "pass"
+    checks = [
+        {"name": "result_status", "status": "pass" if ok else "fail"},
+        {"name": "output_contract", "status": "pass" if output_contract else "not_declared"},
+        {
+            "name": "evidence_contract",
+            "status": contract_status,
+            "missing_fields": missing_contract_fields,
+        },
+    ]
+    if output_contract.get("freshness_fields"):
+        checks.append({"name": "freshness", "status": freshness_status})
+    if output_contract.get("missing_data_fields") or missing_data_count:
+        checks.append({"name": "missing_data", "status": missing_data_status, "count": missing_data_count})
+    status = _post_tool_check_status(ok=ok, checks=checks)
+    return {
+        "schema_version": TOOL_CHECK_SCHEMA_VERSION,
+        "stage": "post_tool",
+        "status": status,
+        "checks": checks,
+        "tool_name": str(tool_name or ""),
+        "output_contract_present": bool(output_contract),
+        "evidence_summary": evidence_summary,
+    }
+
+
+def _post_tool_check_status(*, ok: bool, checks: list[dict[str, Any]]) -> str:
+    if not ok:
+        return "fail"
+    statuses = {str(check.get("status") or "") for check in checks}
+    if "fail" in statuses:
+        return "fail"
+    if "warning" in statuses or "not_declared" in statuses:
+        return "warning"
+    return "pass"
+
+
+def _evidence_contract_status(output_contract: dict[str, Any]) -> tuple[str, list[str]]:
+    if not output_contract:
+        return "not_declared", []
+    required = ("source_label", "canonical_renderer", "primary_rows", "fact_fields")
+    missing = [field for field in required if not output_contract.get(field)]
+    return ("warning" if missing else "pass"), missing
+
+
+def _freshness_check_status(*, output_contract: dict[str, Any], data: Any) -> str:
+    if not output_contract.get("freshness_fields"):
+        return "not_applicable"
+    if _tool_missing_data_count(data):
+        return "warning"
+    if not isinstance(data, dict):
+        return "warning"
+    quote_refresh = data.get("quote_refresh")
+    if isinstance(quote_refresh, dict):
+        status = str(quote_refresh.get("status") or "").strip().lower()
+        if status in {"missing_quote", "stale", "expired", "failed", "error"}:
+            return "warning"
+    rows = data.get("rows")
+    if isinstance(rows, list):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            quote_status = str(row.get("quote_status") or "").strip().lower()
+            if quote_status in {"missing_quote", "stale", "expired", "failed", "error"}:
+                return "warning"
+    return "pass"
+
+
+def _tool_evidence_summary(*, tool_name: str, payload: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    output_contract = _output_contract_for_tool(tool_name, payload)
+    data = result.get("data") if isinstance(result, dict) else None
+    primary_rows = str(output_contract.get("primary_rows") or "").strip()
+    row_count_field = str(output_contract.get("row_count_field") or "").strip()
+    row_count = None
+    if isinstance(data, dict):
+        if row_count_field and row_count_field in data:
+            row_count = data.get(row_count_field)
+        elif primary_rows and isinstance(data.get(primary_rows), list):
+            row_count = len(data[primary_rows])
+    summary = {
+        "tool_name": str(tool_name or ""),
+        "source_label": output_contract.get("source_label"),
+        "canonical_renderer": output_contract.get("canonical_renderer"),
+        "guard_profile": output_contract.get("guard_profile"),
+        "primary_rows": primary_rows or None,
+        "row_count": row_count,
+        "fact_field_count": len(output_contract.get("fact_fields") or []) if isinstance(output_contract.get("fact_fields"), list) else 0,
+        "missing_data_count": _tool_missing_data_count(data),
+    }
+    return {key: value for key, value in summary.items() if value is not None}
+
+
+def _tool_missing_data_count(data: Any) -> int:
+    if not isinstance(data, dict):
+        return 0
+    count = 0
+    missing = data.get("missing_data")
+    if isinstance(missing, list):
+        count += len(missing)
+    elif isinstance(missing, dict):
+        count += len(missing)
+    quote_refresh = data.get("quote_refresh")
+    if isinstance(quote_refresh, dict) and isinstance(quote_refresh.get("missing_symbols"), list):
+        count += len(quote_refresh["missing_symbols"])
+    return count
+
+
 def execute_tool_plan(
     *,
     question: str,
@@ -348,6 +738,12 @@ def execute_tool_plan(
     plan = _normalize_tool_plan(plan, question=question, today=_planner_today(None))
     validate_tool_plan(plan, allow_preview=False)
     plan_revisions: list[dict[str, Any]] = [_plan_revision_payload(1, plan=plan, reason="initial bounded plan")]
+    task_contract = build_task_contract(
+        question=question,
+        plan=plan.public_payload(),
+        request_context=request.public_payload(),
+        today=_planner_today_from_context(conversation_context),
+    )
     tool_events: list[dict[str, Any]] = []
     observations: list[dict[str, Any]] = []
     fact_observations: list[dict[str, Any]] = []
@@ -357,13 +753,17 @@ def execute_tool_plan(
     error_payload: dict[str, Any] | None = None
     capability_status: dict[str, Any] = {"required": [], "satisfied": [], "gaps": []}
     evidence_gaps: list[dict[str, Any]] = []
+    coverage_result: CoverageResult | None = None
+    coverage_payload: dict[str, Any] = {}
     followup_decisions: list[dict[str, Any]] = []
     iteration = 1
+    tool_events.append({"phase": "task_contract", "contract": task_contract.public_payload()})
 
     while True:
         ok, error_payload = _execute_read_plan_steps(
             request=request,
             plan=plan,
+            task_contract=task_contract.public_payload(),
             execute_tool_fn=execute_tool_fn,
             tool_events=tool_events,
             observations=observations,
@@ -385,18 +785,26 @@ def execute_tool_plan(
             plan=plan.public_payload(),
             observations=fact_observations,
         )
-        evidence_gaps = _assess_evidence_gaps(plan=plan, evidence_bundle=evidence_bundle, observations=fact_observations)
+        coverage_result = verify_coverage(task_contract=task_contract, evidence_bundle=evidence_bundle)
+        coverage_payload = coverage_result.public_payload()
+        coverage_hook_results = hook_results_from_coverage(coverage_payload)
+        tool_events.append({"phase": "coverage_verify", **coverage_payload, "hook_results": coverage_hook_results})
+        evidence_gaps = _merge_evidence_gaps(
+            _assess_evidence_gaps(plan=plan, evidence_bundle=evidence_bundle, observations=fact_observations),
+            list(coverage_result.gaps),
+        )
+        followup_evidence_gaps = _followup_evidence_gaps(evidence_gaps)
         if not _should_replan_read_only(
             ok=ok,
             plan_tools_fn=plan_tools_fn,
-            evidence_gaps=evidence_gaps,
+            evidence_gaps=followup_evidence_gaps,
             iteration=iteration,
             tool_call_count=len(observations),
         ):
             stop_decision = _followup_stop_decision(
                 ok=ok,
                 plan_tools_fn=plan_tools_fn,
-                evidence_gaps=evidence_gaps,
+                evidence_gaps=followup_evidence_gaps,
                 iteration=iteration,
                 tool_call_count=len(observations),
                 revision=len(plan_revisions) + 1,
@@ -410,7 +818,7 @@ def execute_tool_plan(
             settings=settings,
             conversation_context=conversation_context,
             plan_tools_fn=plan_tools_fn,
-            evidence_gaps=evidence_gaps,
+            evidence_gaps=followup_evidence_gaps,
             prior_plan=plan,
             observations=observations,
             revision=len(plan_revisions) + 1,
@@ -437,6 +845,8 @@ def execute_tool_plan(
         question=question,
         settings=settings,
         plan=plan,
+        task_contract=task_contract.public_payload(),
+        coverage=coverage_payload,
         evidence_bundle=evidence_bundle,
         fact_observations=fact_observations,
         llm_observations=llm_observations,
@@ -447,6 +857,11 @@ def execute_tool_plan(
         followup_decisions=followup_decisions,
     )
     final_response_payload = _final_response_payload(synthesis)
+    answer_hook_results = hook_results_from_answer_trace(
+        synthesis_trace=dict(synthesis.trace),
+        final_response=final_response_payload,
+    )
+    synthesis_trace = {**dict(synthesis.trace), "hook_results": answer_hook_results}
     agent_session = build_agent_session_snapshot(
         request=request,
         command_id=command_id,
@@ -455,9 +870,11 @@ def execute_tool_plan(
         plan_revisions=plan_revisions,
         tool_events=tool_events,
         observations=observations,
+        task_contract=task_contract.public_payload(),
         evidence_bundle=evidence_bundle,
+        coverage=coverage_payload,
         final_response=final_response_payload,
-        synthesis_trace=dict(synthesis.trace),
+        synthesis_trace=synthesis_trace,
         ok=ok,
     )
     data = {
@@ -465,13 +882,15 @@ def execute_tool_plan(
         "plan": plan.public_payload(),
         "observations": observations,
         "synthesis_observations": llm_observations,
+        "task_contract": task_contract.public_payload(),
         "evidence_bundle": evidence_bundle.public_payload(),
+        "coverage": coverage_payload,
         "agent_session": agent_session.public_payload(),
         "tool_events": tool_events,
         "tool_calls_used": len(observations),
         "writes_allowed": False,
         "final_response": final_response_payload,
-        "synthesis": dict(synthesis.trace),
+        "synthesis": synthesis_trace,
         "tool_results": tool_results,
         "capability_status": capability_status,
         "evidence_gaps": evidence_gaps,
@@ -490,6 +909,7 @@ def _execute_read_plan_steps(
     *,
     request: AssistantRequest,
     plan: PlannerPlan,
+    task_contract: dict[str, Any],
     execute_tool_fn: Callable[[str, dict[str, Any]], dict[str, Any]],
     tool_events: list[dict[str, Any]],
     observations: list[dict[str, Any]],
@@ -501,6 +921,7 @@ def _execute_read_plan_steps(
 ) -> tuple[bool, dict[str, Any] | None]:
     if not ok:
         return ok, error_payload
+    executor = ToolExecutor(execute_tool_fn=execute_tool_fn, source="agent_loop")
     for step in plan.steps:
         if len(observations) >= MAX_AGENT_LOOP_TOOL_CALLS:
             error = AgentToolError(
@@ -523,58 +944,29 @@ def _execute_read_plan_steps(
             return False, build_error_payload(error)
         index = len(observations) + 1
         payload = _inject_system_fields(step.arguments, request=request, tool_name=step.tool_name)
-        call = ToolCall(tool_name=step.tool_name, payload=payload)
-        try:
-            decision = DEFAULT_TOOL_POLICY.authorize_read_tool(call, source="agent_loop")
-        except AgentToolError as err:
-            tool_events.append(
-                {
-                    "phase": "authorize_tool",
-                    "tool_name": step.tool_name,
-                    "allowed": False,
-                    "error_code": err.code,
-                }
-            )
-            return False, build_error_payload(err)
-        tool_events.append(
-            {
-                "phase": "authorize_tool",
-                "tool_name": step.tool_name,
-                "allowed": True,
-                "decision": decision.public_payload(),
-            }
+        outcome = executor.execute_read_tool(
+            request=request,
+            task_contract=task_contract,
+            index=index,
+            tool_name=step.tool_name,
+            payload=payload,
+            plan_arguments=step.arguments,
         )
-        result = execute_tool_fn(step.tool_name, payload)
-        tool_results.append(
-            {
-                "index": index,
-                "tool_name": step.tool_name,
-                "ok": bool(result.get("ok", False)) if isinstance(result, dict) else False,
-                "error": result.get("error") if isinstance(result, dict) else None,
-            }
-        )
-        observations.append(
-            build_tool_observation(index=index, tool_name=step.tool_name, payload=payload, result=result).public_payload()
-        )
-        fact_observations.append(
-            build_fact_observation(index=index, tool_name=step.tool_name, payload=payload, result=result)
-        )
-        llm_observations.append(
-            build_synthesis_observation(index=index, tool_name=step.tool_name, payload=payload, result=result)
-        )
-        error = result.get("error") if isinstance(result, dict) else None
-        error_code = error.get("code") if isinstance(error, dict) else None
-        step_ok = bool(result.get("ok", False)) if isinstance(result, dict) else False
-        tool_events.append(
-            {
-                "phase": "observe_tool_result",
-                "tool_name": step.tool_name,
-                "ok": step_ok,
-                "error_code": str(error_code) if error_code else None,
-            }
-        )
-        if not step_ok:
-            return False, dict(error) if isinstance(error, dict) else {"code": "TOOL_FAILED", "message": "tool call failed"}
+        tool_events.append(outcome.authorization_event)
+        if not outcome.allowed:
+            return False, outcome.error_payload
+        if outcome.tool_result is not None:
+            tool_results.append(outcome.tool_result)
+        if outcome.observation is not None:
+            observations.append(outcome.observation)
+        if outcome.fact_observation is not None:
+            fact_observations.append(outcome.fact_observation)
+        if outcome.synthesis_observation is not None:
+            llm_observations.append(outcome.synthesis_observation)
+        if outcome.result_event is not None:
+            tool_events.append(outcome.result_event)
+        if not outcome.ok:
+            return False, outcome.error_payload
     return ok, error_payload
 
 
@@ -624,6 +1016,24 @@ def _should_replan_read_only(
         and iteration < MAX_AGENT_LOOP_ITERATIONS
         and tool_call_count < MAX_AGENT_LOOP_TOOL_CALLS
     )
+
+
+def _followup_evidence_gaps(evidence_gaps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [dict(gap) for gap in evidence_gaps if isinstance(gap, dict) and _evidence_gap_allows_followup(gap)]
+
+
+def _evidence_gap_allows_followup(gap: dict[str, Any]) -> bool:
+    if gap.get("recoverable") is False:
+        return False
+    recoverable_by = str(gap.get("recoverable_by") or "").strip()
+    if not recoverable_by:
+        return False
+    if recoverable_by in {"apply", "confirm", "service", "notification", "broker"}:
+        return False
+    suggested_tool = str(gap.get("suggested_tool") or "").strip()
+    if suggested_tool and suggested_tool not in {"analysis_catalog", "analysis_query", "option_positions_read", "operation_timeline"}:
+        return False
+    return True
 
 
 def _can_recover_execution_failure(*, ok: bool, evidence_gaps: list[dict[str, Any]]) -> bool:
@@ -983,24 +1393,40 @@ def _followup_gap_rejection(plan: PlannerPlan, *, evidence_gaps: list[dict[str, 
         if isinstance(gap, dict)
         and str(gap.get("recoverable_by") or "") == "analysis_query"
     ]
-    if not analysis_gaps:
-        return ""
-    if not any(step.tool_name in {"analysis_query", "analysis_catalog"} for step in plan.steps):
-        return "follow-up plan did not include analysis_catalog or analysis_query for the analysis evidence gap"
-    for step in plan.steps:
-        if step.tool_name not in {"analysis_query", "analysis_catalog"}:
-            return "follow-up plan for analysis evidence gap used a non-analysis tool"
-    for gap in analysis_gaps:
-        if str(gap.get("kind") or "") == "analysis_preflight_repair":
-            if any(_step_addresses_preflight_repair_gap(step, gap=gap) for step in plan.steps):
+    if analysis_gaps:
+        if not any(step.tool_name in {"analysis_query", "analysis_catalog"} for step in plan.steps):
+            return "follow-up plan did not include analysis_catalog or analysis_query for the analysis evidence gap"
+        for step in plan.steps:
+            if step.tool_name not in {"analysis_query", "analysis_catalog"}:
+                return "follow-up plan for analysis evidence gap used a non-analysis tool"
+        for gap in analysis_gaps:
+            if str(gap.get("kind") or "") == "analysis_preflight_repair":
+                if any(_step_addresses_preflight_repair_gap(step, gap=gap) for step in plan.steps):
+                    continue
+                return "follow-up analysis query did not use a suggested field or view for the preflight repair gap"
+            suggested_views = {str(item) for item in gap.get("suggested_views") or [] if str(item).strip()}
+            if not suggested_views:
                 continue
-            return "follow-up analysis query did not use a suggested field or view for the preflight repair gap"
-        suggested_views = {str(item) for item in gap.get("suggested_views") or [] if str(item).strip()}
-        if not suggested_views:
+            if any(_step_uses_any_analysis_view(step, suggested_views) for step in plan.steps):
+                continue
+            return "follow-up analysis query did not use a suggested view for the evidence gap"
+    operation_gaps = [
+        gap
+        for gap in evidence_gaps
+        if isinstance(gap, dict)
+        and str(gap.get("recoverable_by") or "") == "operation_timeline"
+    ]
+    if not operation_gaps:
+        return ""
+    if not any(step.tool_name in {"operation_timeline", "analysis_query", "analysis_catalog"} for step in plan.steps):
+        return "follow-up plan did not include operation_timeline or analysis_query for the operation evidence gap"
+    for step in plan.steps:
+        if step.tool_name not in {"operation_timeline", "analysis_query", "analysis_catalog"}:
+            return "follow-up plan for operation evidence gap used a non-read operation tool"
+    for gap in operation_gaps:
+        if any(_step_closes_operation_gap(step, gap=gap) for step in plan.steps):
             continue
-        if any(_step_uses_any_analysis_view(step, suggested_views) for step in plan.steps):
-            continue
-        return "follow-up analysis query did not use a suggested view for the evidence gap"
+        return "follow-up operation query did not target upgrade operation status evidence"
     return ""
 
 
@@ -1058,6 +1484,25 @@ def _step_uses_any_analysis_view(step: PlannerPlanStep, views: set[str]) -> bool
     return any(re.search(rf"(?is)\b{re.escape(view)}\b", sql) for view in views)
 
 
+def _step_closes_operation_gap(step: PlannerPlanStep, *, gap: dict[str, Any]) -> bool:
+    if step.tool_name == "operation_timeline":
+        operation_types = step.arguments.get("operation_types") or step.arguments.get("operation_type") or []
+        if isinstance(operation_types, str):
+            operation_type_values = [operation_types]
+        elif isinstance(operation_types, (list, tuple, set)):
+            operation_type_values = [str(item) for item in operation_types]
+        else:
+            operation_type_values = []
+        if not operation_type_values:
+            return True
+        return any("upgrade" in item for item in operation_type_values)
+    if step.tool_name == "analysis_catalog":
+        return _step_uses_any_analysis_view(step, {"upgrade_operation_status"})
+    if step.tool_name == "analysis_query":
+        return _step_uses_any_analysis_view(step, {"upgrade_operation_status"})
+    return False
+
+
 def _assess_evidence_gaps(*, plan: PlannerPlan, evidence_bundle: Any, observations: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     payload = evidence_bundle.public_payload() if hasattr(evidence_bundle, "public_payload") else {}
     missing_data = payload.get("missing_data") if isinstance(payload, dict) else []
@@ -1101,6 +1546,30 @@ def _assess_evidence_gaps(*, plan: PlannerPlan, evidence_bundle: Any, observatio
     gaps.extend(_analysis_evidence_gaps(plan=plan, evidence_payload=payload))
     gaps.extend(_analysis_preflight_repair_gaps(observations or []))
     return gaps
+
+
+def _merge_evidence_gaps(*gap_groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    for gaps in gap_groups:
+        for gap in gaps:
+            if not isinstance(gap, dict):
+                continue
+            signature = (
+                gap.get("kind"),
+                gap.get("recoverable_by"),
+                tuple(gap.get("missing_accounts") or []),
+                tuple(gap.get("covered_accounts") or []),
+                tuple(gap.get("symbols") or []),
+                tuple(gap.get("accounts") or []),
+                tuple(gap.get("suggested_views") or []),
+                gap.get("suggested_tool"),
+            )
+            if signature in seen:
+                continue
+            out.append(dict(gap))
+            seen.add(signature)
+    return out
 
 
 def _analysis_preflight_repair_gaps(observations: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1744,17 +2213,19 @@ def _translation_from_tool_plan_result(result: LlmPlannerResult, *, question: st
     except AgentToolError as err:
         return LlmTranslationResult(intent=None, trace={**dict(result.trace), "reason": "invalid_plan", "error_code": err.code}, error=err), ()
     planned_steps = tuple(
-        AgentLoopStep(
-            index=index,
-            phase="plan_tool",
-            status="planned",
-            intent_name=step.tool_name if _plan_step_kind(step.tool_name) == "preview" else None,
-            tool_name=step.tool_name,
-            arguments=dict(step.arguments),
-            purpose=step.purpose,
-        )
+        _agent_loop_step_from_plan_step(index=index, step=step, question=question)
         for index, step in enumerate(result.plan.steps, start=1)
     )
+    precheck_error = _planned_step_precheck_error(planned_steps)
+    if precheck_error is not None:
+        return (
+            LlmTranslationResult(
+                intent=None,
+                trace={**dict(result.trace), "reason": "pre_tool_check_failed", "error_code": precheck_error.code},
+                error=precheck_error,
+            ),
+            planned_steps,
+        )
     preview_step = _single_preview_step(result.plan)
     if preview_step is not None:
         return (
@@ -1780,6 +2251,68 @@ def _translation_from_tool_plan_result(result: LlmPlannerResult, *, question: st
             trace=dict(result.trace),
         ),
         planned_steps,
+    )
+
+
+def _planned_step_precheck_error(steps: tuple[AgentLoopStep, ...]) -> AgentToolError | None:
+    for step in steps:
+        precheck = step.precheck if isinstance(step.precheck, dict) else {}
+        if precheck.get("status") != "fail":
+            continue
+        return AgentToolError(
+            code="PRE_TOOL_CHECK_FAILED",
+            message="planned tool call failed pre-tool safety checks",
+            details={"tool_name": step.tool_name, "precheck": precheck},
+        )
+    return None
+
+
+def _agent_loop_step_from_plan_step(*, index: int, step: PlannerPlanStep, question: str = "") -> AgentLoopStep:
+    kind = _plan_step_kind(step.tool_name)
+    action_policy_payload: dict[str, Any] | None = None
+    action_safety_payload: dict[str, Any] | None = None
+    precheck: dict[str, Any] | None = None
+    hook_results: tuple[dict[str, Any], ...] = ()
+    if kind == "preview":
+        call = ToolCall(tool_name=step.tool_name, payload=dict(step.arguments))
+        action_policy = decide_tool_action_policy(
+            call=call,
+            request=None,
+            task_contract=None,
+            source="agent_loop_plan",
+            tool_policy=DEFAULT_TOOL_POLICY,
+        )
+        action_policy_payload = action_policy.public_payload()
+        action_safety = assess_action_safety(
+            question=question,
+            task_contract=None,
+            tool_name=step.tool_name,
+            payload=dict(step.arguments),
+            action_policy=action_policy_payload,
+            source="agent_loop_plan",
+        )
+        action_safety_payload = action_safety.public_payload()
+        precheck = _pre_tool_check(
+            tool_name=step.tool_name,
+            payload=dict(step.arguments),
+            plan_arguments=dict(step.arguments),
+            task_contract=None,
+            action_policy=action_policy_payload,
+            action_safety=action_safety_payload,
+        )
+        hook_results = tuple(hook_results_from_tool_check(precheck))
+    return AgentLoopStep(
+        index=index,
+        phase="plan_tool",
+        status="planned",
+        intent_name=step.tool_name if kind == "preview" else None,
+        tool_name=step.tool_name,
+        arguments=dict(step.arguments),
+        purpose=step.purpose,
+        action_policy=action_policy_payload,
+        action_safety=action_safety_payload,
+        precheck=precheck,
+        hook_results=hook_results,
     )
 
 
@@ -2097,6 +2630,8 @@ def _build_final_response(
     question: str,
     settings: AssistantSettings,
     plan: PlannerPlan,
+    task_contract: dict[str, Any] | None = None,
+    coverage: dict[str, Any] | None = None,
     evidence_bundle: Any | None = None,
     fact_observations: list[dict[str, Any]],
     llm_observations: list[dict[str, Any]],
@@ -2114,7 +2649,11 @@ def _build_final_response(
         )
     if not ok:
         return LlmSynthesisResult(
-            response_text=_fallback_response(plan=plan, observations=llm_observations, error_payload=error_payload),
+            response_text=_fallback_response(
+                plan=plan,
+                observations=llm_observations,
+                error_payload=error_payload,
+            ),
             trace={"attempted": False, "reason": "tool_error", "schema_version": TOOL_PLAN_SYNTHESIS_SCHEMA_VERSION},
         )
     capability_gap = _capability_gap_response(fact_observations)
@@ -2134,6 +2673,8 @@ def _build_final_response(
             settings=settings,
             plan=plan,
             evidence=evidence,
+            task_contract=task_contract,
+            coverage=coverage,
             evidence_bundle=evidence_bundle,
             fact_observations=fact_observations,
             conversation_context=conversation_context,
@@ -2147,7 +2688,13 @@ def _build_final_response(
             grounded_observations = _with_grounded_facts_observation(llm_observations, fact_text)
             synthesis = synthesizer(question, settings, plan, grounded_observations, conversation_context)
             if synthesis.response_text:
-                guard = _verify_answer_guard(synthesis.response_text, observations=fact_observations, evidence_bundle=evidence_bundle)
+                guard = _verify_answer_guard(
+                    synthesis.response_text,
+                    observations=fact_observations,
+                    evidence_bundle=evidence_bundle,
+                    task_contract=task_contract,
+                    coverage=coverage,
+                )
                 if not guard["violations"]:
                     return LlmSynthesisResult(
                         response_text=_combine_grounded_response(fact_text, synthesis.response_text),
@@ -2162,7 +2709,13 @@ def _build_final_response(
                 retry_observations = _with_answer_guard_feedback(grounded_observations, guard)
                 retry = synthesizer(question, settings, plan, retry_observations, conversation_context)
                 if retry.response_text:
-                    retry_guard = _verify_answer_guard(retry.response_text, observations=fact_observations, evidence_bundle=evidence_bundle)
+                    retry_guard = _verify_answer_guard(
+                        retry.response_text,
+                        observations=fact_observations,
+                        evidence_bundle=evidence_bundle,
+                        task_contract=task_contract,
+                        coverage=coverage,
+                    )
                     if not retry_guard["violations"]:
                         return LlmSynthesisResult(
                             response_text=_combine_grounded_response(fact_text, retry.response_text),
@@ -2203,7 +2756,13 @@ def _build_final_response(
     synthesizer = synthesize_response_fn or synthesize_tool_plan_response
     synthesis = synthesizer(question, settings, plan, llm_observations, conversation_context)
     if synthesis.response_text:
-        guard = _verify_answer_guard(synthesis.response_text, observations=fact_observations, evidence_bundle=evidence_bundle)
+        guard = _verify_answer_guard(
+            synthesis.response_text,
+            observations=fact_observations,
+            evidence_bundle=evidence_bundle,
+            task_contract=task_contract,
+            coverage=coverage,
+        )
         if not guard["violations"]:
             return LlmSynthesisResult(
                 response_text=synthesis.response_text,
@@ -2213,7 +2772,13 @@ def _build_final_response(
         retry_observations = _with_answer_guard_feedback(llm_observations, guard)
         retry = synthesizer(question, settings, plan, retry_observations, conversation_context)
         if retry.response_text:
-            retry_guard = _verify_answer_guard(retry.response_text, observations=fact_observations, evidence_bundle=evidence_bundle)
+            retry_guard = _verify_answer_guard(
+                retry.response_text,
+                observations=fact_observations,
+                evidence_bundle=evidence_bundle,
+                task_contract=task_contract,
+                coverage=coverage,
+            )
             if not retry_guard["violations"]:
                 return LlmSynthesisResult(
                     response_text=retry.response_text,
@@ -2231,6 +2796,26 @@ def _build_final_response(
                 "violations": guard["violations"],
                 "retry_violations": retry_guard["violations"],
             }
+    task_fallback = (
+        _task_contract_fallback_response(
+            plan=plan,
+            evidence_bundle=evidence_bundle,
+            task_contract=task_contract,
+            coverage=coverage,
+        )
+        if "guard" in locals() and _task_contract_fallback_should_handle(guard=guard, task_contract=task_contract)
+        else ""
+    )
+    if task_fallback:
+        trace = {
+            **dict(synthesis.trace),
+            "reason": "task_contract_fallback",
+            "fallback": "task_contract",
+            "error_code": synthesis.error.code if synthesis.error else None,
+        }
+        if "guard" in locals():
+            trace["answer_guard"] = {"status": "failed_then_fallback", **guard}
+        return LlmSynthesisResult(response_text=task_fallback, trace=trace, error=synthesis.error)
     if len(plan.steps) == 1 and fact_observations:
         text = _canonical_response(plan.steps[0], _first_tool_observation(plan.steps[0], fact_observations))
         if text:
@@ -2263,7 +2848,11 @@ def _build_final_response(
             error=synthesis.error,
         )
     return LlmSynthesisResult(
-        response_text=_fallback_response(plan=plan, observations=llm_observations, error_payload=error_payload),
+        response_text=_fallback_response(
+            plan=plan,
+            observations=llm_observations,
+            error_payload=error_payload,
+        ),
         trace={
             **dict(synthesis.trace),
             "fallback": "structured_observation_summary",
@@ -2343,6 +2932,8 @@ def _compose_agent_response(
     settings: AssistantSettings,
     plan: PlannerPlan,
     evidence: AnswerEvidence,
+    task_contract: dict[str, Any] | None,
+    coverage: dict[str, Any] | None,
     evidence_bundle: Any | None,
     fact_observations: list[dict[str, Any]],
     conversation_context: dict[str, Any] | None,
@@ -2353,7 +2944,13 @@ def _compose_agent_response(
     observations = [dict(item) for item in evidence.observations]
     synthesis = synthesizer(question, settings, plan, observations, conversation_context)
     if synthesis.response_text:
-        guard = _verify_answer_guard(synthesis.response_text, observations=fact_observations, evidence_bundle=evidence_bundle)
+        guard = _verify_answer_guard(
+            synthesis.response_text,
+            observations=fact_observations,
+            evidence_bundle=evidence_bundle,
+            task_contract=task_contract,
+            coverage=coverage,
+        )
         if not guard["violations"]:
             return LlmSynthesisResult(
                 response_text=_append_provenance(synthesis.response_text, evidence.provenance_lines),
@@ -2369,7 +2966,13 @@ def _compose_agent_response(
         retry_observations = _with_answer_guard_feedback(observations, guard)
         retry = synthesizer(question, settings, plan, retry_observations, conversation_context)
         if retry.response_text:
-            retry_guard = _verify_answer_guard(retry.response_text, observations=fact_observations, evidence_bundle=evidence_bundle)
+            retry_guard = _verify_answer_guard(
+                retry.response_text,
+                observations=fact_observations,
+                evidence_bundle=evidence_bundle,
+                task_contract=task_contract,
+                coverage=coverage,
+            )
             if not retry_guard["violations"]:
                 return LlmSynthesisResult(
                     response_text=_append_provenance(retry.response_text, evidence.provenance_lines),
@@ -2389,7 +2992,17 @@ def _compose_agent_response(
                 "violations": guard["violations"],
                 "retry_violations": retry_guard["violations"],
             }
-    fallback_text = evidence.fallback_text or _fallback_response(
+    task_fallback_text = (
+        _task_contract_fallback_response(
+            plan=plan,
+            evidence_bundle=evidence_bundle,
+            task_contract=task_contract,
+            coverage=coverage,
+        )
+        if "guard" in locals() and _task_contract_fallback_should_handle(guard=guard, task_contract=task_contract)
+        else ""
+    )
+    fallback_text = task_fallback_text or evidence.fallback_text or _fallback_response(
         plan=plan,
         observations=observations,
         error_payload=error_payload,
@@ -2397,8 +3010,12 @@ def _compose_agent_response(
     trace = {
         **dict(synthesis.trace),
         "attempted": bool(synthesis.trace.get("attempted", False)),
-        "reason": "agent_renderer_fallback",
-        "fallback": "canonical_renderer" if evidence.fallback_text else "structured_observation_summary",
+        "reason": "task_contract_fallback" if task_fallback_text else "agent_renderer_fallback",
+        "fallback": "task_contract"
+        if task_fallback_text
+        else "canonical_renderer"
+        if evidence.fallback_text
+        else "structured_observation_summary",
         "error_code": synthesis.error.code if synthesis.error else None,
         "answer_evidence": dict(evidence.trace or {}),
     }
@@ -2454,6 +3071,13 @@ def _final_response_payload(synthesis: LlmSynthesisResult) -> dict[str, Any]:
             reason="analysis result renderer used after synthesis was unavailable or unsafe",
             canonical_renderer_required=True,
             llm_may_summarize=True,
+        ).public_payload()
+    if reason == "task_contract_fallback":
+        return FinalResponsePlan(
+            status="rendered",
+            reason="task-shaped deterministic fallback used after synthesis was unavailable or unsafe",
+            canonical_renderer_required=False,
+            llm_may_summarize=False,
         ).public_payload()
     if reason == "grounded_renderer_with_analysis":
         return FinalResponsePlan(
@@ -2715,11 +3339,233 @@ def _fallback_response(
     return "\n".join(lines)
 
 
+def _task_contract_fallback_should_handle(*, guard: dict[str, Any], task_contract: dict[str, Any] | None) -> bool:
+    contract = task_contract if isinstance(task_contract, dict) else {}
+    families = {str(item) for item in contract.get("intent_families") or [] if str(item).strip()}
+    violations = [item for item in guard.get("violations") or [] if isinstance(item, dict)]
+    retry_violations = [item for item in guard.get("retry_violations") or [] if isinstance(item, dict)]
+    relevant = violations + retry_violations
+    if "account_comparison" in families:
+        return any(
+            str(item.get("type") or "") == "answer_shape_missing_required_key"
+            and str(item.get("required_answer_key") or "") in {"comparison_winner", "amount_difference", "rate_difference"}
+            for item in relevant
+        )
+    if "upgrade_status" in families:
+        return any(
+            str(item.get("type") or "") == "answer_shape_missing_required_key"
+            and str(item.get("required_answer_key") or "") in {"command_status", "current_version", "target_version", "source_and_policy"}
+            for item in relevant
+        )
+    return False
+
+
+def _task_contract_fallback_response(
+    *,
+    plan: PlannerPlan,
+    evidence_bundle: Any | None,
+    task_contract: dict[str, Any] | None,
+    coverage: dict[str, Any] | None,
+) -> str:
+    contract = task_contract if isinstance(task_contract, dict) else {}
+    if not contract:
+        return ""
+    coverage_payload = coverage if isinstance(coverage, dict) else {}
+    missing_text = _coverage_missing_fallback(plan=plan, evidence_bundle=evidence_bundle, coverage=coverage_payload)
+    if missing_text:
+        return missing_text
+    families = {str(item) for item in contract.get("intent_families") or [] if str(item).strip()}
+    if "account_comparison" in families:
+        return _account_comparison_fallback(evidence_bundle=evidence_bundle, task_contract=contract)
+    return ""
+
+
+def _coverage_missing_fallback(*, plan: PlannerPlan, evidence_bundle: Any | None, coverage: dict[str, Any]) -> str:
+    gaps = [item for item in coverage.get("gaps") or [] if isinstance(item, dict)]
+    missing = [str(item) for item in coverage.get("missing") or [] if str(item).strip()]
+    if not gaps and not missing:
+        return ""
+    lines = [f"{plan.goal or '分析'}：当前证据不足，只能给部分结论。"]
+    for gap in gaps:
+        kind = str(gap.get("kind") or "")
+        if kind == "analysis_missing_account_coverage":
+            accounts = ", ".join(str(item) for item in gap.get("missing_accounts") or [] if str(item).strip())
+            lines.append(f"- 缺少账户覆盖：{accounts or '-'}，无法完成同口径账户对比。")
+        elif kind == "analysis_breakdown_needed":
+            lines.append("- 缺少收益组成或标的归因明细，不能判断主要来源。")
+        elif kind == "recoverable_missing_quote":
+            symbols = ", ".join(str(item) for item in gap.get("symbols") or [] if str(item).strip())
+            lines.append(f"- 缺少实时行情：{symbols or '-'}，不能计算当前正股浮盈亏和生命周期PnL。")
+        elif kind == "upgrade_current_version_missing":
+            lines.append("- 缺少当前版本：无法展示或校验升级前版本。")
+        elif kind == "upgrade_target_version_missing":
+            lines.append("- 缺少目标版本：无法展示或校验本次升级目标版本。")
+        elif kind == "upgrade_receipt_missing":
+            lines.append("- 缺少最终回执证据：无法证明升级完成后的成功/失败回执已经送达。")
+        elif kind == "upgrade_command_status_missing":
+            lines.append("- 缺少命令状态：无法确认升级命令当前进度。")
+        elif kind == "upgrade_status_conflict":
+            lines.append("- 升级状态证据冲突：不能给出单一成功或失败结论。")
+    if missing:
+        labels = ", ".join(_required_answer_label(item) for item in missing)
+        lines.append(f"- 未覆盖的必答项：{labels}。")
+    source = _evidence_source_line(evidence_bundle)
+    if source:
+        lines.append(source)
+    return "\n".join(lines)
+
+
+def _account_comparison_fallback(*, evidence_bundle: Any | None, task_contract: dict[str, Any]) -> str:
+    payload = evidence_bundle.public_payload() if hasattr(evidence_bundle, "public_payload") else {}
+    facts = [item for item in payload.get("facts") or [] if isinstance(item, dict)]
+    evidence_scope = payload.get("scope") if isinstance(payload.get("scope"), dict) else {}
+    scope = task_contract.get("scope") if isinstance(task_contract.get("scope"), dict) else {}
+    requested = [str(item).strip().lower() for item in scope.get("requested_accounts") or [] if str(item).strip()]
+    if len(requested) < 2:
+        return ""
+    metric = _comparison_metric(facts=facts, requested_accounts=requested)
+    if not metric:
+        return ""
+    values = metric["values"]
+    winner = max(values, key=lambda item: item[1])
+    loser = min(values, key=lambda item: item[1])
+    currency = str(metric.get("currency") or "").upper()
+    amount = abs(float(winner[1]) - float(loser[1]))
+    value_text = f"{currency} {_format_plain_number(amount)}" if currency else _format_plain_number(amount)
+    months = [str(item).strip() for item in evidence_scope.get("months") or [] if str(item).strip()]
+    period_prefix = f"{months[0]} " if len(months) == 1 else ""
+    lines = [f"{period_prefix}{winner[0]} 高于 {loser[0]}（{winner[0]} 更高），差额 {value_text}。"]
+    rate_metric = _comparison_metric(facts=facts, requested_accounts=requested, rate=True)
+    if rate_metric:
+        rate_values = rate_metric["values"]
+        rate_winner = max(rate_values, key=lambda item: item[1])
+        rate_loser = min(rate_values, key=lambda item: item[1])
+        rate_diff = abs(float(rate_winner[1]) - float(rate_loser[1])) * 100
+        lines.append(f"收益率差 {_format_plain_number(rate_diff)} 个百分点，{rate_winner[0]} 更高。")
+    source = _evidence_source_line(evidence_bundle)
+    if source:
+        lines.append(source)
+    return "\n".join(lines)
+
+
+def _comparison_metric(
+    *,
+    facts: list[dict[str, Any]],
+    requested_accounts: list[str],
+    rate: bool = False,
+) -> dict[str, Any]:
+    preferred = (
+        ("net_return_rate", "return_rate", "cashflow_rate", "rate")
+        if rate
+        else ("net_income_cny", "net_cashflow_cny", "net_income", "net_cashflow", "pnl", "income", "amount")
+    )
+    requested = set(requested_accounts)
+    by_metric: dict[tuple[str, str, str], dict[str, tuple[float, str]]] = {}
+    for fact in facts:
+        account, metric_name = _comparison_fact_account_metric(fact, requested_accounts=requested)
+        if account not in requested:
+            continue
+        value = _safe_float(fact.get("value"))
+        if value is None:
+            continue
+        if rate:
+            if "rate" not in metric_name and "return" not in metric_name and "percent" not in metric_name:
+                continue
+        elif not any(token in metric_name for token in preferred):
+            continue
+        period = _comparison_fact_period(fact)
+        currency = "" if rate else str(fact.get("currency") or _currency_from_field(metric_name) or "").upper()
+        if not period or (not rate and not currency):
+            continue
+        by_metric.setdefault((metric_name, period, currency), {})[account] = (float(value), currency)
+    for token in preferred:
+        for (metric_name, period, currency), account_values in by_metric.items():
+            if token not in metric_name:
+                continue
+            if not requested <= set(account_values):
+                continue
+            values = [(account, account_values[account][0]) for account in requested_accounts]
+            return {"metric": metric_name, "values": values, "currency": currency, "period": period}
+    return {}
+
+
+def _comparison_fact_account_metric(fact: dict[str, Any], *, requested_accounts: set[str]) -> tuple[str, str]:
+    field_name = _comparison_fact_field_name(fact)
+    account = str(fact.get("account") or "").strip().lower()
+    if account:
+        return account, field_name
+    for requested in sorted(requested_accounts, key=len, reverse=True):
+        prefix = f"{requested}_"
+        if field_name.startswith(prefix):
+            return requested, field_name[len(prefix) :]
+    return "", field_name
+
+
+def _comparison_fact_field_name(fact: dict[str, Any]) -> str:
+    source_path = str(fact.get("source_path") or "")
+    if "." in source_path:
+        return source_path.rsplit(".", 1)[-1].lower()
+    return str(fact.get("path") or "").lower().rsplit(".", 1)[-1]
+
+
+def _comparison_fact_period(fact: dict[str, Any]) -> str:
+    as_of = str(fact.get("as_of") or "").strip()
+    if as_of:
+        return as_of
+    source_path = str(fact.get("source_path") or "")
+    if source_path.startswith("rows[") and "]." in source_path:
+        return source_path.split("].", 1)[0] + "]"
+    return ""
+
+
+def _currency_from_field(field_name: str) -> str:
+    if field_name.endswith("_cny"):
+        return "CNY"
+    if field_name.endswith("_hkd"):
+        return "HKD"
+    if field_name.endswith("_usd"):
+        return "USD"
+    return ""
+
+
+def _evidence_source_line(evidence_bundle: Any | None) -> str:
+    payload = evidence_bundle.public_payload() if hasattr(evidence_bundle, "public_payload") else {}
+    datasets = [item for item in payload.get("datasets") or [] if isinstance(item, dict)]
+    sources = sorted({str(item.get("source_label") or "").strip() for item in datasets if str(item.get("source_label") or "").strip()})
+    if not sources:
+        return ""
+    return "数据来源：" + "；".join(sources)
+
+
+def _required_answer_label(key: str) -> str:
+    return {
+        "comparison_winner": "谁更高",
+        "amount_difference": "金额差额",
+        "rate_difference": "收益率差",
+        "main_drivers": "主要来源",
+        "spot_freshness": "行情新鲜度",
+        "unrealized_pnl": "正股浮盈亏",
+        "lifecycle_pnl": "生命周期PnL",
+        "command_status": "命令状态",
+        "current_version": "当前版本",
+        "target_version": "目标版本",
+    }.get(str(key), str(key))
+
+
+def _format_plain_number(value: float) -> str:
+    number = float(value)
+    if abs(number - round(number)) < 0.000001:
+        return f"{number:,.0f}"
+    return f"{number:,.2f}".rstrip("0").rstrip(".")
+
+
 def _verify_answer_guard(
     response_text: str,
     *,
     observations: list[dict[str, Any]],
     evidence_bundle: Any | None = None,
+    task_contract: dict[str, Any] | None = None,
+    coverage: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     text = str(response_text or "")
     compact = re.sub(r"\s+", "", text.lower())
@@ -2820,7 +3666,14 @@ def _verify_answer_guard(
     violations.extend(_unsupported_assigned_stock_numeric_claims(text, observations=observations))
     contract_verification = verify_response_against_evidence(text, evidence_bundle=evidence_bundle)
     violations.extend(contract_verification.violations)
-    return {"facts": facts, "contract_verifier": contract_verification.public_payload(), "violations": violations}
+    shape_verification = verify_response_shape(text, task_contract=task_contract, coverage=coverage)
+    violations.extend(shape_verification.violations)
+    return {
+        "facts": facts,
+        "contract_verifier": contract_verification.public_payload(),
+        "shape_verifier": shape_verification.public_payload(),
+        "violations": violations,
+    }
 
 
 _UX_FORCED_SECTION_RE = re.compile(r"(?im)^\s*(?:事实|分析)\s*[:：]?\s*$")
@@ -2876,6 +3729,8 @@ def _with_answer_guard_feedback(observations: list[dict[str, Any]], guard: dict[
                 "violations": guard.get("violations") or [],
                 "rewrite_instruction": (
                     "Your previous response contradicted tool observations. Rewrite using only observations. "
+                    "Also satisfy the required answer shape from any answer_shape violations: include named accounts, "
+                    "differences, rates, drivers, freshness, or explicit missing-data impact when required. "
                     "When monthly_income_report query_scope.month=all_available, answer over the OM local ledger coverage. "
                     "Do not claim missing months/accounts unless coverage or diagnostics explicitly says so. "
                     "Answer as one natural user-facing Agent response; do not expose canonical/synthesis/fact/analysis modes, "
@@ -4047,6 +4902,8 @@ __all__ = [
     "TOOL_PLAN_SYNTHESIS_SCHEMA_VERSION",
     "PlannerPlan",
     "PlannerPlanStep",
+    "ToolExecutionOutcome",
+    "ToolExecutor",
     "ToolObservation",
     "build_tool_observation",
     "build_synthesis_observation",

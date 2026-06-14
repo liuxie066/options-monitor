@@ -63,6 +63,22 @@ class AnswerVerificationResult:
         }
 
 
+@dataclass(frozen=True)
+class AnswerShapeVerificationResult:
+    violations: tuple[dict[str, Any], ...]
+    required_answer: tuple[str, ...]
+    satisfied_answer: tuple[str, ...]
+    missing_answer: tuple[str, ...]
+
+    def public_payload(self) -> dict[str, Any]:
+        return {
+            "violations": [dict(item) for item in self.violations],
+            "required_answer": list(self.required_answer),
+            "satisfied_answer": list(self.satisfied_answer),
+            "missing_answer": list(self.missing_answer),
+        }
+
+
 def verify_response_against_evidence(response_text: str, *, evidence_bundle: EvidenceBundle | None) -> AnswerVerificationResult:
     if evidence_bundle is None:
         return AnswerVerificationResult(violations=(), checked_claim_count=0, supported_claim_count=0)
@@ -212,6 +228,179 @@ def verify_response_against_evidence(response_text: str, *, evidence_bundle: Evi
         checked_claim_count=checked,
         supported_claim_count=supported,
     )
+
+
+def verify_response_shape(
+    response_text: str,
+    *,
+    task_contract: dict[str, Any] | None,
+    coverage: dict[str, Any] | None,
+) -> AnswerShapeVerificationResult:
+    contract = task_contract if isinstance(task_contract, dict) else {}
+    if not contract:
+        return AnswerShapeVerificationResult(violations=(), required_answer=(), satisfied_answer=(), missing_answer=())
+    text = str(response_text or "")
+    lower_text = text.lower()
+    compact = re.sub(r"\s+", "", text.lower())
+    required = tuple(str(item) for item in contract.get("required_answer") or [] if str(item).strip())
+    families = {str(item) for item in contract.get("intent_families") or [] if str(item).strip()}
+    scope = contract.get("scope") if isinstance(contract.get("scope"), dict) else {}
+    coverage_payload = coverage if isinstance(coverage, dict) else {}
+    coverage_missing = tuple(str(item) for item in coverage_payload.get("missing") or [] if str(item).strip())
+    coverage_gaps = [item for item in coverage_payload.get("gaps") or [] if isinstance(item, dict)]
+    satisfied: set[str] = set()
+    violations: list[dict[str, Any]] = []
+    if "account_comparison" not in families:
+        satisfied.update(required)
+        enforced_missing_keys: set[str] = set()
+        if "assigned_stock_pnl" in families and any(str(gap.get("kind") or "") == "recoverable_missing_quote" for gap in coverage_gaps):
+            enforced_missing_keys.update({"spot_freshness", "unrealized_pnl", "lifecycle_pnl"})
+        if "upgrade_status" in families:
+            enforced_missing_keys.update({"command_status", "current_version", "target_version"})
+        for key in required:
+            if key not in enforced_missing_keys or key not in coverage_missing:
+                continue
+            satisfied.discard(key)
+            if _shape_missing_key_acknowledged(compact, key=key, gaps=coverage_gaps):
+                satisfied.add(key)
+                continue
+            violations.append(
+                _shape_violation(
+                    "answer_shape_missing_required_key",
+                    key,
+                    "coverage marks this required answer as missing, but the response does not explain the missing evidence",
+                )
+            )
+        return AnswerShapeVerificationResult(
+            violations=tuple(violations[:8]),
+            required_answer=required,
+            satisfied_answer=tuple(key for key in required if key in satisfied),
+            missing_answer=tuple(key for key in required if key not in satisfied),
+        )
+
+    for key in required:
+        if key == "source_and_policy":
+            satisfied.add(key)
+            continue
+        if key in coverage_missing:
+            if _shape_missing_key_acknowledged(compact, key=key, gaps=coverage_gaps):
+                satisfied.add(key)
+                continue
+            violations.append(
+                _shape_violation(
+                    "answer_shape_missing_required_key",
+                    key,
+                    "coverage marks this required answer as missing, but the response does not explain the missing evidence",
+                )
+            )
+            continue
+        if _shape_key_satisfied(compact, key=key, families=families):
+            satisfied.add(key)
+            continue
+        violations.append(
+            _shape_violation(
+                "answer_shape_missing_required_key",
+                key,
+                "response does not cover this TaskContract required answer",
+            )
+        )
+
+    if "account_comparison" in families:
+        requested_accounts = [str(item).strip().lower() for item in scope.get("requested_accounts") or [] if str(item).strip()]
+        for account in requested_accounts:
+            if account and not re.search(rf"(?<![a-z0-9_]){re.escape(account)}(?![a-z0-9_])", lower_text):
+                violations.append(
+                    {
+                        "type": "answer_shape_missing_scope",
+                        "required_answer_key": "account_comparison",
+                        "claim": f"missing account {account}",
+                        "evidence": "TaskContract requested account comparison across named accounts",
+                    }
+                )
+
+    missing_answer = tuple(key for key in required if key not in satisfied)
+    return AnswerShapeVerificationResult(
+        violations=tuple(violations[:8]),
+        required_answer=required,
+        satisfied_answer=tuple(key for key in required if key in satisfied),
+        missing_answer=missing_answer,
+    )
+
+
+def _shape_key_satisfied(compact: str, *, key: str, families: set[str]) -> bool:
+    if key == "summary":
+        return bool(compact)
+    if key == "comparison_winner":
+        return any(token in compact for token in ("更高", "高于", "更低", "低于", "多于", "少于", "领先", "落后", "差不多", "无法比较", "不能比较")) or bool(
+            re.search(r"比.+(?:高|低|多|少)", compact)
+        )
+    if key == "amount_difference":
+        return any(token in compact for token in ("差额", "相差", "差异", "高出", "低于", "多", "少")) and _has_number(compact)
+    if key == "rate_difference":
+        return any(token in compact for token in ("收益率", "现金流率", "已实现率", "权利金率", "百分点", "%", "％", "无法比较", "不能比较"))
+    if key == "main_drivers":
+        return any(token in compact for token in ("主要", "来自", "来源", "贡献", "驱动", "原因", "组成", "构成", "top", "driver", "无法判断", "不能判断"))
+    if key == "shares_remaining":
+        return "剩余" in compact and "股" in compact
+    if key == "cost_basis":
+        return any(token in compact for token in ("成本", "成本基数", "成本价"))
+    if key == "spot_freshness":
+        return any(token in compact for token in ("spot", "quote", "行情", "报价", "fresh", "missing_quote", "实时", "缺少行情"))
+    if key == "unrealized_pnl":
+        return any(token in compact for token in ("浮盈亏", "未实现", "无法计算", "不能计算"))
+    if key == "lifecycle_pnl":
+        return any(token in compact for token in ("生命周期", "lifecycle", "权利金归因", "无法计算", "不能计算"))
+    if key == "command_status":
+        return any(token in compact for token in ("状态", "成功", "失败", "执行中", "完成", "未完成", "查不到"))
+    if key == "current_version":
+        return any(token in compact for token in ("当前版本", "当前", "currentversion", "查不到当前版本"))
+    if key == "target_version":
+        return any(token in compact for token in ("目标版本", "目标", "targetversion", "查不到目标版本"))
+    if "assigned_stock_pnl" in families and key in {"unrealized_pnl", "lifecycle_pnl"}:
+        return "无法计算" in compact or "不能计算" in compact
+    return True
+
+
+def _shape_missing_key_acknowledged(compact: str, *, key: str, gaps: list[dict[str, Any]]) -> bool:
+    if not any(token in compact for token in ("缺", "无法", "不能", "未能", "没有", "暂无", "查不到", "不可用")):
+        return False
+    key_tokens = {
+        "comparison_winner": ("比较", "对比", "谁更高", "账户"),
+        "amount_difference": ("差额", "相差", "金额", "收益"),
+        "rate_difference": ("收益率", "率", "百分点"),
+        "main_drivers": ("来源", "组成", "主要", "原因", "driver"),
+        "shares_remaining": ("剩余", "股数", "持仓"),
+        "cost_basis": ("成本", "成本基数", "成本价"),
+        "spot_freshness": ("spot", "quote", "行情", "报价"),
+        "unrealized_pnl": ("浮盈亏", "未实现", "spot", "行情"),
+        "lifecycle_pnl": ("生命周期", "权利金", "spot", "行情"),
+        "command_status": ("状态", "command", "执行"),
+        "current_version": ("当前版本", "当前", "currentversion", "current_version"),
+        "target_version": ("目标版本", "目标", "targetversion", "target_version"),
+    }.get(key, (key,))
+    if any(token in compact for token in key_tokens):
+        return True
+    for gap in gaps:
+        for account in gap.get("missing_accounts") or []:
+            if str(account).strip().lower() in compact:
+                return True
+        for symbol in gap.get("symbols") or []:
+            if str(symbol).strip().lower() in compact:
+                return True
+    return False
+
+
+def _shape_violation(violation_type: str, key: str, evidence: str) -> dict[str, Any]:
+    return {
+        "type": violation_type,
+        "required_answer_key": key,
+        "claim": f"missing required answer: {key}",
+        "evidence": evidence,
+    }
+
+
+def _has_number(text: str) -> bool:
+    return bool(re.search(r"[-+]?\d", text))
 
 
 def _allowed_currency_amounts(evidence_bundle: EvidenceBundle) -> dict[str, list[float]]:
@@ -554,6 +743,28 @@ def _semantic_policy_verification(text: str, *, evidence_bundle: EvidenceBundle)
             }
         )
 
+    if _claims_root_cause(compact) and _has_unresolved_diagnostics(evidence_bundle) and not _has_cause_caveat(compact):
+        checked += 1
+        violations.append(
+            {
+                "type": "unsupported_diagnostic_root_cause_claim",
+                "claim": "原因/根因",
+                "evidence": "diagnostic evidence is missing, stale, conflicting, or has no matching rows",
+                "diagnostics": _unresolved_diagnostics(evidence_bundle)[:4],
+            }
+        )
+
+    if _claims_upstream_quote_failure(compact) and _has_quote_gap_diagnostics(evidence_bundle) and not _has_upstream_cause_caveat(compact):
+        checked += 1
+        violations.append(
+            {
+                "type": "unsupported_quote_upstream_root_cause_claim",
+                "claim": "OpenD/Futu/网络/服务导致缺报价",
+                "evidence": "quote diagnostics only prove missing or stale quote data; they do not identify the upstream cause",
+                "diagnostics": _quote_gap_diagnostics(evidence_bundle)[:4],
+            }
+        )
+
     return violations, checked, supported
 
 
@@ -573,6 +784,14 @@ def _analysis_diagnostic_records(evidence_bundle: EvidenceBundle) -> list[dict[s
         if not isinstance(diagnostics, list):
             continue
         records.extend(dict(item) for item in diagnostics if isinstance(item, dict))
+    return records
+
+
+def _diagnostic_records(evidence_bundle: EvidenceBundle) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for item in getattr(evidence_bundle, "diagnostics", ()) or ():
+        if isinstance(item, dict):
+            records.append(dict(item))
     return records
 
 
@@ -596,6 +815,67 @@ def _unresolved_analysis_diagnostics(evidence_bundle: EvidenceBundle) -> list[di
             }
         )
     return rows
+
+
+def _unresolved_diagnostics(evidence_bundle: EvidenceBundle) -> list[dict[str, Any]]:
+    unresolved_statuses = {
+        "diagnostic_missing",
+        "artifact_missing",
+        "no_matching_rows",
+        "read_error",
+        "empty_artifact",
+        "stale_artifact",
+        "conflicting_evidence",
+    }
+    rows: list[dict[str, Any]] = []
+    for record in _diagnostic_records(evidence_bundle):
+        status = str(record.get("status") or "").strip().lower()
+        if status not in unresolved_statuses:
+            continue
+        source = record.get("source") if isinstance(record.get("source"), dict) else {}
+        rows.append(
+            {
+                "domain": record.get("domain"),
+                "status": record.get("status"),
+                "severity": record.get("severity"),
+                "view": source.get("view"),
+                "observed_reason": record.get("observed_reason"),
+                "answer_boundary": record.get("answer_boundary"),
+                "confidence": record.get("confidence"),
+            }
+        )
+    return rows
+
+
+def _quote_gap_diagnostics(evidence_bundle: EvidenceBundle) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for record in _diagnostic_records(evidence_bundle):
+        if str(record.get("domain") or "") != "quote_freshness":
+            continue
+        status = str(record.get("status") or "").strip().lower()
+        if status not in {"observed_quote_gap", "missing_quote", "stale_artifact"}:
+            continue
+        source = record.get("source") if isinstance(record.get("source"), dict) else {}
+        scope = record.get("scope") if isinstance(record.get("scope"), dict) else {}
+        rows.append(
+            {
+                "domain": record.get("domain"),
+                "status": record.get("status"),
+                "symbols": scope.get("symbols"),
+                "source": source.get("quote_source") or source.get("source_label"),
+                "observed_reason": record.get("observed_reason"),
+                "answer_boundary": record.get("answer_boundary"),
+            }
+        )
+    return rows
+
+
+def _has_unresolved_diagnostics(evidence_bundle: EvidenceBundle) -> bool:
+    return bool(_unresolved_diagnostics(evidence_bundle))
+
+
+def _has_quote_gap_diagnostics(evidence_bundle: EvidenceBundle) -> bool:
+    return bool(_quote_gap_diagnostics(evidence_bundle))
 
 
 def _has_unresolved_analysis_diagnostics(evidence_bundle: EvidenceBundle) -> bool:
@@ -717,6 +997,50 @@ def _claims_average_return_rate(compact: str) -> bool:
 
 def _claims_root_cause(compact: str) -> bool:
     return any(token in compact for token in ("主要来自", "主要原因", "原因是", "根因", "rootcause", "driver", "drivers", "sourceof"))
+
+
+def _claims_upstream_quote_failure(compact: str) -> bool:
+    return any(
+        token in compact
+        for token in (
+            "opend断开",
+            "opend连接失败",
+            "opend失败",
+            "opend异常",
+            "futuapi失败",
+            "富途api失败",
+            "富途接口失败",
+            "富途断开",
+            "网络问题",
+            "网络故障",
+            "服务挂了",
+            "行情服务异常",
+            "broker故障",
+            "broker失败",
+            "gatewaydown",
+            "opendisconnected",
+            "connectionfailed",
+        )
+    )
+
+
+def _has_upstream_cause_caveat(compact: str) -> bool:
+    return any(
+        token in compact
+        for token in (
+            "无法确认",
+            "无法判断",
+            "不能确认",
+            "不能判断",
+            "证据不足",
+            "可能",
+            "推测",
+            "insufficient",
+            "unknown",
+            "maybe",
+            "possibly",
+        )
+    )
 
 
 def _has_cause_caveat(compact: str) -> bool:

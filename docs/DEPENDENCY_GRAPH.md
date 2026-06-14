@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 663 (`src`: 379, `domain`: 52, `scripts`: 7, `tests`: 225)
-- Internal import edges: 3552 total, 1664 production/script edges excluding tests
+- Python files scanned: 668 (`src`: 384, `domain`: 52, `scripts`: 7, `tests`: 225)
+- Internal import edges: 3578 total, 1677 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -44,7 +44,7 @@ flowchart LR
   scripts -->|1| infrastructure
   scripts -->|2| storage
   storage -->|1| domain
-  tests -->|1284| application
+  tests -->|1297| application
   tests -->|289| domain
   tests -->|2| domain_services
   tests -->|95| infrastructure
@@ -75,7 +75,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 1284 |
+| tests | application | 1297 |
 | tests | domain | 289 |
 | tests | interfaces | 174 |
 | tests | infrastructure | 95 |
@@ -175,11 +175,11 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 
 | module | incoming imports |
 |---|---|
-| src.application.agent_tool_contracts | 83 |
+| src.application.agent_tool_contracts | 84 |
 | src.infrastructure.io_utils | 42 |
 | domain.domain.ledger.position_fields | 42 |
 | domain.domain.symbol_identity | 34 |
-| src.application.assistant.contracts | 28 |
+| src.application.assistant.contracts | 29 |
 | src.application.agent_tool_config | 26 |
 | src.application.config_loader | 26 |
 | src.application.settings | 25 |
@@ -197,6 +197,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 |---|---|
 | src.application.agent_tools.base | 31 |
 | src.application.multi_account_tick | 26 |
+| src.application.assistant.agent_loop | 23 |
 | src.interfaces.cli.main | 22 |
 | src.application.close_advice_runner | 21 |
 | src.application.ledger.queries | 20 |
@@ -204,7 +205,6 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.application.pipeline_runtime | 20 |
 | src.application.channels.wechat_clawbot.inbound | 19 |
 | src.application.agent_tool_runtime_status | 18 |
-| src.application.assistant.agent_loop | 18 |
 | src.application.tick_notification_flow | 18 |
 | src.application.sell_put_steps | 17 |
 | src.application.assistant.symbol_operations | 16 |

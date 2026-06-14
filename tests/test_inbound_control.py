@@ -865,6 +865,52 @@ def test_operation_timeline_reports_audit_only_operation_when_store_missing(tmp_
     assert "receipt_not_observed" not in timeline["warnings"]
 
 
+def test_operation_timeline_exposes_upgrade_version_fields(tmp_path: Path) -> None:
+    from src.application.assistant.operation_diagnostics import collect_operation_timeline
+    from src.application.assistant.operation_store import InboundOperationStore
+
+    audit_db = tmp_path / "upgrade_timeline.sqlite3"
+    store = InboundOperationStore(audit_db)
+    store.save_preview(
+        operation_id="in_upgrade_versions",
+        command_id="in_upgrade_versions",
+        channel="feishu",
+        sender_id="ou_1",
+        conversation_id="feishu:chat_a:ou_1",
+        operation_type="upgrade_now",
+        payload_hash="hash_upgrade",
+        payload={
+            "operation_type": "upgrade_now",
+            "arguments": {
+                "target_version": "1.2.164",
+                "release_tag": "v1.2.164",
+            },
+        },
+        preview={
+            "summary": {
+                "status": "dry_run",
+                "current_version": "1.2.163",
+                "target_version": "1.2.164",
+                "release_tag": "v1.2.164",
+            }
+        },
+        ttl_seconds=600,
+    )
+
+    out = collect_operation_timeline(
+        audit_db=str(audit_db),
+        operation_id="in_upgrade_versions",
+        operation_types=["upgrade_now"],
+        limit=1,
+    )
+
+    operation = out["timelines"][0]["operation"]
+    assert operation["current_version"] == "1.2.163"
+    assert operation["target_version"] == "1.2.164"
+    assert operation["release_tag"] == "v1.2.164"
+    assert operation["summary"] == "1.2.163 -> 1.2.164 status dry_run"
+
+
 def test_inbound_manual_trade_confirm_rejects_signature_mismatch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import src.application.ledger.repository as ledger_repository
 

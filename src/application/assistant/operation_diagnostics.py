@@ -453,6 +453,7 @@ def _build_operation_timeline(operation: dict[str, Any], audit_rows: list[dict[s
             "operation_type": operation.get("operation_type"),
             "status": status or None,
             "summary": _operation_summary(operation),
+            **_operation_version_fields(operation),
             "payload_hash": operation.get("payload_hash"),
             "created_at": operation.get("created_at"),
             "expires_at": operation.get("expires_at"),
@@ -746,7 +747,74 @@ def _operation_summary(operation: dict[str, Any]) -> str:
             )
             if part
         )
+    if operation_type == "upgrade_now":
+        version = _operation_version_fields(operation)
+        current = version.get("current_version") or "-"
+        target = version.get("target_version") or "-"
+        preview = _dict(operation.get("preview"))
+        upgrade = _dict(preview.get("upgrade"))
+        summary = _dict(preview.get("summary"))
+        result = _dict(operation.get("result"))
+        status = _first_text(
+            summary.get("status"),
+            upgrade.get("status"),
+            result.get("status"),
+            operation.get("status"),
+        )
+        return f"{current} -> {target} status {status or '-'}"
     return operation_type or "-"
+
+
+def _operation_version_fields(operation: dict[str, Any]) -> dict[str, Any]:
+    operation_type = str(operation.get("operation_type") or "").strip()
+    if "upgrade" not in operation_type:
+        return {}
+    payload = _dict(operation.get("payload"))
+    args = _dict(payload.get("arguments"))
+    preview = _dict(operation.get("preview"))
+    preview_upgrade = _dict(preview.get("upgrade"))
+    preview_summary = _dict(preview.get("summary"))
+    result = _dict(operation.get("result"))
+    nested_result = _dict(result.get("result"))
+    current_version = _first_text(
+        operation.get("current_version"),
+        preview_summary.get("current_version"),
+        preview_upgrade.get("current_version"),
+        _nested(preview_upgrade, "version_check", "current_version"),
+        result.get("current_version"),
+        _nested(result, "version_check", "current_version"),
+        nested_result.get("current_version"),
+        _nested(nested_result, "version_check", "current_version"),
+    )
+    target_version = _first_text(
+        operation.get("target_version"),
+        args.get("target_version"),
+        preview_summary.get("target_version"),
+        preview_upgrade.get("target_version"),
+        preview_upgrade.get("latest_version"),
+        _nested(preview_upgrade, "version_check", "target_version"),
+        _nested(preview_upgrade, "version_check", "latest_version"),
+        result.get("target_version"),
+        result.get("latest_version"),
+        _nested(result, "version_check", "target_version"),
+        _nested(result, "version_check", "latest_version"),
+        nested_result.get("target_version"),
+        nested_result.get("latest_version"),
+    )
+    release_tag = _first_text(
+        args.get("release_tag"),
+        preview_summary.get("release_tag"),
+        preview_upgrade.get("release_tag"),
+        _nested(preview_upgrade, "version_check", "release_tag"),
+        result.get("release_tag"),
+        _nested(result, "version_check", "release_tag"),
+        nested_result.get("release_tag"),
+    )
+    return {
+        "current_version": current_version,
+        "target_version": target_version,
+        "release_tag": release_tag,
+    }
 
 
 def _option_type_suffix(value: Any) -> str:
