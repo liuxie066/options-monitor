@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.280 - 2026-06-15
+
+### Added
+- Added Agent reliability eval and compact trace coverage for runtime scheduler market-window skips.
+
+### Fixed
+- Fixed runtime tick diagnostics so scheduler skips expose scheduler reason fields and are not misclassified as notification delivery failures.
+- Fixed assistant answer verification so notification-channel failure claims are rejected when evidence only proves a scheduler skip.
+
 ## 1.2.279 - 2026-06-15
 
 ### Added
