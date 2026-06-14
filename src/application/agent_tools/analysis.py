@@ -277,6 +277,9 @@ UPGRADE_OPERATION_STATUS_FIELDS: tuple[str, ...] = (
     "current_version",
     "target_version",
     "release_tag",
+    "release_status",
+    "release_published_at",
+    "github_release_url",
     "receipt_status",
     "outcome_status",
     "warning_codes",
@@ -2157,6 +2160,27 @@ def _upgrade_operation_status_row(timeline: dict[str, Any]) -> dict[str, Any] | 
             operation.get("release_tag"),
             _upgrade_version_from_audit_rows(timeline, "release_tag"),
         ),
+        "release_status": _first_nonempty_text(
+            operation.get("release_status"),
+            outcome.get("release_status"),
+            _upgrade_version_from_audit_rows(timeline, "release_status"),
+        ),
+        "release_published_at": _first_nonempty_text(
+            operation.get("release_published_at"),
+            operation.get("published_at"),
+            outcome.get("release_published_at"),
+            outcome.get("published_at"),
+            _upgrade_version_from_audit_rows(timeline, "release_published_at"),
+            _upgrade_version_from_audit_rows(timeline, "published_at"),
+        ),
+        "github_release_url": _first_nonempty_text(
+            operation.get("github_release_url"),
+            operation.get("release_url"),
+            outcome.get("github_release_url"),
+            outcome.get("release_url"),
+            _upgrade_version_from_audit_rows(timeline, "github_release_url"),
+            _upgrade_version_from_audit_rows(timeline, "release_url"),
+        ),
         "receipt_status": _first_nonempty_text(receipt.get("status")) or ("not_observed" if "receipt_not_observed" in warning_codes else None),
         "outcome_status": _first_nonempty_text(outcome.get("status")),
         "warning_codes": warning_codes,
@@ -2577,6 +2601,7 @@ def _upgrade_diagnostic_records(rows: list[dict[str, Any]]) -> list[dict[str, An
     operation_statuses = _row_status_values(rows, "operation_status")
     outcome_statuses = _row_status_values(rows, "outcome_status")
     receipt_statuses = _row_status_values(rows, "receipt_status")
+    release_statuses = _row_status_values(rows, "release_status")
     warning_codes = {
         str(code or "").strip().lower()
         for row in rows
@@ -2609,9 +2634,25 @@ def _upgrade_diagnostic_records(rows: list[dict[str, Any]]) -> list[dict[str, An
                 "recoverable_by": "operation_timeline",
             }
         )
+    if any(
+        isinstance(row, dict)
+        and str(row.get("release_tag") or "").strip()
+        and not any(
+            str(row.get(field) or "").strip()
+            for field in ("release_status", "release_published_at", "github_release_url")
+        )
+        for row in rows
+    ):
+        missing.append(
+            {
+                "kind": "release_publication_status_missing",
+                "impact": "release_tag in operation evidence does not prove GitHub Release publication",
+                "recoverable_by": "release_workflow_status",
+            }
+        )
     diagnostic_status = "conflicting_evidence" if conflict_reasons else "observed_operation_status"
     answer_boundary = "conflicting_upgrade_operation_evidence_only" if conflict_reasons else "upgrade_operation_status_evidence_only"
-    all_statuses = operation_statuses | outcome_statuses | receipt_statuses
+    all_statuses = operation_statuses | outcome_statuses | receipt_statuses | release_statuses
     record: dict[str, Any] = {
         "view": "upgrade_operation_status",
         "status": diagnostic_status,
@@ -2625,6 +2666,7 @@ def _upgrade_diagnostic_records(rows: list[dict[str, Any]]) -> list[dict[str, An
             operation_statuses=operation_statuses,
             outcome_statuses=outcome_statuses,
             receipt_statuses=receipt_statuses,
+            release_statuses=release_statuses,
             conflict_reasons=conflict_reasons,
         ),
         "answer_boundary": answer_boundary,
@@ -2632,6 +2674,8 @@ def _upgrade_diagnostic_records(rows: list[dict[str, Any]]) -> list[dict[str, An
     }
     if outcome_statuses:
         record["outcome_statuses"] = sorted(outcome_statuses)
+    if release_statuses:
+        record["release_statuses"] = sorted(release_statuses)
     if conflict_reasons:
         record["conflicts"] = conflict_reasons
     return [record]
@@ -2685,6 +2729,7 @@ def _upgrade_diagnostic_summary(
     operation_statuses: set[str],
     outcome_statuses: set[str],
     receipt_statuses: set[str],
+    release_statuses: set[str],
     conflict_reasons: list[str],
 ) -> str:
     parts: list[str] = []
@@ -2694,6 +2739,8 @@ def _upgrade_diagnostic_summary(
         parts.append("outcome_status=" + ",".join(sorted(outcome_statuses)[:5]))
     if receipt_statuses:
         parts.append("receipt_status=" + ",".join(sorted(receipt_statuses)[:5]))
+    if release_statuses:
+        parts.append("release_status=" + ",".join(sorted(release_statuses)[:5]))
     if conflict_reasons:
         parts.append("conflict=" + ",".join(conflict_reasons[:5]))
     if missing:
@@ -2722,6 +2769,7 @@ def _upgrade_status_conflict_reasons(rows: list[dict[str, Any]]) -> list[str]:
             "operation_status": str(row.get("operation_status") or "").strip().lower(),
             "outcome_status": str(row.get("outcome_status") or "").strip().lower(),
             "receipt_status": str(row.get("receipt_status") or "").strip().lower(),
+            "release_status": str(row.get("release_status") or "").strip().lower(),
         }
         present = {key: value for key, value in statuses.items() if value}
         if not present:

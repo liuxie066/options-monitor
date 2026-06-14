@@ -546,6 +546,22 @@ def _upgrade_analysis_diagnostic_from_rows(rows: list[dict[str, Any]]) -> dict[s
                 "recoverable_by": "operation_timeline",
             }
         )
+    if any(
+        isinstance(row, dict)
+        and str(row.get("release_tag") or "").strip()
+        and not any(
+            str(row.get(field) or "").strip()
+            for field in ("release_status", "release_published_at", "github_release_url")
+        )
+        for row in rows
+    ):
+        missing.append(
+            {
+                "kind": "release_publication_status_missing",
+                "impact": "release_tag in operation evidence does not prove GitHub Release publication",
+                "recoverable_by": "release_workflow_status",
+            }
+        )
     conflict_reasons = _upgrade_status_conflict_reasons(rows)
     status = "conflicting_evidence" if conflict_reasons else "observed_operation_status"
     return {

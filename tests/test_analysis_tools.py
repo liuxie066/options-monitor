@@ -141,6 +141,9 @@ def test_analysis_catalog_exposes_p2_semantic_views() -> None:
     assert data["views"]["runtime_tick_status"]["row_grain"] == "market + account + latest_run"
     assert data["views"]["quote_freshness"]["row_grain"] == "symbol + market + source"
     assert data["views"]["upgrade_operation_status"]["row_grain"] == "command_id + operation_id"
+    assert "release_status" in data["views"]["upgrade_operation_status"]["fields"]
+    assert "release_published_at" in data["views"]["upgrade_operation_status"]["fields"]
+    assert "github_release_url" in data["views"]["upgrade_operation_status"]["fields"]
 
 
 def test_analysis_query_authorizer_rejects_non_whitelisted_tables() -> None:
@@ -544,6 +547,66 @@ def test_analysis_query_upgrade_operation_status_marks_status_conflict() -> None
     assert diagnostic["receipt_statuses"] == ["observed"]
     assert diagnostic["answer_boundary"] == "conflicting_upgrade_operation_evidence_only"
     assert diagnostic["conflicts"] == ["operation_status=applied,outcome_status=failed,receipt_status=observed"]
+
+
+def test_analysis_query_upgrade_operation_status_extracts_release_publication_fields() -> None:
+    ctx = _AnalysisQueryContext()
+
+    def fake_operation_timeline(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "schema_version": "operation-timeline-v1",
+            "timeline_count": 1,
+            "timelines": [
+                {
+                    "identity": {"command_id": "in_release_ok", "operation_id": "in_release_ok"},
+                    "operation": {
+                        "operation_id": "in_release_ok",
+                        "command_id": "in_release_ok",
+                        "operation_type": "upgrade_now",
+                        "status": "applied",
+                        "current_version": "1.2.272",
+                        "target_version": "1.2.273",
+                        "release_tag": "v1.2.273",
+                        "release_status": "published",
+                        "release_published_at": "2026-06-14T19:01:30Z",
+                        "github_release_url": "https://github.example/releases/tag/v1.2.273",
+                    },
+                    "receipt": {"status": "observed"},
+                    "outcome": {"status": "succeeded", "ok": True},
+                    "warnings": [],
+                }
+            ],
+            "warnings": [],
+        }
+
+    ctx.collect_operation_timeline = fake_operation_timeline  # type: ignore[method-assign]
+
+    data, warnings, _meta = ANALYSIS_QUERY_TOOL.call(
+        ctx,
+        {
+            "sql": (
+                "select command_id, release_tag, release_status, release_published_at, github_release_url "
+                "from upgrade_operation_status where command_id = 'in_release_ok'"
+            ),
+            "limit": 20,
+        },
+    )
+
+    assert warnings == []
+    assert data["rows"] == [
+        {
+            "command_id": "in_release_ok",
+            "release_tag": "v1.2.273",
+            "release_status": "published",
+            "release_published_at": "2026-06-14T19:01:30Z",
+            "github_release_url": "https://github.example/releases/tag/v1.2.273",
+        }
+    ]
+    diagnostic = data["evidence"]["diagnostics"][0]
+    assert diagnostic["status"] == "observed_operation_status"
+    assert diagnostic["severity"] == "info"
+    assert diagnostic["release_statuses"] == ["published"]
+    assert diagnostic["missing_data"] == []
 
 
 def test_analysis_query_upgrade_operation_status_reports_missing_audit_artifact() -> None:

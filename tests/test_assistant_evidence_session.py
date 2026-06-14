@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date
 from pathlib import Path
 import sqlite3
@@ -24,6 +25,18 @@ from src.application.assistant.session_store import AgentSessionStore, collect_a
 from src.application.assistant.task_contract import TASK_CONTRACT_SCHEMA_VERSION, build_task_contract
 from src.application.assistant.verifier_hooks import HOOK_RESULT_SCHEMA_VERSION
 from src.application.tool_execution import execute_tool as run_tool
+
+
+TRACE_ROUTE_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "assistant_trace_route_samples.jsonl"
+
+
+def _load_trace_route_cases() -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for line in TRACE_ROUTE_FIXTURE_PATH.read_text(encoding="utf-8").splitlines():
+        text = line.strip()
+        if text:
+            rows.append(json.loads(text))
+    return rows
 
 
 def test_evidence_bundle_extracts_contract_facts_and_missing_quote() -> None:
@@ -260,6 +273,153 @@ def test_answer_verifier_rejects_definitive_status_on_conflicting_diagnostics() 
 
     ok = verify_response_against_evidence(
         "不能确认升级成功：operation_status=applied 和 outcome_status=failed 存在冲突。",
+        evidence_bundle=bundle,
+    )
+    assert ok.violations == ()
+
+
+def test_answer_verifier_rejects_release_success_when_publication_evidence_missing() -> None:
+    bundle = build_evidence_bundle(
+        question="v1.2.273 远端 release 发布成功了吗？",
+        plan={"goal": "检查远端 release 发布状态", "steps": []},
+        observations=[
+            {
+                "index": 1,
+                "tool_name": "analysis_query",
+                "payload": {
+                    "sql": (
+                        "select command_id, operation_status, current_version, target_version, release_tag, "
+                        "receipt_status from upgrade_operation_status"
+                    )
+                },
+                "ok": True,
+                "error": None,
+                "output_contract": {
+                    "schema_version": "analysis_query.output.v2",
+                    "canonical_renderer": "analysis_result",
+                    "source_label": "OM read-only analysis workspace",
+                    "guard_profile": "analysis_result",
+                    "primary_rows": "rows",
+                    "row_count_field": "row_count",
+                },
+                "data": {
+                    "rows": [
+                        {
+                            "command_id": "in_release_check",
+                            "operation_status": "applied",
+                            "current_version": "1.2.272",
+                            "target_version": "1.2.273",
+                            "release_tag": "v1.2.273",
+                            "receipt_status": "not_observed",
+                        }
+                    ],
+                    "row_count": 1,
+                    "views_used": ["upgrade_operation_status"],
+                    "evidence": {"coverage": {"views": ["upgrade_operation_status"]}},
+                },
+            }
+        ],
+    )
+
+    diagnostic = bundle.public_payload()["diagnostics"][0]
+    assert diagnostic["domain"] == "upgrade"
+    assert diagnostic["status"] == "observed_operation_status"
+    missing_kinds = {item["kind"] for item in diagnostic["missing_data"]}
+    assert "release_publication_status_missing" in missing_kinds
+    assert "receipt_not_observed" in missing_kinds
+
+    bad = verify_response_against_evidence("远端 release 已发布成功。", evidence_bundle=bundle)
+    assert any(item["type"] == "unsupported_diagnostic_status_claim" for item in bad.violations)
+
+    bad_failed = verify_response_against_evidence("远端 release 发布失败。", evidence_bundle=bundle)
+    assert any(item["type"] == "unsupported_diagnostic_status_claim" for item in bad_failed.violations)
+
+    ok = verify_response_against_evidence(
+        "不能确认远端 release 已发布成功：只有 release_tag，没有 GitHub Release 发布状态证据。",
+        evidence_bundle=bundle,
+    )
+    assert ok.violations == ()
+
+
+def test_answer_verifier_allows_release_success_when_publication_evidence_present() -> None:
+    bundle = build_evidence_bundle(
+        question="v1.2.273 远端 release 发布成功了吗？",
+        plan={"goal": "检查远端 release 发布状态", "steps": []},
+        observations=[
+            {
+                "index": 1,
+                "tool_name": "analysis_query",
+                "payload": {
+                    "sql": (
+                        "select release_tag, release_status, release_published_at, github_release_url "
+                        "from upgrade_operation_status"
+                    )
+                },
+                "ok": True,
+                "error": None,
+                "output_contract": {
+                    "schema_version": "analysis_query.output.v2",
+                    "canonical_renderer": "analysis_result",
+                    "source_label": "OM read-only analysis workspace",
+                    "guard_profile": "analysis_result",
+                    "primary_rows": "rows",
+                    "row_count_field": "row_count",
+                },
+                "data": {
+                    "rows": [
+                        {
+                            "release_tag": "v1.2.273",
+                            "release_status": "published",
+                            "release_published_at": "2026-06-14T19:01:30Z",
+                            "github_release_url": "https://github.example/releases/tag/v1.2.273",
+                        }
+                    ],
+                    "row_count": 1,
+                    "views_used": ["upgrade_operation_status"],
+                    "evidence": {"coverage": {"views": ["upgrade_operation_status"]}},
+                },
+            }
+        ],
+    )
+
+    ok = verify_response_against_evidence(
+        "远端 release 已发布成功：release_status=published，published_at=2026-06-14T19:01:30Z。",
+        evidence_bundle=bundle,
+    )
+    assert ok.violations == ()
+
+
+def test_answer_verifier_allows_release_failure_when_failure_evidence_present() -> None:
+    bundle = build_evidence_bundle(
+        question="v1.2.273 远端 release 发布成功了吗？",
+        plan={"goal": "检查远端 release 发布状态", "steps": []},
+        observations=[
+            {
+                "index": 1,
+                "tool_name": "analysis_query",
+                "payload": {"sql": "select release_tag, release_status from upgrade_operation_status"},
+                "ok": True,
+                "error": None,
+                "output_contract": {
+                    "schema_version": "analysis_query.output.v2",
+                    "canonical_renderer": "analysis_result",
+                    "source_label": "OM read-only analysis workspace",
+                    "guard_profile": "analysis_result",
+                    "primary_rows": "rows",
+                    "row_count_field": "row_count",
+                },
+                "data": {
+                    "rows": [{"release_tag": "v1.2.273", "release_status": "failed"}],
+                    "row_count": 1,
+                    "views_used": ["upgrade_operation_status"],
+                    "evidence": {"coverage": {"views": ["upgrade_operation_status"]}},
+                },
+            }
+        ],
+    )
+
+    ok = verify_response_against_evidence(
+        "远端 release 发布失败：release_status=failed。",
         evidence_bundle=bundle,
     )
     assert ok.violations == ()
@@ -1579,6 +1739,23 @@ def test_format_assistant_trace_shows_key_routes() -> None:
             warnings=[],
         )
         assert expected in text
+
+
+def test_format_assistant_trace_route_samples_from_fixture() -> None:
+    cases = _load_trace_route_cases()
+    assert len(cases) >= 5
+    for case in cases:
+        trace = dict(case["trace"])
+        identity = trace.get("identity") if isinstance(trace.get("identity"), dict) else {}
+        text = format_assistant_trace(
+            [trace],
+            filters={"command_id": identity.get("command_id") or case["id"], "limit": 10},
+            warnings=[],
+        )
+        for expected in case.get("expect_contains") or ():
+            assert str(expected) in text, case["id"]
+        for unexpected in case.get("expect_not_contains") or ():
+            assert str(unexpected) not in text, case["id"]
 
 
 def test_agent_loop_replans_read_only_followup_for_recoverable_quote_gap(tmp_path: Path) -> None:
