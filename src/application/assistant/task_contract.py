@@ -141,6 +141,10 @@ def _intent_families(question_goal_text: str, full_text: str) -> list[str]:
         )
     )
     families: list[str] = []
+    is_assigned_stock_pnl = any(token in full_compact for token in ("指派正股", "被指派", "assignedstock")) or (
+        "指派" in full_compact and any(token in full_compact for token in ("正股", "浮盈亏", "生命周期", "spot"))
+    )
+    is_upgrade_status = any(token in compact for token in ("升级", "版本", "回执", "发布", "release", "deploy"))
     if (
         (
             any(token in compact for token in ("对比", "比较", "谁更高", "compare"))
@@ -150,13 +154,15 @@ def _intent_families(question_goal_text: str, full_text: str) -> list[str]:
         and account_metric_focused
     ):
         families.append("account_comparison")
-    if any(token in compact for token in ("为什么", "原因", "来源", "组成", "构成", "主要来自", "哪里", "breakdown", "driver")):
-        families.append("breakdown")
-    if any(token in full_compact for token in ("指派正股", "被指派", "assignedstock")) or (
-        "指派" in full_compact and any(token in full_compact for token in ("正股", "浮盈亏", "生命周期", "spot"))
+    if (
+        not is_upgrade_status
+        and not is_assigned_stock_pnl
+        and any(token in compact for token in ("为什么", "原因", "来源", "组成", "构成", "主要来自", "哪里", "breakdown", "driver"))
     ):
+        families.append("breakdown")
+    if is_assigned_stock_pnl:
         families.append("assigned_stock_pnl")
-    if any(token in compact for token in ("升级", "版本", "回执", "发布", "release", "deploy")):
+    if is_upgrade_status:
         families.append("upgrade_status")
     if not families:
         families.append("general_analysis")
