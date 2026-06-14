@@ -569,6 +569,32 @@ def test_analysis_query_upgrade_operation_status_reports_missing_audit_artifact(
     assert any(item["status"] == "artifact_missing" for item in data["evidence"]["diagnostics"])
 
 
+def test_analysis_query_upgrade_operation_status_reports_missing_command_log_artifact() -> None:
+    ctx = _AnalysisQueryContext()
+
+    def fake_operation_timeline(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "schema_version": "operation-timeline-v1",
+            "timeline_count": 0,
+            "timelines": [],
+            "warnings": ["command_log_missing"],
+        }
+
+    ctx.collect_operation_timeline = fake_operation_timeline  # type: ignore[method-assign]
+
+    data, warnings, _meta = ANALYSIS_QUERY_TOOL.call(
+        ctx,
+        {"sql": "select command_id, operation_status from upgrade_operation_status", "limit": 20},
+    )
+
+    assert data["rows"] == []
+    assert "upgrade_operation_status missing: command_log_missing" in warnings
+    diagnostic = data["evidence"]["diagnostics"][0]
+    assert diagnostic["status"] == "artifact_missing"
+    assert diagnostic["summary"] == "command_log_missing"
+    assert diagnostic["answer_boundary"] == "diagnostic artifact missing"
+
+
 def test_analysis_query_quote_freshness_derives_from_assigned_stock_quotes(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_monthly_tool(*_args, **_kwargs):
         return {

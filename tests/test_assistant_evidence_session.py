@@ -218,6 +218,53 @@ def test_evidence_bundle_marks_upgrade_timeline_status_conflict() -> None:
     assert "outcome_status=failed" in diagnostic["observed_reason"]
 
 
+def test_answer_verifier_rejects_definitive_status_on_conflicting_diagnostics() -> None:
+    bundle = build_evidence_bundle(
+        question="升级 in_123 到底成功还是失败",
+        plan={"goal": "检查升级状态冲突", "steps": []},
+        observations=[
+            {
+                "index": 1,
+                "tool_name": "operation_timeline",
+                "payload": {"operation_types": ["upgrade_now"], "operation_id": "in_123", "limit": 5},
+                "ok": True,
+                "error": None,
+                "data": {
+                    "schema_version": "operation-timeline-v1",
+                    "filters": {"operation_types": ["upgrade_now"], "operation_id": "in_123"},
+                    "timeline_count": 1,
+                    "timelines": [
+                        {
+                            "identity": {"command_id": "in_123", "operation_id": "in_123"},
+                            "operation": {
+                                "operation_id": "in_123",
+                                "command_id": "in_123",
+                                "operation_type": "upgrade_now",
+                                "status": "applied",
+                                "current_version": "1.2.110",
+                                "target_version": "1.2.111",
+                            },
+                            "receipt": {"status": "observed"},
+                            "outcome": {"status": "failed", "ok": False},
+                            "warnings": [],
+                        }
+                    ],
+                    "warnings": [],
+                },
+            }
+        ],
+    )
+
+    bad = verify_response_against_evidence("升级成功，已经完成。", evidence_bundle=bundle)
+    assert any(item["type"] == "unsupported_diagnostic_status_claim" for item in bad.violations)
+
+    ok = verify_response_against_evidence(
+        "不能确认升级成功：operation_status=applied 和 outcome_status=failed 存在冲突。",
+        evidence_bundle=bundle,
+    )
+    assert ok.violations == ()
+
+
 def test_evidence_bundle_extracts_upgrade_missing_version_diagnostics() -> None:
     bundle = build_evidence_bundle(
         question="升级为什么版本是空的",
@@ -721,6 +768,55 @@ def test_answer_verifier_rejects_unsupported_quote_upstream_root_cause() -> None
 
     bad = verify_response_against_evidence(
         "FUTU 指派正股没有浮盈亏，原因是 OpenD 断开导致无法获取报价。",
+        evidence_bundle=bundle,
+    )
+    assert any(item["type"] == "unsupported_quote_upstream_root_cause_claim" for item in bad.violations)
+
+
+def test_answer_verifier_rejects_analysis_quote_gap_upstream_root_cause() -> None:
+    bundle = build_evidence_bundle(
+        question="为什么 FUTU 行情是旧的",
+        plan={"goal": "解释 FUTU 行情新鲜度", "steps": []},
+        observations=[
+            {
+                "index": 1,
+                "tool_name": "analysis_query",
+                "payload": {"sql": "select symbol, quote_status from quote_freshness where symbol = 'FUTU'"},
+                "ok": True,
+                "error": None,
+                "output_contract": {
+                    "schema_version": "analysis_query.output.v2",
+                    "canonical_renderer": "analysis_result",
+                    "source_label": "OM read-only analysis workspace",
+                    "guard_profile": "analysis_result",
+                    "primary_rows": "rows",
+                    "row_count_field": "row_count",
+                    "fact_fields": ["rows[].symbol", "rows[].quote_status"],
+                },
+                "data": {
+                    "rows": [{"symbol": "FUTU", "quote_status": "stale"}],
+                    "row_count": 1,
+                    "views_used": ["quote_freshness"],
+                    "evidence": {
+                        "coverage": {"views": ["quote_freshness"], "symbols": ["FUTU"]},
+                        "diagnostics": [
+                            {
+                                "view": "quote_freshness",
+                                "status": "observed_quote_freshness_gap",
+                                "severity": "warning",
+                                "symbols": ["FUTU"],
+                                "summary": "quote rows include stale quote status",
+                                "answer_boundary": "quote_dependent_calculations_only",
+                            }
+                        ],
+                    },
+                },
+            }
+        ],
+    )
+
+    bad = verify_response_against_evidence(
+        "FUTU 行情是旧的，原因是 OpenD 连接失败。",
         evidence_bundle=bundle,
     )
     assert any(item["type"] == "unsupported_quote_upstream_root_cause_claim" for item in bad.violations)
