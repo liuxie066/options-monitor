@@ -409,6 +409,90 @@ def test_action_safety_denies_prompt_injection_chain_to_write() -> None:
     assert safety["injection_evidence"]
 
 
+def test_action_safety_detects_sql_only_account_scope_expansion() -> None:
+    request = AssistantRequest(text="继续查 sy FUTU 指派正股的行情", sender_id="local", config_key="us")
+    call = ToolCall(
+        tool_name="analysis_query",
+        payload={"sql": "SELECT symbol, quote_status FROM quote_freshness WHERE account = 'lx' AND symbol = 'FUTU'"},
+    )
+    policy = decide_tool_action_policy(
+        call=call,
+        request=request,
+        task_contract={"requested_effect": "read", "scope": {"requested_accounts": ["sy"], "requested_symbols": ["FUTU"]}},
+    )
+
+    safety = assess_action_safety(
+        question=request.text,
+        task_contract={"requested_effect": "read", "scope": {"requested_accounts": ["sy"], "requested_symbols": ["FUTU"]}},
+        tool_name="analysis_query",
+        payload=call.payload,
+        action_policy=policy.public_payload(),
+    ).public_payload()
+
+    assert safety["status"] == "ask"
+    assert safety["code"] == "account_scope_expansion"
+    assert safety["scope_delta"]["accounts"]["out_of_scope"] == ["lx"]
+    assert safety["route"] == "ask"
+
+
+def test_action_safety_detects_sql_only_symbol_scope_expansion() -> None:
+    request = AssistantRequest(text="继续查 sy FUTU 指派正股的行情", sender_id="local", config_key="us")
+    call = ToolCall(
+        tool_name="analysis_query",
+        payload={"sql": "SELECT symbol, quote_status FROM quote_freshness WHERE account = 'sy' AND symbol = 'TSLA'"},
+    )
+    policy = decide_tool_action_policy(
+        call=call,
+        request=request,
+        task_contract={"requested_effect": "read", "scope": {"requested_accounts": ["sy"], "requested_symbols": ["FUTU"]}},
+    )
+
+    safety = assess_action_safety(
+        question=request.text,
+        task_contract={"requested_effect": "read", "scope": {"requested_accounts": ["sy"], "requested_symbols": ["FUTU"]}},
+        tool_name="analysis_query",
+        payload=call.payload,
+        action_policy=policy.public_payload(),
+    ).public_payload()
+
+    assert safety["status"] == "ask"
+    assert safety["code"] == "symbol_scope_expansion"
+    assert safety["scope_delta"]["symbols"]["out_of_scope"] == ["TSLA"]
+    assert safety["route"] == "ask"
+
+
+def test_action_safety_detects_sql_only_period_scope_expansion() -> None:
+    request = AssistantRequest(text="对比 lx 和 sy 2026-05 的收益", sender_id="local", config_key="us")
+    call = ToolCall(
+        tool_name="analysis_query",
+        payload={"sql": "SELECT account, month, net_cashflow_cny FROM account_monthly_performance WHERE month = '2026-06'"},
+    )
+    policy = decide_tool_action_policy(
+        call=call,
+        request=request,
+        task_contract={
+            "requested_effect": "read",
+            "scope": {"requested_accounts": ["lx", "sy"], "requested_months": ["2026-05"]},
+        },
+    )
+
+    safety = assess_action_safety(
+        question=request.text,
+        task_contract={
+            "requested_effect": "read",
+            "scope": {"requested_accounts": ["lx", "sy"], "requested_months": ["2026-05"]},
+        },
+        tool_name="analysis_query",
+        payload=call.payload,
+        action_policy=policy.public_payload(),
+    ).public_payload()
+
+    assert safety["status"] == "ask"
+    assert safety["code"] == "period_scope_expansion"
+    assert safety["scope_delta"]["period"]["out_of_scope"] == ["2026-06"]
+    assert safety["route"] == "ask"
+
+
 def test_tool_executor_precheck_rejects_planner_system_arguments() -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
 

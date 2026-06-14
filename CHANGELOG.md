@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.2.277 - 2026-06-15
+
+### Fixed
+- Fixed assistant action safety so SQL-only read payloads still enforce requested account, symbol, and month scope boundaries.
+- Fixed assistant task contracts so month digits and SQL keywords are not misclassified as requested symbols.
+- Expanded Agent reliability eval and compact trace fixtures for read-scope clarification paths.
+
 ## 1.2.276 - 2026-06-15
 
 ### Added
