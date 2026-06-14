@@ -47,6 +47,33 @@ def test_release_test_plan_requires_full_pytest_for_ledger_changes() -> None:
     assert plan["commands"][-1] == "python3 -m pytest"
 
 
+def test_release_test_plan_maps_agent_reliability_changes_to_p2_gate() -> None:
+    from src.application.release_test_plan import build_release_test_plan
+
+    plan = build_release_test_plan(
+        changed_files=[
+            "src/application/assistant/coverage_verifier.py",
+            "src/application/agent_tools/analysis.py",
+            "tests/fixtures/assistant_agent_eval.jsonl",
+        ],
+        mode="standard",
+        version="1.2.184",
+    )
+
+    assert plan["risk"] == "standard"
+    assert plan["requires_full_pytest"] is False
+    assert {rule["name"] for rule in plan["matched_rules"]} >= {"agent_reliability", "dependency_graph"}
+    assert (
+        "python3 -m pytest tests/test_assistant_agent_eval.py::test_assistant_agent_eval_fixture_covers_p2_agent_eval_gap_groups "
+        "tests/test_assistant_evidence_session.py::test_format_assistant_trace_route_samples_from_fixture"
+    ) in plan["commands"]
+    assert (
+        "python3 -m pytest tests/test_assistant_evidence_session.py tests/test_assistant_agent_eval.py "
+        "tests/test_assistant_runtime.py tests/test_analysis_tools.py"
+    ) in plan["commands"]
+    assert "python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py" in plan["commands"]
+
+
 def test_release_test_plan_full_mode_always_adds_full_pytest() -> None:
     from src.application.release_test_plan import build_release_test_plan
 

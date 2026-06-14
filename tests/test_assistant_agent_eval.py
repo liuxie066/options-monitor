@@ -24,6 +24,42 @@ from src.application.assistant.contracts import AssistantRequest, ToolCall
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "assistant_agent_eval.jsonl"
 
+P2_AGENT_EVAL_REQUIRED_FIXTURE_GROUPS: dict[str, set[str]] = {
+    "runtime_stale_conflict": {
+        "runtime_why_conflict_stale_answer",
+        "runtime_notification_missing_not_success_answer",
+        "runtime_notification_status_conflict_answer",
+        "runtime_scheduler_skip_market_window_answer",
+    },
+    "upgrade_conflict_release_status": {
+        "operation_upgrade_conflict_command_log_missing_answer",
+        "operation_upgrade_release_tag_not_enough_answer",
+        "operation_upgrade_release_published_answer",
+        "operation_upgrade_release_failed_answer",
+        "operation_upgrade_release_outcome_conflict_answer",
+    },
+    "scope_expansion": {
+        "action_safety_read_followup_same_scope_allowed",
+        "action_safety_read_scope_expansion_asks",
+        "action_safety_read_sql_account_scope_expansion_asks",
+        "action_safety_read_sql_symbol_scope_expansion_asks",
+        "action_safety_read_sql_period_scope_expansion_asks",
+        "action_safety_cross_account_write_denied",
+    },
+    "answer_source_freshness": {
+        "analysis_quote_stale_answer_discloses_freshness",
+        "operation_upgrade_stale_timeline_answer",
+    },
+    "prompt_injection_and_write_preview": {
+        "prompt_injection_from_tool_output_denied",
+        "write_preview_no_apply_manual_trade_open",
+    },
+    "upgrade_followup": {
+        "analysis_upgrade_receipt_missing_version",
+        "operation_upgrade_followup_timeline_completes_answer",
+    },
+}
+
 
 def _load_cases() -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
@@ -32,6 +68,29 @@ def _load_cases() -> list[dict[str, Any]]:
         if text:
             rows.append(json.loads(text))
     return rows
+
+
+def test_assistant_agent_eval_fixture_covers_p2_agent_eval_gap_groups() -> None:
+    cases = {str(item["id"]): item for item in _load_cases()}
+    required_ids = {case_id for group in P2_AGENT_EVAL_REQUIRED_FIXTURE_GROUPS.values() for case_id in group}
+    assert sorted(required_ids - set(cases)) == []
+
+    for case_id in required_ids:
+        case = cases[case_id]
+        mode = str(case.get("mode") or "agent_answer")
+        if mode == "action_safety":
+            assert case.get("expect_status") in {"allow", "ask", "deny"}
+            assert str(case.get("expect_code") or "").strip()
+            assert case.get("expect_route") in {"execute", "ask", "deny"}
+            continue
+        if mode == "planner_preview":
+            assert case.get("expect_operation_type")
+            assert case.get("expect_contains")
+            assert case.get("expect_not_contains")
+            continue
+        assert case.get("tool_result") or case.get("tool_results")
+        assert case.get("expect_contains")
+        assert case.get("expect_not_contains")
 
 
 def _plan_from_payload(raw_payload: dict[str, Any]) -> PlannerPlan:

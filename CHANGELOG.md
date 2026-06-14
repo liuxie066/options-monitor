@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.284 - 2026-06-15
+
+### Added
+- Added an Agent reliability release-test-plan rule so assistant, agent-tool, eval, trace, and reliability design changes automatically require the P2 fixture, eval, runtime, analysis, and plugin gates.
+- Added P2 coverage guards for assistant golden eval gap groups and compact trace route samples.
+
+### Changed
+- Updated the Agent reliability P0-P2 design notes and regenerated the dependency graph for the new release gate coverage.
+
 ## 1.2.283 - 2026-06-15
 
 ### Added

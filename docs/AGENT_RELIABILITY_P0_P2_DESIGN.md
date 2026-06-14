@@ -2054,7 +2054,7 @@ python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_sm
 | upgrade conflict / command log missing / release status | 已补 `operation_upgrade_conflict_command_log_missing_answer`、`operation_upgrade_release_tag_not_enough_answer`、`operation_upgrade_release_published_answer`、`operation_upgrade_release_failed_answer`、`operation_upgrade_release_outcome_conflict_answer` golden fixture；`command_log_missing` 会归入 `artifact_missing`；只有 `release_tag` 时会产生 `release_publication_status_missing`，并由 coverage 转成不可补 `upgrade_release_publication_status_missing`；`release_status` 与 `outcome_status` / `operation_status` 矛盾会归入不可补 `upgrade_status_conflict`；`operation_timeline` diagnostic scope 已暴露 operation/outcome/receipt status，Answer verifier 可校验状态值但仍拦截无 caveat 的确定性成功/失败结论 | 继续从线上补真实 release success / failure 样本 | 不能宣称升级或 release 成功；必须说明冲突、缺日志或缺发布证据的影响 |
 | scope expansion 误判 | 已补 `action_safety_read_followup_same_scope_allowed`、`action_safety_read_scope_expansion_asks`、`action_safety_read_sql_account_scope_expansion_asks`、`action_safety_read_sql_symbol_scope_expansion_asks`、`action_safety_read_sql_period_scope_expansion_asks`、`action_safety_cross_account_write_denied` golden fixture；ActionSafety 会从 SQL-only payload 提取账户、标的、月份 scope 线索 | 继续从线上补更多误判样本 | 同 scope read follow-up 允许；未请求写入或跨账户/跨标的/跨月份写入拒绝，read 场景越界要求 ask |
 | answer source/freshness | Answer verifier 已覆盖金额、quote、diagnostic root cause、analysis quote gap 上游根因外推、unresolved diagnostics 下的确定性状态结论；已补旧 runtime 快照、stale quote、old operation timeline、runtime freshness gap、partial confidence root-cause final answer 断言；quote freshness diagnostic 会在缺省摘要里保留 `quote_status` 和 as-of/spot_time；route fixture 已覆盖 quote stale rewrite | 继续沉淀更多线上 freshness 样本 | 最终回答必须披露 as-of / stale 影响 |
-| 发布 gate | 已补 release checklist 对应命令和失败回退说明 | 每次 release 前按 6.21 执行并记录证据 | release 前能一眼判断是否可发 |
+| 发布 gate | 已补 release checklist 对应命令和失败回退说明；`release_test_plan` 已能在 Agent reliability、evidence、trace、eval 或 tool contract 文件变更时自动纳入 P2 gate | 每次 release 前按 6.21 执行并记录证据 | release 前能一眼判断是否可发 |
 
 不补：
 
@@ -2132,11 +2132,17 @@ python3 scripts/release_check.py
 |---|---|---|---|
 | fixture 格式 | `jq -c . tests/fixtures/assistant_agent_eval.jsonl` | 33 条 JSONL 都能逐行解析 | 停止发布，先修 fixture；不要删除失败样本 |
 | trace route fixture | `jq -c . tests/fixtures/assistant_trace_route_samples.jsonl` + `python3 -m pytest tests/test_assistant_evidence_session.py::test_format_assistant_trace_route_samples_from_fixture` | ask/preview/rewrite/fallback/denied/release/read-scope-ask/runtime-conflict/runtime-scheduler-skip/quote-stale/upgrade-stale 都能解释 route 且不泄露内部细节 | 停止发布，先修 compact renderer 或脱敏 fixture |
-| agent eval | `python3 -m pytest tests/test_assistant_agent_eval.py` | stale/conflict/release_tag/scope 等 fixture 全部通过 | 回到 evidence / coverage / verifier 修根因，不加固定文案 |
+| agent eval | `python3 -m pytest tests/test_assistant_agent_eval.py` | stale/conflict/release_tag/scope 等 fixture 全部通过，且 P2 agent-eval gap group 覆盖断言通过 | 回到 evidence / coverage / verifier 修根因，不加固定文案 |
 | verifier / runtime / analysis | `python3 -m pytest tests/test_assistant_evidence_session.py tests/test_assistant_runtime.py tests/test_analysis_tools.py` | diagnostics、follow-up、rewrite/fallback、analysis view 回归全部通过 | 保留失败 trace，缩小到对应模块修复 |
 | agent contract | `python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py` | public tool contract 和 smoke 全部通过 | 不发布；先同步 tool metadata / output contract |
 | release metadata | `python3 scripts/release_check.py --tag v<VERSION>` | `VERSION`、`CHANGELOG.md`、tag 名称一致 | 修版本元数据；不要手动绕过 VERSION workflow |
 | diff hygiene | `git diff --check` | 无 whitespace / conflict marker 问题 | 修当前 diff；不要把格式噪声混入 release |
+
+`scripts/release_test_plan.py --mode standard --base origin/main` 会根据当前变更生成
+read-only 发布测试计划。涉及 `src/application/assistant/**`、`src/application/agent_tools/**`、
+`assistant_agent_eval.jsonl`、`assistant_trace_route_samples.jsonl` 或本文档时，计划必须包含
+fixture guard、agent eval / evidence session / runtime / analysis / plugin contract 的 P2 gate；
+不要只依赖泛化的 dependency graph 检查。
 
 可发布判定：
 
