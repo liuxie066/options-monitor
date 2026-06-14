@@ -139,6 +139,8 @@ def test_analysis_catalog_exposes_p2_semantic_views() -> None:
     assert data["views"]["candidate_filter_diagnostics"]["row_grain"] == "run_id + account + symbol + option_type + rule"
     assert data["views"]["close_advice_snapshot"]["row_grain"] == "account + position_id + advice_run_id"
     assert data["views"]["runtime_tick_status"]["row_grain"] == "market + account + latest_run"
+    assert "notification_status" in data["views"]["runtime_tick_status"]["fields"]
+    assert "notification_status" in data["views"]["runtime_tick_status"]["recommended_filters"]
     assert data["views"]["quote_freshness"]["row_grain"] == "symbol + market + source"
     assert data["views"]["upgrade_operation_status"]["row_grain"] == "command_id + operation_id"
     assert "release_status" in data["views"]["upgrade_operation_status"]["fields"]
@@ -382,6 +384,44 @@ def test_analysis_query_runtime_tick_status_uses_runtime_read_surface(monkeypatc
             "accounts": ["lx"],
             "summary": "runtime status rows were observed",
             "answer_boundary": "observed_runtime_status_only",
+        }
+    ]
+    assert meta["requested_views"] == ["runtime_tick_status"]
+    assert meta["materialized_views"] == ["runtime_tick_status"]
+
+
+def test_analysis_query_runtime_tick_status_surfaces_notification_conflict(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_runtime_status_tool(*_args, **_kwargs):
+        return {
+            "config": {"config_key": "us", "accounts": ["lx"]},
+            "summary": {
+                "latest_status": "success",
+                "latest_run_path": "output_runs/run-1",
+                "warning_count": 0,
+                "warning_codes": [],
+            },
+            "freshness": {"status": "fresh", "age_seconds": 12},
+            "notification_diagnosis": {"status": "failed", "reason": "delivery returned an error"},
+            "accounts": {"lx": {"notification": {"exists": True}}},
+        }, [], {}
+
+    monkeypatch.setattr(analysis_module, "_call_runtime_status_tool", fake_runtime_status_tool)
+
+    data, warnings, meta = ANALYSIS_QUERY_TOOL.call(
+        _AnalysisQueryContext(),
+        {"sql": "select account, latest_status, notification_status from runtime_tick_status", "limit": 10},
+    )
+
+    assert warnings == []
+    assert data["rows"] == [{"account": "lx", "latest_status": "success", "notification_status": "failed"}]
+    assert data["evidence"]["diagnostics"] == [
+        {
+            "view": "runtime_tick_status",
+            "status": "conflicting_evidence",
+            "severity": "warning",
+            "accounts": ["lx"],
+            "summary": "runtime diagnostic evidence is conflicting: latest_status=success, notification_status=failed",
+            "answer_boundary": "conflicting_runtime_evidence_only",
         }
     ]
     assert meta["requested_views"] == ["runtime_tick_status"]
@@ -694,6 +734,52 @@ def test_analysis_query_quote_freshness_derives_from_assigned_stock_quotes(monke
             "quote_statuses": ["fresh"],
             "summary": "quote freshness rows were observed",
             "answer_boundary": "quote_dependent_calculations_only",
+        }
+    ]
+    assert meta["requested_views"] == ["quote_freshness"]
+    assert meta["materialized_views"] == ["quote_freshness"]
+
+
+def test_analysis_query_quote_freshness_gap_summary_includes_as_of(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_monthly_tool(*_args, **_kwargs):
+        return {
+            "assignment_lifecycle_rows": [
+                {
+                    "account": "sy",
+                    "symbol": "FUTU",
+                    "quote_source": "assigned_stock",
+                    "quote_status": "stale",
+                    "spot": 97.54,
+                    "spot_time": "2026-06-14T21:30:00+08:00",
+                }
+            ]
+        }, [], {}
+
+    monkeypatch.setattr(analysis_module, "monthly_income_report_tool", fake_monthly_tool)
+
+    data, warnings, meta = ANALYSIS_QUERY_TOOL.call(
+        _AnalysisQueryContext(),
+        {"sql": "select symbol, quote_status, spot_time from quote_freshness", "limit": 10},
+    )
+
+    assert warnings == []
+    assert data["rows"] == [
+        {"symbol": "FUTU", "quote_status": "stale", "spot_time": "2026-06-14T21:30:00+08:00"}
+    ]
+    assert data["evidence"]["diagnostics"] == [
+        {
+            "view": "quote_freshness",
+            "status": "observed_quote_freshness_gap",
+            "severity": "warning",
+            "accounts": [],
+            "symbols": ["FUTU"],
+            "quote_statuses": ["stale"],
+            "summary": (
+                "quote freshness rows indicate stale or missing quote data: "
+                "quote_status=stale; as_of=2026-06-14T21:30:00+08:00"
+            ),
+            "answer_boundary": "quote_dependent_calculations_only",
+            "as_of_values": ["2026-06-14T21:30:00+08:00"],
         }
     ]
     assert meta["requested_views"] == ["quote_freshness"]
