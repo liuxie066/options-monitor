@@ -28,6 +28,19 @@ from src.application.tool_execution import execute_tool as run_tool
 
 
 TRACE_ROUTE_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "assistant_trace_route_samples.jsonl"
+REQUIRED_TRACE_ROUTE_SAMPLE_IDS = {
+    "trace_ask_missing_account",
+    "trace_preview_manual_trade",
+    "trace_rewrite_upgrade_conflict",
+    "trace_fallback_bad_answer",
+    "trace_denied_cross_account_write",
+    "trace_pass_release_workflow_published",
+    "trace_ask_read_scope_expansion",
+    "trace_rewrite_runtime_notification_conflict",
+    "trace_rewrite_runtime_scheduler_skip",
+    "trace_rewrite_quote_stale_freshness",
+    "trace_rewrite_upgrade_stale_timeline",
+}
 
 
 def _load_trace_route_cases() -> list[dict[str, Any]]:
@@ -2489,6 +2502,8 @@ def test_format_assistant_trace_shows_key_routes() -> None:
 def test_format_assistant_trace_route_samples_from_fixture() -> None:
     cases = _load_trace_route_cases()
     assert len(cases) >= 5
+    ids = {str(case.get("id") or "") for case in cases}
+    assert sorted(REQUIRED_TRACE_ROUTE_SAMPLE_IDS - ids) == []
     for case in cases:
         trace = dict(case["trace"])
         identity = trace.get("identity") if isinstance(trace.get("identity"), dict) else {}

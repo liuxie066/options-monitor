@@ -122,6 +122,28 @@ TEST_RULES: tuple[TestRule, ...] = (
         ),
     ),
     TestRule(
+        name="agent_reliability",
+        patterns=(
+            "docs/AGENT_RELIABILITY_P0_P2_DESIGN.md",
+            "src/application/assistant/**",
+            "src/application/agent_tools/**",
+            "tests/fixtures/assistant_agent_eval.jsonl",
+            "tests/fixtures/assistant_trace_route_samples.jsonl",
+            "tests/test_assistant_agent_eval.py",
+            "tests/test_assistant_evidence_session.py",
+            "tests/test_assistant_runtime.py",
+            "tests/test_analysis_tools.py",
+            "tests/test_agent_plugin_contract.py",
+            "tests/test_agent_plugin_smoke.py",
+        ),
+        reason="Agent reliability, evidence, trace, eval, or tool contract files changed",
+        commands=(
+            "python3 -m pytest tests/test_assistant_agent_eval.py::test_assistant_agent_eval_fixture_covers_p2_agent_eval_gap_groups tests/test_assistant_evidence_session.py::test_format_assistant_trace_route_samples_from_fixture",
+            "python3 -m pytest tests/test_assistant_evidence_session.py tests/test_assistant_agent_eval.py tests/test_assistant_runtime.py tests/test_analysis_tools.py",
+            "python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py",
+        ),
+    ),
+    TestRule(
         name="dependency_graph",
         patterns=(
             "scripts/generate_dependency_graph.py",
