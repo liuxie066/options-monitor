@@ -7,6 +7,7 @@ from src.application.assistant.agent_loop import (
     AgentLoopPlanFn,
     AgentLoopSynthesizeFn,
     INTERNAL_TOOL_PLAN_NAME,
+    TOOL_CHECK_SCHEMA_VERSION,
     ToolExecutor,
     execute_tool_plan,
 )
@@ -22,7 +23,12 @@ from src.application.assistant.commands import spec_by_intent
 from src.application.assistant.contracts import AssistantRequest, PerceptionResult
 from src.application.assistant.audit import InboundAuditStore
 from src.application.assistant.router import ExecuteToolFn, handle_assistant_request
+from src.application.assistant.session import (
+    build_operation_readback_agent_session_snapshot,
+    build_preview_agent_session_snapshot,
+)
 from src.application.assistant.session_store import AgentSessionStore
+from src.application.assistant.verifier_hooks import hook_results_from_tool_check
 from src.application.tool_execution import execute_tool
 
 _COMMAND_SPECS_BY_INTENT = spec_by_intent()
@@ -242,6 +248,8 @@ def _merge_agent_loop_preview_receipt(llm_trace: dict[str, Any], response: dict[
     }
     if permission_request.get("target_summary"):
         receipt["target_summary"] = str(permission_request.get("target_summary") or "")
+    postcheck = _preview_receipt_postcheck(response=response, permission_request=permission_request, receipt=receipt)
+    receipt_hooks = hook_results_from_tool_check(postcheck)
 
     merged: dict[str, Any] = dict(llm_trace or {})
     loop_raw = merged.get("agent_loop")
@@ -258,14 +266,73 @@ def _merge_agent_loop_preview_receipt(llm_trace: dict[str, Any], response: dict[
         if isinstance(step, dict) and not attached:
             if step.get("intent_name") == selected_intent or step.get("tool_name") == selected_intent:
                 step["preview_receipt"] = receipt
+                step["postcheck"] = postcheck
+                step["hook_results"] = _append_hook_results(step.get("hook_results"), receipt_hooks)
                 attached = True
         updated_steps.append(step)
     if not attached and len(updated_steps) == 1 and isinstance(updated_steps[0], dict):
         updated_steps[0]["preview_receipt"] = receipt
+        updated_steps[0]["postcheck"] = postcheck
+        updated_steps[0]["hook_results"] = _append_hook_results(updated_steps[0].get("hook_results"), receipt_hooks)
     if updated_steps:
         loop["steps"] = updated_steps
     merged["agent_loop"] = loop
     return merged
+
+
+def _preview_receipt_postcheck(
+    *,
+    response: dict[str, Any],
+    permission_request: dict[str, Any],
+    receipt: dict[str, Any],
+) -> dict[str, Any]:
+    operation_id = str(receipt.get("operation_id") or "").strip()
+    permission_schema = str(receipt.get("permission_request_schema") or "").strip()
+    operation_type = str(receipt.get("operation_type") or "").strip()
+    handler_tool = str(receipt.get("handler_tool") or "").strip()
+    confirm_required = bool(receipt.get("confirm_required"))
+    apply_allowed = bool(receipt.get("apply_allowed"))
+    response_ok = bool(response.get("ok", False))
+    checks = [
+        {
+            "name": "result_status",
+            "status": "pass" if response_ok else "fail",
+            "code": "ok" if response_ok else "response_failed",
+        },
+        {
+            "name": "receipt",
+            "status": "pass" if operation_id and operation_type and handler_tool else "fail",
+            "code": "complete" if operation_id and operation_type and handler_tool else "missing_receipt_identity",
+        },
+        {
+            "name": "permission_request",
+            "status": "pass" if permission_schema == "om-agent-permission-request-v1" else "fail",
+            "code": permission_schema or "missing_permission_request_schema",
+        },
+        {
+            "name": "confirmation_guard",
+            "status": "pass" if confirm_required and not apply_allowed else "fail",
+            "code": "preview_requires_confirmation" if confirm_required and not apply_allowed else "unsafe_preview_receipt",
+        },
+    ]
+    status = "pass" if all(item["status"] == "pass" for item in checks) else "fail"
+    return {
+        "schema_version": TOOL_CHECK_SCHEMA_VERSION,
+        "stage": "post_tool",
+        "status": status,
+        "checks": checks,
+        "tool_name": handler_tool or str(response.get("tool_name") or ""),
+        "receipt_source": str(receipt.get("receipt_source") or ""),
+        "operation_id_present": bool(operation_id),
+        "operation_type": operation_type,
+        "permission_request_keys": sorted(str(key) for key in permission_request.keys()),
+    }
+
+
+def _append_hook_results(existing: Any, hooks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out = [dict(item) for item in existing or [] if isinstance(item, dict)]
+    out.extend(dict(item) for item in hooks if isinstance(item, dict))
+    return out
 
 
 def _update_audit_response(*, store: InboundAuditStore, response: dict[str, Any]) -> None:
@@ -284,8 +351,8 @@ def _persist_agent_session(*, store: InboundAuditStore, request: AssistantReques
     if isinstance(meta, dict) and bool(meta.get("idempotent_replay")):
         return
     data = response.get("data") if isinstance(response.get("data"), dict) else {}
-    command_id = data.get("command_id")
-    session = _agent_session_payload_from_response(data)
+    command_id = _agent_session_command_id(data)
+    session = _agent_session_payload_from_response(request=request, response=response)
     if not session:
         return
     try:
@@ -301,12 +368,90 @@ def _persist_agent_session(*, store: InboundAuditStore, request: AssistantReques
             meta["agent_session_store_warning"] = f"{type(exc).__name__}: {exc}"
 
 
-def _agent_session_payload_from_response(data: dict[str, Any]) -> dict[str, Any] | None:
+def _agent_session_command_id(data: dict[str, Any]) -> Any:
+    status = str(data.get("status") or "").strip().lower()
+    if status in {"previewed", "applied", "cancelled", "canceled", "failed", "expired"} and data.get("operation_id"):
+        return data.get("operation_id")
+    return data.get("command_id") or data.get("operation_id")
+
+
+def _agent_session_payload_from_response(*, request: AssistantRequest, response: dict[str, Any]) -> dict[str, Any] | None:
+    data = response.get("data") if isinstance(response.get("data"), dict) else {}
     action = data.get("action") if isinstance(data.get("action"), dict) else {}
     result = action.get("result") if isinstance(action.get("result"), dict) else {}
     result_data = result.get("data") if isinstance(result.get("data"), dict) else {}
     session = result_data.get("agent_session") if isinstance(result_data.get("agent_session"), dict) else None
-    return dict(session) if isinstance(session, dict) else None
+    if isinstance(session, dict):
+        return dict(session)
+    operation_postcheck = _operation_readback_postcheck(response=response)
+    if operation_postcheck:
+        operation_session = build_operation_readback_agent_session_snapshot(
+            request=request,
+            command_id=str(data.get("operation_id") or data.get("command_id") or "").strip() or None,
+            response=response,
+            postcheck=operation_postcheck,
+            hook_results=hook_results_from_tool_check(operation_postcheck),
+        )
+        if operation_session is not None:
+            return operation_session.public_payload()
+    meta = response.get("meta") if isinstance(response.get("meta"), dict) else {}
+    assistant = meta.get("assistant") if isinstance(meta.get("assistant"), dict) else {}
+    llm = assistant.get("llm") if isinstance(assistant.get("llm"), dict) else {}
+    agent_loop = llm.get("agent_loop") if isinstance(llm.get("agent_loop"), dict) else {}
+    preview_session = build_preview_agent_session_snapshot(
+        request=request,
+        command_id=str(data.get("operation_id") or data.get("command_id") or "").strip() or None,
+        question=str(request.text or ""),
+        agent_loop=agent_loop,
+        response=response,
+    )
+    return preview_session.public_payload() if preview_session is not None else None
+
+
+def _operation_readback_postcheck(*, response: dict[str, Any]) -> dict[str, Any] | None:
+    data = response.get("data") if isinstance(response.get("data"), dict) else {}
+    status = str(data.get("status") or "").strip().lower()
+    final_statuses = {"applied", "cancelled", "canceled", "failed", "expired"}
+    if status not in final_statuses:
+        return None
+    operation_id = str(data.get("operation_id") or data.get("resolved_operation_id") or "").strip()
+    operation_type = str(data.get("operation_type") or "").strip()
+    response_ok = bool(response.get("ok", False))
+    result = data.get("result") if isinstance(data.get("result"), dict) else {}
+    result_status = str(result.get("status") or status).strip().lower()
+    checks = [
+        {
+            "name": "result_status",
+            "status": "pass" if response_ok else "fail",
+            "code": "ok" if response_ok else "response_failed",
+        },
+        {
+            "name": "operation_readback",
+            "status": "pass" if operation_id and status in final_statuses else "fail",
+            "code": status if operation_id else "missing_operation_id",
+        },
+        {
+            "name": "operation_identity",
+            "status": "pass" if operation_id and operation_type else "fail",
+            "code": "complete" if operation_id and operation_type else "missing_operation_identity",
+        },
+        {
+            "name": "final_status",
+            "status": "pass" if result_status in final_statuses else "fail",
+            "code": result_status or "missing_result_status",
+        },
+    ]
+    return {
+        "schema_version": TOOL_CHECK_SCHEMA_VERSION,
+        "stage": "post_tool",
+        "status": "pass" if all(item["status"] == "pass" for item in checks) else "fail",
+        "checks": checks,
+        "tool_name": str(response.get("tool_name") or ""),
+        "operation_id_present": bool(operation_id),
+        "operation_type": operation_type,
+        "operation_status": status,
+        "result_status": result_status,
+    }
 
 
 def _with_assistant_meta(
