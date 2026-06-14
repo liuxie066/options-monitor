@@ -1049,7 +1049,7 @@ def _upgrade_warning_impact(warning: str) -> str:
 
 def _upgrade_status_conflict_reasons(rows: list[dict[str, Any]]) -> list[str]:
     reasons: set[str] = set()
-    success_statuses = {"applied", "success", "succeeded", "completed", "ok", "observed", "delivered", "sent"}
+    success_statuses = {"applied", "success", "succeeded", "completed", "ok", "observed", "delivered", "sent", "published"}
     failure_statuses = {"failed", "failure", "error", "cancelled", "canceled", "rejected"}
     terminal_statuses = success_statuses | failure_statuses
     for row in rows:
@@ -1059,6 +1059,7 @@ def _upgrade_status_conflict_reasons(rows: list[dict[str, Any]]) -> list[str]:
             "operation_status": str(row.get("operation_status") or "").strip().lower(),
             "outcome_status": str(row.get("outcome_status") or "").strip().lower(),
             "receipt_status": str(row.get("receipt_status") or "").strip().lower(),
+            "release_status": str(row.get("release_status") or "").strip().lower(),
         }
         present = {key: value for key, value in statuses.items() if value}
         if not present:
