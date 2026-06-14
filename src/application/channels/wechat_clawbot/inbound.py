@@ -36,6 +36,7 @@ from src.application.channels.wechat_clawbot.message import (
     message_user_id,
 )
 from src.application.channels.wechat_clawbot.state import DEFAULT_WECHAT_CLAWBOT_LABEL, resolve_wechat_clawbot_state_dir
+from src.application.channels.wechat_clawbot.reply import reply_wechat_clawbot_text
 from src.application.channels.wechat_clawbot.state_store import WechatClawbotStateStore
 from src.infrastructure.io_utils import utc_now
 
@@ -185,6 +186,9 @@ def check_wechat_clawbot_serve_settings(settings: WechatClawbotServeSettings) ->
 def handle_wechat_clawbot_message(
     payload: dict[str, Any],
     *,
+    base: Path | None = None,
+    label: str = DEFAULT_WECHAT_CLAWBOT_LABEL,
+    state_dir: str | None = None,
     config_key: str | None = None,
     config_path: str | None = None,
     audit_db: str | None = None,
@@ -206,6 +210,9 @@ def handle_wechat_clawbot_message(
     try:
         request = wechat_clawbot_message_to_assistant_request(
             payload,
+            base=base,
+            label=label,
+            state_dir=state_dir,
             config_key=config_key,
             config_path=config_path,
             audit_db=audit_db,
@@ -250,6 +257,9 @@ def handle_wechat_clawbot_message(
 def wechat_clawbot_message_to_assistant_request(
     payload: dict[str, Any],
     *,
+    base: Path | None = None,
+    label: str = DEFAULT_WECHAT_CLAWBOT_LABEL,
+    state_dir: str | None = None,
     config_key: str | None = None,
     config_path: str | None = None,
     audit_db: str | None = None,
@@ -262,6 +272,20 @@ def wechat_clawbot_message_to_assistant_request(
     if not text:
         raise AgentToolError(code="INPUT_ERROR", message="failed to extract WeChat ClawBot text message")
     chat_key = message_chat_key(payload)
+    context_token = message_context_token(payload)
+    group_id = message_group_id(payload) or None
+    base_path = (base or Path.cwd()).expanduser()
+    resolved_label = str(label or DEFAULT_WECHAT_CLAWBOT_LABEL)
+    store = _state_store(base=base_path, label=resolved_label, state_dir=state_dir)
+    reply_context = {
+        "provider": WECHAT_CLAWBOT_NOTIFICATION_PROVIDER,
+        "base": str(base_path),
+        "label": resolved_label,
+        "state_dir": str(store.state_dir),
+        "to_user_id": sender_id,
+        "context_token": context_token,
+        "group_id": group_id,
+    }
     return AssistantRequest(
         text=text,
         sender_id=sender_id,
@@ -272,6 +296,7 @@ def wechat_clawbot_message_to_assistant_request(
         config_path=config_path,
         audit_db=audit_db,
         assistant_config_path=assistant_config_path,
+        reply_context={key: value for key, value in reply_context.items() if value},
     )
 
 
@@ -312,6 +337,9 @@ def poll_wechat_clawbot_once(
 
     for message in messages:
         inbound_kwargs: dict[str, Any] = {
+            "base": base,
+            "label": label,
+            "state_dir": state_dir,
             "config_key": config_key,
             "config_path": config_path,
             "audit_db": audit_db,
