@@ -33,6 +33,7 @@ CONFIRM_INTENTS = frozenset({"upgrade_confirm", "upgrade_cancel"})
 UPGRADE_OPERATION_TYPES = PREVIEW_INTENTS
 UpgradeWorkerLauncher = Callable[[str, Path], dict[str, Any]]
 ReplyFn = Callable[..., dict[str, Any]]
+WechatReplyFn = Callable[..., dict[str, Any]]
 UPGRADE_WORKER_LAUNCHER: UpgradeWorkerLauncher | None = None
 _DEFAULT_RUNTIME_ROOT = Path("/var/lib/options-monitor")
 _FINAL_RECEIPT_RETRY_DELAYS_SECONDS = (1.0, 3.0)
@@ -115,7 +116,7 @@ def _confirm_operation(*, operation_id: str | None, request: AssistantRequest, s
         "operation_id": operation_id,
         "status": "confirmed",
         "task_status": "queued",
-        "receipt_target": _receipt_target_from_request(request),
+        "receipt_target": _receipt_target_from_request(request, include_reply_context=True),
     }
     confirmed = confirm_previewed_operation_or_raise(
         operation_id=operation_id,
@@ -220,7 +221,7 @@ def _attach_receipt_target(payload: dict[str, Any], request: AssistantRequest) -
     payload["receipt_target"] = _receipt_target_from_request(request)
 
 
-def _receipt_target_from_request(request: AssistantRequest) -> dict[str, Any]:
+def _receipt_target_from_request(request: AssistantRequest, *, include_reply_context: bool = False) -> dict[str, Any]:
     receipt = {
         "channel": request.channel,
         "sender_id": request.sender_id,
@@ -228,7 +229,10 @@ def _receipt_target_from_request(request: AssistantRequest) -> dict[str, Any]:
         "conversation_id": request.conversation_id,
         "config_key": request.config_key,
         "config_path": request.config_path,
+        "assistant_config_path": request.assistant_config_path,
     }
+    if include_reply_context and isinstance(request.reply_context, dict) and request.reply_context:
+        receipt["reply_context"] = dict(request.reply_context)
     return {key: value for key, value in receipt.items() if value}
 
 
@@ -290,6 +294,7 @@ def run_confirmed_upgrade_operation(
     audit_db: str | Path | None = None,
     send_receipt: bool = True,
     reply_fn: ReplyFn = reply_text_message,
+    wechat_reply_fn: WechatReplyFn | None = None,
 ) -> dict[str, Any]:
     store = InboundOperationStore(audit_db)
     operation = store.get(operation_id)
@@ -355,18 +360,18 @@ def run_confirmed_upgrade_operation(
         result = _apply_operation(payload)
     except AgentToolError as exc:
         failed = {"operation_id": operation_id, "status": "failed", "error": exc.code, "message": exc.message}
-        failed["final_receipt"] = _send_final_receipt(operation_id=operation_id, receipt_target=receipt_target, payload=payload, preview=preview, result=failed, status="failed", enabled=send_receipt, reply_fn=reply_fn)
+        failed["final_receipt"] = _send_final_receipt(operation_id=operation_id, receipt_target=receipt_target, payload=payload, preview=preview, result=failed, status="failed", enabled=send_receipt, reply_fn=reply_fn, wechat_reply_fn=wechat_reply_fn)
         store.mark_failed(operation_id, result=failed)
         raise
     except Exception as exc:
         failed = {"operation_id": operation_id, "status": "failed", "error": type(exc).__name__, "message": str(exc)}
-        failed["final_receipt"] = _send_final_receipt(operation_id=operation_id, receipt_target=receipt_target, payload=payload, preview=preview, result=failed, status="failed", enabled=send_receipt, reply_fn=reply_fn)
+        failed["final_receipt"] = _send_final_receipt(operation_id=operation_id, receipt_target=receipt_target, payload=payload, preview=preview, result=failed, status="failed", enabled=send_receipt, reply_fn=reply_fn, wechat_reply_fn=wechat_reply_fn)
         store.mark_failed(operation_id, result=failed)
         raise AgentToolError(code="INTERNAL_ERROR", message="upgrade operation failed in background worker", details=failed) from exc
 
     if not bool(result.get("ok", False)):
         failed = {"operation_id": operation_id, "status": "failed", "result": result}
-        failed["final_receipt"] = _send_final_receipt(operation_id=operation_id, receipt_target=receipt_target, payload=payload, preview=preview, result=result, status="failed", enabled=send_receipt, reply_fn=reply_fn)
+        failed["final_receipt"] = _send_final_receipt(operation_id=operation_id, receipt_target=receipt_target, payload=payload, preview=preview, result=result, status="failed", enabled=send_receipt, reply_fn=reply_fn, wechat_reply_fn=wechat_reply_fn)
         store.mark_failed(operation_id, result=failed)
         return build_response(
             tool_name="inbound.upgrade.worker",
@@ -384,7 +389,7 @@ def run_confirmed_upgrade_operation(
     applied = dict(result)
     applied["operation_id"] = operation_id
     applied["status"] = "applied"
-    applied["final_receipt"] = _send_final_receipt(operation_id=operation_id, receipt_target=receipt_target, payload=payload, preview=preview, result=applied, status="applied", enabled=send_receipt, reply_fn=reply_fn)
+    applied["final_receipt"] = _send_final_receipt(operation_id=operation_id, receipt_target=receipt_target, payload=payload, preview=preview, result=applied, status="applied", enabled=send_receipt, reply_fn=reply_fn, wechat_reply_fn=wechat_reply_fn)
     store.mark_applied(operation_id, result=applied)
     return build_response(
         tool_name="inbound.upgrade.worker",
@@ -501,19 +506,48 @@ def _send_final_receipt(
     status: str,
     enabled: bool,
     reply_fn: ReplyFn,
+    wechat_reply_fn: WechatReplyFn | None,
 ) -> dict[str, Any]:
-    message_id = str(receipt_target.get("message_id") or "").strip()
     if not enabled:
         return {"attempted": False, "ok": True, "reason": "disabled"}
+    channel = str(receipt_target.get("channel") or "").strip().lower()
+    text = render_upgrade_response(status=status, operation_id=operation_id, payload=payload, preview=preview, result=result)
+    if channel == "feishu":
+        return _send_feishu_final_receipt(
+            operation_id=operation_id,
+            receipt_target=receipt_target,
+            text=text,
+            reply_fn=reply_fn,
+        )
+    if channel in {"wechat", "wechat_clawbot"}:
+        return _send_wechat_final_receipt(
+            operation_id=operation_id,
+            receipt_target=receipt_target,
+            text=text,
+            wechat_reply_fn=wechat_reply_fn or _reply_wechat_clawbot_text,
+        )
+    return {
+        "attempted": False,
+        "ok": True,
+        "reason": "unsupported_channel",
+        "channel": channel or None,
+    }
+
+
+def _send_feishu_final_receipt(
+    *,
+    operation_id: str,
+    receipt_target: dict[str, Any],
+    text: str,
+    reply_fn: ReplyFn,
+) -> dict[str, Any]:
+    message_id = str(receipt_target.get("message_id") or "").strip()
     if not message_id:
         return {"attempted": False, "ok": True, "reason": "missing_message_id"}
-    if str(receipt_target.get("channel") or "").strip().lower() != "feishu":
-        return {"attempted": False, "ok": True, "reason": "not_feishu"}
     env = build_effective_env().values
     bot = resolve_feishu_bot_config(environ=env)
     if not (bot.app_id and bot.app_secret):
         return {"attempted": True, "ok": False, "reason": "missing_app_credentials"}
-    text = render_upgrade_response(status=status, operation_id=operation_id, payload=payload, preview=preview, result=result)
     failures: list[dict[str, Any]] = []
     max_attempts = len(_FINAL_RECEIPT_RETRY_DELAYS_SECONDS) + 1
     for attempt in range(1, max_attempts + 1):
@@ -549,6 +583,80 @@ def _send_final_receipt(
         "error": last_error,
         "errors": failures,
     }
+
+
+def _send_wechat_final_receipt(
+    *,
+    operation_id: str,
+    receipt_target: dict[str, Any],
+    text: str,
+    wechat_reply_fn: WechatReplyFn,
+) -> dict[str, Any]:
+    reply_context = receipt_target.get("reply_context")
+    context = reply_context if isinstance(reply_context, dict) else {}
+    to_user_id = str(context.get("to_user_id") or receipt_target.get("sender_id") or "").strip()
+    context_token = str(context.get("context_token") or "").strip()
+    if not to_user_id or not context_token:
+        return {
+            "attempted": False,
+            "ok": False,
+            "reason": "missing_reply_context",
+            "channel": "wechat",
+        }
+    base = Path(str(context.get("base") or repo_base())).expanduser()
+    label = str(context.get("label") or "default").strip() or "default"
+    state_dir = str(context.get("state_dir") or "").strip() or None
+    group_id = str(context.get("group_id") or "").strip() or None
+    failures: list[dict[str, Any]] = []
+    max_attempts = len(_FINAL_RECEIPT_RETRY_DELAYS_SECONDS) + 1
+    for attempt in range(1, max_attempts + 1):
+        try:
+            api_response = wechat_reply_fn(
+                base=base,
+                label=label,
+                state_dir=state_dir,
+                to_user_id=to_user_id,
+                context_token=context_token,
+                group_id=group_id,
+                text=text,
+                idempotency_key=f"{operation_id}:upgrade-final",
+            )
+        except Exception as exc:
+            failures.append({"attempt": attempt, "error": f"{type(exc).__name__}: {exc}"})
+            if attempt < max_attempts:
+                time.sleep(_FINAL_RECEIPT_RETRY_DELAYS_SECONDS[attempt - 1])
+            continue
+        ok = bool(api_response.get("ok", False))
+        reason = str(api_response.get("reason") or ("sent" if ok else "reply_failed"))
+        if ok:
+            return {
+                "attempted": True,
+                "ok": True,
+                "reason": reason,
+                "provider": "wechat_clawbot",
+                "attempts": attempt,
+                **({"previous_errors": failures} if failures else {}),
+                "api_response": api_response,
+            }
+        failures.append({"attempt": attempt, "error": reason, "api_response": api_response})
+        if attempt < max_attempts:
+            time.sleep(_FINAL_RECEIPT_RETRY_DELAYS_SECONDS[attempt - 1])
+    last_error = failures[-1]["error"] if failures else "unknown reply failure"
+    return {
+        "attempted": True,
+        "ok": False,
+        "reason": "reply_failed",
+        "provider": "wechat_clawbot",
+        "attempts": len(failures),
+        "error": last_error,
+        "errors": failures,
+    }
+
+
+def _reply_wechat_clawbot_text(**kwargs: Any) -> dict[str, Any]:
+    from src.application.channels.wechat_clawbot.reply import reply_wechat_clawbot_text
+
+    return reply_wechat_clawbot_text(**kwargs)
 
 
 def _upgrade_defaults(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -684,6 +792,7 @@ def render_upgrade_response(
     current = summary.get("current_version") or "-"
     target = summary.get("target_version") or "-"
     upgrade_status = summary.get("status") or "-"
+    channel_service = _upgrade_response_channel_service(payload=payload, result=result)
     if status == "no_upgrade_available" or upgrade_status == "no_upgrade_available":
         return "\n".join(
             [
@@ -739,7 +848,7 @@ def render_upgrade_response(
                 "已收到升级确认，开始执行升级。",
                 f"当前版本：{current}",
                 f"目标版本：{target}",
-                "升级期间飞书服务可能短暂重启，完成后会发送最终结果。",
+                f"升级期间{channel_service}可能短暂重启，完成后会发送最终结果。",
                 f"command_id: {operation_id}",
             ]
         )
@@ -782,6 +891,23 @@ def _upgrade_response_data(
     if target:
         _upgrade_response_setdefault(data, "target_version", target)
     return data
+
+
+def _upgrade_response_channel_service(*, payload: dict[str, Any], result: dict[str, Any] | None) -> str:
+    channel = ""
+    if isinstance(result, dict):
+        target = result.get("receipt_target")
+        if isinstance(target, dict):
+            channel = str(target.get("channel") or "").strip().lower()
+    if not channel and isinstance(payload, dict):
+        target = payload.get("receipt_target")
+        if isinstance(target, dict):
+            channel = str(target.get("channel") or "").strip().lower()
+    return {
+        "feishu": "飞书服务",
+        "wechat": "微信 ClawBot 服务",
+        "wechat_clawbot": "微信 ClawBot 服务",
+    }.get(channel, "通知服务")
 
 
 def _upgrade_response_merge(data: dict[str, Any], source: dict[str, Any]) -> None:

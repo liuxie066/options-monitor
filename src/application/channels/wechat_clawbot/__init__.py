@@ -16,6 +16,7 @@ from src.application.channels.wechat_clawbot.notification import (
     normalize_wechat_clawbot_send_output,
     send_wechat_clawbot_message_process,
 )
+from src.application.channels.wechat_clawbot.reply import reply_wechat_clawbot_text
 from src.application.channels.wechat_clawbot.state import (
     WechatClawbotBinding,
     WechatClawbotState,
@@ -35,6 +36,7 @@ __all__ = [
     "load_wechat_clawbot_state",
     "normalize_wechat_clawbot_send_output",
     "poll_wechat_clawbot_once",
+    "reply_wechat_clawbot_text",
     "send_wechat_clawbot_message_process",
     "start_wechat_clawbot_qrcode",
     "wechat_clawbot_message_to_assistant_request",

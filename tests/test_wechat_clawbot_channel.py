@@ -175,7 +175,72 @@ def test_wechat_clawbot_message_adapter_builds_assistant_request(tmp_path: Path)
         conversation_id="wechat:group_1:user_1",
         config_key="us",
         audit_db=str(tmp_path / "audit.sqlite3"),
+        reply_context={
+            "provider": "wechat_clawbot",
+            "base": str(Path.cwd()),
+            "label": "default",
+            "state_dir": str((Path.cwd() / "output_shared" / "state" / "channels" / "wechat_clawbot" / "default").resolve()),
+            "to_user_id": "user_1",
+            "context_token": "ctx_1",
+            "group_id": "group_1",
+        },
     )
+
+
+def test_reply_wechat_clawbot_text_reuses_idempotent_receipt(tmp_path: Path) -> None:
+    from src.application.channels.wechat_clawbot.inbound import reply_wechat_clawbot_text
+
+    state_dir = tmp_path / "wechat-state"
+    state_dir.mkdir()
+    (state_dir / "state.json").write_text(
+        json.dumps({"bot_token": "bot_1", "base_url": "https://example.invalid"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    sends: list[dict[str, object]] = []
+    client_inits: list[dict[str, object]] = []
+
+    class FakeClient:
+        def __init__(self, *, bot_token: str, base_url: str, timeout: int) -> None:
+            client_inits.append({"bot_token": bot_token, "base_url": base_url, "timeout": timeout})
+
+        def send_text_message(self, **kwargs):  # type: ignore[no-untyped-def]
+            sends.append(dict(kwargs))
+            return {"ret": 0, "data": {"message_id": "reply_1"}}
+
+    first = reply_wechat_clawbot_text(
+        base=tmp_path,
+        label="ops",
+        state_dir=str(state_dir),
+        to_user_id="user_1",
+        context_token="ctx_1",
+        group_id="group_1",
+        text="升级执行完成。",
+        idempotency_key="in_123:upgrade-final",
+        client_factory=FakeClient,
+    )
+    second = reply_wechat_clawbot_text(
+        base=tmp_path,
+        label="ops",
+        state_dir=str(state_dir),
+        to_user_id="user_1",
+        context_token="ctx_1",
+        group_id="group_1",
+        text="升级执行完成。",
+        idempotency_key="in_123:upgrade-final",
+        client_factory=FakeClient,
+    )
+
+    assert first["ok"] is True
+    assert first["reason"] == "sent"
+    assert first["client_id"] == sends[0]["client_id"]
+    assert second["ok"] is True
+    assert second["reason"] == "idempotent_replay"
+    assert second["replayed"] is True
+    assert second["message_id"] == "reply_1"
+    assert len(sends) == 1
+    assert len(client_inits) == 1
+    receipts = json.loads((state_dir / "outbound_receipts.json").read_text(encoding="utf-8"))
+    assert receipts["receipts"]["in_123:upgrade-final"]["message_id"] == "reply_1"
 
 
 def test_wechat_clawbot_poll_once_routes_inbound_and_replies(tmp_path: Path) -> None:

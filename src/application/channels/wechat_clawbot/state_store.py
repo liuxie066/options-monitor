@@ -16,6 +16,7 @@ class WechatClawbotStateStore:
         self.state_path = self.state_dir / "state.json"
         self.pending_login_path = self.state_dir / "pending_login.json"
         self.bindings_path = self.state_dir / "bindings.json"
+        self.outbound_receipts_path = self.state_dir / "outbound_receipts.json"
 
     def load_state(self, default: dict[str, Any] | None = None) -> dict[str, Any]:
         return self._read_json_object(self.state_path, default=default)
@@ -34,6 +35,12 @@ class WechatClawbotStateStore:
 
     def save_bindings(self, payload: dict[str, Any]) -> None:
         self._write_json_object(self.bindings_path, payload)
+
+    def load_outbound_receipts(self, default: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self._read_json_object(self.outbound_receipts_path, default=default)
+
+    def save_outbound_receipts(self, payload: dict[str, Any]) -> None:
+        self._write_json_object(self.outbound_receipts_path, payload)
 
     def write_qrcode_artifact(self, content: str | None) -> str | None:
         raw = str(content or "").strip()

@@ -316,6 +316,7 @@ def _normalize_request(request: AssistantRequest) -> AssistantRequest:
         config_path=str(request.config_path).strip() if request.config_path is not None and str(request.config_path).strip() else None,
         audit_db=str(request.audit_db).strip() if request.audit_db is not None and str(request.audit_db).strip() else None,
         assistant_config_path=str(request.assistant_config_path).strip() if request.assistant_config_path is not None and str(request.assistant_config_path).strip() else None,
+        reply_context=dict(request.reply_context) if isinstance(request.reply_context, dict) else None,
     )
 
 
