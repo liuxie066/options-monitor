@@ -154,6 +154,8 @@ def _answer_keys(*, intent_families: list[str], text: str) -> tuple[list[str], l
         )
     if "upgrade_status" in intent_families:
         required.extend(["command_status", "current_version", "target_version", "source_and_policy"])
+        if any(token in compact for token in ("发布", "release", "deploy")):
+            required.append("release_status")
     if not required:
         required.extend(["summary", "source_and_policy"])
     return _unique(required), _unique(optional)

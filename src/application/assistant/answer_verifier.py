@@ -256,7 +256,7 @@ def verify_response_shape(
         if "assigned_stock_pnl" in families and any(str(gap.get("kind") or "") == "recoverable_missing_quote" for gap in coverage_gaps):
             enforced_missing_keys.update({"spot_freshness", "unrealized_pnl", "lifecycle_pnl"})
         if "upgrade_status" in families:
-            enforced_missing_keys.update({"command_status", "current_version", "target_version"})
+            enforced_missing_keys.update({"command_status", "current_version", "target_version", "release_status"})
         for key in required:
             if key not in enforced_missing_keys or key not in coverage_missing:
                 continue
@@ -356,6 +356,8 @@ def _shape_key_satisfied(compact: str, *, key: str, families: set[str]) -> bool:
         return any(token in compact for token in ("当前版本", "当前", "currentversion", "查不到当前版本"))
     if key == "target_version":
         return any(token in compact for token in ("目标版本", "目标", "targetversion", "查不到目标版本"))
+    if key == "release_status":
+        return any(token in compact for token in ("release_status", "发布状态", "发布成功", "发布失败", "已发布", "未发布", "不能证明", "无法证明"))
     if "assigned_stock_pnl" in families and key in {"unrealized_pnl", "lifecycle_pnl"}:
         return "无法计算" in compact or "不能计算" in compact
     return True
@@ -377,6 +379,7 @@ def _shape_missing_key_acknowledged(compact: str, *, key: str, gaps: list[dict[s
         "command_status": ("状态", "command", "执行"),
         "current_version": ("当前版本", "当前", "currentversion", "current_version"),
         "target_version": ("目标版本", "目标", "targetversion", "target_version"),
+        "release_status": ("release_status", "发布状态", "发布", "release", "githubrelease"),
     }.get(key, (key,))
     if any(token in compact for token in key_tokens):
         return True

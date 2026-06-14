@@ -3354,7 +3354,8 @@ def _task_contract_fallback_should_handle(*, guard: dict[str, Any], task_contrac
     if "upgrade_status" in families:
         return any(
             str(item.get("type") or "") == "answer_shape_missing_required_key"
-            and str(item.get("required_answer_key") or "") in {"command_status", "current_version", "target_version", "source_and_policy"}
+            and str(item.get("required_answer_key") or "")
+            in {"command_status", "current_version", "target_version", "release_status", "source_and_policy"}
             for item in relevant
         )
     return False
@@ -3404,6 +3405,8 @@ def _coverage_missing_fallback(*, plan: PlannerPlan, evidence_bundle: Any | None
             lines.append("- 缺少最终回执证据：无法证明升级完成后的成功/失败回执已经送达。")
         elif kind == "upgrade_command_status_missing":
             lines.append("- 缺少命令状态：无法确认升级命令当前进度。")
+        elif kind == "upgrade_release_publication_status_missing":
+            lines.append("- 缺少 release 发布状态：只有 release tag，无法证明 GitHub Release 已发布或发布失败。")
         elif kind == "upgrade_status_conflict":
             lines.append("- 升级状态证据冲突：不能给出单一成功或失败结论。")
     if missing:
@@ -3549,6 +3552,7 @@ def _required_answer_label(key: str) -> str:
         "command_status": "命令状态",
         "current_version": "当前版本",
         "target_version": "目标版本",
+        "release_status": "release 发布状态",
     }.get(str(key), str(key))
 
 

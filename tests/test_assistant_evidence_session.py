@@ -341,6 +341,161 @@ def test_answer_verifier_rejects_release_success_when_publication_evidence_missi
     assert ok.violations == ()
 
 
+def test_task_contract_requires_release_status_for_release_publication_question() -> None:
+    contract = build_task_contract(
+        question="v1.2.273 远端 release 发布成功了吗？",
+        plan={"goal": "检查远端 release 发布状态", "steps": []},
+        request_context={"config_key": "us"},
+        today=date(2026, 6, 15),
+    )
+
+    assert contract.intent_families == ("upgrade_status",)
+    assert "release_status" in contract.required_answer
+
+
+def test_coverage_marks_release_publication_status_missing_unrecoverable() -> None:
+    plan = PlannerPlan(
+        goal="检查远端 release 发布状态",
+        response_mode="synthesis",
+        steps=(
+            PlannerPlanStep(
+                id="step_1",
+                tool_name="analysis_query",
+                arguments={
+                    "sql": (
+                        "select command_id, operation_status, current_version, target_version, release_tag, "
+                        "receipt_status from upgrade_operation_status where release_tag = 'v1.2.273'"
+                    )
+                },
+                purpose="读取升级操作中的 release tag 和回执状态",
+            ),
+        ),
+    )
+    contract = build_task_contract(
+        question="v1.2.273 远端 release 发布成功了吗？",
+        plan=plan.public_payload(),
+        request_context={"config_key": "us"},
+        today=date(2026, 6, 15),
+    )
+    bundle = build_evidence_bundle(
+        question=contract.question,
+        plan=plan.public_payload(),
+        observations=[
+            {
+                "index": 1,
+                "tool_name": "analysis_query",
+                "payload": plan.steps[0].arguments,
+                "ok": True,
+                "error": None,
+                "output_contract": {
+                    "schema_version": "analysis_query.output.v2",
+                    "canonical_renderer": "analysis_result",
+                    "source_label": "OM read-only analysis workspace",
+                    "guard_profile": "analysis_result",
+                    "primary_rows": "rows",
+                    "row_count_field": "row_count",
+                    "fact_fields": [],
+                },
+                "data": {
+                    "rows": [
+                        {
+                            "command_id": "in_release_check",
+                            "operation_status": "applied",
+                            "current_version": "1.2.272",
+                            "target_version": "1.2.273",
+                            "release_tag": "v1.2.273",
+                            "receipt_status": "observed",
+                        }
+                    ],
+                    "row_count": 1,
+                    "views_used": ["upgrade_operation_status"],
+                    "evidence": {"coverage": {"views": ["upgrade_operation_status"]}},
+                },
+            }
+        ],
+    )
+
+    coverage = verify_coverage(task_contract=contract, evidence_bundle=bundle).public_payload()
+    assert coverage["status"] == "unrecoverable_gap"
+    assert coverage["next_action"] == "answer_with_missing_data"
+    assert coverage["missing"] == ["release_status"]
+    gaps = {item["kind"]: item for item in coverage["gaps"]}
+    assert set(gaps) == {"upgrade_release_publication_status_missing"}
+    assert gaps["upgrade_release_publication_status_missing"]["required_answer_key"] == "release_status"
+    assert gaps["upgrade_release_publication_status_missing"]["recoverable"] is False
+    assert gaps["upgrade_release_publication_status_missing"]["recoverable_by"] == "release_workflow_status"
+    assert "suggested_tool" not in gaps["upgrade_release_publication_status_missing"]
+
+
+def test_coverage_accepts_release_publication_status_evidence() -> None:
+    plan = PlannerPlan(
+        goal="检查远端 release 发布状态",
+        response_mode="synthesis",
+        steps=(
+            PlannerPlanStep(
+                id="step_1",
+                tool_name="analysis_query",
+                arguments={
+                    "sql": (
+                        "select current_version, target_version, operation_status, release_tag, release_status, "
+                        "release_published_at, github_release_url from upgrade_operation_status where release_tag = 'v1.2.273'"
+                    )
+                },
+                purpose="读取远端 release 发布证据",
+            ),
+        ),
+    )
+    contract = build_task_contract(
+        question="v1.2.273 远端 release 发布成功了吗？",
+        plan=plan.public_payload(),
+        request_context={"config_key": "us"},
+        today=date(2026, 6, 15),
+    )
+    bundle = build_evidence_bundle(
+        question=contract.question,
+        plan=plan.public_payload(),
+        observations=[
+            {
+                "index": 1,
+                "tool_name": "analysis_query",
+                "payload": plan.steps[0].arguments,
+                "ok": True,
+                "error": None,
+                "output_contract": {
+                    "schema_version": "analysis_query.output.v2",
+                    "canonical_renderer": "analysis_result",
+                    "source_label": "OM read-only analysis workspace",
+                    "guard_profile": "analysis_result",
+                    "primary_rows": "rows",
+                    "row_count_field": "row_count",
+                    "fact_fields": [],
+                },
+                "data": {
+                    "rows": [
+                        {
+                            "operation_status": "applied",
+                            "current_version": "1.2.272",
+                            "target_version": "1.2.273",
+                            "release_tag": "v1.2.273",
+                            "release_status": "published",
+                            "release_published_at": "2026-06-14T19:01:30Z",
+                            "github_release_url": "https://github.example/releases/tag/v1.2.273",
+                        }
+                    ],
+                    "row_count": 1,
+                    "views_used": ["upgrade_operation_status"],
+                    "evidence": {"coverage": {"views": ["upgrade_operation_status"]}},
+                },
+            }
+        ],
+    )
+
+    coverage = verify_coverage(task_contract=contract, evidence_bundle=bundle).public_payload()
+    assert coverage["status"] == "complete"
+    assert coverage["missing"] == []
+    assert coverage["gaps"] == []
+
+
 def test_answer_verifier_allows_release_success_when_publication_evidence_present() -> None:
     bundle = build_evidence_bundle(
         question="v1.2.273 远端 release 发布成功了吗？",

@@ -112,6 +112,11 @@ def _provided_answer_keys(
         diagnostics, "target_version"
     ):
         keys.add("target_version")
+    if (
+        any("release_status" in path or "release_published_at" in path or "github_release_url" in path for path in fact_paths)
+        or _diagnostics_have_release_status(diagnostics)
+    ):
+        keys.add("release_status")
     if any("command_status" in path or "operation_status" in path or "outcome_status" in path or "status" in path for path in fact_paths):
         keys.add("command_status")
     if _diagnostics_have_command_status(diagnostics):
@@ -327,6 +332,16 @@ def _upgrade_status_gaps(
                 recoverable=False,
             )
         )
+    if "release_publication_status_missing" in missing_kinds:
+        gaps.append(
+            _upgrade_gap(
+                kind="upgrade_release_publication_status_missing",
+                required_answer_key="release_status",
+                impact="只有 release tag，无法证明 GitHub Release 已发布或发布失败",
+                recoverable=False,
+                recoverable_by="release_workflow_status",
+            )
+        )
     if any(str(item.get("status") or "").strip() == "conflicting_evidence" for item in diagnostics):
         gaps.append(
             _upgrade_gap(
@@ -339,18 +354,26 @@ def _upgrade_status_gaps(
     return gaps
 
 
-def _upgrade_gap(*, kind: str, required_answer_key: str, impact: str, recoverable: bool) -> dict[str, Any]:
+def _upgrade_gap(
+    *,
+    kind: str,
+    required_answer_key: str,
+    impact: str,
+    recoverable: bool,
+    recoverable_by: str = "operation_timeline",
+) -> dict[str, Any]:
     gap: dict[str, Any] = {
         "kind": kind,
         "required_answer_key": required_answer_key,
         "impact": impact,
         "recoverable": bool(recoverable),
-        "recoverable_by": "operation_timeline",
+        "recoverable_by": recoverable_by,
         "reason": "task contract requires upgrade status evidence, but upgrade operation evidence is incomplete",
     }
     if recoverable:
-        gap["suggested_tool"] = "operation_timeline"
-        gap["suggested_arguments"] = {"operation_types": ["upgrade_now"], "limit": 5}
+        if recoverable_by == "operation_timeline":
+            gap["suggested_tool"] = "operation_timeline"
+            gap["suggested_arguments"] = {"operation_types": ["upgrade_now"], "limit": 5}
     return gap
 
 
@@ -379,6 +402,19 @@ def _diagnostics_have_command_status(diagnostics: list[dict[str, Any]]) -> bool:
             continue
         scope = diagnostic.get("scope") if isinstance(diagnostic.get("scope"), dict) else {}
         if scope.get("statuses") or str(diagnostic.get("status") or "").startswith("observed_"):
+            return True
+    return False
+
+
+def _diagnostics_have_release_status(diagnostics: list[dict[str, Any]]) -> bool:
+    for diagnostic in diagnostics:
+        if str(diagnostic.get("domain") or "") != "upgrade":
+            continue
+        if diagnostic.get("release_statuses"):
+            return True
+        scope = diagnostic.get("scope") if isinstance(diagnostic.get("scope"), dict) else {}
+        statuses = scope.get("release_statuses")
+        if statuses:
             return True
     return False
 
