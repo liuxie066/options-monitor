@@ -580,6 +580,91 @@ def test_answer_verifier_allows_release_failure_when_failure_evidence_present() 
     assert ok.violations == ()
 
 
+def test_release_status_conflict_with_outcome_is_unrecoverable() -> None:
+    plan = PlannerPlan(
+        goal="检查远端 release 发布状态冲突",
+        response_mode="synthesis",
+        steps=(
+            PlannerPlanStep(
+                id="step_1",
+                tool_name="analysis_query",
+                arguments={
+                    "sql": (
+                        "select current_version, target_version, release_tag, release_status, outcome_status "
+                        "from upgrade_operation_status where release_tag = 'v1.2.277'"
+                    )
+                },
+                purpose="读取远端 release 与升级结果状态",
+            ),
+        ),
+    )
+    contract = build_task_contract(
+        question="v1.2.277 远端 release 发布成功了吗？",
+        plan=plan.public_payload(),
+        request_context={"config_key": "us"},
+        today=date(2026, 6, 15),
+    )
+    bundle = build_evidence_bundle(
+        question=contract.question,
+        plan=plan.public_payload(),
+        observations=[
+            {
+                "index": 1,
+                "tool_name": "analysis_query",
+                "payload": plan.steps[0].arguments,
+                "ok": True,
+                "error": None,
+                "output_contract": {
+                    "schema_version": "analysis_query.output.v2",
+                    "canonical_renderer": "analysis_result",
+                    "source_label": "OM read-only analysis workspace",
+                    "guard_profile": "analysis_result",
+                    "primary_rows": "rows",
+                    "row_count_field": "row_count",
+                    "fact_fields": [],
+                },
+                "data": {
+                    "rows": [
+                        {
+                            "current_version": "1.2.276",
+                            "target_version": "1.2.277",
+                            "release_tag": "v1.2.277",
+                            "release_status": "published",
+                            "release_published_at": "2026-06-14T20:33:30Z",
+                            "outcome_status": "failed",
+                        }
+                    ],
+                    "row_count": 1,
+                    "views_used": ["upgrade_operation_status"],
+                    "evidence": {"coverage": {"views": ["upgrade_operation_status"]}},
+                },
+            }
+        ],
+    )
+
+    diagnostic = bundle.public_payload()["diagnostics"][0]
+    assert diagnostic["status"] == "conflicting_evidence"
+    assert diagnostic["confidence"] == "conflict"
+    assert diagnostic["answer_boundary"] == "conflicting_upgrade_operation_evidence_only"
+    assert "outcome_status=failed" in diagnostic["observed_reason"]
+    assert "release_status=published" in diagnostic["observed_reason"]
+
+    coverage = verify_coverage(task_contract=contract, evidence_bundle=bundle).public_payload()
+    assert coverage["status"] == "unrecoverable_gap"
+    assert coverage["next_action"] == "answer_with_missing_data"
+    gaps = {item["kind"]: item for item in coverage["gaps"]}
+    assert gaps["upgrade_status_conflict"]["recoverable"] is False
+
+    bad = verify_response_against_evidence("v1.2.277 远端 release 已发布成功。", evidence_bundle=bundle)
+    assert any(item["type"] == "unsupported_diagnostic_status_claim" for item in bad.violations)
+
+    ok = verify_response_against_evidence(
+        "不能确认 v1.2.277 远端 release 发布成功：release_status=published 但 outcome_status=failed，状态证据存在冲突。",
+        evidence_bundle=bundle,
+    )
+    assert ok.violations == ()
+
+
 def test_evidence_bundle_extracts_upgrade_missing_version_diagnostics() -> None:
     bundle = build_evidence_bundle(
         question="升级为什么版本是空的",
