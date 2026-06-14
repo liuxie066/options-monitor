@@ -250,6 +250,8 @@ RUNTIME_TICK_STATUS_FIELDS: tuple[str, ...] = (
     "latest_status",
     "freshness_status",
     "freshness_age_seconds",
+    "notification_status",
+    "notification_reason",
     "notification_exists",
     "warning_count",
     "warning_codes",
@@ -798,7 +800,7 @@ VIEW_SPECS: dict[str, dict[str, Any]] = _build_view_specs({
         "source_tools": ("runtime_status",),
         "semantic_source": "runtime_status and scheduler artifacts",
         "freshness": "runtime_snapshot",
-        "recommended_filters": ("market", "account", "freshness_status", "latest_status"),
+        "recommended_filters": ("market", "account", "freshness_status", "latest_status", "notification_status"),
         "safe_join_keys": ("account",),
     },
     "quote_freshness": {
@@ -1998,6 +2000,9 @@ def _runtime_tick_status_rows_from_data(data: dict[str, Any]) -> list[dict[str, 
         accounts = ["all"]
     summary = data.get("summary") if isinstance(data.get("summary"), dict) else {}
     freshness = data.get("freshness") if isinstance(data.get("freshness"), dict) else {}
+    notification_diagnosis = (
+        data.get("notification_diagnosis") if isinstance(data.get("notification_diagnosis"), dict) else {}
+    )
     account_status = data.get("accounts") if isinstance(data.get("accounts"), dict) else {}
     latest_run_id = _run_id_from_runtime_summary(summary)
     market = str(config.get("config_key") or "").strip().upper()
@@ -2013,6 +2018,8 @@ def _runtime_tick_status_rows_from_data(data: dict[str, Any]) -> list[dict[str, 
                 "latest_status": summary.get("latest_status"),
                 "freshness_status": freshness.get("status") or summary.get("freshness_status"),
                 "freshness_age_seconds": freshness.get("age_seconds"),
+                "notification_status": notification_diagnosis.get("status"),
+                "notification_reason": notification_diagnosis.get("reason"),
                 "notification_exists": bool(notification.get("exists")) if notification else None,
                 "warning_count": summary.get("warning_count"),
                 "warning_codes": summary.get("warning_codes") or [],
@@ -2543,7 +2550,11 @@ def _close_advice_diagnostic_records(rows: list[dict[str, Any]]) -> list[dict[st
 
 
 def _runtime_diagnostic_records(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    statuses = {str(row.get("latest_status") or "").strip().lower() for row in rows if isinstance(row, dict)}
+    statuses = (
+        _row_status_values(rows, "diagnostic_status")
+        | _row_status_values(rows, "latest_status")
+        | _row_status_values(rows, "status")
+    )
     freshness = {str(row.get("freshness_status") or "").strip().lower() for row in rows if isinstance(row, dict)}
     warning_codes = {
         str(code or "").strip().lower()
@@ -2551,10 +2562,15 @@ def _runtime_diagnostic_records(rows: list[dict[str, Any]]) -> list[dict[str, An
         if isinstance(row, dict)
         for code in _jsonish_list(row.get("warning_codes"))
     }
+    notification_statuses = _row_status_values(rows, "notification_status")
     notification_values = {row.get("notification_exists") for row in rows if isinstance(row, dict)}
+    conflict_reasons = _runtime_status_conflict_reasons(rows)
     status = "observed_runtime_status"
     severity = "info"
-    if statuses & {"failed", "error", "failed_run", "exec_failed"}:
+    if "conflicting_evidence" in statuses or conflict_reasons:
+        status = "conflicting_evidence"
+        severity = "warning"
+    elif statuses & {"failed", "error", "failed_run", "exec_failed"}:
         status = "observed_run_failure"
         severity = "warning"
     elif statuses & {"skip", "skipped", "locked", "outside_window"}:
@@ -2562,20 +2578,34 @@ def _runtime_diagnostic_records(rows: list[dict[str, Any]]) -> list[dict[str, An
         severity = "warning"
     elif warning_codes & {"no_candidates", "empty_candidates", "candidate_empty"}:
         status = "observed_no_candidates"
-    elif False in notification_values:
+    elif False in notification_values or notification_statuses & {
+        "missing",
+        "not_sent",
+        "not_observed",
+        "failed",
+        "error",
+        "send_failed_or_unconfirmed",
+    }:
         status = "observed_notification_missing"
         severity = "warning"
     elif freshness & {"missing", "stale", "unknown", "failed", "error"}:
         status = "observed_runtime_freshness_gap"
         severity = "warning"
+    summary = (
+        "runtime diagnostic evidence is conflicting: " + "; ".join(conflict_reasons)
+        if status == "conflicting_evidence" and conflict_reasons
+        else _runtime_diagnostic_summary(status=status)
+    )
     return [
         {
             "view": "runtime_tick_status",
             "status": status,
             "severity": severity,
             "accounts": _sorted_unique_row_values(rows, "account"),
-            "summary": _runtime_diagnostic_summary(status=status),
-            "answer_boundary": "observed_runtime_status_only",
+            "summary": summary,
+            "answer_boundary": "conflicting_runtime_evidence_only"
+            if status == "conflicting_evidence"
+            else "observed_runtime_status_only",
         }
     ]
 
@@ -2583,18 +2613,20 @@ def _runtime_diagnostic_records(rows: list[dict[str, Any]]) -> list[dict[str, An
 def _quote_diagnostic_records(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     quote_statuses = {str(row.get("quote_status") or "").strip().lower() for row in rows if isinstance(row, dict)}
     bad = quote_statuses & {"missing", "missing_quote", "stale", "unknown", "failed", "error"}
-    return [
-        {
-            "view": "quote_freshness",
-            "status": "observed_quote_freshness_gap" if bad else "observed_quote_freshness",
-            "severity": "warning" if bad else "info",
-            "accounts": _sorted_unique_row_values(rows, "account"),
-            "symbols": _sorted_unique_row_values(rows, "symbol"),
-            "quote_statuses": sorted(quote_statuses),
-            "summary": _quote_diagnostic_summary(has_gap=bool(bad)),
-            "answer_boundary": "quote_dependent_calculations_only",
-        }
-    ]
+    as_of_values = _quote_as_of_values(rows)
+    record = {
+        "view": "quote_freshness",
+        "status": "observed_quote_freshness_gap" if bad else "observed_quote_freshness",
+        "severity": "warning" if bad else "info",
+        "accounts": _sorted_unique_row_values(rows, "account"),
+        "symbols": _sorted_unique_row_values(rows, "symbol"),
+        "quote_statuses": sorted(quote_statuses),
+        "summary": _quote_diagnostic_summary(quote_statuses=sorted(quote_statuses), as_of_values=as_of_values),
+        "answer_boundary": "quote_dependent_calculations_only",
+    }
+    if as_of_values:
+        record["as_of_values"] = as_of_values
+    return [record]
 
 
 def _upgrade_diagnostic_records(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2717,10 +2749,27 @@ def _runtime_diagnostic_summary(*, status: str) -> str:
     }.get(status, "runtime status rows were observed")
 
 
-def _quote_diagnostic_summary(*, has_gap: bool) -> str:
-    if has_gap:
-        return "quote freshness rows indicate stale or missing quote data"
+def _quote_diagnostic_summary(*, quote_statuses: list[str], as_of_values: list[Any]) -> str:
+    bad = set(quote_statuses) & {"missing", "missing_quote", "stale", "unknown", "failed", "error"}
+    if bad:
+        parts = ["quote_status=" + ",".join(str(item) for item in quote_statuses if item)]
+        if as_of_values:
+            parts.append("as_of=" + ",".join(str(item) for item in as_of_values[:3]))
+        return "quote freshness rows indicate stale or missing quote data: " + "; ".join(parts)
     return "quote freshness rows were observed"
+
+
+def _quote_as_of_values(rows: list[dict[str, Any]]) -> list[Any]:
+    values: list[Any] = []
+    seen: set[str] = set()
+    for field in ("as_of", "spot_time"):
+        for value in _sorted_unique_row_values(rows, field):
+            text = str(value or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            values.append(value)
+    return values
 
 
 def _upgrade_diagnostic_summary(
@@ -2756,6 +2805,58 @@ def _row_status_values(rows: list[dict[str, Any]], field: str) -> set[str]:
         for row in rows
         if isinstance(row, dict) and str(row.get(field) or "").strip()
     }
+
+
+def _runtime_status_conflict_reasons(rows: list[dict[str, Any]]) -> list[str]:
+    success_statuses = {
+        "success",
+        "succeeded",
+        "completed",
+        "complete",
+        "ok",
+        "observed",
+        "sent",
+        "delivered",
+    }
+    failure_statuses = {
+        "failed",
+        "failure",
+        "error",
+        "failed_run",
+        "exec_failed",
+        "send_failed",
+        "send_failed_or_unconfirmed",
+        "delivery_failed",
+    }
+    terminal_statuses = success_statuses | failure_statuses
+    fields = ("latest_status", "status", "run_status", "notification_status", "delivery_status")
+    grouped: dict[tuple[str, str, str], list[dict[str, str]]] = {}
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            continue
+        present = {
+            field: str(row.get(field) or "").strip().lower()
+            for field in fields
+            if str(row.get(field) or "").strip().lower() in terminal_statuses
+        }
+        if not present:
+            continue
+        key = (
+            str(row.get("market") or "").strip().lower(),
+            str(row.get("account") or "").strip().lower(),
+            str(row.get("latest_run_id") or row.get("run_id") or index).strip().lower(),
+        )
+        grouped.setdefault(key, []).append(present)
+
+    reasons: set[str] = set()
+    for group in grouped.values():
+        merged: dict[str, str] = {}
+        for item in group:
+            merged.update(item)
+        values = set(merged.values())
+        if values & success_statuses and values & failure_statuses:
+            reasons.add(", ".join(f"{field}={merged[field]}" for field in fields if field in merged))
+    return sorted(reasons)
 
 
 def _upgrade_status_conflict_reasons(rows: list[dict[str, Any]]) -> list[str]:

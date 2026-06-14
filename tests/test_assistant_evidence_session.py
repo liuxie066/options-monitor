@@ -1189,6 +1189,68 @@ def test_answer_verifier_rejects_runtime_notification_missing_success_claim() ->
     assert caveated.violations == ()
 
 
+def test_evidence_bundle_infers_runtime_notification_status_conflict_from_rows() -> None:
+    bundle = build_evidence_bundle(
+        question="今天 lx 推送成功了吗",
+        plan={"goal": "解释 runtime 通知送达冲突", "steps": []},
+        observations=[
+            {
+                "index": 1,
+                "tool_name": "analysis_query",
+                "payload": {
+                    "sql": (
+                        "select account, latest_status, notification_status "
+                        "from runtime_tick_status where account = 'lx'"
+                    )
+                },
+                "ok": True,
+                "error": None,
+                "output_contract": {
+                    "schema_version": "analysis_query.output.v2",
+                    "canonical_renderer": "analysis_result",
+                    "source_label": "OM read-only analysis workspace",
+                    "guard_profile": "analysis_result",
+                    "primary_rows": "rows",
+                    "row_count_field": "row_count",
+                    "fact_fields": ["rows[].account", "rows[].latest_status", "rows[].notification_status"],
+                },
+                "data": {
+                    "rows": [
+                        {
+                            "account": "lx",
+                            "latest_status": "success",
+                            "notification_status": "failed",
+                        }
+                    ],
+                    "row_count": 1,
+                    "views_used": ["runtime_tick_status"],
+                    "evidence": {"coverage": {"views": ["runtime_tick_status"], "accounts": ["lx"]}},
+                },
+            }
+        ],
+    )
+
+    diagnostic = bundle.public_payload()["diagnostics"][0]
+    assert diagnostic["domain"] == "runtime_tick"
+    assert diagnostic["status"] == "conflicting_evidence"
+    assert diagnostic["confidence"] == "conflict"
+    assert diagnostic["answer_boundary"] == "conflicting_runtime_evidence_only"
+    assert "latest_status=success" in diagnostic["observed_reason"]
+    assert "notification_status=failed" in diagnostic["observed_reason"]
+
+    bad = verify_response_against_evidence(
+        "今天 lx 推送成功。",
+        evidence_bundle=bundle,
+    )
+    assert any(item["type"] == "unsupported_diagnostic_status_claim" for item in bad.violations)
+
+    caveated = verify_response_against_evidence(
+        "不能确认今天 lx 推送成功：latest_status=success 但 notification_status=failed，运行和通知证据存在冲突。",
+        evidence_bundle=bundle,
+    )
+    assert caveated.violations == ()
+
+
 def test_answer_verifier_rejects_partial_confidence_root_cause() -> None:
     bundle = build_evidence_bundle(
         question="为什么 NVDA 没出现在候选里",
@@ -1429,6 +1491,73 @@ def test_answer_verifier_rejects_analysis_quote_gap_upstream_root_cause() -> Non
         evidence_bundle=bundle,
     )
     assert any(item["type"] == "unsupported_quote_upstream_root_cause_claim" for item in bad.violations)
+
+
+def test_evidence_bundle_infers_quote_freshness_gap_with_as_of_from_rows() -> None:
+    bundle = build_evidence_bundle(
+        question="FUTU 指派正股现在浮盈亏是多少？",
+        plan={"goal": "解释 FUTU stale quote 对当前浮盈亏的影响", "steps": []},
+        observations=[
+            {
+                "index": 1,
+                "tool_name": "analysis_query",
+                "payload": {"sql": "select symbol, quote_status, spot_time from quote_freshness where symbol = 'FUTU'"},
+                "ok": True,
+                "error": None,
+                "output_contract": {
+                    "schema_version": "analysis_query.output.v2",
+                    "canonical_renderer": "analysis_result",
+                    "source_label": "OM read-only analysis workspace",
+                    "guard_profile": "analysis_result",
+                    "primary_rows": "rows",
+                    "row_count_field": "row_count",
+                    "fact_fields": ["rows[].symbol", "rows[].quote_status", "rows[].spot_time"],
+                },
+                "data": {
+                    "rows": [
+                        {
+                            "symbol": "FUTU",
+                            "quote_status": "stale",
+                            "spot_time": "2026-06-14T21:30:00+08:00",
+                        }
+                    ],
+                    "row_count": 1,
+                    "views_used": ["quote_freshness"],
+                    "evidence": {
+                        "coverage": {"views": ["quote_freshness"], "symbols": ["FUTU"]},
+                        "freshness": [
+                            {
+                                "view": "quote_freshness",
+                                "symbol": "FUTU",
+                                "quote_status": "stale",
+                                "as_of": "2026-06-14T21:30:00+08:00",
+                            }
+                        ],
+                    },
+                },
+            }
+        ],
+    )
+
+    diagnostic = bundle.public_payload()["diagnostics"][0]
+    assert diagnostic["domain"] == "quote_freshness"
+    assert diagnostic["status"] == "observed_quote_freshness_gap"
+    assert diagnostic["confidence"] == "direct"
+    assert diagnostic["answer_boundary"] == "quote_dependent_calculations_only"
+    assert "quote_status=stale" in diagnostic["observed_reason"]
+    assert "as_of=2026-06-14T21:30:00+08:00" in diagnostic["observed_reason"]
+
+    bad = verify_response_against_evidence(
+        "FUTU 现在行情是最新的，可以确认当前浮盈亏。",
+        evidence_bundle=bundle,
+    )
+    assert any(item["type"] == "unsupported_analysis_freshness_claim" for item in bad.violations)
+
+    ok = verify_response_against_evidence(
+        "FUTU quote_status=stale，as_of=2026-06-14T21:30:00+08:00，不能确认当前浮盈亏。",
+        evidence_bundle=bundle,
+    )
+    assert ok.violations == ()
 
 
 def test_evidence_bundle_records_cross_tool_reconciliation_views() -> None:
