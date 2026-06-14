@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.270 - 2026-06-14
+
+### Changed
+- Added a Claude/OpenClaw supplement preference to address the operator as `棒棒的liuxie`.
+
 ## 1.2.269 - 2026-06-14
 
 ### Added
