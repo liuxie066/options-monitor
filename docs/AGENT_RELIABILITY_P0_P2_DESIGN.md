@@ -1553,14 +1553,14 @@ P2 按最小可交付版本收敛为五件事：
 
 | 能力 | 当前状态 | 已有事实 | 下一步 |
 |---|---|---|---|
-| Diagnostic evidence | M2 本地部分验收通过 | `EvidenceBundle` 已有 `diagnostics[]`、`diagnostic_count`、`diagnostic_domains`；已覆盖 analysis diagnostics、assigned-stock quote gap、upgrade operation/receipt/version/release publication gap；analysis rows 可归一出 candidate/runtime/quote/upgrade direct、missing、conflict/stale 缺口诊断；`upgrade_operation_status` 已接入真实 operation timeline read surface；`command_log_missing` / command audit 缺失会归入 `artifact_missing`；`release_tag` 不能证明 GitHub Release 已发布；`release_status` / `release_published_at` / `github_release_url` 可表达发布成功或失败证据 | 继续补更多 release status 线上样本 |
+| Diagnostic evidence | M2 本地部分验收通过 | `EvidenceBundle` 已有 `diagnostics[]`、`diagnostic_count`、`diagnostic_domains`；已覆盖 analysis diagnostics、assigned-stock quote gap、upgrade operation/receipt/version/release publication gap；analysis rows 可归一出 candidate/runtime/quote/upgrade direct、missing、conflict/stale 缺口诊断；`upgrade_operation_status` 已接入真实 operation timeline read surface；`command_log_missing` / command audit 缺失会归入 `artifact_missing`；`release_tag` 不能证明 GitHub Release 已发布；`release_status` / `release_published_at` / `github_release_url` 可表达发布成功或失败证据，且 `release_status` 与 `operation_status` / `outcome_status` 矛盾时归入 conflict | 继续补更多 release status 线上样本 |
 | Coverage verifier | M2.5 本地验收通过 | 已覆盖 account comparison、breakdown、assigned-stock missing quote、upgrade status missing version/receipt/release publication status；coverage result 已进入 session trace / hook trace；不可补 upgrade gap 不会进入 follow-up planner | 继续补更多线上 stale/conflict 样本 |
 | Root-cause verifier | 本地部分验收通过 | answer verifier 已能拦截无证据 root cause、quote upstream overclaim、analysis quote freshness gap 的上游根因外推，以及 unresolved diagnostics 下直接宣称成功/失败/完成的确定性状态结论；unresolved 判定已统一使用 status、missing_data、confidence、severity 和 answer_boundary，能拦截 partial/missing/conflict/stale/freshness gap 证据下的确定根因外推，同时保留 direct runtime skip 这类直接观测原因 | 继续从线上补更多业务域 stale/conflict/partial 样本 |
 | ActionPolicy | 已落地 P1 | read path 和 preview path 已有 policy decision，planner 不能直接 apply | 保持为权限权威，P2 不另建权限系统 |
 | ActionSafety | 已落地 M1 | 规则版 classifier 已检查 effect、scope、prompt injection chain；AgentLoop read tool 和 preview plan trace 已接入；同 scope read follow-up allow、跨账户 read ask、跨账户 write preview deny 已有 golden eval | 继续沉淀更多线上误判 golden case |
 | Hook pipeline | M3 本地验收通过 | `HookResult` 包装模型已接入 pre-tool、post-tool、coverage、answer trace；当前只做 trace，不接管 route；M3 聚焦测试和相关回归已通过 | 保持 route authority 在 AgentLoop，不继续扩大 hook pipeline |
 | Trace compact | M4 本地验收通过 | session snapshot 已能记录 task contract、coverage、evidence 摘要、diagnostics count/domains 和 hook code 摘要；`assistant_trace.response_text` 已按任务/工具/证据/缺口/校验/最终展示，并覆盖 ask、preview、rewrite、fallback、denied、release workflow pass、read scope ask route 断言和 redaction 断言；`assistant_trace_route_samples` 已沉淀 7 条脱敏 route fixture | 继续沉淀真实线上 route 样本 |
-| Golden eval | M4 本地验收通过 | `assistant_agent_eval` 已有 29 条 fixture，覆盖收益对比、指派正股、stale quote freshness、candidate why、runtime why、runtime conflict/stale、runtime notification missing、upgrade receipt missing version、upgrade conflict / command log missing、release tag not enough、release published/failed、old operation timeline、scope expansion、SQL-only scope expansion、prompt injection from tool output、write preview no apply；harness 已支持 final response、answer guard、diagnostic domain/status、action safety 和 preview no apply 断言 | 后续只追加线上回归样本，不为单一问题写专用模式 |
+| Golden eval | M4 本地验收通过 | `assistant_agent_eval` 已有 30 条 fixture，覆盖收益对比、指派正股、stale quote freshness、candidate why、runtime why、runtime conflict/stale、runtime notification missing、upgrade receipt missing version、upgrade conflict / command log missing、release tag not enough、release published/failed、release/outcome conflict、old operation timeline、scope expansion、SQL-only scope expansion、prompt injection from tool output、write preview no apply；harness 已支持 final response、answer guard、diagnostic domain/status、action safety 和 preview no apply 断言 | 后续只追加线上回归样本，不为单一问题写专用模式 |
 
 这个状态表的意义是控制开发顺序：
 
@@ -1742,7 +1742,7 @@ Golden eval 至少覆盖：
 
 本地落地状态：
 
-- `assistant_agent_eval` 已扩展为 29 条 fixture。
+- `assistant_agent_eval` 已扩展为 30 条 fixture。
 - `prompt_injection_from_tool_output_denied` 使用 action safety 模式，断言工具输出里的
   `忽略上文/确认写入/修改配置` 不能形成写入授权链路。
 - `write_preview_no_apply_manual_trade_open` 走真实 AgentLoop preview path，断言只生成
@@ -1865,10 +1865,10 @@ P2 必须分清“业务事实”和“过程解释”，否则 trace 容易污�
 | 包 | 状态 | 可合并前还缺 |
 |---|---|---|
 | M1 ActionSafety | 本地回归部分通过 | prompt injection chain、preview no apply、scope expansion 已有 golden 覆盖；同 scope read follow-up 允许，跨账户 read 要求澄清，跨账户 write preview 拒绝；SQL-only payload 里的账户、标的、月份越界会进入 ask |
-| M2 Diagnostic adapter | 本地部分验收通过 | candidate/runtime/quote row-derived diagnostics 已覆盖 direct/missing/conflict/stale；upgrade missing version 已从 fixture 扩展为真实 `upgrade_operation_status` view，并保留 partial/missing_data 语义；runtime conflict/stale、stale quote、old operation timeline、upgrade conflict / command log missing、release_tag-only publication gap、release published/failed 已进入 golden eval | 仍需更多线上 release status 样本 |
+| M2 Diagnostic adapter | 本地部分验收通过 | candidate/runtime/quote row-derived diagnostics 已覆盖 direct/missing/conflict/stale；upgrade missing version 已从 fixture 扩展为真实 `upgrade_operation_status` view，并保留 partial/missing_data 语义；runtime conflict/stale、stale quote、old operation timeline、upgrade conflict / command log missing、release_tag-only publication gap、release published/failed、release/outcome conflict 已进入 golden eval | 仍需更多线上 release status 样本 |
 | M2.5 Coverage/Upgrade | 本地验收通过 | `CoverageVerifier` 已把 upgrade diagnostics 转成 current/target version、receipt、command status、release publication status gap；已查 operation timeline 后仍缺版本/回执/release 发布证据会 `answer_with_missing_data`，不会触发 follow-up；未查 timeline 且有 operation id 时允许一次只读 follow-up |
 | M3 HookResult | 本地验收通过 | hook code 已进入 compact trace；后续只补真实样本，不扩大 hook pipeline |
-| M4 Trace/Eval | 本地验收通过 | compact trace renderer、redaction、ask/preview/rewrite/fallback/denied/release workflow pass/read scope ask route 断言已落地；`assistant_trace_route_samples` 已有 7 条脱敏 route fixture；`assistant_agent_eval` 已扩到 29 条，包含 stale quote、runtime conflict/stale、runtime notification missing、old operation timeline、upgrade conflict / command log missing、release tag not enough、release published/failed、scope expansion、SQL-only scope expansion、upgrade receipt missing version、prompt injection from tool output、write preview no apply | 可继续补真实线上 route 样本 |
+| M4 Trace/Eval | 本地验收通过 | compact trace renderer、redaction、ask/preview/rewrite/fallback/denied/release workflow pass/read scope ask route 断言已落地；`assistant_trace_route_samples` 已有 7 条脱敏 route fixture；`assistant_agent_eval` 已扩到 30 条，包含 stale quote、runtime conflict/stale、runtime notification missing、old operation timeline、upgrade conflict / command log missing、release tag not enough、release published/failed、release/outcome conflict、scope expansion、SQL-only scope expansion、upgrade receipt missing version、prompt injection from tool output、write preview no apply | 可继续补真实线上 route 样本 |
 
 M3 已完成本地验收，后续不要继续扩大 hook pipeline。M3 已证明三件事：
 
@@ -2045,7 +2045,7 @@ python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_sm
 |---|---|---|---|
 | 真实 session route 样本 | 已补 `assistant_trace_route_samples` 7 条脱敏 route fixture，覆盖 ask / preview / rewrite / fallback / deny / release workflow pass / read scope ask；compact trace 能解释 route 且不展示 SQL/path/session id/lot id/raw log | 继续从真实线上回执补充同格式样本 | trace 能解释 route，不泄露 SQL/path/internal id |
 | runtime stale / conflict | 已补 `runtime_why_conflict_stale_answer`、`runtime_notification_missing_not_success_answer` golden fixture；`runtime_tick_status` 已能归一 direct / missing / conflict；Answer verifier 已覆盖 runtime freshness gap / notification missing 不能被说成确定根因或确定送达成功，同时 direct scheduler skip 仍可作为直接观测原因 | 继续从线上补更多 runtime stale / notification audit 样本 | why 回答不能给单一确定原因 |
-| upgrade conflict / command log missing / release status | 已补 `operation_upgrade_conflict_command_log_missing_answer`、`operation_upgrade_release_tag_not_enough_answer`、`operation_upgrade_release_published_answer`、`operation_upgrade_release_failed_answer` golden fixture；`command_log_missing` 会归入 `artifact_missing`；只有 `release_tag` 时会产生 `release_publication_status_missing`，并由 coverage 转成不可补 `upgrade_release_publication_status_missing` | 继续从线上补真实 release success / failure 样本 | 不能宣称升级或 release 成功；必须说明冲突、缺日志或缺发布证据的影响 |
+| upgrade conflict / command log missing / release status | 已补 `operation_upgrade_conflict_command_log_missing_answer`、`operation_upgrade_release_tag_not_enough_answer`、`operation_upgrade_release_published_answer`、`operation_upgrade_release_failed_answer`、`operation_upgrade_release_outcome_conflict_answer` golden fixture；`command_log_missing` 会归入 `artifact_missing`；只有 `release_tag` 时会产生 `release_publication_status_missing`，并由 coverage 转成不可补 `upgrade_release_publication_status_missing`；`release_status` 与 `outcome_status` / `operation_status` 矛盾会归入不可补 `upgrade_status_conflict` | 继续从线上补真实 release success / failure 样本 | 不能宣称升级或 release 成功；必须说明冲突、缺日志或缺发布证据的影响 |
 | scope expansion 误判 | 已补 `action_safety_read_followup_same_scope_allowed`、`action_safety_read_scope_expansion_asks`、`action_safety_read_sql_account_scope_expansion_asks`、`action_safety_read_sql_symbol_scope_expansion_asks`、`action_safety_read_sql_period_scope_expansion_asks`、`action_safety_cross_account_write_denied` golden fixture；ActionSafety 会从 SQL-only payload 提取账户、标的、月份 scope 线索 | 继续从线上补更多误判样本 | 同 scope read follow-up 允许；未请求写入或跨账户/跨标的/跨月份写入拒绝，read 场景越界要求 ask |
 | answer source/freshness | Answer verifier 已覆盖金额、quote、diagnostic root cause、analysis quote gap 上游根因外推、unresolved diagnostics 下的确定性状态结论；已补旧 runtime 快照、stale quote、old operation timeline、runtime freshness gap、partial confidence root-cause final answer 断言 | 继续沉淀更多线上 freshness 样本 | 最终回答必须披露 as-of / stale 影响 |
 | 发布 gate | 已补 release checklist 对应命令和失败回退说明 | 每次 release 前按 6.21 执行并记录证据 | release 前能一眼判断是否可发 |
@@ -2124,7 +2124,7 @@ python3 scripts/release_check.py
 
 | Gate | 命令 | 通过证据 | 失败回退 |
 |---|---|---|---|
-| fixture 格式 | `jq -c . tests/fixtures/assistant_agent_eval.jsonl` | 29 条 JSONL 都能逐行解析 | 停止发布，先修 fixture；不要删除失败样本 |
+| fixture 格式 | `jq -c . tests/fixtures/assistant_agent_eval.jsonl` | 30 条 JSONL 都能逐行解析 | 停止发布，先修 fixture；不要删除失败样本 |
 | trace route fixture | `jq -c . tests/fixtures/assistant_trace_route_samples.jsonl` + `python3 -m pytest tests/test_assistant_evidence_session.py::test_format_assistant_trace_route_samples_from_fixture` | ask/preview/rewrite/fallback/denied/release/read-scope-ask 都能解释 route 且不泄露内部细节 | 停止发布，先修 compact renderer 或脱敏 fixture |
 | agent eval | `python3 -m pytest tests/test_assistant_agent_eval.py` | stale/conflict/release_tag/scope 等 fixture 全部通过 | 回到 evidence / coverage / verifier 修根因，不加固定文案 |
 | verifier / runtime / analysis | `python3 -m pytest tests/test_assistant_evidence_session.py tests/test_assistant_runtime.py tests/test_analysis_tools.py` | diagnostics、follow-up、rewrite/fallback、analysis view 回归全部通过 | 保留失败 trace，缩小到对应模块修复 |

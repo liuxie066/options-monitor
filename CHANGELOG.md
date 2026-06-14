@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.278 - 2026-06-15
+
+### Fixed
+- Fixed assistant upgrade/release evidence handling so a published release status that conflicts with a failed operation outcome is treated as conflicting evidence, not a confirmed successful release.
+- Added Agent reliability eval and evidence-session coverage for release/outcome status conflicts.
+
 ## 1.2.277 - 2026-06-15
 
 ### Fixed
