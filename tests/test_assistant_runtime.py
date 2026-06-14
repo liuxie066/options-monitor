@@ -716,6 +716,94 @@ def test_assistant_runtime_renders_assigned_stock_missing_quote_explicitly() -> 
     assert "提示：assigned stock quote refresh missing: FUTU" in text
 
 
+def test_assistant_runtime_renders_analysis_result_compact_warnings() -> None:
+    text = render_canonical_tool_result(
+        renderer_key="analysis_result",
+        data={
+            "fallback_text": (
+                "分析查询结果：1 行\n"
+                "| month | account | avg_rate |\n"
+                "| --- | --- | --- |\n"
+                "| 2026-06 | lx | 0.0123 |\n"
+                "数据来源：OM read-only analysis workspace"
+            ),
+            "preflight": {
+                "ok": True,
+                "warnings": [
+                    "avg(net_return_rate) is unsafe for return-rate fields; recompute as "
+                    "sum(money numerator) / sum(cash_secured_cny) when aggregating."
+                ],
+            },
+            "evidence": {
+                "coverage": {
+                    "views": ["account_monthly_performance"],
+                    "months": ["2026-06"],
+                    "accounts": ["lx"],
+                    "symbols": [],
+                },
+                "freshness": [{"view": "quote_freshness", "symbol": "FUTU", "freshness": "missing"}],
+                "aggregation_policy": [
+                    {
+                        "field": "net_return_rate",
+                        "function": "avg",
+                        "policy": "invalid_rate_aggregation",
+                        "status": "warning",
+                    }
+                ],
+            },
+        },
+        tool_result=build_response(
+            tool_name="analysis_query",
+            ok=True,
+            warnings=["close_advice_snapshot missing: 没有找到最近的平仓建议报告。"],
+        ),
+    )
+
+    assert "| 2026-06 | lx | 0.0123 |" in text
+    assert "提示：收益率聚合需复核，avg(net_return_rate) 不能直接代表组合收益率。" in text
+    assert "提示：数据新鲜度存在缺失/过期：FUTU missing。" in text
+    assert "提示：平仓建议快照缺失：没有找到最近的平仓建议报告。" in text
+    assert "覆盖范围：账户 lx；月份 2026-06；视图 account_monthly_performance。" in text
+    assert text.endswith("数据来源：OM read-only analysis workspace")
+
+
+def test_assistant_runtime_renders_analysis_result_diagnostic_warnings() -> None:
+    text = render_canonical_tool_result(
+        renderer_key="analysis_result",
+        data={
+            "fallback_text": (
+                "分析查询结果：1 行\n"
+                "| row_count |\n"
+                "| --- |\n"
+                "| 0 |\n"
+                "数据来源：OM read-only analysis workspace"
+            ),
+            "evidence": {
+                "coverage": {
+                    "views": ["candidate_filter_diagnostics"],
+                    "accounts": [],
+                    "months": [],
+                    "symbols": [],
+                },
+                "diagnostics": [
+                    {
+                        "view": "candidate_filter_diagnostics",
+                        "status": "diagnostic_missing",
+                        "severity": "warning",
+                        "summary": "candidate filter trace artifact is missing",
+                        "answer_boundary": "cannot infer diagnostic root cause",
+                    }
+                ],
+            },
+        },
+        tool_result=build_response(tool_name="analysis_query", ok=True),
+    )
+
+    assert "提示：候选诊断缺失，不能判断确定原因。" in text
+    assert "覆盖范围：视图 candidate_filter_diagnostics。" in text
+    assert text.endswith("数据来源：OM read-only analysis workspace")
+
+
 def test_assistant_runtime_does_not_overwrite_original_audit_on_duplicate_replay(tmp_path: Path) -> None:
     audit_db = tmp_path / "inbound.sqlite3"
 
@@ -3717,18 +3805,725 @@ def test_agent_loop_analysis_query_manifest_exposes_view_fields_and_template() -
     analysis_tool = next(item for item in manifest if item["name"] == "analysis_query")
     semantics = analysis_tool["semantics"]
 
-    income_view = semantics["analysis_views"]["monthly_income_return_summary"]
+    income_view = semantics["analysis_views"]["account_monthly_performance"]
     assert "net_income_cny" in income_view["fields"]
     assert "net_return_rate" in income_view["fields"]
     assert "net_cashflow" not in income_view["fields"]
+    assert income_view["row_grain"] == "month + account"
+    assert income_view["alias_of"] == "monthly_income_return_summary"
+    assert income_view["field_semantics"]["net_income_cny"]["aggregation"] == "sum"
+    assert income_view["field_semantics"]["net_income_cny"]["currency"] == "CNY"
+    assert income_view["field_semantics"]["net_return_rate"]["aggregation"] == "weighted_recompute"
+    assert "avg" in income_view["field_semantics"]["net_return_rate"]["do_not"]
+
+    legacy_view = semantics["analysis_views"]["monthly_income_return_summary"]
+    assert "net_income_cny" in legacy_view["fields"]
+
+    components_view = semantics["analysis_views"]["account_monthly_income_components"]
+    assert components_view["row_grain"] == "month + account + component"
+    assert "amount_cny" in components_view["fields"]
+
+    assigned_view = semantics["analysis_views"]["assigned_stock_position_pnl"]
+    assert assigned_view["row_grain"] == "account + symbol + stock_lot_id"
+    assert "assignment_lifecycle_pnl" in assigned_view["fields"]
+
+    exposure_view = semantics["analysis_views"]["open_option_exposure"]
+    assert exposure_view["row_grain"] == "account + symbol + option_type + side + strike + expiration"
+    assert "risk_model" in exposure_view["fields"]
+
+    strategy_view = semantics["analysis_views"]["strategy_config_by_symbol_account"]
+    assert strategy_view["row_grain"] == "symbol + account + strategy_family"
+
+    candidate_view = semantics["analysis_views"]["candidate_filter_diagnostics"]
+    assert candidate_view["row_grain"] == "run_id + account + symbol + option_type + rule"
+
+    close_view = semantics["analysis_views"]["close_advice_snapshot"]
+    assert close_view["row_grain"] == "account + position_id + advice_run_id"
+
+    runtime_view = semantics["analysis_views"]["runtime_tick_status"]
+    assert runtime_view["row_grain"] == "market + account + latest_run"
+
+    quote_view = semantics["analysis_views"]["quote_freshness"]
+    assert quote_view["row_grain"] == "symbol + market + source"
 
     template = semantics["query_templates"]["lx_sy_income_comparison"]
+    assert "account_monthly_performance" in template
     assert "net_income_cny" in template
     assert "net_return_rate" in template
     assert "net_cashflow" not in template
 
     notes = "\n".join(analysis_tool["planner_notes"])
     assert "Do not invent columns" in notes
+    assert "account_monthly_income_components" in notes
+    assert "assigned_stock_position_pnl" in notes
+    assert "open_option_exposure" in notes
+    assert "strategy_config_by_symbol_account" in notes
+    assert "candidate_filter_diagnostics" in notes
+    assert "runtime_tick_status" in notes
+
+
+def test_agent_loop_replans_analysis_query_for_breakdown_gap(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+    followup_contexts: list[dict[str, Any]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        sql = str(payload.get("sql") or "")
+        if "symbol_income_attribution" in sql:
+            return build_response(
+                tool_name=tool_name,
+                ok=True,
+                data={
+                    "columns": ["month", "account", "symbol", "component", "amount_gross"],
+                    "rows": [
+                        {
+                            "month": "2026-06",
+                            "account": "sy",
+                            "symbol": "FUTU",
+                            "component": "premium_income",
+                            "amount_gross": 425.0,
+                        }
+                    ],
+                    "row_count": 1,
+                    "evidence": {
+                        "coverage": {
+                            "views": ["symbol_income_attribution"],
+                            "months": ["2026-06"],
+                            "accounts": ["sy"],
+                            "symbols": ["FUTU"],
+                        }
+                    },
+                    "fallback_text": "分析查询结果：1 行\n| month | account | symbol | component | amount_gross |",
+                },
+            )
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "columns": ["month", "account", "net_income_cny"],
+                "rows": [
+                    {"month": "2026-06", "account": "lx", "net_income_cny": 2414.0},
+                    {"month": "2026-06", "account": "sy", "net_income_cny": 11138.0},
+                ],
+                "row_count": 2,
+                "evidence": {
+                    "coverage": {
+                        "views": ["account_monthly_performance"],
+                        "months": ["2026-06"],
+                        "accounts": ["lx", "sy"],
+                        "symbols": [],
+                    }
+                },
+                "fallback_text": "分析查询结果：2 行\n| month | account | net_income_cny |",
+            },
+        )
+
+    def _plan(
+        _text: str,
+        _settings: AssistantSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        followup = conversation_context.get("agent_loop_followup") if isinstance(conversation_context, dict) else None
+        if isinstance(followup, dict):
+            followup_contexts.append(followup)
+            return LlmPlannerResult(
+                plan=PlannerPlan(
+                    goal="分析 lx 和 sy 收益差异主要来自哪里",
+                    response_mode="synthesis",
+                    steps=(
+                        PlannerPlanStep(
+                            id="step_2",
+                            tool_name="analysis_query",
+                            arguments={
+                                "sql": (
+                                    "select month, account, symbol, component, amount_gross "
+                                    "from symbol_income_attribution where month = '2026-06'"
+                                ),
+                                "limit": 20,
+                            },
+                            purpose="补查标的级收益来源",
+                        ),
+                    ),
+                ),
+                trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
+            )
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="分析 lx 和 sy 收益差异主要来自哪里",
+                response_mode="synthesis",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="analysis_query",
+                        arguments={
+                            "sql": (
+                                "select month, account, net_income_cny "
+                                "from account_monthly_performance where account in ('lx','sy')"
+                            ),
+                            "limit": 20,
+                        },
+                        purpose="先对比账户级收益",
+                    ),
+                ),
+            ),
+            trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
+        )
+
+    def _synthesize(
+        _question: str,
+        _settings: AssistantSettings,
+        _plan: PlannerPlan,
+        _observations: list[dict[str, Any]],
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmSynthesisResult:
+        return LlmSynthesisResult(
+            response_text="2026-06 sy 更高，差异主要来自 FUTU 的 premium_income。",
+            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="分析 lx 和 sy 收益差异主要来自哪里",
+            sender_id="local",
+            message_id="msg_agent_analysis_query_breakdown_replan",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+        synthesize_response_fn=_synthesize,
+    )
+
+    assert out["ok"] is True
+    assert len(calls) == 2
+    assert "account_monthly_performance" in calls[0][1]["sql"]
+    assert "symbol_income_attribution" in calls[1][1]["sql"]
+    assert followup_contexts
+    assert followup_contexts[0]["evidence_gaps"][0]["kind"] == "analysis_breakdown_needed"
+    assert followup_contexts[0]["decision_contract"]["schema_version"] == "om-agent-loop-followup-decision-v1"
+    assert "call_tool" in followup_contexts[0]["decision_contract"]["allowed_decisions"]
+    assert "analysis_query" in followup_contexts[0]["decision_contract"]["allowed_tools"]
+    tool_plan_data = out["data"]["action"]["result"]["data"]
+    assert len(tool_plan_data["plan_revisions"]) == 2
+    assert tool_plan_data["evidence_gaps"] == []
+    assert tool_plan_data["followup_decisions"][0]["decision"] == "call_tool"
+    assert tool_plan_data["followup_decisions"][0]["status"] == "accepted"
+    assert tool_plan_data["followup_decisions"][0]["tool_name"] == "analysis_query"
+    assert "view:symbol_income_attribution" in tool_plan_data["followup_decisions"][0]["expected_evidence"]
+    session_decisions = tool_plan_data["agent_session"]["answer_trace"]["followup_decisions"]
+    assert session_decisions[0]["schema_version"] == "om-agent-loop-followup-decision-v1"
+    assert session_decisions[0]["status"] == "accepted"
+    assert "FUTU" in out["data"]["response_text"]
+
+
+def test_agent_loop_replans_analysis_query_for_missing_account_coverage(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+    followup_contexts: list[dict[str, Any]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        sql = str(payload.get("sql") or "")
+        if "account = 'sy'" in sql:
+            return build_response(
+                tool_name=tool_name,
+                ok=True,
+                data={
+                    "columns": ["month", "account", "net_income_cny"],
+                    "rows": [{"month": "2026-06", "account": "sy", "net_income_cny": 11138.0}],
+                    "row_count": 1,
+                    "evidence": {
+                        "coverage": {
+                            "views": ["account_monthly_performance"],
+                            "months": ["2026-06"],
+                            "accounts": ["sy"],
+                            "symbols": [],
+                        }
+                    },
+                    "fallback_text": "分析查询结果：1 行\n| month | account | net_income_cny |",
+                },
+            )
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "columns": ["month", "account", "net_income_cny"],
+                "rows": [{"month": "2026-06", "account": "lx", "net_income_cny": 2414.0}],
+                "row_count": 1,
+                "evidence": {
+                    "coverage": {
+                        "views": ["account_monthly_performance"],
+                        "months": ["2026-06"],
+                        "accounts": ["lx"],
+                        "symbols": [],
+                    }
+                },
+                "fallback_text": "分析查询结果：1 行\n| month | account | net_income_cny |",
+            },
+        )
+
+    def _plan(
+        _text: str,
+        _settings: AssistantSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        followup = conversation_context.get("agent_loop_followup") if isinstance(conversation_context, dict) else None
+        if isinstance(followup, dict):
+            followup_contexts.append(followup)
+            return LlmPlannerResult(
+                plan=PlannerPlan(
+                    goal="对比 lx 和 sy 的账户收益",
+                    response_mode="synthesis",
+                    steps=(
+                        PlannerPlanStep(
+                            id="step_2",
+                            tool_name="analysis_query",
+                            arguments={
+                                "sql": (
+                                    "select month, account, net_income_cny "
+                                    "from account_monthly_performance where account = 'sy'"
+                                ),
+                                "limit": 20,
+                            },
+                            purpose="补查 sy 账户收益覆盖",
+                        ),
+                    ),
+                ),
+                trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
+            )
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="对比 lx 和 sy 的账户收益",
+                response_mode="synthesis",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="analysis_query",
+                        arguments={
+                            "sql": (
+                                "select month, account, net_income_cny "
+                                "from account_monthly_performance where account = 'lx'"
+                            ),
+                            "limit": 20,
+                        },
+                        purpose="读取 lx 账户收益",
+                    ),
+                ),
+            ),
+            trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
+        )
+
+    def _synthesize(
+        _question: str,
+        _settings: AssistantSettings,
+        _plan: PlannerPlan,
+        _observations: list[dict[str, Any]],
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmSynthesisResult:
+        return LlmSynthesisResult(
+            response_text="2026-06 sy 高于 lx。",
+            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="对比 lx 和 sy 的账户收益",
+            sender_id="local",
+            message_id="msg_agent_analysis_query_missing_account_replan",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+        synthesize_response_fn=_synthesize,
+    )
+
+    assert out["ok"] is True
+    assert len(calls) == 2
+    assert "account = 'lx'" in calls[0][1]["sql"]
+    assert "account = 'sy'" in calls[1][1]["sql"]
+    assert followup_contexts[0]["evidence_gaps"][0]["kind"] == "analysis_missing_account_coverage"
+    assert followup_contexts[0]["evidence_gaps"][0]["missing_accounts"] == ["sy"]
+    tool_plan_data = out["data"]["action"]["result"]["data"]
+    assert tool_plan_data["evidence_gaps"] == []
+    assert tool_plan_data["followup_decisions"][0]["status"] == "accepted"
+    assert "account:sy" in tool_plan_data["followup_decisions"][0]["expected_evidence"]
+    assert "2026-06 sy 高于 lx" in out["data"]["response_text"]
+
+
+def test_agent_loop_rejects_duplicate_analysis_followup_query(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+    duplicate_sql = "select month, account, net_income_cny from account_monthly_performance"
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "columns": ["month", "account", "net_income_cny"],
+                "rows": [{"month": "2026-06", "account": "lx", "net_income_cny": 2414.0}],
+                "row_count": 1,
+                "evidence": {
+                    "coverage": {
+                        "views": ["account_monthly_performance"],
+                        "months": ["2026-06"],
+                        "accounts": ["lx"],
+                        "symbols": [],
+                    }
+                },
+                "fallback_text": "分析查询结果：1 行\n| month | account | net_income_cny |",
+            },
+        )
+
+    def _plan(
+        _text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="分析 lx 和 sy 收益差异主要来自哪里",
+                response_mode="synthesis",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="analysis_query",
+                        arguments={"sql": duplicate_sql, "limit": 20},
+                        purpose="重复查询账户级收益",
+                    ),
+                ),
+            ),
+            trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="分析 lx 和 sy 收益差异主要来自哪里",
+            sender_id="local",
+            message_id="msg_agent_analysis_query_duplicate_replan",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+    )
+
+    assert out["ok"] is True
+    assert len(calls) == 1
+    tool_plan_data = out["data"]["action"]["result"]["data"]
+    assert tool_plan_data["followup_decisions"][0]["status"] == "rejected"
+    assert tool_plan_data["followup_decisions"][0]["reason"] == "follow-up plan duplicates the previous plan"
+    assert tool_plan_data["evidence_gaps"][0]["kind"] == "analysis_missing_account_coverage"
+
+
+def test_agent_loop_repairs_analysis_query_unknown_column_preflight(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+    followup_contexts: list[dict[str, Any]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        sql = str(payload.get("sql") or "")
+        if "net_cashflow" in sql:
+            return build_response(
+                tool_name=tool_name,
+                ok=False,
+                error={
+                    "code": "INPUT_ERROR",
+                    "message": "analysis_query failed: unknown column net_cashflow",
+                    "hint": "Use analysis_catalog to inspect available fields.",
+                    "details": {
+                        "preflight": {
+                            "ok": False,
+                            "error_code": "UNKNOWN_COLUMN",
+                            "message": "column net_cashflow does not exist in referenced analysis views",
+                            "suggestions": ["net_income_cny", "net_return_rate"],
+                            "available_fields": {
+                                "account_monthly_performance": [
+                                    "month",
+                                    "account",
+                                    "net_income_cny",
+                                    "net_return_rate",
+                                ]
+                            },
+                        },
+                        "error_code": "UNKNOWN_COLUMN",
+                        "unknown_column": "net_cashflow",
+                        "referenced_views": ["account_monthly_performance"],
+                        "suggestions": ["net_income_cny", "net_return_rate"],
+                    },
+                },
+            )
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "columns": ["month", "account", "net_income_cny"],
+                "rows": [{"month": "2026-06", "account": "lx", "net_income_cny": 2414.0}],
+                "row_count": 1,
+                "evidence": {
+                    "coverage": {
+                        "views": ["account_monthly_performance"],
+                        "months": ["2026-06"],
+                        "accounts": ["lx"],
+                        "symbols": [],
+                    }
+                },
+                "fallback_text": "分析查询结果：1 行\n| month | account | net_income_cny |",
+            },
+        )
+
+    def _plan(
+        _text: str,
+        _settings: AssistantSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        followup = conversation_context.get("agent_loop_followup") if isinstance(conversation_context, dict) else None
+        if isinstance(followup, dict):
+            followup_contexts.append(followup)
+            return LlmPlannerResult(
+                plan=PlannerPlan(
+                    goal="查询 lx 六月收益",
+                    response_mode="synthesis",
+                    steps=(
+                        PlannerPlanStep(
+                            id="step_2",
+                            tool_name="analysis_query",
+                            arguments={
+                                "sql": (
+                                    "select month, account, net_income_cny "
+                                    "from account_monthly_performance where account = 'lx'"
+                                ),
+                                "limit": 20,
+                            },
+                            purpose="用 preflight 建议字段修复收益查询",
+                        ),
+                    ),
+                ),
+                trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
+            )
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="查询 lx 六月收益",
+                response_mode="synthesis",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="analysis_query",
+                        arguments={
+                            "sql": (
+                                "select month, account, net_cashflow "
+                                "from account_monthly_performance where account = 'lx'"
+                            ),
+                            "limit": 20,
+                        },
+                        purpose="查询 lx 收益",
+                    ),
+                ),
+            ),
+            trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
+        )
+
+    def _synthesize(
+        _question: str,
+        _settings: AssistantSettings,
+        _plan: PlannerPlan,
+        _observations: list[dict[str, Any]],
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmSynthesisResult:
+        return LlmSynthesisResult(
+            response_text="lx 2026-06 收益是 CNY 2,414。",
+            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="查询 lx 六月收益",
+            sender_id="local",
+            message_id="msg_agent_analysis_query_preflight_repair",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+        synthesize_response_fn=_synthesize,
+    )
+
+    assert out["ok"] is True
+    assert len(calls) == 2
+    assert "net_cashflow" in calls[0][1]["sql"]
+    assert "net_income_cny" in calls[1][1]["sql"]
+    assert followup_contexts[0]["evidence_gaps"][0]["kind"] == "analysis_preflight_repair"
+    assert followup_contexts[0]["evidence_gaps"][0]["unknown_column"] == "net_cashflow"
+    tool_plan_data = out["data"]["action"]["result"]["data"]
+    assert tool_plan_data["evidence_gaps"] == []
+    assert tool_plan_data["followup_decisions"][0]["status"] == "accepted"
+    assert "field:net_income_cny" in tool_plan_data["followup_decisions"][0]["expected_evidence"]
+    assert tool_plan_data["tool_results"][0]["ok"] is False
+    assert tool_plan_data["tool_results"][1]["ok"] is True
+    assert tool_plan_data["agent_session"]["tool_transcript"][0]["ok"] is False
+    assert "CNY 2,414" in out["data"]["response_text"]
+
+
+def test_agent_loop_rejects_preflight_repair_without_suggested_field(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(
+            tool_name=tool_name,
+            ok=False,
+            error={
+                "code": "INPUT_ERROR",
+                "message": "analysis_query failed: unknown column net_cashflow",
+                "details": {
+                    "preflight": {
+                        "ok": False,
+                        "error_code": "UNKNOWN_COLUMN",
+                        "suggestions": ["net_income_cny"],
+                    },
+                    "error_code": "UNKNOWN_COLUMN",
+                    "unknown_column": "net_cashflow",
+                    "referenced_views": ["account_monthly_performance"],
+                    "suggestions": ["net_income_cny"],
+                },
+            },
+        )
+
+    def _plan(
+        _text: str,
+        _settings: AssistantSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        followup = conversation_context.get("agent_loop_followup") if isinstance(conversation_context, dict) else None
+        sql = (
+            "select month, account, premium_income_cny "
+            "from account_monthly_performance where account = 'lx'"
+        ) if isinstance(followup, dict) else (
+            "select month, account, net_cashflow "
+            "from account_monthly_performance where account = 'lx'"
+        )
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="查询 lx 六月收益",
+                response_mode="synthesis",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="analysis_query",
+                        arguments={"sql": sql, "limit": 20},
+                        purpose="查询 lx 收益",
+                    ),
+                ),
+            ),
+            trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="查询 lx 六月收益",
+            sender_id="local",
+            message_id="msg_agent_analysis_query_preflight_repair_rejected",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+    )
+
+    assert out["ok"] is False
+    assert len(calls) == 1
+    tool_plan_data = out["data"]["action"]["result"]["data"]
+    assert tool_plan_data["followup_decisions"][0]["status"] == "rejected"
+    assert (
+        tool_plan_data["followup_decisions"][0]["reason"]
+        == "follow-up analysis query did not use a suggested field or view for the preflight repair gap"
+    )
+
+
+def test_agent_loop_followup_needs_clarification_stops_cleanly(tmp_path: Path) -> None:
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "columns": ["month", "account", "net_income_cny"],
+                "rows": [],
+                "row_count": 0,
+                "evidence": {"coverage": {"views": ["account_monthly_performance"], "accounts": [], "months": []}},
+                "fallback_text": "分析查询结果：0 行",
+            },
+        )
+
+    def _plan(
+        _text: str,
+        _settings: AssistantSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        followup = conversation_context.get("agent_loop_followup") if isinstance(conversation_context, dict) else None
+        if isinstance(followup, dict):
+            return LlmPlannerResult(
+                plan=None,
+                trace={"attempted": True, "reason": "needs_clarification"},
+                error=AgentToolError(code="NEEDS_CLARIFICATION", message="请指定要查询的月份或账户范围。"),
+            )
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="查询收益",
+                response_mode="synthesis",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="analysis_query",
+                        arguments={"sql": "select month, account, net_income_cny from account_monthly_performance", "limit": 20},
+                        purpose="查询收益",
+                    ),
+                ),
+            ),
+            trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="查询收益",
+            sender_id="local",
+            message_id="msg_agent_analysis_query_followup_clarify",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+    )
+
+    assert out["ok"] is True
+    assert out["data"]["response_text"] == "请指定要查询的月份或账户范围。"
+    tool_plan_data = out["data"]["action"]["result"]["data"]
+    assert tool_plan_data["followup_decisions"][0]["decision"] == "ask_clarification"
+    assert tool_plan_data["final_response"]["status"] == "needs_clarification"
+    assert tool_plan_data["agent_session"]["task_state"] == "asking_clarification"
 
 
 def test_assistant_runtime_agent_loop_answer_guard_rewrites_contradictory_income_synthesis(tmp_path: Path) -> None:
@@ -3899,6 +4694,723 @@ def test_assistant_runtime_agent_loop_answer_guard_rewrites_contradictory_income
     assert coverage["months"] == ["2026-05", "2026-06"]
     assert coverage["accounts"] == ["lx", "sy"]
     assert coverage["complete_for_query_scope"] is True
+
+
+def test_assistant_runtime_agent_loop_answer_guard_falls_back_on_analysis_policy_violations(tmp_path: Path) -> None:
+    synthesis_observation_counts: list[int] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "schema_version": "analysis.query.output.v2",
+                "source_label": "OM read-only analysis workspace",
+                "query": {"sql": payload.get("sql"), "limit": payload.get("limit")},
+                "columns": ["month", "account", "avg_rate"],
+                "rows": [{"month": "2026-06", "account": "lx", "avg_rate": 0.0123}],
+                "row_count": 1,
+                "truncated": False,
+                "views_used": ["account_monthly_performance"],
+                "cell_refs": {"r1.month": "2026-06", "r1.account": "lx", "r1.avg_rate": 0.0123},
+                "fallback_text": "分析查询结果：1 行\n| month | account | avg_rate |\n| --- | --- | --- |\n| 2026-06 | lx | 0.0123 |",
+                "evidence": {
+                    "coverage": {
+                        "views": ["account_monthly_performance"],
+                        "months": ["2026-06"],
+                        "accounts": ["lx"],
+                        "symbols": [],
+                    },
+                    "freshness": [{"view": "quote_freshness", "symbol": "FUTU", "freshness": "missing"}],
+                    "aggregation_policy": [
+                        {
+                            "field": "net_return_rate",
+                            "function": "avg",
+                            "policy": "invalid_rate_aggregation",
+                            "status": "warning",
+                        }
+                    ],
+                },
+            },
+        )
+
+    def _plan(
+        _text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="分析 lx 收益率",
+                response_mode="synthesis",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="analysis_query",
+                        arguments={
+                            "sql": (
+                                "select month, account, avg(net_return_rate) as avg_rate "
+                                "from account_monthly_performance where account = 'lx' group by month, account"
+                            ),
+                            "limit": 20,
+                        },
+                        purpose="读取收益率分析",
+                    ),
+                ),
+            ),
+            trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
+        )
+
+    def _synthesize(
+        _question: str,
+        _settings: AssistantSettings,
+        _plan: PlannerPlan,
+        observations: list[dict[str, Any]],
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmSynthesisResult:
+        synthesis_observation_counts.append(len(observations))
+        return LlmSynthesisResult(
+            response_text="全部账户当前最新平均收益率为 1.23%，差异主要来自账户级收益。",
+            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="分析 lx 收益率",
+            sender_id="local",
+            message_id="msg_agent_analysis_policy_guard_fallback",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+        synthesize_response_fn=_synthesize,
+    )
+
+    assert out["ok"] is True
+    assert synthesis_observation_counts == [2, 3]
+    text = out["data"]["response_text"]
+    assert "分析查询结果：1 行" in text
+    assert "提示：收益率聚合需复核，avg(net_return_rate) 不能直接代表组合收益率。" in text
+    assert "提示：数据新鲜度存在缺失/过期：FUTU missing。" in text
+    assert "覆盖范围：账户 lx；月份 2026-06；视图 account_monthly_performance。" in text
+    assert "全部账户当前最新平均收益率" not in text
+    synthesis = out["data"]["action"]["result"]["data"]["synthesis"]
+    assert synthesis["reason"] == "agent_renderer_fallback"
+    assert synthesis["answer_guard"]["status"] == "failed_then_fallback"
+    violation_types = {item["type"] for item in synthesis["answer_guard"]["violations"]}
+    assert {
+        "unsupported_analysis_coverage_all_accounts",
+        "unsupported_analysis_freshness_claim",
+        "unsupported_analysis_rate_aggregation",
+        "unsupported_analysis_root_cause_claim",
+    } <= violation_types
+
+
+def test_assistant_runtime_agent_loop_answer_guard_falls_back_on_missing_diagnostic_root_cause(
+    tmp_path: Path,
+) -> None:
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "schema_version": "analysis.query.output.v2",
+                "source_label": "OM read-only analysis workspace",
+                "query": {"sql": payload.get("sql"), "limit": payload.get("limit")},
+                "columns": ["row_count"],
+                "rows": [{"row_count": 0}],
+                "row_count": 1,
+                "truncated": False,
+                "views_used": ["candidate_filter_diagnostics"],
+                "fallback_text": (
+                    "分析查询结果：1 行\n"
+                    "| row_count |\n"
+                    "| --- |\n"
+                    "| 0 |"
+                ),
+                "evidence": {
+                    "coverage": {
+                        "views": ["candidate_filter_diagnostics"],
+                        "months": [],
+                        "accounts": [],
+                        "symbols": [],
+                    },
+                    "diagnostics": [
+                        {
+                            "view": "candidate_filter_diagnostics",
+                            "status": "diagnostic_missing",
+                            "severity": "warning",
+                            "summary": "candidate filter trace artifact is missing",
+                            "answer_boundary": "cannot infer diagnostic root cause",
+                        }
+                    ],
+                },
+            },
+        )
+
+    def _plan(
+        _text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="解释 NVDA 没出现在候选里的原因",
+                response_mode="synthesis",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="analysis_query",
+                        arguments={
+                            "sql": (
+                                "select count(*) as row_count from candidate_filter_diagnostics "
+                                "where symbol = 'NVDA'"
+                            ),
+                            "limit": 20,
+                        },
+                        purpose="读取候选过滤诊断",
+                    ),
+                ),
+            ),
+            trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
+        )
+
+    def _synthesize(
+        _question: str,
+        _settings: AssistantSettings,
+        _plan: PlannerPlan,
+        _observations: list[dict[str, Any]],
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmSynthesisResult:
+        return LlmSynthesisResult(
+            response_text="NVDA 没出现在候选里的原因是没有被过滤，系统没有问题。",
+            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="为什么 NVDA 没出现在候选里？",
+            sender_id="local",
+            message_id="msg_agent_analysis_diagnostic_guard_fallback",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+        synthesize_response_fn=_synthesize,
+    )
+
+    assert out["ok"] is True
+    text = out["data"]["response_text"]
+    assert "NVDA 没出现在候选里的原因是没有被过滤" not in text
+    assert "提示：候选诊断缺失，不能判断确定原因。" in text
+    synthesis = out["data"]["action"]["result"]["data"]["synthesis"]
+    assert synthesis["reason"] == "agent_renderer_fallback"
+    assert synthesis["answer_guard"]["status"] == "failed_then_fallback"
+    violation_types = {item["type"] for item in synthesis["answer_guard"]["violations"]}
+    assert "unsupported_analysis_diagnostic_root_cause_claim" in violation_types
+
+
+def test_assistant_runtime_agent_loop_answer_guard_rewrites_internal_ux_leak(tmp_path: Path) -> None:
+    synthesis_observation_counts: list[int] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "schema_version": "analysis.query.output.v2",
+                "source_label": "OM read-only analysis workspace",
+                "query": {"sql": payload.get("sql"), "limit": payload.get("limit")},
+                "columns": ["month", "lx_income_cny", "sy_income_cny", "income_diff_cny"],
+                "rows": [
+                    {
+                        "month": "2026-05",
+                        "lx_income_cny": 35842.0,
+                        "sy_income_cny": 23973.0,
+                        "income_diff_cny": 11869.0,
+                    }
+                ],
+                "row_count": 1,
+                "truncated": False,
+                "views_used": ["account_monthly_performance"],
+                "cell_refs": {
+                    "r1.month": "2026-05",
+                    "r1.lx_income_cny": 35842.0,
+                    "r1.sy_income_cny": 23973.0,
+                    "r1.income_diff_cny": 11869.0,
+                },
+                "fallback_text": (
+                    "分析查询结果：1 行\n"
+                    "| month | lx_income_cny | sy_income_cny | income_diff_cny |\n"
+                    "| --- | --- | --- | --- |\n"
+                    "| 2026-05 | 35842 | 23973 | 11869 |"
+                ),
+                "evidence": {
+                    "coverage": {
+                        "views": ["account_monthly_performance"],
+                        "months": ["2026-05"],
+                        "accounts": ["lx", "sy"],
+                        "symbols": [],
+                    },
+                    "freshness": [{"view": "account_monthly_performance", "freshness": "snapshot"}],
+                    "aggregation_policy": [
+                        {"field": "net_income_cny", "function": "sum", "policy": "allowed", "status": "ok"}
+                    ],
+                },
+            },
+        )
+
+    def _plan(
+        _text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="对比 lx 和 sy 的账户收益",
+                response_mode="synthesis",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="analysis_query",
+                        arguments={
+                            "sql": (
+                                "select month, "
+                                "sum(case when account = 'lx' then net_income_cny else 0 end) as lx_income_cny, "
+                                "sum(case when account = 'sy' then net_income_cny else 0 end) as sy_income_cny, "
+                                "11869 as income_diff_cny from account_monthly_performance group by month"
+                            ),
+                            "limit": 20,
+                        },
+                        purpose="读取账户收益对比",
+                    ),
+                ),
+            ),
+            trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
+        )
+
+    def _synthesize(
+        _question: str,
+        _settings: AssistantSettings,
+        _plan: PlannerPlan,
+        observations: list[dict[str, Any]],
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmSynthesisResult:
+        synthesis_observation_counts.append(len(observations))
+        if observations[-1]["tool_name"] != "assistant.answer_guard":
+            return LlmSynthesisResult(
+                response_text=(
+                    "事实\n"
+                    "analysis_query 的 SQL 是 select month from account_monthly_performance。\n"
+                    "分析\n"
+                    "stock_lot_id=debug-lot，所以 2026-05 lx 比 sy 高 CNY 11,869。"
+                ),
+                trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+            )
+        return LlmSynthesisResult(
+            response_text="2026-05 lx 比 sy 高，差额 CNY 11,869。",
+            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="对比 lx 和 sy 的账户收益",
+            sender_id="local",
+            message_id="msg_agent_analysis_internal_ux_rewrite",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+        synthesize_response_fn=_synthesize,
+    )
+
+    assert out["ok"] is True
+    assert synthesis_observation_counts == [2, 3]
+    text = out["data"]["response_text"]
+    assert "2026-05 lx 比 sy 高，差额 CNY 11,869" in text
+    assert "analysis_query" not in text
+    assert "select month" not in text
+    assert "stock_lot_id" not in text
+    assert "事实\n" not in text
+    assert "分析\n" not in text
+    synthesis = out["data"]["action"]["result"]["data"]["synthesis"]
+    assert synthesis["reason"] == "agent_composed_response"
+    assert synthesis["answer_guard"]["status"] == "failed_then_rewritten"
+    violation_types = {item["type"] for item in synthesis["answer_guard"]["violations"]}
+    assert {
+        "unsupported_internal_tool_leak",
+        "unsupported_internal_sql_leak",
+        "unsupported_internal_id_leak",
+        "unsupported_forced_fact_analysis_split",
+    } <= violation_types
+
+
+def test_assistant_runtime_agent_loop_answer_guard_accepts_derived_difference_rewrite(tmp_path: Path) -> None:
+    synthesis_observation_counts: list[int] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "schema_version": "analysis.query.output.v2",
+                "source_label": "OM read-only analysis workspace",
+                "query": {"sql": payload.get("sql"), "limit": payload.get("limit")},
+                "columns": ["month", "lx_income_cny", "sy_income_cny"],
+                "rows": [{"month": "2026-05", "lx_income_cny": 35842.41, "sy_income_cny": 21453.29}],
+                "row_count": 1,
+                "truncated": False,
+                "views_used": ["account_monthly_performance"],
+                "cell_refs": {
+                    "r1.month": "2026-05",
+                    "r1.lx_income_cny": 35842.41,
+                    "r1.sy_income_cny": 21453.29,
+                },
+                "fallback_text": (
+                    "分析查询结果：1 行\n"
+                    "| month | lx_income_cny | sy_income_cny |\n"
+                    "| --- | --- | --- |\n"
+                    "| 2026-05 | 35842.41 | 21453.29 |"
+                ),
+                "evidence": {
+                    "coverage": {
+                        "views": ["account_monthly_performance"],
+                        "months": ["2026-05"],
+                        "accounts": ["lx", "sy"],
+                        "symbols": [],
+                    },
+                    "freshness": [{"view": "account_monthly_performance", "freshness": "snapshot"}],
+                    "aggregation_policy": [
+                        {"field": "net_income_cny", "function": "sum", "policy": "allowed", "status": "ok"}
+                    ],
+                },
+            },
+        )
+
+    def _plan(
+        _text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="对比 lx 和 sy 的账户收益",
+                response_mode="synthesis",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="analysis_query",
+                        arguments={
+                            "sql": (
+                                "select month, "
+                                "sum(case when account = 'lx' then net_income_cny else 0 end) as lx_income_cny, "
+                                "sum(case when account = 'sy' then net_income_cny else 0 end) as sy_income_cny "
+                                "from account_monthly_performance group by month"
+                            ),
+                            "limit": 20,
+                        },
+                        purpose="读取账户收益对比",
+                    ),
+                ),
+            ),
+            trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
+        )
+
+    def _synthesize(
+        _question: str,
+        _settings: AssistantSettings,
+        _plan: PlannerPlan,
+        observations: list[dict[str, Any]],
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmSynthesisResult:
+        synthesis_observation_counts.append(len(observations))
+        if observations[-1]["tool_name"] != "assistant.answer_guard":
+            return LlmSynthesisResult(
+                response_text="2026-05 lx 比 sy 高，差额 CNY 20,000。",
+                trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+            )
+        return LlmSynthesisResult(
+            response_text="2026-05 lx 比 sy 高，差额 CNY 14,389.12。",
+            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="对比 lx 和 sy 的账户收益",
+            sender_id="local",
+            message_id="msg_agent_analysis_derived_difference_rewrite",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+        synthesize_response_fn=_synthesize,
+    )
+
+    assert out["ok"] is True
+    assert synthesis_observation_counts == [2, 3]
+    text = out["data"]["response_text"]
+    assert "CNY 14,389.12" in text
+    assert "CNY 20,000" not in text
+    synthesis = out["data"]["action"]["result"]["data"]["synthesis"]
+    assert synthesis["reason"] == "agent_composed_response"
+    assert synthesis["answer_guard"]["status"] == "failed_then_rewritten"
+    assert synthesis["answer_guard"]["violations"][0]["type"] == "unsupported_contract_currency_amount"
+
+
+def test_assistant_runtime_agent_loop_answer_guard_rewrites_wrong_derived_rate(tmp_path: Path) -> None:
+    synthesis_observation_counts: list[int] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "schema_version": "analysis.query.output.v2",
+                "source_label": "OM read-only analysis workspace",
+                "query": {"sql": payload.get("sql"), "limit": payload.get("limit")},
+                "columns": ["month", "account", "net_income_cny", "cash_secured_cny"],
+                "rows": [
+                    {
+                        "month": "2026-06",
+                        "account": "lx",
+                        "net_income_cny": 9000.0,
+                        "cash_secured_cny": 300000.0,
+                    }
+                ],
+                "row_count": 1,
+                "truncated": False,
+                "views_used": ["account_monthly_performance"],
+                "fallback_text": (
+                    "分析查询结果：1 行\n"
+                    "| month | account | net_income_cny | cash_secured_cny |\n"
+                    "| --- | --- | --- | --- |\n"
+                    "| 2026-06 | lx | 9000 | 300000 |"
+                ),
+                "evidence": {
+                    "coverage": {
+                        "views": ["account_monthly_performance"],
+                        "months": ["2026-06"],
+                        "accounts": ["lx"],
+                        "symbols": [],
+                    },
+                    "freshness": [{"view": "account_monthly_performance", "freshness": "snapshot"}],
+                    "aggregation_policy": [
+                        {"field": "net_income_cny", "function": "sum", "policy": "allowed", "status": "ok"}
+                    ],
+                },
+            },
+        )
+
+    def _plan(
+        _text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="分析 lx 收益率",
+                response_mode="synthesis",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="analysis_query",
+                        arguments={
+                            "sql": (
+                                "select month, account, net_income_cny, cash_secured_cny "
+                                "from account_monthly_performance where account = 'lx'"
+                            ),
+                            "limit": 20,
+                        },
+                        purpose="读取收益率分子和分母",
+                    ),
+                ),
+            ),
+            trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
+        )
+
+    def _synthesize(
+        _question: str,
+        _settings: AssistantSettings,
+        _plan: PlannerPlan,
+        observations: list[dict[str, Any]],
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmSynthesisResult:
+        synthesis_observation_counts.append(len(observations))
+        if observations[-1]["tool_name"] != "assistant.answer_guard":
+            return LlmSynthesisResult(
+                response_text="2026-06 lx 净收益率 5.00%。",
+                trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+            )
+        return LlmSynthesisResult(
+            response_text="2026-06 lx 净收益率 3.00%。",
+            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="分析 lx 收益率",
+            sender_id="local",
+            message_id="msg_agent_analysis_derived_rate_rewrite",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+        synthesize_response_fn=_synthesize,
+    )
+
+    assert out["ok"] is True
+    assert synthesis_observation_counts == [2, 3]
+    text = out["data"]["response_text"]
+    assert "3.00%" in text
+    assert "5.00%" not in text
+    synthesis = out["data"]["action"]["result"]["data"]["synthesis"]
+    assert synthesis["reason"] == "agent_composed_response"
+    assert synthesis["answer_guard"]["status"] == "failed_then_rewritten"
+    assert synthesis["answer_guard"]["violations"][0]["type"] == "unsupported_contract_rate"
+
+
+def test_assistant_runtime_agent_loop_answer_guard_rewrites_wrong_contribution_share(tmp_path: Path) -> None:
+    synthesis_observation_counts: list[int] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "schema_version": "analysis.query.output.v2",
+                "source_label": "OM read-only analysis workspace",
+                "query": {"sql": payload.get("sql"), "limit": payload.get("limit")},
+                "columns": ["month", "account", "symbol", "component_amount_cny", "total_amount_cny"],
+                "rows": [
+                    {
+                        "month": "2026-06",
+                        "account": "sy",
+                        "symbol": "FUTU",
+                        "component_amount_cny": 400.0,
+                        "total_amount_cny": 1000.0,
+                    }
+                ],
+                "row_count": 1,
+                "truncated": False,
+                "views_used": ["symbol_income_attribution"],
+                "fallback_text": (
+                    "分析查询结果：1 行\n"
+                    "| month | account | symbol | component_amount_cny | total_amount_cny |\n"
+                    "| --- | --- | --- | --- | --- |\n"
+                    "| 2026-06 | sy | FUTU | 400 | 1000 |"
+                ),
+                "evidence": {
+                    "coverage": {
+                        "views": ["symbol_income_attribution"],
+                        "months": ["2026-06"],
+                        "accounts": ["sy"],
+                        "symbols": ["FUTU"],
+                    },
+                    "freshness": [{"view": "symbol_income_attribution", "freshness": "snapshot"}],
+                    "aggregation_policy": [
+                        {"field": "component_amount_cny", "function": "sum", "policy": "allowed", "status": "ok"}
+                    ],
+                },
+            },
+        )
+
+    def _plan(
+        _text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="分析 sy 六月收益贡献",
+                response_mode="synthesis",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="analysis_query",
+                        arguments={
+                            "sql": (
+                                "select month, account, symbol, amount_cny as component_amount_cny, "
+                                "sum(amount_cny) over (partition by month, account) as total_amount_cny "
+                                "from symbol_income_attribution where account = 'sy'"
+                            ),
+                            "limit": 20,
+                        },
+                        purpose="读取标的收益贡献和分母",
+                    ),
+                ),
+            ),
+            trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
+        )
+
+    def _synthesize(
+        _question: str,
+        _settings: AssistantSettings,
+        _plan: PlannerPlan,
+        observations: list[dict[str, Any]],
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmSynthesisResult:
+        synthesis_observation_counts.append(len(observations))
+        if observations[-1]["tool_name"] != "assistant.answer_guard":
+            return LlmSynthesisResult(
+                response_text="2026-06 sy 的 FUTU 贡献占比 50%。",
+                trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+            )
+        return LlmSynthesisResult(
+            response_text="2026-06 sy 的 FUTU 贡献占比 40%。",
+            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="分析 sy 六月收益贡献",
+            sender_id="local",
+            message_id="msg_agent_analysis_contribution_share_rewrite",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+        synthesize_response_fn=_synthesize,
+    )
+
+    assert out["ok"] is True
+    assert synthesis_observation_counts == [2, 3]
+    text = out["data"]["response_text"]
+    assert "贡献占比 40%" in text
+    assert "贡献占比 50%" not in text
+    synthesis = out["data"]["action"]["result"]["data"]["synthesis"]
+    assert synthesis["reason"] == "agent_composed_response"
+    assert synthesis["answer_guard"]["status"] == "failed_then_rewritten"
+    assert synthesis["answer_guard"]["violations"][0]["type"] == "unsupported_contract_rate"
 
 
 def test_assistant_runtime_agent_loop_grounded_income_falls_back_from_wrong_contract_quantity(tmp_path: Path) -> None:

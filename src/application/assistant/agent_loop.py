@@ -48,6 +48,7 @@ from src.infrastructure.openai_responses import OpenAIResponsesError, extract_re
 AGENT_LOOP_SCHEMA_VERSION = "om-agent-loop-v1"
 TOOL_PLAN_SCHEMA_VERSION = "om-tool-plan-v1"
 TOOL_PLAN_SYNTHESIS_SCHEMA_VERSION = "om-tool-plan-synthesis-v1"
+FOLLOWUP_DECISION_SCHEMA_VERSION = "om-agent-loop-followup-decision-v1"
 INTERNAL_TOOL_PLAN_NAME = "assistant.tool_plan"
 MAX_TOOL_PLAN_STEPS = 3
 MAX_AGENT_LOOP_ITERATIONS = 3
@@ -356,6 +357,7 @@ def execute_tool_plan(
     error_payload: dict[str, Any] | None = None
     capability_status: dict[str, Any] = {"required": [], "satisfied": [], "gaps": []}
     evidence_gaps: list[dict[str, Any]] = []
+    followup_decisions: list[dict[str, Any]] = []
     iteration = 1
 
     while True:
@@ -383,7 +385,7 @@ def execute_tool_plan(
             plan=plan.public_payload(),
             observations=fact_observations,
         )
-        evidence_gaps = _assess_evidence_gaps(plan=plan, evidence_bundle=evidence_bundle)
+        evidence_gaps = _assess_evidence_gaps(plan=plan, evidence_bundle=evidence_bundle, observations=fact_observations)
         if not _should_replan_read_only(
             ok=ok,
             plan_tools_fn=plan_tools_fn,
@@ -391,6 +393,17 @@ def execute_tool_plan(
             iteration=iteration,
             tool_call_count=len(observations),
         ):
+            stop_decision = _followup_stop_decision(
+                ok=ok,
+                plan_tools_fn=plan_tools_fn,
+                evidence_gaps=evidence_gaps,
+                iteration=iteration,
+                tool_call_count=len(observations),
+                revision=len(plan_revisions) + 1,
+            )
+            if stop_decision:
+                followup_decisions.append(stop_decision)
+                tool_events.append({"phase": "followup_decision", **stop_decision})
             break
         next_plan = _plan_followup_read_steps(
             question=question,
@@ -399,11 +412,23 @@ def execute_tool_plan(
             plan_tools_fn=plan_tools_fn,
             evidence_gaps=evidence_gaps,
             prior_plan=plan,
+            observations=observations,
             revision=len(plan_revisions) + 1,
+            followup_decisions=followup_decisions,
             tool_events=tool_events,
         )
         if next_plan is None:
             break
+        if _can_recover_execution_failure(ok=ok, evidence_gaps=evidence_gaps):
+            ok = True
+            error_payload = None
+            tool_events.append(
+                {
+                    "phase": "recover_tool_error",
+                    "status": "accepted_followup",
+                    "evidence_gaps": [dict(item) for item in evidence_gaps],
+                }
+            )
         plan = next_plan
         plan_revisions.append(_plan_revision_payload(len(plan_revisions) + 1, plan=plan, reason="follow-up evidence-gap plan"))
         iteration += 1
@@ -419,6 +444,7 @@ def execute_tool_plan(
         synthesize_response_fn=synthesize_response_fn,
         ok=ok,
         error_payload=error_payload,
+        followup_decisions=followup_decisions,
     )
     final_response_payload = _final_response_payload(synthesis)
     agent_session = build_agent_session_snapshot(
@@ -449,6 +475,7 @@ def execute_tool_plan(
         "tool_results": tool_results,
         "capability_status": capability_status,
         "evidence_gaps": evidence_gaps,
+        "followup_decisions": followup_decisions,
         "plan_revisions": plan_revisions,
     }
     return build_response(
@@ -591,11 +618,53 @@ def _should_replan_read_only(
     tool_call_count: int,
 ) -> bool:
     return (
-        ok
+        (ok or _can_recover_execution_failure(ok=ok, evidence_gaps=evidence_gaps))
         and plan_tools_fn is not None
         and bool(evidence_gaps)
         and iteration < MAX_AGENT_LOOP_ITERATIONS
         and tool_call_count < MAX_AGENT_LOOP_TOOL_CALLS
+    )
+
+
+def _can_recover_execution_failure(*, ok: bool, evidence_gaps: list[dict[str, Any]]) -> bool:
+    if ok:
+        return False
+    return any(
+        isinstance(gap, dict)
+        and str(gap.get("kind") or "") == "analysis_preflight_repair"
+        and str(gap.get("recoverable_by") or "") == "analysis_query"
+        for gap in evidence_gaps
+    )
+
+
+def _followup_stop_decision(
+    *,
+    ok: bool,
+    plan_tools_fn: AgentLoopPlanFn | None,
+    evidence_gaps: list[dict[str, Any]],
+    iteration: int,
+    tool_call_count: int,
+    revision: int,
+) -> dict[str, Any]:
+    if not evidence_gaps:
+        return {}
+    reason = ""
+    if not ok:
+        reason = "tool execution failed before recoverable evidence gaps could be closed"
+    elif plan_tools_fn is None:
+        reason = "follow-up planner is unavailable"
+    elif iteration >= MAX_AGENT_LOOP_ITERATIONS:
+        reason = "max follow-up iterations reached"
+    elif tool_call_count >= MAX_AGENT_LOOP_TOOL_CALLS:
+        reason = "max tool calls reached"
+    if not reason:
+        return {}
+    return _followup_decision_payload(
+        revision=revision,
+        decision="stop_with_gap",
+        status="stopped",
+        reason=reason,
+        evidence_gaps=evidence_gaps,
     )
 
 
@@ -607,7 +676,9 @@ def _plan_followup_read_steps(
     plan_tools_fn: AgentLoopPlanFn | None,
     evidence_gaps: list[dict[str, Any]],
     prior_plan: PlannerPlan,
+    observations: list[dict[str, Any]],
     revision: int,
+    followup_decisions: list[dict[str, Any]],
     tool_events: list[dict[str, Any]],
 ) -> PlannerPlan | None:
     if plan_tools_fn is None:
@@ -617,10 +688,40 @@ def _plan_followup_read_steps(
         "revision": revision,
         "prior_plan": prior_plan.public_payload(),
         "evidence_gaps": [dict(item) for item in evidence_gaps],
+        "decision_contract": _followup_decision_contract(evidence_gaps=evidence_gaps),
         "instruction": "Plan only read-only follow-up steps that directly close recoverable evidence gaps.",
     }
     plan_result = plan_tools_fn(question, settings, context)
     if plan_result.error is not None:
+        if plan_result.error.code == "NEEDS_CLARIFICATION":
+            clarification = str(plan_result.error.message or "需要补充范围后才能继续分析。").strip()
+            decision = _followup_decision_payload(
+                revision=revision,
+                decision="ask_clarification",
+                status="stopped",
+                reason=clarification,
+                evidence_gaps=evidence_gaps,
+                clarification=clarification,
+            )
+            followup_decisions.append(decision)
+            tool_events.append({"phase": "followup_decision", **decision})
+            tool_events.append(
+                {
+                    "phase": "replan",
+                    "status": "needs_clarification",
+                    "error_code": plan_result.error.code,
+                }
+            )
+            return None
+        decision = _followup_decision_payload(
+            revision=revision,
+            decision="stop_with_gap",
+            status="failed",
+            reason=f"follow-up planner failed: {plan_result.error.code}",
+            evidence_gaps=evidence_gaps,
+        )
+        followup_decisions.append(decision)
+        tool_events.append({"phase": "followup_decision", **decision})
         tool_events.append(
             {
                 "phase": "replan",
@@ -630,12 +731,30 @@ def _plan_followup_read_steps(
         )
         return None
     if plan_result.plan is None or not plan_result.plan.steps:
+        decision = _followup_decision_payload(
+            revision=revision,
+            decision="stop_with_gap",
+            status="no_followup_plan",
+            reason="follow-up planner did not produce a tool call",
+            evidence_gaps=evidence_gaps,
+        )
+        followup_decisions.append(decision)
+        tool_events.append({"phase": "followup_decision", **decision})
         tool_events.append({"phase": "replan", "status": "no_followup_plan"})
         return None
     try:
         next_plan = _normalize_tool_plan(plan_result.plan, question=question, today=_planner_today_from_context(context))
         validate_tool_plan(next_plan, question=question, allow_preview=False)
     except AgentToolError as err:
+        decision = _followup_decision_payload(
+            revision=revision,
+            decision="call_tool",
+            status="rejected",
+            reason=f"invalid follow-up plan: {err.code}",
+            evidence_gaps=evidence_gaps,
+        )
+        followup_decisions.append(decision)
+        tool_events.append({"phase": "followup_decision", **decision})
         tool_events.append(
             {
                 "phase": "replan",
@@ -644,8 +763,32 @@ def _plan_followup_read_steps(
             }
         )
         return None
+    duplicate_rejection = _followup_duplicate_rejection(next_plan, prior_plan=prior_plan, observations=observations)
+    if duplicate_rejection:
+        decision = _followup_decision_payload(
+            revision=revision,
+            decision="call_tool",
+            status="rejected",
+            reason=duplicate_rejection,
+            evidence_gaps=evidence_gaps,
+            plan=next_plan,
+        )
+        followup_decisions.append(decision)
+        tool_events.append({"phase": "followup_decision", **decision})
+        tool_events.append({"phase": "replan", "status": "duplicate_plan"})
+        return None
     gap_rejection = _followup_gap_rejection(next_plan, evidence_gaps=evidence_gaps)
     if gap_rejection:
+        decision = _followup_decision_payload(
+            revision=revision,
+            decision="call_tool",
+            status="rejected",
+            reason=gap_rejection,
+            evidence_gaps=evidence_gaps,
+            plan=next_plan,
+        )
+        followup_decisions.append(decision)
+        tool_events.append({"phase": "followup_decision", **decision})
         tool_events.append(
             {
                 "phase": "replan",
@@ -656,9 +799,16 @@ def _plan_followup_read_steps(
             }
         )
         return None
-    if next_plan.public_payload() == prior_plan.public_payload():
-        tool_events.append({"phase": "replan", "status": "duplicate_plan"})
-        return None
+    decision = _followup_decision_payload(
+        revision=revision,
+        decision="call_tool",
+        status="accepted",
+        reason="follow-up plan directly addresses recoverable evidence gaps",
+        evidence_gaps=evidence_gaps,
+        plan=next_plan,
+    )
+    followup_decisions.append(decision)
+    tool_events.append({"phase": "followup_decision", **decision})
     tool_events.append(
         {
             "phase": "replan",
@@ -671,6 +821,149 @@ def _plan_followup_read_steps(
     return next_plan
 
 
+def _followup_decision_contract(*, evidence_gaps: list[dict[str, Any]]) -> dict[str, Any]:
+    suggested_tools = sorted(
+        {
+            str(gap.get("suggested_tool") or "")
+            for gap in evidence_gaps
+            if isinstance(gap, dict) and str(gap.get("suggested_tool") or "").strip()
+        }
+    )
+    allowed_tools = sorted({"analysis_catalog", "analysis_query", *suggested_tools})
+    return {
+        "schema_version": FOLLOWUP_DECISION_SCHEMA_VERSION,
+        "allowed_decisions": ["call_tool", "final_answer", "ask_clarification", "stop_with_gap"],
+        "allowed_tools": allowed_tools,
+        "required_fields": ["decision", "reason"],
+        "call_tool_fields": ["tool_name", "arguments", "expected_evidence"],
+        "safety_rules": [
+            "tool must be allowlisted",
+            "analysis_query must remain SELECT-only over whitelisted views",
+            "query must not duplicate an earlier query",
+            "query must use suggested views or explicitly close the evidence gap",
+            "scope must not broaden beyond the user question or evidence gap",
+        ],
+    }
+
+
+def _followup_decision_payload(
+    *,
+    revision: int,
+    decision: str,
+    status: str,
+    reason: str,
+    evidence_gaps: list[dict[str, Any]],
+    plan: PlannerPlan | None = None,
+    clarification: str | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "schema_version": FOLLOWUP_DECISION_SCHEMA_VERSION,
+        "revision": int(revision),
+        "decision": str(decision or "stop_with_gap"),
+        "status": str(status or ""),
+        "reason": str(reason or "").strip(),
+        "expected_evidence": _followup_expected_evidence(evidence_gaps),
+        "evidence_gaps": [dict(item) for item in evidence_gaps if isinstance(item, dict)],
+    }
+    if clarification:
+        payload["clarification"] = str(clarification).strip()
+    if plan is not None:
+        payload["steps"] = [step.public_payload() for step in plan.steps]
+        if len(plan.steps) == 1:
+            payload["tool_name"] = plan.steps[0].tool_name
+            payload["arguments"] = _safe_tool_payload(plan.steps[0].arguments)
+    return payload
+
+
+def _followup_expected_evidence(evidence_gaps: list[dict[str, Any]]) -> list[str]:
+    expected: list[str] = []
+    for gap in evidence_gaps:
+        if not isinstance(gap, dict):
+            continue
+        kind = str(gap.get("kind") or "").strip()
+        if kind:
+            expected.append(kind)
+        for view in gap.get("suggested_views") or []:
+            if str(view).strip():
+                expected.append(f"view:{view}")
+        for field in gap.get("suggested_fields") or []:
+            if str(field).strip():
+                expected.append(f"field:{field}")
+        for account in gap.get("missing_accounts") or []:
+            if str(account).strip():
+                expected.append(f"account:{account}")
+        for symbol in gap.get("symbols") or []:
+            if str(symbol).strip():
+                expected.append(f"symbol:{symbol}")
+    return _unique_strings(expected)[:12]
+
+
+def _unique_strings(values: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        item = str(value or "").strip()
+        if not item or item in seen:
+            continue
+        out.append(item)
+        seen.add(item)
+    return out
+
+
+def _followup_duplicate_rejection(
+    plan: PlannerPlan,
+    *,
+    prior_plan: PlannerPlan,
+    observations: list[dict[str, Any]],
+) -> str:
+    if plan.public_payload() == prior_plan.public_payload():
+        return "follow-up plan duplicates the previous plan"
+    attempted = {
+        signature
+        for observation in observations
+        if isinstance(observation, dict)
+        for signature in [_followup_observation_signature(observation)]
+        if signature
+    }
+    for step in plan.steps:
+        signature = _followup_step_signature(step.tool_name, step.arguments)
+        if signature and signature in attempted:
+            return "follow-up query repeats an earlier tool call"
+    return ""
+
+
+def _followup_observation_signature(observation: dict[str, Any]) -> str:
+    payload = observation.get("payload") if isinstance(observation.get("payload"), dict) else {}
+    return _followup_step_signature(str(observation.get("tool_name") or ""), payload)
+
+
+def _followup_step_signature(tool_name: str, arguments: dict[str, Any]) -> str:
+    if tool_name == "analysis_query":
+        sql = _normalized_sql(str(arguments.get("sql") or arguments.get("query") or ""))
+        return f"analysis_query:{sql}" if sql else ""
+    if tool_name == "analysis_catalog":
+        views = arguments.get("views") or arguments.get("view") or ""
+        if isinstance(views, str):
+            view_items = sorted(item.strip() for item in views.split(",") if item.strip())
+        elif isinstance(views, (list, tuple, set)):
+            view_items = sorted(str(item).strip() for item in views if str(item).strip())
+        else:
+            view_items = []
+        return f"analysis_catalog:{','.join(view_items)}"
+    comparable = {
+        key: value
+        for key, value in arguments.items()
+        if key not in {"config_key", "audit_db", "message_id", "command_id"}
+    }
+    if not comparable:
+        return str(tool_name or "")
+    return f"{tool_name}:{json.dumps(comparable, ensure_ascii=False, sort_keys=True, default=str)}"
+
+
+def _normalized_sql(sql: str) -> str:
+    return re.sub(r"\s+", " ", str(sql or "").strip().lower())
+
+
 def _followup_gap_rejection(plan: PlannerPlan, *, evidence_gaps: list[dict[str, Any]]) -> str:
     quote_gaps = [
         gap
@@ -679,13 +972,58 @@ def _followup_gap_rejection(plan: PlannerPlan, *, evidence_gaps: list[dict[str, 
         and str(gap.get("kind") or "") == "recoverable_missing_quote"
         and str(gap.get("recoverable_by") or "") == "refresh_quotes"
     ]
-    if not quote_gaps:
+    if quote_gaps:
+        for gap in quote_gaps:
+            if any(_step_closes_quote_gap(step, gap=gap) for step in plan.steps):
+                continue
+            return "follow-up plan did not include assigned-stock quote refresh for the recoverable missing quote gap"
+    analysis_gaps = [
+        gap
+        for gap in evidence_gaps
+        if isinstance(gap, dict)
+        and str(gap.get("recoverable_by") or "") == "analysis_query"
+    ]
+    if not analysis_gaps:
         return ""
-    for gap in quote_gaps:
-        if any(_step_closes_quote_gap(step, gap=gap) for step in plan.steps):
+    if not any(step.tool_name in {"analysis_query", "analysis_catalog"} for step in plan.steps):
+        return "follow-up plan did not include analysis_catalog or analysis_query for the analysis evidence gap"
+    for step in plan.steps:
+        if step.tool_name not in {"analysis_query", "analysis_catalog"}:
+            return "follow-up plan for analysis evidence gap used a non-analysis tool"
+    for gap in analysis_gaps:
+        if str(gap.get("kind") or "") == "analysis_preflight_repair":
+            if any(_step_addresses_preflight_repair_gap(step, gap=gap) for step in plan.steps):
+                continue
+            return "follow-up analysis query did not use a suggested field or view for the preflight repair gap"
+        suggested_views = {str(item) for item in gap.get("suggested_views") or [] if str(item).strip()}
+        if not suggested_views:
             continue
-        return "follow-up plan did not include assigned-stock quote refresh for the recoverable missing quote gap"
+        if any(_step_uses_any_analysis_view(step, suggested_views) for step in plan.steps):
+            continue
+        return "follow-up analysis query did not use a suggested view for the evidence gap"
     return ""
+
+
+def _step_addresses_preflight_repair_gap(step: PlannerPlanStep, *, gap: dict[str, Any]) -> bool:
+    if step.tool_name == "analysis_catalog":
+        return True
+    if step.tool_name != "analysis_query":
+        return False
+    sql = str(step.arguments.get("sql") or step.arguments.get("query") or "")
+    normalized = _normalized_sql(sql)
+    suggested_views = {str(item).strip() for item in gap.get("suggested_views") or [] if str(item).strip()}
+    suggested_fields = {str(item).strip() for item in gap.get("suggested_fields") or [] if str(item).strip()}
+    error_code = str(gap.get("error_code") or "").strip().upper()
+    if error_code == "UNKNOWN_VIEW":
+        return bool(suggested_views) and any(re.search(rf"(?is)\b{re.escape(view)}\b", sql) for view in suggested_views)
+    if error_code == "UNKNOWN_COLUMN":
+        uses_field = bool(suggested_fields) and any(
+            re.search(rf"(?is)\b{re.escape(field)}\b", sql) for field in suggested_fields
+        )
+        if not uses_field:
+            return False
+        return not suggested_views or any(re.search(rf"(?is)\b{re.escape(view)}\b", sql) for view in suggested_views)
+    return bool(normalized)
 
 
 def _step_closes_quote_gap(step: PlannerPlanStep, *, gap: dict[str, Any]) -> bool:
@@ -706,11 +1044,25 @@ def _step_closes_quote_gap(step: PlannerPlanStep, *, gap: dict[str, Any]) -> boo
     return True
 
 
-def _assess_evidence_gaps(*, plan: PlannerPlan, evidence_bundle: Any) -> list[dict[str, Any]]:
+def _step_uses_any_analysis_view(step: PlannerPlanStep, views: set[str]) -> bool:
+    if step.tool_name == "analysis_catalog":
+        requested_views = step.arguments.get("views") or step.arguments.get("view")
+        if isinstance(requested_views, str):
+            return requested_views in views or any(item.strip() in views for item in requested_views.split(","))
+        if isinstance(requested_views, (list, tuple, set)):
+            return any(str(item) in views for item in requested_views)
+        return True
+    if step.tool_name != "analysis_query":
+        return False
+    sql = str(step.arguments.get("sql") or step.arguments.get("query") or "")
+    return any(re.search(rf"(?is)\b{re.escape(view)}\b", sql) for view in views)
+
+
+def _assess_evidence_gaps(*, plan: PlannerPlan, evidence_bundle: Any, observations: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     payload = evidence_bundle.public_payload() if hasattr(evidence_bundle, "public_payload") else {}
     missing_data = payload.get("missing_data") if isinstance(payload, dict) else []
     if not isinstance(missing_data, list):
-        return []
+        missing_data = []
     gaps: list[dict[str, Any]] = []
     needs_assigned_stock_quote_refresh = any(
         step.tool_name == "option_positions_read"
@@ -746,7 +1098,160 @@ def _assess_evidence_gaps(*, plan: PlannerPlan, evidence_bundle: Any) -> list[di
                     "reason": "assigned-stock quote dependent facts are missing and the executed plan did not request quote refresh",
                 }
             )
+    gaps.extend(_analysis_evidence_gaps(plan=plan, evidence_payload=payload))
+    gaps.extend(_analysis_preflight_repair_gaps(observations or []))
     return gaps
+
+
+def _analysis_preflight_repair_gaps(observations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    analysis_observations = [
+        observation
+        for observation in observations
+        if isinstance(observation, dict) and str(observation.get("tool_name") or "") == "analysis_query"
+    ]
+    if not analysis_observations:
+        return []
+    latest = analysis_observations[-1]
+    if bool(latest.get("ok", False)):
+        return []
+    error = latest.get("error") if isinstance(latest.get("error"), dict) else {}
+    details = error.get("details") if isinstance(error.get("details"), dict) else {}
+    preflight = details.get("preflight") if isinstance(details.get("preflight"), dict) else {}
+    if preflight.get("ok") is not False:
+        return []
+    error_code = str(details.get("error_code") or preflight.get("error_code") or "").strip().upper()
+    if error_code not in {"UNKNOWN_COLUMN", "UNKNOWN_VIEW"}:
+        return []
+    suggestions = _unique_strings([str(item) for item in (details.get("suggestions") or preflight.get("suggestions") or [])])
+    referenced_views = _unique_strings([str(item) for item in details.get("referenced_views") or []])
+    suggested_views = referenced_views
+    suggested_fields: list[str] = []
+    if error_code == "UNKNOWN_COLUMN":
+        suggested_fields = suggestions
+    else:
+        suggested_views = suggestions
+    gap: dict[str, Any] = {
+        "kind": "analysis_preflight_repair",
+        "recoverable_by": "analysis_query",
+        "suggested_tool": "analysis_query",
+        "error_code": error_code,
+        "suggested_views": suggested_views,
+        "suggested_fields": suggested_fields,
+        "reason": "analysis_query preflight failed with repairable catalog diagnostics",
+    }
+    if latest.get("index") is not None:
+        gap["source_observation_index"] = latest.get("index")
+    if details.get("unknown_column"):
+        gap["unknown_column"] = details.get("unknown_column")
+    if details.get("unknown_view"):
+        gap["unknown_view"] = details.get("unknown_view")
+    if suggestions:
+        gap["suggestions"] = suggestions
+    if referenced_views:
+        gap["referenced_views"] = referenced_views
+    return [gap]
+
+
+def _analysis_evidence_gaps(*, plan: PlannerPlan, evidence_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    if not any(step.tool_name == "analysis_query" for step in plan.steps):
+        return []
+    datasets = evidence_payload.get("datasets") if isinstance(evidence_payload, dict) else []
+    if not isinstance(datasets, list):
+        return []
+    covered_views: set[str] = set()
+    covered_accounts: set[str] = set()
+    has_non_empty_analysis_result = False
+    for dataset in datasets:
+        if not isinstance(dataset, dict) or dataset.get("tool_name") != "analysis_query" or dataset.get("ok") is not True:
+            continue
+        if dataset.get("row_count") != 0:
+            has_non_empty_analysis_result = True
+        analysis_evidence = dataset.get("analysis_evidence") if isinstance(dataset.get("analysis_evidence"), dict) else {}
+        coverage = analysis_evidence.get("coverage") if isinstance(analysis_evidence.get("coverage"), dict) else {}
+        covered_views.update(str(item) for item in coverage.get("views") or [] if str(item).strip())
+        covered_accounts.update(str(item).strip().lower() for item in coverage.get("accounts") or [] if str(item).strip())
+    has_breakdown_detail = bool(covered_views & {"account_monthly_income_components", "symbol_income_attribution"})
+    requested_accounts = _analysis_requested_accounts(plan.goal)
+    gaps: list[dict[str, Any]] = []
+    if requested_accounts and covered_accounts:
+        missing_accounts = sorted(set(requested_accounts) - covered_accounts)
+        if missing_accounts:
+            gaps.append(
+                {
+                    "kind": "analysis_missing_account_coverage",
+                    "recoverable_by": "analysis_query",
+                    "suggested_tool": "analysis_query",
+                    "suggested_views": sorted(covered_views) or ["account_monthly_performance"],
+                    "missing_accounts": missing_accounts,
+                    "covered_accounts": sorted(covered_accounts),
+                    "reason": "the question names accounts that are not covered by the current analysis evidence",
+                }
+            )
+    for dataset in datasets:
+        if not isinstance(dataset, dict) or dataset.get("tool_name") != "analysis_query" or dataset.get("ok") is not True:
+            continue
+        row_count = dataset.get("row_count")
+        if row_count == 0 and not has_non_empty_analysis_result:
+            gaps.append(
+                {
+                    "kind": "analysis_empty_result",
+                    "recoverable_by": "analysis_query",
+                    "suggested_tool": "analysis_query",
+                    "suggested_views": ["runtime_tick_status", "quote_freshness", "candidate_filter_diagnostics"],
+                    "reason": "analysis query returned no rows; a narrower or diagnostic follow-up query may be needed",
+                }
+            )
+            continue
+        analysis_evidence = dataset.get("analysis_evidence") if isinstance(dataset.get("analysis_evidence"), dict) else {}
+        coverage = analysis_evidence.get("coverage") if isinstance(analysis_evidence.get("coverage"), dict) else {}
+        views = {str(item) for item in coverage.get("views") or [] if str(item).strip()}
+        if not has_breakdown_detail and _analysis_question_needs_breakdown(plan.goal) and views and views.issubset(
+            {"account_monthly_performance", "monthly_income_return_summary", "monthly_income_combined_return_summary"}
+        ):
+            gaps.append(
+                {
+                    "kind": "analysis_breakdown_needed",
+                    "recoverable_by": "analysis_query",
+                    "suggested_tool": "analysis_query",
+                    "suggested_views": ["account_monthly_income_components", "symbol_income_attribution"],
+                    "reason": "the question asks for source/cause/breakdown but the query only returned account-level summary evidence",
+                }
+            )
+    return gaps
+
+
+def _analysis_requested_accounts(goal: str) -> set[str]:
+    compact = str(goal or "").lower()
+    requested: set[str] = set()
+    for account in ACCOUNT_VALUES:
+        label = str(account or "").strip().lower()
+        if not label:
+            continue
+        if re.search(rf"(?<![a-z0-9_]){re.escape(label)}(?![a-z0-9_])", compact):
+            requested.add(label)
+    return requested
+
+
+def _analysis_question_needs_breakdown(goal: str) -> bool:
+    text = re.sub(r"\s+", "", str(goal or "").lower())
+    return any(
+        token in text
+        for token in (
+            "为什么",
+            "原因",
+            "来源",
+            "组成",
+            "构成",
+            "主要来自",
+            "差异主要",
+            "不同在哪里",
+            "亏在哪里",
+            "breakdown",
+            "source",
+            "driver",
+            "why",
+        )
+    )
 
 
 def _plan_revision_payload(revision: int, *, plan: PlannerPlan, reason: str) -> dict[str, Any]:
@@ -1599,7 +2104,14 @@ def _build_final_response(
     synthesize_response_fn: AgentLoopSynthesizeFn | None,
     ok: bool,
     error_payload: dict[str, Any] | None,
+    followup_decisions: list[dict[str, Any]] | None = None,
 ) -> LlmSynthesisResult:
+    clarification = _followup_clarification_text(followup_decisions or [])
+    if clarification:
+        return LlmSynthesisResult(
+            response_text=clarification,
+            trace={"attempted": False, "reason": "ask_clarification", "schema_version": TOOL_PLAN_SYNTHESIS_SCHEMA_VERSION},
+        )
     if not ok:
         return LlmSynthesisResult(
             response_text=_fallback_response(plan=plan, observations=llm_observations, error_payload=error_payload),
@@ -1761,6 +2273,17 @@ def _build_final_response(
     )
 
 
+def _followup_clarification_text(followup_decisions: list[dict[str, Any]]) -> str:
+    for decision in reversed(followup_decisions):
+        if not isinstance(decision, dict):
+            continue
+        if str(decision.get("decision") or "") != "ask_clarification":
+            continue
+        text = str(decision.get("clarification") or decision.get("reason") or "").strip()
+        return text or "需要补充范围后才能继续分析。"
+    return ""
+
+
 def _build_answer_evidence(
     *,
     plan: PlannerPlan,
@@ -1896,6 +2419,13 @@ def _final_response_payload(synthesis: LlmSynthesisResult) -> dict[str, Any]:
             reason="LLM composed the response from guarded tool evidence",
             canonical_renderer_required=False,
             llm_may_summarize=True,
+        ).public_payload()
+    if reason == "ask_clarification":
+        return FinalResponsePlan(
+            status="needs_clarification",
+            reason="follow-up planning determined that user scope is required",
+            canonical_renderer_required=False,
+            llm_may_summarize=False,
         ).public_payload()
     if reason == "agent_renderer_fallback":
         return FinalResponsePlan(
@@ -2051,7 +2581,9 @@ def _answer_evidence_observation(
     renderer_key = str(output_contract.get("canonical_renderer") or "").strip()
     instruction = (
         "Answer the user naturally in Chinese using only the tool observations. "
+        "Start with the direct conclusion, then add only the key evidence needed to support it. "
         "Do not expose internal ids such as stock_lot_id, record_id, event_id, or source_deal_id. "
+        "Do not expose SQL, tool names, artifact paths, trace ids, canonical/synthesis mode names, or raw tool receipts. "
         "Do not use a forced 事实/分析 split. "
         "For direct summary questions, prefer a short synthesis; for detail/list questions, include compact rows only when useful. "
         "Do not append 数据来源 or 口径 lines; the system appends deterministic provenance. "
@@ -2193,6 +2725,7 @@ def _verify_answer_guard(
     compact = re.sub(r"\s+", "", text.lower())
     facts = _answer_guard_facts(observations)
     violations: list[dict[str, Any]] = []
+    violations.extend(_normal_answer_ux_violations(text))
     if facts["all_tools_ok"] and any(token in compact for token in ("工具查询失败", "工具调用失败", "查询失败")):
         violations.append(
             {
@@ -2290,6 +2823,46 @@ def _verify_answer_guard(
     return {"facts": facts, "contract_verifier": contract_verification.public_payload(), "violations": violations}
 
 
+_UX_FORCED_SECTION_RE = re.compile(r"(?im)^\s*(?:事实|分析)\s*[:：]?\s*$")
+_UX_INTERNAL_MODE_RE = re.compile(
+    r"(?i)\b(?:canonical|synthesis|fact\s*mode|analysis\s*mode|tool_plan|output_contract|evidencebundle|assistant\.answer_evidence)\b"
+)
+_UX_TOOL_NAME_RE = re.compile(r"(?i)\b(?:analysis_query|analysis_catalog)\b")
+_UX_SQL_RE = re.compile(r"(?is)(?:\bsql\b|\bselect\b.{0,240}\bfrom\b|\bwith\b.{0,240}\bselect\b)")
+_UX_INTERNAL_ID_RE = re.compile(
+    r"(?i)\b(?:stock_lot_id|record_id|event_id|source_deal_id|position_key|trace_id|artifact_path)\b"
+)
+_UX_INTERNAL_PATH_RE = re.compile(
+    r"(?i)(?:/Volumes/|/Users/|output_runs/|output_shared/|candidate_filter_trace\.jsonl|\.(?:sqlite3|jsonl)\b)"
+)
+
+
+def _normal_answer_ux_violations(response_text: str) -> list[dict[str, Any]]:
+    text = str(response_text or "")
+    checks: tuple[tuple[str, str, re.Pattern[str]], ...] = (
+        ("unsupported_internal_mode_leak", "internal answer mode leaked", _UX_INTERNAL_MODE_RE),
+        ("unsupported_internal_tool_leak", "internal tool name leaked", _UX_TOOL_NAME_RE),
+        ("unsupported_internal_sql_leak", "SQL detail leaked", _UX_SQL_RE),
+        ("unsupported_internal_id_leak", "internal identifier leaked", _UX_INTERNAL_ID_RE),
+        ("unsupported_internal_path_leak", "internal artifact path leaked", _UX_INTERNAL_PATH_RE),
+        ("unsupported_forced_fact_analysis_split", "forced fact/analysis section split leaked", _UX_FORCED_SECTION_RE),
+    )
+    violations: list[dict[str, Any]] = []
+    for violation_type, evidence, pattern in checks:
+        match = pattern.search(text)
+        if not match:
+            continue
+        claim = str(match.group(0) or "").strip()
+        violations.append(
+            {
+                "type": violation_type,
+                "claim": claim[:80],
+                "evidence": evidence,
+            }
+        )
+    return violations
+
+
 def _with_answer_guard_feedback(observations: list[dict[str, Any]], guard: dict[str, Any]) -> list[dict[str, Any]]:
     return [
         *observations,
@@ -2305,6 +2878,8 @@ def _with_answer_guard_feedback(observations: list[dict[str, Any]], guard: dict[
                     "Your previous response contradicted tool observations. Rewrite using only observations. "
                     "When monthly_income_report query_scope.month=all_available, answer over the OM local ledger coverage. "
                     "Do not claim missing months/accounts unless coverage or diagnostics explicitly says so. "
+                    "Answer as one natural user-facing Agent response; do not expose canonical/synthesis/fact/analysis modes, "
+                    "SQL, tool names, internal ids, artifact paths, or raw tool receipts. "
                     "For factual rows, use contracts/contracts_open/contracts_closed as the trade quantity; "
                     "do not treat one row or one lot as one contract, and do not alter symbols, dates, strikes, or accounts."
                 ),
@@ -2936,7 +3511,13 @@ def _planner_tool_manifest() -> list[dict[str, Any]]:
             notes.append("Use for open-ended analysis: 对比, 有什么不同, 排名, 趋势, 组成, 来源, 按账户/月份/标的汇总, 差额, 收益率差.")
             notes.append("Generate one SELECT or WITH query over analysis_catalog views; never include writes, PRAGMA, ATTACH, paths, config, or system arguments.")
             notes.append("Use only the columns listed in semantics.analysis_views. Do not invent columns such as net_cashflow, total_return, return_rate, or open_basis_pnl unless they are listed.")
-            notes.append("For lx vs sy income comparison, query monthly_income_return_summary columns month, account, net_income_cny, net_return_rate, realized_pnl_cny, premium_income_cny, and compute differences in SQL when useful.")
+            notes.append("For account income/performance comparison, prefer account_monthly_performance columns month, account, net_income_cny, net_return_rate, realized_pnl_cny, premium_income_cny, and cash_secured_cny.")
+            notes.append("For account income composition or source questions, use account_monthly_income_components; filter included_in_net_income=1 when explaining return numerator components.")
+            notes.append("For assigned-stock PnL analysis, prefer assigned_stock_position_pnl; use assigned_stock_sale_events when the question asks about sold shares or realized sale PnL.")
+            notes.append("For current option exposure or expiry concentration, use open_option_exposure and expiration_risk_buckets; for symbol-level income drivers, use symbol_income_attribution.")
+            notes.append("For strategy setting comparisons by symbol/account, use strategy_config_by_symbol_account instead of raw config rows.")
+            notes.append("For candidate diagnostics, close-advice questions, runtime push/scan diagnostics, or quote freshness gaps, use candidate_filter_diagnostics, close_advice_snapshot, runtime_tick_status, and quote_freshness.")
+            notes.append("Do not avg/sum return-rate fields directly; recompute weighted rates from money numerator and cash_secured_cny when aggregating rows.")
             notes.append("Tool result rows/cell_refs are evidence; if synthesis fails, the analysis_result renderer preserves the task-shaped table.")
             semantics = {
                 "data_source": "OM read-only analysis workspace backed by local ledger/config/runtime read tools",
@@ -2950,9 +3531,9 @@ def _planner_tool_manifest() -> list[dict[str, Any]]:
                         "sum(case when account = 'sy' then net_income_cny else 0 end) then 'lx' else 'sy' end as higher_account, "
                         "round(abs(sum(case when account = 'lx' then net_income_cny else 0 end) - "
                         "sum(case when account = 'sy' then net_income_cny else 0 end)), 2) as income_diff_cny, "
-                        "round(sum(case when account = 'lx' then net_return_rate else 0 end) - "
-                        "sum(case when account = 'sy' then net_return_rate else 0 end), 6) as return_rate_diff "
-                        "from monthly_income_return_summary where account in ('lx','sy') group by month order by month"
+                        "round(max(case when account = 'lx' then net_return_rate end) - "
+                        "max(case when account = 'sy' then net_return_rate end), 6) as return_rate_diff "
+                        "from account_monthly_performance where account in ('lx','sy') group by month order by month"
                     ),
                 },
                 "answer_capabilities": {
@@ -3039,13 +3620,44 @@ def _planner_tool_manifest() -> list[dict[str, Any]]:
 
 
 def _analysis_views_for_planner_manifest() -> dict[str, dict[str, Any]]:
-    return {
-        name: {
+    views: dict[str, dict[str, Any]] = {}
+    for name, spec in ANALYSIS_VIEW_SPECS.items():
+        field_semantics = spec.get("field_semantics") if isinstance(spec.get("field_semantics"), dict) else {}
+        views[name] = {
             "description": str(spec.get("description") or ""),
             "fields": [str(field) for field in spec.get("fields") or []],
+            "row_grain": str(spec.get("row_grain") or ""),
+            "primary_keys": [str(item) for item in spec.get("primary_keys") or ()],
+            "time_grain": str(spec.get("time_grain") or ""),
+            "source_tools": [str(item) for item in spec.get("source_tools") or ()],
+            "freshness": str(spec.get("freshness") or ""),
+            "recommended_filters": [str(item) for item in spec.get("recommended_filters") or ()],
+            "safe_join_keys": [str(item) for item in spec.get("safe_join_keys") or ()],
+            "alias_of": str(spec.get("alias_of") or ""),
+            "field_semantics": _analysis_field_semantics_for_planner(field_semantics),
         }
-        for name, spec in ANALYSIS_VIEW_SPECS.items()
+    return views
+
+
+def _analysis_field_semantics_for_planner(field_semantics: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    allowed_keys = {
+        "type",
+        "unit",
+        "currency",
+        "formula",
+        "aggregation",
+        "null_meaning",
+        "source",
+        "freshness",
+        "do_not",
     }
+    out: dict[str, dict[str, Any]] = {}
+    for field, raw_meta in field_semantics.items():
+        if not isinstance(raw_meta, dict):
+            continue
+        meta = {key: value for key, value in raw_meta.items() if key in allowed_keys and value not in (None, "", [], {})}
+        out[str(field)] = meta
+    return out
 
 
 def _planner_preview_input_schema(intent_name: str) -> dict[str, Any]:
@@ -3142,8 +3754,10 @@ Rules:
 - If observation.capability_status has gaps, say the request is only partially satisfied and name the gap; do not present a nearby result as complete.
 - Do not downgrade a detail/composition question into a nearby summary.
 - Keep Chinese output concise and Markdown-friendly.
+- Start with the direct answer. Use a short "关键依据：" bullet block only when it improves readability.
 - Do not force a 事实/分析 section split. Write one natural answer; use compact bullets only when the user asked for details or the rows are necessary.
-- Do not expose internal ids such as stock_lot_id, record_id, event_id, source_deal_id, or position_key.
+- Do not expose SQL, tool names, raw tool receipts, artifact paths, trace ids, or internal ids such as stock_lot_id, record_id, event_id, source_deal_id, or position_key.
+- Do not mention internal answer modes such as canonical, synthesis, fact mode, or analysis mode.
 - If observations include assistant.answer_evidence, follow its composition_instruction. Do not append 数据来源 or 口径; the system appends deterministic provenance.
 - Mention the data scope only when it changes the answer; do not duplicate deterministic provenance.
 - For monthly_income_report, "历史以来", "累计", and "总净现金流" mean the OM local ledger coverage returned by the tool.
@@ -3424,6 +4038,7 @@ __all__ = [
     "AgentLoopSynthesizeFn",
     "AgentLoopTranslateFn",
     "FinalResponsePlan",
+    "FOLLOWUP_DECISION_SCHEMA_VERSION",
     "INTERNAL_TOOL_PLAN_NAME",
     "LlmSynthesisResult",
     "LlmPlannerResult",

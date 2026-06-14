@@ -89,6 +89,7 @@ def build_agent_session_snapshot(
         answer_trace={
             "final_response": dict(final_response),
             "synthesis": dict(synthesis_trace),
+            "followup_decisions": _followup_decisions(tool_events),
         },
         audit_ref={
             "channel": request.channel,
@@ -153,6 +154,16 @@ def _tool_transcript(*, tool_events: list[dict[str, Any]], observations: list[di
             }
         )
     return transcript
+
+
+def _followup_decisions(tool_events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    decisions: list[dict[str, Any]] = []
+    for event in tool_events:
+        if not isinstance(event, dict) or event.get("phase") != "followup_decision":
+            continue
+        payload = {key: value for key, value in event.items() if key != "phase"}
+        decisions.append(dict(payload))
+    return decisions
 
 
 __all__ = [

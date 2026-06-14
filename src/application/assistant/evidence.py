@@ -173,7 +173,10 @@ def build_evidence_bundle(
 
     scope = scope_accumulator.public_payload()
     deduped_missing = _dedupe_records(missing_data)
-    calculations = _reconciliation_calculations(facts=facts, datasets=datasets, missing_data=deduped_missing)
+    calculations = [
+        *_reconciliation_calculations(facts=facts, datasets=datasets, missing_data=deduped_missing),
+        *_analysis_query_calculations(facts=facts),
+    ]
     conflicts = _conflict_records(facts=facts)
     return EvidenceBundle(
         scope=scope,
@@ -210,11 +213,13 @@ class _ScopeAccumulator:
         self._add(self.accounts, filters.get("account"))
         self._add(self.symbols, filters.get("symbol"))
         self._add(self.months, filters.get("month"))
-        coverage = data.get("coverage") if isinstance(data.get("coverage"), dict) else {}
-        for value in coverage.get("accounts") or []:
-            self._add(self.accounts, value)
-        for value in coverage.get("months") or []:
-            self._add(self.months, value)
+        for coverage in _coverage_payloads(data):
+            for value in coverage.get("accounts") or []:
+                self._add(self.accounts, value)
+            for value in coverage.get("months") or []:
+                self._add(self.months, value)
+            for value in coverage.get("symbols") or []:
+                self._add(self.symbols, value)
         for rows_key in ("rows", "summary", "return_summary", "cashflow_rows", "realized_rows", "premium_rows"):
             rows = data.get(rows_key)
             if not isinstance(rows, list):
@@ -265,7 +270,7 @@ def _dataset_payload(
     if row_count is None and primary_rows:
         rows = data.get(primary_rows)
         row_count = len(rows) if isinstance(rows, list) else None
-    return {
+    payload = {
         "dataset_id": f"dataset_{observation_index:02d}",
         "observation_index": observation_index,
         "tool_name": str(observation.get("tool_name") or ""),
@@ -279,6 +284,46 @@ def _dataset_payload(
         "row_count": row_count,
         "payload": dict(observation.get("payload") or {}) if isinstance(observation.get("payload"), dict) else {},
     }
+    analysis_evidence = _analysis_evidence_payload(data)
+    if analysis_evidence:
+        payload["analysis_evidence"] = analysis_evidence
+    return payload
+
+
+def _coverage_payloads(data: dict[str, Any]) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
+    coverage = data.get("coverage")
+    if isinstance(coverage, dict):
+        payloads.append(coverage)
+    evidence = data.get("evidence")
+    if isinstance(evidence, dict) and isinstance(evidence.get("coverage"), dict):
+        payloads.append(evidence["coverage"])
+    query_explain = data.get("query_explain")
+    if isinstance(query_explain, dict) and isinstance(query_explain.get("coverage"), dict):
+        payloads.append(query_explain["coverage"])
+    return payloads
+
+
+def _analysis_evidence_payload(data: dict[str, Any]) -> dict[str, Any]:
+    evidence = data.get("evidence") if isinstance(data.get("evidence"), dict) else {}
+    query_explain = data.get("query_explain") if isinstance(data.get("query_explain"), dict) else {}
+    out: dict[str, Any] = {}
+    coverage = evidence.get("coverage") if isinstance(evidence.get("coverage"), dict) else query_explain.get("coverage")
+    if isinstance(coverage, dict):
+        out["coverage"] = dict(coverage)
+    freshness = evidence.get("freshness")
+    if isinstance(freshness, list):
+        out["freshness"] = [dict(item) for item in freshness if isinstance(item, dict)]
+    aggregation_policy = evidence.get("aggregation_policy")
+    if isinstance(aggregation_policy, list):
+        out["aggregation_policy"] = [dict(item) for item in aggregation_policy if isinstance(item, dict)]
+    diagnostics = evidence.get("diagnostics")
+    if isinstance(diagnostics, list):
+        out["diagnostics"] = [dict(item) for item in diagnostics if isinstance(item, dict)]
+    warnings = query_explain.get("warnings")
+    if isinstance(warnings, list):
+        out["warnings"] = [str(item) for item in warnings if str(item).strip()]
+    return out
 
 
 def _missing_data_records(
@@ -461,6 +506,8 @@ def _infer_unit(path: str, value: Any) -> str:
         return "currency"
     if "percent" in name or "rate" in name:
         return "percent"
+    if name.endswith("_per_share") and any(token in name for token in ("cost", "price", "spot")):
+        return "currency"
     if "contract" in name:
         return "contract"
     if "share" in name or "quantity" in name or name in {"remaining_shares", "sold_shares"}:
@@ -610,6 +657,274 @@ def _reconciliation_calculations(
             }
         )
     return calculations
+
+
+def _analysis_query_calculations(*, facts: list[EvidenceFact]) -> list[dict[str, Any]]:
+    rows = _analysis_query_fact_rows(facts)
+    formulas: list[dict[str, Any]] = []
+    for row_key in sorted(rows):
+        row = rows[row_key]
+        formulas.extend(_analysis_amount_formulas(row_key=row_key, row=row))
+        formulas.extend(_analysis_ratio_formulas(row_key=row_key, row=row))
+        formulas.extend(_analysis_lifecycle_formulas(row_key=row_key, row=row))
+        if len(formulas) >= 80:
+            break
+    if not formulas:
+        return []
+    return [
+        {
+            "kind": "analysis_formula_evidence",
+            "tool_name": "analysis_query",
+            "formulas": formulas[:80],
+        }
+    ]
+
+
+def _analysis_query_fact_rows(facts: list[EvidenceFact]) -> dict[str, dict[str, dict[str, Any]]]:
+    rows: dict[str, dict[str, dict[str, Any]]] = {}
+    for fact in facts:
+        if fact.source_tool != "analysis_query":
+            continue
+        row_key = _analysis_fact_row_key(fact)
+        field_name = _analysis_fact_field_name(fact)
+        if not row_key or not field_name:
+            continue
+        value = _safe_float(fact.value)
+        rows.setdefault(row_key, {})[field_name] = {
+            "value": value,
+            "raw_value": fact.value,
+            "currency": fact.currency,
+            "unit": fact.unit,
+            "fact_id": fact.fact_id,
+            "field": field_name,
+        }
+    return rows
+
+
+def _analysis_amount_formulas(*, row_key: str, row: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    by_currency: dict[str, list[dict[str, Any]]] = {}
+    for field, item in row.items():
+        currency = str(item.get("currency") or "").upper()
+        value = item.get("value")
+        if not currency or not isinstance(value, (int, float)):
+            continue
+        if not _analysis_money_formula_source(field):
+            continue
+        by_currency.setdefault(currency, []).append(item)
+    formulas: list[dict[str, Any]] = []
+    for currency, items in sorted(by_currency.items()):
+        if len(items) < 2:
+            continue
+        for left_index, left in enumerate(items[:8]):
+            for right in items[left_index + 1 : 8]:
+                left_value = float(left["value"])
+                right_value = float(right["value"])
+                diff = round(left_value - right_value, 6)
+                if abs(diff) >= 0.000001:
+                    formulas.append(
+                        {
+                            "kind": "amount_difference",
+                            "row": row_key,
+                            "currency": currency,
+                            "operands": [left["field"], right["field"]],
+                            "fact_ids": [left["fact_id"], right["fact_id"]],
+                            "values": [diff, -diff, abs(diff)],
+                            "status": "verified",
+                        }
+                    )
+                total = round(left_value + right_value, 6)
+                formulas.append(
+                    {
+                        "kind": "amount_sum",
+                        "row": row_key,
+                        "currency": currency,
+                        "operands": [left["field"], right["field"]],
+                        "fact_ids": [left["fact_id"], right["fact_id"]],
+                        "values": [total],
+                        "status": "verified",
+                    }
+                )
+        if 2 < len(items) <= 8:
+            total = round(sum(float(item["value"]) for item in items), 6)
+            formulas.append(
+                {
+                    "kind": "amount_sum",
+                    "row": row_key,
+                    "currency": currency,
+                    "operands": [str(item["field"]) for item in items],
+                    "fact_ids": [str(item["fact_id"]) for item in items],
+                    "values": [total],
+                    "status": "verified",
+                }
+            )
+    return formulas
+
+
+def _analysis_ratio_formulas(*, row_key: str, row: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    formulas: list[dict[str, Any]] = []
+    cash_secured = _analysis_row_number(row, "cash_secured_cny")
+    if cash_secured is not None and abs(cash_secured) >= 0.000001:
+        for numerator_name in ("net_income_cny", "premium_income_cny", "realized_pnl_cny"):
+            numerator = _analysis_row_number(row, numerator_name)
+            if numerator is None:
+                continue
+            formulas.append(
+                {
+                    "kind": "ratio",
+                    "row": row_key,
+                    "output": numerator_name.replace("_cny", "_return_rate"),
+                    "numerator": numerator_name,
+                    "denominator": "cash_secured_cny",
+                    "value": round(numerator / cash_secured, 8),
+                    "policy": "weighted_recompute",
+                    "status": "verified",
+                }
+            )
+    rate_items = [
+        item
+        for field, item in row.items()
+        if isinstance(item.get("value"), (int, float)) and ("rate" in field or item.get("unit") == "percent")
+    ]
+    for left_index, left in enumerate(rate_items[:8]):
+        for right in rate_items[left_index + 1 : 8]:
+            left_value = _normalized_rate_value(float(left["value"]))
+            right_value = _normalized_rate_value(float(right["value"]))
+            diff = round(left_value - right_value, 8)
+            if abs(diff) < 0.000001:
+                continue
+            formulas.append(
+                {
+                    "kind": "rate_difference",
+                    "row": row_key,
+                    "operands": [left["field"], right["field"]],
+                    "values": [diff, -diff, abs(diff)],
+                    "unit": "rate",
+                    "status": "verified",
+                }
+            )
+    for denominator_name in _analysis_denominator_fields(row):
+        denominator = _analysis_row_number(row, denominator_name)
+        if denominator is None or abs(denominator) < 0.000001:
+            continue
+        for numerator_name in _analysis_contribution_numerator_fields(row, denominator_name=denominator_name):
+            numerator = _analysis_row_number(row, numerator_name)
+            if numerator is None:
+                continue
+            formulas.append(
+                {
+                    "kind": "contribution_share",
+                    "row": row_key,
+                    "numerator": numerator_name,
+                    "denominator": denominator_name,
+                    "value": round(numerator / denominator, 8),
+                    "policy": "requires_denominator",
+                    "status": "verified",
+                }
+            )
+    return formulas
+
+
+def _analysis_lifecycle_formulas(*, row_key: str, row: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    component_names = [
+        "assigned_stock_unrealized_pnl",
+        "assigned_stock_realized_pnl",
+        "option_premium_attribution",
+    ]
+    components: list[dict[str, Any]] = []
+    currencies: set[str] = set()
+    for name in component_names:
+        item = row.get(name)
+        if not item or not isinstance(item.get("value"), (int, float)):
+            return []
+        components.append(item)
+        currency = str(item.get("currency") or "").upper()
+        if currency:
+            currencies.add(currency)
+    if len(currencies) != 1:
+        return []
+    total = round(sum(float(item["value"]) for item in components), 6)
+    return [
+        {
+            "kind": "assigned_stock_lifecycle",
+            "row": row_key,
+            "currency": next(iter(currencies)),
+            "operands": component_names,
+            "fact_ids": [str(item["fact_id"]) for item in components],
+            "values": [total],
+            "status": "verified",
+        }
+    ]
+
+
+def _analysis_fact_row_key(fact: EvidenceFact) -> str:
+    source_path = str(fact.source_path or "")
+    if not source_path.startswith("rows["):
+        return ""
+    return source_path.split("].", 1)[0] + "]" if "]." in source_path else ""
+
+
+def _analysis_fact_field_name(fact: EvidenceFact) -> str:
+    source_path = str(fact.source_path or "")
+    if "." in source_path:
+        return source_path.rsplit(".", 1)[-1].lower()
+    return str(fact.path or "").rsplit(".", 1)[-1].lower()
+
+
+def _analysis_money_formula_source(field: str) -> bool:
+    name = str(field or "").lower()
+    if any(token in name for token in ("diff", "difference", "delta")):
+        return False
+    if any(token in name for token in ("spot", "strike", "price", "per_share", "cash_secured")):
+        return False
+    if name.startswith("total_") or name.endswith("_total_cny"):
+        return False
+    return any(
+        token in name
+        for token in (
+            "income",
+            "pnl",
+            "cashflow",
+            "premium",
+            "amount",
+            "market_value",
+            "cost_basis",
+            "basis",
+            "gross",
+            "attribution",
+        )
+    )
+
+
+def _analysis_row_number(row: dict[str, dict[str, Any]], field: str) -> float | None:
+    item = row.get(field)
+    value = item.get("value") if isinstance(item, dict) else None
+    return float(value) if isinstance(value, (int, float)) else None
+
+
+def _normalized_rate_value(value: float) -> float:
+    return value / 100.0 if abs(value) > 1 and abs(value) <= 100 else value
+
+
+def _analysis_denominator_fields(row: dict[str, dict[str, Any]]) -> list[str]:
+    fields: list[str] = []
+    for field, item in row.items():
+        if not isinstance(item.get("value"), (int, float)):
+            continue
+        if field.startswith("total_") or field.endswith("_total_cny") or field in {"total_income_cny", "total_amount_cny"}:
+            fields.append(field)
+    return fields
+
+
+def _analysis_contribution_numerator_fields(row: dict[str, dict[str, Any]], *, denominator_name: str) -> list[str]:
+    fields: list[str] = []
+    for field, item in row.items():
+        if field == denominator_name:
+            continue
+        if not isinstance(item.get("value"), (int, float)):
+            continue
+        if _analysis_money_formula_source(field):
+            fields.append(field)
+    return fields[:8]
 
 
 def _fact_accounting_view(fact: EvidenceFact) -> str:

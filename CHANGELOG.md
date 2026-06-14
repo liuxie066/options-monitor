@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 1.2.269 - 2026-06-14
+
+### Added
+- Added the expanded SQLite Tool OS design and implementation for semantic catalog v2, P0/P1/P2 semantic analysis views, lazy materialization, query preflight/explain metadata, evidence v2, bounded read-only follow-up planning, and P2 diagnostic interpretation.
+- Added normal-answer UX golden eval coverage for account income comparison, assigned-stock PnL, candidate diagnostics, close advice, runtime diagnostics, and strategy config questions.
+
+### Changed
+- Expanded AgentLoop and EvidenceBundle handling so open-ended analytical questions can use guarded `analysis_query` evidence, follow-up decisions, formula checks, diagnostic records, and task-shaped fallback without exposing internal SQL or mode details to users.
+- Updated Tool OS documentation, tool reference, and dependency graph output to match the current Agent loop and analysis workspace behavior.
+
+### Fixed
+- Fixed normal LLM-composed Agent answers so internal mode names, `analysis_query` / `analysis_catalog`, SQL, internal ids, artifact paths, and forced `事实` / `分析` headings trigger rewrite or deterministic fallback before reaching users.
+- Fixed evidence unit inference for per-share cost fields such as `stock_cost_per_share`, allowing user-facing expressions like `USD 117.45/股` to be verified as currency facts.
+
 ## 1.2.268 - 2026-06-14
 
 ### Fixed
