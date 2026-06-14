@@ -128,6 +128,52 @@ def test_evidence_bundle_extracts_contract_facts_and_missing_quote() -> None:
     assert trace_payload["diagnostic_domains"] == ["quote_freshness"]
 
 
+def test_evidence_bundle_extracts_analysis_catalog_contract_facts() -> None:
+    from src.application.agent_tool_registry import get_tool_definition
+
+    definition = get_tool_definition("analysis_catalog")
+    assert definition is not None
+    output_contract = definition.resolve_output_contract({})
+
+    bundle = build_evidence_bundle(
+        question="能分析哪些数据？",
+        plan={"goal": "能分析哪些数据？", "steps": []},
+        observations=[
+            {
+                "index": 1,
+                "tool_name": "analysis_catalog",
+                "payload": {"config_key": "us"},
+                "ok": True,
+                "error": None,
+                "output_contract": output_contract,
+                "data": {
+                    "source_label": "OM read-only analysis workspace",
+                    "view_count": 1,
+                    "view_names": ["account_monthly_performance"],
+                    "views": {
+                        "account_monthly_performance": {
+                            "description": "monthly account performance",
+                            "fields": ["month", "account", "net_income_cny"],
+                            "freshness": "snapshot",
+                            "recommended_filters": ["month", "account"],
+                        }
+                    },
+                    "sql_rules": {"allowed_statements": ["SELECT", "WITH"], "writes_allowed": False},
+                },
+            }
+        ],
+    )
+
+    facts = bundle.public_payload()["facts"]
+    assert any(item["path"] == "view_count" and item["value"] == 1 for item in facts)
+    assert any(
+        item["path"] == "view_names[]" and item["value"] == "account_monthly_performance"
+        for item in facts
+    )
+    assert any(item["path"] == "sql_rules.allowed_statements[]" and item["value"] == "SELECT" for item in facts)
+    assert any(item["path"] == "sql_rules.writes_allowed" and item["value"] is False for item in facts)
+
+
 def test_evidence_bundle_extracts_upgrade_timeline_diagnostics() -> None:
     bundle = build_evidence_bundle(
         question="为什么升级没回执",

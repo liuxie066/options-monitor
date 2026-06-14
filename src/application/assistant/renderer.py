@@ -43,6 +43,7 @@ def render_inbound_text(*, intent: PerceptionResult | None, tool_result: dict[st
     data_raw = tool_result.get("data")
     data = cast(dict[str, Any], data_raw) if isinstance(data_raw, dict) else {}
     renderer_key = {
+        "analysis_catalog": "analysis_catalog",
         "analysis_query": "analysis_result",
         "monthly_income_report": "monthly_income",
         "position_query": "position_rows",
@@ -155,6 +156,42 @@ def _render_analysis_result(data: dict[str, Any], tool_result: dict[str, Any]) -
     if len(rows) > 12:
         lines.append(f"其余 {len(rows) - 12} 行已省略。")
     lines.extend(warning_lines)
+    lines.append("数据来源：OM read-only analysis workspace")
+    return "\n".join(lines)
+
+
+def _render_analysis_catalog(data: dict[str, Any], _tool_result: dict[str, Any]) -> str:
+    views = data.get("views")
+    if not isinstance(views, dict) or not views:
+        return "分析目录：0 个可用视图。\n数据来源：OM read-only analysis workspace"
+
+    view_items = sorted((str(name), spec) for name, spec in views.items() if str(name).strip())
+    view_count = data.get("view_count")
+    try:
+        total = int(view_count)
+    except (TypeError, ValueError, OverflowError):
+        total = len(view_items)
+
+    lines = [f"分析目录：{total} 个可用视图"]
+    for name, spec_raw in view_items[:10]:
+        spec = spec_raw if isinstance(spec_raw, dict) else {}
+        fields = [str(item) for item in spec.get("fields") or () if str(item).strip()]
+        filters = [str(item) for item in spec.get("recommended_filters") or () if str(item).strip()]
+        freshness = str(spec.get("freshness") or "").strip()
+        parts = [f"{len(fields)} 个字段"]
+        if filters:
+            parts.append("常用过滤：" + ", ".join(filters[:4]))
+        if freshness:
+            parts.append(f"freshness={freshness}")
+        lines.append(f"- {name}：" + "；".join(parts))
+    if len(view_items) > 10:
+        lines.append(f"其余 {len(view_items) - 10} 个视图已省略。")
+
+    sql_rules = data.get("sql_rules") if isinstance(data.get("sql_rules"), dict) else {}
+    allowed = [str(item) for item in sql_rules.get("allowed_statements") or () if str(item).strip()]
+    writes_allowed = bool(sql_rules.get("writes_allowed"))
+    if allowed:
+        lines.append("查询规则：" + "/".join(allowed) + f"，写入{'允许' if writes_allowed else '不允许'}。")
     lines.append("数据来源：OM read-only analysis workspace")
     return "\n".join(lines)
 
@@ -1533,6 +1570,7 @@ def _money(value: Any, currency: Any) -> str:
 _CanonicalRenderer = Callable[[dict[str, Any], dict[str, Any]], str]
 
 _CANONICAL_RENDERERS: dict[str, _CanonicalRenderer] = {
+    "analysis_catalog": _render_analysis_catalog,
     "analysis_result": _render_analysis_result,
     "monthly_income": lambda data, _tool_result: _render_monthly_income(data),
     "position_rows": lambda data, _tool_result: _render_positions(data),

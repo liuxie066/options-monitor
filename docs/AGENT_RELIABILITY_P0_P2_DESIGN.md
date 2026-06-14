@@ -694,6 +694,11 @@ P1 把 action policy 和 pre/post checks 写入 session trace：
 | 工具输出缺 source/freshness | postcheck warning 或 fail，最终回答说明影响 |
 | preview 回执 | 包含 operation_id、风险、confirm/cancel hint |
 
+当前落地补充：`analysis_catalog` 已补齐 `canonical_renderer`、`fact_fields` 和
+`view_count` evidence contract 字段，并提供不展示 SQL 模板的 canonical renderer；
+ToolExecutor postcheck 对该工具应为 `pass`，而不是长期以 incomplete contract warning
+运行。
+
 建议测试：
 
 ```bash

@@ -994,6 +994,8 @@ def _analysis_catalog_tool(
         "schema_version": "analysis.catalog.v2",
         "source_label": "OM read-only analysis workspace",
         "views": specs,
+        "view_count": len(specs),
+        "view_names": sorted(specs),
         "field_types": _catalog_field_types(specs),
         "aggregation_policies": _catalog_aggregation_policies(specs),
         "join_policies": _catalog_join_policies(specs),
@@ -3304,9 +3306,17 @@ ANALYSIS_CATALOG_TOOL = build_agent_tool(
     examples=({"input": {"config_key": "us"}},),
     output_contract={
         "schema_version": "analysis_catalog.output.v2",
+        "canonical_renderer": "analysis_catalog",
         "source_label": "OM read-only analysis workspace",
         "guard_profile": "analysis_catalog",
         "primary_rows": "views",
+        "row_count_field": "view_count",
+        "fact_fields": [
+            "view_count",
+            "view_names[]",
+            "sql_rules.allowed_statements[]",
+            "sql_rules.writes_allowed",
+        ],
     },
 )
 

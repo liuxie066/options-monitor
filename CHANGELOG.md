@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.283 - 2026-06-15
+
+### Added
+- Added an `analysis_catalog` canonical renderer that summarizes available analysis views without exposing embedded SQL templates.
+- Added evidence extraction coverage for `analysis_catalog` contract facts so planner support tools produce usable source-backed facts.
+
+### Fixed
+- Fixed the `analysis_catalog` evidence contract by declaring its canonical renderer, row count, and fact fields so ToolExecutor postchecks no longer report an incomplete contract.
+- Regenerated the dependency graph after the new evidence-session coverage changed test imports.
+
 ## 1.2.282 - 2026-06-15
 
 ### Added
