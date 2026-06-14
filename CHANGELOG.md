@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.2.271 - 2026-06-14
+
+### Fixed
+- Fixed inbound WeChat ClawBot upgrade confirmations to preserve reply context through the background upgrade worker and send the final upgrade receipt through ClawBot instead of silently skipping non-Feishu channels.
+- Fixed upgrade confirmation copy to describe the active notification service instead of hard-coding Feishu.
+- Added idempotent WeChat ClawBot final replies with stable client ids and persisted outbound receipts for safe worker retry.
+
 ## 1.2.270 - 2026-06-14
 
 ### Changed

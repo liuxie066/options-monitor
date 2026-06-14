@@ -148,14 +148,16 @@ class WechatClawbotClient:
         context_token: str,
         text: str,
         group_id: str | None = None,
+        client_id: str | None = None,
     ) -> dict[str, Any]:
+        resolved_client_id = str(client_id or "").strip() or uuid4().hex
         msg: dict[str, Any] = {
             "message_type": 2,
             "message_state": 2,
             "context_token": str(context_token or ""),
             "from_user_id": "",
             "to_user_id": str(to_user_id or ""),
-            "client_id": uuid4().hex,
+            "client_id": resolved_client_id,
             "item_list": [
                 {
                     "type": 1,

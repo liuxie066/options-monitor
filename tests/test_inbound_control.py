@@ -1518,6 +1518,130 @@ def test_inbound_upgrade_worker_retries_final_receipt(monkeypatch: pytest.Monkey
     assert "升级执行完成" in str(reply_attempts[-1]["text"])
 
 
+def test_inbound_upgrade_worker_sends_wechat_clawbot_final_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from src.application.assistant import upgrade_operations
+
+    _enable_inbound_upgrade_write(monkeypatch)
+    monkeypatch.setenv("OM_INBOUND_ADMIN_OPEN_IDS", "wechat:user_1")
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    audit_db = tmp_path / "inbound.sqlite3"
+    wechat_replies: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        upgrade_operations,
+        "service_upgrade_check",
+        lambda **kwargs: {
+            "ok": True,
+            "repo_root": str(kwargs["repo_root"]),
+            "repo_root_resolved": str(kwargs["repo_root"]),
+            "repo_root_resolution": {"status": "input"},
+            "runtime_root": str(kwargs["runtime_root"]),
+            "current_version": "1.2.268",
+            "latest_version": "1.2.270",
+            "release_tag": "v1.2.270",
+            "upgrade_available": True,
+            "version_check": {"ok": True},
+        },
+    )
+    monkeypatch.setattr(
+        upgrade_operations,
+        "service_upgrade",
+        lambda **kwargs: {
+            "ok": True,
+            "status": "upgraded",
+            "changed": True,
+            "current_version": "1.2.268",
+            "target_version": kwargs.get("target_version") or "1.2.270",
+            "release_tag": "v1.2.270",
+            "repo_root": str(kwargs["repo_root"]),
+            "runtime_root": str(kwargs["runtime_root"]),
+        },
+    )
+    monkeypatch.setattr(
+        upgrade_operations,
+        "UPGRADE_WORKER_LAUNCHER",
+        lambda operation_id, audit_db: {"launcher": "test", "operation_id": operation_id},
+    )
+
+    preview = handle_assistant_request(
+        AssistantRequest(
+            text="立即升级",
+            sender_id="user_1",
+            channel="wechat",
+            message_id="msg_upgrade_preview",
+            conversation_id="wechat:group_1:user_1",
+            audit_db=str(audit_db),
+            reply_context={
+                "provider": "wechat_clawbot",
+                "base": str(tmp_path),
+                "label": "ops",
+                "state_dir": str(tmp_path / "wechat-state"),
+                "to_user_id": "user_1",
+                "context_token": "ctx_preview",
+                "group_id": "group_1",
+            },
+        ),
+        allowed_senders="wechat:user_1",
+    )
+    operation_id = preview["data"]["operation_id"]
+    confirmed = handle_assistant_request(
+        AssistantRequest(
+            text=f"确认升级 {operation_id}",
+            sender_id="user_1",
+            channel="wechat",
+            message_id="msg_upgrade_confirm",
+            conversation_id="wechat:group_1:user_1",
+            audit_db=str(audit_db),
+            reply_context={
+                "provider": "wechat_clawbot",
+                "base": str(tmp_path),
+                "label": "ops",
+                "state_dir": str(tmp_path / "wechat-state"),
+                "to_user_id": "user_1",
+                "context_token": "ctx_confirm",
+                "group_id": "group_1",
+            },
+        ),
+        allowed_senders="wechat:user_1",
+    )
+
+    assert confirmed["ok"] is True
+    response_text = confirmed["data"]["response_text"]
+    assert "升级期间微信 ClawBot 服务可能短暂重启" in response_text
+    assert "升级期间飞书服务" not in response_text
+
+    def _wechat_reply_fn(**kwargs):  # type: ignore[no-untyped-def]
+        wechat_replies.append(dict(kwargs))
+        return {
+            "attempted": True,
+            "ok": True,
+            "reason": "sent",
+            "provider": "wechat_clawbot",
+            "message_id": "wechat_reply_1",
+        }
+
+    worker = upgrade_operations.run_confirmed_upgrade_operation(
+        operation_id=operation_id,
+        audit_db=audit_db,
+        wechat_reply_fn=_wechat_reply_fn,
+    )
+
+    final_receipt = worker["data"]["result"]["final_receipt"]
+    assert worker["ok"] is True
+    assert final_receipt["ok"] is True
+    assert final_receipt["provider"] == "wechat_clawbot"
+    assert final_receipt["reason"] == "sent"
+    assert len(wechat_replies) == 1
+    assert wechat_replies[0]["to_user_id"] == "user_1"
+    assert wechat_replies[0]["context_token"] == "ctx_confirm"
+    assert wechat_replies[0]["group_id"] == "group_1"
+    assert wechat_replies[0]["idempotency_key"] == f"{operation_id}:upgrade-final"
+    assert "升级执行完成" in str(wechat_replies[0]["text"])
+
+
 def test_inbound_upgrade_returns_no_upgrade_without_pending_operation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from src.application.assistant import upgrade_operations
 

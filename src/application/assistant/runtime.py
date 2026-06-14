@@ -126,6 +126,7 @@ def _request_with_default_market_scope(request: AssistantRequest, settings: Assi
         config_path=request.config_path,
         audit_db=request.audit_db,
         assistant_config_path=request.assistant_config_path,
+        reply_context=dict(request.reply_context) if isinstance(request.reply_context, dict) else None,
     )
 
 
