@@ -135,14 +135,18 @@ def _render_symbol_config(data: dict[str, Any]) -> str:
     return f"{symbol} 当前没有可展示的策略配置。"
 
 
-def _render_analysis_result(data: dict[str, Any]) -> str:
+def _render_analysis_result(data: dict[str, Any], tool_result: dict[str, Any]) -> str:
+    warning_lines = _analysis_result_warning_lines(data, tool_result)
     fallback = str(data.get("fallback_text") or "").strip()
     if fallback:
-        return fallback
+        return _append_analysis_result_warning_lines(fallback, warning_lines)
     columns = [str(item) for item in data.get("columns") or [] if str(item).strip()]
     rows = [item for item in data.get("rows") or [] if isinstance(item, dict)]
     if not columns:
-        return "分析查询完成：0 行。\n数据来源：OM read-only analysis workspace"
+        return _append_analysis_result_warning_lines(
+            "分析查询完成：0 行。\n数据来源：OM read-only analysis workspace",
+            warning_lines,
+        )
     lines = [f"分析查询结果：{len(rows)} 行"]
     lines.append("| " + " | ".join(columns) + " |")
     lines.append("| " + " | ".join("---" for _ in columns) + " |")
@@ -150,8 +154,206 @@ def _render_analysis_result(data: dict[str, Any]) -> str:
         lines.append("| " + " | ".join(_analysis_cell(row.get(column)) for column in columns) + " |")
     if len(rows) > 12:
         lines.append(f"其余 {len(rows) - 12} 行已省略。")
+    lines.extend(warning_lines)
     lines.append("数据来源：OM read-only analysis workspace")
     return "\n".join(lines)
+
+
+def _append_analysis_result_warning_lines(text: str, warning_lines: list[str]) -> str:
+    if not warning_lines:
+        return text
+    lines = text.rstrip().splitlines()
+    if lines and lines[-1].startswith("数据来源："):
+        return "\n".join([*lines[:-1], *warning_lines, lines[-1]])
+    return "\n".join([*lines, *warning_lines])
+
+
+def _analysis_result_warning_lines(data: dict[str, Any], tool_result: dict[str, Any]) -> list[str]:
+    raw_warnings: list[str] = []
+    raw_warnings.extend(_string_list(data.get("warnings")))
+    raw_warnings.extend(_string_list(tool_result.get("warnings")))
+    preflight = data.get("preflight") if isinstance(data.get("preflight"), dict) else {}
+    query_explain = data.get("query_explain") if isinstance(data.get("query_explain"), dict) else {}
+    raw_warnings.extend(_string_list(preflight.get("warnings")))
+    raw_warnings.extend(_string_list(query_explain.get("warnings")))
+
+    evidence = data.get("evidence") if isinstance(data.get("evidence"), dict) else {}
+    lines: list[str] = []
+    lines.extend(_analysis_diagnostic_warning_lines(evidence))
+    lines.extend(_analysis_policy_warning_lines(evidence))
+    lines.extend(_analysis_freshness_warning_lines(evidence))
+
+    for warning in raw_warnings:
+        compact = _compact_analysis_warning(warning)
+        if compact:
+            lines.append(compact)
+
+    coverage = _analysis_coverage_line(evidence=evidence, query_explain=query_explain, has_warnings=bool(lines))
+    if coverage:
+        lines.append(coverage)
+    return _unique(lines)[:4]
+
+
+def _analysis_diagnostic_warning_lines(evidence: dict[str, Any]) -> list[str]:
+    diagnostics = evidence.get("diagnostics")
+    if not isinstance(diagnostics, list):
+        return []
+    lines: list[str] = []
+    for record in diagnostics:
+        if not isinstance(record, dict):
+            continue
+        view = str(record.get("view") or "").strip()
+        status = str(record.get("status") or "").strip().lower()
+        if status in {"observed_rejection", "observed_candidate_diagnostic", "observed_close_advice", "observed_quote_freshness"}:
+            continue
+        if status == "diagnostic_missing":
+            lines.append(f"提示：{_diagnostic_view_label(view)}缺失，不能判断确定原因。")
+        elif status == "no_matching_rows":
+            lines.append(f"提示：{_diagnostic_view_label(view)}没有匹配记录，不能等同于没有问题。")
+        elif status == "read_error":
+            lines.append(f"提示：{_diagnostic_view_label(view)}读取失败，相关诊断不完整。")
+        elif status == "empty_artifact":
+            lines.append(f"提示：{_diagnostic_view_label(view)}为空，不能判断确定原因。")
+        elif status == "observed_run_failure":
+            lines.append("提示：运行状态显示最近扫描失败。")
+        elif status == "observed_scheduler_skip":
+            lines.append("提示：运行状态显示最近扫描被跳过。")
+        elif status == "observed_no_candidates":
+            lines.append("提示：运行状态显示最近扫描没有候选输出。")
+        elif status == "observed_notification_missing":
+            lines.append("提示：运行状态显示通知输出缺失。")
+        elif status in {"observed_runtime_freshness_gap", "observed_quote_freshness_gap"}:
+            lines.append("提示：行情或运行状态存在缺失/过期，相关计算可能不完整。")
+    return lines
+
+
+def _diagnostic_view_label(view: str) -> str:
+    return {
+        "candidate_filter_diagnostics": "候选诊断",
+        "close_advice_snapshot": "平仓建议快照",
+        "runtime_tick_status": "运行状态",
+        "quote_freshness": "行情新鲜度",
+    }.get(view, "诊断证据")
+
+
+def _analysis_policy_warning_lines(evidence: dict[str, Any]) -> list[str]:
+    policies = evidence.get("aggregation_policy")
+    if not isinstance(policies, list):
+        return []
+    lines: list[str] = []
+    for item in policies:
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("status") or "").strip().lower()
+        policy = str(item.get("policy") or "").strip().lower()
+        if status not in {"warning", "invalid", "error"} and "invalid" not in policy:
+            continue
+        field = str(item.get("field") or "").strip() or "字段"
+        function_name = str(item.get("function") or "").strip()
+        if "rate" in field.lower() or "rate" in policy:
+            prefix = f"{function_name}({field})" if function_name else field
+            lines.append(f"提示：收益率聚合需复核，{prefix} 不能直接代表组合收益率。")
+        else:
+            prefix = f"{function_name}({field})" if function_name else field
+            lines.append(f"提示：聚合口径需复核：{prefix}。")
+    return lines
+
+
+def _analysis_freshness_warning_lines(evidence: dict[str, Any]) -> list[str]:
+    freshness_rows = evidence.get("freshness")
+    if not isinstance(freshness_rows, list):
+        return []
+    bad_statuses = {"missing", "missing_quote", "stale", "unknown", "error", "failed"}
+    items: list[str] = []
+    for row in freshness_rows:
+        if not isinstance(row, dict):
+            continue
+        status = str(row.get("freshness") or row.get("status") or row.get("quote_status") or "").strip()
+        if status.lower() not in bad_statuses:
+            continue
+        label = str(row.get("symbol") or row.get("view") or row.get("source") or "数据").strip()
+        items.append(f"{label} {status}")
+    if not items:
+        return []
+    suffix = " 等" if len(items) > 4 else ""
+    return [f"提示：数据新鲜度存在缺失/过期：{'; '.join(items[:4])}{suffix}。"]
+
+
+def _compact_analysis_warning(warning: str) -> str:
+    text = str(warning or "").strip()
+    if not text:
+        return ""
+    lower = text.lower()
+    if "unsafe for return-rate fields" in lower:
+        return ""
+    if "read_error" in lower:
+        return "提示：部分诊断数据读取失败，相关结果可能不完整。"
+    if "runtime config path unavailable" in lower:
+        return "提示：运行配置路径不可用，策略配置结果可能不完整。"
+    if "truncated at materialization row cap" in lower:
+        return "提示：部分分析数据已达到物化上限，结果可能不完整。"
+
+    label, message = _analysis_warning_label_and_message(text)
+    if " missing:" in f" {lower}" or lower.endswith(" missing"):
+        return f"提示：{label}缺失{_colon_message(message)}。"
+    if " empty:" in f" {lower}" or lower.endswith(" empty"):
+        return f"提示：{label}为空{_colon_message(message)}。"
+    if "/" in text or "\\" in text:
+        return "提示：部分分析数据不可读取，结果可能不完整。"
+    return f"提示：{text[:120]}{'...' if len(text) > 120 else ''}"
+
+
+def _analysis_warning_label_and_message(text: str) -> tuple[str, str]:
+    raw_label, sep, raw_message = text.partition(":")
+    label_map = {
+        "candidate_filter_diagnostics missing": "候选诊断",
+        "candidate_filter_diagnostics empty": "候选诊断",
+        "close_advice_snapshot missing": "平仓建议快照",
+        "close_advice_snapshot empty": "平仓建议快照",
+        "runtime_tick_status missing": "运行状态",
+        "runtime_tick_status empty": "运行状态",
+        "quote_freshness missing": "行情新鲜度",
+        "quote_freshness empty": "行情新鲜度",
+    }
+    label = label_map.get(raw_label.strip().lower(), raw_label.strip())
+    message = raw_message.strip() if sep else ""
+    return label or "分析数据", message
+
+
+def _colon_message(message: str) -> str:
+    return f"：{message}" if message else ""
+
+
+def _analysis_coverage_line(
+    *,
+    evidence: dict[str, Any],
+    query_explain: dict[str, Any],
+    has_warnings: bool,
+) -> str:
+    coverage = evidence.get("coverage") if isinstance(evidence.get("coverage"), dict) else None
+    if coverage is None:
+        coverage = query_explain.get("coverage") if isinstance(query_explain.get("coverage"), dict) else None
+    if not isinstance(coverage, dict):
+        return ""
+    status = str(coverage.get("status") or coverage.get("coverage_status") or "").strip().lower()
+    complete = coverage.get("complete_for_query_scope")
+    should_show = complete is False or status in {"partial", "incomplete", "unknown"} or has_warnings
+    if not should_show:
+        return ""
+    parts: list[str] = []
+    for key, label in (("accounts", "账户"), ("months", "月份"), ("symbols", "标的"), ("views", "视图")):
+        values = _string_list(coverage.get(key))
+        if values:
+            parts.append(f"{label} {', '.join(values[:6])}{' 等' if len(values) > 6 else ''}")
+    if not parts:
+        return ""
+    return f"覆盖范围：{'；'.join(parts)}。"
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
 
 
 def _analysis_cell(value: Any) -> str:
@@ -1331,7 +1533,7 @@ def _money(value: Any, currency: Any) -> str:
 _CanonicalRenderer = Callable[[dict[str, Any], dict[str, Any]], str]
 
 _CANONICAL_RENDERERS: dict[str, _CanonicalRenderer] = {
-    "analysis_result": lambda data, _tool_result: _render_analysis_result(data),
+    "analysis_result": _render_analysis_result,
     "monthly_income": lambda data, _tool_result: _render_monthly_income(data),
     "position_rows": lambda data, _tool_result: _render_positions(data),
     "assigned_stock_lifecycle": lambda data, _tool_result: _render_assigned_stock_lifecycle(data),

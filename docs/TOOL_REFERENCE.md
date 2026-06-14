@@ -604,12 +604,14 @@ om option-positions assigned-stock-sale --target-stock-lot-id assigned-stock-ass
 ## 5.9 `analysis_catalog` / `analysis_query`
 
 用途：
-- Tool OS v1 的通用只读分析工作台。
-- `analysis_catalog` 返回可查询 view、字段说明、示例和只读 SQL 边界。
+- Tool OS 的通用只读分析工作台。
+- `analysis_catalog` 返回可查询 view、字段说明、行粒度、聚合策略、join
+  策略、示例和只读 SQL 边界。
 - `analysis_query` 在内存 SQLite 中执行单条 SELECT/CTE，只能读取白名单 view，
-  用于对比、排名、趋势、组成、分组、差额、收益率差等开放式问题。
-- 这是通用工具，不是收益专用 API。首批 view 覆盖收益、现金流、已实现明细、
-  指派正股生命周期、position lots、trade events 和监控标的策略配置。
+  用于对比、排名、趋势、组成、分组、差额、收益率差、排障等开放式问题。
+- 这是通用工具，不是收益专用 API。view 覆盖收益、现金流、已实现明细、
+  指派正股生命周期、option exposure、trade events、策略配置、候选过滤诊断、
+  close advice、runtime 状态和 quote freshness。
 
 关键约束：
 - 只允许单条 `SELECT` 或 `WITH ... SELECT`。
@@ -620,30 +622,80 @@ om option-positions assigned-stock-sale --target-stock-lot-id assigned-stock-ass
   `coalesce`、`substr`、`lower`、`upper` 等；不允许 `load_extension` 等越界函数。
 - 工具会限制用户可见输出行数，并返回 `truncated=true|false`；内部读取源数据时使用
   更高的物化上限，避免把分析源数据误截断到展示上限。
+- `analysis_query` 只懒加载 SQL 实际引用的 view；`select 1` 不会加载业务源。
+- 输出 schema 为 `analysis.query.output.v2`，保留旧字段兼容；新增
+  `query_explain`、`preflight`、`evidence.coverage`、`evidence.freshness`、
+  `evidence.aggregation_policy`、`evidence.diagnostics` 等证据。
 - 输出包含 `columns`、`rows`、`cell_refs`、`views_used`、`source_label` 和
-  `fallback_text`。`cell_refs` 是 answer guard 校验动态查询结果的证据。
+  `fallback_text`。`cell_refs` 和 `evidence` 是 answer guard 校验动态查询结果的证据。
+- answer guard 会使用 Evidence v2 拦截未被证据支持的全部账户、最新/实时、
+  平均收益率和 root-cause 类结论。
+- normal answer UX guard 会拦截正常合成答案里的内部模式名、`analysis_query` /
+  `analysis_catalog`、SQL、internal id、artifact path 和强制 `事实` / `分析` 标题；
+  首次命中会要求 LLM 重写，重写仍不安全时使用 deterministic fallback。
+- 对 P2 诊断 view，`evidence.diagnostics` 会区分 observed rejection、
+  no matching rows、diagnostic missing、empty artifact、read error、runtime
+  skip/failure、quote freshness gap 等状态；缺失或无匹配诊断不能被回答成
+  “没有问题”或确定 root cause。
+- 对同一 `analysis_query` 结果行内的同币种金融字段，answer guard 可以验证简单
+  差额和合计结论；错误金额仍会触发 fallback 或重写。
+- 对同一 `analysis_query` 结果行内的分子/分母字段，answer guard 可以验证收益率、
+  收益率百分点差、贡献占比；贡献占比没有分母证据时会被判为 unsupported。
+- 对指派正股行内的 `assigned_stock_unrealized_pnl`、
+  `assigned_stock_realized_pnl`、`option_premium_attribution`，answer guard
+  可以验证生命周期 PnL 合计。
 - 如果 LLM synthesis 不可用或 answer guard 认为不安全，Agent fallback 必须展示
   `analysis_query` 的任务形表格，而不是附近业务工具的原始长报告。
+- fallback 表格会追加紧凑提示：收益率聚合风险、行情/数据新鲜度缺失或过期、
+  可选诊断源缺失、P2 诊断无匹配/读取失败/runtime 或 quote 诊断状态，以及本次查询
+  覆盖的账户、月份、标的或 view。
 
-首批 view：
-- `monthly_income_summary`
-- `monthly_income_return_summary`
-- `monthly_income_combined_return_summary`
-- `monthly_income_cashflow_rows`
-- `monthly_income_realized_rows`
-- `monthly_income_premium_rows`
-- `assigned_stock_lifecycle`
-- `assigned_stock_sales`
-- `assigned_stock_review`
-- `position_lots`
-- `trade_events`
-- `symbol_strategy_config`
+语义 view：
+- P0 收益/指派正股：
+  `account_monthly_performance`、`account_monthly_income_components`、
+  `assigned_stock_position_pnl`、`assigned_stock_sale_events`
+- P1 exposure/归因/配置：
+  `open_option_exposure`、`expiration_risk_buckets`、
+  `symbol_income_attribution`、`strategy_config_by_symbol_account`
+- P2 诊断：
+  `candidate_filter_diagnostics`、`close_advice_snapshot`、
+  `runtime_tick_status`、`quote_freshness`
+- 兼容 view：
+  `monthly_income_summary`、`monthly_income_return_summary`、
+  `monthly_income_combined_return_summary`、`monthly_income_cashflow_rows`、
+  `monthly_income_realized_rows`、`monthly_income_premium_rows`、
+  `assigned_stock_lifecycle`、`assigned_stock_sales`、`assigned_stock_review`、
+  `position_lots`、`trade_events`、`symbol_strategy_config`
+
+P2 诊断 view 读取已有本地 artifact 或只读状态面。缺失 artifact 时返回 warning
+和空结果，不启动 broker、OpenD、cron 或其他生产服务。
+
+Agent loop 约束：
+- 对开放式分析问题优先让 planner 使用 `analysis_query`，必要时先调用
+  `analysis_catalog` 查字段。
+- 当首次查询只有账户级摘要，但用户问“来源/组成/主要来自哪里”时，Agent 可以做一次
+  只读 follow-up，补查 `account_monthly_income_components` 或
+  `symbol_income_attribution`。
+- 当问题明确提到多个账户但 evidence 只覆盖部分账户时，Agent 可以做一次只读
+  follow-up 补齐缺失账户覆盖。
+- 当 `analysis_query` preflight 返回 `UNKNOWN_COLUMN` / `UNKNOWN_VIEW` 且包含
+  catalog 建议时，Agent 可以用建议字段或建议 view 做一次只读修复查询；原失败
+  observation 会保留在 trace，正常回执不展示内部 SQL 修复细节。
+- 当 follow-up planner 判定账户、月份、标的、market 或 run 范围无法安全推断时，
+  Agent 会以 `ask_clarification` 停止并向用户提出一个简短问题。
+- follow-up 只能使用 `analysis_catalog` / `analysis_query`，且必须命中 evidence gap
+  建议的 view；不允许借 follow-up 扩大到写工具或生产操作。
+- follow-up 决策会以 `om-agent-loop-followup-decision-v1` 写入
+  `assistant.tool_plan.followup_decisions` 和
+  `AgentSession.answer_trace.followup_decisions`，记录
+  `call_tool`、`stop_with_gap`、rejected duplicate 等状态。
 
 示例：
 
 ```bash
 om-agent run --tool analysis_catalog --input-json '{"config_key":"us"}'
-om-agent run --tool analysis_query --input-json '{"config_key":"us","sql":"select month, account, net_income_cny, net_return_rate from monthly_income_return_summary order by month, account","limit":50}'
+om-agent run --tool analysis_query --input-json '{"config_key":"us","sql":"select month, account, net_income_cny, net_return_rate from account_monthly_performance order by month, account","limit":50}'
+om-agent run --tool analysis_query --input-json '{"config_key":"us","sql":"select month, account, symbol, component, amount_cny from symbol_income_attribution order by month, account, amount_cny desc","limit":50}'
 ```
 
 ---

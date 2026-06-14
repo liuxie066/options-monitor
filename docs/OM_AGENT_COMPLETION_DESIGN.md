@@ -67,9 +67,13 @@ Current implementation status:
   table. This creates durable operator trace without moving pending operations
   out of the existing pending-operation store.
 - Phase 3 is implemented for the first read-only replan workflows: AgentLoop can
-  do bounded follow-up planning when evidence contains a recoverable gap. The
-  first supported follow-up gap is assigned-stock quote data recoverable by
-  `refresh_quotes`; monthly-income detail questions are normalized to
+  do bounded follow-up planning when evidence contains a recoverable gap.
+  Supported gaps now include assigned-stock quote data recoverable by
+  `refresh_quotes`, empty analysis results, account-summary evidence for
+  breakdown/source questions, and missing named-account coverage in
+  `analysis_query` evidence. Follow-up decisions are recorded with
+  `om-agent-loop-followup-decision-v1` in the tool-plan payload and AgentSession
+  answer trace; monthly-income detail questions are normalized to
   `include_rows=true` before execution so detail-row requirements are fetched
   directly rather than guessed from summaries.
 - Phase 4 is implemented for the primary cross-tool accounting workflow:
@@ -241,6 +245,12 @@ user: 对比 lx 和 sy 的账户收益，有什么不同？
 It must not fall back to a nearby raw monthly income report. Raw canonical
 renderers remain audit and safety surfaces for the original business tools, but
 Tool OS result tables are the product fallback for Tool OS analytical tasks.
+
+The next expansion of this lane is documented in
+[SQLite Tool OS Expansion Design](SQLITE_TOOL_OS_EXPANSION_DESIGN.md). That
+follow-up keeps SQLite as the controlled computation surface and adds semantic
+catalog metadata, business views, query preflight/explain diagnostics, bounded
+multi-query follow-up, and richer evidence for answer guard.
 
 ## Target Architecture
 
