@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 1.2.276 - 2026-06-15
+
+### Added
+- Added assistant golden eval coverage for runtime notification audits where job success does not prove final message delivery.
+- Added a compact trace fixture for successful release-workflow evidence so release answers can show verified publication without leaking raw logs or internal fields.
+
+### Fixed
+- Fixed assistant answer verification so stale, missing, conflicting, or partial diagnostics cannot support definitive root-cause or delivery-success claims.
+- Preserved direct runtime skip explanations while requiring caveats for stale runtime snapshots, missing notification evidence, and partial diagnostic confidence.
+- Updated Agent reliability P0-P2 design notes and release gate counts for the expanded diagnostic, eval, and trace coverage.
+
 ## 1.2.275 - 2026-06-15
 
 ### Fixed

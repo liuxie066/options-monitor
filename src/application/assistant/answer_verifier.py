@@ -832,20 +832,10 @@ def _unresolved_analysis_diagnostics(evidence_bundle: EvidenceBundle) -> list[di
 
 
 def _unresolved_diagnostics(evidence_bundle: EvidenceBundle) -> list[dict[str, Any]]:
-    unresolved_statuses = {
-        "diagnostic_missing",
-        "artifact_missing",
-        "no_matching_rows",
-        "read_error",
-        "empty_artifact",
-        "stale_artifact",
-        "conflicting_evidence",
-    }
     rows: list[dict[str, Any]] = []
     for record in _diagnostic_records(evidence_bundle):
-        status = str(record.get("status") or "").strip().lower()
         missing_data = record.get("missing_data") if isinstance(record.get("missing_data"), list) else []
-        if status not in unresolved_statuses and not missing_data:
+        if not _diagnostic_is_unresolved(record, missing_data=missing_data):
             continue
         source = record.get("source") if isinstance(record.get("source"), dict) else {}
         rows.append(
@@ -861,6 +851,33 @@ def _unresolved_diagnostics(evidence_bundle: EvidenceBundle) -> list[dict[str, A
             }
         )
     return rows
+
+
+def _diagnostic_is_unresolved(record: dict[str, Any], *, missing_data: list[Any]) -> bool:
+    status = str(record.get("status") or "").strip().lower()
+    confidence = str(record.get("confidence") or "").strip().lower()
+    severity = str(record.get("severity") or "").strip().lower()
+    boundary = str(record.get("answer_boundary") or "").strip().lower()
+    unresolved_statuses = {
+        "diagnostic_missing",
+        "artifact_missing",
+        "no_matching_rows",
+        "read_error",
+        "empty_artifact",
+        "stale_artifact",
+        "conflicting_evidence",
+    }
+    if status in unresolved_statuses or missing_data:
+        return True
+    if confidence in {"missing", "conflict", "partial"}:
+        return True
+    if severity in {"error", "critical"}:
+        return True
+    if any(token in status for token in ("missing", "stale", "freshness_gap", "conflict", "conflicting")):
+        return True
+    if any(token in boundary for token in ("stale", "missing", "conflict", "conflicting", "cannot infer")):
+        return True
+    return False
 
 
 def _quote_gap_diagnostics(evidence_bundle: EvidenceBundle) -> list[dict[str, Any]]:
@@ -1136,12 +1153,17 @@ def _has_cause_caveat(compact: str) -> bool:
             "无法确认",
             "无法判断",
             "不能确认",
+            "不能给",
             "证据不足",
             "无匹配",
             "没有匹配",
             "需要明细",
             "缺少明细",
             "缺少",
+            "旧快照",
+            "stale",
+            "冲突",
+            "不一致",
             "可能",
             "推测",
             "insufficient",
