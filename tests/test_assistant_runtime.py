@@ -656,6 +656,52 @@ def test_tool_executor_postcheck_marks_assigned_stock_missing_quote_warning() ->
     assert outcome.postcheck["evidence_summary"]["missing_data_count"] == 1
 
 
+def test_tool_executor_postcheck_accepts_analysis_catalog_evidence_contract() -> None:
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        assert tool_name == "analysis_catalog"
+        assert payload["config_key"] == "us"
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "source_label": "OM read-only analysis workspace",
+                "view_count": 1,
+                "view_names": ["account_monthly_performance"],
+                "views": {
+                    "account_monthly_performance": {
+                        "description": "monthly account performance",
+                        "fields": ["month", "account", "net_income_cny"],
+                        "freshness": "snapshot",
+                        "recommended_filters": ["month", "account"],
+                    }
+                },
+                "sql_rules": {"allowed_statements": ["SELECT", "WITH"], "writes_allowed": False},
+            },
+        )
+
+    request = AssistantRequest(text="能分析哪些数据？", sender_id="local", config_key="us")
+    outcome = ToolExecutor(execute_tool_fn=_execute).execute_read_tool(
+        request=request,
+        task_contract={"requested_effect": "read"},
+        index=1,
+        tool_name="analysis_catalog",
+        payload={"config_key": "us"},
+        plan_arguments={},
+    )
+
+    assert outcome.allowed is True
+    assert outcome.postcheck is not None
+    assert outcome.postcheck["status"] == "pass"
+    assert outcome.result_event is not None
+    assert any(item["hook"] == "evidence_contract" and item["status"] == "pass" for item in outcome.result_event["hook_results"])
+    checks = {item["name"]: item for item in outcome.postcheck["checks"]}
+    assert checks["output_contract"]["status"] == "pass"
+    assert checks["evidence_contract"]["status"] == "pass"
+    assert checks["evidence_contract"]["missing_fields"] == []
+    assert outcome.postcheck["evidence_summary"]["canonical_renderer"] == "analysis_catalog"
+    assert outcome.postcheck["evidence_summary"]["row_count"] == 1
+
+
 def test_assistant_capability_catalog_has_safe_llm_invariants() -> None:
     payload = capability_catalog_payload()
     capabilities = payload["capabilities"]
@@ -1199,6 +1245,39 @@ def test_assistant_runtime_renders_analysis_result_diagnostic_warnings() -> None
     assert "提示：候选诊断缺失，不能判断确定原因。" in text
     assert "覆盖范围：视图 candidate_filter_diagnostics。" in text
     assert text.endswith("数据来源：OM read-only analysis workspace")
+
+
+def test_assistant_runtime_renders_analysis_catalog_without_sql_examples() -> None:
+    text = render_canonical_tool_result(
+        renderer_key="analysis_catalog",
+        data={
+            "view_count": 1,
+            "views": {
+                "account_monthly_performance": {
+                    "description": "monthly account performance",
+                    "fields": ["month", "account", "net_income_cny"],
+                    "freshness": "snapshot",
+                    "recommended_filters": ["month", "account"],
+                }
+            },
+            "sql_rules": {"allowed_statements": ["SELECT", "WITH"], "writes_allowed": False},
+            "query_patterns": [
+                {
+                    "question": "对比 lx 和 sy",
+                    "sql": "select month, account from account_monthly_performance",
+                }
+            ],
+        },
+        tool_result=build_response(tool_name="analysis_catalog", ok=True),
+    )
+
+    assert "分析目录：1 个可用视图" in text
+    assert "account_monthly_performance：3 个字段" in text
+    assert "常用过滤：month, account" in text
+    assert "freshness=snapshot" in text
+    assert "查询规则：SELECT/WITH，写入不允许。" in text
+    assert "select month, account from account_monthly_performance" not in text.lower()
+    assert "数据来源：OM read-only analysis workspace" in text
 
 
 def test_assistant_runtime_does_not_overwrite_original_audit_on_duplicate_replay(tmp_path: Path) -> None:
