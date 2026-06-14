@@ -754,6 +754,17 @@ def _semantic_policy_verification(text: str, *, evidence_bundle: EvidenceBundle)
             }
         )
 
+    if _claims_definitive_operational_status(compact) and _has_unresolved_diagnostics(evidence_bundle) and not _has_evidence_gap_caveat(compact):
+        checked += 1
+        violations.append(
+            {
+                "type": "unsupported_diagnostic_status_claim",
+                "claim": "成功/失败/完成状态",
+                "evidence": "diagnostic evidence is missing, stale, or conflicting, so the response must disclose the evidence gap",
+                "diagnostics": _unresolved_diagnostics(evidence_bundle)[:4],
+            }
+        )
+
     if _claims_upstream_quote_failure(compact) and _has_quote_gap_diagnostics(evidence_bundle) and not _has_upstream_cause_caveat(compact):
         checked += 1
         violations.append(
@@ -853,7 +864,7 @@ def _quote_gap_diagnostics(evidence_bundle: EvidenceBundle) -> list[dict[str, An
         if str(record.get("domain") or "") != "quote_freshness":
             continue
         status = str(record.get("status") or "").strip().lower()
-        if status not in {"observed_quote_gap", "missing_quote", "stale_artifact"}:
+        if status not in {"observed_quote_gap", "observed_quote_freshness_gap", "missing_quote", "stale_artifact"}:
             continue
         source = record.get("source") if isinstance(record.get("source"), dict) else {}
         scope = record.get("scope") if isinstance(record.get("scope"), dict) else {}
@@ -1020,6 +1031,64 @@ def _claims_upstream_quote_failure(compact: str) -> bool:
             "gatewaydown",
             "opendisconnected",
             "connectionfailed",
+        )
+    )
+
+
+def _claims_definitive_operational_status(compact: str) -> bool:
+    return any(
+        token in compact
+        for token in (
+            "升级成功",
+            "升级失败",
+            "已经成功",
+            "已成功",
+            "已经失败",
+            "已失败",
+            "执行成功",
+            "执行失败",
+            "已经完成",
+            "已完成",
+            "完成了",
+            "成功回执已发送",
+            "回执已发送",
+            "推送成功",
+            "没有推送",
+            "已推送",
+            "successfully",
+            "succeeded",
+            "failed",
+            "completed",
+        )
+    )
+
+
+def _has_evidence_gap_caveat(compact: str) -> bool:
+    return any(
+        token in compact
+        for token in (
+            "无法确认",
+            "无法判断",
+            "不能确认",
+            "不能判断",
+            "不能证明",
+            "不能给",
+            "证据不足",
+            "证据冲突",
+            "存在冲突",
+            "冲突",
+            "不一致",
+            "缺失",
+            "缺少",
+            "缺日志",
+            "旧快照",
+            "快照",
+            "stale",
+            "missing",
+            "unknown",
+            "insufficient",
+            "conflict",
+            "partial",
         )
     )
 

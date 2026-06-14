@@ -1025,6 +1025,9 @@ def _upgrade_warning_impact(warning: str) -> str:
         "operations_table_missing": "pending operation table is missing",
         "audit_table_missing": "inbound audit table is missing",
         "audit_db_missing": "inbound audit database is missing",
+        "command_log_missing": "upgrade command log is missing",
+        "command_audit_missing": "upgrade command audit is missing",
+        "operation_log_missing": "upgrade operation log is missing",
     }.get(normalized, f"upgrade operation warning: {normalized}")
 
 

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.273 - 2026-06-15
+
+### Added
+- Added Agent reliability golden eval coverage for stale quotes, runtime conflict/stale evidence, upgrade command-log gaps, old operation timelines, and read/write scope expansion boundaries.
+
+### Fixed
+- Fixed upgrade diagnostics so missing command logs, command audits, and operation logs are surfaced as explicit artifact gaps.
+- Fixed answer verification so stale, missing, or conflicting diagnostics cannot be summarized as definitive success/failure/completion without disclosing the evidence gap.
+- Fixed quote freshness verification so stale analysis evidence cannot be over-explained as an upstream OpenD/Futu failure without supporting evidence.
+
 ## 1.2.272 - 2026-06-15
 
 ### Added
