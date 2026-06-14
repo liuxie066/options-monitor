@@ -73,8 +73,9 @@ P0-P2 的切分：
 
 1. Planner 有工具计划，但“用户必须得到哪些答案”还不够结构化。
 2. Coverage verifier 还不够通用，容易出现用户问“对比 A/B”，回答却只给全部摘要。
-3. `ToolExecutor` 已进入 AgentLoop read 工具路径，但 preview/receipt 类工具还需要继续
-   收口到同一套 action policy、precheck/postcheck 和 session trace 证据里。
+3. `ToolExecutor` 已进入 AgentLoop read 工具路径；preview planning、preview receipt、
+   preview session trace 和 confirm/apply readback 已有 action policy、precheck/postcheck
+   与 hook trace。
 4. `output_contract` 仍偏工具自定义，缺统一 annotations、schema、verifier 声明。
 5. Trace 已经存在，但还不能稳定解释每次回答的 plan、evidence gap、verifier 和
    fallback 原因。
@@ -696,9 +697,13 @@ P1 把 action policy 和 pre/post checks 写入 session trace：
 | 工具输出缺 source/freshness | postcheck warning 或 fail，最终回答说明影响 |
 | preview 回执 | 包含 operation_id、风险、confirm/cancel hint |
 
-当前落地补充：`ToolExecutor` 已被 AgentLoop runtime 使用；session transcript 会记录
-`action_policy`、`action_safety`、`precheck`、`postcheck` 和 hook results。`analysis_catalog`
-已补齐 `canonical_renderer`、`fact_fields` 和
+当前落地补充：`ToolExecutor` 已被 AgentLoop runtime 使用；read path 的 session transcript
+会记录 `action_policy`、`action_safety`、`precheck`、`postcheck` 和 hook results。AgentLoop
+preview path 已记录 action policy / action safety / precheck，并在 deterministic preview
+回执合并时写入 receipt postcheck 与 receipt hook；preview session 已持久化到
+`assistant_trace` 存储，且不会暴露原始成交提醒。confirm/apply readback 会复用同一
+`operation_id` 更新最终状态、postcheck 与 operation readback hook。
+`analysis_catalog` 已补齐 `canonical_renderer`、`fact_fields` 和
 `view_count` evidence contract 字段，并提供不展示 SQL 模板的 canonical renderer；
 ToolExecutor postcheck 对该工具应为 `pass`，而不是长期以 incomplete contract warning
 运行。
@@ -1874,7 +1879,7 @@ P2 必须分清“业务事实”和“过程解释”，否则 trace 容易污�
 
 | 包 | 状态 | 可合并前还缺 |
 |---|---|---|
-| P1 ToolExecutor / trace | 本地验收通过 | AgentLoop read 工具已走 `ToolExecutor`；session transcript 已包含 action policy、action safety、precheck、postcheck 和 hook results；后续只迁移 preview/receipt 类工具，不新增第二套执行层 |
+| P1 ToolExecutor / trace | 本地验收通过 | AgentLoop read 工具已走 `ToolExecutor`；session transcript 已包含 action policy、action safety、precheck、postcheck 和 hook results；preview planning 已有 action policy/action safety/precheck，preview receipt 已有 postcheck 和 receipt hook；preview session 已进入 `assistant_trace` 持久化且脱敏 raw_text；confirm/apply readback 已复用同一 `operation_id` 更新最终状态，不新增第二套执行层 |
 | M1 ActionSafety | 本地回归部分通过 | prompt injection chain、preview no apply、scope expansion 已有 golden 覆盖；同 scope read follow-up 允许，跨账户 read 要求澄清，跨账户 write preview 拒绝；SQL-only payload 里的账户、标的、月份越界会进入 ask |
 | M2 Diagnostic adapter | 本地部分验收通过 | candidate/runtime/quote row-derived diagnostics 已覆盖 direct/missing/conflict/stale；`runtime_tick_status` 已穿透 scheduler_should_run_scan / scheduler_should_notify / scheduler_reason，能把 scheduler market-window skip 与通知通道失败分开；upgrade missing version 已从 fixture 扩展为真实 `upgrade_operation_status` view，并保留 partial/missing_data 语义；runtime conflict/stale、runtime scheduler market-window skip、runtime notification conflict、stale quote、old operation timeline、upgrade conflict / command log missing、release_tag-only publication gap、release published/failed、release/outcome conflict 已进入 golden eval | 仍需更多线上 release status / runtime notification 样本 |
 | M2.5 Coverage/Upgrade | 本地验收通过 | `CoverageVerifier` 已把 upgrade diagnostics 转成 current/target version、receipt、command status、release publication status gap；已查 operation timeline 后仍缺版本/回执/release 发布证据会 `answer_with_missing_data`，不会触发 follow-up；未查 timeline 且有 operation id 时允许一次只读 follow-up，并已有 AgentLoop e2e 和 golden eval 覆盖 audit_db 注入、证据合并、旧 capability gap 清除 |
@@ -2217,7 +2222,8 @@ P0 完成定义：
 5. 扩展 `AgentTool` manifest annotations 和 evidence contract。
 6. 迁移 `analysis_query`、assigned-stock read、monthly income read、assistant_trace、
    preview trade/upgrade 相关工具。
-7. 把 action policy 和 checks 写入 `AgentSessionSnapshot`。（read 工具路径已落地）
+7. 把 action policy 和 checks 写入 `AgentSessionSnapshot`。（read 工具路径、preview
+   receipt、preview session trace 和 confirm/apply readback 已落地）
 
 P1 完成定义：
 

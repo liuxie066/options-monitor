@@ -48,6 +48,7 @@ from src.application.assistant.llm_reply import LlmReplyResult, generate_general
 from src.application.assistant.llm_translator import LlmTranslationResult, parse_llm_translation_payload, translate_inbound_intent
 from src.application.assistant.renderer import render_canonical_tool_result
 from src.application.assistant.settings import PlannerSettings
+from src.application.assistant.session_store import collect_assistant_trace
 from src.application.assistant.tool_policy import DEFAULT_TOOL_POLICY
 from src.application.assistant.verifier_hooks import HOOK_RESULT_SCHEMA_VERSION
 from src.application.agent_tool_contracts import AgentToolError, build_response
@@ -6491,6 +6492,24 @@ def test_assistant_runtime_agent_loop_plans_manual_trade_open_preview(monkeypatc
     assert preview_receipt["apply_allowed"] is False
     assert preview_receipt["handler_tool"] == "inbound.manual_trade"
     assert agent_loop["steps"][0]["preview_receipt"] == preview_receipt
+    step_postcheck = agent_loop["steps"][0]["postcheck"]
+    assert step_postcheck["schema_version"] == TOOL_CHECK_SCHEMA_VERSION
+    assert step_postcheck["stage"] == "post_tool"
+    assert step_postcheck["status"] == "pass"
+    assert {item["name"]: item["status"] for item in step_postcheck["checks"]} == {
+        "result_status": "pass",
+        "receipt": "pass",
+        "permission_request": "pass",
+        "confirmation_guard": "pass",
+    }
+    assert any(
+        item["hook"] == "receipt" and item["stage"] == "post_tool" and item["status"] == "pass"
+        for item in agent_loop["steps"][0]["hook_results"]
+    )
+    assert any(
+        item["hook"] == "confirmation_guard" and item["stage"] == "post_tool" and item["status"] == "pass"
+        for item in agent_loop["steps"][0]["hook_results"]
+    )
     assert out["meta"]["assistant"]["perception_trace"]["selected_source"] == "agent_loop"
     assert out["meta"]["assistant"]["perception_trace"]["selected_perception"]["source"] == "agent_loop_plan"
     if sqlite_path.exists():
@@ -6500,6 +6519,81 @@ def test_assistant_runtime_agent_loop_plans_manual_trade_open_preview(monkeypatc
             ).fetchone()
             if has_trade_events:
                 assert conn.execute("SELECT COUNT(*) FROM trade_events").fetchone()[0] == 0
+    trace = collect_assistant_trace(audit_db=str(tmp_path / "inbound.sqlite3"), command_id=out["data"]["operation_id"])
+    assert trace["trace_count"] == 1
+    trace_entry = trace["traces"][0]
+    assert trace_entry["identity"]["command_id"] == out["data"]["operation_id"]
+    assert trace_entry["task"]["state"] == "waiting_for_permission"
+    assert "成交提醒】成功卖出" not in trace_entry["task"]["goal"]
+    assert trace_entry["answer"]["response_status"] == "preview"
+    assert trace_entry["permission_state"]["pending_operation_ids"] == [out["data"]["operation_id"]]
+    assert trace_entry["permission_state"]["apply_allowed"] is False
+    trace_tool = trace_entry["tools"][0]
+    assert trace_tool["tool_name"] == "manual_trade_open"
+    assert trace_tool["payload"] == {"account": "sy"}
+    assert "raw_text" not in trace_tool["payload"]
+    assert trace_tool["precheck"]["status"] == "pass"
+    assert trace_tool["postcheck"]["status"] == "pass"
+    assert any(item["hook"] == "receipt" and item["status"] == "pass" for item in trace_tool["hook_results"])
+    trace_text = trace["response_text"]
+    assert "任务：记录开仓预览：sy 0700.HK" in trace_text
+    assert "工具：读取OM 本地交易预览（ok，1 行）" in trace_text
+    assert "最终：preview（pending operator confirmation）" in trace_text
+    assert "post/receipt=pass/complete" in trace_text
+    assert "post/confirmation_guard=pass/preview_requires_confirmation" in trace_text
+    assert "raw_text" not in trace_text
+    assert "成交提醒】成功卖出" not in trace_text
+
+    confirmed = handle_assistant_message(
+        AssistantRequest(
+            text="确认记录",
+            sender_id="local",
+            channel="local",
+            message_id="msg_agent_loop_manual_trade_open_confirm",
+            config_path=str(cfg_path),
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        allowed_senders="local:local",
+        settings=AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+        now_fn=lambda: date(2026, 6, 4),
+    )
+
+    assert confirmed["ok"] is True
+    assert confirmed["data"]["operation_id"] == out["data"]["operation_id"]
+    assert confirmed["data"]["status"] == "applied"
+    with sqlite3.connect(sqlite_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM trade_events").fetchone()[0] == 1
+    applied_trace = collect_assistant_trace(
+        audit_db=str(tmp_path / "inbound.sqlite3"),
+        command_id=out["data"]["operation_id"],
+    )
+    assert applied_trace["trace_count"] == 1
+    applied_entry = applied_trace["traces"][0]
+    assert applied_entry["identity"]["command_id"] == out["data"]["operation_id"]
+    assert applied_entry["task"]["state"] == "done"
+    assert applied_entry["answer"]["response_status"] == "applied"
+    assert applied_entry["permission_state"]["pending_operation_ids"] == []
+    assert applied_entry["permission_state"]["operation_status"] == "applied"
+    applied_tool = applied_entry["tools"][0]
+    assert applied_tool["tool_name"] == "inbound.manual_trade"
+    assert applied_tool["payload"]["operation_id"] == out["data"]["operation_id"]
+    assert applied_tool["payload"]["status"] == "applied"
+    assert applied_tool["payload"]["account"] == "sy"
+    assert applied_tool["payload"]["symbol"] == "0700.HK"
+    assert "raw_text" not in applied_tool["payload"]
+    assert applied_tool["postcheck"]["status"] == "pass"
+    assert any(item["hook"] == "operation_readback" and item["status"] == "pass" for item in applied_tool["hook_results"])
+    applied_trace_text = applied_trace["response_text"]
+    assert "工具：读取OM 本地操作回执（ok，1 行）" in applied_trace_text
+    assert "最终：applied（operation readback）" in applied_trace_text
+    assert "post/operation_readback=pass/applied" in applied_trace_text
+    assert "raw_text" not in applied_trace_text
+    assert "成交提醒】成功卖出" not in applied_trace_text
 
 
 def test_assistant_runtime_agent_loop_rejects_read_plan_for_trade_preview_request(tmp_path: Path) -> None:
