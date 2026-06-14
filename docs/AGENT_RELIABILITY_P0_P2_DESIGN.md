@@ -73,8 +73,8 @@ P0-P2 的切分：
 
 1. Planner 有工具计划，但“用户必须得到哪些答案”还不够结构化。
 2. Coverage verifier 还不够通用，容易出现用户问“对比 A/B”，回答却只给全部摘要。
-3. 工具执行路径尚未形成统一 `ToolExecutor`，pre/post 校验分散在工具、policy、
-   answer guard 和 deterministic handler 中。
+3. `ToolExecutor` 已进入 AgentLoop read 工具路径，但 preview/receipt 类工具还需要继续
+   收口到同一套 action policy、precheck/postcheck 和 session trace 证据里。
 4. `output_contract` 仍偏工具自定义，缺统一 annotations、schema、verifier 声明。
 5. Trace 已经存在，但还不能稳定解释每次回答的 plan、evidence gap、verifier 和
    fallback 原因。
@@ -535,7 +535,9 @@ User asks write/upgrade/model change
 
 ### 5.3 ToolExecutor
 
-新增统一执行器，先包住 AgentLoop 可调用工具，不急着替换全部 CLI。
+统一执行器已新增，并已包住 AgentLoop read 工具路径；本轮继续保持“不替换全部 CLI”的
+边界，只把 AgentLoop 可见工具逐步收口到同一套 action policy、precheck/postcheck 和
+trace 事件。
 
 建议接口：
 
@@ -694,7 +696,9 @@ P1 把 action policy 和 pre/post checks 写入 session trace：
 | 工具输出缺 source/freshness | postcheck warning 或 fail，最终回答说明影响 |
 | preview 回执 | 包含 operation_id、风险、confirm/cancel hint |
 
-当前落地补充：`analysis_catalog` 已补齐 `canonical_renderer`、`fact_fields` 和
+当前落地补充：`ToolExecutor` 已被 AgentLoop runtime 使用；session transcript 会记录
+`action_policy`、`action_safety`、`precheck`、`postcheck` 和 hook results。`analysis_catalog`
+已补齐 `canonical_renderer`、`fact_fields` 和
 `view_count` evidence contract 字段，并提供不展示 SQL 模板的 canonical renderer；
 ToolExecutor postcheck 对该工具应为 `pass`，而不是长期以 incomplete contract warning
 运行。
@@ -1870,6 +1874,7 @@ P2 必须分清“业务事实”和“过程解释”，否则 trace 容易污�
 
 | 包 | 状态 | 可合并前还缺 |
 |---|---|---|
+| P1 ToolExecutor / trace | 本地验收通过 | AgentLoop read 工具已走 `ToolExecutor`；session transcript 已包含 action policy、action safety、precheck、postcheck 和 hook results；后续只迁移 preview/receipt 类工具，不新增第二套执行层 |
 | M1 ActionSafety | 本地回归部分通过 | prompt injection chain、preview no apply、scope expansion 已有 golden 覆盖；同 scope read follow-up 允许，跨账户 read 要求澄清，跨账户 write preview 拒绝；SQL-only payload 里的账户、标的、月份越界会进入 ask |
 | M2 Diagnostic adapter | 本地部分验收通过 | candidate/runtime/quote row-derived diagnostics 已覆盖 direct/missing/conflict/stale；`runtime_tick_status` 已穿透 scheduler_should_run_scan / scheduler_should_notify / scheduler_reason，能把 scheduler market-window skip 与通知通道失败分开；upgrade missing version 已从 fixture 扩展为真实 `upgrade_operation_status` view，并保留 partial/missing_data 语义；runtime conflict/stale、runtime scheduler market-window skip、runtime notification conflict、stale quote、old operation timeline、upgrade conflict / command log missing、release_tag-only publication gap、release published/failed、release/outcome conflict 已进入 golden eval | 仍需更多线上 release status / runtime notification 样本 |
 | M2.5 Coverage/Upgrade | 本地验收通过 | `CoverageVerifier` 已把 upgrade diagnostics 转成 current/target version、receipt、command status、release publication status gap；已查 operation timeline 后仍缺版本/回执/release 发布证据会 `answer_with_missing_data`，不会触发 follow-up；未查 timeline 且有 operation id 时允许一次只读 follow-up，并已有 AgentLoop e2e 和 golden eval 覆盖 audit_db 注入、证据合并、旧 capability gap 清除 |
@@ -2049,11 +2054,11 @@ python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_sm
 
 | 缺口 | 当前状态 | 需要补什么 | 完成判定 |
 |---|---|---|---|
-| 真实 session route 样本 | 已补 `assistant_trace_route_samples` 11 条脱敏 route fixture，覆盖 ask / preview / rewrite / fallback / deny / release workflow pass / read scope ask / runtime notification conflict rewrite / runtime scheduler skip rewrite / quote stale freshness rewrite / upgrade stale timeline rewrite；compact trace 能解释 route 且不展示 SQL/path/session id/lot id/raw log | 继续从真实线上回执补充同格式样本 | trace 能解释 route，不泄露 SQL/path/internal id |
+| 真实 session route 样本 | 已补 `assistant_trace_route_samples` 11 条脱敏 route fixture，覆盖 ask / preview / rewrite / fallback / deny / release workflow pass / read scope ask / runtime notification conflict rewrite / runtime scheduler skip rewrite / quote stale freshness rewrite / upgrade stale timeline rewrite；compact trace 能解释 route，且已有集中 redaction guard 防止 SQL/path/session id/lot id/raw log/canonical/synthesis 泄露 | 继续从真实线上回执补充同格式样本 | trace 能解释 route，不泄露 SQL/path/internal id |
 | runtime stale / conflict | 已补 `runtime_why_conflict_stale_answer`、`runtime_scheduler_skip_market_window_answer`、`runtime_notification_missing_not_success_answer`、`runtime_notification_status_conflict_answer` golden fixture；`runtime_tick_status` 已能归一 direct / missing / conflict，并能把 scheduler market-window skip、runtime 成功终态与通知失败终态分开识别；Answer verifier 已覆盖 runtime freshness gap / notification missing / notification conflict 不能被说成确定根因或确定送达成功，同时 direct scheduler skip 仍可作为直接观测原因 | 继续从线上补更多 runtime stale / notification audit 样本 | why 回答不能给单一确定原因 |
 | upgrade conflict / command log missing / release status | 已补 `operation_upgrade_conflict_command_log_missing_answer`、`operation_upgrade_release_tag_not_enough_answer`、`operation_upgrade_release_published_answer`、`operation_upgrade_release_failed_answer`、`operation_upgrade_release_outcome_conflict_answer` golden fixture；`command_log_missing` 会归入 `artifact_missing`；只有 `release_tag` 时会产生 `release_publication_status_missing`，并由 coverage 转成不可补 `upgrade_release_publication_status_missing`；`release_status` 与 `outcome_status` / `operation_status` 矛盾会归入不可补 `upgrade_status_conflict`；`operation_timeline` diagnostic scope 已暴露 operation/outcome/receipt status，Answer verifier 可校验状态值但仍拦截无 caveat 的确定性成功/失败结论 | 继续从线上补真实 release success / failure 样本 | 不能宣称升级或 release 成功；必须说明冲突、缺日志或缺发布证据的影响 |
 | scope expansion 误判 | 已补 `action_safety_read_followup_same_scope_allowed`、`action_safety_read_scope_expansion_asks`、`action_safety_read_sql_account_scope_expansion_asks`、`action_safety_read_sql_symbol_scope_expansion_asks`、`action_safety_read_sql_period_scope_expansion_asks`、`action_safety_cross_account_write_denied` golden fixture；ActionSafety 会从 SQL-only payload 提取账户、标的、月份 scope 线索 | 继续从线上补更多误判样本 | 同 scope read follow-up 允许；未请求写入或跨账户/跨标的/跨月份写入拒绝，read 场景越界要求 ask |
-| answer source/freshness | Answer verifier 已覆盖金额、quote、diagnostic root cause、analysis quote gap 上游根因外推、unresolved diagnostics 下的确定性状态结论；已补旧 runtime 快照、stale quote、old operation timeline、runtime freshness gap、partial confidence root-cause final answer 断言；quote freshness diagnostic 会在缺省摘要里保留 `quote_status` 和 as-of/spot_time；route fixture 已覆盖 quote stale rewrite | 继续沉淀更多线上 freshness 样本 | 最终回答必须披露 as-of / stale 影响 |
+| answer source/freshness | Answer verifier 已覆盖金额、quote、diagnostic root cause、analysis quote gap 上游根因外推、unresolved diagnostics 下的确定性状态结论；已补旧 runtime 快照、stale quote、old operation timeline、runtime freshness gap、partial confidence root-cause final answer 断言；quote freshness diagnostic 会在缺省摘要里保留 `quote_status` 和 as-of/spot_time；route fixture 已覆盖 quote stale rewrite；agent eval 已有集中 UX leak guard，防止最终回执展示内部工具名、SQL、内部 id/path、raw log、canonical/synthesis 或强制事实/分析分段 | 继续沉淀更多线上 freshness 样本 | 最终回答必须披露 as-of / stale 影响，且不泄露内部执行细节 |
 | 发布 gate | 已补 release checklist 对应命令和失败回退说明；`release_test_plan` 已能在 Agent reliability、evidence、trace、eval 或 tool contract 文件变更时自动纳入 P2 gate | 每次 release 前按 6.21 执行并记录证据 | release 前能一眼判断是否可发 |
 
 不补：
@@ -2131,8 +2136,8 @@ python3 scripts/release_check.py
 | Gate | 命令 | 通过证据 | 失败回退 |
 |---|---|---|---|
 | fixture 格式 | `jq -c . tests/fixtures/assistant_agent_eval.jsonl` | 33 条 JSONL 都能逐行解析 | 停止发布，先修 fixture；不要删除失败样本 |
-| trace route fixture | `jq -c . tests/fixtures/assistant_trace_route_samples.jsonl` + `python3 -m pytest tests/test_assistant_evidence_session.py::test_format_assistant_trace_route_samples_from_fixture` | ask/preview/rewrite/fallback/denied/release/read-scope-ask/runtime-conflict/runtime-scheduler-skip/quote-stale/upgrade-stale 都能解释 route 且不泄露内部细节 | 停止发布，先修 compact renderer 或脱敏 fixture |
-| agent eval | `python3 -m pytest tests/test_assistant_agent_eval.py` | stale/conflict/release_tag/scope 等 fixture 全部通过，且 P2 agent-eval gap group 覆盖断言通过 | 回到 evidence / coverage / verifier 修根因，不加固定文案 |
+| trace route fixture | `jq -c . tests/fixtures/assistant_trace_route_samples.jsonl` + `python3 -m pytest tests/test_assistant_evidence_session.py::test_format_assistant_trace_route_samples_from_fixture` | ask/preview/rewrite/fallback/denied/release/read-scope-ask/runtime-conflict/runtime-scheduler-skip/quote-stale/upgrade-stale 都能解释 route，且集中 redaction guard 通过 | 停止发布，先修 compact renderer 或脱敏 fixture |
+| agent eval | `python3 -m pytest tests/test_assistant_agent_eval.py` | stale/conflict/release_tag/scope 等 fixture 全部通过，P2 agent-eval gap group 覆盖断言通过，且集中 UX leak guard 通过 | 回到 evidence / coverage / verifier 修根因，不加固定文案 |
 | verifier / runtime / analysis | `python3 -m pytest tests/test_assistant_evidence_session.py tests/test_assistant_runtime.py tests/test_analysis_tools.py` | diagnostics、follow-up、rewrite/fallback、analysis view 回归全部通过 | 保留失败 trace，缩小到对应模块修复 |
 | agent contract | `python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py` | public tool contract 和 smoke 全部通过 | 不发布；先同步 tool metadata / output contract |
 | release metadata | `python3 scripts/release_check.py --tag v<VERSION>` | `VERSION`、`CHANGELOG.md`、tag 名称一致 | 修版本元数据；不要手动绕过 VERSION workflow |
@@ -2206,13 +2211,13 @@ P0 完成定义：
 ### P1 开发顺序
 
 1. 新增 `ActionPolicy` 数据模型。
-2. 新增 `ToolExecutor`，先在 AgentLoop 内部使用。
+2. 新增 `ToolExecutor`，先在 AgentLoop 内部使用。（已落地 read 工具路径）
 3. 把现有 `ToolPolicyEngine.authorize_read_tool` 作为 P1 policy 的 read-only 分支。
 4. 增加 precheck/postcheck 结果模型。
 5. 扩展 `AgentTool` manifest annotations 和 evidence contract。
 6. 迁移 `analysis_query`、assigned-stock read、monthly income read、assistant_trace、
    preview trade/upgrade 相关工具。
-7. 把 action policy 和 checks 写入 `AgentSessionSnapshot`。
+7. 把 action policy 和 checks 写入 `AgentSessionSnapshot`。（read 工具路径已落地）
 
 P1 完成定义：
 

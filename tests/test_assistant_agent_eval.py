@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import date
 from pathlib import Path
@@ -23,6 +24,19 @@ from src.application.assistant.contracts import AssistantRequest, ToolCall
 
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "assistant_agent_eval.jsonl"
+
+ANSWER_INTERNAL_LEAK_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("internal_tool_name", re.compile(r"(?i)\b(?:analysis_query|analysis_catalog|assistant\.answer_evidence)\b")),
+    ("internal_sql", re.compile(r"(?is)(?:\bsql\b(?!ite)|\bselect\b.{0,240}\bfrom\b|\bwith\b.{0,240}\bselect\b)")),
+    (
+        "internal_id",
+        re.compile(r"(?i)\b(?:stock_lot_id|record_id|event_id|source_deal_id|position_key|trace_id|artifact_path)\b"),
+    ),
+    ("internal_path", re.compile(r"(?i)(?:/Volumes/|/Users/|/private/|output_runs/|output_shared/|\.(?:sqlite3|jsonl)\b)")),
+    ("raw_receipt", re.compile(r"(?i)\braw command log\b")),
+    ("internal_mode", re.compile(r"(?i)\b(?:canonical|synthesis|tool_plan|output_contract|evidencebundle)\b")),
+    ("forced_fact_analysis_split", re.compile(r"(?:^|\n)(?:事实|分析)\s*\n")),
+)
 
 P2_AGENT_EVAL_REQUIRED_FIXTURE_GROUPS: dict[str, set[str]] = {
     "runtime_stale_conflict": {
@@ -68,6 +82,11 @@ def _load_cases() -> list[dict[str, Any]]:
         if text:
             rows.append(json.loads(text))
     return rows
+
+
+def _assert_no_internal_answer_leak(text: str, *, case_id: str) -> None:
+    for code, pattern in ANSWER_INTERNAL_LEAK_PATTERNS:
+        assert not pattern.search(text), f"{case_id} leaked {code}: {text}"
 
 
 def test_assistant_agent_eval_fixture_covers_p2_agent_eval_gap_groups() -> None:
@@ -265,6 +284,7 @@ def test_assistant_agent_eval_uses_guarded_answer_evidence(case: dict[str, Any],
         assert str(expected) in text
     for unexpected in case.get("expect_not_contains") or ():
         assert str(unexpected) not in text
+    _assert_no_internal_answer_leak(text, case_id=str(case["id"]))
     previous_index = -1
     for expected in case.get("expect_order") or ():
         current_index = text.index(str(expected))
@@ -436,6 +456,7 @@ def _run_planner_preview_case(case: dict[str, Any], *, tmp_path: Path, monkeypat
         assert str(expected) in text
     for unexpected in case.get("expect_not_contains") or ():
         assert str(unexpected) not in text
+    _assert_no_internal_answer_leak(text, case_id=str(case["id"]))
     assert out["data"]["perception"]["intent_name"] == case["expect_perception_intent"]
     permission = out["data"]["permission_request"]
     assert permission["operation_type"] == case["expect_operation_type"]
