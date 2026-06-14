@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -124,13 +125,22 @@ def test_analysis_catalog_exposes_p1_semantic_views() -> None:
 def test_analysis_catalog_exposes_p2_semantic_views() -> None:
     data, _warnings, _meta = ANALYSIS_CATALOG_TOOL.call(
         _CatalogContext(),
-        {"views": ["candidate_filter_diagnostics", "close_advice_snapshot", "runtime_tick_status", "quote_freshness"]},
+        {
+            "views": [
+                "candidate_filter_diagnostics",
+                "close_advice_snapshot",
+                "runtime_tick_status",
+                "quote_freshness",
+                "upgrade_operation_status",
+            ]
+        },
     )
 
     assert data["views"]["candidate_filter_diagnostics"]["row_grain"] == "run_id + account + symbol + option_type + rule"
     assert data["views"]["close_advice_snapshot"]["row_grain"] == "account + position_id + advice_run_id"
     assert data["views"]["runtime_tick_status"]["row_grain"] == "market + account + latest_run"
     assert data["views"]["quote_freshness"]["row_grain"] == "symbol + market + source"
+    assert data["views"]["upgrade_operation_status"]["row_grain"] == "command_id + operation_id"
 
 
 def test_analysis_query_authorizer_rejects_non_whitelisted_tables() -> None:
@@ -373,6 +383,190 @@ def test_analysis_query_runtime_tick_status_uses_runtime_read_surface(monkeypatc
     ]
     assert meta["requested_views"] == ["runtime_tick_status"]
     assert meta["materialized_views"] == ["runtime_tick_status"]
+
+
+def test_analysis_query_upgrade_operation_status_uses_operation_timeline() -> None:
+    ctx = _AnalysisQueryContext()
+    calls: list[dict[str, Any]] = []
+
+    def fake_operation_timeline(**kwargs: Any) -> dict[str, Any]:
+        calls.append(dict(kwargs))
+        return {
+            "schema_version": "operation-timeline-v1",
+            "timeline_count": 1,
+            "timelines": [
+                {
+                    "identity": {
+                        "command_id": "in_85aa7e2e5c59ef4c6a620a68",
+                        "operation_id": "in_85aa7e2e5c59ef4c6a620a68",
+                    },
+                    "operation": {
+                        "operation_id": "in_85aa7e2e5c59ef4c6a620a68",
+                        "command_id": "in_85aa7e2e5c59ef4c6a620a68",
+                        "operation_type": "upgrade_now",
+                        "status": "confirmed",
+                        "current_version": None,
+                        "target_version": None,
+                        "created_at": "2026-06-14T10:00:00+00:00",
+                        "confirmed_at": "2026-06-14T10:01:00+00:00",
+                    },
+                    "receipt": {"status": "not_observed"},
+                    "outcome": {"status": "confirmed", "ok": False, "warnings": ["receipt_not_observed"]},
+                    "warnings": ["receipt_not_observed"],
+                }
+            ],
+            "warnings": ["receipt_not_observed"],
+        }
+
+    ctx.collect_operation_timeline = fake_operation_timeline  # type: ignore[method-assign]
+
+    data, warnings, meta = ANALYSIS_QUERY_TOOL.call(
+        ctx,
+        {
+            "sql": (
+                "select command_id, operation_status, current_version, target_version, receipt_status, warning_codes "
+                "from upgrade_operation_status "
+                "where command_id = 'in_85aa7e2e5c59ef4c6a620a68'"
+            ),
+            "limit": 20,
+        },
+    )
+
+    assert warnings == []
+    assert calls[0]["operation_id"] == "in_85aa7e2e5c59ef4c6a620a68"
+    assert calls[0]["operation_types"] == ["upgrade_now"]
+    assert data["rows"] == [
+        {
+            "command_id": "in_85aa7e2e5c59ef4c6a620a68",
+            "operation_status": "confirmed",
+            "current_version": None,
+            "target_version": None,
+            "receipt_status": "not_observed",
+            "warning_codes": '["receipt_not_observed"]',
+        }
+    ]
+    assert data["evidence"]["diagnostics"] == [
+        {
+            "view": "upgrade_operation_status",
+            "status": "observed_operation_status",
+            "severity": "warning",
+            "command_ids": ["in_85aa7e2e5c59ef4c6a620a68"],
+            "operation_ids": [],
+            "operation_statuses": ["confirmed"],
+            "receipt_statuses": ["not_observed"],
+            "summary": (
+                "upgrade operation status rows were observed "
+                "(operation_status=confirmed; receipt_status=not_observed; "
+                "missing=current_version_missing,target_version_missing,receipt_not_observed)"
+            ),
+            "answer_boundary": "upgrade_operation_status_evidence_only",
+            "missing_data": [
+                {
+                    "kind": "current_version_missing",
+                    "impact": "cannot display or verify current version",
+                    "recoverable_by": "operation_timeline",
+                },
+                {
+                    "kind": "target_version_missing",
+                    "impact": "cannot display or verify target version",
+                    "recoverable_by": "operation_timeline",
+                },
+                {
+                    "kind": "receipt_not_observed",
+                    "impact": "cannot prove final upgrade receipt delivery from operation status evidence",
+                    "recoverable_by": "operation_timeline",
+                },
+            ],
+        }
+    ]
+    assert meta["requested_views"] == ["upgrade_operation_status"]
+    assert meta["materialized_views"] == ["upgrade_operation_status"]
+
+
+def test_analysis_query_upgrade_operation_status_marks_status_conflict() -> None:
+    ctx = _AnalysisQueryContext()
+
+    def fake_operation_timeline(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "schema_version": "operation-timeline-v1",
+            "timeline_count": 1,
+            "timelines": [
+                {
+                    "identity": {
+                        "command_id": "in_conflict",
+                        "operation_id": "in_conflict",
+                    },
+                    "operation": {
+                        "operation_id": "in_conflict",
+                        "command_id": "in_conflict",
+                        "operation_type": "upgrade_now",
+                        "status": "applied",
+                        "current_version": "1.2.110",
+                        "target_version": "1.2.111",
+                    },
+                    "receipt": {"status": "observed"},
+                    "outcome": {"status": "failed", "ok": False},
+                    "warnings": [],
+                }
+            ],
+            "warnings": [],
+        }
+
+    ctx.collect_operation_timeline = fake_operation_timeline  # type: ignore[method-assign]
+
+    data, warnings, _meta = ANALYSIS_QUERY_TOOL.call(
+        ctx,
+        {
+            "sql": (
+                "select command_id, operation_status, outcome_status, current_version, target_version, receipt_status "
+                "from upgrade_operation_status where command_id = 'in_conflict'"
+            ),
+            "limit": 20,
+        },
+    )
+
+    assert warnings == []
+    assert data["rows"] == [
+        {
+            "command_id": "in_conflict",
+            "operation_status": "applied",
+            "outcome_status": "failed",
+            "current_version": "1.2.110",
+            "target_version": "1.2.111",
+            "receipt_status": "observed",
+        }
+    ]
+    diagnostic = data["evidence"]["diagnostics"][0]
+    assert diagnostic["status"] == "conflicting_evidence"
+    assert diagnostic["severity"] == "warning"
+    assert diagnostic["operation_statuses"] == ["applied"]
+    assert diagnostic["outcome_statuses"] == ["failed"]
+    assert diagnostic["receipt_statuses"] == ["observed"]
+    assert diagnostic["answer_boundary"] == "conflicting_upgrade_operation_evidence_only"
+    assert diagnostic["conflicts"] == ["operation_status=applied,outcome_status=failed,receipt_status=observed"]
+
+
+def test_analysis_query_upgrade_operation_status_reports_missing_audit_artifact() -> None:
+    ctx = _AnalysisQueryContext()
+
+    def fake_operation_timeline(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "schema_version": "operation-timeline-v1",
+            "timeline_count": 0,
+            "timelines": [],
+            "warnings": ["audit_db_missing"],
+        }
+
+    ctx.collect_operation_timeline = fake_operation_timeline  # type: ignore[method-assign]
+
+    data, warnings, _meta = ANALYSIS_QUERY_TOOL.call(
+        ctx,
+        {"sql": "select command_id, operation_status from upgrade_operation_status", "limit": 20},
+    )
+
+    assert data["rows"] == []
+    assert "upgrade_operation_status missing: audit_db_missing" in warnings
+    assert any(item["status"] == "artifact_missing" for item in data["evidence"]["diagnostics"])
 
 
 def test_analysis_query_quote_freshness_derives_from_assigned_stock_quotes(monkeypatch: pytest.MonkeyPatch) -> None:

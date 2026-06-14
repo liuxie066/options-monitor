@@ -138,6 +138,7 @@ class AgentTool:
 
     def to_manifest(self) -> dict[str, Any]:
         side_effects = list(self.side_effects)
+        output_contract = deepcopy(self.output_contract)
         return {
             "name": self.name,
             "read_only": self.read_only,
@@ -145,15 +146,64 @@ class AgentTool:
             "requires": list(self.requires),
             "capabilities": list(self.capabilities),
             "side_effects": side_effects,
+            "annotations": _manifest_annotations(self),
             "input_schema": dict(self.input_schema),
+            "input_schema_version": "om-tool-input-v1",
+            "output_schema": {},
             "risk_level": self.resolved_risk_level(),
             "requires_confirm": bool(self.requires_confirm),
             "requires_env": list(self.requires_env),
             "safe_default_input": dict(self.safe_default_input),
             "examples": deepcopy(list(self.examples)),
             "answer_policy": self.answer_policy,
-            "output_contract": deepcopy(self.output_contract),
+            "output_contract": output_contract,
+            "evidence_contract": _manifest_evidence_contract(output_contract),
+            "verifiers": _manifest_verifiers(self, output_contract),
         }
+
+
+def _manifest_annotations(tool: AgentTool) -> dict[str, bool]:
+    risk_level = tool.resolved_risk_level()
+    return {
+        "read_only": bool(tool.read_only),
+        "destructive": bool("delete" in tool.side_effects or risk_level in {"destructive", "admin_write"}),
+        "idempotent": bool(tool.read_only and not tool.side_effects and not tool.requires_confirm),
+        "open_world": bool(tool.requires_env or risk_level in {"preview_admin", "remote_admin"}),
+    }
+
+
+def _manifest_evidence_contract(output_contract: dict[str, Any]) -> dict[str, Any]:
+    if not output_contract:
+        return {}
+    evidence_keys = {
+        "schema_version",
+        "payload_dependent",
+        "source_label",
+        "canonical_renderer",
+        "guard_profile",
+        "primary_rows",
+        "row_count_field",
+        "fact_fields",
+        "freshness_fields",
+        "missing_data_fields",
+        "calculation_fields",
+    }
+    return {key: deepcopy(value) for key, value in output_contract.items() if key in evidence_keys}
+
+
+def _manifest_verifiers(tool: AgentTool, output_contract: dict[str, Any]) -> list[str]:
+    verifiers: list[str] = ["schema"]
+    if output_contract:
+        verifiers.append("output_contract")
+    if output_contract.get("freshness_fields"):
+        verifiers.append("freshness")
+    if output_contract.get("missing_data_fields"):
+        verifiers.append("missing_data")
+    if output_contract.get("fact_fields"):
+        verifiers.append("numeric")
+    if tool.requires_confirm or tool.resolved_risk_level() in {"preview_write", "preview_admin"}:
+        verifiers.append("receipt")
+    return list(dict.fromkeys(verifiers))
 
 
 def build_agent_tool(
