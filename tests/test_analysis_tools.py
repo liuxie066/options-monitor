@@ -428,6 +428,64 @@ def test_analysis_query_runtime_tick_status_surfaces_notification_conflict(monke
     assert meta["materialized_views"] == ["runtime_tick_status"]
 
 
+def test_analysis_query_runtime_tick_status_surfaces_scheduler_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_runtime_status_tool(*_args, **_kwargs):
+        return {
+            "config": {"config_key": "hk", "accounts": ["sy"]},
+            "summary": {
+                "latest_status": "success",
+                "latest_run_path": "output_runs/run-2",
+                "warning_count": 0,
+                "warning_codes": [],
+            },
+            "freshness": {"status": "fresh", "age_seconds": 30},
+            "notification_diagnosis": {
+                "status": "scheduler_skipped",
+                "reason": "market_closed",
+                "scheduler_should_run_scan": False,
+                "scheduler_should_notify": False,
+                "scheduler_reason": "market_closed",
+            },
+            "accounts": {"sy": {"notification": {"exists": False}}},
+        }, [], {}
+
+    monkeypatch.setattr(analysis_module, "_call_runtime_status_tool", fake_runtime_status_tool)
+
+    data, warnings, meta = ANALYSIS_QUERY_TOOL.call(
+        _AnalysisQueryContext(),
+        {
+            "sql": (
+                "select account, notification_status, scheduler_should_run_scan, "
+                "scheduler_should_notify, scheduler_reason from runtime_tick_status"
+            ),
+            "limit": 10,
+        },
+    )
+
+    assert warnings == []
+    assert data["rows"] == [
+        {
+            "account": "sy",
+            "notification_status": "scheduler_skipped",
+            "scheduler_should_run_scan": False,
+            "scheduler_should_notify": False,
+            "scheduler_reason": "market_closed",
+        }
+    ]
+    assert data["evidence"]["diagnostics"] == [
+        {
+            "view": "runtime_tick_status",
+            "status": "observed_scheduler_skip",
+            "severity": "warning",
+            "accounts": ["sy"],
+            "summary": "scheduler skipped because market_closed",
+            "answer_boundary": "observed_runtime_status_only",
+        }
+    ]
+    assert meta["requested_views"] == ["runtime_tick_status"]
+    assert meta["materialized_views"] == ["runtime_tick_status"]
+
+
 def test_analysis_query_upgrade_operation_status_uses_operation_timeline() -> None:
     ctx = _AnalysisQueryContext()
     calls: list[dict[str, Any]] = []

@@ -1082,6 +1082,74 @@ def test_answer_verifier_allows_direct_runtime_skip_root_cause() -> None:
     assert result.violations == ()
 
 
+def test_evidence_bundle_infers_runtime_scheduler_reason_from_rows() -> None:
+    bundle = build_evidence_bundle(
+        question="今天 sy 为什么没推送",
+        plan={"goal": "解释 runtime scheduler 跳过原因", "steps": []},
+        observations=[
+            {
+                "index": 1,
+                "tool_name": "analysis_query",
+                "payload": {
+                    "sql": (
+                        "select account, notification_status, scheduler_should_run_scan, "
+                        "scheduler_reason from runtime_tick_status"
+                    )
+                },
+                "ok": True,
+                "error": None,
+                "output_contract": {
+                    "schema_version": "analysis_query.output.v2",
+                    "canonical_renderer": "analysis_result",
+                    "source_label": "OM read-only analysis workspace",
+                    "guard_profile": "analysis_result",
+                    "primary_rows": "rows",
+                    "row_count_field": "row_count",
+                    "fact_fields": [
+                        "rows[].account",
+                        "rows[].notification_status",
+                        "rows[].scheduler_should_run_scan",
+                        "rows[].scheduler_reason",
+                    ],
+                },
+                "data": {
+                    "rows": [
+                        {
+                            "account": "sy",
+                            "notification_status": "scheduler_skipped",
+                            "scheduler_should_run_scan": False,
+                            "scheduler_reason": "market_closed",
+                        }
+                    ],
+                    "row_count": 1,
+                    "views_used": ["runtime_tick_status"],
+                    "evidence": {"coverage": {"views": ["runtime_tick_status"], "accounts": ["sy"]}},
+                },
+            }
+        ],
+    )
+
+    diagnostic = bundle.public_payload()["diagnostics"][0]
+    assert diagnostic["domain"] == "runtime_tick"
+    assert diagnostic["status"] == "observed_scheduler_skip"
+    assert diagnostic["scope"]["accounts"] == ["sy"]
+    assert diagnostic["confidence"] == "direct"
+    assert diagnostic["observed_reason"] == "scheduler skipped because market_closed"
+    assert diagnostic["answer_boundary"] == "observed_runtime_status_only"
+
+    bad = verify_response_against_evidence(
+        "今天 sy 没推送是通知通道故障。",
+        evidence_bundle=bundle,
+    )
+    assert any(item["type"] == "unsupported_runtime_notification_root_cause_claim" for item in bad.violations)
+
+    ok = verify_response_against_evidence(
+        "今天 sy 没推送当前只能归因到调度器跳过：scheduler_reason=market_closed；这不是通知通道失败证据。",
+        evidence_bundle=bundle,
+    )
+    assert ok.violations == ()
+
+
 def test_answer_verifier_rejects_runtime_freshness_gap_root_cause() -> None:
     bundle = build_evidence_bundle(
         question="今天为什么没推送",

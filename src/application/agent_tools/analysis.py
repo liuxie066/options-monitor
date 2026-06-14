@@ -253,6 +253,14 @@ RUNTIME_TICK_STATUS_FIELDS: tuple[str, ...] = (
     "notification_status",
     "notification_reason",
     "notification_exists",
+    "scheduler_should_run_scan",
+    "scheduler_should_notify",
+    "scheduler_reason",
+    "no_send",
+    "account_messages_count",
+    "send_attempted_count",
+    "send_confirmed_count",
+    "send_failed_count",
     "warning_count",
     "warning_codes",
     "source",
@@ -2021,6 +2029,14 @@ def _runtime_tick_status_rows_from_data(data: dict[str, Any]) -> list[dict[str, 
                 "notification_status": notification_diagnosis.get("status"),
                 "notification_reason": notification_diagnosis.get("reason"),
                 "notification_exists": bool(notification.get("exists")) if notification else None,
+                "scheduler_should_run_scan": notification_diagnosis.get("scheduler_should_run_scan"),
+                "scheduler_should_notify": notification_diagnosis.get("scheduler_should_notify"),
+                "scheduler_reason": notification_diagnosis.get("scheduler_reason"),
+                "no_send": notification_diagnosis.get("no_send"),
+                "account_messages_count": notification_diagnosis.get("account_messages_count"),
+                "send_attempted_count": notification_diagnosis.get("send_attempted_count"),
+                "send_confirmed_count": notification_diagnosis.get("send_confirmed_count"),
+                "send_failed_count": notification_diagnosis.get("send_failed_count"),
                 "warning_count": summary.get("warning_count"),
                 "warning_codes": summary.get("warning_codes") or [],
                 "source": "runtime_status",
@@ -2565,6 +2581,8 @@ def _runtime_diagnostic_records(rows: list[dict[str, Any]]) -> list[dict[str, An
     notification_statuses = _row_status_values(rows, "notification_status")
     notification_values = {row.get("notification_exists") for row in rows if isinstance(row, dict)}
     conflict_reasons = _runtime_status_conflict_reasons(rows)
+    scheduler_reason = _runtime_first_text(rows, "skip_reason", "scheduler_reason")
+    notification_reason = _runtime_first_text(rows, "notification_reason", "final_reason")
     status = "observed_runtime_status"
     severity = "info"
     if "conflicting_evidence" in statuses or conflict_reasons:
@@ -2573,17 +2591,26 @@ def _runtime_diagnostic_records(rows: list[dict[str, Any]]) -> list[dict[str, An
     elif statuses & {"failed", "error", "failed_run", "exec_failed"}:
         status = "observed_run_failure"
         severity = "warning"
-    elif statuses & {"skip", "skipped", "locked", "outside_window"}:
+    elif (
+        statuses & {"scheduler_skip", "skip", "skipped", "locked", "outside_window"}
+        or notification_statuses & {"scheduler_skipped"}
+        or any(row.get("scheduler_should_run_scan") is False for row in rows if isinstance(row, dict))
+    ):
         status = "observed_scheduler_skip"
         severity = "warning"
     elif warning_codes & {"no_candidates", "empty_candidates", "candidate_empty"}:
         status = "observed_no_candidates"
     elif False in notification_values or notification_statuses & {
         "missing",
+        "notification_route_missing",
+        "no_notification_content",
+        "no_send",
         "not_sent",
         "not_observed",
+        "outer_delivery_disabled",
         "failed",
         "error",
+        "sent_partial",
         "send_failed_or_unconfirmed",
     }:
         status = "observed_notification_missing"
@@ -2594,7 +2621,11 @@ def _runtime_diagnostic_records(rows: list[dict[str, Any]]) -> list[dict[str, An
     summary = (
         "runtime diagnostic evidence is conflicting: " + "; ".join(conflict_reasons)
         if status == "conflicting_evidence" and conflict_reasons
-        else _runtime_diagnostic_summary(status=status)
+        else _runtime_diagnostic_summary(
+            status=status,
+            scheduler_reason=scheduler_reason,
+            notification_reason=notification_reason,
+        )
     )
     return [
         {
@@ -2739,14 +2770,31 @@ def _close_advice_diagnostic_summary(*, actions: list[Any], tiers: list[Any]) ->
     return f"close-advice snapshot rows were observed{suffix}"
 
 
-def _runtime_diagnostic_summary(*, status: str) -> str:
+def _runtime_diagnostic_summary(*, status: str, scheduler_reason: str = "", notification_reason: str = "") -> str:
+    if status == "observed_scheduler_skip":
+        return f"scheduler skipped because {scheduler_reason}" if scheduler_reason else "runtime status indicates the latest run was skipped"
+    if status == "observed_notification_missing":
+        return (
+            f"runtime notification was not observed: {notification_reason}"
+            if notification_reason
+            else "runtime status indicates notification output is missing"
+        )
     return {
         "observed_run_failure": "runtime status indicates a failed latest run",
-        "observed_scheduler_skip": "runtime status indicates the latest run was skipped",
         "observed_no_candidates": "runtime status indicates no candidate output",
-        "observed_notification_missing": "runtime status indicates notification output is missing",
         "observed_runtime_freshness_gap": "runtime status indicates stale or missing freshness",
     }.get(status, "runtime status rows were observed")
+
+
+def _runtime_first_text(rows: list[dict[str, Any]], *fields: str) -> str:
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for field in fields:
+            text = str(row.get(field) or "").strip()
+            if text:
+                return text
+    return ""
 
 
 def _quote_diagnostic_summary(*, quote_statuses: list[str], as_of_values: list[Any]) -> str:

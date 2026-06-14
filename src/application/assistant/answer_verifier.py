@@ -779,6 +779,20 @@ def _semantic_policy_verification(text: str, *, evidence_bundle: EvidenceBundle)
             }
         )
 
+    if _claims_notification_channel_failure(compact) and _has_runtime_scheduler_skip_diagnostics(evidence_bundle):
+        checked += 1
+        if _has_notification_failure_caveat(compact):
+            supported += 1
+        else:
+            violations.append(
+                {
+                    "type": "unsupported_runtime_notification_root_cause_claim",
+                    "claim": "通知通道/发送失败导致未推送",
+                    "evidence": "runtime diagnostics show scheduler skip, not notification delivery failure",
+                    "diagnostics": _runtime_scheduler_skip_diagnostics(evidence_bundle)[:4],
+                }
+            )
+
     return violations, checked, supported
 
 
@@ -903,12 +917,36 @@ def _quote_gap_diagnostics(evidence_bundle: EvidenceBundle) -> list[dict[str, An
     return rows
 
 
+def _runtime_scheduler_skip_diagnostics(evidence_bundle: EvidenceBundle) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for record in _diagnostic_records(evidence_bundle):
+        if str(record.get("domain") or "") != "runtime_tick":
+            continue
+        if str(record.get("status") or "").strip().lower() != "observed_scheduler_skip":
+            continue
+        scope = record.get("scope") if isinstance(record.get("scope"), dict) else {}
+        rows.append(
+            {
+                "domain": record.get("domain"),
+                "status": record.get("status"),
+                "accounts": scope.get("accounts"),
+                "observed_reason": record.get("observed_reason"),
+                "answer_boundary": record.get("answer_boundary"),
+            }
+        )
+    return rows
+
+
 def _has_unresolved_diagnostics(evidence_bundle: EvidenceBundle) -> bool:
     return bool(_unresolved_diagnostics(evidence_bundle))
 
 
 def _has_quote_gap_diagnostics(evidence_bundle: EvidenceBundle) -> bool:
     return bool(_quote_gap_diagnostics(evidence_bundle))
+
+
+def _has_runtime_scheduler_skip_diagnostics(evidence_bundle: EvidenceBundle) -> bool:
+    return bool(_runtime_scheduler_skip_diagnostics(evidence_bundle))
 
 
 def _has_unresolved_analysis_diagnostics(evidence_bundle: EvidenceBundle) -> bool:
@@ -1053,6 +1091,48 @@ def _claims_upstream_quote_failure(compact: str) -> bool:
             "gatewaydown",
             "opendisconnected",
             "connectionfailed",
+        )
+    )
+
+
+def _claims_notification_channel_failure(compact: str) -> bool:
+    return any(
+        token in compact
+        for token in (
+            "通知通道故障",
+            "通知通道失败",
+            "通知渠道故障",
+            "通知渠道失败",
+            "通知发送失败",
+            "通知失败",
+            "发送失败",
+            "送达失败",
+            "deliveryfailed",
+            "sendfailed",
+            "notificationfailed",
+        )
+    )
+
+
+def _has_notification_failure_caveat(compact: str) -> bool:
+    return any(
+        token in compact
+        for token in (
+            "不是通知通道故障",
+            "不是通知通道失败",
+            "不是通知渠道故障",
+            "不是通知渠道失败",
+            "不是通知发送失败",
+            "不是通知失败",
+            "不是发送失败",
+            "不是送达失败",
+            "不能归因到通知",
+            "不能确认通知",
+            "无法确认通知",
+            "没有通知通道失败证据",
+            "没有通知失败证据",
+            "notnotificationfailure",
+            "notsendfailure",
         )
     )
 

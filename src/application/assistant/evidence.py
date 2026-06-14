@@ -464,7 +464,8 @@ def _runtime_analysis_diagnostic_from_rows(rows: list[dict[str, Any]]) -> dict[s
     statuses = _row_statuses(rows, "diagnostic_status", "latest_status", "status")
     freshness = _row_statuses(rows, "freshness_status")
     notification = _row_statuses(rows, "notification_status")
-    skip_reason = _first_row_text(rows, "skip_reason")
+    skip_reason = _first_row_text(rows, "skip_reason", "scheduler_reason")
+    notification_reason = _first_row_text(rows, "notification_reason", "final_reason")
     conflict_reasons = _runtime_status_conflict_reasons(rows)
     status = "observed_runtime_status"
     severity = "info"
@@ -474,10 +475,27 @@ def _runtime_analysis_diagnostic_from_rows(rows: list[dict[str, Any]]) -> dict[s
     elif statuses & {"failed", "error", "failed_run", "exec_failed"}:
         status = "observed_run_failure"
         severity = "warning"
-    elif statuses & {"scheduler_skip", "skip", "skipped", "locked", "outside_window"} or skip_reason:
+    elif (
+        statuses & {"scheduler_skip", "skip", "skipped", "locked", "outside_window"}
+        or notification & {"scheduler_skipped"}
+        or any(row.get("scheduler_should_run_scan") is False for row in rows if isinstance(row, dict))
+        or skip_reason
+    ):
         status = "observed_scheduler_skip"
         severity = "warning"
-    elif notification & {"missing", "not_sent", "not_observed", "failed", "error"}:
+    elif notification & {
+        "missing",
+        "notification_route_missing",
+        "no_notification_content",
+        "no_send",
+        "not_sent",
+        "not_observed",
+        "outer_delivery_disabled",
+        "failed",
+        "error",
+        "sent_partial",
+        "send_failed_or_unconfirmed",
+    }:
         status = "observed_notification_missing"
         severity = "warning"
     elif freshness & {"missing", "stale", "unknown", "failed", "error"}:
@@ -488,7 +506,11 @@ def _runtime_analysis_diagnostic_from_rows(rows: list[dict[str, Any]]) -> dict[s
         or (
             "runtime diagnostic evidence is conflicting: " + "; ".join(conflict_reasons)
             if status == "conflicting_evidence" and conflict_reasons
-            else _runtime_diagnostic_summary(status=status, skip_reason=skip_reason)
+            else _runtime_diagnostic_summary(
+                status=status,
+                skip_reason=skip_reason,
+                notification_reason=notification_reason,
+            )
         )
     )
     return {
@@ -761,7 +783,7 @@ def _candidate_diagnostic_summary(*, status: str, rules: list[str]) -> str:
     return "candidate diagnostic rows were observed"
 
 
-def _runtime_diagnostic_summary(*, status: str, skip_reason: str = "") -> str:
+def _runtime_diagnostic_summary(*, status: str, skip_reason: str = "", notification_reason: str = "") -> str:
     if status == "conflicting_evidence":
         return "runtime diagnostic evidence is conflicting"
     if status == "observed_scheduler_skip":
@@ -769,7 +791,7 @@ def _runtime_diagnostic_summary(*, status: str, skip_reason: str = "") -> str:
     if status == "observed_run_failure":
         return "runtime latest run failure was observed"
     if status == "observed_notification_missing":
-        return "runtime notification was not observed"
+        return f"runtime notification was not observed: {notification_reason}" if notification_reason else "runtime notification was not observed"
     if status == "observed_runtime_freshness_gap":
         return "runtime freshness gap was observed"
     return "runtime status rows were observed"
