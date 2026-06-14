@@ -2093,7 +2093,15 @@ def _upgrade_operation_status_rows(ctx: AgentToolContext, payload: dict[str, Any
     warnings = [
         f"upgrade_operation_status missing: {warning}"
         for warning in data.get("warnings", [])
-        if str(warning or "").strip() in {"audit_db_missing", "operations_table_missing", "audit_table_missing"}
+        if str(warning or "").strip()
+        in {
+            "audit_db_missing",
+            "operations_table_missing",
+            "audit_table_missing",
+            "command_log_missing",
+            "command_audit_missing",
+            "operation_log_missing",
+        }
     ]
     if not rows:
         warnings.append("upgrade_operation_status empty: operation_timeline returned no upgrade rows")
@@ -2410,7 +2418,17 @@ def _diagnostic_records_from_warnings(
         elif " empty:" in f" {lower}" or lower.endswith(" empty"):
             status = "empty_artifact"
             boundary = "diagnostic source had no rows"
-        elif any(marker in lower for marker in ("audit_db_missing", "operations_table_missing", "audit_table_missing")):
+        elif any(
+            marker in lower
+            for marker in (
+                "audit_db_missing",
+                "operations_table_missing",
+                "audit_table_missing",
+                "command_log_missing",
+                "command_audit_missing",
+                "operation_log_missing",
+            )
+        ):
             status = "artifact_missing"
             boundary = "diagnostic artifact missing"
         elif "unavailable:" in lower:
