@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.285 - 2026-06-15
+
+### Added
+- Added centralized assistant final-answer UX leak guards so eval cases fail if user-facing receipts expose internal tool names, SQL, internal IDs, local paths, raw logs, internal modes, or forced fact/analysis sectioning.
+- Added centralized compact trace redaction guards so route samples fail if compact traces expose session IDs, internal tool names, SQL, internal IDs, local paths, raw logs, or internal modes.
+
+### Changed
+- Updated the Agent reliability P0-P2 design notes to reflect the current ToolExecutor read-path implementation and the remaining preview/receipt convergence work.
+
 ## 1.2.284 - 2026-06-15
 
 ### Added

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import date
 from pathlib import Path
 import sqlite3
@@ -28,6 +29,18 @@ from src.application.tool_execution import execute_tool as run_tool
 
 
 TRACE_ROUTE_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "assistant_trace_route_samples.jsonl"
+TRACE_INTERNAL_LEAK_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("session_id", re.compile(r"\bas_[A-Za-z0-9_:-]+\b")),
+    ("internal_tool_name", re.compile(r"(?i)\b(?:analysis_query|analysis_catalog|manual_trade_open)\b")),
+    ("internal_sql", re.compile(r"(?is)(?:\bsql\b(?!ite)|\bselect\b.{0,240}\bfrom\b|\bwith\b.{0,240}\bselect\b)")),
+    (
+        "internal_id",
+        re.compile(r"(?i)\b(?:stock_lot_id|record_id|event_id|source_deal_id|position_key|trace_id|artifact_path)\b"),
+    ),
+    ("internal_path", re.compile(r"(?i)(?:/Volumes/|/Users/|/private/|output_runs/|output_shared/|\.(?:sqlite3|jsonl)\b)")),
+    ("raw_receipt", re.compile(r"(?i)(?:raw command log|raw_log|真实成交提醒)")),
+    ("internal_mode", re.compile(r"(?i)\b(?:canonical|synthesis|tool_plan|output_contract|evidencebundle)\b")),
+)
 REQUIRED_TRACE_ROUTE_SAMPLE_IDS = {
     "trace_ask_missing_account",
     "trace_preview_manual_trade",
@@ -50,6 +63,11 @@ def _load_trace_route_cases() -> list[dict[str, Any]]:
         if text:
             rows.append(json.loads(text))
     return rows
+
+
+def _assert_no_internal_trace_leak(text: str, *, case_id: str) -> None:
+    for code, pattern in TRACE_INTERNAL_LEAK_PATTERNS:
+        assert not pattern.search(text), f"{case_id} leaked {code}: {text}"
 
 
 def test_evidence_bundle_extracts_contract_facts_and_missing_quote() -> None:
@@ -2347,6 +2365,9 @@ def test_agent_loop_tool_result_contains_evidence_bundle_and_session(tmp_path: P
     assert session["tool_transcript"][0]["postcheck"]["status"] == "pass"
     assert session["tool_transcript"][0]["hook_results"][0]["schema_version"] == HOOK_RESULT_SCHEMA_VERSION
     assert any(item["hook"] == "action_policy" and item["status"] == "pass" for item in session["tool_transcript"][0]["hook_results"])
+    assert any(item["hook"] == "action_safety" and item["status"] == "pass" for item in session["tool_transcript"][0]["hook_results"])
+    assert any(item["hook"] == "output_contract" and item["status"] == "pass" for item in session["tool_transcript"][0]["hook_results"])
+    assert any(item["hook"] == "evidence_contract" and item["status"] == "pass" for item in session["tool_transcript"][0]["hook_results"])
     assert any(item["hook"] == "result_status" and item["status"] == "pass" for item in session["tool_transcript"][0]["hook_results"])
     assert session["tool_transcript"][0]["evidence_summary"]["source_label"] == "OM 本地 SQLite assigned_stock_events + trade_events"
     assert session["tool_transcript"][0]["evidence_summary"]["primary_rows"] == "rows"
@@ -2516,6 +2537,7 @@ def test_format_assistant_trace_route_samples_from_fixture() -> None:
             assert str(expected) in text, case["id"]
         for unexpected in case.get("expect_not_contains") or ():
             assert str(unexpected) not in text, case["id"]
+        _assert_no_internal_trace_leak(text, case_id=str(case["id"]))
 
 
 def test_agent_loop_replans_read_only_followup_for_recoverable_quote_gap(tmp_path: Path) -> None:
