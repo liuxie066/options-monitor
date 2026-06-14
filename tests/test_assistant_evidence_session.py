@@ -953,6 +953,215 @@ def test_evidence_bundle_infers_runtime_skip_diagnostics_from_analysis_rows() ->
     assert diagnostic["answer_boundary"] == "observed_runtime_status_only"
 
 
+def test_answer_verifier_allows_direct_runtime_skip_root_cause() -> None:
+    bundle = build_evidence_bundle(
+        question="今天为什么没推送",
+        plan={"goal": "解释 runtime 推送诊断", "steps": []},
+        observations=[
+            {
+                "index": 1,
+                "tool_name": "analysis_query",
+                "payload": {"sql": "select market, account, latest_status, skip_reason from runtime_tick_status"},
+                "ok": True,
+                "error": None,
+                "output_contract": {
+                    "schema_version": "analysis_query.output.v2",
+                    "canonical_renderer": "analysis_result",
+                    "source_label": "OM read-only analysis workspace",
+                    "guard_profile": "analysis_result",
+                    "primary_rows": "rows",
+                    "row_count_field": "row_count",
+                    "fact_fields": ["rows[].market", "rows[].account", "rows[].latest_status", "rows[].skip_reason"],
+                },
+                "data": {
+                    "rows": [
+                        {
+                            "market": "us",
+                            "account": "lx",
+                            "latest_status": "scheduler_skip",
+                            "skip_reason": "market_closed",
+                        }
+                    ],
+                    "row_count": 1,
+                    "views_used": ["runtime_tick_status"],
+                    "evidence": {"coverage": {"views": ["runtime_tick_status"], "accounts": ["lx"]}},
+                },
+            }
+        ],
+    )
+
+    result = verify_response_against_evidence(
+        "今天 lx 没推送的原因是 runtime 记录显示 scheduler_skip，skip_reason 是 market_closed。",
+        evidence_bundle=bundle,
+    )
+    assert result.violations == ()
+
+
+def test_answer_verifier_rejects_runtime_freshness_gap_root_cause() -> None:
+    bundle = build_evidence_bundle(
+        question="今天为什么没推送",
+        plan={"goal": "解释 runtime 推送诊断", "steps": []},
+        observations=[
+            {
+                "index": 1,
+                "tool_name": "analysis_query",
+                "payload": {"sql": "select market, account, freshness_status, summary from runtime_tick_status"},
+                "ok": True,
+                "error": None,
+                "output_contract": {
+                    "schema_version": "analysis_query.output.v2",
+                    "canonical_renderer": "analysis_result",
+                    "source_label": "OM read-only analysis workspace",
+                    "guard_profile": "analysis_result",
+                    "primary_rows": "rows",
+                    "row_count_field": "row_count",
+                    "fact_fields": ["rows[].market", "rows[].account", "rows[].freshness_status", "rows[].summary"],
+                },
+                "data": {
+                    "rows": [
+                        {
+                            "market": "us",
+                            "account": "lx",
+                            "freshness_status": "stale",
+                            "summary": "runtime snapshot is stale",
+                        }
+                    ],
+                    "row_count": 1,
+                    "views_used": ["runtime_tick_status"],
+                    "evidence": {"coverage": {"views": ["runtime_tick_status"], "accounts": ["lx"]}},
+                },
+            }
+        ],
+    )
+
+    diagnostic = bundle.public_payload()["diagnostics"][0]
+    assert diagnostic["status"] == "observed_runtime_freshness_gap"
+    assert diagnostic["confidence"] == "direct"
+
+    bad = verify_response_against_evidence(
+        "今天 lx 没推送的原因是 market_closed。",
+        evidence_bundle=bundle,
+    )
+    assert any(item["type"] == "unsupported_diagnostic_root_cause_claim" for item in bad.violations)
+
+    caveated = verify_response_against_evidence(
+        "runtime 记录是旧快照，不能确认今天 lx 没推送的原因。",
+        evidence_bundle=bundle,
+    )
+    assert caveated.violations == ()
+
+
+def test_answer_verifier_rejects_runtime_notification_missing_success_claim() -> None:
+    bundle = build_evidence_bundle(
+        question="今天 lx 推送成功了吗",
+        plan={"goal": "解释 runtime 通知送达诊断", "steps": []},
+        observations=[
+            {
+                "index": 1,
+                "tool_name": "analysis_query",
+                "payload": {"sql": "select account, latest_status, notification_status from runtime_tick_status"},
+                "ok": True,
+                "error": None,
+                "output_contract": {
+                    "schema_version": "analysis_query.output.v2",
+                    "canonical_renderer": "analysis_result",
+                    "source_label": "OM read-only analysis workspace",
+                    "guard_profile": "analysis_result",
+                    "primary_rows": "rows",
+                    "row_count_field": "row_count",
+                    "fact_fields": ["rows[].account", "rows[].latest_status", "rows[].notification_status"],
+                },
+                "data": {
+                    "rows": [
+                        {
+                            "account": "lx",
+                            "latest_status": "success",
+                            "notification_status": "not_observed",
+                        }
+                    ],
+                    "row_count": 1,
+                    "views_used": ["runtime_tick_status"],
+                    "evidence": {"coverage": {"views": ["runtime_tick_status"], "accounts": ["lx"]}},
+                },
+            }
+        ],
+    )
+
+    diagnostic = bundle.public_payload()["diagnostics"][0]
+    assert diagnostic["status"] == "observed_notification_missing"
+    assert diagnostic["confidence"] == "direct"
+
+    bad = verify_response_against_evidence(
+        "今天 lx 推送成功。",
+        evidence_bundle=bundle,
+    )
+    assert any(item["type"] == "unsupported_diagnostic_status_claim" for item in bad.violations)
+
+    caveated = verify_response_against_evidence(
+        "只能确认 runtime latest_status=success，但 notification_status=not_observed，不能确认推送成功。",
+        evidence_bundle=bundle,
+    )
+    assert caveated.violations == ()
+
+
+def test_answer_verifier_rejects_partial_confidence_root_cause() -> None:
+    bundle = build_evidence_bundle(
+        question="为什么 NVDA 没出现在候选里",
+        plan={"goal": "解释 NVDA 候选诊断", "steps": []},
+        observations=[
+            {
+                "index": 1,
+                "tool_name": "analysis_query",
+                "payload": {"sql": "select symbol, diagnostic_status, summary from candidate_filter_diagnostics"},
+                "ok": True,
+                "error": None,
+                "output_contract": {
+                    "schema_version": "analysis_query.output.v2",
+                    "canonical_renderer": "analysis_result",
+                    "source_label": "OM read-only analysis workspace",
+                    "guard_profile": "analysis_result",
+                    "primary_rows": "rows",
+                    "row_count_field": "row_count",
+                    "fact_fields": ["rows[].symbol", "rows[].diagnostic_status", "rows[].summary"],
+                },
+                "data": {
+                    "rows": [
+                        {
+                            "symbol": "NVDA",
+                            "diagnostic_status": "observed_candidate_summary_only",
+                            "summary": "candidate diagnostics only have summary-level evidence",
+                        }
+                    ],
+                    "row_count": 1,
+                    "views_used": ["candidate_filter_diagnostics"],
+                    "evidence": {
+                        "coverage": {"views": ["candidate_filter_diagnostics"], "symbols": ["NVDA"]},
+                        "diagnostics": [
+                            {
+                                "view": "candidate_filter_diagnostics",
+                                "status": "observed_candidate_summary_only",
+                                "severity": "warning",
+                                "symbols": ["NVDA"],
+                                "summary": "candidate diagnostics only have summary-level evidence",
+                                "answer_boundary": "summary_diagnostic_evidence_only",
+                            }
+                        ],
+                    },
+                },
+            }
+        ],
+    )
+
+    diagnostic = bundle.public_payload()["diagnostics"][0]
+    assert diagnostic["confidence"] == "partial"
+
+    bad = verify_response_against_evidence(
+        "NVDA 没出现在候选里的原因是 liquidity 过滤。",
+        evidence_bundle=bundle,
+    )
+    assert any(item["type"] == "unsupported_diagnostic_root_cause_claim" for item in bad.violations)
+
+
 def test_evidence_bundle_marks_analysis_diagnostic_missing_and_conflict() -> None:
     missing_bundle = build_evidence_bundle(
         question="为什么 NVDA 没出现在候选里",
