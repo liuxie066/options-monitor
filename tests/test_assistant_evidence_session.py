@@ -1510,6 +1510,35 @@ def test_task_contract_and_coverage_detect_missing_account_comparison_scope() ->
     assert coverage["gaps"][0]["missing_accounts"] == ["sy"]
 
 
+def test_task_contract_does_not_treat_month_digits_as_symbols() -> None:
+    plan = PlannerPlan(
+        goal="对比 lx 和 sy 2026-05 的账户收益",
+        response_mode="synthesis",
+        steps=(
+            PlannerPlanStep(
+                id="step_1",
+                tool_name="analysis_query",
+                arguments={
+                    "sql": "SELECT month, account, net_income_cny FROM account_monthly_performance WHERE month = '2026-05'",
+                    "limit": 20,
+                },
+                purpose="读取 2026-05 账户收益",
+            ),
+        ),
+    )
+    contract = build_task_contract(
+        question="对比 lx 和 sy 2026-05 的账户收益",
+        plan=plan.public_payload(),
+        request_context={"config_key": "us"},
+        today=date(2026, 6, 14),
+    )
+
+    assert contract.scope["requested_months"] == ["2026-05"]
+    assert contract.scope["planned_months"] == ["2026-05"]
+    assert contract.scope["requested_symbols"] == []
+    assert contract.scope["planned_symbols"] == []
+
+
 def test_coverage_rejects_account_comparison_without_same_period_metric() -> None:
     plan = PlannerPlan(
         goal="对比 lx 和 sy 的账户收益",
