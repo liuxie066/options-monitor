@@ -1554,7 +1554,7 @@ P2 按最小可交付版本收敛为五件事：
 | 能力 | 当前状态 | 已有事实 | 下一步 |
 |---|---|---|---|
 | Diagnostic evidence | M2 本地部分验收通过 | `EvidenceBundle` 已有 `diagnostics[]`、`diagnostic_count`、`diagnostic_domains`；已覆盖 analysis diagnostics、assigned-stock quote gap、upgrade operation/receipt/version/release publication gap；analysis rows 可归一出 candidate/runtime/quote/upgrade direct、missing、conflict/stale 缺口诊断；`upgrade_operation_status` 已接入真实 operation timeline read surface；`command_log_missing` / command audit 缺失会归入 `artifact_missing`；`release_tag` 不能证明 GitHub Release 已发布；`release_status` / `release_published_at` / `github_release_url` 可表达发布成功或失败证据 | 继续补更多 release status 线上样本 |
-| Coverage verifier | M2.5 本地验收通过 | 已覆盖 account comparison、breakdown、assigned-stock missing quote、upgrade status missing version/receipt；coverage result 已进入 session trace / hook trace；不可补 upgrade gap 不会进入 follow-up planner | 继续补更多线上 stale/conflict 样本 |
+| Coverage verifier | M2.5 本地验收通过 | 已覆盖 account comparison、breakdown、assigned-stock missing quote、upgrade status missing version/receipt/release publication status；coverage result 已进入 session trace / hook trace；不可补 upgrade gap 不会进入 follow-up planner | 继续补更多线上 stale/conflict 样本 |
 | Root-cause verifier | 部分落地 | answer verifier 已能拦截无证据 root cause、quote upstream overclaim、analysis quote freshness gap 的上游根因外推，以及 unresolved diagnostics 下直接宣称成功/失败/完成的确定性状态结论；normalized diagnostics 已能区分 direct / partial / missing / conflict 的主要状态 | 把更多业务域的 conflict/stale 语义纳入统一规则 |
 | ActionPolicy | 已落地 P1 | read path 和 preview path 已有 policy decision，planner 不能直接 apply | 保持为权限权威，P2 不另建权限系统 |
 | ActionSafety | 已落地 M1 | 规则版 classifier 已检查 effect、scope、prompt injection chain；AgentLoop read tool 和 preview plan trace 已接入；同 scope read follow-up allow、跨账户 read ask、跨账户 write preview deny 已有 golden eval | 继续沉淀更多线上误判 golden case |
@@ -1866,7 +1866,7 @@ P2 必须分清“业务事实”和“过程解释”，否则 trace 容易污�
 |---|---|---|
 | M1 ActionSafety | 本地回归部分通过 | prompt injection chain、preview no apply、scope expansion 已有 golden 覆盖；同 scope read follow-up 允许，跨账户 read 要求澄清，跨账户 write preview 拒绝 |
 | M2 Diagnostic adapter | 本地部分验收通过 | candidate/runtime/quote row-derived diagnostics 已覆盖 direct/missing/conflict/stale；upgrade missing version 已从 fixture 扩展为真实 `upgrade_operation_status` view，并保留 partial/missing_data 语义；runtime conflict/stale、stale quote、old operation timeline、upgrade conflict / command log missing、release_tag-only publication gap、release published/failed 已进入 golden eval | 仍需更多线上 release status 样本 |
-| M2.5 Coverage/Upgrade | 本地验收通过 | `CoverageVerifier` 已把 upgrade diagnostics 转成 current/target version、receipt、command status gap；已查 operation timeline 后仍缺版本/回执会 `answer_with_missing_data`，不会触发 follow-up；未查 timeline 且有 operation id 时允许一次只读 follow-up |
+| M2.5 Coverage/Upgrade | 本地验收通过 | `CoverageVerifier` 已把 upgrade diagnostics 转成 current/target version、receipt、command status、release publication status gap；已查 operation timeline 后仍缺版本/回执/release 发布证据会 `answer_with_missing_data`，不会触发 follow-up；未查 timeline 且有 operation id 时允许一次只读 follow-up |
 | M3 HookResult | 本地验收通过 | hook code 已进入 compact trace；后续只补真实样本，不扩大 hook pipeline |
 | M4 Trace/Eval | 本地验收通过 | compact trace renderer、redaction、ask/preview/rewrite/fallback/denied route 断言已落地；`assistant_trace_route_samples` 已有 5 条脱敏 route fixture；`assistant_agent_eval` 已扩到 25 条，包含 stale quote、runtime conflict/stale、old operation timeline、upgrade conflict / command log missing、release tag not enough、release published/failed、scope expansion、upgrade receipt missing version、prompt injection from tool output、write preview no apply | 可继续补真实线上 route 样本 |
 
@@ -1960,6 +1960,7 @@ python3 -m pytest tests/test_analysis_tools.py -k "analysis_query or evidence or
 | `target_version_missing` | `upgrade_target_version_missing` | 已查 operation timeline 后为 false |
 | `receipt_not_observed` | `upgrade_receipt_missing` | false |
 | `final_receipt_missing` | `upgrade_receipt_missing` | false |
+| `release_publication_status_missing` | `upgrade_release_publication_status_missing` | false |
 | `conflicting_evidence` | `upgrade_status_conflict` | false |
 
 如果用户给了 `command_id`，但 evidence 没有 `upgrade_operation_status` 或 operation timeline
@@ -1987,7 +1988,7 @@ operation/audit 状态，不能执行升级、重启、补发通知或修改 run
 
 ```text
 结论：当前证据能确认什么 / 不能确认什么
-缺口：缺当前版本、目标版本或最终回执，以及影响
+缺口：缺当前版本、目标版本、最终回执或 release 发布状态，以及影响
 数据来源：operation timeline / command audit / release status
 ```
 
@@ -2044,7 +2045,7 @@ python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_sm
 |---|---|---|---|
 | 真实 session route 样本 | 已补 `assistant_trace_route_samples` 5 条脱敏 route fixture，覆盖 ask / preview / rewrite / fallback / deny；compact trace 能解释 route 且不展示 SQL/path/session id/lot id/raw log | 继续从真实线上回执补充同格式样本 | trace 能解释 route，不泄露 SQL/path/internal id |
 | runtime stale / conflict | 已补 `runtime_why_conflict_stale_answer` golden fixture；`runtime_tick_status` 已能归一 direct / missing / conflict | 继续从线上补更多 runtime stale / notification audit 样本 | why 回答不能给单一确定原因 |
-| upgrade conflict / command log missing / release status | 已补 `operation_upgrade_conflict_command_log_missing_answer`、`operation_upgrade_release_tag_not_enough_answer`、`operation_upgrade_release_published_answer`、`operation_upgrade_release_failed_answer` golden fixture；`command_log_missing` 会归入 `artifact_missing`；只有 `release_tag` 时会产生 `release_publication_status_missing` | 继续从线上补真实 release success / failure 样本 | 不能宣称升级或 release 成功；必须说明冲突、缺日志或缺发布证据的影响 |
+| upgrade conflict / command log missing / release status | 已补 `operation_upgrade_conflict_command_log_missing_answer`、`operation_upgrade_release_tag_not_enough_answer`、`operation_upgrade_release_published_answer`、`operation_upgrade_release_failed_answer` golden fixture；`command_log_missing` 会归入 `artifact_missing`；只有 `release_tag` 时会产生 `release_publication_status_missing`，并由 coverage 转成不可补 `upgrade_release_publication_status_missing` | 继续从线上补真实 release success / failure 样本 | 不能宣称升级或 release 成功；必须说明冲突、缺日志或缺发布证据的影响 |
 | scope expansion 误判 | 已补 `action_safety_read_followup_same_scope_allowed`、`action_safety_read_scope_expansion_asks`、`action_safety_cross_account_write_denied` golden fixture | 继续从线上补更多误判样本 | 同 scope read follow-up 允许；未请求写入或跨账户写入拒绝 |
 | answer source/freshness | Answer verifier 已覆盖金额、quote、diagnostic root cause、analysis quote gap 上游根因外推、unresolved diagnostics 下的确定性状态结论；已补旧 runtime 快照、stale quote、old operation timeline final answer 断言 | 继续沉淀更多线上 freshness 样本 | 最终回答必须披露 as-of / stale 影响 |
 | 发布 gate | 已补 release checklist 对应命令和失败回退说明 | 每次 release 前按 6.21 执行并记录证据 | release 前能一眼判断是否可发 |

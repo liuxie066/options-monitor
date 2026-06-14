@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.2.275 - 2026-06-15
+
+### Fixed
+- Fixed assistant coverage verification so release publication questions require explicit GitHub Release status evidence, not only a release tag.
+- Fixed upgrade-status fallback copy to explain missing release publication evidence when the operation timeline lacks a published or failed release status.
+- Updated Agent reliability P0-P2 design notes to reflect the release publication coverage verifier behavior.
+
 ## 1.2.274 - 2026-06-15
 
 ### Added
