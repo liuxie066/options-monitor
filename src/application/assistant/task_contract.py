@@ -10,6 +10,46 @@ from src.application.assistant.time_filters import extract_month_filter
 
 
 TASK_CONTRACT_SCHEMA_VERSION = "om-agent-task-contract-v1"
+_NON_SYMBOL_TOKENS = {
+    "AND",
+    "ASC",
+    "AVG",
+    "BY",
+    "CASE",
+    "COUNT",
+    "CNY",
+    "DESC",
+    "ELSE",
+    "END",
+    "FROM",
+    "GROUP",
+    "HK",
+    "HKD",
+    "IN",
+    "IS",
+    "JOIN",
+    "LEFT",
+    "LIKE",
+    "LIMIT",
+    "MAX",
+    "MIN",
+    "NOT",
+    "NULL",
+    "ON",
+    "OR",
+    "ORDER",
+    "OUTER",
+    "P0",
+    "P1",
+    "P2",
+    "RIGHT",
+    "SUM",
+    "THEN",
+    "US",
+    "USD",
+    "WHEN",
+    "WHERE",
+}
 
 
 @dataclass(frozen=True)
@@ -207,7 +247,7 @@ def _extract_symbols(text: str) -> list[str]:
     symbols: list[str] = []
     for match in re.finditer(r"(?<![A-Za-z0-9_.])([A-Z0-9]{1,5}(?:\.HK)?)(?![A-Za-z0-9_.])", str(text or "")):
         symbol = match.group(1).upper()
-        if symbol in {"HKD", "USD", "CNY", "P0", "P1", "P2"}:
+        if symbol.isdigit() or symbol in _NON_SYMBOL_TOKENS:
             continue
         symbols.append(symbol)
     return _unique(symbols)

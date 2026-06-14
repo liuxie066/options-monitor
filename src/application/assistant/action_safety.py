@@ -9,6 +9,46 @@ from src.application.assistant.capability_catalog import ACCOUNT_VALUES, spec_by
 
 ACTION_SAFETY_SCHEMA_VERSION = "om-agent-action-safety-v1"
 _COMMAND_SPECS_BY_INTENT = spec_by_intent()
+_NON_SYMBOL_TOKENS = {
+    "AND",
+    "ASC",
+    "AVG",
+    "BY",
+    "CASE",
+    "COUNT",
+    "CNY",
+    "DESC",
+    "ELSE",
+    "END",
+    "FROM",
+    "GROUP",
+    "HK",
+    "HKD",
+    "IN",
+    "IS",
+    "JOIN",
+    "LEFT",
+    "LIKE",
+    "LIMIT",
+    "MAX",
+    "MIN",
+    "NOT",
+    "NULL",
+    "ON",
+    "OR",
+    "ORDER",
+    "OUTER",
+    "P0",
+    "P1",
+    "P2",
+    "RIGHT",
+    "SUM",
+    "THEN",
+    "US",
+    "USD",
+    "WHEN",
+    "WHERE",
+}
 
 
 @dataclass(frozen=True)
@@ -313,9 +353,18 @@ def _scope_delta(*, contract: dict[str, Any], payload: dict[str, Any], text: str
     requested_accounts = _normal_values(scope.get("requested_accounts"), lower=True) or _accounts_from_text(text)
     requested_symbols = _normal_values(scope.get("requested_symbols"), upper=True) or _symbols_from_text(text)
     requested_months = _normal_values(scope.get("requested_months"))
-    provided_accounts = _payload_values(payload, keys=("account", "accounts"), lower=True)
-    provided_symbols = _payload_values(payload, keys=("symbol", "symbols"), upper=True)
-    provided_months = _payload_values(payload, keys=("month", "months"))
+    payload_text = "\n".join(_payload_scope_texts(payload))
+    provided_accounts = _normal_values(
+        [*_payload_values(payload, keys=("account", "accounts"), lower=True), *_accounts_from_text(payload_text)],
+        lower=True,
+    )
+    provided_symbols = _normal_values(
+        [*_payload_values(payload, keys=("symbol", "symbols"), upper=True), *_symbols_from_text(payload_text)],
+        upper=True,
+    )
+    provided_months = _normal_values(
+        [*_payload_values(payload, keys=("month", "months")), *_months_from_text(payload_text)]
+    )
     return {
         "accounts": _scope_field_delta(requested=requested_accounts, provided=provided_accounts),
         "symbols": _scope_field_delta(requested=requested_symbols, provided=provided_symbols),
@@ -337,10 +386,33 @@ def _symbols_from_text(text: str) -> list[str]:
     symbols: list[str] = []
     for match in re.finditer(r"(?<![A-Za-z0-9_.])([A-Z0-9]{1,5}(?:\.HK)?)(?![A-Za-z0-9_.])", str(text or "")):
         symbol = match.group(1).upper()
-        if symbol in {"HKD", "USD", "CNY", "P0", "P1", "P2"}:
+        if symbol.isdigit() or symbol in _NON_SYMBOL_TOKENS:
             continue
         symbols.append(symbol)
     return _normal_values(symbols, upper=True)
+
+
+def _months_from_text(text: str) -> list[str]:
+    months: list[str] = []
+    for year, month in re.findall(r"(?<!\d)(20\d{2})[-/.年](0?[1-9]|1[0-2])(?:月)?(?!\d)", str(text or "")):
+        months.append(f"{year}-{int(month):02d}")
+    return _normal_values(months)
+
+
+def _payload_scope_texts(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        texts: list[str] = []
+        for item in value.values():
+            texts.extend(_payload_scope_texts(item))
+        return texts
+    if isinstance(value, (list, tuple, set)):
+        texts = []
+        for item in value:
+            texts.extend(_payload_scope_texts(item))
+        return texts
+    return []
 
 
 def _scope_field_delta(*, requested: list[str], provided: list[str]) -> dict[str, Any]:
