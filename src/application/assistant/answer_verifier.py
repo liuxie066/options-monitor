@@ -507,6 +507,15 @@ def _allowed_statuses(evidence_bundle: EvidenceBundle) -> set[str]:
         normalized = _normalize_status(status)
         if normalized:
             allowed.add(normalized)
+    for diagnostic in getattr(evidence_bundle, "diagnostics", ()) or ():
+        if not isinstance(diagnostic, dict):
+            continue
+        diagnostic_scope = diagnostic.get("scope") if isinstance(diagnostic.get("scope"), dict) else {}
+        for key in ("statuses", "operation_statuses", "outcome_statuses", "receipt_statuses", "release_statuses"):
+            for status in diagnostic_scope.get(key) or []:
+                normalized = _normalize_status(status)
+                if normalized:
+                    allowed.add(normalized)
     for fact in evidence_bundle.facts:
         if fact.unit == "status":
             normalized = _normalize_status(fact.value)

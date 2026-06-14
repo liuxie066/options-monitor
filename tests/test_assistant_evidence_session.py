@@ -2024,6 +2024,30 @@ def test_task_contract_treats_source_focused_difference_as_breakdown() -> None:
     assert "amount_difference" not in contract.required_answer
 
 
+def test_task_contract_keeps_upgrade_why_out_of_income_breakdown() -> None:
+    contract = build_task_contract(
+        question="为什么升级 in_456 当前版本和目标版本是空的？也没有成功回执？",
+        plan={
+            "goal": "检查升级版本和回执",
+            "steps": [
+                {
+                    "id": "step_1",
+                    "tool_name": "operation_timeline",
+                    "arguments": {"operation_types": ["upgrade_now"], "operation_id": "in_456"},
+                    "purpose": "读取升级 operation timeline",
+                }
+            ],
+        },
+        request_context={"config_key": "us"},
+        today=date(2026, 6, 15),
+    )
+
+    assert contract.intent_families == ("upgrade_status",)
+    assert "current_version" in contract.required_answer
+    assert "target_version" in contract.required_answer
+    assert "main_drivers" not in contract.required_answer
+
+
 def test_task_contract_does_not_treat_strategy_config_difference_as_income_comparison() -> None:
     contract = build_task_contract(
         question="FUTU 在 lx 和 sy 的策略配置有什么差异？",
@@ -2615,6 +2639,147 @@ def test_agent_loop_replans_read_only_followup_for_recoverable_quote_gap(tmp_pat
     assert tool_plan_data["tool_calls_used"] == 2
     assert tool_plan_data["evidence_gaps"] == []
     assert "spot USD 98" in out["data"]["response_text"]
+
+
+def test_agent_loop_replans_operation_timeline_for_recoverable_upgrade_gap(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+    planner_followup_contexts: list[dict[str, Any]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        if tool_name == "operation_timeline":
+            return build_response(
+                tool_name=tool_name,
+                ok=True,
+                data={
+                    "schema_version": "operation-timeline-v1",
+                    "filters": {"operation_types": ["upgrade_now"], "operation_id": "in_456"},
+                    "timeline_count": 1,
+                    "timelines": [
+                        {
+                            "identity": {"command_id": "in_456", "operation_id": "in_456"},
+                            "operation": {
+                                "operation_id": "in_456",
+                                "command_id": "in_456",
+                                "operation_type": "upgrade_now",
+                                "status": "applied",
+                                "current_version": "1.2.279",
+                                "target_version": "1.2.280",
+                            },
+                            "receipt": {"status": "observed"},
+                            "outcome": {"status": "applied", "ok": True},
+                            "warnings": [],
+                        }
+                    ],
+                    "warnings": [],
+                },
+            )
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={"status": "ok", "summary": {"latest_status": "ok"}},
+        )
+
+    def _plan(
+        _text: str,
+        _settings: AssistantSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        followup = conversation_context.get("agent_loop_followup") if isinstance(conversation_context, dict) else None
+        if isinstance(followup, dict):
+            planner_followup_contexts.append(followup)
+            return LlmPlannerResult(
+                plan=PlannerPlan(
+                    goal="补查升级版本和回执",
+                    response_mode="synthesis",
+                    required_capabilities=("operation_timeline", "read_only"),
+                    steps=(
+                        PlannerPlanStep(
+                            id="step_2",
+                            tool_name="operation_timeline",
+                            arguments={"operation_types": ["upgrade_now"], "operation_id": "in_456", "limit": 5},
+                            purpose="补查升级 operation timeline",
+                        ),
+                    ),
+                ),
+                trace={"schema_version": TOOL_PLAN_SCHEMA_VERSION, "attempted": True, "reason": "followup"},
+            )
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="检查升级版本和回执",
+                response_mode="synthesis",
+                required_capabilities=("healthcheck", "read_only"),
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="healthcheck",
+                        arguments={},
+                        purpose="先读取系统健康状态",
+                    ),
+                ),
+            ),
+            trace={"schema_version": TOOL_PLAN_SCHEMA_VERSION, "attempted": True, "reason": "initial"},
+        )
+
+    def _synthesize(
+        _question: str,
+        _settings: AssistantSettings,
+        _plan: PlannerPlan,
+        observations: list[dict[str, Any]],
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmSynthesisResult:
+        operation_observation = next(item for item in observations if item["tool_name"] == "operation_timeline")
+        assert operation_observation["ok"] is True
+        return LlmSynthesisResult(
+            response_text="升级记录显示状态已应用，当前版本 1.2.279，目标版本 1.2.280，最终回执已观测到。",
+            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="为什么升级 in_456 当前版本和目标版本是空的？也没有成功回执？",
+            sender_id="local",
+            message_id="msg_agent_upgrade_recoverable_followup",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+        synthesize_response_fn=_synthesize,
+    )
+
+    assert out["ok"] is True
+    assert calls[0] == ("healthcheck", {})
+    assert calls[1][0] == "operation_timeline"
+    assert calls[1][1]["operation_types"] == ["upgrade_now"]
+    assert calls[1][1]["operation_id"] == "in_456"
+    assert calls[1][1]["limit"] == 5
+    assert calls[1][1]["audit_db"] == str(tmp_path / "inbound.sqlite3")
+    assert len(calls) == 2
+    assert planner_followup_contexts
+    followup = planner_followup_contexts[0]
+    assert {gap["kind"] for gap in followup["evidence_gaps"]} >= {
+        "upgrade_current_version_missing",
+        "upgrade_target_version_missing",
+    }
+    assert followup["decision_contract"]["schema_version"] == "om-agent-loop-followup-decision-v1"
+    assert "operation_timeline" in followup["decision_contract"]["allowed_tools"]
+
+    tool_plan_data = out["data"]["action"]["result"]["data"]
+    assert len(tool_plan_data["plan_revisions"]) == 2
+    assert tool_plan_data["tool_calls_used"] == 2
+    assert tool_plan_data["coverage"]["status"] == "complete"
+    assert tool_plan_data["coverage"]["gaps"] == []
+    assert tool_plan_data["evidence_gaps"] == []
+    assert len(tool_plan_data["followup_decisions"]) == 1
+    assert tool_plan_data["followup_decisions"][0]["status"] == "accepted"
+    assert tool_plan_data["followup_decisions"][0]["tool_name"] == "operation_timeline"
+    assert "当前版本 1.2.279" in out["data"]["response_text"]
+    assert "目标版本 1.2.280" in out["data"]["response_text"]
 
 
 def test_agent_loop_does_not_replan_unrecoverable_upgrade_gap(tmp_path: Path) -> None:

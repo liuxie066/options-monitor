@@ -4185,7 +4185,7 @@ def _capability_gap_response(observations: list[dict[str, Any]]) -> str:
             continue
         gaps = [str(value) for value in status.get("gaps") or [] if str(value).strip()]
         if not gaps:
-            continue
+            return ""
         if "combined_account_return" in gaps:
             return (
                 "当前只能部分满足：工具已完成查询，但没有可用的合并账户收益率结果。"
@@ -4216,6 +4216,8 @@ def _inject_system_fields(arguments: dict[str, Any], *, request: AssistantReques
             payload["config_key"] = _config_key_for_tool_payload(tool_name=tool_name, payload=payload, default=request.config_key)
     if tool_name == "option_positions_read":
         payload.setdefault("action", "list")
+    if tool_name == "operation_timeline" and request.audit_db:
+        payload.setdefault("audit_db", request.audit_db)
     if tool_name == "runtime_runs":
         payload.setdefault("limit", 10)
     if tool_name == "runtime_logs":

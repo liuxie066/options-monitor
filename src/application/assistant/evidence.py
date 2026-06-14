@@ -624,10 +624,20 @@ def _upgrade_analysis_diagnostic_from_rows(rows: list[dict[str, Any]]) -> dict[s
         )
     conflict_reasons = _upgrade_status_conflict_reasons(rows)
     status = "conflicting_evidence" if conflict_reasons else "observed_operation_status"
+    operation_statuses = _row_statuses(rows, "operation_status")
+    outcome_statuses = _row_statuses(rows, "outcome_status")
+    release_statuses = _row_statuses(rows, "release_status")
     return {
         "view": "upgrade_operation_status",
         "status": status,
         "severity": "warning" if conflict_reasons or missing else "info",
+        "scope": {
+            "statuses": sorted(operation_statuses | outcome_statuses),
+            "operation_statuses": sorted(operation_statuses),
+            "outcome_statuses": sorted(outcome_statuses),
+            "receipt_statuses": sorted(receipt_statuses),
+            "release_statuses": sorted(release_statuses),
+        },
         "summary": _first_row_text(rows, "summary", "reason")
         or (
             "upgrade operation evidence is conflicting: " + "; ".join(conflict_reasons)
@@ -991,6 +1001,9 @@ def _operation_timeline_upgrade_diagnostics(
                         "operation_ids": _list_str(identity.get("operation_id") or operation.get("operation_id")),
                         "command_ids": _list_str(identity.get("command_id") or operation.get("command_id")),
                         "statuses": _list_str(status),
+                        "operation_statuses": _list_str(operation_status),
+                        "outcome_statuses": _list_str(outcome_status),
+                        "receipt_statuses": _list_str(receipt_status),
                     },
                     "version": {
                         "current_version": current_version,

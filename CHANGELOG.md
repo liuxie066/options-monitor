@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.2.281 - 2026-06-15
+
+### Fixed
+- Fixed AgentLoop upgrade-status follow-up so command-id questions can trigger one read-only `operation_timeline` lookup with system-injected audit DB evidence.
+- Fixed upgrade answer verification so operation timeline diagnostics expose operation, outcome, and receipt statuses as verifiable evidence without letting stale first-pass capability gaps dominate the final answer.
+- Fixed assistant task contracts so upgrade "why" questions are not misclassified as income breakdown requests.
+
 ## 1.2.280 - 2026-06-15
 
 ### Added
