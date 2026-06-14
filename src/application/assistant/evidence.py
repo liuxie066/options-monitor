@@ -465,9 +465,10 @@ def _runtime_analysis_diagnostic_from_rows(rows: list[dict[str, Any]]) -> dict[s
     freshness = _row_statuses(rows, "freshness_status")
     notification = _row_statuses(rows, "notification_status")
     skip_reason = _first_row_text(rows, "skip_reason")
+    conflict_reasons = _runtime_status_conflict_reasons(rows)
     status = "observed_runtime_status"
     severity = "info"
-    if "conflicting_evidence" in statuses:
+    if "conflicting_evidence" in statuses or conflict_reasons:
         status = "conflicting_evidence"
         severity = "warning"
     elif statuses & {"failed", "error", "failed_run", "exec_failed"}:
@@ -482,13 +483,20 @@ def _runtime_analysis_diagnostic_from_rows(rows: list[dict[str, Any]]) -> dict[s
     elif freshness & {"missing", "stale", "unknown", "failed", "error"}:
         status = "observed_runtime_freshness_gap"
         severity = "warning"
+    summary = (
+        _first_row_text(rows, "summary", "message", "reason")
+        or (
+            "runtime diagnostic evidence is conflicting: " + "; ".join(conflict_reasons)
+            if status == "conflicting_evidence" and conflict_reasons
+            else _runtime_diagnostic_summary(status=status, skip_reason=skip_reason)
+        )
+    )
     return {
         "view": "runtime_tick_status",
         "status": status,
         "severity": severity,
         "accounts": _sorted_unique_row_values(rows, "account"),
-        "summary": _first_row_text(rows, "summary", "message", "reason")
-        or _runtime_diagnostic_summary(status=status, skip_reason=skip_reason),
+        "summary": summary,
         "answer_boundary": "observed_runtime_status_only"
         if status != "conflicting_evidence"
         else "conflicting_runtime_evidence_only",
@@ -515,16 +523,46 @@ def _quote_analysis_diagnostic_from_rows(rows: list[dict[str, Any]]) -> dict[str
         return _analysis_no_matching_rows_diagnostic("quote_freshness")
     quote_statuses = _row_statuses(rows, "quote_status", "freshness_status")
     bad = quote_statuses & {"missing", "missing_quote", "stale", "unknown", "failed", "error"}
-    return {
+    as_of_values = _quote_as_of_values(rows)
+    summary = _first_row_text(rows, "summary", "reason") or _quote_diagnostic_summary(
+        quote_statuses=sorted(quote_statuses),
+        as_of_values=as_of_values,
+    )
+    record = {
         "view": "quote_freshness",
         "status": "observed_quote_freshness_gap" if bad else "observed_quote_freshness",
         "severity": "warning" if bad else "info",
         "accounts": _sorted_unique_row_values(rows, "account"),
         "symbols": _sorted_unique_row_values(rows, "symbol"),
-        "summary": _first_row_text(rows, "summary", "reason")
-        or ("quote rows include missing/stale quote status" if bad else "quote freshness rows were observed"),
+        "summary": summary,
         "answer_boundary": "quote_dependent_calculations_only",
     }
+    if as_of_values:
+        record["as_of_values"] = as_of_values
+    return record
+
+
+def _quote_diagnostic_summary(*, quote_statuses: list[str], as_of_values: list[Any]) -> str:
+    bad = set(quote_statuses) & {"missing", "missing_quote", "stale", "unknown", "failed", "error"}
+    if bad:
+        parts = ["quote_status=" + ",".join(str(item) for item in quote_statuses if item)]
+        if as_of_values:
+            parts.append("as_of=" + ",".join(str(item) for item in as_of_values[:3]))
+        return "quote freshness rows indicate stale or missing quote data: " + "; ".join(parts)
+    return "quote freshness rows were observed"
+
+
+def _quote_as_of_values(rows: list[dict[str, Any]]) -> list[Any]:
+    values: list[Any] = []
+    seen: set[str] = set()
+    for field in ("as_of", "spot_time"):
+        for value in _sorted_unique_row_values(rows, field):
+            text = str(value or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            values.append(value)
+    return values
 
 
 def _upgrade_analysis_diagnostic_from_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -613,6 +651,58 @@ def _row_statuses(rows: list[dict[str, Any]], *fields: str) -> set[str]:
             if text:
                 out.add(text)
     return out
+
+
+def _runtime_status_conflict_reasons(rows: list[dict[str, Any]]) -> list[str]:
+    success_statuses = {
+        "success",
+        "succeeded",
+        "completed",
+        "complete",
+        "ok",
+        "observed",
+        "sent",
+        "delivered",
+    }
+    failure_statuses = {
+        "failed",
+        "failure",
+        "error",
+        "failed_run",
+        "exec_failed",
+        "send_failed",
+        "send_failed_or_unconfirmed",
+        "delivery_failed",
+    }
+    terminal_statuses = success_statuses | failure_statuses
+    fields = ("latest_status", "status", "run_status", "notification_status", "delivery_status")
+    grouped: dict[tuple[str, str, str], list[dict[str, str]]] = {}
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            continue
+        present = {
+            field: str(row.get(field) or "").strip().lower()
+            for field in fields
+            if str(row.get(field) or "").strip().lower() in terminal_statuses
+        }
+        if not present:
+            continue
+        key = (
+            str(row.get("market") or "").strip().lower(),
+            str(row.get("account") or "").strip().lower(),
+            str(row.get("latest_run_id") or row.get("run_id") or index).strip().lower(),
+        )
+        grouped.setdefault(key, []).append(present)
+
+    reasons: set[str] = set()
+    for group in grouped.values():
+        merged: dict[str, str] = {}
+        for item in group:
+            merged.update(item)
+        values = set(merged.values())
+        if values & success_statuses and values & failure_statuses:
+            reasons.add(", ".join(f"{field}={merged[field]}" for field in fields if field in merged))
+    return sorted(reasons)
 
 
 def _first_row_text(rows: list[dict[str, Any]], *fields: str) -> str:

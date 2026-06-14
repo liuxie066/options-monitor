@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.279 - 2026-06-15
+
+### Added
+- Added Agent reliability eval and compact trace coverage for runtime notification conflicts, stale quote freshness, and stale upgrade operation timelines.
+
+### Fixed
+- Fixed runtime status diagnostics so successful tick completion with failed notification delivery is treated as conflicting evidence instead of a successful push.
+- Fixed quote freshness diagnostics to preserve quote status and as-of/spot timestamps in analysis evidence and answer verification.
+
 ## 1.2.278 - 2026-06-15
 
 ### Fixed
