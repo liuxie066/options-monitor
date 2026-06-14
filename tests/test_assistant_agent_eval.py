@@ -34,8 +34,8 @@ def _load_cases() -> list[dict[str, Any]]:
     return rows
 
 
-def _plan_from_case(case: dict[str, Any]) -> PlannerPlan:
-    raw = dict(case["plan"])
+def _plan_from_payload(raw_payload: dict[str, Any]) -> PlannerPlan:
+    raw = dict(raw_payload)
     return PlannerPlan(
         goal=str(raw.get("goal") or ""),
         response_mode=str(raw.get("response_mode") or "synthesis"),
@@ -50,6 +50,10 @@ def _plan_from_case(case: dict[str, Any]) -> PlannerPlan:
             for index, item in enumerate(raw.get("steps") or (), start=1)
         ),
     )
+
+
+def _plan_from_case(case: dict[str, Any]) -> PlannerPlan:
+    return _plan_from_payload(dict(case["plan"]))
 
 
 def _write_trade_runtime_config(tmp_path: Path) -> tuple[Path, Path]:
@@ -117,14 +121,26 @@ def test_assistant_agent_eval_uses_guarded_answer_evidence(case: dict[str, Any],
         return
 
     plan = _plan_from_case(case)
+    followup_plan = _plan_from_payload(dict(case["followup_plan"])) if isinstance(case.get("followup_plan"), dict) else None
+    tool_results = [dict(item) for item in case.get("tool_results") or () if isinstance(item, dict)]
+    if not tool_results:
+        tool_results = [dict(case["tool_result"])]
     synthesis_responses = [str(item) for item in case.get("synthesis_responses") or ()]
+    execute_calls: list[tuple[str, dict[str, Any]]] = []
     observed_synthesis_inputs: list[list[dict[str, Any]]] = []
 
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
-        assert tool_name == plan.steps[0].tool_name
+        execute_calls.append((tool_name, dict(payload)))
+        result_index = len(execute_calls) - 1
+        assert result_index < len(tool_results)
+        result = dict(tool_results[result_index])
+        expected_tool_name = str(result.get("tool_name") or "").strip()
+        if not expected_tool_name and result_index == 0 and plan.steps:
+            expected_tool_name = plan.steps[0].tool_name
+        if expected_tool_name:
+            assert tool_name == expected_tool_name
         if tool_name not in {"healthcheck", "operation_timeline", "assistant_trace"}:
             assert payload.get("config_key") == "us"
-        result = dict(case["tool_result"])
         return build_response(
             tool_name=tool_name,
             ok=bool(result.get("ok", True)),
@@ -139,12 +155,14 @@ def test_assistant_agent_eval_uses_guarded_answer_evidence(case: dict[str, Any],
         _conversation_context: dict[str, Any] | None,
     ) -> LlmPlannerResult:
         assert text == case["question"]
+        followup = _conversation_context.get("agent_loop_followup") if isinstance(_conversation_context, dict) else None
+        selected_plan = followup_plan if isinstance(followup, dict) and followup_plan is not None else plan
         return LlmPlannerResult(
-            plan=plan,
+            plan=selected_plan,
             trace={
                 "enabled": True,
                 "attempted": True,
-                "reason": "accepted",
+                "reason": "followup" if isinstance(followup, dict) else "accepted",
                 "provider": "fixture",
                 "schema_version": TOOL_PLAN_SCHEMA_VERSION,
             },
@@ -196,6 +214,18 @@ def test_assistant_agent_eval_uses_guarded_answer_evidence(case: dict[str, Any],
 
     tool_plan_data = out["data"]["action"]["result"]["data"]
     assert tool_plan_data["synthesis"]["reason"] == case["expect_reason"]
+    if case.get("expect_tool_calls"):
+        _assert_expected_tool_calls(execute_calls, expected_calls=case["expect_tool_calls"])
+    if case.get("expect_tool_calls_used") is not None:
+        assert tool_plan_data["tool_calls_used"] == int(case["expect_tool_calls_used"])
+    if case.get("expect_plan_revision_count") is not None:
+        assert len(tool_plan_data["plan_revisions"]) == int(case["expect_plan_revision_count"])
+    if case.get("expect_followup_tool"):
+        decisions = [item for item in tool_plan_data["followup_decisions"] if isinstance(item, dict)]
+        assert any(
+            item.get("status") == "accepted" and item.get("tool_name") == case["expect_followup_tool"]
+            for item in decisions
+        )
     if case.get("expect_final_response_status"):
         assert tool_plan_data["final_response"]["status"] == case["expect_final_response_status"]
     if case.get("expect_answer_guard_status"):
@@ -220,16 +250,44 @@ def test_assistant_agent_eval_uses_guarded_answer_evidence(case: dict[str, Any],
             assert tool_plan_data["final_response"]["status"] in {"synthesized", "rendered"}
             assert guard.get("status") in {"passed", "", None}
     assert observed_synthesis_inputs
-    evidence = observed_synthesis_inputs[0][-1]
-    assert evidence["tool_name"] == "assistant.answer_evidence"
-    assert "fallback_renderer_text" in evidence["data"]
-    assert "provenance_lines" in evidence["data"]
+    evidence = next(
+        (
+            observations[-1]
+            for observations in reversed(observed_synthesis_inputs)
+            if observations and observations[-1].get("tool_name") == "assistant.answer_evidence"
+        ),
+        None,
+    )
+    expect_answer_evidence = bool(case.get("expect_answer_evidence", True))
+    if expect_answer_evidence:
+        assert evidence is not None
+        assert evidence["tool_name"] == "assistant.answer_evidence"
+        assert "fallback_renderer_text" in evidence["data"]
+        assert "provenance_lines" in evidence["data"]
+    elif evidence is not None:
+        assert evidence["tool_name"] == "assistant.answer_evidence"
+        assert "fallback_renderer_text" in evidence["data"]
+        assert "provenance_lines" in evidence["data"]
     first_observation = tool_plan_data["synthesis_observations"][0]
     renderer = first_observation["output_contract"]["canonical_renderer"]
     if case.get("expect_renderer"):
         assert renderer == case["expect_renderer"]
     else:
         assert renderer
+
+
+def _assert_expected_tool_calls(
+    calls: list[tuple[str, dict[str, Any]]],
+    *,
+    expected_calls: list[dict[str, Any]],
+) -> None:
+    assert len(calls) == len(expected_calls)
+    for (tool_name, payload), expected in zip(calls, expected_calls, strict=True):
+        assert tool_name == expected["tool_name"]
+        for key, value in dict(expected.get("payload_subset") or {}).items():
+            assert payload.get(key) == value
+        for key in expected.get("payload_required_keys") or ():
+            assert str(payload.get(key) or "").strip()
 
 
 def _run_action_safety_case(case: dict[str, Any]) -> None:

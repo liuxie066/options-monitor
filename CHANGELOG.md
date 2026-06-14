@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.282 - 2026-06-15
+
+### Added
+- Added Agent reliability golden eval coverage for upgrade `operation_timeline` follow-up answers, including tool-call count, plan revision, and injected audit DB assertions.
+- Updated the Agent reliability P0-P2 design notes and release gate counts for the expanded follow-up eval coverage.
+
 ## 1.2.281 - 2026-06-15
 
 ### Fixed
