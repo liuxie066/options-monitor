@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.274 - 2026-06-15
+
+### Added
+- Added release publication fields to the `upgrade_operation_status` analysis view so Agent answers can distinguish a release tag from confirmed GitHub Release publication.
+- Added compact assistant trace route fixtures for ask, preview, rewrite, fallback, and denied paths.
+
+### Fixed
+- Fixed answer verification so a `release_tag` alone cannot be summarized as a successful or failed remote release without publication status evidence.
+- Fixed upgrade diagnostics to surface missing release publication evidence and to allow explicit published/failed release status when supported by evidence.
+
 ## 1.2.273 - 2026-06-15
 
 ### Added

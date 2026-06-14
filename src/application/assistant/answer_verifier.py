@@ -841,7 +841,8 @@ def _unresolved_diagnostics(evidence_bundle: EvidenceBundle) -> list[dict[str, A
     rows: list[dict[str, Any]] = []
     for record in _diagnostic_records(evidence_bundle):
         status = str(record.get("status") or "").strip().lower()
-        if status not in unresolved_statuses:
+        missing_data = record.get("missing_data") if isinstance(record.get("missing_data"), list) else []
+        if status not in unresolved_statuses and not missing_data:
             continue
         source = record.get("source") if isinstance(record.get("source"), dict) else {}
         rows.append(
@@ -853,6 +854,7 @@ def _unresolved_diagnostics(evidence_bundle: EvidenceBundle) -> list[dict[str, A
                 "observed_reason": record.get("observed_reason"),
                 "answer_boundary": record.get("answer_boundary"),
                 "confidence": record.get("confidence"),
+                "missing_data": missing_data[:4],
             }
         )
     return rows
@@ -1053,10 +1055,22 @@ def _claims_definitive_operational_status(compact: str) -> bool:
             "成功回执已发送",
             "回执已发送",
             "推送成功",
+            "发布成功",
+            "发布失败",
+            "已发布",
+            "已经发布",
+            "release已发布",
+            "release发布成功",
+            "release发布失败",
+            "远端release成功",
+            "远端release失败",
+            "githubrelease已发布",
+            "tag已发布",
             "没有推送",
             "已推送",
             "successfully",
             "succeeded",
+            "published",
             "failed",
             "completed",
         )
