@@ -99,7 +99,7 @@ om-agent run --tool runtime_status --env-file /etc/options-monitor/options-monit
 说明：
 - `om-agent` 更适合给程序调
 - `om` 更适合人工操作
-- `om-agent` 的 CLI 由 `src/interfaces/agent/cli.py` 维护；工具实现和 manifest metadata 归属 `src/application/agent_tools/<domain>.py`；`src/application/agent_tool_registry.py` 只负责收集、去重和输出 manifest；写入门禁归属 `src/application/agent_tools/permissions.py`；runtime config helper 由 `src/application/agent_tool_config.py` / `src/application/agent_tool_init_local.py` 维护。
+- `om-agent` 的 CLI 由 `src/interfaces/agent/cli.py` 维护；工具实现和 manifest metadata 归属 `src/application/agent_tools/<domain>.py`，其中较重的历史实现位于同目录 `*_impl.py`；`src/application/agent_tool_registry.py` 只负责收集、去重和输出 manifest；根层 `src/application/agent_tool_*.py` 除 config / contract / registry helper 外只保留兼容 re-export；写入门禁归属 `src/application/agent_tools/permissions.py`；runtime config helper 由 `src/application/agent_tool_config.py` / `src/application/agent_tool_init_local.py` 维护。
 
 配置优先级和 `config_validate` / `healthcheck` / `runtime_status` / `openclaw_readiness` 的正式边界，请以根目录 `CONFIGURATION_GUIDE.md` 为准。这里只保留工具说明，不再重复完整配置规则。
 
@@ -421,7 +421,38 @@ om-agent run --tool candidate_rank_explain --input-json '{"mode":"put","score_we
 
 ---
 
-## 5.5.2 Offline Shadow Replay Evidence
+## 5.5.2 `candidate_filter_explain`
+
+用途：
+- 解释单个标的为什么被候选过滤、后置过滤、接受，或为什么缺少 trace 证据
+- 支持 canonical symbol、中文名、Futu code 和 alias，例如 `9992.HK` 或 `泡泡玛特`
+- `account` 只是扫描/run 范围，不是标的身份或业务归属
+
+默认 trace 发现：
+- 显式 `trace_path` / `trace_paths` 优先。
+- 否则从 `runtime_root`、`config_path` 所在目录、`OM_RUNTIME_ROOT`、service profile
+  和 repo root 推导 runtime roots。
+- 未传 `run_id` 时，先读 `output_shared/state/last_run_dir.txt`，再扫描最近
+  `output_runs/*/accounts/*/candidate_filter_trace.jsonl`，最后回退到旧的
+  `output_shared/reports` 和 `output_shared/agent_tools/reports`。
+- `candidate_filter_diagnostics` view 使用同一套 trace 发现逻辑；窄工具用于单标的
+  问答，view 用于聚合、对比、趋势和跨 run/account/rule 分析。
+
+示例：
+
+```bash
+om-agent run --tool candidate_filter_explain --input-json '{"config_key":"hk","symbol":"泡泡玛特"}'
+om-agent run --tool candidate_filter_explain --input-json '{"run_id":"20260515T182459Z-474761","account":"sy","symbol":"9992.HK"}'
+om-agent run --tool candidate_filter_explain --input-json '{"trace_path":"output_shared/reports/candidate_filter_trace.jsonl","symbol":"NVDA"}'
+```
+
+注意：
+- 该工具只读已有 trace，不重新扫描、不发通知、不写报告。
+- 当 trace 文件缺失或没有匹配行时，只能报告诊断缺失，不能推断确定过滤原因。
+
+---
+
+## 5.5.3 Offline Shadow Replay Evidence
 
 用途：
 - 通过 `research collect --scope candidate` 从已有候选 CSV、reject log 和 `candidate_filter_trace.jsonl` 收集离线 shadow replay readiness

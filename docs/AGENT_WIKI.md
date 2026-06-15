@@ -181,12 +181,12 @@ def rank_candidate_rows(rows: list[dict[str, Any]], *, mode: StrategyMode | str)
 
 ### Candidate Diagnostics
 
-- Candidate ranking explanation: `src/application/agent_tool_candidate_rank.py`
-- Filter trace explanation: `src/application/agent_tool_candidate_filter.py`
+- Candidate ranking explanation: `src/application/agent_tools/candidate_rank_impl.py`
+- Filter trace explanation: `src/application/agent_tools/candidate_filter_impl.py`
 - Candidate evidence readiness: `healthcheck` / `doctor` `candidate_evidence` check
 - Docs: `docs/candidate_strategy.md`
 
-For "why did this symbol/account not get a candidate", start from `candidate_filter_explain` and trace artifacts, not from final candidate CSV alone. If the user gives a Chinese name or alias, resolve it with `symbol_resolve` or pass the raw alias to `candidate_filter_explain`; `account` is scan scope, not symbol identity.
+For "why did this symbol/account not get a candidate", start from `candidate_filter_explain` and trace artifacts, not from final candidate CSV alone. If the user gives a Chinese name or alias, resolve it with `symbol_resolve` or pass the raw alias to `candidate_filter_explain`; `account` is scan scope, not symbol identity. The tool discovers traces from the runtime root, latest-run pointer, recent `output_runs`, and shared-report fallbacks; only pass explicit paths for manual forensics.
 
 For offline strategy evidence review, collect a candidate-scoped Research bundle first:
 
@@ -330,7 +330,9 @@ Do not weaken production config validation to make local tests pass. Fix the con
 
 When adding or changing a tool, put the implementation and manifest metadata in
 the owning `agent_tools` domain module, then update focused tests and docs
-together. Do not reintroduce a central handler switchboard.
+together. Root-level `src/application/agent_tool_*.py` files, except shared
+config/contract/registry helpers, are compatibility re-export shims only. Do
+not reintroduce a central handler switchboard.
 
 ## 7. Import Constraints
 

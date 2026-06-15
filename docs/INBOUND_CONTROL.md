@@ -577,6 +577,10 @@ For open-ended analytical tasks, the preferred path is Tool OS v1:
   questions such as `泡泡玛特被哪个参数过滤了`; `candidate_filter_diagnostics`
   remains the Tool OS view for aggregation, comparison, trend, and cross-run or
   cross-account analysis.
+- Both paths use the same runtime trace discovery: explicit trace paths first,
+  then runtime root from injected config path / `OM_RUNTIME_ROOT` / service
+  profile / repo root, latest-run pointer, recent `output_runs`, and legacy
+  shared-report fallbacks.
 - Future diagnostic views should extend the same catalog/query surface when the
   task shape is analytical. Add or expose a narrow read API only when the user
   intent is task-shaped and the API removes ambiguity for LLM planning.

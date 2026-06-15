@@ -939,6 +939,7 @@ def test_agent_loop_planner_catalog_matches_registry_backed_manifest() -> None:
     assert "symbol" in candidate_filter["input_schema"]
     assert "account" in candidate_filter["input_schema"]
     assert "trace_path" not in candidate_filter["input_schema"]
+    assert "runtime_root" not in candidate_filter["input_schema"]
     candidate_notes = " ".join(candidate_filter["planner_notes"])
     assert "single-symbol candidate filter" in candidate_notes
     assert "account is optional scan/run scope only" in candidate_notes

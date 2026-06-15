@@ -314,6 +314,187 @@ def test_candidate_filter_explain_uses_config_symbol_aliases_before_matching_tra
     assert sell_put["reason_counts"]["risk_delta"] == 1
 
 
+def test_candidate_filter_explain_discovers_runtime_last_run_trace(tmp_path: Path) -> None:
+    from src.application.agent_tool_candidate_filter import candidate_filter_explain_tool
+    from src.application.candidate_filter_trace import (
+        append_candidate_filter_trace_rows,
+        build_candidate_filter_trace_row,
+    )
+
+    runtime = tmp_path / "runtime"
+    run_dir = runtime / "output_runs" / "run-hk-1"
+    trace_path = run_dir / "accounts" / "sy" / "candidate_filter_trace.jsonl"
+    append_candidate_filter_trace_rows(
+        trace_path,
+        [
+            build_candidate_filter_trace_row(
+                run_id="run-hk-1",
+                account="sy",
+                symbol="9992.HK",
+                function="sell_put",
+                mode="put",
+                status="rejected",
+                stage="risk_filter",
+                rule="risk_spread",
+                metric_value=0.35,
+                threshold=0.2,
+                message="spread too wide",
+            )
+        ],
+    )
+    pointer_dir = runtime / "output_shared" / "state"
+    pointer_dir.mkdir(parents=True)
+    (pointer_dir / "last_run_dir.txt").write_text(str(run_dir), encoding="utf-8")
+
+    data, warnings, meta = candidate_filter_explain_tool(
+        {"runtime_root": str(runtime), "symbol": "泡泡玛特"},
+        repo_base=lambda: tmp_path / "repo",
+        mask_path=lambda path: str(path) if path else None,
+    )
+
+    assert warnings == []
+    assert data["symbol"] == "9992.HK"
+    assert data["trace_count"] == 1
+    assert meta["trace_discovery"]["strategy"] == "runtime_roots_latest_runs"
+    assert meta["trace_discovery"]["matched_file_count"] == 1
+    assert meta["source_files"][0]["path"] == str(trace_path.resolve())
+
+
+def test_candidate_filter_explain_discovers_recent_runtime_run_without_pointer(tmp_path: Path) -> None:
+    from src.application.agent_tool_candidate_filter import candidate_filter_explain_tool
+    from src.application.candidate_filter_trace import (
+        append_candidate_filter_trace_rows,
+        build_candidate_filter_trace_row,
+    )
+
+    runtime = tmp_path / "runtime"
+    (runtime / "output_runs" / "old-run" / "accounts" / "sy").mkdir(parents=True)
+    trace_path = runtime / "output_runs" / "new-run" / "accounts" / "sy" / "candidate_filter_trace.jsonl"
+    append_candidate_filter_trace_rows(
+        trace_path,
+        [
+            build_candidate_filter_trace_row(
+                run_id="new-run",
+                account="sy",
+                symbol="9992.HK",
+                function="sell_put",
+                mode="put",
+                status="post_filtered",
+                stage="post_filter",
+                rule="hk_cash_insufficient",
+                metric_value=5000,
+                threshold=10000,
+                message="cash not enough",
+            )
+        ],
+    )
+
+    data, warnings, meta = candidate_filter_explain_tool(
+        {"runtime_root": str(runtime), "account": "sy", "symbol": "泡泡玛特"},
+        repo_base=lambda: tmp_path / "repo",
+        mask_path=lambda path: str(path) if path else None,
+    )
+
+    assert warnings == []
+    assert data["trace_count"] == 1
+    assert data["status_counts"] == {"post_filtered": 1}
+    assert meta["trace_discovery"]["matched_file_count"] == 1
+
+
+def test_candidate_filter_explain_infers_runtime_root_from_config_path(tmp_path: Path) -> None:
+    from src.application.agent_tool_candidate_filter import candidate_filter_explain_tool
+    from src.application.candidate_filter_trace import (
+        append_candidate_filter_trace_rows,
+        build_candidate_filter_trace_row,
+    )
+
+    runtime = tmp_path / "runtime"
+    config_path = runtime / "config.hk.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text("{}", encoding="utf-8")
+    trace_path = runtime / "output_runs" / "run-from-config" / "accounts" / "sy" / "candidate_filter_trace.jsonl"
+    append_candidate_filter_trace_rows(
+        trace_path,
+        [
+            build_candidate_filter_trace_row(
+                run_id="run-from-config",
+                account="sy",
+                symbol="9992.HK",
+                function="sell_put",
+                mode="put",
+                status="rejected",
+                stage="risk_filter",
+                rule="risk_delta",
+                metric_value=-0.42,
+                threshold=-0.3,
+                message="delta too high",
+            )
+        ],
+    )
+
+    data, warnings, meta = candidate_filter_explain_tool(
+        {"config_path": str(config_path), "symbol": "泡泡玛特"},
+        repo_base=lambda: tmp_path / "repo",
+        mask_path=lambda path: str(path) if path else None,
+    )
+
+    assert warnings == []
+    assert data["trace_count"] == 1
+    assert meta["source_files"][0]["path"] == str(trace_path.resolve())
+
+
+def test_candidate_filter_explain_uses_config_key_resolved_path_for_trace_discovery(tmp_path: Path) -> None:
+    from src.application.agent_tools.candidate import CANDIDATE_FILTER_EXPLAIN_TOOL
+    from src.application.candidate_filter_trace import (
+        append_candidate_filter_trace_rows,
+        build_candidate_filter_trace_row,
+    )
+
+    runtime = tmp_path / "runtime"
+    config_path = runtime / "config.hk.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text("{}", encoding="utf-8")
+    trace_path = runtime / "output_runs" / "run-from-config-key" / "accounts" / "sy" / "candidate_filter_trace.jsonl"
+    append_candidate_filter_trace_rows(
+        trace_path,
+        [
+            build_candidate_filter_trace_row(
+                run_id="run-from-config-key",
+                account="sy",
+                symbol="9992.HK",
+                function="sell_put",
+                mode="put",
+                status="rejected",
+                stage="risk_filter",
+                rule="risk_spread",
+                metric_value=0.35,
+                threshold=0.2,
+                message="spread too wide",
+            )
+        ],
+    )
+
+    class _Ctx:
+        def repo_base(self) -> Path:
+            return tmp_path / "repo"
+
+        def mask_path(self, value: object) -> str | None:
+            return str(value) if value else None
+
+        def load_runtime_config(self, **_kwargs: object) -> tuple[Path, dict[str, object]]:
+            return config_path, {}
+
+    data, warnings, meta = CANDIDATE_FILTER_EXPLAIN_TOOL.call(
+        _Ctx(),
+        {"config_key": "hk", "symbol": "泡泡玛特"},
+    )
+
+    assert warnings == []
+    assert data["trace_count"] == 1
+    assert meta["config_path"] == str(config_path)
+    assert meta["source_files"][0]["path"] == str(trace_path.resolve())
+
+
 def test_symbol_resolve_tool_maps_name_alias_to_canonical_symbol() -> None:
     from src.application.tool_execution import execute_tool as run_tool
 

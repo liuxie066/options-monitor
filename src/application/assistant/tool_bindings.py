@@ -125,7 +125,7 @@ READ_TOOL_BINDINGS: tuple[AssistantToolBinding, ...] = (
         arguments=("symbol", "account", "function", "run_id"),
         required_arguments=("symbol",),
         examples=("泡泡玛特被哪个参数过滤了？", "为什么 NVDA 没出现在候选里？", "lx NVDA sell_put 为什么被过滤？"),
-        summary="explain a single symbol's observed candidate filter/rejection/missing trace rows from candidate_filter_trace artifacts",
+        summary="explain a single symbol's observed candidate filter/rejection/missing trace rows from runtime candidate_filter_trace artifacts",
         scope_policy="symbol_market_config_optional",
         planner_notes=(
             "Use for single-symbol candidate filter, rejection, missing-candidate, or 被哪个参数过滤 questions.",
@@ -134,7 +134,7 @@ READ_TOOL_BINDINGS: tuple[AssistantToolBinding, ...] = (
             "For aggregation/comparison/trend across many symbols, rules, accounts, or runs, use analysis_query over candidate_filter_diagnostics instead.",
         ),
         planner_semantics={
-            "data_source": "candidate_filter_trace.jsonl artifacts",
+            "data_source": "candidate_filter_trace.jsonl artifacts discovered from runtime root/latest output_runs",
             "answer_capabilities": {
                 "filter_explain": "explains observed accepted/rejected/post-filtered/not-observed candidate trace rows for one symbol",
                 "candidate_filter_trace": "uses scan-time trace artifacts as the fact source",
@@ -143,7 +143,7 @@ READ_TOOL_BINDINGS: tuple[AssistantToolBinding, ...] = (
             "scope_semantics": {
                 "account": "scan/run scope only; omit to search all account trace artifacts in scope",
                 "function": "optional filter function such as sell_put, sell_call, cash_reserve, or share_coverage",
-                "run_id omitted": "searches default shared trace artifacts; pass run_id when a specific run is required",
+                "run_id omitted": "searches runtime last-run pointer, recent output_runs, and shared trace fallbacks; pass run_id when a specific run is required",
             },
             "not_promised": [
                 "inferring root cause when trace rows are missing",

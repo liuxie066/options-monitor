@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from src.application.agent_tool_notifications import preview_notification_tool
+from src.application.agent_tools.notifications_impl import preview_notification_tool
 from src.application.agent_tools.base import AgentTool, AgentToolContext, build_agent_tool
 
 
