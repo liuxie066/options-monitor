@@ -5,7 +5,7 @@ from typing import Any
 
 from domain.domain.symbol_identity import symbol_market
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.assistant.commands import spec_by_intent
+from src.application.assistant.capability_catalog import spec_by_intent
 from src.application.assistant.contracts import (
     AssistantRequest,
     AssistantSafetyClass,
@@ -15,22 +15,10 @@ from src.application.assistant.contracts import (
 )
 from src.application.assistant.position_query import PositionQuery
 from src.application.assistant.tool_policy import INTERNAL_TOOL_PLAN_NAME
+from src.application.assistant.tool_bindings import binding_for_intent, config_required_intent_names
 
 
-CONFIG_SCOPED_INTENTS = frozenset(
-    {
-        "runtime_status",
-        "healthcheck",
-        "config_validate",
-        "symbol_resolve",
-        "symbol_config_query",
-        "position_query",
-        "assigned_stock_position_query",
-        "position_exit_analysis",
-        "monthly_income_report",
-        "symbol_list",
-    }
-)
+CONFIG_SCOPED_INTENTS = config_required_intent_names()
 _COMMAND_SPECS_BY_INTENT = spec_by_intent()
 
 
@@ -156,40 +144,8 @@ def _tool_payload_from_perception(
     arguments = dict(perception.arguments)
     if intent_name in {"runtime_status", "healthcheck", "config_validate"}:
         return base
-    if intent_name == "symbol_config_query":
-        symbol = str(arguments.get("symbol") or "").strip()
-        if not symbol:
-            raise AgentToolError(code="NEEDS_CLARIFICATION", message="需要指定要查询的标的。")
-        payload = {
-            **_base_payload_for_symbol_config(request, symbol=symbol),
-            "symbol": symbol,
-        }
-        for key in ("strategy", "field"):
-            value = str(arguments.get(key) or "").strip()
-            if value:
-                payload[key] = value
-        return payload
-    if intent_name == "symbol_resolve":
-        symbol = str(arguments.get("symbol") or "").strip()
-        if not symbol:
-            raise AgentToolError(code="NEEDS_CLARIFICATION", message="需要指定要解析的标的。")
-        return {
-            **_base_payload_for_symbol_config(request, symbol=symbol),
-            "symbol": symbol,
-        }
-    if intent_name == "candidate_filter_explain":
-        symbol = str(arguments.get("symbol") or "").strip()
-        if not symbol:
-            raise AgentToolError(code="NEEDS_CLARIFICATION", message="需要指定要诊断的标的。")
-        payload: dict[str, Any] = {
-            **_base_payload_for_symbol_config(request, symbol=symbol),
-            "symbol": symbol,
-        }
-        for key in ("account", "function", "run_id"):
-            value = str(arguments.get(key) or "").strip()
-            if value:
-                payload[key] = value
-        return payload
+    if intent_name in {"symbol_config_query", "symbol_resolve", "candidate_filter_explain"}:
+        return _bound_symbol_payload(intent_name=intent_name, arguments=arguments, request=request)
     if intent_name == "position_query":
         query = PositionQuery.from_payload(arguments).to_payload()
         return {
@@ -264,6 +220,31 @@ def _tool_payload_from_perception(
         code="INPUT_ERROR",
         message=f"unsupported assistant perception: {intent_name}",
     )
+
+
+def _bound_symbol_payload(
+    *,
+    intent_name: str,
+    arguments: dict[str, Any],
+    request: AssistantRequest,
+) -> dict[str, Any]:
+    binding = binding_for_intent(intent_name)
+    if binding is None:
+        raise AgentToolError(code="INPUT_ERROR", message=f"unsupported bound assistant perception: {intent_name}")
+    symbol = str(arguments.get("symbol") or "").strip()
+    if not symbol:
+        raise AgentToolError(code="NEEDS_CLARIFICATION", message="需要指定标的。")
+    payload = {
+        **_base_payload_for_symbol_config(request, symbol=symbol),
+        "symbol": symbol,
+    }
+    for key in binding.arguments:
+        if key == "symbol":
+            continue
+        value = str(arguments.get(key) or "").strip()
+        if value:
+            payload[key] = value
+    return payload
 
 
 def _requires_confirmation(risk_level: str | None) -> bool:

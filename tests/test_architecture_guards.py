@@ -156,38 +156,28 @@ def test_assistant_config_rejects_business_runtime_shape() -> None:
     assert "use config.assistant.json, not config.<market>.json" in str(exc.value)
 
 
-def test_llm_intent_surface_keeps_executable_read_only_and_preview_limited() -> None:
-    from src.application.assistant.llm_intent_schema import llm_intent_json_schema, llm_intent_schema
+def test_agent_loop_planner_surface_keeps_read_only_and_preview_limited() -> None:
     from src.application.agent_tool_registry import get_tool_definition
-    from src.application.assistant.commands import llm_executable_specs, llm_recognizable_specs
+    from src.application.assistant.agent_loop import AGENT_LOOP_PREVIEW_CAPABILITIES, AGENT_LOOP_READ_TOOLS
+    from src.application.assistant.capability_catalog import planner_preview_specs, planner_read_specs
     from src.application.tool_allowlist import PURE_READ_TOOLS
 
-    schema = llm_intent_schema()
-    json_schema = llm_intent_json_schema()
-    allowed_names = {spec.intent_name for spec in llm_executable_specs()}
-    recognizable_names = {spec.intent_name for spec in llm_recognizable_specs()}
+    read_tool_names = {str(spec.tool_name) for spec in planner_read_specs() if spec.tool_name}
+    preview_names = {spec.intent_name for spec in planner_preview_specs()}
 
-    assert schema["write_intents_allowed"] is False
-    assert set(json_schema["properties"]["intent"]["enum"]) == recognizable_names
-    assert allowed_names <= recognizable_names
-    assert "position_exit_analysis" in allowed_names
-    assert "symbol_config_query" in allowed_names
-    assert "symbol_edit" in recognizable_names
-    assert "symbol_edit" not in allowed_names
-    assert not any(name.endswith(("_confirm", "_cancel")) for name in recognizable_names)
-    assert recognizable_names - allowed_names == {"help", "symbol_edit"}
+    assert AGENT_LOOP_READ_TOOLS == read_tool_names - {"inbound.pending", "inbound.symbols"}
+    assert "close_advice_read" in AGENT_LOOP_READ_TOOLS
+    assert "symbol_config_read" in AGENT_LOOP_READ_TOOLS
+    assert "symbol_edit" in AGENT_LOOP_PREVIEW_CAPABILITIES
+    assert "manual_trade_open" in AGENT_LOOP_PREVIEW_CAPABILITIES
+    assert "manual_trade_confirm" not in AGENT_LOOP_PREVIEW_CAPABILITIES
+    assert "symbol_confirm" not in AGENT_LOOP_PREVIEW_CAPABILITIES
+    assert AGENT_LOOP_PREVIEW_CAPABILITIES <= preview_names
 
-    pure_read_router_tools = {"inbound.pending", "inbound.symbols"}
-    for spec in llm_executable_specs():
-        assert spec.read_only is True
-        if spec.tool_name is None:
-            continue
-        if spec.tool_name in pure_read_router_tools:
-            assert spec.intent_name in {"pending_operations", "symbol_list"}
-            continue
-        definition = get_tool_definition(spec.tool_name)
-        assert definition is not None, spec.tool_name
-        assert spec.tool_name in PURE_READ_TOOLS
+    for tool_name in AGENT_LOOP_READ_TOOLS:
+        definition = get_tool_definition(tool_name)
+        assert definition is not None, tool_name
+        assert tool_name in PURE_READ_TOOLS
         assert definition.risk_level == "read_only"
         assert not definition.side_effects
         assert definition.requires_confirm is False
@@ -233,9 +223,9 @@ def test_agent_registry_collects_domain_modules_instead_of_tool_tuple() -> None:
 
 
 def test_assistant_owns_command_catalog_and_interaction_contracts() -> None:
-    from src.application.assistant.commands import capability_catalog_text
-    from src.application.assistant.commands import capability_specs
-    from src.application.assistant.commands import command_specs
+    from src.application.assistant.capability_catalog import capability_catalog_text
+    from src.application.assistant.capability_catalog import capability_specs
+    from src.application.assistant.capability_catalog import command_specs
 
     assert capability_catalog_text()
     assert capability_specs()
@@ -335,9 +325,9 @@ def test_perception_producers_do_not_plan_or_execute_tools() -> None:
     checked = [
         ROOT / "src" / "application" / "assistant" / "command_parser.py",
         ROOT / "src" / "application" / "assistant" / "deterministic_commands.py",
-        ROOT / "src" / "application" / "assistant" / "llm_intent_schema.py",
-        ROOT / "src" / "application" / "assistant" / "llm_translator.py",
     ]
+    assert not (ROOT / "src" / "application" / "assistant" / "llm_intent_schema.py").exists()
+    assert not (ROOT / "src" / "application" / "assistant" / "llm_translator.py").exists()
     offenders: dict[str, list[str]] = {}
     for path in checked:
         text = path.read_text(encoding="utf-8")
@@ -349,6 +339,7 @@ def test_perception_producers_do_not_plan_or_execute_tools() -> None:
 
 
 def test_legacy_assistant_frame_and_tool_plan_are_removed() -> None:
+    assert not (ROOT / "src" / "application" / "assistant" / "commands.py").exists()
     assert not (ROOT / "src" / "application" / "assistant" / "parser.py").exists()
     assert not (ROOT / "src" / "application" / "assistant" / "frame_planner.py").exists()
     assert not (ROOT / "src" / "application" / "assistant" / "intent_arbitrator.py").exists()
@@ -358,10 +349,25 @@ def test_legacy_assistant_frame_and_tool_plan_are_removed() -> None:
     legacy_offenders: list[str] = []
     for path in sorted((ROOT / "src" / "application" / "assistant").glob("*.py")):
         text = path.read_text(encoding="utf-8")
-        if any(token in text for token in ("AssistantFrame", "ToolPlan", "SemanticFrame", "AssistantIntent")):
+        if any(
+            token in text
+            for token in (
+                "AssistantFrame",
+                "ToolPlan",
+                "SemanticFrame",
+                "AssistantIntent",
+                "LlmTranslatorSettings",
+            )
+        ):
             legacy_offenders.append(str(path.relative_to(ROOT)))
 
     assert legacy_offenders == []
+
+    settings_text = (ROOT / "src" / "application" / "assistant" / "settings.py").read_text(encoding="utf-8")
+    assert "DEFAULT_ASSISTANT_MODE" not in settings_text
+    assert "ASSISTANT_MODES" not in settings_text
+    assert "mode: str" not in settings_text
+    assert '"mode": self.mode' not in settings_text
 
 
 def test_runtime_router_and_arbitrator_do_not_know_model_profiles() -> None:
@@ -444,7 +450,7 @@ def test_inbound_transport_does_not_import_assistant_control_plane_details() -> 
     forbidden = (
         "src.application.assistant.agent_loop",
         "src.application.assistant.command_parser",
-        "src.application.assistant.commands",
+        "src.application.assistant.capability_catalog",
         "src.application.assistant.frame_planner",
         "src.application.assistant.intent_arbitrator",
         "src.application.assistant.perception",

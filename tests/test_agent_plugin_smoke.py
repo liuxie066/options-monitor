@@ -1757,7 +1757,6 @@ def test_runtime_status_reports_assistant_llm_and_latest_agent_route(monkeypatch
         json.dumps(
             {
                 "assistant": {
-                    "mode": "agent_loop",
                     "context_window_messages": 6,
                     "default_market_scope": "us",
                     "llm": {
@@ -1791,7 +1790,6 @@ def test_runtime_status_reports_assistant_llm_and_latest_agent_route(monkeypatch
             "response": {
                 "meta": {
                     "assistant": {
-                        "mode": "agent_loop",
                         "route": "agent_loop",
                         "llm": {"attempted": True, "reason": "accepted"},
                         "context": {"provided": True, "recent_count": 1, "pending_count": 0},
@@ -1803,14 +1801,15 @@ def test_runtime_status_reports_assistant_llm_and_latest_agent_route(monkeypatch
 
     data, _warnings, _meta = _call_runtime_status_for_upgrade(tmp_path, fixture["cfg_path"], fixture["cfg"])
 
-    assert data["assistant_runtime"]["config"]["mode"] == "agent_loop"
+    assert data["assistant_runtime"]["config"]["enabled"] is True
+    assert data["assistant_runtime"]["config"]["planner"]["enabled"] is True
     assert data["assistant_runtime"]["llm"]["enabled"] is True
     assert data["assistant_runtime"]["llm"]["provider"] == "deepseek"
     assert data["assistant_runtime"]["llm"]["endpoint_url"] == "https://api.deepseek.com/chat/completions"
     assert data["assistant_runtime"]["llm"]["api_key_configured"] is True
     assert data["assistant_runtime"]["audit"]["latest"]["route"] == "agent_loop"
     assert data["assistant_runtime"]["audit"]["latest"]["llm_reason"] == "accepted"
-    assert data["summary"]["assistant_mode"] == "agent_loop"
+    assert data["summary"]["assistant_enabled"] is True
     assert data["summary"]["assistant_latest_route"] == "agent_loop"
 
 
@@ -1831,7 +1830,7 @@ def test_runtime_status_does_not_report_llm_endpoint_when_llm_disabled(tmp_path:
 
     data, _warnings, _meta = _call_runtime_status_for_upgrade(tmp_path, fixture["cfg_path"], fixture["cfg"])
 
-    assert data["assistant_runtime"]["config"]["mode"] == "agent_loop"
+    assert data["assistant_runtime"]["config"]["enabled"] is True
     assert data["assistant_runtime"]["llm"]["enabled"] is False
     assert data["assistant_runtime"]["llm"]["provider"] == ""
     assert data["assistant_runtime"]["llm"]["endpoint_url"] is None
@@ -1847,7 +1846,6 @@ def test_runtime_status_uses_service_profile_assistant_config_and_env_file(tmp_p
         json.dumps(
             {
                 "assistant": {
-                    "mode": "agent_loop",
                     "llm": {
                         "provider": "deepseek",
                         "base_url": "https://api.deepseek.com",
@@ -1899,7 +1897,6 @@ def test_runtime_status_uses_service_profile_assistant_config_and_env_file(tmp_p
             "response": {
                 "meta": {
                     "assistant": {
-                        "mode": "agent_loop",
                         "route": "agent_loop",
                         "llm": {"attempted": True, "reason": "accepted"},
                     }
@@ -1911,7 +1908,7 @@ def test_runtime_status_uses_service_profile_assistant_config_and_env_file(tmp_p
     data, _warnings, _meta = _call_runtime_status_for_upgrade(tmp_path, fixture["cfg_path"], fixture["cfg"])
 
     assert data["assistant_runtime"]["config"]["path"] == str(assistant_path)
-    assert data["assistant_runtime"]["config"]["mode"] == "agent_loop"
+    assert data["assistant_runtime"]["config"]["enabled"] is True
     assert data["assistant_runtime"]["llm"]["api_key_configured"] is True
     assert data["assistant_runtime"]["llm"]["env_file"] == str(env_file)
     assert data["assistant_runtime"]["llm"]["env_file_loaded"] is True
@@ -1932,7 +1929,6 @@ def test_runtime_status_ignores_unreadable_profile_env_file_when_env_is_injected
         json.dumps(
             {
                 "assistant": {
-                    "mode": "agent_loop",
                     "llm": {
                         "provider": "deepseek",
                         "base_url": "https://api.deepseek.com",

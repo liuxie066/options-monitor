@@ -19,7 +19,7 @@ from src.interfaces.cli.account_ops import (
 )
 from src.interfaces.cli.assistant_ops import (
     add_assistant_commands,
-    check_llm_translator,
+    check_llm_planner,
     handle_assistant_command,
     handle_assistant_message,
 )
@@ -220,7 +220,7 @@ def main(argv: list[str] | None = None) -> int:
             return handle_assistant_command(
                 args,
                 repo_base_fn=repo_base,
-                check_llm_translator_fn=check_llm_translator,
+                check_llm_planner_fn=check_llm_planner,
                 handle_assistant_message_fn=handle_assistant_message,
             )
 

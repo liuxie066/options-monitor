@@ -6,20 +6,21 @@ from typing import Any, Callable
 from src.application.assistant.agent_loop import (
     AgentLoopPlanFn,
     AgentLoopSynthesizeFn,
+    AGENT_LOOP_READ_TOOLS,
     INTERNAL_TOOL_PLAN_NAME,
     TOOL_CHECK_SCHEMA_VERSION,
     ToolExecutor,
     execute_tool_plan,
+    skipped_llm_trace,
 )
 from src.application.assistant.perception_trace import (
     PerceptionTrace,
     build_assistant_decision,
 )
-from src.application.assistant.perception import GenerateReplyFn, PerceptionEngine, TranslateIntentFn
-from src.application.assistant.llm_translator import skipped_llm_trace
+from src.application.assistant.perception import GenerateReplyFn, PerceptionEngine
 from src.application.assistant.settings import AssistantSettings
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.assistant.commands import spec_by_intent
+from src.application.assistant.capability_catalog import spec_by_intent
 from src.application.assistant.contracts import AssistantRequest, PerceptionResult
 from src.application.assistant.audit import InboundAuditStore
 from src.application.assistant.router import ExecuteToolFn, handle_assistant_request
@@ -42,7 +43,6 @@ def handle_assistant_message(
     allowed_senders: str | None = None,
     now_fn: Callable[[], date] | None = None,
     settings: AssistantSettings | None = None,
-    translate_intent_fn: TranslateIntentFn | None = None,
     plan_tools_fn: AgentLoopPlanFn | None = None,
     synthesize_response_fn: AgentLoopSynthesizeFn | None = None,
     generate_reply_fn: GenerateReplyFn | None = None,
@@ -73,7 +73,6 @@ def handle_assistant_message(
         request=request,
         audit_store=store,
         settings=runtime_settings,
-        translate_intent_fn=translate_intent_fn,
         plan_tools_fn=plan_tools_fn,
         generate_reply_fn=generate_reply_fn,
     )
@@ -201,7 +200,7 @@ def _merge_agent_loop_tool_events(
     loop_raw = merged.get("agent_loop")
     loop: dict[str, Any] = dict(loop_raw) if isinstance(loop_raw, dict) else {}
     loop.setdefault("enabled", True)
-    loop.setdefault("planner", "llm_read_only_intent")
+    loop.setdefault("planner", "llm_tool_plan")
     loop["tool_events"] = [dict(item) for item in tool_events]
     loop["observations"] = [dict(item) for item in observations]
     loop["tool_calls_used"] = sum(1 for item in tool_events if item.get("phase") == "observe_tool_result")
@@ -468,7 +467,6 @@ def _with_assistant_meta(
     context_meta = llm_meta.pop("context", {"provided": False})
     assistant_meta = {
         "enabled": bool(settings.enabled),
-        "mode": settings.mode,
         "planner": settings.planner.public_payload(),
         "route": route,
         "llm": llm_meta,
@@ -490,6 +488,8 @@ def _with_assistant_meta(
 def _intent_metadata(perception: PerceptionResult | None) -> dict[str, Any]:
     if perception is None:
         return {}
+    if perception.intent_name == "tool_plan":
+        return _tool_plan_metadata(perception)
     spec = _COMMAND_SPECS_BY_INTENT.get(perception.intent_name)
     if spec is None:
         return {}
@@ -500,4 +500,20 @@ def _intent_metadata(perception: PerceptionResult | None) -> dict[str, Any]:
         "operation_target": spec.operation_target,
         "llm_allowed": bool(spec.llm_allowed),
         "supported": bool(spec.supported),
+    }
+
+
+def _tool_plan_metadata(perception: PerceptionResult) -> dict[str, Any]:
+    arguments = perception.arguments if isinstance(perception.arguments, dict) else {}
+    plan = arguments.get("plan") if isinstance(arguments.get("plan"), dict) else {}
+    steps = plan.get("steps") if isinstance(plan.get("steps"), list) else []
+    tool_names = [str(step.get("tool_name") or "").strip() for step in steps if isinstance(step, dict)]
+    read_only = bool(tool_names) and all(name in AGENT_LOOP_READ_TOOLS for name in tool_names)
+    return {
+        "read_only": read_only if tool_names else None,
+        "risk_level": "read_only" if read_only else "unknown",
+        "operation_action": "tool_plan",
+        "operation_target": "assistant_read_tools",
+        "llm_allowed": read_only,
+        "supported": read_only,
     }
