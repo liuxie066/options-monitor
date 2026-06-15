@@ -104,7 +104,6 @@ ASSISTANT_CONFIG_KEYS = {
     'default_market_scope',
     'enabled',
     'llm',
-    'mode',
     'models',
     'planner',
 }
@@ -275,10 +274,6 @@ def _validate_assistant_config(cfg: dict) -> None:
         die('assistant has unsupported keys: ' + ', '.join(unsupported_assistant_keys))
     if 'enabled' in assistant and assistant.get('enabled') is not None and not isinstance(assistant.get('enabled'), bool):
         die('assistant.enabled must be a boolean')
-    if 'mode' in assistant and assistant.get('mode') is not None:
-        mode = str(assistant.get('mode') or '').strip().lower()
-        if mode not in {'disabled', 'agent_loop'}:
-            die('assistant.mode legacy modes are retired; use assistant.enabled and assistant.planner.enabled')
     planner = assistant.get('planner') or {}
     if planner and not isinstance(planner, dict):
         die('assistant.planner must be an object')

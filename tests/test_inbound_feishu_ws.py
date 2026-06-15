@@ -300,7 +300,6 @@ def test_feishu_ws_agent_loop_degrades_when_conversation_context_fails(
         json.dumps(
             {
                 "assistant": {
-                    "mode": "agent_loop",
                     "llm": {"provider": "openai", "model": "gpt-5.2", "api_key_env": "OM_LLM_API_KEY"},
                 }
             }
@@ -527,7 +526,6 @@ def test_feishu_ws_settings_reads_behavior_from_assistant_config(tmp_path: Path)
                     }
                 },
                 "assistant": {
-                    "mode": "agent_loop",
                     "context_window_messages": 9,
                     "default_market_scope": "us",
                     "llm": {
@@ -564,7 +562,6 @@ def test_feishu_ws_settings_reads_behavior_from_assistant_config(tmp_path: Path)
     assert settings.max_reply_chars == 1200
     assert settings.ack_reaction == "SMILE"
     assert settings.queue_size == 5
-    assert settings.assistant_mode == "agent_loop"
     assert settings.assistant_enabled is True
     assert settings.assistant_planner_enabled is True
     assert settings.assistant_context_window_messages == 9
@@ -590,7 +587,6 @@ def test_feishu_ws_settings_enables_command_runtime_by_default(tmp_path: Path) -
         },
     )
 
-    assert settings.assistant_mode == "agent_loop"
     assert settings.assistant_enabled is True
     assert settings.assistant_planner_enabled is True
     assert settings.assistant_llm.enabled is False

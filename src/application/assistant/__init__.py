@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.application.assistant.commands import (
+from src.application.assistant.capability_catalog import (
     AssistantCapabilitySpec,
     AssistantCommandSpec,
     capability_catalog_text,
@@ -14,7 +14,7 @@ from src.application.assistant.commands import (
 from src.application.assistant.contracts import AssistantRequest, PerceptionResult, ToolCall
 from src.application.assistant.perception import PerceptionEngine
 from src.application.assistant.perception_trace import AssistantDecision, PerceptionCandidate, PerceptionTrace
-from src.application.assistant.settings import AssistantSettings, LlmTranslatorSettings
+from src.application.assistant.settings import AssistantSettings, AssistantLlmSettings
 
 __all__ = [
     "AssistantCapabilitySpec",
@@ -22,7 +22,7 @@ __all__ = [
     "AssistantDecision",
     "AssistantRequest",
     "AssistantSettings",
-    "LlmTranslatorSettings",
+    "AssistantLlmSettings",
     "PerceptionCandidate",
     "PerceptionEngine",
     "PerceptionResult",

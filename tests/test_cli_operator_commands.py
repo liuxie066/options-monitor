@@ -238,11 +238,11 @@ def test_assistant_llm_check_command_forwards_diagnostic_args(monkeypatch, capsy
 
     calls: list[dict] = []
 
-    def _check_llm_translator(**kwargs):
+    def _check_llm_planner(**kwargs):
         calls.append(kwargs)
         return {"summary": {"ok": True, "status": "ready"}, "checks": []}
 
-    monkeypatch.setattr(cli, "check_llm_translator", _check_llm_translator)
+    monkeypatch.setattr(cli, "check_llm_planner", _check_llm_planner)
 
     rc = cli.main([
         "assistant",

@@ -6,7 +6,7 @@ from datetime import date
 from typing import Callable
 
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.assistant.commands import commands_by_intent, operation_target_intents
+from src.application.assistant.capability_catalog import commands_by_intent, operation_target_intents
 from src.application.assistant.contracts import PerceptionResult
 from src.application.assistant.position_query import parse_position_query_text, position_query_intent_arguments
 

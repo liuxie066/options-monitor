@@ -15,7 +15,7 @@ from src.application.assistant.llm_common import (
     unsupported_llm_provider_error,
 )
 from src.application.assistant.user_profile import user_profile_trace
-from src.application.assistant.settings import LlmTranslatorSettings
+from src.application.assistant.settings import AssistantLlmSettings
 from src.application.agent_tool_contracts import AgentToolError
 from src.infrastructure.openai_chat_completions import (
     OpenAIChatCompletionsError,
@@ -58,7 +58,7 @@ Rules:
 def generate_general_reply(
     text: str,
     *,
-    settings: LlmTranslatorSettings,
+    settings: AssistantLlmSettings,
     environ: dict[str, str] | None = None,
     create_response_fn: CreateStructuredResponseFn | None = None,
     conversation_context: dict[str, Any] | None = None,
@@ -179,7 +179,7 @@ def generate_general_reply(
 def _provider_input_text(
     text: str,
     *,
-    settings: LlmTranslatorSettings,
+    settings: AssistantLlmSettings,
     conversation_context: dict[str, Any] | None,
 ) -> str:
     payload: dict[str, Any] = {
@@ -216,7 +216,7 @@ def _parse_provider_reply(response: dict[str, Any]) -> str | None:
 
 
 def _trace(
-    settings: LlmTranslatorSettings,
+    settings: AssistantLlmSettings,
     *,
     attempted: bool,
     reason: str,

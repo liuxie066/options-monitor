@@ -16,7 +16,7 @@ Verified entry points for this snapshot:
 - `./om assistant capabilities --format json`
 - `src/application/agent_tool_registry.py`
 - `src/application/tool_allowlist.py`
-- `src/application/assistant/commands.py`
+- `src/application/assistant/capability_catalog.py`
 - `src/application/assistant/agent_loop.py`
 
 ## Operating Boundary
@@ -239,8 +239,8 @@ Copilot should not use them as default evidence paths.
 - `src/application/assistant/agent_loop.py` has a narrower Inbound planner allowlist
   than the full pure-read manifest. That is intentional for remote LLM planning,
   but it should remain tested against the public capability catalog.
-- `assistant.mode` is a legacy compatibility field only. The active product
-  controls are `assistant.enabled` and `assistant.planner.enabled`. The runtime
+- `assistant.mode` is retired and unsupported. The active product controls are
+  `assistant.enabled` and `assistant.planner.enabled`. The runtime
   target is one `AgentSession` boundary + `AgentLoop` with deterministic parsing,
   optional model planning inside `Understand`, and durable operator trace in
   `agent_sessions`.
@@ -258,7 +258,7 @@ sync:
 - `src/application/agent_tool_registry.py`
 - `src/application/tool_allowlist.py`
 - `./om assistant capabilities --format json`
-- `src/application/assistant/commands.py`
+- `src/application/assistant/capability_catalog.py`
 - `src/application/assistant/agent_loop.py`
 
 Minimum invariants:

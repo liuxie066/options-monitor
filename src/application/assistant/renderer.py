@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, cast
 
-from src.application.assistant.commands import command_help_text
+from src.application.assistant.capability_catalog import command_help_text
 from src.application.assistant.contracts import PerceptionResult
 
 

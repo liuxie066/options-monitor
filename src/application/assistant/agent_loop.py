@@ -35,11 +35,17 @@ from src.application.assistant.llm_common import (
     strip_json_code_fence,
     unsupported_llm_provider_error,
 )
-from src.application.assistant.llm_translator import LlmTranslationResult
 from src.application.assistant.renderer import render_canonical_tool_result, render_inbound_text
 from src.application.assistant.session import build_agent_session_snapshot
 from src.application.assistant.settings import AssistantSettings
 from src.application.assistant.task_contract import build_task_contract
+from src.application.assistant.tool_bindings import (
+    planner_binding_for_tool,
+    planner_config_scoped_tool_names,
+    primary_intent_name_for_tool,
+    symbol_market_config_tool_names,
+    tool_name_for_intent,
+)
 from src.application.assistant.verifier_hooks import (
     hook_results_from_answer_trace,
     hook_results_from_coverage,
@@ -143,24 +149,20 @@ _BANNED_PLAN_ARGUMENT_EXACT = frozenset(
 )
 _BANNED_PLAN_ARGUMENT_SUFFIXES = ("_path", "_paths", "_root", "_roots", "_dir", "_dirs", "_file", "_host", "_port")
 _BANNED_PLAN_ARGUMENT_CONTAINS = ("_path_",)
-_CONFIG_SCOPED_PLAN_TOOLS = frozenset(
-    {
-        "analysis_catalog",
-        "analysis_query",
-        "monthly_income_report",
-        "option_positions_read",
-        "runtime_status",
-        "close_advice_read",
-        "symbol_resolve",
-        "symbol_config_read",
-        "candidate_filter_explain",
-    }
-)
+_CONFIG_SCOPED_PLAN_TOOLS = planner_config_scoped_tool_names()
+_SYMBOL_MARKET_CONFIG_PLAN_TOOLS = symbol_market_config_tool_names()
+
+
+@dataclass(frozen=True)
+class AgentLoopPlanningOutcome:
+    perception: PerceptionResult | None
+    trace: dict[str, Any]
+    error: AgentToolError | None = None
 
 
 @dataclass(frozen=True)
 class AgentLoopResult:
-    translation: LlmTranslationResult
+    planning: AgentLoopPlanningOutcome
     trace: dict[str, Any]
     steps: tuple["AgentLoopStep", ...] = ()
 
@@ -476,7 +478,6 @@ class AnswerEvidence:
     trace: dict[str, Any] | None = None
 
 
-AgentLoopTranslateFn = Callable[[str, AssistantSettings, dict[str, Any] | None], LlmTranslationResult]
 AgentLoopPlanFn = Callable[[str, AssistantSettings, dict[str, Any] | None], LlmPlannerResult]
 AgentLoopSynthesizeFn = Callable[
     [str, AssistantSettings, PlannerPlan, list[dict[str, Any]], dict[str, Any] | None],
@@ -489,7 +490,6 @@ def run_read_only_agent_loop(
     *,
     settings: AssistantSettings,
     conversation_context: dict[str, Any] | None,
-    translate_intent_fn: AgentLoopTranslateFn | None = None,
     plan_tools_fn: AgentLoopPlanFn | None = None,
     now_fn: Callable[[], date] | None = None,
     max_steps: int = MAX_TOOL_PLAN_STEPS,
@@ -503,33 +503,27 @@ def run_read_only_agent_loop(
     steps = max(1, min(int(max_steps), MAX_TOOL_PLAN_STEPS))
     today = _planner_today(now_fn)
     loop_context = _with_temporal_context(conversation_context, today=today)
-    if plan_tools_fn is not None or translate_intent_fn is None:
-        plan_result = (plan_tools_fn or plan_read_only_tools)(text, settings, loop_context)
-        plan_result = _normalize_tool_plan_result(plan_result, question=text, today=today)
-        translation, planned_steps = _translation_from_tool_plan_result(plan_result, question=text)
-        trace = dict(translation.trace or plan_result.trace)
-    else:
-        translator = translate_intent_fn
-        translation = translator(text, settings, loop_context)
-        planned_steps = _planned_steps_from_translation(translation)
-        trace = dict(translation.trace)
+    plan_result = (plan_tools_fn or plan_read_only_tools)(text, settings, loop_context)
+    plan_result = _normalize_tool_plan_result(plan_result, question=text, today=today)
+    planning, planned_steps = _planning_outcome_from_tool_plan_result(plan_result, question=text)
+    trace = dict(planning.trace or plan_result.trace)
     trace["agent_loop"] = {
         "schema_version": AGENT_LOOP_SCHEMA_VERSION,
         "enabled": True,
-        "planner": "llm_tool_plan" if translate_intent_fn is None or plan_tools_fn is not None else "llm_read_only_intent",
+        "planner": "llm_tool_plan",
         "max_steps": steps,
         "steps_used": len(planned_steps),
         "writes_allowed": False,
         "preview_operations_allowed": True,
         "steps": [step.public_payload() for step in planned_steps],
         "final_response": FinalResponsePlan(
-            status="pending_tool_execution" if translation.intent is not None else "no_plan",
+            status="pending_tool_execution" if planning.perception is not None else "no_plan",
             reason="canonical renderer will own factual output"
-            if translation.intent is not None
+            if planning.perception is not None
             else "planner did not produce an executable assistant capability",
         ).public_payload(),
     }
-    return AgentLoopResult(translation=translation, trace=trace, steps=planned_steps)
+    return AgentLoopResult(planning=planning, trace=trace, steps=planned_steps)
 
 
 def build_tool_observation(*, index: int, tool_name: str, payload: dict[str, Any], result: dict[str, Any]) -> ToolObservation:
@@ -755,7 +749,7 @@ def execute_tool_plan(
     synthesize_response_fn: AgentLoopSynthesizeFn | None = None,
 ) -> dict[str, Any]:
     plan = parse_tool_plan_payload(plan_payload)
-    plan = _normalize_tool_plan(plan, question=question, today=_planner_today(None))
+    plan = _normalize_tool_plan(plan, question=question, today=_planner_today_from_context(conversation_context))
     validate_tool_plan(plan, allow_preview=False)
     plan_revisions: list[dict[str, Any]] = [_plan_revision_payload(1, plan=plan, reason="initial bounded plan")]
     task_contract = build_task_contract(
@@ -2247,6 +2241,13 @@ def validate_tool_plan(plan: PlannerPlan, *, question: str | None = None, allow_
                 hint="LLM planner may create a pending preview, but direct tool execution remains read-only.",
                 details={"preview_capabilities": sorted(step.tool_name for step in plan.steps if _plan_step_kind(step.tool_name) == "preview")},
             )
+        if question is not None and not _question_requests_preview_operation(question):
+            raise AgentToolError(
+                code="PLAN_RISK_MISMATCH",
+                message="LLM 规划了写入预览，但用户原文不像写入预览请求。",
+                hint="preview-write 只能用于明确的记录、修改、升级或模型切换请求；普通查询必须规划为只读工具。",
+                details={"preview_capabilities": sorted(step.tool_name for step in plan.steps if _plan_step_kind(step.tool_name) == "preview")},
+            )
         if preview_count > 1 or read_count:
             raise AgentToolError(
                 code="PLAN_UNSUPPORTED_COMPOSITION",
@@ -2354,39 +2355,27 @@ def _question_requests_preview_operation(question: str) -> bool:
     if any(token in compact for token in high_confidence_tokens):
         return True
     symbol_setting_tokens = ("coveredcall", "sellcall", "sellput", "minstrike", "maxstrike", "min_strike", "max_strike")
+    trade_update_tokens = ("premium", "权利金", "合约数", "张数", "close", "平仓价")
     if any(token in compact for token in ("是多少", "多少", "是什么", "当前", "现在", "目前", "查询", "查看")):
         return False
+    if "改成" in compact and any(token in compact for token in trade_update_tokens):
+        return True
     if ("设置" in compact or "修改监控" in compact or "配置标的" in compact) and any(token in compact for token in symbol_setting_tokens):
         return True
     return "立即升级" in compact or "切换模型" in compact or "使用模型" in compact
 
 
-def _planned_steps_from_translation(translation: LlmTranslationResult) -> tuple[AgentLoopStep, ...]:
-    if translation.intent is None:
-        return ()
-    return (
-        AgentLoopStep(
-            index=1,
-            phase="plan_tool",
-            status="planned",
-            intent_name=translation.intent.intent_name,
-            tool_name=_tool_name_for_intent(translation.intent.intent_name),
-            arguments=dict(translation.intent.arguments),
-        ),
-    )
-
-
-def _translation_from_tool_plan_result(result: LlmPlannerResult, *, question: str) -> tuple[LlmTranslationResult, tuple[AgentLoopStep, ...]]:
+def _planning_outcome_from_tool_plan_result(result: LlmPlannerResult, *, question: str) -> tuple[AgentLoopPlanningOutcome, tuple[AgentLoopStep, ...]]:
     if result.error is not None:
-        return LlmTranslationResult(intent=None, trace=dict(result.trace), error=result.error), ()
+        return AgentLoopPlanningOutcome(perception=None, trace=dict(result.trace), error=result.error), ()
     if result.plan is None:
-        return LlmTranslationResult(intent=None, trace=dict(result.trace)), ()
+        return AgentLoopPlanningOutcome(perception=None, trace=dict(result.trace)), ()
     if not result.plan.steps:
-        return LlmTranslationResult(intent=None, trace={**dict(result.trace), "reason": "no_plan"}, error=_no_tool_plan_error()), ()
+        return AgentLoopPlanningOutcome(perception=None, trace={**dict(result.trace), "reason": "no_plan"}, error=_no_tool_plan_error()), ()
     try:
         validate_tool_plan(result.plan, question=question)
     except AgentToolError as err:
-        return LlmTranslationResult(intent=None, trace={**dict(result.trace), "reason": "invalid_plan", "error_code": err.code}, error=err), ()
+        return AgentLoopPlanningOutcome(perception=None, trace={**dict(result.trace), "reason": "invalid_plan", "error_code": err.code}, error=err), ()
     planned_steps = tuple(
         _agent_loop_step_from_plan_step(index=index, step=step, question=question)
         for index, step in enumerate(result.plan.steps, start=1)
@@ -2394,8 +2383,8 @@ def _translation_from_tool_plan_result(result: LlmPlannerResult, *, question: st
     precheck_error = _planned_step_precheck_error(planned_steps)
     if precheck_error is not None:
         return (
-            LlmTranslationResult(
-                intent=None,
+            AgentLoopPlanningOutcome(
+                perception=None,
                 trace={**dict(result.trace), "reason": "pre_tool_check_failed", "error_code": precheck_error.code},
                 error=precheck_error,
             ),
@@ -2404,8 +2393,8 @@ def _translation_from_tool_plan_result(result: LlmPlannerResult, *, question: st
     preview_step = _single_preview_step(result.plan)
     if preview_step is not None:
         return (
-            LlmTranslationResult(
-                intent=PerceptionResult(
+            AgentLoopPlanningOutcome(
+                perception=PerceptionResult(
                     intent_name=preview_step.tool_name,
                     arguments=dict(preview_step.arguments),
                     source="agent_loop_plan",
@@ -2416,8 +2405,8 @@ def _translation_from_tool_plan_result(result: LlmPlannerResult, *, question: st
             planned_steps,
         )
     return (
-        LlmTranslationResult(
-            intent=PerceptionResult(
+        AgentLoopPlanningOutcome(
+            perception=PerceptionResult(
                 intent_name="tool_plan",
                 arguments={"plan": result.plan.public_payload(), "response_mode": result.plan.response_mode},
                 source="agent_loop_plan",
@@ -2507,6 +2496,7 @@ def _safe_tool_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "kind",
         "limit",
         "lines",
+        "market_scope",
         "sql",
         "query",
         "view",
@@ -2514,6 +2504,7 @@ def _safe_tool_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "symbol",
         "strategy",
         "field",
+        "function",
         "option_type",
         "side",
         "strike",
@@ -4391,6 +4382,8 @@ def _inject_system_fields(arguments: dict[str, Any], *, request: AssistantReques
             payload["config_key"] = _config_key_for_tool_payload(tool_name=tool_name, payload=payload, default=request.config_key)
     if tool_name == "option_positions_read":
         payload.setdefault("action", "list")
+    if tool_name == "close_advice_read":
+        payload.setdefault("market_scope", "all")
     if tool_name == "operation_timeline" and request.audit_db:
         payload.setdefault("audit_db", request.audit_db)
     if tool_name == "runtime_runs":
@@ -4404,7 +4397,7 @@ def _inject_system_fields(arguments: dict[str, Any], *, request: AssistantReques
 def _config_path_for_tool_payload(*, tool_name: str, payload: dict[str, Any], default: str | None) -> str | None:
     if not default:
         return None
-    if tool_name not in {"symbol_config_read", "symbol_resolve", "candidate_filter_explain"}:
+    if tool_name not in _SYMBOL_MARKET_CONFIG_PLAN_TOOLS:
         return default
     market_key = _market_config_key(payload.get("symbol"))
     if market_key is None:
@@ -4416,7 +4409,7 @@ def _config_path_for_tool_payload(*, tool_name: str, payload: dict[str, Any], de
 
 
 def _config_key_for_tool_payload(*, tool_name: str, payload: dict[str, Any], default: str) -> str:
-    if tool_name not in {"symbol_config_read", "symbol_resolve", "candidate_filter_explain"}:
+    if tool_name not in _SYMBOL_MARKET_CONFIG_PLAN_TOOLS:
         return default
     market_key = _market_config_key(payload.get("symbol"))
     if market_key is not None:
@@ -4500,8 +4493,9 @@ def _planner_tool_manifest() -> list[dict[str, Any]]:
             for key, value in definition.input_schema.items()
             if not _is_banned_plan_argument(str(key))
         }
-        notes: list[str] = []
-        semantics: dict[str, Any] = {}
+        binding = planner_binding_for_tool(name)
+        notes: list[str] = list(binding.planner_notes) if binding is not None else []
+        semantics: dict[str, Any] = dict(binding.planner_semantics) if binding is not None else {}
         if name == "monthly_income_report":
             notes.append("Set include_rows=true for cashflow details, composition, source, 明细, 组成, 构成, 来源, or 由什么组成.")
             notes.append("When include_rows=true, canonical factual rows are rendered by the system; synthesis should only add analysis.")
@@ -4618,54 +4612,6 @@ def _planner_tool_manifest() -> list[dict[str, Any]]:
                     "broker realtime statement outside the local OM ledger",
                     "ordinary option profit or return calculations; use monthly_income_report for monthly income questions",
                     "close advice; use close_advice_read for should-close or take-profit analysis",
-                ],
-            }
-        if name == "symbol_resolve":
-            notes.append("Use when the user asks what a symbol/name/alias maps to, or before SQL-style analysis that needs a canonical symbol.")
-            notes.append("The tool resolves Chinese names, configured aliases, Futu codes, HK numeric codes, and canonical US/HK symbols.")
-            notes.append("This tool only resolves identity; it does not answer whether the symbol was filtered, held, profitable, or configured.")
-            semantics = {
-                "data_source": "OM symbol identity resolver plus runtime config aliases when scoped config is injected",
-                "answer_capabilities": {
-                    "symbol_resolve": "maps a raw symbol/name/alias to canonical_symbol, market, currency, and futu_code",
-                    "read_only": "does not mutate config or runtime state",
-                },
-                "scope_semantics": {
-                    "config injected": "runtime config aliases are included; HK/US sibling config may be selected from the symbol market",
-                    "config omitted": "built-in canonicalization and fallback aliases only",
-                },
-                "not_promised": [
-                    "market data lookup",
-                    "watchlist membership",
-                    "candidate filter diagnosis",
-                ],
-            }
-        if name == "candidate_filter_explain":
-            notes.append("Use for single-symbol candidate filter, rejection, missing-candidate, or 被哪个参数过滤 questions.")
-            notes.append("symbol can be canonical, Chinese name, Futu code, or alias such as 泡泡玛特; the tool resolves it before matching trace rows.")
-            notes.append("account is optional scan/run scope only, not business semantics for symbol identity.")
-            notes.append("For aggregation/comparison/trend across many symbols, rules, accounts, or runs, use analysis_query over candidate_filter_diagnostics instead.")
-            semantics = {
-                "data_source": "candidate_filter_trace.jsonl artifacts",
-                "answer_capabilities": {
-                    "filter_explain": "explains observed accepted/rejected/post-filtered/not-observed candidate trace rows for one symbol",
-                    "candidate_filter_trace": "uses scan-time trace artifacts as the fact source",
-                    "read_only": "does not run scans, fetch market data, send notifications, or write reports",
-                },
-                "scope_semantics": {
-                    "account": "scan/run scope only; omit to search all account trace artifacts in scope",
-                    "function": "optional filter function such as sell_put, sell_call, cash_reserve, or share_coverage",
-                    "run_id omitted": "searches default shared trace artifacts; pass run_id when a specific run is required",
-                },
-                "not_promised": [
-                    "inferring root cause when trace rows are missing",
-                    "rerunning candidate scans",
-                    "aggregated rule comparisons across runs",
-                ],
-                "answer_rules": [
-                    "If trace_count is zero, say the candidate diagnostic is missing and cannot determine the exact filtering parameter.",
-                    "Use rule, metric_value, threshold, status, stage, contract_symbol, expiration, and strike from tool events as evidence.",
-                    "Do not present account as symbol identity or business ownership.",
                 ],
             }
         if name == "symbol_config_read":
@@ -4919,6 +4865,10 @@ def _llm_trace(
     return payload
 
 
+def skipped_llm_trace(settings: Any, *, reason: str) -> dict[str, Any]:
+    return _llm_trace(settings, attempted=False, reason=reason)
+
+
 def _fact_data(tool_name: str, data: dict[str, Any]) -> dict[str, Any]:
     out = dict(data)
     if tool_name == "monthly_income_report":
@@ -5062,36 +5012,11 @@ def _strip_internal_identifiers(value: Any) -> Any:
 
 
 def _tool_name_for_intent(intent_name: str) -> str | None:
-    return {
-        "monthly_income_report": "monthly_income_report",
-        "position_query": "option_positions_read",
-        "assigned_stock_position_query": "option_positions_read",
-        "position_exit_analysis": "close_advice_read",
-        "runtime_status": "runtime_status",
-        "runtime_runs": "runtime_runs",
-        "runtime_logs": "runtime_logs",
-        "symbol_config_query": "symbol_config_read",
-        "symbol_resolve": "symbol_resolve",
-        "candidate_filter_explain": "candidate_filter_explain",
-        "analysis_catalog": "analysis_catalog",
-        "analysis_query": "analysis_query",
-    }.get(str(intent_name or ""))
+    return tool_name_for_intent(intent_name)
 
 
 def _intent_name_for_tool(tool_name: str) -> str | None:
-    return {
-        "monthly_income_report": "monthly_income_report",
-        "option_positions_read": "position_query",
-        "close_advice_read": "position_exit_analysis",
-        "runtime_status": "runtime_status",
-        "runtime_runs": "runtime_runs",
-        "runtime_logs": "runtime_logs",
-        "symbol_config_read": "symbol_config_query",
-        "symbol_resolve": "symbol_resolve",
-        "candidate_filter_explain": "candidate_filter_explain",
-        "analysis_catalog": "analysis_catalog",
-        "analysis_query": "analysis_query",
-    }.get(str(tool_name or ""))
+    return primary_intent_name_for_tool(tool_name)
 
 
 def _clip_mapping(value: dict[str, Any], *, limit: int = 12) -> dict[str, Any]:
@@ -5127,7 +5052,7 @@ __all__ = [
     "AgentLoopStep",
     "AgentLoopPlanFn",
     "AgentLoopSynthesizeFn",
-    "AgentLoopTranslateFn",
+    "AgentLoopPlanningOutcome",
     "FinalResponsePlan",
     "FOLLOWUP_DECISION_SCHEMA_VERSION",
     "INTERNAL_TOOL_PLAN_NAME",
@@ -5147,6 +5072,7 @@ __all__ = [
     "parse_tool_plan_payload",
     "plan_read_only_tools",
     "run_read_only_agent_loop",
+    "skipped_llm_trace",
     "synthesize_tool_plan_response",
     "tool_plan_json_schema",
     "validate_tool_plan",

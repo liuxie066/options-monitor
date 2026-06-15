@@ -132,8 +132,7 @@ Yield must remain group-level and must not use the single-leg parameter model.
 Use
 `review_readiness` to decide whether evidence is ready for manual strategy
 review, and use `candidate-impact` / `candidate-impact-report` to compare how
-explicit threshold variants would change the observed candidate set. The older
-`parameter-backtest` / `parameter-report` commands are compatibility aliases.
+explicit threshold variants would change the observed candidate set.
 This workflow must not call online AI providers, mutate runtime config, write
 trade state, or send notifications.
 
@@ -145,7 +144,7 @@ Use `./om assistant handle` when a remote messaging gateway needs to send user t
 ./om assistant handle --text '/positions sy' --sender ou_xxx --channel feishu --message-id msg_xxx
 ```
 
-This is a controlled Inbound message entrypoint, not an `om-agent` tool and not a shell bridge. It performs Inbound slash-command parsing, deterministic operation-alias handling or bounded AgentLoop planning, sender allowlist checks, message idempotency, SQLite audit, and then calls an allowlisted tool or creates a pending preview through the existing operation path. The current `./om assistant ...` CLI namespace and `assistant` config keys remain compatibility names. Inbound config may opt into LLM intent translation/planning; translated intents and plans still return into the same allowlist, audit, pending-operation, and renderer path. LLM-originated plans may read or initiate approved previews only; confirm/cancel/apply remains deterministic-only.
+This is a controlled Inbound message entrypoint, not an `om-agent` tool and not a shell bridge. It performs Inbound slash-command parsing, deterministic operation-alias handling or bounded AgentLoop planning, sender allowlist checks, message idempotency, SQLite audit, and then calls an allowlisted tool or creates a pending preview through the existing operation path. The current `./om assistant ...` CLI namespace and `assistant` config keys remain compatibility names. Inbound config may opt into LLM tool planning; planner output still returns into the same allowlist, audit, pending-operation, and renderer path. LLM-originated plans may read or initiate approved previews only; confirm/cancel/apply remains deterministic-only.
 
 Remote channels require:
 

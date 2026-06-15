@@ -8,7 +8,7 @@ import sqlite3
 from typing import Any
 
 from src.application.agent_tool_contracts import build_response
-from src.application.assistant import AssistantRequest, AssistantSettings, LlmTranslatorSettings, handle_assistant_message
+from src.application.assistant import AssistantRequest, AssistantSettings, AssistantLlmSettings, handle_assistant_message
 from src.application.assistant.agent_loop import (
     LlmPlannerResult,
     LlmSynthesisResult,
@@ -2673,8 +2673,7 @@ def test_agent_loop_tool_result_contains_evidence_bundle_and_session(tmp_path: P
         ),
         execute_tool_fn=_execute,
         settings=AssistantSettings(
-            mode="agent_loop",
-            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         plan_tools_fn=_plan,
         synthesize_response_fn=_synthesize,
@@ -3126,8 +3125,7 @@ def test_agent_loop_replans_read_only_followup_for_recoverable_quote_gap(tmp_pat
         ),
         execute_tool_fn=_execute,
         settings=AssistantSettings(
-            mode="agent_loop",
-            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         plan_tools_fn=_plan,
         synthesize_response_fn=_synthesize,
@@ -3249,8 +3247,7 @@ def test_agent_loop_stops_after_one_followup_for_same_quote_gap(tmp_path: Path) 
         ),
         execute_tool_fn=_execute,
         settings=AssistantSettings(
-            mode="agent_loop",
-            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         plan_tools_fn=_plan,
     )
@@ -3386,15 +3383,14 @@ def test_agent_loop_replans_operation_timeline_for_recoverable_upgrade_gap(tmp_p
         ),
         execute_tool_fn=_execute,
         settings=AssistantSettings(
-            mode="agent_loop",
-            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         plan_tools_fn=_plan,
         synthesize_response_fn=_synthesize,
     )
 
     assert out["ok"] is True
-    assert calls[0] == ("healthcheck", {})
+    assert calls[0] == ("healthcheck", {"config_key": "us"})
     assert calls[1][0] == "operation_timeline"
     assert calls[1][1]["operation_types"] == ["upgrade_now"]
     assert calls[1][1]["operation_id"] == "in_456"
@@ -3514,8 +3510,7 @@ def test_agent_loop_does_not_replan_unrecoverable_upgrade_gap(tmp_path: Path) ->
         ),
         execute_tool_fn=_execute,
         settings=AssistantSettings(
-            mode="agent_loop",
-            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         plan_tools_fn=_plan,
         synthesize_response_fn=_synthesize,
@@ -3649,8 +3644,7 @@ def test_agent_loop_contract_verifier_rejects_unsupported_currency_amount(tmp_pa
         ),
         execute_tool_fn=_execute,
         settings=AssistantSettings(
-            mode="agent_loop",
-            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         plan_tools_fn=_plan,
         synthesize_response_fn=_synthesize,
@@ -3751,8 +3745,7 @@ def test_agent_loop_answer_shape_fallback_preserves_account_comparison(tmp_path:
         ),
         execute_tool_fn=_execute,
         settings=AssistantSettings(
-            mode="agent_loop",
-            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         plan_tools_fn=_plan,
         synthesize_response_fn=_synthesize,
@@ -3839,8 +3832,7 @@ def test_message_less_local_agent_sessions_do_not_overwrite_each_other(tmp_path:
         )
 
     settings = AssistantSettings(
-        mode="agent_loop",
-        llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
     )
     first = handle_assistant_message(
         AssistantRequest(text="查看 lx 指派正股持仓盈亏", sender_id="local", config_key="us", audit_db=str(audit_db)),
@@ -3935,8 +3927,7 @@ def test_agent_loop_returns_error_when_tool_budget_is_exhausted(tmp_path: Path) 
         ),
         execute_tool_fn=_execute,
         settings=AssistantSettings(
-            mode="agent_loop",
-            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         plan_tools_fn=_plan,
         synthesize_response_fn=lambda *_args: LlmSynthesisResult(
@@ -4021,8 +4012,7 @@ def test_agent_loop_rejects_unrelated_followup_plan_for_evidence_gap(tmp_path: P
         ),
         execute_tool_fn=_execute,
         settings=AssistantSettings(
-            mode="agent_loop",
-            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         plan_tools_fn=_plan,
         synthesize_response_fn=lambda *_args: LlmSynthesisResult(

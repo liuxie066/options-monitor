@@ -67,7 +67,7 @@ Shadow Replay 的分析结论使用 [Opportunity Quality](OPPORTUNITY_QUALITY.md
 
 ## 候选影响对比
 
-`candidate-impact` 用已有扫描证据做候选影响对比，用来回答“如果当时承保参数换成这一组，会新增/移除哪些候选”。旧 `parameter-backtest` 命令保留为兼容入口。它不是重新扫描市场，也不会用 OpenD 事后恢复当时没有保存的期权链；它也不判断哪组参数最优。
+`candidate-impact` 用已有扫描证据做候选影响对比，用来回答“如果当时承保参数换成这一组，会新增/移除哪些候选”。它不是重新扫描市场，也不会用 OpenD 事后恢复当时没有保存的期权链；它也不判断哪组参数最优。
 
 ```bash
 cat > params.json <<'JSON'
@@ -99,7 +99,7 @@ JSON
   --min-sample 30
 ```
 
-用户常用入口是 `candidate-impact-report`：它复用同一套对比逻辑，一次写出 JSON 和 Markdown，不自动生成参数、不修改 runtime config、不发送通知。旧 `parameter-report` 命令保留为兼容入口。
+用户常用入口是 `candidate-impact-report`：它复用同一套对比逻辑，一次写出 JSON 和 Markdown，不自动生成参数、不修改 runtime config、不发送通知。
 
 ```bash
 ./om research shadow-replay candidate-impact-report \
@@ -113,7 +113,7 @@ JSON
   --min-sample 30
 ```
 
-`candidate-impact-report` 默认写入 `output_shared/research/shadow_replay/backtests/candidate-impact-report-<market>-<date-window>-<timestamp>/result.<market>.json|md`；旧 `parameter-report` 默认目录仍保留 `parameter-report-*` 前缀。也可以用 `--output-dir` 指定精确目录。
+`candidate-impact-report` 默认写入 `output_shared/research/shadow_replay/backtests/candidate-impact-report-<market>-<date-window>-<timestamp>/result.<market>.json|md`。也可以用 `--output-dir` 指定精确目录。
 
 也可以对已建立的 dataset 回测，并输出 Markdown 报告：
 

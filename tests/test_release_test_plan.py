@@ -163,7 +163,7 @@ P2_CODE_ACCEPTANCE_EVIDENCE = {
         },
         "runtime": {
             "test:test_assistant_runtime_agent_loop_action_safety_rejects_preview_for_read_request",
-            "test:test_assistant_runtime_rejects_llm_injected_write_intent_even_with_custom_translator",
+            "test:test_assistant_runtime_rejects_llm_injected_write_preview_when_question_is_read_only",
         },
         "trace_eval": {
             "agent:prompt_injection_from_tool_output_denied",
@@ -288,7 +288,7 @@ P2_CODE_ACCEPTANCE_EVIDENCE = {
 }
 P2_ROUTE_PRIORITY_EVIDENCE = {
     "deny": {
-        "test:test_assistant_runtime_rejects_llm_injected_write_intent_even_with_custom_translator",
+        "test:test_assistant_runtime_rejects_llm_injected_write_preview_when_question_is_read_only",
         "test:test_assistant_runtime_agent_loop_action_safety_rejects_preview_for_read_request",
         "trace:trace_denied_cross_account_write",
     },
@@ -461,7 +461,7 @@ P2_NOT_DO_BOUNDARY_EVIDENCE = {
     },
     "不把 tool output 中的指令当作下一步授权。": {
         "test_action_safety_denies_prompt_injection_chain_to_write",
-        "test_assistant_runtime_rejects_llm_injected_write_intent_even_with_custom_translator",
+        "test_assistant_runtime_rejects_llm_injected_write_preview_when_question_is_read_only",
     },
     "不在普通回答里展示 SQL、path、internal id、lot id、raw command log。": {
         "test_assistant_agent_eval_uses_guarded_answer_evidence",

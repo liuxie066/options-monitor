@@ -56,8 +56,8 @@ The current code still uses names such as `AssistantRequest`,
 `PerceptionResult`, `ReasoningResolution`, `ActionResult`,
 `ObservationResponse`, and `AgentSessionSnapshot`. Treat them as
 implementation handles inside the same Agent loop, not as separate runtime
-layers. `assistant.mode` is a legacy compatibility field only; the active
-product controls are `assistant.enabled` and `assistant.planner.enabled`.
+layers. `assistant.mode` is retired and unsupported; the active product controls
+are `assistant.enabled` and `assistant.planner.enabled`.
 
 The authority split is:
 
@@ -97,7 +97,7 @@ Slash commands are the deterministic read surface. They do not call LLM:
 Natural-language read requests are planner territory when
 `assistant.planner.enabled=true`. For example, `状态`, `持仓 sy`, `这个月赚了多少`,
 `指派正股持仓盈亏`, `分析 long call 是不是应该平仓`, and `现在泡泡玛特 sell put 的 max strike 是多少`
-must be translated into bounded read-only capabilities such as
+must be planned as bounded read-only capabilities such as
 `runtime_status`, `option_positions_read`, `monthly_income_report`,
 `close_advice_read`, or `symbol_config_read`. If a needed read tool or required
 slot is missing, Inbound should ask for the missing capability/field instead of
@@ -155,7 +155,7 @@ and `assistant.planner.enabled=true|false`.
 
 By default, `default_market_scope` is intentionally unset. Feishu WS should receive an explicit `--config-key us|hk` or `--config-path` when it is bound to one market. Only set `assistant.default_market_scope: us|hk|all` when that default is an explicit product decision for Inbound.
 
-LLM translation is disabled by default:
+LLM planning is disabled by default:
 
 ```yaml
 assistant:
@@ -189,7 +189,7 @@ remain command-first. Natural-language read queries should be handled by the
 Planner or rejected with clarification; they should not be recovered through
 keyword fallback.
 
-The command surface authority is `src/application/assistant/commands.py`. Slash command metadata, the LLM intent surface, and inbound help text should use that catalog instead of maintaining separate command lists.
+The command surface authority is `src/application/assistant/capability_catalog.py`. Slash command metadata, the LLM tool surface, and inbound help text should use that catalog instead of maintaining separate command lists.
 
 After an inbound message is parsed, the execution router follows one chain:
 `PerceptionResult -> ReasoningResolution -> ActionResult -> ObservationResponse`.
@@ -276,11 +276,11 @@ The same model surface is available in chat through one slash command namespace:
 
 `/model` and `/model list` are read-only. `/model use <name>` only creates a preview; it writes `config.yaml` and rebuilds `config.assistant.json` after `确认模型` or `/confirm model <operation_id>`.
 
-When LLM translation runs, OM sends a bounded same-conversation context window to the translator: recent inbound audit rows plus current pending operation summaries. Sender and conversation identifiers are used locally to select the window, but are not sent to the provider. `assistant.context_window_messages` controls the recent-message window and is capped at 20; this context is only used for intent translation, not execution.
+When LLM planning runs, OM sends a bounded same-conversation context window to the planner: recent inbound audit rows plus current pending operation summaries. Sender and conversation identifiers are used locally to select the window, but are not sent to the provider. `assistant.context_window_messages` controls the recent-message window and is capped at 20; this context is only used for bounded tool planning, not execution.
 
 If repo-local `user.md` exists, OM Copilot also includes it as `context.user_profile`. This file is a manually maintained, hint-only user profile for stable collaboration preferences such as language, operator role, response style, and safety preferences. The current user message still wins over profile hints, and the profile must not be treated as market, ledger, broker, or config fact. `user.md` is ignored by git and should not contain secrets, credentials, webhook URLs, private keys, or account identifiers; obvious secret-like lines are redacted before provider calls.
 
-Check the translator control plane before enabling it in Feishu:
+Check the planner control plane before enabling it in Feishu:
 
 ```bash
 ./om assistant commands --format text

@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from src.application.agent_tool_contracts import build_response
-from src.application.assistant import AssistantSettings, LlmTranslatorSettings, handle_assistant_message
+from src.application.assistant import AssistantSettings, AssistantLlmSettings, handle_assistant_message
 from src.application.assistant.action_policy import decide_tool_action_policy
 from src.application.assistant.action_safety import assess_action_safety
 from src.application.assistant.agent_loop import (
@@ -450,8 +450,7 @@ def test_assistant_agent_eval_uses_guarded_answer_evidence(case: dict[str, Any],
         ),
         execute_tool_fn=_execute,
         settings=AssistantSettings(
-            mode="agent_loop",
-            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         plan_tools_fn=_plan,
         synthesize_response_fn=_synthesize,
@@ -626,8 +625,7 @@ def _run_planner_preview_case(case: dict[str, Any], *, tmp_path: Path, monkeypat
         execute_tool_fn=_execute,
         allowed_senders="local:local",
         settings=AssistantSettings(
-            mode="agent_loop",
-            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         plan_tools_fn=_plan,
         now_fn=lambda: date(2026, 6, 4),

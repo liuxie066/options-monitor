@@ -133,14 +133,13 @@ preview/confirm operations, and user-facing rendering are owned by
 The current implementation path still contains files named `runtime.py`,
 `router.py`, `perception.py`, `reasoning.py`, `action.py`, and
 `observation.py`; those are implementation handles inside one Agent loop, not
-separate product runtime layers. `assistant.mode` is a legacy compatibility
-field only; the active product path is controlled by `assistant.enabled` and
+separate product runtime layers. `assistant.mode` is retired and unsupported;
+the active product path is controlled by `assistant.enabled` and
 `assistant.planner.enabled`.
 
-LLM providers are optional. They may translate a message into a structured
-Inbound intent or, in `agent_loop`, plan bounded read tools plus exactly one
-approved preview-write capability. Deterministic OM tools own facts, and write
-actions remain behind preview/confirm gates.
+LLM providers are optional. In `agent_loop`, they may plan bounded read tools
+plus exactly one approved preview-write capability. Deterministic OM tools own
+facts, and write actions remain behind preview/confirm gates.
 
 Model selection is a control-plane concern. `config.yaml` may define multiple
 `assistant.models` profiles and an `assistant.active_model`, but
@@ -173,7 +172,7 @@ Act        -> ActionResult / ToolResult / PendingOperation
 Observe    -> ObservationResponse / audited reply
 ```
 
-The command parser, deterministic command aliases, and LLM translator must only
+The command parser, deterministic command aliases, and LLM planner must only
 emit `PerceptionResult` or a bounded Planner `tool_plan`. Tool-name selection,
 config-scoped payload construction, capability support, safety class
 validation, and confirmation requirements are owned by

@@ -5,7 +5,7 @@ from datetime import date
 from typing import Callable
 
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.assistant.commands import command_specs, operation_specs
+from src.application.assistant.capability_catalog import command_specs, operation_specs
 from src.application.assistant.contracts import PerceptionResult
 
 

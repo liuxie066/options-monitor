@@ -91,7 +91,6 @@ def _assistant_settings(
     if assistant_cfg:
         configured = AssistantSettings.from_runtime_config(assistant_cfg)
         return AssistantSettings(
-            mode=configured.mode,
             enabled=configured.enabled,
             context_window_messages=configured.context_window_messages,
             default_market_scope=configured.default_market_scope,
