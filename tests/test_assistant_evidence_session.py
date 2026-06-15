@@ -52,6 +52,8 @@ REQUIRED_TRACE_ROUTE_SAMPLE_IDS = {
     "trace_denied_cross_account_write",
     "trace_pass_release_workflow_published",
     "trace_ask_read_scope_expansion",
+    "trace_rewrite_runtime_notification_missing",
+    "trace_rewrite_runtime_freshness_gap",
     "trace_rewrite_runtime_notification_conflict",
     "trace_rewrite_runtime_scheduler_skip",
     "trace_rewrite_quote_stale_freshness",
@@ -59,6 +61,7 @@ REQUIRED_TRACE_ROUTE_SAMPLE_IDS = {
     "trace_pass_operation_readback_applied",
     "trace_pass_operation_readback_cancelled",
     "trace_pass_upgrade_readback_cancelled",
+    "trace_rewrite_release_no_matching_rows",
 }
 
 

@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 1.2.289 - 2026-06-15
+
+### Added
+- Added compact assistant trace route fixtures for release-status no-match, runtime notification-missing, and runtime
+  freshness-gap cases, including redaction guards for SQL, local paths, raw logs, GitHub URLs, internal IDs, and
+  internal tool names.
+- Added an assistant golden eval for runtime freshness gaps so stale runtime snapshots cannot be turned into a
+  definitive current push-failure root cause.
+- Added an assistant golden eval for partial-confidence candidate diagnostics so summary-only evidence cannot become a
+  definitive filter root cause.
+
 ## 1.2.288 - 2026-06-15
 
 ### Added

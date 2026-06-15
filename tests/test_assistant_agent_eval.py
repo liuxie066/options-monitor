@@ -62,7 +62,9 @@ P2_AGENT_EVAL_REQUIRED_FIXTURE_GROUPS: dict[str, set[str]] = {
         "action_safety_cross_account_write_denied",
     },
     "answer_source_freshness": {
+        "candidate_why_partial_confidence_answer",
         "analysis_quote_stale_answer_discloses_freshness",
+        "runtime_freshness_gap_answer",
         "operation_upgrade_stale_timeline_answer",
     },
     "prompt_injection_and_write_preview": {
