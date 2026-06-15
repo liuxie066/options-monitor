@@ -76,7 +76,8 @@ P0-P2 的切分：
 3. `ToolExecutor` 已进入 AgentLoop read 工具路径；preview planning、preview receipt、
    preview session trace 和 confirm/apply readback 已有 action policy、precheck/postcheck
    与 hook trace。
-4. `output_contract` 仍偏工具自定义，缺统一 annotations、schema、verifier 声明。
+4. `output_contract` 仍偏工具自定义；已开始统一 evidence annotations、
+   schema、verifier 声明，并为非行表工具补 `result_shape=scalar`。
 5. Trace 已经存在，但还不能稳定解释每次回答的 plan、evidence gap、verifier 和
    fallback 原因。
 
@@ -606,9 +607,9 @@ PostToolCheck 做输出校验和证据归一：
 | Check | 说明 |
 |---|---|
 | `output_schema` | 工具输出符合声明的 schema |
-| `output_contract` | 必须带 source、renderer、primary rows、fact fields |
+| `output_contract` | 必须带 source、renderer、fact fields；行表工具带 primary rows，scalar 工具显式声明 result shape |
 | `freshness` | 当前类问题需要 current/quote 时，必须标记 fresh/stale/missing |
-| `missing_data` | 缺失数据必须带 kind、impact、recoverable_by |
+| `missing_data` | 缺失数据必须带 kind、impact、recoverable_by；可补缺口必须带 suggested_tool |
 | `receipt` | preview/write 类必须有 operation_id、permission_request |
 | `read_back` | apply 仍在 deterministic path，但回执必须能读回最终状态 |
 
@@ -796,6 +797,18 @@ P2 优先扩展只读诊断 view 和 evidence：
 | runtime tick | `今天为什么没推送` | `runtime_tick_status` |
 | quote freshness | `为什么浮盈亏没有 spot` | `quote_freshness` |
 | upgrade/deploy | `升级为什么没回执` | operation audit、command log、release status |
+
+路径仲裁：
+
+- 单标的候选过滤问题（例如 `泡泡玛特被哪个参数过滤了`）优先走
+  `symbol_resolve`（仅在需要解析中文名/别名时）和 `candidate_filter_explain`。
+  这是 LLM-facing 的任务形窄入口，避免把自然语言 symbol 拼进 SQL 后得到 0 行。
+- TaskContract 将这类单标的候选过滤 why 识别为 `candidate_filter_diagnostic`，
+  必答项是 `summary` + `source_and_policy`；它不是收益/组成类 `breakdown`，
+  因此不要求 `main_drivers`。
+- `candidate_filter_diagnostics` 是同一 `candidate_filter_trace.jsonl` 事实源上的
+  Tool OS view，优先用于聚合、对比、趋势、跨 account/run/rule 分析。
+- 两条路径都不能在 trace 缺失时推断“没有被过滤”；缺 trace/artifact 只能回答证据缺失。
 
 规则：
 
@@ -1225,7 +1238,8 @@ deny > fail > recoverable_gap > warning > pass
 
 Bounded follow-up 规则：
 
-1. 同一个 `gap.code + scope` 最多补一次。
+1. 同一个 `gap.code + scope` 最多补一次；运行时以 `kind/code + suggested_tool + account/symbol/month/view/field/operation`
+   等 scope 字段生成 gap signature，只在 follow-up plan 被接受后记录为已尝试。
 2. follow-up 只能调用同 effect 的 read-only 工具。
 3. follow-up 不能扩大用户未要求的账户、标的、月份。
 4. follow-up 后仍缺数据时，answer 必须说明缺口和影响。
@@ -1470,6 +1484,7 @@ P2 最少补齐这些 case：
 | `assigned_stock_missing_quote` | 缺 spot 不算当前浮盈亏 |
 | `assigned_stock_fresh_quote` | fresh quote 下能回答持仓/spot/PnL |
 | `income_breakdown_followup` | 用户问来源时不能只给汇总 |
+| `symbol_resolve_identity` | 中文名/别名/Futu code 能解析到 canonical symbol |
 | `candidate_missing_artifact` | artifact 缺失不能编 root cause |
 | `candidate_observed_rejection` | 有 observed rejection 才能给直接原因 |
 | `runtime_no_notification` | market/scheduler/notification 状态分开 |
@@ -1573,8 +1588,8 @@ P2 按最小可交付版本收敛为五件事：
 | ActionPolicy | 已落地 P1 | read path 和 preview path 已有 policy decision，planner 不能直接 apply | 保持为权限权威，P2 不另建权限系统 |
 | ActionSafety | 已落地 M1 | 规则版 classifier 已检查 effect、scope、prompt injection chain；AgentLoop read tool 和 preview plan trace 已接入；同 scope read follow-up allow、跨账户 read ask、跨账户 write preview deny 已有 golden eval | 继续沉淀更多线上误判 golden case |
 | Hook pipeline | M3 本地验收通过 | `HookResult` 包装模型已接入 pre-tool、post-tool、coverage、answer trace；当前只做 trace，不接管 route；M3 聚焦测试和相关回归已通过 | 保持 route authority 在 AgentLoop，不继续扩大 hook pipeline |
-| Trace compact | M4 本地验收通过 | session snapshot 已能记录 task contract、coverage、evidence 摘要、diagnostics count/domains 和 hook code 摘要；`assistant_trace.response_text` 已按任务/工具/证据/缺口/校验/最终展示，并覆盖 ask、preview、rewrite、fallback、denied、release workflow pass、release no matching rows rewrite、read scope ask、runtime notification missing/conflict rewrite、runtime freshness gap rewrite、runtime scheduler skip rewrite、quote stale freshness rewrite、upgrade stale timeline rewrite、operation readback applied/cancelled、upgrade readback cancelled route 断言和 redaction 断言；`assistant_trace_route_samples` 已沉淀 17 条脱敏 route fixture | 继续沉淀真实线上 route 样本 |
-| Golden eval | M4 本地验收通过 | `assistant_agent_eval` 已有 38 条 fixture，覆盖收益对比、收益对比缺 sy 后同 scope follow-up、指派正股、stale quote freshness、runtime freshness gap、candidate why、candidate missing artifact、candidate partial-confidence root-cause、runtime why、runtime conflict/stale、runtime scheduler market-window skip、runtime notification missing、runtime notification conflict、upgrade receipt missing version、upgrade follow-up operation_timeline、upgrade conflict / command log missing、release tag not enough、release no matching rows、release published/failed、release/outcome conflict、old operation timeline、scope expansion、SQL-only scope expansion、prompt injection from tool output、write preview no apply；harness 已支持 final response、answer guard、coverage status/gap、diagnostic domain/status、action safety、preview no apply 和 follow-up tool call 断言 | 后续只追加线上回归样本，不为单一问题写专用模式 |
+| Trace compact | M4 本地验收通过 | session snapshot 已能记录 task contract、coverage、evidence 摘要、diagnostics count/domains 和 hook code 摘要；`assistant_trace.response_text` 已按任务/工具/证据/缺口/校验/最终展示，并覆盖 ask、preview/no-apply receipt、rewrite、fallback、denied、prompt injection deny、planner apply deny、release workflow pass/failed pass、release no matching rows rewrite、read scope ask、SQL period scope ask、runtime notification delivered pass、runtime notification missing/conflict rewrite、runtime freshness gap rewrite、runtime scheduler skip rewrite、quote stale freshness rewrite、candidate missing trace rewrite、upgrade command log missing rewrite、upgrade stale timeline rewrite、operation readback applied/cancelled、upgrade readback cancelled route 断言和 redaction 断言；`assistant_trace_route_samples` 已沉淀 24 条脱敏 route fixture | 继续沉淀真实线上 route 样本 |
+| Golden eval | M4 本地验收通过 | `assistant_agent_eval` 已有 42 条 fixture，覆盖收益对比、收益对比缺 sy 后同 scope follow-up、收益来源 summary-only 后 breakdown follow-up、指派正股、指派正股 fresh quote、指派正股缺 quote 后 refresh follow-up、stale quote freshness、symbol identity resolve、candidate_filter_explain observed rejection、candidate_filter_explain missing trace、candidate partial-confidence root-cause、runtime why、runtime conflict/stale、runtime scheduler market-window skip、runtime notification missing、runtime notification conflict、upgrade receipt missing version、upgrade follow-up operation_timeline、upgrade conflict / command log missing、release tag not enough、release no matching rows、release published/failed、release/outcome conflict、old operation timeline、scope expansion、SQL-only scope expansion、prompt injection from tool output、write preview no apply；harness 已支持 final response、answer guard、coverage status/gap、diagnostic domain/status、action safety、preview no apply、follow-up tool call 断言；测试会解析 6.6.2 P2 minimum case checklist，并要求 agent eval 与 trace route fixture mapping 完整对齐 | 后续只追加线上回归样本，不为单一问题写专用模式 |
 
 这个状态表的意义是控制开发顺序：
 
@@ -1605,7 +1620,8 @@ P2 历史上不按“抽象层”推进，而按四个可合并的小包推进�
   `command_status`、`current_version`、`target_version`、`receipt_status`。
 - 把 `current_version_missing`、`target_version_missing`、`receipt_not_observed`、
   `final_receipt_missing` 映射成 coverage gap。
-- gap 必须带 `required_answer_key`、`impact`、`recoverable` 和 `recoverable_by`。
+- gap 必须带 `required_answer_key`、`impact`、`recoverable` 和 `recoverable_by`；
+  `recoverable=true` 时还必须带明确的只读 `suggested_tool`。
 - 如果缺口只能通过 command audit / operation timeline 再读一次补齐，且当前 evidence
   还没有查询过对应只读 view，可以标记 `recoverable=true`。
 - 如果已经查过 `upgrade_operation_status` / operation timeline 后仍缺版本或回执，
@@ -1683,7 +1699,14 @@ P2 历史上不按“抽象层”推进，而按四个可合并的小包推进�
 
 当前本地落地：
 
-- `analysis_query.evidence.diagnostics` 仍是优先来源。
+- 开放式分析的 `analysis_query.evidence.diagnostics` 仍是优先来源；单标的
+  candidate-filter root-cause 使用 `candidate_filter_explain` 的 structured
+  evidence 作为优先来源。
+- `symbol_resolve` 的 `canonical_symbol` 作为 symbol fact 进入 answer verifier，
+  因此 LLM 可以在 guarded synthesis 中自然说明中文名/别名对应的标准代码。
+- `candidate_filter_explain` 在 AgentLoop 下会接收系统注入的 `config_key` / `config_path`，
+  用 runtime config aliases 先解析用户输入的中文名或配置别名，再匹配
+  `candidate_filter_trace`；planner 仍不能传入 config/path 这类系统字段。
 - 当 analysis result 只有 `rows/views_used` 而没有嵌套 diagnostics 时，`EvidenceBundle`
   会从 `candidate_filter_diagnostics`、`runtime_tick_status`、`close_advice_snapshot`、
   `quote_freshness`、`upgrade_operation_status` 的 rows 归一出 diagnostic evidence。
@@ -1756,8 +1779,49 @@ Golden eval 至少覆盖：
 
 本地落地状态：
 
-- `assistant_agent_eval` 已扩展为 38 条 fixture，新增覆盖升级状态问题触发一次只读
+- `assistant_agent_eval` 已扩展为 42 条 fixture，新增覆盖升级状态问题触发一次只读
   `operation_timeline` follow-up 后合并证据生成答案的路径。
+- 收益来源 / 组成问题已有 AgentLoop 级 golden eval：首轮只有
+  `account_monthly_performance` summary 时触发同 scope `analysis_query` follow-up，
+  补查 `account_monthly_income_components` 后再回答主要来源，不能只拿汇总编 driver。
+- 指派正股 missing quote 已有 AgentLoop 级 golden eval：首轮持仓读取缺 spot 时触发同
+  scope `refresh_quotes` follow-up；刷新后仍缺 quote 时，最终回答必须说明不能计算当前正股浮盈亏和生命周期 PnL，
+  不能编造金额或上游 OpenD/Futu 根因。
+- 指派正股 fresh quote 已有 `option_positions_read action=assigned-stock` 路径 golden eval：
+  quote fresh 时必须能回答剩余股数、成本、spot、正股浮盈亏和生命周期 PnL，同时不泄露 lot id 或工具名。
+- `tests/test_assistant_agent_eval.py` 和 `tests/test_assistant_evidence_session.py` 会解析本文档
+  6.6.2 的 P2 minimum case checklist，并要求每个 literal case 都映射到 required fixture，
+  避免只按主题分组覆盖后遗漏文档中的条目；`trace_compact_no_internal_leak` 由 trace route fixture 显式覆盖。
+- `test_assistant_agent_eval_minimum_cases_satisfy_online_sample_contract` 会约束 6.6.2 minimum
+  fixture 必须有问题、证据、route / 结果断言、必须出现文本、禁止出现文本；有 coverage gap
+  或 diagnostic 的 case 还必须断言缺口或影响文案，避免线上样本只靠固定回答文本通过。
+- `test_assistant_trace_route_samples_satisfy_online_sample_contract` 会约束 trace route fixture
+  必须符合 6.20 线上样本契约：`trace_*` 命名、compact trace、final route 断言、必须/禁止展示文本，
+  且 payload 中的 SQL、local path、raw log、message id、session id 等敏感值必须进入
+  `expect_not_contains`。
+- `test_documented_p2_failure_handling_routes_have_evidence` 会解析 6.12 的失败处理表，要求每个
+  failure point 的 route 与文档一致，并映射到现有测试、Agent eval 或 compact trace fixture；文档新增失败
+  route 但没有证据样本时，发布门禁会失败。
+- `test_documented_p2_bounded_followup_denials_have_evidence` 会解析 6.12 的 bounded follow-up
+  禁止清单，要求 planner apply/confirm/cancel、写入确认缺口、外部副作用缺口和 scope 扩张都映射到
+  现有 runtime、eval 或 trace 证据；文档新增禁止项但没有证据样本时，发布门禁会失败。
+- `test_documented_p2_closure_completion_items_have_test_evidence` 会解析 6.18 的五条完成判定，
+  并要求每条都映射到现有 coverage / follow-up / answer / eval 测试证据，避免收口标准只停留在文档。
+- `test_documented_p2_release_gaps_have_fixture_or_gate_evidence` 会把 6.19 六类发布前缺口
+  直接映射到已存在的 agent eval、trace route fixture 或 release-plan 测试；文档新增缺口但没有证据样本时，
+  发布门禁会失败。
+- `test_documented_p2_not_do_items_have_boundary_evidence` 会解析 6.17 的“不做清单”，要求每条
+  都映射到现有权限、配置、registry、trace/eval 或 leak guard 测试；文档新增边界但没有行为证据时，
+  发布门禁会失败。
+- `test_documented_p2_code_acceptance_matrix_has_three_layer_evidence` 会解析 6.13 的代码验收矩阵，
+  要求每个 slice 都同时映射到模型/纯函数、运行时、trace/eval 三类证据；文档新增 slice 但没有三层
+  验收证据时，发布门禁会失败。
+- `test_documented_p2_route_priority_has_trace_or_eval_evidence` 会解析 6.14 的 route 优先级
+  `deny > ask > fallback > rewrite > pass`，要求每个最终 route 都至少有现有测试或 compact trace
+  fixture 证据；文档调整 route 权威但没有 route 样本时，发布门禁会失败。
+- `test_documented_p2_evidence_trace_ownership_has_test_evidence` 会解析 6.15 的五条 Evidence/Trace
+  ownership 实现约束，要求最终答案、hook、session store、compact trace 和测试断言边界都映射到现有
+  测试证据；文档新增所有权约束但没有行为证据时，发布门禁会失败。
 - `prompt_injection_from_tool_output_denied` 使用 action safety 模式，断言工具输出里的
   `忽略上文/确认写入/修改配置` 不能形成写入授权链路。
 - `write_preview_no_apply_manual_trade_open` 走真实 AgentLoop preview path，断言只生成
@@ -1784,7 +1848,7 @@ Bounded follow-up 只允许补同一用户问题所需的只读证据。以下�
 
 - planner 想 apply/confirm/cancel。
 - 缺口来自写入确认。
-- 缺口需要启动服务、通知、broker、OpenD 或远端 release。
+- 缺口需要启动服务、补发通知、broker-facing 操作、启动/修复 OpenD，或发布远端 release。
 - follow-up 会扩大到用户未要求的账户、标的、月份。
 
 ### 6.13 P2 代码验收矩阵
@@ -1795,7 +1859,7 @@ Bounded follow-up 只允许补同一用户问题所需的只读证据。以下�
 |---|---|---|---|
 | ActionSafety | classifier 对 read/preview/apply/scope/injection 的判定 | AgentLoop pre-tool deny/ask/pass | trace 含 action safety code |
 | Quote diagnostics | EvidenceBundle 提取 quote gap/stale | assigned-stock 回答 missing quote fallback | 回答不编 upstream cause |
-| Candidate why | adapter 区分 observed/missing/artifact | why 问题缺 artifact 不 pass | trace 说明缺 candidate trace |
+| Candidate why | `candidate_filter_explain` / diagnostics adapter 区分 observed/missing/artifact | why 问题缺 trace 或 artifact 不 pass | trace 说明缺 candidate trace |
 | Runtime why | adapter 区分 market/scheduler/notification | no notification 问题不编单一原因 | trace 展示状态拆分 |
 | Upgrade receipt | adapter 区分 version/command/receipt | version 为空时不能成功回执 | trace 展示 command log 缺口 |
 | Coverage / upgrade status | coverage gap 区分可补/不可补 | 已查 operation timeline 后不继续 unsafe follow-up | 回答展示缺版本/回执的影响 |
@@ -1884,7 +1948,7 @@ P2 必须分清“业务事实”和“过程解释”，否则 trace 容易污�
 | M2 Diagnostic adapter | 本地部分验收通过 | candidate/runtime/quote row-derived diagnostics 已覆盖 direct/missing/conflict/stale；`runtime_tick_status` 已穿透 scheduler_should_run_scan / scheduler_should_notify / scheduler_reason，能把 scheduler market-window skip 与通知通道失败分开；upgrade missing version 已从 fixture 扩展为真实 `upgrade_operation_status` view，并保留 partial/missing_data 语义；runtime conflict/stale、runtime scheduler market-window skip、runtime notification conflict、stale quote、old operation timeline、upgrade conflict / command log missing、release_tag-only publication gap、release published/failed、release/outcome conflict 已进入 golden eval | 仍需更多线上 release status / runtime notification 样本 |
 | M2.5 Coverage/Upgrade | 本地验收通过 | `CoverageVerifier` 已把 upgrade diagnostics 转成 current/target version、receipt、command status、release publication status gap；已查 operation timeline 后仍缺版本/回执/release 发布证据会 `answer_with_missing_data`，不会触发 follow-up；未查 timeline 且有 operation id 时允许一次只读 follow-up，并已有 AgentLoop e2e 和 golden eval 覆盖 audit_db 注入、证据合并、旧 capability gap 清除 |
 | M3 HookResult | 本地验收通过 | hook code 已进入 compact trace；后续只补真实样本，不扩大 hook pipeline |
-| M4 Trace/Eval | 本地验收通过 | compact trace renderer、redaction、ask/preview/rewrite/fallback/denied/release workflow pass/release no matching rows rewrite/read scope ask/runtime notification missing/conflict rewrite/runtime freshness gap rewrite/runtime scheduler skip rewrite/quote stale freshness rewrite/upgrade stale timeline rewrite/operation readback applied/cancelled/upgrade readback cancelled route 断言已落地；`assistant_trace_route_samples` 已有 17 条脱敏 route fixture；`assistant_agent_eval` 已扩到 38 条，包含收益对比缺 sy follow-up、stale quote、runtime freshness gap、candidate missing artifact、candidate partial-confidence root-cause、runtime conflict/stale、runtime scheduler market-window skip、runtime notification missing、runtime notification conflict、old operation timeline、upgrade follow-up operation_timeline、upgrade conflict / command log missing、release tag not enough、release no matching rows、release published/failed、release/outcome conflict、scope expansion、SQL-only scope expansion、upgrade receipt missing version、prompt injection from tool output、write preview no apply | 可继续补真实线上 route 样本 |
+| M4 Trace/Eval | 本地验收通过 | compact trace renderer、redaction、ask/preview-no-apply receipt/rewrite/fallback/denied/prompt injection deny/planner apply deny/release workflow pass/failed pass/release no matching rows rewrite/read scope ask/SQL period scope ask/runtime notification delivered pass/runtime notification missing/conflict rewrite/runtime freshness gap rewrite/runtime scheduler skip rewrite/quote stale freshness rewrite/candidate missing trace rewrite/upgrade command log missing rewrite/upgrade stale timeline rewrite/operation readback applied/cancelled/upgrade readback cancelled route 断言已落地；`assistant_trace_route_samples` 已有 24 条脱敏 route fixture；`assistant_agent_eval` 已扩到 42 条，包含收益对比缺 sy follow-up、收益来源 breakdown follow-up、指派正股 fresh quote、指派正股缺 quote refresh follow-up、stale quote、symbol identity resolve、candidate_filter_explain observed rejection、candidate_filter_explain missing trace、candidate partial-confidence root-cause、runtime conflict/stale、runtime scheduler market-window skip、runtime notification missing、runtime notification conflict、old operation timeline、upgrade follow-up operation_timeline、upgrade conflict / command log missing、release tag not enough、release no matching rows、release published/failed、release/outcome conflict、scope expansion、SQL-only scope expansion、upgrade receipt missing version、prompt injection from tool output、write preview no apply；6.6.2 P2 minimum checklist 已有文档解析驱动的 agent eval 与 trace route 映射断言 | 可继续补真实线上 route 样本 |
 
 M3 已完成本地验收，后续不要继续扩大 hook pipeline。M3 已证明三件事：
 
@@ -1926,6 +1990,9 @@ python3 -m pytest tests/test_analysis_tools.py -k "analysis_query or evidence or
 - 不把 tool output 中的指令当作下一步授权。
 - 不在普通回答里展示 SQL、path、internal id、lot id、raw command log。
 - 不为了一个线上问题新增专用工具；优先增强通用 evidence、coverage、trace 和 eval。
+- `symbol_resolve` 属于通用 symbol identity read tool，不是 candidate-filter 专用
+  hard-coded answer；`candidate_filter_explain` 和 `candidate_filter_diagnostics`
+  共享 trace 事实源，区别只在任务形入口和聚合 view。
 
 如果后续确实需要新增工具，必须满足三个条件：
 
@@ -1987,10 +2054,15 @@ operation/audit 状态，不能执行升级、重启、补发通知或修改 run
 
 `AgentLoop` 合并 evidence gaps 后必须过滤不可补缺口：
 
-1. 只有 `recoverable=true` 的 gap 能进入 `_should_replan_read_only`。
-2. `suggested_tool` 必须是 manifest 上的 read-only 工具。
-3. `recoverable_by` 不能是 service、notification、broker、OpenD refresh 或 apply/confirm。
-4. 同一 `gap.kind + scope` 只补一次。
+1. 只有 `recoverable=true` 且带 `suggested_tool` 的 gap 能进入 `_should_replan_read_only`。
+2. `suggested_tool` 必须是 manifest 上的 read-only 工具；当前实现以 registry-declared
+   pure-read tool 为权威，不维护第二套 follow-up 白名单。follow-up planner contract
+   只暴露 gap 的 `suggested_tool`；仅 analysis gap 额外允许 `analysis_catalog`
+   做字段发现。
+3. `recoverable_by` 不能是 service、notification、broker、release workflow、OpenD service repair
+   或 apply/confirm；`refresh_quotes` 只限已有 read-only quote 工具，不能启动或修复 OpenD。
+4. 同一 `gap.kind + scope` 只补一次；如果 follow-up 后仍出现同签名缺口，AgentLoop 直接
+   `stop_with_gap`，不再把同一缺口交给 planner 生成第二个查询。
 5. 不可补缺口进入 final answer，要求 answer verifier 检查是否披露缺口。
 
 这样可以解决两个问题：
@@ -2059,11 +2131,11 @@ python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_sm
 
 | 缺口 | 当前状态 | 需要补什么 | 完成判定 |
 |---|---|---|---|
-| 真实 session route 样本 | 已补 `assistant_trace_route_samples` 17 条脱敏 route fixture，覆盖 ask / preview / rewrite / fallback / deny / release workflow pass / release no matching rows rewrite / read scope ask / runtime notification missing rewrite / runtime notification conflict rewrite / runtime freshness gap rewrite / runtime scheduler skip rewrite / quote stale freshness rewrite / upgrade stale timeline rewrite / operation readback applied / operation readback cancelled / upgrade readback cancelled；compact trace 能解释 route，且已有集中 redaction guard 防止 SQL/path/session id/lot id/raw log/canonical/synthesis 泄露 | 继续从真实线上回执补充同格式样本 | trace 能解释 route，不泄露 SQL/path/internal id |
+| 真实 session route 样本 | 已补 `assistant_trace_route_samples` 24 条脱敏 route fixture，覆盖 ask / preview no apply / rewrite / fallback / deny / prompt injection deny / planner apply deny / release workflow pass / release workflow failed pass / release no matching rows rewrite / read scope ask / SQL period scope ask / runtime notification delivered pass / runtime notification missing rewrite / runtime notification conflict rewrite / runtime freshness gap rewrite / runtime scheduler skip rewrite / quote stale freshness rewrite / candidate missing trace rewrite / upgrade command log missing rewrite / upgrade stale timeline rewrite / operation readback applied / operation readback cancelled / upgrade readback cancelled；compact trace 能解释 route，且已有集中 redaction guard 防止 SQL/path/session id/lot id/raw log/canonical/synthesis 泄露 | 继续从真实线上回执补充同格式样本 | trace 能解释 route，不泄露 SQL/path/internal id |
 | runtime stale / conflict | 已补 `runtime_why_conflict_stale_answer`、`runtime_scheduler_skip_market_window_answer`、`runtime_notification_missing_not_success_answer`、`runtime_notification_status_conflict_answer` golden fixture；`runtime_tick_status` 已能归一 direct / missing / conflict，并能把 scheduler market-window skip、runtime 成功终态与通知失败终态分开识别；Answer verifier 已覆盖 runtime freshness gap / notification missing / notification conflict 不能被说成确定根因或确定送达成功，同时 direct scheduler skip 仍可作为直接观测原因 | 继续从线上补更多 runtime stale / notification audit 样本 | why 回答不能给单一确定原因 |
 | upgrade conflict / command log missing / release status | 已补 `operation_upgrade_conflict_command_log_missing_answer`、`operation_upgrade_release_tag_not_enough_answer`、`operation_upgrade_release_published_answer`、`operation_upgrade_release_failed_answer`、`operation_upgrade_release_outcome_conflict_answer` golden fixture；`command_log_missing` 会归入 `artifact_missing`；只有 `release_tag` 时会产生 `release_publication_status_missing`，并由 coverage 转成不可补 `upgrade_release_publication_status_missing`；`release_status` 与 `outcome_status` / `operation_status` 矛盾会归入不可补 `upgrade_status_conflict`；`operation_timeline` diagnostic scope 已暴露 operation/outcome/receipt status，Answer verifier 可校验状态值但仍拦截无 caveat 的确定性成功/失败结论 | 继续从线上补真实 release success / failure 样本 | 不能宣称升级或 release 成功；必须说明冲突、缺日志或缺发布证据的影响 |
-| scope expansion 误判 | 已补 `action_safety_read_followup_same_scope_allowed`、`action_safety_read_scope_expansion_asks`、`action_safety_read_sql_account_scope_expansion_asks`、`action_safety_read_sql_symbol_scope_expansion_asks`、`action_safety_read_sql_period_scope_expansion_asks`、`action_safety_cross_account_write_denied` golden fixture；ActionSafety 会从 SQL-only payload 提取账户、标的、月份 scope 线索 | 继续从线上补更多误判样本 | 同 scope read follow-up 允许；未请求写入或跨账户/跨标的/跨月份写入拒绝，read 场景越界要求 ask |
-| answer source/freshness | Answer verifier 已覆盖金额、quote、diagnostic root cause、analysis quote gap 上游根因外推、unresolved diagnostics 下的确定性状态结论；已补旧 runtime 快照、stale quote、old operation timeline、runtime freshness gap、partial confidence root-cause final answer 断言；runtime freshness gap 和 candidate summary-only partial-confidence 已进入 agent eval，要求旧快照不能被回答成当前推送根因，摘要级候选诊断不能被回答成确定过滤规则；quote freshness diagnostic 会在缺省摘要里保留 `quote_status` 和 as-of/spot_time；route fixture 已覆盖 quote stale rewrite；agent eval 已有集中 UX leak guard，防止最终回执展示内部工具名、SQL、内部 id/path、raw log、canonical/synthesis 或强制事实/分析分段 | 继续沉淀更多线上 freshness 样本 | 最终回答必须披露 as-of / stale 影响，且不泄露内部执行细节 |
+| scope expansion 误判 | 已补 `action_safety_read_followup_same_scope_allowed`、`action_safety_read_scope_expansion_asks`、`action_safety_read_sql_account_scope_expansion_asks`、`action_safety_read_sql_symbol_scope_expansion_asks`、`action_safety_read_sql_period_scope_expansion_asks`、`action_safety_cross_account_write_denied` golden fixture；ActionSafety 会从 SQL-only payload 提取账户、标的、月份 scope 线索；compact trace 已覆盖 SQL-only period scope ask，且不展示生成 SQL | 继续从线上补更多误判样本 | 同 scope read follow-up 允许；未请求写入或跨账户/跨标的/跨月份写入拒绝，read 场景越界要求 ask |
+| answer source/freshness | Answer verifier 已覆盖金额、quote、diagnostic root cause、analysis quote gap 上游根因外推、unresolved diagnostics 下的确定性状态结论；已补旧 runtime 快照、stale quote、old operation timeline、runtime freshness gap、partial confidence root-cause final answer 断言；runtime freshness gap、candidate_filter_explain missing trace 和 candidate summary-only partial-confidence 已进入 agent eval，要求旧快照不能被回答成当前推送根因，缺 trace / 摘要级候选诊断不能被回答成确定过滤规则；quote freshness diagnostic 会在缺省摘要里保留 `quote_status` 和 as-of/spot_time；route fixture 已覆盖 quote stale rewrite；agent eval 已有集中 UX leak guard，防止最终回执展示内部工具名、SQL、内部 id/path、raw log、canonical/synthesis 或强制事实/分析分段 | 继续沉淀更多线上 freshness 样本 | 最终回答必须披露 as-of / stale 影响，且不泄露内部执行细节 |
 | 发布 gate | 已补 release checklist 对应命令和失败回退说明；`release_test_plan` 已能在 Agent reliability、evidence、trace、eval 或 tool contract 文件变更时自动纳入 P2 gate | 每次 release 前按 6.21 执行并记录证据 | release 前能一眼判断是否可发 |
 
 不补：
@@ -2132,7 +2204,7 @@ python3 -m pytest tests/test_assistant_evidence_session.py
 python3 -m pytest tests/test_assistant_agent_eval.py
 python3 -m pytest tests/test_assistant_runtime.py
 python3 -m pytest tests/test_analysis_tools.py
-python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py
+python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py tests/test_candidate_filter_trace.py
 python3 scripts/release_check.py
 ```
 
@@ -2140,18 +2212,27 @@ python3 scripts/release_check.py
 
 | Gate | 命令 | 通过证据 | 失败回退 |
 |---|---|---|---|
-| fixture 格式 | `jq -c . tests/fixtures/assistant_agent_eval.jsonl` | 38 条 JSONL 都能逐行解析 | 停止发布，先修 fixture；不要删除失败样本 |
-| trace route fixture | `jq -c . tests/fixtures/assistant_trace_route_samples.jsonl` + `python3 -m pytest tests/test_assistant_evidence_session.py::test_format_assistant_trace_route_samples_from_fixture` | ask/preview/rewrite/fallback/denied/release-pass/release-missing/read-scope-ask/runtime-missing/runtime-conflict/runtime-freshness/runtime-scheduler-skip/quote-stale/upgrade-stale/operation-readback applied/cancelled/upgrade-cancelled 都能解释 route，且集中 redaction guard 通过 | 停止发布，先修 compact renderer 或脱敏 fixture |
-| agent eval | `python3 -m pytest tests/test_assistant_agent_eval.py` | stale/conflict/release_tag/scope 等 fixture 全部通过，P2 agent-eval gap group 覆盖断言通过，且集中 UX leak guard 通过 | 回到 evidence / coverage / verifier 修根因，不加固定文案 |
+| fixture 格式 | `jq -c . tests/fixtures/assistant_agent_eval.jsonl` | 42 条 JSONL 都能逐行解析 | 停止发布，先修 fixture；不要删除失败样本 |
+| trace route fixture | `jq -c . tests/fixtures/assistant_trace_route_samples.jsonl` + `python3 -m pytest tests/test_assistant_evidence_session.py::test_format_assistant_trace_route_samples_from_fixture tests/test_assistant_evidence_session.py::test_assistant_trace_fixture_covers_documented_p2_minimum_cases tests/test_assistant_evidence_session.py::test_assistant_trace_minimum_case_mapping_matches_design_document tests/test_assistant_evidence_session.py::test_assistant_trace_route_samples_satisfy_online_sample_contract` | ask/preview-no-apply/rewrite/fallback/denied/prompt-injection-denied/planner-apply-denied/release-pass/release-failed/release-missing/read-scope-ask/sql-period-scope-ask/runtime-delivered/runtime-missing/runtime-conflict/runtime-freshness/runtime-scheduler-skip/quote-stale/candidate-missing-trace/upgrade-command-log-missing/upgrade-stale/operation-readback applied/cancelled/upgrade-cancelled 都能解释 route，集中 redaction guard 通过，且 6.6.2 trace case 与 fixture mapping、6.20 线上样本契约对齐 | 停止发布，先修 compact renderer 或脱敏 fixture |
+| agent eval | `python3 -m pytest tests/test_assistant_agent_eval.py` | stale/conflict/release_tag/scope 等 fixture 全部通过，P2 agent-eval gap group、6.6.2 minimum case mapping、6.20 online sample contract 和集中 UX leak guard 通过 | 回到 evidence / coverage / verifier 修根因，不加固定文案 |
 | verifier / runtime / analysis | `python3 -m pytest tests/test_assistant_evidence_session.py tests/test_assistant_runtime.py tests/test_analysis_tools.py` | diagnostics、follow-up、rewrite/fallback、analysis view 回归全部通过 | 保留失败 trace，缩小到对应模块修复 |
-| agent contract | `python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py` | public tool contract 和 smoke 全部通过 | 不发布；先同步 tool metadata / output contract |
+| agent contract | `python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py tests/test_candidate_filter_trace.py` | public tool contract、smoke、symbol resolve 与 candidate trace 直接工具测试全部通过 | 不发布；先同步 tool metadata / output contract |
 | release metadata | `python3 scripts/release_check.py --tag v<VERSION>` | `VERSION`、`CHANGELOG.md`、tag 名称一致 | 修版本元数据；不要手动绕过 VERSION workflow |
 | diff hygiene | `git diff --check` | 无 whitespace / conflict marker 问题 | 修当前 diff；不要把格式噪声混入 release |
 
 `scripts/release_test_plan.py --mode standard --base origin/main` 会根据当前变更生成
 read-only 发布测试计划。涉及 `src/application/assistant/**`、`src/application/agent_tools/**`、
 `assistant_agent_eval.jsonl`、`assistant_trace_route_samples.jsonl` 或本文档时，计划必须包含
-fixture guard、agent eval / evidence session / runtime / analysis / plugin contract 的 P2 gate；
+fixture guard、6.6.2 doc-to-fixture mapping guard、6.12 failure-handling route guard、
+6.12 bounded-followup deny-list guard、
+6.13 code-acceptance evidence guard、
+6.14 route-priority evidence guard、6.15 evidence/trace ownership guard、6.17 not-do boundary guard、
+6.18 completion-to-test guard、6.19 gap-to-evidence
+guard、6.20 online sample contract guard、agent eval / evidence session / runtime / analysis / plugin contract / candidate trace direct tool tests 的 P2 gate；同时
+release-plan 单测会解析 6.12 的 failure route 表和 bounded follow-up 禁止清单、6.13 的 slice 验收矩阵、6.14 的 route 优先级、
+6.15 的 evidence/trace ownership 约束、6.19 的六类发布前缺口，并要求每一类都映射到具体
+release-gate 命令和 fixture / test 证据；也会解析 6.21 的可发布判定，要求每条判定都映射到具体
+release-gate 命令。
 不要只依赖泛化的 dependency graph 检查。
 
 可发布判定：

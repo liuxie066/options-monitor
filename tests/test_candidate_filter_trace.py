@@ -224,6 +224,110 @@ def test_candidate_filter_explain_reads_trace_path(tmp_path: Path) -> None:
     assert out["meta"]["source_files"][0]["rows"] == 1
 
 
+def test_candidate_filter_explain_resolves_symbol_alias_before_matching_trace(tmp_path: Path) -> None:
+    from src.application.candidate_filter_trace import (
+        append_candidate_filter_trace_rows,
+        build_candidate_filter_trace_row,
+    )
+    from src.application.tool_execution import execute_tool as run_tool
+
+    trace_path = tmp_path / "candidate_filter_trace.jsonl"
+    append_candidate_filter_trace_rows(
+        trace_path,
+        [
+            build_candidate_filter_trace_row(
+                run_id="run-1",
+                account="sy",
+                symbol="9992.HK",
+                function="sell_put",
+                mode="put",
+                status="rejected",
+                stage="risk_filter",
+                rule="risk_spread",
+                metric_value=0.35,
+                threshold=0.2,
+                message="spread too wide",
+                evidence_path="9992_sell_put_candidates_labeled.csv",
+            )
+        ],
+    )
+
+    out = run_tool(
+        "candidate_filter_explain",
+        {"trace_path": str(trace_path), "symbol": "泡泡玛特"},
+    )
+
+    assert out["ok"] is True
+    assert out["data"]["raw_symbol"] == "泡泡玛特"
+    assert out["data"]["symbol"] == "9992.HK"
+    assert out["data"]["canonical_symbol"] == "9992.HK"
+    assert out["data"]["trace_count"] == 1
+    assert out["data"]["scope"]["account_semantics"] == "scan_scope"
+    sell_put = next(item for item in out["data"]["functions"] if item["function"] == "sell_put")
+    assert sell_put["status"] == "rejected"
+    assert sell_put["reason_counts"]["risk_spread"] == 1
+
+
+def test_candidate_filter_explain_uses_config_symbol_aliases_before_matching_trace(tmp_path: Path) -> None:
+    from src.application.agent_tool_candidate_filter import candidate_filter_explain_tool
+    from src.application.candidate_filter_trace import (
+        append_candidate_filter_trace_rows,
+        build_candidate_filter_trace_row,
+    )
+
+    trace_path = tmp_path / "candidate_filter_trace.jsonl"
+    append_candidate_filter_trace_rows(
+        trace_path,
+        [
+            build_candidate_filter_trace_row(
+                run_id="run-1",
+                account="sy",
+                symbol="3690.HK",
+                function="sell_put",
+                mode="put",
+                status="rejected",
+                stage="risk_filter",
+                rule="risk_delta",
+                metric_value=-0.45,
+                threshold=-0.3,
+                message="delta too high",
+                evidence_path="3690_sell_put_candidates_labeled.csv",
+            )
+        ],
+    )
+
+    data, warnings, meta = candidate_filter_explain_tool(
+        {"trace_path": str(trace_path), "symbol": "MELIHK"},
+        repo_base=lambda: tmp_path,
+        mask_path=lambda path: f".../{Path(path).name}" if path else None,
+        symbol_aliases={"MELIHK": "3690.HK"},
+    )
+
+    assert warnings == []
+    assert data["raw_symbol"] == "MELIHK"
+    assert data["symbol"] == "3690.HK"
+    assert data["canonical_symbol"] == "3690.HK"
+    assert data["trace_count"] == 1
+    assert meta["source_files"][0]["path"] == ".../candidate_filter_trace.jsonl"
+    sell_put = next(item for item in data["functions"] if item["function"] == "sell_put")
+    assert sell_put["status"] == "rejected"
+    assert sell_put["reason_counts"]["risk_delta"] == 1
+
+
+def test_symbol_resolve_tool_maps_name_alias_to_canonical_symbol() -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    out = run_tool("symbol_resolve", {"symbol": "泡泡玛特"})
+
+    assert out["ok"] is True
+    assert out["data"]["resolved"] is True
+    assert out["data"]["raw_input"] == "泡泡玛特"
+    assert out["data"]["canonical_symbol"] == "9992.HK"
+    assert out["data"]["market"] == "HK"
+    assert out["data"]["currency"] == "HKD"
+    assert out["data"]["futu_code"] == "HK.09992"
+
+
 def test_candidate_rank_explain_reads_run_account_candidates(tmp_path: Path) -> None:
     from src.application.agent_tool_candidate_rank import candidate_rank_explain_tool
 

@@ -145,6 +145,7 @@ def _intent_families(question_goal_text: str, full_text: str) -> list[str]:
         "指派" in full_compact and any(token in full_compact for token in ("正股", "浮盈亏", "生命周期", "spot"))
     )
     is_upgrade_status = any(token in compact for token in ("升级", "版本", "回执", "发布", "release", "deploy"))
+    is_candidate_filter_diagnostic = _is_candidate_filter_diagnostic(question_goal_text, full_text)
     if (
         (
             any(token in compact for token in ("对比", "比较", "谁更高", "compare"))
@@ -155,6 +156,12 @@ def _intent_families(question_goal_text: str, full_text: str) -> list[str]:
     ):
         families.append("account_comparison")
     if (
+        not is_upgrade_status
+        and not is_assigned_stock_pnl
+        and is_candidate_filter_diagnostic
+    ):
+        families.append("candidate_filter_diagnostic")
+    elif (
         not is_upgrade_status
         and not is_assigned_stock_pnl
         and any(token in compact for token in ("为什么", "原因", "来源", "组成", "构成", "主要来自", "哪里", "breakdown", "driver"))
@@ -187,6 +194,8 @@ def _answer_keys(*, intent_families: list[str], text: str) -> tuple[list[str], l
         optional.append("main_drivers")
     if "breakdown" in intent_families:
         required.extend(["summary", "main_drivers", "source_and_policy"])
+    if "candidate_filter_diagnostic" in intent_families:
+        required.extend(["summary", "source_and_policy"])
     if "assigned_stock_pnl" in intent_families:
         required.extend(
             [
@@ -229,6 +238,8 @@ def _constraints(intent_families: list[str], *, required_answer: list[str]) -> l
     constraints = ["must_cite_source_or_policy", "do_not_expose_internal_ids_or_sql"]
     if "account_comparison" in intent_families or "breakdown" in intent_families:
         constraints.extend(["do_not_average_return_rates", "keep_cashflow_realized_pnl_and_premium_separate"])
+    if "candidate_filter_diagnostic" in intent_families:
+        constraints.append("candidate_filter_root_cause_requires_trace_evidence")
     if "assigned_stock_pnl" in intent_families:
         constraints.extend(
             [
@@ -240,6 +251,41 @@ def _constraints(intent_families: list[str], *, required_answer: list[str]) -> l
     if "upgrade_status" in intent_families and {"current_version", "target_version"} <= set(required_answer):
         constraints.append("version_receipt_requires_current_and_target_version")
     return _unique(constraints)
+
+
+def _is_candidate_filter_diagnostic(question_goal_text: str, full_text: str) -> bool:
+    compact = re.sub(r"\s+", "", question_goal_text.lower())
+    full_compact = re.sub(r"\s+", "", full_text.lower())
+    candidate_context = any(
+        token in full_compact
+        for token in (
+            "候选",
+            "candidate",
+            "filter",
+            "过滤",
+            "trace",
+        )
+    )
+    if not candidate_context:
+        return False
+    return any(
+        token in compact
+        for token in (
+            "没出现在候选",
+            "没进候选",
+            "为什么没",
+            "为什么",
+            "被哪个参数过滤",
+            "参数过滤",
+            "被过滤",
+            "过滤了",
+            "filter",
+            "filtered",
+            "rejected",
+            "missingcandidate",
+            "why",
+        )
+    )
 
 
 def _plan_values(value: Any) -> list[str]:

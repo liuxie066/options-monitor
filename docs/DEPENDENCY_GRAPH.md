@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 668 (`src`: 384, `domain`: 52, `scripts`: 7, `tests`: 225)
-- Internal import edges: 3587 total, 1680 production/script edges excluding tests
+- Internal import edges: 3597 total, 1682 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,7 +31,7 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|224| domain
+  application -->|225| domain
   application -->|2| domain_services
   application -->|109| infrastructure
   application -->|34| storage
@@ -44,7 +44,7 @@ flowchart LR
   scripts -->|1| infrastructure
   scripts -->|2| storage
   storage -->|1| domain
-  tests -->|1303| application
+  tests -->|1311| application
   tests -->|289| domain
   tests -->|2| domain_services
   tests -->|95| infrastructure
@@ -57,7 +57,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 224 |
+| application | domain | 225 |
 | application | infrastructure | 109 |
 | interfaces | application | 109 |
 | application | storage | 34 |
@@ -75,7 +75,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 1303 |
+| tests | application | 1311 |
 | tests | domain | 289 |
 | tests | interfaces | 174 |
 | tests | infrastructure | 95 |
@@ -89,7 +89,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 
 | from | to | imports |
 |---|---|---|
-| src.application | domain.domain | 118 |
+| src.application | domain.domain | 119 |
 | src.interfaces | src.application | 89 |
 | src.application | src.infrastructure | 80 |
 | src.application.ledger | domain.domain.ledger | 29 |
@@ -178,7 +178,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.application.agent_tool_contracts | 84 |
 | src.infrastructure.io_utils | 42 |
 | domain.domain.ledger.position_fields | 42 |
-| domain.domain.symbol_identity | 34 |
+| domain.domain.symbol_identity | 35 |
 | src.application.assistant.contracts | 29 |
 | src.application.agent_tool_config | 26 |
 | src.application.config_loader | 26 |

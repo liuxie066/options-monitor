@@ -77,6 +77,7 @@ ARGUMENT_JSON_SCHEMA: dict[str, dict[str, Any]] = {
     "model_profile": {"type": ["string", "null"]},
     "strategy": {"type": ["string", "null"]},
     "field": {"type": ["string", "null"]},
+    "function": {"type": ["string", "null"]},
     "view": {"type": ["string", "null"]},
     "views": {
         "type": ["array", "null"],
@@ -141,6 +142,24 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         arguments=("symbol", "strategy", "field"),
         examples=("现在泡泡玛特 sell put 的 max strike 是多少", "查询 9992.HK sell_put.max_strike"),
         summary="read current monitored-symbol strategy config for a symbol",
+    ),
+    AssistantCommandSpec(
+        intent_name="symbol_resolve",
+        tool_name="symbol_resolve",
+        commands=(),
+        display_name="标的解析",
+        arguments=("symbol",),
+        examples=("泡泡玛特是什么 symbol", "POP 对应哪个标的", "HK.09992 解析成什么"),
+        summary="resolve a user-provided symbol/name/alias/Futu code to canonical OM symbol identity",
+    ),
+    AssistantCommandSpec(
+        intent_name="candidate_filter_explain",
+        tool_name="candidate_filter_explain",
+        commands=(),
+        display_name="候选过滤诊断",
+        arguments=("symbol", "account", "function", "run_id"),
+        examples=("泡泡玛特被哪个参数过滤了？", "为什么 NVDA 没出现在候选里？", "lx NVDA sell_put 为什么被过滤？"),
+        summary="explain a single symbol's observed candidate filter/rejection/missing trace rows from candidate_filter_trace artifacts",
     ),
     AssistantCommandSpec(
         intent_name="analysis_catalog",

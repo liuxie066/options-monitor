@@ -351,6 +351,14 @@ def _diagnostic_records(
 ) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     records.extend(_analysis_diagnostic_records(observation=observation, data=data, source_label=source_label))
+    records.extend(
+        _candidate_filter_tool_diagnostic_records(
+            observation=observation,
+            data=data,
+            contract=contract,
+            source_label=source_label,
+        )
+    )
     records.extend(_assigned_stock_quote_diagnostic_records(observation=observation, data=data, contract=contract, source_label=source_label))
     records.extend(_upgrade_operation_diagnostic_records(observation=observation, data=data, source_label=source_label))
     return records
@@ -791,6 +799,88 @@ def _candidate_diagnostic_summary(*, status: str, rules: list[str]) -> str:
             else "candidate diagnostic contains observed rejection/filter evidence"
         )
     return "candidate diagnostic rows were observed"
+
+
+def _candidate_filter_tool_diagnostic_records(
+    *,
+    observation: dict[str, Any],
+    data: dict[str, Any],
+    contract: dict[str, Any],
+    source_label: str,
+) -> list[dict[str, Any]]:
+    if str(observation.get("tool_name") or "") != "candidate_filter_explain":
+        return []
+    if str(contract.get("canonical_renderer") or "") != "candidate_filter_explain":
+        return []
+
+    trace_count = int(_safe_float(data.get("trace_count")) or 0)
+    scope = {
+        "accounts": _merged_scope_values((data.get("scope") or {}).get("account") if isinstance(data.get("scope"), dict) else None, data.get("account")),
+        "symbols": _merged_scope_values(data.get("canonical_symbol"), data.get("symbol")),
+        "views": ["candidate_filter_trace"],
+    }
+    if trace_count <= 0:
+        symbol = str(data.get("canonical_symbol") or data.get("symbol") or data.get("raw_symbol") or "").strip()
+        reason = f"candidate filter trace has no matching rows for {symbol}" if symbol else "candidate filter trace has no matching rows"
+        return [
+            _compact_record(
+                {
+                    "schema_version": DIAGNOSTIC_EVIDENCE_SCHEMA_VERSION,
+                    "domain": "candidate_filter",
+                    "status": "no_matching_rows",
+                    "severity": "warning",
+                    "scope": scope,
+                    "source": {
+                        "tool": str(observation.get("tool_name") or ""),
+                        "view": "candidate_filter_trace",
+                        "source_label": source_label,
+                    },
+                    "observed_reason": reason,
+                    "answer_boundary": "cannot infer diagnostic root cause from missing trace rows",
+                    "missing_data": [
+                        {
+                            "kind": "candidate_filter_trace_no_matching_rows",
+                            "impact": "candidate filter root cause cannot be determined",
+                        }
+                    ],
+                    "confidence": "missing",
+                }
+            )
+        ]
+
+    functions = [item for item in data.get("functions") or [] if isinstance(item, dict)]
+    statuses = {str(item.get("status") or "").strip().lower() for item in functions if str(item.get("status") or "").strip()}
+    rules: set[str] = set()
+    for item in functions:
+        reason_counts = item.get("reason_counts") if isinstance(item.get("reason_counts"), dict) else {}
+        rules.update(str(key).strip() for key in reason_counts if str(key).strip())
+        for event in item.get("events") or []:
+            if isinstance(event, dict) and str(event.get("rule") or "").strip():
+                rules.add(str(event.get("rule")).strip())
+
+    status = "observed_candidate_diagnostic"
+    if statuses & {"rejected", "reject", "filtered", "post_filtered", "excluded", "blocked", "skip", "skipped"}:
+        status = "observed_rejection"
+    summary = _candidate_diagnostic_summary(status=status, rules=sorted(rules))
+    return [
+        _compact_record(
+            {
+                "schema_version": DIAGNOSTIC_EVIDENCE_SCHEMA_VERSION,
+                "domain": "candidate_filter",
+                "status": status,
+                "severity": "info",
+                "scope": scope,
+                "source": {
+                    "tool": str(observation.get("tool_name") or ""),
+                    "view": "candidate_filter_trace",
+                    "source_label": source_label,
+                },
+                "observed_reason": summary,
+                "answer_boundary": "observed_filter_trace_evidence_only",
+                "confidence": "direct",
+            }
+        )
+    ]
 
 
 def _runtime_diagnostic_summary(*, status: str, skip_reason: str = "", notification_reason: str = "") -> str:
@@ -1417,7 +1507,7 @@ def _infer_unit(path: str, value: Any) -> str:
     name = path.rsplit(".", 1)[-1].lower()
     if name in {"account"}:
         return "account"
-    if name in {"symbol"}:
+    if name in {"symbol", "canonical_symbol"}:
         return "symbol"
     if name == "currency":
         return "currency_code"

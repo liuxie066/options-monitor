@@ -455,7 +455,9 @@ def _extract_upgrade_identifier(text: str) -> str:
 def _gap_is_recoverable(gap: dict[str, Any]) -> bool:
     if gap.get("recoverable") is False:
         return False
-    return bool(str(gap.get("recoverable_by") or "").strip())
+    recoverable_by = str(gap.get("recoverable_by") or "").strip()
+    suggested_tool = str(gap.get("suggested_tool") or "").strip()
+    return bool(recoverable_by and suggested_tool)
 
 
 def _fresh_quote_symbols(facts: list[dict[str, Any]]) -> set[str]:

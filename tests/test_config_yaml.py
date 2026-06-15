@@ -534,6 +534,31 @@ assistant:
         resolve_yaml_assistant_config(repo_root=REPO_ROOT, config_path=config_path)
 
 
+def test_yaml_assistant_config_rejects_user_configurable_hooks(tmp_path: Path) -> None:
+    config_path = _write_yaml(
+        tmp_path / "config.yaml",
+        """\
+accounts:
+  lx:
+    type: external_holdings
+    holdings_account: lx
+markets:
+  us:
+    accounts: [lx]
+    symbols: [FUTU]
+assistant:
+  enabled: true
+  planner:
+    enabled: true
+  hooks:
+    pre_tool_use: custom
+""",
+    )
+
+    with pytest.raises(SystemExit, match="assistant has unsupported keys: hooks"):
+        resolve_yaml_assistant_config(repo_root=REPO_ROOT, config_path=config_path)
+
+
 def test_yaml_assistant_model_profiles_reject_inline_api_key(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "config.yaml",

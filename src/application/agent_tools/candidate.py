@@ -12,6 +12,37 @@ from domain.domain.strategy_vocab import (
 from src.application.agent_tool_candidate_filter import candidate_filter_explain_tool
 from src.application.agent_tool_candidate_rank import candidate_rank_explain_tool
 from src.application.agent_tools.base import AgentTool, AgentToolContext, build_agent_tool
+from src.application.symbol_aliases import symbol_aliases_from_config
+
+
+_CANDIDATE_FILTER_OUTPUT_CONTRACT: dict[str, Any] = {
+    "schema_version": "candidate_filter_explain.output.v1",
+    "canonical_renderer": "candidate_filter_explain",
+    "source_label": "OM candidate filter trace",
+    "guard_profile": "candidate_filter",
+    "primary_rows": "functions",
+    "row_count_field": "trace_count",
+    "fact_fields": [
+        "symbol",
+        "canonical_symbol",
+        "raw_symbol",
+        "scope.account",
+        "scope.account_semantics",
+        "trace_count",
+        "status_counts",
+        "function_counts",
+        "functions[].function",
+        "functions[].status",
+        "functions[].reason_counts",
+        "functions[].events[].rule",
+        "functions[].events[].metric_value",
+        "functions[].events[].threshold",
+        "functions[].events[].message",
+    ],
+    "missing_data_fields": [
+        "trace_count",
+    ],
+}
 
 
 def _candidate_rank_explain_tool(
@@ -30,11 +61,25 @@ def _candidate_filter_explain_tool(
     ctx: AgentToolContext,
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    return candidate_filter_explain_tool(
+    config_path = None
+    symbol_aliases = None
+    if str(payload.get("config_key") or "").strip() or str(payload.get("config_path") or "").strip():
+        config_path, cfg = ctx.load_runtime_config(
+            config_key=payload.get("config_key"),
+            config_path=payload.get("config_path"),
+        )
+        symbol_aliases = symbol_aliases_from_config(cfg)
+
+    data, warnings, meta = candidate_filter_explain_tool(
         payload,
         repo_base=ctx.repo_base,
         mask_path=ctx.mask_path,
+        symbol_aliases=symbol_aliases,
     )
+    if config_path is not None:
+        meta = dict(meta)
+        meta["config_path"] = ctx.mask_path(config_path)
+    return data, warnings, meta
 
 
 CANDIDATE_RANK_EXPLAIN_TOOL = build_agent_tool(
@@ -76,8 +121,10 @@ CANDIDATE_FILTER_EXPLAIN_TOOL = build_agent_tool(
     requires=("candidate_filter_trace",),
     capabilities=("candidate_filter_trace", "filter_explain", "read_only"),
     input_schema={
-        "symbol": "required canonical symbol, for example NVDA or 0700.HK",
-        "account": "optional account label",
+        "symbol": "required canonical symbol, company name, or alias, for example NVDA, 0700.HK, or 泡泡玛特",
+        "config_key": "optional us|hk; when present, include runtime-config symbol aliases",
+        "config_path": "optional explicit config path; system-injected for Inbound planner calls",
+        "account": "optional scan-scope account label; not part of symbol identity",
         "function": (
             "optional "
             + strategy_key_help(
@@ -101,8 +148,10 @@ CANDIDATE_FILTER_EXPLAIN_TOOL = build_agent_tool(
     safe_default_input={"symbol": "NVDA"},
     examples=(
         {"input": {"run_id": "20260514T100000Z", "account": "lx", "symbol": "NVDA"}},
+        {"input": {"run_id": "20260514T100000Z", "symbol": "泡泡玛特"}},
         {"input": {"trace_path": "output_shared/reports/candidate_filter_trace.jsonl", "symbol": "NVDA"}},
     ),
+    output_contract=_CANDIDATE_FILTER_OUTPUT_CONTRACT,
 )
 
 TOOLS: tuple[AgentTool, ...] = (

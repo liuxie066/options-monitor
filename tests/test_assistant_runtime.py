@@ -18,6 +18,9 @@ from src.application.assistant.agent_loop import (
     PlannerPlan,
     PlannerPlanStep,
     ToolExecutor,
+    _evidence_gap_allows_followup,
+    _followup_decision_contract,
+    _followup_tool_allowlist_rejection,
     _planner_tool_manifest,
     build_tool_observation,
     plan_read_only_tools,
@@ -703,6 +706,48 @@ def test_tool_executor_postcheck_accepts_analysis_catalog_evidence_contract() ->
     assert outcome.postcheck["evidence_summary"]["row_count"] == 1
 
 
+def test_tool_executor_postcheck_accepts_scalar_symbol_resolve_contract() -> None:
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        assert tool_name == "symbol_resolve"
+        assert payload["symbol"] == "泡泡玛特"
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "schema_version": "symbol_resolve.v1",
+                "symbol": "泡泡玛特",
+                "resolved": True,
+                "raw_input": "泡泡玛特",
+                "canonical_symbol": "9992.HK",
+                "market": "HK",
+                "currency": "HKD",
+                "futu_code": "HK.09992",
+                "source_kind": "alias",
+                "status": "ok",
+                "message": "泡泡玛特 -> 9992.HK",
+            },
+        )
+
+    request = AssistantRequest(text="泡泡玛特是什么 symbol？", sender_id="local", config_key="us")
+    outcome = ToolExecutor(execute_tool_fn=_execute).execute_read_tool(
+        request=request,
+        task_contract={"requested_effect": "read"},
+        index=1,
+        tool_name="symbol_resolve",
+        payload={"symbol": "泡泡玛特"},
+        plan_arguments={"symbol": "泡泡玛特"},
+    )
+
+    assert outcome.allowed is True
+    assert outcome.postcheck is not None
+    assert outcome.postcheck["status"] == "pass"
+    checks = {item["name"]: item for item in outcome.postcheck["checks"]}
+    assert checks["evidence_contract"]["status"] == "pass"
+    assert checks["evidence_contract"]["missing_fields"] == []
+    assert outcome.postcheck["evidence_summary"]["result_shape"] == "scalar"
+    assert outcome.postcheck["evidence_summary"]["fact_field_count"] > 0
+
+
 def test_assistant_capability_catalog_has_safe_llm_invariants() -> None:
     payload = capability_catalog_payload()
     capabilities = payload["capabilities"]
@@ -797,6 +842,31 @@ def test_agent_loop_planner_catalog_matches_registry_backed_manifest() -> None:
     assert "operation_id" in operation_timeline["input_schema"]
     assert "operation_types" in operation_timeline["input_schema"]
     assert "audit_db" not in operation_timeline["input_schema"]
+    symbol_resolve = next(tool for tool in _planner_tool_manifest() if tool["name"] == "symbol_resolve")
+    assert "symbol" in symbol_resolve["input_schema"]
+    assert "config_path" not in symbol_resolve["input_schema"]
+    assert "candidate filter diagnosis" in " ".join(symbol_resolve["semantics"]["not_promised"])
+    candidate_filter = next(tool for tool in _planner_tool_manifest() if tool["name"] == "candidate_filter_explain")
+    assert "symbol" in candidate_filter["input_schema"]
+    assert "account" in candidate_filter["input_schema"]
+    assert "trace_path" not in candidate_filter["input_schema"]
+    candidate_notes = " ".join(candidate_filter["planner_notes"])
+    assert "single-symbol candidate filter" in candidate_notes
+    assert "account is optional scan/run scope only" in candidate_notes
+    validate_tool_plan(
+        PlannerPlan(
+            goal="解释泡泡玛特候选过滤参数",
+            steps=(
+                PlannerPlanStep(
+                    id="step_1",
+                    tool_name="candidate_filter_explain",
+                    arguments={"symbol": "泡泡玛特"},
+                ),
+            ),
+        ),
+        question="泡泡玛特被哪个参数过滤了？",
+        allow_preview=False,
+    )
     symbol_config = next(tool for tool in _planner_tool_manifest() if tool["name"] == "symbol_config_read")
     assert "symbol" in symbol_config["input_schema"]
     assert "strategy" in symbol_config["input_schema"]
@@ -1157,7 +1227,53 @@ def test_assistant_runtime_renders_assigned_stock_missing_quote_explicitly() -> 
     assert "检查提示：" in text
     assert "- FUTU missing_quote: open assigned stock lot has no usable as-of quote" in text
     assert "报价刷新：missing_quote source=opend_realtime" in text
+    assert "缺口：缺少实时行情：FUTU，不能计算当前正股浮盈亏和生命周期PnL。" in text
     assert "提示：assigned stock quote refresh missing: FUTU" in text
+
+
+def test_assistant_runtime_renders_symbol_resolve_result() -> None:
+    text = render_canonical_tool_result(
+        renderer_key="symbol_resolve",
+        data={
+            "symbol": "泡泡玛特",
+            "resolved": True,
+            "raw_input": "泡泡玛特",
+            "canonical_symbol": "9992.HK",
+            "market": "HK",
+            "currency": "HKD",
+            "futu_code": "HK.09992",
+        },
+        tool_result=build_response(tool_name="symbol_resolve", ok=True),
+    )
+
+    assert text == "泡泡玛特 -> 9992.HK（HK，HKD，HK.09992）。"
+
+
+def test_assistant_runtime_renders_candidate_filter_explain_missing_trace_as_boundary() -> None:
+    text = render_canonical_tool_result(
+        renderer_key="candidate_filter_explain",
+        data={
+            "symbol": "9992.HK",
+            "raw_symbol": "泡泡玛特",
+            "canonical_symbol": "9992.HK",
+            "account": None,
+            "scope": {"account": None, "account_semantics": "scan_scope"},
+            "trace_count": 0,
+            "functions": [],
+        },
+        tool_result=build_response(
+            tool_name="candidate_filter_explain",
+            ok=True,
+            warnings=["no_matching_trace_rows: no trace rows matched symbol/account/function"],
+        ),
+    )
+
+    assert "没有找到 9992.HK 的候选过滤 trace 匹配记录，不能判断确定原因。" in text
+    assert "输入已解析：泡泡玛特 -> 9992.HK。" in text
+    assert "数据来源：OM candidate filter trace" in text
+    assert "分析查询结果：0 行" not in text
+    assert "| run_id | account |" not in text
+    assert "account=" not in text
 
 
 def test_assistant_runtime_renders_analysis_result_compact_warnings() -> None:
@@ -3096,6 +3212,99 @@ def test_assistant_runtime_agent_loop_injects_config_for_symbol_config_read(tmp_
     }
 
 
+def test_assistant_runtime_agent_loop_injects_config_for_candidate_filter_explain(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "schema_version": "candidate_filter_explain.v1",
+                "symbol": "9992.HK",
+                "raw_symbol": "泡泡玛特",
+                "canonical_symbol": "9992.HK",
+                "scope": {"account": None, "account_semantics": "scan_scope"},
+                "trace_count": 1,
+                "status_counts": {"rejected": 1},
+                "function_counts": {"sell_put": 1},
+                "functions": [
+                    {
+                        "function": "sell_put",
+                        "status": "rejected",
+                        "reason_counts": {"risk_spread": 1},
+                        "events": [{"rule": "risk_spread", "metric_value": 0.35, "threshold": 0.2}],
+                    }
+                ],
+            },
+        )
+
+    def _plan(
+        _text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="解释泡泡玛特候选过滤参数",
+                response_mode="canonical",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="candidate_filter_explain",
+                        arguments={"symbol": "泡泡玛特"},
+                        purpose="读取单标的候选过滤 trace",
+                    ),
+                ),
+            ),
+            trace={
+                "enabled": True,
+                "attempted": True,
+                "reason": "accepted",
+                "provider": "openai",
+                "base_url": "",
+                "model": "gpt-5.2",
+                "api_key_env": "OM_LLM_API_KEY",
+                "confidence_min": 0.75,
+                "timeout_seconds": 20,
+                "max_output_tokens": 512,
+                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+            },
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="泡泡玛特被哪个参数过滤了？",
+            sender_id="local",
+            message_id="msg_agent_loop_candidate_filter_explain",
+            config_key="us",
+            config_path=str(tmp_path / "config.us.json"),
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+    )
+
+    assert out["ok"] is True
+    assert calls == [
+        (
+            "candidate_filter_explain",
+            {
+                "config_path": str(tmp_path / "config.hk.json"),
+                "symbol": "泡泡玛特",
+            },
+        )
+    ]
+    assert "9992.HK 候选过滤诊断：1 条 trace 记录。" in out["data"]["response_text"]
+    agent_loop = out["meta"]["assistant"]["llm"]["agent_loop"]
+    assert agent_loop["observations"][0]["payload"] == {"symbol": "泡泡玛特"}
+
+
 def test_assistant_runtime_llm_intent_routes_symbol_config_to_market_sibling_config_path(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
 
@@ -3172,6 +3381,92 @@ def test_assistant_runtime_llm_intent_routes_symbol_config_to_market_sibling_con
         )
     ]
     assert out["data"]["response_text"] == "9992.HK sell_put.max_strike = 145。"
+
+
+def test_assistant_runtime_llm_intent_routes_candidate_filter_to_market_sibling_config_path(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "schema_version": "candidate_filter_explain.v1",
+                "symbol": "9992.HK",
+                "raw_symbol": "泡泡玛特",
+                "canonical_symbol": "9992.HK",
+                "scope": {"account": "lx", "account_semantics": "scan_scope"},
+                "trace_count": 1,
+                "status_counts": {"rejected": 1},
+                "function_counts": {"sell_put": 1},
+                "functions": [
+                    {
+                        "function": "sell_put",
+                        "status": "rejected",
+                        "reason_counts": {"risk_spread": 1},
+                        "events": [{"rule": "risk_spread", "metric_value": 0.35, "threshold": 0.2}],
+                    }
+                ],
+            },
+        )
+
+    def _translate(
+        _text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmTranslationResult:
+        return LlmTranslationResult(
+            intent=PerceptionResult(
+                intent_name="candidate_filter_explain",
+                arguments={"symbol": "泡泡玛特", "account": "lx", "function": "sell_put"},
+                source="llm",
+                confidence=0.92,
+            ),
+            trace={
+                "enabled": True,
+                "attempted": True,
+                "reason": "accepted",
+                "provider": "openai",
+                "base_url": "",
+                "model": "gpt-5.2",
+                "api_key_env": "OM_LLM_API_KEY",
+                "confidence_min": 0.75,
+                "timeout_seconds": 20,
+                "max_output_tokens": 512,
+            },
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="lx 泡泡玛特 sell_put 被哪个参数过滤了？",
+            sender_id="local",
+            message_id="msg_llm_candidate_filter_config_path",
+            config_key="us",
+            config_path=str(tmp_path / "config.us.json"),
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        translate_intent_fn=_translate,
+    )
+
+    assert out["ok"] is True
+    assert calls == [
+        (
+            "candidate_filter_explain",
+            {
+                "config_path": str(tmp_path / "config.hk.json"),
+                "symbol": "泡泡玛特",
+                "account": "lx",
+                "function": "sell_put",
+            },
+        )
+    ]
+    assert "9992.HK 候选过滤诊断：1 条 trace 记录。" in out["data"]["response_text"]
 
 
 def test_assistant_runtime_agent_loop_satisfies_position_read_tool_capabilities(tmp_path: Path) -> None:
@@ -4641,6 +4936,105 @@ def test_agent_loop_replans_analysis_query_for_missing_account_coverage(tmp_path
     assert tool_plan_data["followup_decisions"][0]["status"] == "accepted"
     assert "account:sy" in tool_plan_data["followup_decisions"][0]["expected_evidence"]
     assert "2026-06 sy 高于 lx" in out["data"]["response_text"]
+
+
+def test_agent_loop_followup_gap_requires_manifest_pure_read_tool() -> None:
+    assert _evidence_gap_allows_followup(
+        {
+            "kind": "analysis_missing_account_coverage",
+            "recoverable": True,
+            "recoverable_by": "analysis_query",
+            "suggested_tool": "analysis_query",
+        }
+    )
+    assert _evidence_gap_allows_followup(
+        {
+            "kind": "recoverable_missing_quote",
+            "recoverable": True,
+            "recoverable_by": "refresh_quotes",
+            "suggested_tool": "option_positions_read",
+        }
+    )
+    assert not _evidence_gap_allows_followup(
+        {
+            "kind": "recoverable_but_no_tool",
+            "recoverable": True,
+            "recoverable_by": "analysis_query",
+        }
+    )
+    assert not _evidence_gap_allows_followup(
+        {
+            "kind": "unsafe_write_followup",
+            "recoverable": True,
+            "recoverable_by": "operation_timeline",
+            "suggested_tool": "version_update",
+        }
+    )
+    assert not _evidence_gap_allows_followup(
+        {
+            "kind": "upgrade_release_publication_status_missing",
+            "recoverable": True,
+            "recoverable_by": "release_workflow_status",
+            "suggested_tool": "analysis_query",
+        }
+    )
+    assert not _evidence_gap_allows_followup(
+        {
+            "kind": "unsafe_service_repair_followup",
+            "recoverable": True,
+            "recoverable_by": " OpenD_Service_Repair ",
+            "suggested_tool": "healthcheck",
+        }
+    )
+
+
+def test_agent_loop_followup_contract_limits_tools_to_recoverable_gap() -> None:
+    analysis_gap = {
+        "kind": "analysis_missing_account_coverage",
+        "recoverable": True,
+        "recoverable_by": "analysis_query",
+        "suggested_tool": "analysis_query",
+    }
+    quote_gap = {
+        "kind": "recoverable_missing_quote",
+        "recoverable": True,
+        "recoverable_by": "refresh_quotes",
+        "suggested_tool": "option_positions_read",
+    }
+    operation_gap = {
+        "kind": "upgrade_current_version_missing",
+        "recoverable": True,
+        "recoverable_by": "operation_timeline",
+        "suggested_tool": "operation_timeline",
+    }
+
+    assert _followup_decision_contract(evidence_gaps=[analysis_gap])["allowed_tools"] == [
+        "analysis_catalog",
+        "analysis_query",
+    ]
+    assert _followup_decision_contract(evidence_gaps=[quote_gap])["allowed_tools"] == ["option_positions_read"]
+    assert _followup_decision_contract(evidence_gaps=[operation_gap])["allowed_tools"] == ["operation_timeline"]
+
+    wrong_operation_plan = PlannerPlan(
+        goal="补查升级版本和回执",
+        steps=(
+            PlannerPlanStep(
+                id="step_2",
+                tool_name="analysis_query",
+                arguments={"sql": "select * from upgrade_operation_status"},
+            ),
+        ),
+    )
+    assert (
+        _followup_tool_allowlist_rejection(wrong_operation_plan, evidence_gaps=[operation_gap])
+        == "follow-up plan used analysis_query, which is not allowed for the recoverable evidence gap"
+    )
+
+    catalog_plan = PlannerPlan(
+        goal="查看分析字段",
+        steps=(PlannerPlanStep(id="step_2", tool_name="analysis_catalog", arguments={}),),
+    )
+    assert _followup_tool_allowlist_rejection(catalog_plan, evidence_gaps=[analysis_gap]) == ""
 
 
 def test_agent_loop_rejects_duplicate_analysis_followup_query(tmp_path: Path) -> None:
@@ -7552,6 +7946,41 @@ def test_llm_intent_schema_accepts_strict_read_only_payload() -> None:
     assert symbol_config.intent.intent_name == "symbol_config_query"
     assert symbol_config.intent.arguments == {"symbol": "泡泡玛特", "strategy": "sell_put", "field": "max_strike"}
 
+    symbol_resolve = parse_llm_translation_payload(
+        {
+            "schema_version": LLM_INTENT_SCHEMA_VERSION,
+            "intent": "symbol_resolve",
+            "arguments": {"symbol": "泡泡玛特"},
+            "confidence": 0.91,
+        },
+        settings=LlmTranslatorSettings(enabled=True, confidence_min=0.75),
+    )
+
+    assert symbol_resolve.error is None
+    assert symbol_resolve.intent is not None
+    assert symbol_resolve.intent.intent_name == "symbol_resolve"
+    assert symbol_resolve.intent.arguments == {"symbol": "泡泡玛特"}
+
+    candidate_filter = parse_llm_translation_payload(
+        {
+            "schema_version": LLM_INTENT_SCHEMA_VERSION,
+            "intent": "candidate_filter_explain",
+            "arguments": {"symbol": "泡泡玛特", "account": "SY", "function": "sell_put", "run_id": "run-1"},
+            "confidence": 0.91,
+        },
+        settings=LlmTranslatorSettings(enabled=True, confidence_min=0.75),
+    )
+
+    assert candidate_filter.error is None
+    assert candidate_filter.intent is not None
+    assert candidate_filter.intent.intent_name == "candidate_filter_explain"
+    assert candidate_filter.intent.arguments == {
+        "symbol": "泡泡玛特",
+        "account": "sy",
+        "function": "sell_put",
+        "run_id": "run-1",
+    }
+
 
 def test_llm_intent_schema_ignores_null_argument_slots_from_provider() -> None:
     result = parse_llm_translation_payload(
@@ -7729,6 +8158,8 @@ def test_llm_intent_schema_documents_allowed_surface() -> None:
     assert capabilities["symbol_config_query"]["llm_executable"] is True
     assert capabilities["upgrade_now"]["risk_level"] == "preview_admin"
     assert schema["argument_keys"]["runtime_logs"] == ["kind", "lines", "run_id"]
+    assert schema["argument_keys"]["candidate_filter_explain"] == ["account", "function", "run_id", "symbol"]
+    assert schema["argument_keys"]["symbol_resolve"] == ["symbol"]
     assert schema["argument_keys"]["symbol_config_query"] == ["field", "strategy", "symbol"]
     assert schema["argument_keys"]["symbol_edit"] == ["ensure_use", "set", "symbol"]
 
@@ -7756,6 +8187,7 @@ def test_llm_intent_schema_documents_allowed_surface() -> None:
         "query",
         "strategy",
         "field",
+        "function",
         "sql",
         "set",
         "ensure_use",

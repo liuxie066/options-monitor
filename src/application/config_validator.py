@@ -98,6 +98,16 @@ INLINE_SECRET_CONFIG_KEYS = {
     'refresh_token',
     'tenant_access_token',
 }
+ASSISTANT_CONFIG_KEYS = {
+    'active_model',
+    'context_window_messages',
+    'default_market_scope',
+    'enabled',
+    'llm',
+    'mode',
+    'models',
+    'planner',
+}
 RETIRED_FEISHU_CALLBACK_KEYS = {
     'encrypt_key',
     'encrypt_key_env',
@@ -260,6 +270,9 @@ def _validate_assistant_config(cfg: dict) -> None:
         assistant = {}
     if not isinstance(assistant, dict):
         die('assistant must be an object')
+    unsupported_assistant_keys = sorted(str(key) for key in assistant.keys() if str(key) not in ASSISTANT_CONFIG_KEYS)
+    if unsupported_assistant_keys:
+        die('assistant has unsupported keys: ' + ', '.join(unsupported_assistant_keys))
     if 'enabled' in assistant and assistant.get('enabled') is not None and not isinstance(assistant.get('enabled'), bool):
         die('assistant.enabled must be a boolean')
     if 'mode' in assistant and assistant.get('mode') is not None:
