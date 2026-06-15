@@ -108,6 +108,8 @@ def build_cancelled_operation_response(
     store: InboundOperationStore,
     response_text: str,
 ) -> dict[str, Any]:
+    payload = operation.get("payload") if isinstance(operation.get("payload"), dict) else {}
+    preview = operation.get("preview") if isinstance(operation.get("preview"), dict) else {}
     result = {"operation_id": operation_id, "status": "cancelled"}
     store.mark_cancelled(operation_id, result=result)
     return build_response(
@@ -118,6 +120,9 @@ def build_cancelled_operation_response(
             **operation_resolution,
             "operation_type": operation.get("operation_type"),
             "status": "cancelled",
+            "payload_hash": operation.get("payload_hash"),
+            "payload": payload,
+            "preview": preview,
             "result": result,
             "response_text": response_text,
         },

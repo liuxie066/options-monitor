@@ -6596,6 +6596,152 @@ def test_assistant_runtime_agent_loop_plans_manual_trade_open_preview(monkeypatc
     assert "成交提醒】成功卖出" not in applied_trace_text
 
 
+def test_assistant_runtime_agent_loop_cancels_manual_trade_open_preview(monkeypatch: Any, tmp_path: Path) -> None:
+    monkeypatch.setenv("OM_INBOUND_OPERATIONS_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_TRADE_WRITE_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_ADMIN_OPEN_IDS", "local:local")
+    monkeypatch.setenv("OM_INBOUND_OPERATION_HMAC_KEY", "test-operation-hmac-key")
+
+    def _fake_resolve(**_kwargs: object) -> tuple[int, str, dict[str, Any]]:
+        return 500, "cache", {"attempted_sources": [{"source": "cache", "status": "resolved", "value": 500}]}
+
+    monkeypatch.setattr("src.application.assistant.manual_trade_parser.resolve_multiplier_with_source_and_diagnostics", _fake_resolve)
+
+    cfg_path, sqlite_path = _write_agent_loop_trade_runtime_config(tmp_path)
+    calls: list[tuple[str, dict[str, Any]]] = []
+    text = "记录开仓 sy 成交提醒: 【成交提醒】成功卖出2张$腾讯 260605 440.00 沽$，成交价格：0.86，此笔订单委托已全部成交，2026/06/04 10:52:44 (香港)。【富途证券(香港)】"
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(tool_name=tool_name, ok=True, data={})
+
+    def _plan(
+        incoming: str,
+        settings: AssistantSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        assert incoming == text
+        assert settings.mode == "agent_loop"
+        assert conversation_context is not None
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="记录 sy 的腾讯开仓成交",
+                response_mode="canonical",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="manual_trade_open",
+                        arguments={"raw_text": text, "account": "sy"},
+                        purpose="Futu 成交提醒是交易记录开仓预览",
+                    ),
+                ),
+            ),
+            trace={
+                "enabled": True,
+                "attempted": True,
+                "reason": "accepted",
+                "provider": "openai",
+                "base_url": "",
+                "model": "gpt-5.2",
+                "api_key_env": "OM_LLM_API_KEY",
+                "confidence_min": 0.75,
+                "timeout_seconds": 20,
+                "max_output_tokens": 512,
+                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+            },
+        )
+
+    previewed = handle_assistant_message(
+        AssistantRequest(
+            text=text,
+            sender_id="local",
+            channel="local",
+            message_id="msg_agent_loop_manual_trade_open_cancel_preview",
+            config_path=str(cfg_path),
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        allowed_senders="local:local",
+        settings=AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+        now_fn=lambda: date(2026, 6, 4),
+    )
+
+    assert previewed["ok"] is True
+    assert previewed["data"]["status"] == "previewed"
+    preview_trace = collect_assistant_trace(
+        audit_db=str(tmp_path / "inbound.sqlite3"),
+        command_id=previewed["data"]["operation_id"],
+    )
+    assert preview_trace["trace_count"] == 1
+    assert preview_trace["traces"][0]["task"]["state"] == "waiting_for_permission"
+
+    cancelled = handle_assistant_message(
+        AssistantRequest(
+            text="取消记录",
+            sender_id="local",
+            channel="local",
+            message_id="msg_agent_loop_manual_trade_open_cancel",
+            config_path=str(cfg_path),
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        allowed_senders="local:local",
+        settings=AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+        now_fn=lambda: date(2026, 6, 4),
+    )
+
+    assert cancelled["ok"] is True
+    assert cancelled["data"]["operation_id"] == previewed["data"]["operation_id"]
+    assert cancelled["data"]["status"] == "cancelled"
+    assert cancelled["data"]["payload"]["arguments"]["account"] == "sy"
+    assert isinstance(cancelled["data"]["preview"], dict)
+    if sqlite_path.exists():
+        with sqlite3.connect(sqlite_path) as conn:
+            has_trade_events = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='trade_events'"
+            ).fetchone()
+            if has_trade_events:
+                assert conn.execute("SELECT COUNT(*) FROM trade_events").fetchone()[0] == 0
+    cancelled_trace = collect_assistant_trace(
+        audit_db=str(tmp_path / "inbound.sqlite3"),
+        command_id=previewed["data"]["operation_id"],
+    )
+    assert cancelled_trace["trace_count"] == 1
+    cancelled_entry = cancelled_trace["traces"][0]
+    assert cancelled_entry["identity"]["command_id"] == previewed["data"]["operation_id"]
+    assert cancelled_entry["task"]["state"] == "done"
+    assert cancelled_entry["answer"]["response_status"] == "cancelled"
+    assert cancelled_entry["permission_state"]["pending_operation_ids"] == []
+    assert cancelled_entry["permission_state"]["operation_status"] == "cancelled"
+    cancelled_tool = cancelled_entry["tools"][0]
+    assert cancelled_tool["tool_name"] == "inbound.manual_trade"
+    assert cancelled_tool["payload"]["operation_id"] == previewed["data"]["operation_id"]
+    assert cancelled_tool["payload"]["status"] == "cancelled"
+    assert cancelled_tool["payload"]["account"] == "sy"
+    assert cancelled_tool["payload"]["symbol"] == "0700.HK"
+    assert "raw_text" not in cancelled_tool["payload"]
+    assert cancelled_tool["postcheck"]["status"] == "pass"
+    assert any(
+        item["hook"] == "operation_readback" and item["status"] == "pass"
+        for item in cancelled_tool["hook_results"]
+    )
+    cancelled_trace_text = cancelled_trace["response_text"]
+    assert "任务：记录开仓预览：sy 0700.HK" in cancelled_trace_text
+    assert "工具：读取OM 本地操作回执（ok，1 行）" in cancelled_trace_text
+    assert "最终：cancelled（operation readback）" in cancelled_trace_text
+    assert "post/operation_readback=pass/cancelled" in cancelled_trace_text
+    assert "raw_text" not in cancelled_trace_text
+    assert "成交提醒】成功卖出" not in cancelled_trace_text
+
+
 def test_assistant_runtime_agent_loop_rejects_read_plan_for_trade_preview_request(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
     text = "记录开仓 sy 成交提醒: 【成交提醒】成功卖出2张$腾讯 260605 440.00 沽$，成交价格：0.86"
