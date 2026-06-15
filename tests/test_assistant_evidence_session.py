@@ -579,7 +579,6 @@ def test_task_contract_requires_release_status_for_release_publication_question(
 def test_coverage_marks_release_publication_status_missing_unrecoverable() -> None:
     plan = PlannerPlan(
         goal="检查远端 release 发布状态",
-        response_mode="synthesis",
         steps=(
             PlannerPlanStep(
                 id="step_1",
@@ -653,7 +652,6 @@ def test_coverage_marks_release_publication_status_missing_unrecoverable() -> No
 def test_coverage_accepts_release_publication_status_evidence() -> None:
     plan = PlannerPlan(
         goal="检查远端 release 发布状态",
-        response_mode="synthesis",
         steps=(
             PlannerPlanStep(
                 id="step_1",
@@ -806,7 +804,6 @@ def test_answer_verifier_allows_release_failure_when_failure_evidence_present() 
 def test_release_status_conflict_with_outcome_is_unrecoverable() -> None:
     plan = PlannerPlan(
         goal="检查远端 release 发布状态冲突",
-        response_mode="synthesis",
         steps=(
             PlannerPlanStep(
                 id="step_1",
@@ -922,7 +919,6 @@ def test_evidence_bundle_extracts_upgrade_missing_version_diagnostics() -> None:
 def test_coverage_marks_upgrade_missing_version_and_receipt_unrecoverable() -> None:
     plan = PlannerPlan(
         goal="检查升级版本和回执",
-        response_mode="synthesis",
         steps=(
             PlannerPlanStep(
                 id="step_1",
@@ -994,7 +990,6 @@ def test_coverage_marks_upgrade_missing_version_and_receipt_unrecoverable() -> N
 def test_coverage_marks_upgrade_status_conflict_unrecoverable() -> None:
     plan = PlannerPlan(
         goal="检查升级状态冲突",
-        response_mode="synthesis",
         steps=(
             PlannerPlanStep(
                 id="step_1",
@@ -1064,7 +1059,6 @@ def test_coverage_marks_upgrade_status_conflict_unrecoverable() -> None:
 def test_coverage_allows_operation_timeline_followup_before_timeline_is_queried() -> None:
     plan = PlannerPlan(
         goal="检查升级版本和回执",
-        response_mode="synthesis",
         steps=(
             PlannerPlanStep(
                 id="step_1",
@@ -1113,7 +1107,6 @@ def test_coverage_allows_operation_timeline_followup_before_timeline_is_queried(
 def test_coverage_accepts_complete_upgrade_status_evidence() -> None:
     plan = PlannerPlan(
         goal="检查升级版本和回执",
-        response_mode="synthesis",
         steps=(
             PlannerPlanStep(
                 id="step_1",
@@ -1268,7 +1261,7 @@ def test_evidence_bundle_extracts_candidate_filter_explain_observed_trace() -> N
     assert diagnostic["scope"]["symbols"] == ["9992.HK"]
     assert diagnostic["source"]["view"] == "candidate_filter_trace"
     assert diagnostic["confidence"] == "direct"
-    assert "risk_spread" in diagnostic["observed_reason"]
+    assert "价差不合格" in diagnostic["observed_reason"]
 
 
 def test_evidence_bundle_marks_candidate_filter_explain_no_matching_trace_as_missing() -> None:
@@ -2165,7 +2158,6 @@ def test_evidence_bundle_records_cross_tool_reconciliation_views() -> None:
 def test_task_contract_and_coverage_detect_missing_account_comparison_scope() -> None:
     plan = PlannerPlan(
         goal="对比 lx 和 sy 的账户收益",
-        response_mode="synthesis",
         steps=(
             PlannerPlanStep(
                 id="step_1",
@@ -2235,7 +2227,6 @@ def test_task_contract_and_coverage_detect_missing_account_comparison_scope() ->
 def test_task_contract_does_not_treat_month_digits_as_symbols() -> None:
     plan = PlannerPlan(
         goal="对比 lx 和 sy 2026-05 的账户收益",
-        response_mode="synthesis",
         steps=(
             PlannerPlanStep(
                 id="step_1",
@@ -2264,7 +2255,6 @@ def test_task_contract_does_not_treat_month_digits_as_symbols() -> None:
 def test_coverage_rejects_account_comparison_without_same_period_metric() -> None:
     plan = PlannerPlan(
         goal="对比 lx 和 sy 的账户收益",
-        response_mode="synthesis",
         steps=(
             PlannerPlanStep(
                 id="step_1",
@@ -2336,7 +2326,6 @@ def test_coverage_rejects_account_comparison_without_same_period_metric() -> Non
 def test_coverage_accepts_pivot_account_comparison_same_period_metric() -> None:
     plan = PlannerPlan(
         goal="对比 lx 和 sy 的账户收益",
-        response_mode="synthesis",
         steps=(
             PlannerPlanStep(
                 id="step_1",
@@ -2625,7 +2614,6 @@ def test_agent_loop_tool_result_contains_evidence_bundle_and_session(tmp_path: P
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="查看 lx 指派正股持仓盈亏",
-                response_mode="synthesis",
                 required_capabilities=("assigned_stock_positions", "read_only"),
                 steps=(
                     PlannerPlanStep(
@@ -3041,7 +3029,6 @@ def test_agent_loop_replans_read_only_followup_for_recoverable_quote_gap(tmp_pat
             return LlmPlannerResult(
                 plan=PlannerPlan(
                     goal="查看 lx 指派正股持仓盈亏",
-                    response_mode="synthesis",
                     required_capabilities=("assigned_stock_positions", "read_only"),
                     steps=(
                         PlannerPlanStep(
@@ -3074,7 +3061,6 @@ def test_agent_loop_replans_read_only_followup_for_recoverable_quote_gap(tmp_pat
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="查看 lx 指派正股持仓盈亏",
-                response_mode="synthesis",
                 required_capabilities=("assigned_stock_positions", "read_only"),
                 steps=(
                     PlannerPlanStep(
@@ -3207,7 +3193,6 @@ def test_agent_loop_stops_after_one_followup_for_same_quote_gap(tmp_path: Path) 
             return LlmPlannerResult(
                 plan=PlannerPlan(
                     goal="查看 lx 指派正股持仓盈亏",
-                    response_mode="synthesis",
                     required_capabilities=("assigned_stock_positions", "read_only"),
                     steps=(
                         PlannerPlanStep(
@@ -3223,7 +3208,6 @@ def test_agent_loop_stops_after_one_followup_for_same_quote_gap(tmp_path: Path) 
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="查看 lx 指派正股持仓盈亏",
-                response_mode="synthesis",
                 required_capabilities=("assigned_stock_positions", "read_only"),
                 steps=(
                     PlannerPlanStep(
@@ -3329,7 +3313,6 @@ def test_agent_loop_replans_operation_timeline_for_recoverable_upgrade_gap(tmp_p
             return LlmPlannerResult(
                 plan=PlannerPlan(
                     goal="补查升级版本和回执",
-                    response_mode="synthesis",
                     required_capabilities=("operation_timeline", "read_only"),
                     steps=(
                         PlannerPlanStep(
@@ -3345,7 +3328,6 @@ def test_agent_loop_replans_operation_timeline_for_recoverable_upgrade_gap(tmp_p
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="检查升级版本和回执",
-                response_mode="synthesis",
                 required_capabilities=("healthcheck", "read_only"),
                 steps=(
                     PlannerPlanStep(
@@ -3458,7 +3440,6 @@ def test_agent_loop_does_not_replan_unrecoverable_upgrade_gap(tmp_path: Path) ->
             return LlmPlannerResult(
                 plan=PlannerPlan(
                     goal="补查升级状态",
-                    response_mode="synthesis",
                     required_capabilities=("operation_timeline", "read_only"),
                     steps=(
                         PlannerPlanStep(
@@ -3474,7 +3455,6 @@ def test_agent_loop_does_not_replan_unrecoverable_upgrade_gap(tmp_path: Path) ->
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="检查升级版本和回执",
-                response_mode="synthesis",
                 required_capabilities=("analysis_query", "read_only"),
                 steps=(
                     PlannerPlanStep(
@@ -3595,7 +3575,6 @@ def test_agent_loop_contract_verifier_rejects_unsupported_currency_amount(tmp_pa
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="分析 lx 2026-06 的净现金流明细",
-                response_mode="synthesis",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -3702,7 +3681,6 @@ def test_agent_loop_answer_shape_fallback_preserves_account_comparison(tmp_path:
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="对比 lx 和 sy 的账户收益",
-                response_mode="synthesis",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -3818,7 +3796,6 @@ def test_message_less_local_agent_sessions_do_not_overwrite_each_other(tmp_path:
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="查看 lx 指派正股持仓盈亏",
-                response_mode="synthesis",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -3913,7 +3890,7 @@ def test_agent_loop_returns_error_when_tool_budget_is_exhausted(tmp_path: Path) 
             for index in range(1, 4)
         )
         return LlmPlannerResult(
-            plan=PlannerPlan(goal="查看 lx 指派正股持仓盈亏", response_mode="synthesis", steps=steps),
+            plan=PlannerPlan(goal="查看 lx 指派正股持仓盈亏", steps=steps),
             trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
         )
 
@@ -3981,7 +3958,6 @@ def test_agent_loop_rejects_unrelated_followup_plan_for_evidence_gap(tmp_path: P
             return LlmPlannerResult(
                 plan=PlannerPlan(
                     goal="查看运行状态",
-                    response_mode="synthesis",
                     steps=(PlannerPlanStep(id="step_2", tool_name="runtime_status", arguments={}, purpose="无关补查"),),
                 ),
                 trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
@@ -3989,7 +3965,6 @@ def test_agent_loop_rejects_unrelated_followup_plan_for_evidence_gap(tmp_path: P
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="查看 lx 指派正股持仓盈亏",
-                response_mode="synthesis",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",

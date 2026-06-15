@@ -128,7 +128,7 @@ def build_preview_agent_session_snapshot(
     goal = _preview_goal(question=question, data=data, receipt=receipt)
     plan = {
         "goal": goal,
-        "response_mode": "preview",
+        "plan_kind": "preview",
         "steps": [_preview_plan_step(step)],
     }
     final_response = {
@@ -214,7 +214,7 @@ def build_operation_readback_agent_session_snapshot(
                 "reason": "operation readback",
                 "plan": {
                     "goal": goal,
-                    "response_mode": "readback",
+                    "plan_kind": "readback",
                     "steps": [
                         {
                             "tool_name": tool_name,

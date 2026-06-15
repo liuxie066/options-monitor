@@ -201,12 +201,11 @@ def test_llm_check_live_probe_uses_read_only_structured_planning(tmp_path: Path)
         assert kwargs["json_schema"] == tool_plan_json_schema()
         return {
             "output_text": json.dumps(
-                {
-                    "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-                    "goal": "check runtime status",
-                    "response_mode": "canonical",
-                    "required_capabilities": [],
-                    "steps": [
+                    {
+                        "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+                        "goal": "check runtime status",
+                        "required_capabilities": [],
+                        "steps": [
                         {
                             "id": "status",
                             "tool_name": "runtime_status",

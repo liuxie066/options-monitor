@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 1.2.294 - 2026-06-16
+
+### Changed
+- Upgraded AgentLoop tool plans to `om-tool-plan-v2`, removing planner-controlled `response_mode` and making
+  AgentLoop responsible for final answer routing, evidence verification, and deterministic fallback.
+- Moved normal diagnostic, analytical, and financial assistant answers onto LLM composition over guarded tool evidence,
+  while keeping deterministic renderers as evidence formatters and fallback paths.
+- Updated candidate filter explanation evidence with readable rejection reason labels and counts so one-symbol filter
+  diagnostics can be summarized without exposing raw trace rule dumps.
+- Renamed operation session snapshot answer markers from `response_mode` to `plan_kind` to avoid reintroducing answer
+  mode terminology outside the planner boundary.
+
+### Fixed
+- Fixed candidate-filter assistant answers such as `泡泡玛特被哪个参数过滤了？` so they use the evidence composer path
+  instead of the deterministic candidate renderer during normal AgentLoop responses.
+
 ## 1.2.293 - 2026-06-16
 
 ### Changed

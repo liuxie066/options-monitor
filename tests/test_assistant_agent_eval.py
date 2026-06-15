@@ -293,7 +293,6 @@ def _plan_from_payload(raw_payload: dict[str, Any]) -> PlannerPlan:
     raw = dict(raw_payload)
     return PlannerPlan(
         goal=str(raw.get("goal") or ""),
-        response_mode=str(raw.get("response_mode") or "synthesis"),
         required_capabilities=tuple(str(item) for item in raw.get("required_capabilities") or ()),
         steps=tuple(
             PlannerPlanStep(

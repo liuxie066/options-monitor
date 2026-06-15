@@ -49,7 +49,6 @@ def _plan_result(tool_name: str, arguments: dict[str, Any] | None = None) -> Llm
     return LlmPlannerResult(
         plan=PlannerPlan(
             goal="test plan",
-            response_mode="canonical",
             steps=(PlannerPlanStep(id="step_1", tool_name=tool_name, arguments=dict(arguments or {})),),
         ),
         trace=_planner_trace(),
@@ -634,7 +633,6 @@ def test_inbound_symbol_config_query_executes_read_only_tool_via_llm(tmp_path: P
     assert tool_call["payload"]["plan"] == {
         "schema_version": TOOL_PLAN_SCHEMA_VERSION,
         "goal": "test plan",
-        "response_mode": "canonical",
         "required_capabilities": [],
         "steps": [
             {

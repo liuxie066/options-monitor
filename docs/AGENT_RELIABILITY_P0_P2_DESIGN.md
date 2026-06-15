@@ -103,20 +103,22 @@ P0-P2 执行路线图。
    现有实现。
 5. `Plan / Act / Verify / Answer` 是实现切分，不是用户可见模式。
 
-## 2.2 Compatibility And Rollout
+## 2.2 Upgrade Boundary
 
-P0-P2 必须渐进发布。任何阶段失败时，都应能退回当前 AgentLoop 行为。
+P0-P2 的 trace/snapshot 读取可以继续忽略未知字段，但 AgentLoop 的当前执行路径不再保留
+planner 侧答案模式兼容层。Planner 只产出任务和工具计划；AgentLoop 负责回答路径、证据校验和
+确定性 fallback。
 
-兼容规则：
+执行规则：
 
 | 组件 | 兼容策略 |
 |---|---|
-| Planner schema | `task_contract` 是 additive；旧 `om-tool-plan-v1` 仍可解析 |
-| `response_mode` | 迁移期保留内部兼容，不作为产品概念继续扩展 |
+| Planner schema | 当前执行路径只接受 `om-tool-plan-v2`，旧 plan 字段直接拒绝 |
+| `response_mode` | 不再作为 planner 字段或内部回答方式控制面存在 |
 | Tool manifest | 新增 annotations / schema / evidence contract 时保留旧字段 |
-| Tool output | 新 verifier 缺失时按当前 output contract 和 renderer 逻辑处理 |
+| Tool output | 新 verifier 缺失时按当前 output contract 和 deterministic fallback 处理 |
 | AgentSession | 新增字段写入 snapshot，但旧 trace reader 必须能忽略未知字段 |
-| Answer verifier | P0 增量加入 required-answer 检查；失败时仍可走现有 fallback |
+| Answer verifier | P0 增量加入 required-answer 检查；失败时走 AgentLoop deterministic fallback |
 
 建议开关：
 
@@ -254,7 +256,7 @@ Contract 来源优先级：
 
 1. Deterministic parser 从显式账户、标的、日期、动词提取 scope。
 2. Planner LLM 补充 `goal` 和 `required_answer`。
-3. Host 校验并裁剪 planner 输出，只保留允许字段。
+3. AgentLoop runtime 校验并裁剪 planner 输出，只保留允许字段。
 4. 无法确定 account/period/symbol 时记录 `ambiguities`，不让 LLM 猜。
 
 ### 4.4 Coverage Verifier
@@ -2281,7 +2283,7 @@ P2 发布稳定后，需要反向裁剪，避免文档和代码继续堆层：
 ### P0 开发顺序
 
 1. 新增 `TaskContract` 数据模型和 trace payload。
-2. Planner 输出 `task_contract`，host 校验并裁剪。
+2. Planner 输出 `task_contract`，AgentLoop runtime 校验并裁剪。
 3. 新增 `CoverageVerifier`，先覆盖 compare、breakdown、assigned-stock、upgrade status。
 4. AgentLoop synthesis 前运行 coverage verifier。
 5. Answer verifier 增加 required-answer shape 检查。
@@ -2386,5 +2388,5 @@ TaskContract
 -> final route
 ```
 
-这就是 OM 需要借鉴 Claude Code 的部分：不是更多模式，而是让每一步都由 host
+这就是 OM 需要借鉴 Claude Code 的部分：不是更多模式，而是让每一步都由 AgentLoop runtime
 验证、记录、回退。
