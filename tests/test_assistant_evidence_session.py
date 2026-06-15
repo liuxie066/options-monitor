@@ -31,7 +31,7 @@ from src.application.tool_execution import execute_tool as run_tool
 TRACE_ROUTE_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "assistant_trace_route_samples.jsonl"
 TRACE_INTERNAL_LEAK_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("session_id", re.compile(r"\bas_[A-Za-z0-9_:-]+\b")),
-    ("internal_tool_name", re.compile(r"(?i)\b(?:analysis_query|analysis_catalog|manual_trade_open)\b")),
+    ("internal_tool_name", re.compile(r"(?i)\b(?:analysis_query|analysis_catalog|manual_trade_open|inbound\.manual_trade)\b")),
     ("internal_sql", re.compile(r"(?is)(?:\bsql\b(?!ite)|\bselect\b.{0,240}\bfrom\b|\bwith\b.{0,240}\bselect\b)")),
     (
         "internal_id",
@@ -53,6 +53,8 @@ REQUIRED_TRACE_ROUTE_SAMPLE_IDS = {
     "trace_rewrite_runtime_scheduler_skip",
     "trace_rewrite_quote_stale_freshness",
     "trace_rewrite_upgrade_stale_timeline",
+    "trace_pass_operation_readback_applied",
+    "trace_pass_operation_readback_cancelled",
 }
 
 
