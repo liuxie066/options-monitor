@@ -39,6 +39,10 @@ ANSWER_INTERNAL_LEAK_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 
 P2_AGENT_EVAL_REQUIRED_FIXTURE_GROUPS: dict[str, set[str]] = {
+    "income_comparison": {
+        "analysis_income_compare_normal_answer_hides_internal_details",
+        "analysis_income_compare_missing_sy_followup_answer",
+    },
     "runtime_stale_conflict": {
         "runtime_why_conflict_stale_answer",
         "runtime_notification_missing_not_success_answer",
@@ -66,6 +70,11 @@ P2_AGENT_EVAL_REQUIRED_FIXTURE_GROUPS: dict[str, set[str]] = {
         "analysis_quote_stale_answer_discloses_freshness",
         "runtime_freshness_gap_answer",
         "operation_upgrade_stale_timeline_answer",
+    },
+    "candidate_diagnostics": {
+        "analysis_candidate_diagnostics_normal_answer",
+        "candidate_missing_artifact_answer",
+        "candidate_why_partial_confidence_answer",
     },
     "prompt_injection_and_write_preview": {
         "prompt_injection_from_tool_output_denied",
@@ -312,6 +321,11 @@ def test_assistant_agent_eval_uses_guarded_answer_evidence(case: dict[str, Any],
         assert tool_plan_data["final_response"]["status"] == case["expect_final_response_status"]
     if case.get("expect_answer_guard_status"):
         assert tool_plan_data["synthesis"]["answer_guard"]["status"] == case["expect_answer_guard_status"]
+    if case.get("expect_coverage_status"):
+        assert tool_plan_data["coverage"]["status"] == case["expect_coverage_status"]
+    if case.get("expect_coverage_gap_kinds") is not None:
+        observed_gap_kinds = [str(item.get("kind") or "") for item in tool_plan_data["coverage"].get("gaps") or []]
+        assert observed_gap_kinds == case["expect_coverage_gap_kinds"]
     evidence_bundle = tool_plan_data["evidence_bundle"]
     if case.get("expect_diagnostic_domains"):
         domains = sorted({str(item.get("domain")) for item in evidence_bundle["diagnostics"] if item.get("domain")})
