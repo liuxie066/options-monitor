@@ -26,6 +26,7 @@ from src.application.assistant.policy import PURE_READ_TOOLS, check_sender_allow
 from src.application.assistant.renderer import render_inbound_text
 from src.application.assistant.router import handle_assistant_request
 from src.application.assistant.runtime import handle_assistant_message
+from src.application.assistant.session_store import collect_assistant_trace
 from src.application.assistant.settings import AssistantSettings, LlmTranslatorSettings
 
 
@@ -1379,6 +1380,107 @@ def test_inbound_upgrade_preview_and_confirm(monkeypatch: pytest.MonkeyPatch, tm
     assert calls[-1]["auto"] is True
     assert calls[-1]["target_version"] == "1.2.111"
     assert str(calls[-1]["runtime_root"]) == str(tmp_path / "runtime")
+
+
+def test_inbound_upgrade_cancel_persists_readback_trace(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from src.application.assistant import upgrade_operations
+
+    _enable_inbound_upgrade_write(monkeypatch)
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    audit_db = tmp_path / "inbound.sqlite3"
+    calls: list[dict[str, object]] = []
+
+    def _fake_service_upgrade_check(**kwargs):  # type: ignore[no-untyped-def]
+        calls.append({"check": True, **dict(kwargs)})
+        return {
+            "ok": True,
+            "repo_root": str(kwargs["repo_root"]),
+            "repo_root_resolved": str(kwargs["repo_root"]),
+            "repo_root_resolution": {"status": "input"},
+            "runtime_root": str(kwargs["runtime_root"]),
+            "current_version": "1.2.110",
+            "latest_version": "1.2.111",
+            "release_tag": "v1.2.111",
+            "upgrade_available": True,
+            "version_check": {"ok": True},
+        }
+
+    monkeypatch.setattr(upgrade_operations, "service_upgrade_check", _fake_service_upgrade_check)
+    monkeypatch.setattr(
+        upgrade_operations,
+        "service_upgrade",
+        lambda **kwargs: pytest.fail(f"unexpected upgrade apply: {kwargs}"),
+    )
+    monkeypatch.setattr(
+        upgrade_operations,
+        "UPGRADE_WORKER_LAUNCHER",
+        lambda operation_id, audit_db: pytest.fail(f"unexpected upgrade worker: {operation_id}"),
+    )
+
+    preview = handle_assistant_message(
+        AssistantRequest(
+            text="立即升级",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_upgrade_cancel_preview",
+            conversation_id="feishu:chat_a:ou_1",
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+        settings=AssistantSettings(mode="agent_loop"),
+    )
+
+    assert preview["ok"] is True
+    assert preview["data"]["status"] == "previewed"
+    assert preview["data"]["payload"]["arguments"] == {"target_version": "1.2.111", "release_tag": "v1.2.111"}
+    operation_id = preview["data"]["operation_id"]
+
+    cancelled = handle_assistant_message(
+        AssistantRequest(
+            text=f"取消升级 {operation_id}",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_upgrade_cancel",
+            conversation_id="feishu:chat_a:ou_1",
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+        settings=AssistantSettings(mode="agent_loop"),
+    )
+
+    assert cancelled["ok"] is True
+    assert cancelled["data"]["operation_id"] == operation_id
+    assert cancelled["data"]["status"] == "cancelled"
+    assert cancelled["data"]["operation_type"] == "upgrade_now"
+    assert cancelled["data"]["payload"]["arguments"]["target_version"] == "1.2.111"
+    assert cancelled["data"]["preview"]["summary"]["current_version"] == "1.2.110"
+    assert cancelled["data"]["preview"]["summary"]["target_version"] == "1.2.111"
+    assert len(calls) == 1
+
+    trace = collect_assistant_trace(audit_db=str(audit_db), command_id=operation_id)
+    assert trace["trace_count"] == 1
+    entry = trace["traces"][0]
+    assert entry["identity"]["command_id"] == operation_id
+    assert entry["task"]["state"] == "done"
+    assert entry["task"]["goal"] == "升级预览：1.2.110 -> 1.2.111 status dry_run"
+    assert entry["answer"]["response_status"] == "cancelled"
+    assert entry["permission_state"]["pending_operation_ids"] == []
+    assert entry["permission_state"]["operation_status"] == "cancelled"
+    tool = entry["tools"][0]
+    assert tool["tool_name"] == "inbound.upgrade"
+    assert tool["payload"]["operation_id"] == operation_id
+    assert tool["payload"]["operation_type"] == "upgrade_now"
+    assert tool["payload"]["status"] == "cancelled"
+    assert tool["postcheck"]["status"] == "pass"
+    assert any(item["hook"] == "operation_readback" and item["status"] == "pass" for item in tool["hook_results"])
+    trace_text = trace["response_text"]
+    assert "任务：升级预览：1.2.110 -> 1.2.111 status dry_run" in trace_text
+    assert "工具：读取OM 本地操作回执（ok，1 行）" in trace_text
+    assert "最终：cancelled（operation readback）" in trace_text
+    assert "post/operation_readback=pass/cancelled" in trace_text
+    assert "inbound.upgrade" not in trace_text
+    assert "runtime_root" not in trace_text
+    assert str(tmp_path) not in trace_text
 
 
 def test_inbound_upgrade_confirm_receipt_uses_payload_and_version_check_fallbacks(
