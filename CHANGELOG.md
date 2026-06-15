@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.2.287 - 2026-06-15
+
+### Added
+- Added compact assistant trace route samples for confirmed and cancelled manual-trade operation readback, including redaction guards
+  for internal operation tool names, raw trade text, and ledger internals.
+
+### Fixed
+- Preserved operation payload and preview metadata in cancelled operation responses so final readback updates the same
+  assistant session trace as the original preview.
+
+### Changed
+- Updated the Agent reliability P0-P2 design notes to count the new operation readback route fixtures.
+
 ## 1.2.286 - 2026-06-15
 
 ### Added
