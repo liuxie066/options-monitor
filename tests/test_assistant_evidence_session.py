@@ -29,6 +29,7 @@ from src.application.tool_execution import execute_tool as run_tool
 
 
 TRACE_ROUTE_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "assistant_trace_route_samples.jsonl"
+DESIGN_DOC_PATH = Path(__file__).resolve().parents[1] / "docs" / "AGENT_RELIABILITY_P0_P2_DESIGN.md"
 TRACE_INTERNAL_LEAK_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("session_id", re.compile(r"\bas_[A-Za-z0-9_:-]+\b")),
     (
@@ -51,8 +52,10 @@ REQUIRED_TRACE_ROUTE_SAMPLE_IDS = {
     "trace_fallback_bad_answer",
     "trace_denied_cross_account_write",
     "trace_pass_release_workflow_published",
+    "trace_pass_release_workflow_failed",
     "trace_ask_read_scope_expansion",
     "trace_rewrite_runtime_notification_missing",
+    "trace_pass_runtime_notification_delivered",
     "trace_rewrite_runtime_freshness_gap",
     "trace_rewrite_runtime_notification_conflict",
     "trace_rewrite_runtime_scheduler_skip",
@@ -62,6 +65,21 @@ REQUIRED_TRACE_ROUTE_SAMPLE_IDS = {
     "trace_pass_operation_readback_cancelled",
     "trace_pass_upgrade_readback_cancelled",
     "trace_rewrite_release_no_matching_rows",
+    "trace_rewrite_candidate_missing_trace",
+    "trace_rewrite_upgrade_command_log_missing",
+    "trace_denied_prompt_injection_chain",
+    "trace_denied_planner_apply",
+    "trace_ask_sql_period_scope_expansion",
+}
+P2_TRACE_ROUTE_MINIMUM_CASES: dict[str, set[str]] = {
+    "trace_compact_no_internal_leak": {
+        "trace_ask_missing_account",
+        "trace_preview_manual_trade",
+        "trace_rewrite_upgrade_conflict",
+        "trace_fallback_bad_answer",
+        "trace_denied_cross_account_write",
+        "trace_pass_release_workflow_published",
+    },
 }
 
 
@@ -74,9 +92,74 @@ def _load_trace_route_cases() -> list[dict[str, Any]]:
     return rows
 
 
+def _load_documented_p2_minimum_case_names() -> set[str]:
+    text = DESIGN_DOC_PATH.read_text(encoding="utf-8")
+    start = text.index("### 6.6.2 P2 Golden Case 清单")
+    section = text[start:]
+    end_match = re.search(r"\n### 6\.7\b", section)
+    if end_match:
+        section = section[: end_match.start()]
+
+    cases: set[str] = set()
+    for line in section.splitlines():
+        match = re.match(r"\|\s*`([^`]+)`\s*\|", line)
+        if match:
+            cases.add(match.group(1))
+    assert cases
+    return cases
+
+
 def _assert_no_internal_trace_leak(text: str, *, case_id: str) -> None:
     for code, pattern in TRACE_INTERNAL_LEAK_PATTERNS:
         assert not pattern.search(text), f"{case_id} leaked {code}: {text}"
+
+
+def _walk_trace_values(value: Any) -> list[tuple[str, Any]]:
+    if isinstance(value, dict):
+        out: list[tuple[str, Any]] = []
+        for key, item in value.items():
+            for child_key, child_value in _walk_trace_values(item):
+                out.append((f"{key}.{child_key}" if child_key else str(key), child_value))
+        return out
+    if isinstance(value, list):
+        out = []
+        for index, item in enumerate(value):
+            for child_key, child_value in _walk_trace_values(item):
+                out.append((f"{index}.{child_key}" if child_key else str(index), child_value))
+        return out
+    return [("", value)]
+
+
+def _assert_trace_fixture_sensitive_values_forbidden(case: dict[str, Any]) -> None:
+    forbidden = "\n".join(str(item) for item in case.get("expect_not_contains") or ())
+    missing: list[str] = []
+    sensitive_key_terms = (
+        "session_id",
+        "sql",
+        "local_path",
+        "raw_log",
+        "raw_text",
+        "message_id",
+        "run_id",
+        "github_release_url",
+        "stock_lot_id",
+        "runtime_root",
+        "trace_path",
+        "artifact_path",
+    )
+
+    for path, value in _walk_trace_values(case.get("trace")):
+        path_lower = path.lower()
+        if not any(term in path_lower for term in sensitive_key_terms):
+            continue
+        text = str(value or "").strip()
+        if not text:
+            continue
+        key = path.rsplit(".", 1)[-1]
+        if not any(token and (token in text or text in token or key in token) for token in forbidden.splitlines()):
+            missing.append(f"{path}={text}")
+
+    assert missing == [], f"{case.get('id')} does not forbid sensitive trace values: {missing}"
 
 
 def test_evidence_bundle_extracts_contract_facts_and_missing_quote() -> None:
@@ -166,6 +249,57 @@ def test_evidence_bundle_extracts_contract_facts_and_missing_quote() -> None:
     trace_payload = bundle.trace_payload()
     assert trace_payload["diagnostic_count"] == 1
     assert trace_payload["diagnostic_domains"] == ["quote_freshness"]
+
+
+def test_symbol_resolve_canonical_symbol_supports_symbol_claims() -> None:
+    bundle = build_evidence_bundle(
+        question="泡泡玛特是什么 symbol？",
+        plan={"goal": "解析泡泡玛特的标的身份", "steps": []},
+        observations=[
+            {
+                "index": 1,
+                "tool_name": "symbol_resolve",
+                "payload": {"symbol": "泡泡玛特"},
+                "ok": True,
+                "error": None,
+                "output_contract": {
+                    "schema_version": "symbol_resolve.output.v1",
+                    "canonical_renderer": "symbol_resolve",
+                    "source_label": "OM symbol identity resolver",
+                    "guard_profile": "symbol_identity",
+                    "fact_fields": [
+                        "symbol",
+                        "raw_input",
+                        "canonical_symbol",
+                        "market",
+                        "currency",
+                        "futu_code",
+                        "source_kind",
+                        "status",
+                        "message",
+                    ],
+                },
+                "data": {
+                    "schema_version": "symbol_resolve.v1",
+                    "symbol": "泡泡玛特",
+                    "resolved": True,
+                    "raw_input": "泡泡玛特",
+                    "canonical_symbol": "9992.HK",
+                    "market": "HK",
+                    "currency": "HKD",
+                    "futu_code": "HK.09992",
+                    "source_kind": "alias",
+                    "status": "ok",
+                    "message": "泡泡玛特 -> 9992.HK",
+                },
+            }
+        ],
+    )
+
+    canonical = next(item for item in bundle.public_payload()["facts"] if item["path"] == "canonical_symbol")
+    assert canonical["unit"] == "symbol"
+    good = verify_response_against_evidence("泡泡玛特对应标准代码 9992.HK（HKD，Futu HK.09992）。", evidence_bundle=bundle)
+    assert good.violations == ()
 
 
 def test_evidence_bundle_extracts_analysis_catalog_contract_facts() -> None:
@@ -1079,6 +1213,223 @@ def test_evidence_bundle_infers_candidate_diagnostics_from_analysis_rows() -> No
     assert diagnostic["source"]["view"] == "candidate_filter_diagnostics"
     assert diagnostic["confidence"] == "direct"
     assert "liquidity" in diagnostic["observed_reason"]
+
+
+def test_evidence_bundle_extracts_candidate_filter_explain_observed_trace() -> None:
+    bundle = build_evidence_bundle(
+        question="泡泡玛特被哪个参数过滤了",
+        plan={"goal": "解释泡泡玛特候选过滤诊断", "steps": []},
+        observations=[
+            {
+                "index": 1,
+                "tool_name": "candidate_filter_explain",
+                "payload": {"symbol": "泡泡玛特"},
+                "ok": True,
+                "error": None,
+                "output_contract": {
+                    "schema_version": "candidate_filter_explain.output.v1",
+                    "canonical_renderer": "candidate_filter_explain",
+                    "source_label": "OM candidate filter trace",
+                    "guard_profile": "candidate_filter",
+                    "primary_rows": "functions",
+                    "row_count_field": "trace_count",
+                    "fact_fields": ["canonical_symbol", "raw_symbol", "trace_count"],
+                },
+                "data": {
+                    "symbol": "9992.HK",
+                    "raw_symbol": "泡泡玛特",
+                    "canonical_symbol": "9992.HK",
+                    "scope": {"account": "sy", "account_semantics": "scan_scope"},
+                    "trace_count": 1,
+                    "functions": [
+                        {
+                            "function": "sell_put",
+                            "status": "rejected",
+                            "reason_counts": {"risk_spread": 1},
+                            "events": [
+                                {
+                                    "rule": "risk_spread",
+                                    "metric_value": 0.35,
+                                    "threshold": 0.2,
+                                    "message": "spread too wide",
+                                }
+                            ],
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+
+    diagnostic = bundle.public_payload()["diagnostics"][0]
+    assert diagnostic["domain"] == "candidate_filter"
+    assert diagnostic["status"] == "observed_rejection"
+    assert diagnostic["scope"]["accounts"] == ["sy"]
+    assert diagnostic["scope"]["symbols"] == ["9992.HK"]
+    assert diagnostic["source"]["view"] == "candidate_filter_trace"
+    assert diagnostic["confidence"] == "direct"
+    assert "risk_spread" in diagnostic["observed_reason"]
+
+
+def test_evidence_bundle_marks_candidate_filter_explain_no_matching_trace_as_missing() -> None:
+    bundle = build_evidence_bundle(
+        question="为什么 PDD 没出现在候选里",
+        plan={"goal": "解释 PDD 候选诊断缺失边界", "steps": []},
+        observations=[
+            {
+                "index": 1,
+                "tool_name": "candidate_filter_explain",
+                "payload": {"symbol": "PDD"},
+                "ok": True,
+                "error": None,
+                "output_contract": {
+                    "schema_version": "candidate_filter_explain.output.v1",
+                    "canonical_renderer": "candidate_filter_explain",
+                    "source_label": "OM candidate filter trace",
+                    "guard_profile": "candidate_filter",
+                    "primary_rows": "functions",
+                    "row_count_field": "trace_count",
+                    "fact_fields": ["canonical_symbol", "trace_count"],
+                },
+                "data": {
+                    "symbol": "PDD",
+                    "canonical_symbol": "PDD",
+                    "trace_count": 0,
+                    "functions": [],
+                },
+            }
+        ],
+    )
+
+    diagnostic = bundle.public_payload()["diagnostics"][0]
+    assert diagnostic["domain"] == "candidate_filter"
+    assert diagnostic["status"] == "no_matching_rows"
+    assert diagnostic["confidence"] == "missing"
+    assert diagnostic["missing_data"][0]["kind"] == "candidate_filter_trace_no_matching_rows"
+
+    bad = verify_response_against_evidence(
+        "PDD 没出现在候选里的原因是 liquidity 过滤。",
+        evidence_bundle=bundle,
+    )
+    assert any(item["type"] == "unsupported_diagnostic_root_cause_claim" for item in bad.violations)
+
+
+def test_task_contract_and_coverage_accept_candidate_filter_explain_trace_evidence() -> None:
+    contract = build_task_contract(
+        question="为什么 NVDA 没出现在候选里？",
+        plan={
+            "goal": "解释 NVDA 单标的候选过滤 trace",
+            "steps": [
+                {
+                    "id": "step_1",
+                    "tool_name": "candidate_filter_explain",
+                    "arguments": {"symbol": "NVDA", "account": "lx"},
+                    "purpose": "读取 NVDA 候选过滤 trace",
+                }
+            ],
+        },
+        request_context={"config_key": "us"},
+        today=date(2026, 6, 15),
+    )
+    assert contract.intent_families == ("candidate_filter_diagnostic",)
+    assert contract.required_answer == ("summary", "source_and_policy")
+    assert "main_drivers" not in contract.required_answer
+
+    observed_bundle = build_evidence_bundle(
+        question=contract.question,
+        plan=contract.public_payload(),
+        observations=[
+            {
+                "index": 1,
+                "tool_name": "candidate_filter_explain",
+                "payload": {"symbol": "NVDA", "account": "lx"},
+                "ok": True,
+                "error": None,
+                "output_contract": {
+                    "schema_version": "candidate_filter_explain.output.v1",
+                    "canonical_renderer": "candidate_filter_explain",
+                    "source_label": "OM candidate filter trace",
+                    "guard_profile": "candidate_filter",
+                    "primary_rows": "functions",
+                    "row_count_field": "trace_count",
+                    "fact_fields": ["canonical_symbol", "trace_count"],
+                },
+                "data": {
+                    "symbol": "NVDA",
+                    "canonical_symbol": "NVDA",
+                    "account": "lx",
+                    "scope": {"account": "lx", "account_semantics": "scan_scope"},
+                    "trace_count": 1,
+                    "functions": [
+                        {
+                            "function": "sell_put",
+                            "status": "rejected",
+                            "reason_counts": {"liquidity": 1},
+                            "events": [{"rule": "liquidity", "message": "open interest too low"}],
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+    observed = verify_coverage(task_contract=contract, evidence_bundle=observed_bundle).public_payload()
+    assert observed["status"] == "complete"
+    assert observed["missing"] == []
+    assert observed["gaps"] == []
+
+
+def test_task_contract_and_coverage_accept_candidate_filter_missing_trace_boundary() -> None:
+    contract = build_task_contract(
+        question="为什么 PDD 没出现在候选里？",
+        plan={
+            "goal": "解释 PDD 候选 trace 缺失边界",
+            "steps": [
+                {
+                    "id": "step_1",
+                    "tool_name": "candidate_filter_explain",
+                    "arguments": {"symbol": "PDD"},
+                    "purpose": "读取 PDD 候选过滤 trace",
+                }
+            ],
+        },
+        request_context={"config_key": "us"},
+        today=date(2026, 6, 15),
+    )
+    assert contract.intent_families == ("candidate_filter_diagnostic",)
+    assert contract.required_answer == ("summary", "source_and_policy")
+
+    missing_bundle = build_evidence_bundle(
+        question=contract.question,
+        plan=contract.public_payload(),
+        observations=[
+            {
+                "index": 1,
+                "tool_name": "candidate_filter_explain",
+                "payload": {"symbol": "PDD"},
+                "ok": True,
+                "error": None,
+                "output_contract": {
+                    "schema_version": "candidate_filter_explain.output.v1",
+                    "canonical_renderer": "candidate_filter_explain",
+                    "source_label": "OM candidate filter trace",
+                    "guard_profile": "candidate_filter",
+                    "primary_rows": "functions",
+                    "row_count_field": "trace_count",
+                    "fact_fields": ["canonical_symbol", "trace_count"],
+                },
+                "data": {
+                    "symbol": "PDD",
+                    "canonical_symbol": "PDD",
+                    "trace_count": 0,
+                    "functions": [],
+                },
+            }
+        ],
+    )
+    missing = verify_coverage(task_contract=contract, evidence_bundle=missing_bundle).public_payload()
+    assert missing["status"] == "complete"
+    assert missing["missing"] == []
+    assert missing["gaps"] == []
 
 
 def test_evidence_bundle_infers_runtime_skip_diagnostics_from_analysis_rows() -> None:
@@ -2381,6 +2732,9 @@ def test_agent_loop_tool_result_contains_evidence_bundle_and_session(tmp_path: P
     assert any(item["hook"] == "output_contract" and item["status"] == "pass" for item in session["tool_transcript"][0]["hook_results"])
     assert any(item["hook"] == "evidence_contract" and item["status"] == "pass" for item in session["tool_transcript"][0]["hook_results"])
     assert any(item["hook"] == "result_status" and item["status"] == "pass" for item in session["tool_transcript"][0]["hook_results"])
+    hook_text = json.dumps(session["tool_transcript"][0]["hook_results"], ensure_ascii=False)
+    for unexpected in ("NVDA", "assigned-stock-assign_1", "stock_lot_id", "assigned_stock_unrealized_pnl"):
+        assert unexpected not in hook_text
     assert session["tool_transcript"][0]["evidence_summary"]["source_label"] == "OM 本地 SQLite assigned_stock_events + trade_events"
     assert session["tool_transcript"][0]["evidence_summary"]["primary_rows"] == "rows"
     assert session["tool_transcript"][0]["evidence_summary"]["row_count"] == 1
@@ -2394,6 +2748,9 @@ def test_agent_loop_tool_result_contains_evidence_bundle_and_session(tmp_path: P
     assert persisted[0]["task_state"] == "done"
     assert persisted[0]["fact_count"] == len(evidence["facts"])
     assert persisted[0]["tool_call_count"] == 1
+    persisted_snapshot_text = json.dumps(persisted[0]["snapshot"], ensure_ascii=False)
+    for unexpected in ("assigned-stock-assign_1", "stock_lot_id", "assigned_stock_unrealized_pnl"):
+        assert unexpected not in persisted_snapshot_text
 
     trace = collect_assistant_trace(audit_db=str(audit_db), command_id=out["data"]["command_id"])
     assert trace["schema_version"] == "om-assistant-trace-v1"
@@ -2416,6 +2773,9 @@ def test_agent_loop_tool_result_contains_evidence_bundle_and_session(tmp_path: P
     assert trace_entry["answer"]["response_status"] == "synthesized"
     assert any(item["hook"] == "final_response" and item["status"] == "pass" for item in trace_entry["answer"]["hook_results"])
     assert any(item["hook"] == "answer_guard" and item["status"] == "pass" for item in trace_entry["answer"]["hook_results"])
+    trace_entry_text = json.dumps(trace_entry, ensure_ascii=False)
+    for unexpected in ("assigned-stock-assign_1", "stock_lot_id", "assigned_stock_unrealized_pnl"):
+        assert unexpected not in trace_entry_text
 
     tool_trace = run_tool("assistant_trace", {"audit_db": str(audit_db), "command_id": out["data"]["command_id"]})
     assert tool_trace["ok"] is True
@@ -2550,6 +2910,61 @@ def test_format_assistant_trace_route_samples_from_fixture() -> None:
         for unexpected in case.get("expect_not_contains") or ():
             assert str(unexpected) not in text, case["id"]
         _assert_no_internal_trace_leak(text, case_id=str(case["id"]))
+
+
+def test_assistant_trace_route_samples_satisfy_online_sample_contract() -> None:
+    cases = _load_trace_route_cases()
+    failures: dict[str, list[str]] = {}
+    for case in cases:
+        case_id = str(case.get("id") or "")
+        missing: list[str] = []
+        if not re.match(r"^trace_(?:ask|preview|rewrite|fallback|denied|pass)_[a-z0-9_]+$", case_id):
+            missing.append("trace id naming")
+        if not isinstance(case.get("trace"), dict):
+            missing.append("trace")
+        trace = case.get("trace") if isinstance(case.get("trace"), dict) else {}
+        task = trace.get("task") if isinstance(trace.get("task"), dict) else {}
+        answer = trace.get("answer") if isinstance(trace.get("answer"), dict) else {}
+        if not str(task.get("goal") or "").strip():
+            missing.append("task goal")
+        if not str(answer.get("response_status") or "").strip():
+            missing.append("answer response_status")
+        if not case.get("expect_contains"):
+            missing.append("expect_contains")
+        if not case.get("expect_not_contains"):
+            missing.append("expect_not_contains")
+        if not any("最终：" in str(item) for item in case.get("expect_contains") or ()):
+            missing.append("final route assertion")
+        if missing:
+            failures[case_id] = missing
+            continue
+        try:
+            _assert_trace_fixture_sensitive_values_forbidden(case)
+        except AssertionError as exc:
+            failures[case_id] = [str(exc)]
+
+    assert failures == {}
+
+
+def test_assistant_trace_fixture_covers_documented_p2_minimum_cases() -> None:
+    cases = {str(item["id"]): item for item in _load_trace_route_cases()}
+    missing: dict[str, list[str]] = {}
+    for case_name, fixture_ids in P2_TRACE_ROUTE_MINIMUM_CASES.items():
+        absent = sorted(fixture_ids - set(cases))
+        if absent:
+            missing[case_name] = absent
+    assert missing == {}
+
+    required_ids = {case_id for group in P2_TRACE_ROUTE_MINIMUM_CASES.values() for case_id in group}
+    for case_id in required_ids:
+        case = cases[case_id]
+        assert case.get("expect_contains")
+        assert case.get("expect_not_contains")
+
+
+def test_assistant_trace_minimum_case_mapping_matches_design_document() -> None:
+    documented_cases = {case for case in _load_documented_p2_minimum_case_names() if case.startswith("trace_")}
+    assert set(P2_TRACE_ROUTE_MINIMUM_CASES) == documented_cases
 
 
 def test_agent_loop_replans_read_only_followup_for_recoverable_quote_gap(tmp_path: Path) -> None:
@@ -2734,6 +3149,137 @@ def test_agent_loop_replans_read_only_followup_for_recoverable_quote_gap(tmp_pat
     assert tool_plan_data["tool_calls_used"] == 2
     assert tool_plan_data["evidence_gaps"] == []
     assert "spot USD 98" in out["data"]["response_text"]
+
+
+def test_agent_loop_stops_after_one_followup_for_same_quote_gap(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+    planner_followup_contexts: list[dict[str, Any]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        refresh = payload.get("refresh_quotes") is True
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "action": "assigned-stock",
+                "filters": {"account": "lx", "status": "open", "refresh_quotes": refresh},
+                "rows": [
+                    {
+                        "stock_lot_id": "assigned-stock-assign_1",
+                        "account": "lx",
+                        "symbol": "NVDA",
+                        "currency": "USD",
+                        "status": "open",
+                        "shares_remaining": 100,
+                        "stock_cost_per_share": 100,
+                        "remaining_stock_cost_basis": 10000,
+                        "spot": None,
+                        "quote_status": "missing_quote",
+                        "assigned_stock_unrealized_pnl": None,
+                        "assigned_stock_realized_pnl": 0,
+                        "assignment_lifecycle_pnl": None,
+                    }
+                ],
+                "row_count": 1,
+                "quote_refresh": {
+                    "status": "missing_quote",
+                    "quote_source": "opend_realtime",
+                    "missing_symbols": ["NVDA"],
+                },
+            },
+        )
+
+    def _plan(
+        _text: str,
+        _settings: AssistantSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        followup = conversation_context.get("agent_loop_followup") if isinstance(conversation_context, dict) else None
+        if isinstance(followup, dict):
+            planner_followup_contexts.append(followup)
+            arguments: dict[str, Any] = {
+                "action": "assigned-stock",
+                "account": "lx",
+                "status": "open",
+                "refresh_quotes": True,
+            }
+            if len(planner_followup_contexts) > 1:
+                arguments["symbol"] = "NVDA"
+            return LlmPlannerResult(
+                plan=PlannerPlan(
+                    goal="查看 lx 指派正股持仓盈亏",
+                    response_mode="synthesis",
+                    required_capabilities=("assigned_stock_positions", "read_only"),
+                    steps=(
+                        PlannerPlanStep(
+                            id=f"step_followup_{len(planner_followup_contexts)}",
+                            tool_name="option_positions_read",
+                            arguments=arguments,
+                            purpose="补查指派正股实时行情",
+                        ),
+                    ),
+                ),
+                trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
+            )
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="查看 lx 指派正股持仓盈亏",
+                response_mode="synthesis",
+                required_capabilities=("assigned_stock_positions", "read_only"),
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="option_positions_read",
+                        arguments={"action": "assigned-stock", "account": "lx", "status": "open"},
+                        purpose="读取指派正股持仓",
+                    ),
+                ),
+            ),
+            trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="查看 lx 指派正股持仓盈亏",
+            sender_id="local",
+            message_id="msg_agent_quote_gap_attempted_once",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+    )
+
+    assert out["ok"] is True
+    assert calls == [
+        ("option_positions_read", {"action": "assigned-stock", "account": "lx", "status": "open", "config_key": "us"}),
+        (
+            "option_positions_read",
+            {"action": "assigned-stock", "account": "lx", "status": "open", "refresh_quotes": True, "config_key": "us"},
+        ),
+    ]
+    assert len(planner_followup_contexts) == 1
+    tool_plan_data = out["data"]["action"]["result"]["data"]
+    assert len(tool_plan_data["plan_revisions"]) == 2
+    assert [item["status"] for item in tool_plan_data["followup_decisions"]] == ["accepted", "stopped"]
+    assert (
+        tool_plan_data["followup_decisions"][1]["reason"]
+        == "recoverable evidence gap already attempted once for this scope"
+    )
+    assert any(
+        event["phase"] == "replan" and event["status"] == "gap_already_attempted"
+        for event in tool_plan_data["tool_events"]
+    )
+    assert tool_plan_data["evidence_gaps"][0]["kind"] == "recoverable_missing_quote"
+    assert "quote=missing_quote" in out["data"]["response_text"]
+    assert "正股浮盈亏 -" in out["data"]["response_text"]
+    assert "生命周期PnL -" in out["data"]["response_text"]
+    assert "缺口：缺少实时行情：NVDA，不能计算当前正股浮盈亏和生命周期PnL。" in out["data"]["response_text"]
 
 
 def test_agent_loop_replans_operation_timeline_for_recoverable_upgrade_gap(tmp_path: Path) -> None:
@@ -3489,4 +4035,10 @@ def test_agent_loop_rejects_unrelated_followup_plan_for_evidence_gap(tmp_path: P
     assert [name for name, _payload in calls] == ["option_positions_read"]
     tool_plan_data = out["data"]["action"]["result"]["data"]
     assert len(tool_plan_data["plan_revisions"]) == 1
-    assert any(event["phase"] == "replan" and event["status"] == "unrelated_to_gap" for event in tool_plan_data["tool_events"])
+    assert any(
+        event["phase"] == "replan" and event["status"] == "tool_not_allowed_for_gap"
+        for event in tool_plan_data["tool_events"]
+    )
+    assert tool_plan_data["followup_decisions"][0]["status"] == "rejected"
+    assert "runtime_status" in tool_plan_data["followup_decisions"][0]["reason"]
+    assert "not allowed for the recoverable evidence gap" in tool_plan_data["followup_decisions"][0]["reason"]

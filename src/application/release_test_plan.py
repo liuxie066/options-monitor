@@ -39,6 +39,7 @@ TEST_RULES: tuple[TestRule, ...] = (
         name="config",
         patterns=(
             "src/application/config_*.py",
+            "src/application/config_validator.py",
             "src/application/layered_config.py",
             "configs/system.json",
             "config*.json",
@@ -48,7 +49,7 @@ TEST_RULES: tuple[TestRule, ...] = (
         ),
         reason="config generation or validation files changed",
         commands=(
-            "python3 -m pytest tests/test_config_yaml.py tests/test_layered_config.py",
+            "python3 -m pytest tests/test_config_yaml.py tests/test_layered_config.py tests/test_validate_config_notifications.py",
             "./om config validate --source yaml --market us --config-yaml configs/examples/config.yaml.example",
             "./om config validate --source yaml --market hk --config-yaml configs/examples/config.yaml.example",
             "./om config build --source yaml --market us --config-yaml configs/examples/config.yaml.example --dry-run",
@@ -135,12 +136,32 @@ TEST_RULES: tuple[TestRule, ...] = (
             "tests/test_analysis_tools.py",
             "tests/test_agent_plugin_contract.py",
             "tests/test_agent_plugin_smoke.py",
+            "tests/test_candidate_filter_trace.py",
         ),
         reason="Agent reliability, evidence, trace, eval, or tool contract files changed",
         commands=(
-            "python3 -m pytest tests/test_assistant_agent_eval.py::test_assistant_agent_eval_fixture_covers_p2_agent_eval_gap_groups tests/test_assistant_evidence_session.py::test_format_assistant_trace_route_samples_from_fixture",
+            "jq -c . tests/fixtures/assistant_agent_eval.jsonl",
+            "jq -c . tests/fixtures/assistant_trace_route_samples.jsonl",
+            "python3 -m pytest tests/test_assistant_agent_eval.py::test_assistant_agent_eval_fixture_covers_p2_agent_eval_gap_groups "
+            "tests/test_assistant_agent_eval.py::test_assistant_agent_eval_fixture_covers_documented_p2_minimum_cases "
+            "tests/test_assistant_agent_eval.py::test_assistant_agent_eval_minimum_case_mapping_matches_design_document "
+            "tests/test_assistant_agent_eval.py::test_assistant_agent_eval_minimum_cases_satisfy_online_sample_contract",
+            "python3 -m pytest tests/test_assistant_evidence_session.py::test_format_assistant_trace_route_samples_from_fixture "
+            "tests/test_assistant_evidence_session.py::test_assistant_trace_fixture_covers_documented_p2_minimum_cases "
+            "tests/test_assistant_evidence_session.py::test_assistant_trace_minimum_case_mapping_matches_design_document "
+            "tests/test_assistant_evidence_session.py::test_assistant_trace_route_samples_satisfy_online_sample_contract",
+            "python3 -m pytest tests/test_release_test_plan.py::test_release_test_plan_covers_documented_p2_release_gaps",
+            "python3 -m pytest tests/test_release_test_plan.py::test_release_test_plan_covers_documented_p2_release_readiness",
+            "python3 -m pytest tests/test_release_test_plan.py::test_documented_p2_failure_handling_routes_have_evidence",
+            "python3 -m pytest tests/test_release_test_plan.py::test_documented_p2_bounded_followup_denials_have_evidence",
+            "python3 -m pytest tests/test_release_test_plan.py::test_documented_p2_release_gaps_have_fixture_or_gate_evidence",
+            "python3 -m pytest tests/test_release_test_plan.py::test_documented_p2_closure_completion_items_have_test_evidence",
+            "python3 -m pytest tests/test_release_test_plan.py::test_documented_p2_not_do_items_have_boundary_evidence",
+            "python3 -m pytest tests/test_release_test_plan.py::test_documented_p2_code_acceptance_matrix_has_three_layer_evidence",
+            "python3 -m pytest tests/test_release_test_plan.py::test_documented_p2_route_priority_has_trace_or_eval_evidence",
+            "python3 -m pytest tests/test_release_test_plan.py::test_documented_p2_evidence_trace_ownership_has_test_evidence",
             "python3 -m pytest tests/test_assistant_evidence_session.py tests/test_assistant_agent_eval.py tests/test_assistant_runtime.py tests/test_analysis_tools.py",
-            "python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py",
+            "python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py tests/test_candidate_filter_trace.py",
         ),
     ),
     TestRule(

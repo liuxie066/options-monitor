@@ -55,6 +55,8 @@ def render_inbound_text(*, intent: PerceptionResult | None, tool_result: dict[st
         "healthcheck": "healthcheck",
         "config_validate": "config_validate",
         "symbol_config_query": "symbol_config",
+        "symbol_resolve": "symbol_resolve",
+        "candidate_filter_explain": "candidate_filter_explain",
     }.get(name)
     if renderer_key:
         rendered = render_canonical_tool_result(renderer_key=renderer_key, data=data, tool_result=tool_result)
@@ -134,6 +136,96 @@ def _render_symbol_config(data: dict[str, Any]) -> str:
         return "\n".join(lines)
 
     return f"{symbol} 当前没有可展示的策略配置。"
+
+
+def _render_symbol_resolve(data: dict[str, Any]) -> str:
+    raw = _value(data.get("raw_input") or data.get("symbol"))
+    canonical = _value(data.get("canonical_symbol"))
+    if not bool(data.get("resolved")) or canonical == "-":
+        message = str(data.get("message") or "").strip()
+        return message or f"无法识别标的：{raw}。"
+    market = _value(data.get("market"))
+    currency = _value(data.get("currency"))
+    futu_code = _value(data.get("futu_code"))
+    details = "，".join(item for item in (market, currency, futu_code) if item != "-")
+    suffix = f"（{details}）" if details else ""
+    if raw != "-" and raw != canonical:
+        return f"{raw} -> {canonical}{suffix}。"
+    return f"{canonical}{suffix}。"
+
+
+def _render_candidate_filter_explain(data: dict[str, Any]) -> str:
+    symbol = _value(data.get("canonical_symbol") or data.get("symbol"))
+    raw = _value(data.get("raw_symbol"))
+    trace_count = data.get("trace_count")
+    try:
+        count = int(trace_count)
+    except Exception:
+        count = 0
+
+    lines: list[str] = []
+    title_symbol = symbol if symbol != "-" else raw
+    if count <= 0:
+        lines.append(f"没有找到 {title_symbol} 的候选过滤 trace 匹配记录，不能判断确定原因。")
+    else:
+        lines.append(f"{title_symbol} 候选过滤诊断：{count} 条 trace 记录。")
+    if raw != "-" and symbol != "-" and raw != symbol:
+        lines.append(f"输入已解析：{raw} -> {symbol}。")
+
+    scope = data.get("scope") if isinstance(data.get("scope"), dict) else {}
+    account = _value(scope.get("account") or data.get("account"))
+    if account != "-":
+        lines.append(f"扫描范围：account={account}；这里的 account 只表示扫描/运行范围，不是标的身份字段。")
+
+    functions = [item for item in data.get("functions") or [] if isinstance(item, dict)]
+    observed = [item for item in functions if str(item.get("status") or "") != "not_observed"]
+    for item in observed[:8]:
+        function_name = _value(item.get("function"))
+        status = _value(item.get("status"))
+        reason_counts = item.get("reason_counts") if isinstance(item.get("reason_counts"), dict) else {}
+        reason_text = _format_reason_counts(reason_counts)
+        line = f"- {function_name}: {status}"
+        if reason_text:
+            line += f"；规则 {reason_text}"
+        event = _first_candidate_event(item)
+        if event:
+            line += f"；{event}"
+        lines.append(line)
+    if count > 0 and not observed:
+        lines.append("已读取 trace，但没有观察到匹配的过滤函数记录。")
+
+    lines.append("数据来源：OM candidate filter trace")
+    return "\n".join(lines)
+
+
+def _format_reason_counts(reason_counts: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for key, value in reason_counts.items():
+        rule = _value(key)
+        if rule == "-":
+            continue
+        try:
+            count = int(value)
+        except Exception:
+            count = 1
+        parts.append(f"{rule} x{count}")
+    return "，".join(parts)
+
+
+def _first_candidate_event(item: dict[str, Any]) -> str:
+    events = [event for event in item.get("events") or [] if isinstance(event, dict)]
+    if not events:
+        return ""
+    event = events[0]
+    metric = _value(event.get("metric_value"))
+    threshold = _value(event.get("threshold"))
+    message = _value(event.get("message"))
+    details: list[str] = []
+    if metric != "-" or threshold != "-":
+        details.append(f"metric={metric}, threshold={threshold}")
+    if message != "-":
+        details.append(message)
+    return "；".join(details)
 
 
 def _render_analysis_result(data: dict[str, Any], tool_result: dict[str, Any]) -> str:
@@ -895,12 +987,52 @@ def _render_assigned_stock_lifecycle(data: dict[str, Any]) -> str:
     if refresh_status:
         source = _value(quote_refresh.get("quote_source"))
         lines.append(f"报价刷新：{refresh_status} source={source}")
+    unusable_quote_symbols = _assigned_stock_unusable_quote_symbols(data=data, rows=rows)
+    if unusable_quote_symbols:
+        lines.append(
+            f"缺口：缺少实时行情：{'、'.join(unusable_quote_symbols)}，不能计算当前正股浮盈亏和生命周期PnL。"
+        )
     warnings = [str(item).strip() for item in _list(data.get("warnings")) if str(item).strip()]
     if warnings:
         lines.append("提示：" + "；".join(warnings[:3]))
     lines.append("口径：正股成本按真实交割价记录，不扣除 Sell Put 权利金；生命周期PnL 才包含权利金归因。")
     lines.append("数据源：OM 本地 SQLite assigned_stock_events + trade_events")
     return "\n".join(lines)
+
+
+_ASSIGNED_STOCK_UNUSABLE_QUOTE_STATUSES = frozenset(
+    {"missing", "missing_quote", "stale", "expired", "unknown", "error", "failed"}
+)
+
+
+def _assigned_stock_unusable_quote_symbols(*, data: dict[str, Any], rows: list[Any]) -> list[str]:
+    symbols: list[str] = []
+    seen: set[str] = set()
+
+    def append_symbol(raw: Any) -> None:
+        symbol = _value(raw)
+        if symbol == "-" or symbol in seen:
+            return
+        symbols.append(symbol)
+        seen.add(symbol)
+
+    quote_refresh = _dict(data.get("quote_refresh"))
+    for symbol in _list(quote_refresh.get("missing_symbols")):
+        append_symbol(symbol)
+
+    for row_raw in rows:
+        row = _dict(row_raw)
+        status = str(row.get("quote_status") or "").strip().lower()
+        if status in _ASSIGNED_STOCK_UNUSABLE_QUOTE_STATUSES:
+            append_symbol(row.get("symbol"))
+
+    for item in _list(data.get("assigned_stock_review_rows")):
+        row = _dict(item)
+        status = str(row.get("status") or "").strip().lower()
+        if status in _ASSIGNED_STOCK_UNUSABLE_QUOTE_STATUSES:
+            append_symbol(row.get("symbol"))
+
+    return symbols
 
 
 def _assigned_stock_should_show_account(rows: list[Any], account_filter: str) -> bool:
@@ -1582,4 +1714,6 @@ _CANONICAL_RENDERERS: dict[str, _CanonicalRenderer] = {
     "healthcheck": _render_healthcheck,
     "config_validate": _render_config_validate,
     "symbol_config": lambda data, _tool_result: _render_symbol_config(data),
+    "symbol_resolve": lambda data, _tool_result: _render_symbol_resolve(data),
+    "candidate_filter_explain": lambda data, _tool_result: _render_candidate_filter_explain(data),
 }

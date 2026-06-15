@@ -2,6 +2,85 @@
 
 ## Unreleased
 
+## 1.2.291 - 2026-06-15
+
+### Added
+- Added direct assistant eval and trace-route guards for the documented P2 minimum golden-case checklist, mapping each
+  case in the design document to one or more required fixtures and failing if the 6.6.2 checklist drifts from the
+  checked-in fixture mappings; release test planning now includes those drift guards and JSONL fixture format checks in
+  the Agent reliability gate.
+- Added an online-sample contract guard for documented P2 minimum agent eval fixtures, requiring route/result assertions,
+  tool evidence, required business text, forbidden leak text, and explicit gap/impact text when diagnostics or coverage
+  gaps are expected.
+- Added an online-sample contract guard for compact trace route fixtures, requiring trace naming, compact trace payloads,
+  final-route assertions, display assertions, and explicit forbidden assertions for sensitive payload values.
+- Added compact assistant trace route coverage for candidate-filter missing trace cases, ensuring the user-facing trace
+  explains the evidence gap without exposing tool names, trace paths, or raw artifacts.
+- Added compact assistant trace route coverage for upgrade command-log-missing cases, ensuring upgrade receipt gaps are
+  visible without exposing SQL, local artifact paths, or raw command logs.
+- Added compact assistant trace route coverage for failed release workflow evidence, pairing the existing published
+  release sample with a failure sample while redacting raw workflow logs and GitHub URLs.
+- Added compact assistant trace route coverage for successful runtime notification delivery audits, ensuring positive
+  delivery evidence remains readable without exposing SQL, run IDs, message IDs, or local runtime paths.
+- Added compact assistant trace route coverage for prompt-injection deny cases, ensuring untrusted tool-output
+  instructions stop at the safety route without exposing the injected text or internal tool payload.
+- Added compact assistant trace route coverage for planner apply attempts, ensuring confirm/apply requests stop at the
+  deterministic operation boundary without exposing operation ids or apply payloads.
+- Strengthened compact assistant trace coverage for manual-trade previews so receipt and confirmation-guard hooks prove
+  the preview requires explicit confirmation and still hides operation ids, apply flags, and raw trade text.
+- Added compact assistant trace route coverage for SQL-only period scope expansion, proving period-mismatched read
+  follow-ups ask for clarification without exposing the generated SQL.
+- Added a P2 closure-completion evidence guard that maps each documented 6.18 completion criterion to existing coverage,
+  follow-up, answer, or eval tests.
+- Added a P2 not-do boundary guard that maps each documented 6.17 boundary to existing permission, config, registry,
+  trace/eval, or leak-guard tests.
+- Added a release-gap evidence guard that maps each documented 6.19 P2 pre-release gap to concrete assistant eval,
+  compact trace, or release-plan test evidence.
+- Added a release-plan guard for the documented P2 pre-release gap categories, ensuring each 6.19 gap maps to a
+  concrete Agent reliability release-gate command.
+- Added a release-plan guard for the documented P2 release-readiness checks, ensuring each 6.21 release criterion maps
+  to a concrete Agent reliability release-gate command.
+- Added a P2 failure-handling route guard that maps each documented 6.12 failure point to existing test, Agent eval, or
+  compact trace evidence.
+- Added a P2 bounded follow-up deny-list guard that maps each documented 6.12 follow-up prohibition to runtime, Agent
+  eval, or compact trace evidence.
+- Added a P2 code-acceptance evidence guard that maps each documented 6.13 slice to model/runtime/trace-eval test or
+  fixture evidence.
+- Added a P2 route-priority evidence guard that maps the documented 6.14 final routes to existing tests or compact trace
+  fixtures.
+- Added a P2 evidence/trace ownership guard that maps the documented 6.15 final-answer, hook, session-store, compact-trace,
+  and test-assertion boundaries to existing test evidence.
+- Added an assistant golden eval for assigned-stock fresh quote cases on the `option_positions_read action=assigned-stock`
+  path, proving current spot, stock PnL, and lifecycle PnL can be answered when quote evidence is fresh.
+- Added an assistant golden eval for income breakdown follow-ups, ensuring summary-only monthly income evidence triggers
+  a read-only component query before the Agent explains main drivers.
+- Added an assistant golden eval for assigned-stock missing quote cases, ensuring the Agent performs the read-only
+  quote refresh follow-up and still refuses to calculate current floating PnL when spot remains unavailable.
+- Added assistant golden eval coverage for symbol identity resolution and moved single-symbol candidate why samples onto
+  `candidate_filter_explain`, with evidence extraction for observed rejection and missing trace rows.
+- Added TaskContract coverage for single-symbol candidate-filter diagnostics and symbol identity answer-guard evidence,
+  so `candidate_filter_explain` answers no longer require generic breakdown drivers and `canonical_symbol` claims are
+  verified from tool facts.
+- Added scalar output-contract evidence annotations for `symbol_resolve`, allowing post-tool checks to pass without
+  inventing table rows for scalar identity results.
+
+### Changed
+- Release test planning now treats `src/application/config_validator.py` changes as config-surface changes so assistant
+  config boundary fixes automatically run config validation gates.
+- Agent reliability release gates now include direct `candidate_filter_trace` tests for symbol resolution and
+  single-symbol trace matching.
+
+### Fixed
+- Tightened bounded follow-up gates so recoverable gaps require an explicit `suggested_tool`, validate it against
+  registry-declared pure-read tools, expose only gap-specific allowed tools to the follow-up planner, track attempted
+  gap signatures so the same scoped gap is only queried once, normalize recoverable-source casing, and block release
+  workflow / service repair sources before invoking the follow-up planner.
+- Fixed `candidate_filter_explain` so AgentLoop-injected runtime config aliases are used before matching
+  `candidate_filter_trace` rows, and LLM intent routing now carries the symbol's market sibling config into the same
+  tool so single-symbol candidate diagnostics stay consistent with `symbol_resolve` and configured Chinese/name aliases.
+- Fixed assigned-stock missing-quote receipts so they explicitly state which symbols lack realtime quotes and that
+  current stock floating PnL and lifecycle PnL cannot be calculated.
+
 ## 1.2.290 - 2026-06-15
 
 ### Added

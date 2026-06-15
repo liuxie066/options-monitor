@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 from domain.domain.symbol_identity import symbol_market
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response
-from src.application.agent_tool_registry import get_tool_definition
+from src.application.agent_tool_registry import get_tool_definition, pure_read_tool_names
 from src.application.agent_tools.analysis import VIEW_SPECS as ANALYSIS_VIEW_SPECS
 from src.application.assistant.capability_catalog import (
     ACCOUNT_VALUES,
@@ -63,6 +63,21 @@ INTERNAL_TOOL_PLAN_NAME = "assistant.tool_plan"
 MAX_TOOL_PLAN_STEPS = 3
 MAX_AGENT_LOOP_ITERATIONS = 3
 MAX_AGENT_LOOP_TOOL_CALLS = 5
+_BLOCKED_FOLLOWUP_RECOVERABLE_BY = frozenset(
+    {
+        "apply",
+        "confirm",
+        "cancel",
+        "service",
+        "notification",
+        "broker",
+        "release_workflow",
+        "release_workflow_status",
+        "opend_service_repair",
+        "opend_repair",
+        "service_repair",
+    }
+)
 AGENT_LOOP_READ_TOOLS = frozenset(
     str(spec.tool_name)
     for spec in planner_read_specs()
@@ -136,7 +151,9 @@ _CONFIG_SCOPED_PLAN_TOOLS = frozenset(
         "option_positions_read",
         "runtime_status",
         "close_advice_read",
+        "symbol_resolve",
         "symbol_config_read",
+        "candidate_filter_explain",
     }
 )
 
@@ -655,7 +672,9 @@ def _post_tool_check_status(*, ok: bool, checks: list[dict[str, Any]]) -> str:
 def _evidence_contract_status(output_contract: dict[str, Any]) -> tuple[str, list[str]]:
     if not output_contract:
         return "not_declared", []
-    required = ("source_label", "canonical_renderer", "primary_rows", "fact_fields")
+    required = ["source_label", "canonical_renderer", "fact_fields"]
+    if str(output_contract.get("result_shape") or "").strip().lower() != "scalar":
+        required.append("primary_rows")
     missing = [field for field in required if not output_contract.get(field)]
     return ("warning" if missing else "pass"), missing
 
@@ -699,6 +718,7 @@ def _tool_evidence_summary(*, tool_name: str, payload: dict[str, Any], result: d
         "source_label": output_contract.get("source_label"),
         "canonical_renderer": output_contract.get("canonical_renderer"),
         "guard_profile": output_contract.get("guard_profile"),
+        "result_shape": output_contract.get("result_shape"),
         "primary_rows": primary_rows or None,
         "row_count": row_count,
         "fact_field_count": len(output_contract.get("fact_fields") or []) if isinstance(output_contract.get("fact_fields"), list) else 0,
@@ -756,6 +776,7 @@ def execute_tool_plan(
     coverage_result: CoverageResult | None = None
     coverage_payload: dict[str, Any] = {}
     followup_decisions: list[dict[str, Any]] = []
+    attempted_followup_gap_signatures: set[str] = set()
     iteration = 1
     tool_events.append({"phase": "task_contract", "contract": task_contract.public_payload()})
 
@@ -794,17 +815,36 @@ def execute_tool_plan(
             list(coverage_result.gaps),
         )
         followup_evidence_gaps = _followup_evidence_gaps(evidence_gaps)
+        unattempted_followup_evidence_gaps = _unattempted_followup_evidence_gaps(
+            followup_evidence_gaps,
+            attempted_followup_gap_signatures=attempted_followup_gap_signatures,
+        )
+        if followup_evidence_gaps and not unattempted_followup_evidence_gaps:
+            stop_decision = _followup_already_attempted_stop_decision(
+                evidence_gaps=followup_evidence_gaps,
+                revision=len(plan_revisions) + 1,
+            )
+            followup_decisions.append(stop_decision)
+            tool_events.append({"phase": "followup_decision", **stop_decision})
+            tool_events.append(
+                {
+                    "phase": "replan",
+                    "status": "gap_already_attempted",
+                    "evidence_gaps": [dict(item) for item in followup_evidence_gaps],
+                }
+            )
+            break
         if not _should_replan_read_only(
             ok=ok,
             plan_tools_fn=plan_tools_fn,
-            evidence_gaps=followup_evidence_gaps,
+            evidence_gaps=unattempted_followup_evidence_gaps,
             iteration=iteration,
             tool_call_count=len(observations),
         ):
             stop_decision = _followup_stop_decision(
                 ok=ok,
                 plan_tools_fn=plan_tools_fn,
-                evidence_gaps=followup_evidence_gaps,
+                evidence_gaps=unattempted_followup_evidence_gaps,
                 iteration=iteration,
                 tool_call_count=len(observations),
                 revision=len(plan_revisions) + 1,
@@ -818,7 +858,7 @@ def execute_tool_plan(
             settings=settings,
             conversation_context=conversation_context,
             plan_tools_fn=plan_tools_fn,
-            evidence_gaps=followup_evidence_gaps,
+            evidence_gaps=unattempted_followup_evidence_gaps,
             prior_plan=plan,
             observations=observations,
             revision=len(plan_revisions) + 1,
@@ -827,6 +867,10 @@ def execute_tool_plan(
         )
         if next_plan is None:
             break
+        _record_followup_gap_attempts(
+            unattempted_followup_evidence_gaps,
+            attempted_followup_gap_signatures=attempted_followup_gap_signatures,
+        )
         if _can_recover_execution_failure(ok=ok, evidence_gaps=evidence_gaps):
             ok = True
             error_payload = None
@@ -1022,16 +1066,39 @@ def _followup_evidence_gaps(evidence_gaps: list[dict[str, Any]]) -> list[dict[st
     return [dict(gap) for gap in evidence_gaps if isinstance(gap, dict) and _evidence_gap_allows_followup(gap)]
 
 
+def _unattempted_followup_evidence_gaps(
+    evidence_gaps: list[dict[str, Any]],
+    *,
+    attempted_followup_gap_signatures: set[str],
+) -> list[dict[str, Any]]:
+    return [
+        dict(gap)
+        for gap in evidence_gaps
+        if _followup_gap_signature(gap) not in attempted_followup_gap_signatures
+    ]
+
+
+def _record_followup_gap_attempts(
+    evidence_gaps: list[dict[str, Any]],
+    *,
+    attempted_followup_gap_signatures: set[str],
+) -> None:
+    for gap in evidence_gaps:
+        attempted_followup_gap_signatures.add(_followup_gap_signature(gap))
+
+
 def _evidence_gap_allows_followup(gap: dict[str, Any]) -> bool:
     if gap.get("recoverable") is False:
         return False
-    recoverable_by = str(gap.get("recoverable_by") or "").strip()
+    recoverable_by = str(gap.get("recoverable_by") or "").strip().lower()
     if not recoverable_by:
         return False
-    if recoverable_by in {"apply", "confirm", "service", "notification", "broker"}:
+    if recoverable_by in _BLOCKED_FOLLOWUP_RECOVERABLE_BY:
         return False
     suggested_tool = str(gap.get("suggested_tool") or "").strip()
-    if suggested_tool and suggested_tool not in {"analysis_catalog", "analysis_query", "option_positions_read", "operation_timeline"}:
+    if not suggested_tool:
+        return False
+    if suggested_tool not in pure_read_tool_names():
         return False
     return True
 
@@ -1074,6 +1141,20 @@ def _followup_stop_decision(
         decision="stop_with_gap",
         status="stopped",
         reason=reason,
+        evidence_gaps=evidence_gaps,
+    )
+
+
+def _followup_already_attempted_stop_decision(
+    *,
+    evidence_gaps: list[dict[str, Any]],
+    revision: int,
+) -> dict[str, Any]:
+    return _followup_decision_payload(
+        revision=revision,
+        decision="stop_with_gap",
+        status="stopped",
+        reason="recoverable evidence gap already attempted once for this scope",
         evidence_gaps=evidence_gaps,
     )
 
@@ -1173,6 +1254,28 @@ def _plan_followup_read_steps(
             }
         )
         return None
+    allowlist_rejection = _followup_tool_allowlist_rejection(next_plan, evidence_gaps=evidence_gaps)
+    if allowlist_rejection:
+        decision = _followup_decision_payload(
+            revision=revision,
+            decision="call_tool",
+            status="rejected",
+            reason=allowlist_rejection,
+            evidence_gaps=evidence_gaps,
+            plan=next_plan,
+        )
+        followup_decisions.append(decision)
+        tool_events.append({"phase": "followup_decision", **decision})
+        tool_events.append(
+            {
+                "phase": "replan",
+                "status": "tool_not_allowed_for_gap",
+                "reason": allowlist_rejection,
+                "evidence_gaps": [dict(item) for item in evidence_gaps],
+                "steps": [step.public_payload() for step in next_plan.steps],
+            }
+        )
+        return None
     duplicate_rejection = _followup_duplicate_rejection(next_plan, prior_plan=prior_plan, observations=observations)
     if duplicate_rejection:
         decision = _followup_decision_payload(
@@ -1232,14 +1335,7 @@ def _plan_followup_read_steps(
 
 
 def _followup_decision_contract(*, evidence_gaps: list[dict[str, Any]]) -> dict[str, Any]:
-    suggested_tools = sorted(
-        {
-            str(gap.get("suggested_tool") or "")
-            for gap in evidence_gaps
-            if isinstance(gap, dict) and str(gap.get("suggested_tool") or "").strip()
-        }
-    )
-    allowed_tools = sorted({"analysis_catalog", "analysis_query", *suggested_tools})
+    allowed_tools = _followup_allowed_tools(evidence_gaps)
     return {
         "schema_version": FOLLOWUP_DECISION_SCHEMA_VERSION,
         "allowed_decisions": ["call_tool", "final_answer", "ask_clarification", "stop_with_gap"],
@@ -1254,6 +1350,21 @@ def _followup_decision_contract(*, evidence_gaps: list[dict[str, Any]]) -> dict[
             "scope must not broaden beyond the user question or evidence gap",
         ],
     }
+
+
+def _followup_allowed_tools(evidence_gaps: list[dict[str, Any]]) -> list[str]:
+    allowed: set[str] = set()
+    for gap in evidence_gaps:
+        if not isinstance(gap, dict):
+            continue
+        suggested_tool = str(gap.get("suggested_tool") or "").strip()
+        if not suggested_tool:
+            continue
+        allowed.add(suggested_tool)
+        if suggested_tool == "analysis_query" or str(gap.get("recoverable_by") or "") == "analysis_query":
+            allowed.add("analysis_catalog")
+    pure_read = pure_read_tool_names()
+    return sorted(tool for tool in allowed if tool in pure_read)
 
 
 def _followup_decision_payload(
@@ -1342,9 +1453,73 @@ def _followup_duplicate_rejection(
     return ""
 
 
+_FOLLOWUP_GAP_SIGNATURE_KEYS = (
+    "kind",
+    "code",
+    "recoverable_by",
+    "suggested_tool",
+    "missing_accounts",
+    "covered_accounts",
+    "accounts",
+    "symbols",
+    "months",
+    "periods",
+    "suggested_views",
+    "suggested_fields",
+    "unknown_column",
+    "error_code",
+    "operation_ids",
+    "command_ids",
+)
+
+
+def _followup_gap_signature(gap: dict[str, Any]) -> str:
+    scoped = {
+        key: _canonical_followup_signature_value(gap.get(key))
+        for key in _FOLLOWUP_GAP_SIGNATURE_KEYS
+        if key in gap and _has_followup_signature_value(gap.get(key))
+    }
+    if not scoped:
+        return json.dumps({"kind": str(gap.get("kind") or gap.get("code") or "")}, ensure_ascii=False, sort_keys=True)
+    return json.dumps(scoped, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _has_followup_signature_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple, set, dict)):
+        return bool(value)
+    return True
+
+
+def _canonical_followup_signature_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): _canonical_followup_signature_value(value[key])
+            for key in sorted(value, key=lambda item: str(item))
+            if _has_followup_signature_value(value[key])
+        }
+    if isinstance(value, (list, tuple, set)):
+        items = [_canonical_followup_signature_value(item) for item in value if _has_followup_signature_value(item)]
+        return sorted(items, key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True, default=str))
+    if isinstance(value, str):
+        return value.strip()
+    return value
+
+
 def _followup_observation_signature(observation: dict[str, Any]) -> str:
     payload = observation.get("payload") if isinstance(observation.get("payload"), dict) else {}
     return _followup_step_signature(str(observation.get("tool_name") or ""), payload)
+
+
+def _followup_tool_allowlist_rejection(plan: PlannerPlan, *, evidence_gaps: list[dict[str, Any]]) -> str:
+    allowed_tools = set(_followup_allowed_tools(evidence_gaps))
+    for step in plan.steps:
+        if step.tool_name not in allowed_tools:
+            return f"follow-up plan used {step.tool_name}, which is not allowed for the recoverable evidence gap"
+    return ""
 
 
 def _followup_step_signature(tool_name: str, arguments: dict[str, Any]) -> str:
@@ -1418,11 +1593,11 @@ def _followup_gap_rejection(plan: PlannerPlan, *, evidence_gaps: list[dict[str, 
     ]
     if not operation_gaps:
         return ""
-    if not any(step.tool_name in {"operation_timeline", "analysis_query", "analysis_catalog"} for step in plan.steps):
-        return "follow-up plan did not include operation_timeline or analysis_query for the operation evidence gap"
+    if not any(step.tool_name == "operation_timeline" for step in plan.steps):
+        return "follow-up plan did not include operation_timeline for the operation evidence gap"
     for step in plan.steps:
-        if step.tool_name not in {"operation_timeline", "analysis_query", "analysis_catalog"}:
-            return "follow-up plan for operation evidence gap used a non-read operation tool"
+        if step.tool_name != "operation_timeline":
+            return "follow-up plan for operation evidence gap used a non-operation-timeline tool"
     for gap in operation_gaps:
         if any(_step_closes_operation_gap(step, gap=gap) for step in plan.steps):
             continue
@@ -4229,7 +4404,7 @@ def _inject_system_fields(arguments: dict[str, Any], *, request: AssistantReques
 def _config_path_for_tool_payload(*, tool_name: str, payload: dict[str, Any], default: str | None) -> str | None:
     if not default:
         return None
-    if tool_name != "symbol_config_read":
+    if tool_name not in {"symbol_config_read", "symbol_resolve", "candidate_filter_explain"}:
         return default
     market_key = _market_config_key(payload.get("symbol"))
     if market_key is None:
@@ -4241,7 +4416,7 @@ def _config_path_for_tool_payload(*, tool_name: str, payload: dict[str, Any], de
 
 
 def _config_key_for_tool_payload(*, tool_name: str, payload: dict[str, Any], default: str) -> str:
-    if tool_name != "symbol_config_read":
+    if tool_name not in {"symbol_config_read", "symbol_resolve", "candidate_filter_explain"}:
         return default
     market_key = _market_config_key(payload.get("symbol"))
     if market_key is not None:
@@ -4301,6 +4476,8 @@ Rules:
 - For multiple explicit months, either call monthly_income_report once per month with matching arguments, or omit month and synthesize from all available rows; never duplicate one month while claiming another.
 - For "记录开仓", "记录平仓", Futu 成交提醒, 成功卖出/买入 option fills, use manual_trade_open or manual_trade_close with raw_text set to the original user message.
 - For current monitored-symbol config questions such as "max strike 是多少", "当前配置", or "查询 sell_put.max_strike", use symbol_config_read with symbol plus optional strategy/field.
+- For user-provided company names, Chinese names, aliases, Futu codes, or uncertain market suffixes, use symbol_resolve when the user asks for identity resolution or when a later SQL-style analysis needs a canonical symbol. Symbol-aware tools may also receive the original alias/name and resolve it internally.
+- For single-symbol candidate filter/rejection questions such as "为什么 X 没出现在候选里", "X 被哪个参数过滤了", "why was X filtered", or "why missing candidate", use candidate_filter_explain with symbol plus optional account/function/run_id. Do not use analysis_query for that single-symbol root-cause shape unless the user asks to compare/group/trend across symbols, accounts, rules, or runs.
 - For open-ended analytical questions such as 对比, 有什么不同, 排名, 趋势, 组成, 来源, 按账户/月份/标的汇总, or cross-domain questions across income/positions/trades/assigned stock/config, prefer analysis_query over narrow business renderers. Use analysis_catalog first only when fields/views are unknown.
 - For analysis_query, use only columns listed in the tool manifest analysis_views. Never invent SQL columns. If the needed fields are not clear from the manifest, plan analysis_catalog before analysis_query.
 - For monitored-symbol setting changes such as covered call min strike 85, use symbol_edit. Do not use symbol_edit for questions about the current value.
@@ -4377,7 +4554,8 @@ def _planner_tool_manifest() -> list[dict[str, Any]]:
             notes.append("For assigned-stock PnL analysis, prefer assigned_stock_position_pnl; use assigned_stock_sale_events when the question asks about sold shares or realized sale PnL.")
             notes.append("For current option exposure or expiry concentration, use open_option_exposure and expiration_risk_buckets; for symbol-level income drivers, use symbol_income_attribution.")
             notes.append("For strategy setting comparisons by symbol/account, use strategy_config_by_symbol_account instead of raw config rows.")
-            notes.append("For candidate diagnostics, close-advice questions, runtime push/scan diagnostics, or quote freshness gaps, use candidate_filter_diagnostics, close_advice_snapshot, runtime_tick_status, and quote_freshness.")
+            notes.append("For aggregate candidate diagnostics across symbols/rules/accounts/runs, use candidate_filter_diagnostics; for one-symbol filter reason questions, use candidate_filter_explain instead.")
+            notes.append("For close-advice questions, runtime push/scan diagnostics, or quote freshness gaps, use close_advice_snapshot, runtime_tick_status, and quote_freshness.")
             notes.append("Do not avg/sum return-rate fields directly; recompute weighted rates from money numerator and cash_secured_cny when aggregating rows.")
             notes.append("Tool result rows/cell_refs are evidence; if synthesis fails, the analysis_result renderer preserves the task-shaped table.")
             semantics = {
@@ -4440,6 +4618,54 @@ def _planner_tool_manifest() -> list[dict[str, Any]]:
                     "broker realtime statement outside the local OM ledger",
                     "ordinary option profit or return calculations; use monthly_income_report for monthly income questions",
                     "close advice; use close_advice_read for should-close or take-profit analysis",
+                ],
+            }
+        if name == "symbol_resolve":
+            notes.append("Use when the user asks what a symbol/name/alias maps to, or before SQL-style analysis that needs a canonical symbol.")
+            notes.append("The tool resolves Chinese names, configured aliases, Futu codes, HK numeric codes, and canonical US/HK symbols.")
+            notes.append("This tool only resolves identity; it does not answer whether the symbol was filtered, held, profitable, or configured.")
+            semantics = {
+                "data_source": "OM symbol identity resolver plus runtime config aliases when scoped config is injected",
+                "answer_capabilities": {
+                    "symbol_resolve": "maps a raw symbol/name/alias to canonical_symbol, market, currency, and futu_code",
+                    "read_only": "does not mutate config or runtime state",
+                },
+                "scope_semantics": {
+                    "config injected": "runtime config aliases are included; HK/US sibling config may be selected from the symbol market",
+                    "config omitted": "built-in canonicalization and fallback aliases only",
+                },
+                "not_promised": [
+                    "market data lookup",
+                    "watchlist membership",
+                    "candidate filter diagnosis",
+                ],
+            }
+        if name == "candidate_filter_explain":
+            notes.append("Use for single-symbol candidate filter, rejection, missing-candidate, or 被哪个参数过滤 questions.")
+            notes.append("symbol can be canonical, Chinese name, Futu code, or alias such as 泡泡玛特; the tool resolves it before matching trace rows.")
+            notes.append("account is optional scan/run scope only, not business semantics for symbol identity.")
+            notes.append("For aggregation/comparison/trend across many symbols, rules, accounts, or runs, use analysis_query over candidate_filter_diagnostics instead.")
+            semantics = {
+                "data_source": "candidate_filter_trace.jsonl artifacts",
+                "answer_capabilities": {
+                    "filter_explain": "explains observed accepted/rejected/post-filtered/not-observed candidate trace rows for one symbol",
+                    "candidate_filter_trace": "uses scan-time trace artifacts as the fact source",
+                    "read_only": "does not run scans, fetch market data, send notifications, or write reports",
+                },
+                "scope_semantics": {
+                    "account": "scan/run scope only; omit to search all account trace artifacts in scope",
+                    "function": "optional filter function such as sell_put, sell_call, cash_reserve, or share_coverage",
+                    "run_id omitted": "searches default shared trace artifacts; pass run_id when a specific run is required",
+                },
+                "not_promised": [
+                    "inferring root cause when trace rows are missing",
+                    "rerunning candidate scans",
+                    "aggregated rule comparisons across runs",
+                ],
+                "answer_rules": [
+                    "If trace_count is zero, say the candidate diagnostic is missing and cannot determine the exact filtering parameter.",
+                    "Use rule, metric_value, threshold, status, stage, contract_symbol, expiration, and strike from tool events as evidence.",
+                    "Do not present account as symbol identity or business ownership.",
                 ],
             }
         if name == "symbol_config_read":
@@ -4845,6 +5071,8 @@ def _tool_name_for_intent(intent_name: str) -> str | None:
         "runtime_runs": "runtime_runs",
         "runtime_logs": "runtime_logs",
         "symbol_config_query": "symbol_config_read",
+        "symbol_resolve": "symbol_resolve",
+        "candidate_filter_explain": "candidate_filter_explain",
         "analysis_catalog": "analysis_catalog",
         "analysis_query": "analysis_query",
     }.get(str(intent_name or ""))
@@ -4859,6 +5087,8 @@ def _intent_name_for_tool(tool_name: str) -> str | None:
         "runtime_runs": "runtime_runs",
         "runtime_logs": "runtime_logs",
         "symbol_config_read": "symbol_config_query",
+        "symbol_resolve": "symbol_resolve",
+        "candidate_filter_explain": "candidate_filter_explain",
         "analysis_catalog": "analysis_catalog",
         "analysis_query": "analysis_query",
     }.get(str(tool_name or ""))
