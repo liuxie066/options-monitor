@@ -61,7 +61,7 @@ from src.infrastructure.openai_chat_completions import (
 from src.infrastructure.openai_responses import OpenAIResponsesError, extract_response_text
 
 AGENT_LOOP_SCHEMA_VERSION = "om-agent-loop-v1"
-TOOL_PLAN_SCHEMA_VERSION = "om-tool-plan-v1"
+TOOL_PLAN_SCHEMA_VERSION = "om-tool-plan-v2"
 TOOL_PLAN_SYNTHESIS_SCHEMA_VERSION = "om-tool-plan-synthesis-v1"
 FOLLOWUP_DECISION_SCHEMA_VERSION = "om-agent-loop-followup-decision-v1"
 TOOL_CHECK_SCHEMA_VERSION = "om-agent-tool-check-v1"
@@ -117,6 +117,7 @@ _BANNED_PLAN_ARGUMENTS = frozenset(
         "opend_telnet_port",
         "output_dir",
         "profile_path",
+        "response_mode",
         "report_dir",
         "report_path",
         "run_dir",
@@ -228,7 +229,6 @@ class PlannerPlanStep:
 class PlannerPlan:
     goal: str
     steps: tuple[PlannerPlanStep, ...]
-    response_mode: str = "synthesis"
     required_capabilities: tuple[str, ...] = ()
     schema_version: str = TOOL_PLAN_SCHEMA_VERSION
 
@@ -236,7 +236,6 @@ class PlannerPlan:
         return {
             "schema_version": self.schema_version,
             "goal": self.goal,
-            "response_mode": self.response_mode,
             "required_capabilities": list(self.required_capabilities),
             "steps": [step.public_payload() for step in self.steps],
         }
@@ -2140,6 +2139,22 @@ def synthesize_tool_plan_response(
 def parse_tool_plan_payload(payload: dict[str, Any]) -> PlannerPlan:
     if not isinstance(payload, dict):
         raise AgentToolError(code="INPUT_ERROR", message="tool plan must be a JSON object")
+    allowed_keys = {"schema_version", "goal", "required_capabilities", "steps"}
+    extra_keys = sorted(str(key) for key in payload if str(key) not in allowed_keys)
+    if extra_keys:
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message=f"tool plan has unsupported top-level fields: {', '.join(extra_keys)}",
+            details={"extra_fields": extra_keys, "allowed_fields": sorted(allowed_keys)},
+        )
+    required_keys = {"schema_version", "goal", "required_capabilities", "steps"}
+    missing_keys = sorted(key for key in required_keys if key not in payload)
+    if missing_keys:
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message=f"tool plan is missing required top-level fields: {', '.join(missing_keys)}",
+            details={"missing_fields": missing_keys, "required_fields": sorted(required_keys)},
+        )
     schema_version = str(payload.get("schema_version") or "").strip()
     if schema_version != TOOL_PLAN_SCHEMA_VERSION:
         raise AgentToolError(
@@ -2147,9 +2162,6 @@ def parse_tool_plan_payload(payload: dict[str, Any]) -> PlannerPlan:
             message="unsupported tool plan schema version",
             details={"schema_version": schema_version, "expected": TOOL_PLAN_SCHEMA_VERSION},
         )
-    response_mode = str(payload.get("response_mode") or "synthesis").strip().lower()
-    if response_mode not in {"canonical", "synthesis"}:
-        raise AgentToolError(code="INPUT_ERROR", message="tool plan response_mode must be canonical or synthesis")
     raw_steps = payload.get("steps")
     if not isinstance(raw_steps, list):
         raise AgentToolError(code="INPUT_ERROR", message="tool plan steps must be a JSON array")
@@ -2176,7 +2188,6 @@ def parse_tool_plan_payload(payload: dict[str, Any]) -> PlannerPlan:
     return PlannerPlan(
         goal=str(payload.get("goal") or "").strip(),
         steps=tuple(steps),
-        response_mode=response_mode,
         required_capabilities=_normalized_capabilities(payload.get("required_capabilities")),
         schema_version=schema_version,
     )
@@ -2408,7 +2419,7 @@ def _planning_outcome_from_tool_plan_result(result: LlmPlannerResult, *, questio
         AgentLoopPlanningOutcome(
             perception=PerceptionResult(
                 intent_name="tool_plan",
-                arguments={"plan": result.plan.public_payload(), "response_mode": result.plan.response_mode},
+                arguments={"plan": result.plan.public_payload()},
                 source="agent_loop_plan",
                 confidence=1.0,
             ),
@@ -2554,22 +2565,12 @@ def _normalize_tool_plan(plan: PlannerPlan, *, question: str, today: date) -> Pl
     detail_requested = _question_requests_income_detail(question)
     all_history_requested = _question_requests_all_income_history(question)
     all_accounts_requested = _question_requests_all_accounts(question)
-    response_mode = plan.response_mode
     changed = False
     steps: list[PlannerPlanStep] = []
     monthly_step_index = 0
     monthly_step_count = sum(1 for step in plan.steps if step.tool_name == "monthly_income_report")
     for step in plan.steps:
         arguments = dict(step.arguments)
-        if "response_mode" in arguments:
-            misplaced_response_mode = arguments.pop("response_mode")
-            normalized_response_mode = str(misplaced_response_mode or "").strip().lower()
-            if normalized_response_mode in {"canonical", "synthesis"}:
-                if response_mode != normalized_response_mode:
-                    response_mode = normalized_response_mode
-                changed = True
-            else:
-                arguments["response_mode"] = misplaced_response_mode
         if step.tool_name == "monthly_income_report":
             monthly_step_index += 1
             purpose_months = _extract_month_filters(step.purpose, today=today)
@@ -2579,13 +2580,9 @@ def _normalize_tool_plan(plan: PlannerPlan, *, question: str, today: date) -> Pl
             if all_history_requested and not months and "month" in arguments:
                 arguments.pop("month", None)
                 changed = True
-                if response_mode != "synthesis":
-                    response_mode = "synthesis"
             elif len(months) > 1 and monthly_step_count == 1 and "month" in arguments:
                 arguments.pop("month", None)
                 changed = True
-                if response_mode != "synthesis":
-                    response_mode = "synthesis"
             elif len(months) > 1 and monthly_step_index <= len(months) and arguments.get("month") != months[monthly_step_index - 1]:
                 arguments["month"] = months[monthly_step_index - 1]
                 changed = True
@@ -2598,13 +2595,6 @@ def _normalize_tool_plan(plan: PlannerPlan, *, question: str, today: date) -> Pl
             if detail_requested and arguments.get("include_rows") is not True:
                 arguments["include_rows"] = True
                 changed = True
-            if detail_requested and response_mode != "synthesis":
-                response_mode = "synthesis"
-                changed = True
-        if step.tool_name == "option_positions_read" and _tool_plan_step_action(arguments) == "assigned-stock":
-            if response_mode != "synthesis":
-                response_mode = "synthesis"
-                changed = True
         if arguments == step.arguments:
             steps.append(step)
         else:
@@ -2614,7 +2604,6 @@ def _normalize_tool_plan(plan: PlannerPlan, *, question: str, today: date) -> Pl
     return PlannerPlan(
         goal=plan.goal,
         steps=tuple(steps),
-        response_mode=response_mode,
         required_capabilities=plan.required_capabilities,
         schema_version=plan.schema_version,
     )
@@ -2743,7 +2732,6 @@ def tool_plan_json_schema() -> dict[str, Any]:
         "properties": {
             "schema_version": {"type": "string", "enum": [TOOL_PLAN_SCHEMA_VERSION]},
             "goal": {"type": "string"},
-            "response_mode": {"type": "string", "enum": ["canonical", "synthesis"]},
             "required_capabilities": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -2765,7 +2753,7 @@ def tool_plan_json_schema() -> dict[str, Any]:
                 },
             },
         },
-        "required": ["schema_version", "goal", "response_mode", "required_capabilities", "steps"],
+        "required": ["schema_version", "goal", "required_capabilities", "steps"],
     }
 
 
@@ -2912,13 +2900,6 @@ def _build_final_response(
             if "guard" in locals():
                 trace["answer_guard"] = {"status": "failed_then_fallback", **guard}
             return LlmSynthesisResult(response_text=fact_text, trace=trace)
-    if plan.response_mode == "canonical" and len(plan.steps) == 1 and fact_observations:
-        text = _canonical_response(plan.steps[0], _first_tool_observation(plan.steps[0], fact_observations))
-        if text:
-            return LlmSynthesisResult(
-                response_text=text,
-                trace={"attempted": False, "reason": "canonical_renderer", "schema_version": TOOL_PLAN_SYNTHESIS_SCHEMA_VERSION},
-            )
     synthesizer = synthesize_response_fn or synthesize_tool_plan_response
     synthesis = synthesizer(question, settings, plan, llm_observations, conversation_context)
     if synthesis.response_text:
@@ -2987,7 +2968,7 @@ def _build_final_response(
         if text:
             trace = {
                 **dict(synthesis.trace),
-                "reason": "canonical_renderer_fallback",
+                "reason": "agent_renderer_fallback",
                 "fallback": "canonical_renderer",
                 "error_code": synthesis.error.code if synthesis.error else None,
             }
@@ -3086,10 +3067,7 @@ def _build_answer_evidence(
 def _agent_composer_required(plan: PlannerPlan, *, evidence: AnswerEvidence) -> bool:
     if not evidence.enabled or len(plan.steps) != 1:
         return False
-    step = plan.steps[0]
-    if _answer_policy_for_step(step) == "facts_then_analysis":
-        return True
-    return plan.response_mode == "synthesis"
+    return True
 
 
 def _compose_agent_response(
@@ -3217,20 +3195,6 @@ def _final_response_payload(synthesis: LlmSynthesisResult) -> dict[str, Any]:
             canonical_renderer_required=True,
             llm_may_summarize=True,
         ).public_payload()
-    if reason == "canonical_renderer":
-        return FinalResponsePlan(
-            status="rendered",
-            reason="canonical renderer produced the factual response",
-            canonical_renderer_required=True,
-            llm_may_summarize=False,
-        ).public_payload()
-    if reason == "canonical_renderer_fallback":
-        return FinalResponsePlan(
-            status="rendered",
-            reason="canonical renderer used after synthesis was unavailable",
-            canonical_renderer_required=True,
-            llm_may_summarize=False,
-        ).public_payload()
     if reason == "analysis_result_fallback":
         return FinalResponsePlan(
             status="rendered",
@@ -3333,7 +3297,7 @@ def _grounded_facts_response_required(plan: PlannerPlan) -> bool:
     if len(plan.steps) != 1:
         return False
     step = plan.steps[0]
-    return plan.response_mode == "synthesis" and _answer_policy_for_step(step) == "facts_then_analysis"
+    return _answer_policy_for_step(step) == "facts_then_analysis"
 
 
 def _answer_policy_for_step(step: PlannerPlanStep) -> str:
@@ -4464,7 +4428,7 @@ Rules:
 - For monthly income summary questions, use monthly_income_report with account/month when available.
 - For combined/all-account return questions, include required_capabilities=["combined_account_return"] and use monthly_income_report without account.
 - For cashflow detail, net cashflow composition, net inflow source, "明细", "组成", "构成", "来源", or "由什么组成", use monthly_income_report with include_rows=true; the Agent composer will write the final user response from tool evidence.
-- For assigned stock / 被指派正股 / 指派正股 holding PnL, floating PnL, spot, cost basis, or lifecycle PnL questions, use option_positions_read with action="assigned-stock", status="open" unless the user asks all/closed, refresh_quotes=true for current holding PnL. Use response_mode=synthesis so the Agent composer can summarize the holding PnL from tool evidence.
+- For assigned stock / 被指派正股 / 指派正股 holding PnL, floating PnL, spot, cost basis, or lifecycle PnL questions, use option_positions_read with action="assigned-stock", status="open" unless the user asks all/closed, refresh_quotes=true for current holding PnL. AgentLoop decides the final answer path from tool evidence.
 - For all-history, cumulative, or total net cashflow questions, omit month so monthly_income_report reads all OM local ledger months.
 - For multiple explicit months, either call monthly_income_report once per month with matching arguments, or omit month and synthesize from all available rows; never duplicate one month while claiming another.
 - For "记录开仓", "记录平仓", Futu 成交提醒, 成功卖出/买入 option fills, use manual_trade_open or manual_trade_close with raw_text set to the original user message.
@@ -4475,9 +4439,7 @@ Rules:
 - For analysis_query, use only columns listed in the tool manifest analysis_views. Never invent SQL columns. If the needed fields are not clear from the manifest, plan analysis_catalog before analysis_query.
 - For monitored-symbol setting changes such as covered call min strike 85, use symbol_edit. Do not use symbol_edit for questions about the current value.
 - For model switch requests, use model_use. For immediate software upgrade requests, use upgrade_now.
-- response_mode is a top-level plan field only. Never include response_mode inside any step.arguments.
-- response_mode is an internal compatibility field, not a user-visible mode. Prefer response_mode=synthesis for financial answers that should be composed from tool evidence; deterministic renderers remain fallback.
-- Use response_mode=canonical only for narrow status/config lookups where a direct deterministic value is the whole answer.
+- Do not include answer-rendering fields such as response_mode, canonical, synthesis, or renderer choices. AgentLoop decides the final answer path, verifies evidence, and owns deterministic fallback.
 - If there is no safe plan, or required slots are missing and the capability cannot safely handle them, return steps=[] instead of guessing.
 """
 
@@ -4790,7 +4752,7 @@ Rules:
 - Start with the direct answer. Use a short "关键依据：" bullet block only when it improves readability.
 - Do not force a 事实/分析 section split. Write one natural answer; use compact bullets only when the user asked for details or the rows are necessary.
 - Do not expose SQL, tool names, raw tool receipts, artifact paths, trace ids, or internal ids such as stock_lot_id, record_id, event_id, source_deal_id, or position_key.
-- Do not mention internal answer modes such as canonical, synthesis, fact mode, or analysis mode.
+- Do not mention internal answer modes, renderer names, fact mode, or analysis mode.
 - If observations include assistant.answer_evidence, follow its composition_instruction. Do not append 数据来源 or 口径; the system appends deterministic provenance.
 - Mention the data scope only when it changes the answer; do not duplicate deterministic provenance.
 - For monthly_income_report, "历史以来", "累计", and "总净现金流" mean the OM local ledger coverage returned by the tool.
@@ -4894,6 +4856,8 @@ def _synthesis_data(tool_name: str, data: dict[str, Any]) -> dict[str, Any]:
             "cell_refs": _clip_mapping(data.get("cell_refs"), limit=120) if isinstance(data.get("cell_refs"), dict) else {},
             "fallback_text": data.get("fallback_text"),
         }
+    if tool_name == "candidate_filter_explain":
+        return _candidate_filter_synthesis_data(data)
     if tool_name == "monthly_income_report":
         coverage = _monthly_income_coverage(data)
         out = {
@@ -4932,6 +4896,58 @@ def _synthesis_data(tool_name: str, data: dict[str, Any]) -> dict[str, Any]:
             "warnings": _clip_list(data.get("warnings"), limit=8),
         }
     return _clip_mapping(data, limit=20)
+
+
+def _candidate_filter_synthesis_data(data: dict[str, Any]) -> dict[str, Any]:
+    functions: list[dict[str, Any]] = []
+    for item in data.get("functions") or []:
+        if not isinstance(item, dict):
+            continue
+        events: list[dict[str, Any]] = []
+        for event in item.get("events") or []:
+            if not isinstance(event, dict):
+                continue
+            events.append(
+                {
+                    "status": event.get("status"),
+                    "rule": event.get("rule"),
+                    "rule_label": event.get("rule_label"),
+                    "is_rejection": event.get("is_rejection"),
+                    "metric_value": event.get("metric_value"),
+                    "threshold": event.get("threshold"),
+                    "message": event.get("message"),
+                    "contract_symbol": event.get("contract_symbol"),
+                    "expiration": event.get("expiration"),
+                    "strike": event.get("strike"),
+                }
+            )
+            if len(events) >= 6:
+                break
+        functions.append(
+            {
+                "function": item.get("function"),
+                "status": item.get("status"),
+                "rejection_reasons": _clip_list(item.get("rejection_reasons"), limit=8),
+                "rejection_reason_counts": dict(item.get("rejection_reason_counts") or {})
+                if isinstance(item.get("rejection_reason_counts"), dict)
+                else {},
+                "reason_labels": dict(item.get("reason_labels") or {}) if isinstance(item.get("reason_labels"), dict) else {},
+                "events": events,
+            }
+        )
+        if len(functions) >= 8:
+            break
+    return {
+        "symbol": data.get("symbol"),
+        "raw_symbol": data.get("raw_symbol"),
+        "canonical_symbol": data.get("canonical_symbol"),
+        "account": data.get("account"),
+        "scope": dict(data.get("scope") or {}) if isinstance(data.get("scope"), dict) else {},
+        "trace_count": data.get("trace_count"),
+        "status_counts": dict(data.get("status_counts") or {}) if isinstance(data.get("status_counts"), dict) else {},
+        "function_counts": dict(data.get("function_counts") or {}) if isinstance(data.get("function_counts"), dict) else {},
+        "functions": functions,
+    }
 
 
 def _monthly_income_coverage(data: dict[str, Any]) -> dict[str, Any]:

@@ -340,6 +340,10 @@ def _rule_label(rule: str) -> str:
     return raw
 
 
+def candidate_rule_label(rule: str) -> str:
+    return _rule_label(rule)
+
+
 def _is_net_income_non_positive(rule: str) -> bool:
     return rule == "metrics_net_income_non_positive"
 

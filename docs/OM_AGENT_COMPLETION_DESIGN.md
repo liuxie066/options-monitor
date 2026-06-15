@@ -158,8 +158,9 @@ surfaces, not in normal chat replies.
 
 The next Agent increment is a general Tool OS layer, not another
 business-specific answer tool. The design follows the useful Claude Code
-pattern: the model chooses tools and explains results, while the host owns
-permission checks, data authority, execution boundaries, and verification.
+pattern: the model chooses tools and explains results, while the AgentLoop
+runtime owns permission checks, data authority, execution boundaries, and
+verification.
 
 This explicitly rejects a narrow tool such as `account_income_compare` as the
 main solution. That tool would answer one question shape, but it would not help
@@ -390,19 +391,14 @@ Missing data is first-class, not a warning string:
 
 ### Planner Output
 
-The planner should gradually move away from presentation flags such as
-`response_mode`. It should express task requirements:
+The planner must not choose answer-rendering modes. It only expresses the task
+goal, required capabilities, and tool steps:
 
 ```json
 {
+  "schema_version": "om-tool-plan-v2",
   "goal": "explain assigned stock PnL for sy",
-  "requirements": {
-    "needs_current_quote": true,
-    "needs_lifecycle_pnl": true,
-    "needs_detail_rows": true,
-    "needs_reconciliation": false,
-    "needs_write_preview": false
-  },
+  "required_capabilities": ["positions", "quotes", "pnl"],
   "steps": [
     {
       "tool_name": "option_positions_read",
@@ -418,8 +414,12 @@ The planner should gradually move away from presentation flags such as
 }
 ```
 
-`response_mode` may remain internally during migration, but it should not be the
-planner's conceptual control surface.
+Fields such as `response_mode`, `canonical`, `synthesis`, and renderer choices
+are invalid planner output. AgentLoop decides the final answer path from the
+user task, tool contracts, and gathered evidence. Normal diagnostic,
+analytical, and financial explanations use LLM composition over guarded
+evidence; deterministic renderers remain evidence formatters and fallbacks when
+composition is unavailable or unsafe.
 
 ### Loop Algorithm
 

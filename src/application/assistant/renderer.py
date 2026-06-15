@@ -182,11 +182,15 @@ def _render_candidate_filter_explain(data: dict[str, Any]) -> str:
     for item in observed[:8]:
         function_name = _value(item.get("function"))
         status = _value(item.get("status"))
-        reason_counts = item.get("reason_counts") if isinstance(item.get("reason_counts"), dict) else {}
-        reason_text = _format_reason_counts(reason_counts)
+        rejection_reasons = [reason for reason in item.get("rejection_reasons") or [] if isinstance(reason, dict)]
+        reason_counts = item.get("rejection_reason_counts") if isinstance(item.get("rejection_reason_counts"), dict) else {}
+        if not reason_counts:
+            reason_counts = item.get("reason_counts") if isinstance(item.get("reason_counts"), dict) else {}
+        labels = item.get("reason_labels") if isinstance(item.get("reason_labels"), dict) else {}
+        reason_text = _format_rejection_reasons(rejection_reasons) or _format_reason_counts(reason_counts, labels=labels)
         line = f"- {function_name}: {status}"
         if reason_text:
-            line += f"；规则 {reason_text}"
+            line += f"；拒绝原因 {reason_text}"
         event = _first_candidate_event(item)
         if event:
             line += f"；{event}"
@@ -198,17 +202,34 @@ def _render_candidate_filter_explain(data: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _format_reason_counts(reason_counts: dict[str, Any]) -> str:
+def _format_rejection_reasons(reasons: list[dict[str, Any]]) -> str:
+    parts: list[str] = []
+    for reason in reasons:
+        label = _value(reason.get("label") or reason.get("rule"))
+        if label == "-":
+            continue
+        try:
+            count = int(reason.get("count"))
+        except Exception:
+            count = 1
+        parts.append(f"{label} x{count}")
+    return "，".join(parts)
+
+
+def _format_reason_counts(reason_counts: dict[str, Any], *, labels: dict[str, Any] | None = None) -> str:
     parts: list[str] = []
     for key, value in reason_counts.items():
         rule = _value(key)
         if rule == "-":
             continue
+        label = _value((labels or {}).get(rule)) if labels else "-"
+        if label == "-":
+            label = rule
         try:
             count = int(value)
         except Exception:
             count = 1
-        parts.append(f"{rule} x{count}")
+        parts.append(f"{label} x{count}")
     return "，".join(parts)
 
 
@@ -220,7 +241,10 @@ def _first_candidate_event(item: dict[str, Any]) -> str:
     metric = _value(event.get("metric_value"))
     threshold = _value(event.get("threshold"))
     message = _value(event.get("message"))
+    rule_label = _value(event.get("rule_label"))
     details: list[str] = []
+    if rule_label != "-":
+        details.append(rule_label)
     if metric != "-" or threshold != "-":
         details.append(f"metric={metric}, threshold={threshold}")
     if message != "-":

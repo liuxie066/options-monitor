@@ -16,6 +16,10 @@ from src.application.candidate_filter_trace import (
     TRACE_STATUS_ORDER,
     read_candidate_filter_trace,
 )
+from src.application.candidate_reject_summary import candidate_rule_label
+
+
+_REJECTION_STATUSES = {"rejected", "reject", "filtered", "post_filtered", "excluded", "blocked", "skip", "skipped"}
 
 
 def candidate_filter_explain_tool(
@@ -126,6 +130,9 @@ def _summarize_function(function_name: str, rows: list[dict[str, Any]]) -> dict[
             "function": function_name,
             "status": "not_observed",
             "reason_counts": {},
+            "reason_labels": {},
+            "rejection_reason_counts": {},
+            "rejection_reasons": [],
             "events": [],
         }
     ordered = sorted(
@@ -137,19 +144,30 @@ def _summarize_function(function_name: str, rows: list[dict[str, Any]]) -> dict[
         ),
     )
     reason_counts = Counter(str(row.get("rule") or "unknown") for row in rows)
+    rejection_reason_counts = Counter(str(row.get("rule") or "unknown") for row in rows if _is_rejection_row(row))
+    reason_labels = {rule: candidate_rule_label(rule) for rule in sorted(reason_counts)}
     return {
         "function": function_name,
         "status": str(ordered[0].get("status") or "unknown"),
         "reason_counts": dict(reason_counts),
+        "reason_labels": reason_labels,
+        "rejection_reason_counts": dict(rejection_reason_counts),
+        "rejection_reasons": [
+            {"rule": rule, "label": candidate_rule_label(rule), "count": count}
+            for rule, count in rejection_reason_counts.most_common(8)
+        ],
         "events": [_event_summary(row) for row in ordered[:20]],
     }
 
 
 def _event_summary(row: dict[str, Any]) -> dict[str, Any]:
+    rule = str(row.get("rule") or "").strip()
     return {
         "status": row.get("status"),
         "stage": row.get("stage"),
         "rule": row.get("rule"),
+        "rule_label": candidate_rule_label(rule) if rule else None,
+        "is_rejection": _is_rejection_row(row),
         "metric_value": row.get("metric_value"),
         "threshold": row.get("threshold"),
         "contract_symbol": row.get("contract_symbol"),
@@ -158,3 +176,9 @@ def _event_summary(row: dict[str, Any]) -> dict[str, Any]:
         "message": row.get("message"),
         "evidence_path": row.get("evidence_path"),
     }
+
+
+def _is_rejection_row(row: dict[str, Any]) -> bool:
+    status = str(row.get("status") or "").strip().lower()
+    rule = str(row.get("rule") or "").strip().lower()
+    return status in _REJECTION_STATUSES and rule not in {"candidate_accepted", "accepted"}
