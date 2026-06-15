@@ -533,13 +533,15 @@ messages. Slash commands are resolved by the Inbound command catalog before LLM
 and do not call the Planner.
 
 The current provider adapters use OpenAI Responses API for `openai` and Chat
-Completions JSON output for `deepseek`. They produce an `om-tool-plan-v1`
-capability plan for the AgentLoop. Planner read steps still go through the read
-whitelist before execution. Planner preview-write steps are converted back into
-the same operation preview path as deterministic commands, so sender allowlist,
-operation gates, preview storage, audit, idempotency, and later explicit
-confirmation still apply. Low-confidence or incomplete requests must return
-clarification.
+Completions JSON output for `deepseek`. They produce an `om-tool-plan-v2`
+capability plan for the AgentLoop. The plan describes the goal, required
+capabilities, and tool steps; AgentLoop decides the final answer path from the
+task, tool contracts, and gathered evidence. Planner read steps still go
+through the read whitelist before execution. Planner preview-write steps are
+converted back into the same operation preview path as deterministic commands, so
+sender allowlist, operation gates, preview storage, audit, idempotency, and later
+explicit confirmation still apply. Low-confidence or incomplete requests must
+return clarification.
 
 `agent_loop` is the current bounded Planner lane inside the Agent loop. It may plan read tools or one preview-write operation, but deterministic execution, factual rendering, preview storage, confirm/apply, and audit ownership remain outside model authority. If a write-like request such as a Futu fill alert is planned as a read query, OM rejects the plan instead of silently returning nearby holdings or income data.
 
@@ -555,10 +557,10 @@ user question
 -> read-only OM tools fetch ledger/runtime/config/strategy evidence
 -> optional Tool OS query builds a task-shaped result table
 -> AgentLoop builds an internal evidence bundle from tool observations
--> LLM composes the user-facing answer from that evidence
+-> LLM composes normal analytical answers from that evidence
 -> answer guard checks the response against tool facts and query cells
 -> deterministic provenance is appended
--> task-shaped fallback is used when composition is unavailable or unsafe
+-> deterministic renderer remains an evidence formatter and fallback when composition is unavailable or unsafe
 ```
 
 The design goal is to preserve LLM intelligence without making the LLM a factual source. The LLM may choose what to inspect, which dimensions to compare, and what explanation angle is useful. It must not be the component that invents accounting facts such as amount, currency, contract count, account, symbol, expiration, close type, or date.

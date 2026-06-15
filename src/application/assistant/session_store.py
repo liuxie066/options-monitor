@@ -520,7 +520,7 @@ def _friendly_final_reason(answer: dict[str, Any]) -> str:
         return "使用任务形状保底"
     if fallback == "analysis_result_renderer" or synthesis_reason == "analysis_result_fallback":
         return "使用分析结果保底"
-    if fallback == "canonical_renderer" or synthesis_reason in {"agent_renderer_fallback", "canonical_renderer_fallback"}:
+    if fallback == "canonical_renderer" or synthesis_reason == "agent_renderer_fallback":
         return "使用确定性 renderer"
     if synthesis_reason in {"agent_composed_response", "synthesized", "synthesized_after_answer_guard"}:
         return "LLM 回答通过证据校验"

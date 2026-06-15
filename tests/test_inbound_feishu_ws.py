@@ -218,7 +218,6 @@ def test_feishu_ws_agent_loop_routes_cashflow_detail_plan(tmp_path: Path) -> Non
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="分析 lx 2026-06 的净现金流明细",
-                response_mode="synthesis",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -328,7 +327,6 @@ def test_feishu_ws_agent_loop_degrades_when_conversation_context_fails(
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="runtime status",
-                response_mode="canonical",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",

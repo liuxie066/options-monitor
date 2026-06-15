@@ -5,6 +5,8 @@ from datetime import date
 import calendar
 from typing import Any
 
+from src.application.candidate_reject_summary import candidate_rule_label
+
 
 EVIDENCE_BUNDLE_SCHEMA_VERSION = "om-agent-evidence-bundle-v1"
 DIAGNOSTIC_EVIDENCE_SCHEMA_VERSION = "om-agent-diagnostic-evidence-v1"
@@ -793,8 +795,9 @@ def _candidate_diagnostic_summary(*, status: str, rules: list[str]) -> str:
     if status == "conflicting_evidence":
         return "candidate diagnostic evidence is conflicting"
     if status == "observed_rejection":
+        labels = [candidate_rule_label(rule) for rule in rules]
         return (
-            "candidate diagnostic contains observed rejection/filter evidence by rules: " + ", ".join(rules)
+            "candidate diagnostic contains observed rejection/filter evidence by rules: " + ", ".join(labels)
             if rules
             else "candidate diagnostic contains observed rejection/filter evidence"
         )
@@ -852,10 +855,16 @@ def _candidate_filter_tool_diagnostic_records(
     statuses = {str(item.get("status") or "").strip().lower() for item in functions if str(item.get("status") or "").strip()}
     rules: set[str] = set()
     for item in functions:
-        reason_counts = item.get("reason_counts") if isinstance(item.get("reason_counts"), dict) else {}
+        reason_counts = item.get("rejection_reason_counts") if isinstance(item.get("rejection_reason_counts"), dict) else {}
+        if not reason_counts:
+            reason_counts = item.get("reason_counts") if isinstance(item.get("reason_counts"), dict) else {}
         rules.update(str(key).strip() for key in reason_counts if str(key).strip())
         for event in item.get("events") or []:
-            if isinstance(event, dict) and str(event.get("rule") or "").strip():
+            if (
+                isinstance(event, dict)
+                and bool(event.get("is_rejection", True))
+                and str(event.get("rule") or "").strip()
+            ):
                 rules.add(str(event.get("rule")).strip())
 
     status = "observed_candidate_diagnostic"

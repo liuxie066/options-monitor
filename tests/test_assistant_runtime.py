@@ -90,13 +90,11 @@ def _plan_result(
     arguments: dict[str, Any] | None = None,
     *,
     goal: str = "test plan",
-    response_mode: str = "canonical",
     purpose: str = "",
 ) -> LlmPlannerResult:
     return LlmPlannerResult(
         plan=PlannerPlan(
             goal=goal,
-            response_mode=response_mode,
             steps=(
                 PlannerPlanStep(
                     id="step_1",
@@ -1749,7 +1747,6 @@ def test_assistant_runtime_agent_loop_prioritizes_bare_upgrade_confirm_over_plan
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="误判为立即升级",
-                response_mode="canonical",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -2804,7 +2801,6 @@ def test_assistant_runtime_agent_loop_executes_planned_cashflow_detail(tmp_path:
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="分析 lx 2026-06 的净现金流明细",
-                response_mode="synthesis",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -2838,7 +2834,6 @@ def test_assistant_runtime_agent_loop_executes_planned_cashflow_detail(tmp_path:
     ) -> LlmSynthesisResult:
         assert question == "分析 lx 6月的净现金流明细"
         assert settings.enabled is True
-        assert plan.response_mode == "synthesis"
         assert conversation_context is not None
         assert observations[0]["data"]["cashflow_rows"][0]["symbol"] == "0700.HK"
         assert observations[-1]["tool_name"] == "assistant.answer_evidence"
@@ -2930,7 +2925,6 @@ def test_assistant_runtime_agent_loop_satisfies_single_account_return_capability
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="查询 lx 2026-06 单账户收益",
-                response_mode="synthesis",
                 required_capabilities=("account_return",),
                 steps=(
                     PlannerPlanStep(
@@ -3036,7 +3030,6 @@ def test_assistant_runtime_agent_loop_injects_config_for_symbol_config_read(tmp_
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="查询泡泡玛特 sell put max strike",
-                response_mode="canonical",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -3089,7 +3082,8 @@ def test_assistant_runtime_agent_loop_injects_config_for_symbol_config_read(tmp_
             },
         )
     ]
-    assert out["data"]["response_text"] == "9992.HK sell_put.max_strike = 145。"
+    assert out["data"]["response_text"].startswith("9992.HK sell_put.max_strike = 145。")
+    assert "数据来源：OM runtime symbol config" in out["data"]["response_text"]
     agent_loop = out["meta"]["assistant"]["llm"]["agent_loop"]
     assert agent_loop["observations"][0]["payload"] == {
         "symbol": "泡泡玛特",
@@ -3120,7 +3114,18 @@ def test_assistant_runtime_agent_loop_injects_config_for_candidate_filter_explai
                         "function": "sell_put",
                         "status": "rejected",
                         "reason_counts": {"risk_spread": 1},
-                        "events": [{"rule": "risk_spread", "metric_value": 0.35, "threshold": 0.2}],
+                        "reason_labels": {"risk_spread": "价差不合格"},
+                        "rejection_reason_counts": {"risk_spread": 1},
+                        "rejection_reasons": [{"rule": "risk_spread", "label": "价差不合格", "count": 1}],
+                        "events": [
+                            {
+                                "rule": "risk_spread",
+                                "rule_label": "价差不合格",
+                                "is_rejection": True,
+                                "metric_value": 0.35,
+                                "threshold": 0.2,
+                            }
+                        ],
                     }
                 ],
             },
@@ -3134,7 +3139,6 @@ def test_assistant_runtime_agent_loop_injects_config_for_candidate_filter_explai
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="解释泡泡玛特候选过滤参数",
-                response_mode="canonical",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -3159,6 +3163,21 @@ def test_assistant_runtime_agent_loop_injects_config_for_candidate_filter_explai
             },
         )
 
+    def _synthesize(
+        question: str,
+        _settings: AssistantSettings,
+        _plan: PlannerPlan,
+        observations: list[dict[str, Any]],
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmSynthesisResult:
+        assert question == "泡泡玛特被哪个参数过滤了？"
+        assert observations[0]["data"]["functions"][0]["rejection_reasons"][0]["label"] == "价差不合格"
+        assert observations[-1]["tool_name"] == "assistant.answer_evidence"
+        return LlmSynthesisResult(
+            response_text="泡泡玛特（9992.HK）这次 sell_put 主要被价差不合格过滤；这是本次 trace 观察到的拒绝原因。",
+            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+        )
+
     out = handle_assistant_message(
         AssistantRequest(
             text="泡泡玛特被哪个参数过滤了？",
@@ -3173,6 +3192,7 @@ def test_assistant_runtime_agent_loop_injects_config_for_candidate_filter_explai
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         plan_tools_fn=_plan,
+        synthesize_response_fn=_synthesize,
     )
 
     assert out["ok"] is True
@@ -3185,9 +3205,13 @@ def test_assistant_runtime_agent_loop_injects_config_for_candidate_filter_explai
             },
         )
     ]
-    assert "9992.HK 候选过滤诊断：1 条 trace 记录。" in out["data"]["response_text"]
+    assert out["data"]["response_text"].startswith("泡泡玛特（9992.HK）这次 sell_put 主要被价差不合格过滤")
+    assert "risk_spread" not in out["data"]["response_text"]
+    assert "候选过滤诊断：" not in out["data"]["response_text"]
     agent_loop = out["meta"]["assistant"]["llm"]["agent_loop"]
     assert agent_loop["observations"][0]["payload"] == {"symbol": "泡泡玛特"}
+    assert agent_loop["final_response"]["status"] == "synthesized"
+    assert agent_loop["final_response"]["reason"] == "LLM composed the response from guarded tool evidence"
 
 
 def test_assistant_runtime_llm_intent_routes_symbol_config_to_market_sibling_config_path(tmp_path: Path) -> None:
@@ -3245,7 +3269,8 @@ def test_assistant_runtime_llm_intent_routes_symbol_config_to_market_sibling_con
             },
         )
     ]
-    assert out["data"]["response_text"] == "9992.HK sell_put.max_strike = 145。"
+    assert out["data"]["response_text"].startswith("9992.HK sell_put.max_strike = 145。")
+    assert "数据来源：OM runtime symbol config" in out["data"]["response_text"]
 
 
 def test_assistant_runtime_llm_intent_routes_candidate_filter_to_market_sibling_config_path(tmp_path: Path) -> None:
@@ -3354,7 +3379,6 @@ def test_assistant_runtime_agent_loop_satisfies_position_read_tool_capabilities(
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="读取当前持仓明细",
-                response_mode="synthesis",
                 required_capabilities=("option_positions", "read_only"),
                 steps=(
                     PlannerPlanStep(
@@ -3486,7 +3510,6 @@ def test_assistant_runtime_agent_loop_routes_assigned_stock_holding_pnl(tmp_path
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="查看 lx 指派正股持仓盈亏",
-                response_mode="canonical",
                 required_capabilities=("assigned_stock_positions", "read_only"),
                 steps=(
                     PlannerPlanStep(
@@ -3520,7 +3543,6 @@ def test_assistant_runtime_agent_loop_routes_assigned_stock_holding_pnl(tmp_path
         _conversation_context: dict[str, Any] | None,
     ) -> LlmSynthesisResult:
         assert question == "查看 lx 指派正股持仓盈亏"
-        assert plan.response_mode == "synthesis"
         assert observations[-1]["tool_name"] == "assistant.answer_evidence"
         assert "stock_lot_id" not in json.dumps(observations[0]["data"], ensure_ascii=False)
         return LlmSynthesisResult(
@@ -3563,7 +3585,7 @@ def test_assistant_runtime_agent_loop_routes_assigned_stock_holding_pnl(tmp_path
         "satisfied": ["assigned_stock_positions", "read_only"],
         "gaps": [],
     }
-    assert tool_plan_data["plan"]["response_mode"] == "synthesis"
+    assert "response_mode" not in tool_plan_data["plan"]
     assert tool_plan_data["final_response"]["reason"] == "LLM composed the response from guarded tool evidence"
 
 
@@ -3613,7 +3635,6 @@ def test_assistant_runtime_agent_loop_analyzes_assigned_stock_when_requested(tmp
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="分析 lx 指派正股持仓盈亏",
-                response_mode="canonical",
                 required_capabilities=("assigned_stock_positions", "read_only"),
                 steps=(
                     PlannerPlanStep(
@@ -3647,7 +3668,6 @@ def test_assistant_runtime_agent_loop_analyzes_assigned_stock_when_requested(tmp
         _conversation_context: dict[str, Any] | None,
     ) -> LlmSynthesisResult:
         assert question == "分析 lx 指派正股持仓盈亏"
-        assert plan.response_mode == "synthesis"
         assert plan.required_capabilities == ("assigned_stock_positions", "read_only")
         assert observations[-1]["tool_name"] == "assistant.answer_evidence"
         assert "正股浮盈亏 USD -200" in observations[-1]["data"]["fallback_renderer_text"]
@@ -3684,7 +3704,7 @@ def test_assistant_runtime_agent_loop_analyzes_assigned_stock_when_requested(tmp
     assert "数据来源：OM 本地 SQLite assigned_stock_events + trade_events；spot=opend_realtime（ok）" in text
     assert "\n\n分析\n" not in text
     tool_plan_data = out["data"]["action"]["result"]["data"]
-    assert tool_plan_data["plan"]["response_mode"] == "synthesis"
+    assert "response_mode" not in tool_plan_data["plan"]
     assert tool_plan_data["final_response"]["reason"] == "LLM composed the response from guarded tool evidence"
 
 
@@ -3734,7 +3754,6 @@ def test_assistant_runtime_agent_loop_assigned_stock_falls_back_from_invented_am
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="查看 lx 指派正股持仓盈亏",
-                response_mode="synthesis",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -3844,7 +3863,6 @@ def test_assistant_runtime_agent_loop_grounded_positions_fall_back_from_wrong_co
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="分析当前持仓",
-                response_mode="synthesis",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -3951,7 +3969,6 @@ def test_assistant_runtime_agent_loop_reports_unsatisfied_combined_income_capabi
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="查询全部账户 2026-05 合并总收益",
-                response_mode="synthesis",
                 required_capabilities=("combined_account_return",),
                 steps=(
                     PlannerPlanStep(
@@ -4082,7 +4099,6 @@ def test_assistant_runtime_agent_loop_canonical_income_uses_untruncated_fact_obs
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="查询全部账户 2026-06 合并收益",
-                response_mode="canonical",
                 required_capabilities=("combined_account_return",),
                 steps=(
                     PlannerPlanStep(
@@ -4189,7 +4205,6 @@ def test_assistant_runtime_agent_loop_uses_canonical_fallback_when_synthesis_una
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="查询lx账户2026年6月的收益情况",
-                response_mode="synthesis",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -4329,7 +4344,6 @@ def test_assistant_runtime_agent_loop_analysis_query_uses_task_shaped_fallback(t
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="对比 lx 和 sy 的账户收益",
-                response_mode="synthesis",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -4548,7 +4562,6 @@ def test_agent_loop_replans_analysis_query_for_breakdown_gap(tmp_path: Path) -> 
             return LlmPlannerResult(
                 plan=PlannerPlan(
                     goal="分析 lx 和 sy 收益差异主要来自哪里",
-                    response_mode="synthesis",
                     steps=(
                         PlannerPlanStep(
                             id="step_2",
@@ -4569,7 +4582,6 @@ def test_agent_loop_replans_analysis_query_for_breakdown_gap(tmp_path: Path) -> 
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="分析 lx 和 sy 收益差异主要来自哪里",
-                response_mode="synthesis",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -4694,7 +4706,6 @@ def test_agent_loop_replans_analysis_query_for_missing_account_coverage(tmp_path
             return LlmPlannerResult(
                 plan=PlannerPlan(
                     goal="对比 lx 和 sy 的账户收益",
-                    response_mode="synthesis",
                     steps=(
                         PlannerPlanStep(
                             id="step_2",
@@ -4715,7 +4726,6 @@ def test_agent_loop_replans_analysis_query_for_missing_account_coverage(tmp_path
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="对比 lx 和 sy 的账户收益",
-                response_mode="synthesis",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -4907,7 +4917,6 @@ def test_agent_loop_rejects_duplicate_analysis_followup_query(tmp_path: Path) ->
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="分析 lx 和 sy 收益差异主要来自哪里",
-                response_mode="synthesis",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -5010,7 +5019,6 @@ def test_agent_loop_repairs_analysis_query_unknown_column_preflight(tmp_path: Pa
             return LlmPlannerResult(
                 plan=PlannerPlan(
                     goal="查询 lx 六月收益",
-                    response_mode="synthesis",
                     steps=(
                         PlannerPlanStep(
                             id="step_2",
@@ -5031,7 +5039,6 @@ def test_agent_loop_repairs_analysis_query_unknown_column_preflight(tmp_path: Pa
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="查询 lx 六月收益",
-                response_mode="synthesis",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -5135,7 +5142,6 @@ def test_agent_loop_rejects_preflight_repair_without_suggested_field(tmp_path: P
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="查询 lx 六月收益",
-                response_mode="synthesis",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -5202,7 +5208,6 @@ def test_agent_loop_followup_needs_clarification_stops_cleanly(tmp_path: Path) -
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="查询收益",
-                response_mode="synthesis",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -5317,7 +5322,6 @@ def test_assistant_runtime_agent_loop_answer_guard_rewrites_contradictory_income
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="查询历史以来总的净现金流",
-                response_mode="synthesis",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -5453,7 +5457,6 @@ def test_assistant_runtime_agent_loop_answer_guard_falls_back_on_analysis_policy
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="分析 lx 收益率",
-                response_mode="synthesis",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -5571,7 +5574,6 @@ def test_assistant_runtime_agent_loop_answer_guard_falls_back_on_missing_diagnos
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="解释 NVDA 没出现在候选里的原因",
-                response_mode="synthesis",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -5673,7 +5675,6 @@ def test_assistant_runtime_agent_loop_answer_guard_falls_back_on_unsupported_quo
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="解释 sy FUTU 指派正股为什么没有浮盈亏",
-                response_mode="synthesis",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -5786,7 +5787,6 @@ def test_assistant_runtime_agent_loop_answer_guard_rewrites_internal_ux_leak(tmp
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="对比 lx 和 sy 的账户收益",
-                response_mode="synthesis",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -5917,7 +5917,6 @@ def test_assistant_runtime_agent_loop_answer_guard_accepts_derived_difference_re
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="对比 lx 和 sy 的账户收益",
-                response_mode="synthesis",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -6035,7 +6034,6 @@ def test_assistant_runtime_agent_loop_answer_guard_rewrites_wrong_derived_rate(t
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="分析 lx 收益率",
-                response_mode="synthesis",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -6152,7 +6150,6 @@ def test_assistant_runtime_agent_loop_answer_guard_rewrites_wrong_contribution_s
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="分析 sy 六月收益贡献",
-                response_mode="synthesis",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -6319,7 +6316,6 @@ def test_assistant_runtime_agent_loop_grounded_income_falls_back_from_wrong_cont
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="查询 2026-06 收益组成",
-                response_mode="synthesis",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -6436,7 +6432,6 @@ def test_assistant_runtime_agent_loop_grounded_income_returns_facts_when_llm_una
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="查询 2026-06 收益组成",
-                response_mode="synthesis",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -6517,7 +6512,6 @@ def test_assistant_runtime_agent_loop_rejects_disallowed_plan_tool(tmp_path: Pat
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="非法升级",
-                response_mode="synthesis",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -6594,7 +6588,6 @@ def test_assistant_runtime_agent_loop_plans_manual_trade_open_preview(monkeypatc
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="记录 sy 的腾讯开仓成交",
-                response_mode="canonical",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -6840,7 +6833,6 @@ def test_assistant_runtime_agent_loop_cancels_manual_trade_open_preview(monkeypa
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="记录 sy 的腾讯开仓成交",
-                response_mode="canonical",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -6970,7 +6962,6 @@ def test_assistant_runtime_agent_loop_rejects_read_plan_for_trade_preview_reques
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="误判为持仓查询",
-                response_mode="canonical",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -7035,7 +7026,6 @@ def test_assistant_runtime_agent_loop_action_safety_rejects_preview_for_read_req
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="错误地把只读收益问题规划成交易预览",
-                response_mode="canonical",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -7101,7 +7091,6 @@ def test_assistant_runtime_agent_loop_rejects_confirm_plan(tmp_path: Path) -> No
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="非法确认",
-                response_mode="canonical",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -7158,7 +7147,7 @@ def test_plan_read_only_tools_treats_empty_steps_as_no_plan() -> None:
                 {
                     "schema_version": TOOL_PLAN_SCHEMA_VERSION,
                     "goal": "无法安全规划",
-                    "response_mode": "synthesis",
+                    "required_capabilities": [],
                     "steps": [],
                 }
             )
@@ -7188,7 +7177,7 @@ def test_plan_read_only_tools_treats_empty_steps_as_no_plan() -> None:
     assert result.trace["error_code"] == "NEEDS_CLARIFICATION"
 
 
-def test_plan_read_only_tools_hoists_misplaced_response_mode_argument() -> None:
+def test_plan_read_only_tools_rejects_response_mode_fields() -> None:
     calls: list[dict[str, Any]] = []
 
     def _create_response(**kwargs: Any) -> dict[str, Any]:
@@ -7222,12 +7211,10 @@ def test_plan_read_only_tools_hoists_misplaced_response_mode_argument() -> None:
     )
 
     assert calls
-    assert result.error is None
-    assert result.plan is not None
-    assert result.plan.response_mode == "synthesis"
-    assert result.plan.steps[0].tool_name == "monthly_income_report"
-    assert result.plan.steps[0].arguments == {}
-    assert result.trace["reason"] == "accepted"
+    assert result.plan is None
+    assert result.error is not None
+    assert result.error.code == "INPUT_ERROR"
+    assert result.trace["reason"] == "invalid_plan"
 
 
 def test_tool_plan_rejects_system_scoped_argument_families() -> None:
@@ -7286,12 +7273,11 @@ def test_agent_loop_income_cashflow_eval_plan_guard() -> None:
             "text": "历史以来总的净现金流",
             "plan": PlannerPlan(
                 goal="查询历史以来总的净现金流",
-                response_mode="canonical",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
                         tool_name="monthly_income_report",
-                        arguments={"month": "2026-06", "response_mode": "synthesis"},
+                        arguments={"month": "2026-06"},
                         purpose="获取所有月份的总净现金流",
                     ),
                 ),
@@ -7302,7 +7288,6 @@ def test_agent_loop_income_cashflow_eval_plan_guard() -> None:
             "text": "所有账户累计净现金流",
             "plan": PlannerPlan(
                 goal="查询所有账户累计净现金流",
-                response_mode="synthesis",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -7318,7 +7303,6 @@ def test_agent_loop_income_cashflow_eval_plan_guard() -> None:
             "text": "5月和6月的总收益",
             "plan": PlannerPlan(
                 goal="获取5月和6月的总收益",
-                response_mode="canonical",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -7343,7 +7327,6 @@ def test_agent_loop_income_cashflow_eval_plan_guard() -> None:
             "text": "今年以来各账户收益对比",
             "plan": PlannerPlan(
                 goal="今年以来各账户收益对比",
-                response_mode="synthesis",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -7359,7 +7342,6 @@ def test_agent_loop_income_cashflow_eval_plan_guard() -> None:
             "text": "分析 lx 6月的净现金流明细，重点是明细",
             "plan": PlannerPlan(
                 goal="分析 lx 6月的净现金流明细",
-                response_mode="canonical",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -7377,7 +7359,6 @@ def test_agent_loop_income_cashflow_eval_plan_guard() -> None:
             "text": "sy 2026-06 收益由什么组成",
             "plan": PlannerPlan(
                 goal="sy 2026-06 收益组成",
-                response_mode="canonical",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -7395,7 +7376,6 @@ def test_agent_loop_income_cashflow_eval_plan_guard() -> None:
             "text": "lx 6月权利金收入和已实现PnL分别是多少",
             "plan": PlannerPlan(
                 goal="lx 6月权利金和已实现PnL",
-                response_mode="synthesis",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -7411,7 +7391,6 @@ def test_agent_loop_income_cashflow_eval_plan_guard() -> None:
             "text": "6月收益",
             "plan": PlannerPlan(
                 goal="6月收益",
-                response_mode="synthesis",
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -7479,7 +7458,7 @@ def test_assistant_runtime_agent_loop_empty_plan_uses_general_reply_for_non_busi
         _conversation_context: dict[str, Any] | None,
     ) -> LlmPlannerResult:
         return LlmPlannerResult(
-            plan=PlannerPlan(goal="无法安全规划", response_mode="synthesis", steps=()),
+            plan=PlannerPlan(goal="无法安全规划", steps=()),
             trace={
                 "enabled": True,
                 "attempted": True,
@@ -7761,7 +7740,6 @@ def test_openai_responses_client_builds_structured_output_request() -> None:
                                 {
                                     "schema_version": TOOL_PLAN_SCHEMA_VERSION,
                                     "goal": "check status",
-                                    "response_mode": "canonical",
                                     "required_capabilities": [],
                                     "steps": [
                                         {"id": "step_1", "tool_name": "runtime_status", "arguments": {}, "purpose": "check status"}
@@ -7843,7 +7821,6 @@ def test_openai_chat_completions_client_builds_deepseek_json_request() -> None:
                             {
                                 "schema_version": TOOL_PLAN_SCHEMA_VERSION,
                                 "goal": "check status",
-                                "response_mode": "canonical",
                                 "required_capabilities": [],
                                 "steps": [
                                     {"id": "step_1", "tool_name": "runtime_status", "arguments": {}, "purpose": "check status"}
