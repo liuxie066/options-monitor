@@ -10,9 +10,10 @@ import sqlite3
 from typing import Any
 
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.agent_tool_operations import option_positions_read_tool
-from src.application.agent_tool_scan import monthly_income_report_tool
+from src.application.agent_tools.operations_impl import option_positions_read_tool
+from src.application.agent_tools.materialization_impl import monthly_income_report_tool
 from src.application.agent_tools.base import AgentTool, AgentToolContext, build_agent_tool
+from src.application.agent_tools.candidate_filter_trace_discovery import find_candidate_filter_trace_paths
 from src.application.candidate_filter_trace import infer_trace_scope_from_path, read_candidate_filter_trace
 
 
@@ -1838,7 +1839,7 @@ def _symbol_strategy_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _candidate_filter_diagnostic_rows(ctx: AgentToolContext, payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
-    paths = _candidate_filter_trace_paths(ctx, payload)
+    paths = _candidate_filter_trace_paths(ctx, _payload_with_resolved_config_path(ctx, payload))
     if not paths:
         return [], ["candidate_filter_diagnostics missing: no candidate_filter_trace.jsonl artifacts found"]
     rows: list[dict[str, Any]] = []
@@ -1863,26 +1864,15 @@ def _candidate_filter_diagnostic_rows(ctx: AgentToolContext, payload: dict[str, 
 
 
 def _candidate_filter_trace_paths(ctx: AgentToolContext, payload: dict[str, Any]) -> list[Path]:
-    base = ctx.repo_base().resolve()
-    account = str(payload.get("account") or "").strip().lower()
-    candidates: list[Path] = []
-    run_id = str(payload.get("run_id") or "").strip()
-    if run_id:
-        run_dir = (base / "output_runs" / run_id).resolve()
-        if account:
-            candidates.append(run_dir / "accounts" / account / "candidate_filter_trace.jsonl")
-        else:
-            candidates.extend(sorted(run_dir.glob("accounts/*/candidate_filter_trace.jsonl")))
-    candidates.append(base / "output_shared" / "reports" / "candidate_filter_trace.jsonl")
-    candidates.append(base / "output_shared" / "agent_tools" / "reports" / "candidate_filter_trace.jsonl")
-    out: list[Path] = []
-    seen: set[Path] = set()
-    for path in candidates:
-        resolved = path.resolve()
-        if resolved in seen or not resolved.exists() or not resolved.is_file():
-            continue
-        seen.add(resolved)
-        out.append(resolved)
+    return find_candidate_filter_trace_paths(payload, repo_base=ctx.repo_base)
+
+
+def _payload_with_resolved_config_path(ctx: AgentToolContext, payload: dict[str, Any]) -> dict[str, Any]:
+    if str(payload.get("config_path") or "").strip() or not str(payload.get("config_key") or "").strip():
+        return payload
+    config_path, _cfg = ctx.load_runtime_config(config_key=payload.get("config_key"), config_path=None)
+    out = dict(payload)
+    out["config_path"] = str(config_path)
     return out
 
 
@@ -1991,13 +1981,13 @@ def _runtime_tick_status_rows(ctx: AgentToolContext, payload: dict[str, Any]) ->
 
 
 def _call_close_advice_read_tool(payload: dict[str, Any], **kwargs: Any) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    from src.application.agent_tool_close_advice_read import close_advice_read_tool
+    from src.application.agent_tools.close_advice_read_impl import close_advice_read_tool
 
     return close_advice_read_tool(payload, **kwargs)
 
 
 def _call_runtime_status_tool(payload: dict[str, Any], **kwargs: Any) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    from src.application.agent_tool_runtime_status import runtime_status_tool
+    from src.application.agent_tools.runtime_status_impl import runtime_status_tool
 
     return runtime_status_tool(payload, **kwargs)
 

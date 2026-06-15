@@ -11,7 +11,7 @@ from src.application.agent_tools.permissions import write_tools_enabled_from_env
 
 AgentToolEntry = AgentTool
 
-_SKIP_AGENT_TOOL_MODULES: frozenset[str] = frozenset({"base"})
+_SKIP_AGENT_TOOL_MODULES: frozenset[str] = frozenset({"base", "permissions"})
 _PREFERRED_MODULE_ORDER: tuple[str, ...] = (
     "diagnostics",
     "runtime",
@@ -40,7 +40,12 @@ def _discover_tool_modules() -> tuple[ModuleType, ...]:
     modules: list[ModuleType] = []
     for module_info in pkgutil.iter_modules(package_paths):
         module_name = module_info.name
-        if module_name.startswith("_") or module_name in _SKIP_AGENT_TOOL_MODULES:
+        if (
+            module_name.startswith("_")
+            or module_name in _SKIP_AGENT_TOOL_MODULES
+            or module_name.endswith("_impl")
+            or module_name.endswith("_helpers")
+        ):
             continue
         module = importlib.import_module(f"{prefix}{module_name}")
         if hasattr(module, "TOOLS"):

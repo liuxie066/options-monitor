@@ -68,7 +68,7 @@ def _healthcheck_tool(
     ctx: AgentToolContext,
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    from src.application.agent_tool_healthcheck import run_healthcheck_tool
+    from src.application.agent_tools.healthcheck_impl import run_healthcheck_tool
 
     return run_healthcheck_tool(
         payload,
@@ -94,7 +94,7 @@ def _runtime_status_tool(
     ctx: AgentToolContext,
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    from src.application.agent_tool_runtime_status import runtime_status_tool
+    from src.application.agent_tools.runtime_status_impl import runtime_status_tool
 
     return runtime_status_tool(
         payload,
@@ -149,7 +149,7 @@ def _openclaw_readiness_tool(
     ctx: AgentToolContext,
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    from src.application.agent_tool_openclaw import openclaw_readiness_tool
+    from src.application.agent_tools.openclaw_impl import openclaw_readiness_tool
 
     return openclaw_readiness_tool(
         payload,

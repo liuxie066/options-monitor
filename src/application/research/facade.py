@@ -43,8 +43,8 @@ def _run_research_collect(
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     from src.application.account_config import accounts_from_config, list_account_config_views, normalize_accounts
     from src.application.agent_tool_config import load_runtime_config, write_tools_enabled
-    from src.application.agent_tool_healthcheck import run_healthcheck_tool
-    from src.application.agent_tool_runtime import (
+    from src.application.agent_tools.healthcheck_impl import run_healthcheck_tool
+    from src.application.agent_tools.runtime_helpers import (
         healthcheck_symbols_for_futu,
         mask_account_id,
         read_json_object_or_empty as _read_json_object_or_empty,
@@ -53,7 +53,7 @@ def _run_research_collect(
         run_futu_doctor,
         validate_runtime_config,
     )
-    from src.application.agent_tool_runtime_status import runtime_status_tool
+    from src.application.agent_tools.runtime_status_impl import runtime_status_tool
     from src.application.config_loader import resolve_watchlist_config
     from src.application.config_validator import validate_config
     from src.application.futu_portfolio_context import infer_futu_portfolio_settings

@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 1.2.293 - 2026-06-16
+
+### Changed
+- Moved the heavy Agent tool implementations behind `src/application/agent_tools/*_impl.py` modules while keeping
+  root `agent_tool_*` files as compatibility re-export shims, reducing duplicate handler surfaces without changing the
+  registered tool manifest.
+- Documented the current Agent tool ownership boundary: domain modules own implementation and metadata, registry only
+  collects tools, and planner-facing tool arguments continue to hide system/path fields from the LLM.
+
+### Fixed
+- Fixed `candidate_filter_explain` trace discovery so one-symbol questions can find runtime traces from resolved
+  config paths, `OM_RUNTIME_ROOT`, service profile roots, latest-run pointers, recent `output_runs`, and legacy shared
+  report fallbacks.
+- Fixed `candidate_filter_diagnostics` to use the same runtime trace discovery path as `candidate_filter_explain`, so
+  Tool OS analysis and the narrow LLM tool no longer disagree about where candidate filter traces live.
+
 ## 1.2.292 - 2026-06-15
 
 ### Changed

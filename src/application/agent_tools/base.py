@@ -264,7 +264,7 @@ def build_default_agent_tool_context() -> AgentToolContext:
     from src.application.account_config import accounts_from_config, list_account_config_views, normalize_accounts
     from src.application.agent_tool_config import load_runtime_config, repo_base, resolve_output_root, write_tools_enabled
     from src.application.agent_tool_contracts import mask_path
-    from src.application.agent_tool_runtime import (
+    from src.application.agent_tools.runtime_helpers import (
         as_float as _as_float,
         extract_context_symbols as _extract_context_symbols,
         healthcheck_symbols_for_futu as _healthcheck_symbols_for_futu_impl,
@@ -279,7 +279,7 @@ def build_default_agent_tool_context() -> AgentToolContext:
         validate_runtime_config as _validate_runtime_config_impl,
         write_json_atomic as _write_json_atomic,
     )
-    from src.application.agent_tool_symbols import (
+    from src.application.agent_tools.symbols_impl import (
         apply_symbol_mutation,
         list_symbol_rows,
     )
