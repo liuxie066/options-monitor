@@ -36,7 +36,7 @@ def _close_advice_read_tool(
     ctx: AgentToolContext,
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    from src.application.agent_tool_close_advice_read import close_advice_read_tool
+    from src.application.agent_tools.close_advice_read_impl import close_advice_read_tool
 
     return close_advice_read_tool(
         payload,

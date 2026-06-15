@@ -25,8 +25,9 @@ from src.application.assistant.evidence import build_evidence_bundle
 
 
 class _AnalysisQueryContext:
-    def __init__(self, base: Path | None = None):
+    def __init__(self, base: Path | None = None, config_path: Path | None = None):
         self.base = base or Path(".")
+        self.config_path = config_path
 
     def __getattr__(self, _name):
         def _stub(*_args, **_kwargs):
@@ -41,7 +42,7 @@ class _AnalysisQueryContext:
         return f".../{Path(value).name}" if value else None
 
     def load_runtime_config(self, **_kwargs):
-        return Path("config.us.json"), {}
+        return self.config_path or Path("config.us.json"), {}
 
     def list_symbol_rows(self, *_args, **_kwargs):
         return []
@@ -323,6 +324,83 @@ def test_analysis_query_candidate_filter_diagnostics_reads_trace_artifact(tmp_pa
     ]
     assert meta["requested_views"] == ["candidate_filter_diagnostics"]
     assert meta["materialized_views"] == ["candidate_filter_diagnostics"]
+
+
+def test_analysis_query_candidate_filter_diagnostics_discovers_runtime_run_from_config_path(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    config_path = runtime / "config.hk.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text("{}", encoding="utf-8")
+    run_dir = runtime / "output_runs" / "run-hk-1"
+    trace_path = run_dir / "accounts" / "sy" / "candidate_filter_trace.jsonl"
+    trace_path.parent.mkdir(parents=True)
+    trace_path.write_text(
+        (
+            '{"run_id":"run-hk-1","account":"sy","symbol":"9992.HK","function":"sell_put",'
+            '"option_type":"put","status":"rejected","stage":"risk","rule":"risk_spread",'
+            '"metric_value":0.35,"threshold":0.2,"message":"spread too wide"}\n'
+        ),
+        encoding="utf-8",
+    )
+    pointer_dir = runtime / "output_shared" / "state"
+    pointer_dir.mkdir(parents=True)
+    (pointer_dir / "last_run_dir.txt").write_text(str(run_dir), encoding="utf-8")
+
+    data, warnings, meta = ANALYSIS_QUERY_TOOL.call(
+        _AnalysisQueryContext(repo),
+        {
+            "config_path": str(config_path),
+            "sql": (
+                "select run_id, account, symbol, status, rule "
+                "from candidate_filter_diagnostics where symbol = '9992.HK'"
+            ),
+            "limit": 10,
+        },
+    )
+
+    assert warnings == []
+    assert data["rows"] == [
+        {"run_id": "run-hk-1", "account": "sy", "symbol": "9992.HK", "status": "rejected", "rule": "risk_spread"}
+    ]
+    assert meta["requested_views"] == ["candidate_filter_diagnostics"]
+    assert meta["materialized_views"] == ["candidate_filter_diagnostics"]
+
+
+def test_analysis_query_candidate_filter_diagnostics_discovers_runtime_run_from_config_key(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    config_path = runtime / "config.hk.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text("{}", encoding="utf-8")
+    run_dir = runtime / "output_runs" / "run-hk-key"
+    trace_path = run_dir / "accounts" / "sy" / "candidate_filter_trace.jsonl"
+    trace_path.parent.mkdir(parents=True)
+    trace_path.write_text(
+        (
+            '{"run_id":"run-hk-key","account":"sy","symbol":"9992.HK","function":"sell_put",'
+            '"option_type":"put","status":"rejected","stage":"risk","rule":"risk_delta",'
+            '"metric_value":-0.42,"threshold":-0.3,"message":"delta too high"}\n'
+        ),
+        encoding="utf-8",
+    )
+
+    data, warnings, _meta = ANALYSIS_QUERY_TOOL.call(
+        _AnalysisQueryContext(repo, config_path=config_path),
+        {
+            "config_key": "hk",
+            "sql": (
+                "select run_id, account, symbol, status, rule "
+                "from candidate_filter_diagnostics where symbol = '9992.HK'"
+            ),
+            "limit": 10,
+        },
+    )
+
+    assert warnings == []
+    assert data["rows"] == [
+        {"run_id": "run-hk-key", "account": "sy", "symbol": "9992.HK", "status": "rejected", "rule": "risk_delta"}
+    ]
 
 
 def test_analysis_query_close_advice_snapshot_missing_artifact_returns_warning(

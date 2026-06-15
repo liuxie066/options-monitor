@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import inspect
 import re
 import pytest
@@ -218,8 +219,79 @@ def test_agent_registry_collects_domain_modules_instead_of_tool_tuple() -> None:
     assert "importlib.import_module" in registry_text
     assert "_collect_tool_definitions" in registry_text
     assert "for module in AGENT_TOOL_MODULES" in registry_text
+    assert 'module_name.endswith("_impl")' in registry_text
+    assert 'module_name.endswith("_helpers")' in registry_text
     assert "AgentToolDefinition(" not in registry_text
     assert "from src.application.agent_tools.candidate import" not in registry_text
+
+
+def test_legacy_agent_tool_modules_are_compatibility_shims() -> None:
+    allowed_owner_modules = {
+        "agent_tool_config.py",
+        "agent_tool_contracts.py",
+        "agent_tool_init_local.py",
+        "agent_tool_registry.py",
+    }
+    allowed_shim_wrappers = {
+        "agent_tool_runtime_status.py": {"runtime_status_tool"},
+    }
+    offenders: list[str] = []
+    for path in sorted((ROOT / "src" / "application").glob("agent_tool_*.py")):
+        if path.name in allowed_owner_modules:
+            continue
+        text = path.read_text(encoding="utf-8")
+        tree = ast.parse(text)
+        local_defs = [
+            node.name
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        ]
+        imported_modules = [
+            node.module
+            for node in tree.body
+            if isinstance(node, ast.ImportFrom) and node.module is not None
+        ]
+        allowed_defs = allowed_shim_wrappers.get(path.name, set())
+        unexpected_defs = [name for name in local_defs if name not in allowed_defs]
+        if unexpected_defs:
+            offenders.append(f"{path.relative_to(ROOT)} defines {unexpected_defs}")
+        if allowed_defs and not all(f"_impl.{name}" in text for name in allowed_defs):
+            offenders.append(f"{path.relative_to(ROOT)} wrapper does not forward to agent_tools impl")
+        if local_defs and not allowed_defs:
+            offenders.append(f"{path.relative_to(ROOT)} defines {local_defs}")
+        if not any(
+            str(module) == "src.application.agent_tools"
+            or str(module).startswith("src.application.agent_tools.")
+            for module in imported_modules
+        ):
+            offenders.append(f"{path.relative_to(ROOT)} does not re-export from agent_tools")
+
+    assert offenders == []
+
+
+def test_assistant_tool_names_are_registry_or_inbound_surfaces() -> None:
+    from src.application.agent_tool_registry import tool_names
+    from src.application.assistant.capability_catalog import command_specs
+
+    registry_names = set(tool_names())
+    inbound_operation_surfaces = {
+        "inbound.manual_trade",
+        "inbound.model",
+        "inbound.pending",
+        "inbound.symbols",
+        "inbound.upgrade",
+    }
+    unknown = sorted(
+        {
+            str(spec.tool_name)
+            for spec in command_specs()
+            if spec.tool_name is not None
+            and str(spec.tool_name) not in registry_names
+            and str(spec.tool_name) not in inbound_operation_surfaces
+        }
+    )
+
+    assert unknown == []
 
 
 def test_assistant_owns_command_catalog_and_interaction_contracts() -> None:
@@ -523,11 +595,14 @@ def test_feishu_payload_adapter_public_signature_uses_assistant_naming() -> None
 
 
 def test_runtime_status_tool_is_not_owned_by_openclaw_module() -> None:
-    openclaw_text = (ROOT / "src" / "application" / "agent_tool_openclaw.py").read_text(encoding="utf-8")
-    runtime_text = (ROOT / "src" / "application" / "agent_tool_runtime_status.py").read_text(encoding="utf-8")
+    openclaw_text = (ROOT / "src" / "application" / "agent_tools" / "openclaw_impl.py").read_text(encoding="utf-8")
+    runtime_text = (ROOT / "src" / "application" / "agent_tools" / "runtime_status_impl.py").read_text(encoding="utf-8")
+    runtime_shim_text = (ROOT / "src" / "application" / "agent_tool_runtime_status.py").read_text(encoding="utf-8")
     diagnostics_text = (ROOT / "src" / "application" / "agent_tools" / "diagnostics.py").read_text(encoding="utf-8")
 
     assert "def runtime_status_tool(" not in openclaw_text
     assert "def runtime_status_tool(" in runtime_text
-    assert "from src.application.agent_tool_runtime_status import runtime_status_tool" in diagnostics_text
+    assert "_impl.runtime_status_tool" in runtime_shim_text
+    assert "service_status_from_profile = _impl.service_status_from_profile" in runtime_shim_text
+    assert "from src.application.agent_tools.runtime_status_impl import runtime_status_tool" in diagnostics_text
     assert not (ROOT / "src" / "application" / "agent_tool_handlers.py").exists()

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from src.application.agent_tool_scan import (
+from src.application.agent_tools.materialization_impl import (
     close_advice_rows_summary,
     close_advice_tool,
     get_close_advice_tool,

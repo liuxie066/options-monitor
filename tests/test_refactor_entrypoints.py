@@ -43,6 +43,7 @@ def test_shell_entrypoints_work_outside_repo_cwd(tmp_path: Path) -> None:
 def test_runtime_entrypoints_use_application_facades() -> None:
     service_src = (ROOT / "src" / "infrastructure" / "external_services.py").read_text(encoding="utf-8")
     agent_runtime_src = (ROOT / "src" / "application" / "agent_tool_runtime.py").read_text(encoding="utf-8")
+    runtime_helpers_src = (ROOT / "src" / "application" / "agent_tools" / "runtime_helpers.py").read_text(encoding="utf-8")
     pipeline_runtime_src = (ROOT / "src" / "application" / "pipeline_runtime.py").read_text(encoding="utf-8")
     cli_src = (ROOT / "src" / "interfaces" / "cli" / "main.py").read_text(encoding="utf-8")
     run_ops_src = (ROOT / "src" / "interfaces" / "cli" / "run_ops.py").read_text(encoding="utf-8")
@@ -98,7 +99,7 @@ def test_runtime_entrypoints_use_application_facades() -> None:
     assert "scripts/opend_watchdog.py" not in service_src
     assert "scripts/doctor_futu.py" not in agent_runtime_src
     assert "scripts/append_cash_summary.py" not in pipeline_runtime_src
-    assert "from src.application.futu_doctor import run_futu_doctor_checks" in agent_runtime_src
+    assert "from src.application.futu_doctor import run_futu_doctor_checks" in runtime_helpers_src
     assert "from src.application.cash_summary_footer import append_cash_summary_footer" in pipeline_runtime_src
     assert "from src.infrastructure.opend_watchdog import run_watchdog_check" in service_src
     assert "src.interfaces.cli.main" in om_src

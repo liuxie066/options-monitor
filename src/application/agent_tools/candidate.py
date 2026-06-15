@@ -9,8 +9,8 @@ from domain.domain.strategy_vocab import (
     STRATEGY_YIELD_ENHANCEMENT,
     strategy_key_help,
 )
-from src.application.agent_tool_candidate_filter import candidate_filter_explain_tool
-from src.application.agent_tool_candidate_rank import candidate_rank_explain_tool
+from src.application.agent_tools.candidate_filter_impl import candidate_filter_explain_tool
+from src.application.agent_tools.candidate_rank_impl import candidate_rank_explain_tool
 from src.application.agent_tools.base import AgentTool, AgentToolContext, build_agent_tool
 from src.application.symbol_aliases import symbol_aliases_from_config
 
@@ -70,8 +70,12 @@ def _candidate_filter_explain_tool(
         )
         symbol_aliases = symbol_aliases_from_config(cfg)
 
+    tool_payload = dict(payload)
+    if config_path is not None:
+        tool_payload["config_path"] = str(config_path)
+
     data, warnings, meta = candidate_filter_explain_tool(
-        payload,
+        tool_payload,
         repo_base=ctx.repo_base,
         mask_path=ctx.mask_path,
         symbol_aliases=symbol_aliases,
@@ -124,6 +128,7 @@ CANDIDATE_FILTER_EXPLAIN_TOOL = build_agent_tool(
         "symbol": "required canonical symbol, company name, or alias, for example NVDA, 0700.HK, or 泡泡玛特",
         "config_key": "optional us|hk; when present, include runtime-config symbol aliases",
         "config_path": "optional explicit config path; system-injected for Inbound planner calls",
+        "runtime_root": "optional explicit runtime root; defaults from config_path, OM_RUNTIME_ROOT, service profile, and repo root",
         "account": "optional scan-scope account label; not part of symbol identity",
         "function": (
             "optional "
@@ -137,7 +142,7 @@ CANDIDATE_FILTER_EXPLAIN_TOOL = build_agent_tool(
             )
             + "|cash_reserve|share_coverage"
         ),
-        "run_id": "optional output_runs run id; use latest externally when desired",
+        "run_id": "optional output_runs run id; omitted means search last-run pointer and recent runtime runs",
         "run_dir": "optional explicit output_runs/<run_id> directory",
         "report_dir": "optional report dir containing candidate_filter_trace.jsonl",
         "trace_path": "optional explicit candidate_filter_trace.jsonl path",

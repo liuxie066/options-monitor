@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.agent_tool_operations import version_check_tool, version_update_tool
+from src.application.agent_tools.operations_impl import version_check_tool, version_update_tool
 from src.application.agent_tools.base import AgentTool, AgentToolContext, build_agent_tool
 
 
