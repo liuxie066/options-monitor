@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from collections import Counter
 from pathlib import Path
 from typing import Any, Callable
 
+from domain.domain.symbol_identity import canonical_symbol
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.candidate_filter_trace import (
     CANDIDATE_FILTER_FUNCTIONS,
@@ -17,14 +19,16 @@ def candidate_filter_explain_tool(
     *,
     repo_base: Callable[[], Path],
     mask_path: Callable[[str | Path | None], str | None],
+    symbol_aliases: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    symbol = str(payload.get("symbol") or "").strip().upper()
-    if not symbol:
+    raw_symbol = str(payload.get("symbol") or "").strip()
+    if not raw_symbol:
         raise AgentToolError(
             code="INPUT_ERROR",
             message="symbol is required",
             hint="Pass symbol together with run_id/account or trace_path.",
         )
+    symbol = _symbol_for_match(raw_symbol, symbol_aliases=symbol_aliases)
     account = str(payload.get("account") or "").strip().lower()
     function_filter = str(payload.get("function") or "").strip().lower()
     if function_filter and function_filter not in CANDIDATE_FILTER_FUNCTIONS:
@@ -50,7 +54,7 @@ def candidate_filter_explain_tool(
     matching = [
         row
         for row in loaded_rows
-        if str(row.get("symbol") or "").strip().upper() == symbol
+        if _symbol_for_match(row.get("symbol"), symbol_aliases=symbol_aliases) == symbol
         and (not account or str(row.get("account") or "").strip().lower() == account)
         and (not function_filter or str(row.get("function") or "").strip().lower() == function_filter)
     ]
@@ -65,7 +69,13 @@ def candidate_filter_explain_tool(
     return (
         {
             "symbol": symbol,
+            "raw_symbol": raw_symbol,
+            "canonical_symbol": symbol,
             "account": account or None,
+            "scope": {
+                "account": account or None,
+                "account_semantics": "scan_scope",
+            },
             "trace_count": len(matching),
             "status_counts": dict(status_counts),
             "function_counts": dict(function_counts),
@@ -74,6 +84,13 @@ def candidate_filter_explain_tool(
         warnings,
         {"source_files": source_files},
     )
+
+
+def _symbol_for_match(value: Any, *, symbol_aliases: Mapping[str, Any] | None = None) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    return canonical_symbol(raw, symbol_aliases=symbol_aliases) or raw.upper()
 
 
 def _trace_paths(payload: dict[str, Any], *, repo_base: Callable[[], Path]) -> list[Path]:

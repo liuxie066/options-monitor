@@ -4,6 +4,10 @@
 `account_income_compare` 这样的窄工具，而是把现有 `analysis_catalog` /
 `analysis_query` 打造成 Agent 的受控只读分析工作区。
 
+这条原则针对“按每个开放式分析形状新增 API”。它不否定已有或必要的任务形
+诊断入口：例如单标的候选过滤原因应由 `candidate_filter_explain` 承担，
+`candidate_filter_diagnostics` 则作为同一 trace 事实源上的聚合/对比/趋势 view。
+
 相关文档：
 
 - [OM Agent Completion Design](OM_AGENT_COMPLETION_DESIGN.md)

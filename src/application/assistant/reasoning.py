@@ -22,6 +22,7 @@ CONFIG_SCOPED_INTENTS = frozenset(
         "runtime_status",
         "healthcheck",
         "config_validate",
+        "symbol_resolve",
         "symbol_config_query",
         "position_query",
         "assigned_stock_position_query",
@@ -164,6 +165,27 @@ def _tool_payload_from_perception(
             "symbol": symbol,
         }
         for key in ("strategy", "field"):
+            value = str(arguments.get(key) or "").strip()
+            if value:
+                payload[key] = value
+        return payload
+    if intent_name == "symbol_resolve":
+        symbol = str(arguments.get("symbol") or "").strip()
+        if not symbol:
+            raise AgentToolError(code="NEEDS_CLARIFICATION", message="需要指定要解析的标的。")
+        return {
+            **_base_payload_for_symbol_config(request, symbol=symbol),
+            "symbol": symbol,
+        }
+    if intent_name == "candidate_filter_explain":
+        symbol = str(arguments.get("symbol") or "").strip()
+        if not symbol:
+            raise AgentToolError(code="NEEDS_CLARIFICATION", message="需要指定要诊断的标的。")
+        payload: dict[str, Any] = {
+            **_base_payload_for_symbol_config(request, symbol=symbol),
+            "symbol": symbol,
+        }
+        for key in ("account", "function", "run_id"):
             value = str(arguments.get(key) or "").strip()
             if value:
                 payload[key] = value

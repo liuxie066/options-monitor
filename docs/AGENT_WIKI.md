@@ -56,7 +56,7 @@ Use the lowest-risk tool that can answer the question.
 | Is the online run healthy? | `runtime_status` | Reads existing runtime artifacts without running pipelines |
 | Can this environment run? | `healthcheck` | Validates readiness and dependencies |
 | Did cron/tick decide to skip? | `scheduler_status`, `scheduler_decision.json` | Separates scheduler rules from cron execution |
-| Why did a symbol disappear? | `candidate_filter_explain` | Uses trace evidence instead of guessing from final CSV |
+| Why did a symbol disappear? | `symbol_resolve` if identity is unclear, then `candidate_filter_explain` | Uses trace evidence instead of guessing from final CSV |
 | Why is candidate ranking odd? | `candidate_rank_explain` | Explains existing candidate CSV ranking |
 | Is shadow replay evidence ready for tuning? | `research collect --scope candidate` | Offline candidate/reject universe readiness; no live config mutation |
 | Is candidate evidence complete enough for scan diagnosis? | `healthcheck` / `doctor` with `candidate_evidence` inputs | Diagnostic row-count/readiness check, not a strategy recommendation |
@@ -186,7 +186,7 @@ def rank_candidate_rows(rows: list[dict[str, Any]], *, mode: StrategyMode | str)
 - Candidate evidence readiness: `healthcheck` / `doctor` `candidate_evidence` check
 - Docs: `docs/candidate_strategy.md`
 
-For "why did this symbol/account not get a candidate", start from `candidate_filter_explain` and trace artifacts, not from final candidate CSV alone.
+For "why did this symbol/account not get a candidate", start from `candidate_filter_explain` and trace artifacts, not from final candidate CSV alone. If the user gives a Chinese name or alias, resolve it with `symbol_resolve` or pass the raw alias to `candidate_filter_explain`; `account` is scan scope, not symbol identity.
 
 For offline strategy evidence review, collect a candidate-scoped Research bundle first:
 
@@ -355,10 +355,11 @@ scripts/              -> operational wrappers only; delegate to src/ or domain/
 ### A Symbol Is Missing
 
 1. Get run/account/symbol from the user or runtime artifact.
-2. Run `candidate_filter_explain`.
-3. Compare market-level candidate evidence with account-level filters.
-4. If account constraints are involved, inspect cash, holdings, and cost basis with `query_cash_headroom` and position tools.
-5. Add a focused regression test around the leaking boundary if behavior is wrong.
+2. Resolve natural-language or alias symbols with `symbol_resolve` when needed.
+3. Run `candidate_filter_explain`.
+4. Compare market-level candidate evidence with account-level filters.
+5. If account constraints are involved, inspect cash, holdings, and cost basis with `query_cash_headroom` and position tools.
+6. Add a focused regression test around the leaking boundary if behavior is wrong.
 
 ### Multi-Account Strategy Behavior Looks Wrong
 

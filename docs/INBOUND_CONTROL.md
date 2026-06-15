@@ -572,8 +572,14 @@ For open-ended analytical tasks, the preferred path is Tool OS v1:
   `columns`, `rows`, `cell_refs`, coverage, and a compact deterministic table.
 - The first views cover monthly income summaries/details, assigned-stock
   lifecycle, position lots, trade events, and monitored-symbol strategy config.
-- Future candidate-filter, close-advice, and runtime views should extend the
-  same catalog/query surface instead of adding narrow answer APIs.
+- Candidate-filter has two supported read paths over the same trace facts:
+  `candidate_filter_explain` is the LLM-facing narrow tool for one-symbol
+  questions such as `泡泡玛特被哪个参数过滤了`; `candidate_filter_diagnostics`
+  remains the Tool OS view for aggregation, comparison, trend, and cross-run or
+  cross-account analysis.
+- Future diagnostic views should extend the same catalog/query surface when the
+  task shape is analytical. Add or expose a narrow read API only when the user
+  intent is task-shaped and the API removes ambiguity for LLM planning.
 
 For income, cashflow, positions, and assigned-stock analysis, the evidence bundle is the authority. It should contain the evidence needed for the final answer, for example:
 

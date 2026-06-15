@@ -24,6 +24,15 @@ from src.application.assistant.contracts import AssistantRequest, ToolCall
 
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "assistant_agent_eval.jsonl"
+DESIGN_DOC_PATH = Path(__file__).resolve().parents[1] / "docs" / "AGENT_RELIABILITY_P0_P2_DESIGN.md"
+CONFIG_KEY_OPTIONAL_EVAL_TOOLS = frozenset(
+    {
+        "candidate_filter_explain",
+        "healthcheck",
+        "operation_timeline",
+        "assistant_trace",
+    }
+)
 
 ANSWER_INTERNAL_LEAK_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("internal_tool_name", re.compile(r"(?i)\b(?:analysis_query|analysis_catalog|assistant\.answer_evidence)\b")),
@@ -42,6 +51,9 @@ P2_AGENT_EVAL_REQUIRED_FIXTURE_GROUPS: dict[str, set[str]] = {
     "income_comparison": {
         "analysis_income_compare_normal_answer_hides_internal_details",
         "analysis_income_compare_missing_sy_followup_answer",
+    },
+    "income_breakdown": {
+        "income_breakdown_followup_answer",
     },
     "runtime_stale_conflict": {
         "runtime_why_conflict_stale_answer",
@@ -71,10 +83,18 @@ P2_AGENT_EVAL_REQUIRED_FIXTURE_GROUPS: dict[str, set[str]] = {
         "runtime_freshness_gap_answer",
         "operation_upgrade_stale_timeline_answer",
     },
+    "symbol_identity": {
+        "symbol_resolve_alias_answer",
+    },
     "candidate_diagnostics": {
-        "analysis_candidate_diagnostics_normal_answer",
+        "candidate_filter_explain_observed_rejection_answer",
         "candidate_missing_artifact_answer",
         "candidate_why_partial_confidence_answer",
+    },
+    "assigned_stock_pnl": {
+        "analysis_assigned_stock_pnl_normal_answer",
+        "assigned_stock_fresh_quote_answer",
+        "assigned_stock_missing_quote_answer",
     },
     "prompt_injection_and_write_preview": {
         "prompt_injection_from_tool_output_denied",
@@ -86,6 +106,61 @@ P2_AGENT_EVAL_REQUIRED_FIXTURE_GROUPS: dict[str, set[str]] = {
     },
 }
 
+P2_AGENT_EVAL_MINIMUM_CASES: dict[str, set[str]] = {
+    "compare_lx_sy_income_difference": {
+        "analysis_income_compare_normal_answer_hides_internal_details",
+    },
+    "compare_lx_sy_missing_sy": {
+        "analysis_income_compare_missing_sy_followup_answer",
+    },
+    "assigned_stock_missing_quote": {
+        "assigned_stock_missing_quote_answer",
+    },
+    "assigned_stock_fresh_quote": {
+        "assigned_stock_fresh_quote_answer",
+    },
+    "income_breakdown_followup": {
+        "income_breakdown_followup_answer",
+    },
+    "symbol_resolve_identity": {
+        "symbol_resolve_alias_answer",
+    },
+    "candidate_missing_artifact": {
+        "candidate_missing_artifact_answer",
+    },
+    "candidate_observed_rejection": {
+        "candidate_filter_explain_observed_rejection_answer",
+    },
+    "runtime_no_notification": {
+        "runtime_notification_missing_not_success_answer",
+        "runtime_notification_status_conflict_answer",
+        "runtime_scheduler_skip_market_window_answer",
+    },
+    "upgrade_receipt_missing_version": {
+        "analysis_upgrade_receipt_missing_version",
+    },
+    "prompt_injection_from_tool_output": {
+        "prompt_injection_from_tool_output_denied",
+    },
+    "write_preview_no_apply": {
+        "write_preview_no_apply_manual_trade_open",
+    },
+}
+P2_AGENT_EVAL_GAP_IMPACT_TERMS = (
+    "不能",
+    "缺",
+    "不足",
+    "冲突",
+    "旧快照",
+    "没有观测",
+    "not_observed",
+    "stale",
+    "failed",
+    "拒绝",
+    "未写入",
+    "不是",
+)
+
 
 def _load_cases() -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
@@ -94,6 +169,27 @@ def _load_cases() -> list[dict[str, Any]]:
         if text:
             rows.append(json.loads(text))
     return rows
+
+
+def _load_documented_p2_minimum_case_names() -> set[str]:
+    text = DESIGN_DOC_PATH.read_text(encoding="utf-8")
+    start = text.index("### 6.6.2 P2 Golden Case 清单")
+    section = text[start:]
+    end_match = re.search(r"\n### 6\.7\b", section)
+    if end_match:
+        section = section[: end_match.start()]
+
+    cases: set[str] = set()
+    for line in section.splitlines():
+        match = re.match(r"\|\s*`([^`]+)`\s*\|", line)
+        if match:
+            cases.add(match.group(1))
+    assert cases
+    return cases
+
+
+def _p2_agent_eval_minimum_fixture_ids() -> set[str]:
+    return {fixture_id for fixture_ids in P2_AGENT_EVAL_MINIMUM_CASES.values() for fixture_id in fixture_ids}
 
 
 def _assert_no_internal_answer_leak(text: str, *, case_id: str) -> None:
@@ -122,6 +218,75 @@ def test_assistant_agent_eval_fixture_covers_p2_agent_eval_gap_groups() -> None:
         assert case.get("tool_result") or case.get("tool_results")
         assert case.get("expect_contains")
         assert case.get("expect_not_contains")
+
+
+def test_assistant_agent_eval_fixture_covers_documented_p2_minimum_cases() -> None:
+    cases = {str(item["id"]): item for item in _load_cases()}
+    missing: dict[str, list[str]] = {}
+    for case_name, fixture_ids in P2_AGENT_EVAL_MINIMUM_CASES.items():
+        absent = sorted(fixture_ids - set(cases))
+        if absent:
+            missing[case_name] = absent
+    assert missing == {}
+
+
+def test_assistant_agent_eval_minimum_case_mapping_matches_design_document() -> None:
+    documented_cases = {case for case in _load_documented_p2_minimum_case_names() if not case.startswith("trace_")}
+    assert set(P2_AGENT_EVAL_MINIMUM_CASES) == documented_cases
+
+
+def test_assistant_agent_eval_minimum_cases_satisfy_online_sample_contract() -> None:
+    cases = {str(item["id"]): item for item in _load_cases()}
+    failures: dict[str, list[str]] = {}
+    for case_id in sorted(_p2_agent_eval_minimum_fixture_ids()):
+        case = cases[case_id]
+        mode = str(case.get("mode") or "agent_answer")
+        missing: list[str] = []
+
+        if not str(case.get("question") or "").strip():
+            missing.append("question")
+
+        if mode == "action_safety":
+            if not case.get("task_contract"):
+                missing.append("task_contract")
+            if not case.get("payload"):
+                missing.append("payload")
+            if case.get("expect_route") not in {"execute", "ask", "deny"}:
+                missing.append("expect_route")
+            if not str(case.get("expect_code") or "").strip():
+                missing.append("expect_code")
+        elif mode == "planner_preview":
+            if not case.get("plan"):
+                missing.append("plan")
+            if not case.get("expect_operation_type"):
+                missing.append("expect_operation_type")
+            if not case.get("expect_contains"):
+                missing.append("expect_contains")
+            if not case.get("expect_not_contains"):
+                missing.append("expect_not_contains")
+        else:
+            if not case.get("plan"):
+                missing.append("plan")
+            if not (case.get("tool_result") or case.get("tool_results")):
+                missing.append("tool evidence")
+            if not (case.get("expect_final_route") or case.get("expect_final_response_status") or case.get("expect_reason")):
+                missing.append("route assertion")
+            if not case.get("expect_contains"):
+                missing.append("expect_contains")
+            if not case.get("expect_not_contains"):
+                missing.append("expect_not_contains")
+            if case.get("followup_plan") and not case.get("expect_followup_tool"):
+                missing.append("follow-up assertion")
+
+        if case.get("expect_coverage_gap_kinds") or case.get("expect_diagnostic_statuses"):
+            contains = " ".join(str(item) for item in case.get("expect_contains") or ())
+            if not any(term in contains for term in P2_AGENT_EVAL_GAP_IMPACT_TERMS):
+                missing.append("gap or impact text")
+
+        if missing:
+            failures[case_id] = missing
+
+    assert failures == {}
 
 
 def _plan_from_payload(raw_payload: dict[str, Any]) -> PlannerPlan:
@@ -229,7 +394,9 @@ def test_assistant_agent_eval_uses_guarded_answer_evidence(case: dict[str, Any],
             expected_tool_name = plan.steps[0].tool_name
         if expected_tool_name:
             assert tool_name == expected_tool_name
-        if tool_name not in {"healthcheck", "operation_timeline", "assistant_trace"}:
+        if tool_name == "symbol_resolve":
+            assert payload.get("config_key") in {"us", "hk"}
+        elif tool_name not in CONFIG_KEY_OPTIONAL_EVAL_TOOLS:
             assert payload.get("config_key") == "us"
         return build_response(
             tool_name=tool_name,

@@ -21,6 +21,7 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "version_check" in tool_names
     assert "config_validate" in tool_names
     assert "scheduler_status" in tool_names
+    assert "symbol_resolve" in tool_names
     assert "symbol_config_read" in tool_names
     assert "prepare_close_advice_inputs" in tool_names
     assert "close_advice" in tool_names
@@ -95,6 +96,10 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert config_validate["risk_level"] == "read_only"
     scheduler_status = next(item for item in spec["tools"] if item["name"] == "scheduler_status")
     assert scheduler_status["side_effects"] == []
+    symbol_resolve = next(item for item in spec["tools"] if item["name"] == "symbol_resolve")
+    assert symbol_resolve["risk_level"] == "read_only"
+    assert symbol_resolve["requires_confirm"] is False
+    assert "symbol" in symbol_resolve["input_schema"]
     symbol_config_read = next(item for item in spec["tools"] if item["name"] == "symbol_config_read")
     assert symbol_config_read["risk_level"] == "read_only"
     assert symbol_config_read["requires_confirm"] is False
@@ -140,6 +145,7 @@ def test_agent_registry_manifest_and_tool_objects_stay_in_sync() -> None:
         "healthcheck",
         "config_validate",
         "scheduler_status",
+        "symbol_resolve",
         "version_update",
         "manage_symbols",
         "scan_opportunities",
@@ -190,6 +196,9 @@ def test_agent_tool_output_contracts_advertise_canonical_renderers() -> None:
     assert tools["runtime_logs"]["output_contract"]["canonical_renderer"] == "runtime_logs"
     assert tools["assistant_trace"]["output_contract"]["canonical_renderer"] == "assistant_trace"
     assert tools["config_validate"]["output_contract"]["canonical_renderer"] == "config_validate"
+    assert tools["symbol_resolve"]["output_contract"]["canonical_renderer"] == "symbol_resolve"
+    assert tools["symbol_resolve"]["output_contract"]["result_shape"] == "scalar"
+    assert "canonical_symbol" in tools["symbol_resolve"]["output_contract"]["fact_fields"]
     assert tools["symbol_config_read"]["output_contract"]["canonical_renderer"] == "symbol_config"
     assert tools["close_advice_read"]["output_contract"]["canonical_renderer"] == "position_exit_analysis"
     assert tools["analysis_catalog"]["output_contract"]["canonical_renderer"] == "analysis_catalog"
@@ -241,6 +250,9 @@ def test_agent_tool_manifest_exposes_p1_annotations_and_evidence_contract() -> N
         "payload_dependent": True,
     }
     assert monthly_income["verifiers"] == ["schema", "output_contract"]
+    symbol_resolve = tools["symbol_resolve"]
+    assert symbol_resolve["evidence_contract"]["result_shape"] == "scalar"
+    assert "canonical_symbol" in symbol_resolve["evidence_contract"]["fact_fields"]
 
 
 def test_agent_registry_collects_domain_tool_modules() -> None:
@@ -277,6 +289,7 @@ def test_pure_read_allowlist_is_derived_from_registry_metadata() -> None:
     assert "version_check" in PURE_READ_TOOLS
     assert "runtime_runs" in PURE_READ_TOOLS
     assert "runtime_logs" in PURE_READ_TOOLS
+    assert "symbol_resolve" in PURE_READ_TOOLS
     assert "symbol_config_read" in PURE_READ_TOOLS
     assert "candidate_filter_explain" in PURE_READ_TOOLS
     assert "operation_timeline" in PURE_READ_TOOLS

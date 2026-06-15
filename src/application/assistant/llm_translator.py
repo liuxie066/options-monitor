@@ -46,6 +46,8 @@ Rules:
 - Do not translate write/admin actions such as recording trades, upgrades, or confirmations.
 - Exception: `symbol_edit` may be chosen only for monitored-symbol setting changes that can create a preview, never for applying/confirming/canceling a change.
 - For current monitored-symbol config questions such as "max strike 是多少", "当前配置", or "查询 sell_put.max_strike", choose `symbol_config_query`, not `symbol_edit`.
+- For symbol/name/alias identity questions, choose `symbol_resolve`.
+- For single-symbol candidate filter/rejection questions such as "被哪个参数过滤了" or "为什么没出现在候选里", choose `candidate_filter_explain`, not `analysis_query`.
 - For `symbol_edit`, only use these set keys: sell_call.enabled, sell_call.min_strike, sell_put.enabled. Covered call min strike implies sell_call.enabled=true and ensure_use includes call_base.
 - Use null for unknown optional arguments.
 - For unclear or unknown messages, return a low confidence value below 0.5.

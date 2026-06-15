@@ -673,6 +673,10 @@ P2 诊断 view 读取已有本地 artifact 或只读状态面。缺失 artifact 
 Agent loop 约束：
 - 对开放式分析问题优先让 planner 使用 `analysis_query`，必要时先调用
   `analysis_catalog` 查字段。
+- 对单标的候选过滤/缺失问题，planner 应优先使用 `candidate_filter_explain`；
+  `candidate_filter_diagnostics` 只作为聚合、对比、趋势、跨 run/account/rule
+  分析 view。中文名或 alias 可先用 `symbol_resolve`，或直接传给支持 symbol
+  解析的窄工具。
 - 当首次查询只有账户级摘要，但用户问“来源/组成/主要来自哪里”时，Agent 可以做一次
   只读 follow-up，补查 `account_monthly_income_components` 或
   `symbol_income_attribution`。

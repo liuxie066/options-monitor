@@ -46,6 +46,28 @@ _SYMBOL_CONFIG_OUTPUT_CONTRACT: dict[str, Any] = {
     ],
 }
 
+_SYMBOL_RESOLVE_OUTPUT_CONTRACT: dict[str, Any] = {
+    "schema_version": "symbol_resolve.output.v1",
+    "canonical_renderer": "symbol_resolve",
+    "source_label": "OM symbol identity resolver",
+    "guard_profile": "symbol_identity",
+    "result_shape": "scalar",
+    "fact_fields": [
+        "symbol",
+        "raw_input",
+        "canonical_symbol",
+        "market",
+        "currency",
+        "futu_code",
+        "source_kind",
+        "status",
+        "message",
+    ],
+    "missing_data_fields": [
+        "canonical_symbol",
+    ],
+}
+
 
 def _mask_path_str(ctx: AgentToolContext, value: Any) -> str:
     return ctx.mask_path(value) or "..."
@@ -253,6 +275,39 @@ def _symbol_config_read_tool(
     return data, [], {"config_path": ctx.mask_path(config_path)}
 
 
+def _symbol_resolve_tool(
+    ctx: AgentToolContext,
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    raw_symbol = str(payload.get("symbol") or "").strip()
+    if not raw_symbol:
+        raise AgentToolError(
+            code="NEEDS_CLARIFICATION",
+            message="symbol_resolve requires symbol",
+            hint="请提供标的代码、中文名或已配置别名，例如 泡泡玛特、9992.HK、NVDA。",
+        )
+
+    cfg: dict[str, Any] | None = None
+    config_path = None
+    if str(payload.get("config_key") or "").strip() or str(payload.get("config_path") or "").strip():
+        config_path, cfg = ctx.load_runtime_config(config_key=payload.get("config_key"), config_path=payload.get("config_path"))
+
+    calibration = calibrate_symbol(raw_symbol, config=cfg)
+    data = {
+        "schema_version": "symbol_resolve.v1",
+        "symbol": raw_symbol,
+        "resolved": calibration.status == "ok" and bool(calibration.canonical_symbol),
+        **calibration.public_payload(),
+    }
+    meta: dict[str, Any] = {}
+    if config_path is not None:
+        masked = ctx.mask_path(config_path)
+        data["config_path"] = masked
+        meta["config_path"] = masked
+    warnings = [] if data["resolved"] else ["symbol_unresolved"]
+    return data, warnings, meta
+
+
 def _manage_symbols_write_requested(payload: dict[str, Any]) -> bool:
     action = str(payload.get("action") or "list").strip().lower()
     return action != "list" and not bool(payload.get("dry_run", False))
@@ -317,6 +372,27 @@ SYMBOL_CONFIG_READ_TOOL = build_agent_tool(
     output_contract=_SYMBOL_CONFIG_OUTPUT_CONTRACT,
 )
 
+SYMBOL_RESOLVE_TOOL = build_agent_tool(
+    name="symbol_resolve",
+    description="Resolve a user-provided symbol, Chinese name, alias, or Futu code to canonical OM symbol identity.",
+    requires=("symbol_identity",),
+    capabilities=("symbol_resolve", "symbol_identity", "read_only"),
+    input_schema={
+        "config_key": "optional us|hk; when present, include runtime-config symbol aliases",
+        "config_path": "optional explicit config path; system-injected for Inbound planner calls",
+        "symbol": "required symbol, company name, option root, Futu code, or configured alias such as 泡泡玛特",
+    },
+    handler=_symbol_resolve_tool,
+    pure_read=True,
+    safe_default_input={"symbol": "NVDA"},
+    examples=(
+        {"input": {"symbol": "泡泡玛特"}},
+        {"input": {"symbol": "HK.09992"}},
+        {"input": {"symbol": "NVDA"}},
+    ),
+    output_contract=_SYMBOL_RESOLVE_OUTPUT_CONTRACT,
+)
+
 MANAGE_SYMBOLS_TOOL = build_agent_tool(
     name="manage_symbols",
     description="List or mutate symbols[] entries. Write actions require OM_AGENT_ENABLE_WRITE_TOOLS=true and confirm=true.",
@@ -348,6 +424,7 @@ MANAGE_SYMBOLS_TOOL = build_agent_tool(
 TOOLS: tuple[AgentTool, ...] = (
     CONFIG_VALIDATE_TOOL,
     SCHEDULER_STATUS_TOOL,
+    SYMBOL_RESOLVE_TOOL,
     SYMBOL_CONFIG_READ_TOOL,
     MANAGE_SYMBOLS_TOOL,
 )
@@ -430,5 +507,6 @@ __all__ = [
     "MANAGE_SYMBOLS_TOOL",
     "SCHEDULER_STATUS_TOOL",
     "SYMBOL_CONFIG_READ_TOOL",
+    "SYMBOL_RESOLVE_TOOL",
     "TOOLS",
 ]

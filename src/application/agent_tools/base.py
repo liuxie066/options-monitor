@@ -181,6 +181,7 @@ def _manifest_evidence_contract(output_contract: dict[str, Any]) -> dict[str, An
         "source_label",
         "canonical_renderer",
         "guard_profile",
+        "result_shape",
         "primary_rows",
         "row_count_field",
         "fact_fields",
