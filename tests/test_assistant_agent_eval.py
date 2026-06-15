@@ -51,6 +51,7 @@ P2_AGENT_EVAL_REQUIRED_FIXTURE_GROUPS: dict[str, set[str]] = {
         "operation_upgrade_release_published_answer",
         "operation_upgrade_release_failed_answer",
         "operation_upgrade_release_outcome_conflict_answer",
+        "operation_upgrade_release_no_matching_rows_answer",
     },
     "scope_expansion": {
         "action_safety_read_followup_same_scope_allowed",

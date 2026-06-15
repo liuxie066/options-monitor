@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+## 1.2.288 - 2026-06-15
+
+### Added
+- Added upgrade-cancel operation readback trace coverage, including a runtime regression and compact trace redaction
+  fixture for internal upgrade tool names, runtime paths, and raw logs.
+- Added an assistant golden eval for release-status queries with no matching rows, ensuring the Agent does not treat
+  missing release evidence as a successful publication.
+
+### Fixed
+- Fixed release-only Task Contracts so remote release publication questions require release evidence without forcing
+  unrelated upgrade command/current-version/target-version gaps into the answer.
+
 ## 1.2.287 - 2026-06-15
 
 ### Added

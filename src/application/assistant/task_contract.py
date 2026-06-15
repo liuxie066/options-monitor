@@ -113,7 +113,7 @@ def build_task_contract(
         scope=scope,
         required_answer=tuple(required),
         optional_answer=tuple(optional),
-        constraints=tuple(_constraints(intent_families)),
+        constraints=tuple(_constraints(intent_families, required_answer=required)),
     )
 
 
@@ -199,15 +199,33 @@ def _answer_keys(*, intent_families: list[str], text: str) -> tuple[list[str], l
             ]
         )
     if "upgrade_status" in intent_families:
-        required.extend(["command_status", "current_version", "target_version", "source_and_policy"])
-        if any(token in compact for token in ("发布", "release", "deploy")):
+        release_focused = any(token in compact for token in ("发布", "release", "deploy"))
+        operation_focused = any(
+            token in compact
+            for token in (
+                "升级",
+                "回执",
+                "命令",
+                "当前版本",
+                "目标版本",
+                "版本数据",
+                "command",
+                "current_version",
+                "target_version",
+            )
+        )
+        if release_focused and not operation_focused:
+            required.extend(["release_status", "source_and_policy"])
+        else:
+            required.extend(["command_status", "current_version", "target_version", "source_and_policy"])
+        if release_focused:
             required.append("release_status")
     if not required:
         required.extend(["summary", "source_and_policy"])
     return _unique(required), _unique(optional)
 
 
-def _constraints(intent_families: list[str]) -> list[str]:
+def _constraints(intent_families: list[str], *, required_answer: list[str]) -> list[str]:
     constraints = ["must_cite_source_or_policy", "do_not_expose_internal_ids_or_sql"]
     if "account_comparison" in intent_families or "breakdown" in intent_families:
         constraints.extend(["do_not_average_return_rates", "keep_cashflow_realized_pnl_and_premium_separate"])
@@ -219,7 +237,7 @@ def _constraints(intent_families: list[str]) -> list[str]:
                 "realtime_unrealized_pnl_requires_fresh_spot",
             ]
         )
-    if "upgrade_status" in intent_families:
+    if "upgrade_status" in intent_families and {"current_version", "target_version"} <= set(required_answer):
         constraints.append("version_receipt_requires_current_and_target_version")
     return _unique(constraints)
 
