@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.2.290 - 2026-06-15
+
+### Added
+- Added an assistant golden eval for income comparisons where the first read only covers `lx`; the Agent must perform a
+  same-scope read-only follow-up for `sy` before answering winner, amount difference, and rate difference.
+- Added an assistant golden eval for candidate diagnostics with no matching artifact rows, so missing evidence cannot
+  become a definitive filter root cause.
+
 ## 1.2.289 - 2026-06-15
 
 ### Added
