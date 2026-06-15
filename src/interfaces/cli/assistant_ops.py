@@ -16,7 +16,7 @@ from src.application.assistant import (
 )
 from src.application.assistant.config_loader import load_assistant_config
 from src.application.assistant.contracts import AssistantRequest
-from src.application.assistant.diagnostics import check_llm_translator
+from src.application.assistant.diagnostics import check_llm_planner
 from src.application.assistant.llm_model_profiles import (
     add_model_profile_to_config,
     configured_model_profiles_payload,
@@ -58,7 +58,6 @@ def _assistant_settings_for_cli(
     if assistant_cfg:
         configured = AssistantSettings.from_runtime_config(assistant_cfg)
         return AssistantSettings(
-            mode=configured.mode,
             enabled=configured.enabled if force_enabled is None else bool(force_enabled),
             context_window_messages=configured.context_window_messages,
             default_market_scope=configured.default_market_scope,
@@ -92,12 +91,12 @@ def add_assistant_commands(parser: argparse.ArgumentParser) -> None:
     assistant_capabilities.add_argument("--format", choices=("json", "text"), default="json")
     assistant_llm_check = assistant_sub.add_parser(
         "llm-check",
-        help="check optional LLM intent translator configuration",
+        help="check optional LLM planner configuration",
     )
     assistant_llm_check.add_argument("--assistant-config", default=None)
     assistant_llm_check.add_argument("--env-file", default=None)
     assistant_llm_check.add_argument("--no-local-env-file", action="store_true")
-    assistant_llm_check.add_argument("--live", action="store_true", help="run one read-only provider translation probe")
+    assistant_llm_check.add_argument("--live", action="store_true", help="run one read-only planner probe")
     assistant_llm_check.add_argument("--text", default=None, help="probe text used with --live")
     assistant_model = assistant_sub.add_parser("model", help="manage optional assistant LLM model profiles")
     assistant_model_sub = assistant_model.add_subparsers(dest="assistant_model_command", required=True)
@@ -241,7 +240,7 @@ def _check_assistant_model_profile(
     args: argparse.Namespace,
     *,
     repo_base_fn: Callable[[], Path] = repo_base,
-    check_llm_translator_fn: Callable[..., dict[str, Any]] = check_llm_translator,
+    check_llm_planner_fn: Callable[..., dict[str, Any]] = check_llm_planner,
 ) -> dict[str, Any]:
     config_yaml_path, config_doc = _load_model_authoring_config(args.config_yaml, repo_base_fn=repo_base_fn)
     assistant = config_doc.get("assistant") if isinstance(config_doc.get("assistant"), dict) else {}
@@ -271,7 +270,7 @@ def _check_assistant_model_profile(
     with tempfile.TemporaryDirectory(prefix="om-assistant-model-check-") as tmp_dir:
         assistant_config_path = Path(tmp_dir) / "config.assistant.json"
         assistant_config_path.write_text(json.dumps(runtime_cfg, ensure_ascii=False), encoding="utf-8")
-        data = check_llm_translator_fn(
+        data = check_llm_planner_fn(
             repo_root=repo_base_fn(),
             config_path=assistant_config_path,
             env_file=args.env_file,
@@ -291,11 +290,11 @@ def handle_assistant_command(
     args: argparse.Namespace,
     *,
     repo_base_fn: Callable[[], Path] = repo_base,
-    check_llm_translator_fn: Callable[..., dict[str, Any]] = check_llm_translator,
+    check_llm_planner_fn: Callable[..., dict[str, Any]] = check_llm_planner,
     handle_assistant_message_fn: Callable[..., dict[str, Any]] = handle_assistant_message,
 ) -> int:
     if args.assistant_command == "llm-check":
-        data = check_llm_translator_fn(
+        data = check_llm_planner_fn(
             repo_root=repo_base_fn(),
             config_path=args.assistant_config,
             env_file=args.env_file,
@@ -400,7 +399,7 @@ def handle_assistant_command(
             data = _check_assistant_model_profile(
                 args,
                 repo_base_fn=repo_base_fn,
-                check_llm_translator_fn=check_llm_translator_fn,
+                check_llm_planner_fn=check_llm_planner_fn,
             )
             if args.format == "text":
                 sys.stdout.write(_assistant_model_text(data, command="check") + "\n")

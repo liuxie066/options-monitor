@@ -11,7 +11,7 @@ from typing import Any, Callable, Mapping, cast
 
 from src.application.assistant.config_loader import load_assistant_config
 from src.application.assistant.audit import InboundAuditStore
-from src.application.assistant.settings import DEFAULT_CONTEXT_WINDOW_MESSAGES, AssistantSettings, LlmTranslatorSettings
+from src.application.assistant.settings import DEFAULT_CONTEXT_WINDOW_MESSAGES, AssistantSettings, AssistantLlmSettings
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response, mask_path
 from domain.domain.multi_tick import FEISHU_APP_NOTIFICATION_PROVIDER
 from src.application.channels.feishu import build_feishu_inbound_channel_service
@@ -61,12 +61,11 @@ class FeishuWsSettings:
     max_reply_chars: int = DEFAULT_FEISHU_REPLY_MAX_CHARS
     ack_reaction: str = ""
     queue_size: int = DEFAULT_FEISHU_WS_QUEUE_SIZE
-    assistant_mode: str = "agent_loop"
     assistant_enabled: bool = True
     assistant_planner_enabled: bool = True
     assistant_context_window_messages: int = DEFAULT_CONTEXT_WINDOW_MESSAGES
     assistant_default_market_scope: str = ""
-    assistant_llm: LlmTranslatorSettings = field(default_factory=LlmTranslatorSettings)
+    assistant_llm: AssistantLlmSettings = field(default_factory=AssistantLlmSettings)
 
     def validate_for_serve(self) -> None:
         if not (self.config_path or self.config_key):
@@ -102,7 +101,6 @@ class FeishuWsSettings:
             "max_reply_chars": int(self.max_reply_chars),
             "ack_reaction": self.ack_reaction,
             "queue_size": int(self.queue_size),
-            "assistant_mode": self.assistant_mode,
             "assistant_enabled": bool(self.assistant_enabled),
             "assistant_planner_enabled": bool(self.assistant_planner_enabled),
             "assistant_context_window_messages": int(self.assistant_context_window_messages),
@@ -158,7 +156,6 @@ def build_feishu_ws_settings(
             behavior_cfg.get("queue_size"),
             default=DEFAULT_FEISHU_WS_QUEUE_SIZE,
         ),
-        assistant_mode=assistant_settings.mode,
         assistant_enabled=bool(assistant_settings.enabled),
         assistant_planner_enabled=bool(assistant_settings.planner_enabled),
         assistant_context_window_messages=assistant_settings.context_window_messages,

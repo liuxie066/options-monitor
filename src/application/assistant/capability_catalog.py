@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from src.application.assistant.tool_bindings import AssistantToolBinding, assistant_tool_bindings
+
 
 @dataclass(frozen=True)
 class AssistantCommandSpec:
@@ -32,7 +34,8 @@ AssistantCapabilitySpec = AssistantCommandSpec
 AgentCommandSpec = AssistantCommandSpec
 
 
-LLM_INTENT_SCHEMA_VERSION = "om-llm-intent-v1"
+COMMAND_CATALOG_SCHEMA_VERSION = "om-assistant-command-catalog-v1"
+LLM_CAPABILITY_MANIFEST_SCHEMA_VERSION = "om-llm-capability-manifest-v1"
 LLM_PLANNER_PREVIEW_INTENTS = frozenset(
     {
         "manual_trade_open",
@@ -45,251 +48,36 @@ LLM_PLANNER_PREVIEW_INTENTS = frozenset(
 )
 
 ACCOUNT_VALUES = ("lx", "sy")
-POSITION_STATUS_VALUES = ("open", "close", "all")
-LOG_KIND_VALUES = ("all", "tool", "state")
 
-ARGUMENT_JSON_SCHEMA: dict[str, dict[str, Any]] = {
-    "account": {"type": ["string", "null"], "enum": [*ACCOUNT_VALUES, None]},
-    "status": {"type": ["string", "null"], "enum": [*POSITION_STATUS_VALUES, None]},
-    "assigned_stock_status": {"type": ["string", "null"], "enum": ["open", "partially_sold", "closed", "all", None]},
-    "symbol": {"type": ["string", "null"]},
-    "stock_lot_id": {"type": ["string", "null"]},
-    "refresh_quotes": {"type": ["boolean", "null"]},
-    "option_type": {"type": ["string", "null"], "enum": ["put", "call", None]},
-    "side": {"type": ["string", "null"], "enum": ["short", "long", None]},
-    "strike": {"type": ["number", "null"]},
-    "expiration": {
-        "type": ["object", "null"],
-        "additionalProperties": False,
-        "properties": {
-            "exact": {"type": ["string", "null"]},
-            "month": {"type": ["string", "null"]},
-            "before": {"type": ["string", "null"]},
-            "after": {"type": ["string", "null"]},
-            "within_days": {"type": ["integer", "null"]},
-        },
-    },
-    "month": {"type": ["string", "null"]},
-    "run_id": {"type": ["string", "null"]},
-    "kind": {"type": ["string", "null"], "enum": [*LOG_KIND_VALUES, None]},
-    "limit": {"type": ["integer", "null"]},
-    "lines": {"type": ["integer", "null"]},
-    "model_profile": {"type": ["string", "null"]},
-    "strategy": {"type": ["string", "null"]},
-    "field": {"type": ["string", "null"]},
-    "function": {"type": ["string", "null"]},
-    "view": {"type": ["string", "null"]},
-    "views": {
-        "type": ["array", "null"],
-        "items": {"type": "string"},
-        "maxItems": 16,
-    },
-    "sql": {"type": ["string", "null"]},
-    "query": {"type": ["string", "null"]},
-    "set": {
-        "type": ["object", "null"],
-        "additionalProperties": {"type": ["string", "number", "integer", "boolean", "null"]},
-    },
-    "ensure_use": {
-        "type": ["array", "null"],
-        "items": {"type": "string"},
-        "maxItems": 8,
-    },
-    "plan": {
-        "type": ["object", "null"],
-        "additionalProperties": True,
-    },
-}
+
+def _spec_from_binding(binding: AssistantToolBinding) -> AssistantCommandSpec:
+    return AssistantCommandSpec(
+        intent_name=binding.intent_name,
+        tool_name=binding.tool_name,
+        commands=binding.commands,
+        display_name=binding.display_name,
+        arguments=binding.arguments,
+        read_only=binding.read_only,
+        llm_allowed=binding.llm_allowed,
+        llm_visible=binding.llm_visible,
+        supported=binding.supported,
+        risk_level=binding.risk_level,
+        examples=binding.examples,
+        summary=binding.summary,
+        kind=binding.kind,
+        planner_allowed=binding.planner_allowed,
+        direct_executable=binding.direct_executable,
+        requires_pending=binding.requires_pending,
+        requires_confirm=binding.requires_confirm,
+    )
+
+
+def _binding_command_specs() -> tuple[AssistantCommandSpec, ...]:
+    return tuple(_spec_from_binding(binding) for binding in assistant_tool_bindings())
+
 
 COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
-    AssistantCommandSpec(
-        intent_name="help",
-        tool_name=None,
-        commands=("/help", "/?"),
-        display_name="帮助",
-        examples=("帮助", "/help"),
-        summary="show supported inbound commands",
-    ),
-    AssistantCommandSpec(
-        intent_name="runtime_status",
-        tool_name="runtime_status",
-        commands=("/status",),
-        display_name="状态",
-        examples=("状态", "/status"),
-        summary="show runtime status",
-    ),
-    AssistantCommandSpec(
-        intent_name="healthcheck",
-        tool_name="healthcheck",
-        commands=("/health", "/doctor"),
-        display_name="健康检查",
-        examples=("健康检查", "/health"),
-        summary="run read-only health checks",
-    ),
-    AssistantCommandSpec(
-        intent_name="config_validate",
-        tool_name="config_validate",
-        commands=("/config-check", "/config"),
-        display_name="配置检查",
-        examples=("配置检查", "/config-check"),
-        summary="validate runtime config",
-    ),
-    AssistantCommandSpec(
-        intent_name="symbol_config_query",
-        tool_name="symbol_config_read",
-        commands=(),
-        display_name="标的配置",
-        arguments=("symbol", "strategy", "field"),
-        examples=("现在泡泡玛特 sell put 的 max strike 是多少", "查询 9992.HK sell_put.max_strike"),
-        summary="read current monitored-symbol strategy config for a symbol",
-    ),
-    AssistantCommandSpec(
-        intent_name="symbol_resolve",
-        tool_name="symbol_resolve",
-        commands=(),
-        display_name="标的解析",
-        arguments=("symbol",),
-        examples=("泡泡玛特是什么 symbol", "POP 对应哪个标的", "HK.09992 解析成什么"),
-        summary="resolve a user-provided symbol/name/alias/Futu code to canonical OM symbol identity",
-    ),
-    AssistantCommandSpec(
-        intent_name="candidate_filter_explain",
-        tool_name="candidate_filter_explain",
-        commands=(),
-        display_name="候选过滤诊断",
-        arguments=("symbol", "account", "function", "run_id"),
-        examples=("泡泡玛特被哪个参数过滤了？", "为什么 NVDA 没出现在候选里？", "lx NVDA sell_put 为什么被过滤？"),
-        summary="explain a single symbol's observed candidate filter/rejection/missing trace rows from candidate_filter_trace artifacts",
-    ),
-    AssistantCommandSpec(
-        intent_name="analysis_catalog",
-        tool_name="analysis_catalog",
-        commands=(),
-        display_name="分析目录",
-        arguments=("view", "views"),
-        examples=("有哪些数据可以分析", "收益和指派正股能查询哪些字段"),
-        summary="inspect Tool OS read-only analysis views and SQL rules",
-    ),
-    AssistantCommandSpec(
-        intent_name="analysis_query",
-        tool_name="analysis_query",
-        commands=(),
-        display_name="通用分析",
-        arguments=("sql", "query", "limit", "account", "month"),
-        examples=(
-            "对比 lx 和 sy 的账户收益，有什么不同？",
-            "指派正股浮盈亏按账户汇总",
-            "按标的统计已实现收益",
-        ),
-        summary=(
-            "run SELECT-only queries over whitelisted OM analysis views for comparisons, rankings, trends, "
-            "breakdowns, and cross-domain analytical answers"
-        ),
-    ),
-    AssistantCommandSpec(
-        intent_name="operation_timeline",
-        tool_name="operation_timeline",
-        commands=(),
-        display_name="操作时间线",
-        arguments=("operation_id", "operation_types", "statuses", "limit"),
-        llm_allowed=False,
-        llm_visible=False,
-        planner_allowed=True,
-        direct_executable=False,
-        risk_level="read_only",
-        examples=("查询升级 command_id 的操作时间线",),
-        summary="planner-only read surface for operation audit evidence such as upgrade status and receipt diagnostics",
-    ),
-    AssistantCommandSpec(
-        intent_name="position_query",
-        tool_name="option_positions_read",
-        commands=("/positions",),
-        display_name="持仓",
-        arguments=("account", "status", "symbol", "option_type", "side", "strike", "expiration", "limit"),
-        examples=("持仓", "持仓 [账户]", "持仓 [到期月份/到期日/标的/类型/方向]", "/positions [lx|sy|all]"),
-        summary="list option positions",
-    ),
-    AssistantCommandSpec(
-        intent_name="assigned_stock_position_query",
-        tool_name="option_positions_read",
-        commands=("/assigned-stock",),
-        display_name="指派正股",
-        arguments=("account", "symbol", "assigned_stock_status", "stock_lot_id", "refresh_quotes"),
-        examples=(
-            "指派正股持仓盈亏",
-            "查看 lx 被指派正股浮盈亏",
-            "NVDA 指派正股盈亏",
-            "/assigned-stock [lx|sy|all] [symbol] [open|partially_sold|closed|all]",
-        ),
-        summary="show assigned stock lots from Sell Put assignment, including cost basis, realtime spot, and holding PnL",
-    ),
-    AssistantCommandSpec(
-        intent_name="position_exit_analysis",
-        tool_name="close_advice_read",
-        commands=(),
-        display_name="平仓/止盈分析",
-        arguments=("account", "symbol", "option_type", "side", "strike", "expiration", "limit"),
-        read_only=True,
-        llm_allowed=True,
-        supported=True,
-        risk_level="read_only",
-        examples=("分析 long call 是不是应该平仓", "泡泡玛特 long call 的持仓应该止盈吗"),
-        summary="analyze matching option positions using the latest generated close-advice report",
-    ),
-    AssistantCommandSpec(
-        intent_name="monthly_income_report",
-        tool_name="monthly_income_report",
-        commands=("/income",),
-        display_name="收益",
-        arguments=("account", "month"),
-        examples=("收益", "收益 [账户]", "收益 [账户] [YYYY-MM|6月|本月|上月]", "/income [lx|sy] [YYYY-MM|6月|本月|上月]"),
-        summary="show monthly income report",
-    ),
-    AssistantCommandSpec(
-        intent_name="runtime_runs",
-        tool_name="runtime_runs",
-        commands=("/runs",),
-        display_name="运行记录",
-        arguments=("limit",),
-        examples=("最近运行", "/runs [limit]"),
-        summary="list recent runtime runs",
-    ),
-    AssistantCommandSpec(
-        intent_name="runtime_logs",
-        tool_name="runtime_logs",
-        commands=("/logs",),
-        display_name="日志",
-        arguments=("run_id", "kind", "lines"),
-        examples=("日志 <run_id>", "/logs <run_id>"),
-        summary="show runtime logs for a run",
-    ),
-    AssistantCommandSpec(
-        intent_name="symbol_list",
-        tool_name="inbound.symbols",
-        commands=("/symbols",),
-        display_name="监控标的",
-        examples=("查看监控标的", "/symbols"),
-        summary="list monitored symbols",
-        planner_allowed=False,
-    ),
-    AssistantCommandSpec(
-        intent_name="pending_operations",
-        tool_name="inbound.pending",
-        commands=("/pending",),
-        display_name="待确认",
-        examples=("待确认", "/pending"),
-        summary="list pending preview operations",
-        planner_allowed=False,
-    ),
-    AssistantCommandSpec(
-        intent_name="model_list",
-        tool_name="inbound.model",
-        commands=("/model",),
-        display_name="模型",
-        llm_allowed=False,
-        examples=("/model", "/model list"),
-        summary="list configured assistant model profiles",
-    ),
+    *_binding_command_specs(),
     AssistantCommandSpec(
         intent_name="model_use",
         tool_name="inbound.model",
@@ -555,7 +343,7 @@ def command_catalog_payload() -> dict[str, Any]:
             "write_command_count": sum(1 for item in specs if not item["read_only"]),
             "write_capability_count": sum(1 for item in specs if not item["read_only"]),
         },
-        "schema_version": LLM_INTENT_SCHEMA_VERSION,
+        "schema_version": COMMAND_CATALOG_SCHEMA_VERSION,
         "commands": specs,
         "capabilities": specs,
         "help_text": command_help_text(),
@@ -665,27 +453,12 @@ def planner_preview_specs() -> tuple[AssistantCommandSpec, ...]:
     return tuple(spec for spec in COMMAND_SPECS if _planner_allowed(spec) and _kind(spec) == "preview")
 
 
-def llm_executable_arguments() -> dict[str, frozenset[str]]:
-    return {
-        spec.intent_name: frozenset(spec.arguments)
-        for spec in llm_recognizable_specs()
-    }
-
-
-def llm_allowed_arguments() -> dict[str, frozenset[str]]:
-    return llm_executable_arguments()
-
-
 def llm_executable_intent_names() -> list[str]:
     return sorted(spec.intent_name for spec in llm_executable_specs())
 
 
 def llm_recognizable_intent_names() -> list[str]:
     return sorted(spec.intent_name for spec in llm_recognizable_specs())
-
-
-def llm_intent_names() -> list[str]:
-    return llm_recognizable_intent_names()
 
 
 def llm_capability_manifest() -> dict[str, Any]:
@@ -695,44 +468,13 @@ def llm_capability_manifest() -> dict[str, Any]:
         if spec.llm_visible
     ]
     return {
-        "schema_version": LLM_INTENT_SCHEMA_VERSION,
+        "schema_version": LLM_CAPABILITY_MANIFEST_SCHEMA_VERSION,
         "intent_field_semantics": "The JSON `intent` field is the OM capability_id.",
         "routing_rule": "Choose only capabilities where llm_recognizable is true. The reasoning layer will reject recognized but unsupported capabilities without downgrading them.",
         "llm_executable_intents": llm_executable_intent_names(),
         "llm_recognizable_intents": llm_recognizable_intent_names(),
         "capabilities": capabilities,
     }
-
-
-def llm_capability_prompt() -> str:
-    manifest = llm_capability_manifest()
-    lines = [
-        "Available OM capabilities:",
-        "The JSON `intent` field must be one llm_recognizable capability_id from this manifest.",
-        "Capabilities with llm_executable=true are read-only tool calls.",
-        "Capabilities with llm_recognizable=true and llm_executable=false may only enter deterministic reasoning; preview-write capabilities can create a pending preview but cannot apply writes.",
-        "Capabilities with llm_recognizable=false must not be routed by LLM.",
-    ]
-    for item in manifest["capabilities"]:
-        executable = "true" if item["llm_executable"] else "false"
-        recognizable = "true" if item["llm_recognizable"] else "false"
-        commands = ", ".join(item["commands"]) if item["commands"] else "-"
-        usage = " | ".join(item["examples"]) if item["examples"] else "-"
-        args = ", ".join(item["arguments"]) if item["arguments"] else "-"
-        lines.append(
-            f"- {item['capability_id']} ({item['display_name']}): {item['summary']}; risk={item['risk_level']}; "
-            f"llm_recognizable={recognizable}; llm_executable={executable}; commands={commands}; args={args}; usage={usage}"
-        )
-    return "\n".join(lines)
-
-
-def llm_argument_schema_properties() -> dict[str, dict[str, Any]]:
-    names = sorted({arg for spec in llm_recognizable_specs() for arg in spec.arguments})
-    return {name: dict(ARGUMENT_JSON_SCHEMA[name]) for name in names}
-
-
-def llm_argument_schema_required_keys() -> list[str]:
-    return sorted({arg for spec in llm_recognizable_specs() for arg in spec.arguments})
 
 
 def _spec_payload(spec: AssistantCommandSpec) -> dict[str, Any]:

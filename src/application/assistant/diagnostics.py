@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
-from src.application.assistant.commands import llm_capability_manifest
+from src.application.assistant.capability_catalog import llm_capability_manifest
 from src.application.assistant.config_loader import load_assistant_config
 from src.application.assistant.llm_common import (
     CreateStructuredResponseFn,
@@ -14,7 +14,7 @@ from src.application.assistant.llm_common import (
     supported_llm_providers,
 )
 from src.application.assistant.agent_loop import plan_read_only_tools
-from src.application.assistant.settings import AssistantSettings, LlmTranslatorSettings
+from src.application.assistant.settings import AssistantSettings, AssistantLlmSettings
 from src.application.settings import build_effective_env
 from src.infrastructure.openai_chat_completions import resolve_chat_completions_url
 from src.infrastructure.openai_responses import resolve_responses_url
@@ -23,7 +23,7 @@ from src.infrastructure.openai_responses import resolve_responses_url
 DEFAULT_LIVE_PROBE_TEXT = "状态"
 
 
-def check_llm_translator(
+def check_llm_planner(
     *,
     repo_root: str | Path,
     config_path: str | Path | None = None,
@@ -83,7 +83,6 @@ def check_llm_translator(
             "config_kind": "assistant",
             "config_path": str(path),
             "loaded": bool(cfg),
-            "mode": runtime_settings.mode,
         },
         "env": {
             "env_file": str(effective_env.env_file) if effective_env.env_file is not None else None,
@@ -113,13 +112,6 @@ def _append_assistant_config_check(checks: list[dict[str, Any]], *, cfg: dict[st
             "message": "config.assistant.json not found; using default AgentLoop settings",
         })
         return True
-    if settings.mode not in {"agent_loop", "disabled"}:
-        checks.append({
-            "name": "assistant_config",
-            "status": "error",
-            "message": "assistant mode compatibility field is invalid",
-        })
-        return False
     checks.append({
         "name": "assistant_config",
         "status": "ok",
@@ -128,7 +120,7 @@ def _append_assistant_config_check(checks: list[dict[str, Any]], *, cfg: dict[st
     return True
 
 
-def _config_checks(settings: LlmTranslatorSettings, *, effective_env: Any) -> list[dict[str, Any]]:
+def _config_checks(settings: AssistantLlmSettings, *, effective_env: Any) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
     checks.append({
         "name": "enabled",
@@ -238,16 +230,16 @@ def _required_text_check(name: str, value: str, *, expected: str | None = None, 
     }
 
 
-def _provider_api_kind(settings: LlmTranslatorSettings) -> str:
+def _provider_api_kind(settings: AssistantLlmSettings) -> str:
     provider = normalize_llm_provider(settings.provider) or "openai"
     return provider_api_kind(provider)
 
 
-def _provider_endpoint_url(settings: LlmTranslatorSettings) -> str:
+def _provider_endpoint_url(settings: AssistantLlmSettings) -> str:
     return provider_endpoint_url(settings)
 
 
-def _base_url_message(settings: LlmTranslatorSettings) -> str:
+def _base_url_message(settings: AssistantLlmSettings) -> str:
     if _provider_api_kind(settings) == "chat_completions":
         return "using default DeepSeek Chat Completions API" if not settings.base_url else "using configured Chat Completions API"
     return "using default OpenAI Responses API" if not settings.base_url else "using configured OpenAI Responses API"

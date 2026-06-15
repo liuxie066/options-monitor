@@ -9,9 +9,7 @@ DEFAULT_LLM_CONFIDENCE_MIN = 0.75
 DEFAULT_LLM_TIMEOUT_SECONDS = 20
 DEFAULT_LLM_MAX_OUTPUT_TOKENS = 512
 DEFAULT_CONTEXT_WINDOW_MESSAGES = 8
-DEFAULT_ASSISTANT_MODE = "agent_loop"
 DEFAULT_MARKET_SCOPE = ""
-ASSISTANT_MODES = frozenset({"disabled", "agent_loop"})
 
 
 @dataclass(frozen=True)
@@ -23,7 +21,7 @@ class PlannerSettings:
 
 
 @dataclass(frozen=True)
-class LlmTranslatorSettings:
+class AssistantLlmSettings:
     enabled: bool = False
     provider: str = ""
     base_url: str = ""
@@ -48,20 +46,14 @@ class LlmTranslatorSettings:
 
 @dataclass(frozen=True)
 class AssistantSettings:
-    mode: str = DEFAULT_ASSISTANT_MODE
     enabled: bool | None = None
     context_window_messages: int = DEFAULT_CONTEXT_WINDOW_MESSAGES
     default_market_scope: str = DEFAULT_MARKET_SCOPE
     planner: PlannerSettings = PlannerSettings()
-    llm: LlmTranslatorSettings = LlmTranslatorSettings()
+    llm: AssistantLlmSettings = AssistantLlmSettings()
 
     def __post_init__(self) -> None:
-        legacy_mode = str(self.mode or "").strip().lower()
-        mode = DEFAULT_ASSISTANT_MODE
-        if self.enabled is False or legacy_mode == "disabled":
-            mode = "disabled"
-        object.__setattr__(self, "mode", mode)
-        object.__setattr__(self, "enabled", mode != "disabled")
+        object.__setattr__(self, "enabled", self.enabled is not False)
 
     @property
     def llm_enabled(self) -> bool:
@@ -93,7 +85,6 @@ class AssistantSettings:
 
     def public_payload(self) -> dict[str, Any]:
         return {
-            "mode": self.mode,
             "enabled": bool(self.enabled),
             "context_window_messages": int(self.context_window_messages),
             "default_market_scope": self.default_market_scope,
@@ -116,9 +107,6 @@ def _bool(value: Any, *, default: bool) -> bool:
 def _assistant_enabled(assistant_cfg: dict[str, Any]) -> bool:
     if "enabled" in assistant_cfg:
         return _bool(assistant_cfg.get("enabled"), default=True)
-    legacy_mode = str(assistant_cfg.get("mode") or "").strip().lower()
-    if legacy_mode == "disabled":
-        return False
     return True
 
 
@@ -129,10 +117,10 @@ def _market_scope(value: Any) -> str:
     return DEFAULT_MARKET_SCOPE
 
 
-def _llm_settings(llm_cfg: dict[str, Any], *, enabled: bool) -> LlmTranslatorSettings:
+def _llm_settings(llm_cfg: dict[str, Any], *, enabled: bool) -> AssistantLlmSettings:
     provider = str(llm_cfg.get("provider") or "").strip()
     model = str(llm_cfg.get("model") or "").strip()
-    return LlmTranslatorSettings(
+    return AssistantLlmSettings(
         enabled=bool(enabled and provider and model),
         provider=provider,
         base_url=str(llm_cfg.get("base_url") or "").strip(),

@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 1.2.292 - 2026-06-15
+
+### Changed
+- Consolidated Inbound LLM planning onto the registered tool surface, removing the old LLM intent translator path and
+  assistant command metadata duplication.
+- Retired `assistant.mode` from runtime assistant config; active controls are now `assistant.enabled` and
+  `assistant.planner.enabled`.
+- Renamed Shadow Replay parameter backtest internals to candidate-impact naming and made `candidate-impact` /
+  `candidate-impact-report` the only supported CLI entries.
+
+### Removed
+- Removed legacy assistant LLM intent schema/eval fixtures and the old command catalog module.
+- Removed Shadow Replay `parameter-backtest` and `parameter-report` compatibility aliases.
+
 ## 1.2.291 - 2026-06-15
 
 ### Added

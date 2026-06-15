@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from src.application.agent_tool_contracts import AgentToolError, build_response
-from src.application.assistant.commands import command_specs
+from src.application.assistant.capability_catalog import command_specs
 from src.application.assistant.command_parser import parse_assistant_command
 from src.application.assistant.contracts import (
     AssistantRequest,
@@ -18,8 +18,7 @@ from src.application.assistant.contracts import (
     PerceptionResult,
     ToolCall,
 )
-from src.application.assistant.llm_intent_schema import LLM_INTENT_SCHEMA_VERSION
-from src.application.assistant.llm_translator import LlmTranslationResult, parse_llm_translation_payload
+from src.application.assistant.agent_loop import LlmPlannerResult, PlannerPlan, PlannerPlanStep, TOOL_PLAN_SCHEMA_VERSION
 from src.application.inbound.feishu import feishu_payload_to_inbound_request, handle_feishu_payload
 from src.application.assistant.deterministic_commands import parse_deterministic_text
 from src.application.assistant.policy import PURE_READ_TOOLS, check_sender_allowed, enforce_tool_allowed
@@ -27,7 +26,34 @@ from src.application.assistant.renderer import render_inbound_text
 from src.application.assistant.router import handle_assistant_request
 from src.application.assistant.runtime import handle_assistant_message
 from src.application.assistant.session_store import collect_assistant_trace
-from src.application.assistant.settings import AssistantSettings, LlmTranslatorSettings
+from src.application.assistant.settings import AssistantSettings, AssistantLlmSettings
+
+
+def _planner_trace(*, reason: str = "accepted") -> dict[str, Any]:
+    return {
+        "enabled": True,
+        "attempted": True,
+        "reason": reason,
+        "provider": "openai",
+        "base_url": "",
+        "model": "gpt-5.2",
+        "api_key_env": "OM_LLM_API_KEY",
+        "confidence_min": 0.75,
+        "timeout_seconds": 20,
+        "max_output_tokens": 512,
+        "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+    }
+
+
+def _plan_result(tool_name: str, arguments: dict[str, Any] | None = None) -> LlmPlannerResult:
+    return LlmPlannerResult(
+        plan=PlannerPlan(
+            goal="test plan",
+            response_mode="canonical",
+            steps=(PlannerPlanStep(id="step_1", tool_name=tool_name, arguments=dict(arguments or {})),),
+        ),
+        trace=_planner_trace(),
+    )
 
 
 def _write_inbound_runtime_config(tmp_path: Path) -> tuple[Path, Path]:
@@ -420,33 +446,16 @@ def test_inbound_exit_analysis_routes_to_close_advice_read(tmp_path: Path) -> No
             },
         )
 
-    def _translate(
+    def _plan(
         text: str,
         _settings: AssistantSettings,
         conversation_context: dict[str, Any] | None,
-    ) -> LlmTranslationResult:
+    ) -> LlmPlannerResult:
         assert text == "分析 long call 是不是应该平仓"
         assert conversation_context is not None
-        return LlmTranslationResult(
-            intent=PerceptionResult(
-                intent_name="position_exit_analysis",
-                arguments={"status": "open", "option_type": "call", "side": "long", "limit": 50},
-                source="llm",
-                confidence=0.93,
-            ),
-            trace={
-                "enabled": True,
-                "attempted": True,
-                "reason": "accepted",
-                "provider": "openai",
-                "base_url": "",
-                "model": "gpt-5.2",
-                "api_key_env": "OM_LLM_API_KEY",
-                "confidence_min": 0.75,
-                "timeout_seconds": 20,
-                "max_output_tokens": 512,
-                "schema_version": LLM_INTENT_SCHEMA_VERSION,
-            },
+        return _plan_result(
+            "close_advice_read",
+            {"query": {"status": "open", "option_type": "call", "side": "long", "limit": 50}},
         )
 
     out = handle_assistant_message(
@@ -461,9 +470,9 @@ def test_inbound_exit_analysis_routes_to_close_advice_read(tmp_path: Path) -> No
         execute_tool_fn=_execute_tool,
         allowed_senders="local:local",
         settings=AssistantSettings(
-            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
-        translate_intent_fn=_translate,
+        plan_tools_fn=_plan,
     )
 
     assert out["ok"] is True
@@ -477,8 +486,8 @@ def test_inbound_exit_analysis_routes_to_close_advice_read(tmp_path: Path) -> No
             },
         )
     ]
-    assert out["data"]["perception"]["intent_name"] == "position_exit_analysis"
-    assert out["data"]["reasoning"]["tool_call"]["tool_name"] == "close_advice_read"
+    assert out["data"]["perception"]["intent_name"] == "tool_plan"
+    assert out["data"]["reasoning"]["tool_call"]["tool_name"] == "assistant.tool_plan"
     assert "平仓建议分析" in out["data"]["response_text"]
     assert "继续持有 Call 凸性腿" in out["data"]["response_text"]
     assert "Call现值 820" in out["data"]["response_text"]
@@ -590,22 +599,14 @@ def test_inbound_symbol_config_query_executes_read_only_tool_via_llm(tmp_path: P
     cfg_path = tmp_path / "config.hk.json"
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    def _translate(
+    def _plan(
         text: str,
-        runtime_settings: AssistantSettings,
+        _runtime_settings: AssistantSettings,
         conversation_context: dict[str, Any] | None,
-    ) -> LlmTranslationResult:
+    ) -> LlmPlannerResult:
         assert text == "现在泡泡玛特 sell put的max strike是多少？"
         assert conversation_context is not None
-        return parse_llm_translation_payload(
-            {
-                "schema_version": LLM_INTENT_SCHEMA_VERSION,
-                "intent": "symbol_config_query",
-                "arguments": {"symbol": "泡泡玛特", "strategy": "sell_put", "field": "max_strike"},
-                "confidence": 0.96,
-            },
-            settings=runtime_settings.llm,
-        )
+        return _plan_result("symbol_config_read", {"symbol": "泡泡玛特", "strategy": "sell_put", "field": "max_strike"})
 
     out = handle_assistant_message(
         AssistantRequest(
@@ -618,22 +619,30 @@ def test_inbound_symbol_config_query_executes_read_only_tool_via_llm(tmp_path: P
         ),
         allowed_senders="local:local",
         settings=AssistantSettings(
-            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
-        translate_intent_fn=_translate,
+        plan_tools_fn=_plan,
     )
 
     assert out["ok"] is True
-    assert out["tool_name"] == "symbol_config_read"
-    assert out["data"]["perception"]["intent_name"] == "symbol_config_query"
-    assert out["data"]["reasoning"]["tool_call"] == {
-        "tool_name": "symbol_config_read",
-        "payload": {
-            "config_path": str(cfg_path),
-            "symbol": "泡泡玛特",
-            "strategy": "sell_put",
-            "field": "max_strike",
-        },
+    assert out["tool_name"] == "assistant.tool_plan"
+    assert out["data"]["perception"]["intent_name"] == "tool_plan"
+    tool_call = out["data"]["reasoning"]["tool_call"]
+    assert tool_call["tool_name"] == "assistant.tool_plan"
+    assert tool_call["payload"]["question"] == "现在泡泡玛特 sell put的max strike是多少？"
+    assert tool_call["payload"]["config_path"] == str(cfg_path)
+    assert tool_call["payload"]["plan"] == {
+        "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+        "goal": "test plan",
+        "response_mode": "canonical",
+        "required_capabilities": [],
+        "steps": [
+            {
+                "id": "step_1",
+                "tool_name": "symbol_config_read",
+                "arguments": {"symbol": "泡泡玛特", "strategy": "sell_put", "field": "max_strike"},
+            }
+        ],
     }
     assert "operation_type" not in out["data"]
     assert "9992.HK" in out["data"]["response_text"]
@@ -1427,7 +1436,7 @@ def test_inbound_upgrade_cancel_persists_readback_trace(monkeypatch: pytest.Monk
             audit_db=str(audit_db),
         ),
         allowed_senders="feishu:ou_1",
-        settings=AssistantSettings(mode="agent_loop"),
+        settings=AssistantSettings(),
     )
 
     assert preview["ok"] is True
@@ -1445,7 +1454,7 @@ def test_inbound_upgrade_cancel_persists_readback_trace(monkeypatch: pytest.Monk
             audit_db=str(audit_db),
         ),
         allowed_senders="feishu:ou_1",
-        settings=AssistantSettings(mode="agent_loop"),
+        settings=AssistantSettings(),
     )
 
     assert cancelled["ok"] is True
@@ -2430,25 +2439,20 @@ def test_inbound_llm_symbol_edit_creates_preview_only(monkeypatch: pytest.Monkey
     audit_db = tmp_path / "inbound.sqlite3"
     before = json.loads(cfg_path.read_text(encoding="utf-8"))
 
-    def _translate(
+    def _plan(
         text: str,
-        runtime_settings: AssistantSettings,
+        _runtime_settings: AssistantSettings,
         conversation_context: dict[str, Any] | None,
-    ) -> LlmTranslationResult:
+    ) -> LlmPlannerResult:
         assert text == "设置 NVDA covered call min strike 140"
         assert conversation_context is not None
-        return parse_llm_translation_payload(
+        return _plan_result(
+            "symbol_edit",
             {
-                "schema_version": LLM_INTENT_SCHEMA_VERSION,
-                "intent": "symbol_edit",
-                "arguments": {
-                    "symbol": "NVDA",
-                    "set": {"covered_call.min_strike": 140},
-                    "ensure_use": None,
-                },
-                "confidence": 0.96,
+                "symbol": "NVDA",
+                "set": {"sell_call.min_strike": 140.0, "sell_call.enabled": True},
+                "ensure_use": ["call_base"],
             },
-            settings=runtime_settings.llm,
         )
 
     out = handle_assistant_message(
@@ -2462,14 +2466,14 @@ def test_inbound_llm_symbol_edit_creates_preview_only(monkeypatch: pytest.Monkey
         ),
         allowed_senders="feishu:ou_1",
         settings=AssistantSettings(
-            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
-        translate_intent_fn=_translate,
+        plan_tools_fn=_plan,
     )
 
     assert out["ok"] is True
     assert out["tool_name"] == "inbound.symbols"
-    assert out["data"]["perception"]["source"] == "llm"
+    assert out["data"]["perception"]["source"] == "agent_loop_plan"
     assert out["data"]["perception"]["intent_name"] == "symbol_edit"
     assert out["data"]["reasoning"]["status"] == "preview_required"
     assert out["data"]["reasoning"]["safety_class"] == "write_preview"

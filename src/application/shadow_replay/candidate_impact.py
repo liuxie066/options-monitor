@@ -46,7 +46,6 @@ from src.application.shadow_replay.settlement import is_usable_mark
 
 
 CANDIDATE_IMPACT_SCHEMA_VERSION = "shadow_replay_candidate_impact.v1"
-PARAMETER_BACKTEST_SCHEMA_VERSION = "shadow_replay_parameter_backtest.v1"
 ACCEPTED_STATUSES = {"accepted", "notified"}
 REJECTED_STATUSES = {"rejected", "post_filtered", "ranked_below"}
 PARAMETER_FIELD_MAP = {
@@ -89,38 +88,6 @@ def run_shadow_replay_candidate_impact(
         output_format=output_format,
         output=output,
         schema_version=CANDIDATE_IMPACT_SCHEMA_VERSION,
-    )
-
-
-def run_shadow_replay_parameter_backtest(
-    *,
-    repo_root: str | Path,
-    params: str | Path | dict[str, Any] | ParameterSet,
-    dataset: str | Path | None = None,
-    runs_root: str | Path | None = None,
-    start_date: str | None = None,
-    end_date: str | None = None,
-    accounts: list[str] | tuple[str, ...] | None = None,
-    market: str | None = None,
-    min_sample: int = 30,
-    output_format: str = "json",
-    output: str | Path | None = None,
-) -> dict[str, Any]:
-    """Compatibility wrapper for the legacy parameter-backtest entrypoint."""
-
-    return _run_shadow_replay_candidate_impact(
-        repo_root=repo_root,
-        params=params,
-        dataset=dataset,
-        runs_root=runs_root,
-        start_date=start_date,
-        end_date=end_date,
-        accounts=accounts,
-        market=market,
-        min_sample=min_sample,
-        output_format=output_format,
-        output=output,
-        schema_version=PARAMETER_BACKTEST_SCHEMA_VERSION,
     )
 
 

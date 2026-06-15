@@ -507,7 +507,6 @@ def _assistant_runtime_summary(
         "config": {
             "path": mask_path(path),
             "loaded": bool(cfg),
-            "mode": settings.mode,
             "enabled": bool(settings.enabled),
             "planner": settings.planner.public_payload(),
             "context_window_messages": int(settings.context_window_messages),
@@ -2206,7 +2205,7 @@ def runtime_status_tool(
     assistant_llm_summary = assistant_runtime.get("llm") if isinstance(assistant_runtime.get("llm"), dict) else {}
     assistant_audit_summary = assistant_runtime.get("audit") if isinstance(assistant_runtime.get("audit"), dict) else {}
     assistant_latest = assistant_audit_summary.get("latest") if isinstance(assistant_audit_summary.get("latest"), dict) else {}
-    data["summary"]["assistant_mode"] = assistant_config_summary.get("mode")
+    data["summary"]["assistant_enabled"] = bool(assistant_config_summary.get("enabled"))
     assistant_planner = assistant_config_summary.get("planner") if isinstance(assistant_config_summary.get("planner"), dict) else {}
     data["summary"]["assistant_planner_enabled"] = bool(assistant_planner.get("enabled"))
     data["summary"]["assistant_llm_enabled"] = bool(assistant_llm_summary.get("enabled"))

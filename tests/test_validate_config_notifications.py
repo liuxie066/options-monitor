@@ -97,13 +97,17 @@ def test_validate_config_rejects_invalid_assistant_context_window() -> None:
         assert "assistant.context_window_messages must be <= 20" in str(exc)
 
 
-def test_validate_config_accepts_disabled_assistant_mode() -> None:
+def test_validate_config_rejects_assistant_mode() -> None:
     import src.application.config_validator as mod
 
     cfg = _base_cfg()
     cfg["assistant"] = {"mode": "disabled"}
 
-    mod.validate_config(cfg)
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "assistant has unsupported keys: mode" in str(exc)
 
 
 def test_validate_config_rejects_non_object_assistant() -> None:
@@ -213,7 +217,7 @@ def test_validate_config_rejects_invalid_assistant_llm_config() -> None:
         assert "assistant.llm.provider must be one of: openai, deepseek" in str(exc)
 
 
-def test_validate_config_retires_legacy_assistant_modes_and_accepts_planner_config() -> None:
+def test_validate_config_rejects_legacy_assistant_modes_and_accepts_planner_config() -> None:
     import src.application.config_validator as mod
 
     cfg = _base_cfg()
@@ -223,7 +227,7 @@ def test_validate_config_retires_legacy_assistant_modes_and_accepts_planner_conf
         mod.validate_config(cfg)
         raise AssertionError("expected SystemExit")
     except SystemExit as exc:
-        assert "assistant.mode legacy modes are retired; use assistant.enabled and assistant.planner.enabled" in str(exc)
+        assert "assistant has unsupported keys: mode" in str(exc)
 
     cfg = _base_cfg()
     cfg["assistant"] = {"mode": "deterministic"}
@@ -232,7 +236,7 @@ def test_validate_config_retires_legacy_assistant_modes_and_accepts_planner_conf
         mod.validate_config(cfg)
         raise AssertionError("expected SystemExit")
     except SystemExit as exc:
-        assert "assistant.mode legacy modes are retired; use assistant.enabled and assistant.planner.enabled" in str(exc)
+        assert "assistant has unsupported keys: mode" in str(exc)
 
     cfg = _base_cfg()
     cfg["assistant"] = {"enabled": "yes"}

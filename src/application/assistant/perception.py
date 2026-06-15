@@ -5,7 +5,7 @@ import re
 from typing import Any, Callable
 
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.assistant.agent_loop import AgentLoopPlanFn, run_read_only_agent_loop
+from src.application.assistant.agent_loop import AgentLoopPlanFn, AgentLoopPlanningOutcome, run_read_only_agent_loop, skipped_llm_trace
 from src.application.assistant.audit import InboundAuditStore
 from src.application.assistant.command_parser import parse_assistant_command
 from src.application.assistant.capability_catalog import is_llm_planner_preview_spec, spec_by_intent
@@ -13,7 +13,6 @@ from src.application.assistant.contracts import AssistantRequest, PerceptionResu
 from src.application.assistant.conversation_context import build_conversation_context, context_trace
 from src.application.assistant.deterministic_commands import parse_deterministic_text
 from src.application.assistant.llm_reply import LlmReplyResult, generate_general_reply
-from src.application.assistant.llm_translator import LlmTranslationResult, skipped_llm_trace
 from src.application.assistant.perception_trace import (
     PerceptionTrace,
     accepted_candidate,
@@ -24,7 +23,6 @@ from src.application.assistant.perception_trace import (
 from src.application.assistant.settings import AssistantSettings
 from src.application.assistant.time_filters import extract_month_filter
 
-TranslateIntentFn = Callable[[str, AssistantSettings, dict[str, Any] | None], LlmTranslationResult]
 GenerateReplyFn = Callable[[str, AssistantSettings, dict[str, Any] | None], LlmReplyResult]
 
 _COMMAND_SPECS_BY_INTENT = spec_by_intent()
@@ -91,14 +89,12 @@ class PerceptionEngine:
         request: AssistantRequest,
         audit_store: InboundAuditStore,
         settings: AssistantSettings,
-        translate_intent_fn: TranslateIntentFn | None = None,
         plan_tools_fn: AgentLoopPlanFn | None = None,
         generate_reply_fn: GenerateReplyFn | None = None,
     ) -> None:
         self._request = request
         self._audit_store = audit_store
         self._settings = settings
-        self._translate_intent_fn = translate_intent_fn
         self._plan_tools_fn = plan_tools_fn
         self._generate_reply_fn = generate_reply_fn
         self.route = self._initial_route(request.text)
@@ -181,12 +177,12 @@ class PerceptionEngine:
             )
 
         conversation_context = self._conversation_context()
-        llm_result = self._translate(text, conversation_context=conversation_context, now_fn=parser_now_fn)
+        llm_result = self._plan_with_llm(text, conversation_context=conversation_context, now_fn=parser_now_fn)
         if "context" not in self.llm_trace:
             self.llm_trace["context"] = context_trace(conversation_context)
-        if llm_result.intent is not None:
+        if llm_result.perception is not None:
             return self._handle_llm_perception(
-                llm_result.intent,
+                llm_result.perception,
                 deterministic_candidate,
                 llm_first=True,
                 text=text,
@@ -265,7 +261,7 @@ class PerceptionEngine:
             )
         reply_result = self._maybe_generate_general_reply(
             text,
-            translate_error=llm_error,
+            planning_error=llm_error,
             conversation_context=conversation_context,
         )
         if reply_result.response_text:
@@ -340,12 +336,12 @@ class PerceptionEngine:
             )
             raise err
         conversation_context = self._conversation_context()
-        llm_result = self._translate(text, conversation_context=conversation_context, now_fn=parser_now_fn)
+        llm_result = self._plan_with_llm(text, conversation_context=conversation_context, now_fn=parser_now_fn)
         if "context" not in self.llm_trace:
             self.llm_trace["context"] = context_trace(conversation_context)
-        if llm_result.intent is not None:
+        if llm_result.perception is not None:
             return self._handle_llm_perception(
-                llm_result.intent,
+                llm_result.perception,
                 deterministic_candidate,
                 text=text,
                 now_fn=parser_now_fn,
@@ -366,7 +362,6 @@ class PerceptionEngine:
     def _conversation_context(self) -> dict[str, Any] | None:
         if (
             not self._settings.planner_enabled
-            and self._translate_intent_fn is None
             and self._plan_tools_fn is None
             and self._generate_reply_fn is None
         ):
@@ -406,30 +401,31 @@ class PerceptionEngine:
             }
         return self.last_conversation_context
 
-    def _translate(
+    def _plan_with_llm(
         self,
         text: str,
         *,
         conversation_context: dict[str, Any] | None,
         now_fn: Callable[[], date] | None,
-    ) -> LlmTranslationResult:
+    ) -> AgentLoopPlanningOutcome:
         if not self._settings.planner_enabled and self._plan_tools_fn is None:
-            llm_result = LlmTranslationResult(
-                intent=None,
+            llm_result = AgentLoopPlanningOutcome(
+                perception=None,
                 trace=skipped_llm_trace(self._settings.llm, reason="planner_disabled"),
             )
             self.llm_trace = dict(llm_result.trace)
             return llm_result
+        conversation_context = _with_perception_temporal_context(conversation_context, now_fn=now_fn)
+        self.last_conversation_context = conversation_context
         loop_result = run_read_only_agent_loop(
             text,
             settings=self._settings,
             conversation_context=conversation_context,
-            translate_intent_fn=self._translate_intent_fn,
             plan_tools_fn=self._plan_tools_fn,
             now_fn=now_fn,
         )
         self.llm_trace = dict(loop_result.trace)
-        return loop_result.translation
+        return loop_result.planning
 
     def _llm_source(self) -> str:
         return "agent_loop"
@@ -491,7 +487,7 @@ class PerceptionEngine:
         llm_error_candidate = error_candidate(llm_source, llm_error, reason=str(self.llm_trace.get("reason") or ""))
         reply_result = self._maybe_generate_general_reply(
             text,
-            translate_error=llm_error,
+            planning_error=llm_error,
             conversation_context=conversation_context,
         )
         if reply_result.response_text:
@@ -529,10 +525,10 @@ class PerceptionEngine:
         self,
         text: str,
         *,
-        translate_error: AgentToolError,
+        planning_error: AgentToolError,
         conversation_context: dict[str, Any] | None,
     ) -> LlmReplyResult:
-        if not general_reply_allowed(text, translate_error=translate_error):
+        if not general_reply_allowed(text, planning_error=planning_error):
             return LlmReplyResult(
                 response_text=None,
                 trace={
@@ -542,7 +538,7 @@ class PerceptionEngine:
                         "reason": "blocked_by_safety_filter",
                     },
                 },
-                error=translate_error,
+                error=planning_error,
             )
         if self._generate_reply_fn is not None:
             reply_result = self._generate_reply_fn(text, self._settings, conversation_context)
@@ -563,8 +559,8 @@ def looks_like_command(text: str) -> bool:
     return str(text or "").lstrip().startswith("/")
 
 
-def general_reply_allowed(text: str, *, translate_error: AgentToolError) -> bool:
-    if translate_error.code in {"PERMISSION_DENIED", "INPUT_ERROR"}:
+def general_reply_allowed(text: str, *, planning_error: AgentToolError) -> bool:
+    if planning_error.code in {"PERMISSION_DENIED", "INPUT_ERROR"}:
         return False
     compact = str(text or "").strip().lower()
     if not compact:
@@ -674,6 +670,22 @@ def _reconcile_month_slot_from_text(perception: PerceptionResult, *, text: str, 
     )
 
 
+def _with_perception_temporal_context(
+    conversation_context: dict[str, Any] | None,
+    *,
+    now_fn: Callable[[], date] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(conversation_context, dict):
+        return conversation_context
+    today = now_fn() if now_fn is not None else date.today()
+    context = dict(conversation_context)
+    context["temporal_context"] = {
+        "current_date": today.isoformat(),
+        "timezone": "Asia/Shanghai",
+    }
+    return context
+
+
 def _merge_argument_slots(
     *,
     llm_arguments: dict[str, Any],
@@ -743,7 +755,6 @@ def _deterministic_operation_command_has_priority(perception: PerceptionResult) 
 __all__ = [
     "GenerateReplyFn",
     "PerceptionEngine",
-    "TranslateIntentFn",
     "ensure_llm_perception_allowed",
     "general_reply_allowed",
     "looks_like_command",

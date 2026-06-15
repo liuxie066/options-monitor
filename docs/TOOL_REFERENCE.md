@@ -432,8 +432,8 @@ om-agent run --tool candidate_rank_explain --input-json '{"mode":"put","score_we
 - `research shadow-replay mark` 可从 `required_data/parsed/*_required_data.csv` 为本地 dataset 生成 mark path
 - `research shadow-replay settle` 可从可用 mark 推导 mark-to-market outcome，也可在到期日/到期后用 spot/strike 推导到期 outcome
 - `research shadow-replay analyze` 会在已有可用 mark path / outcome facts 时输出路径风险、outcome stats、review_readiness 和按 DTE/Delta/IV/Spread/集中度分桶的 outcome-by-bucket 表现
-- `research shadow-replay candidate-impact` 用历史 run artifacts 或已有 dataset 做 `insurance_underwriting` 候选影响对比，比较 production observed 与阈值 variants 会新增/移除哪些候选，不重建历史期权链、不修改 runtime config；旧 `parameter-backtest` 保留为兼容入口
-- `research shadow-replay candidate-impact-report` 是用户常用报告入口，会一次写出 JSON + Markdown 候选影响报告；参数仍来自 `--params` 或 `--params-dir`，不会自动生成参数、不修改 runtime config；旧 `parameter-report` 保留为兼容入口
+- `research shadow-replay candidate-impact` 用历史 run artifacts 或已有 dataset 做 `insurance_underwriting` 候选影响对比，比较 production observed 与阈值 variants 会新增/移除哪些候选，不重建历史期权链、不修改 runtime config
+- `research shadow-replay candidate-impact-report` 是用户常用报告入口，会一次写出 JSON + Markdown 候选影响报告；参数仍来自 `--params` 或 `--params-dir`，不会自动生成参数、不修改 runtime config
 - `research archive pull/verify/inventory/build-datasets/prune-remote` 是远端空间有限时的证据归档链路：先把远端 runtime 证据 rsync 到本地 `output_shared/research/remote_archive/<remote>/`，再从 verified archive 生成 Shadow Replay dataset
 - 缺少被拒样本、mark path 或 outcome facts 时返回 `not_ready` / `evidence_incomplete`，防止幸存者偏差
 - 只输出人工复盘证据和候选影响对比，不自动改配置
@@ -943,7 +943,6 @@ output_shared/research/strategy_lab/
 - `scheduler_evidence` 来自线上调度系统；尽量提供 `last_run_id` 和 `last_triggered_at`，否则本地 runtime 文件不能完整证明线上 cron 是否按时触发。
 - `include_healthcheck=true` 只在 `quality` / `full` scope 下有意义。
 - `--shadow-replay-min-sample` 只影响 Research bundle 里的 `candidate_evidence.shadow_replay` 样本充足性判断，不会改生产策略参数。
-- 旧 `parameter-backtest` / `parameter-report` 只作为兼容入口；新文档和人工操作优先使用 `candidate-impact` / `candidate-impact-report`。
 - Candidate-impact 报告只能说明 observed run universe 内候选集合变化，不能自动生成最优参数，也不能修改 runtime config、交易状态或通知。
 - `strategy-lab update` 默认 dry-run；显式 `--build-dataset --write` 时只从 latest scanned run 构建本地 replay dataset，显式 `--write` 时只执行已有 Shadow Replay `collect_marks` / `settle` data-plan 和本地 receipt，不会执行 analyze、生成参数建议或修改生产状态。
 - 未显式传 `--dataset-id` 时，`strategy-lab update --latest --build-dataset --write` 默认使用 latest scanned run id 作为 dataset id；同名 dataset 已存在时返回 `dataset_build_reason=dataset_already_exists` 并跳过构建。

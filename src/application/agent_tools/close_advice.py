@@ -55,6 +55,7 @@ CLOSE_ADVICE_READ_TOOL = build_agent_tool(
     input_schema={
         "config_key": "us|hk",
         "config_path": "optional explicit config path",
+        "market_scope": "optional us|hk|all close-advice market filter; all searches cross-market reports",
         "query": "optional object with account, symbol, option_type, side, strike, expiration, limit",
         "run_id": "optional output_runs run id",
         "runs_root": "optional output_runs root",
