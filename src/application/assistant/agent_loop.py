@@ -894,11 +894,12 @@ def execute_tool_plan(
         followup_decisions=followup_decisions,
     )
     final_response_payload = _final_response_payload(synthesis)
+    base_synthesis_trace = _audit_synthesis_trace(dict(synthesis.trace))
     answer_hook_results = hook_results_from_answer_trace(
-        synthesis_trace=dict(synthesis.trace),
+        synthesis_trace=base_synthesis_trace,
         final_response=final_response_payload,
     )
-    synthesis_trace = {**dict(synthesis.trace), "hook_results": answer_hook_results}
+    synthesis_trace = {**base_synthesis_trace, "hook_results": answer_hook_results}
     agent_session = build_agent_session_snapshot(
         request=request,
         command_id=command_id,
@@ -3255,6 +3256,19 @@ def _final_response_payload(synthesis: LlmSynthesisResult) -> dict[str, Any]:
         canonical_renderer_required=False,
         llm_may_summarize=False,
     ).public_payload()
+
+
+def _audit_synthesis_trace(trace: dict[str, Any]) -> dict[str, Any]:
+    out = dict(trace)
+    if "composer" not in out:
+        out["composer"] = {
+            "attempted": bool(out.get("attempted", False)),
+            "reason": out.get("reason"),
+            "schema_version": out.get("schema_version"),
+        }
+    if "guard" not in out and isinstance(out.get("answer_guard"), dict):
+        out["guard"] = dict(out["answer_guard"])
+    return out
 
 
 def _first_tool_observation(step: PlannerPlanStep, observations: list[dict[str, Any]]) -> dict[str, Any]:

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.296 - 2026-06-16
+
+### Changed
+- Added explicit `composer` and `guard` audit aliases to AgentLoop synthesis traces so operator diagnostics can read
+  `composer.attempted`, `guard.status`, and `guard.violation_type` without knowing the older internal field names.
+
 ## 1.2.295 - 2026-06-16
 
 ### Changed
