@@ -3357,8 +3357,11 @@ def test_assistant_runtime_candidate_filter_metric_acronyms_do_not_trigger_rende
     tool_plan_data = out["data"]["action"]["result"]["data"]
     synthesis = tool_plan_data["synthesis"]
     assert synthesis["reason"] == "agent_composed_response"
+    assert synthesis["composer"]["attempted"] is True
     assert synthesis["answer_guard"]["status"] == "passed"
+    assert synthesis["guard"]["status"] == "passed"
     assert synthesis["answer_guard"]["violation_type"] is None
+    assert synthesis["guard"]["violation_type"] is None
     assert tool_plan_data["final_response"]["status"] == "synthesized"
     classifications = {item["claim"]: item for item in synthesis["answer_guard"]["claim_classification"]}
     assert classifications["9992.HK"]["classification"] == "supported_symbol"
