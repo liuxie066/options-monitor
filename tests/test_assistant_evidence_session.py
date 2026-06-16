@@ -3273,7 +3273,15 @@ def test_agent_loop_replans_read_only_followup_for_recoverable_quote_gap(tmp_pat
     ) -> LlmSynthesisResult:
         answer_evidence = observations[-1]
         assert answer_evidence["tool_name"] == "assistant.answer_evidence"
-        assert "spot USD 98" in answer_evidence["data"]["fallback_renderer_text"]
+        assert "fallback_renderer_text" not in answer_evidence["data"]
+        refreshed_rows = [
+            row
+            for item in observations
+            if item.get("tool_name") == "option_positions_read"
+            for row in (item.get("data", {}).get("rows") or [])
+            if isinstance(row, dict) and row.get("spot") == 98.0
+        ]
+        assert refreshed_rows
         return LlmSynthesisResult(
             response_text="lx 当前 NVDA 指派正股剩余 100 股，成本 USD 100/股，spot USD 98，正股浮盈亏 USD -200，生命周期PnL USD 50。",
             trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
@@ -3823,6 +3831,120 @@ def test_agent_loop_contract_verifier_rejects_unsupported_currency_amount(tmp_pa
     assert synthesis["answer_guard"]["status"] == "failed_then_fallback"
     violations = synthesis["answer_guard"]["violations"]
     assert any(item["type"] == "unsupported_contract_currency_amount" for item in violations)
+
+
+def test_agent_loop_monthly_income_composer_does_not_receive_fallback_renderer_text(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+    observed_observations: list[list[dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, dict(payload)))
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "summary": [
+                    {"month": "2026-06", "account": "lx", "currency": "CNY", "net_cashflow_gross": 3000.0},
+                    {"month": "2026-06", "account": "sy", "currency": "CNY", "net_cashflow_gross": 11138.0},
+                ],
+                "return_summary": [
+                    {
+                        "month": "2026-06",
+                        "account": "lx",
+                        "net_income_cny": 3000.0,
+                        "net_income_by_ccy": {"CNY": 3000.0},
+                        "cash_secured_cny": 319148.94,
+                        "net_return_rate": 0.0094,
+                    },
+                    {
+                        "month": "2026-06",
+                        "account": "sy",
+                        "net_income_cny": 11138.0,
+                        "net_income_by_ccy": {"CNY": 11138.0},
+                        "cash_secured_cny": 473957.45,
+                        "net_return_rate": 0.0235,
+                    },
+                ],
+                "filters": {"month": "2026-06"},
+                "row_count": 2,
+                "premium_row_count": 0,
+            },
+        )
+
+    def _plan(
+        text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        assert text == "6月收益分析"
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="分析 2026-06 收益",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="monthly_income_report",
+                        arguments={"month": "2026-06"},
+                        purpose="读取 2026-06 月收益统计",
+                    ),
+                ),
+                required_capabilities=("income_report",),
+            ),
+            trace={
+                "enabled": True,
+                "attempted": True,
+                "reason": "accepted",
+                "provider": "openai",
+                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+            },
+        )
+
+    def _synthesize(
+        _question: str,
+        _settings: AssistantSettings,
+        _plan: PlannerPlan,
+        observations: list[dict[str, Any]],
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmSynthesisResult:
+        observed_observations.append(observations)
+        assert observations[-1]["tool_name"] == "assistant.answer_evidence"
+        assert "fallback_renderer_text" not in observations[-1]["data"]
+        assert observations[0]["data"]["return_summary"][0]["net_income_cny"] == 3000.0
+        assert observations[0]["data"]["return_summary"][1]["net_return_rate"] == 0.0235
+        return LlmSynthesisResult(
+            response_text=(
+                "2026-06 收益看，sy 的净现金流明显高于 lx：sy CNY 11,138，lx CNY 3,000；"
+                "现金流率分别是 2.35% 和 0.94%。"
+            ),
+            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="6月收益分析",
+            sender_id="local",
+            message_id="msg_monthly_income_receipt_like_summary",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+        synthesize_response_fn=_synthesize,
+    )
+
+    assert out["ok"] is True
+    assert calls == [("monthly_income_report", {"config_key": "us", "month": "2026-06"})]
+    assert len(observed_observations) == 1
+    text = out["data"]["response_text"]
+    assert not text.startswith("收益统计完成")
+    assert "sy 的净现金流明显高于 lx" in text
+    assert "数据来源：OM 本地账本" in text
+    synthesis = out["data"]["action"]["result"]["data"]["synthesis"]
+    assert synthesis["reason"] == "agent_composed_response"
+    assert synthesis["answer_guard"]["status"] == "passed"
 
 
 def test_agent_loop_answer_shape_fallback_preserves_account_comparison(tmp_path: Path) -> None:
