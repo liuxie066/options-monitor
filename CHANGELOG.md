@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 1.2.295 - 2026-06-16
+
+### Changed
+- Upgraded the AgentLoop answer guard into an evidence-aware claim verifier so symbol-like tokens are classified against
+  tool evidence vocabulary before they can trigger hard symbol violations.
+- Added answer guard audit details for passed, rewritten, and fallback routes, including violation type summaries,
+  contract verifier payloads, and claim classification records.
+
+### Fixed
+- Fixed candidate-filter LLM answers that mention metrics or rule vocabulary such as `IV/RV`, `OI`, `DTE`,
+  `annualized_return_below_min`, or `risk_spread` so those evidence-backed terms no longer force renderer fallback.
+- Fixed ISO-style date claim extraction so unsupported full dates such as `2026-06-19` are verified as dates instead of
+  being truncated during answer guard checks.
+
 ## 1.2.294 - 2026-06-16
 
 ### Changed
