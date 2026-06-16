@@ -670,6 +670,13 @@ def test_run_one_account_appends_close_advice_quote_issue_summary(monkeypatch, t
     env = _install_common_patches(monkeypatch, request)
     runlog = _FakeRunlog()
 
+    def _write_run_account_text(base, run_id, acct, name, text):
+        target = request.accounts_root / acct / "reports" / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+
+    monkeypatch.setattr(env["mod"].run_repo, "write_run_account_text", _write_run_account_text)
+
     monkeypatch.setattr(
         env["mod"],
         "decide_account_scan_gate",
@@ -723,6 +730,8 @@ def test_run_one_account_appends_close_advice_quote_issue_summary(monkeypatch, t
     assert "系统异常表示数据拉取/字段覆盖失败，行情质量不足表示有行情但定价可信度不够" in outcome.result.notification_text
     assert "spread_too_wide=1" in outcome.result.notification_text
     assert "样例: 0700.HK put 2026-04-29 480.00P: OpenD 限频" in outcome.result.notification_text
+    final_text = (request.accounts_root / "lx" / "reports" / "symbols_notification.txt").read_text(encoding="utf-8")
+    assert final_text == outcome.result.notification_text + "\n"
     close_events = [evt for evt in env["audit_events"] if evt["action"] == "close_advice"]
     assert close_events
     assert close_events[-1]["extra"]["quote_issue_rows"] == 2
@@ -735,6 +744,13 @@ def test_run_one_account_suppresses_close_advice_spread_only_quality_summary(mon
     request.base_cfg["close_advice"] = {"enabled": True}
     env = _install_common_patches(monkeypatch, request)
     runlog = _FakeRunlog()
+
+    def _write_run_account_text(base, run_id, acct, name, text):
+        target = request.accounts_root / acct / "reports" / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+
+    monkeypatch.setattr(env["mod"].run_repo, "write_run_account_text", _write_run_account_text)
 
     monkeypatch.setattr(
         env["mod"],
@@ -792,3 +808,5 @@ def test_run_one_account_suppresses_close_advice_spread_only_quality_summary(mon
     assert "行情质量不足" not in outcome.result.notification_text
     assert "spread_too_wide=1" not in outcome.result.notification_text
     assert "样例:" not in outcome.result.notification_text
+    final_text = (request.accounts_root / "lx" / "reports" / "symbols_notification.txt").read_text(encoding="utf-8")
+    assert final_text == outcome.result.notification_text + "\n"
