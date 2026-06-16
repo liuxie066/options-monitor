@@ -584,34 +584,6 @@ def run_one_account(
             exc=exc,
         )
 
-    try:
-        run_repo.write_run_account_text(
-            request.base,
-            request.run_id,
-            acct,
-            "symbols_notification.txt",
-            text + "\n",
-        )
-        audit_fn("write", "write_run_account_text:symbols_notification.txt", run_id=request.run_id, account=acct)
-        if cfg_override.exists() and cfg_override.stat().st_size > 0:
-            run_repo.copy_to_run_account(
-                request.base,
-                request.run_id,
-                acct,
-                cfg_override,
-                "config.override.json",
-            )
-            audit_fn("write", "copy_to_run_account:config.override.json", run_id=request.run_id, account=acct)
-    except Exception as exc:
-        _record_account_run_degraded(
-            runlog=runlog,
-            audit_fn=audit_fn,
-            run_id=request.run_id,
-            account=acct,
-            action="write_run_account_artifacts",
-            exc=exc,
-        )
-
     close_advice_cfg = (cfg.get("close_advice") or {}) if isinstance(cfg, dict) else {}
     if bool(close_advice_cfg.get("enabled", False)):
         try:
@@ -706,6 +678,34 @@ def run_one_account(
                 message=str(exc),
             )
             runlog.safe_event("close_advice", "error", message=f"close advice failed for {acct}: {exc}")
+
+    try:
+        run_repo.write_run_account_text(
+            request.base,
+            request.run_id,
+            acct,
+            "symbols_notification.txt",
+            text + "\n",
+        )
+        audit_fn("write", "write_run_account_text:symbols_notification.txt", run_id=request.run_id, account=acct)
+        if cfg_override.exists() and cfg_override.stat().st_size > 0:
+            run_repo.copy_to_run_account(
+                request.base,
+                request.run_id,
+                acct,
+                cfg_override,
+                "config.override.json",
+            )
+            audit_fn("write", "copy_to_run_account:config.override.json", run_id=request.run_id, account=acct)
+    except Exception as exc:
+        _record_account_run_degraded(
+            runlog=runlog,
+            audit_fn=audit_fn,
+            run_id=request.run_id,
+            account=acct,
+            action="write_run_account_artifacts",
+            exc=exc,
+        )
 
     acct_metrics["ran_scan"] = True
     acct_metrics["should_notify"] = bool(should_notify)

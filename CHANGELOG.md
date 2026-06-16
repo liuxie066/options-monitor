@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.297 - 2026-06-16
+
+### Fixed
+- Fixed account notification run artifacts so `symbols_notification.txt` is written after close advice is appended,
+  keeping the saved notification text aligned with the text used by the delivery flow.
+
 ## 1.2.296 - 2026-06-16
 
 ### Changed
