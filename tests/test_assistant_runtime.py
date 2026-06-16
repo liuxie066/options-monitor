@@ -3214,6 +3214,160 @@ def test_assistant_runtime_agent_loop_injects_config_for_candidate_filter_explai
     assert agent_loop["final_response"]["reason"] == "LLM composed the response from guarded tool evidence"
 
 
+def test_assistant_runtime_candidate_filter_metric_acronyms_do_not_trigger_renderer_fallback(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "schema_version": "candidate_filter_explain.v1",
+                "symbol": "9992.HK",
+                "raw_symbol": "泡泡玛特",
+                "canonical_symbol": "9992.HK",
+                "scope": {"account": None, "account_semantics": "scan_scope"},
+                "trace_count": 8,
+                "status_counts": {"rejected": 8},
+                "function_counts": {"sell_put": 8},
+                "functions": [
+                    {
+                        "function": "sell_put",
+                        "status": "rejected",
+                        "reason_counts": {
+                            "vol_edge_ratio_below_min": 2,
+                            "risk_spread": 1,
+                            "annualized_return_below_min": 1,
+                            "open_interest_below_min": 1,
+                            "dte_out_of_range": 1,
+                            "delta_too_high": 1,
+                        },
+                        "reason_labels": {
+                            "vol_edge_ratio_below_min": "IV/RV 不足",
+                            "risk_spread": "价差不合格",
+                            "annualized_return_below_min": "年化收益不足",
+                            "open_interest_below_min": "OI 不足",
+                            "dte_out_of_range": "DTE 不符合",
+                            "delta_too_high": "Delta 过高",
+                        },
+                        "rejection_reason_counts": {
+                            "vol_edge_ratio_below_min": 2,
+                            "risk_spread": 1,
+                            "annualized_return_below_min": 1,
+                        },
+                        "rejection_reasons": [
+                            {"rule": "vol_edge_ratio_below_min", "label": "IV/RV 不足", "count": 2},
+                            {"rule": "risk_spread", "label": "价差不合格", "count": 1},
+                            {"rule": "annualized_return_below_min", "label": "年化收益不足", "count": 1},
+                            {"rule": "open_interest_below_min", "label": "OI 不足", "count": 1},
+                            {"rule": "dte_out_of_range", "label": "DTE 不符合", "count": 1},
+                            {"rule": "delta_too_high", "label": "Delta 过高", "count": 1},
+                        ],
+                        "events": [
+                            {
+                                "rule": "vol_edge_ratio_below_min",
+                                "rule_label": "IV/RV 不足",
+                                "is_rejection": True,
+                                "metric_value": 0.91,
+                                "threshold": 1.1,
+                                "message": "IV/RV edge below minimum",
+                            },
+                            {
+                                "rule": "risk_spread",
+                                "rule_label": "价差不合格",
+                                "is_rejection": True,
+                                "metric_value": 0.35,
+                                "threshold": 0.2,
+                                "message": "spread too wide",
+                            },
+                        ],
+                    }
+                ],
+            },
+        )
+
+    def _plan(
+        _text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="解释泡泡玛特候选过滤参数",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="candidate_filter_explain",
+                        arguments={"symbol": "泡泡玛特"},
+                        purpose="读取单标的候选过滤 trace",
+                    ),
+                ),
+            ),
+            trace=_planner_trace(),
+        )
+
+    def _synthesize(
+        question: str,
+        _settings: AssistantSettings,
+        _plan: PlannerPlan,
+        observations: list[dict[str, Any]],
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmSynthesisResult:
+        assert question == "泡泡玛特被哪个参数过滤了？"
+        assert observations[-1]["tool_name"] == "assistant.answer_evidence"
+        return LlmSynthesisResult(
+            response_text=(
+                "泡泡玛特（9992.HK）这次 sell_put 的过滤证据包括 IV/RV 不足、OI 不足、"
+                "DTE 不符合、Delta 过高、annualized_return_below_min 和 risk_spread。"
+            ),
+            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="泡泡玛特被哪个参数过滤了？",
+            sender_id="local",
+            message_id="msg_agent_loop_candidate_filter_metric_terms",
+            config_key="us",
+            config_path=str(tmp_path / "config.us.json"),
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+        synthesize_response_fn=_synthesize,
+    )
+
+    assert out["ok"] is True
+    assert calls == [
+        (
+            "candidate_filter_explain",
+            {
+                "config_path": str(tmp_path / "config.hk.json"),
+                "symbol": "泡泡玛特",
+            },
+        )
+    ]
+    text = out["data"]["response_text"]
+    assert text.startswith("泡泡玛特（9992.HK）这次 sell_put 的过滤证据包括 IV/RV 不足")
+    assert "候选过滤诊断：" not in text
+    tool_plan_data = out["data"]["action"]["result"]["data"]
+    synthesis = tool_plan_data["synthesis"]
+    assert synthesis["reason"] == "agent_composed_response"
+    assert synthesis["answer_guard"]["status"] == "passed"
+    assert synthesis["answer_guard"]["violation_type"] is None
+    assert tool_plan_data["final_response"]["status"] == "synthesized"
+    classifications = {item["claim"]: item for item in synthesis["answer_guard"]["claim_classification"]}
+    assert classifications["9992.HK"]["classification"] == "supported_symbol"
+    assert classifications["IV"]["classification"] == "domain_evidence_term"
+    assert classifications["RV"]["classification"] == "domain_evidence_term"
+    assert classifications["OI"]["classification"] == "domain_evidence_term"
+    assert classifications["DTE"]["classification"] == "domain_evidence_term"
+
+
 def test_assistant_runtime_llm_intent_routes_symbol_config_to_market_sibling_config_path(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
 

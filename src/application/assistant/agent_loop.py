@@ -2856,7 +2856,7 @@ def _build_final_response(
                             **dict(synthesis.trace),
                             "reason": "grounded_renderer_with_analysis",
                             "grounded_facts": True,
-                            "answer_guard": {"status": "passed"},
+                            "answer_guard": _answer_guard_trace_payload("passed", guard),
                         },
                         error=synthesis.error,
                     )
@@ -2877,16 +2877,15 @@ def _build_final_response(
                                 **dict(retry.trace),
                                 "reason": "grounded_renderer_with_analysis",
                                 "grounded_facts": True,
-                                "answer_guard": {
-                                    "status": "failed_then_rewritten",
-                                    "violations": guard["violations"],
-                                },
+                                "answer_guard": _answer_guard_trace_payload("failed_then_rewritten", guard),
                             },
                             error=retry.error,
                         )
                     guard = {
-                        "violations": guard["violations"],
+                        **guard,
                         "retry_violations": retry_guard["violations"],
+                        "retry_contract_verifier": retry_guard.get("contract_verifier"),
+                        "retry_shape_verifier": retry_guard.get("shape_verifier"),
                     }
             trace = {
                 **dict(synthesis.trace),
@@ -2898,7 +2897,10 @@ def _build_final_response(
                 "error_code": synthesis.error.code if synthesis.error else None,
             }
             if "guard" in locals():
-                trace["answer_guard"] = {"status": "failed_then_fallback", **guard}
+                trace["answer_guard"] = {
+                    **guard,
+                    **_answer_guard_trace_payload("failed_then_fallback", guard),
+                }
             return LlmSynthesisResult(response_text=fact_text, trace=trace)
     synthesizer = synthesize_response_fn or synthesize_tool_plan_response
     synthesis = synthesizer(question, settings, plan, llm_observations, conversation_context)
@@ -2913,7 +2915,7 @@ def _build_final_response(
         if not guard["violations"]:
             return LlmSynthesisResult(
                 response_text=synthesis.response_text,
-                trace={**dict(synthesis.trace), "answer_guard": {"status": "passed"}},
+                trace={**dict(synthesis.trace), "answer_guard": _answer_guard_trace_payload("passed", guard)},
                 error=synthesis.error,
             )
         retry_observations = _with_answer_guard_feedback(llm_observations, guard)
@@ -2932,16 +2934,15 @@ def _build_final_response(
                     trace={
                         **dict(retry.trace),
                         "reason": "synthesized_after_answer_guard",
-                        "answer_guard": {
-                            "status": "failed_then_rewritten",
-                            "violations": guard["violations"],
-                        },
+                        "answer_guard": _answer_guard_trace_payload("failed_then_rewritten", guard),
                     },
                     error=retry.error,
                 )
             guard = {
-                "violations": guard["violations"],
+                **guard,
                 "retry_violations": retry_guard["violations"],
+                "retry_contract_verifier": retry_guard.get("contract_verifier"),
+                "retry_shape_verifier": retry_guard.get("shape_verifier"),
             }
     task_fallback = (
         _task_contract_fallback_response(
@@ -2961,7 +2962,10 @@ def _build_final_response(
             "error_code": synthesis.error.code if synthesis.error else None,
         }
         if "guard" in locals():
-            trace["answer_guard"] = {"status": "failed_then_fallback", **guard}
+            trace["answer_guard"] = {
+                **guard,
+                **_answer_guard_trace_payload("failed_then_fallback", guard),
+            }
         return LlmSynthesisResult(response_text=task_fallback, trace=trace, error=synthesis.error)
     if len(plan.steps) == 1 and fact_observations:
         text = _canonical_response(plan.steps[0], _first_tool_observation(plan.steps[0], fact_observations))
@@ -2973,7 +2977,10 @@ def _build_final_response(
                 "error_code": synthesis.error.code if synthesis.error else None,
             }
             if "guard" in locals():
-                trace["answer_guard"] = {"status": "failed_then_fallback", **guard}
+                trace["answer_guard"] = {
+                    **guard,
+                    **_answer_guard_trace_payload("failed_then_fallback", guard),
+                }
             return LlmSynthesisResult(
                 response_text=text,
                 trace=trace,
@@ -2988,7 +2995,10 @@ def _build_final_response(
             "error_code": synthesis.error.code if synthesis.error else None,
         }
         if "guard" in locals():
-            trace["answer_guard"] = {"status": "failed_then_fallback", **guard}
+            trace["answer_guard"] = {
+                **guard,
+                **_answer_guard_trace_payload("failed_then_fallback", guard),
+            }
         return LlmSynthesisResult(
             response_text=analysis_fallback,
             trace=trace,
@@ -3101,7 +3111,7 @@ def _compose_agent_response(
                 trace={
                     **dict(synthesis.trace),
                     "reason": "agent_composed_response",
-                    "answer_guard": {"status": "passed"},
+                    "answer_guard": _answer_guard_trace_payload("passed", guard),
                     "answer_evidence": dict(evidence.trace or {}),
                     "provenance_appended": bool(evidence.provenance_lines),
                 },
@@ -3123,18 +3133,17 @@ def _compose_agent_response(
                     trace={
                         **dict(retry.trace),
                         "reason": "agent_composed_response",
-                        "answer_guard": {
-                            "status": "failed_then_rewritten",
-                            "violations": guard["violations"],
-                        },
+                        "answer_guard": _answer_guard_trace_payload("failed_then_rewritten", guard),
                         "answer_evidence": dict(evidence.trace or {}),
                         "provenance_appended": bool(evidence.provenance_lines),
                     },
                     error=retry.error,
                 )
             guard = {
-                "violations": guard["violations"],
+                **guard,
                 "retry_violations": retry_guard["violations"],
+                "retry_contract_verifier": retry_guard.get("contract_verifier"),
+                "retry_shape_verifier": retry_guard.get("shape_verifier"),
             }
     task_fallback_text = (
         _task_contract_fallback_response(
@@ -3164,7 +3173,10 @@ def _compose_agent_response(
         "answer_evidence": dict(evidence.trace or {}),
     }
     if "guard" in locals():
-        trace["answer_guard"] = {"status": "failed_then_fallback", **guard}
+        trace["answer_guard"] = {
+            **guard,
+            **_answer_guard_trace_payload("failed_then_fallback", guard),
+        }
     return LlmSynthesisResult(
         response_text=_append_provenance(fallback_text, evidence.provenance_lines),
         trace=trace,
@@ -3808,6 +3820,40 @@ def _verify_answer_guard(
         "shape_verifier": shape_verification.public_payload(),
         "violations": violations,
     }
+
+
+def _answer_guard_trace_payload(status: str, guard: dict[str, Any]) -> dict[str, Any]:
+    violations = [dict(item) for item in guard.get("violations") or [] if isinstance(item, dict)]
+    retry_violations = [dict(item) for item in guard.get("retry_violations") or [] if isinstance(item, dict)]
+    contract_verifier = dict(guard.get("contract_verifier") or {}) if isinstance(guard.get("contract_verifier"), dict) else {}
+    retry_contract_verifier = (
+        dict(guard.get("retry_contract_verifier") or {}) if isinstance(guard.get("retry_contract_verifier"), dict) else {}
+    )
+    shape_verifier = dict(guard.get("shape_verifier") or {}) if isinstance(guard.get("shape_verifier"), dict) else {}
+    retry_shape_verifier = (
+        dict(guard.get("retry_shape_verifier") or {}) if isinstance(guard.get("retry_shape_verifier"), dict) else {}
+    )
+    out: dict[str, Any] = {
+        "status": status,
+        "violations": violations,
+        "violation_type": str(violations[0].get("type") or "") if violations else None,
+        "violation_types": sorted({str(item.get("type") or "") for item in violations if item.get("type")}),
+    }
+    if retry_violations:
+        out["retry_violations"] = retry_violations
+        out["retry_violation_type"] = str(retry_violations[0].get("type") or "")
+        out["retry_violation_types"] = sorted({str(item.get("type") or "") for item in retry_violations if item.get("type")})
+    if contract_verifier:
+        out["contract_verifier"] = contract_verifier
+        out["claim_classification"] = list(contract_verifier.get("claim_classification") or [])
+    if retry_contract_verifier:
+        out["retry_contract_verifier"] = retry_contract_verifier
+        out["retry_claim_classification"] = list(retry_contract_verifier.get("claim_classification") or [])
+    if shape_verifier:
+        out["shape_verifier"] = shape_verifier
+    if retry_shape_verifier:
+        out["retry_shape_verifier"] = retry_shape_verifier
+    return out
 
 
 _UX_FORCED_SECTION_RE = re.compile(r"(?im)^\s*(?:事实|分析)\s*[:：]?\s*$")

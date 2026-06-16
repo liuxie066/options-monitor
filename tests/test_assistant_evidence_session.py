@@ -1264,6 +1264,129 @@ def test_evidence_bundle_extracts_candidate_filter_explain_observed_trace() -> N
     assert "价差不合格" in diagnostic["observed_reason"]
 
 
+def test_contract_verifier_classifies_candidate_filter_metrics_before_symbol_check() -> None:
+    bundle = build_evidence_bundle(
+        question="泡泡玛特被哪个参数过滤了",
+        plan={"goal": "解释泡泡玛特候选过滤诊断", "steps": []},
+        observations=[
+            {
+                "index": 1,
+                "tool_name": "candidate_filter_explain",
+                "payload": {"symbol": "泡泡玛特"},
+                "ok": True,
+                "error": None,
+                "output_contract": {
+                    "schema_version": "candidate_filter_explain.output.v1",
+                    "canonical_renderer": "candidate_filter_explain",
+                    "source_label": "OM candidate filter trace",
+                    "guard_profile": "candidate_filter",
+                    "primary_rows": "functions",
+                    "row_count_field": "trace_count",
+                    "fact_fields": [
+                        "canonical_symbol",
+                        "raw_symbol",
+                        "trace_count",
+                        "functions[].function",
+                        "functions[].status",
+                        "functions[].reason_counts",
+                        "functions[].reason_labels",
+                        "functions[].rejection_reason_counts",
+                        "functions[].rejection_reasons[].rule",
+                        "functions[].rejection_reasons[].label",
+                        "functions[].rejection_reasons[].count",
+                        "functions[].events[].rule",
+                        "functions[].events[].rule_label",
+                        "functions[].events[].metric_value",
+                        "functions[].events[].threshold",
+                        "functions[].events[].message",
+                    ],
+                },
+                "data": {
+                    "symbol": "9992.HK",
+                    "raw_symbol": "泡泡玛特",
+                    "canonical_symbol": "9992.HK",
+                    "scope": {"account": "sy", "account_semantics": "scan_scope"},
+                    "trace_count": 6,
+                    "functions": [
+                        {
+                            "function": "sell_put",
+                            "status": "rejected",
+                            "reason_counts": {
+                                "vol_edge_ratio_below_min": 2,
+                                "risk_spread": 1,
+                                "annualized_return_below_min": 1,
+                                "open_interest_below_min": 1,
+                                "dte_out_of_range": 1,
+                                "delta_too_high": 1,
+                            },
+                            "reason_labels": {
+                                "vol_edge_ratio_below_min": "IV/RV 不足",
+                                "risk_spread": "价差不合格",
+                                "annualized_return_below_min": "年化收益不足",
+                                "open_interest_below_min": "OI 不足",
+                                "dte_out_of_range": "DTE 不符合",
+                                "delta_too_high": "Delta 过高",
+                            },
+                            "rejection_reason_counts": {
+                                "vol_edge_ratio_below_min": 2,
+                                "risk_spread": 1,
+                                "annualized_return_below_min": 1,
+                            },
+                            "rejection_reasons": [
+                                {"rule": "vol_edge_ratio_below_min", "label": "IV/RV 不足", "count": 2},
+                                {"rule": "risk_spread", "label": "价差不合格", "count": 1},
+                                {"rule": "annualized_return_below_min", "label": "年化收益不足", "count": 1},
+                                {"rule": "open_interest_below_min", "label": "OI 不足", "count": 1},
+                                {"rule": "dte_out_of_range", "label": "DTE 不符合", "count": 1},
+                                {"rule": "delta_too_high", "label": "Delta 过高", "count": 1},
+                            ],
+                            "events": [
+                                {
+                                    "rule": "vol_edge_ratio_below_min",
+                                    "rule_label": "IV/RV 不足",
+                                    "metric_value": 0.91,
+                                    "threshold": 1.1,
+                                    "message": "IV/RV edge below minimum",
+                                },
+                                {
+                                    "rule": "risk_spread",
+                                    "rule_label": "价差不合格",
+                                    "metric_value": 0.35,
+                                    "threshold": 0.2,
+                                    "message": "spread too wide",
+                                },
+                            ],
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+
+    ok = verify_response_against_evidence(
+        (
+            "9992.HK 本次被 IV/RV 不足、OI 不足、DTE 不符合、Delta 过高、"
+            "annualized_return_below_min 和 risk_spread 过滤。"
+        ),
+        evidence_bundle=bundle,
+    )
+    assert ok.violations == ()
+    classifications = {item["claim"]: item for item in ok.public_payload()["claim_classification"]}
+    assert classifications["9992.HK"]["classification"] == "supported_symbol"
+    assert classifications["IV"]["classification"] == "domain_evidence_term"
+    assert classifications["RV"]["classification"] == "domain_evidence_term"
+    assert classifications["OI"]["classification"] == "domain_evidence_term"
+    assert classifications["DTE"]["classification"] == "domain_evidence_term"
+
+    bad = verify_response_against_evidence(
+        "NVDA 也被 risk_spread 过滤。",
+        evidence_bundle=bundle,
+    )
+    assert any(item["type"] == "unsupported_contract_symbol" and item["claim"] == "NVDA" for item in bad.violations)
+    bad_classifications = {item["claim"]: item for item in bad.public_payload()["claim_classification"]}
+    assert bad_classifications["NVDA"]["classification"] == "unsupported_symbol"
+
+
 def test_evidence_bundle_marks_candidate_filter_explain_no_matching_trace_as_missing() -> None:
     bundle = build_evidence_bundle(
         question="为什么 PDD 没出现在候选里",
@@ -2570,6 +2693,61 @@ def test_contract_verifier_rejects_unsupported_quantity_symbol_date_and_status()
         "unsupported_contract_symbol",
         "unsupported_contract_date",
         "unsupported_contract_status",
+    } <= violation_types
+
+
+def test_contract_verifier_rejects_unsupported_high_risk_claims() -> None:
+    bundle = build_evidence_bundle(
+        question="解释泡泡玛特候选过滤和合约信息",
+        plan={"goal": "解释泡泡玛特候选过滤和合约信息", "steps": []},
+        observations=[
+            {
+                "index": 1,
+                "tool_name": "monthly_income_report",
+                "payload": {"account": "lx", "month": "2026-06"},
+                "ok": True,
+                "error": None,
+                "output_contract": {
+                    "schema_version": "monthly_income_report.output.v1",
+                    "canonical_renderer": "monthly_income_report",
+                    "source_label": "OM monthly income report",
+                    "guard_profile": "cashflow_rows",
+                    "primary_rows": "cashflow_rows",
+                    "row_count_field": "row_count",
+                    "fact_fields": [
+                        "cashflow_rows[].symbol",
+                        "cashflow_rows[].currency",
+                        "cashflow_rows[].contracts",
+                        "cashflow_rows[].net_cashflow_gross",
+                        "cashflow_rows[].expiration_ymd",
+                    ],
+                },
+                "data": {
+                    "cashflow_rows": [
+                        {
+                            "symbol": "9992.HK",
+                            "currency": "HKD",
+                            "contracts": 1,
+                            "net_cashflow_gross": 1200.0,
+                            "expiration_ymd": "2026-06-18",
+                        }
+                    ],
+                    "row_count": 1,
+                },
+            }
+        ],
+    )
+
+    bad = verify_response_against_evidence(
+        "NVDA 的收入是 HKD 9,999，有 3 张合约，日期是 2026-06-19。",
+        evidence_bundle=bundle,
+    )
+    violation_types = {item["type"] for item in bad.violations}
+    assert {
+        "unsupported_contract_symbol",
+        "unsupported_contract_currency_amount",
+        "unsupported_contract_quantity",
+        "unsupported_contract_date",
     } <= violation_types
 
 

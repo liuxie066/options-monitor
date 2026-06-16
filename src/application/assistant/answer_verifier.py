@@ -11,7 +11,7 @@ _CURRENCY_AMOUNT_RE = re.compile(r"\b(USD|HKD|CNY)\s*([-+]?\d[\d,]*(?:\.\d+)?)",
 _PERCENT_RE = re.compile(r"(?<![\w.])([-+]?\d[\d,]*(?:\.\d+)?)\s*[%％]")
 _PERCENT_POINT_RE = re.compile(r"(?<![\w.])([-+]?\d[\d,]*(?:\.\d+)?)\s*个?百分点")
 _QUANTITY_RE = re.compile(r"(?<![\w.])([-+]?\d[\d,]*(?:\.\d+)?)\s*(股|张|条|笔)")
-_DATE_RE = re.compile(r"\b(20\d{2}[-/](?:0?[1-9]|1[0-2])(?:[-/](?:0?[1-9]|[12]\d|3[01]))?|20\d{2}年(?:0?[1-9]|1[0-2])月(?:[0-3]?\d日)?)")
+_DATE_RE = re.compile(r"\b(20\d{2}[-/](?:0?[1-9]|1[0-2])(?:[-/](?:[12]\d|3[01]|0?[1-9]))?|20\d{2}年(?:0?[1-9]|1[0-2])月(?:[0-3]?\d日)?)")
 _SYMBOL_RE = re.compile(r"\b(?:\d{4,5}\.HK|[A-Z]{1,6}(?:\.[A-Z]{1,3})?)\b")
 _STATUS_RE = re.compile(r"\b(open|closed|partially_sold|fresh|missing_quote|stale|expired|previewed|applied|cancelled|failed)\b")
 _LOSS_TOKENS = ("亏", "损", "loss", "negative")
@@ -47,6 +47,27 @@ _RATE_CUE_TOKENS = (
     "contribution",
     "percentage point",
 )
+_DOMAIN_FACT_PATH_TOKENS = (
+    "answer_boundary",
+    "diagnostic",
+    "function",
+    "label",
+    "message",
+    "metric",
+    "reason",
+    "rule",
+    "source",
+    "view",
+)
+_DOMAIN_TERM_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*|[\u4e00-\u9fff]+")
+_DOMAIN_TERM_SKIP_KEYS = {
+    "account",
+    "accounts",
+    "canonical_symbol",
+    "raw_symbol",
+    "symbol",
+    "symbols",
+}
 
 
 @dataclass(frozen=True)
@@ -54,13 +75,22 @@ class AnswerVerificationResult:
     violations: tuple[dict[str, Any], ...]
     checked_claim_count: int
     supported_claim_count: int
+    claim_classification: tuple[dict[str, Any], ...] = ()
 
     def public_payload(self) -> dict[str, Any]:
         return {
             "violations": [dict(item) for item in self.violations],
             "checked_claim_count": int(self.checked_claim_count),
             "supported_claim_count": int(self.supported_claim_count),
+            "claim_classification": [dict(item) for item in self.claim_classification],
         }
+
+
+@dataclass(frozen=True)
+class _EvidenceVocabulary:
+    guard_profiles: frozenset[str]
+    diagnostic_domains: frozenset[str]
+    domain_terms: frozenset[str]
 
 
 @dataclass(frozen=True)
@@ -88,9 +118,11 @@ def verify_response_against_evidence(response_text: str, *, evidence_bundle: Evi
     allowed_symbols = _allowed_symbols(evidence_bundle)
     allowed_statuses = _allowed_statuses(evidence_bundle)
     allowed_rates = _allowed_rate_values(evidence_bundle)
+    vocabulary = _evidence_vocabulary(evidence_bundle)
     checked = 0
     supported = 0
     violations: list[dict[str, Any]] = []
+    claim_classification: list[dict[str, Any]] = []
     text = str(response_text or "")
     for match in _CURRENCY_AMOUNT_RE.finditer(text):
         currency = str(match.group(1) or "").upper()
@@ -187,10 +219,22 @@ def verify_response_against_evidence(response_text: str, *, evidence_bundle: Evi
         )
     for match in _SYMBOL_RE.finditer(text):
         symbol = _normalize_symbol(match.group(0))
-        if not symbol or symbol in _IGNORED_SYMBOL_TOKENS or not allowed_symbols:
+        if not symbol:
+            continue
+        segment = _segment_for_match(text, match.start(), match.end())
+        classification = _classify_symbol_like_claim(
+            match.group(0),
+            symbol=symbol,
+            segment=segment,
+            allowed_symbols=allowed_symbols,
+            vocabulary=vocabulary,
+        )
+        claim_classification.append(classification)
+        action = str(classification.get("action") or "")
+        if action == "ignored":
             continue
         checked += 1
-        if symbol in allowed_symbols:
+        if action == "supported":
             supported += 1
             continue
         violations.append(
@@ -227,6 +271,7 @@ def verify_response_against_evidence(response_text: str, *, evidence_bundle: Evi
         violations=tuple(violations[:8]),
         checked_claim_count=checked,
         supported_claim_count=supported,
+        claim_classification=tuple(claim_classification[:24]),
     )
 
 
@@ -547,6 +592,181 @@ def _allowed_rate_values(evidence_bundle: EvidenceBundle) -> list[float]:
     allowed.extend(_analysis_derived_rate_values(evidence_bundle))
     allowed.extend(_calculation_rate_values(evidence_bundle))
     return allowed
+
+
+def _evidence_vocabulary(evidence_bundle: EvidenceBundle) -> _EvidenceVocabulary:
+    guard_profiles: set[str] = set()
+    diagnostic_domains: set[str] = set()
+    domain_terms: set[str] = set()
+
+    for contract in evidence_bundle.guard_contracts:
+        if not isinstance(contract, dict):
+            continue
+        guard_profile = _normalize_domain_term(contract.get("guard_profile"))
+        if guard_profile:
+            guard_profiles.add(guard_profile)
+            domain_terms.add(guard_profile)
+        renderer = _normalize_domain_term(contract.get("canonical_renderer"))
+        if renderer:
+            domain_terms.add(renderer)
+        for field_path in contract.get("fact_fields") or []:
+            field_text = str(field_path or "").strip()
+            if _domain_fact_path(field_text):
+                _add_domain_terms(domain_terms, field_text)
+
+    for fact in evidence_bundle.facts:
+        path = str(getattr(fact, "path", "") or "")
+        if str(getattr(fact, "unit", "") or "") == "symbol":
+            continue
+        if _domain_fact_path(path):
+            _add_domain_terms(domain_terms, getattr(fact, "value", None))
+            _add_domain_terms(domain_terms, path)
+
+    for diagnostic in getattr(evidence_bundle, "diagnostics", ()) or ():
+        if not isinstance(diagnostic, dict):
+            continue
+        domain = _normalize_domain_term(diagnostic.get("domain"))
+        if domain:
+            diagnostic_domains.add(domain)
+            domain_terms.add(domain)
+        _add_diagnostic_terms(domain_terms, diagnostic)
+
+    return _EvidenceVocabulary(
+        guard_profiles=frozenset(guard_profiles),
+        diagnostic_domains=frozenset(diagnostic_domains),
+        domain_terms=frozenset(domain_terms),
+    )
+
+
+def _classify_symbol_like_claim(
+    claim: str,
+    *,
+    symbol: str,
+    segment: str,
+    allowed_symbols: set[str],
+    vocabulary: _EvidenceVocabulary,
+) -> dict[str, Any]:
+    base = {
+        "type": "symbol_like",
+        "claim": str(claim),
+        "normalized": symbol,
+    }
+    if symbol in _IGNORED_SYMBOL_TOKENS:
+        return {
+            **base,
+            "classification": "ignored_token",
+            "confidence": "low",
+            "source": "answer_verifier.ignore_list",
+            "action": "ignored",
+        }
+    if symbol in allowed_symbols:
+        return {
+            **base,
+            "classification": "supported_symbol",
+            "confidence": "high",
+            "source": "evidence.allowed_symbols",
+            "action": "supported",
+        }
+    if _domain_evidence_term(claim, symbol=symbol, vocabulary=vocabulary):
+        return {
+            **base,
+            "classification": "domain_evidence_term",
+            "confidence": "low",
+            "source": "evidence.vocabulary",
+            "action": "ignored",
+        }
+    if not allowed_symbols:
+        return {
+            **base,
+            "classification": "unverified_symbol_without_symbol_evidence",
+            "confidence": "low",
+            "source": "evidence.allowed_symbols",
+            "action": "ignored",
+        }
+    return {
+        **base,
+        "classification": "unsupported_symbol",
+        "confidence": "high",
+        "source": "symbol_regex",
+        "action": "violation",
+        "segment": str(segment or "")[:160],
+    }
+
+
+def _domain_evidence_term(claim: str, *, symbol: str, vocabulary: _EvidenceVocabulary) -> bool:
+    candidates = {
+        _normalize_domain_term(claim),
+        _normalize_domain_term(symbol),
+    }
+    candidates.discard("")
+    if candidates & set(vocabulary.domain_terms):
+        return True
+    for candidate in candidates:
+        for part in str(candidate).split("_"):
+            normalized = _normalize_domain_term(part)
+            if normalized and normalized in vocabulary.domain_terms:
+                return True
+    return False
+
+
+def _domain_fact_path(path: str) -> bool:
+    lowered = str(path or "").lower()
+    return any(token in lowered for token in _DOMAIN_FACT_PATH_TOKENS)
+
+
+def _add_diagnostic_terms(out: set[str], value: Any) -> None:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            normalized_key = str(key or "").strip().lower()
+            if normalized_key in _DOMAIN_TERM_SKIP_KEYS:
+                continue
+            _add_domain_terms(out, key)
+            _add_diagnostic_terms(out, child)
+        return
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            _add_diagnostic_terms(out, item)
+        return
+    _add_domain_terms(out, value)
+
+
+def _add_domain_terms(out: set[str], value: Any) -> None:
+    if value is None or isinstance(value, bool):
+        return
+    if isinstance(value, dict):
+        for key, child in value.items():
+            _add_domain_terms(out, key)
+            _add_domain_terms(out, child)
+        return
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            _add_domain_terms(out, item)
+        return
+    text = str(value or "").strip()
+    if not text:
+        return
+    normalized_full = _normalize_domain_term(text)
+    if normalized_full:
+        out.add(normalized_full)
+    for match in _DOMAIN_TERM_RE.finditer(text.replace("/", " ")):
+        token = _normalize_domain_term(match.group(0))
+        if token:
+            out.add(token)
+        for part in str(match.group(0) or "").split("_"):
+            part_token = _normalize_domain_term(part)
+            if part_token:
+                out.add(part_token)
+
+
+def _normalize_domain_term(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if re.fullmatch(r"[-+]?\d+(?:\.\d+)?", text):
+        return ""
+    if len(text) == 1 and text.isascii():
+        return ""
+    return text.upper()
 
 
 def _analysis_derived_rate_values(evidence_bundle: EvidenceBundle) -> list[float]:
