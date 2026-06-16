@@ -523,11 +523,11 @@ def test_assistant_agent_eval_uses_guarded_answer_evidence(case: dict[str, Any],
     if expect_answer_evidence:
         assert evidence is not None
         assert evidence["tool_name"] == "assistant.answer_evidence"
-        assert "fallback_renderer_text" in evidence["data"]
+        assert "fallback_renderer_text" not in evidence["data"]
         assert "provenance_lines" in evidence["data"]
     elif evidence is not None:
         assert evidence["tool_name"] == "assistant.answer_evidence"
-        assert "fallback_renderer_text" in evidence["data"]
+        assert "fallback_renderer_text" not in evidence["data"]
         assert "provenance_lines" in evidence["data"]
     first_observation = tool_plan_data["synthesis_observations"][0]
     renderer = first_observation["output_contract"]["canonical_renderer"]
