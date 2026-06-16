@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.2.298 - 2026-06-16
+
+### Fixed
+- Kept deterministic fallback renderer text out of AgentLoop synthesis evidence so natural-language analysis answers
+  compose from structured tool facts instead of copying fixed OM ledger receipts.
+- Updated assistant evidence coverage and docs to keep provenance deterministic while treating fallback renderer text as
+  internal fallback state only.
+
 ## 1.2.297 - 2026-06-16
 
 ### Fixed

@@ -3577,7 +3577,9 @@ def test_assistant_runtime_agent_loop_satisfies_position_read_tool_capabilities(
             "gaps": [],
         }
         assert observations[-1]["tool_name"] == "assistant.answer_evidence"
-        assert "NVDA short put 100 exp 2026-06-19 open 1" in observations[-1]["data"]["fallback_renderer_text"]
+        assert "fallback_renderer_text" not in observations[-1]["data"]
+        assert observations[0]["data"]["rows"][0]["symbol"] == "NVDA"
+        assert observations[0]["data"]["rows"][0]["contracts_open"] == 1
         assert "record_id" not in json.dumps(observations[0]["data"], ensure_ascii=False)
         return LlmSynthesisResult(
             response_text="当前 open 期权持仓共 1 条。",
@@ -3827,7 +3829,8 @@ def test_assistant_runtime_agent_loop_analyzes_assigned_stock_when_requested(tmp
         assert question == "分析 lx 指派正股持仓盈亏"
         assert plan.required_capabilities == ("assigned_stock_positions", "read_only")
         assert observations[-1]["tool_name"] == "assistant.answer_evidence"
-        assert "正股浮盈亏 USD -200" in observations[-1]["data"]["fallback_renderer_text"]
+        assert "fallback_renderer_text" not in observations[-1]["data"]
+        assert observations[0]["data"]["rows"][0]["assigned_stock_unrealized_pnl"] == -200.0
         return LlmSynthesisResult(
             response_text="正股自身仍是浮亏，但生命周期PnL仍为正，下一步应重点看是否继续持有正股或卖 covered call。",
             trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},

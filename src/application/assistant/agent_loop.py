@@ -3052,7 +3052,6 @@ def _build_answer_evidence(
         return AnswerEvidence(enabled=False)
     evidence_observation = _answer_evidence_observation(
         observations=llm_observations,
-        fallback_text=fallback_text,
         provenance_lines=provenance_lines,
         output_contract=output_contract,
         step=step,
@@ -3353,7 +3352,6 @@ def _contract_from_observation(observation: dict[str, Any]) -> dict[str, Any]:
 def _answer_evidence_observation(
     *,
     observations: list[dict[str, Any]],
-    fallback_text: str,
     provenance_lines: list[str],
     output_contract: dict[str, Any],
     step: PlannerPlanStep,
@@ -3378,7 +3376,6 @@ def _answer_evidence_observation(
         "data": {
             "renderer_key": renderer_key,
             "tool_name": step.tool_name,
-            "fallback_renderer_text": fallback_text,
             "provenance_lines": list(provenance_lines),
             "composition_instruction": instruction,
         },

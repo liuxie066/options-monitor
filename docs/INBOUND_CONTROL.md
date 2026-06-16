@@ -590,7 +590,7 @@ For open-ended analytical tasks, the preferred path is Tool OS v1:
 For income, cashflow, positions, and assigned-stock analysis, the evidence bundle is the authority. It should contain the evidence needed for the final answer, for example:
 
 - `data_scope`: source, account scope, month scope, coverage, warnings.
-- `fallback_renderer_text`: deterministic fallback text derived from the tool contract or Tool OS query result.
+- Structured facts from the tool observations; deterministic fallback renderer text is internal fallback state and is not exposed to synthesis.
 - `provenance_lines`: deterministic data-source and accounting-policy footer.
 - `totals_by_account`: net cashflow, realized PnL, premium, and cash-secured denominator when available.
 - `totals_by_source`: open premium, close/exercise/assignment/expiry realized PnL, long-option recovery, and other cashflow buckets when available.
