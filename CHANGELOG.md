@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 1.2.301 - 2026-06-17
+
+### Added
+- Added planner manifest budgeting to Assistant traces so scoped analysis-view selection, manifest size, and recent-read
+  hint counts are auditable for capability planning.
+- Added planner-context golden eval fixtures covering short follow-ups, explicit-message precedence over prior context, and
+  evidence-gap suggested views.
+
+### Changed
+- Scoped the Assistant planner manifest so `analysis_query` receives only task-relevant analysis views while keeping the
+  full tool list visible and preserving `analysis_catalog` as the fallback.
+- Updated the P2 reliability design gates to treat planner context budget as part of the Assistant golden eval surface.
+
 ## 1.2.300 - 2026-06-17
 
 ### Added
