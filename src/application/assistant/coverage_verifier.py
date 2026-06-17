@@ -312,14 +312,16 @@ def _recipe_evidence_gaps(
                 "reason": "selected recipe requires risk premise evidence for strategy or candidate recommendation",
             }
         )
-    if "dry_run_or_replay" in evidence_needs and not _has_strategy_replay_evidence(facts=facts, datasets=datasets, diagnostics=diagnostics):
+    if "dry_run_or_replay" in evidence_needs and not _has_strategy_replay_evidence(datasets=datasets, diagnostics=diagnostics):
         gaps.append(
             {
                 "kind": "recipe_strategy_replay_evidence_missing",
                 "recipe_name": recipe_name,
                 "required_evidence": "dry_run_or_replay",
-                "recoverable": False,
-                "recoverable_by": "strategy_replay_read_surface",
+                "recoverable": True,
+                "recoverable_by": "analysis_query",
+                "suggested_tool": "analysis_query",
+                "suggested_views": ["strategy_replay_read_surface"],
                 "impact": "缺少 replay / dry-run 证据，策略建议只能保持前提性或说明证据不足",
                 "reason": "selected recipe requires replay or dry-run evidence before giving a strategy recommendation",
             }
@@ -657,19 +659,44 @@ def _has_risk_premise_evidence(
 
 def _has_strategy_replay_evidence(
     *,
-    facts: list[dict[str, Any]],
     datasets: list[dict[str, Any]],
     diagnostics: list[dict[str, Any]],
 ) -> bool:
-    joined = " ".join(
-        [
-            *(str(dataset.get("source_label") or "") for dataset in datasets),
-            *(str(dataset.get("tool_name") or "") for dataset in datasets),
-            *(str(item.get("source_tool") or "") for item in facts),
-            *(str(item.get("domain") or "") for item in diagnostics),
-        ]
-    ).lower()
-    return any(token in joined for token in ("replay", "dry_run", "dry-run", "strategy_lab", "shadow_replay"))
+    if _has_observed_strategy_replay_diagnostic(diagnostics):
+        return True
+    if "strategy_replay_read_surface" in _covered_views(datasets):
+        has_rows = any(
+            "strategy_replay_read_surface" in _dataset_views(dataset)
+            and _dataset_row_count(dataset) > 0
+            and _dataset_has_strategy_replay_evidence_shape(dataset)
+            for dataset in datasets
+        )
+        if has_rows and not _has_missing_strategy_replay_diagnostic(diagnostics):
+            return True
+    return False
+
+
+def _has_observed_strategy_replay_diagnostic(diagnostics: list[dict[str, Any]]) -> bool:
+    for diagnostic in diagnostics:
+        source = diagnostic.get("source") if isinstance(diagnostic.get("source"), dict) else {}
+        view = str(source.get("view") or diagnostic.get("view") or "").strip()
+        domain = str(diagnostic.get("domain") or "").strip()
+        status = str(diagnostic.get("status") or "").strip()
+        if (view == "strategy_replay_read_surface" or domain == "strategy_replay") and status == "observed_strategy_replay_evidence":
+            return True
+    return False
+
+
+def _has_missing_strategy_replay_diagnostic(diagnostics: list[dict[str, Any]]) -> bool:
+    missing_statuses = {"diagnostic_missing", "artifact_missing", "empty_artifact", "read_error", "no_matching_rows"}
+    for diagnostic in diagnostics:
+        source = diagnostic.get("source") if isinstance(diagnostic.get("source"), dict) else {}
+        view = str(source.get("view") or diagnostic.get("view") or "").strip()
+        domain = str(diagnostic.get("domain") or "").strip()
+        status = str(diagnostic.get("status") or "").strip()
+        if (view == "strategy_replay_read_surface" or domain == "strategy_replay") and status in missing_statuses:
+            return True
+    return False
 
 
 def _gap_is_recoverable(gap: dict[str, Any]) -> bool:
@@ -834,10 +861,55 @@ def _covered_accounts(*, evidence: dict[str, Any], facts: list[dict[str, Any]], 
 def _covered_views(datasets: list[dict[str, Any]]) -> set[str]:
     views: set[str] = set()
     for dataset in datasets:
-        analysis_evidence = dataset.get("analysis_evidence") if isinstance(dataset.get("analysis_evidence"), dict) else {}
-        coverage = analysis_evidence.get("coverage") if isinstance(analysis_evidence.get("coverage"), dict) else {}
-        views.update(str(item).strip() for item in coverage.get("views") or [] if str(item).strip())
+        views.update(_dataset_views(dataset))
     return views
+
+
+def _dataset_views(dataset: dict[str, Any]) -> set[str]:
+    analysis_evidence = dataset.get("analysis_evidence") if isinstance(dataset.get("analysis_evidence"), dict) else {}
+    coverage = analysis_evidence.get("coverage") if isinstance(analysis_evidence.get("coverage"), dict) else {}
+    return {str(item).strip() for item in coverage.get("views") or [] if str(item).strip()}
+
+
+def _dataset_row_count(dataset: dict[str, Any]) -> int:
+    try:
+        return int(dataset.get("row_count") or 0)
+    except Exception:
+        return 0
+
+
+def _dataset_columns(dataset: dict[str, Any]) -> set[str]:
+    return {str(item).strip() for item in dataset.get("columns") or [] if str(item).strip()}
+
+
+def _dataset_has_strategy_replay_evidence_shape(dataset: dict[str, Any]) -> bool:
+    evidence_columns = {
+        "artifact_kind",
+        "status",
+        "data_mode",
+        "dataset_id",
+        "selected_run_ids",
+        "candidate_snapshot_count",
+        "filter_decision_count",
+        "decision_instance_count",
+        "underwriting_candidate_count",
+        "mark_path_snapshot_count",
+        "usable_mark_path_snapshot_count",
+        "outcome_fact_count",
+        "evidence_level",
+        "strict_backtest_allowed",
+        "candidate_impact_allowed",
+        "production_recommendation_allowed",
+        "dry_run_patch_allowed",
+        "recommended_variant",
+        "best_variant",
+        "strategy_family",
+        "confidence",
+        "next_action",
+        "limitations",
+        "safety_summary",
+    }
+    return bool(_dataset_columns(dataset) & evidence_columns)
 
 
 def _suggested_analysis_views(datasets: list[dict[str, Any]]) -> list[str]:

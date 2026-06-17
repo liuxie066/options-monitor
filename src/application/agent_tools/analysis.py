@@ -22,6 +22,8 @@ DEFAULT_QUERY_LIMIT = 80
 MAX_MATERIALIZED_ROWS = 5000
 MAX_INPUT_SQL_CHARS = 4000
 SQLITE_PROGRESS_OPCODE_LIMIT = 20000
+MAX_STRATEGY_REPLAY_ARTIFACTS = 200
+MAX_STRATEGY_REPLAY_ARTIFACT_BYTES = 5_000_000
 ALLOWED_SQL_FUNCTIONS = {
     "abs",
     "avg",
@@ -298,6 +300,45 @@ UPGRADE_OPERATION_STATUS_FIELDS: tuple[str, ...] = (
     "confirmed_at",
     "applied_at",
     "cancelled_at",
+    "source",
+)
+
+STRATEGY_REPLAY_READ_SURFACE_FIELDS: tuple[str, ...] = (
+    "source_root",
+    "artifact_kind",
+    "artifact_id",
+    "artifact_path",
+    "schema_version",
+    "generated_at_utc",
+    "status",
+    "reason",
+    "data_mode",
+    "universe_scope",
+    "market",
+    "accounts",
+    "dataset_id",
+    "selected_run_ids",
+    "candidate_snapshot_count",
+    "filter_decision_count",
+    "decision_instance_count",
+    "underwriting_candidate_count",
+    "mark_path_snapshot_count",
+    "usable_mark_path_snapshot_count",
+    "outcome_fact_count",
+    "min_sample",
+    "evidence_level",
+    "strict_backtest_allowed",
+    "candidate_impact_allowed",
+    "production_recommendation_allowed",
+    "runtime_config_write_allowed",
+    "dry_run_patch_allowed",
+    "recommended_variant",
+    "best_variant",
+    "strategy_family",
+    "confidence",
+    "next_action",
+    "limitations",
+    "safety_summary",
     "source",
 )
 
@@ -834,6 +875,17 @@ VIEW_SPECS: dict[str, dict[str, Any]] = _build_view_specs({
         "recommended_filters": ("command_id", "operation_id", "operation_status", "receipt_status"),
         "safe_join_keys": ("command_id", "operation_id"),
     },
+    "strategy_replay_read_surface": {
+        "description": "read-only Strategy Lab and Shadow Replay artifact summaries for replay, dry-run proposal, and evidence-bound strategy review",
+        "fields": STRATEGY_REPLAY_READ_SURFACE_FIELDS,
+        "row_grain": "research artifact or replay dataset",
+        "primary_keys": ("source_root", "artifact_kind", "artifact_id"),
+        "source_tools": ("analysis_query", "research.shadow-replay", "research.strategy-lab"),
+        "semantic_source": "Strategy Lab / Shadow Replay read-only artifacts",
+        "freshness": "artifact_snapshot",
+        "recommended_filters": ("artifact_kind", "status", "data_mode", "strategy_family", "market", "dataset_id"),
+        "safe_join_keys": ("artifact_kind", "dataset_id", "market", "strategy_family"),
+    },
     "position_lots": {
         "description": "canonical option position lots from local SQLite projection",
         "fields": (
@@ -933,6 +985,7 @@ _ARTIFACT_SOURCE_VIEWS: set[str] = {
     "candidate_filter_diagnostics",
     "close_advice_snapshot",
     "runtime_tick_status",
+    "strategy_replay_read_surface",
 }
 _QUOTE_SOURCE_VIEWS: set[str] = {"quote_freshness"}
 _OPERATION_SOURCE_VIEWS: set[str] = {"upgrade_operation_status"}
@@ -1095,9 +1148,13 @@ def _catalog_investigation_recipes(specs: dict[str, dict[str, Any]]) -> list[dic
             "domains": ["strategy", "candidate"],
             "task_modes": ["analyze", "recommend"],
             "evidence_needs": ["current_state", "constraints", "risk_premise", "dry_run_or_replay"],
-            "primary_views": ["candidate_filter_diagnostics", "close_advice_snapshot", "strategy_config_by_symbol_account"],
+            "primary_views": [
+                "candidate_filter_diagnostics",
+                "close_advice_snapshot",
+                "strategy_config_by_symbol_account",
+                "strategy_replay_read_surface",
+            ],
             "source_tools": ["analysis_query"],
-            "external_evidence": ["research_shadow_replay_or_strategy_lab_dry_run"],
             "followup_tool": "analysis_query",
             "answer_shape": ["judgement", "options", "risk", "premise"],
         },
@@ -1246,6 +1303,7 @@ def _materialize_views(
     candidate_rows: list[dict[str, Any]] = []
     close_advice_rows: list[dict[str, Any]] = []
     runtime_rows: list[dict[str, Any]] = []
+    strategy_replay_rows: list[dict[str, Any]] = []
     upgrade_operation_rows: list[dict[str, Any]] = []
 
     if requested & (_MONTHLY_SOURCE_VIEWS | _QUOTE_SOURCE_VIEWS):
@@ -1340,6 +1398,10 @@ def _materialize_views(
         runtime_rows, runtime_warnings = _runtime_tick_status_rows(ctx, payload)
         warnings.extend(runtime_warnings)
 
+    if requested & {"strategy_replay_read_surface"}:
+        strategy_replay_rows, strategy_replay_warnings = _strategy_replay_read_surface_rows(ctx, payload)
+        warnings.extend(strategy_replay_warnings)
+
     if requested & _OPERATION_SOURCE_VIEWS:
         upgrade_operation_rows, upgrade_warnings = _upgrade_operation_status_rows(ctx, payload)
         warnings.extend(upgrade_warnings)
@@ -1387,6 +1449,7 @@ def _materialize_views(
         "runtime_tick_status": _normalize_rows(runtime_rows),
         "quote_freshness": _normalize_rows(quote_rows),
         "upgrade_operation_status": _normalize_rows(upgrade_operation_rows),
+        "strategy_replay_read_surface": _normalize_rows(strategy_replay_rows),
         "position_lots": _normalize_rows(position_data.get("rows")),
         "trade_events": _normalize_rows(event_data.get("rows")),
         "symbol_strategy_config": _normalize_rows(symbol_rows),
@@ -2110,6 +2173,530 @@ def _run_id_from_runtime_summary(summary: dict[str, Any]) -> str | None:
     return None
 
 
+def _strategy_replay_read_surface_rows(ctx: AgentToolContext, payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
+    roots = _strategy_replay_roots(ctx, payload)
+    rows: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    for root in roots:
+        root_rows, root_warnings = _strategy_replay_rows_for_root(ctx, root, payload)
+        rows.extend(root_rows)
+        warnings.extend(root_warnings)
+        if len(rows) >= MAX_MATERIALIZED_ROWS:
+            warnings.append("strategy_replay_read_surface truncated at materialization row cap")
+            rows = rows[:MAX_MATERIALIZED_ROWS]
+            break
+    if not rows:
+        warnings.append("strategy_replay_read_surface missing: no Strategy Lab or Shadow Replay artifacts found")
+    return rows, warnings
+
+
+def _strategy_replay_roots(ctx: AgentToolContext, payload: dict[str, Any]) -> list[Path]:
+    roots: list[Path] = []
+    try:
+        roots.append(ctx.repo_base().expanduser().resolve())
+    except Exception:
+        pass
+    config_path = payload.get("config_path")
+    if not str(config_path or "").strip() and str(payload.get("config_key") or "").strip():
+        try:
+            config_path, _cfg = ctx.load_runtime_config(config_key=payload.get("config_key"), config_path=None)
+        except Exception:
+            config_path = None
+    if str(config_path or "").strip():
+        try:
+            roots.append(Path(config_path).expanduser().resolve().parent)
+        except Exception:
+            pass
+    out: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        key = str(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(root)
+    return out
+
+
+def _strategy_replay_rows_for_root(
+    ctx: AgentToolContext,
+    root: Path,
+    payload: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    rows: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    rows.extend(_shadow_replay_dataset_status_rows(ctx, root, payload, warnings=warnings))
+    for path in _strategy_replay_artifact_paths(root):
+        if len(rows) >= MAX_MATERIALIZED_ROWS:
+            break
+        try:
+            artifact = _read_strategy_replay_json(path)
+        except Exception as exc:
+            warnings.append(f"strategy_replay_read_surface read_error: {path.name}: {type(exc).__name__}: {exc}")
+            continue
+        row = _strategy_replay_artifact_row(ctx, root=root, path=path, artifact=artifact)
+        if row:
+            rows.append(row)
+    return rows, warnings
+
+
+def _shadow_replay_dataset_status_rows(
+    ctx: AgentToolContext,
+    root: Path,
+    payload: dict[str, Any],
+    *,
+    warnings: list[str],
+) -> list[dict[str, Any]]:
+    try:
+        data = _call_shadow_replay_dataset_status(
+            repo_root=root,
+            min_sample=_bounded_strategy_replay_min_sample(payload.get("min_sample")),
+        )
+    except Exception as exc:
+        warnings.append(f"strategy_replay_read_surface unavailable: shadow replay dataset status failed: {type(exc).__name__}: {exc}")
+        return []
+    datasets = data.get("datasets") if isinstance(data.get("datasets"), list) else []
+    rows = [
+        _strategy_replay_dataset_status_row(ctx, root=root, status_payload=data, dataset=row)
+        for row in datasets
+        if isinstance(row, dict)
+    ]
+    return [row for row in rows if row]
+
+
+def _call_shadow_replay_dataset_status(*, repo_root: Path, min_sample: int) -> dict[str, Any]:
+    from src.application.shadow_replay import shadow_replay_dataset_status
+
+    return shadow_replay_dataset_status(repo_root=repo_root, min_sample=min_sample)
+
+
+def _bounded_strategy_replay_min_sample(value: Any) -> int:
+    try:
+        sample = int(value)
+    except Exception:
+        sample = 30
+    return max(1, min(sample, MAX_MATERIALIZED_ROWS))
+
+
+def _strategy_replay_artifact_paths(root: Path) -> list[Path]:
+    research_root = root / "output_shared" / "research"
+    search_roots = [
+        research_root / "strategy_lab",
+        research_root / "shadow_replay" / "backtests",
+    ]
+    paths: list[Path] = []
+    for directory in search_roots:
+        if not directory.exists() or not directory.is_dir():
+            continue
+        paths.extend(path for path in sorted(directory.rglob("*.json")) if path.is_file())
+        if len(paths) >= MAX_STRATEGY_REPLAY_ARTIFACTS:
+            break
+    return paths[:MAX_STRATEGY_REPLAY_ARTIFACTS]
+
+
+def _read_strategy_replay_json(path: Path) -> dict[str, Any]:
+    if path.stat().st_size > MAX_STRATEGY_REPLAY_ARTIFACT_BYTES:
+        raise ValueError("artifact exceeds strategy replay read-surface size limit")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return payload if isinstance(payload, dict) else {}
+
+
+def _strategy_replay_artifact_row(
+    ctx: AgentToolContext,
+    *,
+    root: Path,
+    path: Path,
+    artifact: dict[str, Any],
+) -> dict[str, Any] | None:
+    schema = str(artifact.get("schema_version") or "").strip()
+    if schema == "shadow_replay_candidate_impact.v1":
+        return _strategy_replay_candidate_impact_row(ctx, root=root, path=path, artifact=artifact, source="shadow_replay_candidate_impact")
+    if schema == "shadow_replay_candidate_impact_report.v1":
+        result = artifact.get("candidate_impact_result")
+        if isinstance(result, dict):
+            return _strategy_replay_candidate_impact_row(
+                ctx,
+                root=root,
+                path=path,
+                artifact={**result, "schema_version": schema},
+                source="shadow_replay_candidate_impact_report",
+            )
+    if schema == "strategy_lab_readiness.v1":
+        return _strategy_lab_readiness_row(ctx, root=root, path=path, artifact=artifact)
+    if schema == "strategy_lab_experiment.v1":
+        return _strategy_lab_experiment_row(ctx, root=root, path=path, artifact=artifact)
+    if schema == "strategy_lab_proposal.v1":
+        return _strategy_lab_proposal_row(ctx, root=root, path=path, artifact=artifact)
+    return None
+
+
+def _strategy_replay_dataset_status_row(
+    ctx: AgentToolContext,
+    *,
+    root: Path,
+    status_payload: dict[str, Any],
+    dataset: dict[str, Any],
+) -> dict[str, Any]:
+    mark_count = _int_or_none(dataset.get("mark_path_snapshot_count"))
+    usable_mark_count = _int_or_none(dataset.get("usable_mark_path_snapshot_count"))
+    outcome_count = _int_or_none(dataset.get("outcome_fact_count"))
+    candidate_count = _int_or_none(dataset.get("candidate_snapshot_count"))
+    evidence_checks = dataset.get("evidence_checks") if isinstance(dataset.get("evidence_checks"), dict) else {}
+    return _strategy_replay_base_row(
+        ctx,
+        root=root,
+        path=Path(str(dataset.get("dataset_dir") or "")) if str(dataset.get("dataset_dir") or "").strip() else None,
+        artifact_kind="shadow_replay_dataset",
+        artifact_id=str(dataset.get("dataset_id") or "").strip() or "dataset",
+        schema_version=str(status_payload.get("schema_version") or ""),
+        generated_at_utc=status_payload.get("generated_at_utc"),
+        source="shadow_replay_dataset_status",
+        status=dataset.get("status"),
+        reason=dataset.get("reason"),
+        data_mode=_strategy_replay_data_mode(usable_mark_count=usable_mark_count, outcome_count=outcome_count),
+        dataset_id=dataset.get("dataset_id"),
+        candidate_snapshot_count=candidate_count,
+        filter_decision_count=_int_or_none(dataset.get("filter_decision_count")),
+        mark_path_snapshot_count=mark_count,
+        usable_mark_path_snapshot_count=usable_mark_count,
+        outcome_fact_count=outcome_count,
+        min_sample=dataset.get("min_sample"),
+        evidence_level=dataset.get("evidence_level"),
+        strict_backtest_allowed=bool(evidence_checks.get("has_candidate_universe")) if evidence_checks else (candidate_count or 0) > 0,
+        production_recommendation_allowed=False,
+        runtime_config_write_allowed=False,
+        next_action=dataset.get("next_suggested_action"),
+        safety_summary=(status_payload.get("safety") if isinstance(status_payload.get("safety"), dict) else {}),
+    )
+
+
+def _strategy_replay_candidate_impact_row(
+    ctx: AgentToolContext,
+    *,
+    root: Path,
+    path: Path,
+    artifact: dict[str, Any],
+    source: str,
+) -> dict[str, Any]:
+    summary = artifact.get("summary") if isinstance(artifact.get("summary"), dict) else {}
+    coverage = artifact.get("coverage") if isinstance(artifact.get("coverage"), dict) else {}
+    filters = artifact.get("filters") if isinstance(artifact.get("filters"), dict) else {}
+    gates = artifact.get("gates") if isinstance(artifact.get("gates"), dict) else {}
+    candidate_gate = gates.get("candidate_impact") if isinstance(gates.get("candidate_impact"), dict) else {}
+    production_gate = gates.get("production_recommendation") if isinstance(gates.get("production_recommendation"), dict) else {}
+    candidate_impact = artifact.get("candidate_impact") if isinstance(artifact.get("candidate_impact"), dict) else {}
+    recommendation = artifact.get("recommendation") if isinstance(artifact.get("recommendation"), dict) else {}
+    return _strategy_replay_base_row(
+        ctx,
+        root=root,
+        path=path,
+        artifact_kind="shadow_replay_candidate_impact",
+        artifact_id=_strategy_replay_artifact_id(root=root, path=path),
+        schema_version=artifact.get("schema_version"),
+        generated_at_utc=artifact.get("generated_at_utc"),
+        source=source,
+        status=_first_nonempty_text(recommendation.get("status"), candidate_impact.get("status"), candidate_gate.get("status")),
+        reason=_first_nonempty_text(recommendation.get("reason"), candidate_impact.get("reason"), candidate_gate.get("reason"), coverage.get("reason")),
+        data_mode=artifact.get("data_mode"),
+        universe_scope=artifact.get("universe_scope"),
+        market=filters.get("market"),
+        accounts=filters.get("accounts"),
+        selected_run_ids=coverage.get("selected_run_ids"),
+        candidate_snapshot_count=summary.get("candidate_snapshot_count"),
+        underwriting_candidate_count=summary.get("underwriting_candidate_count"),
+        mark_path_snapshot_count=summary.get("mark_path_snapshot_count"),
+        usable_mark_path_snapshot_count=summary.get("usable_mark_path_snapshot_count"),
+        outcome_fact_count=summary.get("outcome_fact_count"),
+        min_sample=summary.get("min_sample"),
+        strict_backtest_allowed=coverage.get("strict_backtest_allowed"),
+        candidate_impact_allowed=_first_bool(candidate_impact.get("allowed"), candidate_gate.get("allowed"), recommendation.get("candidate_impact_allowed")),
+        production_recommendation_allowed=_first_bool(
+            recommendation.get("production_recommendation_allowed"),
+            production_gate.get("allowed"),
+        ),
+        runtime_config_write_allowed=False,
+        dry_run_patch_allowed=False,
+        recommended_variant=_first_nonempty_text(recommendation.get("candidate_variant"), candidate_impact.get("best_variant_by_new_accepts")),
+        best_variant=_first_nonempty_text(candidate_impact.get("best_variant_by_new_accepts"), candidate_impact.get("best_variant_by_total_accepts")),
+        next_action=recommendation.get("next_action"),
+        limitations=_strategy_replay_limitations(candidate_impact, recommendation),
+        safety_summary=artifact.get("safety") if isinstance(artifact.get("safety"), dict) else {},
+    )
+
+
+def _strategy_lab_readiness_row(
+    ctx: AgentToolContext,
+    *,
+    root: Path,
+    path: Path,
+    artifact: dict[str, Any],
+) -> dict[str, Any]:
+    summary = artifact.get("summary") if isinstance(artifact.get("summary"), dict) else {}
+    readiness = artifact.get("readiness") if isinstance(artifact.get("readiness"), dict) else {}
+    readiness_summary = readiness.get("summary") if isinstance(readiness.get("summary"), dict) else summary
+    input_scope = artifact.get("input_scope") if isinstance(artifact.get("input_scope"), dict) else {}
+    source_scope = input_scope.get("source") if isinstance(input_scope.get("source"), dict) else {}
+    filters = input_scope.get("filters") if isinstance(input_scope.get("filters"), dict) else {}
+    return _strategy_replay_base_row(
+        ctx,
+        root=root,
+        path=path,
+        artifact_kind="strategy_lab_readiness",
+        artifact_id=_strategy_replay_artifact_id(root=root, path=path),
+        schema_version=artifact.get("schema_version"),
+        generated_at_utc=artifact.get("generated_at_utc"),
+        source="strategy_lab_readiness",
+        status=summary.get("status"),
+        data_mode=summary.get("data_mode"),
+        universe_scope=source_scope.get("mode"),
+        market=filters.get("market"),
+        accounts=filters.get("accounts"),
+        dataset_id=_path_name(artifact.get("dataset_dir")),
+        candidate_snapshot_count=readiness_summary.get("candidate_snapshot_count"),
+        decision_instance_count=readiness_summary.get("decision_instance_count"),
+        mark_path_snapshot_count=readiness_summary.get("usable_mark_path_snapshot_count"),
+        usable_mark_path_snapshot_count=readiness_summary.get("usable_mark_path_snapshot_count"),
+        outcome_fact_count=readiness_summary.get("outcome_fact_count"),
+        min_sample=readiness_summary.get("min_sample"),
+        production_recommendation_allowed=False,
+        runtime_config_write_allowed=False,
+        next_action=readiness.get("next_action"),
+        limitations=readiness.get("limitations"),
+        safety_summary=artifact.get("safety") if isinstance(artifact.get("safety"), dict) else {},
+    )
+
+
+def _strategy_lab_experiment_row(
+    ctx: AgentToolContext,
+    *,
+    root: Path,
+    path: Path,
+    artifact: dict[str, Any],
+) -> dict[str, Any]:
+    summary = artifact.get("summary") if isinstance(artifact.get("summary"), dict) else {}
+    input_scope = artifact.get("input_scope") if isinstance(artifact.get("input_scope"), dict) else {}
+    evaluation = artifact.get("evaluation") if isinstance(artifact.get("evaluation"), dict) else {}
+    evaluation_summary = evaluation.get("summary") if isinstance(evaluation.get("summary"), dict) else {}
+    coverage = evaluation.get("coverage") if isinstance(evaluation.get("coverage"), dict) else {}
+    filters = evaluation.get("filters") if isinstance(evaluation.get("filters"), dict) else {}
+    gates = evaluation.get("gates") if isinstance(evaluation.get("gates"), dict) else {}
+    candidate_gate = gates.get("candidate_impact") if isinstance(gates.get("candidate_impact"), dict) else {}
+    production_gate = gates.get("production_recommendation") if isinstance(gates.get("production_recommendation"), dict) else {}
+    scorecard = artifact.get("scorecard") if isinstance(artifact.get("scorecard"), dict) else {}
+    best = scorecard.get("best_variant") if isinstance(scorecard.get("best_variant"), dict) else {}
+    return _strategy_replay_base_row(
+        ctx,
+        root=root,
+        path=path,
+        artifact_kind="strategy_lab_experiment",
+        artifact_id=_strategy_replay_artifact_id(root=root, path=path),
+        schema_version=artifact.get("schema_version"),
+        generated_at_utc=artifact.get("generated_at_utc"),
+        source="strategy_lab_experiment",
+        status=summary.get("status"),
+        reason=scorecard.get("reason"),
+        data_mode=evaluation.get("data_mode"),
+        universe_scope=evaluation.get("universe_scope"),
+        market=_first_nonempty_text(filters.get("market"), input_scope.get("market")),
+        accounts=filters.get("accounts") or input_scope.get("accounts"),
+        dataset_id=_path_name(artifact.get("dataset_dir")),
+        selected_run_ids=coverage.get("selected_run_ids"),
+        candidate_snapshot_count=evaluation_summary.get("candidate_snapshot_count"),
+        underwriting_candidate_count=evaluation_summary.get("underwriting_candidate_count"),
+        mark_path_snapshot_count=evaluation_summary.get("mark_path_snapshot_count"),
+        usable_mark_path_snapshot_count=evaluation_summary.get("usable_mark_path_snapshot_count"),
+        outcome_fact_count=evaluation_summary.get("outcome_fact_count"),
+        min_sample=summary.get("min_sample"),
+        strict_backtest_allowed=coverage.get("strict_backtest_allowed"),
+        candidate_impact_allowed=_first_bool(summary.get("candidate_impact_allowed"), candidate_gate.get("allowed")),
+        production_recommendation_allowed=_first_bool(summary.get("production_recommendation_allowed"), production_gate.get("allowed")),
+        runtime_config_write_allowed=False,
+        dry_run_patch_allowed=False,
+        recommended_variant=best.get("variant"),
+        best_variant=best.get("variant"),
+        strategy_family=best.get("strategy_family"),
+        limitations=scorecard.get("limitations"),
+        safety_summary=artifact.get("safety") if isinstance(artifact.get("safety"), dict) else {},
+    )
+
+
+def _strategy_lab_proposal_row(
+    ctx: AgentToolContext,
+    *,
+    root: Path,
+    path: Path,
+    artifact: dict[str, Any],
+) -> dict[str, Any]:
+    evidence_summary = artifact.get("evidence_summary") if isinstance(artifact.get("evidence_summary"), dict) else {}
+    impact = artifact.get("impact") if isinstance(artifact.get("impact"), dict) else {}
+    dry_run_patch = artifact.get("dry_run_patch") if isinstance(artifact.get("dry_run_patch"), dict) else {}
+    return _strategy_replay_base_row(
+        ctx,
+        root=root,
+        path=path,
+        artifact_kind="strategy_lab_proposal",
+        artifact_id=_strategy_replay_artifact_id(root=root, path=path),
+        schema_version=artifact.get("schema_version"),
+        generated_at_utc=artifact.get("generated_at_utc"),
+        source="strategy_lab_proposal",
+        status=artifact.get("status"),
+        reason=evidence_summary.get("optimization_claim"),
+        data_mode=evidence_summary.get("data_mode"),
+        universe_scope=evidence_summary.get("universe_scope"),
+        candidate_snapshot_count=impact.get("candidate_count"),
+        production_recommendation_allowed=artifact.get("production_recommendation_allowed"),
+        runtime_config_write_allowed=artifact.get("runtime_config_write_allowed"),
+        dry_run_patch_allowed=bool(dry_run_patch),
+        recommended_variant=artifact.get("recommended_variant"),
+        best_variant=artifact.get("recommended_variant"),
+        strategy_family=artifact.get("strategy_family"),
+        confidence=artifact.get("confidence"),
+        next_action=artifact.get("next_action"),
+        limitations=artifact.get("limitations"),
+        safety_summary=artifact.get("safety") if isinstance(artifact.get("safety"), dict) else {},
+    )
+
+
+def _strategy_replay_base_row(
+    ctx: AgentToolContext,
+    *,
+    root: Path,
+    path: Path | None,
+    artifact_kind: str,
+    artifact_id: str,
+    schema_version: Any,
+    source: str,
+    generated_at_utc: Any = None,
+    status: Any = None,
+    reason: Any = None,
+    data_mode: Any = None,
+    universe_scope: Any = None,
+    market: Any = None,
+    accounts: Any = None,
+    dataset_id: Any = None,
+    selected_run_ids: Any = None,
+    candidate_snapshot_count: Any = None,
+    filter_decision_count: Any = None,
+    decision_instance_count: Any = None,
+    underwriting_candidate_count: Any = None,
+    mark_path_snapshot_count: Any = None,
+    usable_mark_path_snapshot_count: Any = None,
+    outcome_fact_count: Any = None,
+    min_sample: Any = None,
+    evidence_level: Any = None,
+    strict_backtest_allowed: Any = None,
+    candidate_impact_allowed: Any = None,
+    production_recommendation_allowed: Any = None,
+    runtime_config_write_allowed: Any = None,
+    dry_run_patch_allowed: Any = None,
+    recommended_variant: Any = None,
+    best_variant: Any = None,
+    strategy_family: Any = None,
+    confidence: Any = None,
+    next_action: Any = None,
+    limitations: Any = None,
+    safety_summary: Any = None,
+) -> dict[str, Any]:
+    return {
+        "source_root": _mask_strategy_replay_path(ctx, root),
+        "artifact_kind": artifact_kind,
+        "artifact_id": artifact_id,
+        "artifact_path": _mask_strategy_replay_path(ctx, path) if path is not None else None,
+        "schema_version": schema_version,
+        "generated_at_utc": generated_at_utc,
+        "status": status,
+        "reason": reason,
+        "data_mode": data_mode,
+        "universe_scope": universe_scope,
+        "market": market,
+        "accounts": accounts,
+        "dataset_id": dataset_id,
+        "selected_run_ids": selected_run_ids,
+        "candidate_snapshot_count": candidate_snapshot_count,
+        "filter_decision_count": filter_decision_count,
+        "decision_instance_count": decision_instance_count,
+        "underwriting_candidate_count": underwriting_candidate_count,
+        "mark_path_snapshot_count": mark_path_snapshot_count,
+        "usable_mark_path_snapshot_count": usable_mark_path_snapshot_count,
+        "outcome_fact_count": outcome_fact_count,
+        "min_sample": min_sample,
+        "evidence_level": evidence_level,
+        "strict_backtest_allowed": strict_backtest_allowed,
+        "candidate_impact_allowed": candidate_impact_allowed,
+        "production_recommendation_allowed": production_recommendation_allowed,
+        "runtime_config_write_allowed": runtime_config_write_allowed,
+        "dry_run_patch_allowed": dry_run_patch_allowed,
+        "recommended_variant": recommended_variant,
+        "best_variant": best_variant,
+        "strategy_family": strategy_family,
+        "confidence": confidence,
+        "next_action": next_action,
+        "limitations": limitations,
+        "safety_summary": safety_summary,
+        "source": source,
+    }
+
+
+def _strategy_replay_data_mode(*, usable_mark_count: int | None, outcome_count: int | None) -> str:
+    if (outcome_count or 0) > 0 and (usable_mark_count or 0) > 0:
+        return "closed_replay"
+    if (usable_mark_count or 0) > 0:
+        return "path_only"
+    return "filter_only"
+
+
+def _strategy_replay_artifact_id(*, root: Path, path: Path) -> str:
+    try:
+        return str(path.relative_to(root / "output_shared" / "research"))
+    except Exception:
+        return path.name
+
+
+def _mask_strategy_replay_path(ctx: AgentToolContext, path: Path | str | None) -> str | None:
+    if path is None:
+        return None
+    try:
+        return ctx.mask_path(path) or str(path)
+    except Exception:
+        return str(path)
+
+
+def _path_name(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return Path(text).name
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def _first_bool(*values: Any) -> bool | None:
+    for value in values:
+        if isinstance(value, bool):
+            return value
+    return None
+
+
+def _strategy_replay_limitations(*payloads: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for payload in payloads:
+        raw = payload.get("limitations") if isinstance(payload, dict) else None
+        values = raw if isinstance(raw, list) else [raw] if raw else []
+        for value in values:
+            text = str(value or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            out.append(text)
+    return out
+
+
 def _quote_freshness_rows(*, assignment_rows: Any, runtime_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     del runtime_rows
     if not isinstance(assignment_rows, list):
@@ -2481,6 +3068,7 @@ def _query_diagnostics(
             "runtime_tick_status",
             "quote_freshness",
             "upgrade_operation_status",
+            "strategy_replay_read_surface",
         }:
             continue
         if view_name in warning_views:
@@ -2508,6 +3096,7 @@ def _diagnostic_records_from_warnings(
             "runtime_tick_status",
             "quote_freshness",
             "upgrade_operation_status",
+            "strategy_replay_read_surface",
         ):
             if lower.startswith(candidate):
                 view_name = candidate
@@ -2571,6 +3160,8 @@ def _diagnostic_records_from_rows(*, view_name: str, rows: list[dict[str, Any]])
         return _quote_diagnostic_records(rows)
     if view_name == "upgrade_operation_status":
         return _upgrade_diagnostic_records(rows)
+    if view_name == "strategy_replay_read_surface":
+        return _strategy_replay_diagnostic_records(rows)
     return []
 
 
@@ -2801,6 +3392,41 @@ def _upgrade_diagnostic_records(rows: list[dict[str, Any]]) -> list[dict[str, An
     return [record]
 
 
+def _strategy_replay_diagnostic_records(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    artifact_kinds = _sorted_unique_row_values(rows, "artifact_kind")
+    statuses = _row_status_values(rows, "status")
+    data_modes = _row_status_values(rows, "data_mode")
+    strategies = _sorted_unique_row_values(rows, "strategy_family")
+    dry_run_allowed = any(bool(row.get("dry_run_patch_allowed")) for row in rows if isinstance(row, dict))
+    candidate_allowed = any(bool(row.get("candidate_impact_allowed")) for row in rows if isinstance(row, dict))
+    status = "observed_strategy_replay_evidence"
+    severity = "info"
+    if not artifact_kinds:
+        status = "observed_strategy_replay_surface"
+    summary = _strategy_replay_diagnostic_summary(
+        artifact_kinds=artifact_kinds,
+        data_modes=sorted(data_modes),
+        dry_run_allowed=dry_run_allowed,
+        candidate_allowed=candidate_allowed,
+    )
+    record: dict[str, Any] = {
+        "view": "strategy_replay_read_surface",
+        "status": status,
+        "severity": severity,
+        "artifact_kinds": artifact_kinds,
+        "statuses": sorted(statuses),
+        "data_modes": sorted(data_modes),
+        "strategy_families": strategies,
+        "summary": summary,
+        "answer_boundary": "offline_replay_or_dry_run_evidence_only",
+    }
+    if dry_run_allowed:
+        record["dry_run_patch_allowed"] = True
+    if candidate_allowed:
+        record["candidate_impact_allowed"] = True
+    return [record]
+
+
 def _diagnostic_warning_summary(*, view_name: str, warning: str, status: str) -> str:
     if status == "read_error":
         return f"{view_name} diagnostic source could not be read"
@@ -2902,6 +3528,26 @@ def _upgrade_diagnostic_summary(
     suffix = f" ({'; '.join(parts)})" if parts else ""
     prefix = "upgrade operation evidence is conflicting" if conflict_reasons else "upgrade operation status rows were observed"
     return f"{prefix}{suffix}"
+
+
+def _strategy_replay_diagnostic_summary(
+    *,
+    artifact_kinds: list[Any],
+    data_modes: list[str],
+    dry_run_allowed: bool,
+    candidate_allowed: bool,
+) -> str:
+    parts: list[str] = []
+    if artifact_kinds:
+        parts.append("artifacts=" + ",".join(str(item) for item in artifact_kinds[:5]))
+    if data_modes:
+        parts.append("data_mode=" + ",".join(str(item) for item in data_modes[:5]))
+    if dry_run_allowed:
+        parts.append("dry_run_patch_available")
+    if candidate_allowed:
+        parts.append("candidate_impact_allowed")
+    suffix = f" ({'; '.join(parts)})" if parts else ""
+    return f"strategy replay read-surface rows were observed{suffix}"
 
 
 def _row_status_values(rows: list[dict[str, Any]], field: str) -> set[str]:
