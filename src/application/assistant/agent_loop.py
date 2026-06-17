@@ -69,6 +69,59 @@ INTERNAL_TOOL_PLAN_NAME = "assistant.tool_plan"
 MAX_TOOL_PLAN_STEPS = 3
 MAX_AGENT_LOOP_ITERATIONS = 3
 MAX_AGENT_LOOP_TOOL_CALLS = 5
+_INVESTIGATION_RECIPES: tuple[dict[str, Any], ...] = (
+    {
+        "name": "income_analysis_breakdown",
+        "domains": ["income"],
+        "task_modes": ["analyze", "compare"],
+        "evidence_needs": ["summary", "driver_or_breakdown", "same_scope_comparable_data"],
+        "primary_views": ["account_monthly_performance", "account_monthly_income_components", "symbol_income_attribution"],
+        "source_tools": ["analysis_query"],
+        "followup_tool": "analysis_query",
+        "answer_shape": ["conclusion", "drivers", "source_policy"],
+    },
+    {
+        "name": "position_or_quote_diagnosis",
+        "domains": ["position", "runtime"],
+        "task_modes": ["diagnose", "explain"],
+        "evidence_needs": ["current_state", "diagnostic_evidence", "quote_freshness"],
+        "primary_views": ["assigned_stock_position_pnl", "quote_freshness", "runtime_tick_status"],
+        "source_tools": ["analysis_query"],
+        "followup_tool": "analysis_query",
+        "answer_shape": ["observation", "cause_chain", "evidence_boundary"],
+    },
+    {
+        "name": "operation_status_readback",
+        "domains": ["operation"],
+        "task_modes": ["diagnose", "explain"],
+        "evidence_needs": ["observed_status", "operation_readback", "receipt_status"],
+        "primary_views": ["upgrade_operation_status"],
+        "source_tools": ["operation_timeline", "assistant_trace"],
+        "followup_tool": "operation_timeline",
+        "answer_shape": ["observation", "cause_chain", "evidence_boundary", "next_step"],
+    },
+    {
+        "name": "strategy_replay_review",
+        "domains": ["strategy", "candidate"],
+        "task_modes": ["analyze", "recommend"],
+        "evidence_needs": ["current_state", "constraints", "risk_premise", "dry_run_or_replay"],
+        "primary_views": ["candidate_filter_diagnostics", "close_advice_snapshot", "strategy_config_by_symbol_account"],
+        "source_tools": ["analysis_query"],
+        "external_evidence": ["research_shadow_replay_or_strategy_lab_dry_run"],
+        "followup_tool": "analysis_query",
+        "answer_shape": ["judgement", "options", "risk", "premise"],
+    },
+    {
+        "name": "action_lifecycle_audit",
+        "domains": ["operation"],
+        "task_modes": ["preview_write", "diagnose"],
+        "evidence_needs": ["permission_request", "preview_receipt", "operation_readback", "audit"],
+        "primary_views": ["upgrade_operation_status"],
+        "source_tools": ["operation_timeline", "assistant_trace"],
+        "followup_tool": "operation_timeline",
+        "answer_shape": ["preview_summary", "risk", "confirmation_handle", "verification_status"],
+    },
+)
 _BLOCKED_FOLLOWUP_RECOVERABLE_BY = frozenset(
     {
         "apply",
@@ -231,6 +284,7 @@ class PlannerPlan:
     steps: tuple[PlannerPlanStep, ...]
     required_capabilities: tuple[str, ...] = ()
     task_contract: dict[str, Any] | None = None
+    selected_recipe: dict[str, Any] | None = None
     schema_version: str = TOOL_PLAN_SCHEMA_VERSION
 
     def public_payload(self) -> dict[str, Any]:
@@ -242,6 +296,8 @@ class PlannerPlan:
         }
         if isinstance(self.task_contract, dict) and self.task_contract:
             payload["task_contract"] = _safe_task_contract_payload(self.task_contract)
+        if isinstance(self.selected_recipe, dict) and self.selected_recipe:
+            payload["selected_recipe"] = _safe_selected_recipe_payload(self.selected_recipe)
         return payload
 
 
@@ -754,13 +810,15 @@ def execute_tool_plan(
     plan = parse_tool_plan_payload(plan_payload)
     plan = _normalize_tool_plan(plan, question=question, today=_planner_today_from_context(conversation_context))
     validate_tool_plan(plan, allow_preview=False)
-    plan_revisions: list[dict[str, Any]] = [_plan_revision_payload(1, plan=plan, reason="initial bounded plan")]
     task_contract = build_task_contract(
         question=question,
         plan=plan.public_payload(),
         request_context=request.public_payload(),
         today=_planner_today_from_context(conversation_context),
     )
+    selected_recipe = _selected_recipe_for_task_contract(task_contract=task_contract.public_payload(), plan=plan)
+    plan = _with_selected_recipe(plan, selected_recipe)
+    plan_revisions: list[dict[str, Any]] = [_plan_revision_payload(1, plan=plan, reason="initial bounded plan")]
     tool_events: list[dict[str, Any]] = []
     observations: list[dict[str, Any]] = []
     fact_observations: list[dict[str, Any]] = []
@@ -775,7 +833,14 @@ def execute_tool_plan(
     followup_decisions: list[dict[str, Any]] = []
     attempted_followup_gap_signatures: set[str] = set()
     iteration = 1
-    tool_events.append({"phase": "task_contract", "contract": task_contract.public_payload()})
+    tool_events.append(
+        {
+            "phase": "task_contract",
+            "contract": task_contract.public_payload(),
+            "selected_recipe": _safe_selected_recipe_payload(selected_recipe),
+            "evidence_needs": list(task_contract.required_evidence),
+        }
+    )
 
     while True:
         ok, error_payload = _execute_read_plan_steps(
@@ -879,6 +944,8 @@ def execute_tool_plan(
                 }
             )
         plan = next_plan
+        if selected_recipe:
+            plan = _with_selected_recipe(plan, selected_recipe)
         plan_revisions.append(_plan_revision_payload(len(plan_revisions) + 1, plan=plan, reason="follow-up evidence-gap plan"))
         iteration += 1
 
@@ -925,6 +992,7 @@ def execute_tool_plan(
         "observations": observations,
         "synthesis_observations": llm_observations,
         "task_contract": task_contract.public_payload(),
+        "selected_recipe": _safe_selected_recipe_payload(selected_recipe),
         "evidence_bundle": evidence_bundle.public_payload(),
         "coverage": coverage_payload,
         "agent_session": agent_session.public_payload(),
@@ -1310,6 +1378,8 @@ def _plan_followup_read_steps(
             }
         )
         return None
+    if prior_plan.selected_recipe and not next_plan.selected_recipe:
+        next_plan = _with_selected_recipe(next_plan, _safe_selected_recipe_payload(prior_plan.selected_recipe))
     decision = _followup_decision_payload(
         revision=revision,
         decision="call_tool",
@@ -1435,7 +1505,7 @@ def _followup_duplicate_rejection(
     prior_plan: PlannerPlan,
     observations: list[dict[str, Any]],
 ) -> str:
-    if plan.public_payload() == prior_plan.public_payload():
+    if _followup_plan_duplicate_payload(plan) == _followup_plan_duplicate_payload(prior_plan):
         return "follow-up plan duplicates the previous plan"
     attempted = {
         signature
@@ -1449,6 +1519,12 @@ def _followup_duplicate_rejection(
         if signature and signature in attempted:
             return "follow-up query repeats an earlier tool call"
     return ""
+
+
+def _followup_plan_duplicate_payload(plan: PlannerPlan) -> dict[str, Any]:
+    payload = dict(plan.public_payload())
+    payload.pop("selected_recipe", None)
+    return payload
 
 
 _FOLLOWUP_GAP_SIGNATURE_KEYS = (
@@ -2144,7 +2220,7 @@ def synthesize_tool_plan_response(
 def parse_tool_plan_payload(payload: dict[str, Any]) -> PlannerPlan:
     if not isinstance(payload, dict):
         raise AgentToolError(code="INPUT_ERROR", message="tool plan must be a JSON object")
-    allowed_keys = {"schema_version", "goal", "required_capabilities", "steps", "task_contract"}
+    allowed_keys = {"schema_version", "goal", "required_capabilities", "steps", "task_contract", "selected_recipe"}
     extra_keys = sorted(str(key) for key in payload if str(key) not in allowed_keys)
     if extra_keys:
         raise AgentToolError(
@@ -2195,6 +2271,7 @@ def parse_tool_plan_payload(payload: dict[str, Any]) -> PlannerPlan:
         steps=tuple(steps),
         required_capabilities=_normalized_capabilities(payload.get("required_capabilities")),
         task_contract=_normalized_planner_task_contract(payload.get("task_contract")),
+        selected_recipe=_normalized_selected_recipe(payload.get("selected_recipe")),
         schema_version=schema_version,
     )
 
@@ -2219,6 +2296,20 @@ def _normalized_planner_task_contract(value: Any) -> dict[str, Any] | None:
     }
     out = {str(key): value[key] for key in value if str(key) in allowed}
     return out or None
+
+
+def _normalized_selected_recipe(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    name = str(value.get("name") or "").strip()
+    canonical = _recipe_by_name(name)
+    if canonical is None:
+        return None
+    out = dict(canonical)
+    reason = str(value.get("reason") or "").strip()
+    if reason:
+        out["reason"] = reason
+    return out
 
 
 def _normalized_capabilities(value: Any) -> tuple[str, ...]:
@@ -2571,6 +2662,104 @@ def _safe_task_contract_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return {key: payload[key] for key in sorted(allowed) if key in payload}
 
 
+def _safe_selected_recipe_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "name",
+        "domains",
+        "task_modes",
+        "evidence_needs",
+        "primary_views",
+        "source_tools",
+        "external_evidence",
+        "followup_tool",
+        "answer_shape",
+        "match_source",
+        "reason",
+    }
+    return {key: payload[key] for key in sorted(allowed) if key in payload}
+
+
+def _recipe_by_name(name: str) -> dict[str, Any] | None:
+    normalized = str(name or "").strip()
+    for recipe in _INVESTIGATION_RECIPES:
+        if recipe.get("name") == normalized:
+            return _visible_recipe_payload(recipe)
+    return None
+
+
+def _visible_recipe_payload(recipe: dict[str, Any]) -> dict[str, Any]:
+    payload = {key: recipe[key] for key in recipe if key != "reason"}
+    views = [
+        str(view)
+        for view in payload.get("primary_views") or []
+        if str(view) in ANALYSIS_VIEW_SPECS or str(view) == "upgrade_operation_status"
+    ]
+    payload["primary_views"] = views
+    return _safe_selected_recipe_payload(payload)
+
+
+def _selected_recipe_for_task_contract(*, task_contract: dict[str, Any], plan: PlannerPlan) -> dict[str, Any]:
+    declared = _safe_selected_recipe_payload(plan.selected_recipe or {}) if isinstance(plan.selected_recipe, dict) else {}
+    if declared.get("name"):
+        return {**declared, "match_source": "planner_declared"}
+    inferred = _infer_recipe_from_task_contract(task_contract)
+    if inferred:
+        return {**inferred, "match_source": "runtime_inferred"}
+    return {}
+
+
+def _infer_recipe_from_task_contract(task_contract: dict[str, Any]) -> dict[str, Any]:
+    domain = str(task_contract.get("domain") or "").strip()
+    task_mode = str(task_contract.get("task_mode") or "").strip()
+    requested_effect = str(task_contract.get("requested_effect") or "").strip()
+    required_evidence = {str(item).strip() for item in task_contract.get("required_evidence") or [] if str(item).strip()}
+    required_answer = {str(item).strip() for item in task_contract.get("required_answer") or [] if str(item).strip()}
+    intent_families = {str(item).strip() for item in task_contract.get("intent_families") or [] if str(item).strip()}
+    if requested_effect == "preview_write" or required_evidence.intersection({"permission_request", "preview_receipt", "audit"}):
+        recipe = _recipe_by_name("action_lifecycle_audit")
+    elif domain == "income" and (
+        task_mode in {"analyze", "compare"} or required_evidence.intersection({"driver_or_breakdown", "same_scope_comparable_data"})
+    ):
+        recipe = _recipe_by_name("income_analysis_breakdown")
+    elif domain in {"strategy", "candidate"} and (
+        task_mode in {"analyze", "recommend"}
+        or required_evidence.intersection({"dry_run_or_replay", "risk_premise"})
+        or "candidate_filter" in intent_families
+    ):
+        recipe = _recipe_by_name("strategy_replay_review")
+    elif domain == "operation" and (
+        task_mode in {"diagnose", "explain"}
+        or required_evidence.intersection({"operation_readback", "receipt_status", "observed_status"})
+        or required_answer.intersection({"command_status", "current_version", "target_version", "release_status"})
+    ):
+        recipe = _recipe_by_name("operation_status_readback")
+    elif domain in {"position", "runtime"} and (
+        task_mode in {"diagnose", "explain"}
+        or required_evidence.intersection({"diagnostic_evidence", "quote_freshness"})
+        or intent_families.intersection({"assigned_stock_pnl", "runtime_status"})
+    ):
+        recipe = _recipe_by_name("position_or_quote_diagnosis")
+    else:
+        recipe = None
+    return recipe or {}
+
+
+def _with_selected_recipe(plan: PlannerPlan, selected_recipe: dict[str, Any]) -> PlannerPlan:
+    recipe = _safe_selected_recipe_payload(selected_recipe)
+    if not recipe:
+        return plan
+    if plan.selected_recipe == recipe:
+        return plan
+    return PlannerPlan(
+        goal=plan.goal,
+        steps=plan.steps,
+        required_capabilities=plan.required_capabilities,
+        task_contract=dict(plan.task_contract) if isinstance(plan.task_contract, dict) else None,
+        selected_recipe=recipe,
+        schema_version=plan.schema_version,
+    )
+
+
 def _planner_today(now_fn: Callable[[], date] | None) -> date:
     if now_fn is not None:
         return now_fn()
@@ -2653,6 +2842,7 @@ def _normalize_tool_plan(plan: PlannerPlan, *, question: str, today: date) -> Pl
         steps=tuple(steps),
         required_capabilities=plan.required_capabilities,
         task_contract=dict(plan.task_contract) if isinstance(plan.task_contract, dict) else None,
+        selected_recipe=dict(plan.selected_recipe) if isinstance(plan.selected_recipe, dict) else None,
         schema_version=plan.schema_version,
     )
 
@@ -2834,6 +3024,32 @@ def tool_plan_json_schema() -> dict[str, Any]:
                     "required_evidence",
                     "answer_shape",
                 ],
+            },
+            "selected_recipe": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "enum": [
+                            "income_analysis_breakdown",
+                            "position_or_quote_diagnosis",
+                            "operation_status_readback",
+                            "strategy_replay_review",
+                            "action_lifecycle_audit",
+                        ],
+                    },
+                    "reason": {"type": "string"},
+                    "domains": {"type": "array", "items": {"type": "string"}},
+                    "task_modes": {"type": "array", "items": {"type": "string"}},
+                    "evidence_needs": {"type": "array", "items": {"type": "string"}},
+                    "primary_views": {"type": "array", "items": {"type": "string"}},
+                    "source_tools": {"type": "array", "items": {"type": "string"}},
+                    "external_evidence": {"type": "array", "items": {"type": "string"}},
+                    "followup_tool": {"type": "string"},
+                    "answer_shape": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["name"],
             },
             "required_capabilities": {
                 "type": "array",
@@ -4579,6 +4795,7 @@ Return only JSON that matches the requested schema.
 Rules:
 - Produce 1 to 3 read-only tool calls, or exactly 1 preview-write capability call.
 - Also fill task_contract when you can safely infer it. The task_contract is your structured understanding of the user goal; the steps are your executable plan. If unsure, keep task_contract conservative rather than guessing.
+- Also fill selected_recipe.name when one investigation recipe matches the task_contract and planned evidence path. Use income_analysis_breakdown for income analysis/breakdown, position_or_quote_diagnosis for position/runtime diagnosis, operation_status_readback for operation status/readback questions, strategy_replay_review for strategy/candidate replay or recommendation, and action_lifecycle_audit for preview-write lifecycle/audit questions.
 - task_contract.domain is one of income, position, candidate, config, operation, runtime, strategy, general. task_contract.task_mode is one of summarize, analyze, compare, diagnose, explain, recommend, preview_write.
 - Use task_mode=analyze for analysis/复盘/表现/来源/结构 questions, compare for same-scope comparisons, diagnose for why/missing/failure/abnormal status questions, explain for rules or accounting policies, recommend for advisory options, and preview_write only for approved preview operations.
 - task_contract.required_evidence should name evidence categories needed to complete the answer, not tool names. Examples: summary, driver_or_breakdown, same_scope_comparable_data, observed_status, diagnostic_evidence, rule_or_config_source, current_state, constraints, risk_premise, source_policy.
@@ -4654,11 +4871,12 @@ def _planner_tool_manifest() -> list[dict[str, Any]]:
             }
         if name == "analysis_catalog":
             notes.append("Use when the user asks what data/fields can be analyzed, or before analysis_query if view names are unknown.")
+            notes.append("Use investigation_recipes to map task_contract domains, task modes, and evidence gaps to the safest generic views/tools.")
             notes.append("This is a pure-read catalog; it does not answer the business question by itself.")
             semantics = {
                 "data_source": "OM Tool OS catalog",
                 "answer_capabilities": {
-                    "analysis_catalog": "lists whitelisted read-only views and SQL rules",
+                    "analysis_catalog": "lists whitelisted read-only views, SQL rules, and investigation recipes",
                     "read_only": "catalog only; no ledger mutation",
                 },
                 "scope_semantics": {

@@ -203,6 +203,7 @@ def test_agent_tool_output_contracts_advertise_canonical_renderers() -> None:
     assert tools["close_advice_read"]["output_contract"]["canonical_renderer"] == "position_exit_analysis"
     assert tools["analysis_catalog"]["output_contract"]["canonical_renderer"] == "analysis_catalog"
     assert "view_names[]" in tools["analysis_catalog"]["output_contract"]["fact_fields"]
+    assert "investigation_recipes[].name" in tools["analysis_catalog"]["output_contract"]["fact_fields"]
 
     positions = get_tool_definition("option_positions_read")
     assert positions is not None

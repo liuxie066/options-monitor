@@ -28,6 +28,7 @@ from src.application.assistant.session import (
     build_operation_readback_agent_session_snapshot,
     build_preview_agent_session_snapshot,
 )
+from src.application.assistant.operation_lifecycle import build_action_lifecycle
 from src.application.assistant.session_store import AgentSessionStore
 from src.application.assistant.verifier_hooks import hook_results_from_tool_check
 from src.application.tool_execution import execute_tool
@@ -247,6 +248,9 @@ def _merge_agent_loop_preview_receipt(llm_trace: dict[str, Any], response: dict[
     }
     if permission_request.get("target_summary"):
         receipt["target_summary"] = str(permission_request.get("target_summary") or "")
+    action_lifecycle = data.get("action_lifecycle") if isinstance(data.get("action_lifecycle"), dict) else {}
+    if action_lifecycle:
+        receipt["action_lifecycle"] = dict(action_lifecycle)
     postcheck = _preview_receipt_postcheck(response=response, permission_request=permission_request, receipt=receipt)
     receipt_hooks = hook_results_from_tool_check(postcheck)
 
@@ -292,6 +296,7 @@ def _preview_receipt_postcheck(
     confirm_required = bool(receipt.get("confirm_required"))
     apply_allowed = bool(receipt.get("apply_allowed"))
     response_ok = bool(response.get("ok", False))
+    lifecycle = receipt.get("action_lifecycle") if isinstance(receipt.get("action_lifecycle"), dict) else {}
     checks = [
         {
             "name": "result_status",
@@ -312,6 +317,15 @@ def _preview_receipt_postcheck(
             "name": "confirmation_guard",
             "status": "pass" if confirm_required and not apply_allowed else "fail",
             "code": "preview_requires_confirmation" if confirm_required and not apply_allowed else "unsafe_preview_receipt",
+        },
+        {
+            "name": "action_lifecycle",
+            "status": "pass"
+            if lifecycle.get("schema_version") == "om-agent-action-lifecycle-v1"
+            and lifecycle.get("status") == "previewed"
+            and lifecycle.get("operation_id") == operation_id
+            else "fail",
+            "code": str(lifecycle.get("phase") or "missing_action_lifecycle"),
         },
     ]
     status = "pass" if all(item["status"] == "pass" for item in checks) else "fail"
@@ -418,6 +432,13 @@ def _operation_readback_postcheck(*, response: dict[str, Any]) -> dict[str, Any]
     response_ok = bool(response.get("ok", False))
     result = data.get("result") if isinstance(data.get("result"), dict) else {}
     result_status = str(result.get("status") or status).strip().lower()
+    lifecycle = build_action_lifecycle(
+        operation_id=operation_id,
+        operation_type=operation_type,
+        status=status,
+        result=result,
+        source="operation_readback_postcheck",
+    )
     checks = [
         {
             "name": "result_status",
@@ -439,6 +460,15 @@ def _operation_readback_postcheck(*, response: dict[str, Any]) -> dict[str, Any]
             "status": "pass" if result_status in final_statuses else "fail",
             "code": result_status or "missing_result_status",
         },
+        {
+            "name": "action_lifecycle",
+            "status": "pass"
+            if lifecycle.get("schema_version") == "om-agent-action-lifecycle-v1"
+            and lifecycle.get("status") in final_statuses
+            and lifecycle.get("operation_id") == operation_id
+            else "fail",
+            "code": str(lifecycle.get("phase") or "missing_action_lifecycle"),
+        },
     ]
     return {
         "schema_version": TOOL_CHECK_SCHEMA_VERSION,
@@ -450,6 +480,7 @@ def _operation_readback_postcheck(*, response: dict[str, Any]) -> dict[str, Any]
         "operation_type": operation_type,
         "operation_status": status,
         "result_status": result_status,
+        "action_lifecycle": lifecycle,
     }
 
 
