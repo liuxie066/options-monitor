@@ -11,11 +11,13 @@
   verify/audit phase, required next action, and verification status without expanding write permissions.
 - Added recipe-driven coverage checks so selected investigation recipes can require income breakdown evidence, operation
   readback/receipt evidence, risk-premise evidence, and replay/dry-run evidence.
+- Added `strategy_replay_read_surface` to `analysis_query`, exposing read-only Strategy Lab and Shadow Replay artifact
+  summaries for replay, dry-run proposal, and strategy evidence review.
 
 ### Changed
 - Tightened read-only follow-up planning around recipe coverage gaps: operation readback gaps now suggest
-  `operation_timeline` with the scoped operation id, while strategy replay gaps remain bounded as missing evidence until
-  a replay read surface is available.
+  `operation_timeline` with the scoped operation id, while strategy replay gaps now suggest a bounded
+  `analysis_query` follow-up over `strategy_replay_read_surface`.
 
 ## 1.2.299 - 2026-06-17
 
