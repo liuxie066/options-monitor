@@ -2595,7 +2595,7 @@ def test_selected_recipe_operation_readback_gap_uses_planner_scope_operation_id(
     assert gaps["recipe_receipt_status_missing"]["suggested_tool"] == "operation_timeline"
 
 
-def test_selected_recipe_strategy_replay_gap_is_unrecoverable_without_read_surface() -> None:
+def test_selected_recipe_strategy_replay_gap_is_recoverable_by_read_surface() -> None:
     payload = {
         "schema_version": TOOL_PLAN_SCHEMA_VERSION,
         "goal": "评估 NVDA covered call 策略是否要调整",
@@ -2669,10 +2669,287 @@ def test_selected_recipe_strategy_replay_gap_is_unrecoverable_without_read_surfa
     coverage = verify_coverage(task_contract=contract, evidence_bundle=bundle).public_payload()
     gaps = {item["kind"]: item for item in coverage["gaps"]}
 
-    assert coverage["status"] == "unrecoverable_gap"
-    assert coverage["next_action"] == "answer_with_missing_data"
-    assert gaps["recipe_strategy_replay_evidence_missing"]["recoverable"] is False
-    assert gaps["recipe_strategy_replay_evidence_missing"]["recoverable_by"] == "strategy_replay_read_surface"
+    assert coverage["status"] == "recoverable_gap"
+    assert gaps["recipe_strategy_replay_evidence_missing"]["recoverable"] is True
+    assert gaps["recipe_strategy_replay_evidence_missing"]["recoverable_by"] == "analysis_query"
+    assert gaps["recipe_strategy_replay_evidence_missing"]["suggested_tool"] == "analysis_query"
+    assert gaps["recipe_strategy_replay_evidence_missing"]["suggested_views"] == ["strategy_replay_read_surface"]
+
+
+def test_selected_recipe_strategy_replay_gap_ignores_tool_name_without_read_surface() -> None:
+    payload = {
+        "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+        "goal": "评估 NVDA covered call 策略是否要调整",
+        "task_contract": {
+            "schema_version": TASK_CONTRACT_SCHEMA_VERSION,
+            "domain": "strategy",
+            "task_mode": "recommend",
+            "requested_effect": "read",
+            "scope": {"symbols": ["NVDA"], "config_keys": ["us"]},
+            "required_answer": ["summary", "source_and_policy"],
+            "required_evidence": ["dry_run_or_replay"],
+            "answer_shape": ["judgement", "risk", "premise"],
+        },
+        "selected_recipe": {"name": "strategy_replay_review"},
+        "required_capabilities": ["read_only"],
+        "steps": [
+            {
+                "id": "step_1",
+                "tool_name": "strategy_replay_analyze",
+                "arguments": {"symbol": "NVDA", "dry_run": True},
+                "purpose": "尝试读取 replay 证据",
+            }
+        ],
+    }
+    plan = parse_tool_plan_payload(payload)
+    contract = build_task_contract(
+        question="NVDA covered call 要不要调整？",
+        plan=plan.public_payload(),
+        request_context={"config_key": "us"},
+        today=date(2026, 6, 17),
+    )
+    bundle = build_evidence_bundle(
+        question="NVDA covered call 要不要调整？",
+        plan=plan.public_payload(),
+        observations=[
+            {
+                "index": 1,
+                "tool_name": "strategy_replay_analyze",
+                "payload": plan.steps[0].arguments,
+                "ok": True,
+                "error": None,
+                "output_contract": {
+                    "schema_version": "strategy_replay_analyze.output.v1",
+                    "canonical_renderer": "analysis_result",
+                    "source_label": "strategy replay analyzer",
+                    "guard_profile": "analysis_rows",
+                    "primary_rows": "rows",
+                    "row_count_field": "row_count",
+                    "fact_fields": [],
+                },
+                "data": {"rows": [], "row_count": 0},
+            }
+        ],
+    )
+
+    coverage = verify_coverage(task_contract=contract, evidence_bundle=bundle).public_payload()
+    gap_kinds = {item["kind"] for item in coverage["gaps"]}
+
+    assert "recipe_strategy_replay_evidence_missing" in gap_kinds
+
+
+def test_selected_recipe_strategy_replay_gap_requires_read_surface_evidence_columns() -> None:
+    payload = {
+        "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+        "goal": "评估 NVDA covered call 策略是否要调整",
+        "task_contract": {
+            "schema_version": TASK_CONTRACT_SCHEMA_VERSION,
+            "domain": "strategy",
+            "task_mode": "recommend",
+            "requested_effect": "read",
+            "scope": {"symbols": ["NVDA"], "config_keys": ["us"]},
+            "required_answer": ["summary", "source_and_policy"],
+            "required_evidence": ["dry_run_or_replay"],
+            "answer_shape": ["judgement", "risk", "premise"],
+        },
+        "selected_recipe": {"name": "strategy_replay_review"},
+        "required_capabilities": ["analysis_query", "read_only"],
+        "steps": [
+            {
+                "id": "step_1",
+                "tool_name": "analysis_query",
+                "arguments": {
+                    "sql": "select count(*) as row_count from strategy_replay_read_surface",
+                    "limit": 20,
+                },
+                "purpose": "检查 replay 读面是否存在",
+            }
+        ],
+    }
+    plan = parse_tool_plan_payload(payload)
+    contract = build_task_contract(
+        question="NVDA covered call 要不要调整？",
+        plan=plan.public_payload(),
+        request_context={"config_key": "us"},
+        today=date(2026, 6, 17),
+    )
+    bundle = build_evidence_bundle(
+        question="NVDA covered call 要不要调整？",
+        plan=plan.public_payload(),
+        observations=[
+            {
+                "index": 1,
+                "tool_name": "analysis_query",
+                "payload": plan.steps[0].arguments,
+                "ok": True,
+                "error": None,
+                "output_contract": {
+                    "schema_version": "analysis_query.output.v2",
+                    "canonical_renderer": "analysis_result",
+                    "source_label": "OM read-only analysis workspace",
+                    "guard_profile": "analysis_result",
+                    "primary_rows": "rows",
+                    "row_count_field": "row_count",
+                    "fact_fields": [],
+                },
+                "data": {
+                    "columns": ["row_count"],
+                    "rows": [{"row_count": 42}],
+                    "row_count": 1,
+                    "evidence": {
+                        "coverage": {"views": ["strategy_replay_read_surface"]},
+                        "diagnostics": [
+                            {
+                                "view": "strategy_replay_read_surface",
+                                "status": "observed_strategy_replay_surface",
+                                "severity": "info",
+                                "summary": "strategy replay read-surface rows were observed",
+                                "answer_boundary": "offline_replay_or_dry_run_evidence_only",
+                            }
+                        ],
+                    },
+                },
+            }
+        ],
+    )
+
+    coverage = verify_coverage(task_contract=contract, evidence_bundle=bundle).public_payload()
+    gap_kinds = {item["kind"] for item in coverage["gaps"]}
+
+    assert "recipe_strategy_replay_evidence_missing" in gap_kinds
+
+
+def test_selected_recipe_strategy_replay_gap_is_satisfied_by_read_surface() -> None:
+    payload = {
+        "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+        "goal": "评估 NVDA covered call 策略是否要调整",
+        "task_contract": {
+            "schema_version": TASK_CONTRACT_SCHEMA_VERSION,
+            "domain": "strategy",
+            "task_mode": "recommend",
+            "requested_effect": "read",
+            "scope": {"symbols": ["NVDA"], "config_keys": ["us"]},
+            "required_answer": ["summary", "source_and_policy"],
+            "required_evidence": ["current_state", "risk_premise", "dry_run_or_replay"],
+            "answer_shape": ["judgement", "risk", "premise"],
+        },
+        "selected_recipe": {"name": "strategy_replay_review"},
+        "required_capabilities": ["analysis_query", "read_only"],
+        "steps": [
+            {
+                "id": "step_1",
+                "tool_name": "analysis_query",
+                "arguments": {
+                    "sql": (
+                        "select symbol, account, reason from candidate_filter_diagnostics where symbol = 'NVDA'"
+                    ),
+                    "limit": 20,
+                },
+                "purpose": "读取候选风险前提",
+            },
+            {
+                "id": "step_2",
+                "tool_name": "analysis_query",
+                "arguments": {
+                    "sql": (
+                        "select artifact_kind, data_mode, status "
+                        "from strategy_replay_read_surface where data_mode = 'closed_replay'"
+                    ),
+                    "limit": 20,
+                },
+                "purpose": "读取离线 replay / dry-run 证据",
+            },
+        ],
+    }
+    plan = parse_tool_plan_payload(payload)
+    contract = build_task_contract(
+        question="NVDA covered call 要不要调整？",
+        plan=plan.public_payload(),
+        request_context={"config_key": "us"},
+        today=date(2026, 6, 17),
+    )
+    bundle = build_evidence_bundle(
+        question="NVDA covered call 要不要调整？",
+        plan=plan.public_payload(),
+        observations=[
+            {
+                "index": 1,
+                "tool_name": "analysis_query",
+                "payload": plan.steps[0].arguments,
+                "ok": True,
+                "error": None,
+                "output_contract": {
+                    "schema_version": "analysis_query.output.v2",
+                    "canonical_renderer": "analysis_result",
+                    "source_label": "OM read-only analysis workspace",
+                    "guard_profile": "analysis_result",
+                    "primary_rows": "rows",
+                    "row_count_field": "row_count",
+                    "fact_fields": [],
+                },
+                "data": {
+                    "columns": ["symbol", "account", "reason"],
+                    "rows": [{"symbol": "NVDA", "account": "lx", "reason": "delta risk above target"}],
+                    "row_count": 1,
+                    "evidence": {
+                        "coverage": {
+                            "views": ["candidate_filter_diagnostics"],
+                            "accounts": ["lx"],
+                            "symbols": ["NVDA"],
+                        }
+                    },
+                },
+            },
+            {
+                "index": 2,
+                "tool_name": "analysis_query",
+                "payload": plan.steps[1].arguments,
+                "ok": True,
+                "error": None,
+                "output_contract": {
+                    "schema_version": "analysis_query.output.v2",
+                    "canonical_renderer": "analysis_result",
+                    "source_label": "OM read-only analysis workspace",
+                    "guard_profile": "analysis_result",
+                    "primary_rows": "rows",
+                    "row_count_field": "row_count",
+                    "fact_fields": [],
+                },
+                "data": {
+                    "columns": ["artifact_kind", "data_mode", "status"],
+                    "rows": [
+                        {
+                            "artifact_kind": "shadow_replay_candidate_impact",
+                            "data_mode": "closed_replay",
+                            "status": "ready_for_live_shadow_review",
+                        }
+                    ],
+                    "row_count": 1,
+                    "evidence": {
+                        "coverage": {
+                            "views": ["strategy_replay_read_surface"],
+                            "accounts": ["lx"],
+                            "symbols": ["NVDA"],
+                        },
+                        "diagnostics": [
+                            {
+                                "view": "strategy_replay_read_surface",
+                                "status": "observed_strategy_replay_evidence",
+                                "severity": "info",
+                                "summary": "strategy replay read-surface rows were observed",
+                                "answer_boundary": "offline_replay_or_dry_run_evidence_only",
+                            }
+                        ],
+                    },
+                },
+            },
+        ],
+    )
+
+    coverage = verify_coverage(task_contract=contract, evidence_bundle=bundle).public_payload()
+    gap_kinds = {item["kind"] for item in coverage["gaps"]}
+
+    assert "recipe_strategy_replay_evidence_missing" not in gap_kinds
 
 
 def test_income_analysis_contract_accepts_monthly_detail_rows_as_breakdown_evidence() -> None:

@@ -172,7 +172,8 @@ OM 的生产边界。
 - `analysis_catalog` / `analysis_query`：read-only semantic SQL over whitelisted views。
 - artifact/runtime inspector：读取 runtime status、operation timeline、assistant trace、
   scanned-run / notification / quote freshness 摘要。
-- dry-run / replay：策略、筛选、配置建议先走离线证据和 dry-run。
+- dry-run / replay：策略、筛选、配置建议先走离线证据和 dry-run；Agent 通过
+  `analysis_query.strategy_replay_read_surface` 读取 Strategy Lab / Shadow Replay 只读产物摘要。
 - preview operation：写操作只生成 pending preview。
 
 非目标：
@@ -186,6 +187,7 @@ OM 的生产边界。
 - 开放式分析问题能通过 analysis workspace 做聚合、排序、对比、补查。
 - 运行/升级问题能从 status 补到 operation timeline 或明确缺口。
 - 策略建议能连接 Strategy Lab / replay / dry-run evidence，而不是读一个配置就下结论。
+  缺 replay / dry-run 时，CoverageVerifier 只能补 `strategy_replay_read_surface`，补不到则保持证据缺口。
 
 ## Phase 5: Controlled Follow-up
 

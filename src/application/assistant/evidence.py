@@ -302,6 +302,9 @@ def _dataset_payload(
         "row_count": row_count,
         "payload": dict(observation.get("payload") or {}) if isinstance(observation.get("payload"), dict) else {},
     }
+    columns = data.get("columns")
+    if isinstance(columns, list):
+        payload["columns"] = [str(item) for item in columns if str(item).strip()]
     analysis_evidence = _analysis_evidence_payload(data)
     if analysis_evidence:
         payload["analysis_evidence"] = analysis_evidence
@@ -426,6 +429,8 @@ def _analysis_diagnostics_from_rows(data: dict[str, Any]) -> list[dict[str, Any]
             records.append(_quote_analysis_diagnostic_from_rows(rows))
         elif view_name == "upgrade_operation_status":
             records.append(_upgrade_analysis_diagnostic_from_rows(rows))
+        elif view_name == "strategy_replay_read_surface":
+            records.append(_strategy_replay_analysis_diagnostic_from_rows(rows))
     return [_compact_record(record) for record in records if record]
 
 
@@ -658,6 +663,26 @@ def _upgrade_analysis_diagnostic_from_rows(rows: list[dict[str, Any]]) -> dict[s
         if conflict_reasons
         else "upgrade_operation_status_evidence_only",
         "missing_data": missing,
+    }
+
+
+def _strategy_replay_analysis_diagnostic_from_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    if _rows_represent_no_matches(rows):
+        return _analysis_no_matching_rows_diagnostic("strategy_replay_read_surface")
+    artifact_kinds = _sorted_unique_row_values(rows, "artifact_kind")
+    data_modes = _sorted_unique_row_values(rows, "data_mode")
+    summary_parts: list[str] = []
+    if artifact_kinds:
+        summary_parts.append("artifacts=" + ",".join(str(item) for item in artifact_kinds[:5]))
+    if data_modes:
+        summary_parts.append("data_mode=" + ",".join(str(item) for item in data_modes[:5]))
+    return {
+        "view": "strategy_replay_read_surface",
+        "status": "observed_strategy_replay_evidence" if artifact_kinds else "observed_strategy_replay_surface",
+        "severity": "info",
+        "summary": "strategy replay read-surface rows were observed"
+        + (f" ({'; '.join(summary_parts)})" if summary_parts else ""),
+        "answer_boundary": "offline_replay_or_dry_run_evidence_only",
     }
 
 
@@ -1195,6 +1220,8 @@ def _inbound_upgrade_diagnostics(
 
 def _diagnostic_domain_for_view(view: str) -> str:
     normalized = str(view or "").strip()
+    if "strategy_replay" in normalized or "shadow_replay" in normalized or "strategy_lab" in normalized:
+        return "strategy_replay"
     if "candidate" in normalized:
         return "candidate_filter"
     if "quote" in normalized:

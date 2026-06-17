@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +55,11 @@ class _CatalogContext:
 
     def mask_path(self, value):
         return f".../{Path(value).name}" if value else None
+
+
+def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(json.dumps(row) for row in rows) + ("\n" if rows else ""), encoding="utf-8")
 
 
 def test_analysis_query_rejects_write_sql_before_context_access() -> None:
@@ -133,6 +139,7 @@ def test_analysis_catalog_exposes_p2_semantic_views() -> None:
                 "runtime_tick_status",
                 "quote_freshness",
                 "upgrade_operation_status",
+                "strategy_replay_read_surface",
             ]
         },
     )
@@ -147,6 +154,8 @@ def test_analysis_catalog_exposes_p2_semantic_views() -> None:
     assert "release_status" in data["views"]["upgrade_operation_status"]["fields"]
     assert "release_published_at" in data["views"]["upgrade_operation_status"]["fields"]
     assert "github_release_url" in data["views"]["upgrade_operation_status"]["fields"]
+    assert data["views"]["strategy_replay_read_surface"]["row_grain"] == "research artifact or replay dataset"
+    assert "dry_run_patch_allowed" in data["views"]["strategy_replay_read_surface"]["fields"]
 
 
 def test_analysis_catalog_exposes_investigation_recipes() -> None:
@@ -164,6 +173,19 @@ def test_analysis_catalog_exposes_investigation_recipes() -> None:
     assert "operation_status_readback" in recipes
     assert recipes["operation_status_readback"]["followup_tool"] == "operation_timeline"
     assert "operation_readback" in recipes["operation_status_readback"]["evidence_needs"]
+
+
+def test_analysis_catalog_strategy_replay_recipe_uses_read_surface() -> None:
+    data, _warnings, _meta = ANALYSIS_CATALOG_TOOL.call(
+        _CatalogContext(),
+        {"views": ["strategy_replay_read_surface", "candidate_filter_diagnostics"]},
+    )
+
+    recipes = {item["name"]: item for item in data["investigation_recipes"]}
+    assert "strategy_replay_review" in recipes
+    assert recipes["strategy_replay_review"]["followup_tool"] == "analysis_query"
+    assert "dry_run_or_replay" in recipes["strategy_replay_review"]["evidence_needs"]
+    assert "strategy_replay_read_surface" in recipes["strategy_replay_review"]["primary_views"]
 
 
 def test_analysis_query_authorizer_rejects_non_whitelisted_tables() -> None:
@@ -418,6 +440,210 @@ def test_analysis_query_candidate_filter_diagnostics_discovers_runtime_run_from_
     assert data["rows"] == [
         {"run_id": "run-hk-key", "account": "sy", "symbol": "9992.HK", "status": "rejected", "rule": "risk_delta"}
     ]
+
+
+def test_analysis_query_strategy_replay_read_surface_reads_research_artifacts(tmp_path: Path) -> None:
+    result_path = (
+        tmp_path
+        / "output_shared"
+        / "research"
+        / "shadow_replay"
+        / "backtests"
+        / "candidate-impact-report-us-2026-06-02"
+        / "result.us.json"
+    )
+    result_path.parent.mkdir(parents=True)
+    result_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "shadow_replay_candidate_impact.v1",
+                "generated_at_utc": "2026-06-17T00:00:00Z",
+                "data_mode": "closed_replay",
+                "universe_scope": "observed_run_universe",
+                "coverage": {
+                    "strict_backtest_allowed": True,
+                    "selected_run_ids": ["run-1"],
+                },
+                "filters": {"accounts": ["lx"], "market": "us"},
+                "summary": {
+                    "candidate_snapshot_count": 42,
+                    "underwriting_candidate_count": 40,
+                    "mark_path_snapshot_count": 38,
+                    "usable_mark_path_snapshot_count": 38,
+                    "outcome_fact_count": 35,
+                    "min_sample": 30,
+                },
+                "gates": {
+                    "candidate_impact": {"allowed": True, "status": "ready"},
+                    "production_recommendation": {"allowed": False, "status": "blocked"},
+                },
+                "candidate_impact": {
+                    "allowed": True,
+                    "status": "ready",
+                    "best_variant_by_new_accepts": "iv_rv_1_10",
+                },
+                "recommendation": {
+                    "status": "ready_for_live_shadow_review",
+                    "production_recommendation_allowed": False,
+                    "candidate_variant": "iv_rv_1_10",
+                    "next_action": "review_variant_then_run_live_shadow_before_production_change",
+                },
+                "safety": {"writes_runtime_config": False},
+            }
+        ),
+        encoding="utf-8",
+    )
+    proposal_path = tmp_path / "output_shared" / "research" / "strategy_lab" / "experiments" / "case" / "proposal.json"
+    proposal_path.parent.mkdir(parents=True)
+    proposal_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "strategy_lab_proposal.v1",
+                "generated_at_utc": "2026-06-17T00:01:00Z",
+                "status": "shadow_rollout_candidate",
+                "strategy_family": "sell_put",
+                "recommended_variant": "iv_rv_1_10",
+                "confidence": "medium",
+                "runtime_config_write_allowed": False,
+                "production_recommendation_allowed": False,
+                "dry_run_patch": {"sell_put.insurance_underwriting.min_iv_rv_ratio": 1.1},
+                "evidence_summary": {
+                    "data_mode": "closed_replay",
+                    "universe_scope": "observed_run_universe",
+                    "optimization_claim": "observed_universe_only",
+                },
+                "impact": {"candidate_count": 40},
+                "limitations": ["proposal_is_advisory_only"],
+                "next_action": "review_shadow_rollout",
+                "safety": {"runtime_config_write_allowed": False},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    data, warnings, meta = ANALYSIS_QUERY_TOOL.call(
+        _AnalysisQueryContext(tmp_path),
+        {
+            "sql": (
+                "select artifact_kind, status, data_mode, candidate_impact_allowed, "
+                "production_recommendation_allowed, dry_run_patch_allowed, best_variant, strategy_family "
+                "from strategy_replay_read_surface order by artifact_kind"
+            ),
+            "limit": 10,
+        },
+    )
+
+    assert warnings == []
+    assert data["rows"] == [
+        {
+            "artifact_kind": "shadow_replay_candidate_impact",
+            "status": "ready_for_live_shadow_review",
+            "data_mode": "closed_replay",
+            "candidate_impact_allowed": 1,
+            "production_recommendation_allowed": 0,
+            "dry_run_patch_allowed": 0,
+            "best_variant": "iv_rv_1_10",
+            "strategy_family": None,
+        },
+        {
+            "artifact_kind": "strategy_lab_proposal",
+            "status": "shadow_rollout_candidate",
+            "data_mode": "closed_replay",
+            "candidate_impact_allowed": None,
+            "production_recommendation_allowed": 0,
+            "dry_run_patch_allowed": 1,
+            "best_variant": "iv_rv_1_10",
+            "strategy_family": "sell_put",
+        },
+    ]
+    assert data["evidence"]["diagnostics"] == [
+        {
+            "view": "strategy_replay_read_surface",
+            "status": "observed_strategy_replay_evidence",
+            "severity": "info",
+            "artifact_kinds": ["shadow_replay_candidate_impact", "strategy_lab_proposal"],
+            "statuses": ["ready_for_live_shadow_review", "shadow_rollout_candidate"],
+            "data_modes": ["closed_replay"],
+            "strategy_families": ["sell_put"],
+            "summary": (
+                "strategy replay read-surface rows were observed "
+                "(artifacts=shadow_replay_candidate_impact,strategy_lab_proposal; "
+                "data_mode=closed_replay; dry_run_patch_available; candidate_impact_allowed)"
+            ),
+            "answer_boundary": "offline_replay_or_dry_run_evidence_only",
+            "dry_run_patch_allowed": True,
+            "candidate_impact_allowed": True,
+        }
+    ]
+    assert meta["requested_views"] == ["strategy_replay_read_surface"]
+    assert meta["materialized_views"] == ["strategy_replay_read_surface"]
+
+
+def test_analysis_query_strategy_replay_read_surface_reads_dataset_status(tmp_path: Path) -> None:
+    dataset = tmp_path / "output_shared" / "research" / "shadow_replay" / "datasets" / "case-dataset"
+    _write_jsonl(
+        dataset / "candidate_snapshots.jsonl",
+        [
+            {
+                "symbol": "NVDA",
+                "account": "lx",
+                "status": "accepted",
+                "contract_symbol": "NVDA260619P00100000",
+                "option_type": "put",
+                "strategy_profile": "short_vol",
+            }
+        ],
+    )
+    _write_jsonl(dataset / "filter_decisions.jsonl", [])
+    _write_jsonl(dataset / "mark_path_snapshots.jsonl", [])
+    _write_jsonl(dataset / "outcome_facts.jsonl", [])
+
+    data, warnings, meta = ANALYSIS_QUERY_TOOL.call(
+        _AnalysisQueryContext(tmp_path),
+        {
+            "sql": (
+                "select artifact_kind, dataset_id, status, data_mode, candidate_snapshot_count, "
+                "production_recommendation_allowed from strategy_replay_read_surface"
+            ),
+            "limit": 10,
+        },
+    )
+
+    assert warnings == []
+    assert data["rows"] == [
+        {
+            "artifact_kind": "shadow_replay_dataset",
+            "dataset_id": "case-dataset",
+            "status": "not_ready",
+            "data_mode": "filter_only",
+            "candidate_snapshot_count": 1,
+            "production_recommendation_allowed": 0,
+        }
+    ]
+    assert data["evidence"]["diagnostics"][0]["status"] == "observed_strategy_replay_evidence"
+    assert meta["requested_views"] == ["strategy_replay_read_surface"]
+    assert meta["materialized_views"] == ["strategy_replay_read_surface"]
+
+
+def test_analysis_query_strategy_replay_read_surface_missing_artifact_returns_warning(tmp_path: Path) -> None:
+    data, warnings, meta = ANALYSIS_QUERY_TOOL.call(
+        _AnalysisQueryContext(tmp_path),
+        {"sql": "select count(*) as row_count from strategy_replay_read_surface", "limit": 10},
+    )
+
+    assert data["rows"] == [{"row_count": 0}]
+    assert warnings == ["strategy_replay_read_surface missing: no Strategy Lab or Shadow Replay artifacts found"]
+    assert data["evidence"]["diagnostics"] == [
+        {
+            "view": "strategy_replay_read_surface",
+            "status": "diagnostic_missing",
+            "severity": "warning",
+            "summary": "no Strategy Lab or Shadow Replay artifacts found",
+            "answer_boundary": "cannot infer diagnostic root cause",
+        }
+    ]
+    assert meta["requested_views"] == ["strategy_replay_read_surface"]
+    assert meta["materialized_views"] == ["strategy_replay_read_surface"]
 
 
 def test_analysis_query_close_advice_snapshot_missing_artifact_returns_warning(
