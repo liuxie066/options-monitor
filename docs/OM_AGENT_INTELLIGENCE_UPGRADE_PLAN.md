@@ -282,3 +282,14 @@ Release gate：
 
 本文档的短期实现目标是 1-6 的 read-only 智能化主线；Phase 7 保持现有
 pending-operation 权限权威，并补足 trace / verify / eval，而不扩大写权限。
+
+当前落地切片：
+
+- `analysis_catalog` 暴露 `investigation_recipes`，让 Planner 能把任务契约和证据缺口映射到
+  `analysis_query`、`operation_timeline`、`assistant_trace` 等通用调查工具。
+- Planner schema / trace 已接入 `selected_recipe`；新 planner 可显式声明 recipe，旧 planner
+  缺省时 runtime 会按 `task_contract` 推导，并写入 AgentSession plan revision。
+- preview / confirm / cancel / readback 的 AgentSession trace 携带 `action_lifecycle`，
+  `operation_timeline` 也输出 phase / verify status，方便执行后用通用读回证据解释闭环。
+- 仍保留受控 follow-up 和 pending-operation 权限边界；未给 Planner 任意 shell、任意 Python
+  或直接生产写权限。

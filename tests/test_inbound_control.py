@@ -754,12 +754,18 @@ def test_inbound_manual_trade_preview_and_confirm_open(monkeypatch: pytest.Monke
     assert identity["ledger_event_id"]
     assert identity["record_id"]
     assert timeline["operation"]["status"] == "applied"
+    assert timeline["action_lifecycle"]["schema_version"] == "om-agent-action-lifecycle-v1"
+    assert timeline["action_lifecycle"]["status"] == "applied"
+    assert timeline["action_lifecycle"]["phase"] == "verify"
+    assert timeline["action_lifecycle"]["verify_status"] == "verified_applied"
     assert timeline["audit"]["apply_count"] == 1
     assert timeline["ledger"]["present"] is True
     assert "ledger_event_id_missing" not in timeline["warnings"]
     assert "record_id_missing" not in timeline["warnings"]
     assert "apply_audit_missing" not in timeline["warnings"]
     assert "receipt_not_observed" in timeline["warnings"]
+    assert "phase=verify" in timeline_out["data"]["response_text"]
+    assert "verify=verified_applied" in timeline_out["data"]["response_text"]
 
 
 def test_operation_timeline_reports_audit_only_operation_when_store_missing(tmp_path: Path) -> None:
@@ -866,6 +872,9 @@ def test_operation_timeline_reports_audit_only_operation_when_store_missing(tmp_
     assert timeline["audit"]["apply_count"] == 1
     assert timeline["receipt"]["status"] == "observed"
     assert timeline["receipt"]["message_id"] == "reply_1"
+    assert timeline["action_lifecycle"]["status"] == "applied"
+    assert timeline["action_lifecycle"]["phase"] == "verify"
+    assert timeline["action_lifecycle"]["verify_status"] == "verified_applied"
     assert "operation_store_missing" in timeline["warnings"]
     assert "operation_missing" in timeline["warnings"]
     assert "ledger_event_id_missing" not in timeline["warnings"]
@@ -917,6 +926,8 @@ def test_operation_timeline_exposes_upgrade_version_fields(tmp_path: Path) -> No
     assert operation["target_version"] == "1.2.164"
     assert operation["release_tag"] == "v1.2.164"
     assert operation["summary"] == "1.2.163 -> 1.2.164 status dry_run"
+    assert out["timelines"][0]["action_lifecycle"]["status"] == "previewed"
+    assert out["timelines"][0]["action_lifecycle"]["phase"] == "preview"
 
 
 def test_inbound_manual_trade_confirm_rejects_signature_mismatch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

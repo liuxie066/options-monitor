@@ -6859,6 +6859,11 @@ def test_assistant_runtime_agent_loop_plans_manual_trade_open_preview(monkeypatc
     assert preview_receipt["confirm_required"] is True
     assert preview_receipt["apply_allowed"] is False
     assert preview_receipt["handler_tool"] == "inbound.manual_trade"
+    preview_lifecycle = preview_receipt["action_lifecycle"]
+    assert preview_lifecycle["schema_version"] == "om-agent-action-lifecycle-v1"
+    assert preview_lifecycle["status"] == "previewed"
+    assert preview_lifecycle["phase"] == "preview"
+    assert preview_lifecycle["required_next_action"] == "confirm_or_cancel"
     assert agent_loop["steps"][0]["preview_receipt"] == preview_receipt
     step_postcheck = agent_loop["steps"][0]["postcheck"]
     assert step_postcheck["schema_version"] == TOOL_CHECK_SCHEMA_VERSION
@@ -6869,6 +6874,7 @@ def test_assistant_runtime_agent_loop_plans_manual_trade_open_preview(monkeypatc
         "receipt": "pass",
         "permission_request": "pass",
         "confirmation_guard": "pass",
+        "action_lifecycle": "pass",
     }
     assert any(
         item["hook"] == "receipt" and item["stage"] == "post_tool" and item["status"] == "pass"
@@ -6896,6 +6902,8 @@ def test_assistant_runtime_agent_loop_plans_manual_trade_open_preview(monkeypatc
     assert trace_entry["answer"]["response_status"] == "preview"
     assert trace_entry["permission_state"]["pending_operation_ids"] == [out["data"]["operation_id"]]
     assert trace_entry["permission_state"]["apply_allowed"] is False
+    assert trace_entry["permission_state"]["action_lifecycle"]["status"] == "previewed"
+    assert trace_entry["permission_state"]["action_lifecycle"]["verify_status"] == "pending_final_readback"
     trace_tool = trace_entry["tools"][0]
     assert trace_tool["tool_name"] == "manual_trade_open"
     assert trace_tool["payload"] == {"account": "sy"}
@@ -6946,6 +6954,9 @@ def test_assistant_runtime_agent_loop_plans_manual_trade_open_preview(monkeypatc
     assert applied_entry["answer"]["response_status"] == "applied"
     assert applied_entry["permission_state"]["pending_operation_ids"] == []
     assert applied_entry["permission_state"]["operation_status"] == "applied"
+    assert applied_entry["permission_state"]["action_lifecycle"]["status"] == "applied"
+    assert applied_entry["permission_state"]["action_lifecycle"]["phase"] == "verify"
+    assert applied_entry["permission_state"]["action_lifecycle"]["verify_status"] == "verified_applied"
     applied_tool = applied_entry["tools"][0]
     assert applied_tool["tool_name"] == "inbound.manual_trade"
     assert applied_tool["payload"]["operation_id"] == out["data"]["operation_id"]
@@ -6954,7 +6965,9 @@ def test_assistant_runtime_agent_loop_plans_manual_trade_open_preview(monkeypatc
     assert applied_tool["payload"]["symbol"] == "0700.HK"
     assert "raw_text" not in applied_tool["payload"]
     assert applied_tool["postcheck"]["status"] == "pass"
+    assert applied_tool["action_lifecycle"]["status"] == "applied"
     assert any(item["hook"] == "operation_readback" and item["status"] == "pass" for item in applied_tool["hook_results"])
+    assert any(item["hook"] == "action_lifecycle" and item["status"] == "pass" for item in applied_tool["hook_results"])
     applied_trace_text = applied_trace["response_text"]
     assert "工具：读取OM 本地操作回执（ok，1 行）" in applied_trace_text
     assert "最终：applied（operation readback）" in applied_trace_text
@@ -7085,6 +7098,9 @@ def test_assistant_runtime_agent_loop_cancels_manual_trade_open_preview(monkeypa
     assert cancelled_entry["answer"]["response_status"] == "cancelled"
     assert cancelled_entry["permission_state"]["pending_operation_ids"] == []
     assert cancelled_entry["permission_state"]["operation_status"] == "cancelled"
+    assert cancelled_entry["permission_state"]["action_lifecycle"]["status"] == "cancelled"
+    assert cancelled_entry["permission_state"]["action_lifecycle"]["phase"] == "audit"
+    assert cancelled_entry["permission_state"]["action_lifecycle"]["verify_status"] == "verified_cancelled"
     cancelled_tool = cancelled_entry["tools"][0]
     assert cancelled_tool["tool_name"] == "inbound.manual_trade"
     assert cancelled_tool["payload"]["operation_id"] == previewed["data"]["operation_id"]
@@ -7093,10 +7109,12 @@ def test_assistant_runtime_agent_loop_cancels_manual_trade_open_preview(monkeypa
     assert cancelled_tool["payload"]["symbol"] == "0700.HK"
     assert "raw_text" not in cancelled_tool["payload"]
     assert cancelled_tool["postcheck"]["status"] == "pass"
+    assert cancelled_tool["action_lifecycle"]["status"] == "cancelled"
     assert any(
         item["hook"] == "operation_readback" and item["status"] == "pass"
         for item in cancelled_tool["hook_results"]
     )
+    assert any(item["hook"] == "action_lifecycle" and item["status"] == "pass" for item in cancelled_tool["hook_results"])
     cancelled_trace_text = cancelled_trace["response_text"]
     assert "任务：记录开仓预览：sy 0700.HK" in cancelled_trace_text
     assert "工具：读取OM 本地操作回执（ok，1 行）" in cancelled_trace_text

@@ -2363,6 +2363,10 @@ def test_planner_task_contract_payload_survives_plan_schema() -> None:
             "required_evidence": ["summary", "driver_or_breakdown", "source_policy"],
             "answer_shape": ["conclusion", "drivers", "source_policy"],
         },
+        "selected_recipe": {
+            "name": "income_analysis_breakdown",
+            "reason": "income analysis requires driver evidence",
+        },
         "required_capabilities": ["analysis_query", "read_only"],
         "steps": [
             {
@@ -2380,6 +2384,9 @@ def test_planner_task_contract_payload_survives_plan_schema() -> None:
 
     assert plan.task_contract is not None
     assert plan.public_payload()["task_contract"]["task_mode"] == "analyze"
+    assert plan.public_payload()["selected_recipe"]["name"] == "income_analysis_breakdown"
+    assert plan.public_payload()["selected_recipe"]["followup_tool"] == "analysis_query"
+    assert "driver_or_breakdown" in plan.public_payload()["selected_recipe"]["evidence_needs"]
 
     contract = build_task_contract(
         question="6月收益分析",
@@ -3092,6 +3099,10 @@ def test_agent_loop_tool_result_contains_evidence_bundle_and_session(tmp_path: P
     assert session["goal"] == "查看 lx 指派正股持仓盈亏"
     assert session["task_contract"]["schema_version"] == TASK_CONTRACT_SCHEMA_VERSION
     assert session["task_contract"]["intent_families"] == ["assigned_stock_pnl"]
+    session_recipe = session["plan_revisions"][0]["plan"]["selected_recipe"]
+    assert session_recipe["name"] == "position_or_quote_diagnosis"
+    assert session_recipe["match_source"] == "runtime_inferred"
+    assert "quote_freshness" in session_recipe["evidence_needs"]
     assert session["coverage"]["schema_version"] == COVERAGE_RESULT_SCHEMA_VERSION
     assert session["coverage"]["status"] == "complete"
     assert session["evidence_bundle"]["fact_count"] == len(evidence["facts"])
@@ -3146,6 +3157,9 @@ def test_agent_loop_tool_result_contains_evidence_bundle_and_session(tmp_path: P
     assert trace_entry["identity"]["session_id"] == session["session_id"]
     assert trace_entry["task"]["goal"] == "查看 lx 指派正股持仓盈亏"
     assert trace_entry["plan"]["revision_count"] == 1
+    trace_recipe = trace_entry["plan"]["revisions"][0]["selected_recipe"]
+    assert trace_recipe["name"] == "position_or_quote_diagnosis"
+    assert trace_recipe["match_source"] == "runtime_inferred"
     assert trace_entry["tools"][0]["tool_name"] == "option_positions_read"
     assert trace_entry["tools"][0]["action_policy"]["decision"] == "allow_read"
     assert trace_entry["tools"][0]["action_safety"]["code"] == "ok"

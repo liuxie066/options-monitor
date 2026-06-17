@@ -149,6 +149,23 @@ def test_analysis_catalog_exposes_p2_semantic_views() -> None:
     assert "github_release_url" in data["views"]["upgrade_operation_status"]["fields"]
 
 
+def test_analysis_catalog_exposes_investigation_recipes() -> None:
+    data, _warnings, _meta = ANALYSIS_CATALOG_TOOL.call(
+        _CatalogContext(),
+        {"views": ["account_monthly_performance", "symbol_income_attribution", "upgrade_operation_status"]},
+    )
+
+    recipes = {item["name"]: item for item in data["investigation_recipes"]}
+    assert "income_analysis_breakdown" in recipes
+    assert recipes["income_analysis_breakdown"]["followup_tool"] == "analysis_query"
+    assert "driver_or_breakdown" in recipes["income_analysis_breakdown"]["evidence_needs"]
+    assert "symbol_income_attribution" in recipes["income_analysis_breakdown"]["primary_views"]
+
+    assert "operation_status_readback" in recipes
+    assert recipes["operation_status_readback"]["followup_tool"] == "operation_timeline"
+    assert "operation_readback" in recipes["operation_status_readback"]["evidence_needs"]
+
+
 def test_analysis_query_authorizer_rejects_non_whitelisted_tables() -> None:
     with pytest.raises(AgentToolError) as exc:
         _execute_select(

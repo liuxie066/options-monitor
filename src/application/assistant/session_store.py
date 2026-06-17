@@ -438,6 +438,7 @@ _DISPLAY_HOOKS = {
     "receipt",
     "confirmation_guard",
     "operation_readback",
+    "action_lifecycle",
     "operation_identity",
     "final_status",
     "answer_guard",
@@ -600,6 +601,7 @@ def _compact_plan_revisions(value: Any) -> list[dict[str, Any]]:
                 "revision": item.get("revision"),
                 "reason": item.get("reason"),
                 "goal": plan.get("goal"),
+                "selected_recipe": _compact_selected_recipe(plan.get("selected_recipe")),
                 "steps": [
                     {
                         "tool_name": step.get("tool_name"),
@@ -612,6 +614,23 @@ def _compact_plan_revisions(value: Any) -> list[dict[str, Any]]:
             }
         )
     return out
+
+
+def _compact_selected_recipe(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    allowed = {
+        "name",
+        "match_source",
+        "evidence_needs",
+        "primary_views",
+        "source_tools",
+        "external_evidence",
+        "followup_tool",
+        "answer_shape",
+        "reason",
+    }
+    return {key: value.get(key) for key in sorted(allowed) if key in value}
 
 
 def _compact_tools(value: Any) -> list[dict[str, Any]]:
@@ -634,12 +653,32 @@ def _compact_tools(value: Any) -> list[dict[str, Any]]:
                 "postcheck": _compact_tool_check(item.get("postcheck")),
                 "hook_results": _compact_hook_results(item.get("hook_results")),
                 "evidence_summary": _compact_evidence_summary(item.get("evidence_summary")),
+                "action_lifecycle": _compact_action_lifecycle(item.get("action_lifecycle")),
                 "ok": bool(item.get("ok", False)),
                 "error_code": item.get("error_code"),
                 "summary": dict(item.get("summary") or {}) if isinstance(item.get("summary"), dict) else {},
             }
         )
     return out
+
+
+def _compact_action_lifecycle(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    allowed = {
+        "schema_version",
+        "operation_id",
+        "operation_type",
+        "status",
+        "phase",
+        "stages",
+        "required_next_action",
+        "verify_status",
+        "audit_status",
+        "source",
+        "result_status",
+    }
+    return {key: value.get(key) for key in sorted(allowed) if key in value}
 
 
 def _compact_hook_results(value: Any) -> list[dict[str, Any]]:

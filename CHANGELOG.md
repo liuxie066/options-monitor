@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Added
+- Added investigation recipes to the read-only analysis catalog so Agent planners can map task contracts and evidence
+  gaps to generic analysis views, `analysis_query`, `operation_timeline`, and trace tools.
+- Added Planner `selected_recipe` trace support so Agent sessions record the investigation recipe chosen from the task
+  contract, including runtime inference for older planner outputs.
+- Added action lifecycle evidence to preview/readback traces and `operation_timeline`, exposing preview/confirm/execute/
+  verify/audit phase, required next action, and verification status without expanding write permissions.
+
 ## 1.2.299 - 2026-06-17
 
 ### Added

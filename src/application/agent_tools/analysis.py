@@ -1000,6 +1000,7 @@ def _analysis_catalog_tool(
         "field_types": _catalog_field_types(specs),
         "aggregation_policies": _catalog_aggregation_policies(specs),
         "join_policies": _catalog_join_policies(specs),
+        "investigation_recipes": _catalog_investigation_recipes(specs),
         "sql_rules": {
             "allowed_statements": ["SELECT", "WITH"],
             "single_statement_only": True,
@@ -1052,6 +1053,70 @@ def _catalog_join_policies(specs: dict[str, dict[str, Any]]) -> dict[str, dict[s
         }
         for view_name, spec in specs.items()
     }
+
+
+def _catalog_investigation_recipes(specs: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    visible_views = set(specs)
+    recipes = [
+        {
+            "name": "income_analysis_breakdown",
+            "domains": ["income"],
+            "task_modes": ["analyze", "compare"],
+            "evidence_needs": ["summary", "driver_or_breakdown", "same_scope_comparable_data"],
+            "primary_views": [
+                "account_monthly_performance",
+                "account_monthly_income_components",
+                "symbol_income_attribution",
+            ],
+            "followup_tool": "analysis_query",
+            "answer_shape": ["conclusion", "drivers", "source_policy"],
+        },
+        {
+            "name": "position_or_quote_diagnosis",
+            "domains": ["position", "runtime"],
+            "task_modes": ["diagnose", "explain"],
+            "evidence_needs": ["current_state", "diagnostic_evidence", "quote_freshness"],
+            "primary_views": ["assigned_stock_position_pnl", "quote_freshness", "runtime_tick_status"],
+            "followup_tool": "analysis_query",
+            "answer_shape": ["observation", "cause_chain", "evidence_boundary"],
+        },
+        {
+            "name": "operation_status_readback",
+            "domains": ["operation"],
+            "task_modes": ["diagnose", "explain"],
+            "evidence_needs": ["observed_status", "operation_readback", "receipt_status"],
+            "primary_views": ["upgrade_operation_status"],
+            "source_tools": ["operation_timeline", "assistant_trace"],
+            "followup_tool": "operation_timeline",
+            "answer_shape": ["observation", "cause_chain", "evidence_boundary", "next_step"],
+        },
+        {
+            "name": "strategy_replay_review",
+            "domains": ["strategy", "candidate"],
+            "task_modes": ["analyze", "recommend"],
+            "evidence_needs": ["current_state", "constraints", "risk_premise", "dry_run_or_replay"],
+            "primary_views": ["candidate_filter_diagnostics", "close_advice_snapshot", "strategy_config_by_symbol_account"],
+            "source_tools": ["analysis_query"],
+            "external_evidence": ["research_shadow_replay_or_strategy_lab_dry_run"],
+            "followup_tool": "analysis_query",
+            "answer_shape": ["judgement", "options", "risk", "premise"],
+        },
+        {
+            "name": "action_lifecycle_audit",
+            "domains": ["operation"],
+            "task_modes": ["preview_write", "diagnose"],
+            "evidence_needs": ["permission_request", "preview_receipt", "operation_readback", "audit"],
+            "primary_views": ["upgrade_operation_status"],
+            "source_tools": ["operation_timeline", "assistant_trace"],
+            "followup_tool": "operation_timeline",
+            "answer_shape": ["preview_summary", "risk", "confirmation_handle", "verification_status"],
+        },
+    ]
+    return [
+        recipe
+        for recipe in recipes
+        if not visible_views or visible_views.intersection(str(view) for view in recipe.get("primary_views") or [])
+    ]
 
 
 def _analysis_query_tool(
@@ -3304,6 +3369,8 @@ ANALYSIS_CATALOG_TOOL = build_agent_tool(
         "fact_fields": [
             "view_count",
             "view_names[]",
+            "investigation_recipes[].name",
+            "investigation_recipes[].primary_views[]",
             "sql_rules.allowed_statements[]",
             "sql_rules.writes_allowed",
         ],

@@ -7,6 +7,7 @@ from typing import Any
 
 from src.application.agent_tool_contracts import mask_path
 from src.application.assistant.audit import InboundAuditStore, inbound_sqlite_error
+from src.application.assistant.operation_lifecycle import build_action_lifecycle
 from src.application.assistant.operation_store import InboundOperationStore
 from src.application.assistant.renderer import render_pending_operations
 
@@ -207,11 +208,14 @@ def format_operation_timeline(timelines: list[dict[str, Any]], *, filters: dict[
         identity = _dict(item.get("identity"))
         operation = _dict(item.get("operation"))
         outcome = _dict(item.get("outcome"))
+        lifecycle = _dict(item.get("action_lifecycle"))
         lines.append(
             "- "
             f"{operation.get('created_at') or '-'} "
             f"{operation.get('operation_type') or '-'} "
             f"status={outcome.get('status') or operation.get('status') or '-'} "
+            f"phase={lifecycle.get('phase') or '-'} "
+            f"verify={lifecycle.get('verify_status') or '-'} "
             f"operation_id={identity.get('operation_id') or '-'} "
             f"event={identity.get('ledger_event_id') or '-'} "
             f"record={identity.get('record_id') or '-'} "
@@ -433,6 +437,14 @@ def _build_operation_timeline(operation: dict[str, Any], audit_rows: list[dict[s
         inbound_message_id=inbound_message_id,
     )
     status = str(operation.get("status") or "").strip()
+    operation_type = str(operation.get("operation_type") or "").strip()
+    lifecycle = build_action_lifecycle(
+        operation_id=operation_id,
+        operation_type=operation_type,
+        status=status,
+        result=result,
+        source="operation_timeline",
+    )
     return {
         "schema_version": OPERATION_TIMELINE_SCHEMA_VERSION,
         "identity": {
@@ -450,7 +462,7 @@ def _build_operation_timeline(operation: dict[str, Any], audit_rows: list[dict[s
         "operation": {
             "operation_id": operation_id or None,
             "command_id": command_id or None,
-            "operation_type": operation.get("operation_type"),
+            "operation_type": operation_type or None,
             "status": status or None,
             "summary": _operation_summary(operation),
             **_operation_version_fields(operation),
@@ -461,6 +473,7 @@ def _build_operation_timeline(operation: dict[str, Any], audit_rows: list[dict[s
             "applied_at": operation.get("applied_at"),
             "cancelled_at": operation.get("cancelled_at"),
         },
+        "action_lifecycle": lifecycle,
         "audit": {
             "preview_command_id": command_id or None,
             "preview_message_id": preview_audit.get("message_id") if isinstance(preview_audit, dict) else None,
@@ -540,6 +553,13 @@ def _build_audit_only_timeline(operation_id: str, rows: list[dict[str, Any]], *,
         )
     )
     warnings = list(dict.fromkeys(warnings))
+    lifecycle = build_action_lifecycle(
+        operation_id=operation_id,
+        operation_type=operation_type or "",
+        status=status,
+        result={"status": status},
+        source="operation_timeline_audit_only",
+    )
     return {
         "schema_version": OPERATION_TIMELINE_SCHEMA_VERSION,
         "identity": {
@@ -568,6 +588,7 @@ def _build_audit_only_timeline(operation_id: str, rows: list[dict[str, Any]], *,
             "cancelled_at": None,
             "source": "audit_only",
         },
+        "action_lifecycle": lifecycle,
         "audit": {
             "preview_command_id": operation_id,
             "preview_message_id": preview_audit.get("message_id") if isinstance(preview_audit, dict) else None,
