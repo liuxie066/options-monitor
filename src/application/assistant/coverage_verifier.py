@@ -214,7 +214,7 @@ def _account_comparison_metric_gaps(
 
 
 def _breakdown_gaps(*, task_contract: TaskContract, datasets: list[dict[str, Any]], facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    if "breakdown" not in task_contract.intent_families:
+    if not _task_requires_breakdown(task_contract):
         return []
     if _has_breakdown_evidence(datasets=datasets, facts=facts):
         return []
@@ -230,6 +230,13 @@ def _breakdown_gaps(*, task_contract: TaskContract, datasets: list[dict[str, Any
             "reason": "task contract requires breakdown/main-driver evidence, but only summary evidence is covered",
         }
     ]
+
+
+def _task_requires_breakdown(task_contract: TaskContract) -> bool:
+    if "breakdown" in task_contract.intent_families:
+        return True
+    required = {str(item).strip() for item in task_contract.required_evidence if str(item).strip()}
+    return bool(required & {"driver_or_breakdown", "income_components"})
 
 
 def _assigned_stock_quote_gaps(
@@ -630,8 +637,22 @@ def _has_breakdown_evidence(*, datasets: list[dict[str, Any]], facts: list[dict[
     if views & {"account_monthly_income_components", "symbol_income_attribution"}:
         return True
     paths = {str(item.get("path") or "").lower() for item in facts}
+    if any(
+        path.startswith(("cashflow_rows[]", "realized_rows[]", "premium_rows[]"))
+        for path in paths
+    ) and any("symbol" in path for path in paths):
+        return True
     return any("component" in path for path in paths) or (
-        any("symbol" in path for path in paths) and any("amount" in path or "income" in path or "pnl" in path for path in paths)
+        any("symbol" in path for path in paths)
+        and any(
+            "amount" in path
+            or "income" in path
+            or "pnl" in path
+            or "cashflow" in path
+            or "premium" in path
+            or "realized" in path
+            for path in paths
+        )
     )
 
 

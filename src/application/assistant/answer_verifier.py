@@ -289,6 +289,8 @@ def verify_response_shape(
     compact = re.sub(r"\s+", "", text.lower())
     required = tuple(str(item) for item in contract.get("required_answer") or [] if str(item).strip())
     families = {str(item) for item in contract.get("intent_families") or [] if str(item).strip()}
+    task_mode = str(contract.get("task_mode") or "").strip()
+    answer_shape = tuple(str(item) for item in contract.get("answer_shape") or [] if str(item).strip())
     scope = contract.get("scope") if isinstance(contract.get("scope"), dict) else {}
     coverage_payload = coverage if isinstance(coverage, dict) else {}
     coverage_missing = tuple(str(item) for item in coverage_payload.get("missing") or [] if str(item).strip())
@@ -298,22 +300,48 @@ def verify_response_shape(
     if "account_comparison" not in families:
         satisfied.update(required)
         enforced_missing_keys: set[str] = set()
+        strict_shape_keys: set[str] = set()
+        enforced_shape_keys: dict[str, str] = {}
+        if task_mode == "analyze":
+            if "main_drivers" in required:
+                enforced_missing_keys.add("main_drivers")
+                strict_shape_keys.add("main_drivers")
+            if "drivers" in answer_shape:
+                enforced_shape_keys["drivers"] = "main_drivers"
         if "assigned_stock_pnl" in families and any(str(gap.get("kind") or "") == "recoverable_missing_quote" for gap in coverage_gaps):
             enforced_missing_keys.update({"spot_freshness", "unrealized_pnl", "lifecycle_pnl"})
         if "upgrade_status" in families:
             enforced_missing_keys.update({"command_status", "current_version", "target_version", "release_status"})
         for key in required:
-            if key not in enforced_missing_keys or key not in coverage_missing:
+            if key not in enforced_missing_keys:
+                continue
+            if key not in coverage_missing and key not in strict_shape_keys:
+                continue
+            if key not in coverage_missing and _shape_key_satisfied(compact, key=key, families=families):
+                continue
+            if key not in coverage_missing and _shape_missing_key_acknowledged(compact, key=key, gaps=coverage_gaps):
                 continue
             satisfied.discard(key)
-            if _shape_missing_key_acknowledged(compact, key=key, gaps=coverage_gaps):
+            if key in coverage_missing and _shape_missing_key_acknowledged(compact, key=key, gaps=coverage_gaps):
                 satisfied.add(key)
                 continue
             violations.append(
                 _shape_violation(
                     "answer_shape_missing_required_key",
                     key,
-                    "coverage marks this required answer as missing, but the response does not explain the missing evidence",
+                    "response does not satisfy this TaskContract answer requirement or explain the missing evidence",
+                )
+            )
+        for shape_key, answer_key in enforced_shape_keys.items():
+            if _shape_key_satisfied(compact, key=answer_key, families=families):
+                continue
+            if _shape_missing_key_acknowledged(compact, key=answer_key, gaps=coverage_gaps):
+                continue
+            violations.append(
+                _shape_violation(
+                    "answer_shape_missing_required_key",
+                    shape_key,
+                    "response does not cover this TaskContract answer shape",
                 )
             )
         return AnswerShapeVerificationResult(
@@ -384,7 +412,10 @@ def _shape_key_satisfied(compact: str, *, key: str, families: set[str]) -> bool:
     if key == "rate_difference":
         return any(token in compact for token in ("收益率", "现金流率", "已实现率", "权利金率", "百分点", "%", "％", "无法比较", "不能比较"))
     if key == "main_drivers":
-        return any(token in compact for token in ("主要", "来自", "来源", "贡献", "驱动", "原因", "组成", "构成", "top", "driver", "无法判断", "不能判断"))
+        return any(
+            token in compact
+            for token in ("主要", "来自", "来源", "贡献", "驱动", "原因", "组成", "构成", "明细", "top", "driver", "无法判断", "不能判断")
+        )
     if key == "shares_remaining":
         return "剩余" in compact and "股" in compact
     if key == "cost_basis":
