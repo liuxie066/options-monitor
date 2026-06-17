@@ -16,6 +16,7 @@ from src.application.assistant.agent_loop import (
     PlannerPlanStep,
     TOOL_CHECK_SCHEMA_VERSION,
     TOOL_PLAN_SCHEMA_VERSION,
+    parse_tool_plan_payload,
 )
 from src.application.assistant.action_policy import ACTION_POLICY_SCHEMA_VERSION
 from src.application.assistant.action_safety import ACTION_SAFETY_SCHEMA_VERSION
@@ -2347,6 +2348,227 @@ def test_task_contract_and_coverage_detect_missing_account_comparison_scope() ->
     assert coverage["gaps"][0]["missing_accounts"] == ["sy"]
 
 
+def test_planner_task_contract_payload_survives_plan_schema() -> None:
+    payload = {
+        "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+        "goal": "分析 2026-06 收益来源",
+        "task_contract": {
+            "schema_version": TASK_CONTRACT_SCHEMA_VERSION,
+            "goal": "分析 2026-06 收益来源",
+            "domain": "income",
+            "task_mode": "analyze",
+            "requested_effect": "read",
+            "scope": {"months": ["2026-06"], "accounts": ["lx", "sy"], "config_keys": ["us"]},
+            "required_answer": ["summary", "main_drivers", "source_and_policy"],
+            "required_evidence": ["summary", "driver_or_breakdown", "source_policy"],
+            "answer_shape": ["conclusion", "drivers", "source_policy"],
+        },
+        "required_capabilities": ["analysis_query", "read_only"],
+        "steps": [
+            {
+                "id": "step_1",
+                "tool_name": "analysis_query",
+                "arguments": {
+                    "sql": "select month, account, net_income_cny from account_monthly_performance where month = '2026-06'",
+                    "limit": 20,
+                },
+                "purpose": "读取收益汇总",
+            }
+        ],
+    }
+    plan = parse_tool_plan_payload(payload)
+
+    assert plan.task_contract is not None
+    assert plan.public_payload()["task_contract"]["task_mode"] == "analyze"
+
+    contract = build_task_contract(
+        question="6月收益分析",
+        plan=plan.public_payload(),
+        request_context={"config_key": "us"},
+        today=date(2026, 6, 17),
+    )
+
+    assert contract.planner_declared is True
+    assert contract.domain == "income"
+    assert contract.task_mode == "analyze"
+    assert "driver_or_breakdown" in contract.required_evidence
+    assert "drivers" in contract.answer_shape
+    assert contract.scope["planned_months"] == ["2026-06"]
+    assert contract.scope["planned_accounts"] == ["lx", "sy"]
+
+
+def test_analyze_task_contract_requires_breakdown_when_only_summary_view_is_covered() -> None:
+    plan = PlannerPlan(
+        goal="分析 2026-06 收益来源",
+        task_contract={
+            "schema_version": TASK_CONTRACT_SCHEMA_VERSION,
+            "domain": "income",
+            "task_mode": "analyze",
+            "requested_effect": "read",
+            "scope": {"months": ["2026-06"]},
+            "required_answer": ["summary", "main_drivers", "source_and_policy"],
+            "required_evidence": ["summary", "driver_or_breakdown", "source_policy"],
+            "answer_shape": ["conclusion", "drivers", "source_policy"],
+        },
+        steps=(
+            PlannerPlanStep(
+                id="step_1",
+                tool_name="analysis_query",
+                arguments={
+                    "sql": "select month, account, net_income_cny from account_monthly_performance where month = '2026-06'",
+                    "limit": 20,
+                },
+                purpose="读取收益汇总",
+            ),
+        ),
+    )
+    contract = build_task_contract(
+        question="6月收益分析",
+        plan=plan.public_payload(),
+        request_context={"config_key": "us"},
+        today=date(2026, 6, 17),
+    )
+    bundle = build_evidence_bundle(
+        question="6月收益分析",
+        plan=plan.public_payload(),
+        observations=[
+            {
+                "index": 1,
+                "tool_name": "analysis_query",
+                "payload": plan.steps[0].arguments,
+                "ok": True,
+                "error": None,
+                "output_contract": {
+                    "schema_version": "analysis_query.output.v1",
+                    "canonical_renderer": "analysis_result",
+                    "source_label": "OM read-only analysis workspace",
+                    "guard_profile": "analysis_rows",
+                    "primary_rows": "rows",
+                    "row_count_field": "row_count",
+                    "fact_fields": [],
+                },
+                "data": {
+                    "columns": ["month", "account", "net_income_cny"],
+                    "rows": [{"month": "2026-06", "account": "lx", "net_income_cny": 2414.0}],
+                    "row_count": 1,
+                    "evidence": {
+                        "coverage": {
+                            "views": ["account_monthly_performance"],
+                            "months": ["2026-06"],
+                            "accounts": ["lx"],
+                            "symbols": [],
+                        }
+                    },
+                },
+            }
+        ],
+    )
+
+    coverage = verify_coverage(task_contract=contract, evidence_bundle=bundle).public_payload()
+
+    assert coverage["status"] == "recoverable_gap"
+    assert coverage["gaps"][0]["kind"] == "analysis_breakdown_needed"
+    assert coverage["gaps"][0]["suggested_views"] == ["account_monthly_income_components", "symbol_income_attribution"]
+
+
+def test_income_analysis_contract_accepts_monthly_detail_rows_as_breakdown_evidence() -> None:
+    plan = PlannerPlan(
+        goal="分析 2026-06 收益",
+        steps=(
+            PlannerPlanStep(
+                id="step_1",
+                tool_name="monthly_income_report",
+                arguments={"month": "2026-06", "include_rows": True},
+                purpose="读取收益分析明细",
+            ),
+        ),
+    )
+    contract = build_task_contract(
+        question="6月收益分析",
+        plan=plan.public_payload(),
+        request_context={"config_key": "us"},
+        today=date(2026, 6, 17),
+    )
+    bundle = build_evidence_bundle(
+        question="6月收益分析",
+        plan=plan.public_payload(),
+        observations=[
+            {
+                "index": 1,
+                "tool_name": "monthly_income_report",
+                "payload": {"config_key": "us", "month": "2026-06", "include_rows": True},
+                "ok": True,
+                "error": None,
+                "output_contract": {
+                    "schema_version": "monthly_income_report.detail_output.v1",
+                    "canonical_renderer": "monthly_income",
+                    "source_label": "OM 本地账本",
+                    "guard_profile": "income_rows",
+                    "primary_rows": "cashflow_rows",
+                    "row_count_field": "row_count",
+                    "fact_fields": [
+                        "cashflow_rows[].account",
+                        "cashflow_rows[].symbol",
+                        "cashflow_rows[].currency",
+                        "cashflow_rows[].net_cashflow_gross",
+                    ],
+                },
+                "data": {
+                    "filters": {"month": "2026-06"},
+                    "summary": [{"month": "2026-06", "account": "sy", "currency": "HKD", "net_cashflow_gross": 11200.0}],
+                    "cashflow_rows": [
+                        {
+                            "month": "2026-06",
+                            "account": "sy",
+                            "symbol": "0700.HK",
+                            "currency": "HKD",
+                            "net_cashflow_gross": 11200.0,
+                        }
+                    ],
+                    "row_count": 1,
+                    "cashflow_row_count": 1,
+                },
+            }
+        ],
+    )
+
+    coverage = verify_coverage(task_contract=contract, evidence_bundle=bundle).public_payload()
+
+    assert contract.domain == "income"
+    assert contract.task_mode == "analyze"
+    assert "driver_or_breakdown" in contract.required_evidence
+    assert "drivers" in contract.answer_shape
+    assert coverage["status"] == "complete"
+    assert coverage["gaps"] == []
+
+
+def test_answer_shape_requires_drivers_for_analysis_task() -> None:
+    task_contract = {
+        "schema_version": TASK_CONTRACT_SCHEMA_VERSION,
+        "domain": "income",
+        "task_mode": "analyze",
+        "requested_effect": "read",
+        "intent_families": ["general_analysis"],
+        "required_answer": ["summary", "source_and_policy"],
+        "answer_shape": ["conclusion", "drivers", "source_policy"],
+        "scope": {"requested_months": ["2026-06"]},
+    }
+
+    weak = verify_response_shape(
+        "2026-06 净收入 CNY 14,139，收益率 1.79%。",
+        task_contract=task_contract,
+        coverage={"status": "complete", "missing": [], "gaps": []},
+    ).public_payload()
+    strong = verify_response_shape(
+        "2026-06 收益主要来自 sy 的已实现 PnL 和权利金贡献，lx 贡献较小。",
+        task_contract=task_contract,
+        coverage={"status": "complete", "missing": [], "gaps": []},
+    ).public_payload()
+
+    assert weak["violations"][0]["required_answer_key"] == "drivers"
+    assert strong["violations"] == []
+
+
 def test_task_contract_does_not_treat_month_digits_as_symbols() -> None:
     plan = PlannerPlan(
         goal="对比 lx 和 sy 2026-05 的账户收益",
@@ -3865,8 +4087,25 @@ def test_agent_loop_monthly_income_composer_does_not_receive_fallback_renderer_t
                         "net_return_rate": 0.0235,
                     },
                 ],
+                "cashflow_rows": [
+                    {
+                        "month": "2026-06",
+                        "account": "lx",
+                        "symbol": "NVDA",
+                        "currency": "USD",
+                        "net_cashflow_gross": 420.0,
+                    },
+                    {
+                        "month": "2026-06",
+                        "account": "sy",
+                        "symbol": "0700.HK",
+                        "currency": "HKD",
+                        "net_cashflow_gross": 11200.0,
+                    },
+                ],
                 "filters": {"month": "2026-06"},
                 "row_count": 2,
+                "cashflow_row_count": 2,
                 "premium_row_count": 0,
             },
         )
@@ -3913,8 +4152,8 @@ def test_agent_loop_monthly_income_composer_does_not_receive_fallback_renderer_t
         assert observations[0]["data"]["return_summary"][1]["net_return_rate"] == 0.0235
         return LlmSynthesisResult(
             response_text=(
-                "2026-06 收益看，sy 的净现金流明显高于 lx：sy CNY 11,138，lx CNY 3,000；"
-                "现金流率分别是 2.35% 和 0.94%。"
+                "2026-06 收益看，sy 的净现金流明显高于 lx：sy CNY 11,138，lx CNY 3,000。"
+                "主要差异来自 sy 的 0700.HK 现金流贡献更大；现金流率分别是 2.35% 和 0.94%。"
             ),
             trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
         )
@@ -3936,11 +4175,12 @@ def test_agent_loop_monthly_income_composer_does_not_receive_fallback_renderer_t
     )
 
     assert out["ok"] is True
-    assert calls == [("monthly_income_report", {"config_key": "us", "month": "2026-06"})]
+    assert calls == [("monthly_income_report", {"config_key": "us", "include_rows": True, "month": "2026-06"})]
     assert len(observed_observations) == 1
     text = out["data"]["response_text"]
     assert not text.startswith("收益统计完成")
     assert "sy 的净现金流明显高于 lx" in text
+    assert "主要差异来自 sy" in text
     assert "数据来源：OM 本地账本" in text
     synthesis = out["data"]["action"]["result"]["data"]["synthesis"]
     assert synthesis["reason"] == "agent_composed_response"

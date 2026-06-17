@@ -7548,6 +7548,21 @@ def test_agent_loop_income_cashflow_eval_plan_guard() -> None:
             "expected": [{"tool_name": "monthly_income_report", "arguments": {"account": "lx", "month": "2026-06"}}],
         },
         {
+            "text": "6月收益分析",
+            "plan": PlannerPlan(
+                goal="分析 6月收益",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="monthly_income_report",
+                        arguments={"month": "2026-06"},
+                        purpose="查询6月收益摘要",
+                    ),
+                ),
+            ),
+            "expected": [{"tool_name": "monthly_income_report", "arguments": {"include_rows": True, "month": "2026-06"}}],
+        },
+        {
             "text": "6月收益",
             "plan": PlannerPlan(
                 goal="6月收益",

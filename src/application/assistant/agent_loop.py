@@ -230,15 +230,19 @@ class PlannerPlan:
     goal: str
     steps: tuple[PlannerPlanStep, ...]
     required_capabilities: tuple[str, ...] = ()
+    task_contract: dict[str, Any] | None = None
     schema_version: str = TOOL_PLAN_SCHEMA_VERSION
 
     def public_payload(self) -> dict[str, Any]:
-        return {
+        payload = {
             "schema_version": self.schema_version,
             "goal": self.goal,
             "required_capabilities": list(self.required_capabilities),
             "steps": [step.public_payload() for step in self.steps],
         }
+        if isinstance(self.task_contract, dict) and self.task_contract:
+            payload["task_contract"] = _safe_task_contract_payload(self.task_contract)
+        return payload
 
 
 @dataclass(frozen=True)
@@ -2140,7 +2144,7 @@ def synthesize_tool_plan_response(
 def parse_tool_plan_payload(payload: dict[str, Any]) -> PlannerPlan:
     if not isinstance(payload, dict):
         raise AgentToolError(code="INPUT_ERROR", message="tool plan must be a JSON object")
-    allowed_keys = {"schema_version", "goal", "required_capabilities", "steps"}
+    allowed_keys = {"schema_version", "goal", "required_capabilities", "steps", "task_contract"}
     extra_keys = sorted(str(key) for key in payload if str(key) not in allowed_keys)
     if extra_keys:
         raise AgentToolError(
@@ -2190,8 +2194,31 @@ def parse_tool_plan_payload(payload: dict[str, Any]) -> PlannerPlan:
         goal=str(payload.get("goal") or "").strip(),
         steps=tuple(steps),
         required_capabilities=_normalized_capabilities(payload.get("required_capabilities")),
+        task_contract=_normalized_planner_task_contract(payload.get("task_contract")),
         schema_version=schema_version,
     )
+
+
+def _normalized_planner_task_contract(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    allowed = {
+        "schema_version",
+        "goal",
+        "domain",
+        "task_mode",
+        "requested_effect",
+        "intent_families",
+        "scope",
+        "required_answer",
+        "optional_answer",
+        "required_evidence",
+        "answer_shape",
+        "constraints",
+        "ambiguities",
+    }
+    out = {str(key): value[key] for key in value if str(key) in allowed}
+    return out or None
 
 
 def _normalized_capabilities(value: Any) -> tuple[str, ...]:
@@ -2525,6 +2552,25 @@ def _safe_tool_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return {key: payload[key] for key in sorted(allowed) if key in payload}
 
 
+def _safe_task_contract_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "schema_version",
+        "goal",
+        "domain",
+        "task_mode",
+        "requested_effect",
+        "intent_families",
+        "scope",
+        "required_answer",
+        "optional_answer",
+        "required_evidence",
+        "answer_shape",
+        "constraints",
+        "ambiguities",
+    }
+    return {key: payload[key] for key in sorted(allowed) if key in payload}
+
+
 def _planner_today(now_fn: Callable[[], date] | None) -> date:
     if now_fn is not None:
         return now_fn()
@@ -2606,6 +2652,7 @@ def _normalize_tool_plan(plan: PlannerPlan, *, question: str, today: date) -> Pl
         goal=plan.goal,
         steps=tuple(steps),
         required_capabilities=plan.required_capabilities,
+        task_contract=dict(plan.task_contract) if isinstance(plan.task_contract, dict) else None,
         schema_version=plan.schema_version,
     )
 
@@ -2616,7 +2663,14 @@ def _tool_plan_step_action(arguments: dict[str, Any]) -> str:
 
 def _question_requests_income_detail(question: str) -> bool:
     text = str(question or "")
-    return any(token in text for token in ("明细", "组成", "构成", "来源", "由什么组成"))
+    compact = re.sub(r"\s+", "", text)
+    detail_tokens = ("明细", "组成", "构成", "来源", "由什么组成")
+    analysis_tokens = ("分析", "复盘", "表现")
+    income_tokens = ("收益", "收入", "现金流", "权利金", "已实现", "PnL", "pnl")
+    return any(token in text for token in detail_tokens) or (
+        any(token in compact for token in analysis_tokens)
+        and any(token in compact for token in income_tokens)
+    )
 
 
 def _question_requests_all_income_history(question: str) -> bool:
@@ -2733,6 +2787,54 @@ def tool_plan_json_schema() -> dict[str, Any]:
         "properties": {
             "schema_version": {"type": "string", "enum": [TOOL_PLAN_SCHEMA_VERSION]},
             "goal": {"type": "string"},
+            "task_contract": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "schema_version": {"type": "string", "enum": ["om-agent-task-contract-v1"]},
+                    "goal": {"type": "string"},
+                    "domain": {
+                        "type": "string",
+                        "enum": ["income", "position", "candidate", "config", "operation", "runtime", "strategy", "general"],
+                    },
+                    "task_mode": {
+                        "type": "string",
+                        "enum": ["summarize", "analyze", "compare", "diagnose", "explain", "recommend", "preview_write"],
+                    },
+                    "requested_effect": {"type": "string", "enum": ["read", "preview_write", "prohibited"]},
+                    "intent_families": {"type": "array", "items": {"type": "string"}},
+                    "scope": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "accounts": {"type": "array", "items": {"type": "string"}},
+                            "requested_accounts": {"type": "array", "items": {"type": "string"}},
+                            "symbols": {"type": "array", "items": {"type": "string"}},
+                            "requested_symbols": {"type": "array", "items": {"type": "string"}},
+                            "months": {"type": "array", "items": {"type": "string"}},
+                            "requested_months": {"type": "array", "items": {"type": "string"}},
+                            "config_keys": {"type": "array", "items": {"type": "string"}},
+                        },
+                    },
+                    "required_answer": {"type": "array", "items": {"type": "string"}},
+                    "optional_answer": {"type": "array", "items": {"type": "string"}},
+                    "required_evidence": {"type": "array", "items": {"type": "string"}},
+                    "answer_shape": {"type": "array", "items": {"type": "string"}},
+                    "constraints": {"type": "array", "items": {"type": "string"}},
+                    "ambiguities": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": [
+                    "schema_version",
+                    "goal",
+                    "domain",
+                    "task_mode",
+                    "requested_effect",
+                    "scope",
+                    "required_answer",
+                    "required_evidence",
+                    "answer_shape",
+                ],
+            },
             "required_capabilities": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -4476,6 +4578,11 @@ Return only JSON that matches the requested schema.
 
 Rules:
 - Produce 1 to 3 read-only tool calls, or exactly 1 preview-write capability call.
+- Also fill task_contract when you can safely infer it. The task_contract is your structured understanding of the user goal; the steps are your executable plan. If unsure, keep task_contract conservative rather than guessing.
+- task_contract.domain is one of income, position, candidate, config, operation, runtime, strategy, general. task_contract.task_mode is one of summarize, analyze, compare, diagnose, explain, recommend, preview_write.
+- Use task_mode=analyze for analysis/复盘/表现/来源/结构 questions, compare for same-scope comparisons, diagnose for why/missing/failure/abnormal status questions, explain for rules or accounting policies, recommend for advisory options, and preview_write only for approved preview operations.
+- task_contract.required_evidence should name evidence categories needed to complete the answer, not tool names. Examples: summary, driver_or_breakdown, same_scope_comparable_data, observed_status, diagnostic_evidence, rule_or_config_source, current_state, constraints, risk_premise, source_policy.
+- task_contract.answer_shape should name what the final answer must cover, such as conclusion, drivers, same_scope_comparison, cause_chain, evidence_boundary, risk, premise, options, source_policy.
 - Use only tools/capabilities in the provided manifest.
 - Fill required_capabilities with the user's required answer capabilities from the tool manifest. Use [] only when the request needs no special capability beyond the planned tool call.
 - Preview-write capabilities only create a pending preview. They never apply writes, confirm pending operations, notify users externally, or mutate config/ledger directly.
@@ -4484,7 +4591,7 @@ Rules:
 - Resolve relative dates using context.temporal_context.current_date in Asia/Shanghai. For a month without a year such as "6月", use the current_date year.
 - For monthly income summary questions, use monthly_income_report with account/month when available.
 - For combined/all-account return questions, include required_capabilities=["combined_account_return"] and use monthly_income_report without account.
-- For cashflow detail, net cashflow composition, net inflow source, "明细", "组成", "构成", "来源", or "由什么组成", use monthly_income_report with include_rows=true; the Agent composer will write the final user response from tool evidence.
+- For income analysis/review/performance, cashflow detail, net cashflow composition, net inflow source, "分析", "复盘", "表现", "明细", "组成", "构成", "来源", or "由什么组成", use monthly_income_report with include_rows=true; the Agent composer will write the final user response from tool evidence.
 - For assigned stock / 被指派正股 / 指派正股 holding PnL, floating PnL, spot, cost basis, or lifecycle PnL questions, use option_positions_read with action="assigned-stock", status="open" unless the user asks all/closed, refresh_quotes=true for current holding PnL. AgentLoop decides the final answer path from tool evidence.
 - For all-history, cumulative, or total net cashflow questions, omit month so monthly_income_report reads all OM local ledger months.
 - For multiple explicit months, either call monthly_income_report once per month with matching arguments, or omit month and synthesize from all available rows; never duplicate one month while claiming another.
@@ -4492,7 +4599,7 @@ Rules:
 - For current monitored-symbol config questions such as "max strike 是多少", "当前配置", or "查询 sell_put.max_strike", use symbol_config_read with symbol plus optional strategy/field.
 - For user-provided company names, Chinese names, aliases, Futu codes, or uncertain market suffixes, use symbol_resolve when the user asks for identity resolution or when a later SQL-style analysis needs a canonical symbol. Symbol-aware tools may also receive the original alias/name and resolve it internally.
 - For single-symbol candidate filter/rejection questions such as "为什么 X 没出现在候选里", "X 被哪个参数过滤了", "why was X filtered", or "why missing candidate", use candidate_filter_explain with symbol plus optional account/function/run_id. Do not use analysis_query for that single-symbol root-cause shape unless the user asks to compare/group/trend across symbols, accounts, rules, or runs.
-- For open-ended analytical questions such as 对比, 有什么不同, 排名, 趋势, 组成, 来源, 按账户/月份/标的汇总, or cross-domain questions across income/positions/trades/assigned stock/config, prefer analysis_query over narrow business renderers. Use analysis_catalog first only when fields/views are unknown.
+- For non-monthly-income open-ended analytical questions such as 分析, 复盘, 表现, 对比, 有什么不同, 排名, 趋势, 组成, 来源, 按账户/月份/标的汇总, or cross-domain questions across income/positions/trades/assigned stock/config, prefer analysis_query over narrow business renderers. Use analysis_catalog first only when fields/views are unknown.
 - For analysis_query, use only columns listed in the tool manifest analysis_views. Never invent SQL columns. If the needed fields are not clear from the manifest, plan analysis_catalog before analysis_query.
 - For monitored-symbol setting changes such as covered call min strike 85, use symbol_edit. Do not use symbol_edit for questions about the current value.
 - For model switch requests, use model_use. For immediate software upgrade requests, use upgrade_now.
@@ -4516,7 +4623,7 @@ def _planner_tool_manifest() -> list[dict[str, Any]]:
         notes: list[str] = list(binding.planner_notes) if binding is not None else []
         semantics: dict[str, Any] = dict(binding.planner_semantics) if binding is not None else {}
         if name == "monthly_income_report":
-            notes.append("Set include_rows=true for cashflow details, composition, source, 明细, 组成, 构成, 来源, or 由什么组成.")
+            notes.append("Set include_rows=true for income analysis/review/performance, cashflow details, composition, source, 分析, 复盘, 表现, 明细, 组成, 构成, 来源, or 由什么组成.")
             notes.append("When include_rows=true, canonical factual rows are rendered by the system; synthesis should only add analysis.")
             notes.append("Data comes from OM local ledger, not broker realtime cash statements.")
             notes.append("If month is omitted, the tool reads all months currently available in the OM local ledger.")
@@ -4533,7 +4640,7 @@ def _planner_tool_manifest() -> list[dict[str, Any]]:
                 "scope_semantics": {
                     "month omitted": "all months currently available in the OM local ledger",
                     "account omitted": "all available ledger accounts for the selected broker/config",
-                    "include_rows": "include detail rows for composition/source questions",
+                    "include_rows": "include detail rows for income analysis, composition, or source questions",
                 },
                 "not_promised": [
                     "complete broker account history before OM ledger ingestion",
