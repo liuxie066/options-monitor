@@ -6,6 +6,7 @@ from typing import Any
 
 from src.application.assistant.contracts import AssistantRequest
 from src.application.assistant.evidence import EvidenceBundle
+from src.application.assistant.operation_lifecycle import build_action_lifecycle
 from src.application.assistant.operation_store import operation_summary
 
 
@@ -126,6 +127,12 @@ def build_preview_agent_session_snapshot(
         return None
     operation_id = str(receipt.get("operation_id") or data.get("operation_id") or command_id or "").strip()
     goal = _preview_goal(question=question, data=data, receipt=receipt)
+    lifecycle = _safe_action_lifecycle(data.get("action_lifecycle")) or build_action_lifecycle(
+        operation_id=operation_id,
+        operation_type=str(receipt.get("operation_type") or data.get("operation_type") or ""),
+        status="previewed",
+        source="agent_session_preview",
+    )
     plan = {
         "goal": goal,
         "plan_kind": "preview",
@@ -134,6 +141,7 @@ def build_preview_agent_session_snapshot(
     final_response = {
         "status": "preview",
         "reason": "pending operator confirmation",
+        "action_lifecycle": lifecycle,
         "hook_results": [],
     }
     return AgentSessionSnapshot(
@@ -158,6 +166,7 @@ def build_preview_agent_session_snapshot(
             "preview_operations_allowed": True,
             "pending_operation_ids": [operation_id] if operation_id else [],
             "apply_allowed": False,
+            "action_lifecycle": lifecycle,
             "permission_request": _safe_permission_request(data.get("permission_request")),
         },
         answer_trace={
@@ -194,12 +203,20 @@ def build_operation_readback_agent_session_snapshot(
     operation_type = str(data.get("operation_type") or "").strip()
     payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
     preview = data.get("preview") if isinstance(data.get("preview"), dict) else {}
+    lifecycle = _safe_action_lifecycle(data.get("action_lifecycle")) or build_action_lifecycle(
+        operation_id=operation_id,
+        operation_type=operation_type,
+        status=status,
+        result=data.get("result") if isinstance(data.get("result"), dict) else None,
+        source="agent_session_readback",
+    )
     tool_name = _operation_tool_name(response=response, data=data)
     safe_payload = _safe_operation_payload(operation_id=operation_id, operation_type=operation_type, status=status, payload=payload)
     goal = _operation_goal(operation_type=operation_type, payload=payload, preview=preview)
     final_response = {
         "status": status,
         "reason": "operation readback",
+        "action_lifecycle": lifecycle,
         "hook_results": [dict(item) for item in hook_results if isinstance(item, dict)],
     }
     return AgentSessionSnapshot(
@@ -249,6 +266,7 @@ def build_operation_readback_agent_session_snapshot(
                     "row_count": 1,
                     "missing_data_count": 0,
                 },
+                "action_lifecycle": lifecycle,
                 "ok": bool(response.get("ok", False)) and str(postcheck.get("status") or "") == "pass",
                 "error_code": None,
                 "summary": {
@@ -270,6 +288,7 @@ def build_operation_readback_agent_session_snapshot(
             "operation_id": operation_id,
             "resolved_operation_id": data.get("resolved_operation_id"),
             "operation_status": status,
+            "action_lifecycle": lifecycle,
         },
         answer_trace={
             "final_response": final_response,
@@ -340,6 +359,7 @@ def _preview_tool_transcript_item(
             "row_count": 1,
             "missing_data_count": 0,
         },
+        "action_lifecycle": _safe_action_lifecycle(receipt.get("action_lifecycle")),
         "ok": bool(response.get("ok", False)) and str(postcheck.get("status") or "") == "pass",
         "error_code": None,
         "summary": {
@@ -382,6 +402,26 @@ def _safe_permission_request(value: Any) -> dict[str, Any]:
         "target_summary",
     }
     return {key: request.get(key) for key in sorted(allowed) if key in request}
+
+
+def _safe_action_lifecycle(value: Any) -> dict[str, Any]:
+    lifecycle = value if isinstance(value, dict) else {}
+    if not lifecycle:
+        return {}
+    allowed = {
+        "schema_version",
+        "operation_id",
+        "operation_type",
+        "status",
+        "phase",
+        "stages",
+        "required_next_action",
+        "verify_status",
+        "audit_status",
+        "source",
+        "result_status",
+    }
+    return {key: lifecycle.get(key) for key in sorted(allowed) if key in lifecycle}
 
 
 def _operation_tool_name(*, response: dict[str, Any], data: dict[str, Any]) -> str:
