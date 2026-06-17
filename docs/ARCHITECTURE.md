@@ -8,7 +8,7 @@ domain rules, external adapters, and local state repositories.
 
 | Layer | Path | Owns |
 |---|---|---|
-| Interfaces | `src/interfaces/` | Human CLI and Ops Copilot CLI request/response adaptation |
+| Interfaces | `src/interfaces/` | Human CLI, Tool Gateway, and Inbound Assistant request/response adaptation |
 | Application | `src/application/` | Use-case orchestration, config assembly, pipeline execution, notification flow |
 | Domain | `domain/domain/` | Deterministic strategy, scheduler, notification, position, and schema decisions |
 | Infrastructure | `src/infrastructure/` | OpenD/Futu, Feishu, OpenClaw, exchange-rate and subprocess adapters |
@@ -27,7 +27,7 @@ Rules:
 
 `./om` is the human CLI. It forwards to `src.interfaces.cli.main`.
 
-`./om-agent` is the structured Ops Copilot CLI. It forwards to
+`./om-agent` is the structured Tool Gateway CLI. It forwards to
 `src.interfaces.agent.cli`, where tool execution is routed through:
 
 ```text
@@ -37,9 +37,9 @@ src.interfaces.agent.cli
 -> src.application.agent_tools.<domain>.TOOLS
 ```
 
-`src.application.agent_tool_registry` is a collector/manifest adapter. New Ops
-Copilot tools should live in `src/application/agent_tools/` domain modules and
-export `TOOLS`. All Ops Copilot tools execute through `AgentTool.call(ctx,
+`src.application.agent_tool_registry` is a collector/manifest adapter. New Tool
+Gateway tools should live in `src/application/agent_tools/` domain modules and
+export `TOOLS`. All Tool Gateway tools execute through `AgentTool.call(ctx,
 payload)`. Root-level `src/application/agent_tool_*.py` modules are reserved
 for compatibility re-exports and shared helpers such as config/contracts; they
 must not own tool implementations. The legacy
@@ -48,7 +48,7 @@ must not own tool implementations. The legacy
 ## Research, Shadow Replay, And Strategy Lab
 
 Research and Shadow Replay are an independent offline evidence/replay module,
-not part of Ops Copilot core and not a remote chat surface. Strategy Lab is
+not part of the Inbound Assistant core and not a remote chat surface. Strategy Lab is
 the strategy-evolution product surface above that offline module; its current
 implemented surfaces are evidence update, read-only decision-instance
 readiness, experiments, advisory proposals, and redacted local LLM context.
@@ -277,7 +277,7 @@ Strategy terminology is centralized in `domain.domain.strategy_vocab`.
 Application and interface code should use it to translate between stable
 internal ids such as `sell_call` and user-facing names such as `Covered Call`.
 Do not scatter display names, aliases, or section labels through notification,
-report, or Ops Copilot manifest code.
+report, or Tool Gateway manifest code.
 
 ## Option Positions Flow
 
@@ -373,6 +373,6 @@ When adding code:
 - Put pure business decisions in `domain/domain`.
 - Put use-case orchestration in `src/application`.
 - Put external system adapters in `src/infrastructure`.
-- Put CLI and Ops Copilot CLI argument/response adaptation in `src/interfaces`.
+- Put CLI, Tool Gateway, and Inbound Assistant argument/response adaptation in `src/interfaces`.
 - Prefer a small facade-preserving move over changing public command behavior.
 - Add or update boundary tests when moving ownership between layers.

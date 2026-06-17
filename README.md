@@ -40,7 +40,7 @@
 | 入口 | 面向对象 | 适合做什么 |
 |---|---|---|
 | `om` | 人工 CLI | 配置构建、手动运行、持仓维护、只读查询 |
-| `om-agent` | Ops Copilot / 程序 | JSON manifest、结构化工具调用、只读诊断 |
+| `om-agent` | 程序 / 外部 agent / Tool Gateway | JSON manifest、结构化工具调用、只读诊断 |
 
 源码目录内也可以直接使用 fallback：`./om` / `./om-agent`。
 
@@ -48,7 +48,7 @@
 
 1. 首次启用先完成安装，然后运行 `om setup check`。
 2. 日常人工操作优先 `om`。
-3. Ops Copilot 接入、排障和结构化读取优先 `om-agent`。
+3. 外部 agent 接入、排障和结构化读取优先 `om-agent`。
 
 ## 它做什么，不做什么
 
@@ -418,7 +418,7 @@ Strategy Lab 是正在落地的策略进化产品入口，定位在 Research / S
 ./om sell-put-cash --market 富途 --account sy
 ```
 
-Ops Copilot：
+Tool Gateway：
 
 ```bash
 ./om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","account":"lx"}'
@@ -432,7 +432,7 @@ Ops Copilot：
 ./om close-advice --config-key us
 ```
 
-推荐的 Ops Copilot 一站式入口：
+推荐的 Tool Gateway 一站式入口：
 
 ```bash
 ./om-agent run --tool get_close_advice --input-json '{"config_key":"us"}'
@@ -465,7 +465,7 @@ Ops Copilot：
 ./om symbols --config config.us.json rm TCOM --apply
 ```
 
-Ops Copilot 只读列出：
+Tool Gateway 只读列出：
 
 ```bash
 ./om-agent run --tool manage_symbols --input-json '{"config_key":"us","action":"list"}'
@@ -672,16 +672,17 @@ Feishu 常见只用于这些场景：
 - 单账户和多账户走同一条 tick 链路
 - 多账户问题先按账户维度排查，不要默认认为是全局 gate
 
-## Ops Copilot 使用指南
+## Agent / Tool Gateway 使用指南
 
 这个仓库把文档拆成两层：
 
 - [AGENTS.md](AGENTS.md)：给本地 agent 首先加载的短说明书，记录安全红线、入口层级和模块归属
-- [docs/AGENT_GETTING_STARTED.md](docs/AGENT_GETTING_STARTED.md)：Ops Copilot 接入的最短路径
-- [docs/AGENT_WIKI.md](docs/AGENT_WIKI.md)：给 Ops Copilot 深入执行任务时看的手册，包含工具选择、Research、排障 playbook 和验证矩阵
-- [docs/OM_AGENT_CAPABILITY_MAP.md](docs/OM_AGENT_CAPABILITY_MAP.md)：Ops Copilot 能力边界、Inbound 暴露面和验证方式
+- [docs/AGENT_GETTING_STARTED.md](docs/AGENT_GETTING_STARTED.md)：Tool Gateway 接入的最短路径
+- [docs/AGENT_WIKI.md](docs/AGENT_WIKI.md)：给本地 agent 深入执行任务时看的手册，包含工具选择、Research、排障 playbook 和验证矩阵
+- [docs/OM_ASSISTANT_ARCHITECTURE.md](docs/OM_ASSISTANT_ARCHITECTURE.md)：当前权威术语和架构边界，说明 `./om-agent`、`./om assistant`、`AgentLoop` 的关系
+- [docs/OM_AGENT_CAPABILITY_MAP.md](docs/OM_AGENT_CAPABILITY_MAP.md)：Tool Gateway 与 Inbound Assistant 的能力边界、LLM 暴露面和验证方式
 
-安装 Ops Copilot 插件：
+安装 agent 插件：
 
 ```bash
 bash scripts/install_agent_plugin.sh
@@ -715,7 +716,7 @@ bash scripts/install_agent_plugin.sh
 ./om assistant model current
 ```
 
-Slash 只读查询会直接执行；自然语言只读请求在 planner 开启时由 LLM 规划到只读工具；写操作必须先返回预览并等待确认。链路带 sender allowlist、message_id 幂等和 SQLite audit。Inbound command facade 默认开启，当前 CLI namespace 仍是 `./om assistant ...`，例如 `/status`、`/positions sy`、`/income 2026-05`、`分析 long call 是不是应该平仓`、`/model`、`/model use deepseek-default`、`/record-open ...`、`/record-close ...`、`设置 09898 covered call min strike 85`。Ops Copilot 边界和 Inbound LLM 可见/可执行范围以 [docs/OM_AGENT_CAPABILITY_MAP.md](docs/OM_AGENT_CAPABILITY_MAP.md) 为准；接飞书、微信或 Hermes 前先看 [docs/INBOUND_CONTROL.md](docs/INBOUND_CONTROL.md)。
+Slash 只读查询会直接执行；自然语言只读请求在 planner 开启时由 LLM 规划到只读工具；写操作必须先返回预览并等待确认。链路带 sender allowlist、message_id 幂等和 SQLite audit。Inbound command facade 默认开启，当前 CLI namespace 仍是 `./om assistant ...`，例如 `/status`、`/positions sy`、`/income 2026-05`、`分析 long call 是不是应该平仓`、`/model`、`/model use deepseek-default`、`/record-open ...`、`/record-close ...`、`设置 09898 covered call min strike 85`。`./om-agent` 是 Tool Gateway，不是 OM 自己的 Agent；AgentLoop 是 `./om assistant` 内部 planner loop。术语边界以 [docs/OM_ASSISTANT_ARCHITECTURE.md](docs/OM_ASSISTANT_ARCHITECTURE.md) 为准，能力边界和 Inbound LLM 可见/可执行范围以 [docs/OM_AGENT_CAPABILITY_MAP.md](docs/OM_AGENT_CAPABILITY_MAP.md) 为准；接飞书、微信或 Hermes 前先看 [docs/INBOUND_CONTROL.md](docs/INBOUND_CONTROL.md)。
 
 Research / Shadow Replay / Strategy Lab 离线侧线：
 
@@ -733,7 +734,7 @@ Research / Shadow Replay / Strategy Lab 离线侧线：
 ./om research strategy-lab llm-context --experiment output_shared/research/strategy_lab/experiment.json --proposal output_shared/research/strategy_lab/proposal.json --output output_shared/research/strategy_lab/llm_context.json
 ```
 
-`research` 和 Shadow Replay 是独立的离线证据/复盘模块，不属于 Ops Copilot core，也不暴露为 `./om-agent` tool。线上侧只收集 redacted bundle / handoff，不调用在线 AI；Shadow Replay 只读已有候选、reject、trace、mark、outcome 和归档 run 证据，显式 `--write` 时也只写本地 replay artifact。`review_readiness` 用来判断是否可以人工复盘，`candidate-impact` / `candidate-impact-report` 用来比较显式阈值 variants 会新增/移除哪些候选；旧 `parameter-backtest` / `parameter-report` 仅作为兼容入口。Strategy Lab 是上层产品入口，当前已提供 `update`、`readiness`、`experiment`、`proposal` 和 `llm-context`。Strategy Lab 不会自动产出生产参数，也不能修改 runtime config、交易状态或通知；`experiment` 对 Sell Put / Covered Call 使用单腿 candidate-impact，对 Combo Yield 使用组合级 observed-universe optimizer；`update --build-dataset --write` 只从 latest scanned run 构建本地 replay dataset，`update --write` 只代理本地 replay dataset mark / settle data-plan，`llm-context` 只生成脱敏本地上下文，不调用在线 AI。run 列表和日志摘要与 `./om runs` / `./om logs` 同源，调度系统状态需要通过 `scheduler_evidence` 或 CLI 的 `--scheduler-evidence-json` 显式传入。
+`research` 和 Shadow Replay 是独立的离线证据/复盘模块，不属于 Inbound Assistant core，也不暴露为 `./om-agent` tool。线上侧只收集 redacted bundle / handoff，不调用在线 AI；Shadow Replay 只读已有候选、reject、trace、mark、outcome 和归档 run 证据，显式 `--write` 时也只写本地 replay artifact。`review_readiness` 用来判断是否可以人工复盘，`candidate-impact` / `candidate-impact-report` 用来比较显式阈值 variants 会新增/移除哪些候选；旧 `parameter-backtest` / `parameter-report` 仅作为兼容入口。Strategy Lab 是上层产品入口，当前已提供 `update`、`readiness`、`experiment`、`proposal` 和 `llm-context`。Strategy Lab 不会自动产出生产参数，也不能修改 runtime config、交易状态或通知；`experiment` 对 Sell Put / Covered Call 使用单腿 candidate-impact，对 Combo Yield 使用组合级 observed-universe optimizer；`update --build-dataset --write` 只从 latest scanned run 构建本地 replay dataset，`update --write` 只代理本地 replay dataset mark / settle data-plan，`llm-context` 只生成脱敏本地上下文，不调用在线 AI。run 列表和日志摘要与 `./om runs` / `./om logs` 同源，调度系统状态需要通过 `scheduler_evidence` 或 CLI 的 `--scheduler-evidence-json` 显式传入。
 
 写工具门禁：
 
@@ -821,9 +822,10 @@ README 只记录公开入口和边界。生产 cron id、长驻服务启停和�
 - [RUNBOOK.md](RUNBOOK.md)：运维巡检、定时任务、应急操作
 - [docs/INSTALL.md](docs/INSTALL.md)：安装方式、release 目录布局和 installer 安全契约
 - [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md)：普通用户首次运行路径
-- [docs/AGENT_GETTING_STARTED.md](docs/AGENT_GETTING_STARTED.md)：Ops Copilot 快速开始
-- [docs/AGENT_WIKI.md](docs/AGENT_WIKI.md)：Ops Copilot 任务手册
-- [docs/AGENT_INTEGRATION.md](docs/AGENT_INTEGRATION.md)：Ops Copilot JSON 合同
+- [docs/AGENT_GETTING_STARTED.md](docs/AGENT_GETTING_STARTED.md)：Tool Gateway 快速开始
+- [docs/AGENT_WIKI.md](docs/AGENT_WIKI.md)：本地 agent 任务手册
+- [docs/OM_ASSISTANT_ARCHITECTURE.md](docs/OM_ASSISTANT_ARCHITECTURE.md)：Tool Gateway、Inbound Assistant 和 AgentLoop 的当前架构边界
+- [docs/AGENT_INTEGRATION.md](docs/AGENT_INTEGRATION.md)：`./om-agent` Tool Gateway JSON 合同
 - [docs/INBOUND_CONTROL.md](docs/INBOUND_CONTROL.md)：飞书、微信、Hermes 等远程消息入口的安全控制层
 - [docs/TOOL_REFERENCE.md](docs/TOOL_REFERENCE.md)：`om-agent` 工具说明
 - [docs/candidate_strategy.md](docs/candidate_strategy.md)：候选生成和策略边界

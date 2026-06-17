@@ -1,17 +1,27 @@
 # OM Agent Intelligence Upgrade Plan
 
-本文档定义 OM Agent 下一轮智能化升级的 1-7 阶段方案。它不是新产品名，
+> Historical design note. This document is retained for rollout planning
+> context, but it is not the current architecture terminology authority. Current
+> naming and boundaries live in
+> [OM_ASSISTANT_ARCHITECTURE.md](OM_ASSISTANT_ARCHITECTURE.md): `./om-agent`
+> is the Tool Gateway, `./om assistant` is the Inbound Assistant, and
+> `AgentLoop` is an internal assistant planner loop.
+
+本文档记录历史上的智能化 1-7 阶段方案。它不是当前产品名，
 也不是替换现有 AgentLoop 的并行架构；它是在
 [OM_AGENT_COMPLETION_DESIGN.md](OM_AGENT_COMPLETION_DESIGN.md)、
 [AGENT_RELIABILITY_P0_P2_DESIGN.md](AGENT_RELIABILITY_P0_P2_DESIGN.md) 和
 [SQLITE_TOOL_OS_EXPANSION_DESIGN.md](SQLITE_TOOL_OS_EXPANSION_DESIGN.md)
 之上继续收敛现有实现。
 
-产品定位保持不变：
+历史计划当时使用的产品表述是：
 
 ```text
 OM Agent = 嵌入 OM 运行世界的运营与策略 Agent
 ```
+
+当前术语应改读为：`./om assistant` 承载 Inbound Assistant 能力，
+`AgentLoop` 是其内部 planner loop，`./om-agent` 只是 Tool Gateway。
 
 核心升级方向：
 

@@ -25,7 +25,7 @@
 | Accounts | Lowercase labels such as `lx`, `sy`; read from top-level `accounts` in runtime config |
 | Canonical Configs | `config.yaml` is the human authoring source; `config.us.json` / `config.hk.json` are generated runtime snapshots |
 | Reports | `output/`, `output_accounts/<account>/`, `output_shared/`, `output_runs/<run_id>/` |
-| Local Agent Entry | `./om-agent` |
+| Local Tool Gateway Entry | `./om-agent` |
 | Human CLI Entry | `./om` |
 | Detailed Agent Handbook | `docs/AGENT_WIKI.md` |
 
@@ -33,7 +33,7 @@
 
 Use the highest-level safe entry point available:
 
-1. `./om-agent` for structured JSON tools and read-first diagnostics.
+1. `./om-agent` for structured JSON tools and read-first diagnostics. It is the local Tool Gateway, not OM's autonomous Agent.
 2. `./om` for human/operator CLI workflows.
 3. `python3 -m src.application.<module>` only when no public facade exists.
 4. `python3 scripts/...` only for compatibility or operational wrappers.

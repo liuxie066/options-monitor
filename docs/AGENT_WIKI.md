@@ -1,12 +1,12 @@
-# Ops Copilot Handbook - options-monitor
+# Agent Handbook - options-monitor
 
-> This is the task-driven manual for Ops Copilot and local coding agents working in `options-monitor`.
+> This is the task-driven manual for local agents working in `options-monitor`.
 > Keep `AGENTS.md` short enough for prompt prefix use; put detailed execution guidance here.
 
 ## 1. Operating Model
 
 `options-monitor` is an operations-sensitive local monitoring system for options strategies.
-Ops Copilot should treat it as production tooling:
+Local agents should treat it as production tooling:
 
 - Inspect before changing.
 - Prefer read-only tools before runtime commands.
@@ -18,14 +18,26 @@ Primary entry points:
 
 | Need | Entry |
 |---|---|
-| Structured tool call / JSON response | `./om-agent` |
+| Structured tool call / JSON response | `./om-agent` Tool Gateway |
+| Local or remote message handling | `./om assistant handle` Inbound Assistant |
 | Human/operator command | `./om` |
 | Runtime tick | `./om run tick ...` |
 | Guarded production tick wrapper | `./om run tick-cron ...` |
 | MacBook Codex online-evidence handoff | `./om research collect ...` |
 
-For the canonical capability boundary, risk classes, Inbound exposure, and
-verification map, see [OM_AGENT_CAPABILITY_MAP.md](OM_AGENT_CAPABILITY_MAP.md).
+Entrypoint rule:
+
+- Use `./om-agent` for structured local JSON tool calls, manifest checks, and
+  read-first diagnostics.
+- Use `./om assistant handle` for local or remote messages. This is the
+  Inbound Assistant surface.
+- Never invoke `AgentLoop` directly. It is an internal planner/evidence loop
+  that `./om assistant` may use after policy and capability filtering.
+
+For the canonical terminology and dimension boundary, see
+[OM_ASSISTANT_ARCHITECTURE.md](OM_ASSISTANT_ARCHITECTURE.md). For capability
+boundaries, risk classes, Inbound Assistant exposure, and verification maps,
+see [OM_AGENT_CAPABILITY_MAP.md](OM_AGENT_CAPABILITY_MAP.md).
 
 ## 2. First Five Minutes
 
@@ -46,6 +58,19 @@ For live quality or runtime questions, start with existing state:
 ```
 
 Do not run tick, send notifications, mutate positions, sync Feishu, or deploy unless the user explicitly asks for that side effect.
+
+For Inbound Assistant route diagnosis, read the durable assistant trace instead
+of guessing from the final text:
+
+```bash
+./om-agent run --tool assistant_trace --input-json '{"limit":10}'
+```
+
+`assistant_trace` is a local Tool Gateway diagnostic for `./om assistant`
+sessions. Its useful fields are `capability_selection`, `progress`,
+`progress.blocked_by`, and `answer.clarification_request`. The compact
+`response_text` is redacted for operator reading; the JSON keeps structured
+diagnostic fields for tests and local debugging.
 
 ## 3. Tool Selection
 
@@ -68,7 +93,7 @@ Use the lowest-risk tool that can answer the question.
 ## 4. Research / Shadow Replay Workflow
 
 Research and Shadow Replay are an independent offline evidence/replay module.
-They are not Ops Copilot core, not `./om-agent` tools, and not an online AI
+They are not Inbound Assistant core, not `./om-agent` tools, and not an online AI
 product feature. The online/Linux side collects redacted evidence. MacBook Codex
 reads the handoff and helps diagnose quality issues, ledger problems, and
 strategy-improvement directions.
@@ -319,7 +344,7 @@ Notification text should remain Markdown-friendly and operationally direct. Do n
 
 Do not weaken production config validation to make local tests pass. Fix the config path, test fixture, or validation contract instead.
 
-### Ops Copilot Tools
+### Tool Gateway Tools
 
 - Tool modules: `src/application/agent_tools/<domain>.py`
 - Manifest collector: `src/application/agent_tool_registry.py`
@@ -397,7 +422,7 @@ Use supported `gh release view --json` fields such as `tagName`, `name`, `url`, 
 
 | Change area | Suggested checks |
 |---|---|
-| Ops Copilot manifest/handler | `python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py` |
+| Tool Gateway manifest/handler | `python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py` |
 | Research | `python3 -m pytest tests/test_research.py` |
 | Candidate filter/rank | Candidate engine tests, candidate tool tests, focused trace/replay tests |
 | Tick orchestration | `python3 -m pytest tests/test_multi_tick_*.py tests/test_unified_tick_entrypoint.py` |
@@ -412,8 +437,9 @@ For type checking, prefer the narrow touched path first. Use broad checks when t
 
 - `AGENTS.md`: compact, stable, high-signal context for agents.
 - `docs/AGENT_WIKI.md`: this task manual and code ownership map.
-- `docs/TOOL_REFERENCE.md`: public `om-agent` tool contract and examples.
-- `docs/AGENT_INTEGRATION.md`: JSON envelope and integration contract.
+- `docs/OM_ASSISTANT_ARCHITECTURE.md`: current terminology and architecture dimension boundary.
+- `docs/TOOL_REFERENCE.md`: public `om-agent` Tool Gateway contract and examples.
+- `docs/AGENT_INTEGRATION.md`: Tool Gateway JSON envelope and integration contract.
 - `README.md`: human-facing product overview plus common operator commands.
 - `RUNBOOK.md`: production cron, maintenance, and emergency operations.
 
