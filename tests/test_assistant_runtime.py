@@ -19,6 +19,7 @@ from src.application.assistant.agent_loop import (
     PlannerPlanStep,
     ToolExecutor,
     _evidence_gap_allows_followup,
+    _clarification_request_payload,
     _followup_decision_contract,
     _followup_tool_allowlist_rejection,
     _planner_tool_manifest,
@@ -5399,8 +5400,44 @@ def test_agent_loop_followup_needs_clarification_stops_cleanly(tmp_path: Path) -
     assert out["data"]["response_text"] == "请指定要查询的月份或账户范围。"
     tool_plan_data = out["data"]["action"]["result"]["data"]
     assert tool_plan_data["followup_decisions"][0]["decision"] == "ask_clarification"
+    assert tool_plan_data["followup_decisions"][0]["clarification_request"]["schema_version"] == (
+        "om-agent-clarification-request-v1"
+    )
+    assert tool_plan_data["followup_decisions"][0]["clarification_request"]["questions"][0]["slot"] == "scope"
+    assert tool_plan_data["followup_decisions"][0]["clarification_request"]["questions"][0]["options"] == []
     assert tool_plan_data["final_response"]["status"] == "needs_clarification"
+    assert tool_plan_data["final_response"]["clarification_request"]["questions"][0]["slot"] == "scope"
+    assert tool_plan_data["final_response"]["clarification_request"]["questions"][0]["options"] == []
     assert tool_plan_data["agent_session"]["task_state"] == "asking_clarification"
+    assert tool_plan_data["agent_session"]["progress"]["state"] == "asking_clarification"
+    assert tool_plan_data["agent_session"]["progress"]["next_action"] == "provide_clarification"
+    assert any(
+        item["kind"] == "clarification"
+        for item in tool_plan_data["agent_session"]["progress"]["blocked_by"]
+    )
+    trace = collect_assistant_trace(
+        audit_db=str(tmp_path / "inbound.sqlite3"),
+        command_id=out["data"]["command_id"],
+    )
+    assert trace["traces"][0]["answer"]["clarification_request"]["questions"][0]["slot"] == "scope"
+    assert trace["traces"][0]["progress"]["next_action"] == "provide_clarification"
+    assert "进度：等待补充澄清信息" in trace["response_text"]
+
+
+def test_clarification_request_uses_context_account_options_without_hardcoded_defaults() -> None:
+    payload = _clarification_request_payload(
+        "请指定要查询的账户。",
+        context={"available_accounts": ["ops", "research"]},
+    )
+    question = payload["questions"][0]
+
+    assert question["slot"] == "account"
+    assert [item["label"] for item in question["options"]] == ["ops", "research"]
+    assert "lx" not in [item["label"] for item in question["options"]]
+    assert "sy" not in [item["label"] for item in question["options"]]
+
+    no_context = _clarification_request_payload("请指定要查询的账户。")
+    assert no_context["questions"][0]["options"] == []
 
 
 def test_assistant_runtime_agent_loop_answer_guard_rewrites_contradictory_income_synthesis(tmp_path: Path) -> None:
@@ -6900,6 +6937,11 @@ def test_assistant_runtime_agent_loop_plans_manual_trade_open_preview(monkeypatc
     assert trace_entry["task"]["state"] == "waiting_for_permission"
     assert "成交提醒】成功卖出" not in trace_entry["task"]["goal"]
     assert trace_entry["answer"]["response_status"] == "preview"
+    assert trace_entry["capability_selection"]["selected"][0]["effect"] == "preview"
+    assert trace_entry["progress"]["state"] == "waiting_for_permission"
+    assert trace_entry["progress"]["next_action"] == "confirm_or_cancel"
+    assert trace_entry["progress"]["pending_operation_ids"] == [out["data"]["operation_id"]]
+    assert any(item["kind"] == "permission" for item in trace_entry["progress"]["blocked_by"])
     assert trace_entry["permission_state"]["pending_operation_ids"] == [out["data"]["operation_id"]]
     assert trace_entry["permission_state"]["apply_allowed"] is False
     assert trace_entry["permission_state"]["action_lifecycle"]["status"] == "previewed"
@@ -6913,6 +6955,8 @@ def test_assistant_runtime_agent_loop_plans_manual_trade_open_preview(monkeypatc
     assert any(item["hook"] == "receipt" and item["status"] == "pass" for item in trace_tool["hook_results"])
     trace_text = trace["response_text"]
     assert "任务：记录开仓预览：sy 0700.HK" in trace_text
+    assert "能力：selected=1（preview）" in trace_text
+    assert "进度：等待人工确认或取消" in trace_text
     assert "工具：读取OM 本地交易预览（ok，1 行）" in trace_text
     assert "最终：preview（pending operator confirmation）" in trace_text
     assert "post/receipt=pass/complete" in trace_text
