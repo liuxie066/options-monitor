@@ -11,6 +11,8 @@ from src.application.assistant.operation_store import operation_summary
 
 
 AGENT_SESSION_SCHEMA_VERSION = "om-agent-session-v1"
+AGENT_PROGRESS_SCHEMA_VERSION = "om-agent-progress-v1"
+AGENT_CAPABILITY_SELECTION_SCHEMA_VERSION = "om-agent-capability-selection-v1"
 
 
 @dataclass(frozen=True)
@@ -19,6 +21,8 @@ class AgentSessionSnapshot:
     request: dict[str, Any]
     goal: str
     task_state: str
+    capability_selection: dict[str, Any]
+    progress: dict[str, Any]
     plan_revisions: tuple[dict[str, Any], ...]
     tool_transcript: tuple[dict[str, Any], ...]
     task_contract: dict[str, Any]
@@ -36,6 +40,8 @@ class AgentSessionSnapshot:
             "request": dict(self.request),
             "goal": self.goal,
             "task_state": self.task_state,
+            "capability_selection": dict(self.capability_selection),
+            "progress": dict(self.progress),
             "plan_revisions": [dict(item) for item in self.plan_revisions],
             "tool_transcript": [dict(item) for item in self.tool_transcript],
             "task_contract": dict(self.task_contract),
@@ -80,27 +86,41 @@ def build_agent_session_snapshot(
             ]
         )
     )
+    task_state = _task_state(ok=ok, final_response=final_response)
+    tool_transcript = tuple(_tool_transcript(tool_events=tool_events, observations=observations))
+    permission_state = {
+        "writes_allowed": False,
+        "preview_operations_allowed": True,
+        "pending_operation_ids": [],
+        "apply_allowed": False,
+    }
+    answer_trace = {
+        "final_response": dict(final_response),
+        "synthesis": dict(synthesis_trace),
+        "followup_decisions": _followup_decisions(tool_events),
+    }
     return AgentSessionSnapshot(
         session_id=session_id,
         request=request.public_payload(),
         goal=goal,
-        task_state=_task_state(ok=ok, final_response=final_response),
+        task_state=task_state,
+        capability_selection=_capability_selection_payload(plan_revisions=revisions, tool_events=tool_events),
+        progress=_progress_payload(
+            task_state=task_state,
+            plan_revisions=revisions,
+            tool_transcript=tool_transcript,
+            coverage=coverage,
+            permission_state=permission_state,
+            answer_trace=answer_trace,
+            tool_events=tool_events,
+        ),
         plan_revisions=revisions,
-        tool_transcript=tuple(_tool_transcript(tool_events=tool_events, observations=observations)),
+        tool_transcript=tool_transcript,
         task_contract=dict(task_contract or {}),
         evidence_bundle=evidence_bundle.trace_payload(),
         coverage=dict(coverage or {}),
-        permission_state={
-            "writes_allowed": False,
-            "preview_operations_allowed": True,
-            "pending_operation_ids": [],
-            "apply_allowed": False,
-        },
-        answer_trace={
-            "final_response": dict(final_response),
-            "synthesis": dict(synthesis_trace),
-            "followup_decisions": _followup_decisions(tool_events),
-        },
+        permission_state=permission_state,
+        answer_trace=answer_trace,
         audit_ref={
             "channel": request.channel,
             "message_id": request.message_id,
@@ -144,39 +164,55 @@ def build_preview_agent_session_snapshot(
         "action_lifecycle": lifecycle,
         "hook_results": [],
     }
+    task_state = "waiting_for_permission"
+    plan_revisions = (
+        {
+            "revision": 1,
+            "source": "agent_loop",
+            "reason": "preview operation plan",
+            "plan": plan,
+        },
+    )
+    tool_transcript = (_preview_tool_transcript_item(step=step, response=response, receipt=receipt),)
+    coverage: dict[str, Any] = {}
+    permission_state = {
+        "writes_allowed": False,
+        "preview_operations_allowed": True,
+        "pending_operation_ids": [operation_id] if operation_id else [],
+        "apply_allowed": False,
+        "action_lifecycle": lifecycle,
+        "permission_request": _safe_permission_request(data.get("permission_request")),
+    }
+    answer_trace = {
+        "final_response": final_response,
+        "synthesis": {
+            "reason": "preview_permission_request",
+            "hook_results": [],
+        },
+        "followup_decisions": [],
+    }
     return AgentSessionSnapshot(
         session_id=_session_id(request=request, command_id=operation_id or command_id, goal=goal),
         request=request.public_payload(),
         goal=goal,
-        task_state="waiting_for_permission",
-        plan_revisions=(
-            {
-                "revision": 1,
-                "source": "agent_loop",
-                "reason": "preview operation plan",
-                "plan": plan,
-            },
+        task_state=task_state,
+        capability_selection=_capability_selection_payload(plan_revisions=plan_revisions, tool_events=[]),
+        progress=_progress_payload(
+            task_state=task_state,
+            plan_revisions=plan_revisions,
+            tool_transcript=tool_transcript,
+            coverage=coverage,
+            permission_state=permission_state,
+            answer_trace=answer_trace,
+            tool_events=[],
         ),
-        tool_transcript=(_preview_tool_transcript_item(step=step, response=response, receipt=receipt),),
+        plan_revisions=plan_revisions,
+        tool_transcript=tool_transcript,
         task_contract={},
         evidence_bundle=EvidenceBundle(scope={}, facts=(), datasets=()).trace_payload(),
-        coverage={},
-        permission_state={
-            "writes_allowed": False,
-            "preview_operations_allowed": True,
-            "pending_operation_ids": [operation_id] if operation_id else [],
-            "apply_allowed": False,
-            "action_lifecycle": lifecycle,
-            "permission_request": _safe_permission_request(data.get("permission_request")),
-        },
-        answer_trace={
-            "final_response": final_response,
-            "synthesis": {
-                "reason": "preview_permission_request",
-                "hook_results": [],
-            },
-            "followup_decisions": [],
-        },
+        coverage=coverage,
+        permission_state=permission_state,
+        answer_trace=answer_trace,
         audit_ref={
             "channel": request.channel,
             "message_id": request.message_id,
@@ -219,85 +255,101 @@ def build_operation_readback_agent_session_snapshot(
         "action_lifecycle": lifecycle,
         "hook_results": [dict(item) for item in hook_results if isinstance(item, dict)],
     }
+    task_state = "done" if status in {"applied", "cancelled", "canceled"} else "failed"
+    plan_revisions = (
+        {
+            "revision": 1,
+            "source": "deterministic_operation",
+            "reason": "operation readback",
+            "plan": {
+                "goal": goal,
+                "plan_kind": "readback",
+                "steps": [
+                    {
+                        "tool_name": tool_name,
+                        "arguments": safe_payload,
+                        "purpose": "record final operation state",
+                    }
+                ],
+            },
+        },
+    )
+    tool_transcript = (
+        {
+            "index": 1,
+            "tool_name": tool_name,
+            "payload": safe_payload,
+            "authorized": True,
+            "authorization_reason": "deterministic_operation_readback",
+            "action_policy": {
+                "allowed": True,
+                "decision": "readback",
+                "allowed_effect": "readback",
+                "requires_confirmation": False,
+                "apply_allowed": False,
+                "authority": "deterministic_operation_response",
+            },
+            "action_safety": {},
+            "precheck": {},
+            "postcheck": dict(postcheck),
+            "hook_results": [dict(item) for item in hook_results if isinstance(item, dict)],
+            "evidence_summary": {
+                "source_label": "OM 本地操作回执",
+                "row_count": 1,
+                "missing_data_count": 0,
+            },
+            "action_lifecycle": lifecycle,
+            "ok": bool(response.get("ok", False)) and str(postcheck.get("status") or "") == "pass",
+            "error_code": None,
+            "summary": {
+                "status": status,
+                "operation_id": operation_id,
+                "operation_type": operation_type,
+                "resolved_operation_id": data.get("resolved_operation_id"),
+            },
+        },
+    )
+    coverage: dict[str, Any] = {}
+    permission_state = {
+        "writes_allowed": False,
+        "preview_operations_allowed": True,
+        "pending_operation_ids": [],
+        "apply_allowed": False,
+        "operation_id": operation_id,
+        "resolved_operation_id": data.get("resolved_operation_id"),
+        "operation_status": status,
+        "action_lifecycle": lifecycle,
+    }
+    answer_trace = {
+        "final_response": final_response,
+        "synthesis": {
+            "reason": "operation_readback",
+            "hook_results": [dict(item) for item in hook_results if isinstance(item, dict)],
+        },
+        "followup_decisions": [],
+    }
     return AgentSessionSnapshot(
         session_id=_session_id(request=request, command_id=operation_id, goal=goal),
         request=request.public_payload(),
         goal=goal,
-        task_state="done" if status in {"applied", "cancelled", "canceled"} else "failed",
-        plan_revisions=(
-            {
-                "revision": 1,
-                "source": "deterministic_operation",
-                "reason": "operation readback",
-                "plan": {
-                    "goal": goal,
-                    "plan_kind": "readback",
-                    "steps": [
-                        {
-                            "tool_name": tool_name,
-                            "arguments": safe_payload,
-                            "purpose": "record final operation state",
-                        }
-                    ],
-                },
-            },
+        task_state=task_state,
+        capability_selection=_capability_selection_payload(plan_revisions=plan_revisions, tool_events=[]),
+        progress=_progress_payload(
+            task_state=task_state,
+            plan_revisions=plan_revisions,
+            tool_transcript=tool_transcript,
+            coverage=coverage,
+            permission_state=permission_state,
+            answer_trace=answer_trace,
+            tool_events=[],
         ),
-        tool_transcript=(
-            {
-                "index": 1,
-                "tool_name": tool_name,
-                "payload": safe_payload,
-                "authorized": True,
-                "authorization_reason": "deterministic_operation_readback",
-                "action_policy": {
-                    "allowed": True,
-                    "decision": "readback",
-                    "allowed_effect": "readback",
-                    "requires_confirmation": False,
-                    "apply_allowed": False,
-                    "authority": "deterministic_operation_response",
-                },
-                "action_safety": {},
-                "precheck": {},
-                "postcheck": dict(postcheck),
-                "hook_results": [dict(item) for item in hook_results if isinstance(item, dict)],
-                "evidence_summary": {
-                    "source_label": "OM 本地操作回执",
-                    "row_count": 1,
-                    "missing_data_count": 0,
-                },
-                "action_lifecycle": lifecycle,
-                "ok": bool(response.get("ok", False)) and str(postcheck.get("status") or "") == "pass",
-                "error_code": None,
-                "summary": {
-                    "status": status,
-                    "operation_id": operation_id,
-                    "operation_type": operation_type,
-                    "resolved_operation_id": data.get("resolved_operation_id"),
-                },
-            },
-        ),
+        plan_revisions=plan_revisions,
+        tool_transcript=tool_transcript,
         task_contract={},
         evidence_bundle=EvidenceBundle(scope={}, facts=(), datasets=()).trace_payload(),
-        coverage={},
-        permission_state={
-            "writes_allowed": False,
-            "preview_operations_allowed": True,
-            "pending_operation_ids": [],
-            "apply_allowed": False,
-            "operation_id": operation_id,
-            "resolved_operation_id": data.get("resolved_operation_id"),
-            "operation_status": status,
-            "action_lifecycle": lifecycle,
-        },
-        answer_trace={
-            "final_response": final_response,
-            "synthesis": {
-                "reason": "operation_readback",
-                "hook_results": [dict(item) for item in hook_results if isinstance(item, dict)],
-            },
-            "followup_decisions": [],
-        },
+        coverage=coverage,
+        permission_state=permission_state,
+        answer_trace=answer_trace,
         audit_ref={
             "channel": request.channel,
             "message_id": request.message_id,
@@ -596,8 +648,308 @@ def _followup_decisions(tool_events: list[dict[str, Any]]) -> list[dict[str, Any
     return decisions
 
 
+def _capability_selection_payload(
+    *,
+    plan_revisions: tuple[dict[str, Any], ...],
+    tool_events: list[dict[str, Any]],
+) -> dict[str, Any]:
+    selected_capabilities: list[dict[str, Any]] = []
+    selected_tools: set[str] = set()
+    required: set[str] = set()
+    satisfied: set[str] = set()
+    rejected: list[dict[str, Any]] = []
+    for revision in plan_revisions:
+        if not isinstance(revision, dict):
+            continue
+        plan = revision.get("plan") if isinstance(revision.get("plan"), dict) else {}
+        revision_id = revision.get("revision")
+        for capability in plan.get("required_capabilities") or []:
+            text = str(capability or "").strip()
+            if text:
+                required.add(text)
+        effect = _plan_effect(plan)
+        for step in plan.get("steps") or []:
+            if not isinstance(step, dict):
+                continue
+            tool_name = str(step.get("tool_name") or "").strip()
+            if not tool_name:
+                continue
+            selected_tools.add(tool_name)
+            selected_capabilities.append(
+                {
+                    "tool_name": tool_name,
+                    "revision": revision_id,
+                    "effect": effect,
+                    "reason": _clip_text(step.get("purpose"), 160),
+                }
+            )
+    for event in tool_events:
+        if not isinstance(event, dict):
+            continue
+        if event.get("phase") == "assess_capabilities":
+            required.update(str(item) for item in event.get("required") or [] if str(item).strip())
+            satisfied.update(str(item) for item in event.get("satisfied") or [] if str(item).strip())
+            for gap in event.get("gaps") or []:
+                text = str(gap or "").strip()
+                if text:
+                    rejected.append({"capability_id": text, "reason": "capability gap"})
+        if event.get("phase") == "authorize_tool" and event.get("allowed") is False:
+            tool_name = str(event.get("tool_name") or "").strip()
+            if tool_name:
+                rejected.append(
+                    {
+                        "tool_name": tool_name,
+                        "reason": str(event.get("error_code") or "permission denied"),
+                    }
+                )
+    return {
+        "schema_version": AGENT_CAPABILITY_SELECTION_SCHEMA_VERSION,
+        "selected": _dedupe_capability_items(selected_capabilities),
+        "required": sorted(required),
+        "satisfied": sorted(satisfied),
+        "rejected": _dedupe_capability_items(rejected),
+        "selected_tools": sorted(selected_tools),
+    }
+
+
+def _plan_effect(plan: dict[str, Any]) -> str:
+    kind = str(plan.get("plan_kind") or "").strip().lower()
+    if kind in {"preview", "readback"}:
+        return kind
+    return "read"
+
+
+def _progress_payload(
+    *,
+    task_state: str,
+    plan_revisions: tuple[dict[str, Any], ...],
+    tool_transcript: tuple[dict[str, Any], ...],
+    coverage: dict[str, Any] | None,
+    permission_state: dict[str, Any],
+    answer_trace: dict[str, Any],
+    tool_events: list[dict[str, Any]],
+) -> dict[str, Any]:
+    coverage_payload = coverage if isinstance(coverage, dict) else {}
+    pending_operation_ids = _string_list(permission_state.get("pending_operation_ids"))
+    blocked_by = _progress_blockers(
+        task_state=task_state,
+        tool_transcript=tool_transcript,
+        coverage=coverage_payload,
+        pending_operation_ids=pending_operation_ids,
+        answer_trace=answer_trace,
+        tool_events=tool_events,
+    )
+    next_action = _progress_next_action(
+        task_state=task_state,
+        coverage=coverage_payload,
+        pending_operation_ids=pending_operation_ids,
+        blocked_by=blocked_by,
+        answer_trace=answer_trace,
+    )
+    return {
+        "schema_version": AGENT_PROGRESS_SCHEMA_VERSION,
+        "state": task_state,
+        "summary": _progress_summary(task_state=task_state, coverage=coverage_payload, blocked_by=blocked_by),
+        "plan_revision_count": len(plan_revisions),
+        "planned_step_count": _planned_step_count(plan_revisions),
+        "tool_call_count": len(tool_transcript),
+        "completed_step_count": sum(1 for item in tool_transcript if item.get("ok") is True),
+        "failed_step_count": sum(1 for item in tool_transcript if item.get("ok") is False),
+        "denied_step_count": _denied_step_count(tool_transcript=tool_transcript, tool_events=tool_events),
+        "coverage_status": str(coverage_payload.get("status") or "not_applicable"),
+        "coverage_next_action": str(coverage_payload.get("next_action") or "not_applicable"),
+        "pending_operation_ids": pending_operation_ids,
+        "blocked_by": blocked_by,
+        "next_action": next_action,
+    }
+
+
+def _planned_step_count(plan_revisions: tuple[dict[str, Any], ...]) -> int:
+    count = 0
+    for revision in plan_revisions:
+        if not isinstance(revision, dict):
+            continue
+        plan = revision.get("plan") if isinstance(revision.get("plan"), dict) else {}
+        steps = plan.get("steps") if isinstance(plan.get("steps"), list) else []
+        count += len([item for item in steps if isinstance(item, dict)])
+    return count
+
+
+def _progress_blockers(
+    *,
+    task_state: str,
+    tool_transcript: tuple[dict[str, Any], ...],
+    coverage: dict[str, Any],
+    pending_operation_ids: list[str],
+    answer_trace: dict[str, Any],
+    tool_events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    blockers: list[dict[str, Any]] = []
+    if pending_operation_ids:
+        blockers.append({"kind": "permission", "next_action": "confirm_or_cancel", "count": len(pending_operation_ids)})
+    final_response = answer_trace.get("final_response") if isinstance(answer_trace.get("final_response"), dict) else {}
+    if str(final_response.get("status") or "") in {"needs_clarification", "clarify"}:
+        blockers.append({"kind": "clarification", "reason": _clip_text(final_response.get("reason"), 120)})
+    for event in tool_events:
+        if not isinstance(event, dict):
+            continue
+        if event.get("phase") == "authorize_tool" and event.get("allowed") is False:
+            blockers.append(
+                {
+                    "kind": "permission_denial",
+                    "tool_name": str(event.get("tool_name") or ""),
+                    "code": str(event.get("error_code") or "PERMISSION_DENIED"),
+                }
+            )
+    for tool in tool_transcript:
+        if not isinstance(tool, dict):
+            continue
+        if tool.get("authorized") is False:
+            blockers.append(
+                {
+                    "kind": "permission_denial",
+                    "tool_name": str(tool.get("tool_name") or ""),
+                    "code": str(tool.get("error_code") or "PERMISSION_DENIED"),
+                }
+            )
+        elif tool.get("ok") is False:
+            blockers.append(
+                {
+                    "kind": "tool_failure",
+                    "tool_name": str(tool.get("tool_name") or ""),
+                    "code": str(tool.get("error_code") or "TOOL_FAILED"),
+                }
+            )
+    coverage_status = str(coverage.get("status") or "")
+    if coverage_status and coverage_status != "complete":
+        for gap in coverage.get("gaps") or []:
+            if not isinstance(gap, dict):
+                continue
+            blockers.append(
+                {
+                    "kind": "evidence_gap",
+                    "gap_kind": str(gap.get("kind") or ""),
+                    "recoverable_by": str(gap.get("recoverable_by") or ""),
+                    "suggested_tool": str(gap.get("suggested_tool") or ""),
+                }
+            )
+        for missing in coverage.get("missing") or []:
+            text = str(missing or "").strip()
+            if text:
+                blockers.append({"kind": "missing_answer_key", "key": text})
+    for decision in answer_trace.get("followup_decisions") or []:
+        if not isinstance(decision, dict):
+            continue
+        status = str(decision.get("status") or "")
+        if status == "accepted":
+            continue
+        blockers.append(
+            {
+                "kind": "followup_stop",
+                "status": status,
+                "reason": _clip_text(decision.get("reason"), 160),
+            }
+        )
+    if task_state == "failed" and not blockers:
+        blockers.append({"kind": "failed", "reason": "assistant task failed"})
+    return _dedupe_progress_blockers(blockers)
+
+
+def _progress_next_action(
+    *,
+    task_state: str,
+    coverage: dict[str, Any],
+    pending_operation_ids: list[str],
+    blocked_by: list[dict[str, Any]],
+    answer_trace: dict[str, Any],
+) -> str:
+    if pending_operation_ids:
+        return "confirm_or_cancel"
+    final_response = answer_trace.get("final_response") if isinstance(answer_trace.get("final_response"), dict) else {}
+    if str(final_response.get("status") or "") in {"needs_clarification", "clarify"}:
+        return "provide_clarification"
+    blocker_kinds = {str(item.get("kind") or "") for item in blocked_by if isinstance(item, dict)}
+    if "permission_denial" in blocker_kinds:
+        return "inspect_denied_tool"
+    if "tool_failure" in blocker_kinds:
+        return "inspect_tool_failure"
+    if str(coverage.get("next_action") or "") == "followup_tool":
+        return "plan_followup_tool"
+    if str(coverage.get("status") or "") not in {"", "complete"}:
+        return "answer_with_missing_data"
+    if task_state == "failed":
+        return "inspect_failure"
+    if task_state == "waiting_for_permission":
+        return "confirm_or_cancel"
+    if task_state == "asking_clarification":
+        return "provide_clarification"
+    return "none"
+
+
+def _progress_summary(*, task_state: str, coverage: dict[str, Any], blocked_by: list[dict[str, Any]]) -> str:
+    if task_state == "waiting_for_permission":
+        return "等待人工确认或取消"
+    if task_state == "asking_clarification":
+        return "等待补充澄清信息"
+    if task_state == "failed":
+        return "执行失败，需要查看阻塞项"
+    if blocked_by:
+        return "已生成回答，但仍有证据或权限阻塞项"
+    if str(coverage.get("status") or "") == "complete":
+        return "已完成，证据覆盖完整"
+    return "已完成"
+
+
+def _denied_step_count(*, tool_transcript: tuple[dict[str, Any], ...], tool_events: list[dict[str, Any]]) -> int:
+    count = sum(1 for item in tool_transcript if isinstance(item, dict) and item.get("authorized") is False)
+    count += sum(
+        1
+        for item in tool_events
+        if isinstance(item, dict) and item.get("phase") == "authorize_tool" and item.get("allowed") is False
+    )
+    return count
+
+
+def _dedupe_progress_blockers(blockers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[tuple[str, str], ...]] = set()
+    for blocker in blockers:
+        key = tuple(sorted((str(k), str(v)) for k, v in blocker.items() if v not in (None, "", [], {})))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({k: v for k, v in blocker.items() if v not in (None, "", [], {})})
+    return out
+
+
+def _dedupe_capability_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[tuple[str, str], ...]] = set()
+    for item in items:
+        clean = {key: value for key, value in item.items() if value not in (None, "", [], {})}
+        key = tuple(sorted((str(k), str(v)) for k, v in clean.items()))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(clean)
+    return out
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _clip_text(value: Any, limit: int) -> str:
+    text = str(value or "").strip()
+    return text if len(text) <= limit else text[: max(0, limit - 1)] + "..."
+
+
 __all__ = [
     "AGENT_SESSION_SCHEMA_VERSION",
+    "AGENT_CAPABILITY_SELECTION_SCHEMA_VERSION",
+    "AGENT_PROGRESS_SCHEMA_VERSION",
     "AgentSessionSnapshot",
     "build_agent_session_snapshot",
     "build_operation_readback_agent_session_snapshot",

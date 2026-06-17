@@ -26,6 +26,7 @@ from src.application.assistant.evidence import DIAGNOSTIC_EVIDENCE_SCHEMA_VERSIO
 from src.application.assistant.session_store import AgentSessionStore, collect_assistant_trace, format_assistant_trace
 from src.application.assistant.task_contract import TASK_CONTRACT_SCHEMA_VERSION, build_task_contract
 from src.application.assistant.verifier_hooks import HOOK_RESULT_SCHEMA_VERSION
+from src.application.agent_tool_registry import get_tool_definition
 from src.application.tool_execution import execute_tool as run_tool
 
 
@@ -3571,6 +3572,16 @@ def test_agent_loop_tool_result_contains_evidence_bundle_and_session(tmp_path: P
     assert session["schema_version"] == "om-agent-session-v1"
     assert session["task_state"] == "done"
     assert session["goal"] == "查看 lx 指派正股持仓盈亏"
+    assert session["capability_selection"]["schema_version"] == "om-agent-capability-selection-v1"
+    assert session["capability_selection"]["selected_tools"] == ["option_positions_read"]
+    assert session["capability_selection"]["selected"][0]["effect"] == "read"
+    assert session["progress"]["schema_version"] == "om-agent-progress-v1"
+    assert session["progress"]["state"] == "done"
+    assert session["progress"]["coverage_status"] == "complete"
+    assert session["progress"]["tool_call_count"] == 1
+    assert session["progress"]["completed_step_count"] == 1
+    assert session["progress"]["blocked_by"] == []
+    assert session["progress"]["next_action"] == "none"
     assert session["task_contract"]["schema_version"] == TASK_CONTRACT_SCHEMA_VERSION
     assert session["task_contract"]["intent_families"] == ["assigned_stock_pnl"]
     session_recipe = session["plan_revisions"][0]["plan"]["selected_recipe"]
@@ -3631,6 +3642,10 @@ def test_agent_loop_tool_result_contains_evidence_bundle_and_session(tmp_path: P
     assert trace_entry["identity"]["session_id"] == session["session_id"]
     assert trace_entry["task"]["goal"] == "查看 lx 指派正股持仓盈亏"
     assert trace_entry["plan"]["revision_count"] == 1
+    assert trace_entry["capability_selection"]["selected_tools"] == ["option_positions_read"]
+    assert trace_entry["progress"]["state"] == "done"
+    assert trace_entry["progress"]["coverage_status"] == "complete"
+    assert trace_entry["progress"]["next_action"] == "none"
     trace_recipe = trace_entry["plan"]["revisions"][0]["selected_recipe"]
     assert trace_recipe["name"] == "position_or_quote_diagnosis"
     assert trace_recipe["match_source"] == "runtime_inferred"
@@ -3658,6 +3673,8 @@ def test_agent_loop_tool_result_contains_evidence_bundle_and_session(tmp_path: P
     assert tool_trace["data"]["traces"][0]["identity"]["command_id"] == out["data"]["command_id"]
     trace_text = tool_trace["data"]["response_text"]
     assert "任务：查看 lx 指派正股持仓盈亏" in trace_text
+    assert "能力：selected=1" in trace_text
+    assert "进度：已完成，证据覆盖完整" in trace_text
     assert "工具：读取指派正股持仓（ok，1 行）" in trace_text
     assert "证据：facts=" in trace_text
     assert "缺口：无" in trace_text
@@ -3667,6 +3684,89 @@ def test_agent_loop_tool_result_contains_evidence_bundle_and_session(tmp_path: P
     assert "option_positions_read" not in trace_text
     assert "stock_lot_id" not in trace_text
     assert "session=as_" not in trace_text
+
+    trace_definition = get_tool_definition("assistant_trace")
+    assert trace_definition is not None
+    trace_evidence = build_evidence_bundle(
+        question="解释 assistant trace",
+        plan={"goal": "解释 assistant trace"},
+        observations=[
+            {
+                "index": 1,
+                "tool_name": "assistant_trace",
+                "payload": {"command_id": out["data"]["command_id"]},
+                "ok": True,
+                "output_contract": trace_definition.resolve_output_contract({}),
+                "data": tool_trace["data"],
+            }
+        ],
+    ).public_payload()
+    trace_facts = {(item["path"], item["value"]) for item in trace_evidence["facts"]}
+    assert ("traces[].capability_selection.selected_tools[]", "option_positions_read") in trace_facts
+    assert ("traces[].progress.next_action", "none") in trace_facts
+    assert ("traces[].progress.coverage_status", "complete") in trace_facts
+
+
+def test_assistant_trace_preserves_blocker_tool_name_in_json_without_text_leak(tmp_path: Path) -> None:
+    audit_db = tmp_path / "inbound.sqlite3"
+    request = AssistantRequest(
+        text="检查失败工具",
+        sender_id="local",
+        message_id="msg_failed_tool_trace",
+        audit_db=str(audit_db),
+    )
+    snapshot = {
+        "schema_version": "om-agent-session-v1",
+        "session_id": "as_failed_tool_trace",
+        "request": request.public_payload(),
+        "goal": "检查失败工具",
+        "task_state": "failed",
+        "capability_selection": {},
+        "progress": {
+            "schema_version": "om-agent-progress-v1",
+            "state": "failed",
+            "summary": "执行失败，需要查看阻塞项",
+            "tool_call_count": 1,
+            "completed_step_count": 0,
+            "failed_step_count": 1,
+            "denied_step_count": 0,
+            "coverage_status": "not_applicable",
+            "next_action": "inspect_tool_failure",
+            "blocked_by": [
+                {
+                    "kind": "tool_failure",
+                    "tool_name": "analysis_query",
+                    "code": "TOOL_FAILED",
+                }
+            ],
+        },
+        "plan_revisions": [],
+        "tool_transcript": [],
+        "task_contract": {},
+        "evidence_bundle": {},
+        "coverage": {},
+        "permission_state": {},
+        "answer_trace": {
+            "final_response": {"status": "failed", "reason": "tool failed"},
+            "synthesis": {},
+            "followup_decisions": [],
+        },
+        "audit_ref": {},
+    }
+    AgentSessionStore(audit_db).upsert_snapshot(
+        snapshot=snapshot,
+        command_id="cmd_failed_tool_trace",
+        request=request,
+        response={"data": {"response_text": "工具失败"}},
+    )
+
+    trace = collect_assistant_trace(audit_db=str(audit_db), command_id="cmd_failed_tool_trace")
+    blocker = trace["traces"][0]["progress"]["blocked_by"][0]
+
+    assert blocker["kind"] == "tool_failure"
+    assert blocker["tool_name"] == "analysis_query"
+    assert "blocked_by=tool_failure" in trace["response_text"]
+    assert "analysis_query" not in trace["response_text"]
 
 
 def test_format_assistant_trace_compact_redacts_internal_details() -> None:

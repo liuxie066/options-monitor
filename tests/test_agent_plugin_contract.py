@@ -195,6 +195,11 @@ def test_agent_tool_output_contracts_advertise_canonical_renderers() -> None:
     assert tools["runtime_runs"]["output_contract"]["canonical_renderer"] == "runtime_runs"
     assert tools["runtime_logs"]["output_contract"]["canonical_renderer"] == "runtime_logs"
     assert tools["assistant_trace"]["output_contract"]["canonical_renderer"] == "assistant_trace"
+    assistant_trace_fields = tools["assistant_trace"]["output_contract"]["fact_fields"]
+    assert "traces[].capability_selection.selected_tools[]" in assistant_trace_fields
+    assert "traces[].progress.next_action" in assistant_trace_fields
+    assert "traces[].progress.blocked_by[].tool_name" in assistant_trace_fields
+    assert "traces[].answer.clarification_request.questions[].slot" in assistant_trace_fields
     assert tools["config_validate"]["output_contract"]["canonical_renderer"] == "config_validate"
     assert tools["symbol_resolve"]["output_contract"]["canonical_renderer"] == "symbol_resolve"
     assert tools["symbol_resolve"]["output_contract"]["result_shape"] == "scalar"

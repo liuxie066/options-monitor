@@ -54,8 +54,24 @@ _ASSISTANT_TRACE_OUTPUT_CONTRACT: dict[str, Any] = {
         "traces[].task.state",
         "traces[].evidence.fact_count",
         "traces[].evidence.missing_data_count",
+        "traces[].capability_selection.selected_tools[]",
+        "traces[].capability_selection.selected[].tool_name",
+        "traces[].capability_selection.selected[].effect",
+        "traces[].capability_selection.required[]",
+        "traces[].capability_selection.satisfied[]",
+        "traces[].capability_selection.rejected[].tool_name",
+        "traces[].capability_selection.rejected[].reason",
+        "traces[].progress.state",
+        "traces[].progress.summary",
+        "traces[].progress.coverage_status",
+        "traces[].progress.next_action",
+        "traces[].progress.blocked_by[].kind",
+        "traces[].progress.blocked_by[].tool_name",
         "traces[].answer.response_status",
         "traces[].answer.synthesis_reason",
+        "traces[].answer.clarification_request.status",
+        "traces[].answer.clarification_request.questions[].slot",
+        "traces[].answer.clarification_request.questions[].question",
     ],
 }
 
@@ -257,7 +273,7 @@ OPERATION_TIMELINE_TOOL = build_agent_tool(
 ASSISTANT_TRACE_TOOL = build_agent_tool(
     name="assistant_trace",
     description=(
-        "Read durable AgentSession snapshots from inbound SQLite to explain recent Agent plans, tool calls, "
+        "Read durable Assistant session snapshots from inbound SQLite to explain recent assistant plans, tool calls, "
         "evidence counts, answer guard/fallback decisions, and permission state."
     ),
     requires=("inbound_audit_db",),
@@ -265,14 +281,14 @@ ASSISTANT_TRACE_TOOL = build_agent_tool(
     input_schema={
         "audit_db": "optional inbound audit SQLite path",
         "inbound_audit_db": "optional alias for audit_db",
-        "session_id": "optional exact AgentSession id",
+        "session_id": "optional exact Assistant session id",
         "command_id": "optional exact inbound command id",
         "channel": "optional channel filter such as feishu",
         "sender_id": "optional operator sender id filter",
         "conversation_id": "optional conversation filter",
         "message_id": "optional inbound message id filter",
-        "limit": "optional number of recent Agent sessions to return; defaults to 10",
-        "include_snapshot": "optional bool; include compact raw AgentSession snapshot for deep debugging",
+        "limit": "optional number of recent Assistant sessions to return; defaults to 10",
+        "include_snapshot": "optional bool; include compact raw Assistant session snapshot for deep debugging",
     },
     handler=_assistant_trace_tool,
     pure_read=True,
