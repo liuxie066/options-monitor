@@ -414,7 +414,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 ## Reading
 
 - `src.interfaces` is a thin facade by intent. Keep `src.interfaces.cli.main` as the public `om` dispatcher, and keep command-specific application imports in focused `src.interfaces.cli.*_ops` owners.
-- `src.application.agent_tools` owns Ops Copilot tool metadata and execution; keep each domain `TOOLS` module aligned with registry discovery and permission tests.
+- `src.application.agent_tools` owns Tool Gateway tool metadata and execution; keep each domain `TOOLS` module aligned with registry discovery and permission tests.
 - The strongest production dependency remains `src.application -> domain.domain`, which is the intended direction: application orchestration calls deterministic domain policy.
 - `src.application -> src.infrastructure` is also expected, but new external-system access should stay in infrastructure adapters rather than leaking directly into domain code.
 - Keep shared constants and pure config-section helpers in neutral modules rather than importing them across feature owners.
