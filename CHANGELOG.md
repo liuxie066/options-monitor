@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.2.300 - 2026-06-17
+
 ### Added
 - Added investigation recipes to the read-only analysis catalog so Agent planners can map task contracts and evidence
   gaps to generic analysis views, `analysis_query`, `operation_timeline`, and trace tools.
@@ -13,11 +15,19 @@
   readback/receipt evidence, risk-premise evidence, and replay/dry-run evidence.
 - Added `strategy_replay_read_surface` to `analysis_query`, exposing read-only Strategy Lab and Shadow Replay artifact
   summaries for replay, dry-run proposal, and strategy evidence review.
+- Added structured assistant trace state for capability selection, progress, blockers, and clarification requests.
+- Added the OM Assistant architecture authority document that separates `./om-agent`, `./om assistant`, and `AgentLoop`
+  into Tool Gateway, Inbound Assistant, and internal planner dimensions.
 
 ### Changed
 - Tightened read-only follow-up planning around recipe coverage gaps: operation readback gaps now suggest
   `operation_timeline` with the scoped operation id, while strategy replay gaps now suggest a bounded
   `analysis_query` follow-up over `strategy_replay_read_surface`.
+- Renamed current Tool Gateway / Inbound Assistant documentation and public manifest wording to avoid treating
+  `./om-agent` as OM's autonomous assistant.
+
+### Fixed
+- Fixed assistant clarification payloads so account options come from request context instead of hardcoded account labels.
 
 ## 1.2.299 - 2026-06-17
 
