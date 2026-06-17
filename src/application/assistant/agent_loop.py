@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -818,6 +818,8 @@ def execute_tool_plan(
     )
     selected_recipe = _selected_recipe_for_task_contract(task_contract=task_contract.public_payload(), plan=plan)
     plan = _with_selected_recipe(plan, selected_recipe)
+    if selected_recipe:
+        task_contract = replace(task_contract, selected_recipe=_safe_selected_recipe_payload(selected_recipe))
     plan_revisions: list[dict[str, Any]] = [_plan_revision_payload(1, plan=plan, reason="initial bounded plan")]
     tool_events: list[dict[str, Any]] = []
     observations: list[dict[str, Any]] = []
@@ -2721,10 +2723,13 @@ def _infer_recipe_from_task_contract(task_contract: dict[str, Any]) -> dict[str,
         task_mode in {"analyze", "compare"} or required_evidence.intersection({"driver_or_breakdown", "same_scope_comparable_data"})
     ):
         recipe = _recipe_by_name("income_analysis_breakdown")
-    elif domain in {"strategy", "candidate"} and (
+    elif domain == "strategy" and (
         task_mode in {"analyze", "recommend"}
         or required_evidence.intersection({"dry_run_or_replay", "risk_premise"})
-        or "candidate_filter" in intent_families
+    ):
+        recipe = _recipe_by_name("strategy_replay_review")
+    elif domain == "candidate" and (
+        task_mode in {"analyze", "recommend"} and required_evidence.intersection({"dry_run_or_replay", "risk_premise"})
     ):
         recipe = _recipe_by_name("strategy_replay_review")
     elif domain == "operation" and (
