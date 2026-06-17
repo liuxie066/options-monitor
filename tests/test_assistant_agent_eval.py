@@ -19,6 +19,8 @@ from src.application.assistant.agent_loop import (
     LlmSynthesisResult,
     PlannerPlan,
     PlannerPlanStep,
+    _planner_input_text,
+    _planner_tool_manifest,
 )
 from src.application.assistant.contracts import AssistantRequest, ToolCall
 
@@ -104,6 +106,11 @@ P2_AGENT_EVAL_REQUIRED_FIXTURE_GROUPS: dict[str, set[str]] = {
         "analysis_upgrade_receipt_missing_version",
         "operation_upgrade_followup_timeline_completes_answer",
     },
+    "planner_context_budget": {
+        "planner_context_income_followup_uses_recent_read_hint",
+        "planner_context_explicit_candidate_message_overrides_income_context",
+        "planner_context_followup_suggested_views_drive_selection",
+    },
 }
 
 P2_AGENT_EVAL_MINIMUM_CASES: dict[str, set[str]] = {
@@ -144,6 +151,11 @@ P2_AGENT_EVAL_MINIMUM_CASES: dict[str, set[str]] = {
     },
     "write_preview_no_apply": {
         "write_preview_no_apply_manual_trade_open",
+    },
+    "planner_context_budget": {
+        "planner_context_income_followup_uses_recent_read_hint",
+        "planner_context_explicit_candidate_message_overrides_income_context",
+        "planner_context_followup_suggested_views_drive_selection",
     },
 }
 P2_AGENT_EVAL_GAP_IMPACT_TERMS = (
@@ -215,6 +227,12 @@ def test_assistant_agent_eval_fixture_covers_p2_agent_eval_gap_groups() -> None:
             assert case.get("expect_contains")
             assert case.get("expect_not_contains")
             continue
+        if mode == "planner_context":
+            assert str(case.get("question") or "").strip()
+            assert case.get("expect_selection_sources")
+            assert case.get("expect_analysis_views")
+            assert case.get("expect_analysis_views_absent") is not None
+            continue
         assert case.get("tool_result") or case.get("tool_results")
         assert case.get("expect_contains")
         assert case.get("expect_not_contains")
@@ -264,6 +282,15 @@ def test_assistant_agent_eval_minimum_cases_satisfy_online_sample_contract() -> 
                 missing.append("expect_contains")
             if not case.get("expect_not_contains"):
                 missing.append("expect_not_contains")
+        elif mode == "planner_context":
+            if not case.get("expect_selection_sources"):
+                missing.append("expect_selection_sources")
+            if not case.get("expect_analysis_views"):
+                missing.append("expect_analysis_views")
+            if case.get("expect_analysis_views_absent") is None:
+                missing.append("expect_analysis_views_absent")
+            if case.get("expect_max_manifest_chars") is None:
+                missing.append("expect_max_manifest_chars")
         else:
             if not case.get("plan"):
                 missing.append("plan")
@@ -308,6 +335,44 @@ def _plan_from_payload(raw_payload: dict[str, Any]) -> PlannerPlan:
 
 def _plan_from_case(case: dict[str, Any]) -> PlannerPlan:
     return _plan_from_payload(dict(case["plan"]))
+
+
+def _planner_context_from_case(case: dict[str, Any]) -> dict[str, Any] | None:
+    raw_context = case.get("conversation_context")
+    return dict(raw_context) if isinstance(raw_context, dict) else None
+
+
+def _run_planner_context_case(case: dict[str, Any]) -> None:
+    payload = json.loads(
+        _planner_input_text(
+            str(case["question"]),
+            conversation_context=_planner_context_from_case(case),
+        )
+    )
+    budget = payload["manifest_budget"]
+    analysis_query = next(tool for tool in payload["tools"] if tool["name"] == "analysis_query")
+    analysis_views = set(analysis_query["semantics"]["analysis_views"])
+    full_manifest_chars = len(json.dumps(_planner_tool_manifest(), ensure_ascii=False, sort_keys=True))
+
+    assert budget["mode"] == "scoped_analysis_views"
+    assert budget["analysis_views_included"] == len(analysis_views)
+    assert budget["analysis_views_omitted"] > 0
+    assert budget["manifest_chars"] < full_manifest_chars
+    assert budget["selection_sources"] == case["expect_selection_sources"]
+    for group_name in case.get("expect_matched_view_groups") or ():
+        assert str(group_name) in budget["matched_view_groups"]
+    for view_name in case.get("expect_analysis_views") or ():
+        assert str(view_name) in analysis_views
+    for view_name in case.get("expect_analysis_views_absent") or ():
+        assert str(view_name) not in analysis_views
+    if case.get("expect_max_manifest_chars") is not None:
+        assert budget["manifest_chars"] <= int(case["expect_max_manifest_chars"])
+    if case.get("expect_max_analysis_views_included") is not None:
+        assert budget["analysis_views_included"] <= int(case["expect_max_analysis_views_included"])
+    if case.get("expect_recent_read_hint_count") is not None:
+        context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+        recent_hints = context.get("recent_read_hints") if isinstance(context.get("recent_read_hints"), list) else []
+        assert len(recent_hints) == int(case["expect_recent_read_hint_count"])
 
 
 def _write_trade_runtime_config(tmp_path: Path) -> tuple[Path, Path]:
@@ -372,6 +437,9 @@ def test_assistant_agent_eval_uses_guarded_answer_evidence(case: dict[str, Any],
         return
     if mode == "planner_preview":
         _run_planner_preview_case(case, tmp_path=tmp_path, monkeypatch=monkeypatch)
+        return
+    if mode == "planner_context":
+        _run_planner_context_case(case)
         return
 
     plan = _plan_from_case(case)
