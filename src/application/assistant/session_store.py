@@ -322,6 +322,8 @@ def format_assistant_trace(traces: list[dict[str, Any]], *, filters: dict[str, A
         )
         goal = str(task.get("goal") or "").strip()
         lines.append(f"  任务：{_clip(goal, 180) if goal else '-'}")
+        lines.append(f"  能力：{_trace_capability_text(trace.get('capability_selection'))}")
+        lines.append(f"  进度：{_trace_progress_text(trace.get('progress'))}")
         lines.append(f"  工具：{_trace_tools_text(trace.get('tools'))}")
         lines.append(f"  证据：{_trace_evidence_text(evidence)}")
         lines.append(f"  缺口：{_trace_gap_text(evidence)}")
@@ -344,6 +346,74 @@ def _trace_tools_text(value: Any) -> str:
     if len(tools) > 3:
         parts.append(f"另 {len(tools) - 3} 个工具")
     return "；".join(parts)
+
+
+def _trace_capability_text(value: Any) -> str:
+    capability = value if isinstance(value, dict) else {}
+    if not capability:
+        return "未记录"
+    selected = [item for item in capability.get("selected") or [] if isinstance(item, dict)]
+    required = _string_list(capability.get("required"))
+    rejected = [item for item in capability.get("rejected") or [] if isinstance(item, dict)]
+    parts: list[str] = []
+    if selected:
+        effects = _unique(str(item.get("effect") or "read") for item in selected if str(item.get("effect") or "").strip())
+        parts.append(f"selected={len(selected)}" + (f"（{','.join(effects[:3])}）" if effects else ""))
+    if required:
+        parts.append(f"required={len(required)}")
+    if rejected:
+        parts.append(f"rejected={len(rejected)}")
+    return "，".join(parts) if parts else "无显式能力选择"
+
+
+def _trace_progress_text(value: Any) -> str:
+    progress = value if isinstance(value, dict) else {}
+    if not progress:
+        return "未记录"
+    summary = str(progress.get("summary") or progress.get("state") or "").strip() or "未记录"
+    tool_call_count = _safe_int(progress.get("tool_call_count"))
+    completed = _safe_int(progress.get("completed_step_count"))
+    failed = _safe_int(progress.get("failed_step_count"))
+    denied = _safe_int(progress.get("denied_step_count"))
+    coverage_status = str(progress.get("coverage_status") or "").strip()
+    next_action = str(progress.get("next_action") or "").strip()
+    blockers = [item for item in progress.get("blocked_by") or [] if isinstance(item, dict)]
+    parts = [summary]
+    if tool_call_count:
+        parts.append(f"工具 {completed}/{tool_call_count} 完成")
+    if failed:
+        parts.append(f"失败 {failed}")
+    if denied:
+        parts.append(f"拒绝 {denied}")
+    if coverage_status and coverage_status != "not_applicable":
+        parts.append(f"coverage={coverage_status}")
+    if blockers:
+        parts.append("blocked_by=" + "、".join(_blocker_label(item) for item in blockers[:3]))
+    if next_action:
+        parts.append(f"next={next_action}")
+    return "，".join(parts)
+
+
+def _blocker_label(item: dict[str, Any]) -> str:
+    kind = str(item.get("kind") or "blocker").strip()
+    if kind == "evidence_gap":
+        gap_kind = str(item.get("gap_kind") or "").strip()
+        return f"evidence_gap:{_clip(gap_kind, 48)}" if gap_kind else "evidence_gap"
+    if kind == "missing_answer_key":
+        key = str(item.get("key") or "").strip()
+        return f"missing:{_clip(key, 48)}" if key else "missing"
+    if kind == "followup_stop":
+        status = str(item.get("status") or "").strip()
+        return f"followup:{_clip(status, 32)}" if status else "followup"
+    if kind == "clarification":
+        return "clarification"
+    if kind == "permission":
+        return "permission"
+    if kind == "permission_denial":
+        return "permission_denial"
+    if kind == "tool_failure":
+        return "tool_failure"
+    return _clip(kind, 48)
 
 
 def _tool_display_label(tool: dict[str, Any]) -> str:
@@ -559,6 +629,8 @@ def _trace_from_row(row: dict[str, Any], *, include_snapshot: bool) -> dict[str,
             "revision_count": int(row.get("plan_revision_count") or 0),
             "revisions": _compact_plan_revisions(snapshot.get("plan_revisions")),
         },
+        "capability_selection": _compact_capability_selection(snapshot.get("capability_selection")),
+        "progress": _compact_progress(snapshot.get("progress")),
         "tools": _compact_tools(snapshot.get("tool_transcript")),
         "evidence": {
             "fact_count": int(row.get("fact_count") or 0),
@@ -577,6 +649,7 @@ def _trace_from_row(row: dict[str, Any], *, include_snapshot: bool) -> dict[str,
             "synthesis_reason": synthesis.get("reason"),
             "fallback": synthesis.get("fallback"),
             "answer_guard": synthesis.get("answer_guard") if isinstance(synthesis.get("answer_guard"), dict) else None,
+            "clarification_request": _compact_clarification_request(final_response.get("clarification_request")),
             "hook_results": _compact_hook_results(final_response.get("hook_results") or synthesis.get("hook_results")),
             "response_text_chars": len(str(row.get("response_text") or "")),
         },
@@ -631,6 +704,101 @@ def _compact_selected_recipe(value: Any) -> dict[str, Any]:
         "reason",
     }
     return {key: value.get(key) for key in sorted(allowed) if key in value}
+
+
+def _compact_capability_selection(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    allowed_top = {"schema_version", "required", "satisfied", "selected_tools"}
+    out = {key: value.get(key) for key in sorted(allowed_top) if key in value}
+    out["selected"] = [
+        _compact_capability_item(item)
+        for item in value.get("selected") or []
+        if isinstance(item, dict)
+    ]
+    out["rejected"] = [
+        _compact_capability_item(item)
+        for item in value.get("rejected") or []
+        if isinstance(item, dict)
+    ]
+    return out
+
+
+def _compact_capability_item(value: dict[str, Any]) -> dict[str, Any]:
+    allowed = {"capability_id", "tool_name", "revision", "effect", "reason"}
+    return {key: value.get(key) for key in sorted(allowed) if key in value}
+
+
+def _compact_progress(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    allowed = {
+        "schema_version",
+        "state",
+        "summary",
+        "plan_revision_count",
+        "planned_step_count",
+        "tool_call_count",
+        "completed_step_count",
+        "failed_step_count",
+        "denied_step_count",
+        "coverage_status",
+        "coverage_next_action",
+        "pending_operation_ids",
+        "next_action",
+    }
+    out = {key: value.get(key) for key in sorted(allowed) if key in value}
+    out["blocked_by"] = [
+        _compact_progress_blocker(item)
+        for item in value.get("blocked_by") or []
+        if isinstance(item, dict)
+    ]
+    return out
+
+
+def _compact_progress_blocker(value: dict[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "kind",
+        "tool_name",
+        "next_action",
+        "count",
+        "code",
+        "gap_kind",
+        "recoverable_by",
+        "suggested_tool",
+        "key",
+        "status",
+        "reason",
+    }
+    return {key: value.get(key) for key in sorted(allowed) if key in value}
+
+
+def _compact_clarification_request(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    questions = []
+    for item in value.get("questions") or []:
+        if not isinstance(item, dict):
+            continue
+        questions.append(
+            {
+                "slot": item.get("slot"),
+                "question": item.get("question"),
+                "options": [
+                    {
+                        "label": option.get("label"),
+                        "description": option.get("description"),
+                    }
+                    for option in item.get("options") or []
+                    if isinstance(option, dict)
+                ],
+            }
+        )
+    return {
+        "schema_version": value.get("schema_version"),
+        "status": value.get("status"),
+        "questions": questions,
+    }
 
 
 def _compact_tools(value: Any) -> list[dict[str, Any]]:
@@ -787,6 +955,18 @@ def _string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _unique(values: Any) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values or []:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
 
 
 def _bounded_limit(value: Any) -> int:

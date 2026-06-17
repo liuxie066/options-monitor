@@ -1265,6 +1265,7 @@ def _plan_followup_read_steps(
                 reason=clarification,
                 evidence_gaps=evidence_gaps,
                 clarification=clarification,
+                clarification_context=context,
             )
             followup_decisions.append(decision)
             tool_events.append({"phase": "followup_decision", **decision})
@@ -1450,6 +1451,7 @@ def _followup_decision_payload(
     evidence_gaps: list[dict[str, Any]],
     plan: PlannerPlan | None = None,
     clarification: str | None = None,
+    clarification_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "schema_version": FOLLOWUP_DECISION_SCHEMA_VERSION,
@@ -1462,6 +1464,10 @@ def _followup_decision_payload(
     }
     if clarification:
         payload["clarification"] = str(clarification).strip()
+        payload["clarification_request"] = _clarification_request_payload(
+            clarification,
+            context=clarification_context,
+        )
     if plan is not None:
         payload["steps"] = [step.public_payload() for step in plan.steps]
         if len(plan.steps) == 1:
@@ -3123,11 +3129,22 @@ def _build_final_response(
     error_payload: dict[str, Any] | None,
     followup_decisions: list[dict[str, Any]] | None = None,
 ) -> LlmSynthesisResult:
-    clarification = _followup_clarification_text(followup_decisions or [])
+    clarification_decision = _followup_clarification_decision(followup_decisions or [])
+    clarification = _clarification_text_from_decision(clarification_decision)
     if clarification:
+        clarification_request = (
+            clarification_decision.get("clarification_request")
+            if isinstance(clarification_decision.get("clarification_request"), dict)
+            else _clarification_request_payload(clarification, context=conversation_context)
+        )
         return LlmSynthesisResult(
             response_text=clarification,
-            trace={"attempted": False, "reason": "ask_clarification", "schema_version": TOOL_PLAN_SYNTHESIS_SCHEMA_VERSION},
+            trace={
+                "attempted": False,
+                "reason": "ask_clarification",
+                "schema_version": TOOL_PLAN_SYNTHESIS_SCHEMA_VERSION,
+                "clarification_request": clarification_request,
+            },
         )
     if not ok:
         return LlmSynthesisResult(
@@ -3347,15 +3364,108 @@ def _build_final_response(
     )
 
 
-def _followup_clarification_text(followup_decisions: list[dict[str, Any]]) -> str:
+def _followup_clarification_decision(followup_decisions: list[dict[str, Any]]) -> dict[str, Any]:
     for decision in reversed(followup_decisions):
         if not isinstance(decision, dict):
             continue
         if str(decision.get("decision") or "") != "ask_clarification":
             continue
-        text = str(decision.get("clarification") or decision.get("reason") or "").strip()
-        return text or "需要补充范围后才能继续分析。"
+        return dict(decision)
+    return {}
+
+
+def _clarification_text_from_decision(decision: dict[str, Any]) -> str:
+    if not decision:
+        return ""
+    text = str(decision.get("clarification") or decision.get("reason") or "").strip()
+    if text:
+        return text
+    if str(decision.get("decision") or "") == "ask_clarification":
+        return "需要补充范围后才能继续分析。"
     return ""
+
+
+def _clarification_request_payload(text: str, *, context: dict[str, Any] | None = None) -> dict[str, Any]:
+    question = str(text or "").strip() or "需要补充范围后才能继续分析。"
+    slot = _clarification_slot(question)
+    return {
+        "schema_version": "om-agent-clarification-request-v1",
+        "status": "needs_user_input",
+        "questions": [
+            {
+                "slot": slot,
+                "question": question,
+                "options": _clarification_options(slot=slot, context=context),
+            }
+        ],
+    }
+
+
+def _clarification_slot(question: str) -> str:
+    compact = re.sub(r"\s+", "", str(question or "").lower())
+    has_account = "账户" in compact or "account" in compact
+    has_period = "月份" in compact or "month" in compact or "日期" in compact
+    has_symbol = "标的" in compact or "symbol" in compact
+    if sum(bool(item) for item in (has_account, has_period, has_symbol)) > 1:
+        return "scope"
+    if has_account:
+        return "account"
+    if has_period:
+        return "period"
+    if has_symbol:
+        return "symbol"
+    return "scope"
+
+
+def _clarification_options(*, slot: str, context: dict[str, Any] | None) -> list[dict[str, str]]:
+    if slot == "account":
+        return [
+            {"label": account, "description": f"只查询 {account} 账户"}
+            for account in _clarification_account_candidates(context)
+        ]
+    return []
+
+
+def _clarification_account_candidates(context: dict[str, Any] | None) -> list[str]:
+    if not isinstance(context, dict):
+        return []
+    candidates: list[str] = []
+    for key in ("account_options", "available_accounts", "configured_accounts"):
+        candidates.extend(_string_values(context.get(key)))
+    options = context.get("clarification_options")
+    if isinstance(options, dict):
+        candidates.extend(_string_values(options.get("accounts")))
+    followup = context.get("agent_loop_followup")
+    if isinstance(followup, dict):
+        for gap in followup.get("evidence_gaps") or []:
+            if isinstance(gap, dict):
+                candidates.extend(_string_values(gap.get("missing_accounts")))
+        prior_plan = followup.get("prior_plan")
+        if isinstance(prior_plan, dict):
+            contract = prior_plan.get("task_contract") if isinstance(prior_plan.get("task_contract"), dict) else {}
+            scope = contract.get("scope") if isinstance(contract.get("scope"), dict) else {}
+            candidates.extend(_string_values(scope.get("requested_accounts")))
+    return _unique_strings(candidates)
+
+
+def _string_values(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _unique_strings(values: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
 
 
 def _build_answer_evidence(
@@ -3521,12 +3631,16 @@ def _final_response_payload(synthesis: LlmSynthesisResult) -> dict[str, Any]:
             llm_may_summarize=True,
         ).public_payload()
     if reason == "ask_clarification":
-        return FinalResponsePlan(
+        payload = FinalResponsePlan(
             status="needs_clarification",
             reason="follow-up planning determined that user scope is required",
             canonical_renderer_required=False,
             llm_may_summarize=False,
         ).public_payload()
+        clarification_request = synthesis.trace.get("clarification_request")
+        if isinstance(clarification_request, dict):
+            payload["clarification_request"] = dict(clarification_request)
+        return payload
     if reason == "agent_renderer_fallback":
         return FinalResponsePlan(
             status="rendered",
