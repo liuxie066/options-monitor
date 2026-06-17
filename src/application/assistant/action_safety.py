@@ -5,18 +5,32 @@ import re
 from typing import Any
 
 from src.application.assistant.capability_catalog import ACCOUNT_VALUES, spec_by_intent
+from src.application.symbol_calibration import calibrate_symbol
 
 
 ACTION_SAFETY_SCHEMA_VERSION = "om-agent-action-safety-v1"
 _COMMAND_SPECS_BY_INTENT = spec_by_intent()
+_SYMBOL_TEXT_RE = re.compile(
+    r"(?<![A-Za-z0-9_.])"
+    r"([A-Za-z]{1,8}(?:\.[A-Za-z]{1,4})?|[A-Za-z]{2}\.\d{4,5}|\d{3,5}(?:\.HK)?|[\u4e00-\u9fff]{2,8})"
+    r"(?![A-Za-z0-9_.])"
+)
 _NON_SYMBOL_TOKENS = {
+    "ACCOUNT",
+    "ACTION",
+    "ALL",
     "AND",
+    "AS",
+    "ASSIGNED",
     "ASC",
     "AVG",
     "BY",
+    "CALL",
     "CASE",
+    "CASHFLOW",
     "COUNT",
     "CNY",
+    "COVERED",
     "DESC",
     "ELSE",
     "END",
@@ -30,24 +44,49 @@ _NON_SYMBOL_TOKENS = {
     "LEFT",
     "LIKE",
     "LIMIT",
+    "LONG",
+    "LX",
+    "MARKET",
     "MAX",
     "MIN",
+    "MONTH",
     "NOT",
     "NULL",
     "ON",
+    "OPEN",
     "OR",
     "ORDER",
     "OUTER",
     "P0",
     "P1",
     "P2",
+    "PUT",
+    "REFRESH",
     "RIGHT",
+    "SELECT",
+    "SELL",
+    "SHORT",
+    "STATUS",
+    "STOCK",
+    "STRIKE",
     "SUM",
+    "SY",
+    "SYMBOL",
     "THEN",
     "US",
     "USD",
     "WHEN",
     "WHERE",
+}
+_PAYLOAD_SCOPE_TEXT_SKIP_KEYS = {
+    "artifact_path",
+    "audit_db",
+    "config_path",
+    "db_path",
+    "file_path",
+    "output_path",
+    "path",
+    "paths",
 }
 
 
@@ -61,6 +100,7 @@ class ActionSafetyDecision:
     proposed_effect: str
     route: str
     reason: str
+    source: str = "agent_loop"
     scope_delta: dict[str, Any] = field(default_factory=dict)
     injection_evidence: tuple[str, ...] = ()
     schema_version: str = ACTION_SAFETY_SCHEMA_VERSION
@@ -82,6 +122,7 @@ class ActionSafetyDecision:
             "injection_evidence": list(self.injection_evidence),
             "route": self.route,
             "reason": self.reason,
+            "source": self.source,
         }
 
 
@@ -102,7 +143,7 @@ def assess_action_safety(
     conservative when the proposed effect or scope no longer matches the
     original user request.
     """
-    _ = source
+    source_text = str(source or "").strip() or "agent_loop"
     contract = _contract_payload(task_contract)
     text = str(question if question is not None else contract.get("question") or "")
     requested_effect = _requested_effect(text=text, contract=contract)
@@ -125,6 +166,7 @@ def assess_action_safety(
             injection_evidence=injection_evidence,
             route="deny",
             reason="ActionPolicy did not allow this tool call.",
+            source=source_text,
         )
 
     if _is_apply_or_confirm(tool_name=tool_name, action_policy=policy):
@@ -139,6 +181,7 @@ def assess_action_safety(
             injection_evidence=injection_evidence,
             route="deny",
             reason="Planner may not confirm, cancel, apply, or otherwise execute pending operations.",
+            source=source_text,
         )
 
     if injection_evidence and proposed_family != "read":
@@ -153,6 +196,7 @@ def assess_action_safety(
             injection_evidence=injection_evidence,
             route="deny",
             reason="Untrusted tool output contains instruction-like text and cannot authorize a side-effect action.",
+            source=source_text,
         )
 
     if requested_effect == "read" and proposed_family != "read":
@@ -167,6 +211,7 @@ def assess_action_safety(
             injection_evidence=injection_evidence,
             route="deny",
             reason="User asked for read-only information, but the proposed tool creates a preview or side-effect action.",
+            source=source_text,
         )
 
     if requested_effect in {"preview", "confirm"} and proposed_family == "read":
@@ -181,6 +226,7 @@ def assess_action_safety(
             injection_evidence=injection_evidence,
             route="ask",
             reason="User request appears to require an operation preview, but the proposed tool is read-only.",
+            source=source_text,
         )
 
     scope_code = _scope_decision_code(tool_name=tool_name, proposed_family=proposed_family, scope_delta=scope_delta)
@@ -197,6 +243,7 @@ def assess_action_safety(
             injection_evidence=injection_evidence,
             route=status,
             reason=_scope_reason(scope_code),
+            source=source_text,
         )
 
     if proposed_family == "preview":
@@ -211,6 +258,7 @@ def assess_action_safety(
             injection_evidence=injection_evidence,
             route="preview",
             reason="The proposed preview operation matches the user's explicit operation request.",
+            source=source_text,
         )
 
     return _decision(
@@ -224,6 +272,7 @@ def assess_action_safety(
         injection_evidence=injection_evidence,
         route="execute",
         reason="The proposed read-only tool call matches the task effect and scope.",
+        source=source_text,
     )
 
 
@@ -239,6 +288,7 @@ def _decision(
     injection_evidence: tuple[str, ...],
     route: str,
     reason: str,
+    source: str,
 ) -> ActionSafetyDecision:
     return ActionSafetyDecision(
         status=status,
@@ -251,6 +301,7 @@ def _decision(
         injection_evidence=injection_evidence,
         route=route,
         reason=reason,
+        source=source,
     )
 
 
@@ -351,17 +402,14 @@ def _is_apply_or_confirm(*, tool_name: str, action_policy: dict[str, Any]) -> bo
 def _scope_delta(*, contract: dict[str, Any], payload: dict[str, Any], text: str = "") -> dict[str, Any]:
     scope = contract.get("scope") if isinstance(contract.get("scope"), dict) else {}
     requested_accounts = _normal_values(scope.get("requested_accounts"), lower=True) or _accounts_from_text(text)
-    requested_symbols = _normal_values(scope.get("requested_symbols"), upper=True) or _symbols_from_text(text)
+    requested_symbols = _normal_symbol_values(scope.get("requested_symbols")) or _symbols_from_text(text)
     requested_months = _normal_values(scope.get("requested_months"))
     payload_text = "\n".join(_payload_scope_texts(payload))
     provided_accounts = _normal_values(
         [*_payload_values(payload, keys=("account", "accounts"), lower=True), *_accounts_from_text(payload_text)],
         lower=True,
     )
-    provided_symbols = _normal_values(
-        [*_payload_values(payload, keys=("symbol", "symbols"), upper=True), *_symbols_from_text(payload_text)],
-        upper=True,
-    )
+    provided_symbols = _normal_symbol_values([*_payload_raw_values(payload, keys=("symbol", "symbols")), *_symbols_from_text(payload_text)])
     provided_months = _normal_values(
         [*_payload_values(payload, keys=("month", "months")), *_months_from_text(payload_text)]
     )
@@ -384,12 +432,43 @@ def _accounts_from_text(text: str) -> list[str]:
 
 def _symbols_from_text(text: str) -> list[str]:
     symbols: list[str] = []
-    for match in re.finditer(r"(?<![A-Za-z0-9_.])([A-Z0-9]{1,5}(?:\.HK)?)(?![A-Za-z0-9_.])", str(text or "")):
-        symbol = match.group(1).upper()
-        if symbol.isdigit() or symbol in _NON_SYMBOL_TOKENS:
+    for match in _SYMBOL_TEXT_RE.finditer(str(text or "")):
+        symbol = _normalize_symbol_token(match.group(1))
+        if not symbol:
             continue
         symbols.append(symbol)
-    return _normal_values(symbols, upper=True)
+    return _normal_values(symbols)
+
+
+def _normal_symbol_values(value: Any) -> list[str]:
+    raw_values: list[Any]
+    if value is None:
+        raw_values = []
+    elif isinstance(value, (list, tuple, set)):
+        raw_values = list(value)
+    else:
+        raw_values = [value]
+    symbols = [_normalize_symbol_token(raw) for raw in raw_values]
+    return _normal_values(symbols)
+
+
+def _normalize_symbol_token(raw: Any) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    upper = text.upper()
+    if upper in _NON_SYMBOL_TOKENS:
+        return ""
+    calibrated = calibrate_symbol(text)
+    if calibrated.status == "ok" and calibrated.canonical_symbol:
+        return str(calibrated.canonical_symbol).strip().upper()
+    if re.search(r"[\u4e00-\u9fff]", text):
+        return ""
+    if re.search(r"\d", text) or "." in text:
+        return upper
+    if text == upper:
+        return upper
+    return ""
 
 
 def _months_from_text(text: str) -> list[str]:
@@ -399,18 +478,20 @@ def _months_from_text(text: str) -> list[str]:
     return _normal_values(months)
 
 
-def _payload_scope_texts(value: Any) -> list[str]:
+def _payload_scope_texts(value: Any, *, key: str = "") -> list[str]:
+    if key and key.lower() in _PAYLOAD_SCOPE_TEXT_SKIP_KEYS:
+        return []
     if isinstance(value, str):
         return [value]
     if isinstance(value, dict):
         texts: list[str] = []
-        for item in value.values():
-            texts.extend(_payload_scope_texts(item))
+        for item_key, item in value.items():
+            texts.extend(_payload_scope_texts(item, key=str(item_key)))
         return texts
     if isinstance(value, (list, tuple, set)):
         texts = []
         for item in value:
-            texts.extend(_payload_scope_texts(item))
+            texts.extend(_payload_scope_texts(item, key=key))
         return texts
     return []
 
@@ -478,6 +559,10 @@ def _normal_values(value: Any, *, lower: bool = False, upper: bool = False) -> l
 
 
 def _payload_values(payload: dict[str, Any], *, keys: tuple[str, ...], lower: bool = False, upper: bool = False) -> list[str]:
+    return _normal_values(_payload_raw_values(payload, keys=keys), lower=lower, upper=upper)
+
+
+def _payload_raw_values(payload: dict[str, Any], *, keys: tuple[str, ...]) -> list[Any]:
     values: list[Any] = []
     for key in keys:
         if key not in payload:
@@ -487,7 +572,7 @@ def _payload_values(payload: dict[str, Any], *, keys: tuple[str, ...], lower: bo
             values.extend(value)
         else:
             values.append(value)
-    return _normal_values(values, lower=lower, upper=upper)
+    return values
 
 
 def _prompt_injection_evidence(texts: list[str] | tuple[str, ...]) -> list[str]:
