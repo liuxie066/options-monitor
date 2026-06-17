@@ -281,7 +281,13 @@ The same model surface is available in chat through one slash command namespace:
 
 `/model` and `/model list` are read-only. `/model use <name>` only creates a preview; it writes `config.yaml` and rebuilds `config.assistant.json` after `确认模型` or `/confirm model <operation_id>`.
 
-When LLM planning runs, OM sends a bounded same-conversation context window to the planner: recent inbound audit rows plus current pending operation summaries. Sender and conversation identifiers are used locally to select the window, but are not sent to the provider. `assistant.context_window_messages` controls the recent-message window and is capped at 20; this context is only used for bounded tool planning, not execution.
+When LLM planning runs, OM builds a bounded same-conversation context window for
+planning. Sender and conversation identifiers are used locally to select the
+window, but are not sent to the provider. The provider receives compact hint-only
+fields such as `last_successful_read`, `recent_read_hints`, temporal context,
+and profile semantics; it does not receive the full inbound audit rows.
+`assistant.context_window_messages` controls the recent-message window and is
+capped at 20; this context is only used for bounded tool planning, not execution.
 
 If repo-local `user.md` exists, OM Copilot also includes it as `context.user_profile`. This file is a manually maintained, hint-only user profile for stable collaboration preferences such as language, operator role, response style, and safety preferences. The current user message still wins over profile hints, and the profile must not be treated as market, ledger, broker, or config fact. `user.md` is ignored by git and should not contain secrets, credentials, webhook URLs, private keys, or account identifiers; obvious secret-like lines are redacted before provider calls.
 
@@ -303,6 +309,16 @@ LLM check validates `config.assistant.json`, the effective env file, redacted
 API-key presence, the resolved provider endpoint URL, and the current capability
 routing surface. `--live` sends one read-only structured planning probe to the
 configured provider.
+
+The planner keeps the full tool list visible, but scopes the heavy
+`analysis_query.semantics.analysis_views` section to the user's current task.
+This follows the Claude Code-style context-budget lesson without adding another
+Agent layer: give the planner enough local capability semantics for the current
+question, let short follow-ups use recent read-tool context as hint only,
+keep `analysis_catalog` as the fallback when a view/field is missing, and
+record `planner_input.manifest_budget` in trace so capability-selection context
+remains auditable. Explicit current-message matches still win over conversation
+context.
 
 ## Sender Allowlist
 
