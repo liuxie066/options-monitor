@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 1.2.299 - 2026-06-17
+
+### Added
+- Added the OM Agent intelligence upgrade plan covering phased planner contract, investigation runtime, coverage,
+  follow-up, composer, answer verifier, and action lifecycle work.
+- Added planner-declared `task_contract` support to AgentLoop tool plans so task domain, task mode, evidence needs, and
+  answer shape can be traced and verified.
+
+### Changed
+- Upgraded TaskContract inference, coverage checks, and answer shape verification so income analysis requests require
+  breakdown/driver evidence while pure metric calculations stay on key-fact evidence.
+- Taught the monthly income planner guard to request detail rows for income analysis, review, and performance questions
+  without changing ordinary monthly income summaries.
+
+### Fixed
+- Fixed monthly income analysis answers so guarded composition cannot pass a receipt-like summary that omits the requested
+  driver or breakdown explanation.
+
 ## 1.2.298 - 2026-06-16
 
 ### Fixed
