@@ -465,6 +465,116 @@ def test_action_safety_allows_matching_preview_without_apply_authority() -> None
     assert safety["route"] == "preview"
 
 
+def test_action_safety_allows_symbol_edit_alias_scope() -> None:
+    cases = (
+        ("设置 09898 covered call min strike 85", "9898.HK"),
+        ("设置 HK.09898 covered call min strike 85", "9898.HK"),
+        ("设置 泡泡玛特 covered call min strike 85", "9992.HK"),
+        ("设置 tigr covered call min strike 6.5", "TIGR"),
+    )
+    for question, symbol in cases:
+        call = ToolCall(tool_name="symbol_edit", payload={"symbol": symbol, "set": {"sell_call.min_strike": 85}})
+        policy = decide_tool_action_policy(
+            call=call,
+            request=None,
+            task_contract={"requested_effect": "preview"},
+            source="agent_loop_plan",
+        )
+
+        safety = assess_action_safety(
+            question=question,
+            task_contract={"requested_effect": "preview"},
+            tool_name="symbol_edit",
+            payload=call.payload,
+            action_policy=policy.public_payload(),
+            source="agent_loop_plan",
+        ).public_payload()
+
+        assert safety["status"] == "allow_preview"
+        assert safety["code"] == "ok"
+        assert safety["route"] == "preview"
+        assert safety["source"] == "agent_loop_plan"
+
+
+def test_action_safety_denies_symbol_edit_alias_scope_mismatch() -> None:
+    call = ToolCall(tool_name="symbol_edit", payload={"symbol": "TSLA", "set": {"sell_call.min_strike": 85}})
+    policy = decide_tool_action_policy(
+        call=call,
+        request=None,
+        task_contract={"requested_effect": "preview"},
+        source="agent_loop_plan",
+    )
+
+    safety = assess_action_safety(
+        question="设置 泡泡玛特 covered call min strike 85",
+        task_contract={"requested_effect": "preview"},
+        tool_name="symbol_edit",
+        payload=call.payload,
+        action_policy=policy.public_payload(),
+        source="agent_loop_plan",
+    ).public_payload()
+
+    assert safety["status"] == "deny"
+    assert safety["code"] == "symbol_scope_expansion"
+    assert safety["scope_delta"]["symbols"]["requested"] == ["9992.HK"]
+    assert safety["scope_delta"]["symbols"]["out_of_scope"] == ["TSLA"]
+
+
+def test_action_safety_ignores_payload_paths_for_symbol_scope() -> None:
+    call = ToolCall(
+        tool_name="candidate_filter_explain",
+        payload={
+            "config_path": "/private/tmp/om-debug/config.hk.json",
+            "symbol": "泡泡玛特",
+            "account": "lx",
+            "function": "sell_put",
+        },
+    )
+    contract = {
+        "requested_effect": "read",
+        "scope": {"requested_accounts": ["lx"], "requested_symbols": ["9992.HK"]},
+    }
+    policy = decide_tool_action_policy(call=call, request=None, task_contract=contract)
+
+    safety = assess_action_safety(
+        question="lx 泡泡玛特 sell_put 被哪个参数过滤了？",
+        task_contract=contract,
+        tool_name=call.tool_name,
+        payload=call.payload,
+        action_policy=policy.public_payload(),
+    ).public_payload()
+
+    assert safety["status"] == "allow"
+    assert safety["code"] == "ok"
+    assert safety["scope_delta"]["symbols"]["provided"] == ["9992.HK"]
+
+
+def test_action_safety_ignores_query_enums_for_symbol_scope() -> None:
+    call = ToolCall(
+        tool_name="close_advice_read",
+        payload={
+            "config_key": "us",
+            "market_scope": "all",
+            "query": {"status": "open", "option_type": "call", "side": "long", "limit": 50},
+        },
+    )
+    contract = {"requested_effect": "read", "scope": {}}
+    policy = decide_tool_action_policy(call=call, request=None, task_contract=contract)
+
+    safety = assess_action_safety(
+        question="分析 long call 是不是应该平仓",
+        task_contract=contract,
+        tool_name=call.tool_name,
+        payload=call.payload,
+        action_policy=policy.public_payload(),
+    ).public_payload()
+
+    assert safety["status"] == "allow"
+    assert safety["code"] == "ok"
+    assert safety["scope_delta"]["symbols"]["requested"] == []
+    assert safety["scope_delta"]["symbols"]["provided"] == []
+
+
 def test_action_safety_asks_when_trade_preview_lacks_account_scope() -> None:
     request = AssistantRequest(text="记录开仓 成交提醒", sender_id="local", config_key="hk")
     call = ToolCall(tool_name="manual_trade_open", payload={"raw_text": request.text})
