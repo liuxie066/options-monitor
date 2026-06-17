@@ -2402,6 +2402,8 @@ def test_planner_task_contract_payload_survives_plan_schema() -> None:
     assert "drivers" in contract.answer_shape
     assert contract.scope["planned_months"] == ["2026-06"]
     assert contract.scope["planned_accounts"] == ["lx", "sy"]
+    assert contract.public_payload()["selected_recipe"]["name"] == "income_analysis_breakdown"
+    assert "driver_or_breakdown" in contract.public_payload()["selected_recipe"]["evidence_needs"]
 
 
 def test_analyze_task_contract_requires_breakdown_when_only_summary_view_is_covered() -> None:
@@ -2476,6 +2478,201 @@ def test_analyze_task_contract_requires_breakdown_when_only_summary_view_is_cove
     assert coverage["status"] == "recoverable_gap"
     assert coverage["gaps"][0]["kind"] == "analysis_breakdown_needed"
     assert coverage["gaps"][0]["suggested_views"] == ["account_monthly_income_components", "symbol_income_attribution"]
+
+
+def test_selected_recipe_requires_income_breakdown_when_task_contract_is_weak() -> None:
+    payload = {
+        "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+        "goal": "查看 2026-06 指标",
+        "task_contract": {
+            "schema_version": TASK_CONTRACT_SCHEMA_VERSION,
+            "domain": "income",
+            "task_mode": "analyze",
+            "requested_effect": "read",
+            "scope": {"months": ["2026-06"]},
+            "required_answer": ["summary", "source_and_policy"],
+            "required_evidence": ["summary", "source_policy"],
+            "answer_shape": ["conclusion", "source_policy"],
+        },
+        "selected_recipe": {"name": "income_analysis_breakdown"},
+        "required_capabilities": ["analysis_query", "read_only"],
+        "steps": [
+            {
+                "id": "step_1",
+                "tool_name": "analysis_query",
+                "arguments": {
+                    "sql": "select month, account, net_income_cny from account_monthly_performance where month = '2026-06'",
+                    "limit": 20,
+                },
+                "purpose": "读取收益汇总",
+            }
+        ],
+    }
+    plan = parse_tool_plan_payload(payload)
+    contract = build_task_contract(
+        question="看一下这个月",
+        plan=plan.public_payload(),
+        request_context={"config_key": "us"},
+        today=date(2026, 6, 17),
+    )
+    bundle = build_evidence_bundle(
+        question="看一下这个月",
+        plan=plan.public_payload(),
+        observations=[
+            {
+                "index": 1,
+                "tool_name": "analysis_query",
+                "payload": plan.steps[0].arguments,
+                "ok": True,
+                "error": None,
+                "output_contract": {
+                    "schema_version": "analysis_query.output.v1",
+                    "canonical_renderer": "analysis_result",
+                    "source_label": "OM read-only analysis workspace",
+                    "guard_profile": "analysis_rows",
+                    "primary_rows": "rows",
+                    "row_count_field": "row_count",
+                    "fact_fields": [],
+                },
+                "data": {
+                    "columns": ["month", "account", "net_income_cny"],
+                    "rows": [{"month": "2026-06", "account": "lx", "net_income_cny": 2414.0}],
+                    "row_count": 1,
+                    "evidence": {
+                        "coverage": {
+                            "views": ["account_monthly_performance"],
+                            "months": ["2026-06"],
+                            "accounts": ["lx"],
+                            "symbols": [],
+                        }
+                    },
+                },
+            }
+        ],
+    )
+
+    coverage = verify_coverage(task_contract=contract, evidence_bundle=bundle).public_payload()
+
+    assert contract.required_evidence == ("summary", "source_policy")
+    assert coverage["status"] == "recoverable_gap"
+    assert coverage["gaps"][0]["kind"] == "analysis_breakdown_needed"
+
+
+def test_selected_recipe_operation_readback_gap_uses_planner_scope_operation_id() -> None:
+    payload = {
+        "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+        "goal": "检查操作状态和回执",
+        "task_contract": {
+            "schema_version": TASK_CONTRACT_SCHEMA_VERSION,
+            "domain": "operation",
+            "task_mode": "diagnose",
+            "requested_effect": "read",
+            "scope": {"operation_ids": ["op_recipe_1"]},
+            "required_answer": ["summary", "source_and_policy"],
+            "required_evidence": ["observed_status"],
+            "answer_shape": ["observation", "evidence_boundary"],
+        },
+        "selected_recipe": {"name": "operation_status_readback"},
+        "required_capabilities": ["healthcheck", "read_only"],
+        "steps": [{"id": "step_1", "tool_name": "healthcheck", "arguments": {}, "purpose": "读取系统状态"}],
+    }
+    plan = parse_tool_plan_payload(payload)
+    contract = build_task_contract(
+        question="检查这次操作状态",
+        plan=plan.public_payload(),
+        request_context={"config_key": "us"},
+        today=date(2026, 6, 17),
+    )
+    bundle = build_evidence_bundle(question="检查这次操作状态", plan=plan.public_payload(), observations=[])
+
+    coverage = verify_coverage(task_contract=contract, evidence_bundle=bundle).public_payload()
+    gaps = {item["kind"]: item for item in coverage["gaps"]}
+
+    assert contract.scope["operation_ids"] == ["op_recipe_1"]
+    assert coverage["status"] == "recoverable_gap"
+    assert gaps["recipe_operation_readback_missing"]["suggested_tool"] == "operation_timeline"
+    assert gaps["recipe_operation_readback_missing"]["suggested_arguments"] == {"limit": 5, "operation_id": "op_recipe_1"}
+    assert gaps["recipe_receipt_status_missing"]["suggested_tool"] == "operation_timeline"
+
+
+def test_selected_recipe_strategy_replay_gap_is_unrecoverable_without_read_surface() -> None:
+    payload = {
+        "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+        "goal": "评估 NVDA covered call 策略是否要调整",
+        "task_contract": {
+            "schema_version": TASK_CONTRACT_SCHEMA_VERSION,
+            "domain": "strategy",
+            "task_mode": "recommend",
+            "requested_effect": "read",
+            "scope": {"symbols": ["NVDA"], "config_keys": ["us"]},
+            "required_answer": ["summary", "source_and_policy"],
+            "required_evidence": ["current_state", "risk_premise", "dry_run_or_replay"],
+            "answer_shape": ["judgement", "risk", "premise"],
+        },
+        "selected_recipe": {"name": "strategy_replay_review"},
+        "required_capabilities": ["analysis_query", "read_only"],
+        "steps": [
+            {
+                "id": "step_1",
+                "tool_name": "analysis_query",
+                "arguments": {
+                    "sql": "select symbol, account, reason from candidate_filter_diagnostics where symbol = 'NVDA'",
+                    "limit": 20,
+                },
+                "purpose": "读取候选风险前提",
+            }
+        ],
+    }
+    plan = parse_tool_plan_payload(payload)
+    contract = build_task_contract(
+        question="NVDA covered call 要不要调整？",
+        plan=plan.public_payload(),
+        request_context={"config_key": "us"},
+        today=date(2026, 6, 17),
+    )
+    bundle = build_evidence_bundle(
+        question="NVDA covered call 要不要调整？",
+        plan=plan.public_payload(),
+        observations=[
+            {
+                "index": 1,
+                "tool_name": "analysis_query",
+                "payload": plan.steps[0].arguments,
+                "ok": True,
+                "error": None,
+                "output_contract": {
+                    "schema_version": "analysis_query.output.v1",
+                    "canonical_renderer": "analysis_result",
+                    "source_label": "OM read-only analysis workspace",
+                    "guard_profile": "analysis_rows",
+                    "primary_rows": "rows",
+                    "row_count_field": "row_count",
+                    "fact_fields": [],
+                },
+                "data": {
+                    "columns": ["symbol", "account", "reason"],
+                    "rows": [{"symbol": "NVDA", "account": "lx", "reason": "delta risk above target"}],
+                    "row_count": 1,
+                    "evidence": {
+                        "coverage": {
+                            "views": ["candidate_filter_diagnostics"],
+                            "months": [],
+                            "accounts": ["lx"],
+                            "symbols": ["NVDA"],
+                        }
+                    },
+                },
+            }
+        ],
+    )
+
+    coverage = verify_coverage(task_contract=contract, evidence_bundle=bundle).public_payload()
+    gaps = {item["kind"]: item for item in coverage["gaps"]}
+
+    assert coverage["status"] == "unrecoverable_gap"
+    assert coverage["next_action"] == "answer_with_missing_data"
+    assert gaps["recipe_strategy_replay_evidence_missing"]["recoverable"] is False
+    assert gaps["recipe_strategy_replay_evidence_missing"]["recoverable_by"] == "strategy_replay_read_surface"
 
 
 def test_income_analysis_contract_accepts_monthly_detail_rows_as_breakdown_evidence() -> None:
@@ -3821,6 +4018,139 @@ def test_agent_loop_replans_operation_timeline_for_recoverable_upgrade_gap(tmp_p
     assert tool_plan_data["followup_decisions"][0]["tool_name"] == "operation_timeline"
     assert "当前版本 1.2.279" in out["data"]["response_text"]
     assert "目标版本 1.2.280" in out["data"]["response_text"]
+
+
+def test_agent_loop_replans_operation_timeline_for_recipe_readback_gap(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+    planner_followup_contexts: list[dict[str, Any]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        if tool_name == "operation_timeline":
+            return build_response(
+                tool_name=tool_name,
+                ok=True,
+                data={
+                    "schema_version": "operation-timeline-v1",
+                    "filters": {"operation_id": "op_recipe_1"},
+                    "timeline_count": 1,
+                    "timelines": [
+                        {
+                            "identity": {"command_id": "op_recipe_1", "operation_id": "op_recipe_1"},
+                            "operation": {
+                                "operation_id": "op_recipe_1",
+                                "command_id": "op_recipe_1",
+                                "operation_type": "manual_open",
+                                "status": "applied",
+                            },
+                            "receipt": {"status": "observed"},
+                            "outcome": {"status": "applied", "ok": True},
+                            "warnings": [],
+                        }
+                    ],
+                    "warnings": [],
+                },
+            )
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={"status": "ok", "summary": {"ok": True, "critical_count": 0, "warning_count": 0}, "checks": []},
+        )
+
+    def _plan(
+        _text: str,
+        _settings: AssistantSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        followup = conversation_context.get("agent_loop_followup") if isinstance(conversation_context, dict) else None
+        if isinstance(followup, dict):
+            planner_followup_contexts.append(followup)
+            return LlmPlannerResult(
+                plan=PlannerPlan(
+                    goal="补查操作 readback",
+                    required_capabilities=("operation_timeline", "read_only"),
+                    steps=(
+                        PlannerPlanStep(
+                            id="step_2",
+                            tool_name="operation_timeline",
+                            arguments={"operation_id": "op_recipe_1", "limit": 5},
+                            purpose="补查 operation timeline",
+                        ),
+                    ),
+                ),
+                trace={"schema_version": TOOL_PLAN_SCHEMA_VERSION, "attempted": True, "reason": "followup"},
+            )
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="检查操作状态",
+                task_contract={
+                    "schema_version": TASK_CONTRACT_SCHEMA_VERSION,
+                    "domain": "operation",
+                    "task_mode": "diagnose",
+                    "requested_effect": "read",
+                    "scope": {"operation_ids": ["op_recipe_1"]},
+                    "required_answer": ["summary", "source_and_policy"],
+                    "required_evidence": ["observed_status"],
+                    "answer_shape": ["observation", "evidence_boundary"],
+                },
+                selected_recipe={"name": "operation_status_readback"},
+                required_capabilities=("healthcheck", "read_only"),
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="healthcheck",
+                        arguments={},
+                        purpose="先读取系统健康状态",
+                    ),
+                ),
+            ),
+            trace={"schema_version": TOOL_PLAN_SCHEMA_VERSION, "attempted": True, "reason": "initial"},
+        )
+
+    def _synthesize(
+        _question: str,
+        _settings: AssistantSettings,
+        _plan: PlannerPlan,
+        observations: list[dict[str, Any]],
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmSynthesisResult:
+        assert any(item["tool_name"] == "operation_timeline" for item in observations)
+        return LlmSynthesisResult(
+            response_text="操作 op_recipe_1 已有 timeline readback，最终回执已观测到。",
+            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="检查这次操作状态",
+            sender_id="local",
+            message_id="msg_agent_recipe_operation_followup",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+        synthesize_response_fn=_synthesize,
+    )
+
+    assert out["ok"] is True
+    assert calls[0] == ("healthcheck", {"config_key": "us"})
+    assert calls[1][0] == "operation_timeline"
+    assert calls[1][1]["operation_id"] == "op_recipe_1"
+    assert calls[1][1]["limit"] == 5
+    assert planner_followup_contexts
+    followup = planner_followup_contexts[0]
+    assert followup["evidence_gaps"][0]["kind"] == "recipe_operation_readback_missing"
+    assert followup["decision_contract"]["allowed_tools"] == ["operation_timeline"]
+    tool_plan_data = out["data"]["action"]["result"]["data"]
+    assert tool_plan_data["coverage"]["status"] == "complete"
+    assert tool_plan_data["evidence_gaps"] == []
+    assert tool_plan_data["followup_decisions"][0]["status"] == "accepted"
+    assert tool_plan_data["followup_decisions"][0]["tool_name"] == "operation_timeline"
+    assert "最终回执已观测到" in out["data"]["response_text"]
 
 
 def test_agent_loop_does_not_replan_unrecoverable_upgrade_gap(tmp_path: Path) -> None:

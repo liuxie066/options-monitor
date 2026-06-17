@@ -44,6 +44,14 @@ def verify_coverage(*, task_contract: TaskContract, evidence_bundle: EvidenceBun
     gaps.extend(_breakdown_gaps(task_contract=task_contract, datasets=datasets, facts=facts))
     gaps.extend(_assigned_stock_quote_gaps(task_contract=task_contract, missing_data=missing_data, facts=facts))
     gaps.extend(
+        _recipe_evidence_gaps(
+            task_contract=task_contract,
+            facts=facts,
+            datasets=datasets,
+            diagnostics=diagnostics,
+        )
+    )
+    gaps.extend(
         _upgrade_status_gaps(
             task_contract=task_contract,
             provided=provided,
@@ -236,7 +244,115 @@ def _task_requires_breakdown(task_contract: TaskContract) -> bool:
     if "breakdown" in task_contract.intent_families:
         return True
     required = {str(item).strip() for item in task_contract.required_evidence if str(item).strip()}
-    return bool(required & {"driver_or_breakdown", "income_components"})
+    if required & {"driver_or_breakdown", "income_components"}:
+        return True
+    recipe = task_contract.selected_recipe if isinstance(task_contract.selected_recipe, dict) else {}
+    recipe_needs = {str(item).strip() for item in recipe.get("evidence_needs") or [] if str(item).strip()}
+    if not recipe_needs & {"driver_or_breakdown", "income_components"}:
+        return False
+    answer_shape = {str(item).strip() for item in task_contract.answer_shape if str(item).strip()}
+    required_answer = {str(item).strip() for item in task_contract.required_answer if str(item).strip()}
+    return task_contract.task_mode == "analyze" or "drivers" in answer_shape or "main_drivers" in required_answer
+
+
+def _recipe_evidence_gaps(
+    *,
+    task_contract: TaskContract,
+    facts: list[dict[str, Any]],
+    datasets: list[dict[str, Any]],
+    diagnostics: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    recipe = task_contract.selected_recipe if isinstance(task_contract.selected_recipe, dict) else {}
+    recipe_name = str(recipe.get("name") or "").strip()
+    evidence_needs = {str(item).strip() for item in recipe.get("evidence_needs") or [] if str(item).strip()}
+    if not recipe_name or not evidence_needs:
+        return []
+    if task_contract.requested_effect == "preview_write":
+        return []
+    gaps: list[dict[str, Any]] = []
+    if "operation_readback" in evidence_needs and not _has_operation_readback_evidence(datasets=datasets, diagnostics=diagnostics):
+        gaps.append(
+            _recipe_operation_gap(
+                kind="recipe_operation_readback_missing",
+                recipe_name=recipe_name,
+                required_evidence="operation_readback",
+                impact="缺少操作 readback / timeline 证据，不能证明执行状态闭环",
+                task_contract=task_contract,
+            )
+        )
+    if "receipt_status" in evidence_needs and not _has_receipt_status_evidence(facts=facts, datasets=datasets, diagnostics=diagnostics):
+        gaps.append(
+            _recipe_operation_gap(
+                kind="recipe_receipt_status_missing",
+                recipe_name=recipe_name,
+                required_evidence="receipt_status",
+                impact="缺少最终回执证据，不能证明结果已被观测或送达",
+                task_contract=task_contract,
+            )
+        )
+    if "audit" in evidence_needs and not _has_audit_evidence(datasets=datasets, diagnostics=diagnostics):
+        gaps.append(
+            _recipe_operation_gap(
+                kind="recipe_audit_evidence_missing",
+                recipe_name=recipe_name,
+                required_evidence="audit",
+                impact="缺少 trace/timeline 审计证据，不能复盘操作闭环",
+                task_contract=task_contract,
+            )
+        )
+    if "risk_premise" in evidence_needs and not _has_risk_premise_evidence(facts=facts, datasets=datasets, diagnostics=diagnostics):
+        gaps.append(
+            {
+                "kind": "recipe_risk_premise_missing",
+                "recipe_name": recipe_name,
+                "required_evidence": "risk_premise",
+                "recoverable_by": "analysis_query",
+                "suggested_tool": "analysis_query",
+                "suggested_views": ["candidate_filter_diagnostics", "close_advice_snapshot", "strategy_config_by_symbol_account"],
+                "reason": "selected recipe requires risk premise evidence for strategy or candidate recommendation",
+            }
+        )
+    if "dry_run_or_replay" in evidence_needs and not _has_strategy_replay_evidence(facts=facts, datasets=datasets, diagnostics=diagnostics):
+        gaps.append(
+            {
+                "kind": "recipe_strategy_replay_evidence_missing",
+                "recipe_name": recipe_name,
+                "required_evidence": "dry_run_or_replay",
+                "recoverable": False,
+                "recoverable_by": "strategy_replay_read_surface",
+                "impact": "缺少 replay / dry-run 证据，策略建议只能保持前提性或说明证据不足",
+                "reason": "selected recipe requires replay or dry-run evidence before giving a strategy recommendation",
+            }
+        )
+    return gaps
+
+
+def _recipe_operation_gap(
+    *,
+    kind: str,
+    recipe_name: str,
+    required_evidence: str,
+    impact: str,
+    task_contract: TaskContract,
+) -> dict[str, Any]:
+    recoverable = _has_operation_identifier(task_contract=task_contract)
+    gap: dict[str, Any] = {
+        "kind": kind,
+        "recipe_name": recipe_name,
+        "required_evidence": required_evidence,
+        "impact": impact,
+        "recoverable": bool(recoverable),
+        "recoverable_by": "operation_timeline",
+        "reason": "selected recipe requires operation lifecycle/readback evidence",
+    }
+    if recoverable:
+        gap["suggested_tool"] = "operation_timeline"
+        suggested_arguments: dict[str, Any] = {"limit": 5}
+        operation_id = _operation_identifier(task_contract=task_contract)
+        if operation_id:
+            suggested_arguments["operation_id"] = operation_id
+        gap["suggested_arguments"] = suggested_arguments
+    return gap
 
 
 def _assigned_stock_quote_gaps(
@@ -457,6 +573,103 @@ def _has_upgrade_operation_identifier(*, task_contract: TaskContract, diagnostic
 def _extract_upgrade_identifier(text: str) -> str:
     match = re.search(r"\b(?:in|op)_[A-Za-z0-9_:-]+\b", str(text or ""))
     return match.group(0) if match else ""
+
+
+def _has_operation_identifier(*, task_contract: TaskContract) -> bool:
+    return bool(_operation_identifier(task_contract=task_contract))
+
+
+def _operation_identifier(*, task_contract: TaskContract) -> str:
+    if _extract_upgrade_identifier(task_contract.question) or _extract_upgrade_identifier(task_contract.goal):
+        return _extract_upgrade_identifier(task_contract.question) or _extract_upgrade_identifier(task_contract.goal)
+    scope = task_contract.scope if isinstance(task_contract.scope, dict) else {}
+    for key in ("operation_ids", "command_ids"):
+        values = scope.get(key)
+        if isinstance(values, list):
+            for item in values:
+                text = str(item).strip()
+                if text:
+                    return text
+    return ""
+
+
+def _has_operation_readback_evidence(*, datasets: list[dict[str, Any]], diagnostics: list[dict[str, Any]]) -> bool:
+    if any(str(dataset.get("tool_name") or "") == "operation_timeline" for dataset in datasets):
+        return True
+    if "upgrade_operation_status" in _covered_views(datasets):
+        return True
+    for diagnostic in diagnostics:
+        source = diagnostic.get("source") if isinstance(diagnostic.get("source"), dict) else {}
+        view = str(source.get("view") or diagnostic.get("view") or "").strip()
+        if view in {"operation_timeline", "upgrade_operation_status"}:
+            return True
+    return False
+
+
+def _has_receipt_status_evidence(
+    *,
+    facts: list[dict[str, Any]],
+    datasets: list[dict[str, Any]],
+    diagnostics: list[dict[str, Any]],
+) -> bool:
+    fact_paths = {str(item.get("path") or "").lower() for item in facts}
+    if any("receipt" in path or "delivery" in path for path in fact_paths):
+        return True
+    if any(str(dataset.get("tool_name") or "") == "operation_timeline" for dataset in datasets):
+        return True
+    for diagnostic in diagnostics:
+        source = diagnostic.get("source") if isinstance(diagnostic.get("source"), dict) else {}
+        view = str(source.get("view") or diagnostic.get("view") or "").strip()
+        if view == "operation_timeline":
+            return True
+        scope = diagnostic.get("scope") if isinstance(diagnostic.get("scope"), dict) else {}
+        if scope.get("receipt_statuses") or diagnostic.get("receipt_statuses"):
+            return True
+    return False
+
+
+def _has_audit_evidence(*, datasets: list[dict[str, Any]], diagnostics: list[dict[str, Any]]) -> bool:
+    tools = {str(dataset.get("tool_name") or "") for dataset in datasets}
+    if tools.intersection({"operation_timeline", "assistant_trace"}):
+        return True
+    for diagnostic in diagnostics:
+        source = diagnostic.get("source") if isinstance(diagnostic.get("source"), dict) else {}
+        view = str(source.get("view") or diagnostic.get("view") or "").strip()
+        if view in {"operation_timeline", "assistant_trace"}:
+            return True
+    return False
+
+
+def _has_risk_premise_evidence(
+    *,
+    facts: list[dict[str, Any]],
+    datasets: list[dict[str, Any]],
+    diagnostics: list[dict[str, Any]],
+) -> bool:
+    views = _covered_views(datasets)
+    if views.intersection({"candidate_filter_diagnostics", "close_advice_snapshot", "strategy_config_by_symbol_account"}):
+        return True
+    fact_paths = {str(item.get("path") or "").lower() for item in facts}
+    if any(token in path for path in fact_paths for token in ("risk", "delta", "iv", "rv", "drawdown", "volatility", "score")):
+        return True
+    return any(str(item.get("domain") or "") in {"candidate", "close_advice", "runtime"} for item in diagnostics)
+
+
+def _has_strategy_replay_evidence(
+    *,
+    facts: list[dict[str, Any]],
+    datasets: list[dict[str, Any]],
+    diagnostics: list[dict[str, Any]],
+) -> bool:
+    joined = " ".join(
+        [
+            *(str(dataset.get("source_label") or "") for dataset in datasets),
+            *(str(dataset.get("tool_name") or "") for dataset in datasets),
+            *(str(item.get("source_tool") or "") for item in facts),
+            *(str(item.get("domain") or "") for item in diagnostics),
+        ]
+    ).lower()
+    return any(token in joined for token in ("replay", "dry_run", "dry-run", "strategy_lab", "shadow_replay"))
 
 
 def _gap_is_recoverable(gap: dict[str, Any]) -> bool:

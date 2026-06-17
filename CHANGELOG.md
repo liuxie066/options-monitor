@@ -9,6 +9,13 @@
   contract, including runtime inference for older planner outputs.
 - Added action lifecycle evidence to preview/readback traces and `operation_timeline`, exposing preview/confirm/execute/
   verify/audit phase, required next action, and verification status without expanding write permissions.
+- Added recipe-driven coverage checks so selected investigation recipes can require income breakdown evidence, operation
+  readback/receipt evidence, risk-premise evidence, and replay/dry-run evidence.
+
+### Changed
+- Tightened read-only follow-up planning around recipe coverage gaps: operation readback gaps now suggest
+  `operation_timeline` with the scoped operation id, while strategy replay gaps remain bounded as missing evidence until
+  a replay read surface is available.
 
 ## 1.2.299 - 2026-06-17
 

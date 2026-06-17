@@ -291,5 +291,8 @@ pending-operation 权限权威，并补足 trace / verify / eval，而不扩大�
   缺省时 runtime 会按 `task_contract` 推导，并写入 AgentSession plan revision。
 - preview / confirm / cancel / readback 的 AgentSession trace 携带 `action_lifecycle`，
   `operation_timeline` 也输出 phase / verify status，方便执行后用通用读回证据解释闭环。
+- CoverageVerifier 已消费 `selected_recipe.evidence_needs`：收益分析 recipe 会要求拆解/driver 证据，
+  operation readback recipe 会触发受控 `operation_timeline` follow-up，策略 replay recipe 在缺少
+  replay / dry-run 读面时保持不可恢复证据缺口。
 - 仍保留受控 follow-up 和 pending-operation 权限边界；未给 Planner 任意 shell、任意 Python
   或直接生产写权限。

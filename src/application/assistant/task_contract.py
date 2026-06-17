@@ -66,11 +66,12 @@ class TaskContract:
     requested_effect: str = "read"
     required_evidence: tuple[str, ...] = ()
     answer_shape: tuple[str, ...] = ()
+    selected_recipe: dict[str, Any] | None = None
     planner_declared: bool = False
     schema_version: str = TASK_CONTRACT_SCHEMA_VERSION
 
     def public_payload(self) -> dict[str, Any]:
-        return {
+        payload = {
             "schema_version": self.schema_version,
             "question": self.question,
             "goal": self.goal,
@@ -86,6 +87,9 @@ class TaskContract:
             "answer_shape": list(self.answer_shape),
             "planner_declared": bool(self.planner_declared),
         }
+        if isinstance(self.selected_recipe, dict) and self.selected_recipe:
+            payload["selected_recipe"] = _safe_selected_recipe(self.selected_recipe)
+        return payload
 
 
 def build_task_contract(
@@ -177,8 +181,28 @@ def build_task_contract(
         requested_effect=requested_effect,
         required_evidence=tuple(required_evidence),
         answer_shape=tuple(answer_shape),
+        selected_recipe=_safe_selected_recipe(plan.get("selected_recipe")) if isinstance(plan.get("selected_recipe"), dict) else None,
         planner_declared=bool(planner_contract),
     )
+
+
+def _safe_selected_recipe(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    allowed = {
+        "name",
+        "domains",
+        "task_modes",
+        "evidence_needs",
+        "primary_views",
+        "source_tools",
+        "external_evidence",
+        "followup_tool",
+        "answer_shape",
+        "match_source",
+        "reason",
+    }
+    return {str(key): value[key] for key in value if str(key) in allowed}
 
 
 def _intent_families(question_goal_text: str, full_text: str) -> list[str]:
@@ -349,6 +373,10 @@ def _merge_planner_scope(base_scope: dict[str, Any], raw_scope: Any) -> dict[str
         "months": "planned_months",
         "requested_months": "requested_months",
         "config_keys": "config_keys",
+        "operation_id": "operation_ids",
+        "operation_ids": "operation_ids",
+        "command_id": "command_ids",
+        "command_ids": "command_ids",
     }
     for raw_key, scope_key in key_map.items():
         values = _string_list(raw_scope.get(raw_key))
