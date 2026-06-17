@@ -69,6 +69,147 @@ INTERNAL_TOOL_PLAN_NAME = "assistant.tool_plan"
 MAX_TOOL_PLAN_STEPS = 3
 MAX_AGENT_LOOP_ITERATIONS = 3
 MAX_AGENT_LOOP_TOOL_CALLS = 5
+MAX_PLANNER_ANALYSIS_VIEWS = 12
+_DEFAULT_PLANNER_ANALYSIS_VIEWS: tuple[str, ...] = (
+    "account_monthly_performance",
+    "account_monthly_income_components",
+    "assigned_stock_position_pnl",
+    "open_option_exposure",
+    "candidate_filter_diagnostics",
+    "runtime_tick_status",
+    "strategy_config_by_symbol_account",
+    "quote_freshness",
+)
+_ANALYSIS_VIEW_GROUPS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
+    (
+        "income",
+        (
+            "收益",
+            "收入",
+            "现金流",
+            "净现金流",
+            "权利金",
+            "来源",
+            "组成",
+            "构成",
+            "主要来自",
+            "premium",
+            "income",
+            "return",
+            "pnl",
+            "cashflow",
+            "source",
+            "breakdown",
+            "driver",
+        ),
+        (
+            "account_monthly_performance",
+            "account_monthly_income_components",
+            "monthly_income_summary",
+            "monthly_income_return_summary",
+            "monthly_income_combined_return_summary",
+            "monthly_income_cashflow_rows",
+            "monthly_income_realized_rows",
+            "monthly_income_premium_rows",
+            "symbol_income_attribution",
+        ),
+    ),
+    (
+        "assigned_stock",
+        ("指派正股", "被指派", "正股", "浮盈亏", "卖股", "assigned", "stock pnl", "stock"),
+        (
+            "assigned_stock_position_pnl",
+            "assigned_stock_sale_events",
+            "assigned_stock_lifecycle",
+            "assigned_stock_sales",
+            "assigned_stock_review",
+        ),
+    ),
+    (
+        "position",
+        ("持仓", "仓位", "敞口", "到期", "dte", "expiry", "expiration", "exposure", "position"),
+        (
+            "open_option_exposure",
+            "expiration_risk_buckets",
+            "position_lots",
+            "trade_events",
+            "assigned_stock_position_pnl",
+        ),
+    ),
+    (
+        "candidate_strategy",
+        (
+            "候选",
+            "过滤",
+            "参数",
+            "策略",
+            "复盘",
+            "止盈",
+            "平仓",
+            "replay",
+            "candidate",
+            "filter",
+            "strategy",
+            "close",
+        ),
+        (
+            "candidate_filter_diagnostics",
+            "close_advice_snapshot",
+            "strategy_config_by_symbol_account",
+            "strategy_replay_read_surface",
+            "symbol_strategy_config",
+            "open_option_exposure",
+        ),
+    ),
+    (
+        "runtime",
+        (
+            "运行",
+            "通知",
+            "推送",
+            "扫描",
+            "调度",
+            "报价",
+            "新鲜",
+            "升级",
+            "回执",
+            "runtime",
+            "notification",
+            "scheduler",
+            "quote",
+            "upgrade",
+        ),
+        (
+            "runtime_tick_status",
+            "quote_freshness",
+            "upgrade_operation_status",
+            "candidate_filter_diagnostics",
+        ),
+    ),
+    (
+        "config",
+        ("配置", "监控标的", "symbol config", "config", "threshold", "min_strike", "max_strike"),
+        (
+            "strategy_config_by_symbol_account",
+            "symbol_strategy_config",
+            "candidate_filter_diagnostics",
+        ),
+    ),
+)
+_PLANNER_CONTEXT_TOOL_HINTS: dict[str, tuple[str, ...]] = {
+    "monthly_income_report": ("income", "收益", "现金流", "权利金", "return", "cashflow"),
+    "candidate_filter_explain": ("candidate", "候选", "过滤", "filter", "diagnostic"),
+    "candidate_rank_explain": ("candidate", "候选", "排名", "rank"),
+    "option_positions_read": ("position", "持仓", "仓位", "敞口", "assigned", "stock"),
+    "close_advice_read": ("strategy", "止盈", "平仓", "close", "advice"),
+    "symbol_config_read": ("config", "配置", "监控标的", "symbol config"),
+    "runtime_status": ("runtime", "运行", "扫描", "通知", "推送", "status"),
+    "scheduler_status": ("runtime", "调度", "scheduler"),
+    "healthcheck": ("runtime", "健康", "healthcheck"),
+    "analysis_query": ("analysis", "分析", "query"),
+    "analysis_catalog": ("analysis", "catalog", "views"),
+    "operation_timeline": ("operation", "升级", "回执", "audit", "operation"),
+}
 _INVESTIGATION_RECIPES: tuple[dict[str, Any], ...] = (
     {
         "name": "income_analysis_breakdown",
@@ -2039,12 +2180,16 @@ def plan_read_only_tools(
             ),
         )
 
+    planner_payload = _planner_input_payload(text, conversation_context=conversation_context)
+    planner_input_text = json.dumps(planner_payload, ensure_ascii=False, sort_keys=True)
+    planner_input_trace = _planner_input_trace(planner_payload, planner_input_text)
+
     try:
         response = (create_response_fn or provider_create_response_fn(provider))(
             api_key=api_key,
             base_url=llm_settings.base_url,
             model=llm_settings.model,
-            input_text=_planner_input_text(text, conversation_context=conversation_context),
+            input_text=planner_input_text,
             instructions=_planner_instructions(),
             json_schema=tool_plan_json_schema(),
             timeout=int(llm_settings.timeout_seconds),
@@ -2059,6 +2204,7 @@ def plan_read_only_tools(
                 reason="provider_error",
                 error_code="LLM_PROVIDER_ERROR",
                 conversation_context=conversation_context,
+                planner_input=planner_input_trace,
             ),
             error=AgentToolError(
                 code="LLM_PROVIDER_ERROR",
@@ -2075,6 +2221,7 @@ def plan_read_only_tools(
                 reason="provider_error",
                 error_code="LLM_PROVIDER_ERROR",
                 conversation_context=conversation_context,
+                planner_input=planner_input_trace,
             ),
             error=AgentToolError(
                 code="LLM_PROVIDER_ERROR",
@@ -2093,6 +2240,7 @@ def plan_read_only_tools(
                 reason="invalid_provider_output",
                 error_code="LLM_PROVIDER_ERROR",
                 conversation_context=conversation_context,
+                planner_input=planner_input_trace,
             ),
             error=AgentToolError(
                 code="LLM_PROVIDER_ERROR",
@@ -2113,6 +2261,7 @@ def plan_read_only_tools(
                     error_code="NEEDS_CLARIFICATION",
                     schema_version=TOOL_PLAN_SCHEMA_VERSION,
                     conversation_context=conversation_context,
+                    planner_input=planner_input_trace,
                 ),
                 error=_no_tool_plan_error(),
             )
@@ -2126,6 +2275,7 @@ def plan_read_only_tools(
                 reason="invalid_plan",
                 error_code=err.code,
                 conversation_context=conversation_context,
+                planner_input=planner_input_trace,
             ),
             error=err,
         )
@@ -2137,6 +2287,7 @@ def plan_read_only_tools(
             reason="accepted",
             schema_version=TOOL_PLAN_SCHEMA_VERSION,
             conversation_context=conversation_context,
+            planner_input=planner_input_trace,
         ),
     )
 
@@ -4888,13 +5039,16 @@ def _market_config_key(symbol: Any) -> str | None:
     return None
 
 
-def _planner_input_text(text: str, *, conversation_context: dict[str, Any] | None) -> str:
+def _planner_input_payload(text: str, *, conversation_context: dict[str, Any] | None) -> dict[str, Any]:
+    selection = _planner_analysis_view_selection(text, conversation_context=conversation_context)
+    tools = _planner_tool_manifest(analysis_view_names=selection["selected_analysis_views"])
     payload: dict[str, Any] = {
         "message": str(text or ""),
-        "tools": _planner_tool_manifest(),
+        "tools": tools,
+        "manifest_budget": _planner_manifest_budget(tools=tools, analysis_view_selection=selection),
     }
     if isinstance(conversation_context, dict):
-        payload["context"] = {
+        context_payload = {
             "window_messages": int(conversation_context.get("window_messages") or 0),
             "temporal_context": conversation_context.get("temporal_context")
             if isinstance(conversation_context.get("temporal_context"), dict)
@@ -4907,7 +5061,57 @@ def _planner_input_text(text: str, *, conversation_context: dict[str, Any] | Non
             if isinstance(conversation_context.get("user_profile"), dict)
             else {"provided": False},
         }
-    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        recent_read_hints = _planner_recent_read_hints(conversation_context)
+        if recent_read_hints and _planner_selection_used_context(selection):
+            context_payload["recent_read_hints"] = recent_read_hints
+        payload["context"] = context_payload
+    return payload
+
+
+def _planner_input_text(text: str, *, conversation_context: dict[str, Any] | None) -> str:
+    return json.dumps(
+        _planner_input_payload(text, conversation_context=conversation_context),
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def _planner_input_trace(payload: dict[str, Any], input_text: str) -> dict[str, Any]:
+    tools = payload.get("tools") if isinstance(payload.get("tools"), list) else []
+    budget = payload.get("manifest_budget") if isinstance(payload.get("manifest_budget"), dict) else {}
+    context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+    recent_hints = context.get("recent_read_hints") if isinstance(context.get("recent_read_hints"), list) else []
+    return {
+        "chars": len(input_text),
+        "tool_count": len(tools),
+        "recent_read_hint_count": len(recent_hints),
+        "manifest_budget": dict(budget),
+    }
+
+
+def _planner_selection_used_context(selection: dict[str, Any]) -> bool:
+    return any(str(item).startswith("conversation_context") for item in selection.get("selection_sources") or [])
+
+
+def _planner_manifest_budget(*, tools: list[dict[str, Any]], analysis_view_selection: dict[str, Any]) -> dict[str, Any]:
+    selected = [
+        str(item)
+        for item in analysis_view_selection.get("selected_analysis_views") or []
+        if str(item).strip()
+    ]
+    return {
+        "schema_version": "om-planner-manifest-budget-v1",
+        "mode": analysis_view_selection.get("mode"),
+        "manifest_chars": len(json.dumps(tools, ensure_ascii=False, sort_keys=True)),
+        "tool_count": len(tools),
+        "analysis_views_total": len(ANALYSIS_VIEW_SPECS),
+        "analysis_views_included": len(selected),
+        "analysis_views_omitted": max(0, len(ANALYSIS_VIEW_SPECS) - len(selected)),
+        "selected_analysis_views": selected,
+        "matched_view_groups": list(analysis_view_selection.get("matched_view_groups") or []),
+        "selection_sources": list(analysis_view_selection.get("selection_sources") or []),
+        "fallback": "use analysis_catalog first when a needed analysis view or field is not included",
+    }
 
 
 def _planner_instructions() -> str:
@@ -4948,7 +5152,174 @@ Rules:
 """
 
 
-def _planner_tool_manifest() -> list[dict[str, Any]]:
+def _planner_analysis_view_selection(
+    text: str,
+    *,
+    conversation_context: dict[str, Any] | None,
+) -> dict[str, Any]:
+    selected: list[str] = []
+    matched_groups: list[str] = []
+    selection_sources: list[str] = []
+
+    message_groups, message_views = _planner_matched_analysis_groups(_planner_selection_haystack([text]))
+    if message_views:
+        matched_groups.extend(message_groups)
+        selected.extend(message_views)
+        selection_sources.append("message")
+    else:
+        context_views = _planner_context_suggested_analysis_views(conversation_context)
+        if context_views:
+            selected.extend(context_views)
+            selection_sources.append("conversation_context.followup_suggested_views")
+
+        context_hints = _planner_selection_context_hints(conversation_context)
+        context_groups, context_group_views = _planner_matched_analysis_groups(
+            _planner_selection_haystack(context_hints)
+        )
+        if context_group_views:
+            matched_groups.extend(context_groups)
+            selected.extend(context_group_views)
+            selection_sources.append("conversation_context")
+
+    if not selected:
+        selected.extend(_DEFAULT_PLANNER_ANALYSIS_VIEWS)
+        selection_sources.append("default")
+    selected = [
+        view
+        for view in _unique_strings([str(item) for item in selected])
+        if view in ANALYSIS_VIEW_SPECS
+    ][:MAX_PLANNER_ANALYSIS_VIEWS]
+    if not selected:
+        selected = sorted(ANALYSIS_VIEW_SPECS)[:MAX_PLANNER_ANALYSIS_VIEWS]
+        selection_sources.append("catalog_fallback")
+    return {
+        "mode": "scoped_analysis_views",
+        "selected_analysis_views": selected,
+        "matched_view_groups": matched_groups or ["default"],
+        "selection_sources": _unique_strings(selection_sources),
+    }
+
+
+def _planner_matched_analysis_groups(haystack: str) -> tuple[list[str], list[str]]:
+    matched_groups: list[str] = []
+    selected: list[str] = []
+    if not haystack.strip():
+        return matched_groups, selected
+    for group_name, keywords, views in _ANALYSIS_VIEW_GROUPS:
+        if not any(_planner_keyword_matches(haystack, keyword) for keyword in keywords):
+            continue
+        matched_groups.append(group_name)
+        selected.extend(views)
+    return matched_groups, selected
+
+
+def _planner_selection_haystack(parts: list[Any] | tuple[Any, ...]) -> str:
+    lower = " ".join(str(part or "") for part in parts if str(part or "").strip()).lower()
+    compact = re.sub(r"\s+", "", lower)
+    return f"{lower} {compact}"
+
+
+def _planner_keyword_matches(haystack: str, keyword: str) -> bool:
+    raw = str(keyword or "").lower().strip()
+    if not raw:
+        return False
+    return raw in haystack or re.sub(r"\s+", "", raw) in haystack
+
+
+def _planner_selection_context_hints(conversation_context: dict[str, Any] | None) -> list[str]:
+    if not isinstance(conversation_context, dict):
+        return []
+    hints: list[str] = []
+    followup = conversation_context.get("agent_loop_followup")
+    if isinstance(followup, dict):
+        hints.append(_compact_json_for_planner_selection(followup.get("evidence_gaps")))
+        hints.append(_compact_json_for_planner_selection(followup.get("expected_evidence")))
+
+    last_read = conversation_context.get("last_successful_read")
+    if isinstance(last_read, dict):
+        tool_name = str(last_read.get("tool_name") or "").strip()
+        intent_name = str(last_read.get("intent_name") or "").strip()
+        if tool_name:
+            hints.append(tool_name)
+            hints.extend(_PLANNER_CONTEXT_TOOL_HINTS.get(tool_name, ()))
+        if intent_name:
+            hints.append(intent_name)
+        payload = last_read.get("tool_payload") if isinstance(last_read.get("tool_payload"), dict) else {}
+        hints.append(_compact_json_for_planner_selection(payload))
+
+    recent = conversation_context.get("recent_messages")
+    if isinstance(recent, list):
+        for item in _planner_recent_read_hints(conversation_context):
+            hints.append(str(item.get("raw_text") or ""))
+            hints.append(str(item.get("intent_name") or ""))
+            tool_name = str(item.get("tool_name") or "").strip()
+            hints.append(tool_name)
+            hints.extend(_PLANNER_CONTEXT_TOOL_HINTS.get(tool_name, ()))
+
+    return [hint for hint in hints if str(hint or "").strip()]
+
+
+def _planner_recent_read_hints(conversation_context: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(conversation_context, dict):
+        return []
+    recent = conversation_context.get("recent_messages")
+    if not isinstance(recent, list):
+        return []
+    hints: list[dict[str, Any]] = []
+    for item in reversed(recent):
+        if len(hints) >= 3:
+            break
+        if not isinstance(item, dict) or item.get("result_ok") is not True:
+            continue
+        tool_name = str(item.get("tool_name") or "").strip()
+        if tool_name not in _PLANNER_CONTEXT_TOOL_HINTS:
+            continue
+        hint: dict[str, Any] = {
+            "raw_text": str(item.get("raw_text") or "")[:240],
+            "intent_name": str(item.get("intent_name") or "")[:80],
+            "tool_name": tool_name,
+        }
+        payload = item.get("tool_payload") if isinstance(item.get("tool_payload"), dict) else {}
+        safe_payload = {
+            str(key): value
+            for key, value in payload.items()
+            if str(key) in {"account", "action", "kind", "limit", "month", "query", "status", "symbol"}
+        }
+        if safe_payload:
+            hint["tool_payload"] = safe_payload
+        hints.append(hint)
+    return list(reversed(hints))
+
+
+def _planner_context_suggested_analysis_views(conversation_context: dict[str, Any] | None) -> list[str]:
+    if not isinstance(conversation_context, dict):
+        return []
+    views: list[str] = []
+    followup = conversation_context.get("agent_loop_followup")
+    if isinstance(followup, dict):
+        for gap in followup.get("evidence_gaps") or []:
+            if not isinstance(gap, dict):
+                continue
+            for view in gap.get("suggested_views") or []:
+                name = str(view or "").strip()
+                if name in ANALYSIS_VIEW_SPECS:
+                    views.append(name)
+    return _unique_strings(views)
+
+
+def _compact_json_for_planner_selection(value: Any) -> str:
+    if value in (None, "", [], {}):
+        return ""
+    try:
+        text = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except TypeError:
+        text = str(value)
+    return text[:1000]
+
+
+def _planner_tool_manifest(
+    analysis_view_names: list[str] | tuple[str, ...] | set[str] | None = None,
+) -> list[dict[str, Any]]:
     tools: list[dict[str, Any]] = []
     for name in sorted(AGENT_LOOP_READ_TOOLS):
         definition = get_tool_definition(name)
@@ -5021,7 +5392,7 @@ def _planner_tool_manifest() -> list[dict[str, Any]]:
             notes.append("Tool result rows/cell_refs are evidence; if synthesis fails, the analysis_result renderer preserves the task-shaped table.")
             semantics = {
                 "data_source": "OM read-only analysis workspace backed by local ledger/config/runtime read tools",
-                "analysis_views": _analysis_views_for_planner_manifest(),
+                "analysis_views": _analysis_views_for_planner_manifest(analysis_view_names),
                 "query_templates": {
                     "lx_sy_income_comparison": (
                         "select month, "
@@ -5119,9 +5490,17 @@ def _planner_tool_manifest() -> list[dict[str, Any]]:
     return tools
 
 
-def _analysis_views_for_planner_manifest() -> dict[str, dict[str, Any]]:
+def _analysis_views_for_planner_manifest(
+    view_names: list[str] | tuple[str, ...] | set[str] | None = None,
+) -> dict[str, dict[str, Any]]:
     views: dict[str, dict[str, Any]] = {}
-    for name, spec in ANALYSIS_VIEW_SPECS.items():
+    names = (
+        [str(item) for item in view_names if str(item) in ANALYSIS_VIEW_SPECS]
+        if view_names is not None
+        else list(ANALYSIS_VIEW_SPECS)
+    )
+    for name in names:
+        spec = ANALYSIS_VIEW_SPECS[name]
         field_semantics = spec.get("field_semantics") if isinstance(spec.get("field_semantics"), dict) else {}
         views[name] = {
             "description": str(spec.get("description") or ""),
@@ -5298,6 +5677,7 @@ def _llm_trace(
     error_code: str | None = None,
     schema_version: str | None = None,
     conversation_context: dict[str, Any] | None = None,
+    planner_input: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "enabled": bool(settings.enabled),
@@ -5329,6 +5709,8 @@ def _llm_trace(
                 conversation_context.get("user_profile") if isinstance(conversation_context, dict) else None
             ),
         }
+    if planner_input:
+        payload["planner_input"] = dict(planner_input)
     return payload
 
 

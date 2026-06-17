@@ -22,6 +22,7 @@ from src.application.assistant.agent_loop import (
     _clarification_request_payload,
     _followup_decision_contract,
     _followup_tool_allowlist_rejection,
+    _planner_input_text,
     _planner_tool_manifest,
     build_tool_observation,
     plan_read_only_tools,
@@ -967,6 +968,114 @@ def test_agent_loop_planner_catalog_matches_registry_backed_manifest() -> None:
     assert "持仓明晰" in position_notes
     assert "required_capabilities should be []" in position_notes
     assert position_read["semantics"]["answer_capabilities"]["option_positions"]
+
+
+def test_agent_loop_planner_input_scopes_analysis_views_for_income_questions() -> None:
+    payload = json.loads(_planner_input_text("对比 lx 和 sy 的账户收益，有什么不同？", conversation_context=None))
+    analysis_query = next(tool for tool in payload["tools"] if tool["name"] == "analysis_query")
+    views = analysis_query["semantics"]["analysis_views"]
+    budget = payload["manifest_budget"]
+    full_manifest_chars = len(json.dumps(_planner_tool_manifest(), ensure_ascii=False, sort_keys=True))
+
+    assert "account_monthly_performance" in views
+    assert "account_monthly_income_components" in views
+    assert "candidate_filter_diagnostics" not in views
+    assert budget["mode"] == "scoped_analysis_views"
+    assert budget["analysis_views_included"] == len(views)
+    assert budget["analysis_views_omitted"] > 0
+    assert budget["manifest_chars"] < full_manifest_chars
+    assert "income" in budget["matched_view_groups"]
+
+
+def test_agent_loop_planner_input_uses_last_read_context_for_short_followup() -> None:
+    payload = json.loads(
+        _planner_input_text(
+            "刚才那个再看一下",
+            conversation_context={
+                "last_successful_read": {
+                    "intent_name": "monthly_income_report",
+                    "tool_name": "monthly_income_report",
+                    "tool_payload": {"account": "lx", "month": "2026-06"},
+                },
+            },
+        )
+    )
+    analysis_query = next(tool for tool in payload["tools"] if tool["name"] == "analysis_query")
+    views = analysis_query["semantics"]["analysis_views"]
+    budget = payload["manifest_budget"]
+
+    assert "symbol_income_attribution" in views
+    assert "income" in budget["matched_view_groups"]
+    assert budget["selection_sources"] == ["conversation_context"]
+
+
+def test_agent_loop_planner_input_uses_recent_read_question_for_analysis_query_followup() -> None:
+    payload = json.loads(
+        _planner_input_text(
+            "继续",
+            conversation_context={
+                "recent_messages": [
+                    {
+                        "raw_text": "对比 lx 和 sy 的账户收益，有什么不同？",
+                        "intent_name": "analysis_query",
+                        "tool_name": "analysis_query",
+                        "result_ok": True,
+                    }
+                ],
+                "last_successful_read": {
+                    "intent_name": "analysis_query",
+                    "tool_name": "analysis_query",
+                    "tool_payload": {},
+                },
+            },
+        )
+    )
+    analysis_query = next(tool for tool in payload["tools"] if tool["name"] == "analysis_query")
+    views = analysis_query["semantics"]["analysis_views"]
+    budget = payload["manifest_budget"]
+
+    assert "symbol_income_attribution" in views
+    assert "income" in budget["matched_view_groups"]
+    assert budget["selection_sources"] == ["conversation_context"]
+    assert payload["context"]["recent_read_hints"] == [
+        {
+            "raw_text": "对比 lx 和 sy 的账户收益，有什么不同？",
+            "intent_name": "analysis_query",
+            "tool_name": "analysis_query",
+        }
+    ]
+
+
+def test_agent_loop_planner_input_keeps_explicit_message_ahead_of_context() -> None:
+    payload = json.loads(
+        _planner_input_text(
+            "为什么 NVDA 没出现在候选里？",
+            conversation_context={
+                "recent_messages": [
+                    {
+                        "raw_text": "对比 lx 和 sy 的账户收益，有什么不同？",
+                        "intent_name": "analysis_query",
+                        "tool_name": "analysis_query",
+                        "result_ok": True,
+                    }
+                ],
+                "last_successful_read": {
+                    "intent_name": "monthly_income_report",
+                    "tool_name": "monthly_income_report",
+                    "tool_payload": {"account": "lx", "month": "2026-06"},
+                },
+            },
+        )
+    )
+    analysis_query = next(tool for tool in payload["tools"] if tool["name"] == "analysis_query")
+    views = analysis_query["semantics"]["analysis_views"]
+    budget = payload["manifest_budget"]
+
+    assert "candidate_filter_diagnostics" in views
+    assert "symbol_income_attribution" not in views
+    assert "candidate_strategy" in budget["matched_view_groups"]
+    assert budget["selection_sources"] == ["message"]
+    assert "recent_read_hints" not in payload["context"]
 
 
 def test_agent_loop_planner_manifest_hides_system_scoped_arguments() -> None:
@@ -7397,6 +7506,53 @@ def test_plan_read_only_tools_treats_empty_steps_as_no_plan() -> None:
     assert result.error.details == {"missing_capability": "read_tool_or_required_slots", "weak_downgrade_allowed": False}
     assert result.trace["reason"] == "no_plan"
     assert result.trace["error_code"] == "NEEDS_CLARIFICATION"
+    assert result.trace["planner_input"]["manifest_budget"]["mode"] == "scoped_analysis_views"
+    assert result.trace["planner_input"]["chars"] == len(calls[0]["input_text"])
+
+
+def test_plan_read_only_tools_traces_recent_read_hints() -> None:
+    calls: list[dict[str, Any]] = []
+
+    def _create_response(**kwargs: Any) -> dict[str, Any]:
+        calls.append(dict(kwargs))
+        return {
+            "output_text": json.dumps(
+                {
+                    "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+                    "goal": "无法安全规划",
+                    "required_capabilities": [],
+                    "steps": [],
+                }
+            )
+        }
+
+    result = plan_read_only_tools(
+        "继续",
+        AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        conversation_context={
+            "recent_messages": [
+                {
+                    "raw_text": "对比 lx 和 sy 的账户收益，有什么不同？",
+                    "intent_name": "analysis_query",
+                    "tool_name": "analysis_query",
+                    "result_ok": True,
+                }
+            ],
+            "last_successful_read": {
+                "intent_name": "analysis_query",
+                "tool_name": "analysis_query",
+                "tool_payload": {},
+            },
+        },
+        create_response_fn=_create_response,
+        environ={"OM_LLM_API_KEY": "sk-test"},
+    )
+
+    assert result.trace["planner_input"]["recent_read_hint_count"] == 1
+    assert result.trace["planner_input"]["manifest_budget"]["selection_sources"] == ["conversation_context"]
+    assert "recent_read_hints" in calls[0]["input_text"]
 
 
 def test_plan_read_only_tools_rejects_response_mode_fields() -> None:
