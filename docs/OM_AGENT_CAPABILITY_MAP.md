@@ -1,14 +1,26 @@
-# OM Ops Copilot Capability Map
+# OM Assistant Capability Map
 
-This document defines the intended capability boundary for OM Ops Copilot. It is
-a map, not a new execution path. Current facts should still be verified through
-the tool manifest, Inbound capability catalog, source, tests, configs, and
-runtime artifacts. Current public names such as `./om-agent`,
-`./om assistant ...`, and `src/application/assistant/...` remain compatibility
-facades and implementation paths.
+This document defines the capability boundary for OM's Tool Gateway and Inbound
+Assistant surfaces. It is a capability map, not the architecture terminology
+authority. For current naming and dimension boundaries, first read
+[OM_ASSISTANT_ARCHITECTURE.md](OM_ASSISTANT_ARCHITECTURE.md).
 
-The implementation roadmap for turning this bounded copilot into a fuller Agent
-is tracked in [OM_AGENT_COMPLETION_DESIGN.md](OM_AGENT_COMPLETION_DESIGN.md).
+Current facts should still be verified through the tool manifest, Inbound
+capability catalog, source, tests, configs, and runtime artifacts.
+
+Terminology used here:
+
+- `./om-agent` is the local Tool Gateway CLI for structured JSON tool calls.
+  It is not OM's autonomous/project Agent.
+- `./om assistant ...` is the Inbound Assistant CLI namespace for local or
+  remote messages.
+- `AgentLoop` is an internal Assistant Planner Loop used by `./om assistant`
+  when planner routing is enabled. It is not a public entrypoint and is not a
+  peer of `./om-agent`.
+
+Historical roadmap documents such as
+[OM_AGENT_COMPLETION_DESIGN.md](OM_AGENT_COMPLETION_DESIGN.md) may contain
+useful rationale, but they are not current architecture authorities.
 
 Verified entry points for this snapshot:
 
@@ -21,9 +33,8 @@ Verified entry points for this snapshot:
 
 ## Operating Boundary
 
-OM Ops Copilot is an intelligent operations copilot for OM. It is not Inbound
-itself, not a research analyst, not a chatbot, and not an unrestricted shell
-bridge.
+OM's assistant surface is a controlled operations assistant for OM. It is not a
+research analyst, not an unrestricted chatbot, and not a shell bridge.
 
 Rules:
 
@@ -41,14 +52,29 @@ Rules:
 - Writes to config, notification channels, Feishu, ledger/trade state,
   broker-facing data, or production services require explicit human intent and
   the existing preview/confirm gates.
-- Local report/cache generation and Research / Shadow Replay are not Ops
-  Copilot capabilities. Ops Copilot may recommend those paths only when the user
-  explicitly asks to refresh evidence or evaluate strategy quality.
+- Local report/cache generation and Research / Shadow Replay are outside the
+  Inbound Assistant core. The assistant may recommend those paths only when the
+  user explicitly asks to refresh evidence or evaluate strategy quality.
 
-## Agent Loop Boundary
+## Dimension Boundary
 
-OM Copilot should be reasoned about as one bounded Agent loop, not as multiple
-runtime layers:
+Do not reason about `./om-agent`, `./om assistant`, and `AgentLoop` as three
+parallel agents. They live in different dimensions:
+
+```text
+Entry surfaces
+  ./om-agent      Tool Gateway CLI
+  ./om assistant  Inbound Assistant CLI
+
+Shared tool substrate
+  agent_tools / agent_tool_registry / tool_execution / permissions
+
+Assistant internals
+  runtime / router / perception / reasoning / action
+  AgentLoop / evidence / coverage / synthesis / operation lifecycle
+```
+
+The bounded assistant loop is:
 
 ```text
 Channel input
@@ -96,13 +122,14 @@ Current implementation names map to this loop rather than replacing it:
 | `Observe` output | `ObservationResponse`, canonical renderer, audit payloads |
 
 Do not add a second `ToolRegistry` module. The registry authority is split by
-surface: `src/application/agent_tool_registry.py` remains the `./om-agent` tool
-manifest collector, and `src/application/assistant/capability_catalog.py` is the
-Inbound capability catalog. AgentLoop read tools are derived from the existing
-tool registry plus planner-visible capability metadata; preview-write authority
-comes from capability metadata. Future implementation work should keep
-consolidating metadata into those existing authorities instead of adding another
-runtime layer or parallel tool control plane.
+surface: `src/application/agent_tool_registry.py` remains the `./om-agent` Tool
+Gateway manifest collector, and
+`src/application/assistant/capability_catalog.py` is the Inbound Assistant
+capability catalog. AgentLoop read tools are derived from the existing tool
+registry plus planner-visible capability metadata; preview-write authority comes
+from capability metadata. Future implementation work should keep consolidating
+metadata into those existing authorities instead of adding another runtime layer
+or parallel tool control plane.
 
 LLM authority is deliberately narrow:
 
@@ -122,10 +149,10 @@ LLM authority is deliberately narrow:
 
 | Surface | Purpose | Default capability boundary | LLM role |
 |---|---|---|---|
-| `./om-agent` | Current local structured JSON facade for Ops Copilot deterministic tools | Ops Copilot reads plus selected compatibility helpers; write modes require `OM_AGENT_ENABLE_WRITE_TOOLS=true` and payload confirmation where applicable | None inside tool execution; external agent may plan calls |
-| `./om assistant handle` | Current CLI namespace for Inbound remote messages through Feishu, WeChat, or future channels | Inbound catalog only; no arbitrary shell, no direct full `om-agent` manifest exposure | May recognize allowed intents; read/local tools are directly executable, while approved preview-write capabilities may only create pending previews |
+| `./om-agent` | Local Tool Gateway CLI for structured JSON access to deterministic OM tools | Pure reads plus selected compatibility helpers; write modes require `OM_AGENT_ENABLE_WRITE_TOOLS=true` and payload confirmation where applicable | None inside tool execution; external agents may plan calls |
+| `./om assistant handle` | Inbound Assistant CLI namespace for local/remote messages through Feishu, WeChat, or future channels | Inbound catalog only; no arbitrary shell, no direct full `./om-agent` manifest exposure | May recognize allowed intents; read/local tools are directly executable, while approved preview-write capabilities may only create pending previews |
 
-Related OM surfaces outside Ops Copilot:
+Related OM surfaces outside the Inbound Assistant core:
 
 | Surface | Why it is out of core | Default owner |
 |---|---|---|
@@ -142,7 +169,7 @@ Related OM surfaces outside Ops Copilot:
 | Confirm Write | Applies config, ledger/trade, model, upgrade, or local repo writes | Human/operator only, or Inbound confirm commands for existing pending previews | Explicit confirm, and env/yes gates where implemented |
 | Admin / Live Ops | Service install/start/stop, live tick, notification send, Feishu sync, broker-facing operations | Operator-only | Explicit human request and dry-run/read-only check first |
 
-## Ops Copilot And Guarded Capability Matrix
+## Tool Gateway And Guarded Capability Matrix
 
 | Capability | Entrypoint | Tool(s) | Fact sources | Side effects | Risk class | LLM role | Verification | Allowed surfaces |
 |---|---|---|---|---|---|---|---|---|
@@ -152,7 +179,7 @@ Related OM surfaces outside Ops Copilot:
 | Scheduler diagnosis | `./om-agent run --tool scheduler_status` | `scheduler_status` | Runtime config, scheduler state | None | Core Read | Use after runtime status when skip/timing is suspected | `./om-agent run --tool scheduler_status --input-json '{"config_key":"us","account":"lx"}'` | Local `om-agent`; not default Inbound |
 | Run history | `./om-agent run --tool runtime_runs`, `/runs` | `runtime_runs` | `output_runs` snapshots | None | Core Read | Find relevant run before deeper log or candidate evidence | `./om-agent run --tool runtime_runs --input-json '{"limit":10}'` | `om-agent`, Inbound |
 | Runtime logs | `./om-agent run --tool runtime_logs`, `/logs` | `runtime_logs` | Run audit/tool/tick/service logs | None | Core Read | Choose log scope and line count after identifying run | `./om-agent run --tool runtime_logs --input-json '{"kind":"all","lines":50}'` | `om-agent`, Inbound |
-| Assistant trace | `./om-agent run --tool assistant_trace` | `assistant_trace` | Inbound SQLite `agent_sessions` snapshots and audit path metadata | None | Core Read | None inside tool execution; external operator may inspect Agent decisions | `./om-agent run --tool assistant_trace --input-json '{"limit":10}'` | Local `om-agent`; not default Inbound |
+| Assistant trace | `./om-agent run --tool assistant_trace` | `assistant_trace` | Inbound SQLite `agent_sessions` snapshots and audit path metadata, including capability selection, progress, evidence gaps/blockers, and clarification requests | None | Core Read | None inside tool execution; external operator may inspect derived Assistant state | `./om-agent run --tool assistant_trace --input-json '{"limit":10}'` | Local `om-agent`; not default Inbound |
 | Symbol identity resolution | `./om-agent run --tool symbol_resolve` | `symbol_resolve` | shared symbol identity rules plus runtime config aliases when scoped | None | Core Read | Resolve Chinese names, aliases, Futu codes, and market suffixes before symbol-specific reads | `./om-agent run --tool symbol_resolve --input-json '{"symbol":"泡泡玛特"}'` | `om-agent`, Inbound planner |
 | Candidate filter explanation | `./om-agent run --tool candidate_filter_explain` | `candidate_filter_explain` | `candidate_filter_trace.jsonl`; scoped runtime aliases only for symbol normalization | None | Core Read | Map one-symbol filter/missing-candidate questions to trace filters; `account` is scan scope, not symbol identity | `./om-agent run --tool candidate_filter_explain --input-json '{"symbol":"泡泡玛特"}'` | `om-agent`, Inbound planner |
 | Candidate ranking explanation | `./om-agent run --tool candidate_rank_explain` | `candidate_rank_explain` | Existing candidate CSV/report artifacts | None | Core Read | Compare ranking policy against observed rows | `./om-agent run --tool candidate_rank_explain --input-json '{"mode":"put","top_n":5}'` | Local `om-agent`; not default Inbound |
@@ -178,10 +205,10 @@ Related OM surfaces outside Ops Copilot:
 ## Out-Of-Core OM Tool Surfaces
 
 These tools may appear in `./om-agent spec` or `./om` because the public
-facade still supports them, but they are not Ops Copilot capabilities. Ops
-Copilot should not use them as default evidence paths.
+facade still supports them, but they are outside the Inbound Assistant core.
+The assistant should not use them as default evidence paths.
 
-| Surface | Examples | Purpose | Ops Copilot rule |
+| Surface | Examples | Purpose | Assistant rule |
 |---|---|---|---|
 | Local report/cache generation | `scan_opportunities`, `query_cash_headroom`, `get_portfolio_context`, `prepare_close_advice_inputs`, `close_advice`, `get_close_advice` | Refresh market-derived local reports or caches | Use only when the user explicitly asks to refresh/generate evidence; prefer existing read artifacts first |
 | Research evidence collection | `./om research collect` | Build redacted evidence bundle / handoff | Out of core; suggest only for offline quality analysis |
@@ -191,8 +218,8 @@ Copilot should not use them as default evidence paths.
 | Strategy Lab experiment | `./om research strategy-lab experiment --dataset <dataset> --auto`; `./om research strategy-lab experiment --market us --account lx --start-date <date> --auto` | Generate controlled Sell Put / Covered Call hypotheses from dataset or scanned-run window, reuse candidate-impact, run Combo Yield group experiment, and output observed-universe scorecards | Out of core; read-only offline strategy lab surface |
 | Strategy Lab proposal | `./om research strategy-lab proposal --experiment <experiment-json>` | Build advisory-only dry-run proposal artifacts from an experiment | Out of core; read-only offline strategy lab surface |
 | Strategy Lab LLM context | `./om research strategy-lab llm-context --experiment <experiment-json>` | Build redacted local context for LLM-assisted analysis without calling online AI or applying patches | Out of core; read-only offline strategy lab surface |
-| Test and release workflow | `pytest`, `scripts/release_check.py`, git commands, GitHub release workflow | Validate and publish code changes | Codex/operator-only; Ops Copilot may plan gates but does not own release execution |
-| Live tick / notifications | `om run tick`, `om run tick-cron`, notification delivery adapters | Run production scan/report/notification workflows | Operator-only; Ops Copilot should recommend read-only preflight first |
+| Test and release workflow | `pytest`, `scripts/release_check.py`, git commands, GitHub release workflow | Validate and publish code changes | Codex/operator-only; Assistant may plan gates but does not own release execution |
+| Live tick / notifications | `om run tick`, `om run tick-cron`, notification delivery adapters | Run production scan/report/notification workflows | Operator-only; Assistant should recommend read-only preflight first |
 | Service install/start/stop | `om service ...`, systemd/launchd commands | Modify or operate production services | Operator-only; require explicit human request and dry-run/preflight first |
 
 ## Default Evidence Plans
@@ -212,9 +239,9 @@ Copilot should not use them as default evidence paths.
 
 ## Current Implementation Notes
 
-- `./om-agent spec` exposes more than Ops Copilot. It includes Ops Copilot
-  read tools, selected local report/cache helpers, and selected local write
-  helpers for compatibility. The Ops Copilot boundary in this document is
+- `./om-agent spec` exposes more than the Inbound Assistant core. It includes
+  pure read tools, selected local report/cache helpers, and selected local write
+  helpers for compatibility. The assistant boundary in this document is
   narrower than the raw manifest.
 - Research, Shadow Replay, and Strategy Lab form an independent
   offline evidence/replay module under `./om research ...`. They are used to

@@ -1,9 +1,16 @@
 # OM Agent Reliability P0-P2 Design
 
-本文档定义 OM Agent 从当前实现继续演进的 P0-P2 方案。目标不是照搬
-Claude Code 的完整产品形态，而是把 OM 现有 `AgentLoop`、Tool OS、
-`EvidenceBundle`、answer verifier 和 preview/confirm 路径整理成一条更可靠的
-主线。
+> Historical design note. This document is retained for reliability-roadmap
+> context, but it is not the current architecture terminology authority. Current
+> naming and boundaries live in
+> [OM_ASSISTANT_ARCHITECTURE.md](OM_ASSISTANT_ARCHITECTURE.md): `./om-agent`
+> is the Tool Gateway, `./om assistant` is the Inbound Assistant, and
+> `AgentLoop` is an internal assistant planner loop.
+
+本文档记录历史上的 P0-P2 可靠性路线图。目标不是照搬 Claude Code 的完整产品形态，
+而是把 OM 当时已有的 `AgentLoop`、Tool OS、`EvidenceBundle`、answer verifier
+和 preview/confirm 路径整理成一条更可靠的主线。当前术语和架构边界以
+[OM_ASSISTANT_ARCHITECTURE.md](OM_ASSISTANT_ARCHITECTURE.md) 为准。
 
 相关文档：
 

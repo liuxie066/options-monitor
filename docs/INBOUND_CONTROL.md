@@ -1,10 +1,15 @@
 # Inbound Control And Transport
 
-`./om assistant handle` is the controlled entry point for remote messages from Feishu, WeChat, Hermes, or other gateways.
+`./om assistant handle` is the controlled Inbound Assistant entry point for
+local or remote messages from Feishu, WeChat, Hermes, or other gateways.
 
 It is not a shell bridge. Gateways should pass one message into OM and let OM parse, authorize, audit, and execute the request through the existing agent-tool contract.
 The current CLI namespace is `./om assistant ...`, and the current implementation
 path is `src/application/assistant/...`; the product/module name is Inbound.
+It is also not the same dimension as `./om-agent`: `./om-agent` is the local
+Tool Gateway CLI, while `AgentLoop` is an internal assistant planner loop. See
+[OM_ASSISTANT_ARCHITECTURE.md](OM_ASSISTANT_ARCHITECTURE.md) for the current
+terminology.
 
 ## Bot Channel Model
 
@@ -48,8 +53,8 @@ It is not a second runtime service or a second pending-operation store.
 `src.application.channels` owns channel capability registration and service
 dispatch. `src.application.inbound` owns transport details only: Feishu payload
 extraction, Feishu long-connection receive/reply/reaction behavior, and the
-transport-facing request contract. Inbound parsing, command catalog, LLM
-routing, operation store, audit, policy, and renderer ownership live in
+transport-facing request contract. Inbound Assistant parsing, command catalog,
+LLM routing, operation store, audit, policy, and renderer ownership live in
 `src.application.assistant`.
 
 The current code still uses names such as `AssistantRequest`,
@@ -555,7 +560,7 @@ For analytical questions such as `6月收益的组成`, `分析 lx 6月净现金
 user question
 -> LLM plans the task and required OM tools
 -> read-only OM tools fetch ledger/runtime/config/strategy evidence
--> optional Tool OS query builds a task-shaped result table
+-> optional analysis workspace query builds a task-shaped result table
 -> AgentLoop builds an internal evidence bundle from tool observations
 -> LLM composes normal analytical answers from that evidence
 -> answer guard checks the response against tool facts and query cells
@@ -567,7 +572,8 @@ The design goal is to preserve LLM intelligence without making the LLM a factual
 
 Canonical factual rendering is declared by the tool definition through `output_contract.canonical_renderer`. `agent_loop` uses this contract to build fallback evidence and deterministic provenance; it is not a user-visible `canonical` mode. When a tool has payload-dependent factual output, use an `output_contract_resolver` so the concrete contract travels with the observation.
 
-For open-ended analytical tasks, the preferred path is Tool OS v1:
+For open-ended analytical tasks, the preferred path is the read-only analysis
+workspace:
 
 - `analysis_catalog` exposes the whitelisted read-only views and fields.
 - `analysis_query` runs SELECT-only SQL over those views and returns
@@ -577,8 +583,8 @@ For open-ended analytical tasks, the preferred path is Tool OS v1:
 - Candidate-filter has two supported read paths over the same trace facts:
   `candidate_filter_explain` is the LLM-facing narrow tool for one-symbol
   questions such as `泡泡玛特被哪个参数过滤了`; `candidate_filter_diagnostics`
-  remains the Tool OS view for aggregation, comparison, trend, and cross-run or
-  cross-account analysis.
+  remains the analysis workspace view for aggregation, comparison, trend, and
+  cross-run or cross-account analysis.
 - Both paths use the same runtime trace discovery: explicit trace paths first,
   then runtime root from injected config path / `OM_RUNTIME_ROOT` / service
   profile / repo root, latest-run pointer, recent `output_runs`, and legacy
@@ -611,7 +617,7 @@ Acceptance criteria for this design:
 - A direct assigned-stock holding PnL question returns a concise Agent-composed answer, not a forced facts/analysis split.
 - A known multi-contract row cannot be shown as one contract; guard rewrites or falls back.
 - A known assigned-stock amount cannot drift; unsupported LLM amounts trigger rewrite or fallback.
-- If LLM composition is unavailable, analytical questions still return the Tool OS result table with source/provenance.
+- If LLM composition is unavailable, analytical questions still return the analysis workspace result table with source/provenance.
 - The question `对比 lx 和 sy 的账户收益，有什么不同？` returns per-month account differences, higher account, difference, and rate difference when the ledger evidence supports it.
 - Every composed financial answer carries deterministic provenance when the tool contract provides it.
 

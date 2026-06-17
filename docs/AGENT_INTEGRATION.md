@@ -1,15 +1,22 @@
-# Ops Copilot Integration
+# Tool Gateway Integration
 
-The public launcher is `./om-agent`.
+The public Tool Gateway launcher is `./om-agent`.
 
-It exposes a stable JSON contract intended for local Ops Copilot usage:
+`./om-agent` is a structured local tool-call entrypoint for external agents,
+scripts, OpenClaw, Codex, or operators. It is not OM's autonomous/project
+Agent, and it should not own multi-step planning or message conversation
+state. Current terminology is defined in
+[OM_ASSISTANT_ARCHITECTURE.md](OM_ASSISTANT_ARCHITECTURE.md).
+
+It exposes a stable JSON contract intended for local machine usage:
 
 - `./om-agent add-account --market us|hk --account-label <label> --account-type futu|external_holdings --dry-run`
 - `./om-agent spec`
 - `./om-agent run --tool <name> --input-json '<json>'`
 
-Capability boundaries, risk classes, Inbound exposure, and verification
-rules are maintained in [OM_AGENT_CAPABILITY_MAP.md](OM_AGENT_CAPABILITY_MAP.md).
+Capability boundaries, risk classes, Inbound Assistant exposure, and
+verification rules are maintained in
+[OM_AGENT_CAPABILITY_MAP.md](OM_AGENT_CAPABILITY_MAP.md).
 This document only describes integration contracts and invocation patterns.
 
 也支持：
@@ -79,7 +86,7 @@ Use the launcher as a local command tool. Typical pattern:
 ./om-agent run --tool close_advice --input-json '{"config_key":"us"}'
 ```
 
-Sell Put 现金余量的标准 Ops Copilot 工具是 `query_cash_headroom`。它包装
+Sell Put 现金余量的标准 Tool Gateway 工具是 `query_cash_headroom`。它包装
 `src.application.cash_headroom_query` 里的 `query_sell_put_cash(...)`，用于返回账户现金、
 Sell Put 担保占用和剩余可用现金，并支持按账户和币种折算到 CNY。
 
@@ -144,7 +151,16 @@ Use `./om assistant handle` when a remote messaging gateway needs to send user t
 ./om assistant handle --text '/positions sy' --sender ou_xxx --channel feishu --message-id msg_xxx
 ```
 
-This is a controlled Inbound message entrypoint, not an `om-agent` tool and not a shell bridge. It performs Inbound slash-command parsing, deterministic operation-alias handling or bounded AgentLoop planning, sender allowlist checks, message idempotency, SQLite audit, and then calls an allowlisted tool or creates a pending preview through the existing operation path. The current `./om assistant ...` CLI namespace and `assistant` config keys remain compatibility names. Inbound config may opt into LLM tool planning; planner output still returns into the same allowlist, audit, pending-operation, and renderer path. LLM-originated plans may read or initiate approved previews only; confirm/cancel/apply remains deterministic-only.
+This is a controlled Inbound Assistant message entrypoint, not an `./om-agent`
+tool and not a shell bridge. It performs slash-command parsing, deterministic
+operation-alias handling or bounded AgentLoop planning, sender allowlist checks,
+message idempotency, SQLite audit, and then calls an allowlisted tool or
+creates a pending preview through the existing operation path. The current
+`./om assistant ...` CLI namespace and `assistant` config keys remain
+compatibility names. Inbound config may opt into LLM tool planning; planner
+output still returns into the same allowlist, audit, pending-operation, and
+renderer path. LLM-originated plans may read or initiate approved previews only;
+confirm/cancel/apply remains deterministic-only.
 
 Remote channels require:
 
@@ -182,7 +198,7 @@ Treat `openclaw_readiness` as OpenClaw-specific. It is safe to call outside Open
 
 ## OpenClaw
 
-Treat `./om-agent` as a local tool host command.
+Treat `./om-agent` as a local Tool Gateway command.
 
 Recommended environment:
 

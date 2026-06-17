@@ -154,7 +154,7 @@ tick
 
 ### 4. 配置与控制面
 
-定义：负责用户意图、系统默认值、runtime 快照、账户/标的管理，以及 CLI / Ops Copilot / Inbound 入口。
+定义：负责用户意图、系统默认值、runtime 快照、账户/标的管理，以及 CLI / Tool Gateway / Inbound Assistant 入口。
 
 包含模块：
 
@@ -162,7 +162,7 @@ tick
 - generated runtime config
 - account / symbol management
 - CLI
-- Ops Copilot tools
+- Tool Gateway tools
 - Inbound
 - settings / setup / service operations
 
@@ -197,8 +197,8 @@ Feishu / Inbound
 
 边界：
 
-- CLI / Ops Copilot / Inbound 是入口和控制面，不拥有业务规则。
-- Ops Copilot 工具默认应优先读现有证据；写路径必须受 preview / confirm / env gate 控制。
+- CLI / Tool Gateway / Inbound Assistant 是入口和控制面，不拥有业务规则。
+- Tool Gateway 工具默认应优先读现有证据；写路径必须受 preview / confirm / env gate 控制。
 - 配置默认值应集中在配置层，不应散落到策略实现里形成第二套控制面。
 
 主要实现位置：
@@ -264,7 +264,7 @@ output_runs / required_data / candidate trace / reject logs / marks / outcomes
 | 行情与 required data | 期权链、quote、DTE、IV、delta、multiplier 等开仓/平仓输入 | 开仓机会监控、Close Advice、Research |
 | Event Risk | 财报、除权等事件快照和状态 | 开仓机会监控、Close Advice |
 | Portfolio / Ledger Context | 现金、正股、锁定股数、position lots、risk view | 开仓机会监控、持仓管理 |
-| Candidate Trace / Run Evidence | 拒绝原因、排序证据、运行状态、审计事件 | Ops Copilot 工具、Research、排障 |
+| Candidate Trace / Run Evidence | 拒绝原因、排序证据、运行状态、审计事件 | Tool Gateway 工具、Research、排障 |
 | Storage | SQLite、`output_runs`、`output_shared`、reports、state | 全部产品域 |
 | External Adapters | OpenD/Futu、Feishu、exchange rate、subprocess | 运行与通知、数据采集、Inbound |
 | Domain Rules | 确定性策略、账本、通知、调度和 schema 决策 | Application use cases |

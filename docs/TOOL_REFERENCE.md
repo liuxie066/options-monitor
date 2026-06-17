@@ -2,12 +2,14 @@
 
 这份文档只回答两件事：
 
-1. `om-agent` 目前有哪些公开工具
+1. `om-agent` Tool Gateway 目前有哪些公开工具
 2. 它们和人工 CLI `om` 的关系是什么
 
 如果你只想跑产品，先看根目录 [README.md](../README.md)。
 
-Ops Copilot 边界、Inbound 暴露面和验证方式统一维护在
+术语和架构边界统一维护在
+[OM_ASSISTANT_ARCHITECTURE.md](OM_ASSISTANT_ARCHITECTURE.md)。Tool Gateway 与
+Inbound Assistant 的能力边界、LLM 暴露面和验证方式统一维护在
 [OM_AGENT_CAPABILITY_MAP.md](OM_AGENT_CAPABILITY_MAP.md)。这里不再复制能力地图。
 
 ---
@@ -17,14 +19,14 @@ Ops Copilot 边界、Inbound 暴露面和验证方式统一维护在
 | 入口 | 面向对象 | 典型用途 |
 |---|---|---|
 | `om` | 人工操作 | 手动跑 pipeline、分阶段运行、命令行查询 |
-| `om-agent` | 程序 / Ops Copilot | JSON manifest、结构化 tool 调用 |
+| `om-agent` | 程序 / 外部 agent / Tool Gateway | JSON manifest、结构化 tool 调用 |
 
 安装版默认提供全局 `om` / `om-agent` wrapper。源码目录内的 `./om` / `./om-agent` 是 fallback。
 
 一句话：
 
 - `om` 是人类 CLI
-- `om-agent` 是 Ops Copilot 的程序化工具入口
+- `om-agent` 是 Tool Gateway，不是 OM 自己的 Agent
 
 ---
 
@@ -79,17 +81,18 @@ om-agent run --tool runtime_status --env-file /etc/options-monitor/options-monit
 |---|---|
 | `healthcheck` | `om doctor` / `om healthcheck` |
 | `version_check` | `om version` |
-| `version_update` | Ops Copilot-only local `VERSION` update helper |
+| `version_update` | Tool Gateway-only local `VERSION` update helper |
 | `config_validate` | `om config validate` |
 | runtime config read | `om config get` |
 | `scheduler_status` | `om scheduler` 的只读判定部分 |
 | `scan_opportunities` | `om scan` / `om scan-pipeline` |
-| `candidate_rank_explain` | Ops Copilot-only read existing candidate CSV ranking explanations |
+| `candidate_rank_explain` | Tool Gateway-only read existing candidate CSV ranking explanations |
 | `preview_notification` | `om notify preview` |
 | `runtime_status` | `om status` or raw assistant/runtime artifact summary |
 | `runtime_runs` | `om runs` |
 | `runtime_logs` | `om logs` |
-| `openclaw_readiness` | Ops Copilot-only OpenClaw readiness summary |
+| `assistant_trace` | `om assistant` inbound audit/session trace diagnostic |
+| `openclaw_readiness` | Tool Gateway-only OpenClaw readiness summary |
 | Research / Shadow Replay | `om research collect` / `om research shadow-replay ...` (not an `om-agent` tool) |
 | `get_close_advice` | `om close-advice` |
 | `query_cash_headroom` | `om sell-put-cash` / `src.application.cash_headroom_query::query_sell_put_cash(...)` |
@@ -123,8 +126,10 @@ om assistant model check --active
 只解析 Feishu 事件 payload，然后进入同一条 sender allowlist、message_id
 幂等、SQLite audit 和工具白名单路径。Inbound command facade 默认开启；
 当前 `assistant` config 可选择启用 LLM routing/planning。当前可见和可执行能力用
-`om assistant capabilities` 查看；能力边界以 [OM_AGENT_CAPABILITY_MAP.md](OM_AGENT_CAPABILITY_MAP.md)
-为准。完整远程控制契约见 [INBOUND_CONTROL.md](INBOUND_CONTROL.md)。
+`om assistant capabilities` 查看；术语边界以
+[OM_ASSISTANT_ARCHITECTURE.md](OM_ASSISTANT_ARCHITECTURE.md) 为准，能力边界以
+[OM_AGENT_CAPABILITY_MAP.md](OM_AGENT_CAPABILITY_MAP.md) 为准。完整远程控制契约见
+[INBOUND_CONTROL.md](INBOUND_CONTROL.md)。
 
 ### Tick 入口关系
 
@@ -519,7 +524,7 @@ om research shadow-replay analyze --dataset output_shared/research/shadow_replay
 ## 5.6 `query_cash_headroom`
 
 用途：
-- Ops Copilot 查询 Sell Put 现金占用与余量的标准入口
+- Tool Gateway 查询 Sell Put 现金占用与余量的标准入口
 - 包装 `src.application.cash_headroom_query` 的 `query_sell_put_cash(...)`
 - 返回账户现金、Sell Put 担保占用、剩余可用现金
 - 支持按账户筛选，并按可用汇率折算到 CNY
@@ -532,8 +537,8 @@ om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","accoun
 ```
 
 注意：
-- Ops Copilot payload 使用 `broker` 表示券商口径；未传时读取 runtime config 的 `portfolio.broker`
-- Ops Copilot 工具输入统一使用 `broker`
+- Tool Gateway payload 使用 `broker` 表示券商口径；未传时读取 runtime config 的 `portfolio.broker`
+- Tool Gateway 工具输入统一使用 `broker`
 - 该工具不会发送通知或写 Feishu；它会把查询产物写到本地 agent 输出目录
 
 ---
@@ -635,7 +640,7 @@ om option-positions assigned-stock-sale --target-stock-lot-id assigned-stock-ass
 ## 5.9 `analysis_catalog` / `analysis_query`
 
 用途：
-- Tool OS 的通用只读分析工作台。
+- Inbound Assistant 可使用的通用只读分析工作区。
 - `analysis_catalog` 返回可查询 view、字段说明、行粒度、聚合策略、join
   策略、示例和只读 SQL 边界。
 - `analysis_query` 在内存 SQLite 中执行单条 SELECT/CTE，只能读取白名单 view，
@@ -778,7 +783,7 @@ om-agent run --tool close_advice --input-json '{"config_key":"us"}'
 
 用途：
 - 一次性执行 close advice 推荐路径
-- 推荐给 Ops Copilot 使用；内部会准备输入并运行 `close_advice`
+- 推荐给 Tool Gateway 调用方使用；内部会准备输入并运行 `close_advice`
 
 示例：
 
@@ -786,7 +791,7 @@ om-agent run --tool close_advice --input-json '{"config_key":"us"}'
 om-agent run --tool get_close_advice --input-json '{"config_key":"us"}'
 ```
 
-这是更推荐的 Ops Copilot 入口。
+这是更推荐的 Tool Gateway 入口。
 
 ---
 
@@ -867,6 +872,30 @@ om-agent run --tool runtime_status --input-json '{"config_key":"us"}'
 om-agent run --tool runtime_status --input-json '{"profile_path":"openclaw.profile.json"}'
 om-agent run --tool runtime_runs --input-json '{"limit":10}'
 om-agent run --tool runtime_logs --input-json '{"run_id":"20260515T182459Z-474761","kind":"tool","lines":20}'
+```
+
+---
+
+## 5.15.1 `assistant_trace`
+
+用途：
+- 只读 Inbound Assistant 的 SQLite `agent_sessions` trace
+- 诊断 `./om assistant` 如何选择能力、收集证据、判断进度、请求澄清或停在权限预览
+- 读取 `capability_selection`、`progress`、`progress.blocked_by`、
+  `answer.clarification_request` 等派生 session 字段
+- `response_text` 是给操作者看的 compact trace，会隐藏原始内部细节；JSON 结果保留
+  结构化诊断字段，例如 blocker 的 `tool_name`
+
+注意：
+- `assistant_trace` 通过 `om-agent` Tool Gateway 读取，但它诊断的是
+  `./om assistant` session；这不表示 `om-agent` 自身是 Assistant 或 Planner
+- 它不创建 session schema，不执行 planner，不补跑工具，也不修改 pending operation
+
+示例：
+
+```bash
+om-agent run --tool assistant_trace --input-json '{"limit":10}'
+om-agent run --tool assistant_trace --input-json '{"command_id":"<command-id>","include_snapshot":true}'
 ```
 
 ---
@@ -1040,7 +1069,7 @@ runtime:
 
 ## 7. 人工 CLI：版本检查
 
-`om version` 仍然保留为人工 CLI 能力。Ops Copilot 使用 `version_check`，二者读取同一个本地 `VERSION` 和远端 `v*` tags。
+`om version` 仍然保留为人工 CLI 能力。Tool Gateway 调用方使用 `version_check`，二者读取同一个本地 `VERSION` 和远端 `v*` tags。
 
 示例：
 
@@ -1058,13 +1087,14 @@ om version
 ### 数据表字段
 - `market`
 
-Ops Copilot 工具输入统一使用 `broker`。数据表里的 `market` 字段不作为工具 payload 字段。
+Tool Gateway 工具输入统一使用 `broker`。数据表里的 `market` 字段不作为工具 payload 字段。
 
 ---
 
 ## 9. 相关文档
 
-- Ops Copilot 合同：[`AGENT_INTEGRATION.md`](AGENT_INTEGRATION.md)
+- 当前架构术语：[`OM_ASSISTANT_ARCHITECTURE.md`](OM_ASSISTANT_ARCHITECTURE.md)
+- Tool Gateway 合同：[`AGENT_INTEGRATION.md`](AGENT_INTEGRATION.md)
 - 快速开始：[`GETTING_STARTED.md`](GETTING_STARTED.md)
-- Ops Copilot 快速开始：[`AGENT_GETTING_STARTED.md`](AGENT_GETTING_STARTED.md)
+- Tool Gateway 快速开始：[`AGENT_GETTING_STARTED.md`](AGENT_GETTING_STARTED.md)
 - 配置说明：[`../CONFIGURATION_GUIDE.md`](../CONFIGURATION_GUIDE.md)

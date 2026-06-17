@@ -1,14 +1,14 @@
-# Ops Copilot Getting Started
+# Tool Gateway Getting Started
 
 这份文档只服务一种场景：
 
-> 你要把 `options-monitor` 当作本地 Ops Copilot 工具来接入和调用。
+> 你要把 `options-monitor` 当作本地 Tool Gateway 工具来接入和调用。
 
 如果你只是普通使用者，请先看 [GETTING_STARTED.md](GETTING_STARTED.md)。
 
 ---
 
-## 1. 安装 Ops Copilot 插件
+## 1. 安装 agent 插件
 
 ```bash
 bash scripts/install_agent_plugin.sh
@@ -26,7 +26,7 @@ python3 -m venv .venv
 
 ---
 
-## 2. 查看 Ops Copilot 工具清单
+## 2. 查看 Tool Gateway 工具清单
 
 ```bash
 ./om-agent spec
@@ -129,7 +129,7 @@ healthcheck 会额外给出本地 `ledger_store` 和 `option_positions_bootstrap
 
 ## 7. 常见环境变量
 
-- `OM_OUTPUT_DIR`：覆盖 agent 输出目录
+- `OM_OUTPUT_DIR`：覆盖 Tool Gateway 工具输出目录
 - `OM_RUNTIME_ROOT`：覆盖运行时状态根目录；`option_positions` SQLite 位于 `<runtime_root>/output_shared/state/option_positions.sqlite3`
 - `OM_AGENT_ENABLE_WRITE_TOOLS=true`：允许部分写操作工具
 
@@ -137,8 +137,9 @@ healthcheck 会额外给出本地 `ledger_store` 和 `option_positions_bootstrap
 
 ## 8. 下一步看哪里
 
-- Ops Copilot 任务手册：[`AGENT_WIKI.md`](AGENT_WIKI.md)
-- Ops Copilot JSON 合同：[`AGENT_INTEGRATION.md`](AGENT_INTEGRATION.md)
+- 本地 agent 任务手册：[`AGENT_WIKI.md`](AGENT_WIKI.md)
+- 当前架构术语：[`OM_ASSISTANT_ARCHITECTURE.md`](OM_ASSISTANT_ARCHITECTURE.md)
+- Tool Gateway JSON 合同：[`AGENT_INTEGRATION.md`](AGENT_INTEGRATION.md)
 - 工具说明：[`TOOL_REFERENCE.md`](TOOL_REFERENCE.md)
 - Linux / Mac 服务化部署：[`DEPLOY_LINUX_MAC.md`](DEPLOY_LINUX_MAC.md)
 - 配置字段说明：[`../CONFIGURATION_GUIDE.md`](../CONFIGURATION_GUIDE.md)
