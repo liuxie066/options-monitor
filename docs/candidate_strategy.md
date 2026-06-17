@@ -272,7 +272,7 @@ Covered Call 会先结合持仓 context 计算覆盖能力：
 
 - `return_first` 使用 `build_candidate_rank_key(...)` / `explain_candidate_rank(...)` 解释收益优先排序
 - `insurance_underwriting` 使用 `domain/domain/insurance_underwriting.py::rank_underwriting_candidates(...)` 对齐承保排序
-- Ops Copilot 可通过 `candidate_rank_explain` 读取已有候选 CSV 做只读诊断
+- Tool Gateway 调用方可通过 `candidate_rank_explain` 读取已有候选 CSV 做只读诊断
 
 `candidate_rank_explain` 不重新扫描、不发通知、不写报告，只解释已有候选。
 

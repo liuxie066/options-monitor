@@ -63,7 +63,7 @@ python3 -m pytest tests/test_config_yaml.py tests/test_layered_config.py
 
 - `VERSION` 正确
 - `CHANGELOG.md` 中存在对应版本段落
-- README 与 Ops Copilot 文档没有明显过期命令
+- README 与 Agent / Tool Gateway 文档没有明显过期命令
 - 更新检查功能读取远端 `origin` 的 Git tags，并与本地 `VERSION` 比较
 
 ---
@@ -227,4 +227,4 @@ git push origin "v${VERSION}"
 
 - `./om-agent spec` 输出是否正常
 - 示例配置是否仍能通过 `validate_config.py`
-- Ops Copilot/tool 合同测试是否通过
+- Tool Gateway/tool 合同测试是否通过

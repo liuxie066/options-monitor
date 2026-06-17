@@ -1,8 +1,15 @@
 # OM Agent Completion Design
 
-This document designs the path from the current OM Ops Copilot to a complete,
-bounded Agent. It is an implementation design, not a new public surface. The
-existing authority documents still apply:
+> Historical design note. This document is retained for rationale and rollout
+> history, but it is not the current architecture terminology authority. Current
+> naming and boundaries live in
+> [OM_ASSISTANT_ARCHITECTURE.md](OM_ASSISTANT_ARCHITECTURE.md): `./om-agent`
+> is the Tool Gateway, `./om assistant` is the Inbound Assistant, and
+> `AgentLoop` is an internal assistant planner loop.
+
+This historical document recorded a path from the older OM Ops Copilot framing
+to a complete bounded assistant loop. It is not a new public surface. The
+current authority documents are:
 
 - [OM_AGENT_CAPABILITY_MAP.md](OM_AGENT_CAPABILITY_MAP.md) owns capability
   boundaries, risk classes, and LLM authority.

@@ -113,7 +113,7 @@ def build_agent_spec(*, write_tools_enabled: bool | None = None) -> dict[str, An
     return {
         "schema_version": "1.0",
         "name": "options-monitor-local-tools",
-        "description": "Local Ops Copilot tools for options-monitor. Read-first by default; write tools require explicit enablement and confirmation.",
+        "description": "Local Tool Gateway tools for options-monitor. Read-first by default; write tools require explicit enablement and confirmation.",
         "launcher": {
             "command": ["./om-agent", "run", "--tool", "<tool-name>", "--input-json", "<json>"],
             "add_account_command": ["./om-agent", "add-account", "--market", "us|hk", "--account-label", "<label>", "--account-type", "futu|external_holdings", "--dry-run"],
