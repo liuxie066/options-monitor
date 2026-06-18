@@ -8726,6 +8726,79 @@ def test_plan_read_only_tools_traces_planner_context_use_shadow() -> None:
     assert result.trace["planner_context_use"]["inherited_slots"] == {"account": ["lx"]}
 
 
+def test_plan_read_only_tools_records_context_validation_without_blocking() -> None:
+    def _create_response(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "output_text": json.dumps(
+                {
+                    "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+                    "goal": "continue previous scope",
+                    "required_capabilities": [],
+                    "context_use": {
+                        "schema_version": PLANNER_CONTEXT_USE_SCHEMA_VERSION,
+                        "mode": "carry",
+                        "referenced_turn_ids": [],
+                        "referenced_evidence_refs": [],
+                        "inherited_slots": {"account": ["lx"]},
+                        "current_message_slots": {},
+                        "override_slots": {},
+                        "requires_clarification": False,
+                        "clarification_question": None,
+                    },
+                    "steps": [
+                        {
+                            "id": "step_1",
+                            "tool_name": "analysis_query",
+                            "arguments": {
+                                "sql": "select account from account_monthly_performance limit 5",
+                                "account": "lx",
+                            },
+                            "purpose": "read carried scope",
+                        }
+                    ],
+                }
+            )
+        }
+
+    result = plan_read_only_tools(
+        "继续",
+        AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        conversation_context={
+            "context_projection": {
+                "schema_version": "om-context-projection-v1",
+                "current_user_message": {"text": "继续"},
+                "recent_turns": [
+                    {
+                        "turn_id": "turn_lx",
+                        "safe_slots": {"account": ["lx"]},
+                        "evidence_refs": ["ev_lx"],
+                    }
+                ],
+                "recent_successful_tools": [
+                    {"tool_name": "analysis_query", "safe_slots": {"account": ["lx"]}, "evidence_refs": ["ev_lx"]}
+                ],
+                "available_evidence_refs": [
+                    {"ref_id": "ev_lx", "turn_id": "turn_lx", "source_tool": "analysis_query", "safe_slots": {"account": ["lx"]}}
+                ],
+                "open_evidence_gaps": [],
+                "pending_operations": [],
+                "budget": {"truncated": False},
+            }
+        },
+        create_response_fn=_create_response,
+        environ={"OM_LLM_API_KEY": "sk-test"},
+    )
+
+    assert result.error is None
+    assert result.plan is not None
+    assert result.trace["reason"] == "accepted"
+    assert result.trace["context_validation"]["status"] == "blocked"
+    assert result.trace["context_validation"]["code"] == "CONTEXT_SLOT_NOT_AVAILABLE"
+    assert result.trace["context_validation"]["violation"]["reason"] == "declared_inherited_slot_not_available"
+
+
 def test_tool_plan_json_schema_exposes_optional_context_use() -> None:
     schema = tool_plan_json_schema()
     context_schema = schema["properties"]["context_use"]
