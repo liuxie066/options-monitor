@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.2.308 - 2026-06-18
+
+### Fixed
+- Published the WeChat ClawBot scheduled-notification `client_id` hashing fix with refreshed dependency-graph metadata so
+  the VERSION-driven release gate passes.
+- Restored the Assistant LLM planner settings import used by the context-validation repair path.
+
 ## 1.2.307 - 2026-06-18
 
 ### Fixed
