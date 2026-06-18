@@ -1201,6 +1201,25 @@ def test_cli_channel_status_reports_feishu_and_wechat_without_secrets(tmp_path: 
         json.dumps({"bot_token": "bot_secret_1", "base_url": "https://example.invalid"}, ensure_ascii=False),
         encoding="utf-8",
     )
+    (state_dir / "bindings.json").write_text(
+        json.dumps(
+            {
+                "bindings": {
+                    "ops": {
+                        "to_user_id": "wx_user_1",
+                        "context_token": "ctx_secret_1",
+                        "group_id": "group_1",
+                        "chat_key": "chat_secret_1",
+                        "last_message_id": "msg_1",
+                        "last_text": "private bind text",
+                        "updated_at_utc": "2026-06-18T01:00:00+00:00",
+                    }
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
     profile_path = runtime / "service.profile.json"
     profile_path.write_text(
         json.dumps(
@@ -1262,8 +1281,14 @@ def test_cli_channel_status_reports_feishu_and_wechat_without_secrets(tmp_path: 
     assert payload["data"]["channels"]["feishu"]["available"] is True
     assert payload["data"]["channels"]["wechat_clawbot"]["available"] is True
     assert payload["data"]["channels"]["wechat_clawbot"]["allowed_senders_configured"] is True
+    assert payload["data"]["channels"]["wechat_clawbot"]["binding_count"] == 1
+    assert payload["data"]["channels"]["wechat_clawbot"]["bindings"]["ops"]["has_context_token"] is True
+    assert payload["data"]["channels"]["wechat_clawbot"]["bindings"]["ops"]["last_text_present"] is True
     assert payload["data"]["summary"]["available_channels"] == ["feishu", "wechat_clawbot"]
     assert "bot_secret_1" not in rendered
+    assert "ctx_secret_1" not in rendered
+    assert "private bind text" not in rendered
+    assert "chat_secret_1" not in rendered
     assert "wechat:user_1" not in rendered
 
 
@@ -1279,6 +1304,24 @@ def test_channel_status_reports_wechat_cursor_and_service_state(tmp_path: Path) 
                 "bot_token": "bot_secret_1",
                 "base_url": "https://example.invalid",
                 "get_updates_buf": "cursor_1",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (state_dir / "bindings.json").write_text(
+        json.dumps(
+            {
+                "bindings": {
+                    "ops": {
+                        "to_user_id": "wx_user_1",
+                        "context_token": "ctx_secret_1",
+                        "group_id": "group_1",
+                        "last_message_id": "msg_1",
+                        "last_text": "private bind text",
+                        "updated_at_utc": "2026-06-18T01:00:00+00:00",
+                    }
+                }
             },
             ensure_ascii=False,
         ),
@@ -1313,6 +1356,17 @@ def test_channel_status_reports_wechat_cursor_and_service_state(tmp_path: Path) 
     assert health["available"] is True
     assert health["cursor_configured"] is True
     assert health["cursor_length"] == len("cursor_1")
+    assert health["binding_count"] == 1
+    assert health["binding_names"] == ["ops"]
+    assert health["bindings"]["ops"]["target"] == "wechat:ops:ops"
+    assert health["bindings"]["ops"]["has_to_user_id"] is True
+    assert health["bindings"]["ops"]["has_context_token"] is True
+    assert health["bindings"]["ops"]["has_group_id"] is True
+    assert health["bindings"]["ops"]["last_message_id"] == "msg_1"
+    assert health["bindings"]["ops"]["last_text_present"] is True
+    assert isinstance(health["bindings"]["ops"]["age_seconds"], int)
+    assert "ctx_secret_1" not in json.dumps(health, ensure_ascii=False)
+    assert "private bind text" not in json.dumps(health, ensure_ascii=False)
     assert health["service_present"] is True
     assert health["service_status_checked"] is True
     assert health["service_active"] is True

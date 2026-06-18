@@ -511,9 +511,9 @@ def build_notify_failure_summary_message(
         attempts = int(failure.get("attempts") or 0)
         message_id = failure.get("message_id") or "none"
         confirmed = bool(failure.get("delivery_confirmed"))
-        lines.append(
-            f"  - {account}: {error_code} attempts={attempts} confirmed={confirmed} message_id={message_id}"
-        )
+        provider_response_code = failure.get("provider_response_code")
+        provider_part = "" if provider_response_code is None else f" provider_response_code={provider_response_code}"
+        lines.append(f"  - {account}: {error_code} attempts={attempts} confirmed={confirmed} message_id={message_id}{provider_part}")
     return "\n".join(lines).strip()
 
 
@@ -587,6 +587,7 @@ def send_account_message_with_retry(
             )
             ok = _confirmed_from_send_tool(send_tool_dto, message_id)
             error_code = None if ok else _notify_error_code(send_tool_dto)
+            provider_response_code = send_tool_dto.get("provider_response_code")
             returncode = _coerce_returncode(
                 getattr(send, "returncode", send_tool_dto.get("returncode")),
                 default=(0 if bool(send_tool_dto.get("command_ok")) else 1),
@@ -601,6 +602,7 @@ def send_account_message_with_retry(
                 "stdout_tail": send_tool_dto.get("stdout_tail"),
                 "stderr_tail": send_tool_dto.get("stderr_tail"),
                 "error_code": error_code,
+                "provider_response_code": provider_response_code,
                 "idempotency_key": send_tool_dto.get("idempotency_key") or idempotency_key,
                 "local_receipt_id": send_tool_dto.get("local_receipt_id"),
                 "http_attempts": send_tool_dto.get("http_attempts") if isinstance(send_tool_dto.get("http_attempts"), list) else [],
@@ -622,6 +624,7 @@ def send_account_message_with_retry(
                 "stdout_tail": _tail_text(getattr(exc, "stdout", None) or getattr(exc, "output", None)),
                 "stderr_tail": _tail_text(getattr(exc, "stderr", None)),
                 "error_code": error_code,
+                "provider_response_code": None,
                 "timeout_sec": getattr(exc, "timeout", None),
                 "exception_type": type(exc).__name__,
                 "idempotency_key": idempotency_key,
@@ -641,6 +644,7 @@ def send_account_message_with_retry(
                 "stdout_tail": "",
                 "stderr_tail": _tail_text(f"{type(exc).__name__}: {exc}"),
                 "error_code": error_code,
+                "provider_response_code": None,
                 "exception_type": type(exc).__name__,
                 "idempotency_key": idempotency_key,
                 "local_receipt_id": None,
@@ -699,6 +703,7 @@ def send_account_message_with_retry(
                 "upstream_message_id": record.get("upstream_message_id"),
                 "command_ok": bool(record.get("command_ok")),
                 "delivery_confirmed": bool(record.get("delivery_confirmed")),
+                "provider_response_code": record.get("provider_response_code"),
                 "idempotency_key": record.get("idempotency_key") or idempotency_key,
                 "local_receipt_id": record.get("local_receipt_id"),
                 "retry_attempt_count": int(record.get("retry_attempt_count") or 0),
@@ -734,6 +739,7 @@ def send_account_message_with_retry(
         "stdout_tail": "",
         "stderr_tail": "",
         "error_code": "SEND_FAILED",
+        "provider_response_code": None,
         "idempotency_key": idempotency_key,
         "local_receipt_id": None,
     }
@@ -751,6 +757,7 @@ def send_account_message_with_retry(
         "upstream_message_id": final.get("upstream_message_id"),
         "command_ok": command_ok,
         "delivery_confirmed": bool(final.get("delivery_confirmed")),
+        "provider_response_code": final.get("provider_response_code"),
         "idempotency_key": final.get("idempotency_key") or idempotency_key,
         "local_receipt_id": final.get("local_receipt_id"),
         "retry_attempt_count": int(final.get("retry_attempt_count") or 0),
@@ -827,6 +834,7 @@ def execute_per_account_delivery(
                     "upstream_message_id": send_result.get("upstream_message_id"),
                     "command_ok": bool(send_result.get("command_ok")),
                     "delivery_confirmed": bool(send_result.get("delivery_confirmed")),
+                    "provider_response_code": send_result.get("provider_response_code"),
                     "stdout_tail": final_record.get("stdout_tail"),
                     "stderr_tail": final_record.get("stderr_tail"),
                     "timeout_sec": final_record.get("timeout_sec"),
