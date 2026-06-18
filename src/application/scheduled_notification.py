@@ -131,7 +131,7 @@ class PerAccountSendExecution:
 
 NOTIFY_SEND_MAX_ATTEMPTS = 2
 NOTIFY_SEND_RETRY_DELAYS_SEC: tuple[float, ...] = (1.0,)
-NOTIFY_SEND_RETRYABLE_ERROR_CODES = {"SEND_FAILED", "SEND_EXCEPTION"}
+NOTIFY_SEND_RETRYABLE_ERROR_CODES = {"SEND_FAILED", "SEND_EXCEPTION", "SEND_UNCONFIRMED"}
 
 
 def _snapshot_payload_dict(
@@ -463,12 +463,28 @@ def _retry_delay_for_attempt(attempt: int, retry_delays_sec: tuple[float, ...]) 
         return 0.0
 
 
-def _should_retry_send(*, error_code: str | None, attempt: int, attempts: int, message_id: Any) -> bool:
+def _should_retry_send(
+    *,
+    error_code: str | None,
+    attempt: int,
+    attempts: int,
+    message_id: Any,
+    upstream_message_id: Any = None,
+    local_receipt_id: Any = None,
+) -> bool:
     if int(attempt) >= int(attempts):
         return False
-    if message_id:
+    normalized_error = str(error_code or "")
+    if normalized_error not in NOTIFY_SEND_RETRYABLE_ERROR_CODES:
         return False
-    return str(error_code or "") in NOTIFY_SEND_RETRYABLE_ERROR_CODES
+    if str(upstream_message_id or "").strip():
+        return False
+    local_receipt = str(local_receipt_id or "").strip()
+    if normalized_error == "SEND_UNCONFIRMED":
+        return bool(local_receipt and str(message_id or "").strip() == local_receipt)
+    if message_id and normalized_error != "SEND_UNCONFIRMED":
+        return False
+    return True
 
 
 def _confirmed_from_send_tool(send_tool_dto: dict[str, Any], message_id: Any) -> bool:
@@ -563,6 +579,12 @@ def send_account_message_with_retry(
             send_tool_dto = normalize_notification_delivery_result(send, normalize_fn=normalize_fn)
             raw_message_id = send_tool_dto.get("message_id")
             message_id = None if raw_message_id is None or str(raw_message_id).strip() == "" else str(raw_message_id)
+            raw_upstream_message_id = send_tool_dto.get("upstream_message_id")
+            upstream_message_id = (
+                None
+                if raw_upstream_message_id is None or str(raw_upstream_message_id).strip() == ""
+                else str(raw_upstream_message_id)
+            )
             ok = _confirmed_from_send_tool(send_tool_dto, message_id)
             error_code = None if ok else _notify_error_code(send_tool_dto)
             returncode = _coerce_returncode(
@@ -573,12 +595,14 @@ def send_account_message_with_retry(
                 **start_record,
                 "returncode": returncode,
                 "message_id": message_id,
+                "upstream_message_id": upstream_message_id,
                 "command_ok": bool(send_tool_dto.get("command_ok")),
                 "delivery_confirmed": bool(ok),
                 "stdout_tail": send_tool_dto.get("stdout_tail"),
                 "stderr_tail": send_tool_dto.get("stderr_tail"),
                 "error_code": error_code,
                 "idempotency_key": send_tool_dto.get("idempotency_key") or idempotency_key,
+                "local_receipt_id": send_tool_dto.get("local_receipt_id"),
                 "http_attempts": send_tool_dto.get("http_attempts") if isinstance(send_tool_dto.get("http_attempts"), list) else [],
                 "retry_attempt_count": int(send_tool_dto.get("retry_attempt_count") or 0),
                 "ambiguous_send": bool(send_tool_dto.get("ambiguous_send")),
@@ -592,6 +616,7 @@ def send_account_message_with_retry(
                 **start_record,
                 "returncode": 124,
                 "message_id": None,
+                "upstream_message_id": None,
                 "command_ok": False,
                 "delivery_confirmed": False,
                 "stdout_tail": _tail_text(getattr(exc, "stdout", None) or getattr(exc, "output", None)),
@@ -600,6 +625,7 @@ def send_account_message_with_retry(
                 "timeout_sec": getattr(exc, "timeout", None),
                 "exception_type": type(exc).__name__,
                 "idempotency_key": idempotency_key,
+                "local_receipt_id": None,
             }
         except Exception as exc:
             message_id = None
@@ -609,6 +635,7 @@ def send_account_message_with_retry(
                 **start_record,
                 "returncode": 1,
                 "message_id": None,
+                "upstream_message_id": None,
                 "command_ok": False,
                 "delivery_confirmed": False,
                 "stdout_tail": "",
@@ -616,6 +643,7 @@ def send_account_message_with_retry(
                 "error_code": error_code,
                 "exception_type": type(exc).__name__,
                 "idempotency_key": idempotency_key,
+                "local_receipt_id": None,
             }
 
         will_retry = _should_retry_send(
@@ -623,6 +651,8 @@ def send_account_message_with_retry(
             attempt=attempt,
             attempts=attempts,
             message_id=message_id,
+            upstream_message_id=record.get("upstream_message_id"),
+            local_receipt_id=record.get("local_receipt_id"),
         )
         record["will_retry"] = bool(will_retry)
         attempt_records.append(record)
@@ -666,9 +696,11 @@ def send_account_message_with_retry(
                 "final": final_record,
                 "final_returncode": int(record.get("returncode") or 0),
                 "message_id": record.get("message_id"),
+                "upstream_message_id": record.get("upstream_message_id"),
                 "command_ok": bool(record.get("command_ok")),
                 "delivery_confirmed": bool(record.get("delivery_confirmed")),
                 "idempotency_key": record.get("idempotency_key") or idempotency_key,
+                "local_receipt_id": record.get("local_receipt_id"),
                 "retry_attempt_count": int(record.get("retry_attempt_count") or 0),
                 "ambiguous_send": bool(record.get("ambiguous_send")),
                 "duplicate_risk": bool(record.get("duplicate_risk")),
@@ -696,12 +728,14 @@ def send_account_message_with_retry(
         "max_attempts": attempts,
         "returncode": 1,
         "message_id": None,
+        "upstream_message_id": None,
         "command_ok": False,
         "delivery_confirmed": False,
         "stdout_tail": "",
         "stderr_tail": "",
         "error_code": "SEND_FAILED",
         "idempotency_key": idempotency_key,
+        "local_receipt_id": None,
     }
     command_ok = bool(final.get("command_ok"))
     return {
@@ -714,9 +748,11 @@ def send_account_message_with_retry(
         "final": final,
         "final_returncode": int(final.get("returncode") or 0),
         "message_id": final.get("message_id"),
+        "upstream_message_id": final.get("upstream_message_id"),
         "command_ok": command_ok,
         "delivery_confirmed": bool(final.get("delivery_confirmed")),
         "idempotency_key": final.get("idempotency_key") or idempotency_key,
+        "local_receipt_id": final.get("local_receipt_id"),
         "retry_attempt_count": int(final.get("retry_attempt_count") or 0),
         "ambiguous_send": bool(final.get("ambiguous_send")),
         "duplicate_risk": bool(final.get("duplicate_risk")),
@@ -788,6 +824,7 @@ def execute_per_account_delivery(
                     "attempts": int(send_result.get("attempts") or 1),
                     "final_returncode": int(send_result.get("final_returncode") or 0),
                     "message_id": send_result.get("message_id"),
+                    "upstream_message_id": send_result.get("upstream_message_id"),
                     "command_ok": bool(send_result.get("command_ok")),
                     "delivery_confirmed": bool(send_result.get("delivery_confirmed")),
                     "stdout_tail": final_record.get("stdout_tail"),
@@ -795,6 +832,7 @@ def execute_per_account_delivery(
                     "timeout_sec": final_record.get("timeout_sec"),
                     "exception_type": final_record.get("exception_type"),
                     "idempotency_key": send_result.get("idempotency_key"),
+                    "local_receipt_id": send_result.get("local_receipt_id"),
                     "retry_attempt_count": int(send_result.get("retry_attempt_count") or 0),
                     "ambiguous_send": bool(send_result.get("ambiguous_send")),
                     "duplicate_risk": bool(send_result.get("duplicate_risk")),

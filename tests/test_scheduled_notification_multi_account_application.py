@@ -15,8 +15,10 @@ def test_execute_per_account_delivery_collects_mixed_success_and_unconfirmed(fak
     events: list[dict] = []
     audit_events: list[dict] = []
     failure_codes: list[str] = []
+    send_calls: list[str] = []
 
     def _send_fn(*, message: str, **_kwargs):
+        send_calls.append(message)
         if message == "msg-lx":
             return SimpleNamespace(returncode=0, stdout='{"result":{"messageId":"lx-1"}}', stderr="")
         return SimpleNamespace(returncode=0, stdout='{"ok":true}', stderr="")
@@ -40,13 +42,68 @@ def test_execute_per_account_delivery_collects_mixed_success_and_unconfirmed(fak
     assert out.notify_failures[0]["account"] == "sy"
     assert out.notify_failures[0]["error_code"] == "SEND_UNCONFIRMED"
     assert out.notify_failures[0]["final_returncode"] == 0
+    assert out.notify_failures[0]["attempts"] == 1
     assert out.notify_failures[0]["message_id"] is None
+    assert out.notify_failures[0]["upstream_message_id"] is None
     assert out.notify_failures[0]["command_ok"] is True
     assert out.notify_failures[0]["delivery_confirmed"] is False
     assert failure_codes == ["SEND_UNCONFIRMED"]
+    assert send_calls == ["msg-lx", "msg-sy"]
     assert [e["action"] for e in audit_events] == ["send_start", "send_done", "send_start", "send_fail"]
     assert [e["status"] for e in audit_events if e["action"] in {"send_done", "send_fail"}] == ["ok", "unconfirmed"]
     assert [e["status"] for e in events if e["step"] == "notify"] == ["start", "ok", "start", "error"]
+
+
+def test_execute_per_account_delivery_retries_clawbot_unconfirmed_without_upstream_id(fake_runlog_factory) -> None:
+    mod = importlib.import_module("src.application.scheduled_notification")
+    normalize = importlib.import_module(
+        "src.application.channels.wechat_clawbot.notification"
+    ).normalize_wechat_clawbot_send_output
+    send_calls: list[str] = []
+    sleep_calls: list[float] = []
+
+    def _send_fn(*, message: str, idempotency_key: str, **_kwargs):
+        send_calls.append(message)
+        if len(send_calls) == 1:
+            return {
+                "ok": False,
+                "http_status": 200,
+                "response_json": {"ret": -2},
+                "response_tail": '{"ret": -2}',
+                "local_receipt_id": idempotency_key,
+                "idempotency_key": idempotency_key,
+            }
+        return {
+            "ok": True,
+            "http_status": 200,
+            "response_json": {"ret": 0},
+            "response_tail": '{"ret": 0}',
+            "local_receipt_id": idempotency_key,
+            "idempotency_key": idempotency_key,
+        }
+
+    out = mod.execute_per_account_delivery(
+        delivery_batch=_plan({"sy": "msg-sy"}),
+        run_id="run-clawbot-unconfirmed",
+        runlog=fake_runlog_factory([]),
+        audit_fn=lambda *_args, **_kwargs: None,
+        safe_data_fn=lambda payload: payload,
+        send_fn=_send_fn,
+        normalize_fn=normalize,
+        failure_fields_builder=lambda **_kwargs: {},
+        on_failure=lambda _error_code: None,
+        base="/tmp/base",
+        failure_stage="send_wechat_clawbot_message",
+        sleep_fn=lambda seconds: sleep_calls.append(seconds),
+    )
+
+    assert out.sent_accounts == ["sy"]
+    assert out.notify_failures == []
+    assert send_calls == ["msg-sy", "msg-sy"]
+    assert sleep_calls == [1.0]
+    assert out.send_results[0]["attempts"] == 2
+    assert out.send_results[0]["upstream_message_id"] is None
+    assert out.send_results[0]["local_receipt_id"] == out.send_results[0]["message_id"]
 
 
 def test_execute_per_account_delivery_collects_all_failures(fake_runlog_factory) -> None:
