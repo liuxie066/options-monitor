@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.2.302 - 2026-06-18
+
+### Fixed
+- Refreshed existing WeChat ClawBot notification bindings from inbound messages so scheduled notification pushes reuse
+  the latest valid conversation context after the operator talks to ClawBot.
+- Kept the ClawBot binding refresh scoped to existing matching targets and surfaced a redacted `binding_refresh` summary
+  in poll results for diagnostics.
+
 ## 1.2.301 - 2026-06-17
 
 ### Added
