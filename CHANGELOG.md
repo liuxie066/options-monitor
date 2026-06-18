@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.2.307 - 2026-06-18
+
+### Fixed
+- Hashed WeChat ClawBot scheduled-notification idempotency keys before passing them to iLink `client_id`, matching the
+  inbound reply path while preserving local idempotency and receipt diagnostics.
+- Restored the Assistant LLM planner settings import used by the context-validation repair path.
+
 ## 1.2.306 - 2026-06-18
 
 ### Fixed

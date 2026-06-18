@@ -72,6 +72,13 @@ def _local_receipt_id(*, idempotency_key: str | None, target: str, message: str)
     return "wechat-clawbot-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
 
 
+def _client_id_from_idempotency_key(idempotency_key: str | None) -> str | None:
+    key = str(idempotency_key or "").strip()
+    if not key:
+        return None
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]
+
+
 def send_wechat_clawbot_message(
     *,
     base: Path,
@@ -96,7 +103,7 @@ def send_wechat_clawbot_message(
         group_id=binding.group_id,
         context_token=binding.context_token,
         text=text,
-        client_id=idempotency_key,
+        client_id=_client_id_from_idempotency_key(idempotency_key),
     )
     ok = _response_success(response_json)
     message_id = _extract_message_id(response_json)

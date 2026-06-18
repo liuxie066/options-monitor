@@ -43,7 +43,7 @@ from src.application.assistant.llm_common import (
 )
 from src.application.assistant.renderer import render_canonical_tool_result, render_inbound_text
 from src.application.assistant.session import build_agent_session_snapshot
-from src.application.assistant.settings import AssistantSettings
+from src.application.assistant.settings import AssistantLlmSettings, AssistantSettings
 from src.application.assistant.task_contract import build_task_contract
 from src.application.assistant.tool_bindings import (
     planner_binding_for_tool,
