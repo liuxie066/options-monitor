@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -277,7 +278,9 @@ def test_send_wechat_clawbot_message_uses_bound_context(tmp_path: Path) -> None:
     assert captured["context_token"] == "ctx_1"
     assert captured["group_id"] == "group_1"
     assert captured["text"] == "hello"
-    assert captured["client_id"] == "om-run-1:ops"
+    assert captured["client_id"] == hashlib.sha256("om-run-1:ops".encode("utf-8")).hexdigest()[:32]
+    assert out["idempotency_key"] == "om-run-1:ops"
+    assert out["local_receipt_id"] == "om-run-1:ops"
 
 
 def test_wechat_clawbot_client_wraps_sendmessage_payload_in_msg() -> None:
