@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 1.2.305 - 2026-06-18
+
+### Fixed
+- Retried WeChat ClawBot scheduled notification sends when iLink returned an unconfirmed business response without an
+  upstream message id, including `SEND_UNCONFIRMED` responses such as `ret=-2`.
+- Passed the stable scheduled-notification idempotency key through to iLink `client_id` so retries reuse the same
+  outbound client identifier instead of generating a fresh random id.
+
+### Added
+- Added structured ClawBot notification diagnostics for provider response codes, upstream message ids, and local receipt
+  ids in per-account failure records and failure summaries.
+- Added redacted WeChat ClawBot binding freshness diagnostics to channel health, runtime status, and healthcheck output
+  without exposing context tokens or message text.
+
 ## 1.2.304 - 2026-06-18
 
 ### Fixed
