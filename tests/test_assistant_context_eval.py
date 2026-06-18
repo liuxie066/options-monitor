@@ -8,6 +8,7 @@ from src.application.assistant.context_eval import format_context_eval_text, run
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 AGENT_EVAL_FIXTURE = FIXTURE_DIR / "assistant_agent_eval.jsonl"
 PROJECTION_FIXTURE = FIXTURE_DIR / "assistant_context_projection.jsonl"
+VALIDATION_FIXTURE = FIXTURE_DIR / "assistant_context_validation.jsonl"
 
 
 def test_context_eval_projection_mode_runs_projection_fixture() -> None:
@@ -35,13 +36,31 @@ def test_context_eval_projection_mode_runs_projection_fixture() -> None:
     assert "refs=2" in text
 
 
-def test_context_eval_deferred_modes_have_explicit_empty_reports() -> None:
-    for mode in ("validation", "scenarios"):
-        report = run_context_eval_suite(fixture_path=AGENT_EVAL_FIXTURE, mode=mode)
-        summary = report["summary"]
+def test_context_eval_validation_mode_runs_validation_fixture() -> None:
+    report = run_context_eval_suite(fixture_path=VALIDATION_FIXTURE, mode="validation")
+    summary = report["summary"]
+    results = {item["id"]: item for item in report["results"]}
 
-        assert summary["mode"] == mode
-        assert summary["ok"] is True
-        assert summary["total"] == 0
-        assert summary["failed"] == 0
-        assert summary["empty"] is True
+    assert summary["mode"] == "validation"
+    assert summary["ok"] is True
+    assert summary["total"] == 10
+    assert summary["failed"] == 0
+    assert results["validation_blocks_unreferenced_carry"]["actual"]["context_validation"]["status"] == "blocked"
+    assert results["validation_asks_when_truncated_context_has_no_ref"]["actual"]["context_validation"]["status"] == "ask_clarification"
+
+    text = format_context_eval_text(report)
+    assert "assistant context eval: 10/10 passed" in text
+    assert "mode=validation" in text
+    assert "validation=blocked" in text
+    assert "code=CONTEXT_SLOT_NOT_AVAILABLE" in text
+
+
+def test_context_eval_scenarios_mode_has_explicit_empty_report() -> None:
+    report = run_context_eval_suite(fixture_path=AGENT_EVAL_FIXTURE, mode="scenarios")
+    summary = report["summary"]
+
+    assert summary["mode"] == "scenarios"
+    assert summary["ok"] is True
+    assert summary["total"] == 0
+    assert summary["failed"] == 0
+    assert summary["empty"] is True

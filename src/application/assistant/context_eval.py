@@ -6,6 +6,7 @@ from typing import Any
 
 from src.application.assistant.agent_loop import _planner_input_text, _planner_tool_manifest
 from src.application.assistant.context_projection import build_context_projection, context_projection_trace
+from src.application.assistant.context_validation import validate_context_use
 
 
 CONTEXT_EVAL_SCHEMA_VERSION = "om-assistant-context-eval-v1"
@@ -49,7 +50,7 @@ def run_context_eval_suite(
     failed = [result for result in results if not result.get("ok")]
     skipped = [result for result in results if str(result.get("status") or "") == "skip"]
     passed = [result for result in results if result.get("ok") and str(result.get("status") or "") == "pass"]
-    requires_cases = bool(selected_ids) or eval_mode in {"planner_context", "projection"}
+    requires_cases = bool(selected_ids) or eval_mode in {"planner_context", "projection", "validation"}
     summary = {
         "schema_version": CONTEXT_EVAL_SCHEMA_VERSION,
         "mode": eval_mode,
@@ -135,6 +136,36 @@ def evaluate_projection_case(case: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def evaluate_validation_case(case: dict[str, Any]) -> dict[str, Any]:
+    projection = _case_context_projection(case)
+    if not projection:
+        projection = build_context_projection(
+            current_user_message=str(case.get("current_user_message") or case.get("question") or ""),
+            conversation_context=_case_conversation_context(case),
+            recent_sessions=_case_recent_sessions(case),
+        )
+    validation = validate_context_use(
+        current_user_message=str(case.get("current_user_message") or case.get("question") or ""),
+        context_projection=projection,
+        plan_payload=_case_plan_payload(case),
+        planner_manifest=_case_planner_manifest(case),
+    )
+    actual = _validation_eval_actual_payload(validation)
+    checks = _evaluate_validation_checks(case=case, validation=validation, actual=actual)
+    failures = [check for check in checks if not check.get("passed")]
+    return {
+        "schema_version": CONTEXT_EVAL_SCHEMA_VERSION,
+        "id": str(case.get("id") or ""),
+        "mode": "validation",
+        "question": str(case.get("current_user_message") or case.get("question") or ""),
+        "ok": not failures,
+        "status": "pass" if not failures else "fail",
+        "actual": actual,
+        "checks": checks,
+        "failures": failures,
+    }
+
+
 def format_context_eval_text(report: dict[str, Any]) -> str:
     summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
     lines = [
@@ -173,6 +204,19 @@ def format_context_eval_text(report: dict[str, Any]) -> str:
                         f"gaps={projection.get('open_gap_count', 0)}",
                         f"pending={projection.get('pending_operation_count', 0)}",
                         f"truncated={str(projection.get('truncated', False)).lower()}",
+                    ]
+                )
+            )
+        elif result.get("mode") == "validation":
+            validation = actual.get("context_validation") if isinstance(actual.get("context_validation"), dict) else {}
+            lines.append(
+                " ".join(
+                    [
+                        prefix,
+                        str(result.get("id") or ""),
+                        f"validation={validation.get('status') or '-'}",
+                        f"code={validation.get('code') or '-'}",
+                        f"context={validation.get('context_use_mode') or '-'}",
                     ]
                 )
             )
@@ -218,6 +262,8 @@ def _evaluate_case_for_mode(
         return evaluate_context_case(case, full_manifest_chars=full_manifest_chars)
     if mode == "projection":
         return evaluate_projection_case(case)
+    if mode == "validation":
+        return evaluate_validation_case(case)
     return _evaluate_deferred_context_layer_case(case, mode=mode)
 
 
@@ -264,6 +310,25 @@ def _case_recent_sessions(case: dict[str, Any]) -> list[dict[str, Any]] | None:
     if not isinstance(raw_sessions, list):
         return None
     return [dict(item) for item in raw_sessions if isinstance(item, dict)]
+
+
+def _case_context_projection(case: dict[str, Any]) -> dict[str, Any] | None:
+    raw_projection = case.get("context_projection")
+    return dict(raw_projection) if isinstance(raw_projection, dict) else None
+
+
+def _case_plan_payload(case: dict[str, Any]) -> dict[str, Any]:
+    raw_plan = case.get("plan_payload")
+    if not isinstance(raw_plan, dict):
+        raw_plan = case.get("plan")
+    return dict(raw_plan) if isinstance(raw_plan, dict) else {}
+
+
+def _case_planner_manifest(case: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_manifest = case.get("planner_manifest")
+    if isinstance(raw_manifest, list):
+        return [dict(item) for item in raw_manifest if isinstance(item, dict)]
+    return _planner_tool_manifest()
 
 
 def _analysis_views_from_payload(payload: dict[str, Any]) -> list[str]:
@@ -316,6 +381,44 @@ def _evaluate_context_checks(
         recent_hints = context.get("recent_read_hints") if isinstance(context.get("recent_read_hints"), list) else []
         _add_check(checks, "context.recent_read_hint_count", int(case["expect_recent_read_hint_count"]), len(recent_hints))
     _add_context_expectation_checks(checks, case=case, context=context)
+    return checks
+
+
+def _evaluate_validation_checks(
+    *,
+    case: dict[str, Any],
+    validation: dict[str, Any],
+    actual: dict[str, Any],
+) -> list[dict[str, Any]]:
+    expect = case.get("expect") if isinstance(case.get("expect"), dict) else {}
+    validation_summary = actual.get("context_validation") if isinstance(actual.get("context_validation"), dict) else {}
+    checks: list[dict[str, Any]] = []
+    _add_check(checks, "validation.schema_version", "om-context-validation-v1", validation_summary.get("schema_version"))
+    for key in ("status", "code", "context_use_mode"):
+        if expect.get(key) is not None:
+            _add_check(checks, f"validation.{key}", expect[key], validation_summary.get(key))
+    if expect.get("referenced_turn_ids") is not None:
+        _add_check(checks, "validation.referenced_turn_ids", expect["referenced_turn_ids"], validation.get("referenced_turn_ids"))
+    if expect.get("referenced_evidence_refs") is not None:
+        _add_check(
+            checks,
+            "validation.referenced_evidence_refs",
+            expect["referenced_evidence_refs"],
+            validation.get("referenced_evidence_refs"),
+        )
+    if expect.get("warning_count") is not None:
+        _add_check(checks, "validation.warning_count", int(expect["warning_count"]), len(validation.get("warnings") or []))
+    if expect.get("violation_reason") is not None:
+        violation = validation.get("violation") if isinstance(validation.get("violation"), dict) else {}
+        _add_check(checks, "validation.violation.reason", expect["violation_reason"], violation.get("reason"))
+    if isinstance(expect.get("validated_slots"), dict):
+        slots = validation.get("validated_slots") if isinstance(validation.get("validated_slots"), dict) else {}
+        for key_path, expected, actual_value in _mapping_subset_diffs(
+            dict(expect["validated_slots"]),
+            slots,
+            prefix="validation.validated_slots",
+        ):
+            _add_check(checks, key_path, expected, actual_value)
     return checks
 
 
@@ -493,6 +596,24 @@ def _projection_eval_actual_payload(projection: dict[str, Any]) -> dict[str, Any
             for item in projection.get("recent_successful_tools") or []
             if isinstance(item, dict) and isinstance(item.get("data_shape"), dict)
         ],
+    }
+
+
+def _validation_eval_actual_payload(validation: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "context_validation": {
+            "schema_version": validation.get("schema_version"),
+            "status": validation.get("status"),
+            "code": validation.get("code"),
+            "context_use_mode": validation.get("context_use_mode"),
+            "referenced_turn_ids": list(validation.get("referenced_turn_ids") or []),
+            "referenced_evidence_refs": list(validation.get("referenced_evidence_refs") or []),
+            "warning_count": len(validation.get("warnings") or []),
+            "violation": dict(validation.get("violation") or {}) if isinstance(validation.get("violation"), dict) else {},
+        },
+        "validated_slots": dict(validation.get("validated_slots") or {})
+        if isinstance(validation.get("validated_slots"), dict)
+        else {},
     }
 
 

@@ -28,6 +28,7 @@ from src.application.assistant.answer_guard import (
 from src.application.assistant.action_policy import decide_tool_action_policy
 from src.application.assistant.contracts import AssistantRequest, PerceptionResult, ToolCall
 from src.application.assistant.context_projection import context_projection_trace
+from src.application.assistant.context_validation import validate_context_use
 from src.application.assistant.coverage_verifier import CoverageResult, verify_coverage
 from src.application.assistant.evidence import build_evidence_bundle
 from src.application.assistant.llm_common import (
@@ -2283,10 +2284,19 @@ def plan_read_only_tools(
             ),
         )
     planner_context_use: dict[str, Any] | None = None
+    context_validation: dict[str, Any] | None = None
     try:
         plan = parse_tool_plan_payload(payload)
         plan = _normalize_tool_plan(plan, question=text, today=_planner_today_from_context(conversation_context))
         planner_context_use = plan.context_use
+        context_validation = validate_context_use(
+            current_user_message=text,
+            context_projection=conversation_context.get("context_projection")
+            if isinstance(conversation_context, dict) and isinstance(conversation_context.get("context_projection"), dict)
+            else None,
+            plan_payload=plan.public_payload(),
+            planner_manifest=planner_payload.get("tools") if isinstance(planner_payload.get("tools"), list) else [],
+        )
         if not plan.steps:
             return LlmPlannerResult(
                 plan=None,
@@ -2299,6 +2309,7 @@ def plan_read_only_tools(
                     conversation_context=conversation_context,
                     planner_input=planner_input_trace,
                     planner_context_use=planner_context_use,
+                    context_validation=context_validation,
                 ),
                 error=_no_tool_plan_error(),
             )
@@ -2315,6 +2326,7 @@ def plan_read_only_tools(
                 conversation_context=conversation_context,
                 planner_input=planner_input_trace,
                 planner_context_use=planner_context_use,
+                context_validation=context_validation,
             ),
             error=err,
         )
@@ -2328,6 +2340,7 @@ def plan_read_only_tools(
             conversation_context=conversation_context,
             planner_input=planner_input_trace,
             planner_context_use=planner_context_use,
+            context_validation=context_validation,
         ),
     )
 
@@ -5912,6 +5925,7 @@ def _llm_trace(
     conversation_context: dict[str, Any] | None = None,
     planner_input: dict[str, Any] | None = None,
     planner_context_use: dict[str, Any] | None = None,
+    context_validation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "enabled": bool(settings.enabled),
@@ -5957,6 +5971,8 @@ def _llm_trace(
         payload["planner_input"] = dict(planner_input)
     if planner_context_use is not None:
         payload["planner_context_use"] = _safe_context_use_payload(planner_context_use)
+    if context_validation is not None:
+        payload["context_validation"] = dict(context_validation)
     return payload
 
 

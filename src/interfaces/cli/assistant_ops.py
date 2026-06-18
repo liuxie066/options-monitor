@@ -46,6 +46,8 @@ def _print(payload: dict[str, Any]) -> int:
 def _default_context_eval_fixture(base: Path, *, mode: str) -> Path:
     if mode == "projection":
         return base / "tests" / "fixtures" / "assistant_context_projection.jsonl"
+    if mode == "validation":
+        return base / "tests" / "fixtures" / "assistant_context_validation.jsonl"
     return base / "tests" / "fixtures" / "assistant_agent_eval.jsonl"
 
 
