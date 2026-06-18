@@ -220,6 +220,81 @@ def bind_wechat_clawbot_target(
     )
 
 
+def refresh_wechat_clawbot_bindings_from_message(
+    *,
+    base: Path,
+    label: str = DEFAULT_WECHAT_CLAWBOT_LABEL,
+    message: dict[str, Any],
+    state_dir: str | None = None,
+) -> dict[str, Any]:
+    user_id = message_user_id(message)
+    context_token = message_context_token(message)
+    if not user_id or not context_token:
+        return {"attempted": False, "updated_count": 0, "reason": "missing_context"}
+
+    store = _state_store(base=base, label=label, state_dir=state_dir)
+    bindings_payload = _load_store_json(store.load_bindings, default={"bindings": {}})
+    bindings = bindings_payload.get("bindings") if isinstance(bindings_payload.get("bindings"), dict) else {}
+    if not bindings:
+        return {"attempted": True, "updated_count": 0, "reason": "no_bindings"}
+
+    group_id = message_group_id(message) or None
+    chat_key = message_chat_key(message) or None
+    now = utc_now()
+    updated_names: list[str] = []
+    next_bindings = dict(bindings)
+    for name, raw_binding in bindings.items():
+        if not isinstance(raw_binding, dict):
+            continue
+        if not _binding_matches_message(raw_binding, user_id=user_id, group_id=group_id, chat_key=chat_key):
+            continue
+        refreshed = {
+            **raw_binding,
+            "to_user_id": user_id,
+            "context_token": context_token,
+            "group_id": group_id,
+            "chat_key": chat_key,
+            "last_message_id": message_id(message) or raw_binding.get("last_message_id"),
+            "last_text": message_text(message)[:500],
+            "updated_at_utc": now,
+            "refreshed_from_inbound_at_utc": now,
+        }
+        if refreshed != raw_binding:
+            next_bindings[str(name)] = refreshed
+            updated_names.append(str(name))
+
+    if not updated_names:
+        return {"attempted": True, "updated_count": 0, "reason": "no_matching_binding"}
+
+    bindings_payload["bindings"] = next_bindings
+    bindings_payload["updated_at_utc"] = now
+    store.save_bindings(bindings_payload)
+    return {
+        "attempted": True,
+        "updated_count": len(updated_names),
+        "updated_bindings": updated_names,
+        "reason": "refreshed",
+    }
+
+
+def _binding_matches_message(
+    binding: dict[str, Any],
+    *,
+    user_id: str,
+    group_id: str | None,
+    chat_key: str | None,
+) -> bool:
+    if str(binding.get("to_user_id") or "").strip() != str(user_id or "").strip():
+        return False
+    binding_group_id = str(binding.get("group_id") or "").strip()
+    if binding_group_id and binding_group_id != str(group_id or "").strip():
+        return False
+    binding_chat_key = str(binding.get("chat_key") or "").strip()
+    if binding_chat_key and chat_key and binding_chat_key != str(chat_key or "").strip():
+        return False
+    return True
+
+
 def connect_wechat_clawbot_target(
     *,
     base: Path,

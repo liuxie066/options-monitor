@@ -151,6 +151,58 @@ def test_wechat_clawbot_bind_persists_context_token(tmp_path: Path) -> None:
     assert state["get_updates_buf"] == "buf_2"
 
 
+def test_wechat_clawbot_refreshes_matching_binding_from_inbound_message(tmp_path: Path) -> None:
+    from src.application.channels.wechat_clawbot.binding import refresh_wechat_clawbot_bindings_from_message
+
+    state_dir = tmp_path / "wechat-state"
+    state_dir.mkdir()
+    (state_dir / "bindings.json").write_text(
+        json.dumps(
+            {
+                "bindings": {
+                    "ops": {
+                        "to_user_id": "user_1",
+                        "context_token": "ctx_old",
+                        "group_id": None,
+                        "chat_key": "user_1",
+                        "last_message_id": "msg_old",
+                        "last_text": "bind ops",
+                        "updated_at_utc": "2026-06-10T00:00:00+00:00",
+                    },
+                    "other": {
+                        "to_user_id": "user_2",
+                        "context_token": "ctx_other",
+                        "group_id": None,
+                    },
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    out = refresh_wechat_clawbot_bindings_from_message(
+        base=tmp_path,
+        label="ops",
+        state_dir=str(state_dir),
+        message={
+            "from_user_id": "user_1",
+            "context_token": "ctx_new",
+            "message_id": "msg_new",
+            "item_list": [{"type": 1, "text_item": {"text": "状态"}}],
+        },
+    )
+
+    assert out["reason"] == "refreshed"
+    assert out["updated_bindings"] == ["ops"]
+    bindings = json.loads((state_dir / "bindings.json").read_text(encoding="utf-8"))["bindings"]
+    assert bindings["ops"]["context_token"] == "ctx_new"
+    assert bindings["ops"]["last_message_id"] == "msg_new"
+    assert bindings["ops"]["last_text"] == "状态"
+    assert bindings["ops"]["refreshed_from_inbound_at_utc"]
+    assert bindings["other"]["context_token"] == "ctx_other"
+
+
 def test_wechat_clawbot_message_adapter_builds_assistant_request(tmp_path: Path) -> None:
     from src.application.assistant.contracts import AssistantRequest
     from src.application.channels.wechat_clawbot.inbound import wechat_clawbot_message_to_assistant_request
@@ -254,6 +306,22 @@ def test_wechat_clawbot_poll_once_routes_inbound_and_replies(tmp_path: Path) -> 
         json.dumps({"bot_token": "bot_1", "base_url": "https://example.invalid", "get_updates_buf": "buf_1"}, ensure_ascii=False),
         encoding="utf-8",
     )
+    (state_dir / "bindings.json").write_text(
+        json.dumps(
+            {
+                "bindings": {
+                    "ops": {
+                        "to_user_id": "user_1",
+                        "context_token": "ctx_old",
+                        "group_id": "group_1",
+                        "chat_key": "group_1",
+                    }
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
     calls: list[tuple[str, dict]] = []
     replies: list[dict[str, object]] = []
     typing_calls: list[dict[str, object]] = []
@@ -329,8 +397,13 @@ def test_wechat_clawbot_poll_once_routes_inbound_and_replies(tmp_path: Path) -> 
     assert out["data"]["results"][0]["typing"]["reason"] == "typing_started"
     assert out["data"]["results"][0]["typing"]["stop"]["reason"] == "typing_cancelled"
     assert "typing_ticket" not in out["data"]["results"][0]["typing"]
+    assert out["data"]["results"][0]["binding_refresh"]["reason"] == "refreshed"
+    assert out["data"]["results"][0]["binding_refresh"]["updated_bindings"] == ["ops"]
     state = json.loads((state_dir / "state.json").read_text(encoding="utf-8"))
     assert state["get_updates_buf"] == "buf_2"
+    bindings = json.loads((state_dir / "bindings.json").read_text(encoding="utf-8"))["bindings"]
+    assert bindings["ops"]["context_token"] == "ctx_1"
+    assert bindings["ops"]["last_message_id"] == "msg_1"
     audited = InboundAuditStore(str(tmp_path / "audit.sqlite3")).find_by_message(
         channel="wechat",
         message_id="msg_1",
