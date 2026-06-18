@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 1.2.303 - 2026-06-18
+## 1.2.304 - 2026-06-18
 
 ### Fixed
 - Made Assistant task contracts treat user-requested account, symbol, and month scope as user-text authority while
