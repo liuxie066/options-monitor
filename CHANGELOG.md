@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 1.2.305 - 2026-06-18
+## 1.2.306 - 2026-06-18
 
 ### Fixed
 - Retried WeChat ClawBot scheduled notification sends when iLink returned an unconfirmed business response without an
