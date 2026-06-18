@@ -616,6 +616,22 @@ def test_healthcheck_reports_unified_channel_health(monkeypatch, tmp_path: Path)
         json.dumps({"bot_token": "bot_secret_1", "base_url": "https://example.invalid"}, ensure_ascii=False),
         encoding="utf-8",
     )
+    (state_dir / "bindings.json").write_text(
+        json.dumps(
+            {
+                "bindings": {
+                    "ops": {
+                        "to_user_id": "wx_user_1",
+                        "context_token": "ctx_secret_1",
+                        "last_message_id": "msg_1",
+                        "updated_at_utc": "2026-06-18T01:00:00+00:00",
+                    }
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
     profile_path = tmp_path / "service.profile.json"
     profile_path.write_text(
         json.dumps(
@@ -2003,6 +2019,22 @@ def test_runtime_status_reports_wechat_clawbot_channel_health(tmp_path: Path) ->
         json.dumps({"bot_token": "bot_secret_1", "base_url": "https://example.invalid"}, ensure_ascii=False),
         encoding="utf-8",
     )
+    (state_dir / "bindings.json").write_text(
+        json.dumps(
+            {
+                "bindings": {
+                    "ops": {
+                        "to_user_id": "wx_user_1",
+                        "context_token": "ctx_secret_1",
+                        "last_message_id": "msg_1",
+                        "updated_at_utc": "2026-06-18T01:00:00+00:00",
+                    }
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
     (tmp_path / "service.profile.json").write_text(
         json.dumps(
             {
@@ -2030,9 +2062,12 @@ def test_runtime_status_reports_wechat_clawbot_channel_health(tmp_path: Path) ->
     assert health["label"] == "ops"
     assert health["allowed_senders_configured"] is True
     assert health["bot_token_configured"] is True
+    assert health["binding_count"] == 1
+    assert health["bindings"]["ops"]["has_context_token"] is True
     assert health["reply_enabled"] is False
     assert data["summary"]["wechat_clawbot_available"] is True
     assert "bot_secret_1" not in json.dumps(data, ensure_ascii=False)
+    assert "ctx_secret_1" not in json.dumps(data, ensure_ascii=False)
 
 
 def test_runtime_status_auto_loads_runtime_service_profile_paths(tmp_path: Path) -> None:

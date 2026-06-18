@@ -264,6 +264,7 @@ def test_send_wechat_clawbot_message_uses_bound_context(tmp_path: Path) -> None:
         target="ops",
         message="hello",
         notifications={"wechat_clawbot_state_dir": str(state_dir), "send_timeout_sec": 12},
+        idempotency_key="om-run-1:ops",
         client_factory=FakeClient,
     )
 
@@ -276,6 +277,7 @@ def test_send_wechat_clawbot_message_uses_bound_context(tmp_path: Path) -> None:
     assert captured["context_token"] == "ctx_1"
     assert captured["group_id"] == "group_1"
     assert captured["text"] == "hello"
+    assert captured["client_id"] == "om-run-1:ops"
 
 
 def test_wechat_clawbot_client_wraps_sendmessage_payload_in_msg() -> None:
@@ -379,6 +381,7 @@ def test_wechat_clawbot_success_without_upstream_message_id_uses_local_receipt()
     assert out["message_id"] == "om-local-1"
     assert out["upstream_message_id"] is None
     assert out["local_receipt_id"] == "om-local-1"
+    assert out["provider_response_code"] == 0
     assert out["message"] == "message_id=om-local-1"
 
 
@@ -402,6 +405,7 @@ def test_wechat_clawbot_business_failure_with_local_receipt_is_not_confirmed() -
     assert out["message_id"] == "om-local-1"
     assert out["upstream_message_id"] is None
     assert out["local_receipt_id"] == "om-local-1"
+    assert out["provider_response_code"] == -2
     assert "ret" in out["message"]
 
 
