@@ -36,6 +36,9 @@ class AgentSessionStore:
         plan_revisions = snapshot.get("plan_revisions") if isinstance(snapshot.get("plan_revisions"), list) else []
         tool_transcript = snapshot.get("tool_transcript") if isinstance(snapshot.get("tool_transcript"), list) else []
         response_text = _response_text(response)
+        channel = (_first_text(request_payload.get("channel"), request.channel) or "local").strip().lower() or "local"
+        sender_id = _first_text(request_payload.get("sender_id"), request.sender_id) or ""
+        conversation_id = _first_text(request_payload.get("conversation_id"), request.conversation_id) or f"{channel}:{sender_id}"
         now = utc_now_iso()
         self._ensure_schema()
         try:
@@ -92,9 +95,9 @@ class AgentSessionStore:
                     (
                         session_id,
                         _optional_str(command_id),
-                        _first_text(request_payload.get("channel"), request.channel) or "local",
-                        _first_text(request_payload.get("sender_id"), request.sender_id) or "",
-                        _first_text(request_payload.get("conversation_id"), request.conversation_id),
+                        channel,
+                        sender_id,
+                        conversation_id,
                         _first_text(request_payload.get("message_id"), request.message_id),
                         request.text,
                         _first_text(request_payload.get("config_key"), request.config_key),
@@ -324,6 +327,7 @@ def format_assistant_trace(traces: list[dict[str, Any]], *, filters: dict[str, A
         lines.append(f"  任务：{_clip(goal, 180) if goal else '-'}")
         lines.append(f"  能力：{_trace_capability_text(trace.get('capability_selection'))}")
         lines.append(f"  进度：{_trace_progress_text(trace.get('progress'))}")
+        lines.append(f"  上下文：{_trace_context_text(trace.get('context'))}")
         lines.append(f"  工具：{_trace_tools_text(trace.get('tools'))}")
         lines.append(f"  证据：{_trace_evidence_text(evidence)}")
         lines.append(f"  缺口：{_trace_gap_text(evidence)}")
@@ -348,6 +352,37 @@ def _trace_tools_text(value: Any) -> str:
     return "；".join(parts)
 
 
+def _trace_context_text(value: Any) -> str:
+    context = value if isinstance(value, dict) else {}
+    if not context:
+        return "未记录"
+    if context.get("provided") is False:
+        return "未提供"
+    parts: list[str] = []
+    active = context.get("active_frame") if isinstance(context.get("active_frame"), dict) else {}
+    suppressed = context.get("suppressed_active_frame") if isinstance(context.get("suppressed_active_frame"), dict) else {}
+    frame = active or suppressed
+    if frame:
+        label = "active_frame" if active else "suppressed_frame"
+        source = str(frame.get("source") or "").strip()
+        domain = str(frame.get("domain") or "").strip()
+        tool_name = str(frame.get("tool_name") or "").strip()
+        namespace = str(frame.get("metric_namespace") or "").strip()
+        details = "/".join(item for item in (domain, tool_name, namespace) if item)
+        parts.append(f"{label}={source or '-'}:{details or '-'}")
+    followup = context.get("followup_resolution") if isinstance(context.get("followup_resolution"), dict) else {}
+    if followup:
+        status = str(followup.get("status") or "").strip()
+        namespace = str(followup.get("metric_namespace") or "").strip()
+        previous = str(followup.get("previous_metric_namespace") or "").strip()
+        suffix = f"{previous}->{namespace}" if previous and namespace else namespace
+        parts.append(f"followup={status or '-'}" + (f":{suffix}" if suffix else ""))
+    allowed = context.get("active_frame_allowed")
+    if allowed is False:
+        parts.append("active_frame_allowed=false")
+    return "，".join(parts) if parts else "无上下文 frame"
+
+
 def _trace_capability_text(value: Any) -> str:
     capability = value if isinstance(value, dict) else {}
     if not capability:
@@ -363,6 +398,13 @@ def _trace_capability_text(value: Any) -> str:
         parts.append(f"required={len(required)}")
     if rejected:
         parts.append(f"rejected={len(rejected)}")
+    explanation = capability.get("explanation") if isinstance(capability.get("explanation"), dict) else {}
+    source = str(explanation.get("selection_source") or "").strip()
+    if source:
+        parts.append(f"source={source}")
+    followup_count = _safe_int(explanation.get("followup_revision_count"))
+    if followup_count:
+        parts.append(f"followup={followup_count}")
     return "，".join(parts) if parts else "无显式能力选择"
 
 
@@ -648,16 +690,61 @@ def _trace_from_row(row: dict[str, Any], *, include_snapshot: bool) -> dict[str,
             "response_reason": row.get("response_reason") or final_response.get("reason"),
             "synthesis_reason": synthesis.get("reason"),
             "fallback": synthesis.get("fallback"),
+            "answer_route": answer_trace.get("answer_route"),
+            "scope_source": answer_trace.get("scope_source"),
+            "clarification_reason": answer_trace.get("clarification_reason"),
             "answer_guard": synthesis.get("answer_guard") if isinstance(synthesis.get("answer_guard"), dict) else None,
             "clarification_request": _compact_clarification_request(final_response.get("clarification_request")),
             "hook_results": _compact_hook_results(final_response.get("hook_results") or synthesis.get("hook_results")),
             "response_text_chars": len(str(row.get("response_text") or "")),
         },
+        "context": _compact_context_trace(synthesis.get("context")),
         "permission_state": permission_state,
     }
     if include_snapshot:
         trace["snapshot"] = snapshot
     return trace
+
+
+def _compact_context_trace(value: Any) -> dict[str, Any]:
+    context = value if isinstance(value, dict) else {}
+    if not context:
+        return {}
+    out: dict[str, Any] = {
+        "provided": bool(context.get("provided", True)),
+        "frame_count": _safe_int(context.get("frame_count")),
+        "active_frame_allowed": bool(context.get("active_frame_allowed", True)),
+    }
+    active = _compact_context_frame(context.get("active_frame"))
+    if active:
+        out["active_frame"] = active
+    suppressed = _compact_context_frame(context.get("suppressed_active_frame"))
+    if suppressed:
+        out["suppressed_active_frame"] = suppressed
+    followup = _compact_followup_resolution(context.get("followup_resolution"))
+    if followup:
+        out["followup_resolution"] = followup
+    return out
+
+
+def _compact_context_frame(value: Any) -> dict[str, Any]:
+    frame = value if isinstance(value, dict) else {}
+    out: dict[str, Any] = {}
+    for key in ("source", "rank", "domain", "tool_name", "metric_namespace"):
+        item = frame.get(key)
+        if item not in (None, "", [], {}):
+            out[key] = item
+    return out
+
+
+def _compact_followup_resolution(value: Any) -> dict[str, Any]:
+    followup = value if isinstance(value, dict) else {}
+    out: dict[str, Any] = {}
+    for key in ("status", "reason", "domain", "tool_name", "metric_namespace", "previous_metric_namespace"):
+        item = followup.get(key)
+        if item not in (None, "", [], {}):
+            out[key] = item
+    return out
 
 
 def _compact_plan_revisions(value: Any) -> list[dict[str, Any]]:
@@ -711,6 +798,8 @@ def _compact_capability_selection(value: Any) -> dict[str, Any]:
         return {}
     allowed_top = {"schema_version", "required", "satisfied", "selected_tools"}
     out = {key: value.get(key) for key in sorted(allowed_top) if key in value}
+    if isinstance(value.get("explanation"), dict):
+        out["explanation"] = _compact_capability_explanation(value["explanation"])
     out["selected"] = [
         _compact_capability_item(item)
         for item in value.get("selected") or []
@@ -722,6 +811,22 @@ def _compact_capability_selection(value: Any) -> dict[str, Any]:
         if isinstance(item, dict)
     ]
     return out
+
+
+def _compact_capability_explanation(value: dict[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "selection_source",
+        "plan_sources",
+        "revision_count",
+        "followup_revision_count",
+        "selected_tool_count",
+        "selected_effects",
+        "required_count",
+        "satisfied_count",
+        "rejected_count",
+        "decision_basis",
+    }
+    return {key: value.get(key) for key in sorted(allowed) if key in value}
 
 
 def _compact_capability_item(value: dict[str, Any]) -> dict[str, Any]:

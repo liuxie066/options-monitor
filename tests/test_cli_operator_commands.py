@@ -454,6 +454,29 @@ def test_assistant_commands_command_renders_catalog(capsys) -> None:
     assert "/confirm trade|symbol|upgrade|model" in text
 
 
+def test_assistant_eval_context_command_renders_report(capsys) -> None:
+    import src.interfaces.cli.main as cli
+
+    case_id = "planner_context_candidate_net_income_followup_uses_active_frame"
+    rc = cli.main(["assistant", "eval-context", "--case-id", case_id])
+    text = capsys.readouterr().out
+
+    assert rc == 0
+    assert "assistant context eval: 1/1 passed" in text
+    assert case_id in text
+    assert "sources=conversation_context.active_frame" in text
+    assert "glossary=candidate_option_metrics" in text
+
+    rc = cli.main(["assistant", "eval-context", "--case-id", case_id, "--format", "json"])
+    payload = _read_json_output(capsys)
+
+    assert rc == 0
+    assert payload["tool_name"] == "assistant.eval_context"
+    assert payload["ok"] is True
+    assert payload["data"]["summary"]["total"] == 1
+    assert payload["data"]["results"][0]["actual"]["context"]["metric_glossary_namespace"] == "candidate_option_metrics"
+
+
 def test_assistant_capabilities_command_renders_capability_catalog(capsys) -> None:
     import src.interfaces.cli.main as cli
 

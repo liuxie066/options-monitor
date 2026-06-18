@@ -18,12 +18,16 @@ from src.application.assistant.agent_loop import (
     PlannerPlan,
     PlannerPlanStep,
     ToolExecutor,
+    _clarification_reason_code,
     _evidence_gap_allows_followup,
     _clarification_request_payload,
+    _followup_clarification_should_ask,
     _followup_decision_contract,
     _followup_tool_allowlist_rejection,
     _planner_input_text,
     _planner_tool_manifest,
+    _synthesis_input_text,
+    _validate_plan_against_conversation_frame,
     build_tool_observation,
     plan_read_only_tools,
     run_read_only_agent_loop,
@@ -51,7 +55,7 @@ from src.application.assistant.llm_common import provider_api_kind, provider_end
 from src.application.assistant.llm_reply import LlmReplyResult, generate_general_reply
 from src.application.assistant.renderer import render_canonical_tool_result
 from src.application.assistant.settings import PlannerSettings
-from src.application.assistant.session_store import collect_assistant_trace
+from src.application.assistant.session_store import AgentSessionStore, collect_assistant_trace
 from src.application.assistant.task_contract import build_task_contract
 from src.application.assistant.tool_bindings import (
     assistant_tool_bindings,
@@ -109,6 +113,41 @@ def _plan_result(
         ),
         trace=_planner_trace(),
     )
+
+
+def _candidate_filter_net_income_popmart_data() -> dict[str, Any]:
+    return {
+        "schema_version": "candidate_filter_explain.v1",
+        "symbol": "9992.HK",
+        "raw_symbol": "泡泡玛特",
+        "canonical_symbol": "9992.HK",
+        "scope": {"account": "lx", "account_semantics": "account_scope"},
+        "trace_count": 1,
+        "status_counts": {"rejected": 1},
+        "function_counts": {"sell_put": 1},
+        "functions": [
+            {
+                "function": "sell_put",
+                "status": "rejected",
+                "reason_counts": {"net_income_non_positive": 1},
+                "reason_labels": {"net_income_non_positive": "净收入非正"},
+                "rejection_reason_counts": {"net_income_non_positive": 1},
+                "rejection_reasons": [
+                    {"rule": "net_income_non_positive", "label": "净收入非正", "count": 1}
+                ],
+                "events": [
+                    {
+                        "rule": "net_income_non_positive",
+                        "rule_label": "净收入非正",
+                        "is_rejection": True,
+                        "metric_value": -1.2,
+                        "threshold": 0,
+                        "message": "net income is not positive",
+                    }
+                ],
+            }
+        ],
+    }
 
 
 def _write_agent_loop_trade_runtime_config(tmp_path: Path) -> tuple[Path, Path]:
@@ -736,6 +775,32 @@ def test_action_safety_detects_sql_only_symbol_scope_expansion() -> None:
     assert safety["route"] == "ask"
 
 
+def test_action_safety_ignores_sql_projection_columns_for_symbol_scope() -> None:
+    request = AssistantRequest(text="继续查 sy FUTU 指派正股的行情", sender_id="local", config_key="us")
+    call = ToolCall(
+        tool_name="analysis_query",
+        payload={
+            "sql": "SELECT symbol, quote_status, spot, as_of, summary FROM quote_freshness WHERE account = 'sy' AND symbol = 'FUTU'"
+        },
+    )
+    contract = {"requested_effect": "read", "scope": {"requested_accounts": ["sy"], "requested_symbols": ["FUTU"]}}
+    policy = decide_tool_action_policy(call=call, request=request, task_contract=contract)
+
+    safety = assess_action_safety(
+        question=request.text,
+        task_contract=contract,
+        tool_name="analysis_query",
+        payload=call.payload,
+        action_policy=policy.public_payload(),
+    ).public_payload()
+
+    assert safety["status"] == "allow"
+    assert safety["code"] == "ok"
+    assert safety["scope_delta"]["symbols"]["provided"] == ["FUTU"]
+    assert safety["scope_delta"]["symbols"]["out_of_scope"] == []
+    assert safety["route"] == "execute"
+
+
 def test_action_safety_detects_sql_only_period_scope_expansion() -> None:
     request = AssistantRequest(text="对比 lx 和 sy 2026-05 的收益", sender_id="local", config_key="us")
     call = ToolCall(
@@ -1226,6 +1291,135 @@ def test_agent_loop_planner_input_uses_recent_read_question_for_analysis_query_f
             "tool_name": "analysis_query",
         }
     ]
+
+
+def test_agent_loop_planner_input_resolves_candidate_net_income_followup_from_active_frame() -> None:
+    frame = {
+        "schema_version": "om-conversation-frame-v1",
+        "source": "agent_session",
+        "rank": 1,
+        "domain": "candidate",
+        "task_mode": "diagnose",
+        "tool_name": "candidate_filter_explain",
+        "intent_name": "candidate_filter_explain",
+        "metric_namespace": "candidate_option_metrics",
+        "key_terms": ["候选", "过滤", "净收入", "net_income", "净收入非正"],
+        "tool_payload": {"account": "lx", "symbol": "9992.HK", "function": "sell_put"},
+        "evidence_source": "OM candidate filter trace",
+        "confidence": 0.9,
+    }
+    payload = json.loads(
+        _planner_input_text(
+            "净收入是怎么计算的？",
+            conversation_context={
+                "active_frame": frame,
+                "frame_stack": [frame],
+                "last_successful_read": {
+                    "intent_name": "candidate_filter_explain",
+                    "tool_name": "candidate_filter_explain",
+                    "tool_payload": {"account": "lx", "symbol": "9992.HK", "function": "sell_put"},
+                },
+            },
+        )
+    )
+    analysis_query = next(tool for tool in payload["tools"] if tool["name"] == "analysis_query")
+    views = analysis_query["semantics"]["analysis_views"]
+
+    assert payload["context"]["active_frame"]["metric_namespace"] == "candidate_option_metrics"
+    assert payload["context"]["metric_glossary"]["namespace"] == "candidate_option_metrics"
+    assert payload["context"]["metric_glossary"]["terms"]["net_income"]["formula"] == "gross_income - futu_fee"
+    assert payload["context"]["followup_resolution"]["status"] == "resolved_from_active_frame"
+    assert payload["context"]["followup_resolution"]["metric_namespace"] == "candidate_option_metrics"
+    assert "candidate_filter_diagnostics" in views
+    assert "account_monthly_performance" not in views
+    assert payload["manifest_budget"]["selection_sources"] == ["conversation_context.active_frame"]
+
+
+def test_agent_loop_planner_input_keeps_explicit_account_override_out_of_old_candidate_frame() -> None:
+    frame = {
+        "schema_version": "om-conversation-frame-v1",
+        "source": "agent_session",
+        "rank": 1,
+        "domain": "candidate",
+        "task_mode": "diagnose",
+        "tool_name": "candidate_filter_explain",
+        "intent_name": "candidate_filter_explain",
+        "metric_namespace": "candidate_option_metrics",
+        "key_terms": ["候选", "过滤", "净收入", "net_income", "净收入非正"],
+        "tool_payload": {"account": "lx", "symbol": "9992.HK", "function": "sell_put"},
+        "evidence_source": "OM candidate filter trace",
+        "confidence": 0.9,
+    }
+    context = {
+        "active_frame": frame,
+        "frame_stack": [frame],
+        "last_successful_read": {
+            "intent_name": "candidate_filter_explain",
+            "tool_name": "candidate_filter_explain",
+            "tool_payload": {"account": "lx", "symbol": "9992.HK", "function": "sell_put"},
+        },
+    }
+    question = "刚才泡泡玛特先放下，账户净收入怎么算？"
+    payload = json.loads(_planner_input_text(question, conversation_context=context))
+    analysis_query = next(tool for tool in payload["tools"] if tool["name"] == "analysis_query")
+    views = analysis_query["semantics"]["analysis_views"]
+
+    assert "active_frame" not in payload["context"]
+    assert "frame_stack" not in payload["context"]
+    assert "recent_read_hints" not in payload["context"]
+    assert payload["context"]["metric_glossary"]["namespace"] == "account_income_metrics"
+    assert payload["context"]["followup_resolution"]["status"] == "explicit_message_overrides_context"
+    assert payload["context"]["followup_resolution"]["metric_namespace"] == "account_income_metrics"
+    assert "account_monthly_performance" in views
+    assert "candidate_filter_diagnostics" not in views
+    assert payload["manifest_budget"]["selection_sources"] == ["conversation_context.explicit_override"]
+
+    synthesis_payload = json.loads(
+        _synthesis_input_text(
+            question,
+            plan=PlannerPlan(
+                goal="解释账户净收入",
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="monthly_income_report",
+                        arguments={"account": "lx", "include_rows": True},
+                    ),
+                ),
+            ),
+            observations=[],
+            conversation_context=context,
+        )
+    )
+    assert "active_frame" not in synthesis_payload["context"]
+    assert synthesis_payload["context"]["metric_glossary"]["namespace"] == "account_income_metrics"
+
+
+def test_agent_loop_planner_input_resolves_why_net_income_non_positive_followup() -> None:
+    frame = {
+        "schema_version": "om-conversation-frame-v1",
+        "source": "agent_session",
+        "rank": 1,
+        "domain": "candidate",
+        "task_mode": "diagnose",
+        "tool_name": "candidate_filter_explain",
+        "intent_name": "candidate_filter_explain",
+        "metric_namespace": "candidate_option_metrics",
+        "key_terms": ["候选", "过滤", "净收入", "net_income", "净收入非正"],
+        "tool_payload": {"account": "lx", "symbol": "9992.HK", "function": "sell_put"},
+        "evidence_source": "OM candidate filter trace",
+        "confidence": 0.9,
+    }
+    payload = json.loads(
+        _planner_input_text(
+            "为什么净收入非正？",
+            conversation_context={"active_frame": frame, "frame_stack": [frame]},
+        )
+    )
+
+    assert payload["context"]["followup_resolution"]["status"] == "resolved_from_active_frame"
+    assert payload["context"]["followup_resolution"]["metric_namespace"] == "candidate_option_metrics"
+    assert payload["context"]["metric_glossary"]["namespace"] == "candidate_option_metrics"
 
 
 def test_agent_loop_planner_input_keeps_explicit_message_ahead_of_context() -> None:
@@ -2807,7 +3001,7 @@ def test_assistant_runtime_builds_context_from_same_conversation(tmp_path: Path)
         plan_tools_fn=_plan,
     )
 
-    assert second["ok"] is True
+    assert second["ok"] is True, second
     assert captured_context is not None
     assert captured_context["window_messages"] == 4
     assert captured_context["semantics"] == {
@@ -2855,6 +3049,602 @@ def test_assistant_runtime_last_successful_read_ignores_write_tool_context(tmp_p
 
     assert context["recent_messages"][0]["tool_name"] == "inbound.manual_trade"
     assert context["last_successful_read"] is None
+
+
+def test_conversation_context_derives_read_tool_from_agent_loop_plan(tmp_path: Path) -> None:
+    audit_db = tmp_path / "inbound.sqlite3"
+    store = InboundAuditStore(audit_db)
+    store.record_result(
+        {
+            "command_id": "in_agent_loop_read",
+            "channel": "feishu",
+            "sender_id": "ou_1",
+            "conversation_id": "feishu:chat_a:ou_1",
+            "message_id": "msg_agent_loop_read",
+            "raw_text": "lx 泡泡玛特 sell_put 被哪个参数过滤了？",
+            "parser": "llm",
+            "intent_name": "tool_plan",
+            "tool_name": "assistant.tool_plan",
+            "tool_payload": {
+                "plan": {
+                    "task_contract": {"intent_families": ["candidate_filter_explain"]},
+                    "steps": [
+                        {
+                            "tool_name": "candidate_filter_explain",
+                            "arguments": {"symbol": "9992.HK", "account": "lx", "function": "sell_put"},
+                        }
+                    ],
+                }
+            },
+            "decision": "allowed",
+            "result_ok": True,
+            "response": {
+                "data": {
+                    "action": {
+                        "result": {
+                            "data": {
+                                "response_text": "泡泡玛特 sell_put 被净收入非正过滤。",
+                            }
+                        }
+                    }
+                }
+            },
+        }
+    )
+
+    context = build_conversation_context(
+        AssistantRequest(
+            text="净收入是怎么计算的？",
+            sender_id="ou_1",
+            channel="feishu",
+            conversation_id="feishu:chat_a:ou_1",
+            audit_db=str(audit_db),
+        ),
+        audit_store=store,
+        max_messages=4,
+    )
+
+    assert context["recent_messages"][0]["raw_tool_name"] == "assistant.tool_plan"
+    assert context["recent_messages"][0]["tool_name"] == "candidate_filter_explain"
+    assert context["recent_messages"][0]["tool_payload"] == {
+        "account": "lx",
+        "function": "sell_put",
+        "symbol": "9992.HK",
+    }
+    assert "净收入非正" in context["recent_messages"][0]["response_text"]
+    assert context["last_successful_read"]["intent_name"] == "candidate_filter_explain"
+    assert context["last_successful_read"]["tool_name"] == "candidate_filter_explain"
+    assert context["active_frame"]["domain"] == "candidate"
+    assert context["active_frame"]["tool_name"] == "candidate_filter_explain"
+    assert context["active_frame"]["metric_namespace"] == "candidate_option_metrics"
+    assert "净收入非正" in context["active_frame"]["key_terms"]
+    assert context["active_frame"]["source"] == "inbound_audit"
+
+
+def test_conversation_context_prefers_agent_session_frame_for_recent_read(tmp_path: Path) -> None:
+    audit_db = tmp_path / "inbound.sqlite3"
+    request = AssistantRequest(
+        text="lx 泡泡玛特 sell_put 被哪个参数过滤了？",
+        sender_id="ou_1",
+        channel="feishu",
+        conversation_id="feishu:chat_a:ou_1",
+        message_id="msg_session_frame",
+        audit_db=str(audit_db),
+    )
+    snapshot = {
+        "schema_version": "om-agent-session-v1",
+        "session_id": "session_candidate_popmart",
+        "request": request.public_payload(),
+        "goal": "解释泡泡玛特候选过滤参数",
+        "task_state": "done",
+        "capability_selection": {},
+        "progress": {},
+        "plan_revisions": [],
+        "tool_transcript": [
+            {
+                "tool_name": "candidate_filter_explain",
+                "payload": {"account": "lx", "symbol": "9992.HK", "function": "sell_put"},
+                "ok": True,
+                "summary": {},
+                "evidence_summary": {},
+            }
+        ],
+        "task_contract": {
+            "domain": "candidate",
+            "task_mode": "diagnose",
+            "intent_families": ["candidate_filter_explain"],
+        },
+        "evidence_bundle": {},
+        "coverage": {},
+        "permission_state": {},
+        "answer_trace": {
+            "final_response": {
+                "status": "rendered",
+                "response_text": "泡泡玛特 sell_put 被净收入非正过滤。",
+            }
+        },
+        "audit_ref": {},
+    }
+    AgentSessionStore(audit_db).upsert_snapshot(
+        snapshot=snapshot,
+        command_id="cmd_session_frame",
+        request=request,
+        response={"data": {"response_text": "泡泡玛特 sell_put 被净收入非正过滤。"}},
+    )
+
+    context = build_conversation_context(
+        AssistantRequest(
+            text="净收入是怎么计算的？",
+            sender_id="ou_1",
+            channel="feishu",
+            conversation_id="feishu:chat_a:ou_1",
+            audit_db=str(audit_db),
+        ),
+        audit_store=InboundAuditStore(audit_db),
+        max_messages=4,
+    )
+
+    assert context["active_frame"]["source"] == "agent_session"
+    assert context["active_frame"]["domain"] == "candidate"
+    assert context["active_frame"]["tool_name"] == "candidate_filter_explain"
+    assert context["active_frame"]["metric_namespace"] == "candidate_option_metrics"
+    assert context["active_frame"]["tool_payload"] == {
+        "account": "lx",
+        "function": "sell_put",
+        "symbol": "9992.HK",
+    }
+    assert "净收入非正" in context["active_frame"]["key_terms"]
+
+
+def test_assistant_runtime_two_turn_candidate_net_income_followup_uses_agent_session_frame(tmp_path: Path) -> None:
+    audit_db = tmp_path / "inbound.sqlite3"
+    first_text = "lx 泡泡玛特 sell_put 被哪个参数过滤了？"
+    followup_text = "净收入是怎么计算的？"
+    captured_contexts: dict[str, dict[str, Any] | None] = {}
+    captured_planner_payloads: dict[str, dict[str, Any]] = {}
+    captured_synthesis_payloads: dict[str, dict[str, Any]] = {}
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if tool_name == "candidate_filter_explain":
+            return build_response(tool_name=tool_name, ok=True, data=_candidate_filter_net_income_popmart_data())
+        if tool_name == "analysis_query":
+            return build_response(
+                tool_name=tool_name,
+                ok=True,
+                data={
+                    "source_label": "OM read-only analysis workspace",
+                    "query": {"views": ["candidate_filter_diagnostics"]},
+                    "columns": ["namespace", "metric", "formula"],
+                    "rows": [
+                        {
+                            "namespace": "candidate_option_metrics",
+                            "metric": "net_income",
+                            "formula": "gross_income - futu_fee",
+                        }
+                    ],
+                    "row_count": 1,
+                    "views_used": ["candidate_filter_diagnostics"],
+                },
+            )
+        return build_response(tool_name=tool_name, ok=False, error={"code": "UNEXPECTED_TOOL", "message": tool_name})
+
+    def _plan(
+        text: str,
+        _settings: AssistantSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        captured_contexts[text] = conversation_context
+        if text == first_text:
+            return LlmPlannerResult(
+                plan=PlannerPlan(
+                    goal="解释泡泡玛特 sell_put 候选过滤参数",
+                    task_contract={
+                        "domain": "candidate",
+                        "task_mode": "diagnose",
+                        "intent_families": ["candidate_filter_explain"],
+                    },
+                    steps=(
+                        PlannerPlanStep(
+                            id="step_1",
+                            tool_name="candidate_filter_explain",
+                            arguments={"account": "lx", "symbol": "泡泡玛特", "function": "sell_put"},
+                            purpose="读取单标的候选过滤 trace",
+                        ),
+                    ),
+                ),
+                trace=_planner_trace(),
+            )
+        if text == followup_text:
+            payload = json.loads(_planner_input_text(text, conversation_context=conversation_context))
+            captured_planner_payloads[text] = payload
+            return LlmPlannerResult(
+                plan=PlannerPlan(
+                    goal="解释候选合约净收入计算口径",
+                    task_contract={
+                        "domain": "candidate",
+                        "task_mode": "explain",
+                        "intent_families": ["analysis_query"],
+                    },
+                    steps=(
+                        PlannerPlanStep(
+                            id="step_1",
+                            tool_name="analysis_query",
+                            arguments={
+                                "query": "candidate_option_metrics net_income formula",
+                                "limit": 5,
+                            },
+                            purpose="读取候选过滤诊断视图以解释净收入口径",
+                        ),
+                    ),
+                ),
+                trace=_planner_trace(),
+            )
+        raise AssertionError(text)
+
+    def _synthesize(
+        question: str,
+        settings: AssistantSettings,
+        plan: PlannerPlan,
+        observations: list[dict[str, Any]],
+        conversation_context: dict[str, Any] | None,
+    ) -> LlmSynthesisResult:
+        assert settings.enabled is True
+        if question == first_text:
+            return LlmSynthesisResult(
+                response_text="泡泡玛特 sell_put 被净收入非正过滤。",
+                trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+            )
+        if question == followup_text:
+            captured_synthesis_payloads[question] = json.loads(
+                _synthesis_input_text(
+                    question,
+                    plan=plan,
+                    observations=observations,
+                    conversation_context=conversation_context,
+                )
+            )
+            return LlmSynthesisResult(
+                response_text="候选口径净收入 = gross_income - futu_fee。",
+                trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+            )
+        raise AssertionError(question)
+
+    first = handle_assistant_message(
+        AssistantRequest(
+            text=first_text,
+            sender_id="local",
+            channel="local",
+            message_id="msg_context_candidate_turn_1",
+            config_key="us",
+            config_path=str(tmp_path / "config.us.json"),
+            audit_db=str(audit_db),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2")),
+        plan_tools_fn=_plan,
+        synthesize_response_fn=_synthesize,
+    )
+    second = handle_assistant_message(
+        AssistantRequest(
+            text=followup_text,
+            sender_id="local",
+            channel="local",
+            message_id="msg_context_candidate_turn_2",
+            config_key="us",
+            audit_db=str(audit_db),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2")),
+        plan_tools_fn=_plan,
+        synthesize_response_fn=_synthesize,
+    )
+
+    assert first["ok"] is True
+    assert second["ok"] is True
+    context = captured_contexts[followup_text]
+    assert context is not None
+    assert context["active_frame"]["source"] == "agent_session"
+    assert context["active_frame"]["tool_name"] == "candidate_filter_explain"
+    assert context["active_frame"]["metric_namespace"] == "candidate_option_metrics"
+    assert context["active_frame"]["tool_payload"] == {
+        "account": "lx",
+        "function": "sell_put",
+        "symbol": "泡泡玛特",
+    }
+
+    planner_payload = captured_planner_payloads[followup_text]
+    planner_context = planner_payload["context"]
+    analysis_query = next(tool for tool in planner_payload["tools"] if tool["name"] == "analysis_query")
+    assert planner_context["active_frame"]["source"] == "agent_session"
+    assert planner_context["active_frame"]["metric_namespace"] == "candidate_option_metrics"
+    assert planner_context["metric_glossary"]["namespace"] == "candidate_option_metrics"
+    assert planner_context["followup_resolution"]["status"] == "resolved_from_active_frame"
+    assert "candidate_filter_diagnostics" in analysis_query["semantics"]["analysis_views"]
+    assert "account_monthly_performance" not in analysis_query["semantics"]["analysis_views"]
+    assert planner_payload["manifest_budget"]["selection_sources"] == ["conversation_context.active_frame"]
+
+    synthesis_context = captured_synthesis_payloads[followup_text]["context"]
+    assert synthesis_context["active_frame"]["metric_namespace"] == "candidate_option_metrics"
+    assert synthesis_context["metric_glossary"]["terms"]["net_income"]["formula"] == "gross_income - futu_fee"
+    assert synthesis_context["followup_resolution"]["status"] == "resolved_from_active_frame"
+
+    trace = collect_assistant_trace(audit_db=str(audit_db), command_id=second["data"]["command_id"])
+    assert trace["traces"][0]["context"]["active_frame"]["source"] == "agent_session"
+    assert trace["traces"][0]["context"]["followup_resolution"]["status"] == "resolved_from_active_frame"
+    assert "上下文：active_frame=agent_session:candidate/candidate_filter_explain/candidate_option_metrics" in trace[
+        "response_text"
+    ]
+    assert "followup=resolved_from_active_frame:candidate_option_metrics" in trace["response_text"]
+
+
+def test_assistant_runtime_two_turn_account_net_income_override_suppresses_candidate_frame(tmp_path: Path) -> None:
+    audit_db = tmp_path / "inbound.sqlite3"
+    first_text = "lx 泡泡玛特 sell_put 被哪个参数过滤了？"
+    override_text = "刚才泡泡玛特先放下，账户净收入怎么算？"
+    captured_planner_payloads: dict[str, dict[str, Any]] = {}
+    captured_synthesis_payloads: dict[str, dict[str, Any]] = {}
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if tool_name == "candidate_filter_explain":
+            return build_response(tool_name=tool_name, ok=True, data=_candidate_filter_net_income_popmart_data())
+        if tool_name == "analysis_query":
+            return build_response(
+                tool_name=tool_name,
+                ok=True,
+                data={
+                    "source_label": "OM read-only analysis workspace",
+                    "query": {"views": ["account_monthly_income_components"]},
+                    "columns": ["namespace", "metric", "formula"],
+                    "rows": [
+                        {
+                            "namespace": "account_income_metrics",
+                            "metric": "net_income_cny",
+                            "formula": "income_cashflow_ex_assignment_stock converted to CNY",
+                        }
+                    ],
+                    "row_count": 1,
+                    "views_used": ["account_monthly_income_components"],
+                },
+            )
+        return build_response(tool_name=tool_name, ok=False, error={"code": "UNEXPECTED_TOOL", "message": tool_name})
+
+    def _plan(
+        text: str,
+        _settings: AssistantSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        if text == first_text:
+            return LlmPlannerResult(
+                plan=PlannerPlan(
+                    goal="解释泡泡玛特 sell_put 候选过滤参数",
+                    task_contract={
+                        "domain": "candidate",
+                        "task_mode": "diagnose",
+                        "intent_families": ["candidate_filter_explain"],
+                    },
+                    steps=(
+                        PlannerPlanStep(
+                            id="step_1",
+                            tool_name="candidate_filter_explain",
+                            arguments={"account": "lx", "symbol": "泡泡玛特", "function": "sell_put"},
+                            purpose="读取单标的候选过滤 trace",
+                        ),
+                    ),
+                ),
+                trace=_planner_trace(),
+            )
+        if text == override_text:
+            payload = json.loads(_planner_input_text(text, conversation_context=conversation_context))
+            captured_planner_payloads[text] = payload
+            return LlmPlannerResult(
+                plan=PlannerPlan(
+                    goal="解释账户净收入计算口径",
+                    task_contract={
+                        "domain": "income",
+                        "task_mode": "explain",
+                        "intent_families": ["analysis_query"],
+                    },
+                    steps=(
+                        PlannerPlanStep(
+                            id="step_1",
+                            tool_name="analysis_query",
+                            arguments={
+                                "query": "account_income_metrics net_income_cny formula",
+                                "limit": 5,
+                            },
+                            purpose="读取账户收益口径视图",
+                        ),
+                    ),
+                ),
+                trace=_planner_trace(),
+            )
+        raise AssertionError(text)
+
+    def _synthesize(
+        question: str,
+        _settings: AssistantSettings,
+        plan: PlannerPlan,
+        observations: list[dict[str, Any]],
+        conversation_context: dict[str, Any] | None,
+    ) -> LlmSynthesisResult:
+        if question == first_text:
+            return LlmSynthesisResult(
+                response_text="泡泡玛特 sell_put 被净收入非正过滤。",
+                trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+            )
+        if question == override_text:
+            captured_synthesis_payloads[question] = json.loads(
+                _synthesis_input_text(
+                    question,
+                    plan=plan,
+                    observations=observations,
+                    conversation_context=conversation_context,
+                )
+            )
+            return LlmSynthesisResult(
+                response_text="账户口径净收入是 net_income_cny。",
+                trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+            )
+        raise AssertionError(question)
+
+    first = handle_assistant_message(
+        AssistantRequest(
+            text=first_text,
+            sender_id="local",
+            channel="local",
+            message_id="msg_context_override_turn_1",
+            config_key="us",
+            config_path=str(tmp_path / "config.us.json"),
+            audit_db=str(audit_db),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2")),
+        plan_tools_fn=_plan,
+        synthesize_response_fn=_synthesize,
+    )
+    second = handle_assistant_message(
+        AssistantRequest(
+            text=override_text,
+            sender_id="local",
+            channel="local",
+            message_id="msg_context_override_turn_2",
+            config_key="us",
+            audit_db=str(audit_db),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2")),
+        plan_tools_fn=_plan,
+        synthesize_response_fn=_synthesize,
+    )
+
+    assert first["ok"] is True
+    assert second["ok"] is True
+    planner_payload = captured_planner_payloads[override_text]
+    planner_context = planner_payload["context"]
+    analysis_query = next(tool for tool in planner_payload["tools"] if tool["name"] == "analysis_query")
+    assert "active_frame" not in planner_context
+    assert "frame_stack" not in planner_context
+    assert "recent_read_hints" not in planner_context
+    assert planner_context["metric_glossary"]["namespace"] == "account_income_metrics"
+    assert planner_context["followup_resolution"]["status"] == "explicit_message_overrides_context"
+    assert planner_context["followup_resolution"]["metric_namespace"] == "account_income_metrics"
+    assert "account_monthly_income_components" in analysis_query["semantics"]["analysis_views"]
+    assert "candidate_filter_diagnostics" not in analysis_query["semantics"]["analysis_views"]
+    assert planner_payload["manifest_budget"]["selection_sources"] == ["conversation_context.explicit_override"]
+
+    synthesis_context = captured_synthesis_payloads[override_text]["context"]
+    assert "active_frame" not in synthesis_context
+    assert synthesis_context["metric_glossary"]["namespace"] == "account_income_metrics"
+    assert synthesis_context["followup_resolution"]["status"] == "explicit_message_overrides_context"
+
+    trace = collect_assistant_trace(audit_db=str(audit_db), command_id=second["data"]["command_id"])
+    trace_context = trace["traces"][0]["context"]
+    assert trace_context["active_frame_allowed"] is False
+    assert trace_context["suppressed_active_frame"]["metric_namespace"] == "candidate_option_metrics"
+    assert trace_context["followup_resolution"]["status"] == "explicit_message_overrides_context"
+    assert trace_context["followup_resolution"]["metric_namespace"] == "account_income_metrics"
+    assert "上下文：suppressed_frame=agent_session:candidate/candidate_filter_explain/candidate_option_metrics" in trace[
+        "response_text"
+    ]
+    assert "followup=explicit_message_overrides_context:candidate_option_metrics->account_income_metrics" in trace[
+        "response_text"
+    ]
+
+
+def test_conversation_context_orders_session_and_audit_frames_by_recency(tmp_path: Path) -> None:
+    audit_db = tmp_path / "inbound.sqlite3"
+    request = AssistantRequest(
+        text="lx 泡泡玛特 sell_put 被哪个参数过滤了？",
+        sender_id="ou_1",
+        channel="feishu",
+        conversation_id="feishu:chat_a:ou_1",
+        message_id="msg_old_session_frame",
+        audit_db=str(audit_db),
+    )
+    snapshot = {
+        "schema_version": "om-agent-session-v1",
+        "session_id": "session_old_candidate_popmart",
+        "request": request.public_payload(),
+        "goal": "解释泡泡玛特候选过滤参数",
+        "task_state": "done",
+        "capability_selection": {},
+        "progress": {},
+        "plan_revisions": [],
+        "tool_transcript": [
+            {
+                "tool_name": "candidate_filter_explain",
+                "payload": {"account": "lx", "symbol": "9992.HK", "function": "sell_put"},
+                "ok": True,
+                "summary": {},
+                "evidence_summary": {},
+            }
+        ],
+        "task_contract": {
+            "domain": "candidate",
+            "task_mode": "diagnose",
+            "intent_families": ["candidate_filter_explain"],
+        },
+        "evidence_bundle": {},
+        "coverage": {},
+        "permission_state": {},
+        "answer_trace": {
+            "final_response": {
+                "status": "rendered",
+                "response_text": "泡泡玛特 sell_put 被净收入非正过滤。",
+            }
+        },
+        "audit_ref": {},
+    }
+    AgentSessionStore(audit_db).upsert_snapshot(
+        snapshot=snapshot,
+        command_id="cmd_old_session_frame",
+        request=request,
+        response={"data": {"response_text": "泡泡玛特 sell_put 被净收入非正过滤。"}},
+    )
+    with sqlite3.connect(audit_db) as conn:
+        conn.execute(
+            "UPDATE agent_sessions SET created_at = ?, updated_at = ? WHERE session_id = ?",
+            ("2026-06-18T09:00:00+00:00", "2026-06-18T09:00:00+00:00", "session_old_candidate_popmart"),
+        )
+    store = InboundAuditStore(audit_db)
+    store.record_result(
+        {
+            "command_id": "in_new_income_read",
+            "channel": "feishu",
+            "sender_id": "ou_1",
+            "conversation_id": "feishu:chat_a:ou_1",
+            "message_id": "msg_new_income_read",
+            "raw_text": "lx 6月账户收益",
+            "parser": "llm",
+            "intent_name": "monthly_income_report",
+            "tool_name": "monthly_income_report",
+            "tool_payload": {"account": "lx", "month": "2026-06"},
+            "decision": "allowed",
+            "result_ok": True,
+            "response": {"data": {"response_text": "lx 2026-06 净收入为 100 CNY。"}},
+            "created_at": "2026-06-18T10:00:00+00:00",
+            "finished_at": "2026-06-18T10:00:01+00:00",
+        }
+    )
+
+    context = build_conversation_context(
+        AssistantRequest(
+            text="净收入是怎么计算的？",
+            sender_id="ou_1",
+            channel="feishu",
+            conversation_id="feishu:chat_a:ou_1",
+            audit_db=str(audit_db),
+        ),
+        audit_store=store,
+        max_messages=4,
+    )
+
+    assert context["active_frame"]["source"] == "inbound_audit"
+    assert context["active_frame"]["domain"] == "income"
+    assert context["active_frame"]["tool_name"] == "monthly_income_report"
+    assert context["active_frame"]["metric_namespace"] == "account_income_metrics"
+    assert context["frame_stack"][1]["source"] == "agent_session"
+    assert context["frame_stack"][1]["domain"] == "candidate"
 
 
 def test_conversation_context_reads_user_md_as_hint_only_profile(tmp_path: Path) -> None:
@@ -5631,7 +6421,7 @@ def test_agent_loop_rejects_preflight_repair_without_suggested_field(tmp_path: P
     )
 
 
-def test_agent_loop_followup_needs_clarification_stops_cleanly(tmp_path: Path) -> None:
+def test_agent_loop_followup_low_risk_clarification_downgrades_to_gap(tmp_path: Path) -> None:
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return build_response(
             tool_name=tool_name,
@@ -5688,31 +6478,61 @@ def test_agent_loop_followup_needs_clarification_stops_cleanly(tmp_path: Path) -
     )
 
     assert out["ok"] is True
-    assert out["data"]["response_text"] == "请指定要查询的月份或账户范围。"
+    assert out["data"]["response_text"].startswith("分析查询结果：0 行")
     tool_plan_data = out["data"]["action"]["result"]["data"]
-    assert tool_plan_data["followup_decisions"][0]["decision"] == "ask_clarification"
-    assert tool_plan_data["followup_decisions"][0]["clarification_request"]["schema_version"] == (
-        "om-agent-clarification-request-v1"
-    )
-    assert tool_plan_data["followup_decisions"][0]["clarification_request"]["questions"][0]["slot"] == "scope"
-    assert tool_plan_data["followup_decisions"][0]["clarification_request"]["questions"][0]["options"] == []
-    assert tool_plan_data["final_response"]["status"] == "needs_clarification"
-    assert tool_plan_data["final_response"]["clarification_request"]["questions"][0]["slot"] == "scope"
-    assert tool_plan_data["final_response"]["clarification_request"]["questions"][0]["options"] == []
-    assert tool_plan_data["agent_session"]["task_state"] == "asking_clarification"
-    assert tool_plan_data["agent_session"]["progress"]["state"] == "asking_clarification"
-    assert tool_plan_data["agent_session"]["progress"]["next_action"] == "provide_clarification"
+    assert tool_plan_data["followup_decisions"][0]["decision"] == "stop_with_gap"
+    assert tool_plan_data["followup_decisions"][0]["status"] == "stopped"
+    assert tool_plan_data["followup_decisions"][0]["clarification_reason"] == "missing_scope"
+    assert tool_plan_data["followup_decisions"][0]["planner_clarification"] == "请指定要查询的月份或账户范围。"
+    assert "non-critical evidence gap" in tool_plan_data["followup_decisions"][0]["reason"]
+    assert "clarification_request" not in tool_plan_data["followup_decisions"][0]
+    assert tool_plan_data["final_response"]["status"] == "rendered"
+    assert "clarification_request" not in tool_plan_data["final_response"]
+    assert tool_plan_data["agent_session"]["task_state"] == "done"
+    assert tool_plan_data["agent_session"]["answer_trace"]["answer_route"] == "deterministic_renderer"
+    assert tool_plan_data["agent_session"]["answer_trace"]["clarification_reason"] == "missing_scope"
+    assert tool_plan_data["agent_session"]["progress"]["state"] == "done"
+    assert tool_plan_data["agent_session"]["progress"]["next_action"] == "none"
     assert any(
-        item["kind"] == "clarification"
+        item["kind"] == "followup_stop"
         for item in tool_plan_data["agent_session"]["progress"]["blocked_by"]
     )
     trace = collect_assistant_trace(
         audit_db=str(tmp_path / "inbound.sqlite3"),
         command_id=out["data"]["command_id"],
     )
-    assert trace["traces"][0]["answer"]["clarification_request"]["questions"][0]["slot"] == "scope"
-    assert trace["traces"][0]["progress"]["next_action"] == "provide_clarification"
-    assert "进度：等待补充澄清信息" in trace["response_text"]
+    assert trace["traces"][0]["answer"]["answer_route"] == "deterministic_renderer"
+    assert trace["traces"][0]["answer"]["clarification_reason"] == "missing_scope"
+    assert trace["traces"][0]["answer"]["clarification_request"] == {}
+    assert trace["traces"][0]["progress"]["next_action"] == "none"
+    assert "进度：已生成回答，但仍有证据或权限阻塞项" in trace["response_text"]
+
+
+def test_followup_clarification_gate_keeps_high_risk_operation_scope() -> None:
+    clarification = "请提供 operation_id 后再确认。"
+    assert _clarification_reason_code(clarification) == "missing_operation_scope"
+    assert _followup_clarification_should_ask(
+        clarification=clarification,
+        clarification_reason="missing_operation_scope",
+        evidence_gaps=[
+            {
+                "kind": "operation_confirmation",
+                "recoverable_by": "confirm_write",
+                "suggested_tool": "assistant_confirm_operation",
+            }
+        ],
+    )
+    assert not _followup_clarification_should_ask(
+        clarification="请指定要查询的月份或账户范围。",
+        clarification_reason="missing_scope",
+        evidence_gaps=[
+            {
+                "kind": "analysis_scope",
+                "recoverable_by": "analysis_query",
+                "suggested_tool": "analysis_query",
+            }
+        ],
+    )
 
 
 def test_clarification_request_uses_context_account_options_without_hardcoded_defaults() -> None:
@@ -7825,6 +8645,107 @@ def test_tool_plan_rejects_system_scoped_argument_families() -> None:
             assert err.details["banned_arguments"] == expected_banned
         else:
             raise AssertionError(f"{tool_name} should reject {arguments}")
+
+
+def test_tool_plan_context_drift_rejects_income_plan_for_candidate_net_income_followup() -> None:
+    frame = {
+        "schema_version": "om-conversation-frame-v1",
+        "domain": "candidate",
+        "tool_name": "candidate_filter_explain",
+        "metric_namespace": "candidate_option_metrics",
+        "key_terms": ["净收入", "net_income", "净收入非正"],
+        "tool_payload": {"account": "lx", "symbol": "9992.HK", "function": "sell_put"},
+    }
+    plan = PlannerPlan(
+        goal="解释净收入计算",
+        steps=(
+            PlannerPlanStep(
+                id="step_1",
+                tool_name="analysis_query",
+                arguments={"sql": "select month, account, net_income_cny from account_monthly_performance"},
+                purpose="查询账户收益净收入口径",
+            ),
+        ),
+        task_contract={"domain": "income", "task_mode": "explain"},
+    )
+
+    try:
+        _validate_plan_against_conversation_frame(
+            plan,
+            question="净收入是怎么计算的？",
+            conversation_context={"active_frame": frame},
+        )
+    except AgentToolError as err:
+        assert err.code == "PLAN_CONTEXT_DRIFT"
+        assert err.details["resolution"]["metric_namespace"] == "candidate_option_metrics"
+        assert err.details["offenses"]
+    else:
+        raise AssertionError("candidate net-income follow-up should reject account income plan")
+
+
+def test_tool_plan_context_drift_allows_explicit_account_income_override() -> None:
+    frame = {
+        "schema_version": "om-conversation-frame-v1",
+        "domain": "candidate",
+        "tool_name": "candidate_filter_explain",
+        "metric_namespace": "candidate_option_metrics",
+        "key_terms": ["净收入", "net_income", "净收入非正"],
+        "tool_payload": {"account": "lx", "symbol": "9992.HK", "function": "sell_put"},
+    }
+    plan = PlannerPlan(
+        goal="解释账户净收入计算",
+        steps=(
+            PlannerPlanStep(
+                id="step_1",
+                tool_name="monthly_income_report",
+                arguments={"account": "lx", "include_rows": True},
+                purpose="读取账户收益明细",
+            ),
+        ),
+        task_contract={"domain": "income", "task_mode": "explain"},
+    )
+
+    _validate_plan_against_conversation_frame(
+        plan,
+        question="刚才泡泡玛特先放下，账户净收入怎么算？",
+        conversation_context={"active_frame": frame},
+    )
+
+
+def test_tool_plan_context_drift_rejects_candidate_plan_for_account_income_followup() -> None:
+    frame = {
+        "schema_version": "om-conversation-frame-v1",
+        "domain": "income",
+        "tool_name": "monthly_income_report",
+        "metric_namespace": "account_income_metrics",
+        "key_terms": ["收益", "现金流", "净收入", "net_income_cny"],
+        "tool_payload": {"account": "lx", "month": "2026-06"},
+    }
+    plan = PlannerPlan(
+        goal="解释净收入计算",
+        steps=(
+            PlannerPlanStep(
+                id="step_1",
+                tool_name="candidate_filter_explain",
+                arguments={"symbol": "9992.HK", "account": "lx", "function": "sell_put"},
+                purpose="查询候选过滤净收入",
+            ),
+        ),
+        task_contract={"domain": "candidate", "task_mode": "diagnose"},
+    )
+
+    try:
+        _validate_plan_against_conversation_frame(
+            plan,
+            question="净收入是怎么计算的？",
+            conversation_context={"active_frame": frame},
+        )
+    except AgentToolError as err:
+        assert err.code == "PLAN_CONTEXT_DRIFT"
+        assert err.details["resolution"]["metric_namespace"] == "account_income_metrics"
+        assert err.details["offenses"]
+    else:
+        raise AssertionError("account income follow-up should reject candidate plan")
 
 
 def test_agent_loop_income_cashflow_eval_plan_guard() -> None:

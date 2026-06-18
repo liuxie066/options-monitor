@@ -1469,6 +1469,11 @@ Eval 运行原则：
 - `tests/test_assistant_runtime.py`
 - `tests/test_analysis_tools.py`
 
+Planner context 决策报告可用 `./om assistant eval-context` 直接读取
+`assistant_agent_eval.jsonl` 中的 `planner_context` fixture，输出每个 case 的
+selection source、active frame、metric glossary 和 follow-up resolution，用于快速定位
+短追问上下文漂移。
+
 新增 fixture 不直接访问 OpenD、Feishu、GitHub 或 broker。实时行情、升级状态、远端
 release 统一 mock 成工具 observation。
 

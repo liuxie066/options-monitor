@@ -15,6 +15,7 @@ _SYMBOL_TEXT_RE = re.compile(
     r"([A-Za-z]{1,8}(?:\.[A-Za-z]{1,4})?|[A-Za-z]{2}\.\d{4,5}|\d{3,5}(?:\.HK)?|[\u4e00-\u9fff]{2,8})"
     r"(?![A-Za-z0-9_.])"
 )
+_SQL_SINGLE_QUOTED_LITERAL_RE = re.compile(r"'((?:''|[^'])*)'")
 _NON_SYMBOL_TOKENS = {
     "ACCOUNT",
     "ACTION",
@@ -527,6 +528,8 @@ def _payload_scope_texts(value: Any, *, key: str = "") -> list[str]:
     if key and key.lower() in _PAYLOAD_SCOPE_TEXT_SKIP_KEYS:
         return []
     if isinstance(value, str):
+        if key.lower() == "sql":
+            return _sql_scope_texts(value)
         return [value]
     if isinstance(value, dict):
         texts: list[str] = []
@@ -539,6 +542,10 @@ def _payload_scope_texts(value: Any, *, key: str = "") -> list[str]:
             texts.extend(_payload_scope_texts(item, key=key))
         return texts
     return []
+
+
+def _sql_scope_texts(value: str) -> list[str]:
+    return [match.group(1).replace("''", "'") for match in _SQL_SINGLE_QUOTED_LITERAL_RE.finditer(str(value or ""))]
 
 
 def _scope_field_delta(*, requested: list[str], provided: list[str]) -> dict[str, Any]:
