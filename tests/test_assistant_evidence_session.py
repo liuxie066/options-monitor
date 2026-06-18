@@ -3677,6 +3677,18 @@ def test_agent_loop_tool_result_contains_evidence_bundle_and_session(tmp_path: P
     assert session["capability_selection"]["schema_version"] == "om-agent-capability-selection-v1"
     assert session["capability_selection"]["selected_tools"] == ["option_positions_read"]
     assert session["capability_selection"]["selected"][0]["effect"] == "read"
+    assert session["capability_selection"]["explanation"] == {
+        "selection_source": "plan_revisions",
+        "plan_sources": ["agent_loop"],
+        "revision_count": 1,
+        "followup_revision_count": 0,
+        "selected_tool_count": 1,
+        "selected_effects": ["read"],
+        "required_count": 2,
+        "satisfied_count": 2,
+        "rejected_count": 0,
+        "decision_basis": ["plan_steps", "capability_assessment"],
+    }
     assert session["progress"]["schema_version"] == "om-agent-progress-v1"
     assert session["progress"]["state"] == "done"
     assert session["progress"]["coverage_status"] == "complete"
@@ -3723,6 +3735,9 @@ def test_agent_loop_tool_result_contains_evidence_bundle_and_session(tmp_path: P
     assert session["tool_transcript"][0]["evidence_summary"]["source_label"] == "OM 本地 SQLite assigned_stock_events + trade_events"
     assert session["tool_transcript"][0]["evidence_summary"]["primary_rows"] == "rows"
     assert session["tool_transcript"][0]["evidence_summary"]["row_count"] == 1
+    assert session["answer_trace"]["answer_route"] == "llm_composer"
+    assert session["answer_trace"]["scope_source"] == "user_text"
+    assert "clarification_reason" not in session["answer_trace"]
 
     audit_db = tmp_path / "inbound.sqlite3"
     persisted = AgentSessionStore(audit_db).list_recent(command_id=out["data"]["command_id"])
@@ -3745,6 +3760,9 @@ def test_agent_loop_tool_result_contains_evidence_bundle_and_session(tmp_path: P
     assert trace_entry["task"]["goal"] == "查看 lx 指派正股持仓盈亏"
     assert trace_entry["plan"]["revision_count"] == 1
     assert trace_entry["capability_selection"]["selected_tools"] == ["option_positions_read"]
+    assert trace_entry["capability_selection"]["explanation"]["selection_source"] == "plan_revisions"
+    assert trace_entry["capability_selection"]["explanation"]["selected_tool_count"] == 1
+    assert trace_entry["capability_selection"]["explanation"]["decision_basis"] == ["plan_steps", "capability_assessment"]
     assert trace_entry["progress"]["state"] == "done"
     assert trace_entry["progress"]["coverage_status"] == "complete"
     assert trace_entry["progress"]["next_action"] == "none"
@@ -3763,6 +3781,9 @@ def test_agent_loop_tool_result_contains_evidence_bundle_and_session(tmp_path: P
     assert trace_entry["evidence"]["diagnostic_count"] == 0
     assert trace_entry["evidence"]["diagnostic_domains"] == []
     assert trace_entry["answer"]["response_status"] == "synthesized"
+    assert trace_entry["answer"]["answer_route"] == "llm_composer"
+    assert trace_entry["answer"]["scope_source"] == "user_text"
+    assert trace_entry["answer"]["clarification_reason"] is None
     assert any(item["hook"] == "final_response" and item["status"] == "pass" for item in trace_entry["answer"]["hook_results"])
     assert any(item["hook"] == "answer_guard" and item["status"] == "pass" for item in trace_entry["answer"]["hook_results"])
     trace_entry_text = json.dumps(trace_entry, ensure_ascii=False)
@@ -3776,6 +3797,7 @@ def test_agent_loop_tool_result_contains_evidence_bundle_and_session(tmp_path: P
     trace_text = tool_trace["data"]["response_text"]
     assert "任务：查看 lx 指派正股持仓盈亏" in trace_text
     assert "能力：selected=1" in trace_text
+    assert "source=plan_revisions" in trace_text
     assert "进度：已完成，证据覆盖完整" in trace_text
     assert "工具：读取指派正股持仓（ok，1 行）" in trace_text
     assert "证据：facts=" in trace_text
@@ -4228,6 +4250,8 @@ def test_agent_loop_replans_read_only_followup_for_recoverable_quote_gap(tmp_pat
     tool_plan_data = out["data"]["action"]["result"]["data"]
     assert len(tool_plan_data["plan_revisions"]) == 2
     assert tool_plan_data["agent_session"]["plan_revisions"][1]["reason"] == "follow-up evidence-gap plan"
+    assert tool_plan_data["agent_session"]["capability_selection"]["explanation"]["followup_revision_count"] == 1
+    assert tool_plan_data["agent_session"]["capability_selection"]["explanation"]["selected_tool_count"] == 1
     assert tool_plan_data["tool_calls_used"] == 2
     assert tool_plan_data["evidence_gaps"] == []
     assert "spot USD 98" in out["data"]["response_text"]
