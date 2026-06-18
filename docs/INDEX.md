@@ -19,6 +19,11 @@
 - [AGENT_GETTING_STARTED.md](AGENT_GETTING_STARTED.md)：本地 Tool Gateway 工具快速开始
 - [AGENT_WIKI.md](AGENT_WIKI.md)：本地 agent 任务手册（工具选择、Research / Shadow Replay 侧线、排障 playbook、模块地图、验证矩阵）
 - [OM_AGENT_CAPABILITY_MAP.md](OM_AGENT_CAPABILITY_MAP.md)：Tool Gateway 与 Inbound Assistant 的能力边界、LLM 暴露面和验证方式
+- [OM_ASSISTANT_CONVERSATION_CONTEXT_DESIGN.md](OM_ASSISTANT_CONVERSATION_CONTEXT_DESIGN.md)：Inbound Assistant 多轮对话上下文的当前设计方向
+- [OM_ASSISTANT_CONTEXT_PROJECTION_CONTRACT.md](OM_ASSISTANT_CONTEXT_PROJECTION_CONTRACT.md)：planner 前上下文投影视图合同
+- [OM_ASSISTANT_CONTEXT_VALIDATION_CONTRACT.md](OM_ASSISTANT_CONTEXT_VALIDATION_CONTRACT.md)：planner 后上下文引用校验合同
+- [OM_ASSISTANT_CONTEXT_EVAL_PLAN.md](OM_ASSISTANT_CONTEXT_EVAL_PLAN.md)：上下文 projection / validation / scenario 长期回归计划
+- [OM_ASSISTANT_CONTEXT_IMPLEMENTATION_PLAN.md](OM_ASSISTANT_CONTEXT_IMPLEMENTATION_PLAN.md)：上下文 projection / validation / cutover 的分阶段实现计划
 - [TOOL_REFERENCE.md](TOOL_REFERENCE.md)：工具参考
 - [SESSION_SUMMARY.md](SESSION_SUMMARY.md)：显式 handoff 时使用的摘要模板
 

@@ -27,6 +27,7 @@ from src.application.assistant.answer_guard import (
 )
 from src.application.assistant.action_policy import decide_tool_action_policy
 from src.application.assistant.contracts import AssistantRequest, PerceptionResult, ToolCall
+from src.application.assistant.context_projection import context_projection_trace
 from src.application.assistant.coverage_verifier import CoverageResult, verify_coverage
 from src.application.assistant.evidence import build_evidence_bundle
 from src.application.assistant.llm_common import (
@@ -68,6 +69,7 @@ from src.infrastructure.openai_responses import OpenAIResponsesError, extract_re
 AGENT_LOOP_SCHEMA_VERSION = "om-agent-loop-v1"
 TOOL_PLAN_SCHEMA_VERSION = "om-tool-plan-v2"
 TOOL_PLAN_SYNTHESIS_SCHEMA_VERSION = "om-tool-plan-synthesis-v1"
+PLANNER_CONTEXT_USE_SCHEMA_VERSION = "om-planner-context-use-v1"
 FOLLOWUP_DECISION_SCHEMA_VERSION = "om-agent-loop-followup-decision-v1"
 TOOL_CHECK_SCHEMA_VERSION = "om-agent-tool-check-v1"
 INTERNAL_TOOL_PLAN_NAME = "assistant.tool_plan"
@@ -75,6 +77,7 @@ MAX_TOOL_PLAN_STEPS = 3
 MAX_AGENT_LOOP_ITERATIONS = 3
 MAX_AGENT_LOOP_TOOL_CALLS = 5
 MAX_PLANNER_ANALYSIS_VIEWS = 12
+PLANNER_CONTEXT_USE_MODES = ("none", "carry", "refine", "override", "ambiguous")
 _DEFAULT_PLANNER_ANALYSIS_VIEWS: tuple[str, ...] = (
     "account_monthly_performance",
     "account_monthly_income_components",
@@ -435,6 +438,7 @@ class PlannerPlan:
     required_capabilities: tuple[str, ...] = ()
     task_contract: dict[str, Any] | None = None
     selected_recipe: dict[str, Any] | None = None
+    context_use: dict[str, Any] | None = None
     schema_version: str = TOOL_PLAN_SCHEMA_VERSION
 
     def public_payload(self) -> dict[str, Any]:
@@ -442,6 +446,7 @@ class PlannerPlan:
             "schema_version": self.schema_version,
             "goal": self.goal,
             "required_capabilities": list(self.required_capabilities),
+            "context_use": _safe_context_use_payload(self.context_use),
             "steps": [step.public_payload() for step in self.steps],
         }
         if isinstance(self.task_contract, dict) and self.task_contract:
@@ -2277,9 +2282,11 @@ def plan_read_only_tools(
                 details={"provider": provider},
             ),
         )
+    planner_context_use: dict[str, Any] | None = None
     try:
         plan = parse_tool_plan_payload(payload)
         plan = _normalize_tool_plan(plan, question=text, today=_planner_today_from_context(conversation_context))
+        planner_context_use = plan.context_use
         if not plan.steps:
             return LlmPlannerResult(
                 plan=None,
@@ -2291,6 +2298,7 @@ def plan_read_only_tools(
                     schema_version=TOOL_PLAN_SCHEMA_VERSION,
                     conversation_context=conversation_context,
                     planner_input=planner_input_trace,
+                    planner_context_use=planner_context_use,
                 ),
                 error=_no_tool_plan_error(),
             )
@@ -2306,6 +2314,7 @@ def plan_read_only_tools(
                 error_code=err.code,
                 conversation_context=conversation_context,
                 planner_input=planner_input_trace,
+                planner_context_use=planner_context_use,
             ),
             error=err,
         )
@@ -2318,6 +2327,7 @@ def plan_read_only_tools(
             schema_version=TOOL_PLAN_SCHEMA_VERSION,
             conversation_context=conversation_context,
             planner_input=planner_input_trace,
+            planner_context_use=planner_context_use,
         ),
     )
 
@@ -2413,7 +2423,15 @@ def synthesize_tool_plan_response(
 def parse_tool_plan_payload(payload: dict[str, Any]) -> PlannerPlan:
     if not isinstance(payload, dict):
         raise AgentToolError(code="INPUT_ERROR", message="tool plan must be a JSON object")
-    allowed_keys = {"schema_version", "goal", "required_capabilities", "steps", "task_contract", "selected_recipe"}
+    allowed_keys = {
+        "schema_version",
+        "goal",
+        "required_capabilities",
+        "steps",
+        "task_contract",
+        "selected_recipe",
+        "context_use",
+    }
     extra_keys = sorted(str(key) for key in payload if str(key) not in allowed_keys)
     if extra_keys:
         raise AgentToolError(
@@ -2465,6 +2483,7 @@ def parse_tool_plan_payload(payload: dict[str, Any]) -> PlannerPlan:
         required_capabilities=_normalized_capabilities(payload.get("required_capabilities")),
         task_contract=_normalized_planner_task_contract(payload.get("task_contract")),
         selected_recipe=_normalized_selected_recipe(payload.get("selected_recipe")),
+        context_use=_normalized_context_use(payload.get("context_use")),
         schema_version=schema_version,
     )
 
@@ -2502,6 +2521,85 @@ def _normalized_selected_recipe(value: Any) -> dict[str, Any] | None:
     reason = str(value.get("reason") or "").strip()
     if reason:
         out["reason"] = reason
+    return out
+
+
+def _default_context_use() -> dict[str, Any]:
+    return {
+        "schema_version": PLANNER_CONTEXT_USE_SCHEMA_VERSION,
+        "mode": "none",
+        "referenced_turn_ids": [],
+        "referenced_evidence_refs": [],
+        "inherited_slots": {},
+        "current_message_slots": {},
+        "override_slots": {},
+        "requires_clarification": False,
+        "clarification_question": None,
+    }
+
+
+def _normalized_context_use(value: Any) -> dict[str, Any]:
+    out = _default_context_use()
+    if not isinstance(value, dict):
+        return out
+    mode = str(value.get("mode") or "").strip()
+    if mode in PLANNER_CONTEXT_USE_MODES:
+        out["mode"] = mode
+    out["referenced_turn_ids"] = _context_use_string_list(value.get("referenced_turn_ids"))
+    out["referenced_evidence_refs"] = _context_use_string_list(value.get("referenced_evidence_refs"))
+    out["inherited_slots"] = _context_use_slots(value.get("inherited_slots"))
+    out["current_message_slots"] = _context_use_slots(value.get("current_message_slots"))
+    out["override_slots"] = _context_use_slots(value.get("override_slots"))
+    out["requires_clarification"] = bool(value.get("requires_clarification"))
+    clarification = str(value.get("clarification_question") or "").strip()
+    out["clarification_question"] = _clip_context_use_text(clarification, 240) if clarification else None
+    reason = str(value.get("reason") or "").strip()
+    if reason:
+        out["reason"] = _clip_context_use_text(reason, 240)
+    return out
+
+
+def _safe_context_use_payload(value: Any) -> dict[str, Any]:
+    return _normalized_context_use(value)
+
+
+def _clip_context_use_text(value: str, limit: int) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    if limit <= 3:
+        return text[:limit]
+    return text[: max(0, limit - 3)] + "..."
+
+
+def _context_use_string_list(value: Any, *, limit: int = 20) -> list[str]:
+    values = value if isinstance(value, list) else []
+    out: list[str] = []
+    for item in values[:limit]:
+        text = str(item or "").strip()
+        if text and text not in out:
+            out.append(_clip_context_use_text(text, 120))
+    return out
+
+
+def _context_use_slots(value: Any) -> dict[str, list[Any]]:
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, list[Any]] = {}
+    for key, raw_values in value.items():
+        slot_key = str(key or "").strip()
+        if not slot_key:
+            continue
+        values = raw_values if isinstance(raw_values, list) else [raw_values]
+        bucket: list[Any] = []
+        for item in values[:20]:
+            if isinstance(item, dict):
+                continue
+            normalized: Any = item if isinstance(item, (int, float, bool)) else _clip_context_use_text(str(item or "").strip(), 120)
+            if normalized not in ("", None) and normalized not in bucket:
+                bucket.append(normalized)
+        if bucket:
+            out[slot_key] = bucket
     return out
 
 
@@ -3177,6 +3275,7 @@ def _with_selected_recipe(plan: PlannerPlan, selected_recipe: dict[str, Any]) ->
         required_capabilities=plan.required_capabilities,
         task_contract=dict(plan.task_contract) if isinstance(plan.task_contract, dict) else None,
         selected_recipe=recipe,
+        context_use=dict(plan.context_use) if isinstance(plan.context_use, dict) else None,
         schema_version=plan.schema_version,
     )
 
@@ -3264,6 +3363,7 @@ def _normalize_tool_plan(plan: PlannerPlan, *, question: str, today: date) -> Pl
         required_capabilities=plan.required_capabilities,
         task_contract=dict(plan.task_contract) if isinstance(plan.task_contract, dict) else None,
         selected_recipe=dict(plan.selected_recipe) if isinstance(plan.selected_recipe, dict) else None,
+        context_use=dict(plan.context_use) if isinstance(plan.context_use, dict) else None,
         schema_version=plan.schema_version,
     )
 
@@ -3472,6 +3572,7 @@ def tool_plan_json_schema() -> dict[str, Any]:
                 },
                 "required": ["name"],
             },
+            "context_use": _planner_context_use_json_schema(),
             "required_capabilities": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -3494,6 +3595,44 @@ def tool_plan_json_schema() -> dict[str, Any]:
             },
         },
         "required": ["schema_version", "goal", "required_capabilities", "steps"],
+    }
+
+
+def _planner_context_use_json_schema() -> dict[str, Any]:
+    slot_values_schema: dict[str, Any] = {
+        "type": "array",
+        "items": {"type": ["string", "number", "boolean"]},
+    }
+    slots_schema: dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": slot_values_schema,
+    }
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "schema_version": {"type": "string", "enum": [PLANNER_CONTEXT_USE_SCHEMA_VERSION]},
+            "mode": {"type": "string", "enum": list(PLANNER_CONTEXT_USE_MODES)},
+            "referenced_turn_ids": {"type": "array", "items": {"type": "string"}},
+            "referenced_evidence_refs": {"type": "array", "items": {"type": "string"}},
+            "inherited_slots": slots_schema,
+            "current_message_slots": slots_schema,
+            "override_slots": slots_schema,
+            "requires_clarification": {"type": "boolean"},
+            "clarification_question": {"type": ["string", "null"]},
+            "reason": {"type": "string"},
+        },
+        "required": [
+            "schema_version",
+            "mode",
+            "referenced_turn_ids",
+            "referenced_evidence_refs",
+            "inherited_slots",
+            "current_message_slots",
+            "override_slots",
+            "requires_clarification",
+            "clarification_question",
+        ],
     }
 
 
@@ -4949,6 +5088,13 @@ def _answer_context_trace(question: str, conversation_context: dict[str, Any] | 
         payload["suppressed_active_frame"] = _answer_context_frame_trace(frame)
     if followup_resolution:
         payload["followup_resolution"] = _answer_followup_resolution_trace(followup_resolution)
+    projection_trace = context_projection_trace(
+        conversation_context.get("context_projection")
+        if isinstance(conversation_context.get("context_projection"), dict)
+        else None
+    )
+    if projection_trace.get("provided"):
+        payload["context_projection"] = projection_trace
     return payload
 
 
@@ -5062,6 +5208,10 @@ Rules:
 - Use task_mode=analyze for analysis/复盘/表现/来源/结构 questions, compare for same-scope comparisons, diagnose for why/missing/failure/abnormal status questions, explain for rules or accounting policies, recommend for advisory options, and preview_write only for approved preview operations.
 - task_contract.required_evidence should name evidence categories needed to complete the answer, not tool names. Examples: summary, driver_or_breakdown, same_scope_comparable_data, observed_status, diagnostic_evidence, rule_or_config_source, current_state, constraints, risk_premise, source_policy.
 - task_contract.answer_shape should name what the final answer must cover, such as conclusion, drivers, same_scope_comparison, cause_chain, evidence_boundary, risk, premise, options, source_policy.
+- Always fill context_use when the schema includes it. Use mode=none when the current message is self-contained; use carry/refine/override only when the plan intentionally depends on prior conversation state.
+- Current user message wins over prior context. If the user explicitly changes account, symbol, metric namespace, month, domain, or requested effect, declare mode=override and put the replacement values in current_message_slots or override_slots.
+- Recent turns, active_frame, followup_resolution, and prior evidence refs are planner-visible hints, not hidden truth. Only inherit slots that are needed by the plan, and declare them in context_use.inherited_slots with referenced_turn_ids or referenced_evidence_refs when available.
+- If prior context is required but cannot be chosen safely, set context_use.mode=ambiguous, requires_clarification=true, provide a clarification_question, and return steps=[] rather than guessing.
 - Use only tools/capabilities in the provided manifest.
 - Fill required_capabilities with the user's required answer capabilities from the tool manifest. Use [] only when the request needs no special capability beyond the planned tool call.
 - Preview-write capabilities only create a pending preview. They never apply writes, confirm pending operations, notify users externally, or mutate config/ledger directly.
@@ -5761,6 +5911,7 @@ def _llm_trace(
     schema_version: str | None = None,
     conversation_context: dict[str, Any] | None = None,
     planner_input: dict[str, Any] | None = None,
+    planner_context_use: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "enabled": bool(settings.enabled),
@@ -5804,6 +5955,8 @@ def _llm_trace(
         }
     if planner_input:
         payload["planner_input"] = dict(planner_input)
+    if planner_context_use is not None:
+        payload["planner_context_use"] = _safe_context_use_payload(planner_context_use)
     return payload
 
 

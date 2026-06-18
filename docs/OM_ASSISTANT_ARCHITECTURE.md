@@ -10,6 +10,10 @@ into one overloaded "agent" concept.
 - Current capability matrix: [OM_AGENT_CAPABILITY_MAP.md](OM_AGENT_CAPABILITY_MAP.md).
 - Local tool invocation contract: [AGENT_INTEGRATION.md](AGENT_INTEGRATION.md).
 - Remote/message safety contract: [INBOUND_CONTROL.md](INBOUND_CONTROL.md).
+- Current conversation-context design:
+  [OM_ASSISTANT_CONVERSATION_CONTEXT_DESIGN.md](OM_ASSISTANT_CONVERSATION_CONTEXT_DESIGN.md).
+- Current conversation-context implementation plan:
+  [OM_ASSISTANT_CONTEXT_IMPLEMENTATION_PLAN.md](OM_ASSISTANT_CONTEXT_IMPLEMENTATION_PLAN.md).
 
 Historical design notes such as `OM_AGENT_COMPLETION_DESIGN.md`,
 `OM_AGENT_INTELLIGENCE_UPGRADE_PLAN.md`,
@@ -119,6 +123,48 @@ second pending-operation store, not another tool registry, and not a separate
 project Agent. The durable store remains the inbound audit SQLite
 `agent_sessions` trace table, and the authority path remains
 `./om assistant -> AgentLoop -> tool_execution -> agent_tool_registry`.
+
+## Conversation Context Direction
+
+The current conversation-context direction is to build a bounded planner-facing
+projection of prior turns, then validate the planner's declared context use
+before execution. This follows the useful Claude Code boundary: code owns
+conversation state, projection, budget, and compaction-like boundaries, while
+the model performs natural-language semantic continuity over the visible
+conversation view.
+
+OM adds deterministic validation because planner output can trigger financial
+and runtime read tools. The context layer should therefore be:
+
+```text
+transcript
+  -> ContextProjection
+  -> Planner semantic judgement
+  -> ContextValidator
+  -> policy/tool execution
+```
+
+It should not grow as a collection of business-specific follow-up branches.
+Detailed contracts and rollout plan live in:
+
+- [OM_ASSISTANT_CONTEXT_PROJECTION_CONTRACT.md](OM_ASSISTANT_CONTEXT_PROJECTION_CONTRACT.md)
+- [OM_ASSISTANT_CONTEXT_VALIDATION_CONTRACT.md](OM_ASSISTANT_CONTEXT_VALIDATION_CONTRACT.md)
+- [OM_ASSISTANT_CONTEXT_EVAL_PLAN.md](OM_ASSISTANT_CONTEXT_EVAL_PLAN.md)
+- [OM_ASSISTANT_CONTEXT_IMPLEMENTATION_PLAN.md](OM_ASSISTANT_CONTEXT_IMPLEMENTATION_PLAN.md)
+
+The context eval harness is layered by explicit mode:
+
+```bash
+./om assistant eval-context --mode planner_context
+./om assistant eval-context --mode projection
+./om assistant eval-context --mode validation
+./om assistant eval-context --mode scenarios
+```
+
+`planner_context` is the legacy default during migration. `projection` runs the
+deterministic projection fixtures without LLM calls. `validation` and
+`scenarios` are separate harness lanes so future slices can add fixtures without
+changing the projection evaluator or the legacy planner-context report.
 
 ## `./om-agent` Boundary
 

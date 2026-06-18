@@ -724,6 +724,9 @@ def _compact_context_trace(value: Any) -> dict[str, Any]:
     followup = _compact_followup_resolution(context.get("followup_resolution"))
     if followup:
         out["followup_resolution"] = followup
+    projection = _compact_context_projection(context.get("context_projection"))
+    if projection:
+        out["context_projection"] = projection
     return out
 
 
@@ -742,6 +745,27 @@ def _compact_followup_resolution(value: Any) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key in ("status", "reason", "domain", "tool_name", "metric_namespace", "previous_metric_namespace"):
         item = followup.get(key)
+        if item not in (None, "", [], {}):
+            out[key] = item
+    return out
+
+
+def _compact_context_projection(value: Any) -> dict[str, Any]:
+    projection = value if isinstance(value, dict) else {}
+    if not projection or projection.get("provided") is False:
+        return {}
+    out: dict[str, Any] = {}
+    for key in (
+        "schema_version",
+        "recent_turn_count",
+        "recent_successful_tool_count",
+        "evidence_ref_count",
+        "open_gap_count",
+        "pending_operation_count",
+        "truncated",
+        "truncation_reason",
+    ):
+        item = projection.get(key)
         if item not in (None, "", [], {}):
             out[key] = item
     return out
