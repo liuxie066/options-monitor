@@ -48,6 +48,8 @@ def _default_context_eval_fixture(base: Path, *, mode: str) -> Path:
         return base / "tests" / "fixtures" / "assistant_context_projection.jsonl"
     if mode == "validation":
         return base / "tests" / "fixtures" / "assistant_context_validation.jsonl"
+    if mode == "scenarios":
+        return base / "tests" / "fixtures" / "assistant_context_scenarios.jsonl"
     return base / "tests" / "fixtures" / "assistant_agent_eval.jsonl"
 
 

@@ -503,6 +503,19 @@ def test_assistant_eval_context_command_renders_report(capsys) -> None:
     assert payload["data"]["results"][0]["mode"] == "validation"
     assert payload["data"]["results"][0]["actual"]["context_validation"]["schema_version"] == "om-context-validation-v1"
 
+    rc = cli.main(["assistant", "eval-context", "--mode", "scenarios", "--format", "json"])
+    payload = _read_json_output(capsys)
+
+    assert rc == 0
+    assert payload["tool_name"] == "assistant.eval_context"
+    assert payload["ok"] is True
+    assert payload["data"]["summary"]["mode"] == "scenarios"
+    assert payload["data"]["summary"]["total"] == 10
+    result = payload["data"]["results"][0]
+    assert result["mode"] == "scenarios"
+    assert result["actual"]["validation"]["context_validation"]["schema_version"] == "om-context-validation-v1"
+    assert result["actual"]["validation"]["context_validation"]["status"] in {"passed", "ask_clarification"}
+
 
 def test_assistant_capabilities_command_renders_capability_catalog(capsys) -> None:
     import src.interfaces.cli.main as cli

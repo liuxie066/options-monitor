@@ -9,6 +9,7 @@ FIXTURE_DIR = Path(__file__).parent / "fixtures"
 AGENT_EVAL_FIXTURE = FIXTURE_DIR / "assistant_agent_eval.jsonl"
 PROJECTION_FIXTURE = FIXTURE_DIR / "assistant_context_projection.jsonl"
 VALIDATION_FIXTURE = FIXTURE_DIR / "assistant_context_validation.jsonl"
+SCENARIOS_FIXTURE = FIXTURE_DIR / "assistant_context_scenarios.jsonl"
 
 
 def test_context_eval_projection_mode_runs_projection_fixture() -> None:
@@ -55,12 +56,31 @@ def test_context_eval_validation_mode_runs_validation_fixture() -> None:
     assert "code=CONTEXT_SLOT_NOT_AVAILABLE" in text
 
 
-def test_context_eval_scenarios_mode_has_explicit_empty_report() -> None:
-    report = run_context_eval_suite(fixture_path=AGENT_EVAL_FIXTURE, mode="scenarios")
+def test_context_eval_scenarios_mode_runs_real_followup_regression_fixture() -> None:
+    report = run_context_eval_suite(fixture_path=SCENARIOS_FIXTURE, mode="scenarios")
     summary = report["summary"]
+    families = {item["family"] for item in report["results"]}
 
     assert summary["mode"] == "scenarios"
     assert summary["ok"] is True
-    assert summary["total"] == 0
+    assert summary["total"] == 10
     assert summary["failed"] == 0
-    assert summary["empty"] is True
+    assert summary["empty"] is False
+    assert families == {
+        "candidate_followup",
+        "config_followup",
+        "evidence_gap_carry",
+        "explicit_switch",
+        "income_followup",
+        "metric_followup",
+        "multi_topic_ambiguity",
+        "no_context",
+        "position_followup",
+        "runtime_followup",
+    }
+
+    text = format_context_eval_text(report)
+    assert "assistant context eval: 10/10 passed" in text
+    assert "mode=scenarios" in text
+    assert "family=income_followup" in text
+    assert "validation=ask_clarification" in text
