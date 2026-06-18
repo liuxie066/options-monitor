@@ -24,6 +24,7 @@ from src.application.channels.reply_decision import (
 )
 from src.application.channels.service import ChannelService
 from src.application.channels.wechat_clawbot.adapter import build_wechat_clawbot_inbound_channel_service
+from src.application.channels.wechat_clawbot.binding import refresh_wechat_clawbot_bindings_from_message
 from src.application.channels.wechat_clawbot.ilink_client import DEFAULT_ILINK_BASE_URL, WechatClawbotClient
 from src.application.channels.wechat_clawbot.message import (
     extract_first_string,
@@ -353,9 +354,16 @@ def poll_wechat_clawbot_once(
         if synthesize_response_fn is not None:
             inbound_kwargs["synthesize_response_fn"] = synthesize_response_fn
         typing_status = _maybe_start_typing(message=message, client=client, allowed_senders=allowed_senders)
+        binding_refresh: dict[str, Any] = {"attempted": False, "updated_count": 0, "reason": "not_started"}
         try:
             inbound = service.handle_inbound(WECHAT_CLAWBOT_NOTIFICATION_PROVIDER, message, **inbound_kwargs)
             data = _dict(inbound.get("data"))
+            binding_refresh = _refresh_bound_context_from_message(
+                base=base,
+                label=label,
+                state_dir=state_dir,
+                message=message,
+            )
             reply_status = _maybe_reply(
                 message=message,
                 inbound=inbound,
@@ -380,6 +388,7 @@ def poll_wechat_clawbot_once(
                 "ok": bool(inbound.get("ok", False)),
                 "inbound": inbound,
                 "reply": reply_status,
+                "binding_refresh": binding_refresh,
                 "typing": typing_public,
             }
         )
@@ -409,6 +418,30 @@ def poll_wechat_clawbot_once(
         error=None if all_ok else {"code": "INBOUND_PROCESSING_FAILED", "message": "one or more WeChat ClawBot inbound messages failed"},
         meta={"response_tail": json.dumps(response, ensure_ascii=False)[-500:]},
     )
+
+
+def _refresh_bound_context_from_message(
+    *,
+    base: Path,
+    label: str,
+    state_dir: str | None,
+    message: dict[str, Any],
+) -> dict[str, Any]:
+    try:
+        return refresh_wechat_clawbot_bindings_from_message(
+            base=base,
+            label=label,
+            state_dir=state_dir,
+            message=message,
+        )
+    except Exception as exc:
+        LOG.warning("failed to refresh WeChat ClawBot binding context from inbound message", exc_info=True)
+        return {
+            "attempted": True,
+            "updated_count": 0,
+            "reason": "refresh_failed",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
 
 
 def serve_wechat_clawbot(
