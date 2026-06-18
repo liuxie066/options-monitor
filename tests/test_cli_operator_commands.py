@@ -476,6 +476,17 @@ def test_assistant_eval_context_command_renders_report(capsys) -> None:
     assert payload["data"]["summary"]["total"] == 1
     assert payload["data"]["results"][0]["actual"]["context"]["metric_glossary_namespace"] == "candidate_option_metrics"
 
+    rc = cli.main(["assistant", "eval-context", "--mode", "projection", "--format", "json"])
+    payload = _read_json_output(capsys)
+
+    assert rc == 0
+    assert payload["tool_name"] == "assistant.eval_context"
+    assert payload["ok"] is True
+    assert payload["data"]["summary"]["mode"] == "projection"
+    assert payload["data"]["summary"]["total"] == 1
+    assert payload["data"]["results"][0]["mode"] == "projection"
+    assert payload["data"]["results"][0]["actual"]["context_projection"]["evidence_ref_count"] == 2
+
 
 def test_assistant_capabilities_command_renders_capability_catalog(capsys) -> None:
     import src.interfaces.cli.main as cli

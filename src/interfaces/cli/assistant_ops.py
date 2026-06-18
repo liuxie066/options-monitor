@@ -15,7 +15,7 @@ from src.application.assistant import (
     command_catalog_payload,
 )
 from src.application.assistant.config_loader import load_assistant_config
-from src.application.assistant.context_eval import format_context_eval_text, run_context_eval_suite
+from src.application.assistant.context_eval import CONTEXT_EVAL_MODES, format_context_eval_text, run_context_eval_suite
 from src.application.assistant.contracts import AssistantRequest
 from src.application.assistant.diagnostics import check_llm_planner
 from src.application.assistant.llm_model_profiles import (
@@ -41,6 +41,12 @@ def _dumps(payload: dict[str, Any]) -> str:
 def _print(payload: dict[str, Any]) -> int:
     sys.stdout.write(_dumps(payload))
     return 0 if payload.get("ok", True) else 2
+
+
+def _default_context_eval_fixture(base: Path, *, mode: str) -> Path:
+    if mode == "projection":
+        return base / "tests" / "fixtures" / "assistant_context_projection.jsonl"
+    return base / "tests" / "fixtures" / "assistant_agent_eval.jsonl"
 
 
 def _assistant_settings_for_cli(
@@ -92,10 +98,11 @@ def add_assistant_commands(parser: argparse.ArgumentParser) -> None:
     assistant_capabilities.add_argument("--format", choices=("json", "text"), default="json")
     assistant_context_eval = assistant_sub.add_parser(
         "eval-context",
-        help="run planner-context eval fixtures and print context decision report",
+        help="run assistant context eval fixtures and print context decision report",
     )
     assistant_context_eval.add_argument("--fixture", default=None)
     assistant_context_eval.add_argument("--case-id", action="append", default=None)
+    assistant_context_eval.add_argument("--mode", choices=CONTEXT_EVAL_MODES, default="planner_context")
     assistant_context_eval.add_argument("--format", choices=("json", "text"), default="text")
     assistant_llm_check = assistant_sub.add_parser(
         "llm-check",
@@ -439,9 +446,9 @@ def handle_assistant_command(
         fixture_path = (
             Path(args.fixture).expanduser().resolve()
             if args.fixture
-            else repo_base_fn() / "tests" / "fixtures" / "assistant_agent_eval.jsonl"
+            else _default_context_eval_fixture(repo_base_fn(), mode=args.mode)
         )
-        data = run_context_eval_suite(fixture_path=fixture_path, case_ids=args.case_id)
+        data = run_context_eval_suite(fixture_path=fixture_path, case_ids=args.case_id, mode=args.mode)
         out = build_response(
             tool_name="assistant.eval_context",
             ok=bool(data.get("summary", {}).get("ok")),

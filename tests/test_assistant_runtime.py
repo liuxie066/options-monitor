@@ -11,6 +11,7 @@ from src.application.assistant.agent_loop import (
     AGENT_LOOP_SCHEMA_VERSION,
     AGENT_LOOP_PREVIEW_CAPABILITIES,
     AGENT_LOOP_READ_TOOLS,
+    PLANNER_CONTEXT_USE_SCHEMA_VERSION,
     TOOL_CHECK_SCHEMA_VERSION,
     TOOL_PLAN_SCHEMA_VERSION,
     LlmSynthesisResult,
@@ -29,6 +30,7 @@ from src.application.assistant.agent_loop import (
     _synthesis_input_text,
     _validate_plan_against_conversation_frame,
     build_tool_observation,
+    parse_tool_plan_payload,
     plan_read_only_tools,
     run_read_only_agent_loop,
     tool_plan_json_schema,
@@ -1291,6 +1293,43 @@ def test_agent_loop_planner_input_uses_recent_read_question_for_analysis_query_f
             "tool_name": "analysis_query",
         }
     ]
+
+
+def test_agent_loop_planner_and_synthesis_keep_context_projection_shadow_only() -> None:
+    conversation_context = {
+        "window_messages": 2,
+        "context_projection": {
+            "schema_version": "om-context-projection-v1",
+            "current_user_message": {"text": "继续"},
+            "recent_turns": [{"turn_id": "session:previous", "user_summary": "previous"}],
+            "recent_successful_tools": [{"tool_name": "analysis_query"}],
+            "available_evidence_refs": [{"ref_id": "ev_001"}],
+        },
+    }
+
+    planner_text = _planner_input_text("继续", conversation_context=conversation_context)
+    planner_payload = json.loads(planner_text)
+    assert "context_projection" not in planner_text
+    assert "context_projection" not in planner_payload["context"]
+
+    synthesis_text = _synthesis_input_text(
+        "继续",
+        plan=PlannerPlan(
+            goal="继续分析",
+            steps=(
+                PlannerPlanStep(
+                    id="step_1",
+                    tool_name="analysis_query",
+                    arguments={"query": {"select": ["*"], "from": "account_monthly_performance"}},
+                ),
+            ),
+        ),
+        observations=[],
+        conversation_context=conversation_context,
+    )
+    synthesis_payload = json.loads(synthesis_text)
+    assert "context_projection" not in synthesis_text
+    assert "context_projection" not in synthesis_payload["context"]
 
 
 def test_agent_loop_planner_input_resolves_candidate_net_income_followup_from_active_frame() -> None:
@@ -8508,6 +8547,7 @@ def test_plan_read_only_tools_treats_empty_steps_as_no_plan() -> None:
     assert result.error.details == {"missing_capability": "read_tool_or_required_slots", "weak_downgrade_allowed": False}
     assert result.trace["reason"] == "no_plan"
     assert result.trace["error_code"] == "NEEDS_CLARIFICATION"
+    assert result.trace["planner_context_use"]["mode"] == "none"
     assert result.trace["planner_input"]["manifest_budget"]["mode"] == "scoped_analysis_views"
     assert result.trace["planner_input"]["chars"] == len(calls[0]["input_text"])
 
@@ -8555,6 +8595,167 @@ def test_plan_read_only_tools_traces_recent_read_hints() -> None:
     assert result.trace["planner_input"]["recent_read_hint_count"] == 1
     assert result.trace["planner_input"]["manifest_budget"]["selection_sources"] == ["conversation_context"]
     assert "recent_read_hints" in calls[0]["input_text"]
+
+
+def test_parse_tool_plan_payload_defaults_missing_context_use() -> None:
+    plan = parse_tool_plan_payload(
+        {
+            "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+            "goal": "check runtime status",
+            "required_capabilities": [],
+            "steps": [
+                {
+                    "id": "step_1",
+                    "tool_name": "runtime_status",
+                    "arguments": {},
+                    "purpose": "read runtime status",
+                }
+            ],
+        }
+    )
+
+    assert plan.context_use == {
+        "schema_version": PLANNER_CONTEXT_USE_SCHEMA_VERSION,
+        "mode": "none",
+        "referenced_turn_ids": [],
+        "referenced_evidence_refs": [],
+        "inherited_slots": {},
+        "current_message_slots": {},
+        "override_slots": {},
+        "requires_clarification": False,
+        "clarification_question": None,
+    }
+    assert plan.public_payload()["context_use"]["mode"] == "none"
+
+
+def test_parse_tool_plan_payload_round_trips_context_use() -> None:
+    plan = parse_tool_plan_payload(
+        {
+            "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+            "goal": "explain candidate net income",
+            "required_capabilities": [],
+            "context_use": {
+                "schema_version": PLANNER_CONTEXT_USE_SCHEMA_VERSION,
+                "mode": "refine",
+                "referenced_turn_ids": ["turn_1", "turn_1"],
+                "referenced_evidence_refs": ["evidence:candidate_filter"],
+                "inherited_slots": {"symbol": ["9992.HK"], "account": ["lx"]},
+                "current_message_slots": {"metric": ["净收入"]},
+                "override_slots": {},
+                "requires_clarification": False,
+                "clarification_question": None,
+                "reason": "current message asks for the calculation inside the prior candidate frame",
+            },
+            "steps": [
+                {
+                    "id": "step_1",
+                    "tool_name": "candidate_filter_explain",
+                    "arguments": {"account": "lx", "symbol": "9992.HK", "function": "sell_put"},
+                    "purpose": "read candidate filter evidence",
+                }
+            ],
+        }
+    )
+
+    payload = plan.public_payload()["context_use"]
+    assert payload["schema_version"] == PLANNER_CONTEXT_USE_SCHEMA_VERSION
+    assert payload["mode"] == "refine"
+    assert payload["referenced_turn_ids"] == ["turn_1"]
+    assert payload["referenced_evidence_refs"] == ["evidence:candidate_filter"]
+    assert payload["inherited_slots"] == {"symbol": ["9992.HK"], "account": ["lx"]}
+    assert payload["current_message_slots"] == {"metric": ["净收入"]}
+    assert payload["reason"] == "current message asks for the calculation inside the prior candidate frame"
+
+
+def test_plan_read_only_tools_traces_planner_context_use_shadow() -> None:
+    calls: list[dict[str, Any]] = []
+
+    def _create_response(**kwargs: Any) -> dict[str, Any]:
+        calls.append(dict(kwargs))
+        return {
+            "output_text": json.dumps(
+                {
+                    "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+                    "goal": "check runtime status",
+                    "required_capabilities": [],
+                    "context_use": {
+                        "schema_version": PLANNER_CONTEXT_USE_SCHEMA_VERSION,
+                        "mode": "carry",
+                        "referenced_turn_ids": ["turn_1"],
+                        "referenced_evidence_refs": [],
+                        "inherited_slots": {"account": ["lx"]},
+                        "current_message_slots": {},
+                        "override_slots": {},
+                        "requires_clarification": False,
+                        "clarification_question": None,
+                    },
+                    "steps": [
+                        {
+                            "id": "step_1",
+                            "tool_name": "runtime_status",
+                            "arguments": {},
+                            "purpose": "read runtime status",
+                        }
+                    ],
+                }
+            )
+        }
+
+    result = plan_read_only_tools(
+        "继续看运行状态",
+        AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        conversation_context={"recent_messages": [{"turn_id": "turn_1", "raw_text": "看 lx 状态"}]},
+        create_response_fn=_create_response,
+        environ={"OM_LLM_API_KEY": "sk-test"},
+    )
+
+    assert calls
+    assert calls[0]["json_schema"]["properties"]["context_use"]["properties"]["mode"]["enum"] == [
+        "none",
+        "carry",
+        "refine",
+        "override",
+        "ambiguous",
+    ]
+    assert result.error is None
+    assert result.plan is not None
+    assert result.trace["reason"] == "accepted"
+    assert result.trace["planner_context_use"]["mode"] == "carry"
+    assert result.trace["planner_context_use"]["inherited_slots"] == {"account": ["lx"]}
+
+
+def test_tool_plan_json_schema_exposes_optional_context_use() -> None:
+    schema = tool_plan_json_schema()
+    context_schema = schema["properties"]["context_use"]
+
+    assert "context_use" not in schema["required"]
+    assert context_schema["properties"]["schema_version"]["enum"] == [PLANNER_CONTEXT_USE_SCHEMA_VERSION]
+    assert context_schema["properties"]["mode"]["enum"] == ["none", "carry", "refine", "override", "ambiguous"]
+    assert "inherited_slots" in context_schema["required"]
+
+
+def test_validate_tool_plan_does_not_block_context_use_shadow_declaration() -> None:
+    plan = PlannerPlan(
+        goal="check runtime status",
+        steps=(
+            PlannerPlanStep(
+                id="step_1",
+                tool_name="runtime_status",
+                arguments={},
+                purpose="read runtime status",
+            ),
+        ),
+        context_use={
+            "schema_version": "invalid-context-use-schema",
+            "mode": "ambiguous",
+            "requires_clarification": True,
+            "clarification_question": "Which prior scope should be used?",
+        },
+    )
+
+    validate_tool_plan(plan)
 
 
 def test_plan_read_only_tools_rejects_response_mode_fields() -> None:
