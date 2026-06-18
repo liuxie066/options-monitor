@@ -50,7 +50,7 @@ def run_context_eval_suite(
     failed = [result for result in results if not result.get("ok")]
     skipped = [result for result in results if str(result.get("status") or "") == "skip"]
     passed = [result for result in results if result.get("ok") and str(result.get("status") or "") == "pass"]
-    requires_cases = bool(selected_ids) or eval_mode in {"planner_context", "projection", "validation"}
+    requires_cases = bool(selected_ids) or eval_mode in {"planner_context", "projection", "validation", "scenarios"}
     summary = {
         "schema_version": CONTEXT_EVAL_SCHEMA_VERSION,
         "mode": eval_mode,
@@ -166,6 +166,61 @@ def evaluate_validation_case(case: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def evaluate_scenario_case(case: dict[str, Any], *, full_manifest_chars: int | None = None) -> dict[str, Any]:
+    question = str(case.get("current_user_message") or case.get("question") or "")
+    conversation_context = _case_conversation_context(case) or {}
+    projection = _case_context_projection(case)
+    if not projection:
+        projection = build_context_projection(
+            current_user_message=question,
+            conversation_context=conversation_context,
+            recent_sessions=_case_recent_sessions(case),
+        )
+    planner_context = dict(conversation_context)
+    planner_context["context_projection"] = projection
+    planner_payload = json.loads(_planner_input_text(question, conversation_context=planner_context))
+    budget = planner_payload.get("manifest_budget") if isinstance(planner_payload.get("manifest_budget"), dict) else {}
+    context = planner_payload.get("context") if isinstance(planner_payload.get("context"), dict) else {}
+    analysis_views = _analysis_views_from_payload(planner_payload)
+    validation = validate_context_use(
+        current_user_message=question,
+        context_projection=projection,
+        plan_payload=_case_plan_payload(case),
+        planner_manifest=_case_planner_manifest(case),
+    )
+    full_chars = int(full_manifest_chars or len(json.dumps(_planner_tool_manifest(), ensure_ascii=False, sort_keys=True)))
+    actual = _scenario_eval_actual_payload(
+        case=case,
+        projection=projection,
+        budget=budget,
+        context=context,
+        analysis_views=analysis_views,
+        validation=validation,
+    )
+    checks = _evaluate_scenario_checks(
+        case=case,
+        projection=projection,
+        budget=budget,
+        context=context,
+        analysis_views=analysis_views,
+        validation=validation,
+        full_manifest_chars=full_chars,
+    )
+    failures = [check for check in checks if not check.get("passed")]
+    return {
+        "schema_version": CONTEXT_EVAL_SCHEMA_VERSION,
+        "id": str(case.get("id") or ""),
+        "mode": "scenarios",
+        "family": str(case.get("family") or ""),
+        "question": question,
+        "ok": not failures,
+        "status": "pass" if not failures else "fail",
+        "actual": actual,
+        "checks": checks,
+        "failures": failures,
+    }
+
+
 def format_context_eval_text(report: dict[str, Any]) -> str:
     summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
     lines = [
@@ -234,6 +289,31 @@ def format_context_eval_text(report: dict[str, Any]) -> str:
                     ]
                 )
             )
+        elif result.get("mode") == "scenarios":
+            planner = actual.get("planner_context") if isinstance(actual.get("planner_context"), dict) else {}
+            projection = actual.get("projection") if isinstance(actual.get("projection"), dict) else {}
+            validation = actual.get("validation") if isinstance(actual.get("validation"), dict) else {}
+            planner_budget = planner.get("manifest_budget") if isinstance(planner.get("manifest_budget"), dict) else {}
+            projection_trace = (
+                projection.get("context_projection") if isinstance(projection.get("context_projection"), dict) else {}
+            )
+            validation_trace = (
+                validation.get("context_validation") if isinstance(validation.get("context_validation"), dict) else {}
+            )
+            lines.append(
+                " ".join(
+                    [
+                        prefix,
+                        str(result.get("id") or ""),
+                        f"family={result.get('family') or '-'}",
+                        f"validation={validation_trace.get('status') or '-'}",
+                        f"code={validation_trace.get('code') or '-'}",
+                        f"sources={_compact_list(planner_budget.get('selection_sources'))}",
+                        f"refs={projection_trace.get('evidence_ref_count', 0)}",
+                        f"gaps={projection_trace.get('open_gap_count', 0)}",
+                    ]
+                )
+            )
         else:
             lines.append(
                 " ".join(
@@ -265,6 +345,8 @@ def _evaluate_case_for_mode(
         return evaluate_projection_case(case)
     if mode == "validation":
         return evaluate_validation_case(case)
+    if mode == "scenarios":
+        return evaluate_scenario_case(case, full_manifest_chars=full_manifest_chars)
     return _evaluate_deferred_context_layer_case(case, mode=mode)
 
 
@@ -485,6 +567,67 @@ def _evaluate_projection_checks(
     return checks
 
 
+def _evaluate_scenario_checks(
+    *,
+    case: dict[str, Any],
+    projection: dict[str, Any],
+    budget: dict[str, Any],
+    context: dict[str, Any],
+    analysis_views: list[str],
+    validation: dict[str, Any],
+    full_manifest_chars: int,
+) -> list[dict[str, Any]]:
+    expect = case.get("expect") if isinstance(case.get("expect"), dict) else {}
+    checks: list[dict[str, Any]] = []
+    _add_check(checks, "scenario.family", True, bool(str(case.get("family") or "").strip()))
+
+    projection_expect = expect.get("projection") if isinstance(expect.get("projection"), dict) else {}
+    if projection_expect:
+        checks.extend(
+            _evaluate_projection_checks(
+                case={"expect": projection_expect},
+                projection=projection,
+                actual=_projection_eval_actual_payload(projection),
+            )
+        )
+
+    planner_expect = expect.get("planner") if isinstance(expect.get("planner"), dict) else {}
+    if planner_expect:
+        planner_case = {
+            "expect_selection_sources": planner_expect.get("selection_sources"),
+            "expect_matched_view_groups": planner_expect.get("matched_view_groups"),
+            "expect_analysis_views": planner_expect.get("analysis_views"),
+            "expect_analysis_views_absent": planner_expect.get("analysis_views_absent"),
+            "expect_max_manifest_chars": planner_expect.get("max_manifest_chars"),
+            "expect_max_analysis_views_included": planner_expect.get("max_analysis_views_included"),
+        }
+        checks.extend(
+            _evaluate_context_checks(
+                case=planner_case,
+                budget=budget,
+                context=context,
+                analysis_views=analysis_views,
+                full_manifest_chars=full_manifest_chars,
+            )
+        )
+
+    validation_expect = expect.get("validation") if isinstance(expect.get("validation"), dict) else {}
+    if validation_expect:
+        checks.extend(
+            _evaluate_validation_checks(
+                case={"expect": validation_expect},
+                validation=validation,
+                actual=_validation_eval_actual_payload(validation),
+            )
+        )
+
+    if expect.get("no_legacy_authority"):
+        serialized = json.dumps(context, ensure_ascii=False, sort_keys=True)
+        for key in ("active_frame", "frame_stack", "followup_resolution", "metric_glossary"):
+            _add_check(checks, f"scenario.no_legacy_authority.{key}", True, key not in serialized)
+    return checks
+
+
 def _add_context_expectation_checks(
     checks: list[dict[str, Any]],
     *,
@@ -595,6 +738,27 @@ def _context_eval_actual_payload(
     }
 
 
+def _scenario_eval_actual_payload(
+    *,
+    case: dict[str, Any],
+    projection: dict[str, Any],
+    budget: dict[str, Any],
+    context: dict[str, Any],
+    analysis_views: list[str],
+    validation: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "family": str(case.get("family") or ""),
+        "projection": _projection_eval_actual_payload(projection),
+        "planner_context": _context_eval_actual_payload(
+            budget=budget,
+            context=context,
+            analysis_views=analysis_views,
+        ),
+        "validation": _validation_eval_actual_payload(validation),
+    }
+
+
 def _projection_eval_actual_payload(projection: dict[str, Any]) -> dict[str, Any]:
     trace = context_projection_trace(projection)
     return {
@@ -694,6 +858,7 @@ __all__ = [
     "CONTEXT_EVAL_SCHEMA_VERSION",
     "evaluate_context_case",
     "evaluate_projection_case",
+    "evaluate_scenario_case",
     "format_context_eval_text",
     "normalize_context_eval_mode",
     "run_context_eval_suite",
