@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.303 - 2026-06-18
+
+### Fixed
+- Made Assistant task contracts treat user-requested account, symbol, and month scope as user-text authority while
+  keeping planner-declared scope limited to planned scope.
+- Fixed Assistant action safety so explicit contract scope is authoritative, preventing planner payloads from expanding
+  user-requested scope.
+- Fixed lowercase monitored-symbol requests such as `tigr` in symbol-edit previews without treating diagnostic words
+  such as `trace`, `risk`, or `reason` as stock symbols.
+
 ## 1.2.302 - 2026-06-18
 
 ### Fixed
