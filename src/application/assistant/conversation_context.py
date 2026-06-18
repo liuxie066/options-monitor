@@ -7,6 +7,7 @@ from typing import Any
 from src.application.assistant.audit import InboundAuditStore
 from src.application.assistant.operation_store import InboundOperationStore
 from src.application.assistant.contracts import AssistantRequest
+from src.application.assistant.context_projection import build_context_projection, context_projection_trace
 from src.application.assistant.session_store import AgentSessionStore
 from src.application.assistant.user_profile import load_user_profile_context, user_profile_trace
 from src.application.tool_allowlist import PURE_READ_TOOLS
@@ -76,7 +77,7 @@ def build_conversation_context(
         recent_messages=recent_messages,
     )
 
-    return {
+    context = {
         "scope": normalized,
         "window_messages": window,
         "limits": {
@@ -95,6 +96,12 @@ def build_conversation_context(
         "pending_operations": pending_operations,
         "user_profile": load_user_profile_context(user_profile_path),
     }
+    context["context_projection"] = build_context_projection(
+        current_user_message=request.text,
+        conversation_context=context,
+        recent_sessions=recent_sessions,
+    )
+    return context
 
 
 def context_trace(context: dict[str, Any] | None) -> dict[str, Any]:
@@ -104,7 +111,7 @@ def context_trace(context: dict[str, Any] | None) -> dict[str, Any]:
     pending = context.get("pending_operations")
     frame = context.get("active_frame") if isinstance(context.get("active_frame"), dict) else None
     frames = context.get("frame_stack") if isinstance(context.get("frame_stack"), list) else []
-    return {
+    trace = {
         "provided": True,
         "window_messages": int(context.get("window_messages") or 0),
         "recent_count": len(recent) if isinstance(recent, list) else 0,
@@ -115,6 +122,12 @@ def context_trace(context: dict[str, Any] | None) -> dict[str, Any]:
             context.get("user_profile") if isinstance(context.get("user_profile"), dict) else None
         ),
     }
+    projection_trace = context_projection_trace(
+        context.get("context_projection") if isinstance(context.get("context_projection"), dict) else None
+    )
+    if projection_trace.get("provided"):
+        trace["context_projection"] = projection_trace
+    return trace
 
 
 def _normalized_scope(request: AssistantRequest) -> dict[str, str]:
