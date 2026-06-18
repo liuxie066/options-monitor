@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -180,6 +181,8 @@ def _wechat_clawbot_channel_health(
     else:
         state_dir = runtime_root / "output_shared" / "state" / "channels" / "wechat_clawbot" / label
     state_payload, state_error = _read_wechat_clawbot_state(state_dir)
+    bindings_payload, bindings_error = _read_wechat_clawbot_bindings(state_dir)
+    bindings_status = _wechat_clawbot_bindings_status(bindings_payload, label=label)
     allowed_senders_configured = bool(
         profile.get("allowed_senders_configured")
         or _first_text(profile.get("allowed_senders"), inbound.get("allowed_senders"))
@@ -205,6 +208,10 @@ def _wechat_clawbot_channel_health(
         "state_dir": mask_path(state_dir),
         "state_exists": state_dir.exists(),
         "state_loaded": bool(state_payload),
+        "bindings_path": mask_path(state_dir / "bindings.json"),
+        "bindings_exists": (state_dir / "bindings.json").exists(),
+        "bindings_loaded": bool(bindings_payload),
+        **bindings_status,
         "bot_token_configured": bool(str(state_payload.get("bot_token") or "").strip()),
         "base_url_configured": bool(str(state_payload.get("base_url") or "").strip()),
         "cursor_configured": bool(cursor),
@@ -222,6 +229,8 @@ def _wechat_clawbot_channel_health(
         out["config_error"] = config_error
     if state_error:
         out["state_error"] = state_error
+    if bindings_error:
+        out["bindings_error"] = bindings_error
     if service_status_error:
         out["service_status_error"] = service_status_error
     return out
@@ -309,6 +318,72 @@ def _read_wechat_clawbot_state(state_dir: Path) -> tuple[dict[str, Any], str | N
     if not isinstance(payload, dict):
         return {}, "state.json is not an object"
     return payload, None
+
+
+def _read_wechat_clawbot_bindings(state_dir: Path) -> tuple[dict[str, Any], str | None]:
+    path = state_dir / "bindings.json"
+    if not path.exists():
+        return {}, None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {}, f"{type(exc).__name__}: {exc}"
+    if not isinstance(payload, dict):
+        return {}, "bindings.json is not an object"
+    return payload, None
+
+
+def _wechat_clawbot_bindings_status(payload: dict[str, Any], *, label: str) -> dict[str, Any]:
+    bindings_raw = payload.get("bindings")
+    bindings = bindings_raw if isinstance(bindings_raw, dict) else {}
+    now_utc = datetime.now(timezone.utc)
+    items: dict[str, dict[str, Any]] = {}
+    newest_updated_at: str | None = None
+    newest_age_seconds: int | None = None
+    for name, raw in sorted(bindings.items(), key=lambda item: str(item[0])):
+        if not isinstance(raw, dict):
+            continue
+        updated_at = _first_text(raw.get("updated_at_utc"), raw.get("updated_at")) or None
+        age_seconds = _age_seconds(updated_at, now_utc=now_utc) if updated_at else None
+        if age_seconds is not None and (newest_age_seconds is None or age_seconds < newest_age_seconds):
+            newest_age_seconds = age_seconds
+            newest_updated_at = updated_at
+        group_id = _first_text(raw.get("group_id"))
+        chat_key = _first_text(raw.get("chat_key"))
+        last_text = _first_text(raw.get("last_text"))
+        items[str(name)] = {
+            "target": f"wechat:{label}:{name}",
+            "updated_at_utc": updated_at,
+            "age_seconds": age_seconds,
+            "has_to_user_id": bool(_first_text(raw.get("to_user_id"))),
+            "has_context_token": bool(_first_text(raw.get("context_token"))),
+            "has_group_id": bool(group_id),
+            "has_chat_key": bool(chat_key),
+            "last_message_id": _first_text(raw.get("last_message_id")) or None,
+            "last_text_present": bool(last_text),
+            "last_text_length": len(last_text),
+        }
+    return {
+        "binding_count": len(items),
+        "binding_names": sorted(items),
+        "bindings": items,
+        "newest_binding_updated_at_utc": newest_updated_at,
+        "newest_binding_age_seconds": newest_age_seconds,
+    }
+
+
+def _age_seconds(value: str | None, *, now_utc: datetime) -> int | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    delta = now_utc - parsed.astimezone(timezone.utc)
+    return max(0, int(delta.total_seconds()))
 
 
 def _merge_service_profile_payload(

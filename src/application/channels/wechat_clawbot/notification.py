@@ -31,6 +31,26 @@ def _response_success(response: dict[str, Any]) -> bool:
     return False
 
 
+def _response_code(response: dict[str, Any]) -> int | None:
+    for key in ("ret", "errcode", "code"):
+        value = response.get(key)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+            return int(value)
+    data = response.get("data")
+    if isinstance(data, dict):
+        nested = _response_code(data)
+        if nested is not None:
+            return nested
+    result = response.get("result")
+    if isinstance(result, dict):
+        nested = _response_code(result)
+        if nested is not None:
+            return nested
+    return None
+
+
 def _extract_message_id(response: dict[str, Any]) -> str | None:
     for key in ("message_id", "messageId", "id", "client_msg_id"):
         value = response.get(key)
@@ -76,6 +96,7 @@ def send_wechat_clawbot_message(
         group_id=binding.group_id,
         context_token=binding.context_token,
         text=text,
+        client_id=idempotency_key,
     )
     ok = _response_success(response_json)
     message_id = _extract_message_id(response_json)
@@ -87,6 +108,7 @@ def send_wechat_clawbot_message(
         "response_json": response_json,
         "response_tail": json.dumps(response_json, ensure_ascii=False)[-500:],
         "message_id": message_id,
+        "provider_response_code": _response_code(response_json),
         "local_receipt_id": local_receipt_id,
         "idempotency_key": idempotency_key,
         "binding_label": binding.label,
@@ -103,6 +125,7 @@ def normalize_wechat_clawbot_send_output(*, send_result: dict[str, Any]) -> dict
     upstream_message_id = _extract_message_id(response_json) or result.get("message_id")
     local_receipt_id = result.get("local_receipt_id")
     message_id = upstream_message_id or local_receipt_id
+    provider_response_code = _response_code(response_json)
     delivery_confirmed = bool(command_ok and business_ok and message_id)
     response_tail = str(result.get("response_tail") or "")
     if delivery_confirmed:
@@ -132,6 +155,7 @@ def normalize_wechat_clawbot_send_output(*, send_result: dict[str, Any]) -> dict
             "message_id": (None if message_id is None else str(message_id)),
             "upstream_message_id": (None if upstream_message_id is None else str(upstream_message_id)),
             "http_status": result.get("http_status"),
+            "provider_response_code": provider_response_code,
             "response_json": response_json,
             "response_tail": response_tail,
             "idempotency_key": result.get("idempotency_key"),

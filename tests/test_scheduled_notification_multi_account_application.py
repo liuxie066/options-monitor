@@ -104,6 +104,7 @@ def test_execute_per_account_delivery_retries_clawbot_unconfirmed_without_upstre
     assert out.send_results[0]["attempts"] == 2
     assert out.send_results[0]["upstream_message_id"] is None
     assert out.send_results[0]["local_receipt_id"] == out.send_results[0]["message_id"]
+    assert [record["provider_response_code"] for record in out.send_results[0]["attempt_records"]] == [-2, 0]
 
 
 def test_execute_per_account_delivery_collects_all_failures(fake_runlog_factory) -> None:
