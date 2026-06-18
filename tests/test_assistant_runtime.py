@@ -28,8 +28,8 @@ from src.application.assistant.agent_loop import (
     _planner_input_text,
     _planner_tool_manifest,
     _synthesis_input_text,
-    _validate_plan_against_conversation_frame,
     build_tool_observation,
+    execute_tool_plan,
     parse_tool_plan_payload,
     plan_read_only_tools,
     run_read_only_agent_loop,
@@ -1255,7 +1255,10 @@ def test_agent_loop_planner_input_uses_last_read_context_for_short_followup() ->
 
     assert "symbol_income_attribution" in views
     assert "income" in budget["matched_view_groups"]
-    assert budget["selection_sources"] == ["conversation_context"]
+    assert budget["selection_sources"] == ["context_projection.recent_evidence"]
+    projection = payload["context"]["context_projection"]
+    assert projection["recent_successful_tools"][0]["tool_name"] == "monthly_income_report"
+    assert projection["available_evidence_refs"][0]["source_tool"] == "monthly_income_report"
 
 
 def test_agent_loop_planner_input_uses_recent_read_question_for_analysis_query_followup() -> None:
@@ -1285,17 +1288,14 @@ def test_agent_loop_planner_input_uses_recent_read_question_for_analysis_query_f
 
     assert "symbol_income_attribution" in views
     assert "income" in budget["matched_view_groups"]
-    assert budget["selection_sources"] == ["conversation_context"]
-    assert payload["context"]["recent_read_hints"] == [
-        {
-            "raw_text": "对比 lx 和 sy 的账户收益，有什么不同？",
-            "intent_name": "analysis_query",
-            "tool_name": "analysis_query",
-        }
-    ]
+    assert budget["selection_sources"] == ["context_projection.recent_evidence"]
+    projection = payload["context"]["context_projection"]
+    assert projection["recent_turns"][0]["user_summary"] == "对比 lx 和 sy 的账户收益，有什么不同？"
+    assert projection["recent_successful_tools"][0]["tool_name"] == "analysis_query"
+    assert projection["available_evidence_refs"][0]["source_tool"] == "analysis_query"
 
 
-def test_agent_loop_planner_and_synthesis_keep_context_projection_shadow_only() -> None:
+def test_agent_loop_planner_uses_context_projection_while_synthesis_excludes_projection() -> None:
     conversation_context = {
         "window_messages": 2,
         "context_projection": {
@@ -1309,8 +1309,12 @@ def test_agent_loop_planner_and_synthesis_keep_context_projection_shadow_only() 
 
     planner_text = _planner_input_text("继续", conversation_context=conversation_context)
     planner_payload = json.loads(planner_text)
-    assert "context_projection" not in planner_text
-    assert "context_projection" not in planner_payload["context"]
+    assert "context_projection" in planner_text
+    assert planner_payload["context"]["context_projection"]["recent_turns"][0]["turn_id"] == "session:previous"
+    assert planner_payload["context"]["context_projection"]["available_evidence_refs"][0]["ref_id"] == "ev_001"
+    assert planner_payload["context"]["context_policy"]["current_message_wins"] is True
+    assert "active_frame" not in planner_payload["context"]
+    assert "followup_resolution" not in planner_payload["context"]
 
     synthesis_text = _synthesis_input_text(
         "继续",
@@ -1332,86 +1336,94 @@ def test_agent_loop_planner_and_synthesis_keep_context_projection_shadow_only() 
     assert "context_projection" not in synthesis_payload["context"]
 
 
-def test_agent_loop_planner_input_resolves_candidate_net_income_followup_from_active_frame() -> None:
-    frame = {
-        "schema_version": "om-conversation-frame-v1",
-        "source": "agent_session",
-        "rank": 1,
-        "domain": "candidate",
-        "task_mode": "diagnose",
-        "tool_name": "candidate_filter_explain",
-        "intent_name": "candidate_filter_explain",
-        "metric_namespace": "candidate_option_metrics",
-        "key_terms": ["候选", "过滤", "净收入", "net_income", "净收入非正"],
-        "tool_payload": {"account": "lx", "symbol": "9992.HK", "function": "sell_put"},
-        "evidence_source": "OM candidate filter trace",
-        "confidence": 0.9,
+def _candidate_filter_context_projection(current_user_message: str) -> dict[str, Any]:
+    return {
+        "schema_version": "om-context-projection-v1",
+        "current_user_message": {"text": current_user_message},
+        "recent_turns": [
+            {
+                "turn_id": "turn_candidate_filter",
+                "user_summary": "Asked why a symbol was filtered from candidates",
+                "assistant_summary": "Answered from candidate filter evidence",
+                "tools": ["candidate_filter_explain"],
+                "safe_slots": {"account": ["lx"], "symbol": ["9992.HK"], "function": ["sell_put"]},
+                "evidence_refs": ["ev_candidate_filter"],
+                "result_status": "ok",
+            }
+        ],
+        "recent_successful_tools": [
+            {
+                "turn_id": "turn_candidate_filter",
+                "tool_name": "candidate_filter_explain",
+                "purpose": "Read candidate filter evidence",
+                "safe_payload": {"account": "lx", "symbol": "9992.HK", "function": "sell_put"},
+                "safe_slots": {"account": ["lx"], "symbol": ["9992.HK"], "function": ["sell_put"]},
+                "evidence_refs": ["ev_candidate_filter"],
+                "data_shape": {"views_used": ["candidate_filter_diagnostics"]},
+                "result_status": "ok",
+            }
+        ],
+        "available_evidence_refs": [
+            {
+                "ref_id": "ev_candidate_filter",
+                "turn_id": "turn_candidate_filter",
+                "source_type": "tool_result",
+                "source_tool": "candidate_filter_explain",
+                "label": "candidate filter evidence",
+                "safe_slots": {"account": ["lx"], "symbol": ["9992.HK"], "function": ["sell_put"]},
+                "data_shape": {"views_used": ["candidate_filter_diagnostics"]},
+            }
+        ],
+        "open_evidence_gaps": [],
+        "pending_operations": [],
+        "policy": {
+            "current_message_wins": True,
+            "context_is_hint": True,
+            "ask_when_ambiguous": True,
+            "declare_context_use": True,
+        },
+        "budget": {"truncated": False},
     }
+
+
+def test_agent_loop_planner_input_exposes_candidate_followup_through_context_projection() -> None:
+    question = "净收入是怎么计算的？"
     payload = json.loads(
         _planner_input_text(
-            "净收入是怎么计算的？",
-            conversation_context={
-                "active_frame": frame,
-                "frame_stack": [frame],
-                "last_successful_read": {
-                    "intent_name": "candidate_filter_explain",
-                    "tool_name": "candidate_filter_explain",
-                    "tool_payload": {"account": "lx", "symbol": "9992.HK", "function": "sell_put"},
-                },
-            },
+            question,
+            conversation_context={"context_projection": _candidate_filter_context_projection(question)},
         )
     )
     analysis_query = next(tool for tool in payload["tools"] if tool["name"] == "analysis_query")
     views = analysis_query["semantics"]["analysis_views"]
 
-    assert payload["context"]["active_frame"]["metric_namespace"] == "candidate_option_metrics"
-    assert payload["context"]["metric_glossary"]["namespace"] == "candidate_option_metrics"
-    assert payload["context"]["metric_glossary"]["terms"]["net_income"]["formula"] == "gross_income - futu_fee"
-    assert payload["context"]["followup_resolution"]["status"] == "resolved_from_active_frame"
-    assert payload["context"]["followup_resolution"]["metric_namespace"] == "candidate_option_metrics"
+    assert payload["context"]["context_projection"]["recent_turns"][0]["turn_id"] == "turn_candidate_filter"
+    assert payload["context"]["context_projection"]["available_evidence_refs"][0]["ref_id"] == "ev_candidate_filter"
+    assert payload["context"]["context_projection"]["recent_successful_tools"][0]["tool_name"] == "candidate_filter_explain"
+    assert "active_frame" not in payload["context"]
+    assert "followup_resolution" not in payload["context"]
+    assert "metric_glossary" not in payload["context"]
     assert "candidate_filter_diagnostics" in views
-    assert "account_monthly_performance" not in views
-    assert payload["manifest_budget"]["selection_sources"] == ["conversation_context.active_frame"]
+    assert payload["manifest_budget"]["selection_sources"] == ["message", "context_projection.recent_evidence"]
 
 
-def test_agent_loop_planner_input_keeps_explicit_account_override_out_of_old_candidate_frame() -> None:
-    frame = {
-        "schema_version": "om-conversation-frame-v1",
-        "source": "agent_session",
-        "rank": 1,
-        "domain": "candidate",
-        "task_mode": "diagnose",
-        "tool_name": "candidate_filter_explain",
-        "intent_name": "candidate_filter_explain",
-        "metric_namespace": "candidate_option_metrics",
-        "key_terms": ["候选", "过滤", "净收入", "net_income", "净收入非正"],
-        "tool_payload": {"account": "lx", "symbol": "9992.HK", "function": "sell_put"},
-        "evidence_source": "OM candidate filter trace",
-        "confidence": 0.9,
-    }
-    context = {
-        "active_frame": frame,
-        "frame_stack": [frame],
-        "last_successful_read": {
-            "intent_name": "candidate_filter_explain",
-            "tool_name": "candidate_filter_explain",
-            "tool_payload": {"account": "lx", "symbol": "9992.HK", "function": "sell_put"},
-        },
-    }
+def test_agent_loop_planner_input_keeps_explicit_account_message_ahead_of_projection_context() -> None:
     question = "刚才泡泡玛特先放下，账户净收入怎么算？"
+    context = {
+        "context_projection": _candidate_filter_context_projection(question),
+    }
     payload = json.loads(_planner_input_text(question, conversation_context=context))
     analysis_query = next(tool for tool in payload["tools"] if tool["name"] == "analysis_query")
     views = analysis_query["semantics"]["analysis_views"]
 
     assert "active_frame" not in payload["context"]
     assert "frame_stack" not in payload["context"]
-    assert "recent_read_hints" not in payload["context"]
-    assert payload["context"]["metric_glossary"]["namespace"] == "account_income_metrics"
-    assert payload["context"]["followup_resolution"]["status"] == "explicit_message_overrides_context"
-    assert payload["context"]["followup_resolution"]["metric_namespace"] == "account_income_metrics"
+    assert "metric_glossary" not in payload["context"]
+    assert "followup_resolution" not in payload["context"]
+    assert payload["context"]["context_projection"]["available_evidence_refs"][0]["source_tool"] == "candidate_filter_explain"
     assert "account_monthly_performance" in views
     assert "candidate_filter_diagnostics" not in views
-    assert payload["manifest_budget"]["selection_sources"] == ["conversation_context.explicit_override"]
+    assert payload["manifest_budget"]["selection_sources"] == ["message"]
 
     synthesis_payload = json.loads(
         _synthesis_input_text(
@@ -1431,34 +1443,23 @@ def test_agent_loop_planner_input_keeps_explicit_account_override_out_of_old_can
         )
     )
     assert "active_frame" not in synthesis_payload["context"]
-    assert synthesis_payload["context"]["metric_glossary"]["namespace"] == "account_income_metrics"
 
 
-def test_agent_loop_planner_input_resolves_why_net_income_non_positive_followup() -> None:
-    frame = {
-        "schema_version": "om-conversation-frame-v1",
-        "source": "agent_session",
-        "rank": 1,
-        "domain": "candidate",
-        "task_mode": "diagnose",
-        "tool_name": "candidate_filter_explain",
-        "intent_name": "candidate_filter_explain",
-        "metric_namespace": "candidate_option_metrics",
-        "key_terms": ["候选", "过滤", "净收入", "net_income", "净收入非正"],
-        "tool_payload": {"account": "lx", "symbol": "9992.HK", "function": "sell_put"},
-        "evidence_source": "OM candidate filter trace",
-        "confidence": 0.9,
-    }
+def test_agent_loop_planner_input_uses_projection_for_short_why_followup() -> None:
+    question = "为什么净收入非正？"
     payload = json.loads(
         _planner_input_text(
-            "为什么净收入非正？",
-            conversation_context={"active_frame": frame, "frame_stack": [frame]},
+            question,
+            conversation_context={"context_projection": _candidate_filter_context_projection(question)},
         )
     )
 
-    assert payload["context"]["followup_resolution"]["status"] == "resolved_from_active_frame"
-    assert payload["context"]["followup_resolution"]["metric_namespace"] == "candidate_option_metrics"
-    assert payload["context"]["metric_glossary"]["namespace"] == "candidate_option_metrics"
+    assert payload["context"]["context_projection"]["recent_turns"][0]["turn_id"] == "turn_candidate_filter"
+    assert payload["context"]["context_projection"]["available_evidence_refs"][0]["ref_id"] == "ev_candidate_filter"
+    assert "followup_resolution" not in payload["context"]
+    assert "metric_glossary" not in payload["context"]
+    analysis_query = next(tool for tool in payload["tools"] if tool["name"] == "analysis_query")
+    assert "candidate_filter_diagnostics" in analysis_query["semantics"]["analysis_views"]
 
 
 def test_agent_loop_planner_input_keeps_explicit_message_ahead_of_context() -> None:
@@ -1490,7 +1491,6 @@ def test_agent_loop_planner_input_keeps_explicit_message_ahead_of_context() -> N
     assert "symbol_income_attribution" not in views
     assert "candidate_strategy" in budget["matched_view_groups"]
     assert budget["selection_sources"] == ["message"]
-    assert "recent_read_hints" not in payload["context"]
 
 
 def test_agent_loop_planner_manifest_hides_system_scoped_arguments() -> None:
@@ -2688,6 +2688,55 @@ def test_assistant_runtime_uses_llm_reply_for_non_business_text_after_low_confid
     assert out["meta"]["assistant"]["llm"]["writes_allowed"] is False
 
 
+def test_assistant_runtime_does_not_use_llm_reply_for_context_validation_error(tmp_path: Path) -> None:
+    def _plan(
+        _text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        return LlmPlannerResult(
+            plan=None,
+            trace={**_planner_trace(reason="context_validation_ask_clarification"), "error_code": "PLAN_CONTEXT_AMBIGUOUS"},
+            error=AgentToolError(
+                code="PLAN_CONTEXT_AMBIGUOUS",
+                message="上一轮上下文不明确，请确认要沿用哪一轮范围。",
+                details={
+                    "context_validation": {
+                        "schema_version": "om-context-validation-v1",
+                        "status": "ask_clarification",
+                        "code": "CONTEXT_AMBIGUOUS",
+                    }
+                },
+            ),
+        )
+
+    def _reply(
+        _text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmReplyResult:
+        raise AssertionError("context validation errors must not fall back to general LLM reply")
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="你是什么模型",
+            sender_id="local",
+            message_id="msg_no_llm_reply_for_context_validation",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        settings=AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+        generate_reply_fn=_reply,
+    )
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "PLAN_CONTEXT_AMBIGUOUS"
+    assert out["meta"]["assistant"]["route"] == "agent_loop"
+    assert out["meta"]["assistant"]["perception_trace"]["decision"] == "llm_error"
+
+
 def test_assistant_runtime_does_not_use_llm_reply_for_write_like_text(tmp_path: Path) -> None:
     def _plan(
         _text: str,
@@ -3153,14 +3202,20 @@ def test_conversation_context_derives_read_tool_from_agent_loop_plan(tmp_path: P
     assert "净收入非正" in context["recent_messages"][0]["response_text"]
     assert context["last_successful_read"]["intent_name"] == "candidate_filter_explain"
     assert context["last_successful_read"]["tool_name"] == "candidate_filter_explain"
-    assert context["active_frame"]["domain"] == "candidate"
-    assert context["active_frame"]["tool_name"] == "candidate_filter_explain"
-    assert context["active_frame"]["metric_namespace"] == "candidate_option_metrics"
-    assert "净收入非正" in context["active_frame"]["key_terms"]
-    assert context["active_frame"]["source"] == "inbound_audit"
+    projection = context["context_projection"]
+    assert "active_frame" not in context
+    assert "frame_stack" not in context
+    assert projection["recent_successful_tools"][0]["tool_name"] == "candidate_filter_explain"
+    assert projection["recent_successful_tools"][0]["safe_payload"] == {
+        "account": "lx",
+        "function": "sell_put",
+        "symbol": "9992.HK",
+    }
+    assert projection["available_evidence_refs"][0]["source_tool"] == "candidate_filter_explain"
+    assert projection["available_evidence_refs"][0]["safe_slots"]["symbol"] == ["9992.HK"]
 
 
-def test_conversation_context_prefers_agent_session_frame_for_recent_read(tmp_path: Path) -> None:
+def test_conversation_context_projects_agent_session_recent_read(tmp_path: Path) -> None:
     audit_db = tmp_path / "inbound.sqlite3"
     request = AssistantRequest(
         text="lx 泡泡玛特 sell_put 被哪个参数过滤了？",
@@ -3223,19 +3278,22 @@ def test_conversation_context_prefers_agent_session_frame_for_recent_read(tmp_pa
         max_messages=4,
     )
 
-    assert context["active_frame"]["source"] == "agent_session"
-    assert context["active_frame"]["domain"] == "candidate"
-    assert context["active_frame"]["tool_name"] == "candidate_filter_explain"
-    assert context["active_frame"]["metric_namespace"] == "candidate_option_metrics"
-    assert context["active_frame"]["tool_payload"] == {
+    projection = context["context_projection"]
+    assert "active_frame" not in context
+    assert "frame_stack" not in context
+    assert projection["recent_turns"][0]["turn_id"].startswith("session:")
+    assert projection["recent_turns"][0]["tools"] == ["candidate_filter_explain"]
+    assert projection["recent_successful_tools"][0]["tool_name"] == "candidate_filter_explain"
+    assert projection["recent_successful_tools"][0]["safe_payload"] == {
         "account": "lx",
         "function": "sell_put",
         "symbol": "9992.HK",
     }
-    assert "净收入非正" in context["active_frame"]["key_terms"]
+    assert projection["available_evidence_refs"][0]["source_tool"] == "candidate_filter_explain"
+    assert projection["available_evidence_refs"][0]["turn_id"] == projection["recent_turns"][0]["turn_id"]
 
 
-def test_assistant_runtime_two_turn_candidate_net_income_followup_uses_agent_session_frame(tmp_path: Path) -> None:
+def test_assistant_runtime_two_turn_candidate_net_income_followup_uses_projection_refs(tmp_path: Path) -> None:
     audit_db = tmp_path / "inbound.sqlite3"
     first_text = "lx 泡泡玛特 sell_put 被哪个参数过滤了？"
     followup_text = "净收入是怎么计算的？"
@@ -3382,38 +3440,38 @@ def test_assistant_runtime_two_turn_candidate_net_income_followup_uses_agent_ses
     assert second["ok"] is True
     context = captured_contexts[followup_text]
     assert context is not None
-    assert context["active_frame"]["source"] == "agent_session"
-    assert context["active_frame"]["tool_name"] == "candidate_filter_explain"
-    assert context["active_frame"]["metric_namespace"] == "candidate_option_metrics"
-    assert context["active_frame"]["tool_payload"] == {
-        "account": "lx",
-        "function": "sell_put",
-        "symbol": "泡泡玛特",
-    }
+    assert "active_frame" not in context
+    assert "frame_stack" not in context
+    assert context["context_projection"]["recent_successful_tools"][0]["tool_name"] == "candidate_filter_explain"
+    assert context["context_projection"]["available_evidence_refs"][0]["source_tool"] == "candidate_filter_explain"
 
     planner_payload = captured_planner_payloads[followup_text]
     planner_context = planner_payload["context"]
     analysis_query = next(tool for tool in planner_payload["tools"] if tool["name"] == "analysis_query")
-    assert planner_context["active_frame"]["source"] == "agent_session"
-    assert planner_context["active_frame"]["metric_namespace"] == "candidate_option_metrics"
-    assert planner_context["metric_glossary"]["namespace"] == "candidate_option_metrics"
-    assert planner_context["followup_resolution"]["status"] == "resolved_from_active_frame"
+    projection = planner_context["context_projection"]
+    assert projection["recent_turns"]
+    assert any(
+        item.get("source_tool") == "candidate_filter_explain"
+        for item in projection.get("available_evidence_refs", [])
+    )
+    assert "active_frame" not in planner_context
+    assert "metric_glossary" not in planner_context
+    assert "followup_resolution" not in planner_context
     assert "candidate_filter_diagnostics" in analysis_query["semantics"]["analysis_views"]
-    assert "account_monthly_performance" not in analysis_query["semantics"]["analysis_views"]
-    assert planner_payload["manifest_budget"]["selection_sources"] == ["conversation_context.active_frame"]
+    assert planner_payload["manifest_budget"]["selection_sources"] == ["message", "context_projection.recent_evidence"]
 
     synthesis_context = captured_synthesis_payloads[followup_text]["context"]
-    assert synthesis_context["active_frame"]["metric_namespace"] == "candidate_option_metrics"
-    assert synthesis_context["metric_glossary"]["terms"]["net_income"]["formula"] == "gross_income - futu_fee"
-    assert synthesis_context["followup_resolution"]["status"] == "resolved_from_active_frame"
+    assert "active_frame" not in synthesis_context
+    assert "metric_glossary" not in synthesis_context
+    assert "followup_resolution" not in synthesis_context
 
     trace = collect_assistant_trace(audit_db=str(audit_db), command_id=second["data"]["command_id"])
-    assert trace["traces"][0]["context"]["active_frame"]["source"] == "agent_session"
-    assert trace["traces"][0]["context"]["followup_resolution"]["status"] == "resolved_from_active_frame"
-    assert "上下文：active_frame=agent_session:candidate/candidate_filter_explain/candidate_option_metrics" in trace[
-        "response_text"
-    ]
-    assert "followup=resolved_from_active_frame:candidate_option_metrics" in trace["response_text"]
+    trace_context = trace["traces"][0]["context"]
+    assert "active_frame" not in trace_context
+    assert "followup_resolution" not in trace_context
+    assert trace_context["context_projection"]["recent_successful_tool_count"] >= 1
+    assert trace_context["context_projection"]["evidence_ref_count"] >= 1
+    assert "上下文：projection=turns:" in trace["response_text"]
 
 
 def test_assistant_runtime_two_turn_account_net_income_override_suppresses_candidate_frame(tmp_path: Path) -> None:
@@ -3563,34 +3621,27 @@ def test_assistant_runtime_two_turn_account_net_income_override_suppresses_candi
     analysis_query = next(tool for tool in planner_payload["tools"] if tool["name"] == "analysis_query")
     assert "active_frame" not in planner_context
     assert "frame_stack" not in planner_context
-    assert "recent_read_hints" not in planner_context
-    assert planner_context["metric_glossary"]["namespace"] == "account_income_metrics"
-    assert planner_context["followup_resolution"]["status"] == "explicit_message_overrides_context"
-    assert planner_context["followup_resolution"]["metric_namespace"] == "account_income_metrics"
+    assert "metric_glossary" not in planner_context
+    assert "followup_resolution" not in planner_context
+    assert planner_context["context_projection"]["recent_turns"]
     assert "account_monthly_income_components" in analysis_query["semantics"]["analysis_views"]
     assert "candidate_filter_diagnostics" not in analysis_query["semantics"]["analysis_views"]
-    assert planner_payload["manifest_budget"]["selection_sources"] == ["conversation_context.explicit_override"]
+    assert planner_payload["manifest_budget"]["selection_sources"] == ["message"]
 
     synthesis_context = captured_synthesis_payloads[override_text]["context"]
     assert "active_frame" not in synthesis_context
-    assert synthesis_context["metric_glossary"]["namespace"] == "account_income_metrics"
-    assert synthesis_context["followup_resolution"]["status"] == "explicit_message_overrides_context"
+    assert "metric_glossary" not in synthesis_context
+    assert "followup_resolution" not in synthesis_context
 
     trace = collect_assistant_trace(audit_db=str(audit_db), command_id=second["data"]["command_id"])
     trace_context = trace["traces"][0]["context"]
-    assert trace_context["active_frame_allowed"] is False
-    assert trace_context["suppressed_active_frame"]["metric_namespace"] == "candidate_option_metrics"
-    assert trace_context["followup_resolution"]["status"] == "explicit_message_overrides_context"
-    assert trace_context["followup_resolution"]["metric_namespace"] == "account_income_metrics"
-    assert "上下文：suppressed_frame=agent_session:candidate/candidate_filter_explain/candidate_option_metrics" in trace[
-        "response_text"
-    ]
-    assert "followup=explicit_message_overrides_context:candidate_option_metrics->account_income_metrics" in trace[
-        "response_text"
-    ]
+    assert "active_frame" not in trace_context
+    assert "followup_resolution" not in trace_context
+    assert trace_context["context_projection"]["recent_successful_tool_count"] >= 1
+    assert "上下文：projection=turns:" in trace["response_text"]
 
 
-def test_conversation_context_orders_session_and_audit_frames_by_recency(tmp_path: Path) -> None:
+def test_conversation_context_orders_projection_turns_by_recency(tmp_path: Path) -> None:
     audit_db = tmp_path / "inbound.sqlite3"
     request = AssistantRequest(
         text="lx 泡泡玛特 sell_put 被哪个参数过滤了？",
@@ -3678,12 +3729,17 @@ def test_conversation_context_orders_session_and_audit_frames_by_recency(tmp_pat
         max_messages=4,
     )
 
-    assert context["active_frame"]["source"] == "inbound_audit"
-    assert context["active_frame"]["domain"] == "income"
-    assert context["active_frame"]["tool_name"] == "monthly_income_report"
-    assert context["active_frame"]["metric_namespace"] == "account_income_metrics"
-    assert context["frame_stack"][1]["source"] == "agent_session"
-    assert context["frame_stack"][1]["domain"] == "candidate"
+    projection = context["context_projection"]
+    assert "active_frame" not in context
+    assert "frame_stack" not in context
+    assert projection["recent_turns"][0]["tools"] == ["monthly_income_report"]
+    assert projection["recent_turns"][1]["tools"] == ["candidate_filter_explain"]
+    assert projection["recent_successful_tools"][0]["tool_name"] == "monthly_income_report"
+    assert projection["recent_successful_tools"][1]["tool_name"] == "candidate_filter_explain"
+    assert [ref["source_tool"] for ref in projection["available_evidence_refs"]] == [
+        "candidate_filter_explain",
+        "monthly_income_report",
+    ]
 
 
 def test_conversation_context_reads_user_md_as_hint_only_profile(tmp_path: Path) -> None:
@@ -8552,7 +8608,7 @@ def test_plan_read_only_tools_treats_empty_steps_as_no_plan() -> None:
     assert result.trace["planner_input"]["chars"] == len(calls[0]["input_text"])
 
 
-def test_plan_read_only_tools_traces_recent_read_hints() -> None:
+def test_plan_read_only_tools_traces_context_projection() -> None:
     calls: list[dict[str, Any]] = []
 
     def _create_response(**kwargs: Any) -> dict[str, Any]:
@@ -8592,9 +8648,10 @@ def test_plan_read_only_tools_traces_recent_read_hints() -> None:
         environ={"OM_LLM_API_KEY": "sk-test"},
     )
 
-    assert result.trace["planner_input"]["recent_read_hint_count"] == 1
-    assert result.trace["planner_input"]["manifest_budget"]["selection_sources"] == ["conversation_context"]
-    assert "recent_read_hints" in calls[0]["input_text"]
+    assert result.trace["planner_input"]["context_projection"]["recent_turn_count"] == 1
+    assert result.trace["planner_input"]["context_projection"]["recent_successful_tool_count"] == 1
+    assert result.trace["planner_input"]["manifest_budget"]["selection_sources"] == ["context_projection.recent_evidence"]
+    assert "context_projection" in calls[0]["input_text"]
 
 
 def test_parse_tool_plan_payload_defaults_missing_context_use() -> None:
@@ -8667,7 +8724,7 @@ def test_parse_tool_plan_payload_round_trips_context_use() -> None:
     assert payload["reason"] == "current message asks for the calculation inside the prior candidate frame"
 
 
-def test_plan_read_only_tools_traces_planner_context_use_shadow() -> None:
+def test_plan_read_only_tools_accepts_valid_context_use_before_execution() -> None:
     calls: list[dict[str, Any]] = []
 
     def _create_response(**kwargs: Any) -> dict[str, Any]:
@@ -8706,7 +8763,19 @@ def test_plan_read_only_tools_traces_planner_context_use_shadow() -> None:
         AssistantSettings(
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
-        conversation_context={"recent_messages": [{"turn_id": "turn_1", "raw_text": "看 lx 状态"}]},
+        conversation_context={
+            "recent_messages": [{"turn_id": "turn_1", "raw_text": "看 lx 状态"}],
+            "context_projection": {
+                "schema_version": "om-context-projection-v1",
+                "current_user_message": {"text": "继续看运行状态"},
+                "recent_turns": [{"turn_id": "turn_1", "safe_slots": {"account": ["lx"]}, "evidence_refs": []}],
+                "recent_successful_tools": [],
+                "available_evidence_refs": [],
+                "open_evidence_gaps": [],
+                "pending_operations": [],
+                "budget": {"truncated": False},
+            },
+        },
         create_response_fn=_create_response,
         environ={"OM_LLM_API_KEY": "sk-test"},
     )
@@ -8724,10 +8793,14 @@ def test_plan_read_only_tools_traces_planner_context_use_shadow() -> None:
     assert result.trace["reason"] == "accepted"
     assert result.trace["planner_context_use"]["mode"] == "carry"
     assert result.trace["planner_context_use"]["inherited_slots"] == {"account": ["lx"]}
+    assert result.trace["context_validation"]["status"] == "passed"
 
 
-def test_plan_read_only_tools_records_context_validation_without_blocking() -> None:
+def test_plan_read_only_tools_blocks_invalid_context_after_failed_repair() -> None:
+    calls: list[dict[str, Any]] = []
+
     def _create_response(**_kwargs: Any) -> dict[str, Any]:
+        calls.append(dict(_kwargs))
         return {
             "output_text": json.dumps(
                 {
@@ -8791,12 +8864,247 @@ def test_plan_read_only_tools_records_context_validation_without_blocking() -> N
         environ={"OM_LLM_API_KEY": "sk-test"},
     )
 
-    assert result.error is None
-    assert result.plan is not None
-    assert result.trace["reason"] == "accepted"
+    assert len(calls) == 2
+    assert result.plan is None
+    assert result.error is not None
+    assert result.error.code == "PLAN_CONTEXT_INVALID"
+    assert result.trace["reason"] == "context_validation_blocked"
     assert result.trace["context_validation"]["status"] == "blocked"
     assert result.trace["context_validation"]["code"] == "CONTEXT_SLOT_NOT_AVAILABLE"
     assert result.trace["context_validation"]["violation"]["reason"] == "declared_inherited_slot_not_available"
+    assert result.trace["context_validation_repair"]["attempted"] is True
+    assert result.trace["context_validation_repair"]["status"] == "rejected"
+
+
+def test_plan_read_only_tools_repairs_blocked_context_before_accepting() -> None:
+    calls: list[dict[str, Any]] = []
+
+    def _create_response(**kwargs: Any) -> dict[str, Any]:
+        calls.append(dict(kwargs))
+        repair = "context_validation_repair" in kwargs["input_text"]
+        context_use = {
+            "schema_version": PLANNER_CONTEXT_USE_SCHEMA_VERSION,
+            "mode": "carry",
+            "referenced_turn_ids": ["turn_lx"] if repair else [],
+            "referenced_evidence_refs": ["ev_lx"] if repair else [],
+            "inherited_slots": {"account": ["lx"]},
+            "current_message_slots": {},
+            "override_slots": {},
+            "requires_clarification": False,
+            "clarification_question": None,
+        }
+        return {
+            "output_text": json.dumps(
+                {
+                    "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+                    "goal": "continue previous scope",
+                    "required_capabilities": [],
+                    "context_use": context_use,
+                    "steps": [
+                        {
+                            "id": "step_1",
+                            "tool_name": "analysis_query",
+                            "arguments": {
+                                "sql": "select account from account_monthly_performance limit 5",
+                                "account": "lx",
+                            },
+                            "purpose": "read carried scope",
+                        }
+                    ],
+                }
+            )
+        }
+
+    result = plan_read_only_tools(
+        "继续",
+        AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        conversation_context={
+            "context_projection": {
+                "schema_version": "om-context-projection-v1",
+                "current_user_message": {"text": "继续"},
+                "recent_turns": [
+                    {
+                        "turn_id": "turn_lx",
+                        "safe_slots": {"account": ["lx"]},
+                        "evidence_refs": ["ev_lx"],
+                    }
+                ],
+                "recent_successful_tools": [
+                    {"tool_name": "analysis_query", "safe_slots": {"account": ["lx"]}, "evidence_refs": ["ev_lx"]}
+                ],
+                "available_evidence_refs": [
+                    {"ref_id": "ev_lx", "turn_id": "turn_lx", "source_tool": "analysis_query", "safe_slots": {"account": ["lx"]}}
+                ],
+                "open_evidence_gaps": [],
+                "pending_operations": [],
+                "budget": {"truncated": False},
+            }
+        },
+        create_response_fn=_create_response,
+        environ={"OM_LLM_API_KEY": "sk-test"},
+    )
+
+    assert len(calls) == 2
+    assert "context_validation_repair" not in calls[0]["input_text"]
+    assert "context_validation_repair" in calls[1]["input_text"]
+    assert "context_projection" in calls[1]["input_text"]
+    assert result.error is None
+    assert result.plan is not None
+    assert result.trace["reason"] == "accepted"
+    assert result.trace["context_validation"]["status"] == "passed"
+    assert result.trace["context_validation_repair"]["status"] == "accepted"
+    assert result.trace["context_validation_repair"]["initial_validation"]["status"] == "blocked"
+
+
+def test_plan_read_only_tools_asks_clarification_for_ambiguous_context_without_repair() -> None:
+    calls: list[dict[str, Any]] = []
+
+    def _create_response(**kwargs: Any) -> dict[str, Any]:
+        calls.append(dict(kwargs))
+        return {
+            "output_text": json.dumps(
+                {
+                    "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+                    "goal": "continue ambiguous scope",
+                    "required_capabilities": [],
+                    "context_use": {
+                        "schema_version": PLANNER_CONTEXT_USE_SCHEMA_VERSION,
+                        "mode": "carry",
+                        "referenced_turn_ids": [],
+                        "referenced_evidence_refs": [],
+                        "inherited_slots": {},
+                        "current_message_slots": {},
+                        "override_slots": {},
+                        "requires_clarification": False,
+                        "clarification_question": None,
+                    },
+                    "steps": [
+                        {
+                            "id": "step_1",
+                            "tool_name": "analysis_query",
+                            "arguments": {"sql": "select 1 as ok"},
+                            "purpose": "ambiguous read",
+                        }
+                    ],
+                }
+            )
+        }
+
+    result = plan_read_only_tools(
+        "继续",
+        AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        conversation_context={
+            "context_projection": {
+                "schema_version": "om-context-projection-v1",
+                "current_user_message": {"text": "继续"},
+                "recent_turns": [
+                    {"turn_id": "turn_a", "safe_slots": {"account": ["lx"]}, "evidence_refs": ["ev_a"]},
+                    {"turn_id": "turn_b", "safe_slots": {"account": ["sy"]}, "evidence_refs": ["ev_b"]},
+                ],
+                "recent_successful_tools": [],
+                "available_evidence_refs": [
+                    {"ref_id": "ev_a", "turn_id": "turn_a", "source_tool": "analysis_query", "safe_slots": {"account": ["lx"]}},
+                    {"ref_id": "ev_b", "turn_id": "turn_b", "source_tool": "analysis_query", "safe_slots": {"account": ["sy"]}},
+                ],
+                "open_evidence_gaps": [],
+                "pending_operations": [],
+                "budget": {"truncated": True, "truncation_reason": "recent_turn_limit"},
+            }
+        },
+        create_response_fn=_create_response,
+        environ={"OM_LLM_API_KEY": "sk-test"},
+    )
+
+    assert len(calls) == 1
+    assert result.plan is None
+    assert result.error is not None
+    assert result.error.code == "PLAN_CONTEXT_AMBIGUOUS"
+    assert result.trace["reason"] == "context_validation_ask_clarification"
+    assert result.trace["context_validation"]["status"] == "ask_clarification"
+    assert "context_validation_repair" not in result.trace
+
+
+def test_execute_tool_plan_blocks_invalid_context_before_tool_call(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(tool_name=tool_name, ok=True, data={"rows": []})
+
+    try:
+        execute_tool_plan(
+            question="继续",
+            request=AssistantRequest(
+                text="继续",
+                sender_id="local",
+                message_id="msg_context_invalid_execute_tool_plan",
+                audit_db=str(tmp_path / "inbound.sqlite3"),
+            ),
+            plan_payload={
+                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+                "goal": "continue previous scope",
+                "required_capabilities": [],
+                "context_use": {
+                    "schema_version": PLANNER_CONTEXT_USE_SCHEMA_VERSION,
+                    "mode": "carry",
+                    "referenced_turn_ids": [],
+                    "referenced_evidence_refs": [],
+                    "inherited_slots": {"account": ["lx"]},
+                    "current_message_slots": {},
+                    "override_slots": {},
+                    "requires_clarification": False,
+                    "clarification_question": None,
+                },
+                "steps": [
+                    {
+                        "id": "step_1",
+                        "tool_name": "analysis_query",
+                        "arguments": {
+                            "sql": "select account from account_monthly_performance limit 5",
+                            "account": "lx",
+                        },
+                        "purpose": "read stale scope",
+                    }
+                ],
+            },
+            settings=AssistantSettings(
+                llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+            ),
+            conversation_context={
+                "context_projection": {
+                    "schema_version": "om-context-projection-v1",
+                    "current_user_message": {"text": "继续"},
+                    "recent_turns": [
+                        {
+                            "turn_id": "turn_lx",
+                            "safe_slots": {"account": ["lx"]},
+                            "evidence_refs": ["ev_lx"],
+                        }
+                    ],
+                    "recent_successful_tools": [
+                        {"tool_name": "analysis_query", "safe_slots": {"account": ["lx"]}, "evidence_refs": ["ev_lx"]}
+                    ],
+                    "available_evidence_refs": [
+                        {"ref_id": "ev_lx", "turn_id": "turn_lx", "source_tool": "analysis_query", "safe_slots": {"account": ["lx"]}}
+                    ],
+                    "open_evidence_gaps": [],
+                    "pending_operations": [],
+                    "budget": {"truncated": False},
+                }
+            },
+            execute_tool_fn=_execute,
+        )
+    except AgentToolError as err:
+        assert err.code == "PLAN_CONTEXT_INVALID"
+        assert err.details["context_validation"]["status"] == "blocked"
+    else:
+        raise AssertionError("invalid context use should fail before tool execution")
+
+    assert calls == []
 
 
 def test_tool_plan_json_schema_exposes_optional_context_use() -> None:
@@ -8809,7 +9117,7 @@ def test_tool_plan_json_schema_exposes_optional_context_use() -> None:
     assert "inherited_slots" in context_schema["required"]
 
 
-def test_validate_tool_plan_does_not_block_context_use_shadow_declaration() -> None:
+def test_validate_tool_plan_leaves_context_use_to_context_validator() -> None:
     plan = PlannerPlan(
         goal="check runtime status",
         steps=(
@@ -8919,107 +9227,6 @@ def test_tool_plan_rejects_system_scoped_argument_families() -> None:
             assert err.details["banned_arguments"] == expected_banned
         else:
             raise AssertionError(f"{tool_name} should reject {arguments}")
-
-
-def test_tool_plan_context_drift_rejects_income_plan_for_candidate_net_income_followup() -> None:
-    frame = {
-        "schema_version": "om-conversation-frame-v1",
-        "domain": "candidate",
-        "tool_name": "candidate_filter_explain",
-        "metric_namespace": "candidate_option_metrics",
-        "key_terms": ["净收入", "net_income", "净收入非正"],
-        "tool_payload": {"account": "lx", "symbol": "9992.HK", "function": "sell_put"},
-    }
-    plan = PlannerPlan(
-        goal="解释净收入计算",
-        steps=(
-            PlannerPlanStep(
-                id="step_1",
-                tool_name="analysis_query",
-                arguments={"sql": "select month, account, net_income_cny from account_monthly_performance"},
-                purpose="查询账户收益净收入口径",
-            ),
-        ),
-        task_contract={"domain": "income", "task_mode": "explain"},
-    )
-
-    try:
-        _validate_plan_against_conversation_frame(
-            plan,
-            question="净收入是怎么计算的？",
-            conversation_context={"active_frame": frame},
-        )
-    except AgentToolError as err:
-        assert err.code == "PLAN_CONTEXT_DRIFT"
-        assert err.details["resolution"]["metric_namespace"] == "candidate_option_metrics"
-        assert err.details["offenses"]
-    else:
-        raise AssertionError("candidate net-income follow-up should reject account income plan")
-
-
-def test_tool_plan_context_drift_allows_explicit_account_income_override() -> None:
-    frame = {
-        "schema_version": "om-conversation-frame-v1",
-        "domain": "candidate",
-        "tool_name": "candidate_filter_explain",
-        "metric_namespace": "candidate_option_metrics",
-        "key_terms": ["净收入", "net_income", "净收入非正"],
-        "tool_payload": {"account": "lx", "symbol": "9992.HK", "function": "sell_put"},
-    }
-    plan = PlannerPlan(
-        goal="解释账户净收入计算",
-        steps=(
-            PlannerPlanStep(
-                id="step_1",
-                tool_name="monthly_income_report",
-                arguments={"account": "lx", "include_rows": True},
-                purpose="读取账户收益明细",
-            ),
-        ),
-        task_contract={"domain": "income", "task_mode": "explain"},
-    )
-
-    _validate_plan_against_conversation_frame(
-        plan,
-        question="刚才泡泡玛特先放下，账户净收入怎么算？",
-        conversation_context={"active_frame": frame},
-    )
-
-
-def test_tool_plan_context_drift_rejects_candidate_plan_for_account_income_followup() -> None:
-    frame = {
-        "schema_version": "om-conversation-frame-v1",
-        "domain": "income",
-        "tool_name": "monthly_income_report",
-        "metric_namespace": "account_income_metrics",
-        "key_terms": ["收益", "现金流", "净收入", "net_income_cny"],
-        "tool_payload": {"account": "lx", "month": "2026-06"},
-    }
-    plan = PlannerPlan(
-        goal="解释净收入计算",
-        steps=(
-            PlannerPlanStep(
-                id="step_1",
-                tool_name="candidate_filter_explain",
-                arguments={"symbol": "9992.HK", "account": "lx", "function": "sell_put"},
-                purpose="查询候选过滤净收入",
-            ),
-        ),
-        task_contract={"domain": "candidate", "task_mode": "diagnose"},
-    )
-
-    try:
-        _validate_plan_against_conversation_frame(
-            plan,
-            question="净收入是怎么计算的？",
-            conversation_context={"active_frame": frame},
-        )
-    except AgentToolError as err:
-        assert err.code == "PLAN_CONTEXT_DRIFT"
-        assert err.details["resolution"]["metric_namespace"] == "account_income_metrics"
-        assert err.details["offenses"]
-    else:
-        raise AssertionError("account income follow-up should reject candidate plan")
 
 
 def test_agent_loop_income_cashflow_eval_plan_guard() -> None:
