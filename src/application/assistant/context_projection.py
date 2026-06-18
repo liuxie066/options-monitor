@@ -88,6 +88,27 @@ def build_context_projection(
         if ref:
             evidence_refs.append(ref)
 
+    last_read = context.get("last_successful_read") if isinstance(context.get("last_successful_read"), dict) else {}
+    if last_read and not recent_messages:
+        turn, tool, ref = _turn_from_audit_item(
+            {
+                "created_at": "last_successful_read",
+                "raw_text": last_read.get("raw_text") or last_read.get("intent_name") or last_read.get("tool_name"),
+                "intent_name": last_read.get("intent_name"),
+                "tool_name": last_read.get("tool_name"),
+                "tool_payload": last_read.get("tool_payload") if isinstance(last_read.get("tool_payload"), dict) else {},
+                "result_ok": True,
+            },
+            rank=1,
+            ref_allocator=ref_allocator,
+        )
+        if turn:
+            turn_items.append(turn)
+        if tool:
+            tool_items.append(tool)
+        if ref:
+            evidence_refs.append(ref)
+
     open_gaps.extend(_gaps_from_context(context, start_index=len(open_gaps) + 1))
 
     turn_items = _dedupe_by_id(_sort_by_recency(turn_items), "turn_id")

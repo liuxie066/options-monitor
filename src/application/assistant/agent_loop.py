@@ -27,8 +27,8 @@ from src.application.assistant.answer_guard import (
 )
 from src.application.assistant.action_policy import decide_tool_action_policy
 from src.application.assistant.contracts import AssistantRequest, PerceptionResult, ToolCall
-from src.application.assistant.context_projection import context_projection_trace
-from src.application.assistant.context_validation import validate_context_use
+from src.application.assistant.context_projection import build_context_projection, context_projection_trace
+from src.application.assistant.context_validation import context_validation_trace, validate_context_use
 from src.application.assistant.coverage_verifier import CoverageResult, verify_coverage
 from src.application.assistant.evidence import build_evidence_bundle
 from src.application.assistant.llm_common import (
@@ -41,7 +41,6 @@ from src.application.assistant.llm_common import (
     strip_json_code_fence,
     unsupported_llm_provider_error,
 )
-from src.application.assistant.metric_glossary import metric_glossary_for_frame, metric_glossary_for_namespace
 from src.application.assistant.renderer import render_canonical_tool_result, render_inbound_text
 from src.application.assistant.session import build_agent_session_snapshot
 from src.application.assistant.settings import AssistantSettings
@@ -461,6 +460,14 @@ class PlannerPlan:
 class LlmPlannerResult:
     plan: PlannerPlan | None
     trace: dict[str, Any]
+    error: AgentToolError | None = None
+
+
+@dataclass(frozen=True)
+class _PlannerProviderAttempt:
+    payload: dict[str, Any] | None
+    planner_input: dict[str, Any]
+    reason: str
     error: AgentToolError | None = None
 
 
@@ -969,8 +976,16 @@ def execute_tool_plan(
 ) -> dict[str, Any]:
     plan = parse_tool_plan_payload(plan_payload)
     plan = _normalize_tool_plan(plan, question=question, today=_planner_today_from_context(conversation_context))
+    context_validation = _validate_planner_context_use(
+        text=question,
+        conversation_context=conversation_context,
+        plan=plan,
+        planner_manifest=_planner_tool_manifest(),
+    )
+    context_error = _context_validation_error(context_validation)
+    if context_error is not None:
+        raise context_error
     validate_tool_plan(plan, allow_preview=False)
-    _validate_plan_against_conversation_frame(plan, question=question, conversation_context=conversation_context)
     task_contract = build_task_contract(
         question=question,
         plan=plan.public_payload(),
@@ -1490,7 +1505,6 @@ def _plan_followup_read_steps(
     try:
         next_plan = _normalize_tool_plan(plan_result.plan, question=question, today=_planner_today_from_context(context))
         validate_tool_plan(next_plan, question=question, allow_preview=False)
-        _validate_plan_against_conversation_frame(next_plan, question=question, conversation_context=context)
     except AgentToolError as err:
         decision = _followup_decision_payload(
             revision=revision,
@@ -2215,12 +2229,109 @@ def plan_read_only_tools(
             ),
         )
 
+    response_fn = create_response_fn or provider_create_response_fn(provider)
     planner_payload = _planner_input_payload(text, conversation_context=conversation_context)
+    attempt = _planner_provider_attempt(
+        planner_payload=planner_payload,
+        response_fn=response_fn,
+        api_key=api_key,
+        provider=provider,
+        llm_settings=llm_settings,
+    )
+    if attempt.error is not None:
+        return LlmPlannerResult(
+            plan=None,
+            trace=_llm_trace(
+                llm_settings,
+                attempted=True,
+                reason=attempt.reason,
+                error_code=attempt.error.code,
+                conversation_context=conversation_context,
+                planner_input=attempt.planner_input,
+            ),
+            error=attempt.error,
+        )
+    if attempt.payload is None:
+        return LlmPlannerResult(
+            plan=None,
+            trace=_llm_trace(
+                llm_settings,
+                attempted=True,
+                reason=attempt.reason,
+                error_code="LLM_PROVIDER_ERROR",
+                conversation_context=conversation_context,
+                planner_input=attempt.planner_input,
+            ),
+            error=AgentToolError(
+                code="LLM_PROVIDER_ERROR",
+                message="LLM planner returned invalid JSON.",
+                details={"provider": provider},
+            ),
+        )
+
+    plan, planner_context_use, context_validation, plan_error = _validated_planner_payload(
+        attempt.payload,
+        text=text,
+        conversation_context=conversation_context,
+        planner_manifest=planner_payload.get("tools") if isinstance(planner_payload.get("tools"), list) else [],
+    )
+    if plan_error is not None:
+        if _context_validation_repair_allowed(plan_error):
+            repair_result = _repair_context_validation_plan(
+                text=text,
+                settings=settings,
+                conversation_context=conversation_context,
+                response_fn=response_fn,
+                api_key=api_key,
+                provider=provider,
+                initial_validation=context_validation,
+                initial_planner_input=attempt.planner_input,
+                initial_context_use=planner_context_use,
+                initial_error=plan_error,
+            )
+            if repair_result is not None:
+                return repair_result
+        return LlmPlannerResult(
+            plan=None,
+            trace=_llm_trace(
+                llm_settings,
+                attempted=True,
+                reason=_planner_error_trace_reason(plan_error),
+                error_code=plan_error.code,
+                conversation_context=conversation_context,
+                planner_input=attempt.planner_input,
+                planner_context_use=planner_context_use,
+                context_validation=context_validation,
+            ),
+            error=plan_error,
+        )
+    return LlmPlannerResult(
+        plan=plan,
+        trace=_llm_trace(
+            llm_settings,
+            attempted=True,
+            reason="accepted",
+            schema_version=TOOL_PLAN_SCHEMA_VERSION,
+            conversation_context=conversation_context,
+            planner_input=attempt.planner_input,
+            planner_context_use=planner_context_use,
+            context_validation=context_validation,
+        ),
+    )
+
+
+def _planner_provider_attempt(
+    *,
+    planner_payload: dict[str, Any],
+    response_fn: CreateStructuredResponseFn,
+    api_key: str,
+    provider: str,
+    llm_settings: AssistantLlmSettings,
+) -> _PlannerProviderAttempt:
     planner_input_text = json.dumps(planner_payload, ensure_ascii=False, sort_keys=True)
     planner_input_trace = _planner_input_trace(planner_payload, planner_input_text)
-
     try:
-        response = (create_response_fn or provider_create_response_fn(provider))(
+        response = response_fn(
             api_key=api_key,
             base_url=llm_settings.base_url,
             model=llm_settings.model,
@@ -2231,16 +2342,10 @@ def plan_read_only_tools(
             max_output_tokens=int(llm_settings.max_output_tokens),
         )
     except (OpenAIResponsesError, OpenAIChatCompletionsError) as err:
-        return LlmPlannerResult(
-            plan=None,
-            trace=_llm_trace(
-                llm_settings,
-                attempted=True,
-                reason="provider_error",
-                error_code="LLM_PROVIDER_ERROR",
-                conversation_context=conversation_context,
-                planner_input=planner_input_trace,
-            ),
+        return _PlannerProviderAttempt(
+            payload=None,
+            planner_input=planner_input_trace,
+            reason="provider_error",
             error=AgentToolError(
                 code="LLM_PROVIDER_ERROR",
                 message=str(err),
@@ -2248,88 +2353,148 @@ def plan_read_only_tools(
             ),
         )
     except Exception as err:
-        return LlmPlannerResult(
-            plan=None,
-            trace=_llm_trace(
-                llm_settings,
-                attempted=True,
-                reason="provider_error",
-                error_code="LLM_PROVIDER_ERROR",
-                conversation_context=conversation_context,
-                planner_input=planner_input_trace,
-            ),
+        return _PlannerProviderAttempt(
+            payload=None,
+            planner_input=planner_input_trace,
+            reason="provider_error",
             error=AgentToolError(
                 code="LLM_PROVIDER_ERROR",
                 message=f"LLM planner provider failed: {type(err).__name__}: {err}",
                 details={"provider": provider},
             ),
         )
-
     payload = _parse_provider_payload(response)
     if payload is None:
-        return LlmPlannerResult(
-            plan=None,
-            trace=_llm_trace(
-                llm_settings,
-                attempted=True,
-                reason="invalid_provider_output",
-                error_code="LLM_PROVIDER_ERROR",
-                conversation_context=conversation_context,
-                planner_input=planner_input_trace,
-            ),
-            error=AgentToolError(
-                code="LLM_PROVIDER_ERROR",
-                message="LLM planner returned invalid JSON.",
-                details={"provider": provider},
-            ),
+        return _PlannerProviderAttempt(
+            payload=None,
+            planner_input=planner_input_trace,
+            reason="invalid_provider_output",
         )
+    return _PlannerProviderAttempt(
+        payload=payload,
+        planner_input=planner_input_trace,
+        reason="accepted",
+    )
+
+
+def _validated_planner_payload(
+    payload: dict[str, Any],
+    *,
+    text: str,
+    conversation_context: dict[str, Any] | None,
+    planner_manifest: list[dict[str, Any]],
+) -> tuple[PlannerPlan | None, dict[str, Any] | None, dict[str, Any] | None, AgentToolError | None]:
     planner_context_use: dict[str, Any] | None = None
     context_validation: dict[str, Any] | None = None
     try:
         plan = parse_tool_plan_payload(payload)
         plan = _normalize_tool_plan(plan, question=text, today=_planner_today_from_context(conversation_context))
         planner_context_use = plan.context_use
-        context_validation = validate_context_use(
-            current_user_message=text,
-            context_projection=conversation_context.get("context_projection")
-            if isinstance(conversation_context, dict) and isinstance(conversation_context.get("context_projection"), dict)
-            else None,
-            plan_payload=plan.public_payload(),
-            planner_manifest=planner_payload.get("tools") if isinstance(planner_payload.get("tools"), list) else [],
+        context_validation = _validate_planner_context_use(
+            text=text,
+            conversation_context=conversation_context,
+            plan=plan,
+            planner_manifest=planner_manifest,
         )
+        context_error = _context_validation_error(context_validation)
+        if context_error is not None:
+            return None, planner_context_use, context_validation, context_error
         if not plan.steps:
-            return LlmPlannerResult(
-                plan=None,
-                trace=_llm_trace(
-                    llm_settings,
-                    attempted=True,
-                    reason="no_plan",
-                    error_code="NEEDS_CLARIFICATION",
-                    schema_version=TOOL_PLAN_SCHEMA_VERSION,
-                    conversation_context=conversation_context,
-                    planner_input=planner_input_trace,
-                    planner_context_use=planner_context_use,
-                    context_validation=context_validation,
-                ),
-                error=_no_tool_plan_error(),
-            )
+            return None, planner_context_use, context_validation, _no_tool_plan_error()
         validate_tool_plan(plan, question=text)
-        _validate_plan_against_conversation_frame(plan, question=text, conversation_context=conversation_context)
     except AgentToolError as err:
+        return None, planner_context_use, context_validation, err
+    return plan, planner_context_use, context_validation, None
+
+
+def _repair_context_validation_plan(
+    *,
+    text: str,
+    settings: AssistantSettings,
+    conversation_context: dict[str, Any] | None,
+    response_fn: CreateStructuredResponseFn,
+    api_key: str,
+    provider: str,
+    initial_validation: dict[str, Any] | None,
+    initial_planner_input: dict[str, Any],
+    initial_context_use: dict[str, Any] | None,
+    initial_error: AgentToolError,
+) -> LlmPlannerResult | None:
+    if not isinstance(initial_validation, dict):
+        return None
+    llm_settings = settings.llm
+    repair_context = _conversation_context_with_validation_repair(conversation_context, initial_validation)
+    repair_payload = _planner_input_payload(text, conversation_context=repair_context)
+    repair_attempt = _planner_provider_attempt(
+        planner_payload=repair_payload,
+        response_fn=response_fn,
+        api_key=api_key,
+        provider=provider,
+        llm_settings=llm_settings,
+    )
+    repair_trace = _context_validation_repair_trace(
+        attempted=True,
+        status="provider_error" if repair_attempt.error is not None else "planned",
+        initial_validation=initial_validation,
+        initial_planner_input=initial_planner_input,
+        repair_planner_input=repair_attempt.planner_input,
+        error=repair_attempt.error,
+    )
+    if repair_attempt.error is not None or repair_attempt.payload is None:
         return LlmPlannerResult(
             plan=None,
             trace=_llm_trace(
                 llm_settings,
                 attempted=True,
-                reason="invalid_plan",
-                error_code=err.code,
+                reason=_planner_error_trace_reason(initial_error),
+                error_code=initial_error.code,
                 conversation_context=conversation_context,
-                planner_input=planner_input_trace,
+                planner_input=initial_planner_input,
+                planner_context_use=initial_context_use,
+                context_validation=initial_validation,
+                context_validation_repair=repair_trace,
+            ),
+            error=initial_error,
+        )
+    plan, planner_context_use, context_validation, plan_error = _validated_planner_payload(
+        repair_attempt.payload,
+        text=text,
+        conversation_context=conversation_context,
+        planner_manifest=repair_payload.get("tools") if isinstance(repair_payload.get("tools"), list) else [],
+    )
+    if plan_error is not None:
+        repair_trace = _context_validation_repair_trace(
+            attempted=True,
+            status="rejected",
+            initial_validation=initial_validation,
+            initial_planner_input=initial_planner_input,
+            repair_planner_input=repair_attempt.planner_input,
+            repaired_validation=context_validation,
+            error=plan_error,
+        )
+        return LlmPlannerResult(
+            plan=None,
+            trace=_llm_trace(
+                llm_settings,
+                attempted=True,
+                reason=_planner_error_trace_reason(plan_error),
+                error_code=plan_error.code,
+                conversation_context=conversation_context,
+                planner_input=repair_attempt.planner_input,
                 planner_context_use=planner_context_use,
                 context_validation=context_validation,
+                context_validation_repair=repair_trace,
             ),
-            error=err,
+            error=plan_error,
         )
+    repair_trace = _context_validation_repair_trace(
+        attempted=True,
+        status="accepted",
+        initial_validation=initial_validation,
+        initial_planner_input=initial_planner_input,
+        repair_planner_input=repair_attempt.planner_input,
+        repaired_validation=context_validation,
+    )
     return LlmPlannerResult(
         plan=plan,
         trace=_llm_trace(
@@ -2338,11 +2503,176 @@ def plan_read_only_tools(
             reason="accepted",
             schema_version=TOOL_PLAN_SCHEMA_VERSION,
             conversation_context=conversation_context,
-            planner_input=planner_input_trace,
+            planner_input=repair_attempt.planner_input,
             planner_context_use=planner_context_use,
             context_validation=context_validation,
+            context_validation_repair=repair_trace,
         ),
     )
+
+
+def _validate_planner_context_use(
+    *,
+    text: str,
+    conversation_context: dict[str, Any] | None,
+    plan: PlannerPlan,
+    planner_manifest: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return validate_context_use(
+        current_user_message=text,
+        context_projection=conversation_context.get("context_projection")
+        if isinstance(conversation_context, dict) and isinstance(conversation_context.get("context_projection"), dict)
+        else None,
+        plan_payload=plan.public_payload(),
+        planner_manifest=planner_manifest,
+    )
+
+
+def _context_validation_error(validation: dict[str, Any] | None) -> AgentToolError | None:
+    if not isinstance(validation, dict):
+        return None
+    status = str(validation.get("status") or "")
+    if status == "passed":
+        return None
+    if status == "ask_clarification":
+        return AgentToolError(
+            code="PLAN_CONTEXT_AMBIGUOUS",
+            message=_context_validation_clarification_text(validation),
+            hint="请明确要沿用哪一轮、哪个账户/标的/月度，或把当前问题改成自包含查询。",
+            details={
+                "context_validation": dict(validation),
+                "requires_user_clarification": True,
+                "planner_repairable": False,
+            },
+        )
+    if status == "blocked":
+        return AgentToolError(
+            code="PLAN_CONTEXT_INVALID",
+            message="Planner 对上一轮上下文的引用不安全，已阻止执行工具。",
+            hint="需要重新规划为带显式引用的上下文使用，或向用户澄清要沿用哪一轮范围。",
+            details={
+                "context_validation": dict(validation),
+                "requires_user_clarification": False,
+                "planner_repairable": True,
+            },
+        )
+    return AgentToolError(
+        code="PLAN_CONTEXT_INVALID",
+        message="Planner 上下文校验未通过，已阻止执行工具。",
+        details={"context_validation": dict(validation), "planner_repairable": False},
+    )
+
+
+def _context_validation_clarification_text(validation: dict[str, Any]) -> str:
+    violation = validation.get("violation") if isinstance(validation.get("violation"), dict) else {}
+    reason = str(violation.get("reason") or "").strip()
+    if reason == "planner_declared_ambiguity":
+        return "上一轮上下文不明确，请确认要沿用哪一轮范围。"
+    if reason == "context_projection_truncated_without_reference":
+        return "可见上下文已被裁剪，请明确要沿用的账户、标的、月份或上一轮结果。"
+    if reason == "carry_context_without_reference_and_overlapping_slots":
+        return "有多轮上下文都可能匹配当前追问，请确认要沿用哪一个范围。"
+    return "当前追问缺少足够上下文，请明确要沿用哪一轮范围。"
+
+
+def _context_validation_repair_allowed(err: AgentToolError) -> bool:
+    details = err.details if isinstance(err.details, dict) else {}
+    validation = details.get("context_validation") if isinstance(details.get("context_validation"), dict) else {}
+    return err.code == "PLAN_CONTEXT_INVALID" and str(validation.get("status") or "") == "blocked"
+
+
+def _planner_error_trace_reason(err: AgentToolError) -> str:
+    if err.code == "PLAN_CONTEXT_AMBIGUOUS":
+        return "context_validation_ask_clarification"
+    if err.code == "PLAN_CONTEXT_INVALID":
+        return "context_validation_blocked"
+    if err.code == "NEEDS_CLARIFICATION":
+        return "no_plan"
+    return "invalid_plan"
+
+
+def _conversation_context_with_validation_repair(
+    conversation_context: dict[str, Any] | None,
+    validation: dict[str, Any],
+) -> dict[str, Any]:
+    context = dict(conversation_context or {})
+    context["context_validation_repair"] = _context_validation_repair_payload(validation)
+    return context
+
+
+def _context_validation_repair_payload(validation: dict[str, Any]) -> dict[str, Any]:
+    payload = {
+        "schema_version": "om-context-validation-repair-v1",
+        "status": str(validation.get("status") or ""),
+        "code": str(validation.get("code") or ""),
+        "context_use_mode": str(validation.get("context_use_mode") or ""),
+        "referenced_turn_ids": list(validation.get("referenced_turn_ids") or []),
+        "referenced_evidence_refs": list(validation.get("referenced_evidence_refs") or []),
+        "validation": context_validation_trace(validation),
+        "instruction": (
+            "The previous plan failed deterministic context validation. Return a corrected plan that only "
+            "uses declared, visible context refs. If no safe reference exists, return context_use.mode=ambiguous, "
+            "requires_clarification=true, and steps=[]."
+        ),
+    }
+    violation = validation.get("violation") if isinstance(validation.get("violation"), dict) else {}
+    if violation:
+        payload["violation"] = _safe_context_validation_violation(violation)
+    slots = validation.get("validated_slots") if isinstance(validation.get("validated_slots"), dict) else {}
+    if slots:
+        payload["validated_slots"] = dict(slots)
+    return payload
+
+
+def _safe_context_validation_violation(violation: dict[str, Any]) -> dict[str, Any]:
+    allowed = (
+        "reason",
+        "slot",
+        "tool_name",
+        "missing_turn_ids",
+        "missing_evidence_refs",
+        "declared_values",
+        "available_values",
+        "plan_values",
+        "current_values",
+        "inherited_values",
+        "extra_arguments",
+        "allowed_arguments",
+        "banned_arguments",
+        "step_count",
+    )
+    out: dict[str, Any] = {}
+    for key in allowed:
+        value = violation.get(key)
+        if value not in (None, "", [], {}):
+            out[key] = value
+    return out
+
+
+def _context_validation_repair_trace(
+    *,
+    attempted: bool,
+    status: str,
+    initial_validation: dict[str, Any],
+    initial_planner_input: dict[str, Any],
+    repair_planner_input: dict[str, Any] | None = None,
+    repaired_validation: dict[str, Any] | None = None,
+    error: AgentToolError | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "schema_version": "om-context-validation-repair-trace-v1",
+        "attempted": bool(attempted),
+        "status": str(status or ""),
+        "initial_validation": context_validation_trace(initial_validation),
+        "initial_planner_input": dict(initial_planner_input),
+    }
+    if repair_planner_input is not None:
+        payload["repair_planner_input"] = dict(repair_planner_input)
+    if repaired_validation is not None:
+        payload["repaired_validation"] = context_validation_trace(repaired_validation)
+    if error is not None:
+        payload["error_code"] = error.code
+    return payload
 
 
 def synthesize_tool_plan_response(
@@ -2697,222 +3027,6 @@ def validate_tool_plan(plan: PlannerPlan, *, question: str | None = None, allow_
             details={"planned_tools": [step.tool_name for step in plan.steps]},
         )
 
-
-def _validate_plan_against_conversation_frame(
-    plan: PlannerPlan,
-    *,
-    question: str,
-    conversation_context: dict[str, Any] | None,
-) -> None:
-    resolution = _conversation_followup_resolution(question, conversation_context)
-    if resolution.get("status") != "resolved_from_active_frame":
-        return
-    namespace = str(resolution.get("metric_namespace") or "").strip()
-    offenses: list[dict[str, Any]] = []
-    if namespace == "candidate_option_metrics":
-        offenses = _candidate_metric_context_offenses(plan)
-    elif namespace == "account_income_metrics":
-        offenses = _account_income_metric_context_offenses(plan)
-    if not offenses:
-        return
-    frame = conversation_context.get("active_frame") if isinstance(conversation_context, dict) else {}
-    raise AgentToolError(
-        code="PLAN_CONTEXT_DRIFT",
-        message="短追问的指标口径与上一轮上下文不一致，已阻止 planner 漂移到另一个净收入定义。",
-        hint="保留 active_frame 的 domain/tool/metric_namespace，除非用户明确切换到另一个业务口径。",
-        details={
-            "resolution": resolution,
-            "active_frame": _planner_compact_frame(frame if isinstance(frame, dict) else {}),
-            "offenses": offenses,
-            "planned_tools": [step.tool_name for step in plan.steps],
-        },
-    )
-
-
-def _candidate_metric_context_offenses(plan: PlannerPlan) -> list[dict[str, Any]]:
-    offenses: list[dict[str, Any]] = []
-    contract = plan.task_contract if isinstance(plan.task_contract, dict) else {}
-    if str(contract.get("domain") or "").strip() == "income":
-        offenses.append({"kind": "task_contract_domain", "domain": "income"})
-    for step in plan.steps:
-        if step.tool_name == "monthly_income_report":
-            offenses.append({"kind": "tool_namespace", "tool_name": step.tool_name})
-        elif step.tool_name == "analysis_query" and _analysis_arguments_match_income_metrics(step.arguments):
-            offenses.append({"kind": "analysis_namespace", "tool_name": step.tool_name})
-    return offenses
-
-
-def _account_income_metric_context_offenses(plan: PlannerPlan) -> list[dict[str, Any]]:
-    offenses: list[dict[str, Any]] = []
-    contract = plan.task_contract if isinstance(plan.task_contract, dict) else {}
-    if str(contract.get("domain") or "").strip() == "candidate":
-        offenses.append({"kind": "task_contract_domain", "domain": "candidate"})
-    for step in plan.steps:
-        if step.tool_name in {"candidate_filter_explain", "candidate_rank_explain"}:
-            offenses.append({"kind": "tool_namespace", "tool_name": step.tool_name})
-        elif step.tool_name == "analysis_query" and _analysis_arguments_match_candidate_metrics(step.arguments):
-            offenses.append({"kind": "analysis_namespace", "tool_name": step.tool_name})
-    return offenses
-
-
-def _analysis_arguments_match_income_metrics(arguments: dict[str, Any]) -> bool:
-    text = _planner_selection_haystack([_compact_json_for_planner_selection(arguments)])
-    return any(
-        token in text
-        for token in (
-            "account_monthly_performance",
-            "account_monthly_income_components",
-            "monthly_income_",
-            "net_income_cny",
-            "premium_income_cny",
-            "realized_pnl_cny",
-            "income_cashflow_ex_assignment_stock",
-        )
-    )
-
-
-def _analysis_arguments_match_candidate_metrics(arguments: dict[str, Any]) -> bool:
-    text = _planner_selection_haystack([_compact_json_for_planner_selection(arguments)])
-    return any(
-        token in text
-        for token in (
-            "candidate_filter_diagnostics",
-            "candidate_filter_explain",
-            "metrics_net_income_non_positive",
-            "net_income_non_positive",
-        )
-    )
-
-
-def _conversation_followup_resolution(
-    text: str,
-    conversation_context: dict[str, Any] | None,
-) -> dict[str, Any]:
-    if not isinstance(conversation_context, dict):
-        return {}
-    frame = conversation_context.get("active_frame")
-    if not isinstance(frame, dict):
-        return {}
-    namespace = str(frame.get("metric_namespace") or "").strip()
-    if namespace not in {"candidate_option_metrics", "account_income_metrics"}:
-        return {}
-    if not _is_short_metric_followup(text):
-        return {
-            "schema_version": "om-followup-resolution-v1",
-            "status": "unresolved",
-            "reason": "not_short_metric_followup",
-            "metric_namespace": namespace,
-        }
-    if namespace == "candidate_option_metrics" and _question_explicitly_requests_account_income(text):
-        return {
-            "schema_version": "om-followup-resolution-v1",
-            "status": "explicit_message_overrides_context",
-            "reason": "explicit_account_income_scope",
-            "metric_namespace": "account_income_metrics",
-            "previous_metric_namespace": namespace,
-        }
-    if namespace == "account_income_metrics" and _question_explicitly_requests_candidate_metrics(text):
-        return {
-            "schema_version": "om-followup-resolution-v1",
-            "status": "explicit_message_overrides_context",
-            "reason": "explicit_candidate_scope",
-            "metric_namespace": "candidate_option_metrics",
-            "previous_metric_namespace": namespace,
-        }
-    return {
-        "schema_version": "om-followup-resolution-v1",
-        "status": "resolved_from_active_frame",
-        "reason": "short_metric_followup",
-        "domain": frame.get("domain"),
-        "tool_name": frame.get("tool_name"),
-        "metric_namespace": namespace,
-        "key_terms": [str(item) for item in frame.get("key_terms") or [] if str(item).strip()],
-    }
-
-
-def _active_frame_context_allowed(
-    text: str,
-    conversation_context: dict[str, Any] | None,
-) -> bool:
-    if not isinstance(conversation_context, dict):
-        return False
-    frame = conversation_context.get("active_frame")
-    if not isinstance(frame, dict):
-        return True
-    namespace = str(frame.get("metric_namespace") or "").strip()
-    if namespace == "candidate_option_metrics" and _question_explicitly_requests_account_income(text):
-        return False
-    if namespace == "account_income_metrics" and _question_explicitly_requests_candidate_metrics(text):
-        return False
-    return True
-
-
-def _is_short_metric_followup(text: str) -> bool:
-    compact = re.sub(r"\s+", "", str(text or "").lower())
-    if not compact or len(compact) > 80:
-        return False
-    metric_tokens = ("净收入", "net_income", "netincome", "这个指标", "这个", "那个", "刚才", "上面", "前面")
-    explain_tokens = (
-        "为什么",
-        "为何",
-        "为啥",
-        "怎么算",
-        "怎么计算",
-        "如何计算",
-        "怎么来的",
-        "是什么",
-        "什么意思",
-        "指什么",
-        "how",
-        "calculate",
-        "computed",
-        "meaning",
-    )
-    return any(token in compact for token in metric_tokens) and any(token in compact for token in explain_tokens)
-
-
-def _question_explicitly_requests_account_income(text: str) -> bool:
-    compact = re.sub(r"\s+", "", str(text or "").lower())
-    return any(
-        token in compact
-        for token in (
-            "账户",
-            "账本",
-            "月度",
-            "月份",
-            "现金流",
-            "收益率",
-            "账户收益",
-            "net_income_cny",
-            "account",
-            "monthly",
-            "ledger",
-            "cashflow",
-        )
-    )
-
-
-def _question_explicitly_requests_candidate_metrics(text: str) -> bool:
-    compact = re.sub(r"\s+", "", str(text or "").lower())
-    return any(
-        token in compact
-        for token in (
-            "候选",
-            "过滤",
-            "参数",
-            "期权",
-            "sell_put",
-            "sellput",
-            "sell_call",
-            "sellcall",
-            "covered_call",
-            "coveredcall",
-            "candidate",
-            "filter",
-        )
-    )
-
-
 def _plan_step_kind(tool_name: str) -> str | None:
     name = str(tool_name or "")
     if name in AGENT_LOOP_READ_TOOLS:
@@ -3028,11 +3142,6 @@ def _planning_outcome_from_tool_plan_result(
         return AgentLoopPlanningOutcome(perception=None, trace={**dict(result.trace), "reason": "no_plan"}, error=_no_tool_plan_error()), ()
     try:
         validate_tool_plan(result.plan, question=question)
-        _validate_plan_against_conversation_frame(
-            result.plan,
-            question=question,
-            conversation_context=conversation_context,
-        )
     except AgentToolError as err:
         return AgentLoopPlanningOutcome(perception=None, trace={**dict(result.trace), "reason": "invalid_plan", "error_code": err.code}, error=err), ()
     planned_steps = tuple(
@@ -4999,48 +5108,196 @@ def _market_config_key(symbol: Any) -> str | None:
     return None
 
 
+def _planner_context_projection(
+    text: str,
+    *,
+    conversation_context: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if isinstance(conversation_context, dict):
+        projection = conversation_context.get("context_projection")
+        if isinstance(projection, dict) and projection:
+            return dict(projection)
+    return build_context_projection(
+        current_user_message=str(text or ""),
+        conversation_context=conversation_context if isinstance(conversation_context, dict) else None,
+    )
+
+
+def _planner_projection_payload(projection: dict[str, Any], *, current_user_message: str) -> dict[str, Any]:
+    policy = projection.get("policy") if isinstance(projection.get("policy"), dict) else {}
+    budget = projection.get("budget") if isinstance(projection.get("budget"), dict) else {}
+    out: dict[str, Any] = {
+        "schema_version": str(projection.get("schema_version") or "om-context-projection-v1"),
+        "current_user_message": {"text": str(current_user_message or "")},
+        "recent_turns": _planner_projection_items(
+            projection.get("recent_turns"),
+            allowed_keys={
+                "turn_id",
+                "created_at",
+                "updated_at",
+                "user_summary",
+                "assistant_summary",
+                "tools",
+                "safe_slots",
+                "evidence_refs",
+                "result_status",
+            },
+            limit=6,
+        ),
+        "recent_successful_tools": _planner_projection_items(
+            projection.get("recent_successful_tools"),
+            allowed_keys={
+                "turn_id",
+                "created_at",
+                "tool_name",
+                "purpose",
+                "safe_payload",
+                "safe_slots",
+                "evidence_refs",
+                "data_shape",
+                "result_status",
+            },
+            limit=5,
+        ),
+        "available_evidence_refs": _planner_projection_items(
+            projection.get("available_evidence_refs"),
+            allowed_keys={"ref_id", "turn_id", "source_type", "source_tool", "label", "safe_slots", "data_shape"},
+            limit=12,
+        ),
+        "open_evidence_gaps": _planner_projection_items(
+            projection.get("open_evidence_gaps"),
+            allowed_keys={
+                "gap_id",
+                "turn_id",
+                "kind",
+                "summary",
+                "suggested_tools",
+                "suggested_views",
+                "safe_slots",
+                "created_at",
+            },
+            limit=5,
+        ),
+        "pending_operations": _planner_projection_items(
+            projection.get("pending_operations"),
+            allowed_keys={"operation_id", "operation_type", "status", "summary", "created_at", "expires_at", "safe_slots"},
+            limit=5,
+        ),
+        "user_profile": _planner_projection_sanitize(projection.get("user_profile")),
+        "policy": {
+            "current_message_wins": bool(policy.get("current_message_wins", True)),
+            "context_is_hint": bool(policy.get("context_is_hint", True)),
+            "ask_when_ambiguous": bool(policy.get("ask_when_ambiguous", True)),
+            "declare_context_use": bool(policy.get("declare_context_use", True)),
+        },
+        "budget": _planner_projection_sanitize(budget) if budget else {"truncated": False},
+    }
+    system_events = _planner_projection_items(
+        projection.get("system_events"),
+        allowed_keys={"schema_version", "event_id", "event_type", "summary", "reason"},
+        limit=3,
+    )
+    if system_events:
+        out["system_events"] = system_events
+    _trim_planner_projection_payload(out)
+    return out
+
+
+def _planner_projection_items(
+    value: Any,
+    *,
+    allowed_keys: set[str],
+    limit: int,
+) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in value:
+        if len(out) >= max(0, int(limit)):
+            break
+        if not isinstance(item, dict):
+            continue
+        compact = {
+            str(key): _planner_projection_sanitize(item.get(key))
+            for key in allowed_keys
+            if item.get(key) not in (None, "", [], {})
+        }
+        if compact:
+            out.append(compact)
+    return out
+
+
+def _planner_projection_sanitize(value: Any, *, string_limit: int = 600) -> Any:
+    if value in (None, "", [], {}):
+        return value
+    if isinstance(value, str):
+        return value[:string_limit]
+    if isinstance(value, (int, float, bool)):
+        return value
+    if isinstance(value, list):
+        return [
+            _planner_projection_sanitize(item, string_limit=string_limit)
+            for item in value[:20]
+            if not isinstance(item, dict) or item
+        ]
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key or "").strip()
+            if not key_text:
+                continue
+            sanitized = _planner_projection_sanitize(item, string_limit=string_limit)
+            if sanitized not in (None, "", [], {}):
+                out[key_text] = sanitized
+        return out
+    return str(value)[:string_limit]
+
+
+def _trim_planner_projection_payload(payload: dict[str, Any]) -> None:
+    budget = payload.get("budget") if isinstance(payload.get("budget"), dict) else {}
+    raw_max_chars = budget.get("max_chars") if budget else None
+    try:
+        max_chars = int(raw_max_chars or 12000)
+    except (TypeError, ValueError):
+        max_chars = 12000
+    max_chars = max(1000, min(max_chars, 12000))
+    while len(json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)) > max_chars:
+        for key in ("recent_turns", "recent_successful_tools", "available_evidence_refs", "open_evidence_gaps"):
+            items = payload.get(key)
+            if isinstance(items, list) and items:
+                items.pop()
+                budget = payload.setdefault("budget", {})
+                if isinstance(budget, dict):
+                    budget["truncated"] = True
+                    budget["truncation_reason"] = "planner_projection_budget"
+                break
+        else:
+            break
+
+
 def _planner_input_payload(text: str, *, conversation_context: dict[str, Any] | None) -> dict[str, Any]:
     selection = _planner_analysis_view_selection(text, conversation_context=conversation_context)
     tools = _planner_tool_manifest(analysis_view_names=selection["selected_analysis_views"])
     payload: dict[str, Any] = {
         "message": str(text or ""),
+        "current_user_message": {"text": str(text or "")},
         "tools": tools,
         "manifest_budget": _planner_manifest_budget(tools=tools, analysis_view_selection=selection),
     }
     if isinstance(conversation_context, dict):
-        followup_resolution = _conversation_followup_resolution(text, conversation_context)
-        active_frame_allowed = _active_frame_context_allowed(text, conversation_context)
+        projection = _planner_context_projection(text, conversation_context=conversation_context)
+        projection_payload = _planner_projection_payload(projection, current_user_message=text)
         context_payload = {
-            "window_messages": int(conversation_context.get("window_messages") or 0),
+            "current_user_message": {"text": str(text or "")},
+            "context_projection": projection_payload,
+            "context_policy": dict(projection_payload.get("policy") or {}),
             "temporal_context": conversation_context.get("temporal_context")
             if isinstance(conversation_context.get("temporal_context"), dict)
             else {},
-            "semantics": conversation_context.get("semantics") if isinstance(conversation_context.get("semantics"), dict) else {},
-            "last_successful_read": conversation_context.get("last_successful_read")
-            if isinstance(conversation_context.get("last_successful_read"), dict)
-            else None,
-            "user_profile": conversation_context.get("user_profile")
-            if isinstance(conversation_context.get("user_profile"), dict)
-            else {"provided": False},
         }
-        active_frame = conversation_context.get("active_frame") if isinstance(conversation_context.get("active_frame"), dict) else None
-        if active_frame and active_frame_allowed:
-            context_payload["active_frame"] = _planner_compact_frame(active_frame)
-            glossary = metric_glossary_for_frame(active_frame)
-            if glossary:
-                context_payload["metric_glossary"] = glossary
-        elif followup_resolution.get("status") == "explicit_message_overrides_context":
-            glossary = metric_glossary_for_namespace(str(followup_resolution.get("metric_namespace") or ""))
-            if glossary:
-                context_payload["metric_glossary"] = glossary
-        frame_stack = _planner_compact_frame_stack(conversation_context) if active_frame_allowed else []
-        if frame_stack:
-            context_payload["frame_stack"] = frame_stack
-        if followup_resolution:
-            context_payload["followup_resolution"] = followup_resolution
-        recent_read_hints = _planner_recent_read_hints(conversation_context)
-        if active_frame_allowed and recent_read_hints and _planner_selection_used_context(selection):
-            context_payload["recent_read_hints"] = recent_read_hints
+        repair = conversation_context.get("context_validation_repair")
+        if isinstance(repair, dict) and repair:
+            context_payload["context_validation_repair"] = dict(repair)
         payload["context"] = context_payload
     return payload
 
@@ -5057,28 +5314,12 @@ def _planner_input_trace(payload: dict[str, Any], input_text: str) -> dict[str, 
     tools = payload.get("tools") if isinstance(payload.get("tools"), list) else []
     budget = payload.get("manifest_budget") if isinstance(payload.get("manifest_budget"), dict) else {}
     context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
-    recent_hints = context.get("recent_read_hints") if isinstance(context.get("recent_read_hints"), list) else []
-    active_frame = context.get("active_frame") if isinstance(context.get("active_frame"), dict) else {}
-    frame_stack = context.get("frame_stack") if isinstance(context.get("frame_stack"), list) else []
-    followup_resolution = context.get("followup_resolution") if isinstance(context.get("followup_resolution"), dict) else {}
+    projection = context.get("context_projection") if isinstance(context.get("context_projection"), dict) else {}
+    projection_trace = context_projection_trace(projection)
     return {
         "chars": len(input_text),
         "tool_count": len(tools),
-        "recent_read_hint_count": len(recent_hints),
-        "frame_count": len(frame_stack),
-        "active_frame": {
-            "domain": active_frame.get("domain"),
-            "tool_name": active_frame.get("tool_name"),
-            "metric_namespace": active_frame.get("metric_namespace"),
-        }
-        if active_frame
-        else {},
-        "followup_resolution": {
-            "status": followup_resolution.get("status"),
-            "metric_namespace": followup_resolution.get("metric_namespace"),
-        }
-        if followup_resolution
-        else {},
+        "context_projection": projection_trace,
         "manifest_budget": dict(budget),
     }
 
@@ -5086,21 +5327,10 @@ def _planner_input_trace(payload: dict[str, Any], input_text: str) -> dict[str, 
 def _answer_context_trace(question: str, conversation_context: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(conversation_context, dict):
         return {"provided": False}
-    frames = conversation_context.get("frame_stack") if isinstance(conversation_context.get("frame_stack"), list) else []
-    frame = conversation_context.get("active_frame") if isinstance(conversation_context.get("active_frame"), dict) else None
-    active_frame_allowed = _active_frame_context_allowed(question, conversation_context)
-    followup_resolution = _conversation_followup_resolution(question, conversation_context)
     payload: dict[str, Any] = {
         "provided": True,
-        "frame_count": len(frames),
-        "active_frame_allowed": bool(active_frame_allowed),
+        "window_messages": int(conversation_context.get("window_messages") or 0),
     }
-    if frame and active_frame_allowed:
-        payload["active_frame"] = _answer_context_frame_trace(frame)
-    elif frame:
-        payload["suppressed_active_frame"] = _answer_context_frame_trace(frame)
-    if followup_resolution:
-        payload["followup_resolution"] = _answer_followup_resolution_trace(followup_resolution)
     projection_trace = context_projection_trace(
         conversation_context.get("context_projection")
         if isinstance(conversation_context.get("context_projection"), dict)
@@ -5109,82 +5339,6 @@ def _answer_context_trace(question: str, conversation_context: dict[str, Any] | 
     if projection_trace.get("provided"):
         payload["context_projection"] = projection_trace
     return payload
-
-
-def _answer_context_frame_trace(frame: dict[str, Any]) -> dict[str, Any]:
-    out: dict[str, Any] = {}
-    for key in ("source", "rank", "domain", "tool_name", "metric_namespace"):
-        value = frame.get(key)
-        if value not in (None, "", [], {}):
-            out[key] = value
-    return out
-
-
-def _answer_followup_resolution_trace(resolution: dict[str, Any]) -> dict[str, Any]:
-    out: dict[str, Any] = {}
-    for key in (
-        "status",
-        "reason",
-        "domain",
-        "tool_name",
-        "metric_namespace",
-        "previous_metric_namespace",
-    ):
-        value = resolution.get(key)
-        if value not in (None, "", [], {}):
-            out[key] = value
-    return out
-
-
-def _planner_compact_frame_stack(conversation_context: dict[str, Any] | None) -> list[dict[str, Any]]:
-    if not isinstance(conversation_context, dict):
-        return []
-    frames = conversation_context.get("frame_stack") if isinstance(conversation_context.get("frame_stack"), list) else []
-    return [
-        compact
-        for frame in frames[:3]
-        for compact in [_planner_compact_frame(frame if isinstance(frame, dict) else {})]
-        if compact
-    ]
-
-
-def _planner_compact_frame(frame: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(frame, dict) or not frame:
-        return {}
-    out: dict[str, Any] = {}
-    for key in (
-        "schema_version",
-        "source",
-        "rank",
-        "domain",
-        "task_mode",
-        "tool_name",
-        "intent_name",
-        "metric_namespace",
-        "evidence_source",
-        "confidence",
-    ):
-        value = frame.get(key)
-        if value not in (None, "", [], {}):
-            out[key] = value
-    key_terms = [str(item) for item in frame.get("key_terms") or [] if str(item).strip()]
-    if key_terms:
-        out["key_terms"] = key_terms[:8]
-    payload = frame.get("tool_payload") if isinstance(frame.get("tool_payload"), dict) else {}
-    if payload:
-        out["tool_payload"] = {
-            str(key): value
-            for key, value in payload.items()
-            if str(key) in {"account", "action", "function", "kind", "month", "run_id", "status", "symbol"}
-        }
-    excerpt = str(frame.get("response_excerpt") or "").strip()
-    if excerpt:
-        out["response_excerpt"] = excerpt[:240]
-    return out
-
-
-def _planner_selection_used_context(selection: dict[str, Any]) -> bool:
-    return any(str(item).startswith("conversation_context") for item in selection.get("selection_sources") or [])
 
 
 def _planner_manifest_budget(*, tools: list[dict[str, Any]], analysis_view_selection: dict[str, Any]) -> dict[str, Any]:
@@ -5222,8 +5376,10 @@ Rules:
 - task_contract.required_evidence should name evidence categories needed to complete the answer, not tool names. Examples: summary, driver_or_breakdown, same_scope_comparable_data, observed_status, diagnostic_evidence, rule_or_config_source, current_state, constraints, risk_premise, source_policy.
 - task_contract.answer_shape should name what the final answer must cover, such as conclusion, drivers, same_scope_comparison, cause_chain, evidence_boundary, risk, premise, options, source_policy.
 - Always fill context_use when the schema includes it. Use mode=none when the current message is self-contained; use carry/refine/override only when the plan intentionally depends on prior conversation state.
-- Current user message wins over prior context. If the user explicitly changes account, symbol, metric namespace, month, domain, or requested effect, declare mode=override and put the replacement values in current_message_slots or override_slots.
-- Recent turns, active_frame, followup_resolution, and prior evidence refs are planner-visible hints, not hidden truth. Only inherit slots that are needed by the plan, and declare them in context_use.inherited_slots with referenced_turn_ids or referenced_evidence_refs when available.
+- Current user message wins over context.context_projection. If the user explicitly changes account, symbol, month, domain, strategy, operation, or requested effect, declare mode=override and put the replacement values in current_message_slots or override_slots.
+- Use context.context_projection as the only conversation-state authority for planning. recent_turns, recent_successful_tools, available_evidence_refs, open_evidence_gaps, pending_operations, and safe_slots are planner-visible hints, not hidden truth.
+- Only inherit slots that are needed by the plan, and declare them in context_use.inherited_slots with referenced_turn_ids or referenced_evidence_refs when available. Prefer evidence refs over raw prior summaries whenever a prior tool result is being reused.
+- If open_evidence_gaps suggests relevant views/tools, treat them as recoverable evidence hints, not as facts.
 - If prior context is required but cannot be chosen safely, set context_use.mode=ambiguous, requires_clarification=true, provide a clarification_question, and return steps=[] rather than guessing.
 - Use only tools/capabilities in the provided manifest.
 - Fill required_capabilities with the user's required answer capabilities from the tool manifest. Use [] only when the request needs no special capability beyond the planned tool call.
@@ -5231,8 +5387,7 @@ Rules:
 - Never plan confirm/cancel/apply actions. Confirm/cancel must be handled by deterministic user commands bound to a pending operation.
 - Do not include system-scoped, path, config, audit, host, port, timeout, service, delivery, or trigger arguments such as config_key, config_path, data_config, output_dir, report_path, run_dir, logs_root, state_dir, opend_telnet_host, timeout_sec, or audit_db. The system injects those.
 - Resolve relative dates using context.temporal_context.current_date in Asia/Shanghai. For a month without a year such as "6月", use the current_date year.
-- For short follow-up questions about a term, metric, or calculation, use context.active_frame and context.followup_resolution. If followup_resolution.status=resolved_from_active_frame, preserve active_frame.domain/tool_name/metric_namespace and reuse compatible scope payload unless the user clearly changes topic.
-- If context.metric_glossary is present for an ambiguous term such as 净收入, treat it as the metric definition namespace for planning. Example: after candidate_filter_explain reports "净收入非正" for 泡泡玛特, "净收入是怎么计算的？" refers to candidate_option_metrics.net_income, not account_income_metrics.net_income_cny.
+- For short follow-up questions about a term, metric, calculation, or previous result, inspect context.context_projection.recent_turns and available_evidence_refs. Carry or refine only when one prior turn/evidence ref is clearly relevant; otherwise ask clarification.
 - For monthly income summary questions, use monthly_income_report with account/month when available.
 - For combined/all-account return questions, include required_capabilities=["combined_account_return"] and use monthly_income_report without account.
 - For income analysis/review/performance, cashflow detail, net cashflow composition, net inflow source, "分析", "复盘", "表现", "明细", "组成", "构成", "来源", or "由什么组成", use monthly_income_report with include_rows=true; the Agent composer will write the final user response from tool evidence.
@@ -5260,50 +5415,24 @@ def _planner_analysis_view_selection(
     selected: list[str] = []
     matched_groups: list[str] = []
     selection_sources: list[str] = []
-    followup_resolution = _conversation_followup_resolution(text, conversation_context)
-    if followup_resolution.get("status") == "resolved_from_active_frame":
-        frame_views = _planner_analysis_views_for_active_frame(text, conversation_context)
-        if frame_views:
-            return {
-                "mode": "scoped_analysis_views",
-                "selected_analysis_views": frame_views[:MAX_PLANNER_ANALYSIS_VIEWS],
-                "matched_view_groups": [str(followup_resolution.get("domain") or "active_frame")],
-                "selection_sources": ["conversation_context.active_frame"],
-            }
-    elif followup_resolution.get("status") == "explicit_message_overrides_context":
-        override_views = _planner_analysis_views_for_metric_namespace(str(followup_resolution.get("metric_namespace") or ""))
-        if override_views:
-            return {
-                "mode": "scoped_analysis_views",
-                "selected_analysis_views": override_views[:MAX_PLANNER_ANALYSIS_VIEWS],
-                "matched_view_groups": [_planner_group_for_metric_namespace(str(followup_resolution.get("metric_namespace") or ""))],
-                "selection_sources": ["conversation_context.explicit_override"],
-            }
-
     message_groups, message_views = _planner_matched_analysis_groups(_planner_selection_haystack([text]))
     if message_views:
         matched_groups.extend(message_groups)
         selected.extend(message_views)
         selection_sources.append("message")
-        if _planner_should_blend_context_for_term_followup(text, conversation_context):
-            context_views = _planner_context_suggested_analysis_views(text, conversation_context)
-            if context_views:
-                selected.extend(context_views)
-                selection_sources.append("conversation_context.followup_suggested_views")
-            context_hints = _planner_selection_context_hints(conversation_context, text=text)
-            context_groups, context_group_views = _planner_matched_analysis_groups(
-                _planner_selection_haystack(context_hints)
-            )
-            if context_group_views:
-                matched_groups.extend(context_groups)
-                selected.extend(context_group_views)
-                selection_sources.append("conversation_context.term_followup")
-    else:
-        context_views = _planner_context_suggested_analysis_views(text, conversation_context)
-        if context_views:
-            selected.extend(context_views)
-            selection_sources.append("conversation_context.followup_suggested_views")
+    projection = _planner_context_projection(text, conversation_context=conversation_context)
+    gap_views = _planner_context_suggested_analysis_views(text, conversation_context)
+    if gap_views:
+        selected.extend(gap_views)
+        matched_groups.extend(_planner_groups_for_analysis_views(gap_views))
+        selection_sources.append("context_projection.open_evidence_gaps")
 
+    projection_has_recent_evidence = bool(
+        projection.get("recent_turns") or projection.get("recent_successful_tools") or projection.get("available_evidence_refs")
+    )
+    if projection_has_recent_evidence and (
+        not message_views or _planner_should_blend_context_for_term_followup(text, conversation_context)
+    ):
         context_hints = _planner_selection_context_hints(conversation_context, text=text)
         context_groups, context_group_views = _planner_matched_analysis_groups(
             _planner_selection_haystack(context_hints)
@@ -5311,7 +5440,14 @@ def _planner_analysis_view_selection(
         if context_group_views:
             matched_groups.extend(context_groups)
             selected.extend(context_group_views)
-            selection_sources.append("conversation_context")
+            selection_sources.append("context_projection.recent_evidence")
+
+    if not selected:
+        ref_views = _planner_projection_views_from_refs(projection)
+        if ref_views:
+            selected.extend(ref_views)
+            matched_groups.extend(_planner_groups_for_analysis_views(ref_views))
+            selection_sources.append("context_projection.available_evidence_refs")
 
     if not selected:
         selected.extend(_DEFAULT_PLANNER_ANALYSIS_VIEWS)
@@ -5349,14 +5485,15 @@ def _planner_should_blend_context_for_term_followup(
     text: str,
     conversation_context: dict[str, Any] | None,
 ) -> bool:
-    if not isinstance(conversation_context, dict):
-        return False
-    if not _active_frame_context_allowed(text, conversation_context):
-        return False
+    projection = _planner_context_projection(text, conversation_context=conversation_context)
     if not _planner_selection_context_hints(conversation_context, text=text):
+        return False
+    if not (projection.get("recent_turns") or projection.get("recent_successful_tools") or projection.get("available_evidence_refs")):
         return False
     compact = re.sub(r"\s+", "", str(text or "").lower())
     if not compact:
+        return False
+    if _planner_message_has_explicit_context_switch(compact):
         return False
     term_tokens = (
         "怎么算",
@@ -5371,6 +5508,8 @@ def _planner_should_blend_context_for_term_followup(
         "刚才",
         "上面",
         "前面",
+        "为什么",
+        "为何",
         "why",
         "how",
         "calculate",
@@ -5378,6 +5517,43 @@ def _planner_should_blend_context_for_term_followup(
         "meaning",
     )
     return any(token in compact for token in term_tokens)
+
+
+def _planner_message_has_explicit_context_switch(compact_text: str) -> bool:
+    explicit_tokens = (
+        "账户",
+        "account",
+        "标的",
+        "symbol",
+        "候选",
+        "过滤",
+        "candidate",
+        "filter",
+        "持仓",
+        "仓位",
+        "position",
+        "运行",
+        "通知",
+        "调度",
+        "runtime",
+        "scheduler",
+        "配置",
+        "config",
+        "策略",
+        "strategy",
+        "平仓",
+        "close",
+        "开仓",
+        "成交",
+        "trade",
+    )
+    if any(token in compact_text for token in explicit_tokens):
+        return True
+    if re.search(r"\b[A-Z]{2,6}(?:\.[A-Z]{1,3})?\b", compact_text.upper()):
+        return True
+    if re.search(r"20\d{2}[-年/]?\d{1,2}|[一二三四五六七八九十\d]{1,2}月", compact_text):
+        return True
+    return False
 
 
 def _planner_selection_haystack(parts: list[Any] | tuple[Any, ...]) -> str:
@@ -5394,147 +5570,81 @@ def _planner_keyword_matches(haystack: str, keyword: str) -> bool:
 
 
 def _planner_selection_context_hints(conversation_context: dict[str, Any] | None, *, text: str | None = None) -> list[str]:
-    if not isinstance(conversation_context, dict):
-        return []
+    projection = _planner_context_projection(str(text or ""), conversation_context=conversation_context)
     hints: list[str] = []
-    active_allowed = True if text is None else _active_frame_context_allowed(text, conversation_context)
-    active_frame = conversation_context.get("active_frame")
-    if active_allowed and isinstance(active_frame, dict):
-        hints.append(str(active_frame.get("domain") or ""))
-        hints.append(str(active_frame.get("task_mode") or ""))
-        hints.append(str(active_frame.get("tool_name") or ""))
-        hints.append(str(active_frame.get("intent_name") or ""))
-        hints.append(str(active_frame.get("metric_namespace") or ""))
-        hints.append(str(active_frame.get("evidence_source") or ""))
-        hints.append(_compact_json_for_planner_selection(active_frame.get("key_terms")))
-        hints.append(_compact_json_for_planner_selection(active_frame.get("tool_payload")))
-    followup = conversation_context.get("agent_loop_followup")
-    if isinstance(followup, dict):
-        hints.append(_compact_json_for_planner_selection(followup.get("evidence_gaps")))
-        hints.append(_compact_json_for_planner_selection(followup.get("expected_evidence")))
-
-    last_read = conversation_context.get("last_successful_read")
-    if active_allowed and isinstance(last_read, dict):
-        tool_name = str(last_read.get("tool_name") or "").strip()
-        intent_name = str(last_read.get("intent_name") or "").strip()
+    for gap in projection.get("open_evidence_gaps") or []:
+        if not isinstance(gap, dict):
+            continue
+        hints.append(str(gap.get("kind") or ""))
+        hints.append(str(gap.get("summary") or ""))
+        hints.append(_compact_json_for_planner_selection(gap.get("suggested_tools")))
+        hints.append(_compact_json_for_planner_selection(gap.get("suggested_views")))
+        hints.append(_compact_json_for_planner_selection(gap.get("safe_slots")))
+    for item in projection.get("recent_turns") or []:
+        if not isinstance(item, dict):
+            continue
+        hints.append(str(item.get("user_summary") or ""))
+        hints.append(str(item.get("assistant_summary") or ""))
+        hints.append(_compact_json_for_planner_selection(item.get("tools")))
+        hints.append(_compact_json_for_planner_selection(item.get("safe_slots")))
+    for item in projection.get("recent_successful_tools") or []:
+        if not isinstance(item, dict):
+            continue
+        tool_name = str(item.get("tool_name") or "").strip()
         if tool_name:
             hints.append(tool_name)
             hints.extend(_PLANNER_CONTEXT_TOOL_HINTS.get(tool_name, ()))
-        if intent_name:
-            hints.append(intent_name)
-        payload = last_read.get("tool_payload") if isinstance(last_read.get("tool_payload"), dict) else {}
-        hints.append(_compact_json_for_planner_selection(payload))
-
-    recent = conversation_context.get("recent_messages")
-    if active_allowed and isinstance(recent, list):
-        for item in _planner_recent_read_hints(conversation_context):
-            hints.append(str(item.get("raw_text") or ""))
-            hints.append(str(item.get("intent_name") or ""))
-            tool_name = str(item.get("tool_name") or "").strip()
+        hints.append(str(item.get("purpose") or ""))
+        hints.append(_compact_json_for_planner_selection(item.get("safe_payload")))
+        hints.append(_compact_json_for_planner_selection(item.get("safe_slots")))
+        hints.append(_compact_json_for_planner_selection(item.get("data_shape")))
+    for ref in projection.get("available_evidence_refs") or []:
+        if not isinstance(ref, dict):
+            continue
+        tool_name = str(ref.get("source_tool") or "").strip()
+        if tool_name:
             hints.append(tool_name)
             hints.extend(_PLANNER_CONTEXT_TOOL_HINTS.get(tool_name, ()))
+        hints.append(str(ref.get("label") or ""))
+        hints.append(_compact_json_for_planner_selection(ref.get("safe_slots")))
+        hints.append(_compact_json_for_planner_selection(ref.get("data_shape")))
 
     return [hint for hint in hints if str(hint or "").strip()]
 
 
-def _planner_recent_read_hints(conversation_context: dict[str, Any] | None) -> list[dict[str, Any]]:
-    if not isinstance(conversation_context, dict):
-        return []
-    recent = conversation_context.get("recent_messages")
-    if not isinstance(recent, list):
-        return []
-    hints: list[dict[str, Any]] = []
-    for item in reversed(recent):
-        if len(hints) >= 3:
-            break
-        if not isinstance(item, dict) or item.get("result_ok") is not True:
-            continue
-        tool_name = str(item.get("tool_name") or "").strip()
-        if tool_name not in _PLANNER_CONTEXT_TOOL_HINTS:
-            continue
-        hint: dict[str, Any] = {
-            "raw_text": str(item.get("raw_text") or "")[:240],
-            "intent_name": str(item.get("intent_name") or "")[:80],
-            "tool_name": tool_name,
-        }
-        payload = item.get("tool_payload") if isinstance(item.get("tool_payload"), dict) else {}
-        safe_payload = {
-            str(key): value
-            for key, value in payload.items()
-            if str(key) in {"account", "action", "kind", "limit", "month", "query", "status", "symbol"}
-        }
-        if safe_payload:
-            hint["tool_payload"] = safe_payload
-        hints.append(hint)
-    return list(reversed(hints))
-
-
 def _planner_context_suggested_analysis_views(text: str, conversation_context: dict[str, Any] | None) -> list[str]:
-    if not isinstance(conversation_context, dict):
-        return []
+    projection = _planner_context_projection(text, conversation_context=conversation_context)
     views: list[str] = []
-    views.extend(_planner_analysis_views_for_active_frame(text, conversation_context))
-    followup = conversation_context.get("agent_loop_followup")
-    if isinstance(followup, dict):
-        for gap in followup.get("evidence_gaps") or []:
-            if not isinstance(gap, dict):
-                continue
-            for view in gap.get("suggested_views") or []:
-                name = str(view or "").strip()
-                if name in ANALYSIS_VIEW_SPECS:
-                    views.append(name)
+    for gap in projection.get("open_evidence_gaps") or []:
+        if not isinstance(gap, dict):
+            continue
+        for view in gap.get("suggested_views") or []:
+            name = str(view or "").strip()
+            if name in ANALYSIS_VIEW_SPECS:
+                views.append(name)
     return _unique_strings(views)
 
 
-def _planner_analysis_views_for_active_frame(text: str, conversation_context: dict[str, Any] | None) -> list[str]:
-    if not isinstance(conversation_context, dict):
-        return []
-    if not _active_frame_context_allowed(text, conversation_context):
-        return []
-    frame = conversation_context.get("active_frame")
-    if not isinstance(frame, dict):
-        return []
-    namespace = str(frame.get("metric_namespace") or "").strip()
-    return _planner_analysis_views_for_metric_namespace(namespace)
+def _planner_projection_views_from_refs(projection: dict[str, Any]) -> list[str]:
+    views: list[str] = []
+    for ref in projection.get("available_evidence_refs") or []:
+        if not isinstance(ref, dict):
+            continue
+        data_shape = ref.get("data_shape") if isinstance(ref.get("data_shape"), dict) else {}
+        for view in data_shape.get("views_used") or data_shape.get("views") or []:
+            name = str(view or "").strip()
+            if name in ANALYSIS_VIEW_SPECS:
+                views.append(name)
+    return _unique_strings(views)
 
 
-def _planner_analysis_views_for_metric_namespace(namespace: str) -> list[str]:
-    name = str(namespace or "").strip()
-    if name == "candidate_option_metrics":
-        return [
-            view
-            for view in (
-                "candidate_filter_diagnostics",
-                "strategy_config_by_symbol_account",
-                "symbol_strategy_config",
-            )
-            if view in ANALYSIS_VIEW_SPECS
-        ]
-    if name == "account_income_metrics":
-        return [
-            view
-            for view in (
-                "account_monthly_performance",
-                "account_monthly_income_components",
-                "monthly_income_summary",
-                "monthly_income_return_summary",
-                "monthly_income_cashflow_rows",
-                "monthly_income_premium_rows",
-                "monthly_income_realized_rows",
-                "symbol_income_attribution",
-            )
-            if view in ANALYSIS_VIEW_SPECS
-        ]
-    return []
-
-
-def _planner_group_for_metric_namespace(namespace: str) -> str:
-    name = str(namespace or "").strip()
-    if name == "candidate_option_metrics":
-        return "candidate_strategy"
-    if name == "account_income_metrics":
-        return "income"
-    return "default"
+def _planner_groups_for_analysis_views(views: list[str]) -> list[str]:
+    view_set = {str(item) for item in views if str(item).strip()}
+    groups: list[str] = []
+    for group_name, _keywords, group_views in _ANALYSIS_VIEW_GROUPS:
+        if view_set.intersection(str(view) for view in group_views):
+            groups.append(group_name)
+    return _unique_strings(groups)
 
 
 def _compact_json_for_planner_selection(value: Any) -> str:
@@ -5844,26 +5954,12 @@ def _synthesis_input_text(
         "observations": observations,
     }
     if isinstance(conversation_context, dict):
-        followup_resolution = _conversation_followup_resolution(question, conversation_context)
-        active_frame_allowed = _active_frame_context_allowed(question, conversation_context)
         context_payload: dict[str, Any] = {
             "window_messages": int(conversation_context.get("window_messages") or 0),
             "user_profile": conversation_context.get("user_profile")
             if isinstance(conversation_context.get("user_profile"), dict)
             else {"provided": False},
         }
-        active_frame = conversation_context.get("active_frame") if isinstance(conversation_context.get("active_frame"), dict) else None
-        if active_frame and active_frame_allowed:
-            context_payload["active_frame"] = _planner_compact_frame(active_frame)
-            glossary = metric_glossary_for_frame(active_frame)
-            if glossary:
-                context_payload["metric_glossary"] = glossary
-        elif followup_resolution.get("status") == "explicit_message_overrides_context":
-            glossary = metric_glossary_for_namespace(str(followup_resolution.get("metric_namespace") or ""))
-            if glossary:
-                context_payload["metric_glossary"] = glossary
-        if followup_resolution:
-            context_payload["followup_resolution"] = followup_resolution
         payload["context"] = context_payload
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
@@ -5887,7 +5983,6 @@ Rules:
 - For monthly_income_report, "历史以来", "累计", and "总净现金流" mean the OM local ledger coverage returned by the tool.
 - Do not claim missing months/accounts when observation.coverage includes them or complete_for_query_scope=true.
 - For monthly_income_report detail rows, contract quantity must come from contracts or contracts_closed. Do not infer one row as one contract; if contracts/contracts_closed=2, say 2张/2手, never 一手.
-- If context.followup_resolution.status=resolved_from_active_frame and context.metric_glossary is present, name the metric namespace/口径 first, then explain the glossary formula. Do not switch to another 净收入 definition unless observations prove the user explicitly changed scope.
 - If observations include assistant.grounded_facts, canonical_response is already the factual answer block. Return only a concise analysis block; do not repeat, restate, or alter factual rows, amounts, contract quantities, accounts, dates, symbols, or currencies.
 """
 
@@ -5926,6 +6021,7 @@ def _llm_trace(
     planner_input: dict[str, Any] | None = None,
     planner_context_use: dict[str, Any] | None = None,
     context_validation: dict[str, Any] | None = None,
+    context_validation_repair: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "enabled": bool(settings.enabled),
@@ -5948,21 +6044,17 @@ def _llm_trace(
     if conversation_context is not None:
         recent = conversation_context.get("recent_messages") if isinstance(conversation_context, dict) else None
         pending = conversation_context.get("pending_operations") if isinstance(conversation_context, dict) else None
-        frames = conversation_context.get("frame_stack") if isinstance(conversation_context, dict) and isinstance(conversation_context.get("frame_stack"), list) else []
-        active_frame = conversation_context.get("active_frame") if isinstance(conversation_context, dict) and isinstance(conversation_context.get("active_frame"), dict) else {}
+        projection = (
+            conversation_context.get("context_projection")
+            if isinstance(conversation_context, dict) and isinstance(conversation_context.get("context_projection"), dict)
+            else None
+        )
         payload["context"] = {
             "provided": True,
             "window_messages": int(conversation_context.get("window_messages") or 0) if isinstance(conversation_context, dict) else 0,
             "recent_count": len(recent) if isinstance(recent, list) else 0,
             "pending_count": len(pending) if isinstance(pending, list) else 0,
-            "frame_count": len(frames),
-            "active_frame": {
-                "domain": active_frame.get("domain"),
-                "tool_name": active_frame.get("tool_name"),
-                "metric_namespace": active_frame.get("metric_namespace"),
-            }
-            if active_frame
-            else {},
+            "context_projection": context_projection_trace(projection),
             "user_profile": user_profile_trace(
                 conversation_context.get("user_profile") if isinstance(conversation_context, dict) else None
             ),
@@ -5973,6 +6065,8 @@ def _llm_trace(
         payload["planner_context_use"] = _safe_context_use_payload(planner_context_use)
     if context_validation is not None:
         payload["context_validation"] = dict(context_validation)
+    if context_validation_repair is not None:
+        payload["context_validation_repair"] = dict(context_validation_repair)
     return payload
 
 
