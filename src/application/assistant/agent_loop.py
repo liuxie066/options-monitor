@@ -39,6 +39,7 @@ from src.application.assistant.llm_common import (
     strip_json_code_fence,
     unsupported_llm_provider_error,
 )
+from src.application.assistant.metric_glossary import metric_glossary_for_frame, metric_glossary_for_namespace
 from src.application.assistant.renderer import render_canonical_tool_result, render_inbound_text
 from src.application.assistant.session import build_agent_session_snapshot
 from src.application.assistant.settings import AssistantSettings
@@ -713,7 +714,11 @@ def run_read_only_agent_loop(
     loop_context = _with_temporal_context(conversation_context, today=today)
     plan_result = (plan_tools_fn or plan_read_only_tools)(text, settings, loop_context)
     plan_result = _normalize_tool_plan_result(plan_result, question=text, today=today)
-    planning, planned_steps = _planning_outcome_from_tool_plan_result(plan_result, question=text)
+    planning, planned_steps = _planning_outcome_from_tool_plan_result(
+        plan_result,
+        question=text,
+        conversation_context=loop_context,
+    )
     trace = dict(planning.trace or plan_result.trace)
     trace["agent_loop"] = {
         "schema_version": AGENT_LOOP_SCHEMA_VERSION,
@@ -959,6 +964,7 @@ def execute_tool_plan(
     plan = parse_tool_plan_payload(plan_payload)
     plan = _normalize_tool_plan(plan, question=question, today=_planner_today_from_context(conversation_context))
     validate_tool_plan(plan, allow_preview=False)
+    _validate_plan_against_conversation_frame(plan, question=question, conversation_context=conversation_context)
     task_contract = build_task_contract(
         question=question,
         plan=plan.public_payload(),
@@ -1121,7 +1127,11 @@ def execute_tool_plan(
         synthesis_trace=base_synthesis_trace,
         final_response=final_response_payload,
     )
-    synthesis_trace = {**base_synthesis_trace, "hook_results": answer_hook_results}
+    synthesis_trace = {
+        **base_synthesis_trace,
+        "context": _answer_context_trace(question, conversation_context),
+        "hook_results": answer_hook_results,
+    }
     agent_session = build_agent_session_snapshot(
         request=request,
         command_id=command_id,
@@ -1403,22 +1413,42 @@ def _plan_followup_read_steps(
     if plan_result.error is not None:
         if plan_result.error.code == "NEEDS_CLARIFICATION":
             clarification = str(plan_result.error.message or "需要补充范围后才能继续分析。").strip()
-            decision = _followup_decision_payload(
-                revision=revision,
-                decision="ask_clarification",
-                status="stopped",
-                reason=clarification,
-                evidence_gaps=evidence_gaps,
+            clarification_reason = _clarification_reason_code(clarification)
+            if _followup_clarification_should_ask(
                 clarification=clarification,
-                clarification_context=context,
-            )
+                clarification_reason=clarification_reason,
+                evidence_gaps=evidence_gaps,
+            ):
+                decision = _followup_decision_payload(
+                    revision=revision,
+                    decision="ask_clarification",
+                    status="stopped",
+                    reason=clarification,
+                    evidence_gaps=evidence_gaps,
+                    clarification=clarification,
+                    clarification_context=context,
+                    clarification_reason=clarification_reason,
+                )
+                replan_status = "needs_clarification"
+            else:
+                decision = _followup_decision_payload(
+                    revision=revision,
+                    decision="stop_with_gap",
+                    status="stopped",
+                    reason=f"follow-up planner requested clarification for non-critical evidence gap: {clarification}",
+                    evidence_gaps=evidence_gaps,
+                    clarification_reason=clarification_reason,
+                    planner_clarification=clarification,
+                )
+                replan_status = "clarification_downgraded_to_gap"
             followup_decisions.append(decision)
             tool_events.append({"phase": "followup_decision", **decision})
             tool_events.append(
                 {
                     "phase": "replan",
-                    "status": "needs_clarification",
+                    "status": replan_status,
                     "error_code": plan_result.error.code,
+                    "clarification_reason": clarification_reason,
                 }
             )
             return None
@@ -1454,6 +1484,7 @@ def _plan_followup_read_steps(
     try:
         next_plan = _normalize_tool_plan(plan_result.plan, question=question, today=_planner_today_from_context(context))
         validate_tool_plan(next_plan, question=question, allow_preview=False)
+        _validate_plan_against_conversation_frame(next_plan, question=question, conversation_context=context)
     except AgentToolError as err:
         decision = _followup_decision_payload(
             revision=revision,
@@ -1597,6 +1628,8 @@ def _followup_decision_payload(
     plan: PlannerPlan | None = None,
     clarification: str | None = None,
     clarification_context: dict[str, Any] | None = None,
+    clarification_reason: str | None = None,
+    planner_clarification: str | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "schema_version": FOLLOWUP_DECISION_SCHEMA_VERSION,
@@ -1613,6 +1646,10 @@ def _followup_decision_payload(
             clarification,
             context=clarification_context,
         )
+    if clarification_reason:
+        payload["clarification_reason"] = str(clarification_reason).strip()
+    if planner_clarification:
+        payload["planner_clarification"] = str(planner_clarification).strip()
     if plan is not None:
         payload["steps"] = [step.public_payload() for step in plan.steps]
         if len(plan.steps) == 1:
@@ -2258,6 +2295,7 @@ def plan_read_only_tools(
                 error=_no_tool_plan_error(),
             )
         validate_tool_plan(plan, question=text)
+        _validate_plan_against_conversation_frame(plan, question=text, conversation_context=conversation_context)
     except AgentToolError as err:
         return LlmPlannerResult(
             plan=None,
@@ -2549,6 +2587,221 @@ def validate_tool_plan(plan: PlannerPlan, *, question: str | None = None, allow_
         )
 
 
+def _validate_plan_against_conversation_frame(
+    plan: PlannerPlan,
+    *,
+    question: str,
+    conversation_context: dict[str, Any] | None,
+) -> None:
+    resolution = _conversation_followup_resolution(question, conversation_context)
+    if resolution.get("status") != "resolved_from_active_frame":
+        return
+    namespace = str(resolution.get("metric_namespace") or "").strip()
+    offenses: list[dict[str, Any]] = []
+    if namespace == "candidate_option_metrics":
+        offenses = _candidate_metric_context_offenses(plan)
+    elif namespace == "account_income_metrics":
+        offenses = _account_income_metric_context_offenses(plan)
+    if not offenses:
+        return
+    frame = conversation_context.get("active_frame") if isinstance(conversation_context, dict) else {}
+    raise AgentToolError(
+        code="PLAN_CONTEXT_DRIFT",
+        message="短追问的指标口径与上一轮上下文不一致，已阻止 planner 漂移到另一个净收入定义。",
+        hint="保留 active_frame 的 domain/tool/metric_namespace，除非用户明确切换到另一个业务口径。",
+        details={
+            "resolution": resolution,
+            "active_frame": _planner_compact_frame(frame if isinstance(frame, dict) else {}),
+            "offenses": offenses,
+            "planned_tools": [step.tool_name for step in plan.steps],
+        },
+    )
+
+
+def _candidate_metric_context_offenses(plan: PlannerPlan) -> list[dict[str, Any]]:
+    offenses: list[dict[str, Any]] = []
+    contract = plan.task_contract if isinstance(plan.task_contract, dict) else {}
+    if str(contract.get("domain") or "").strip() == "income":
+        offenses.append({"kind": "task_contract_domain", "domain": "income"})
+    for step in plan.steps:
+        if step.tool_name == "monthly_income_report":
+            offenses.append({"kind": "tool_namespace", "tool_name": step.tool_name})
+        elif step.tool_name == "analysis_query" and _analysis_arguments_match_income_metrics(step.arguments):
+            offenses.append({"kind": "analysis_namespace", "tool_name": step.tool_name})
+    return offenses
+
+
+def _account_income_metric_context_offenses(plan: PlannerPlan) -> list[dict[str, Any]]:
+    offenses: list[dict[str, Any]] = []
+    contract = plan.task_contract if isinstance(plan.task_contract, dict) else {}
+    if str(contract.get("domain") or "").strip() == "candidate":
+        offenses.append({"kind": "task_contract_domain", "domain": "candidate"})
+    for step in plan.steps:
+        if step.tool_name in {"candidate_filter_explain", "candidate_rank_explain"}:
+            offenses.append({"kind": "tool_namespace", "tool_name": step.tool_name})
+        elif step.tool_name == "analysis_query" and _analysis_arguments_match_candidate_metrics(step.arguments):
+            offenses.append({"kind": "analysis_namespace", "tool_name": step.tool_name})
+    return offenses
+
+
+def _analysis_arguments_match_income_metrics(arguments: dict[str, Any]) -> bool:
+    text = _planner_selection_haystack([_compact_json_for_planner_selection(arguments)])
+    return any(
+        token in text
+        for token in (
+            "account_monthly_performance",
+            "account_monthly_income_components",
+            "monthly_income_",
+            "net_income_cny",
+            "premium_income_cny",
+            "realized_pnl_cny",
+            "income_cashflow_ex_assignment_stock",
+        )
+    )
+
+
+def _analysis_arguments_match_candidate_metrics(arguments: dict[str, Any]) -> bool:
+    text = _planner_selection_haystack([_compact_json_for_planner_selection(arguments)])
+    return any(
+        token in text
+        for token in (
+            "candidate_filter_diagnostics",
+            "candidate_filter_explain",
+            "metrics_net_income_non_positive",
+            "net_income_non_positive",
+        )
+    )
+
+
+def _conversation_followup_resolution(
+    text: str,
+    conversation_context: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not isinstance(conversation_context, dict):
+        return {}
+    frame = conversation_context.get("active_frame")
+    if not isinstance(frame, dict):
+        return {}
+    namespace = str(frame.get("metric_namespace") or "").strip()
+    if namespace not in {"candidate_option_metrics", "account_income_metrics"}:
+        return {}
+    if not _is_short_metric_followup(text):
+        return {
+            "schema_version": "om-followup-resolution-v1",
+            "status": "unresolved",
+            "reason": "not_short_metric_followup",
+            "metric_namespace": namespace,
+        }
+    if namespace == "candidate_option_metrics" and _question_explicitly_requests_account_income(text):
+        return {
+            "schema_version": "om-followup-resolution-v1",
+            "status": "explicit_message_overrides_context",
+            "reason": "explicit_account_income_scope",
+            "metric_namespace": "account_income_metrics",
+            "previous_metric_namespace": namespace,
+        }
+    if namespace == "account_income_metrics" and _question_explicitly_requests_candidate_metrics(text):
+        return {
+            "schema_version": "om-followup-resolution-v1",
+            "status": "explicit_message_overrides_context",
+            "reason": "explicit_candidate_scope",
+            "metric_namespace": "candidate_option_metrics",
+            "previous_metric_namespace": namespace,
+        }
+    return {
+        "schema_version": "om-followup-resolution-v1",
+        "status": "resolved_from_active_frame",
+        "reason": "short_metric_followup",
+        "domain": frame.get("domain"),
+        "tool_name": frame.get("tool_name"),
+        "metric_namespace": namespace,
+        "key_terms": [str(item) for item in frame.get("key_terms") or [] if str(item).strip()],
+    }
+
+
+def _active_frame_context_allowed(
+    text: str,
+    conversation_context: dict[str, Any] | None,
+) -> bool:
+    if not isinstance(conversation_context, dict):
+        return False
+    frame = conversation_context.get("active_frame")
+    if not isinstance(frame, dict):
+        return True
+    namespace = str(frame.get("metric_namespace") or "").strip()
+    if namespace == "candidate_option_metrics" and _question_explicitly_requests_account_income(text):
+        return False
+    if namespace == "account_income_metrics" and _question_explicitly_requests_candidate_metrics(text):
+        return False
+    return True
+
+
+def _is_short_metric_followup(text: str) -> bool:
+    compact = re.sub(r"\s+", "", str(text or "").lower())
+    if not compact or len(compact) > 80:
+        return False
+    metric_tokens = ("净收入", "net_income", "netincome", "这个指标", "这个", "那个", "刚才", "上面", "前面")
+    explain_tokens = (
+        "为什么",
+        "为何",
+        "为啥",
+        "怎么算",
+        "怎么计算",
+        "如何计算",
+        "怎么来的",
+        "是什么",
+        "什么意思",
+        "指什么",
+        "how",
+        "calculate",
+        "computed",
+        "meaning",
+    )
+    return any(token in compact for token in metric_tokens) and any(token in compact for token in explain_tokens)
+
+
+def _question_explicitly_requests_account_income(text: str) -> bool:
+    compact = re.sub(r"\s+", "", str(text or "").lower())
+    return any(
+        token in compact
+        for token in (
+            "账户",
+            "账本",
+            "月度",
+            "月份",
+            "现金流",
+            "收益率",
+            "账户收益",
+            "net_income_cny",
+            "account",
+            "monthly",
+            "ledger",
+            "cashflow",
+        )
+    )
+
+
+def _question_explicitly_requests_candidate_metrics(text: str) -> bool:
+    compact = re.sub(r"\s+", "", str(text or "").lower())
+    return any(
+        token in compact
+        for token in (
+            "候选",
+            "过滤",
+            "参数",
+            "期权",
+            "sell_put",
+            "sellput",
+            "sell_call",
+            "sellcall",
+            "covered_call",
+            "coveredcall",
+            "candidate",
+            "filter",
+        )
+    )
+
+
 def _plan_step_kind(tool_name: str) -> str | None:
     name = str(tool_name or "")
     if name in AGENT_LOOP_READ_TOOLS:
@@ -2650,7 +2903,12 @@ def _question_requests_preview_operation(question: str) -> bool:
     return "立即升级" in compact or "切换模型" in compact or "使用模型" in compact
 
 
-def _planning_outcome_from_tool_plan_result(result: LlmPlannerResult, *, question: str) -> tuple[AgentLoopPlanningOutcome, tuple[AgentLoopStep, ...]]:
+def _planning_outcome_from_tool_plan_result(
+    result: LlmPlannerResult,
+    *,
+    question: str,
+    conversation_context: dict[str, Any] | None,
+) -> tuple[AgentLoopPlanningOutcome, tuple[AgentLoopStep, ...]]:
     if result.error is not None:
         return AgentLoopPlanningOutcome(perception=None, trace=dict(result.trace), error=result.error), ()
     if result.plan is None:
@@ -2659,6 +2917,11 @@ def _planning_outcome_from_tool_plan_result(result: LlmPlannerResult, *, questio
         return AgentLoopPlanningOutcome(perception=None, trace={**dict(result.trace), "reason": "no_plan"}, error=_no_tool_plan_error()), ()
     try:
         validate_tool_plan(result.plan, question=question)
+        _validate_plan_against_conversation_frame(
+            result.plan,
+            question=question,
+            conversation_context=conversation_context,
+        )
     except AgentToolError as err:
         return AgentLoopPlanningOutcome(perception=None, trace={**dict(result.trace), "reason": "invalid_plan", "error_code": err.code}, error=err), ()
     planned_steps = tuple(
@@ -3526,6 +3789,53 @@ def _clarification_text_from_decision(decision: dict[str, Any]) -> str:
     if str(decision.get("decision") or "") == "ask_clarification":
         return "需要补充范围后才能继续分析。"
     return ""
+
+
+def _followup_clarification_should_ask(
+    *,
+    clarification: str,
+    clarification_reason: str,
+    evidence_gaps: list[dict[str, Any]],
+) -> bool:
+    if clarification_reason == "missing_operation_scope" and _has_high_risk_followup_gap(evidence_gaps):
+        return True
+    compact = re.sub(r"\s+", "", str(clarification or "").lower())
+    if any(token in compact for token in ("确认", "取消", "confirm", "cancel")) and _has_high_risk_followup_gap(evidence_gaps):
+        return True
+    return False
+
+
+def _has_high_risk_followup_gap(evidence_gaps: list[dict[str, Any]]) -> bool:
+    for gap in evidence_gaps:
+        if not isinstance(gap, dict):
+            continue
+        text = " ".join(
+            str(gap.get(key) or "").lower()
+            for key in ("kind", "recoverable_by", "suggested_tool", "risk_level", "reason")
+        )
+        if any(token in text for token in ("confirm", "cancel", "permission", "preview_write", "confirm_write")):
+            return True
+    return False
+
+
+def _clarification_reason_code(text: str) -> str:
+    compact = re.sub(r"\s+", "", str(text or "").lower())
+    if any(token in compact for token in ("operation_id", "operationid", "操作id", "操作编号", "确认", "取消", "confirm", "cancel")):
+        return "missing_operation_scope"
+    has_account = "账户" in compact or "account" in compact
+    has_symbol = "标的" in compact or "symbol" in compact
+    has_period = "月份" in compact or "month" in compact or "日期" in compact or "period" in compact
+    if sum(bool(item) for item in (has_account, has_symbol, has_period)) > 1:
+        return "missing_scope"
+    if has_account:
+        return "missing_account_scope"
+    if has_symbol:
+        return "missing_symbol_scope"
+    if has_period:
+        return "missing_period_scope"
+    if "范围" in compact or "scope" in compact:
+        return "missing_scope"
+    return "needs_clarification"
 
 
 def _clarification_request_payload(text: str, *, context: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -4546,6 +4856,8 @@ def _planner_input_payload(text: str, *, conversation_context: dict[str, Any] | 
         "manifest_budget": _planner_manifest_budget(tools=tools, analysis_view_selection=selection),
     }
     if isinstance(conversation_context, dict):
+        followup_resolution = _conversation_followup_resolution(text, conversation_context)
+        active_frame_allowed = _active_frame_context_allowed(text, conversation_context)
         context_payload = {
             "window_messages": int(conversation_context.get("window_messages") or 0),
             "temporal_context": conversation_context.get("temporal_context")
@@ -4559,8 +4871,23 @@ def _planner_input_payload(text: str, *, conversation_context: dict[str, Any] | 
             if isinstance(conversation_context.get("user_profile"), dict)
             else {"provided": False},
         }
+        active_frame = conversation_context.get("active_frame") if isinstance(conversation_context.get("active_frame"), dict) else None
+        if active_frame and active_frame_allowed:
+            context_payload["active_frame"] = _planner_compact_frame(active_frame)
+            glossary = metric_glossary_for_frame(active_frame)
+            if glossary:
+                context_payload["metric_glossary"] = glossary
+        elif followup_resolution.get("status") == "explicit_message_overrides_context":
+            glossary = metric_glossary_for_namespace(str(followup_resolution.get("metric_namespace") or ""))
+            if glossary:
+                context_payload["metric_glossary"] = glossary
+        frame_stack = _planner_compact_frame_stack(conversation_context) if active_frame_allowed else []
+        if frame_stack:
+            context_payload["frame_stack"] = frame_stack
+        if followup_resolution:
+            context_payload["followup_resolution"] = followup_resolution
         recent_read_hints = _planner_recent_read_hints(conversation_context)
-        if recent_read_hints and _planner_selection_used_context(selection):
+        if active_frame_allowed and recent_read_hints and _planner_selection_used_context(selection):
             context_payload["recent_read_hints"] = recent_read_hints
         payload["context"] = context_payload
     return payload
@@ -4579,12 +4906,122 @@ def _planner_input_trace(payload: dict[str, Any], input_text: str) -> dict[str, 
     budget = payload.get("manifest_budget") if isinstance(payload.get("manifest_budget"), dict) else {}
     context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
     recent_hints = context.get("recent_read_hints") if isinstance(context.get("recent_read_hints"), list) else []
+    active_frame = context.get("active_frame") if isinstance(context.get("active_frame"), dict) else {}
+    frame_stack = context.get("frame_stack") if isinstance(context.get("frame_stack"), list) else []
+    followup_resolution = context.get("followup_resolution") if isinstance(context.get("followup_resolution"), dict) else {}
     return {
         "chars": len(input_text),
         "tool_count": len(tools),
         "recent_read_hint_count": len(recent_hints),
+        "frame_count": len(frame_stack),
+        "active_frame": {
+            "domain": active_frame.get("domain"),
+            "tool_name": active_frame.get("tool_name"),
+            "metric_namespace": active_frame.get("metric_namespace"),
+        }
+        if active_frame
+        else {},
+        "followup_resolution": {
+            "status": followup_resolution.get("status"),
+            "metric_namespace": followup_resolution.get("metric_namespace"),
+        }
+        if followup_resolution
+        else {},
         "manifest_budget": dict(budget),
     }
+
+
+def _answer_context_trace(question: str, conversation_context: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(conversation_context, dict):
+        return {"provided": False}
+    frames = conversation_context.get("frame_stack") if isinstance(conversation_context.get("frame_stack"), list) else []
+    frame = conversation_context.get("active_frame") if isinstance(conversation_context.get("active_frame"), dict) else None
+    active_frame_allowed = _active_frame_context_allowed(question, conversation_context)
+    followup_resolution = _conversation_followup_resolution(question, conversation_context)
+    payload: dict[str, Any] = {
+        "provided": True,
+        "frame_count": len(frames),
+        "active_frame_allowed": bool(active_frame_allowed),
+    }
+    if frame and active_frame_allowed:
+        payload["active_frame"] = _answer_context_frame_trace(frame)
+    elif frame:
+        payload["suppressed_active_frame"] = _answer_context_frame_trace(frame)
+    if followup_resolution:
+        payload["followup_resolution"] = _answer_followup_resolution_trace(followup_resolution)
+    return payload
+
+
+def _answer_context_frame_trace(frame: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key in ("source", "rank", "domain", "tool_name", "metric_namespace"):
+        value = frame.get(key)
+        if value not in (None, "", [], {}):
+            out[key] = value
+    return out
+
+
+def _answer_followup_resolution_trace(resolution: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key in (
+        "status",
+        "reason",
+        "domain",
+        "tool_name",
+        "metric_namespace",
+        "previous_metric_namespace",
+    ):
+        value = resolution.get(key)
+        if value not in (None, "", [], {}):
+            out[key] = value
+    return out
+
+
+def _planner_compact_frame_stack(conversation_context: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(conversation_context, dict):
+        return []
+    frames = conversation_context.get("frame_stack") if isinstance(conversation_context.get("frame_stack"), list) else []
+    return [
+        compact
+        for frame in frames[:3]
+        for compact in [_planner_compact_frame(frame if isinstance(frame, dict) else {})]
+        if compact
+    ]
+
+
+def _planner_compact_frame(frame: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(frame, dict) or not frame:
+        return {}
+    out: dict[str, Any] = {}
+    for key in (
+        "schema_version",
+        "source",
+        "rank",
+        "domain",
+        "task_mode",
+        "tool_name",
+        "intent_name",
+        "metric_namespace",
+        "evidence_source",
+        "confidence",
+    ):
+        value = frame.get(key)
+        if value not in (None, "", [], {}):
+            out[key] = value
+    key_terms = [str(item) for item in frame.get("key_terms") or [] if str(item).strip()]
+    if key_terms:
+        out["key_terms"] = key_terms[:8]
+    payload = frame.get("tool_payload") if isinstance(frame.get("tool_payload"), dict) else {}
+    if payload:
+        out["tool_payload"] = {
+            str(key): value
+            for key, value in payload.items()
+            if str(key) in {"account", "action", "function", "kind", "month", "run_id", "status", "symbol"}
+        }
+    excerpt = str(frame.get("response_excerpt") or "").strip()
+    if excerpt:
+        out["response_excerpt"] = excerpt[:240]
+    return out
 
 
 def _planner_selection_used_context(selection: dict[str, Any]) -> bool:
@@ -4631,6 +5068,8 @@ Rules:
 - Never plan confirm/cancel/apply actions. Confirm/cancel must be handled by deterministic user commands bound to a pending operation.
 - Do not include system-scoped, path, config, audit, host, port, timeout, service, delivery, or trigger arguments such as config_key, config_path, data_config, output_dir, report_path, run_dir, logs_root, state_dir, opend_telnet_host, timeout_sec, or audit_db. The system injects those.
 - Resolve relative dates using context.temporal_context.current_date in Asia/Shanghai. For a month without a year such as "6月", use the current_date year.
+- For short follow-up questions about a term, metric, or calculation, use context.active_frame and context.followup_resolution. If followup_resolution.status=resolved_from_active_frame, preserve active_frame.domain/tool_name/metric_namespace and reuse compatible scope payload unless the user clearly changes topic.
+- If context.metric_glossary is present for an ambiguous term such as 净收入, treat it as the metric definition namespace for planning. Example: after candidate_filter_explain reports "净收入非正" for 泡泡玛特, "净收入是怎么计算的？" refers to candidate_option_metrics.net_income, not account_income_metrics.net_income_cny.
 - For monthly income summary questions, use monthly_income_report with account/month when available.
 - For combined/all-account return questions, include required_capabilities=["combined_account_return"] and use monthly_income_report without account.
 - For income analysis/review/performance, cashflow detail, net cashflow composition, net inflow source, "分析", "复盘", "表现", "明细", "组成", "构成", "来源", or "由什么组成", use monthly_income_report with include_rows=true; the Agent composer will write the final user response from tool evidence.
@@ -4658,19 +5097,51 @@ def _planner_analysis_view_selection(
     selected: list[str] = []
     matched_groups: list[str] = []
     selection_sources: list[str] = []
+    followup_resolution = _conversation_followup_resolution(text, conversation_context)
+    if followup_resolution.get("status") == "resolved_from_active_frame":
+        frame_views = _planner_analysis_views_for_active_frame(text, conversation_context)
+        if frame_views:
+            return {
+                "mode": "scoped_analysis_views",
+                "selected_analysis_views": frame_views[:MAX_PLANNER_ANALYSIS_VIEWS],
+                "matched_view_groups": [str(followup_resolution.get("domain") or "active_frame")],
+                "selection_sources": ["conversation_context.active_frame"],
+            }
+    elif followup_resolution.get("status") == "explicit_message_overrides_context":
+        override_views = _planner_analysis_views_for_metric_namespace(str(followup_resolution.get("metric_namespace") or ""))
+        if override_views:
+            return {
+                "mode": "scoped_analysis_views",
+                "selected_analysis_views": override_views[:MAX_PLANNER_ANALYSIS_VIEWS],
+                "matched_view_groups": [_planner_group_for_metric_namespace(str(followup_resolution.get("metric_namespace") or ""))],
+                "selection_sources": ["conversation_context.explicit_override"],
+            }
 
     message_groups, message_views = _planner_matched_analysis_groups(_planner_selection_haystack([text]))
     if message_views:
         matched_groups.extend(message_groups)
         selected.extend(message_views)
         selection_sources.append("message")
+        if _planner_should_blend_context_for_term_followup(text, conversation_context):
+            context_views = _planner_context_suggested_analysis_views(text, conversation_context)
+            if context_views:
+                selected.extend(context_views)
+                selection_sources.append("conversation_context.followup_suggested_views")
+            context_hints = _planner_selection_context_hints(conversation_context, text=text)
+            context_groups, context_group_views = _planner_matched_analysis_groups(
+                _planner_selection_haystack(context_hints)
+            )
+            if context_group_views:
+                matched_groups.extend(context_groups)
+                selected.extend(context_group_views)
+                selection_sources.append("conversation_context.term_followup")
     else:
-        context_views = _planner_context_suggested_analysis_views(conversation_context)
+        context_views = _planner_context_suggested_analysis_views(text, conversation_context)
         if context_views:
             selected.extend(context_views)
             selection_sources.append("conversation_context.followup_suggested_views")
 
-        context_hints = _planner_selection_context_hints(conversation_context)
+        context_hints = _planner_selection_context_hints(conversation_context, text=text)
         context_groups, context_group_views = _planner_matched_analysis_groups(
             _planner_selection_haystack(context_hints)
         )
@@ -4711,6 +5182,41 @@ def _planner_matched_analysis_groups(haystack: str) -> tuple[list[str], list[str
     return matched_groups, selected
 
 
+def _planner_should_blend_context_for_term_followup(
+    text: str,
+    conversation_context: dict[str, Any] | None,
+) -> bool:
+    if not isinstance(conversation_context, dict):
+        return False
+    if not _active_frame_context_allowed(text, conversation_context):
+        return False
+    if not _planner_selection_context_hints(conversation_context, text=text):
+        return False
+    compact = re.sub(r"\s+", "", str(text or "").lower())
+    if not compact:
+        return False
+    term_tokens = (
+        "怎么算",
+        "怎么计算",
+        "如何计算",
+        "怎么来的",
+        "是什么",
+        "什么意思",
+        "指什么",
+        "这个",
+        "那个",
+        "刚才",
+        "上面",
+        "前面",
+        "why",
+        "how",
+        "calculate",
+        "computed",
+        "meaning",
+    )
+    return any(token in compact for token in term_tokens)
+
+
 def _planner_selection_haystack(parts: list[Any] | tuple[Any, ...]) -> str:
     lower = " ".join(str(part or "") for part in parts if str(part or "").strip()).lower()
     compact = re.sub(r"\s+", "", lower)
@@ -4724,17 +5230,28 @@ def _planner_keyword_matches(haystack: str, keyword: str) -> bool:
     return raw in haystack or re.sub(r"\s+", "", raw) in haystack
 
 
-def _planner_selection_context_hints(conversation_context: dict[str, Any] | None) -> list[str]:
+def _planner_selection_context_hints(conversation_context: dict[str, Any] | None, *, text: str | None = None) -> list[str]:
     if not isinstance(conversation_context, dict):
         return []
     hints: list[str] = []
+    active_allowed = True if text is None else _active_frame_context_allowed(text, conversation_context)
+    active_frame = conversation_context.get("active_frame")
+    if active_allowed and isinstance(active_frame, dict):
+        hints.append(str(active_frame.get("domain") or ""))
+        hints.append(str(active_frame.get("task_mode") or ""))
+        hints.append(str(active_frame.get("tool_name") or ""))
+        hints.append(str(active_frame.get("intent_name") or ""))
+        hints.append(str(active_frame.get("metric_namespace") or ""))
+        hints.append(str(active_frame.get("evidence_source") or ""))
+        hints.append(_compact_json_for_planner_selection(active_frame.get("key_terms")))
+        hints.append(_compact_json_for_planner_selection(active_frame.get("tool_payload")))
     followup = conversation_context.get("agent_loop_followup")
     if isinstance(followup, dict):
         hints.append(_compact_json_for_planner_selection(followup.get("evidence_gaps")))
         hints.append(_compact_json_for_planner_selection(followup.get("expected_evidence")))
 
     last_read = conversation_context.get("last_successful_read")
-    if isinstance(last_read, dict):
+    if active_allowed and isinstance(last_read, dict):
         tool_name = str(last_read.get("tool_name") or "").strip()
         intent_name = str(last_read.get("intent_name") or "").strip()
         if tool_name:
@@ -4746,7 +5263,7 @@ def _planner_selection_context_hints(conversation_context: dict[str, Any] | None
         hints.append(_compact_json_for_planner_selection(payload))
 
     recent = conversation_context.get("recent_messages")
-    if isinstance(recent, list):
+    if active_allowed and isinstance(recent, list):
         for item in _planner_recent_read_hints(conversation_context):
             hints.append(str(item.get("raw_text") or ""))
             hints.append(str(item.get("intent_name") or ""))
@@ -4789,10 +5306,11 @@ def _planner_recent_read_hints(conversation_context: dict[str, Any] | None) -> l
     return list(reversed(hints))
 
 
-def _planner_context_suggested_analysis_views(conversation_context: dict[str, Any] | None) -> list[str]:
+def _planner_context_suggested_analysis_views(text: str, conversation_context: dict[str, Any] | None) -> list[str]:
     if not isinstance(conversation_context, dict):
         return []
     views: list[str] = []
+    views.extend(_planner_analysis_views_for_active_frame(text, conversation_context))
     followup = conversation_context.get("agent_loop_followup")
     if isinstance(followup, dict):
         for gap in followup.get("evidence_gaps") or []:
@@ -4803,6 +5321,57 @@ def _planner_context_suggested_analysis_views(conversation_context: dict[str, An
                 if name in ANALYSIS_VIEW_SPECS:
                     views.append(name)
     return _unique_strings(views)
+
+
+def _planner_analysis_views_for_active_frame(text: str, conversation_context: dict[str, Any] | None) -> list[str]:
+    if not isinstance(conversation_context, dict):
+        return []
+    if not _active_frame_context_allowed(text, conversation_context):
+        return []
+    frame = conversation_context.get("active_frame")
+    if not isinstance(frame, dict):
+        return []
+    namespace = str(frame.get("metric_namespace") or "").strip()
+    return _planner_analysis_views_for_metric_namespace(namespace)
+
+
+def _planner_analysis_views_for_metric_namespace(namespace: str) -> list[str]:
+    name = str(namespace or "").strip()
+    if name == "candidate_option_metrics":
+        return [
+            view
+            for view in (
+                "candidate_filter_diagnostics",
+                "strategy_config_by_symbol_account",
+                "symbol_strategy_config",
+            )
+            if view in ANALYSIS_VIEW_SPECS
+        ]
+    if name == "account_income_metrics":
+        return [
+            view
+            for view in (
+                "account_monthly_performance",
+                "account_monthly_income_components",
+                "monthly_income_summary",
+                "monthly_income_return_summary",
+                "monthly_income_cashflow_rows",
+                "monthly_income_premium_rows",
+                "monthly_income_realized_rows",
+                "symbol_income_attribution",
+            )
+            if view in ANALYSIS_VIEW_SPECS
+        ]
+    return []
+
+
+def _planner_group_for_metric_namespace(namespace: str) -> str:
+    name = str(namespace or "").strip()
+    if name == "candidate_option_metrics":
+        return "candidate_strategy"
+    if name == "account_income_metrics":
+        return "income"
+    return "default"
 
 
 def _compact_json_for_planner_selection(value: Any) -> str:
@@ -5112,12 +5681,27 @@ def _synthesis_input_text(
         "observations": observations,
     }
     if isinstance(conversation_context, dict):
-        payload["context"] = {
+        followup_resolution = _conversation_followup_resolution(question, conversation_context)
+        active_frame_allowed = _active_frame_context_allowed(question, conversation_context)
+        context_payload: dict[str, Any] = {
             "window_messages": int(conversation_context.get("window_messages") or 0),
             "user_profile": conversation_context.get("user_profile")
             if isinstance(conversation_context.get("user_profile"), dict)
             else {"provided": False},
         }
+        active_frame = conversation_context.get("active_frame") if isinstance(conversation_context.get("active_frame"), dict) else None
+        if active_frame and active_frame_allowed:
+            context_payload["active_frame"] = _planner_compact_frame(active_frame)
+            glossary = metric_glossary_for_frame(active_frame)
+            if glossary:
+                context_payload["metric_glossary"] = glossary
+        elif followup_resolution.get("status") == "explicit_message_overrides_context":
+            glossary = metric_glossary_for_namespace(str(followup_resolution.get("metric_namespace") or ""))
+            if glossary:
+                context_payload["metric_glossary"] = glossary
+        if followup_resolution:
+            context_payload["followup_resolution"] = followup_resolution
+        payload["context"] = context_payload
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
@@ -5140,6 +5724,7 @@ Rules:
 - For monthly_income_report, "历史以来", "累计", and "总净现金流" mean the OM local ledger coverage returned by the tool.
 - Do not claim missing months/accounts when observation.coverage includes them or complete_for_query_scope=true.
 - For monthly_income_report detail rows, contract quantity must come from contracts or contracts_closed. Do not infer one row as one contract; if contracts/contracts_closed=2, say 2张/2手, never 一手.
+- If context.followup_resolution.status=resolved_from_active_frame and context.metric_glossary is present, name the metric namespace/口径 first, then explain the glossary formula. Do not switch to another 净收入 definition unless observations prove the user explicitly changed scope.
 - If observations include assistant.grounded_facts, canonical_response is already the factual answer block. Return only a concise analysis block; do not repeat, restate, or alter factual rows, amounts, contract quantities, accounts, dates, symbols, or currencies.
 """
 
@@ -5198,11 +5783,21 @@ def _llm_trace(
     if conversation_context is not None:
         recent = conversation_context.get("recent_messages") if isinstance(conversation_context, dict) else None
         pending = conversation_context.get("pending_operations") if isinstance(conversation_context, dict) else None
+        frames = conversation_context.get("frame_stack") if isinstance(conversation_context, dict) and isinstance(conversation_context.get("frame_stack"), list) else []
+        active_frame = conversation_context.get("active_frame") if isinstance(conversation_context, dict) and isinstance(conversation_context.get("active_frame"), dict) else {}
         payload["context"] = {
             "provided": True,
             "window_messages": int(conversation_context.get("window_messages") or 0) if isinstance(conversation_context, dict) else 0,
             "recent_count": len(recent) if isinstance(recent, list) else 0,
             "pending_count": len(pending) if isinstance(pending, list) else 0,
+            "frame_count": len(frames),
+            "active_frame": {
+                "domain": active_frame.get("domain"),
+                "tool_name": active_frame.get("tool_name"),
+                "metric_namespace": active_frame.get("metric_namespace"),
+            }
+            if active_frame
+            else {},
             "user_profile": user_profile_trace(
                 conversation_context.get("user_profile") if isinstance(conversation_context, dict) else None
             ),

@@ -15,6 +15,7 @@ from src.application.assistant import (
     command_catalog_payload,
 )
 from src.application.assistant.config_loader import load_assistant_config
+from src.application.assistant.context_eval import format_context_eval_text, run_context_eval_suite
 from src.application.assistant.contracts import AssistantRequest
 from src.application.assistant.diagnostics import check_llm_planner
 from src.application.assistant.llm_model_profiles import (
@@ -89,6 +90,13 @@ def add_assistant_commands(parser: argparse.ArgumentParser) -> None:
         help="list supported assistant capabilities and LLM routing surface",
     )
     assistant_capabilities.add_argument("--format", choices=("json", "text"), default="json")
+    assistant_context_eval = assistant_sub.add_parser(
+        "eval-context",
+        help="run planner-context eval fixtures and print context decision report",
+    )
+    assistant_context_eval.add_argument("--fixture", default=None)
+    assistant_context_eval.add_argument("--case-id", action="append", default=None)
+    assistant_context_eval.add_argument("--format", choices=("json", "text"), default="text")
     assistant_llm_check = assistant_sub.add_parser(
         "llm-check",
         help="check optional LLM planner configuration",
@@ -426,6 +434,23 @@ def handle_assistant_command(
             return 0
         tool_name = "assistant.capabilities" if args.assistant_command == "capabilities" else "assistant.commands"
         return _print(build_response(tool_name=tool_name, ok=True, data=data))
+
+    if args.assistant_command == "eval-context":
+        fixture_path = (
+            Path(args.fixture).expanduser().resolve()
+            if args.fixture
+            else repo_base_fn() / "tests" / "fixtures" / "assistant_agent_eval.jsonl"
+        )
+        data = run_context_eval_suite(fixture_path=fixture_path, case_ids=args.case_id)
+        out = build_response(
+            tool_name="assistant.eval_context",
+            ok=bool(data.get("summary", {}).get("ok")),
+            data=data,
+        )
+        if args.format == "text":
+            sys.stdout.write(format_context_eval_text(data).strip() + "\n")
+            return 0 if out.get("ok", True) else 2
+        return _print(out)
 
     if args.assistant_command == "handle":
         assistant_settings = _assistant_settings_for_cli(

@@ -94,11 +94,17 @@ def build_agent_session_snapshot(
         "pending_operation_ids": [],
         "apply_allowed": False,
     }
+    followup_decisions = _followup_decisions(tool_events)
     answer_trace = {
         "final_response": dict(final_response),
         "synthesis": dict(synthesis_trace),
-        "followup_decisions": _followup_decisions(tool_events),
+        "followup_decisions": followup_decisions,
+        "answer_route": _answer_route(final_response=final_response, synthesis_trace=synthesis_trace),
+        "scope_source": _scope_source(task_contract or {}),
     }
+    clarification_reason = _clarification_reason(final_response=final_response, followup_decisions=followup_decisions)
+    if clarification_reason:
+        answer_trace["clarification_reason"] = clarification_reason
     return AgentSessionSnapshot(
         session_id=session_id,
         request=request.public_payload(),
@@ -190,6 +196,8 @@ def build_preview_agent_session_snapshot(
             "hook_results": [],
         },
         "followup_decisions": [],
+        "answer_route": _answer_route(final_response=final_response, synthesis_trace={"reason": "preview_permission_request"}),
+        "scope_source": _scope_source({}),
     }
     return AgentSessionSnapshot(
         session_id=_session_id(request=request, command_id=operation_id or command_id, goal=goal),
@@ -327,6 +335,8 @@ def build_operation_readback_agent_session_snapshot(
             "hook_results": [dict(item) for item in hook_results if isinstance(item, dict)],
         },
         "followup_decisions": [],
+        "answer_route": _answer_route(final_response=final_response, synthesis_trace={"reason": "operation_readback"}),
+        "scope_source": _scope_source({}),
     }
     return AgentSessionSnapshot(
         session_id=_session_id(request=request, command_id=operation_id, goal=goal),
@@ -578,6 +588,89 @@ def _task_state(*, ok: bool, final_response: dict[str, Any]) -> str:
     return "done"
 
 
+def _answer_route(*, final_response: dict[str, Any], synthesis_trace: dict[str, Any]) -> str:
+    status = str(final_response.get("status") or "").strip()
+    if status in {"needs_clarification", "clarify"}:
+        return "clarification"
+    if status in {"pending_permission", "preview"}:
+        return "preview"
+    if status == "denied":
+        return "denied"
+    reason = str(synthesis_trace.get("reason") or "").strip()
+    fallback = str(synthesis_trace.get("fallback") or "").strip()
+    guard = synthesis_trace.get("answer_guard") if isinstance(synthesis_trace.get("answer_guard"), dict) else {}
+    guard_status = str(guard.get("status") or "").strip()
+    if guard_status == "failed_then_rewritten":
+        return "llm_composer"
+    deterministic_reasons = {
+        "agent_renderer_fallback",
+        "analysis_result_fallback",
+        "task_contract_fallback",
+        "grounded_renderer",
+    }
+    if fallback or reason in deterministic_reasons or "fallback" in reason:
+        return "deterministic_renderer"
+    if reason in {
+        "agent_composed_response",
+        "synthesized",
+        "synthesized_after_answer_guard",
+        "grounded_renderer_with_analysis",
+    }:
+        return "llm_composer"
+    if status == "rendered":
+        return "deterministic_renderer"
+    if status == "synthesized":
+        return "llm_composer"
+    return status or "unknown"
+
+
+def _scope_source(task_contract: dict[str, Any]) -> str:
+    scope = task_contract.get("scope") if isinstance(task_contract.get("scope"), dict) else {}
+    requested = [
+        *_string_list(scope.get("requested_accounts")),
+        *_string_list(scope.get("requested_symbols")),
+        *_string_list(scope.get("requested_months")),
+    ]
+    if requested:
+        return "user_text"
+    planned = [
+        *_string_list(scope.get("planned_accounts")),
+        *_string_list(scope.get("planned_symbols")),
+        *_string_list(scope.get("planned_months")),
+    ]
+    if planned:
+        return "planner_scope"
+    if _string_list(scope.get("config_keys")):
+        return "request_context"
+    if scope:
+        return "contract"
+    return "not_recorded"
+
+
+def _clarification_reason(*, final_response: dict[str, Any], followup_decisions: list[dict[str, Any]]) -> str:
+    for decision in reversed(followup_decisions):
+        if not isinstance(decision, dict):
+            continue
+        reason = str(decision.get("clarification_reason") or "").strip()
+        if reason:
+            return reason
+    request = final_response.get("clarification_request")
+    if isinstance(request, dict):
+        questions = request.get("questions") if isinstance(request.get("questions"), list) else []
+        for question in questions:
+            if not isinstance(question, dict):
+                continue
+            slot = str(question.get("slot") or "").strip()
+            if slot == "scope":
+                return "missing_scope"
+            if slot:
+                return f"missing_{slot}_scope"
+    status = str(final_response.get("status") or "").strip()
+    if status in {"needs_clarification", "clarify"}:
+        return "needs_clarification"
+    return ""
+
+
 def _tool_transcript(*, tool_events: list[dict[str, Any]], observations: list[dict[str, Any]]) -> list[dict[str, Any]]:
     authorize_by_tool: dict[str, dict[str, Any]] = {}
     result_by_tool: dict[str, dict[str, Any]] = {}
@@ -702,13 +795,60 @@ def _capability_selection_payload(
                         "reason": str(event.get("error_code") or "permission denied"),
                     }
                 )
+    selected = _dedupe_capability_items(selected_capabilities)
+    rejected_payload = _dedupe_capability_items(rejected)
     return {
         "schema_version": AGENT_CAPABILITY_SELECTION_SCHEMA_VERSION,
-        "selected": _dedupe_capability_items(selected_capabilities),
+        "selected": selected,
         "required": sorted(required),
         "satisfied": sorted(satisfied),
-        "rejected": _dedupe_capability_items(rejected),
+        "rejected": rejected_payload,
         "selected_tools": sorted(selected_tools),
+        "explanation": _capability_selection_explanation(
+            plan_revisions=plan_revisions,
+            selected=selected,
+            required=required,
+            satisfied=satisfied,
+            rejected=rejected_payload,
+        ),
+    }
+
+
+def _capability_selection_explanation(
+    *,
+    plan_revisions: tuple[dict[str, Any], ...],
+    selected: list[dict[str, Any]],
+    required: set[str],
+    satisfied: set[str],
+    rejected: list[dict[str, Any]],
+) -> dict[str, Any]:
+    effects = sorted({str(item.get("effect") or "read") for item in selected if isinstance(item, dict)})
+    sources = _unique_strings(
+        str(item.get("source") or "agent_loop")
+        for item in plan_revisions
+        if isinstance(item, dict)
+    )
+    followup_count = sum(
+        1
+        for item in plan_revisions
+        if isinstance(item, dict) and str(item.get("reason") or "").startswith("follow-up")
+    )
+    basis = ["plan_steps"]
+    if required or satisfied:
+        basis.append("capability_assessment")
+    if rejected:
+        basis.append("rejections")
+    return {
+        "selection_source": "plan_revisions",
+        "plan_sources": sources,
+        "revision_count": len(plan_revisions),
+        "followup_revision_count": followup_count,
+        "selected_tool_count": len({str(item.get("tool_name") or "") for item in selected if str(item.get("tool_name") or "")}),
+        "selected_effects": effects,
+        "required_count": len(required),
+        "satisfied_count": len(satisfied),
+        "rejected_count": len(rejected),
+        "decision_basis": basis,
     }
 
 
@@ -939,6 +1079,18 @@ def _string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _unique_strings(values: Any) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values or []:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
 
 
 def _clip_text(value: Any, limit: int) -> str:
