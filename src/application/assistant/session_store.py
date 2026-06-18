@@ -359,28 +359,14 @@ def _trace_context_text(value: Any) -> str:
     if context.get("provided") is False:
         return "未提供"
     parts: list[str] = []
-    active = context.get("active_frame") if isinstance(context.get("active_frame"), dict) else {}
-    suppressed = context.get("suppressed_active_frame") if isinstance(context.get("suppressed_active_frame"), dict) else {}
-    frame = active or suppressed
-    if frame:
-        label = "active_frame" if active else "suppressed_frame"
-        source = str(frame.get("source") or "").strip()
-        domain = str(frame.get("domain") or "").strip()
-        tool_name = str(frame.get("tool_name") or "").strip()
-        namespace = str(frame.get("metric_namespace") or "").strip()
-        details = "/".join(item for item in (domain, tool_name, namespace) if item)
-        parts.append(f"{label}={source or '-'}:{details or '-'}")
-    followup = context.get("followup_resolution") if isinstance(context.get("followup_resolution"), dict) else {}
-    if followup:
-        status = str(followup.get("status") or "").strip()
-        namespace = str(followup.get("metric_namespace") or "").strip()
-        previous = str(followup.get("previous_metric_namespace") or "").strip()
-        suffix = f"{previous}->{namespace}" if previous and namespace else namespace
-        parts.append(f"followup={status or '-'}" + (f":{suffix}" if suffix else ""))
-    allowed = context.get("active_frame_allowed")
-    if allowed is False:
-        parts.append("active_frame_allowed=false")
-    return "，".join(parts) if parts else "无上下文 frame"
+    projection = context.get("context_projection") if isinstance(context.get("context_projection"), dict) else {}
+    if projection:
+        turn_count = _safe_int(projection.get("recent_turn_count"))
+        tool_count = _safe_int(projection.get("recent_successful_tool_count"))
+        ref_count = _safe_int(projection.get("evidence_ref_count"))
+        gap_count = _safe_int(projection.get("open_gap_count"))
+        parts.append(f"projection=turns:{turn_count},tools:{tool_count},refs:{ref_count},gaps:{gap_count}")
+    return "，".join(parts) if parts else "无上下文投影"
 
 
 def _trace_capability_text(value: Any) -> str:
@@ -712,41 +698,10 @@ def _compact_context_trace(value: Any) -> dict[str, Any]:
         return {}
     out: dict[str, Any] = {
         "provided": bool(context.get("provided", True)),
-        "frame_count": _safe_int(context.get("frame_count")),
-        "active_frame_allowed": bool(context.get("active_frame_allowed", True)),
     }
-    active = _compact_context_frame(context.get("active_frame"))
-    if active:
-        out["active_frame"] = active
-    suppressed = _compact_context_frame(context.get("suppressed_active_frame"))
-    if suppressed:
-        out["suppressed_active_frame"] = suppressed
-    followup = _compact_followup_resolution(context.get("followup_resolution"))
-    if followup:
-        out["followup_resolution"] = followup
     projection = _compact_context_projection(context.get("context_projection"))
     if projection:
         out["context_projection"] = projection
-    return out
-
-
-def _compact_context_frame(value: Any) -> dict[str, Any]:
-    frame = value if isinstance(value, dict) else {}
-    out: dict[str, Any] = {}
-    for key in ("source", "rank", "domain", "tool_name", "metric_namespace"):
-        item = frame.get(key)
-        if item not in (None, "", [], {}):
-            out[key] = item
-    return out
-
-
-def _compact_followup_resolution(value: Any) -> dict[str, Any]:
-    followup = value if isinstance(value, dict) else {}
-    out: dict[str, Any] = {}
-    for key in ("status", "reason", "domain", "tool_name", "metric_namespace", "previous_metric_namespace"):
-        item = followup.get(key)
-        if item not in (None, "", [], {}):
-            out[key] = item
     return out
 
 

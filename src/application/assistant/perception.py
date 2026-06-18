@@ -562,6 +562,9 @@ def looks_like_command(text: str) -> bool:
 def general_reply_allowed(text: str, *, planning_error: AgentToolError) -> bool:
     if planning_error.code in {"PERMISSION_DENIED", "INPUT_ERROR"}:
         return False
+    details = planning_error.details if isinstance(planning_error.details, dict) else {}
+    if isinstance(details.get("context_validation"), dict):
+        return False
     compact = str(text or "").strip().lower()
     if not compact:
         return False

@@ -221,15 +221,16 @@ def format_context_eval_text(report: dict[str, Any]) -> str:
                 )
             )
         elif result.get("mode") == "planner_context":
+            projection = context.get("context_projection") if isinstance(context.get("context_projection"), dict) else {}
             lines.append(
                 " ".join(
                     [
                         prefix,
                         str(result.get("id") or ""),
                         f"sources={_compact_list(budget.get('selection_sources'))}",
-                        f"frame={_format_frame(context.get('active_frame'))}",
-                        f"glossary={context.get('metric_glossary_namespace') or '-'}",
-                        f"followup={_format_followup(context.get('followup_resolution'))}",
+                        f"projection={projection.get('schema_version') or '-'}",
+                        f"turns={projection.get('recent_turn_count', 0)}",
+                        f"refs={projection.get('evidence_ref_count', 0)}",
                     ]
                 )
             )
@@ -377,9 +378,6 @@ def _evaluate_context_checks(
             True,
             int(budget.get("analysis_views_included") or 0) <= int(case["expect_max_analysis_views_included"]),
         )
-    if case.get("expect_recent_read_hint_count") is not None:
-        recent_hints = context.get("recent_read_hints") if isinstance(context.get("recent_read_hints"), list) else []
-        _add_check(checks, "context.recent_read_hint_count", int(case["expect_recent_read_hint_count"]), len(recent_hints))
     _add_context_expectation_checks(checks, case=case, context=context)
     return checks
 
@@ -493,43 +491,59 @@ def _add_context_expectation_checks(
     case: dict[str, Any],
     context: dict[str, Any],
 ) -> None:
-    if case.get("expect_context_active_frame") is not None:
-        active_frame = context.get("active_frame") if isinstance(context.get("active_frame"), dict) else {}
-        for key_path, expected, actual in _mapping_subset_diffs(
-            dict(case["expect_context_active_frame"]),
-            active_frame,
-            prefix="context.active_frame",
-        ):
-            _add_check(checks, key_path, expected, actual)
-    if case.get("expect_context_active_frame_absent"):
-        _add_check(checks, "context.active_frame_absent", True, "active_frame" not in context)
-    if case.get("expect_context_frame_stack_count") is not None:
-        frame_stack = context.get("frame_stack") if isinstance(context.get("frame_stack"), list) else []
-        _add_check(checks, "context.frame_stack_count", int(case["expect_context_frame_stack_count"]), len(frame_stack))
-    if case.get("expect_context_frame_stack_absent"):
-        _add_check(checks, "context.frame_stack_absent", True, "frame_stack" not in context)
-    glossary = context.get("metric_glossary") if isinstance(context.get("metric_glossary"), dict) else {}
-    if case.get("expect_context_metric_glossary_namespace") is not None:
+    projection = context.get("context_projection") if isinstance(context.get("context_projection"), dict) else {}
+    if case.get("expect_context_projection_provided") is not None:
         _add_check(
             checks,
-            "context.metric_glossary.namespace",
-            case["expect_context_metric_glossary_namespace"],
-            glossary.get("namespace"),
+            "context.context_projection_provided",
+            bool(case["expect_context_projection_provided"]),
+            bool(projection),
         )
-    terms = glossary.get("terms") if isinstance(glossary.get("terms"), dict) else {}
-    for term in case.get("expect_context_metric_glossary_terms") or ():
-        _add_check(checks, f"context.metric_glossary.terms.{term}", True, str(term) in terms)
-    for term, formula in dict(case.get("expect_context_metric_glossary_term_formulas") or {}).items():
-        term_payload = terms.get(str(term)) if isinstance(terms.get(str(term)), dict) else {}
-        _add_check(checks, f"context.metric_glossary.terms.{term}.formula", formula, term_payload.get("formula"))
-    if case.get("expect_followup_resolution") is not None:
-        followup = context.get("followup_resolution") if isinstance(context.get("followup_resolution"), dict) else {}
-        for key_path, expected, actual in _mapping_subset_diffs(
-            dict(case["expect_followup_resolution"]),
-            followup,
-            prefix="context.followup_resolution",
-        ):
-            _add_check(checks, key_path, expected, actual)
+    if case.get("expect_context_projection_current_user_message") is not None:
+        current = projection.get("current_user_message") if isinstance(projection.get("current_user_message"), dict) else {}
+        _add_check(
+            checks,
+            "context.context_projection.current_user_message.text",
+            case["expect_context_projection_current_user_message"],
+            current.get("text"),
+        )
+    for key, context_key in (
+        ("expect_context_projection_recent_turn_count", "recent_turns"),
+        ("expect_context_projection_recent_successful_tool_count", "recent_successful_tools"),
+        ("expect_context_projection_evidence_ref_count", "available_evidence_refs"),
+        ("expect_context_projection_open_gap_count", "open_evidence_gaps"),
+    ):
+        if case.get(key) is not None:
+            values = projection.get(context_key) if isinstance(projection.get(context_key), list) else []
+            _add_check(checks, f"context.context_projection.{context_key}_count", int(case[key]), len(values))
+    for tool_name in case.get("expect_context_projection_recent_tools") or ():
+        tools = [
+            str(item.get("tool_name") or "")
+            for item in projection.get("recent_successful_tools") or []
+            if isinstance(item, dict)
+        ]
+        _add_check(
+            checks,
+            f"context.context_projection.recent_tool.{tool_name}",
+            True,
+            str(tool_name) in set(tools),
+        )
+    for source_tool in case.get("expect_context_projection_evidence_source_tools") or ():
+        refs = [
+            str(item.get("source_tool") or "")
+            for item in projection.get("available_evidence_refs") or []
+            if isinstance(item, dict)
+        ]
+        _add_check(
+            checks,
+            f"context.context_projection.evidence_source_tool.{source_tool}",
+            True,
+            str(source_tool) in set(refs),
+        )
+    if case.get("expect_context_projection_no_legacy_authority"):
+        _add_check(checks, "context.no_active_frame_authority", True, "active_frame" not in context)
+        _add_check(checks, "context.no_frame_stack_authority", True, "frame_stack" not in context)
+        _add_check(checks, "context.no_followup_authority", True, "followup_resolution" not in context)
 
 
 def _mapping_subset_diffs(
@@ -663,76 +677,11 @@ def _data_shape_expectation_matches(data_shapes: list[Any], expected: dict[str, 
 
 
 def _context_decision_summary(context: dict[str, Any]) -> dict[str, Any]:
-    recent_hints = context.get("recent_read_hints") if isinstance(context.get("recent_read_hints"), list) else []
-    frame_stack = context.get("frame_stack") if isinstance(context.get("frame_stack"), list) else []
-    glossary = context.get("metric_glossary") if isinstance(context.get("metric_glossary"), dict) else {}
-    terms = glossary.get("terms") if isinstance(glossary.get("terms"), dict) else {}
+    projection = context.get("context_projection") if isinstance(context.get("context_projection"), dict) else {}
     return {
-        "active_frame": _frame_summary(context.get("active_frame")),
-        "active_frame_present": isinstance(context.get("active_frame"), dict),
-        "frame_stack_count": len(frame_stack),
-        "frame_stack_present": bool(frame_stack),
-        "metric_glossary_namespace": glossary.get("namespace"),
-        "metric_glossary_terms": sorted(str(item) for item in terms),
-        "followup_resolution": _followup_summary(context.get("followup_resolution")),
-        "recent_read_hint_count": len(recent_hints),
+        "context_projection": context_projection_trace(projection),
+        "context_policy": dict(context.get("context_policy") or {}) if isinstance(context.get("context_policy"), dict) else {},
     }
-
-
-def _frame_summary(value: Any) -> dict[str, Any]:
-    frame = value if isinstance(value, dict) else {}
-    if not frame:
-        return {}
-    return {
-        "source": frame.get("source"),
-        "domain": frame.get("domain"),
-        "tool_name": frame.get("tool_name"),
-        "metric_namespace": frame.get("metric_namespace"),
-        "tool_payload": frame.get("tool_payload") if isinstance(frame.get("tool_payload"), dict) else {},
-    }
-
-
-def _followup_summary(value: Any) -> dict[str, Any]:
-    followup = value if isinstance(value, dict) else {}
-    if not followup:
-        return {}
-    return {
-        key: followup.get(key)
-        for key in (
-            "status",
-            "reason",
-            "domain",
-            "tool_name",
-            "metric_namespace",
-            "previous_metric_namespace",
-        )
-        if followup.get(key) not in (None, "", [], {})
-    }
-
-
-def _format_frame(value: Any) -> str:
-    frame = value if isinstance(value, dict) else {}
-    if not frame:
-        return "-"
-    return "/".join(
-        str(item)
-        for item in (frame.get("domain"), frame.get("tool_name"), frame.get("metric_namespace"))
-        if item
-    ) or "-"
-
-
-def _format_followup(value: Any) -> str:
-    followup = value if isinstance(value, dict) else {}
-    if not followup:
-        return "-"
-    status = str(followup.get("status") or "-")
-    namespace = str(followup.get("metric_namespace") or "").strip()
-    previous = str(followup.get("previous_metric_namespace") or "").strip()
-    if previous and namespace:
-        return f"{status}:{previous}->{namespace}"
-    if namespace:
-        return f"{status}:{namespace}"
-    return status
 
 
 def _compact_list(value: Any) -> str:

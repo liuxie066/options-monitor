@@ -108,12 +108,12 @@ P2_AGENT_EVAL_REQUIRED_FIXTURE_GROUPS: dict[str, set[str]] = {
         "operation_upgrade_followup_timeline_completes_answer",
     },
     "planner_context_budget": {
-        "planner_context_income_followup_uses_recent_read_hint",
-        "planner_context_explicit_candidate_message_overrides_income_context",
-        "planner_context_followup_suggested_views_drive_selection",
-        "planner_context_candidate_net_income_followup_uses_active_frame",
-        "planner_context_why_net_income_non_positive_uses_candidate_frame",
-        "planner_context_account_net_income_override_suppresses_candidate_frame",
+        "planner_context_income_followup_uses_projection_recent_evidence",
+        "planner_context_explicit_candidate_message_wins_over_projection_context",
+        "planner_context_projection_open_gaps_drive_selection",
+        "planner_context_candidate_metric_followup_uses_projection_refs",
+        "planner_context_why_metric_status_uses_projection_refs",
+        "planner_context_account_metric_message_wins_over_projection_refs",
     },
 }
 
@@ -157,9 +157,9 @@ P2_AGENT_EVAL_MINIMUM_CASES: dict[str, set[str]] = {
         "write_preview_no_apply_manual_trade_open",
     },
     "planner_context_budget": {
-        "planner_context_income_followup_uses_recent_read_hint",
-        "planner_context_explicit_candidate_message_overrides_income_context",
-        "planner_context_followup_suggested_views_drive_selection",
+        "planner_context_income_followup_uses_projection_recent_evidence",
+        "planner_context_explicit_candidate_message_wins_over_projection_context",
+        "planner_context_projection_open_gaps_drive_selection",
     },
 }
 P2_AGENT_EVAL_GAP_IMPACT_TERMS = (
@@ -217,24 +217,25 @@ def test_assistant_context_eval_report_covers_planner_context_decisions() -> Non
     assert summary["total"] >= 6
     assert summary["failed"] == 0
 
-    candidate = results["planner_context_candidate_net_income_followup_uses_active_frame"]
+    candidate = results["planner_context_candidate_metric_followup_uses_projection_refs"]
     candidate_actual = candidate["actual"]
-    assert candidate_actual["manifest_budget"]["selection_sources"] == ["conversation_context.active_frame"]
-    assert candidate_actual["context"]["active_frame"]["metric_namespace"] == "candidate_option_metrics"
-    assert candidate_actual["context"]["metric_glossary_namespace"] == "candidate_option_metrics"
-    assert candidate_actual["context"]["followup_resolution"]["status"] == "resolved_from_active_frame"
+    assert candidate_actual["manifest_budget"]["selection_sources"] == [
+        "message",
+        "context_projection.recent_evidence",
+    ]
+    assert candidate_actual["context"]["context_projection"]["recent_successful_tool_count"] == 1
+    assert candidate_actual["context"]["context_projection"]["evidence_ref_count"] == 1
 
-    override = results["planner_context_account_net_income_override_suppresses_candidate_frame"]
+    override = results["planner_context_account_metric_message_wins_over_projection_refs"]
     override_actual = override["actual"]
-    assert override_actual["manifest_budget"]["selection_sources"] == ["conversation_context.explicit_override"]
-    assert override_actual["context"]["active_frame_present"] is False
-    assert override_actual["context"]["metric_glossary_namespace"] == "account_income_metrics"
-    assert override_actual["context"]["followup_resolution"]["status"] == "explicit_message_overrides_context"
+    assert override_actual["manifest_budget"]["selection_sources"] == ["message"]
+    assert override_actual["context"]["context_projection"]["recent_successful_tool_count"] == 1
+    assert override_actual["context"]["context_projection"]["evidence_ref_count"] == 1
 
     text = format_context_eval_text(report)
     assert f"assistant context eval: {summary['passed']}/{summary['total']} passed" in text
-    assert "planner_context_candidate_net_income_followup_uses_active_frame" in text
-    assert "followup=explicit_message_overrides_context:candidate_option_metrics->account_income_metrics" in text
+    assert "planner_context_candidate_metric_followup_uses_projection_refs" in text
+    assert "projection=om-context-projection-v1 turns=1 refs=1" in text
 
 
 def _assert_no_internal_answer_leak(text: str, *, case_id: str) -> None:
@@ -413,51 +414,6 @@ def _run_planner_context_case(case: dict[str, Any]) -> None:
         assert budget["manifest_chars"] <= int(case["expect_max_manifest_chars"])
     if case.get("expect_max_analysis_views_included") is not None:
         assert budget["analysis_views_included"] <= int(case["expect_max_analysis_views_included"])
-    context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
-    if case.get("expect_recent_read_hint_count") is not None:
-        recent_hints = context.get("recent_read_hints") if isinstance(context.get("recent_read_hints"), list) else []
-        assert len(recent_hints) == int(case["expect_recent_read_hint_count"])
-    if case.get("expect_context_active_frame") is not None:
-        active_frame = context.get("active_frame")
-        assert isinstance(active_frame, dict), context
-        _assert_mapping_contains(
-            active_frame,
-            dict(case["expect_context_active_frame"]),
-            label=f"{case['id']}.context.active_frame",
-        )
-    if case.get("expect_context_active_frame_absent"):
-        assert "active_frame" not in context
-    if case.get("expect_context_frame_stack_count") is not None:
-        frame_stack = context.get("frame_stack") if isinstance(context.get("frame_stack"), list) else []
-        assert len(frame_stack) == int(case["expect_context_frame_stack_count"])
-    if case.get("expect_context_frame_stack_absent"):
-        assert "frame_stack" not in context
-    if case.get("expect_context_metric_glossary_namespace") is not None:
-        glossary = context.get("metric_glossary")
-        assert isinstance(glossary, dict), context
-        assert glossary.get("namespace") == case["expect_context_metric_glossary_namespace"]
-    if case.get("expect_context_metric_glossary_terms") is not None:
-        glossary = context.get("metric_glossary")
-        assert isinstance(glossary, dict), context
-        terms = glossary.get("terms") if isinstance(glossary.get("terms"), dict) else {}
-        for term in case["expect_context_metric_glossary_terms"]:
-            assert str(term) in terms
-    if case.get("expect_context_metric_glossary_term_formulas") is not None:
-        glossary = context.get("metric_glossary")
-        assert isinstance(glossary, dict), context
-        terms = glossary.get("terms") if isinstance(glossary.get("terms"), dict) else {}
-        for term, formula in dict(case["expect_context_metric_glossary_term_formulas"]).items():
-            term_payload = terms.get(str(term))
-            assert isinstance(term_payload, dict), terms
-            assert term_payload.get("formula") == formula
-    if case.get("expect_followup_resolution") is not None:
-        followup_resolution = context.get("followup_resolution")
-        assert isinstance(followup_resolution, dict), context
-        _assert_mapping_contains(
-            followup_resolution,
-            dict(case["expect_followup_resolution"]),
-            label=f"{case['id']}.context.followup_resolution",
-        )
 
 
 def _write_trade_runtime_config(tmp_path: Path) -> tuple[Path, Path]:

@@ -457,15 +457,16 @@ def test_assistant_commands_command_renders_catalog(capsys) -> None:
 def test_assistant_eval_context_command_renders_report(capsys) -> None:
     import src.interfaces.cli.main as cli
 
-    case_id = "planner_context_candidate_net_income_followup_uses_active_frame"
+    case_id = "planner_context_candidate_metric_followup_uses_projection_refs"
     rc = cli.main(["assistant", "eval-context", "--case-id", case_id])
     text = capsys.readouterr().out
 
     assert rc == 0
     assert "assistant context eval: 1/1 passed" in text
     assert case_id in text
-    assert "sources=conversation_context.active_frame" in text
-    assert "glossary=candidate_option_metrics" in text
+    assert "sources=message,context_projection.recent_evidence" in text
+    assert "projection=om-context-projection-v1" in text
+    assert "refs=1" in text
 
     rc = cli.main(["assistant", "eval-context", "--case-id", case_id, "--format", "json"])
     payload = _read_json_output(capsys)
@@ -474,7 +475,11 @@ def test_assistant_eval_context_command_renders_report(capsys) -> None:
     assert payload["tool_name"] == "assistant.eval_context"
     assert payload["ok"] is True
     assert payload["data"]["summary"]["total"] == 1
-    assert payload["data"]["results"][0]["actual"]["context"]["metric_glossary_namespace"] == "candidate_option_metrics"
+    context = payload["data"]["results"][0]["actual"]["context"]
+    assert context["context_projection"]["schema_version"] == "om-context-projection-v1"
+    assert context["context_projection"]["recent_turn_count"] == 1
+    assert context["context_projection"]["evidence_ref_count"] == 1
+    assert set(context) == {"context_projection", "context_policy"}
 
     rc = cli.main(["assistant", "eval-context", "--mode", "projection", "--format", "json"])
     payload = _read_json_output(capsys)
