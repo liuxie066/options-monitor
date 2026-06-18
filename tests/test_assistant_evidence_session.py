@@ -3079,6 +3079,108 @@ def test_task_contract_does_not_treat_month_digits_as_symbols() -> None:
     assert contract.scope["planned_symbols"] == []
 
 
+def test_task_contract_normalizes_user_requested_symbol_aliases() -> None:
+    plan = PlannerPlan(
+        goal="诊断泡泡玛特 sell_put 过滤原因",
+        steps=(
+            PlannerPlanStep(
+                id="step_1",
+                tool_name="candidate_filter_explain",
+                arguments={"symbol": "泡泡玛特", "account": "lx", "function": "sell_put"},
+                purpose="读取候选过滤 trace",
+            ),
+        ),
+    )
+    contract = build_task_contract(
+        question="lx 泡泡玛特 sell_put 被哪个参数过滤了？",
+        plan=plan.public_payload(),
+        request_context={"config_key": "hk"},
+        today=date(2026, 6, 14),
+    )
+
+    assert contract.scope["requested_accounts"] == ["lx"]
+    assert contract.scope["requested_symbols"] == ["9992.HK"]
+    assert contract.scope["planned_symbols"] == ["9992.HK"]
+
+
+def test_task_contract_does_not_treat_lowercase_words_as_symbols() -> None:
+    plan = PlannerPlan(
+        goal="diagnose candidate trace risk reason",
+        steps=(
+            PlannerPlanStep(
+                id="step_1",
+                tool_name="candidate_filter_explain",
+                arguments={"symbol": "FUTU", "account": "lx"},
+                purpose="读取候选过滤 trace",
+            ),
+        ),
+    )
+    contract = build_task_contract(
+        question="diagnose candidate trace risk reason",
+        plan=plan.public_payload(),
+        request_context={"config_key": "us"},
+        today=date(2026, 6, 14),
+    )
+
+    assert contract.scope["requested_symbols"] == []
+    assert contract.scope["planned_symbols"] == ["FUTU"]
+
+
+def test_task_contract_matches_lowercase_user_symbol_to_planned_symbol() -> None:
+    plan = PlannerPlan(
+        goal="设置 tigr covered call min strike 6.5",
+        steps=(
+            PlannerPlanStep(
+                id="step_1",
+                tool_name="symbol_edit",
+                arguments={"symbol": "TIGR", "set": {"sell_call.min_strike": 6.5}},
+                purpose="预览监控标的配置修改",
+            ),
+        ),
+    )
+    contract = build_task_contract(
+        question="设置 tigr covered call min strike 6.5",
+        plan=plan.public_payload(),
+        request_context={"config_key": "us"},
+        today=date(2026, 6, 14),
+    )
+
+    assert contract.requested_effect == "preview_write"
+    assert contract.scope["requested_symbols"] == ["TIGR"]
+    assert contract.scope["planned_symbols"] == ["TIGR"]
+
+
+def test_task_contract_keeps_planner_requested_scope_out_of_user_requested_scope() -> None:
+    plan = PlannerPlan(
+        goal="诊断 FUTU 过滤原因",
+        steps=(
+            PlannerPlanStep(
+                id="step_1",
+                tool_name="candidate_filter_explain",
+                arguments={"symbol": "TSLA", "account": "lx"},
+                purpose="读取候选过滤 trace",
+            ),
+        ),
+        task_contract={
+            "scope": {
+                "requested_symbols": ["TSLA"],
+                "requested_accounts": ["sy"],
+            },
+        },
+    )
+    contract = build_task_contract(
+        question="lx FUTU 为什么没进候选？",
+        plan=plan.public_payload(),
+        request_context={"config_key": "us"},
+        today=date(2026, 6, 14),
+    )
+
+    assert contract.scope["requested_accounts"] == ["lx"]
+    assert contract.scope["requested_symbols"] == ["FUTU"]
+    assert contract.scope["planned_accounts"] == ["lx", "sy"]
+    assert contract.scope["planned_symbols"] == ["FUTU", "TSLA"]
+
+
 def test_coverage_rejects_account_comparison_without_same_period_metric() -> None:
     plan = PlannerPlan(
         goal="对比 lx 和 sy 的账户收益",

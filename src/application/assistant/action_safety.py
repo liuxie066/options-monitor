@@ -27,13 +27,21 @@ _NON_SYMBOL_TOKENS = {
     "BY",
     "CALL",
     "CASE",
+    "CANDIDATE",
+    "CANDIDATES",
     "CASHFLOW",
     "COUNT",
     "CNY",
     "COVERED",
     "DESC",
+    "DIAGNOSE",
+    "DIAGNOSTIC",
+    "DIAGNOSTICS",
     "ELSE",
     "END",
+    "EVIDENCE",
+    "FILTER",
+    "FILTERED",
     "FROM",
     "GROUP",
     "HK",
@@ -61,11 +69,16 @@ _NON_SYMBOL_TOKENS = {
     "P1",
     "P2",
     "PUT",
+    "REASON",
+    "REJECTED",
     "REFRESH",
     "RIGHT",
+    "RISK",
+    "RULE",
     "SELECT",
     "SELL",
     "SHORT",
+    "SHOW",
     "STATUS",
     "STOCK",
     "STRIKE",
@@ -73,10 +86,12 @@ _NON_SYMBOL_TOKENS = {
     "SY",
     "SYMBOL",
     "THEN",
+    "TRACE",
     "US",
     "USD",
     "WHEN",
     "WHERE",
+    "WHY",
 }
 _PAYLOAD_SCOPE_TEXT_SKIP_KEYS = {
     "artifact_path",
@@ -401,9 +416,21 @@ def _is_apply_or_confirm(*, tool_name: str, action_policy: dict[str, Any]) -> bo
 
 def _scope_delta(*, contract: dict[str, Any], payload: dict[str, Any], text: str = "") -> dict[str, Any]:
     scope = contract.get("scope") if isinstance(contract.get("scope"), dict) else {}
-    requested_accounts = _normal_values(scope.get("requested_accounts"), lower=True) or _accounts_from_text(text)
-    requested_symbols = _normal_symbol_values(scope.get("requested_symbols")) or _symbols_from_text(text)
-    requested_months = _normal_values(scope.get("requested_months"))
+    requested_accounts = (
+        _normal_values(scope.get("requested_accounts"), lower=True)
+        if "requested_accounts" in scope
+        else _accounts_from_text(text)
+    )
+    requested_symbols = (
+        _normal_symbol_values(scope.get("requested_symbols"))
+        if "requested_symbols" in scope
+        else _symbols_from_text(text)
+    )
+    requested_months = (
+        _normal_values(scope.get("requested_months"))
+        if "requested_months" in scope
+        else _months_from_text(text)
+    )
     payload_text = "\n".join(_payload_scope_texts(payload))
     provided_accounts = _normal_values(
         [*_payload_values(payload, keys=("account", "accounts"), lower=True), *_accounts_from_text(payload_text)],
@@ -433,7 +460,7 @@ def _accounts_from_text(text: str) -> list[str]:
 def _symbols_from_text(text: str) -> list[str]:
     symbols: list[str] = []
     for match in _SYMBOL_TEXT_RE.finditer(str(text or "")):
-        symbol = _normalize_symbol_token(match.group(1))
+        symbol = _normalize_symbol_token(match.group(1), free_text=True)
         if not symbol:
             continue
         symbols.append(symbol)
@@ -448,26 +475,44 @@ def _normal_symbol_values(value: Any) -> list[str]:
         raw_values = list(value)
     else:
         raw_values = [value]
-    symbols = [_normalize_symbol_token(raw) for raw in raw_values]
+    symbols = [_normalize_symbol_token(raw, free_text=False) for raw in raw_values]
     return _normal_values(symbols)
 
 
-def _normalize_symbol_token(raw: Any) -> str:
+def _normalize_symbol_token(raw: Any, *, free_text: bool) -> str:
     text = str(raw or "").strip()
     if not text:
         return ""
     upper = text.upper()
     if upper in _NON_SYMBOL_TOKENS:
         return ""
-    calibrated = calibrate_symbol(text)
-    if calibrated.status == "ok" and calibrated.canonical_symbol:
-        return str(calibrated.canonical_symbol).strip().upper()
-    if re.search(r"[\u4e00-\u9fff]", text):
+    if re.fullmatch(r"20\d{2}", text):
         return ""
+    if free_text:
+        calibrated = _calibrated_symbol(text)
+        if calibrated:
+            return calibrated
+        if re.search(r"[\u4e00-\u9fff]", text):
+            return ""
+        if re.search(r"\d", text) or "." in text:
+            return upper
+        if text == upper:
+            return upper
+        return ""
+    calibrated = _calibrated_symbol(text)
+    if calibrated:
+        return calibrated
     if re.search(r"\d", text) or "." in text:
         return upper
     if text == upper:
         return upper
+    return ""
+
+
+def _calibrated_symbol(text: str) -> str:
+    calibrated = calibrate_symbol(text)
+    if calibrated.status == "ok" and calibrated.canonical_symbol:
+        return str(calibrated.canonical_symbol).strip().upper()
     return ""
 
 

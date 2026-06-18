@@ -52,6 +52,7 @@ from src.application.assistant.llm_reply import LlmReplyResult, generate_general
 from src.application.assistant.renderer import render_canonical_tool_result
 from src.application.assistant.settings import PlannerSettings
 from src.application.assistant.session_store import collect_assistant_trace
+from src.application.assistant.task_contract import build_task_contract
 from src.application.assistant.tool_bindings import (
     assistant_tool_bindings,
     config_required_intent_names,
@@ -496,6 +497,48 @@ def test_action_safety_allows_symbol_edit_alias_scope() -> None:
         assert safety["source"] == "agent_loop_plan"
 
 
+def test_action_safety_allows_lowercase_symbol_edit_with_full_task_contract() -> None:
+    question = "设置 tigr covered call min strike 6.5"
+    plan = PlannerPlan(
+        goal=question,
+        steps=(
+            PlannerPlanStep(
+                id="step_1",
+                tool_name="symbol_edit",
+                arguments={"symbol": "TIGR", "set": {"sell_call.min_strike": 6.5}},
+                purpose="预览监控标的配置修改",
+            ),
+        ),
+    )
+    contract = build_task_contract(
+        question=question,
+        plan=plan.public_payload(),
+        request_context={"config_key": "us"},
+        today=date(2026, 6, 14),
+    ).public_payload()
+    call = ToolCall(tool_name="symbol_edit", payload={"symbol": "TIGR", "set": {"sell_call.min_strike": 6.5}})
+    policy = decide_tool_action_policy(
+        call=call,
+        request=None,
+        task_contract=contract,
+        source="agent_loop_plan",
+    )
+
+    safety = assess_action_safety(
+        question=question,
+        task_contract=contract,
+        tool_name=call.tool_name,
+        payload=call.payload,
+        action_policy=policy.public_payload(),
+        source="agent_loop_plan",
+    ).public_payload()
+
+    assert contract["scope"]["requested_symbols"] == ["TIGR"]
+    assert safety["status"] == "allow_preview"
+    assert safety["code"] == "ok"
+    assert safety["route"] == "preview"
+
+
 def test_action_safety_denies_symbol_edit_alias_scope_mismatch() -> None:
     call = ToolCall(tool_name="symbol_edit", payload={"symbol": "TSLA", "set": {"sell_call.min_strike": 85}})
     policy = decide_tool_action_policy(
@@ -547,6 +590,35 @@ def test_action_safety_ignores_payload_paths_for_symbol_scope() -> None:
     assert safety["status"] == "allow"
     assert safety["code"] == "ok"
     assert safety["scope_delta"]["symbols"]["provided"] == ["9992.HK"]
+
+
+def test_action_safety_does_not_treat_lowercase_payload_text_as_symbol_scope_expansion() -> None:
+    call = ToolCall(
+        tool_name="candidate_filter_explain",
+        payload={
+            "symbol": "FUTU",
+            "account": "lx",
+            "note": "candidate trace risk reason",
+        },
+    )
+    contract = {
+        "requested_effect": "read",
+        "scope": {"requested_accounts": ["lx"], "requested_symbols": ["FUTU"]},
+    }
+    policy = decide_tool_action_policy(call=call, request=None, task_contract=contract)
+
+    safety = assess_action_safety(
+        question="lx FUTU 为什么没进候选？",
+        task_contract=contract,
+        tool_name=call.tool_name,
+        payload=call.payload,
+        action_policy=policy.public_payload(),
+    ).public_payload()
+
+    assert safety["status"] == "allow"
+    assert safety["code"] == "ok"
+    assert safety["scope_delta"]["symbols"]["provided"] == ["FUTU"]
+    assert safety["scope_delta"]["symbols"]["out_of_scope"] == []
 
 
 def test_action_safety_ignores_query_enums_for_symbol_scope() -> None:

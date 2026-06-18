@@ -7,20 +7,42 @@ from typing import Any
 
 from src.application.assistant.capability_catalog import ACCOUNT_VALUES
 from src.application.assistant.time_filters import extract_month_filter
+from src.application.symbol_calibration import calibrate_symbol
 
 
 TASK_CONTRACT_SCHEMA_VERSION = "om-agent-task-contract-v1"
+_SYMBOL_TEXT_RE = re.compile(
+    r"(?<![A-Za-z0-9_.])"
+    r"([A-Za-z]{1,8}(?:\.[A-Za-z]{1,4})?|[A-Za-z]{2}\.\d{4,5}|\d{3,5}(?:\.HK)?|[\u4e00-\u9fff]{2,8})"
+    r"(?![A-Za-z0-9_.])"
+)
 _NON_SYMBOL_TOKENS = {
+    "ACCOUNT",
+    "ACTION",
+    "ALL",
     "AND",
+    "AS",
+    "ASSIGNED",
     "ASC",
     "AVG",
     "BY",
+    "CALL",
     "CASE",
+    "CANDIDATE",
+    "CANDIDATES",
+    "CASHFLOW",
     "COUNT",
     "CNY",
+    "COVERED",
     "DESC",
+    "DIAGNOSE",
+    "DIAGNOSTIC",
+    "DIAGNOSTICS",
     "ELSE",
     "END",
+    "EVIDENCE",
+    "FILTER",
+    "FILTERED",
     "FROM",
     "GROUP",
     "HK",
@@ -31,24 +53,46 @@ _NON_SYMBOL_TOKENS = {
     "LEFT",
     "LIKE",
     "LIMIT",
+    "LONG",
+    "LX",
+    "MARKET",
     "MAX",
     "MIN",
+    "MONTH",
     "NOT",
     "NULL",
     "ON",
+    "OPEN",
     "OR",
     "ORDER",
     "OUTER",
     "P0",
     "P1",
     "P2",
+    "PUT",
+    "REASON",
+    "REJECTED",
+    "REFRESH",
     "RIGHT",
+    "RISK",
+    "RULE",
+    "SELECT",
+    "SELL",
+    "SHORT",
+    "SHOW",
+    "STATUS",
+    "STOCK",
+    "STRIKE",
     "SUM",
+    "SY",
+    "SYMBOL",
     "THEN",
+    "TRACE",
     "US",
     "USD",
     "WHEN",
     "WHERE",
+    "WHY",
 }
 
 
@@ -104,13 +148,14 @@ def build_task_contract(
     steps = plan.get("steps") if isinstance(plan.get("steps"), list) else []
     plan_values = list(_plan_values(steps))
     text = "\n".join([str(question or ""), goal, *plan_values])
-    question_goal_text = "\n".join([str(question or ""), goal])
+    user_text = str(question or "")
+    question_goal_text = "\n".join([user_text, goal])
     intent_families = _intent_families(question_goal_text, text)
-    requested_accounts = _extract_accounts(question_goal_text)
-    planned_accounts = _extract_accounts(text)
-    requested_symbols = _extract_symbols(question_goal_text)
     planned_symbols = _extract_symbols(text)
-    requested_months = _extract_months(question_goal_text, today=today)
+    requested_accounts = _extract_accounts(user_text)
+    planned_accounts = _extract_accounts(text)
+    requested_symbols = _extract_symbols(user_text, allowed_lowercase_symbols=set(planned_symbols))
+    requested_months = _extract_months(user_text, today=today)
     planned_months = _extract_months(text, today=today)
     config_keys = _extract_config_keys(plan_values, request_context=request_context)
     scope = {
@@ -367,11 +412,14 @@ def _merge_planner_scope(base_scope: dict[str, Any], raw_scope: Any) -> dict[str
         return scope
     key_map = {
         "accounts": "planned_accounts",
-        "requested_accounts": "requested_accounts",
+        "requested_accounts": "planned_accounts",
+        "planned_accounts": "planned_accounts",
         "symbols": "planned_symbols",
-        "requested_symbols": "requested_symbols",
+        "requested_symbols": "planned_symbols",
+        "planned_symbols": "planned_symbols",
         "months": "planned_months",
-        "requested_months": "requested_months",
+        "requested_months": "planned_months",
+        "planned_months": "planned_months",
         "config_keys": "config_keys",
         "operation_id": "operation_ids",
         "operation_ids": "operation_ids",
@@ -548,14 +596,46 @@ def _extract_accounts(text: str) -> list[str]:
     return _unique(accounts)
 
 
-def _extract_symbols(text: str) -> list[str]:
+def _extract_symbols(text: str, *, allowed_lowercase_symbols: set[str] | None = None) -> list[str]:
     symbols: list[str] = []
-    for match in re.finditer(r"(?<![A-Za-z0-9_.])([A-Z0-9]{1,5}(?:\.HK)?)(?![A-Za-z0-9_.])", str(text or "")):
-        symbol = match.group(1).upper()
-        if symbol.isdigit() or symbol in _NON_SYMBOL_TOKENS:
+    for match in _SYMBOL_TEXT_RE.finditer(str(text or "")):
+        symbol = _normalize_symbol_token(match.group(1), allowed_lowercase_symbols=allowed_lowercase_symbols)
+        if not symbol:
             continue
         symbols.append(symbol)
     return _unique(symbols)
+
+
+def _normalize_symbol_token(raw: Any, *, allowed_lowercase_symbols: set[str] | None = None) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    upper = text.upper()
+    if upper in _NON_SYMBOL_TOKENS:
+        return ""
+    if re.fullmatch(r"20\d{2}", text):
+        return ""
+    if re.search(r"[\u4e00-\u9fff]", text):
+        return _calibrated_symbol(text)
+    if re.search(r"\d", text) or "." in text:
+        calibrated = _calibrated_symbol(text)
+        if calibrated:
+            return calibrated
+        return upper
+    if text == upper:
+        return _calibrated_symbol(text) or upper
+    if allowed_lowercase_symbols:
+        calibrated = _calibrated_symbol(text)
+        if calibrated in allowed_lowercase_symbols:
+            return calibrated
+    return ""
+
+
+def _calibrated_symbol(text: str) -> str:
+    calibrated = calibrate_symbol(text)
+    if calibrated.status == "ok" and calibrated.canonical_symbol:
+        return str(calibrated.canonical_symbol).strip().upper()
+    return ""
 
 
 def _extract_months(text: str, *, today: date) -> list[str]:
