@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 684 (`src`: 398, `domain`: 52, `scripts`: 7, `tests`: 227)
-- Internal import edges: 3652 total, 1711 production/script edges excluding tests
+- Python files scanned: 691 (`src`: 401, `domain`: 52, `scripts`: 7, `tests`: 231)
+- Internal import edges: 3675 total, 1722 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -44,10 +44,10 @@ flowchart LR
   scripts -->|1| infrastructure
   scripts -->|2| storage
   storage -->|1| domain
-  tests -->|1336| application
+  tests -->|1347| application
   tests -->|291| domain
   tests -->|2| domain_services
-  tests -->|95| infrastructure
+  tests -->|96| infrastructure
   tests -->|173| interfaces
   tests -->|8| scripts
   tests -->|18| storage
@@ -75,10 +75,10 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 1336 |
+| tests | application | 1347 |
 | tests | domain | 291 |
 | tests | interfaces | 173 |
-| tests | infrastructure | 95 |
+| tests | infrastructure | 96 |
 | tests | storage | 18 |
 | tests | scripts | 8 |
 | tests | domain_services | 2 |
@@ -175,7 +175,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 
 | module | incoming imports |
 |---|---|
-| src.application.agent_tool_contracts | 82 |
+| src.application.agent_tool_contracts | 85 |
 | src.infrastructure.io_utils | 42 |
 | domain.domain.ledger.position_fields | 42 |
 | domain.domain.symbol_identity | 37 |
@@ -196,8 +196,8 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | module | outgoing imports |
 |---|---|
 | src.application.agent_tools.base | 31 |
+| src.application.assistant.agent_loop | 26 |
 | src.application.multi_account_tick | 26 |
-| src.application.assistant.agent_loop | 25 |
 | src.interfaces.cli.main | 22 |
 | src.application.close_advice_runner | 21 |
 | src.application.channels.wechat_clawbot.inbound | 20 |
