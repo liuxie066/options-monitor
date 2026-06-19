@@ -8,6 +8,8 @@ into one overloaded "agent" concept.
 
 - Current architecture authority: this document.
 - Current capability matrix: [OM_AGENT_CAPABILITY_MAP.md](OM_AGENT_CAPABILITY_MAP.md).
+- Current tool-calling system design:
+  [OM_ASSISTANT_TOOL_CALLING_V2_SYSTEM_DESIGN.md](OM_ASSISTANT_TOOL_CALLING_V2_SYSTEM_DESIGN.md).
 - Local tool invocation contract: [AGENT_INTEGRATION.md](AGENT_INTEGRATION.md).
 - Remote/message safety contract: [INBOUND_CONTROL.md](INBOUND_CONTROL.md).
 - Current conversation-context design:
@@ -124,11 +126,63 @@ project Agent. The durable store remains the inbound audit SQLite
 `agent_sessions` trace table, and the authority path remains
 `./om assistant -> AgentLoop -> tool_execution -> agent_tool_registry`.
 
-## Conversation Context Direction
+## Tool Calling v2 Direction
 
-The current conversation-context direction is to build a bounded planner-facing
-projection of prior turns, then validate the planner's declared context use
-before execution. This follows the useful Claude Code boundary: code owns
+The next tool-calling design should borrow Claude Code's loop shape, not its
+full product permission model. The useful shape is: the model emits tool calls,
+observes results, and stops when it can answer. OM adds financial-operation
+guardrails around that loop.
+
+Target flow:
+
+```text
+message
+  -> request/context projection
+  -> model selects an allowed capability/tool
+  -> tool_execution runs the deterministic tool
+  -> observation is added to the transcript/evidence bundle
+  -> model decides: another read tool, clarification, preview, or answer
+  -> loop guard checks scope, risk, budget, and duplicates
+  -> final answer verification and assistant_trace
+```
+
+The intelligence boundary is:
+
+- the model owns intent understanding, capability selection, result
+  interpretation, deciding whether another read tool is useful, and composing
+  the user-facing answer;
+- code owns the tool protocol, schema validation, scope injection, risk class,
+  loop budget, duplicate-call prevention, evidence extraction, missing-data
+  declarations, answer guardrails, and trace/audit.
+
+Loop continuation is allowed only when all of these are true:
+
+- the model explicitly requests another tool call;
+- the tool is classified as automatic read capability for Inbound Assistant;
+- the call remains inside the normalized request scope;
+- the call is under tool-count, turn, context, and time budgets;
+- the call is not a duplicate of an already observed request/result;
+- the call does not cross config, notification, ledger/trade, broker-facing,
+  release, service, or admin write boundaries.
+
+Preview/write routes exit the read loop and go through existing deterministic
+preview/confirm lifecycle. The model may request an approved preview operation,
+but it must never confirm, cancel, apply, send, or mutate state by continuing
+the tool loop.
+
+`CoverageVerifier` and `AnswerVerifier` are guardrails, not the primary
+intelligence engine. If the model stops but verification detects one obvious,
+recoverable evidence gap, the assistant may issue at most one bounded repair
+prompt/tool follow-up. Otherwise it should answer with explicit missing data or
+ask a clarification only for high-risk or unsafe scope gaps. The design goal is:
+broader automatic reads, tighter writes, a stronger model-driven observe loop,
+and no new tool registry or public agent surface.
+
+## Conversation Context State
+
+The current conversation-context path uses a bounded planner-facing projection
+of prior turns, then validates the planner's declared context use before
+execution. This follows the useful Claude Code boundary: code owns
 conversation state, projection, budget, and compaction-like boundaries, while
 the model performs natural-language semantic continuity over the visible
 conversation view.
@@ -161,10 +215,43 @@ The context eval harness is layered by explicit mode:
 ./om assistant eval-context --mode scenarios
 ```
 
-`planner_context` is the legacy default during migration. `projection` runs the
-deterministic projection fixtures without LLM calls. `validation` and
-`scenarios` are separate harness lanes so future slices can add fixtures without
-changing the projection evaluator or the legacy planner-context report.
+`planner_context` is a historical eval lane, not an alternate contract.
+Current context work should use `projection`, `validation`, and `scenarios` as
+the authoritative regression lanes. New fixtures should move to those modes
+instead of preserving old planner payload shape as a parallel contract.
+
+## Claude Code Reference Boundary
+
+The useful Claude Code reference is its module separation, not the exact
+implementation or product scope. In the local source, Claude Code is split
+roughly this way:
+
+| Claude Code area | Local source examples | OM analogue | Borrowing decision |
+|---|---|---|---|
+| Entrypoints and UI | `main.tsx`, `cli/`, `commands/`, `components/`, `screens/` | `./om`, `./om assistant`, CLI adapters | Keep entrypoints thin; do not place planning or tool policy in CLI parsing. |
+| Model loop and context | `query.ts`, `QueryEngine.ts`, `services/api/`, `services/compact/`, `services/contextCollapse/` | `AgentLoop`, `ContextProjection`, `ContextValidator` | Keep code responsible for projection, budget, and context boundaries; do not copy full compaction machinery unless context pressure proves it is needed. |
+| Tool protocol | `Tool.ts` | `agent_tools` metadata, output/evidence contracts, tool registry metadata | Strengthen deterministic metadata and result contracts instead of letting planner prose define tool semantics. |
+| Tool pool and visibility | `tools.ts`, `ToolSearchTool` | `capability_catalog`, planner-visible manifest, `AgentLoop` tool selection | Make the planner-visible capability view narrow, auditable, and explainable. Do not expose the full Tool Gateway manifest to Inbound Assistant. |
+| Execution orchestration | `services/tools/toolExecution.ts`, `toolOrchestration.ts`, `StreamingToolExecutor.ts` | `tool_execution`, tool-loop guard, evidence bundle, answer verification | Preserve a validate -> policy -> execute -> observe pipeline where the model decides whether to continue and code enforces scope, risk, budget, and duplicate guards. |
+| Permissions and hooks | `utils/permissions/`, permission hooks | `agent_tools/permissions.py`, `action_safety`, `operation_lifecycle` | Keep write authority centralized and reason-coded. Planner output may request preview, but must not apply writes. |
+| Tool implementations | `tools/*` | `src/application/agent_tools/*`, domain services | Keep tools deterministic, scoped, and evidence-oriented. Business rules remain in owning domain/application modules. |
+| Extension surfaces | `services/mcp/`, `services/plugins/`, `skills/` | Local Tool Gateway integration only, not Inbound core | Do not add remote extension/plugin authority to OM Assistant without a separate safety design. |
+
+This mapping reinforces the existing OM boundary:
+
+```text
+./om assistant
+  -> AgentLoop / policy / trace
+  -> planner-visible capability view
+  -> tool_execution
+  -> agent_tool_registry
+  -> deterministic tool
+```
+
+The next Claude Code-inspired improvement should therefore be a model-driven
+read-tool loop with capability selection explainability and planner manifest
+hygiene. It should not add a new public agent surface, second tool registry,
+global conversation state machine, or broader write/admin execution authority.
 
 ## `./om-agent` Boundary
 
@@ -225,11 +312,11 @@ slash command.
 It may:
 
 - build a task contract,
-- plan a small number of read-only tool calls,
+- run a bounded sequence of automatic read tool calls selected by the model,
 - create exactly one approved preview operation when policy allows,
 - collect evidence,
-- verify coverage,
-- perform bounded follow-up for recoverable gaps,
+- use coverage and answer verification as post-check guardrails,
+- perform at most one bounded repair/follow-up for an obvious recoverable gap,
 - synthesize an answer from deterministic evidence,
 - record trace/session data.
 
@@ -248,6 +335,7 @@ The current optimization target is `./om assistant` capability quality:
 - better intent recognition,
 - better capability selection,
 - better task contract and coverage verification,
+- better model-driven read tool iteration,
 - better evidence extraction,
 - better answer quality,
 - clearer preview/confirm receipts,
@@ -257,6 +345,16 @@ The current optimization target is `./om assistant` capability quality:
 needs better tool contracts, pure-read classification, output evidence, or
 execution receipts, but it should stay a Tool Gateway rather than becoming the
 project's autonomous Agent.
+
+The next assistant optimization should focus on capability selection
+explainability, not another context state machine. In practice that means:
+
+- keeping planner-visible capability manifests narrow and auditable,
+- deriving selection reasons from message text, `ContextProjection`,
+  open evidence gaps, and `task_contract.required_evidence`,
+- adding regression fixtures for selected tools/views and selection sources,
+- keeping execution authority inside the existing
+  `AgentLoop -> tool_execution -> agent_tool_registry` path.
 
 ## Verification Sources
 

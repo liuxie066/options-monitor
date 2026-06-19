@@ -8,6 +8,9 @@ authority. For current naming and dimension boundaries, first read
 Current facts should still be verified through the tool manifest, Inbound
 capability catalog, source, tests, configs, and runtime artifacts.
 
+Detailed tool-loop design lives in
+[OM_ASSISTANT_TOOL_CALLING_V2_SYSTEM_DESIGN.md](OM_ASSISTANT_TOOL_CALLING_V2_SYSTEM_DESIGN.md).
+
 Terminology used here:
 
 - `./om-agent` is the local Tool Gateway CLI for structured JSON tool calls.
@@ -49,6 +52,9 @@ Rules:
   LLM-generated accounting facts safe.
 - Intelligence means knowing what to inspect first, what not to touch, and how
   to verify. It does not mean broader execution freedom.
+- Pure reads may be broader than today's deterministic command routes when they
+  are scoped, budgeted, deduplicated, and traced. This broadening applies only
+  to read-only tool calls.
 - Writes to config, notification channels, Feishu, ledger/trade state,
   broker-facing data, or production services require explicit human intent and
   the existing preview/confirm gates.
@@ -145,11 +151,35 @@ LLM authority is deliberately narrow:
 - Explicit confirm/cancel/apply remains deterministic-only and must be bound to
   an existing pending operation plus the existing sender/env/HMAC/TTL gates.
 
+## Capability Selection Explainability
+
+Claude Code's useful pattern here is that the model does not need to see every
+tool all the time. Tool protocol, tool visibility, execution, and permission
+remain separate. OM should apply the same idea to Inbound Assistant capability
+selection:
+
+- planner-visible capabilities should be a narrowed view derived from the
+  Inbound capability catalog and current task contract,
+- the pure-read pool may be wider for model-driven tool calling than for a
+  single deterministic route, but only for `READ_AUTO` capabilities with
+  bounded loop guards,
+- every selected capability should have a short reason tied to one of:
+  current message text, projected context, open evidence gap, or
+  `task_contract.required_evidence`,
+- rejected or hidden capabilities do not need a full planner-generated essay,
+  but trace should make the selected route and selection source auditable,
+- capability selection should never bypass `tool_execution`,
+  `agent_tool_registry`, permission checks, or preview/confirm lifecycle,
+- adding explainability should not broaden the Inbound Assistant manifest.
+
+The implementation target is better traceability of why a tool/view was chosen,
+plus safer automatic read iteration. It is not more write freedom.
+
 ## Surfaces
 
 | Surface | Purpose | Default capability boundary | LLM role |
 |---|---|---|---|
-| `./om-agent` | Local Tool Gateway CLI for structured JSON access to deterministic OM tools | Pure reads plus selected compatibility helpers; write modes require `OM_AGENT_ENABLE_WRITE_TOOLS=true` and payload confirmation where applicable | None inside tool execution; external agents may plan calls |
+| `./om-agent` | Local Tool Gateway CLI for structured JSON access to deterministic OM tools | Pure reads plus selected local operator helpers; write modes require `OM_AGENT_ENABLE_WRITE_TOOLS=true` and payload confirmation where applicable | None inside tool execution; external agents may plan calls |
 | `./om assistant handle` | Inbound Assistant CLI namespace for local/remote messages through Feishu, WeChat, or future channels | Inbound catalog only; no arbitrary shell, no direct full `./om-agent` manifest exposure | May recognize allowed intents; read/local tools are directly executable, while approved preview-write capabilities may only create pending previews |
 
 Related OM surfaces outside the Inbound Assistant core:
@@ -162,12 +192,22 @@ Related OM surfaces outside the Inbound Assistant core:
 
 ## Risk Classes
 
-| Class | Definition | Default exposure | Confirmation rule |
+Tool Calling v2 should reason about risk with these policy classes. The
+capability matrix below still uses the existing labels where useful, but new
+assistant-loop work should map them to this policy model.
+
+| v2 class | Current matrix label | Definition | Default Assistant policy |
 |---|---|---|---|
-| Core Read | Reads existing state or validates config without side effects | `om-agent`; selected tools in Inbound | No confirmation, but path/config inputs must stay scoped |
-| Preview Write | Builds a pending change preview without applying production mutation | Inbound deterministic preview paths; local dry-run helpers | Must clearly present preview; apply remains separate |
-| Confirm Write | Applies config, ledger/trade, model, upgrade, or local repo writes | Human/operator only, or Inbound confirm commands for existing pending previews | Explicit confirm, and env/yes gates where implemented |
-| Admin / Live Ops | Service install/start/stop, live tick, notification send, Feishu sync, broker-facing operations | Operator-only | Explicit human request and dry-run/read-only check first |
+| `READ_AUTO` | Core Read | Reads existing state or validates config without side effects | May run automatically inside the model-driven tool loop when scoped, budgeted, deduplicated, and traced |
+| `SOFT_WRITE_PREVIEW` | Preview Write | Builds a pending preview or local dry-run without applying production mutation | May create a deterministic preview only; apply remains outside the loop |
+| `LEDGER_WRITE_CONFIRM` | Confirm Write for trade/position/ledger/config state | Applies or mutates positions, trade events, ledger/projection state, config, or model state | Requires explicit confirm bound to an existing pending operation plus audit; model-originated loop calls must not apply |
+| `ADMIN_CONFIRM` | Admin / Live Ops | Service operations, release/upgrade apply, live tick, notification send, Feishu sync, broker-facing operations | Operator-only or explicit human request with read-only preflight; never automatic in the assistant loop |
+
+Practical rule: read wider, write tighter. The highest OM risk is not a read
+tool summary; it is mutation of trade/position/ledger/config state or live
+operations. Tool-loop flexibility should therefore be spent on `READ_AUTO`
+evidence gathering, while write/admin routes stay deterministic preview/confirm
+or operator-owned workflows.
 
 ## Tool Gateway And Guarded Capability Matrix
 
@@ -241,7 +281,7 @@ The assistant should not use them as default evidence paths.
 
 - `./om-agent spec` exposes more than the Inbound Assistant core. It includes
   pure read tools, selected local report/cache helpers, and selected local write
-  helpers for compatibility. The assistant boundary in this document is
+  helpers for explicit operator workflows. The assistant boundary in this document is
   narrower than the raw manifest.
 - Research, Shadow Replay, and Strategy Lab form an independent
   offline evidence/replay module under `./om research ...`. They are used to

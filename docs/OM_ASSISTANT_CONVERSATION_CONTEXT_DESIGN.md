@@ -1,8 +1,8 @@
 # OM Assistant Conversation Context Design
 
-> Current design note for improving `./om assistant` multi-turn conversation
-> quality. This document is about conversation context, not wider tool
-> capability, strategy research, or a new public Agent surface.
+> Current design note for `./om assistant` multi-turn conversation quality.
+> This document is about conversation context, not wider tool capability,
+> strategy research, or a new public Agent surface.
 
 ## Status
 
@@ -18,6 +18,8 @@
   - [OM_ASSISTANT_CONTEXT_EVAL_PLAN.md](OM_ASSISTANT_CONTEXT_EVAL_PLAN.md)
 - Implementation plan:
   [OM_ASSISTANT_CONTEXT_IMPLEMENTATION_PLAN.md](OM_ASSISTANT_CONTEXT_IMPLEMENTATION_PLAN.md)
+- Current implementation state: projection, validation, planner input cutover,
+  legacy resolver cleanup, and scenario regression coverage are complete.
 
 ## Problem
 
@@ -27,7 +29,7 @@ single ambiguous metric case work by adding business-specific logic around
 active frames, metric namespaces, and planner drift. That pattern is too narrow:
 each new follow-up shape would invite another keyword branch.
 
-The desired capability is more general:
+The implemented capability is more general:
 
 ```text
 conversation transcript
@@ -77,7 +79,7 @@ Instead:
 This keeps the general conversation mechanism separate from business-specific
 metrics, symbols, tools, and report shapes.
 
-## Target Pipeline
+## Current Pipeline
 
 ```text
 Inbound message
@@ -97,7 +99,7 @@ Inbound message
   -> Final response + AgentSession trace
 ```
 
-The important shift is where context logic lives:
+The important boundary is where context logic lives:
 
 | Concern | Owner |
 |---|---|
@@ -165,7 +167,7 @@ checks structural safety:
 - context references point to real projected turns or evidence refs,
 - inherited slots are allowed by the projection,
 - explicit current-message slots are not overwritten by previous payloads,
-- planner tools are compatible with declared context refs,
+- planner tools fit the declared context refs,
 - the plan asks clarification when projection is truncated or multiple context
   candidates are plausible,
 - no hidden system/path/config/audit fields are copied from context into tool
@@ -174,18 +176,20 @@ checks structural safety:
 Validator failures should block execution and ask for clarification, or request
 planner repair if the route is safe.
 
-## Migration From Current Slice
+## Implementation State
 
-Current context code should be treated as compatibility scaffolding:
+Current context code should be treated as the implemented projection and
+validation path, not as a future migration. Historical surfaces may still appear
+in old fixtures or audit artifacts, but they are not planner authority.
 
-- keep the `net_income` fixtures as regression cases,
-- stop expanding `_conversation_followup_resolution` with more business
-  branches,
-- remove case-level prompt examples from planner instructions,
-- introduce projection and validation beside the existing path,
-- switch planner input to the projection shape,
-- deprecate active-frame special handling once the new path has equivalent eval
-  coverage.
+Current state:
+
+- `net_income` remains a regression case, not the architecture center.
+- `_conversation_followup_resolution` and active-frame style business
+  resolution are historical, not current planner authority.
+- Planner input uses `ContextProjection` plus declared `context_use`.
+- `ContextValidator` checks context references before execution.
+- Scenario fixtures cover representative follow-up behavior.
 
 The goal is not to delete every domain hint. Tool and evidence metadata remain
 valuable. The goal is to stop using hardcoded business follow-up recognition as
@@ -200,8 +204,8 @@ the conversation engine.
 - No business-specific `account_income_compare` style shortcut as the main
   solution.
 - No planner-visible private implementation paths.
-- No attempt to replicate Claude Code's compact machinery in full during the
-  first implementation slice.
+- No attempt to replicate Claude Code's compact machinery in full unless future
+  context pressure proves it is needed.
 
 ## Acceptance Criteria
 

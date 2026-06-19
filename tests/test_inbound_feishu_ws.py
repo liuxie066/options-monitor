@@ -10,6 +10,7 @@ from src.application.agent_tool_contracts import build_response
 from src.application.assistant import AssistantSettings
 from src.application.assistant.audit import InboundAuditStore
 from src.application.assistant.agent_loop import LlmSynthesisResult, LlmPlannerResult, PlannerPlan, PlannerPlanStep
+from src.application.assistant.task_contract import TASK_CONTRACT_SCHEMA_VERSION
 from src.application.inbound.feishu_ws import (
     FeishuWsSettings,
     build_feishu_ws_settings,
@@ -32,6 +33,29 @@ def _message_payload(*, sender: str = "ou_1", text: str = "/income sy 2026-05") 
                 "content": json.dumps({"text": text}, ensure_ascii=False),
             },
         },
+    }
+
+
+def _test_task_contract(
+    *,
+    goal: str,
+    domain: str,
+    task_mode: str,
+    scope: dict[str, Any] | None = None,
+    required_answer: tuple[str, ...] = ("summary",),
+    required_evidence: tuple[str, ...] = ("source_policy",),
+    answer_shape: tuple[str, ...] = ("conclusion", "source_policy"),
+) -> dict[str, Any]:
+    return {
+        "schema_version": TASK_CONTRACT_SCHEMA_VERSION,
+        "goal": goal,
+        "domain": domain,
+        "task_mode": task_mode,
+        "requested_effect": "read",
+        "scope": dict(scope or {}),
+        "required_answer": list(required_answer),
+        "required_evidence": list(required_evidence),
+        "answer_shape": list(answer_shape),
     }
 
 
@@ -218,6 +242,15 @@ def test_feishu_ws_agent_loop_routes_cashflow_detail_plan(tmp_path: Path) -> Non
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="分析 lx 2026-06 的净现金流明细",
+                task_contract=_test_task_contract(
+                    goal="分析 lx 2026-06 的净现金流明细",
+                    domain="income",
+                    task_mode="analyze",
+                    scope={"accounts": ["lx"], "months": ["2026-06"], "config_keys": ["us"]},
+                    required_answer=("summary", "main_drivers", "source_and_policy"),
+                    required_evidence=("summary", "driver_or_breakdown", "source_policy"),
+                    answer_shape=("conclusion", "drivers", "source_policy"),
+                ),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -327,6 +360,14 @@ def test_feishu_ws_agent_loop_degrades_when_conversation_context_fails(
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="runtime status",
+                task_contract=_test_task_contract(
+                    goal="runtime status",
+                    domain="runtime",
+                    task_mode="summarize",
+                    scope={"config_keys": ["us"]},
+                    required_evidence=("summary", "source_policy"),
+                    answer_shape=("direct_answer", "source_policy"),
+                ),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",

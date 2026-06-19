@@ -101,6 +101,14 @@ def build_agent_session_snapshot(
         "followup_decisions": followup_decisions,
         "answer_route": _answer_route(final_response=final_response, synthesis_trace=synthesis_trace),
         "scope_source": _scope_source(task_contract or {}),
+        "loop_stop_reason": _loop_stop_reason(
+            final_response=final_response,
+            synthesis_trace=synthesis_trace,
+            followup_decisions=followup_decisions,
+            coverage=coverage,
+            tool_events=tool_events,
+        ),
+        "repair_attempted": _repair_attempted(followup_decisions),
     }
     clarification_reason = _clarification_reason(final_response=final_response, followup_decisions=followup_decisions)
     if clarification_reason:
@@ -198,6 +206,8 @@ def build_preview_agent_session_snapshot(
         "followup_decisions": [],
         "answer_route": _answer_route(final_response=final_response, synthesis_trace={"reason": "preview_permission_request"}),
         "scope_source": _scope_source({}),
+        "loop_stop_reason": "preview_requested",
+        "repair_attempted": False,
     }
     return AgentSessionSnapshot(
         session_id=_session_id(request=request, command_id=operation_id or command_id, goal=goal),
@@ -289,6 +299,7 @@ def build_operation_readback_agent_session_snapshot(
             "payload": safe_payload,
             "authorized": True,
             "authorization_reason": "deterministic_operation_readback",
+            "risk_class": "READ_AUTO",
             "action_policy": {
                 "allowed": True,
                 "decision": "readback",
@@ -337,6 +348,8 @@ def build_operation_readback_agent_session_snapshot(
         "followup_decisions": [],
         "answer_route": _answer_route(final_response=final_response, synthesis_trace={"reason": "operation_readback"}),
         "scope_source": _scope_source({}),
+        "loop_stop_reason": "operation_readback",
+        "repair_attempted": False,
     }
     return AgentSessionSnapshot(
         session_id=_session_id(request=request, command_id=operation_id, goal=goal),
@@ -411,6 +424,7 @@ def _preview_tool_transcript_item(
         "payload": _safe_preview_payload(step.get("arguments")),
         "authorized": True,
         "authorization_reason": action_policy.get("reason"),
+        "risk_class": "SOFT_WRITE_PREVIEW",
         "action_policy": dict(action_policy),
         "action_safety": dict(step.get("action_safety") or {}) if isinstance(step.get("action_safety"), dict) else {},
         "precheck": dict(step.get("precheck") or {}) if isinstance(step.get("precheck"), dict) else {},
@@ -717,6 +731,7 @@ def _tool_transcript(*, tool_events: list[dict[str, Any]], observations: list[di
                 "payload": dict(observation.get("payload") or {}) if isinstance(observation.get("payload"), dict) else {},
                 "authorized": bool(authorization.get("allowed", True)),
                 "authorization_reason": action_policy.get("reason") or authorization.get("reason"),
+                "risk_class": _risk_class(action_policy),
                 "action_policy": dict(action_policy),
                 "action_safety": dict(action_safety),
                 "precheck": dict(precheck) if isinstance(precheck, dict) else {},
@@ -773,6 +788,8 @@ def _capability_selection_payload(
                     "tool_name": tool_name,
                     "revision": revision_id,
                     "effect": effect,
+                    "risk_class": _risk_class_for_plan_step(tool_name=tool_name, effect=effect, tool_events=tool_events),
+                    "selection_source": _selection_source_for_revision(revision),
                     "reason": _clip_text(step.get("purpose"), 160),
                 }
             )
@@ -804,6 +821,8 @@ def _capability_selection_payload(
         "satisfied": sorted(satisfied),
         "rejected": rejected_payload,
         "selected_tools": sorted(selected_tools),
+        "risk_classes": sorted({str(item.get("risk_class") or "") for item in selected if str(item.get("risk_class") or "")}),
+        "selection_sources": _unique_strings(str(item.get("selection_source") or "") for item in selected if str(item.get("selection_source") or "")),
         "explanation": _capability_selection_explanation(
             plan_revisions=plan_revisions,
             selected=selected,
@@ -823,6 +842,8 @@ def _capability_selection_explanation(
     rejected: list[dict[str, Any]],
 ) -> dict[str, Any]:
     effects = sorted({str(item.get("effect") or "read") for item in selected if isinstance(item, dict)})
+    risk_classes = sorted({str(item.get("risk_class") or "") for item in selected if isinstance(item, dict) and str(item.get("risk_class") or "")})
+    selection_sources = _unique_strings(str(item.get("selection_source") or "") for item in selected if isinstance(item, dict) and str(item.get("selection_source") or ""))
     sources = _unique_strings(
         str(item.get("source") or "agent_loop")
         for item in plan_revisions
@@ -845,6 +866,8 @@ def _capability_selection_explanation(
         "followup_revision_count": followup_count,
         "selected_tool_count": len({str(item.get("tool_name") or "") for item in selected if str(item.get("tool_name") or "")}),
         "selected_effects": effects,
+        "risk_classes": risk_classes,
+        "selection_sources": selection_sources,
         "required_count": len(required),
         "satisfied_count": len(satisfied),
         "rejected_count": len(rejected),
@@ -857,6 +880,61 @@ def _plan_effect(plan: dict[str, Any]) -> str:
     if kind in {"preview", "readback"}:
         return kind
     return "read"
+
+
+def _selection_source_for_revision(revision: dict[str, Any]) -> str:
+    reason = str(revision.get("reason") or "").strip().lower()
+    if reason.startswith("follow-up"):
+        return "evidence_gap"
+    if "preview" in reason:
+        return "message_text"
+    if reason:
+        return "task_contract"
+    return "plan_revision"
+
+
+def _risk_class_for_plan_step(*, tool_name: str, effect: str, tool_events: list[dict[str, Any]]) -> str:
+    action_policy = _action_policy_for_tool(tool_name=tool_name, tool_events=tool_events)
+    if action_policy:
+        return _risk_class(action_policy)
+    if effect == "preview":
+        return "SOFT_WRITE_PREVIEW"
+    if effect == "read":
+        return "READ_AUTO"
+    return "UNKNOWN"
+
+
+def _action_policy_for_tool(*, tool_name: str, tool_events: list[dict[str, Any]]) -> dict[str, Any]:
+    for event in reversed(tool_events):
+        if not isinstance(event, dict):
+            continue
+        if event.get("phase") != "authorize_tool":
+            continue
+        if str(event.get("tool_name") or "") != tool_name:
+            continue
+        action_policy = event.get("action_policy")
+        if isinstance(action_policy, dict):
+            return dict(action_policy)
+        decision = event.get("decision")
+        if isinstance(decision, dict):
+            return dict(decision)
+    return {}
+
+
+def _risk_class(action_policy: dict[str, Any]) -> str:
+    effect = str(action_policy.get("allowed_effect") or "").strip()
+    risk = str(action_policy.get("risk_level") or "").strip()
+    if effect in {"read", "none"} and risk in {"read_only", ""}:
+        return "READ_AUTO"
+    if effect == "preview" or risk == "preview_write":
+        return "SOFT_WRITE_PREVIEW"
+    if risk in {"confirm_write", "local_write"}:
+        return "LEDGER_WRITE_CONFIRM"
+    if risk in {"admin", "live_ops"}:
+        return "ADMIN_CONFIRM"
+    if not risk:
+        return "UNKNOWN"
+    return risk.upper()
 
 
 def _progress_payload(
@@ -1048,6 +1126,54 @@ def _denied_step_count(*, tool_transcript: tuple[dict[str, Any], ...], tool_even
         if isinstance(item, dict) and item.get("phase") == "authorize_tool" and item.get("allowed") is False
     )
     return count
+
+
+def _loop_stop_reason(
+    *,
+    final_response: dict[str, Any],
+    synthesis_trace: dict[str, Any],
+    followup_decisions: list[dict[str, Any]],
+    coverage: dict[str, Any] | None,
+    tool_events: list[dict[str, Any]],
+) -> str:
+    for event in reversed(tool_events):
+        if not isinstance(event, dict):
+            continue
+        phase = str(event.get("phase") or "")
+        if phase == "tool_budget_exhausted":
+            return "tool_budget_exhausted"
+        if phase == "tool_loop_guard" and event.get("allowed") is False:
+            return "tool_loop_guard_rejected"
+        if phase == "authorize_tool" and event.get("allowed") is False:
+            return "permission_denied"
+    for decision in reversed(followup_decisions):
+        if not isinstance(decision, dict):
+            continue
+        status = str(decision.get("status") or "")
+        if status == "accepted":
+            continue
+        reason = str(decision.get("reason") or "").strip()
+        if status:
+            return f"followup_{status}"
+        if reason:
+            return "followup_stopped"
+    status = str(final_response.get("status") or "").strip()
+    if status in {"needs_clarification", "clarify"}:
+        return "clarification_requested"
+    if status in {"pending_permission", "preview"}:
+        return "preview_requested"
+    coverage_payload = coverage if isinstance(coverage, dict) else {}
+    coverage_status = str(coverage_payload.get("status") or "")
+    if coverage_status and coverage_status != "complete":
+        return "answer_with_evidence_gap"
+    fallback = str(synthesis_trace.get("fallback") or "").strip()
+    if fallback:
+        return "fallback_response"
+    return "model_or_renderer_answered"
+
+
+def _repair_attempted(followup_decisions: list[dict[str, Any]]) -> bool:
+    return any(isinstance(item, dict) and str(item.get("status") or "") == "accepted" for item in followup_decisions)
 
 
 def _dedupe_progress_blockers(blockers: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -208,6 +208,26 @@ def _p2_agent_eval_minimum_fixture_ids() -> set[str]:
     return {fixture_id for fixture_ids in P2_AGENT_EVAL_MINIMUM_CASES.values() for fixture_id in fixture_ids}
 
 
+def _assert_fixture_plan_contract(case: dict[str, Any], *, field: str) -> None:
+    plan = case.get(field)
+    assert isinstance(plan, dict), f"{case.get('id')}.{field} missing"
+    contract = plan.get("task_contract")
+    assert isinstance(contract, dict), f"{case.get('id')}.{field}.task_contract missing"
+    required = {
+        "schema_version",
+        "goal",
+        "domain",
+        "task_mode",
+        "requested_effect",
+        "scope",
+        "required_answer",
+        "required_evidence",
+        "answer_shape",
+    }
+    missing = sorted(required - set(contract))
+    assert missing == [], f"{case.get('id')}.{field}.task_contract missing {missing}"
+
+
 def test_assistant_context_eval_report_covers_planner_context_decisions() -> None:
     report = run_context_eval_suite(fixture_path=FIXTURE_PATH)
     summary = report["summary"]
@@ -260,6 +280,7 @@ def test_assistant_agent_eval_fixture_covers_p2_agent_eval_gap_groups() -> None:
             assert case.get("expect_operation_type")
             assert case.get("expect_contains")
             assert case.get("expect_not_contains")
+            _assert_fixture_plan_contract(case, field="plan")
             continue
         if mode == "planner_context":
             assert str(case.get("question") or "").strip()
@@ -270,6 +291,9 @@ def test_assistant_agent_eval_fixture_covers_p2_agent_eval_gap_groups() -> None:
         assert case.get("tool_result") or case.get("tool_results")
         assert case.get("expect_contains")
         assert case.get("expect_not_contains")
+        _assert_fixture_plan_contract(case, field="plan")
+        if isinstance(case.get("followup_plan"), dict):
+            _assert_fixture_plan_contract(case, field="followup_plan")
 
 
 def test_assistant_agent_eval_fixture_covers_documented_p2_minimum_cases() -> None:
@@ -355,6 +379,7 @@ def _plan_from_payload(raw_payload: dict[str, Any]) -> PlannerPlan:
     return PlannerPlan(
         goal=str(raw.get("goal") or ""),
         required_capabilities=tuple(str(item) for item in raw.get("required_capabilities") or ()),
+        task_contract=dict(raw["task_contract"]) if isinstance(raw.get("task_contract"), dict) else None,
         steps=tuple(
             PlannerPlanStep(
                 id=str(item.get("id") or f"step_{index}"),

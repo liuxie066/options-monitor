@@ -270,9 +270,10 @@ The planner input should include:
 - planner manifest,
 - context use policy.
 
-It should not include old `active_frame` as a privileged field once migration is
-complete. If compatibility requires it temporarily, it must be derived from the
-projection and marked as deprecated.
+It must not include old `active_frame` or `followup_resolution` as privileged
+planner authority. If an older fixture or diagnostic report needs historical
+fields, they must be derived from the projection, clearly marked as historical,
+and kept out of executable planner input.
 
 ## Acceptance Criteria
 
