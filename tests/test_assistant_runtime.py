@@ -130,10 +130,20 @@ def _plan_result(
     purpose: str = "",
     task_contract: dict[str, Any] | None = None,
 ) -> LlmPlannerResult:
+    default_task_contract = (
+        _test_task_contract(
+            goal=goal,
+            domain="operation",
+            task_mode="preview_write",
+            requested_effect="preview_write",
+        )
+        if tool_name in AGENT_LOOP_PREVIEW_CAPABILITIES
+        else _test_task_contract(goal=goal)
+    )
     return LlmPlannerResult(
         plan=PlannerPlan(
             goal=goal,
-            task_contract=task_contract or _test_task_contract(goal=goal),
+            task_contract=task_contract or default_task_contract,
             steps=(
                 PlannerPlanStep(
                     id="step_1",
@@ -8136,7 +8146,12 @@ def test_assistant_runtime_agent_loop_plans_manual_trade_open_preview(monkeypatc
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="记录 sy 的腾讯开仓成交",
-                task_contract=_test_task_contract(goal="记录 sy 的腾讯开仓成交"),
+                task_contract=_test_task_contract(
+                    goal="记录 sy 的腾讯开仓成交",
+                    domain="operation",
+                    task_mode="preview_write",
+                    requested_effect="preview_write",
+                ),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -8518,7 +8533,12 @@ def test_assistant_runtime_agent_loop_cancels_manual_trade_open_preview(monkeypa
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="记录 sy 的腾讯开仓成交",
-                task_contract=_test_task_contract(goal="记录 sy 的腾讯开仓成交"),
+                task_contract=_test_task_contract(
+                    goal="记录 sy 的腾讯开仓成交",
+                    domain="operation",
+                    task_mode="preview_write",
+                    requested_effect="preview_write",
+                ),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -8701,6 +8721,209 @@ def test_assistant_runtime_agent_loop_rejects_read_plan_for_trade_preview_reques
     assert out["meta"]["assistant"]["route"] == "agent_loop"
     assert out["meta"]["assistant"]["llm"]["agent_loop"]["steps_used"] == 0
     assert out["meta"]["assistant"]["perception_trace"]["decision"] == "llm_error"
+
+
+def test_assistant_runtime_agent_loop_repairs_assignment_notice_wrong_read_tool(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("OM_INBOUND_OPERATIONS_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_TRADE_WRITE_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_ADMIN_OPEN_IDS", "local:local")
+    monkeypatch.setenv("OM_INBOUND_OPERATION_HMAC_KEY", "test-operation-hmac-key")
+
+    cfg_path, sqlite_path = _write_agent_loop_trade_runtime_config(tmp_path)
+    repo = _seed_agent_loop_open_lot(
+        sqlite_path,
+        account="sy",
+        symbol="PDD",
+        option_type="put",
+        side="short",
+        contracts=2,
+        currency="USD",
+        strike=85.0,
+        multiplier=100,
+        expiration_ymd="2026-06-18",
+    )
+    before_events = len(repo.list_trade_events())
+    text = (
+        "sy 衍生品提醒: 期权被指派通知: 您的保证金综合账户(2905) - "
+        "证券所持有的-2张PDD 260618 85.00P期权已被指派，详情请查看资金明细及持仓情况。【富途证券(香港)】"
+    )
+    plan_contexts: list[dict[str, Any] | None] = []
+
+    def _plan(
+        incoming: str,
+        _settings: AssistantSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        assert incoming == text
+        plan_contexts.append(conversation_context)
+        if len(plan_contexts) == 1:
+            assert conversation_context is not None
+            assert "planner_repair" not in conversation_context
+            return LlmPlannerResult(
+                plan=PlannerPlan(
+                    goal="误把券商指派通知规划为指派正股盈亏查询",
+                    task_contract=_test_task_contract(goal="误把券商指派通知规划为指派正股盈亏查询"),
+                    steps=(
+                        PlannerPlanStep(
+                            id="step_1",
+                            tool_name="option_positions_read",
+                            arguments={"account": "sy", "action": "assigned-stock", "refresh_quotes": True},
+                            purpose="错误地读取被指派正股盈亏",
+                        ),
+                    ),
+                ),
+                trace=_planner_trace(reason="accepted"),
+            )
+        assert conversation_context is not None
+        repair = conversation_context.get("planner_repair")
+        assert isinstance(repair, dict)
+        assert repair["error_code"] == "PLAN_RISK_MISMATCH"
+        assert "manual_assignment" in repair["instruction"]
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="创建 sy PDD 被指派预览",
+                task_contract=_test_task_contract(
+                    goal="创建 sy PDD 被指派预览",
+                    domain="operation",
+                    task_mode="preview_write",
+                    requested_effect="preview_write",
+                ),
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1_repair",
+                        tool_name="manual_assignment",
+                        arguments={"raw_text": text, "account": "sy"},
+                        purpose="Futu 期权被指派通知应创建被指派预览",
+                    ),
+                ),
+            ),
+            trace=_planner_trace(reason="accepted"),
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text=text,
+            sender_id="local",
+            channel="local",
+            message_id="msg_agent_loop_assignment_notice_wrong_read_repair",
+            config_path=str(cfg_path),
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        allowed_senders="local:local",
+        settings=AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+        now_fn=lambda: date(2026, 6, 18),
+    )
+
+    assert out["ok"] is True, out
+    assert len(plan_contexts) == 2
+    assert out["tool_name"] == "inbound.manual_trade"
+    assert out["data"]["operation_type"] == "manual_assignment"
+    assert out["data"]["perception"]["intent_name"] == "manual_assignment"
+    assert out["data"]["perception"]["source"] == "agent_loop_plan"
+    assert out["data"]["payload"]["arguments"]["symbol"] == "PDD"
+    assert out["data"]["payload"]["arguments"]["stock_qty"] == 200
+    assert len(repo.list_trade_events()) == before_events
+
+    llm_trace = out["meta"]["assistant"]["llm"]
+    assert llm_trace["planner_repair"]["status"] == "accepted"
+    assert llm_trace["planner_repair"]["initial_error_code"] == "PLAN_RISK_MISMATCH"
+    assert llm_trace["agent_loop"]["steps_used"] == 1
+    assert llm_trace["agent_loop"]["steps"][0]["tool_name"] == "manual_assignment"
+    assert out["meta"]["assistant"]["perception_trace"]["selected_source"] == "agent_loop"
+
+
+def test_assistant_runtime_agent_loop_repairs_expiry_notice_wrong_read_tool(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("OM_INBOUND_OPERATIONS_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_TRADE_WRITE_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_ADMIN_OPEN_IDS", "local:local")
+    monkeypatch.setenv("OM_INBOUND_OPERATION_HMAC_KEY", "test-operation-hmac-key")
+
+    cfg_path, sqlite_path = _write_agent_loop_trade_runtime_config(tmp_path)
+    repo = _seed_agent_loop_open_lot(
+        sqlite_path,
+        account="sy",
+        symbol="TCOM",
+        option_type="put",
+        side="short",
+        contracts=1,
+        currency="USD",
+        strike=45.0,
+        multiplier=100,
+        expiration_ymd="2026-06-18",
+    )
+    before_events = len(repo.list_trade_events())
+    text = (
+        "sy 衍生品提醒: 期权到期失效通知: 您的保证金综合账户(2905) - "
+        "证券所持有的-1张TCOM 260618 45.00P期权已到期失效，详情请查看持仓情况。【富途证券(香港)】"
+    )
+    plan_contexts: list[dict[str, Any] | None] = []
+
+    def _plan(
+        incoming: str,
+        _settings: AssistantSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        assert incoming == text
+        plan_contexts.append(conversation_context)
+        if len(plan_contexts) == 1:
+            return _plan_result(
+                "option_positions_read",
+                {"account": "sy", "status": "open"},
+                goal="误把到期失效通知规划为持仓查询",
+                purpose="错误地读取持仓",
+            )
+        assert conversation_context is not None
+        repair = conversation_context.get("planner_repair")
+        assert isinstance(repair, dict)
+        assert repair["error_code"] == "PLAN_RISK_MISMATCH"
+        assert "manual_expiry" in repair["instruction"]
+        return _plan_result(
+            "manual_expiry",
+            {"raw_text": text, "account": "sy"},
+            goal="创建 sy TCOM 到期失效预览",
+            purpose="Futu 期权到期失效通知应创建到期失效预览",
+            task_contract=_test_task_contract(
+                goal="创建 sy TCOM 到期失效预览",
+                domain="operation",
+                task_mode="preview_write",
+                requested_effect="preview_write",
+            ),
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text=text,
+            sender_id="local",
+            channel="local",
+            message_id="msg_agent_loop_expiry_notice_wrong_read_repair",
+            config_path=str(cfg_path),
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        allowed_senders="local:local",
+        settings=AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+        now_fn=lambda: date(2026, 6, 18),
+    )
+
+    assert out["ok"] is True, out
+    assert len(plan_contexts) == 2
+    assert out["data"]["operation_type"] == "manual_expiry"
+    assert out["data"]["perception"]["source"] == "agent_loop_plan"
+    assert out["data"]["payload"]["arguments"]["symbol"] == "TCOM"
+    assert out["data"]["payload"]["arguments"]["close_reason"] == "expired_unassigned"
+    assert len(repo.list_trade_events()) == before_events
+    assert out["meta"]["assistant"]["llm"]["planner_repair"]["status"] == "accepted"
 
 
 def test_assistant_runtime_agent_loop_action_safety_rejects_preview_for_read_request(tmp_path: Path) -> None:
