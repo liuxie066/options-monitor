@@ -1202,6 +1202,22 @@ def test_option_positions_read_lists_events_history_and_inspect(monkeypatch, tmp
     assert assigned_stock_row["option_premium_attribution"] == 250.0
     assert assigned_stock_row["assignment_lifecycle_pnl"] == 50.0
 
+    list_wrapped_action = run_tool(
+        "option_positions_read",
+        {
+            "config_path": str(cfg_path),
+            "action": ["assigned-stock"],
+            "account": "user1",
+            "status": ["open"],
+            "symbol": "NVDA",
+            "quote_snapshots": [{"symbol": "NVDA", "spot": 98.0, "quote_time_ms": _ms("2026-05-16")}],
+        },
+    )
+
+    assert list_wrapped_action["ok"] is True
+    assert list_wrapped_action["data"]["action"] == "assigned-stock"
+    assert list_wrapped_action["data"]["row_count"] == 1
+
     quote_refresh_calls: list[dict[str, Any]] = []
 
     def _refresh_assigned_stock_quotes(rows: list[dict[str, Any]], **kwargs: Any) -> AssignedStockQuoteRefreshResult:

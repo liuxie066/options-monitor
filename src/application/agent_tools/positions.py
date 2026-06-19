@@ -159,8 +159,19 @@ def _monthly_income_answer_policy(payload: dict[str, Any]) -> str:
     return "default"
 
 
+def _option_positions_action(payload: dict[str, Any]) -> str:
+    value = payload.get("action")
+    if isinstance(value, (list, tuple, set)):
+        items = [item for item in value if item not in (None, "")]
+        if len(items) == 1:
+            value = items[0]
+        elif not items:
+            value = "list"
+    return str(value or "list").strip().lower()
+
+
 def _option_positions_answer_policy(payload: dict[str, Any]) -> str:
-    action = str(payload.get("action") or "list").strip().lower()
+    action = _option_positions_action(payload)
     if action in {"list", "assigned-stock"}:
         return "facts_then_analysis"
     return "default"
@@ -173,7 +184,7 @@ def _monthly_income_output_contract(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _option_positions_output_contract(payload: dict[str, Any]) -> dict[str, Any] | None:
-    action = str(payload.get("action") or "list").strip().lower()
+    action = _option_positions_action(payload)
     if action == "list":
         return _OPTION_POSITIONS_LIST_OUTPUT_CONTRACT
     if action == "assigned-stock":

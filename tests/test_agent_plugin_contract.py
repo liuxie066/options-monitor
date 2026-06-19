@@ -221,6 +221,9 @@ def test_agent_tool_output_contracts_advertise_canonical_renderers() -> None:
     assert "rows[].assignment_lifecycle_pnl" in assigned_stock_contract["fact_fields"]
     assert "rows[].quote_status" in assigned_stock_contract["freshness_fields"]
     assert "quote_refresh.missing_symbols" in assigned_stock_contract["missing_data_fields"]
+    list_wrapped_assigned_stock_contract = positions.resolve_output_contract({"action": ["assigned-stock"]})
+    assert list_wrapped_assigned_stock_contract["canonical_renderer"] == "assigned_stock_lifecycle"
+    assert positions.resolve_answer_policy({"action": ["assigned-stock"]}) == "facts_then_analysis"
 
     income = get_tool_definition("monthly_income_report")
     assert income is not None
