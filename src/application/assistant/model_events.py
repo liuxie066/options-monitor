@@ -825,24 +825,29 @@ def _manifest_item_is_read_auto(item: dict[str, Any]) -> bool:
 
 def _tool_argument_json_schema(*, key: str, description: str) -> dict[str, Any]:
     lowered = f"{key} {description}".lower()
-    if " bool" in lowered or "boolean" in lowered or lowered.endswith(" bool"):
-        schema: dict[str, Any] = {"type": "boolean"}
+    enum = _tool_argument_enum(description)
+    if enum:
+        schema: dict[str, Any] = {"type": "string", "enum": enum}
+    elif " bool" in lowered or "boolean" in lowered or lowered.endswith(" bool"):
+        schema = {"type": "boolean"}
     elif " int" in lowered or "integer" in lowered or lowered.endswith(" int"):
         schema = {"type": "integer"}
     elif "numeric" in lowered or " number" in lowered or lowered.endswith(" number"):
         schema = {"type": "number"}
     elif " object" in lowered or "structured" in lowered:
         schema = {"type": "object"}
-    elif " list" in lowered or "array" in lowered:
+    elif _tool_argument_is_array(key=key, description=description):
         schema = {"type": "array", "items": {"type": "string"}}
     else:
         schema = {"type": "string"}
     if description:
         schema["description"] = description
-    enum = _tool_argument_enum(description)
-    if enum:
-        schema["enum"] = enum
     return schema
+
+
+def _tool_argument_is_array(*, key: str, description: str) -> bool:
+    tokens = f"{key} {description}".lower().replace("/", " ").replace(",", " ").replace(";", " ").split()
+    return "array" in tokens or "list" in tokens
 
 
 def _tool_argument_is_required(description: str) -> bool:
