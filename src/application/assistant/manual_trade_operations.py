@@ -19,19 +19,24 @@ from src.application.assistant.operation_signature import hash_operation_payload
 from src.application.assistant.operation_store import InboundOperationStore
 from src.application.assistant.operation_status_text import operation_candidate_hint, operation_candidate_summary_lines
 from src.application.assistant.permission_request import build_permission_request
-from src.application.ledger.api import open_position_ledger_from_runtime_config
+from src.application.ledger.api import (
+    open_position_ledger_from_runtime_config,
+    preview_lifecycle_expire_close,
+    record_lifecycle_expire_close,
+)
 from src.application.positions.workflows import (
     ManualCloseMatchError,
+    execute_manual_assignment,
     execute_manual_close,
     execute_manual_open,
 )
 from src.application.strategy_policy import resolve_position_strategy
 
 
-PREVIEW_INTENTS = frozenset({"manual_trade_open", "manual_trade_close"})
+PREVIEW_INTENTS = frozenset({"manual_trade_open", "manual_trade_close", "manual_assignment", "manual_expiry"})
 CONFIRM_INTENTS = frozenset({"manual_trade_confirm", "manual_trade_cancel"})
 UPDATE_INTENTS = frozenset({"manual_trade_update"})
-MANUAL_TRADE_OPERATION_TYPES = frozenset({"manual_open", "manual_close"})
+MANUAL_TRADE_OPERATION_TYPES = frozenset({"manual_open", "manual_close", "manual_assignment", "manual_expiry"})
 MANUAL_OPEN_UPDATE_FIELDS = frozenset(
     {
         "contracts",
@@ -115,6 +120,46 @@ def handle_manual_trade_operation(
         payload = _build_operation_payload(
             "manual_close",
             _manual_close_args(draft["arguments"]),
+            request=request,
+            config_path=config_path,
+            diagnostics=draft["diagnostics"],
+        )
+        return _preview_and_save(payload, request=request, command_id=command_id, store=store, ttl_seconds=policy.confirm_ttl_seconds)
+    if intent.intent_name == "manual_assignment":
+        config_path, cfg = _load_runtime_config_for_request(request)
+        draft = build_manual_trade_draft(
+            "manual_assignment",
+            raw_text=_manual_trade_raw_text(intent, request),
+            accounts=_accounts_from_runtime_config(cfg),
+            config_key=request.config_key,
+            config_path=config_path,
+            runtime_config=cfg,
+            repo_base=repo_base(),
+            allow_opend_refresh=True,
+        )
+        payload = _build_operation_payload(
+            "manual_assignment",
+            _manual_assignment_args(draft["arguments"]),
+            request=request,
+            config_path=config_path,
+            diagnostics=draft["diagnostics"],
+        )
+        return _preview_and_save(payload, request=request, command_id=command_id, store=store, ttl_seconds=policy.confirm_ttl_seconds)
+    if intent.intent_name == "manual_expiry":
+        config_path, cfg = _load_runtime_config_for_request(request)
+        draft = build_manual_trade_draft(
+            "manual_expiry",
+            raw_text=_manual_trade_raw_text(intent, request),
+            accounts=_accounts_from_runtime_config(cfg),
+            config_key=request.config_key,
+            config_path=config_path,
+            runtime_config=cfg,
+            repo_base=repo_base(),
+            allow_opend_refresh=False,
+        )
+        payload = _build_operation_payload(
+            "manual_expiry",
+            _manual_expiry_args(draft["arguments"]),
             request=request,
             config_path=config_path,
             diagnostics=draft["diagnostics"],
@@ -453,6 +498,12 @@ def _preview_operation(payload: dict[str, Any]) -> dict[str, Any]:
             out = execute_manual_open(repo, dry_run=True, **args)
         elif payload.get("operation_type") == "manual_close":
             out = execute_manual_close(repo, dry_run=True, **args)
+        elif payload.get("operation_type") == "manual_assignment":
+            out = execute_manual_assignment(repo, dry_run=True, **args)
+        elif payload.get("operation_type") == "manual_expiry":
+            preview_args = dict(args)
+            preview_args.pop("close_reason", None)
+            out = preview_lifecycle_expire_close(repo, **preview_args)
         else:
             raise AgentToolError(code="INPUT_ERROR", message=f"unsupported operation_type: {payload.get('operation_type')}")
     except ManualCloseMatchError as exc:
@@ -470,6 +521,15 @@ def _apply_operation(payload: dict[str, Any]) -> dict[str, Any]:
             out = execute_manual_open(repo, dry_run=False, **args)
         elif payload.get("operation_type") == "manual_close":
             out = execute_manual_close(repo, dry_run=False, **args)
+        elif payload.get("operation_type") == "manual_assignment":
+            out = execute_manual_assignment(repo, dry_run=False, **args)
+        elif payload.get("operation_type") == "manual_expiry":
+            out = record_lifecycle_expire_close(
+                repo,
+                **args,
+                case_id=None,
+                evidence_ids=[],
+            )
         else:
             raise AgentToolError(code="INPUT_ERROR", message=f"unsupported operation_type: {payload.get('operation_type')}")
     except ManualCloseMatchError as exc:
@@ -539,6 +599,60 @@ def _manual_close_args(args: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _manual_assignment_args(args: dict[str, Any]) -> dict[str, Any]:
+    _require_fields(
+        args,
+        (
+            "account",
+            "symbol",
+            "option_type",
+            "position_side",
+            "contracts_to_close",
+            "strike",
+            "expiration_ymd",
+            "stock_side",
+            "stock_qty",
+            "stock_price",
+        ),
+        action="记录期权被指派",
+    )
+    return {
+        "record_id": _optional_text(args.get("record_id")),
+        "broker": str(args.get("broker") or "富途"),
+        "account": _required_text(args.get("account"), "account"),
+        "symbol": _required_text(args.get("symbol"), "symbol"),
+        "option_type": _required_text(args.get("option_type"), "option_type"),
+        "position_side": _required_text(args.get("position_side") or args.get("side"), "position_side"),
+        "strike": _positive_float(args.get("strike"), "strike"),
+        "expiration_ymd": _required_text(args.get("expiration_ymd"), "expiration_ymd"),
+        "contracts_to_close": _positive_int(args.get("contracts_to_close"), "contracts_to_close"),
+        "stock_side": _required_text(args.get("stock_side"), "stock_side"),
+        "stock_qty": _positive_int(args.get("stock_qty"), "stock_qty"),
+        "stock_price": _positive_float(args.get("stock_price"), "stock_price"),
+        "as_of_ms": _optional_positive_int(args.get("as_of_ms"), "as_of_ms"),
+    }
+
+
+def _manual_expiry_args(args: dict[str, Any]) -> dict[str, Any]:
+    _require_fields(
+        args,
+        ("account", "symbol", "option_type", "position_side", "contracts_to_close", "strike", "expiration_ymd"),
+        action="记录期权到期失效",
+    )
+    return {
+        "broker": str(args.get("broker") or "富途"),
+        "account": _required_text(args.get("account"), "account"),
+        "symbol": _required_text(args.get("symbol"), "symbol"),
+        "option_type": _required_text(args.get("option_type"), "option_type"),
+        "position_side": _required_text(args.get("position_side") or args.get("side"), "position_side"),
+        "strike": _positive_float(args.get("strike"), "strike"),
+        "expiration_ymd": _required_text(args.get("expiration_ymd"), "expiration_ymd"),
+        "contracts_to_close": _positive_int(args.get("contracts_to_close"), "contracts_to_close"),
+        "event_time_ms": _optional_positive_int(args.get("event_time_ms") or args.get("as_of_ms"), "event_time_ms"),
+        "close_reason": str(args.get("close_reason") or "expired_unassigned"),
+    }
+
+
 def render_manual_trade_response(
     status: str,
     operation_id: str,
@@ -566,7 +680,7 @@ def render_manual_trade_response(
             f"方向：{fields.get('side') or args.get('side') or '-'} {fields.get('option_type') or args.get('option_type') or '-'}",
             f"数量：{args.get('contracts') or '-'} 张",
         ]
-    else:
+    elif operation_type == "manual_close":
         title = "交易记录预览已更新：平仓" if status == "updated" else ("交易记录预览：平仓" if status == "previewed" else "交易已写入 OM 本地账本：平仓")
         raw_match = preview_map.get("match")
         match = cast(dict[str, Any], raw_match) if isinstance(raw_match, dict) else {}
@@ -579,6 +693,27 @@ def render_manual_trade_response(
             f"合约：{fields.get('symbol') or args.get('symbol') or '-'} {fields.get('expiration_ymd') or args.get('expiration_ymd') or '-'} {fields.get('strike') or args.get('strike') or '-'}",
             f"平仓数量：{args.get('contracts_to_close') or '-'} 张",
         ]
+    elif operation_type == "manual_assignment":
+        title = "交易记录预览已更新：被指派" if status == "updated" else ("交易记录预览：被指派" if status == "previewed" else "交易已写入 OM 本地账本：被指派")
+        stock_settlement = cast(dict[str, Any], preview_map.get("stock_settlement") or {})
+        lines = [
+            title,
+            f"账户：{args.get('account') or '-'}",
+            f"合约：{args.get('symbol') or '-'} {args.get('expiration_ymd') or '-'} {args.get('strike') or '-'} {args.get('option_type') or '-'}",
+            f"平仓数量：{args.get('contracts_to_close') or '-'} 张",
+            f"正股结算：{stock_settlement.get('side') or args.get('stock_side') or '-'} {stock_settlement.get('shares') or args.get('stock_qty') or '-'} 股 @ {stock_settlement.get('price') or args.get('stock_price') or '-'}",
+        ]
+    elif operation_type == "manual_expiry":
+        title = "交易记录预览已更新：到期失效" if status == "updated" else ("交易记录预览：到期失效" if status == "previewed" else "交易已写入 OM 本地账本：到期失效")
+        lines = [
+            title,
+            f"账户：{args.get('account') or '-'}",
+            f"合约：{args.get('symbol') or '-'} {args.get('expiration_ymd') or '-'} {args.get('strike') or '-'} {args.get('option_type') or '-'}",
+            f"失效数量：{args.get('contracts_to_close') or '-'} 张",
+        ]
+    else:
+        title = "交易记录预览已更新" if status == "updated" else ("交易记录预览" if status == "previewed" else "交易已写入 OM 本地账本")
+        lines = [title, f"operation_type：{operation_type or '-'}"]
     if status in {"previewed", "updated"}:
         lines.extend(
             [

@@ -240,6 +240,45 @@ def _write_agent_loop_trade_runtime_config(tmp_path: Path) -> tuple[Path, Path]:
     return cfg_path, sqlite_path
 
 
+def _seed_agent_loop_open_lot(
+    sqlite_path: Path,
+    *,
+    account: str,
+    symbol: str,
+    option_type: str,
+    side: str,
+    contracts: int,
+    currency: str,
+    strike: float,
+    multiplier: int,
+    expiration_ymd: str,
+) -> Any:
+    from domain.domain.option_position_lots import OpenPositionCommand
+    import src.application.ledger.manual_trades as ledger_manual_trades
+    import src.application.ledger.repository as ledger_repository
+
+    sqlite_path.parent.mkdir(parents=True, exist_ok=True)
+    repo = ledger_repository.SQLiteOptionPositionsRepository(sqlite_path)
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account=account,
+            symbol=symbol,
+            option_type=option_type,
+            side=side,
+            contracts=contracts,
+            currency=currency,
+            strike=strike,
+            multiplier=multiplier,
+            expiration_ymd=expiration_ymd,
+            premium_per_share=1.0,
+            opened_at_ms=1000,
+        ),
+    )
+    return repo
+
+
 def test_assistant_perception_payload_contract() -> None:
     payload = PerceptionResult(
         intent_name="runtime_status",
@@ -1181,6 +1220,8 @@ def test_agent_loop_planner_preview_capabilities_are_exactly_bounded() -> None:
     expected = {
         "manual_trade_open",
         "manual_trade_close",
+        "manual_assignment",
+        "manual_expiry",
         "manual_trade_update",
         "symbol_edit",
         "model_use",
@@ -8329,6 +8370,122 @@ def test_assistant_runtime_agent_loop_plans_manual_trade_open_preview(monkeypatc
     assert "post/operation_readback=pass/applied" in applied_trace_text
     assert "raw_text" not in applied_trace_text
     assert "成交提醒】成功卖出" not in applied_trace_text
+
+
+def test_assistant_runtime_previews_futu_assignment_notice(monkeypatch: Any, tmp_path: Path) -> None:
+    monkeypatch.setenv("OM_INBOUND_OPERATIONS_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_TRADE_WRITE_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_ADMIN_OPEN_IDS", "local:local")
+    monkeypatch.setenv("OM_INBOUND_OPERATION_HMAC_KEY", "test-operation-hmac-key")
+
+    cfg_path, sqlite_path = _write_agent_loop_trade_runtime_config(tmp_path)
+    repo = _seed_agent_loop_open_lot(
+        sqlite_path,
+        account="sy",
+        symbol="PDD",
+        option_type="put",
+        side="short",
+        contracts=2,
+        currency="USD",
+        strike=85.0,
+        multiplier=100,
+        expiration_ymd="2026-06-18",
+    )
+    before_events = len(repo.list_trade_events())
+    text = (
+        "sy 衍生品提醒: 期权被指派通知: 您的保证金综合账户(2905) - "
+        "证券所持有的-2张PDD 260618 85.00P期权已被指派，详情请查看资金明细及持仓情况。【富途证券(香港)】"
+    )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text=text,
+            sender_id="local",
+            channel="local",
+            message_id="msg_futu_assignment_preview",
+            config_path=str(cfg_path),
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        allowed_senders="local:local",
+        now_fn=lambda: date(2026, 6, 18),
+    )
+
+    assert out["ok"] is True
+    assert out["tool_name"] == "inbound.manual_trade"
+    assert out["data"]["operation_type"] == "manual_assignment"
+    assert out["data"]["response_text"].startswith("交易记录预览：被指派")
+    assert "未写入账本" in out["data"]["response_text"]
+    assert out["data"]["perception"]["intent_name"] == "manual_assignment"
+    permission_request = out["data"]["permission_request"]
+    assert permission_request["operation_type"] == "manual_assignment"
+    assert permission_request["apply_allowed"] is False
+    args = out["data"]["payload"]["arguments"]
+    assert args["account"] == "sy"
+    assert args["symbol"] == "PDD"
+    assert args["option_type"] == "put"
+    assert args["position_side"] == "short"
+    assert args["contracts_to_close"] == 2
+    assert args["stock_side"] == "buy"
+    assert args["stock_qty"] == 200
+    assert args["stock_price"] == 85.0
+    assert len(repo.list_trade_events()) == before_events
+
+
+def test_assistant_runtime_previews_futu_expiry_notice(monkeypatch: Any, tmp_path: Path) -> None:
+    monkeypatch.setenv("OM_INBOUND_OPERATIONS_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_TRADE_WRITE_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_ADMIN_OPEN_IDS", "local:local")
+    monkeypatch.setenv("OM_INBOUND_OPERATION_HMAC_KEY", "test-operation-hmac-key")
+
+    cfg_path, sqlite_path = _write_agent_loop_trade_runtime_config(tmp_path)
+    repo = _seed_agent_loop_open_lot(
+        sqlite_path,
+        account="sy",
+        symbol="TCOM",
+        option_type="put",
+        side="short",
+        contracts=1,
+        currency="USD",
+        strike=45.0,
+        multiplier=100,
+        expiration_ymd="2026-06-18",
+    )
+    before_events = len(repo.list_trade_events())
+    text = (
+        "sy 衍生品提醒: 期权到期失效通知: 您的保证金综合账户(2905) - "
+        "证券所持有的-1张TCOM 260618 45.00P期权已到期失效，详情请查看持仓情况。【富途证券(香港)】"
+    )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text=text,
+            sender_id="local",
+            channel="local",
+            message_id="msg_futu_expiry_preview",
+            config_path=str(cfg_path),
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        allowed_senders="local:local",
+        now_fn=lambda: date(2026, 6, 18),
+    )
+
+    assert out["ok"] is True
+    assert out["tool_name"] == "inbound.manual_trade"
+    assert out["data"]["operation_type"] == "manual_expiry"
+    assert out["data"]["response_text"].startswith("交易记录预览：到期失效")
+    assert "未写入账本" in out["data"]["response_text"]
+    assert out["data"]["perception"]["intent_name"] == "manual_expiry"
+    permission_request = out["data"]["permission_request"]
+    assert permission_request["operation_type"] == "manual_expiry"
+    assert permission_request["apply_allowed"] is False
+    args = out["data"]["payload"]["arguments"]
+    assert args["account"] == "sy"
+    assert args["symbol"] == "TCOM"
+    assert args["option_type"] == "put"
+    assert args["position_side"] == "short"
+    assert args["contracts_to_close"] == 1
+    assert args["close_reason"] == "expired_unassigned"
+    assert len(repo.list_trade_events()) == before_events
 
 
 def test_assistant_runtime_agent_loop_cancels_manual_trade_open_preview(monkeypatch: Any, tmp_path: Path) -> None:

@@ -176,6 +176,80 @@ def test_manual_trade_draft_converts_futu_close_fill_side_to_position_side(tmp_p
     assert draft["diagnostics"]["position_side"] == "short"
 
 
+def test_manual_trade_draft_parses_futu_assignment_notice(tmp_path: Path) -> None:
+    message = (
+        "sy 衍生品提醒: 期权被指派通知: 您的保证金综合账户(2905) - "
+        "证券所持有的-2张PDD 260618 85.00P期权已被指派，详情请查看资金明细及持仓情况。【富途证券(香港)】"
+    )
+
+    draft = build_manual_trade_draft(
+        "manual_assignment",
+        raw_text=message,
+        accounts=("lx", "sy"),
+        config_key="us",
+        config_path=None,
+        runtime_config=_runtime_config(),
+        repo_base=tmp_path,
+        allow_opend_refresh=False,
+    )
+
+    assert draft["arguments"] == {
+        "broker": "富途",
+        "account": "sy",
+        "symbol": "PDD",
+        "option_type": "put",
+        "position_side": "short",
+        "contracts_to_close": 2,
+        "strike": 85.0,
+        "expiration_ymd": "2026-06-18",
+        "stock_side": "buy",
+        "stock_qty": 200,
+        "stock_price": 85.0,
+    }
+    diagnostics = draft["diagnostics"]
+    assert diagnostics["operation_type"] == "manual_assignment"
+    assert diagnostics["fill_parser_source"] == "futu_lifecycle_notice"
+    assert diagnostics["trade_side_raw"] == -2
+    assert diagnostics["position_side"] == "short"
+    assert diagnostics["multiplier_source"] == "us_standard_default"
+    assert diagnostics["missing_fields"] == []
+
+
+def test_manual_trade_draft_parses_futu_expiry_notice(tmp_path: Path) -> None:
+    message = (
+        "sy 衍生品提醒: 期权到期失效通知: 您的保证金综合账户(2905) - "
+        "证券所持有的-1张TCOM 260618 45.00P期权已到期失效，详情请查看持仓情况。【富途证券(香港)】"
+    )
+
+    draft = build_manual_trade_draft(
+        "manual_expiry",
+        raw_text=message,
+        accounts=("lx", "sy"),
+        config_key="us",
+        config_path=None,
+        runtime_config=_runtime_config(),
+        repo_base=tmp_path,
+        allow_opend_refresh=False,
+    )
+
+    assert draft["arguments"] == {
+        "broker": "富途",
+        "account": "sy",
+        "symbol": "TCOM",
+        "option_type": "put",
+        "position_side": "short",
+        "contracts_to_close": 1,
+        "strike": 45.0,
+        "expiration_ymd": "2026-06-18",
+        "close_reason": "expired_unassigned",
+    }
+    diagnostics = draft["diagnostics"]
+    assert diagnostics["operation_type"] == "manual_expiry"
+    assert diagnostics["trade_side_raw"] == -1
+    assert diagnostics["position_side"] == "short"
+    assert diagnostics["missing_fields"] == []
+
+
 def test_manual_trade_draft_reports_missing_multiplier(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _patch_multiplier(monkeypatch, None, None)
 

@@ -161,6 +161,10 @@ def _parse_operation_intent(text: str, *, compact: str, lower: str) -> Perceptio
 
     if _looks_like_upgrade_now(compact, lower):
         return PerceptionResult(intent_name="upgrade_now", arguments=_parse_upgrade_request(text))
+    if _looks_like_manual_assignment(compact, lower):
+        return PerceptionResult(intent_name="manual_assignment", arguments=_parse_manual_trade_request(text))
+    if _looks_like_manual_expiry(compact, lower):
+        return PerceptionResult(intent_name="manual_expiry", arguments=_parse_manual_trade_request(text))
     if _looks_like_manual_open(compact, lower):
         return PerceptionResult(intent_name="manual_trade_open", arguments=_parse_manual_trade_request(text))
     if _looks_like_manual_close(compact, lower):
@@ -586,6 +590,14 @@ def _looks_like_manual_open(compact: str, lower: str) -> bool:
 
 def _looks_like_manual_close(compact: str, lower: str) -> bool:
     return compact.startswith("记录平仓") or lower.startswith("record close") or lower.startswith("trade close")
+
+
+def _looks_like_manual_assignment(compact: str, lower: str) -> bool:
+    return "期权被指派通知" in compact or "已被指派" in compact or "被指派" in compact or "assignment notice" in lower
+
+
+def _looks_like_manual_expiry(compact: str, lower: str) -> bool:
+    return "期权到期失效通知" in compact or "已到期失效" in compact or "到期失效" in compact or "expiry notice" in lower
 
 
 def _looks_like_symbol_add(compact: str, lower: str) -> bool:

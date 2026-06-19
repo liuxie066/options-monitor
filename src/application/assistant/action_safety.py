@@ -568,7 +568,7 @@ def _scope_decision_code(*, tool_name: str, proposed_family: str, scope_delta: d
     name = str(tool_name or "")
     accounts = scope_delta.get("accounts") if isinstance(scope_delta.get("accounts"), dict) else {}
     symbols = scope_delta.get("symbols") if isinstance(scope_delta.get("symbols"), dict) else {}
-    if name in {"manual_trade_open", "manual_trade_close"} and not accounts.get("requested"):
+    if name in {"manual_trade_open", "manual_trade_close", "manual_assignment", "manual_expiry"} and not accounts.get("requested"):
         return "missing_account_scope"
     if name == "symbol_edit" and not symbols.get("requested"):
         return "missing_symbol_scope"

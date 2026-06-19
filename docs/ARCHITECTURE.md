@@ -158,8 +158,8 @@ operations, preview creation, and confirm/cancel authority. Objective slot
 repair is handled by small focused helpers such as month filters or
 position-query filters, not by a generic natural-language parser.
 The AgentLoop Planner may plan read tools or exactly one preview capability from
-`manual_trade_open`, `manual_trade_close`, `manual_trade_update`, `symbol_edit`,
-`model_use`, or `upgrade_now`. Any preview-write result can only enter an
+`manual_trade_open`, `manual_trade_close`, `manual_assignment`, `manual_expiry`,
+`manual_trade_update`, `symbol_edit`, `model_use`, or `upgrade_now`. Any preview-write result can only enter an
 existing pending-operation path. Confirm, cancel, apply, notifications, direct
 config writes, ledger/trade writes, and service operations remain outside model
 authority. If deterministic command aliases accept a different preview intent
