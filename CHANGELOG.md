@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 1.2.309 - 2026-06-19
+## 1.2.310 - 2026-06-19
 
 ### Fixed
 - Made expired option auto-close market-scoped and market-local, so US and HK maintenance runs only process their own
