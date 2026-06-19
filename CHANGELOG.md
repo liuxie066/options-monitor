@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 1.2.313 - 2026-06-19
+## 1.2.314 - 2026-06-19
 
 ### Added
 - Added provider-native Assistant tool-call planning for OpenAI Responses and Chat Completions providers, including
