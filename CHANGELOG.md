@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 1.2.311 - 2026-06-19
+## 1.2.312 - 2026-06-19
 
 ### Added
 - Added the Assistant Tool Calling v2 system design, documenting the model-driven read loop, capability selection,
