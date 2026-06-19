@@ -15,6 +15,13 @@ _ACCOUNT_RE_TEMPLATE = r"(?<![a-z0-9_])({accounts})(?![a-z0-9_])"
 _DATE_RE = re.compile(r"(?<!\d)(20\d{2})[-/.](0[1-9]|1[0-2])[-/.](0[1-9]|[12]\d|3[01])(?!\d)")
 _NUMBER_RE = re.compile(r"(?<![A-Za-z0-9.])(\d+(?:\.\d+)?)(?![A-Za-z0-9.])")
 _SYMBOL_RE = re.compile(r"(?<![A-Za-z0-9_.])([A-Za-z]{1,8}(?:\.[A-Za-z]{1,4})?|[A-Za-z]{2}\.\d{4,5}|\d{3,5}(?:\.HK)?|[\u4e00-\u9fff]{2,8})(?![A-Za-z0-9_.])")
+_FUTU_LIFECYCLE_NOTICE_RE = re.compile(
+    r"(?P<contracts>[+-]?\d+)\s*张\s*"
+    r"(?P<symbol>[A-Za-z0-9_.]{1,16}|[\u4e00-\u9fff]{2,12})\s+"
+    r"(?P<expiration>\d{6})\s+"
+    r"(?P<strike>\d+(?:\.\d+)?)\s*"
+    r"(?P<option_type>[PCpc]|购|沽)\s*期权"
+)
 
 
 def build_manual_trade_draft(
@@ -41,6 +48,26 @@ def build_manual_trade_draft(
         )
     elif operation_type == "manual_close":
         arguments, diagnostics = _build_close_draft(
+            raw_text,
+            accounts=accounts,
+            config_key=config_key,
+            config_path=config_path,
+            runtime_config=runtime_config,
+            repo_base=repo_base,
+            allow_opend_refresh=allow_opend_refresh,
+        )
+    elif operation_type == "manual_assignment":
+        arguments, diagnostics = _build_assignment_draft(
+            raw_text,
+            accounts=accounts,
+            config_key=config_key,
+            config_path=config_path,
+            runtime_config=runtime_config,
+            repo_base=repo_base,
+            allow_opend_refresh=allow_opend_refresh,
+        )
+    elif operation_type == "manual_expiry":
+        arguments, diagnostics = _build_expiry_draft(
             raw_text,
             accounts=accounts,
             config_key=config_key,
@@ -214,6 +241,149 @@ def _build_close_draft(
     return args, diagnostics
 
 
+def _build_assignment_draft(
+    text: str,
+    *,
+    accounts: list[str] | tuple[str, ...] | None,
+    config_key: str | None,
+    config_path: str | Path | None,
+    runtime_config: dict[str, Any] | None,
+    repo_base: Path,
+    allow_opend_refresh: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    labeled = _extract_labeled_values(text)
+    notice = _extract_futu_lifecycle_notice_values(text, accounts=accounts)
+    raw_symbol, symbol_source = _first_value_with_source(
+        (labeled.get("symbol"), "labeled"),
+        (notice.get("raw_symbol") or notice.get("symbol"), "futu_lifecycle_notice"),
+        (_extract_symbol(text, accounts=accounts), "text"),
+    )
+    canonical = _canonicalize_symbol(raw_symbol, runtime_config=runtime_config)
+    multiplier, multiplier_source, multiplier_diagnostics = _resolve_lifecycle_multiplier(
+        symbol=canonical or raw_symbol,
+        explicit_multiplier=_parse_float_value(labeled, ("multiplier",)) or _extract_after_label(text, ("multiplier", "乘数")),
+        runtime_config=runtime_config,
+        config_path=config_path,
+        repo_base=repo_base,
+        allow_opend_refresh=allow_opend_refresh,
+    )
+    contracts = _parse_int_value(labeled, ("contracts_to_close", "contracts", "qty")) or notice.get("contracts")
+    option_type = _parse_option_type(str(labeled.get("option_type") or "")) or notice.get("option_type") or _parse_option_type(text)
+    position_side = _parse_position_side(str(labeled.get("side") or "")) or notice.get("position_side") or _parse_position_side(text)
+    stock_side = _assignment_stock_side(option_type=option_type, position_side=position_side)
+    stock_qty = None
+    if contracts is not None and multiplier:
+        stock_qty = int(contracts) * int(multiplier)
+    args: dict[str, Any] = {
+        "record_id": labeled.get("record_id") or _extract_record_id(text),
+        "broker": notice.get("broker"),
+        "account": labeled.get("account") or notice.get("account") or _extract_account(text, accounts=accounts),
+        "symbol": canonical or raw_symbol,
+        "option_type": option_type,
+        "position_side": position_side,
+        "contracts_to_close": contracts,
+        "strike": _parse_float_value(labeled, ("strike",)) or notice.get("strike") or _extract_after_label(text, ("strike", "行权价")),
+        "expiration_ymd": _parse_date(str(labeled.get("expiration_ymd") or labeled.get("exp") or "")) or notice.get("expiration_ymd") or _parse_date(text),
+        "stock_side": labeled.get("stock_side") or stock_side,
+        "stock_qty": _parse_int_value(labeled, ("stock_qty", "shares")) or stock_qty,
+        "stock_price": _parse_float_value(labeled, ("stock_price",)) or notice.get("strike") or _extract_after_label(text, ("stock_price", "正股价格")),
+    }
+    as_of_ms = _parse_int_value(labeled, ("as_of_ms", "event_time_ms"))
+    if as_of_ms is not None:
+        args["as_of_ms"] = as_of_ms
+    args = _compact_args(args)
+    diagnostics = _base_diagnostics(
+        operation_type="manual_assignment",
+        text=text,
+        accounts=accounts,
+        config_key=config_key,
+        config_path=config_path,
+        raw_symbol=raw_symbol,
+        canonical_symbol=canonical,
+        symbol_source=symbol_source,
+        fill=notice,
+        trade_side_raw=notice.get("contracts_signed"),
+        position_side=position_side,
+        multiplier=multiplier,
+        multiplier_source=multiplier_source,
+        multiplier_diagnostics=multiplier_diagnostics,
+        allow_opend_refresh=allow_opend_refresh,
+    )
+    diagnostics["missing_fields"] = _missing_fields(
+        args,
+        (
+            "account",
+            "symbol",
+            "option_type",
+            "position_side",
+            "contracts_to_close",
+            "strike",
+            "expiration_ymd",
+            "stock_side",
+            "stock_qty",
+            "stock_price",
+        ),
+    )
+    return args, diagnostics
+
+
+def _build_expiry_draft(
+    text: str,
+    *,
+    accounts: list[str] | tuple[str, ...] | None,
+    config_key: str | None,
+    config_path: str | Path | None,
+    runtime_config: dict[str, Any] | None,
+    repo_base: Path,
+    allow_opend_refresh: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    del repo_base, allow_opend_refresh
+    labeled = _extract_labeled_values(text)
+    notice = _extract_futu_lifecycle_notice_values(text, accounts=accounts)
+    raw_symbol, symbol_source = _first_value_with_source(
+        (labeled.get("symbol"), "labeled"),
+        (notice.get("raw_symbol") or notice.get("symbol"), "futu_lifecycle_notice"),
+        (_extract_symbol(text, accounts=accounts), "text"),
+    )
+    canonical = _canonicalize_symbol(raw_symbol, runtime_config=runtime_config)
+    position_side = _parse_position_side(str(labeled.get("side") or "")) or notice.get("position_side") or _parse_position_side(text)
+    args: dict[str, Any] = {
+        "broker": notice.get("broker"),
+        "account": labeled.get("account") or notice.get("account") or _extract_account(text, accounts=accounts),
+        "symbol": canonical or raw_symbol,
+        "option_type": _parse_option_type(str(labeled.get("option_type") or "")) or notice.get("option_type") or _parse_option_type(text),
+        "position_side": position_side,
+        "contracts_to_close": _parse_int_value(labeled, ("contracts_to_close", "contracts", "qty")) or notice.get("contracts"),
+        "strike": _parse_float_value(labeled, ("strike",)) or notice.get("strike") or _extract_after_label(text, ("strike", "行权价")),
+        "expiration_ymd": _parse_date(str(labeled.get("expiration_ymd") or labeled.get("exp") or "")) or notice.get("expiration_ymd") or _parse_date(text),
+        "event_time_ms": _parse_int_value(labeled, ("event_time_ms", "as_of_ms")),
+        "close_reason": str(labeled.get("close_reason") or "expired_unassigned"),
+    }
+    args = _compact_args(args)
+    diagnostics = _base_diagnostics(
+        operation_type="manual_expiry",
+        text=text,
+        accounts=accounts,
+        config_key=config_key,
+        config_path=config_path,
+        raw_symbol=raw_symbol,
+        canonical_symbol=canonical,
+        symbol_source=symbol_source,
+        fill=notice,
+        trade_side_raw=notice.get("contracts_signed"),
+        position_side=position_side,
+        multiplier=None,
+        multiplier_source=None,
+        multiplier_diagnostics={"attempted_sources": []},
+        allow_opend_refresh=False,
+    )
+    diagnostics["missing_fields"] = _missing_fields(
+        args,
+        ("account", "symbol", "option_type", "position_side", "contracts_to_close", "strike", "expiration_ymd"),
+    )
+    return args, diagnostics
+
+
 def _base_diagnostics(
     *,
     operation_type: str,
@@ -242,7 +412,11 @@ def _base_diagnostics(
         "multiplier_resolution_attempts": multiplier_diagnostics.get("attempted_sources") or [],
         "multiplier_resolution_message": multiplier_diagnostics.get("message"),
         "multiplier_cache_path": multiplier_diagnostics.get("cache_path"),
-        "fill_parser_source": "futu_fill_alert" if fill else "manual_fields",
+        "fill_parser_source": "futu_lifecycle_notice"
+        if fill.get("contracts_signed") is not None
+        else "futu_fill_alert"
+        if fill
+        else "manual_fields",
         "fill_time_ms": fill.get("fill_time_ms"),
         "trade_side_raw": trade_side_raw,
         "position_side": position_side,
@@ -282,6 +456,85 @@ def _extract_futu_fill_values(text: str, *, accounts: list[str] | tuple[str, ...
         "fill_time_ms": values.get("fill_time_ms"),
     }
     return {key: value for key, value in out.items() if value not in (None, "")}
+
+
+def _extract_futu_lifecycle_notice_values(text: str, *, accounts: list[str] | tuple[str, ...] | None) -> dict[str, Any]:
+    if not _looks_like_futu_lifecycle_notice(text):
+        return {}
+    match = _FUTU_LIFECYCLE_NOTICE_RE.search(text)
+    if not match:
+        return {}
+    signed_contracts = int(match.group("contracts"))
+    raw_symbol = match.group("symbol").strip()
+    option_type = _parse_option_type(match.group("option_type"))
+    out: dict[str, Any] = {
+        "raw_symbol": raw_symbol,
+        "symbol": raw_symbol,
+        "expiration_ymd": _parse_yymmdd(match.group("expiration")),
+        "option_type": option_type,
+        "contracts": abs(signed_contracts),
+        "contracts_signed": signed_contracts,
+        "position_side": "short" if signed_contracts < 0 else "long" if signed_contracts > 0 else None,
+        "strike": float(match.group("strike")),
+        "account": _extract_account(text, accounts=accounts),
+        "broker": "富途",
+    }
+    return {key: value for key, value in out.items() if value not in (None, "")}
+
+
+def _looks_like_futu_lifecycle_notice(text: str) -> bool:
+    return any(token in text for token in ("期权被指派通知", "已被指派", "期权到期失效通知", "已到期失效"))
+
+
+def _parse_yymmdd(text: str) -> str | None:
+    raw = str(text or "").strip()
+    if not re.fullmatch(r"\d{6}", raw):
+        return None
+    return f"20{raw[0:2]}-{raw[2:4]}-{raw[4:6]}"
+
+
+def _assignment_stock_side(*, option_type: Any, position_side: Any) -> str | None:
+    if str(position_side or "").strip().lower() != "short":
+        return None
+    normalized_type = str(option_type or "").strip().lower()
+    if normalized_type == "put":
+        return "buy"
+    if normalized_type == "call":
+        return "sell"
+    return None
+
+
+def _resolve_lifecycle_multiplier(
+    *,
+    symbol: Any,
+    explicit_multiplier: Any,
+    runtime_config: dict[str, Any] | None,
+    config_path: str | Path | None,
+    repo_base: Path,
+    allow_opend_refresh: bool,
+) -> tuple[float | None, str | None, dict[str, Any]]:
+    multiplier, source, diagnostics = _resolve_multiplier(
+        symbol=symbol,
+        explicit_multiplier=explicit_multiplier,
+        runtime_config=runtime_config,
+        config_path=config_path,
+        repo_base=repo_base,
+        allow_opend_refresh=allow_opend_refresh,
+    )
+    if multiplier:
+        return multiplier, source, diagnostics
+    if _looks_like_us_standard_symbol(symbol):
+        attempts = list(diagnostics.get("attempted_sources") or [])
+        attempts.append({"source": "us_standard_default", "status": "resolved", "value": 100})
+        diagnostics = {**diagnostics, "attempted_sources": attempts, "selected_source": "us_standard_default"}
+        diagnostics.pop("message", None)
+        return 100.0, "us_standard_default", diagnostics
+    return multiplier, source, diagnostics
+
+
+def _looks_like_us_standard_symbol(symbol: Any) -> bool:
+    text = str(symbol or "").strip().upper()
+    return re.fullmatch(r"[A-Z]{1,8}(?:\.[A-Z]{1,4})?", text) is not None and not text.endswith(".HK")
 
 
 def _resolve_multiplier(
@@ -353,6 +606,12 @@ def _extract_labeled_values(text: str) -> dict[str, str]:
         "currency": "currency",
         "note": "note",
         "close_reason": "close_reason",
+        "stock_side": "stock_side",
+        "stock_qty": "stock_qty",
+        "shares": "stock_qty",
+        "stock_price": "stock_price",
+        "event_time_ms": "event_time_ms",
+        "as_of_ms": "as_of_ms",
     }
     out: dict[str, str] = {}
     for match in re.finditer(r"([A-Za-z_][A-Za-z0-9_]*|[\u4e00-\u9fff]{2,8})\s*[:=：]\s*([^\s,，]+)", text):
@@ -414,9 +673,10 @@ def _parse_date(text: str) -> str | None:
 
 def _parse_option_type(text: str) -> str | None:
     lower = text.lower()
-    if "put" in lower or "看跌" in text or "沽" in text:
+    token = lower.strip()
+    if token == "p" or "put" in lower or "看跌" in text or "沽" in text:
         return "put"
-    if "call" in lower or "看涨" in text or "购" in text:
+    if token == "c" or "call" in lower or "看涨" in text or "购" in text:
         return "call"
     return None
 

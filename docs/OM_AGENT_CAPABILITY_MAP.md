@@ -143,7 +143,8 @@ LLM authority is deliberately narrow:
   request clarification, and synthesize observations.
 - In `agent_loop`, LLM may initiate exactly one approved preview-write
   capability: `manual_trade_open`, `manual_trade_close`,
-  `manual_trade_update`, `symbol_edit`, `model_use`, or `upgrade_now`.
+  `manual_assignment`, `manual_expiry`, `manual_trade_update`,
+  `symbol_edit`, `model_use`, or `upgrade_now`.
 - LLM-originated preview-write plans only create `PendingOperation` records
   through existing deterministic operation handlers.
 - LLM must never confirm, cancel, apply, send notifications, write config, write
