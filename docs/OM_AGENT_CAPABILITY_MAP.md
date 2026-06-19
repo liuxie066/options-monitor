@@ -17,9 +17,9 @@ Terminology used here:
   It is not OM's autonomous/project Agent.
 - `./om assistant ...` is the Inbound Assistant CLI namespace for local or
   remote messages.
-- `AgentLoop` is an internal Assistant Planner Loop used by `./om assistant`
-  when planner routing is enabled. It is not a public entrypoint and is not a
-  peer of `./om-agent`.
+- `AgentLoop` is an internal Assistant planner/event loop used by
+  `./om assistant` when planner routing is enabled. It is not a public
+  entrypoint and is not a peer of `./om-agent`.
 
 Historical roadmap documents such as
 [OM_AGENT_COMPLETION_DESIGN.md](OM_AGENT_COMPLETION_DESIGN.md) may contain
@@ -105,9 +105,9 @@ This names the authority path:
   pending-operation context. It is not a separate runtime service or a second
   pending-operation store.
 - `Perceive` normalizes the channel message into the current request context.
-- `Understand` may use slash commands, deterministic parsing as a safety
-  component, or the AgentLoop Planner. It only describes intent or proposes a
-  bounded plan; it does not execute tools.
+- `Understand` may use slash commands or deterministic alias parsing as safety
+  components, or enter the AgentLoop structured event path. It only describes
+  intent or produces model tool-call events; it does not execute tools.
 - `Decide` owns permission, safety class, capability support, config-scope
   injection, and preview/confirm boundaries. Its conceptual decisions are
   `allow`, `preview`, `ask`, `deny`, or `defer`.
@@ -123,7 +123,7 @@ Current implementation names map to this loop rather than replacing it:
 |---|---|
 | `AgentSession` | `AssistantRequest`, `AgentSessionSnapshot`, inbound audit row, durable `agent_sessions` trace table, conversation context, pending operation store |
 | `Understand` output | `PerceptionResult`, or an internal `tool_plan` produced by `agent_loop` |
-| `Decide` output | `ReasoningResolution`, planner validation, tool/operation policy checks |
+| `Decide` output | `ReasoningResolution`, model-event validation, tool/operation policy checks |
 | `Act` output | `ActionResult`, `execute_tool(...)`, or operation preview handlers |
 | `Observe` output | `ObservationResponse`, canonical renderer, audit payloads |
 
@@ -132,7 +132,7 @@ surface: `src/application/agent_tool_registry.py` remains the `./om-agent` Tool
 Gateway manifest collector, and
 `src/application/assistant/capability_catalog.py` is the Inbound Assistant
 capability catalog. AgentLoop read tools are derived from the existing tool
-registry plus planner-visible capability metadata; preview-write authority comes
+registry plus model-visible capability metadata; preview-write authority comes
 from capability metadata. Future implementation work should keep consolidating
 metadata into those existing authorities instead of adding another runtime layer
 or parallel tool control plane.
@@ -158,15 +158,15 @@ tool all the time. Tool protocol, tool visibility, execution, and permission
 remain separate. OM should apply the same idea to Inbound Assistant capability
 selection:
 
-- planner-visible capabilities should be a narrowed view derived from the
-  Inbound capability catalog and current task contract,
+- model-visible capabilities should be a narrowed view derived from the
+  Inbound capability catalog and host-derived task contract,
 - the pure-read pool may be wider for model-driven tool calling than for a
   single deterministic route, but only for `READ_AUTO` capabilities with
   bounded loop guards,
 - every selected capability should have a short reason tied to one of:
   current message text, projected context, open evidence gap, or
   `task_contract.required_evidence`,
-- rejected or hidden capabilities do not need a full planner-generated essay,
+- rejected or hidden capabilities do not need a full model-generated essay,
   but trace should make the selected route and selection source auditable,
 - capability selection should never bypass `tool_execution`,
   `agent_tool_registry`, permission checks, or preview/confirm lifecycle,
@@ -192,9 +192,9 @@ Related OM surfaces outside the Inbound Assistant core:
 
 ## Risk Classes
 
-Tool Calling v2 should reason about risk with these policy classes. The
-capability matrix below still uses the existing labels where useful, but new
-assistant-loop work should map them to this policy model.
+The Assistant tool-calling event model should reason about risk with these
+policy classes. The capability matrix below still uses the existing labels
+where useful, but new assistant-loop work should map them to this policy model.
 
 | v2 class | Current matrix label | Definition | Default Assistant policy |
 |---|---|---|---|
@@ -220,8 +220,8 @@ or operator-owned workflows.
 | Run history | `./om-agent run --tool runtime_runs`, `/runs` | `runtime_runs` | `output_runs` snapshots | None | Core Read | Find relevant run before deeper log or candidate evidence | `./om-agent run --tool runtime_runs --input-json '{"limit":10}'` | `om-agent`, Inbound |
 | Runtime logs | `./om-agent run --tool runtime_logs`, `/logs` | `runtime_logs` | Run audit/tool/tick/service logs | None | Core Read | Choose log scope and line count after identifying run | `./om-agent run --tool runtime_logs --input-json '{"kind":"all","lines":50}'` | `om-agent`, Inbound |
 | Assistant trace | `./om-agent run --tool assistant_trace` | `assistant_trace` | Inbound SQLite `agent_sessions` snapshots and audit path metadata, including capability selection, progress, evidence gaps/blockers, and clarification requests | None | Core Read | None inside tool execution; external operator may inspect derived Assistant state | `./om-agent run --tool assistant_trace --input-json '{"limit":10}'` | Local `om-agent`; not default Inbound |
-| Symbol identity resolution | `./om-agent run --tool symbol_resolve` | `symbol_resolve` | shared symbol identity rules plus runtime config aliases when scoped | None | Core Read | Resolve Chinese names, aliases, Futu codes, and market suffixes before symbol-specific reads | `./om-agent run --tool symbol_resolve --input-json '{"symbol":"泡泡玛特"}'` | `om-agent`, Inbound planner |
-| Candidate filter explanation | `./om-agent run --tool candidate_filter_explain` | `candidate_filter_explain` | `candidate_filter_trace.jsonl`; scoped runtime aliases only for symbol normalization | None | Core Read | Map one-symbol filter/missing-candidate questions to trace filters; `account` is scan scope, not symbol identity | `./om-agent run --tool candidate_filter_explain --input-json '{"symbol":"泡泡玛特"}'` | `om-agent`, Inbound planner |
+| Symbol identity resolution | `./om-agent run --tool symbol_resolve` | `symbol_resolve` | shared symbol identity rules plus runtime config aliases when scoped | None | Core Read | Resolve Chinese names, aliases, Futu codes, and market suffixes before symbol-specific reads | `./om-agent run --tool symbol_resolve --input-json '{"symbol":"泡泡玛特"}'` | `om-agent`, Inbound model-visible |
+| Candidate filter explanation | `./om-agent run --tool candidate_filter_explain` | `candidate_filter_explain` | `candidate_filter_trace.jsonl`; scoped runtime aliases only for symbol normalization | None | Core Read | Map one-symbol filter/missing-candidate questions to trace filters; `account` is scan scope, not symbol identity | `./om-agent run --tool candidate_filter_explain --input-json '{"symbol":"泡泡玛特"}'` | `om-agent`, Inbound model-visible |
 | Candidate ranking explanation | `./om-agent run --tool candidate_rank_explain` | `candidate_rank_explain` | Existing candidate CSV/report artifacts | None | Core Read | Compare ranking policy against observed rows | `./om-agent run --tool candidate_rank_explain --input-json '{"mode":"put","top_n":5}'` | Local `om-agent`; not default Inbound |
 | Position read | `./om-agent run --tool option_positions_read`, `/positions` | `option_positions_read` | SQLite option-position store, trade events, projection inspection | None | Core Read | Build query filters; explain missing data explicitly | `./om-agent run --tool option_positions_read --input-json '{"config_key":"us","action":"list","account":"lx","status":"open"}'` | `om-agent`, Inbound |
 | Assigned-stock holding PnL | `./om-agent run --tool option_positions_read`, `/assigned-stock` | `option_positions_read action=assigned-stock` | Sell Put assignment stock lots, `assigned_stock_events`, optional realtime OpenD spot | None | Core Read | Use for 被指派/指派正股持仓盈亏; default open lots with `refresh_quotes=true`; missing spot must be explicit | `./om-agent run --tool option_positions_read --input-json '{"config_key":"us","action":"assigned-stock","account":"lx","refresh_quotes":true}'` | `om-agent`, Inbound |
@@ -231,11 +231,11 @@ or operator-owned workflows.
 | Version check | `./om-agent run --tool version_check` | `version_check` | Local `VERSION`, git release tags | None | Core Read | Use before release planning | `./om-agent run --tool version_check --input-json '{"remote_name":"origin"}'` | Local `om-agent`, Codex/operator |
 | Symbol list | `./om assistant handle`, `/symbols` | `inbound.symbols` read path | Runtime/current assistant config symbol settings | None | Core Read | Recognize list intent only | `./om assistant capabilities --format json` | Inbound only |
 | Pending previews | `./om assistant handle`, `/pending` | `inbound.pending` | Inbound operation store/audit | None | Core Read | Show pending state before confirm/cancel | `./om assistant capabilities --format json` | Inbound only |
-| Model list | `./om assistant handle`, `/model list` | `inbound.model` read path | Inbound model profile config | None | Core Read | Not planner-routed; deterministic command only | `./om assistant capabilities --format json` | Inbound deterministic command only |
-| Symbol config preview | Inbound natural language or slash commands; local dry-run | `inbound.symbols`, `manage_symbols` dry-run/list | Runtime config / `config.yaml` authoring source | Preview/pending operation; local dry-run may write nothing | Preview Write | AgentLoop Planner may create a pending `symbol_edit` preview; no confirm/apply | Inbound pending state, config validation after apply | Inbound preview; local `om-agent` dry-run |
-| Manual trade preview | Inbound natural language or deterministic commands | `inbound.manual_trade` preview paths | User-provided trade text, ledger validation, config/account context | Pending operation/audit only | Preview Write | AgentLoop Planner may create pending `manual_trade_open` / `manual_trade_close` / `manual_trade_update` previews; deterministic operation handler owns parsing and validation | Pending preview and validation warnings | Inbound preview only |
-| Model switch preview | Inbound natural language or deterministic command | `inbound.model` preview path | Current assistant model profiles in config | Pending operation/audit only | Preview Write | AgentLoop Planner may create a pending `model_use` preview; no config write | Pending preview; model check after confirm | Inbound preview only |
-| Upgrade preview | Inbound natural language or deterministic command | `inbound.upgrade` preview path | Release metadata and service/runtime context | Pending operation/audit only | Preview/Admin | AgentLoop Planner may create a pending `upgrade_now` admin preview; no upgrade/apply | Pending preview; upgrade verify after confirm | Inbound preview only |
+| Model list | `./om assistant handle`, `/model list` | `inbound.model` read path | Inbound model profile config | None | Core Read | Not model-routed; deterministic command only | `./om assistant capabilities --format json` | Inbound deterministic command only |
+| Symbol config preview | Inbound natural language or slash commands; local dry-run | `inbound.symbols`, `manage_symbols` dry-run/list | Runtime config / `config.yaml` authoring source | Preview/pending operation; local dry-run may write nothing | Preview Write | Model may request a `symbol_edit` preview event; deterministic handler creates pending preview; no confirm/apply | Inbound pending state, config validation after apply | Inbound preview; local `om-agent` dry-run |
+| Manual trade preview | Inbound natural language or deterministic commands | `inbound.manual_trade` preview paths | User-provided trade text, ledger validation, config/account context | Pending operation/audit only | Preview Write | Model may request manual-trade preview events; deterministic operation handler owns parsing, validation, and pending preview creation | Pending preview and validation warnings | Inbound preview only |
+| Model switch preview | Inbound natural language or deterministic command | `inbound.model` preview path | Current assistant model profiles in config | Pending operation/audit only | Preview Write | Model may request a `model_use` preview event; deterministic handler creates pending preview; no config write | Pending preview; model check after confirm | Inbound preview only |
+| Upgrade preview | Inbound natural language or deterministic command | `inbound.upgrade` preview path | Release metadata and service/runtime context | Pending operation/audit only | Preview/Admin | Model may request an `upgrade_now` preview event; deterministic handler creates pending admin preview; no upgrade/apply | Pending preview; upgrade verify after confirm | Inbound preview only |
 | Local VERSION update | `./om-agent run --tool version_update` | `version_update` | `VERSION`, semver rules | Writes `VERSION` only when `apply=true` | Confirm Write / local repo write | Plan release metadata; not execute without request | `git diff`, release check | Local Codex/operator |
 | Symbol config apply | Inbound confirm or `manage_symbols` non-dry-run | `inbound.symbols` confirm path, `manage_symbols` | Pending preview, config source | Writes `config.yaml` / runtime config where configured | Confirm Write | None at apply time | `config_validate`, `git diff`, pending cleared | Inbound confirm or local operator |
 | Manual trade apply/cancel | Inbound confirm/cancel | `inbound.manual_trade` confirm/cancel paths | Pending preview, ledger validation | Writes trade/ledger state on confirm | Confirm Write | None at apply time | `option_positions_read action=inspect`, audit | Inbound confirm only |
@@ -303,14 +303,15 @@ The assistant should not use them as default evidence paths.
   `agent_tool_registry` tool metadata via `is_pure_read()`: `read_only=true`,
   resolved `risk_level=read_only`, no `side_effects`, and no confirmation
   requirement.
-- `src/application/assistant/agent_loop.py` has a narrower Inbound planner allowlist
-  than the full pure-read manifest. That is intentional for remote LLM planning,
-  but it should remain tested against the public capability catalog.
+- `src/application/assistant/agent_loop.py` has a narrower Inbound model-visible
+  allowlist than the full pure-read manifest. That is intentional for remote
+  LLM tool-call planning, but it should remain tested against the public
+  capability catalog.
 - `assistant.mode` is retired and unsupported. The active product controls are
   `assistant.enabled` and `assistant.planner.enabled`. The runtime
-  target is one `AgentSession` boundary + `AgentLoop` with deterministic parsing,
-  optional model planning inside `Understand`, and durable operator trace in
-  `agent_sessions`.
+  target is one `AgentSession` boundary + `AgentLoop` with structured model
+  tool-call events, deterministic guard/execution, and durable operator trace
+  in `agent_sessions`.
 - Write-request detection is owned by registry metadata/policy. `version_update`
   and `manage_symbols` carry explicit write predicates in their
   `AgentTool`; `src/application/tool_execution.py` delegates env/confirm gates

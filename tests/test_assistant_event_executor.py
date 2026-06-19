@@ -1,0 +1,190 @@
+from __future__ import annotations
+
+from typing import Any
+
+from src.application.agent_tool_contracts import build_response
+from src.application.assistant.agent_loop import execute_model_tool_call_event
+from src.application.assistant.contracts import AssistantRequest
+from src.application.assistant.model_events import model_tool_call_from_provider_block
+
+
+def test_execute_model_tool_call_event_runs_read_tool_through_guard() -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "row_count": 1,
+                "rows": [{"account": "lx", "month": "2026-06", "net_income": 123.45}],
+            },
+        )
+
+    event = model_tool_call_from_provider_block(
+        {
+            "type": "function_call",
+            "call_id": "call_income_1",
+            "name": "monthly_income_report",
+            "arguments": '{"account":"lx","month":"2026-06","include_rows":true}',
+        },
+        provider="openai",
+        event_id="model_tool_call_1",
+    )
+    result = execute_model_tool_call_event(
+        model_event=event,
+        request=AssistantRequest(text="6月收益分析", sender_id="u1", config_key="us"),
+        task_contract={"requested_effect": "read", "scope": {"requested_accounts": ["lx"]}},
+        execute_tool_fn=_execute,
+    )
+
+    assert result.allowed is True
+    assert result.ok is True
+    assert calls == [
+        (
+            "monthly_income_report",
+            {"account": "lx", "month": "2026-06", "include_rows": True, "config_key": "us"},
+        )
+    ]
+    assert result.guard_event.event_type == "tool_guard_decision"
+    assert result.guard_event.allowed is True
+    assert result.guard_event.risk_class == "READ_AUTO"
+    assert result.guard_event.normalized_payload == {
+        "account": "lx",
+        "month": "2026-06",
+        "include_rows": True,
+        "config_key": "us",
+    }
+    provider_result = result.public_payload()["provider_tool_result"]
+    assert provider_result["is_error"] is False
+    assert provider_result["tool_call_id"] == "call_income_1"
+    assert result.result_adapter.raw_result["data"]["row_count"] == 1
+
+
+def test_execute_model_tool_call_event_blocks_write_tool_before_execution() -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+    event = model_tool_call_from_provider_block(
+        {
+            "type": "function_call",
+            "call_id": "call_write_1",
+            "name": "manage_symbols",
+            "arguments": '{"action":"edit","symbol":"NVDA","set":{"sell_put.enabled":false},"confirm":true}',
+        },
+        provider="openai",
+        event_id="model_tool_call_1",
+    )
+
+    result = execute_model_tool_call_event(
+        model_event=event,
+        request=AssistantRequest(text="把 NVDA sell put 关掉", sender_id="u1", config_key="us"),
+        task_contract={"requested_effect": "read", "scope": {}},
+        execute_tool_fn=lambda tool_name, payload: calls.append((tool_name, payload)) or {},
+    )
+
+    assert calls == []
+    assert result.allowed is False
+    assert result.ok is False
+    assert result.guard_event.decision == "not_read_auto"
+    assert result.guard_event.error_code == "PERMISSION_DENIED"
+    assert result.public_payload()["provider_tool_result"]["is_error"] is True
+
+
+def test_execute_model_tool_call_event_blocks_scope_violation_before_execution() -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+    event = model_tool_call_from_provider_block(
+        {
+            "type": "function_call",
+            "call_id": "call_income_1",
+            "name": "monthly_income_report",
+            "arguments": '{"account":"sy","month":"2026-06"}',
+        },
+        provider="openai",
+        event_id="model_tool_call_1",
+    )
+
+    result = execute_model_tool_call_event(
+        model_event=event,
+        request=AssistantRequest(text="lx 6月收益", sender_id="u1", config_key="us"),
+        task_contract={"requested_effect": "read", "scope": {"requested_accounts": ["lx"]}},
+        execute_tool_fn=lambda tool_name, payload: calls.append((tool_name, payload)) or {},
+    )
+
+    assert calls == []
+    assert result.allowed is False
+    assert result.ok is False
+    assert result.guard_event.decision == "pre_tool_check_failed"
+    assert result.guard_event.error_code == "PRE_TOOL_CHECK_FAILED"
+    assert result.guard_event.normalized_payload["account"] == "sy"
+    assert result.public_payload()["provider_tool_result"]["is_error"] is True
+
+
+def test_execute_model_tool_call_event_rejects_duplicate_payload() -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(tool_name=tool_name, ok=True, data={"row_count": 1})
+
+    event = model_tool_call_from_provider_block(
+        {
+            "type": "function_call",
+            "call_id": "call_income_1",
+            "name": "monthly_income_report",
+            "arguments": '{"month":"2026-06"}',
+        },
+        provider="openai",
+        event_id="model_tool_call_1",
+    )
+    attempted_signatures: set[str] = set()
+
+    first = execute_model_tool_call_event(
+        model_event=event,
+        request=AssistantRequest(text="6月收益", sender_id="u1", config_key="us"),
+        task_contract={"requested_effect": "read", "scope": {}},
+        execute_tool_fn=_execute,
+        attempted_signatures=attempted_signatures,
+    )
+    second = execute_model_tool_call_event(
+        model_event=event,
+        request=AssistantRequest(text="6月收益", sender_id="u1", config_key="us"),
+        task_contract={"requested_effect": "read", "scope": {}},
+        execute_tool_fn=_execute,
+        attempted_signatures=attempted_signatures,
+        tool_call_count=1,
+    )
+
+    assert first.ok is True
+    assert second.allowed is False
+    assert second.guard_event.decision == "duplicate_call"
+    assert second.guard_event.error_code == "DUPLICATE_TOOL_CALL"
+    assert len(calls) == 1
+
+
+def test_execute_model_tool_call_event_rejects_budget_exhaustion() -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+    event = model_tool_call_from_provider_block(
+        {
+            "type": "function_call",
+            "call_id": "call_income_1",
+            "name": "monthly_income_report",
+            "arguments": '{"month":"2026-06"}',
+        },
+        provider="openai",
+        event_id="model_tool_call_1",
+    )
+
+    result = execute_model_tool_call_event(
+        model_event=event,
+        request=AssistantRequest(text="6月收益", sender_id="u1", config_key="us"),
+        task_contract={"requested_effect": "read", "scope": {}},
+        execute_tool_fn=lambda tool_name, payload: calls.append((tool_name, payload)) or {},
+        tool_call_count=5,
+        max_tool_calls=5,
+    )
+
+    assert calls == []
+    assert result.allowed is False
+    assert result.guard_event.decision == "tool_budget_exhausted"
+    assert result.guard_event.error_code == "TOOL_BUDGET_EXHAUSTED"
+    assert result.public_payload()["provider_tool_result"]["is_error"] is True

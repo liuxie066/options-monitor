@@ -151,7 +151,7 @@ def build_task_contract(
     user_text = str(question or "")
     question_goal_text = "\n".join([user_text, goal])
     intent_families = _intent_families(question_goal_text, text)
-    planned_symbols = _extract_symbols(text)
+    planned_symbols = _unique([*_extract_symbols(text), *_planned_symbol_values(steps)])
     requested_accounts = _extract_accounts(user_text)
     planned_accounts = _extract_accounts(text)
     requested_symbols = _extract_symbols(user_text, allowed_lowercase_symbols=set(planned_symbols))
@@ -584,6 +584,36 @@ def _plan_values(value: Any) -> list[str]:
     return values
 
 
+def _planned_symbol_values(value: Any) -> list[str]:
+    symbols: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if str(key) in {"symbol", "symbols"}:
+                symbols.extend(_planned_symbol_field_values(item))
+            elif isinstance(item, (dict, list, tuple, set)):
+                symbols.extend(_planned_symbol_values(item))
+    elif isinstance(value, (list, tuple, set)):
+        for item in value:
+            if isinstance(item, (dict, list, tuple, set)):
+                symbols.extend(_planned_symbol_values(item))
+    return _unique(symbols)
+
+
+def _planned_symbol_field_values(value: Any) -> list[str]:
+    symbols: list[str] = []
+    if isinstance(value, dict):
+        for item in value.values():
+            symbols.extend(_planned_symbol_field_values(item))
+    elif isinstance(value, (list, tuple, set)):
+        for item in value:
+            symbols.extend(_planned_symbol_field_values(item))
+    else:
+        symbol = _normalize_planned_symbol_value(value)
+        if symbol:
+            symbols.append(symbol)
+    return _unique(symbols)
+
+
 def _extract_accounts(text: str) -> list[str]:
     compact = str(text or "").lower()
     accounts: list[str] = []
@@ -604,6 +634,20 @@ def _extract_symbols(text: str, *, allowed_lowercase_symbols: set[str] | None = 
             continue
         symbols.append(symbol)
     return _unique(symbols)
+
+
+def _normalize_planned_symbol_value(raw: Any) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    normalized = _normalize_symbol_token(text)
+    if normalized:
+        return normalized
+    if re.fullmatch(r"[A-Za-z]{1,6}", text):
+        upper = text.upper()
+        if upper not in _NON_SYMBOL_TOKENS:
+            return _calibrated_symbol(text) or upper
+    return ""
 
 
 def _normalize_symbol_token(raw: Any, *, allowed_lowercase_symbols: set[str] | None = None) -> str:

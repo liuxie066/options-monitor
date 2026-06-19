@@ -76,7 +76,8 @@ from src.application.assistant.reasoning import CONFIG_SCOPED_INTENTS
 from src.application.assistant.audit import InboundAuditStore
 from src.application.assistant.contracts import PERCEPTION_RESULT_SCHEMA_VERSION, AssistantRequest, PerceptionResult, ToolCall
 from src.infrastructure.openai_chat_completions import create_json_chat_completion, extract_chat_completion_text
-from src.infrastructure.openai_responses import OpenAIResponsesError, create_structured_response, extract_response_text
+from src.infrastructure.openai_chat_completions import create_tool_call_chat_completion
+from src.infrastructure.openai_responses import OpenAIResponsesError, create_structured_response, create_tool_call_response, extract_response_text
 
 
 def _planner_trace(*, reason: str = "accepted", schema_version: str = TOOL_PLAN_SCHEMA_VERSION) -> dict[str, Any]:
@@ -8717,6 +8718,500 @@ def test_plan_read_only_tools_treats_empty_steps_as_no_plan() -> None:
     assert result.trace["planner_input"]["chars"] == len(calls[0]["input_text"])
 
 
+def test_plan_read_only_tools_uses_provider_tool_call_not_output_text_json_plan() -> None:
+    calls: list[dict[str, Any]] = []
+
+    def _create_tool_call_response(**kwargs: Any) -> dict[str, Any]:
+        calls.append(dict(kwargs))
+        return {
+            "output_text": json.dumps(
+                {
+                    "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+                    "goal": "wrong legacy plan",
+                    "task_contract": _test_task_contract(goal="wrong legacy plan"),
+                    "required_capabilities": [],
+                    "steps": [
+                        {
+                            "id": "step_wrong",
+                            "tool_name": "runtime_status",
+                            "arguments": {},
+                            "purpose": "this plain-text JSON plan must be ignored",
+                        }
+                    ],
+                }
+            ),
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_income_1",
+                    "name": "monthly_income_report",
+                    "arguments": '{"month":"2026-06","include_rows":true}',
+                }
+            ],
+        }
+
+    result = plan_read_only_tools(
+        "6月收益分析",
+        AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        conversation_context={"temporal_context": {"current_date": "2026-06-19", "timezone": "Asia/Shanghai"}},
+        create_tool_call_response_fn=_create_tool_call_response,
+        environ={"OM_LLM_API_KEY": "sk-test"},
+    )
+
+    assert calls
+    assert "tools" in calls[0]
+    assert calls[0]["tools"][0]["type"] == "function"
+    assert "json_schema" not in calls[0]
+    assert result.error is None
+    assert result.plan is not None
+    assert result.plan.steps[0].tool_name == "monthly_income_report"
+    assert result.plan.steps[0].arguments == {"month": "2026-06", "include_rows": True}
+    assert result.trace["reason"] == "accepted"
+    assert result.trace["event_model"]["legacy_json_plan_used"] is False
+    assert result.trace["event_model"]["events"][0]["event_type"] == "model_tool_call"
+    assert result.trace["event_model"]["events"][0]["tool_name"] == "monthly_income_report"
+
+
+def test_plan_read_only_tools_preserves_multiple_provider_tool_calls() -> None:
+    def _create_tool_call_response(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_income_1",
+                    "name": "monthly_income_report",
+                    "arguments": '{"month":"2026-06","include_rows":true}',
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_analysis_1",
+                    "name": "analysis_query",
+                    "arguments": '{"sql":"select month, account from account_monthly_performance limit 5"}',
+                },
+            ]
+        }
+
+    result = plan_read_only_tools(
+        "6月收益来源，并对比 lx sy",
+        AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        conversation_context={"temporal_context": {"current_date": "2026-06-19", "timezone": "Asia/Shanghai"}},
+        create_tool_call_response_fn=_create_tool_call_response,
+        environ={"OM_LLM_API_KEY": "sk-test"},
+    )
+
+    assert result.error is None
+    assert result.plan is not None
+    assert result.trace["event_model"]["event_count"] == 2
+    assert [step.tool_name for step in result.plan.steps] == ["monthly_income_report", "analysis_query"]
+    assert result.plan.steps[0].arguments == {"month": "2026-06", "include_rows": True}
+    assert result.plan.steps[1].arguments == {"sql": "select month, account from account_monthly_performance limit 5"}
+
+
+def test_plan_read_only_tools_tool_call_path_carries_single_visible_followup_context() -> None:
+    def _create_tool_call_response(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_income_followup_1",
+                    "name": "monthly_income_report",
+                    "arguments": '{"month":"2026-06","include_rows":true}',
+                }
+            ]
+        }
+
+    result = plan_read_only_tools(
+        "继续拆收益来源",
+        AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        conversation_context={
+            "temporal_context": {"current_date": "2026-06-19", "timezone": "Asia/Shanghai"},
+            "context_projection": {
+                "schema_version": "om-context-projection-v1",
+                "current_user_message": {"text": "继续拆收益来源"},
+                "recent_turns": [
+                    {
+                        "turn_id": "turn_income",
+                        "safe_slots": {"account": ["lx"], "month": ["2026-06"]},
+                        "evidence_refs": ["ev_income"],
+                    }
+                ],
+                "recent_successful_tools": [
+                    {
+                        "tool_name": "monthly_income_report",
+                        "safe_slots": {"account": ["lx"], "month": ["2026-06"]},
+                        "evidence_refs": ["ev_income"],
+                    }
+                ],
+                "available_evidence_refs": [
+                    {
+                        "ref_id": "ev_income",
+                        "turn_id": "turn_income",
+                        "source_tool": "monthly_income_report",
+                        "safe_slots": {"account": ["lx"], "month": ["2026-06"]},
+                    }
+                ],
+                "open_evidence_gaps": [],
+                "pending_operations": [],
+                "budget": {"truncated": False},
+            },
+        },
+        create_tool_call_response_fn=_create_tool_call_response,
+        environ={"OM_LLM_API_KEY": "sk-test"},
+    )
+
+    assert result.error is None
+    assert result.plan is not None
+    assert result.trace["planner_context_use"]["mode"] == "carry"
+    assert result.trace["planner_context_use"]["referenced_turn_ids"] == ["turn_income"]
+    assert result.trace["planner_context_use"]["referenced_evidence_refs"] == ["ev_income"]
+    assert result.trace["planner_context_use"]["inherited_slots"] == {"month": ["2026-06"]}
+    assert result.trace["context_validation"]["status"] == "passed"
+
+
+def test_plan_read_only_tools_tool_call_path_asks_for_ambiguous_followup_context() -> None:
+    def _create_tool_call_response(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_analysis_1",
+                    "name": "analysis_query",
+                    "arguments": '{"sql":"select account from account_monthly_performance where account = \'lx\' limit 5","account":"lx"}',
+                }
+            ]
+        }
+
+    result = plan_read_only_tools(
+        "继续",
+        AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        conversation_context={
+            "temporal_context": {"current_date": "2026-06-19", "timezone": "Asia/Shanghai"},
+            "context_projection": {
+                "schema_version": "om-context-projection-v1",
+                "current_user_message": {"text": "继续"},
+                "recent_turns": [
+                    {"turn_id": "turn_lx", "safe_slots": {"account": ["lx"]}, "evidence_refs": ["ev_lx"]},
+                    {"turn_id": "turn_sy", "safe_slots": {"account": ["sy"]}, "evidence_refs": ["ev_sy"]},
+                ],
+                "recent_successful_tools": [],
+                "available_evidence_refs": [
+                    {
+                        "ref_id": "ev_lx",
+                        "turn_id": "turn_lx",
+                        "source_tool": "analysis_query",
+                        "safe_slots": {"account": ["lx"]},
+                    },
+                    {
+                        "ref_id": "ev_sy",
+                        "turn_id": "turn_sy",
+                        "source_tool": "analysis_query",
+                        "safe_slots": {"account": ["sy"]},
+                    },
+                ],
+                "open_evidence_gaps": [],
+                "pending_operations": [],
+                "budget": {"truncated": True, "truncation_reason": "recent_turn_limit"},
+            },
+        },
+        create_tool_call_response_fn=_create_tool_call_response,
+        environ={"OM_LLM_API_KEY": "sk-test"},
+    )
+
+    assert result.plan is None
+    assert result.error is not None
+    assert result.error.code == "PLAN_CONTEXT_AMBIGUOUS"
+    assert result.trace["reason"] == "context_validation_ask_clarification"
+    assert result.trace["planner_context_use"]["mode"] == "ambiguous"
+    assert result.trace["context_validation"]["status"] == "ask_clarification"
+
+
+def test_plan_read_only_tools_rejects_plain_text_json_plan_as_invalid_model_event() -> None:
+    calls: list[dict[str, Any]] = []
+
+    def _create_tool_call_response(**kwargs: Any) -> dict[str, Any]:
+        calls.append(dict(kwargs))
+        return {
+            "output_text": json.dumps(
+                {
+                    "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+                    "goal": "legacy JSON text",
+                    "task_contract": _test_task_contract(goal="legacy JSON text"),
+                    "required_capabilities": [],
+                    "steps": [
+                        {
+                            "id": "step_1",
+                            "tool_name": "monthly_income_report",
+                            "arguments": {"month": "2026-06"},
+                            "purpose": "legacy planner text",
+                        }
+                    ],
+                }
+            )
+        }
+
+    result = plan_read_only_tools(
+        "6月收益分析",
+        AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        conversation_context={"temporal_context": {"current_date": "2026-06-19", "timezone": "Asia/Shanghai"}},
+        create_tool_call_response_fn=_create_tool_call_response,
+        environ={"OM_LLM_API_KEY": "sk-test"},
+    )
+
+    assert calls
+    assert "tools" in calls[0]
+    assert "json_schema" not in calls[0]
+    assert result.plan is None
+    assert result.error is not None
+    assert result.error.code == "INVALID_MODEL_EVENT"
+    assert "invalid JSON" not in result.error.message
+    assert result.trace["reason"] == "invalid_model_event"
+    assert result.trace["event_model"]["events"] == []
+    assert result.trace["event_model"]["legacy_json_plan_used"] is False
+
+
+def test_plan_read_only_tools_income_source_uses_tool_call_detail_rows() -> None:
+    calls: list[dict[str, Any]] = []
+
+    def _create_tool_call_response(**kwargs: Any) -> dict[str, Any]:
+        calls.append(dict(kwargs))
+        return {
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_income_source_1",
+                    "name": "monthly_income_report",
+                    "arguments": '{"month":"2026-06","include_rows":true}',
+                }
+            ]
+        }
+
+    result = plan_read_only_tools(
+        "6月收益来源",
+        AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        conversation_context={"temporal_context": {"current_date": "2026-06-19", "timezone": "Asia/Shanghai"}},
+        create_tool_call_response_fn=_create_tool_call_response,
+        environ={"OM_LLM_API_KEY": "sk-test"},
+    )
+
+    assert calls
+    assert "tools" in calls[0]
+    assert "json_schema" not in calls[0]
+    assert "response_format" not in calls[0]
+    assert result.error is None
+    assert result.plan is not None
+    assert result.plan.steps[0].tool_name == "monthly_income_report"
+    assert result.plan.steps[0].arguments == {"month": "2026-06", "include_rows": True}
+    assert result.trace["event_model"]["legacy_json_plan_used"] is False
+
+
+def test_plan_read_only_tools_candidate_alias_and_lowercase_symbol_use_tool_calls() -> None:
+    cases = [
+        (
+            "lx 泡泡玛特 sell_put 被哪个参数过滤了？",
+            "call_popmart_filter_1",
+            '{"account":"lx","symbol":"泡泡玛特","function":"sell_put"}',
+            ["9992.HK"],
+        ),
+        (
+            "lx nvda 为什么没出现在候选里？",
+            "call_nvda_filter_1",
+            '{"account":"lx","symbol":"nvda","function":"sell_put"}',
+            ["NVDA"],
+        ),
+    ]
+
+    for text, call_id, arguments, expected_symbols in cases:
+        calls: list[dict[str, Any]] = []
+
+        def _create_tool_call_response(**kwargs: Any) -> dict[str, Any]:
+            calls.append(dict(kwargs))
+            return {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": call_id,
+                        "name": "candidate_filter_explain",
+                        "arguments": arguments,
+                    }
+                ]
+            }
+
+        result = plan_read_only_tools(
+            text,
+            AssistantSettings(
+                llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+            ),
+            conversation_context={"temporal_context": {"current_date": "2026-06-19", "timezone": "Asia/Shanghai"}},
+            create_tool_call_response_fn=_create_tool_call_response,
+            environ={"OM_LLM_API_KEY": "sk-test"},
+        )
+
+        assert calls, text
+        assert "tools" in calls[0], text
+        assert "json_schema" not in calls[0], text
+        assert result.error is None, text
+        assert result.plan is not None, text
+        assert result.plan.steps[0].tool_name == "candidate_filter_explain"
+        assert result.plan.task_contract is not None
+        assert result.plan.task_contract["scope"]["requested_symbols"] == expected_symbols
+        assert result.plan.task_contract["scope"]["planned_symbols"] == expected_symbols
+        assert result.trace["event_model"]["legacy_json_plan_used"] is False
+
+
+def test_assistant_runtime_default_agent_loop_uses_provider_tool_call(monkeypatch: Any, tmp_path: Path) -> None:
+    monkeypatch.setenv("OM_LLM_API_KEY", "sk-test")
+    provider_calls: list[dict[str, Any]] = []
+    tool_calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _create_tool_call_response(**kwargs: Any) -> dict[str, Any]:
+        provider_calls.append(dict(kwargs))
+        return {
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_income_1",
+                    "name": "monthly_income_report",
+                    "arguments": '{"month":"2026-06","include_rows":true}',
+                }
+            ]
+        }
+
+    def _provider_response_fn(provider: str):
+        assert provider == "openai"
+        return _create_tool_call_response
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        tool_calls.append((tool_name, payload))
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "filters": {"month": "2026-06"},
+                "summary": [{"month": "2026-06", "account": "lx", "currency": "USD", "net_cashflow_gross": 123.45}],
+                "return_summary": [{"month": "2026-06", "account": "lx", "net_income_cny": 888.88}],
+                "row_count": 1,
+            },
+        )
+
+    monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_response_fn", _provider_response_fn)
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="6月收益分析",
+            sender_id="local",
+            message_id="msg_default_event_tool_call_income",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        now_fn=lambda: date(2026, 6, 19),
+    )
+
+    assert out["ok"] is True
+    assert provider_calls
+    assert "tools" in provider_calls[0]
+    assert "json_schema" not in provider_calls[0]
+    assert tool_calls == [
+        (
+            "monthly_income_report",
+            {"month": "2026-06", "include_rows": True, "config_key": "us"},
+        )
+    ]
+    llm_trace = out["meta"]["assistant"]["llm"]
+    assert llm_trace["reason"] == "accepted"
+    assert llm_trace["event_model"]["legacy_json_plan_used"] is False
+    assert llm_trace["event_model"]["events"][0]["event_type"] == "model_tool_call"
+    assert out["meta"]["assistant"]["route"] == "agent_loop"
+    assert out["data"]["perception"]["intent_name"] == "tool_plan"
+
+
+def test_assistant_runtime_comparative_income_uses_provider_tool_call(monkeypatch: Any, tmp_path: Path) -> None:
+    monkeypatch.setenv("OM_LLM_API_KEY", "sk-test")
+    provider_calls: list[dict[str, Any]] = []
+    tool_calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _create_tool_call_response(**kwargs: Any) -> dict[str, Any]:
+        provider_calls.append(dict(kwargs))
+        return {
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_income_compare_1",
+                    "name": "monthly_income_report",
+                    "arguments": '{"month":"2026-06","include_rows":true}',
+                }
+            ]
+        }
+
+    def _provider_response_fn(provider: str):
+        assert provider == "openai"
+        return _create_tool_call_response
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        tool_calls.append((tool_name, payload))
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "filters": {"month": "2026-06"},
+                "summary": [
+                    {"month": "2026-06", "account": "lx", "currency": "USD", "net_cashflow_gross": 123.45},
+                    {"month": "2026-06", "account": "sy", "currency": "USD", "net_cashflow_gross": 67.89},
+                ],
+                "return_summary": [
+                    {"month": "2026-06", "account": "lx", "net_income_cny": 888.88},
+                    {"month": "2026-06", "account": "sy", "net_income_cny": 456.78},
+                ],
+                "row_count": 2,
+            },
+        )
+
+    monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_response_fn", _provider_response_fn)
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="对比 lx sy 6月收益",
+            sender_id="local",
+            message_id="msg_default_event_tool_call_income_compare",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        now_fn=lambda: date(2026, 6, 19),
+    )
+
+    assert out["ok"] is True
+    assert provider_calls
+    assert "tools" in provider_calls[0]
+    assert "json_schema" not in provider_calls[0]
+    assert tool_calls == [
+        (
+            "monthly_income_report",
+            {"month": "2026-06", "include_rows": True, "config_key": "us"},
+        )
+    ]
+    assert out["meta"]["assistant"]["llm"]["event_model"]["legacy_json_plan_used"] is False
+    assert out["meta"]["assistant"]["route"] == "agent_loop"
+
+
 def test_plan_read_only_tools_traces_context_projection() -> None:
     calls: list[dict[str, Any]] = []
 
@@ -9881,6 +10376,47 @@ def test_openai_responses_client_builds_structured_output_request() -> None:
     assert "runtime_status" in extract_response_text(response)
 
 
+def test_openai_responses_client_builds_tool_call_request() -> None:
+    calls: list[dict[str, Any]] = []
+
+    def _post(
+        url: str,
+        payload: dict[str, Any],
+        *,
+        headers: dict[str, str],
+        timeout: int,
+    ) -> dict[str, Any]:
+        calls.append({"url": url, "payload": payload, "headers": headers, "timeout": timeout})
+        return {
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "monthly_income_report",
+                    "arguments": '{"month":"2026-06"}',
+                }
+            ]
+        }
+
+    response = create_tool_call_response(
+        api_key="sk-test",
+        base_url="https://llm.example/v1",
+        model="gpt-5.2",
+        input_text="6月收益分析",
+        instructions="use tools",
+        tools=[{"type": "function", "name": "monthly_income_report", "parameters": {"type": "object"}}],
+        timeout=7,
+        http_post_json_fn=_post,
+    )
+
+    assert response["output"][0]["type"] == "function_call"
+    assert calls[0]["url"] == "https://llm.example/v1/responses"
+    assert calls[0]["payload"]["tools"][0]["name"] == "monthly_income_report"
+    assert calls[0]["payload"]["tool_choice"] == "auto"
+    assert "text" not in calls[0]["payload"]
+    assert calls[0]["payload"]["store"] is False
+
+
 def test_openai_responses_client_accepts_full_responses_url() -> None:
     calls: list[dict[str, Any]] = []
 
@@ -9960,3 +10496,54 @@ def test_openai_chat_completions_client_builds_deepseek_json_request() -> None:
     assert calls[0]["payload"]["temperature"] == 0.0
     assert calls[0]["timeout"] == 7
     assert "runtime_status" in extract_chat_completion_text(response)
+
+
+def test_openai_chat_completions_client_builds_tool_call_request() -> None:
+    calls: list[dict[str, Any]] = []
+
+    def _post(
+        url: str,
+        payload: dict[str, Any],
+        *,
+        headers: dict[str, str],
+        timeout: int,
+    ) -> dict[str, Any]:
+        calls.append({"url": url, "payload": payload, "headers": headers, "timeout": timeout})
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {"name": "monthly_income_report", "arguments": '{"month":"2026-06"}'},
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+
+    response = create_tool_call_chat_completion(
+        api_key="sk-test",
+        base_url="https://api.deepseek.com",
+        model="deepseek-v4-flash",
+        input_text="6月收益分析",
+        instructions="use tools",
+        tools=[
+            {
+                "type": "function",
+                "function": {"name": "monthly_income_report", "parameters": {"type": "object"}},
+            }
+        ],
+        timeout=7,
+        http_post_json_fn=_post,
+    )
+
+    assert response["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "monthly_income_report"
+    assert calls[0]["url"] == "https://api.deepseek.com/chat/completions"
+    assert calls[0]["payload"]["tools"][0]["function"]["name"] == "monthly_income_report"
+    assert calls[0]["payload"]["tool_choice"] == "auto"
+    assert "response_format" not in calls[0]["payload"]
+    assert calls[0]["payload"]["stream"] is False

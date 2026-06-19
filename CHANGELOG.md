@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 1.2.313 - 2026-06-19
+
+### Added
+- Added provider-native Assistant tool-call planning for OpenAI Responses and Chat Completions providers, including
+  structured model tool events, tool-result adapters, continuation payload helpers, and evidence verification support.
+- Added Assistant regressions covering provider tool-call planning, multiple read-only tool calls, follow-up context
+  validation, model-event parsing, model continuation, and model evidence assembly.
+
+### Changed
+- Switched the default Assistant read planner from plain JSON plan output to provider tool/function calls, while keeping
+  the legacy JSON planner only for explicitly injected test paths.
+- Preserved multiple model-selected read-only tool calls from a single provider response instead of dropping all but the
+  first tool call.
+- Applied host-derived `context_use` and the existing context-validation gate to provider tool-call plans so contextual
+  follow-ups cannot bypass clarification checks.
+- Updated the Assistant LLM diagnostics live probe to exercise the provider tool-call path instead of the deprecated JSON
+  planner request shape.
+
 ## 1.2.312 - 2026-06-19
 
 ### Added
