@@ -165,6 +165,200 @@ def test_build_expired_close_decisions_closes_at_expiration_plus_full_grace_day(
     assert decisions[0]["expiration_ymd"] == "2026-05-01"
 
 
+def test_build_expired_close_decisions_uses_us_market_local_grace_cutoff() -> None:
+    exp_ms = parse_exp_to_ms("2026-06-18")
+    assert exp_ms is not None
+
+    before_us_midnight_ms = int(datetime(2026, 6, 19, 1, 0, tzinfo=timezone.utc).timestamp() * 1000)
+    decisions = build_expired_close_decisions(
+        [
+            {
+                "record_id": "rec_pdd",
+                "position_id": "PDD_20260618_85P_short",
+                "symbol": "PDD",
+                "status": "open",
+                "contracts": 2,
+                "contracts_open": 2,
+                "expiration": exp_ms,
+            }
+        ],
+        as_of_ms=before_us_midnight_ms,
+        grace_days=1,
+    )
+
+    assert decisions[0]["should_close"] is False
+    assert decisions[0]["skip_reason"] == "grace_period_pending"
+    assert decisions[0]["eligible_after_utc"] == "2026-06-19T04:00:00+00:00"
+    assert decisions[0]["expiration_market"] == "US"
+    assert decisions[0]["expiration_timezone"] == "America/New_York"
+
+    at_us_midnight_ms = int(datetime(2026, 6, 19, 4, 0, tzinfo=timezone.utc).timestamp() * 1000)
+    decisions = build_expired_close_decisions(
+        [
+            {
+                "record_id": "rec_pdd",
+                "position_id": "PDD_20260618_85P_short",
+                "symbol": "PDD",
+                "status": "open",
+                "contracts": 2,
+                "contracts_open": 2,
+                "expiration": exp_ms,
+            }
+        ],
+        as_of_ms=at_us_midnight_ms,
+        grace_days=1,
+    )
+
+    assert decisions[0]["should_close"] is True
+
+
+def test_build_expired_close_decisions_uses_hk_market_local_grace_cutoff() -> None:
+    exp_ms = parse_exp_to_ms("2026-06-18")
+    assert exp_ms is not None
+
+    beijing_morning_ms = int(datetime(2026, 6, 19, 1, 0, tzinfo=timezone.utc).timestamp() * 1000)
+    decisions = build_expired_close_decisions(
+        [
+            {
+                "record_id": "rec_0700",
+                "position_id": "0700_HK_20260618_420P_short",
+                "symbol": "0700.HK",
+                "status": "open",
+                "contracts": 1,
+                "contracts_open": 1,
+                "expiration": exp_ms,
+            }
+        ],
+        as_of_ms=beijing_morning_ms,
+        grace_days=1,
+    )
+
+    assert decisions[0]["should_close"] is True
+
+
+def test_build_expired_close_decisions_waits_for_short_put_assignment_when_itm() -> None:
+    exp_ms = parse_exp_to_ms("2026-06-18")
+    assert exp_ms is not None
+    as_of_ms = int(datetime(2026, 6, 19, 4, 0, tzinfo=timezone.utc).timestamp() * 1000)
+
+    decisions = build_expired_close_decisions(
+        [
+            {
+                "record_id": "rec_pdd",
+                "position_id": "PDD_20260618_85P_short",
+                "symbol": "PDD",
+                "option_type": "put",
+                "side": "short",
+                "strike": 85,
+                "_auto_close_underlying_spot": 80,
+                "status": "open",
+                "contracts": 2,
+                "contracts_open": 2,
+                "expiration": exp_ms,
+            }
+        ],
+        as_of_ms=as_of_ms,
+        grace_days=1,
+    )
+
+    assert decisions[0]["should_close"] is False
+    assert decisions[0]["skip_reason"] == "expiry_assignment_review_required"
+    assert decisions[0]["assignment_review"]["status"] == "itm_or_atm"
+    assert decisions[0]["assignment_review"]["spot"] == 80
+    assert decisions[0]["assignment_review"]["strike"] == 85
+    assert decisions[0]["patch"] is None
+
+
+def test_build_expired_close_decisions_closes_short_put_when_otm_spot_verified() -> None:
+    exp_ms = parse_exp_to_ms("2026-06-18")
+    assert exp_ms is not None
+    as_of_ms = int(datetime(2026, 6, 19, 4, 0, tzinfo=timezone.utc).timestamp() * 1000)
+
+    decisions = build_expired_close_decisions(
+        [
+            {
+                "record_id": "rec_pdd",
+                "position_id": "PDD_20260618_85P_short",
+                "symbol": "PDD",
+                "option_type": "put",
+                "side": "short",
+                "strike": 85,
+                "_auto_close_underlying_spot": 90,
+                "status": "open",
+                "contracts": 2,
+                "contracts_open": 2,
+                "expiration": exp_ms,
+            }
+        ],
+        as_of_ms=as_of_ms,
+        grace_days=1,
+    )
+
+    assert decisions[0]["should_close"] is True
+    assert decisions[0]["assignment_review"]["status"] == "otm_verified"
+    assert decisions[0]["assignment_review"]["spot"] == 90
+
+
+def test_build_expired_close_decisions_waits_for_short_call_assignment_when_itm() -> None:
+    exp_ms = parse_exp_to_ms("2026-06-18")
+    assert exp_ms is not None
+    as_of_ms = int(datetime(2026, 6, 19, 4, 0, tzinfo=timezone.utc).timestamp() * 1000)
+
+    decisions = build_expired_close_decisions(
+        [
+            {
+                "record_id": "rec_call",
+                "position_id": "AAPL_20260618_200C_short",
+                "symbol": "AAPL",
+                "option_type": "call",
+                "side": "short",
+                "strike": 200,
+                "_auto_close_underlying_spot": 210,
+                "status": "open",
+                "contracts": 1,
+                "contracts_open": 1,
+                "expiration": exp_ms,
+            }
+        ],
+        as_of_ms=as_of_ms,
+        grace_days=1,
+    )
+
+    assert decisions[0]["should_close"] is False
+    assert decisions[0]["skip_reason"] == "expiry_assignment_review_required"
+    assert decisions[0]["assignment_review"]["status"] == "itm_or_atm"
+
+
+def test_build_expired_close_decisions_fail_closed_when_short_option_spot_missing() -> None:
+    exp_ms = parse_exp_to_ms("2026-06-18")
+    assert exp_ms is not None
+    as_of_ms = int(datetime(2026, 6, 19, 4, 0, tzinfo=timezone.utc).timestamp() * 1000)
+
+    decisions = build_expired_close_decisions(
+        [
+            {
+                "record_id": "rec_tcom",
+                "position_id": "TCOM_20260618_45P_short",
+                "symbol": "TCOM",
+                "option_type": "put",
+                "side": "short",
+                "strike": 45,
+                "status": "open",
+                "contracts": 1,
+                "contracts_open": 1,
+                "expiration": exp_ms,
+            }
+        ],
+        as_of_ms=as_of_ms,
+        grace_days=1,
+    )
+
+    assert decisions[0]["should_close"] is False
+    assert decisions[0]["skip_reason"] == "expiry_assignment_review_required"
+    assert decisions[0]["assignment_review"]["status"] == "missing_spot"
+    assert decisions[0]["patch"] is None
+
+
 def test_build_expired_close_decisions_skips_already_closed_or_zero_open() -> None:
     as_of_ms = parse_exp_to_ms("2026-05-03")
     assert as_of_ms is not None
@@ -217,6 +411,7 @@ def test_auto_close_expired_positions_uses_effective_contracts_open_fallback(tmp
     assert as_of_ms is not None
 
     positions = [dict(item["fields"], record_id=item["record_id"]) for item in repo.list_position_lots()]
+    positions[0]["_auto_close_underlying_spot"] = 101
 
     decisions, applied, errors = _auto_close_payloads(
         repo,
@@ -432,6 +627,8 @@ def test_auto_close_expired_positions_closes_same_expiry_without_crossing_later_
     as_of_ms = parse_exp_to_ms("2026-05-31")
     assert as_of_ms is not None
     positions = [dict(item["fields"], record_id=item["record_id"]) for item in repo.list_position_lots()]
+    for item in positions:
+        item["_auto_close_underlying_spot"] = 500
 
     decisions, applied, errors = _auto_close_payloads(
         repo,
@@ -506,6 +703,7 @@ def test_auto_close_expired_positions_skips_when_lifecycle_assignment_pending(tm
     as_of_ms = parse_exp_to_ms("2026-05-25")
     assert as_of_ms is not None
     positions = [dict(item["fields"], record_id=item["record_id"]) for item in repo.list_position_lots()]
+    positions[0]["_auto_close_underlying_spot"] = 7
 
     decisions, applied, errors = _auto_close_payloads(
         repo,
@@ -610,6 +808,7 @@ def test_auto_close_expired_positions_fail_closed_on_ledger_identity_mismatch(tm
     as_of_ms = parse_exp_to_ms("2026-05-31")
     assert as_of_ms is not None
     positions = [dict(item["fields"], record_id=item["record_id"]) for item in repo.list_position_lots()]
+    positions[0]["_auto_close_underlying_spot"] = 500
 
     decisions, applied, errors = _auto_close_payloads(
         repo,
@@ -664,6 +863,7 @@ def test_position_maintenance_requires_active_ledger_repair_before_closing_posit
                     "currency": "USD",
                     "strike": 100,
                     "multiplier": 100,
+                    "_auto_close_underlying_spot": 101,
                     "expiration": parse_exp_to_ms("2026-04-17"),
                     "note": "",
                 },

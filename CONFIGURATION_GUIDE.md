@@ -471,6 +471,7 @@ runtime:
 - 这次升级完成的是 **持仓/现金 context 的 per-account OpenD runtime 支持**，不是所有市场数据缓存都已经做成多 gateway 完全隔离。
 - `trade_intake.receipt.enabled` 默认 `true`。apply 模式下，成交写入/未解析/失败后会按 `notify_applied`、`notify_unresolved`、`notify_failed` 发送回执；重复 deal 默认不重复通知，但若上一次回执未确认，会按 `retry_unconfirmed_duplicate` 重试。
 - `option_positions.auto_close.enabled` 控制专用过期自动平仓入口是否工作。
+- `option_positions.auto_close` 会使用 runtime config 的 `_generated.market` 过滤待处理 lot；`config.us.json` 只自动过期平仓 US 标的，`config.hk.json` 只自动过期平仓 HK 标的。`grace_days` 的到期 +N 天 cutoff 按标的市场本地日期计算，US 使用美东时间，HK 使用香港时间。短仓期权还必须有到期后的 OpenD spot 证明已经价外才会自动写入过期平仓；价内/平值或缺少 spot 时会进入 assignment review，等待指派/行权结果。
 - `option_positions.auto_close.receipt.enabled` 默认 `true`。`./om option-positions auto-close-expired --apply` 实际写入或失败时，会按 `notify_applied` / `notify_failed` 发送回执；`notify_noop` 和 `notify_dry_run` 默认 `false`，避免无变更或 dry-run 产生噪音。回执会按账户、券商、业务日和平仓记录生成 `receipt_key`，同一业务日已确认发送的结果不会重复通知；`retry_unconfirmed` 默认 `true`，上一条回执未确认时允许后续定时/人工重跑重试。
 
 #### 4.4.2 auto trade intake multiplier resolution

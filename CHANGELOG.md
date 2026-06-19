@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.2.309 - 2026-06-19
+
+### Fixed
+- Made expired option auto-close market-scoped and market-local, so US and HK maintenance runs only process their own
+  symbols and evaluate grace cutoffs in the underlying market timezone.
+- Required short expired options to have post-expiry OpenD spot evidence proving they are out of the money before writing
+  an automatic expire-close event; in/at-the-money or missing-quote lots now wait for assignment review.
+
 ## 1.2.308 - 2026-06-18
 
 ### Fixed
