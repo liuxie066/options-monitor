@@ -192,6 +192,27 @@ def test_provider_tool_schema_from_manifest_omits_system_scoped_arguments() -> N
     assert "config_path" not in parameters["properties"]
 
 
+def test_provider_tool_schema_treats_pipe_enums_as_scalar_strings() -> None:
+    schema = provider_tool_schema_from_manifest(
+        {
+            "name": "option_positions_read",
+            "description": "Read local option position lots.",
+            "capabilities": ["option_positions", "read_only"],
+            "input_schema": {
+                "action": "list|events|history|inspect|assigned-stock",
+                "status": "list-only open|close|all",
+                "quote_snapshots": "assigned-stock optional quote snapshot list/dict",
+            },
+        }
+    )
+
+    properties = schema["parameters"]["properties"]
+    assert properties["action"]["type"] == "string"
+    assert properties["action"]["enum"] == ["list", "events", "history", "inspect", "assigned-stock"]
+    assert properties["status"]["type"] == "string"
+    assert properties["quote_snapshots"]["type"] == "array"
+
+
 def test_provider_tools_payloads_expose_only_allowed_read_tool_subset() -> None:
     manifest = [
         {

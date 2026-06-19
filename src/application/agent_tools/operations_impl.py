@@ -37,8 +37,23 @@ def _optional_float(value: Any) -> float | None:
         raise AgentToolError(code="INPUT_ERROR", message=f"expected numeric value, got: {value}") from exc
 
 
+def _scalar_text(value: Any, *, default: str = "") -> str:
+    if isinstance(value, (list, tuple, set)):
+        items = [item for item in value if item not in (None, "")]
+        if len(items) == 1:
+            value = items[0]
+        elif not items:
+            value = default
+    if value is None:
+        value = default
+    text = str(value).strip()
+    if not text and default:
+        return str(default).strip()
+    return text
+
+
 def _optional_text(value: Any) -> str | None:
-    text = str(value or "").strip()
+    text = _scalar_text(value)
     return text or None
 
 
@@ -295,7 +310,8 @@ def _events_action(
 
     broker = _optional_text(payload.get("broker"))
     broker = normalize_broker(broker) if broker else None
-    account = normalize_account(payload.get("account")) if payload.get("account") else None
+    account_text = _optional_text(payload.get("account"))
+    account = normalize_account(account_text) if account_text else None
     symbol = _optional_text(payload.get("symbol"))
     symbol = symbol.upper() if symbol else None
     option_type = _optional_text(payload.get("option_type"))
@@ -501,7 +517,7 @@ def option_positions_read_tool(
     repo_base: Callable[[], Path],
     mask_path: Callable[[Any], str],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    action = str(payload.get("action") or "list").strip().lower()
+    action = _scalar_text(payload.get("action"), default="list").lower()
     if action not in {"list", "events", "history", "inspect", "assigned-stock"}:
         raise AgentToolError(code="INPUT_ERROR", message=f"unsupported option_positions_read action: {action}")
 
@@ -524,7 +540,7 @@ def option_positions_read_tool(
         expiration_query = _dict(query.get("expiration"))
         broker = normalize_broker(payload.get("broker") or portfolio_cfg.get("broker") or "富途")
         account = _optional_text(query.get("account") if "account" in query else payload.get("account"))
-        status = str(query.get("status") if "status" in query else payload.get("status") or "open").strip().lower()
+        status = _scalar_text(query.get("status") if "status" in query else payload.get("status"), default="open").lower()
         if status == "closed":
             status = "close"
         if status not in {"open", "close", "all"}:

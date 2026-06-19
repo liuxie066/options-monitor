@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.2.315 - 2026-06-19
+
+### Fixed
+- Fixed provider-native Assistant tool schema inference so pipe-delimited enum arguments such as
+  `option_positions_read.action` are exposed as scalar string enums instead of arrays.
+- Accepted single-item list wrappers for `option_positions_read` scalar selectors, preventing ClawBot assigned-stock
+  queries from failing with `unsupported option_positions_read action: ['assigned-stock']`.
+
 ## 1.2.314 - 2026-06-19
 
 ### Added
