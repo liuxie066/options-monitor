@@ -18,7 +18,13 @@ from src.application.assistant.contracts import (
     PerceptionResult,
     ToolCall,
 )
-from src.application.assistant.agent_loop import LlmPlannerResult, PlannerPlan, PlannerPlanStep, TOOL_PLAN_SCHEMA_VERSION
+from src.application.assistant.agent_loop import (
+    LlmPlannerResult,
+    PLANNER_CONTEXT_USE_SCHEMA_VERSION,
+    PlannerPlan,
+    PlannerPlanStep,
+    TOOL_PLAN_SCHEMA_VERSION,
+)
 from src.application.inbound.feishu import feishu_payload_to_inbound_request, handle_feishu_payload
 from src.application.assistant.deterministic_commands import parse_deterministic_text
 from src.application.assistant.policy import PURE_READ_TOOLS, check_sender_allowed, enforce_tool_allowed
@@ -27,6 +33,7 @@ from src.application.assistant.router import handle_assistant_request
 from src.application.assistant.runtime import handle_assistant_message
 from src.application.assistant.session_store import collect_assistant_trace
 from src.application.assistant.settings import AssistantSettings, AssistantLlmSettings
+from src.application.assistant.task_contract import TASK_CONTRACT_SCHEMA_VERSION
 
 
 def _planner_trace(*, reason: str = "accepted") -> dict[str, Any]:
@@ -49,6 +56,17 @@ def _plan_result(tool_name: str, arguments: dict[str, Any] | None = None) -> Llm
     return LlmPlannerResult(
         plan=PlannerPlan(
             goal="test plan",
+            task_contract={
+                "schema_version": TASK_CONTRACT_SCHEMA_VERSION,
+                "goal": "test plan",
+                "domain": "general",
+                "task_mode": "summarize",
+                "requested_effect": "read",
+                "scope": {},
+                "required_answer": ["summary"],
+                "required_evidence": ["current_state"],
+                "answer_shape": ["conclusion"],
+            },
             steps=(PlannerPlanStep(id="step_1", tool_name=tool_name, arguments=dict(arguments or {})),),
         ),
         trace=_planner_trace(),
@@ -634,6 +652,28 @@ def test_inbound_symbol_config_query_executes_read_only_tool_via_llm(tmp_path: P
         "schema_version": TOOL_PLAN_SCHEMA_VERSION,
         "goal": "test plan",
         "required_capabilities": [],
+        "context_use": {
+            "schema_version": PLANNER_CONTEXT_USE_SCHEMA_VERSION,
+            "mode": "none",
+            "referenced_turn_ids": [],
+            "referenced_evidence_refs": [],
+            "inherited_slots": {},
+            "current_message_slots": {},
+            "override_slots": {},
+            "requires_clarification": False,
+            "clarification_question": None,
+        },
+        "task_contract": {
+            "schema_version": TASK_CONTRACT_SCHEMA_VERSION,
+            "goal": "test plan",
+            "domain": "general",
+            "task_mode": "summarize",
+            "requested_effect": "read",
+            "scope": {},
+            "required_answer": ["summary"],
+            "required_evidence": ["current_state"],
+            "answer_shape": ["conclusion"],
+        },
         "steps": [
             {
                 "id": "step_1",

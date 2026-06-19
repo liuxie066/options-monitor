@@ -15,8 +15,15 @@
 - Eval plan:
   [OM_ASSISTANT_CONTEXT_EVAL_PLAN.md](OM_ASSISTANT_CONTEXT_EVAL_PLAN.md).
 
-This is an implementation plan, not another architecture note. Each slice below
-should be independently reviewable and reversible.
+This document now records the completed context migration and the rollout order
+that got it there. Do not treat the historical slices below as open work unless
+current source or evals show a regression.
+
+Current source has completed the context path through projection, eval split,
+planner `context_use`, validator enforcement, planner input cutover, legacy
+resolver cleanup, and scenario regression coverage. New assistant intelligence
+work should move to capability selection, evidence-loop quality, or answer
+verification docs instead of extending this context migration plan.
 
 ## Success Standard
 
@@ -34,27 +41,23 @@ assistant capability:
 - The historical `net_income` cases remain regression fixtures, not design
   drivers.
 
-## Current Hardcoded Surfaces
+## Retired Hardcoded Surfaces
 
-The current slice rescued one class of follow-up through business-specific
-logic. These points are the migration targets:
+The migration target was to remove planner authority from business-specific
+follow-up branches. These surfaces are historical cleanup targets, not current
+architecture authorities:
 
-| File | Current issue |
+| Historical surface | Current state |
 |---|---|
-| `src/application/assistant/conversation_context.py` | Builds `active_frame` through `_BUSINESS_READ_TOOL_PRIORITY`, `_read_semantics`, `_infer_analysis_namespace`, and `_key_terms`. |
-| `src/application/assistant/agent_loop.py` | Uses `_conversation_followup_resolution`, `_is_short_metric_followup`, explicit account/candidate override checks, `_validate_plan_against_conversation_frame`, and `PLAN_CONTEXT_DRIFT`. |
-| `src/application/assistant/agent_loop.py` | Planner prompt contains a named `net_income` / Pop Mart-style example. |
-| `src/application/assistant/metric_glossary.py` | Encodes two namespace-specific glossary branches. |
-| `src/application/assistant/context_eval.py` | Imports private planner helpers and tests the old planner-context payload shape directly. |
-| `tests/fixtures/assistant_agent_eval.jsonl` | Contains useful regressions but currently asserts active-frame and glossary behavior. |
+| `active_frame` / `followup_resolution` planner payloads | Planner input uses `ContextProjection`; runtime tests assert these legacy authority fields are absent. |
+| `_conversation_followup_resolution`, `_is_short_metric_followup`, `_validate_plan_against_conversation_frame`, `PLAN_CONTEXT_DRIFT` | Removed as source-level planner authority; keep their names only in historical docs. |
+| named `net_income` / Pop Mart prompt examples | Replaced by general context-use principles and regression fixtures. |
+| `metric_glossary.py` namespace branches | Removed from the current assistant planner path. |
+| legacy `planner_context` eval | Retained only as a historical/default report; current validation uses `projection`, `validation`, and `scenarios` lanes. |
 
-The implementation should not delete these in the first slice. They stay as
-compatibility scaffolding until projection, validation, and evals cover the same
-behavior more generally.
+## Current Code Path
 
-## Target Code Path
-
-The target path is:
+The current path is:
 
 ```text
 AssistantRequest
@@ -69,10 +72,13 @@ AssistantRequest
 ```
 
 `build_conversation_context` may continue to collect raw recent audit/session
-state. It should stop being the business resolver. Its output becomes input to
+state. It is not the business resolver. Its output becomes input to
 `build_context_projection`.
 
-## Slice 1: Projection Builder In Shadow Mode
+The slices below are preserved as implementation history. They should not be
+expanded for new capability work.
+
+## Slice 1: Projection Builder In Shadow Mode (Complete)
 
 Goal: create a generic, deterministic planner-facing projection without
 changing runtime behavior.
@@ -122,11 +128,11 @@ Exit criteria:
   operation, open evidence gap, truncation, and sanitization.
 - No planner behavior changes.
 
-Rollback:
+Historical rollback:
 
 - Stop calling `build_context_projection`; the old context path remains intact.
 
-## Slice 2: Context Eval Harness Split
+## Slice 2: Context Eval Harness Split (Complete)
 
 Goal: make eval layers explicit before behavior changes.
 
@@ -143,8 +149,8 @@ Implementation notes:
   - `projection`
   - `validation`
   - `scenarios`
-  - legacy `planner_context` during migration
-- Keep current `./om assistant eval-context` compatible, but allow:
+  - legacy `planner_context` as a historical report
+- Keep the current `./om assistant eval-context` command name stable, but allow:
 
 ```bash
 ./om assistant eval-context --mode projection
@@ -167,11 +173,11 @@ Exit criteria:
 - Projection and validation fixtures run without LLM calls.
 - The current legacy eval still works until cutover.
 
-Rollback:
+Historical rollback:
 
 - Keep the default command path pointed at the legacy `planner_context` mode.
 
-## Slice 3: Planner Schema Extension In Shadow Mode
+## Slice 3: Planner Schema Extension In Shadow Mode (Complete)
 
 Goal: let planner output declare context use without requiring it yet.
 
@@ -221,11 +227,11 @@ Exit criteria:
 - New planner outputs with `context_use` round-trip into trace.
 - Missing `context_use` is observable as `mode=none` rather than a crash.
 
-Rollback:
+Historical rollback:
 
 - Ignore the `context_use` field and keep old planning behavior.
 
-## Slice 4: Deterministic Context Validator In Shadow Mode
+## Slice 4: Deterministic Context Validator In Shadow Mode (Complete)
 
 Goal: implement generic structural validation with no business-specific intent
 branches.
@@ -244,7 +250,7 @@ Implementation notes:
   - slot source,
   - current-message-wins,
   - ambiguity,
-  - tool compatibility,
+  - tool fit,
   - clarification route.
 - The validator may inspect projection shape, planner-visible tool manifest,
   plan steps, and declared safe slots.
@@ -267,11 +273,11 @@ Exit criteria:
 - Validator has no references to `net_income`, candidate-specific rules, or
   account-income-specific rules.
 
-Rollback:
+Historical rollback:
 
 - Keep validator output trace-only.
 
-## Slice 5: Enforce Validator Before Tool Execution
+## Slice 5: Enforce Validator Before Tool Execution (Complete)
 
 Goal: make invalid context use fail closed before any tool call.
 
@@ -305,12 +311,12 @@ Exit criteria:
 - Ambiguous multi-topic follow-up asks clarification.
 - Existing non-context plans still execute.
 
-Rollback:
+Historical rollback:
 
 - Switch validator back to trace-only. Existing old guards remain available
   until Slice 7 completes.
 
-## Slice 6: Planner Input Cutover To Projection
+## Slice 6: Planner Input Cutover To Projection (Complete)
 
 Goal: replace the planner-facing `active_frame` / `followup_resolution` payload
 with `ContextProjection`.
@@ -331,7 +337,7 @@ Implementation notes:
   - planner-visible policy
   - recent turn and evidence refs
 - Do not include legacy `followup_resolution` as planner authority.
-- Keep legacy fields under a clearly named compatibility trace only if tests
+- Keep legacy fields under a clearly named historical trace only if tests
   still need comparison.
 - Replace active-frame analysis view selection with projection-informed
   selection:
@@ -358,14 +364,14 @@ Exit criteria:
 - Historical `net_income` fixtures pass through projection and validation, not
   through `_conversation_followup_resolution`.
 
-Rollback:
+Historical rollback:
 
 - Restore old planner input payload while keeping projection and validation
   modules unused.
 
-## Slice 7: Remove Legacy Hardcoded Resolver
+## Slice 7: Remove Legacy Hardcoded Resolver (Complete)
 
-Goal: delete compatibility scaffolding after the new path has coverage.
+Goal: delete temporary scaffolding after the new path has coverage.
 
 Primary files:
 
@@ -407,12 +413,12 @@ Exit criteria:
 - Context evals pass through projection/validation/scenario modes.
 - Legacy `planner_context` fixture path is either removed or marked historical.
 
-Rollback:
+Historical rollback:
 
 - Revert this cleanup slice only. Earlier projection/validation slices should
   remain usable.
 
-## Slice 8: Scenario Regression Expansion
+## Slice 8: Scenario Regression Expansion (Complete)
 
 Goal: lock the general capability into long-term regression coverage.
 
@@ -443,9 +449,9 @@ Exit criteria:
 - Adding a new family requires a fixture and, at most, tool metadata updates.
 - Projection and validator core remain unchanged for ordinary new domains.
 
-## Cutover Order
+## Completed Cutover Order
 
-Recommended order:
+Implemented order:
 
 1. Projection builder and projection eval.
 2. Eval harness split.
@@ -456,12 +462,13 @@ Recommended order:
 7. Legacy resolver cleanup.
 8. Scenario expansion.
 
-Do not combine Slice 5, Slice 6, and Slice 7 in one commit. That would make
-regressions hard to localize.
+Historical guardrail: Slice 5, Slice 6, and Slice 7 were intentionally kept as
+separate concepts because combining validator enforcement, planner-input
+cutover, and legacy cleanup makes regressions hard to localize.
 
-## Quality Gates
+## Current Quality Gates
 
-Minimum per-slice checks:
+Focused context checks:
 
 ```bash
 git diff --check
@@ -470,7 +477,7 @@ python3 -m pytest tests/test_assistant_context_validation.py
 python3 -m pytest tests/test_assistant_context_eval.py
 ```
 
-Broader cutover checks:
+Broader assistant checks:
 
 ```bash
 python3 -m pytest tests/test_assistant_runtime.py tests/test_assistant_evidence_session.py tests/test_assistant_agent_eval.py
