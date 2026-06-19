@@ -1,0 +1,155 @@
+from __future__ import annotations
+
+from src.application.agent_tool_contracts import build_response
+from src.application.assistant.model_events import (
+    ModelFinalAnswerEvent,
+    ToolGuardDecisionEvent,
+    adapt_tool_result,
+)
+from src.application.assistant.model_evidence import (
+    build_model_evidence_bundle,
+    canonical_fallback_from_tool_results,
+    event_observation_from_tool_result,
+    verify_model_final_answer,
+)
+
+
+def _income_adapter(*, missing_data: list[dict] | None = None):
+    guard = ToolGuardDecisionEvent(
+        event_id="guard_income_1",
+        tool_call_id="call_income_1",
+        tool_name="monthly_income_report",
+        allowed=True,
+        decision="allow",
+        reason="read_auto_in_scope",
+        risk_class="READ_AUTO",
+        scope_source="host_task_contract",
+        normalized_payload={"account": "lx", "month": "2026-06", "include_rows": False, "config_key": "us"},
+    )
+    data = {
+        "filters": {"account": "lx", "month": "2026-06"},
+        "summary": [
+            {
+                "month": "2026-06",
+                "account": "lx",
+                "currency": "USD",
+                "net_cashflow_gross": 123.45,
+                "realized_pnl_gross": 10.0,
+                "open_basis_lifecycle_pnl_gross": 0.0,
+            }
+        ],
+        "return_summary": [
+            {
+                "month": "2026-06",
+                "account": "lx",
+                "net_income_cny": 888.88,
+                "net_income_by_ccy": {"USD": 123.45},
+                "net_return_rate": 0.0123,
+                "cash_collateral_cny": 72266.67,
+            }
+        ],
+        "row_count": 1,
+    }
+    if missing_data is not None:
+        data["missing_data"] = missing_data
+    return adapt_tool_result(
+        event_id="result_income_1",
+        parent_event_id=guard.event_id,
+        tool_call_id="call_income_1",
+        tool_name="monthly_income_report",
+        normalized_payload=guard.normalized_payload,
+        guard_decision=guard,
+        raw_result=build_response(tool_name="monthly_income_report", ok=True, data=data),
+    )
+
+
+def test_event_tool_result_builds_existing_evidence_bundle_with_output_contract() -> None:
+    adapter = _income_adapter()
+
+    model_evidence = build_model_evidence_bundle(
+        question="6月收益分析",
+        task_contract={"goal": "分析 6 月收益", "scope": {"requested_accounts": ["lx"]}},
+        tool_results=[adapter],
+        parent_event_id=adapter.event.event_id,
+    )
+
+    observation = model_evidence.observations[0]
+    trace = model_evidence.evidence_bundle.trace_payload()
+    assert model_evidence.evidence_event.event_type == "evidence_updated"
+    assert observation["output_contract"]["canonical_renderer"] == "monthly_income"
+    assert trace["fact_count"] >= 4
+    assert trace["dataset_count"] == 1
+    assert trace["tools"] == ["monthly_income_report"]
+    assert "income_summary" in trace["guard_profiles"]
+
+
+def test_event_final_answer_verifier_passes_supported_claims_and_fails_unsupported_amount() -> None:
+    adapter = _income_adapter()
+    model_evidence = build_model_evidence_bundle(
+        question="6月收益分析",
+        task_contract={"goal": "分析 6 月收益", "scope": {"requested_accounts": ["lx"]}},
+        tool_results=[adapter],
+    )
+    supported = ModelFinalAnswerEvent(
+        event_id="answer_1",
+        parent_event_id=model_evidence.evidence_event.event_id,
+        answer_text="6月 lx 净现金流为 USD 123.45。",
+    )
+    unsupported = ModelFinalAnswerEvent(
+        event_id="answer_2",
+        parent_event_id=model_evidence.evidence_event.event_id,
+        answer_text="6月 lx 净现金流为 USD 999.99。",
+    )
+
+    ok = verify_model_final_answer(
+        answer_event=supported,
+        model_evidence=model_evidence,
+        tool_results=[adapter],
+    )
+    bad = verify_model_final_answer(
+        answer_event=unsupported,
+        model_evidence=model_evidence,
+        tool_results=[adapter],
+    )
+
+    assert ok.passed is True
+    assert ok.status == "passed"
+    assert bad.passed is False
+    assert bad.status == "failed"
+    assert bad.fallback_text
+    assert any(item["type"] == "unsupported_contract_currency_amount" for item in bad.guard["violations"])
+    assert bad.trace["fallback"] == "canonical_renderer"
+
+
+def test_event_evidence_carries_missing_data_records_from_tool_result_event() -> None:
+    adapter = _income_adapter(
+        missing_data=[{"kind": "ledger_gap", "impact": "income rows are incomplete", "recoverable_by": "analysis_query"}]
+    )
+
+    model_evidence = build_model_evidence_bundle(
+        question="6月收益分析",
+        task_contract={"goal": "分析 6 月收益"},
+        tool_results=[adapter],
+    )
+
+    missing = model_evidence.evidence_bundle.public_payload()["missing_data"]
+    assert any(item["kind"] == "ledger_gap" for item in missing)
+    assert any(item["source_tool"] == "monthly_income_report" for item in missing)
+
+
+def test_event_observation_uses_normalized_payload_for_payload_dependent_contract() -> None:
+    adapter = _income_adapter()
+
+    observation = event_observation_from_tool_result(adapter, index=1)
+
+    assert observation["payload"]["include_rows"] is False
+    assert observation["output_contract"]["schema_version"] == "monthly_income_report.output.v1"
+
+
+def test_canonical_fallback_prefers_existing_renderer() -> None:
+    adapter = _income_adapter()
+
+    fallback = canonical_fallback_from_tool_results([adapter])
+
+    assert fallback
+    assert "USD" in fallback

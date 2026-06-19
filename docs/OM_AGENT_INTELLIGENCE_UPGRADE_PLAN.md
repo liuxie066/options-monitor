@@ -7,11 +7,14 @@
 > is the Tool Gateway, `./om assistant` is the Inbound Assistant, and
 > `AgentLoop` is an internal assistant planner loop.
 >
-> Current reading note: the current Tool Calling v2 direction is model-driven
-> read iteration with deterministic guardrails. Read older `CoverageVerifier`
-> and `AnswerVerifier` language below as post-check/fallback guardrails, not as
-> the primary loop driver, a second intelligence layer, or a preserved path for
-> old planner shapes.
+> Current reading note: the current tool-calling event-model direction is
+> model-driven read iteration with deterministic guardrails, but the current
+> implementation target is the event model in
+> [OM_ASSISTANT_TOOL_CALLING_V2_SYSTEM_DESIGN.md](OM_ASSISTANT_TOOL_CALLING_V2_SYSTEM_DESIGN.md).
+> Read older `Planner must output TaskContract/ToolPlan`, `CoverageVerifier`,
+> and `AnswerVerifier` language below as historical rollout context. It is not
+> a preserved path for ordinary text JSON planning, not the primary loop
+> driver, and not a second intelligence layer.
 
 本文档记录历史上的智能化 1-7 阶段方案。它不是当前产品名，
 也不是替换现有 AgentLoop 的并行架构；它是在
@@ -36,6 +39,10 @@ Planner 统一负责理解和计划，但必须输出可验证的 TaskContract�
 系统提供受控通用调查环境，并用 Policy / Coverage / AnswerVerifier
 保证安全和质量。
 ```
+
+当前读法：这段描述的是历史方案。最新方向是模型通过 provider structured
+tool call 产生 `ModelEvent`，host 派生 `TaskContract` 作为权限和 scope
+护栏；不再要求模型在普通文本中输出完整 JSON plan。
 
 ## 设计原则
 

@@ -27,19 +27,34 @@ from src.application.assistant.answer_guard import (
 )
 from src.application.assistant.action_policy import decide_tool_action_policy
 from src.application.assistant.contracts import AssistantRequest, PerceptionResult, ToolCall
-from src.application.assistant.context_projection import build_context_projection, context_projection_trace
+from src.application.assistant.context_projection import SAFE_SLOT_KEYS, build_context_projection, context_projection_trace
 from src.application.assistant.context_validation import context_validation_trace, validate_context_use
 from src.application.assistant.coverage_verifier import CoverageResult, verify_coverage
 from src.application.assistant.evidence import build_evidence_bundle
 from src.application.assistant.llm_common import (
     CreateStructuredResponseFn,
+    CreateToolCallResponseFn,
     is_supported_llm_provider,
     llm_api_key_value,
     missing_llm_config,
     normalize_llm_provider,
+    provider_api_kind,
     provider_create_response_fn,
+    provider_create_tool_call_response_fn,
     strip_json_code_fence,
     unsupported_llm_provider_error,
+)
+from src.application.assistant.model_events import (
+    AssistantEvent,
+    ModelFinalAnswerEvent,
+    ModelToolCallEvent,
+    ToolGuardDecisionEvent,
+    ToolResultAdapterOutput,
+    adapt_tool_result,
+    chat_completions_tools_payload,
+    event_transcript_payload,
+    model_events_from_provider_response,
+    openai_responses_tools_payload,
 )
 from src.application.assistant.renderer import render_canonical_tool_result, render_inbound_text
 from src.application.assistant.session import build_agent_session_snapshot
@@ -485,6 +500,15 @@ class _PlannerProviderAttempt:
 
 
 @dataclass(frozen=True)
+class _ModelEventProviderAttempt:
+    response: dict[str, Any] | None
+    planner_input: dict[str, Any]
+    events: tuple[ModelToolCallEvent | ModelFinalAnswerEvent | AssistantEvent, ...] = ()
+    reason: str = ""
+    error: AgentToolError | None = None
+
+
+@dataclass(frozen=True)
 class LlmSynthesisResult:
     response_text: str | None
     trace: dict[str, Any]
@@ -526,6 +550,42 @@ class ToolExecutionOutcome:
     ok: bool
     error: AgentToolError | None
     error_payload: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
+class GuardedModelToolCallExecution:
+    model_event: ModelToolCallEvent
+    guard_event: ToolGuardDecisionEvent
+    result_adapter: ToolResultAdapterOutput
+    allowed: bool
+    ok: bool
+    authorization_event: dict[str, Any]
+    legacy_result_event: dict[str, Any] | None = None
+    tool_result: dict[str, Any] | None = None
+    observation: dict[str, Any] | None = None
+    fact_observation: dict[str, Any] | None = None
+    synthesis_observation: dict[str, Any] | None = None
+    error_payload: dict[str, Any] | None = None
+    schema_version: str = "om-guarded-model-tool-call-execution-v1"
+
+    @property
+    def result_event(self) -> Any:
+        return self.result_adapter.event
+
+    def public_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "schema_version": self.schema_version,
+            "allowed": bool(self.allowed),
+            "ok": bool(self.ok),
+            "events": event_transcript_payload([self.model_event, self.guard_event, self.result_adapter.event]),
+            "provider_tool_result": self.result_adapter.event.provider_tool_result_payload(),
+            "authorization_event": dict(self.authorization_event),
+        }
+        if self.legacy_result_event is not None:
+            payload["legacy_result_event"] = dict(self.legacy_result_event)
+        if self.error_payload is not None:
+            payload["error"] = dict(self.error_payload)
+        return payload
 
 
 class ToolExecutor:
@@ -705,6 +765,248 @@ class ToolExecutor:
             if not step_ok
             else None,
         )
+
+
+def execute_model_tool_call_event(
+    *,
+    model_event: ModelToolCallEvent,
+    request: AssistantRequest,
+    task_contract: dict[str, Any],
+    execute_tool_fn: Callable[[str, dict[str, Any]], dict[str, Any]],
+    attempted_signatures: set[str] | None = None,
+    tool_call_count: int = 0,
+    max_tool_calls: int = MAX_AGENT_LOOP_TOOL_CALLS,
+    source: str = "agent_loop",
+) -> GuardedModelToolCallExecution:
+    signatures = attempted_signatures if attempted_signatures is not None else set()
+    payload = _inject_system_fields(model_event.arguments, request=request, tool_name=model_event.tool_name)
+    signature = _tool_loop_duplicate_signature(model_event.tool_name, payload)
+    if int(tool_call_count) >= int(max_tool_calls):
+        guard = _tool_budget_guard_payload(
+            model_event=model_event,
+            payload=payload,
+            task_contract=task_contract,
+            max_tool_calls=max_tool_calls,
+            tool_call_count=tool_call_count,
+            duplicate_signature=signature,
+        )
+        return _guard_denied_model_tool_call_execution(
+            model_event=model_event,
+            payload=payload,
+            guard=guard,
+            error=AgentToolError(
+                code="TOOL_BUDGET_EXHAUSTED",
+                message=f"Agent loop 工具调用预算已用完（最多 {int(max_tool_calls)} 次），未执行该工具调用。",
+                details={
+                    "tool_name": model_event.tool_name,
+                    "max_tool_calls": int(max_tool_calls),
+                    "calls_used": int(tool_call_count),
+                    "duplicate_signature": signature,
+                },
+            ),
+        )
+
+    step = PlannerPlanStep(
+        id=model_event.tool_call_id,
+        tool_name=model_event.tool_name,
+        arguments=dict(model_event.arguments),
+        purpose=model_event.purpose,
+    )
+    guard = _read_tool_loop_guard(
+        step=step,
+        payload=payload,
+        task_contract=task_contract,
+        attempted_signatures=signatures,
+    )
+    if not guard["allowed"]:
+        return _guard_denied_model_tool_call_execution(
+            model_event=model_event,
+            payload=payload,
+            guard=guard,
+            error=AgentToolError(
+                code=str(guard.get("error_code") or "TOOL_LOOP_GUARD_REJECTED"),
+                message=str(guard.get("reason") or "tool loop guard rejected the model tool call"),
+                details={
+                    "tool_name": model_event.tool_name,
+                    "decision": guard.get("decision"),
+                    "risk_class": guard.get("risk_class"),
+                    "duplicate_signature": guard.get("duplicate_signature"),
+                },
+            ),
+        )
+
+    outcome = ToolExecutor(execute_tool_fn=execute_tool_fn, source=source).execute_read_tool(
+        request=request,
+        task_contract=task_contract,
+        index=int(tool_call_count) + 1,
+        tool_name=model_event.tool_name,
+        payload=payload,
+        plan_arguments=model_event.arguments,
+    )
+    outcome.authorization_event["tool_loop_guard"] = dict(guard)
+    guard_event = _tool_guard_event_from_guard(
+        model_event=model_event,
+        guard=_guard_payload_after_authorization(guard=guard, outcome=outcome),
+        normalized_payload=_safe_tool_payload(payload),
+    )
+    raw_result = (
+        outcome.result_payload
+        if isinstance(outcome.result_payload, dict)
+        else _guard_error_tool_result(
+            tool_name=model_event.tool_name,
+            error_payload=outcome.error_payload
+            or build_error_payload(
+                outcome.error
+                or AgentToolError(code="TOOL_NOT_EXECUTED", message="tool call was not executed")
+            ),
+            guard=guard,
+        )
+    )
+    result_adapter = adapt_tool_result(
+        event_id=f"result_{model_event.tool_call_id}",
+        parent_event_id=guard_event.event_id,
+        tool_call_id=model_event.tool_call_id,
+        tool_name=model_event.tool_name,
+        normalized_payload=_safe_tool_payload(payload),
+        guard_decision=guard_event,
+        raw_result=raw_result,
+    )
+    if outcome.ok and guard.get("duplicate_signature"):
+        signatures.add(str(guard["duplicate_signature"]))
+    return GuardedModelToolCallExecution(
+        model_event=model_event,
+        guard_event=guard_event,
+        result_adapter=result_adapter,
+        allowed=bool(outcome.allowed),
+        ok=bool(outcome.ok),
+        authorization_event=outcome.authorization_event,
+        legacy_result_event=outcome.result_event,
+        tool_result=outcome.tool_result,
+        observation=outcome.observation,
+        fact_observation=outcome.fact_observation,
+        synthesis_observation=outcome.synthesis_observation,
+        error_payload=outcome.error_payload,
+    )
+
+
+def _guard_denied_model_tool_call_execution(
+    *,
+    model_event: ModelToolCallEvent,
+    payload: dict[str, Any],
+    guard: dict[str, Any],
+    error: AgentToolError,
+) -> GuardedModelToolCallExecution:
+    guard_event = _tool_guard_event_from_guard(
+        model_event=model_event,
+        guard=guard,
+        normalized_payload=_safe_tool_payload(payload),
+    )
+    error_payload = build_error_payload(error)
+    result_adapter = adapt_tool_result(
+        event_id=f"result_{model_event.tool_call_id}",
+        parent_event_id=guard_event.event_id,
+        tool_call_id=model_event.tool_call_id,
+        tool_name=model_event.tool_name,
+        normalized_payload=_safe_tool_payload(payload),
+        guard_decision=guard_event,
+        raw_result=_guard_error_tool_result(tool_name=model_event.tool_name, error_payload=error_payload, guard=guard),
+    )
+    return GuardedModelToolCallExecution(
+        model_event=model_event,
+        guard_event=guard_event,
+        result_adapter=result_adapter,
+        allowed=False,
+        ok=False,
+        authorization_event={"phase": "tool_loop_guard", **dict(guard)},
+        error_payload=error_payload,
+    )
+
+
+def _tool_guard_event_from_guard(
+    *,
+    model_event: ModelToolCallEvent,
+    guard: dict[str, Any],
+    normalized_payload: dict[str, Any],
+) -> ToolGuardDecisionEvent:
+    return ToolGuardDecisionEvent(
+        event_id=f"guard_{model_event.tool_call_id}",
+        parent_event_id=model_event.event_id,
+        tool_call_id=model_event.tool_call_id,
+        tool_name=model_event.tool_name,
+        allowed=bool(guard.get("allowed")),
+        decision=str(guard.get("decision") or ""),
+        reason=str(guard.get("reason") or ""),
+        risk_class=str(guard.get("risk_class") or "UNKNOWN"),
+        scope_source=str(guard.get("scope_source") or "unknown"),
+        normalized_payload=normalized_payload,
+        duplicate_signature=str(guard.get("duplicate_signature") or "") or None,
+        error_code=str(guard.get("error_code") or "") or None,
+    )
+
+
+def _guard_payload_after_authorization(*, guard: dict[str, Any], outcome: ToolExecutionOutcome) -> dict[str, Any]:
+    if outcome.allowed:
+        return dict(guard)
+    error_code = outcome.error.code if outcome.error is not None else "PERMISSION_DENIED"
+    return {
+        **dict(guard),
+        "allowed": False,
+        "decision": _authorization_denial_decision(outcome.authorization_event),
+        "reason": outcome.error.message if outcome.error is not None else "tool authorization denied",
+        "risk_class": str(outcome.authorization_event.get("risk_class") or guard.get("risk_class") or "UNKNOWN"),
+        "error_code": error_code,
+    }
+
+
+def _authorization_denial_decision(authorization_event: dict[str, Any]) -> str:
+    precheck = authorization_event.get("precheck") if isinstance(authorization_event.get("precheck"), dict) else {}
+    if str(precheck.get("status") or "") in {"fail", "deny"}:
+        return "pre_tool_check_failed"
+    action_policy = authorization_event.get("action_policy") if isinstance(authorization_event.get("action_policy"), dict) else {}
+    if action_policy.get("allowed") is False:
+        return "action_policy_denied"
+    return "authorization_denied"
+
+
+def _tool_budget_guard_payload(
+    *,
+    model_event: ModelToolCallEvent,
+    payload: dict[str, Any],
+    task_contract: dict[str, Any],
+    max_tool_calls: int,
+    tool_call_count: int,
+    duplicate_signature: str,
+) -> dict[str, Any]:
+    return {
+        "schema_version": TOOL_CHECK_SCHEMA_VERSION,
+        "allowed": False,
+        "decision": "tool_budget_exhausted",
+        "reason": "tool call budget exhausted",
+        "tool_name": model_event.tool_name,
+        "risk_class": "READ_AUTO" if _plan_step_kind(model_event.tool_name) == "read" else "UNKNOWN",
+        "duplicate_signature": duplicate_signature,
+        "scope_source": _scope_source_for_guard(task_contract),
+        "max_tool_calls": int(max_tool_calls),
+        "tool_call_count": int(tool_call_count),
+        "payload_keys": sorted(str(key) for key in (payload or {}).keys()),
+        "error_code": "TOOL_BUDGET_EXHAUSTED",
+    }
+
+
+def _guard_error_tool_result(*, tool_name: str, error_payload: dict[str, Any], guard: dict[str, Any]) -> dict[str, Any]:
+    return build_response(
+        tool_name=tool_name,
+        ok=False,
+        data={
+            "guard_decision": {
+                "decision": str(guard.get("decision") or ""),
+                "reason": str(guard.get("reason") or ""),
+                "risk_class": str(guard.get("risk_class") or ""),
+                "scope_source": str(guard.get("scope_source") or ""),
+            }
+        },
+        error=error_payload,
+    )
 
 
 @dataclass(frozen=True)
@@ -2364,6 +2666,32 @@ def plan_read_only_tools(
     conversation_context: dict[str, Any] | None,
     *,
     create_response_fn: CreateStructuredResponseFn | None = None,
+    create_tool_call_response_fn: CreateToolCallResponseFn | None = None,
+    environ: dict[str, str] | None = None,
+) -> LlmPlannerResult:
+    if create_response_fn is not None:
+        return _plan_read_only_tools_legacy_json(
+            text,
+            settings,
+            conversation_context,
+            create_response_fn=create_response_fn,
+            environ=environ,
+        )
+    return _plan_read_only_tools_model_events(
+        text,
+        settings,
+        conversation_context,
+        create_tool_call_response_fn=create_tool_call_response_fn,
+        environ=environ,
+    )
+
+
+def _plan_read_only_tools_legacy_json(
+    text: str,
+    settings: AssistantSettings,
+    conversation_context: dict[str, Any] | None,
+    *,
+    create_response_fn: CreateStructuredResponseFn,
     environ: dict[str, str] | None = None,
 ) -> LlmPlannerResult:
     llm_settings = settings.llm
@@ -2404,7 +2732,7 @@ def plan_read_only_tools(
             ),
         )
 
-    response_fn = create_response_fn or provider_create_response_fn(provider)
+    response_fn = create_response_fn
     planner_payload = _planner_input_payload(text, conversation_context=conversation_context)
     attempt = _planner_provider_attempt(
         planner_payload=planner_payload,
@@ -2492,6 +2820,579 @@ def plan_read_only_tools(
             planner_context_use=planner_context_use,
             context_validation=context_validation,
         ),
+    )
+
+
+def _plan_read_only_tools_model_events(
+    text: str,
+    settings: AssistantSettings,
+    conversation_context: dict[str, Any] | None,
+    *,
+    create_tool_call_response_fn: CreateToolCallResponseFn | None = None,
+    environ: dict[str, str] | None = None,
+) -> LlmPlannerResult:
+    llm_settings = settings.llm
+    if not llm_settings.enabled:
+        return LlmPlannerResult(plan=None, trace=_llm_trace(llm_settings, attempted=False, reason="disabled"))
+
+    missing = missing_llm_config(llm_settings)
+    if missing:
+        return LlmPlannerResult(
+            plan=None,
+            trace=_llm_trace(llm_settings, attempted=False, reason="missing_config", missing=missing),
+            error=AgentToolError(
+                code="LLM_UNAVAILABLE",
+                message="LLM planner is enabled but not fully configured.",
+                hint="Set assistant.llm.provider, assistant.llm.model, and assistant.llm.api_key_env, or disable assistant.planner.enabled.",
+                details={"missing": missing},
+            ),
+        )
+
+    provider = normalize_llm_provider(llm_settings.provider)
+    if not is_supported_llm_provider(provider):
+        return LlmPlannerResult(
+            plan=None,
+            trace=_llm_trace(llm_settings, attempted=False, reason="unsupported_provider"),
+            error=unsupported_llm_provider_error(llm_settings, component="planner"),
+        )
+
+    api_key = llm_api_key_value(llm_settings, environ=environ)
+    if not api_key:
+        return LlmPlannerResult(
+            plan=None,
+            trace=_llm_trace(llm_settings, attempted=False, reason="missing_api_key", missing=["api_key"]),
+            error=AgentToolError(
+                code="LLM_UNAVAILABLE",
+                message="LLM planner API key is not configured.",
+                hint=f"Set {llm_settings.api_key_env} in the local env file or process environment.",
+                details={"api_key_env": llm_settings.api_key_env},
+            ),
+        )
+
+    planner_payload = _planner_input_payload(text, conversation_context=conversation_context)
+    response_fn = create_tool_call_response_fn or provider_create_tool_call_response_fn(provider)
+    attempt = _model_event_provider_attempt(
+        planner_payload=planner_payload,
+        response_fn=response_fn,
+        api_key=api_key,
+        provider=provider,
+        llm_settings=llm_settings,
+    )
+    base_trace = _llm_trace(
+        llm_settings,
+        attempted=True,
+        reason=attempt.reason,
+        error_code=attempt.error.code if attempt.error is not None else None,
+        schema_version=TOOL_PLAN_SCHEMA_VERSION if attempt.error is None and attempt.events else None,
+        conversation_context=conversation_context,
+        planner_input=attempt.planner_input,
+    )
+    base_trace["event_model"] = {
+        "schema_version": "om-assistant-event-planner-v1",
+        "provider": provider,
+        "api_kind": provider_api_kind(provider),
+        "event_count": len(attempt.events),
+        "events": event_transcript_payload(attempt.events) if attempt.events else [],
+        "legacy_json_plan_used": False,
+    }
+    if attempt.error is not None:
+        return LlmPlannerResult(plan=None, trace=base_trace, error=attempt.error)
+
+    plan, event_error = _planner_plan_from_model_events(
+        text=text,
+        events=attempt.events,
+        conversation_context=conversation_context,
+    )
+    if event_error is not None:
+        base_trace["reason"] = "invalid_model_event"
+        base_trace["error_code"] = event_error.code
+        return LlmPlannerResult(plan=None, trace=base_trace, error=event_error)
+    if plan is None:
+        error = _invalid_model_event_error("模型没有生成可执行工具调用，未执行工具。")
+        base_trace["reason"] = "invalid_model_event"
+        base_trace["error_code"] = error.code
+        return LlmPlannerResult(plan=None, trace=base_trace, error=error)
+
+    planner_manifest = planner_payload.get("tools") if isinstance(planner_payload.get("tools"), list) else []
+    context_validation = _validate_model_event_context_use(
+        text=text,
+        conversation_context=conversation_context,
+        plan=plan,
+        planner_manifest=planner_manifest,
+    )
+    base_trace["planner_context_use"] = _safe_context_use_payload(plan.context_use)
+    base_trace["context_validation"] = context_validation
+    context_error = _context_validation_error(context_validation)
+    if context_error is not None:
+        base_trace["reason"] = _planner_error_trace_reason(context_error)
+        base_trace["error_code"] = context_error.code
+        return LlmPlannerResult(plan=None, trace=base_trace, error=context_error)
+
+    return LlmPlannerResult(plan=plan, trace={**base_trace, "reason": "accepted"})
+
+
+def _model_event_provider_attempt(
+    *,
+    planner_payload: dict[str, Any],
+    response_fn: CreateToolCallResponseFn,
+    api_key: str,
+    provider: str,
+    llm_settings: AssistantLlmSettings,
+) -> _ModelEventProviderAttempt:
+    planner_input_text = json.dumps(planner_payload, ensure_ascii=False, sort_keys=True)
+    planner_input_trace = _planner_input_trace(planner_payload, planner_input_text)
+    tools = _provider_tool_call_tools(provider, planner_payload)
+    try:
+        response = response_fn(
+            api_key=api_key,
+            base_url=llm_settings.base_url,
+            model=llm_settings.model,
+            input_text=planner_input_text,
+            instructions=_model_event_planner_instructions(),
+            tools=tools,
+            timeout=int(llm_settings.timeout_seconds),
+            max_output_tokens=int(llm_settings.max_output_tokens),
+        )
+    except (OpenAIResponsesError, OpenAIChatCompletionsError) as err:
+        return _ModelEventProviderAttempt(
+            response=None,
+            planner_input=planner_input_trace,
+            reason="provider_error",
+            error=AgentToolError(
+                code="LLM_PROVIDER_ERROR",
+                message=str(err),
+                details={"provider": provider, "http_status": err.http_status},
+            ),
+        )
+    except Exception as err:
+        return _ModelEventProviderAttempt(
+            response=None,
+            planner_input=planner_input_trace,
+            reason="provider_error",
+            error=AgentToolError(
+                code="LLM_PROVIDER_ERROR",
+                message=f"LLM planner provider failed: {type(err).__name__}: {err}",
+                details={"provider": provider},
+            ),
+        )
+    try:
+        events = model_events_from_provider_response(response, provider=provider, parent_event_id="user_message_1")
+    except AgentToolError as err:
+        return _ModelEventProviderAttempt(
+            response=response,
+            planner_input=planner_input_trace,
+            reason="invalid_model_event",
+            error=err,
+        )
+    if not events:
+        return _ModelEventProviderAttempt(
+            response=response,
+            planner_input=planner_input_trace,
+            events=(),
+            reason="invalid_model_event",
+            error=_invalid_model_event_error("模型没有生成结构化 tool call，未执行工具。"),
+        )
+    return _ModelEventProviderAttempt(
+        response=response,
+        planner_input=planner_input_trace,
+        events=events,
+        reason="accepted",
+    )
+
+
+def _planner_plan_from_model_events(
+    *,
+    text: str,
+    events: tuple[ModelToolCallEvent | ModelFinalAnswerEvent | AssistantEvent, ...],
+    conversation_context: dict[str, Any] | None,
+) -> tuple[PlannerPlan | None, AgentToolError | None]:
+    first = events[0] if events else None
+    if isinstance(first, ModelToolCallEvent):
+        tool_calls = tuple(event for event in events if isinstance(event, ModelToolCallEvent))
+        if len(tool_calls) > MAX_TOOL_PLAN_STEPS:
+            return None, AgentToolError(
+                code="PLAN_TOO_MANY_STEPS",
+                message=f"这个问题需要超过 {MAX_TOOL_PLAN_STEPS} 次工具调用，请拆分问题。",
+                details={"max_steps": MAX_TOOL_PLAN_STEPS, "steps": len(tool_calls)},
+            )
+        return _planner_plan_from_model_tool_calls(
+            text=text,
+            events=tool_calls,
+            conversation_context=conversation_context,
+        ), None
+    if isinstance(first, AssistantEvent) and first.event_type == "clarification_request":
+        return None, AgentToolError(
+            code="NEEDS_CLARIFICATION",
+            message=str(first.payload.get("question") or first.payload.get("message") or "需要补充查询范围。"),
+            details={"clarification_request": first.public_payload()},
+        )
+    if isinstance(first, AssistantEvent) and first.event_type == "preview_request":
+        return None, AgentToolError(
+            code="NEEDS_CLARIFICATION",
+            message="模型识别为写入预览请求，但当前事件入口尚未创建预览操作。请使用明确的预览命令。",
+            details={"preview_request": first.public_payload()},
+        )
+    if isinstance(first, ModelFinalAnswerEvent):
+        return None, _invalid_model_event_error("模型直接回答但没有调用只读工具，未执行工具。")
+    return None, _invalid_model_event_error("模型没有生成可执行工具调用，未执行工具。")
+
+
+def _planner_plan_from_model_tool_calls(
+    *,
+    text: str,
+    events: tuple[ModelToolCallEvent, ...],
+    conversation_context: dict[str, Any] | None,
+) -> PlannerPlan:
+    steps = tuple(
+        PlannerPlanStep(
+            id=event.tool_call_id or f"call_{index}",
+            tool_name=event.tool_name,
+            arguments=dict(event.arguments),
+            purpose=event.purpose or f"Use {event.tool_name} for the current read-only question.",
+        )
+        for index, event in enumerate(events, start=1)
+    )
+    initial_plan = PlannerPlan(
+        goal=str(text or "").strip(),
+        steps=steps,
+        required_capabilities=_required_capabilities_for_model_tool_calls(events),
+        context_use=_default_context_use(),
+    )
+    initial_plan = _normalize_tool_plan(
+        initial_plan,
+        question=text,
+        today=_planner_today_from_context(conversation_context),
+    )
+    host_contract = build_task_contract(
+        question=text,
+        plan=initial_plan.public_payload(),
+        request_context=None,
+        today=_planner_today_from_context(conversation_context),
+    )
+    task_contract = _planner_task_contract_from_host_contract(host_contract.public_payload())
+    context_use = _context_use_for_model_tool_plan(
+        question=text,
+        plan=initial_plan,
+        conversation_context=conversation_context,
+        task_contract=task_contract,
+    )
+    return PlannerPlan(
+        goal=initial_plan.goal,
+        steps=initial_plan.steps,
+        required_capabilities=initial_plan.required_capabilities,
+        task_contract=task_contract,
+        context_use=context_use,
+    )
+
+
+def _provider_tool_call_tools(provider: str, planner_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    manifest = planner_payload.get("tools") if isinstance(planner_payload.get("tools"), list) else []
+    if provider_api_kind(provider) == "chat_completions":
+        return chat_completions_tools_payload(manifest)
+    return openai_responses_tools_payload(manifest)
+
+
+def _validate_model_event_context_use(
+    *,
+    text: str,
+    conversation_context: dict[str, Any] | None,
+    plan: PlannerPlan,
+    planner_manifest: list[dict[str, Any]],
+) -> dict[str, Any]:
+    context_use = _safe_context_use_payload(plan.context_use)
+    validation_plan = plan
+    if context_use.get("mode") == "ambiguous":
+        validation_plan = PlannerPlan(
+            goal=plan.goal,
+            steps=(),
+            required_capabilities=plan.required_capabilities,
+            task_contract=dict(plan.task_contract) if isinstance(plan.task_contract, dict) else None,
+            selected_recipe=dict(plan.selected_recipe) if isinstance(plan.selected_recipe, dict) else None,
+            context_use=context_use,
+            schema_version=plan.schema_version,
+        )
+    return _validate_planner_context_use(
+        text=text,
+        conversation_context=conversation_context,
+        plan=validation_plan,
+        planner_manifest=planner_manifest,
+    )
+
+
+def _required_capabilities_for_model_tool_calls(events: tuple[ModelToolCallEvent, ...]) -> tuple[str, ...]:
+    capabilities: list[str] = []
+    for event in events:
+        capabilities.extend(_required_capabilities_for_model_tool_call(event))
+    return tuple(_unique_strings(capabilities))
+
+
+def _required_capabilities_for_model_tool_call(event: ModelToolCallEvent) -> tuple[str, ...]:
+    tool_name = str(event.tool_name or "").strip()
+    if tool_name == "monthly_income_report":
+        return ("income_report",)
+    if tool_name == "analysis_query":
+        return ("analysis_query",)
+    if tool_name == "candidate_filter_explain":
+        return ("filter_explain",)
+    binding = planner_binding_for_tool(tool_name)
+    if binding is not None and binding.intent_name:
+        return (str(binding.intent_name),)
+    return (tool_name,) if tool_name else ()
+
+
+def _context_use_for_model_tool_plan(
+    *,
+    question: str,
+    plan: PlannerPlan,
+    conversation_context: dict[str, Any] | None,
+    task_contract: dict[str, Any],
+) -> dict[str, Any]:
+    context_use = _default_context_use()
+    plan_slots = _plan_safe_slots_for_context(plan)
+    current_slots = _current_message_slots_for_model_plan(
+        question=question,
+        plan_slots=plan_slots,
+        task_contract=task_contract,
+    )
+    context_use["current_message_slots"] = current_slots
+    inherited_slots = _slot_delta(plan_slots, current_slots)
+    if not inherited_slots:
+        return context_use
+
+    projection = _context_projection_from_conversation(conversation_context)
+    if not projection or not _question_is_contextual_followup(question):
+        return context_use
+    sources = _context_sources_for_model_plan(projection)
+    if not sources:
+        return _ambiguous_context_use(
+            current_slots=current_slots,
+            reason="followup_context_missing",
+            question="当前追问需要沿用上下文，但没有可见的上一轮证据范围。请明确账户、标的、月份或上一轮结果。",
+        )
+    if len(sources) > 1 and not current_slots:
+        return _ambiguous_context_use(
+            current_slots=current_slots,
+            reason="multiple_context_sources_without_current_slot",
+            question="当前追问可能引用多轮上下文，请明确要沿用哪一轮、哪个账户/标的/月度。",
+        )
+
+    matches = [source for source in sources if _slot_values_subset(inherited_slots, source.get("safe_slots", {}))]
+    if len(matches) != 1:
+        return _ambiguous_context_use(
+            current_slots=current_slots,
+            reason="context_source_not_unique",
+            question="当前追问缺少足够上下文，请明确要沿用的账户、标的、月份或上一轮结果。",
+        )
+
+    source = matches[0]
+    context_use["mode"] = "carry"
+    context_use["referenced_turn_ids"] = _unique_strings(source.get("turn_ids") or [])
+    context_use["referenced_evidence_refs"] = _unique_strings(source.get("evidence_refs") or [])
+    context_use["inherited_slots"] = inherited_slots
+    return context_use
+
+
+def _plan_safe_slots_for_context(plan: PlannerPlan) -> dict[str, list[Any]]:
+    slots: dict[str, list[Any]] = {}
+    for step in plan.steps:
+        for key, value in dict(step.arguments or {}).items():
+            slot_key = str(key or "").strip()
+            if slot_key not in SAFE_SLOT_KEYS:
+                continue
+            for item in _context_slot_values(value):
+                _add_context_slot(slots, slot_key, item)
+    return slots
+
+
+def _current_message_slots_for_model_plan(
+    *,
+    question: str,
+    plan_slots: dict[str, list[Any]],
+    task_contract: dict[str, Any],
+) -> dict[str, list[Any]]:
+    slots: dict[str, list[Any]] = {}
+    scope = task_contract.get("scope") if isinstance(task_contract.get("scope"), dict) else {}
+    for scope_key, slot_key in (
+        ("requested_accounts", "account"),
+        ("requested_symbols", "symbol"),
+        ("requested_months", "month"),
+    ):
+        for item in _context_slot_values(scope.get(scope_key)):
+            if _slot_value_in(item, plan_slots.get(slot_key, [])):
+                _add_context_slot(slots, slot_key, item)
+    for key, values in plan_slots.items():
+        for value in values:
+            if _context_slot_value_in_question(question, value):
+                _add_context_slot(slots, key, value)
+    return slots
+
+
+def _slot_delta(left: dict[str, list[Any]], right: dict[str, list[Any]]) -> dict[str, list[Any]]:
+    delta: dict[str, list[Any]] = {}
+    for key, values in left.items():
+        for value in values:
+            if not _slot_value_in(value, right.get(key, [])):
+                _add_context_slot(delta, key, value)
+    return delta
+
+
+def _context_projection_from_conversation(conversation_context: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(conversation_context, dict):
+        return {}
+    projection = conversation_context.get("context_projection")
+    return projection if isinstance(projection, dict) else {}
+
+
+def _context_sources_for_model_plan(projection: dict[str, Any]) -> list[dict[str, Any]]:
+    refs = [item for item in projection.get("available_evidence_refs") or [] if isinstance(item, dict)]
+    if refs:
+        sources: list[dict[str, Any]] = []
+        for ref in refs:
+            ref_id = str(ref.get("ref_id") or "").strip()
+            turn_id = str(ref.get("turn_id") or "").strip()
+            source = {
+                "turn_ids": [turn_id] if turn_id else [],
+                "evidence_refs": [ref_id] if ref_id else [],
+                "safe_slots": _context_slot_mapping(ref.get("safe_slots")),
+            }
+            if source["safe_slots"]:
+                sources.append(source)
+        return sources
+
+    sources = []
+    for turn in projection.get("recent_turns") or []:
+        if not isinstance(turn, dict):
+            continue
+        turn_id = str(turn.get("turn_id") or "").strip()
+        source = {
+            "turn_ids": [turn_id] if turn_id else [],
+            "evidence_refs": _unique_strings(turn.get("evidence_refs") or []),
+            "safe_slots": _context_slot_mapping(turn.get("safe_slots")),
+        }
+        if source["safe_slots"]:
+            sources.append(source)
+    return sources
+
+
+def _ambiguous_context_use(*, current_slots: dict[str, list[Any]], reason: str, question: str) -> dict[str, Any]:
+    context_use = _default_context_use()
+    context_use["mode"] = "ambiguous"
+    context_use["current_message_slots"] = current_slots
+    context_use["requires_clarification"] = True
+    context_use["clarification_question"] = question
+    context_use["reason"] = reason
+    return context_use
+
+
+def _question_is_contextual_followup(question: str) -> bool:
+    compact = re.sub(r"\s+", "", str(question or "").lower())
+    if not compact:
+        return False
+    tokens = (
+        "继续",
+        "再看",
+        "再拆",
+        "进一步",
+        "这个",
+        "上个",
+        "上面",
+        "刚才",
+        "前面",
+        "接着",
+        "补证据",
+        "怎么算",
+        "为什么",
+        "原因",
+    )
+    return any(token in compact for token in tokens) or compact in {"继续", "继续分析", "继续解释"}
+
+
+def _context_slot_mapping(value: Any) -> dict[str, list[Any]]:
+    if not isinstance(value, dict):
+        return {}
+    slots: dict[str, list[Any]] = {}
+    for key, raw_values in value.items():
+        slot_key = str(key or "").strip()
+        if not slot_key:
+            continue
+        for item in _context_slot_values(raw_values):
+            _add_context_slot(slots, slot_key, item)
+    return slots
+
+
+def _context_slot_values(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        values = value
+    elif isinstance(value, tuple):
+        values = list(value)
+    elif isinstance(value, set):
+        values = sorted(value)
+    else:
+        values = [value]
+    return [item for item in values if item not in ("", None, [], {})]
+
+
+def _add_context_slot(slots: dict[str, list[Any]], key: str, value: Any) -> None:
+    if value in ("", None):
+        return
+    bucket = slots.setdefault(str(key), [])
+    if not _slot_value_in(value, bucket):
+        bucket.append(value)
+
+
+def _slot_values_subset(left: dict[str, list[Any]], right: dict[str, list[Any]]) -> bool:
+    for key, values in left.items():
+        for value in values:
+            if not _slot_value_in(value, right.get(key, [])):
+                return False
+    return True
+
+
+def _slot_value_in(value: Any, values: list[Any]) -> bool:
+    normalized = _normalized_context_slot_value(value)
+    return any(_normalized_context_slot_value(item) == normalized for item in values)
+
+
+def _normalized_context_slot_value(value: Any) -> str:
+    return str(value).strip().lower()
+
+
+def _context_slot_value_in_question(question: str, value: Any) -> bool:
+    text = str(question or "")
+    value_text = str(value or "").strip()
+    if not value_text:
+        return False
+    if re.fullmatch(r"[A-Za-z0-9_.-]+", value_text):
+        return re.search(rf"(?<![A-Za-z0-9_.-]){re.escape(value_text)}(?![A-Za-z0-9_.-])", text, re.IGNORECASE) is not None
+    return value_text in text
+
+
+def _planner_task_contract_from_host_contract(contract: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: contract[key]
+        for key in (
+            "schema_version",
+            "goal",
+            "domain",
+            "task_mode",
+            "requested_effect",
+            "intent_families",
+            "scope",
+            "required_answer",
+            "optional_answer",
+            "required_evidence",
+            "answer_shape",
+            "constraints",
+        )
+        if key in contract
+    }
+
+
+def _invalid_model_event_error(message: str) -> AgentToolError:
+    return AgentToolError(
+        code="INVALID_MODEL_EVENT",
+        message=message,
+        hint="请换一种更明确的问法，或稍后重试；本次没有执行任何工具。",
     )
 
 
@@ -5576,6 +6477,25 @@ def _planner_manifest_budget(*, tools: list[dict[str, Any]], analysis_view_selec
     }
 
 
+def _model_event_planner_instructions() -> str:
+    return """\
+You are the options-monitor assistant tool caller.
+
+Use the provided tool/function calling interface for read-only tool selection.
+Do not write JSON plans in normal text. Do not wrap tool choices in Markdown.
+
+Rules:
+- For business, runtime, position, candidate, config, or income questions, call 1 to 3 suitable read-only tools when needed; prefer one tool when it is enough.
+- Use only tools exposed in the current tool list. Do not invent tool names.
+- Do not include system-scoped arguments such as config_key, config_path, paths, host, port, timeout, audit_db, report_path, run_dir, or output_dir. The host injects those.
+- For income analysis/review/performance/source/composition questions, call monthly_income_report and set include_rows=true.
+- For a month without a year such as "6月", resolve it from the current date in the input context.
+- If the user asks a single-symbol candidate filtering/root-cause question, call candidate_filter_explain with the user-visible symbol.
+- If the request is write/admin/confirm/apply, do not call a read tool. Ask for clarification or return a preview_request only when the provider supports it.
+- If no safe read tool applies, do not guess.
+"""
+
+
 def _planner_instructions() -> str:
     return """\
 You are the options-monitor assistant capability planner.
@@ -6528,6 +7448,7 @@ __all__ = [
     "AgentLoopPlanningOutcome",
     "FinalResponsePlan",
     "FOLLOWUP_DECISION_SCHEMA_VERSION",
+    "GuardedModelToolCallExecution",
     "INTERNAL_TOOL_PLAN_NAME",
     "LlmSynthesisResult",
     "LlmPlannerResult",
@@ -6541,6 +7462,7 @@ __all__ = [
     "ToolObservation",
     "build_tool_observation",
     "build_synthesis_observation",
+    "execute_model_tool_call_event",
     "execute_tool_plan",
     "parse_tool_plan_payload",
     "plan_read_only_tools",
