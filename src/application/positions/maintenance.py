@@ -4,13 +4,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from src.application.config_loader import resolve_data_config_path
+from domain.domain.symbol_identity import symbol_market
 from domain.domain.ledger.position_fields import (
     effective_contracts_open,
     normalize_account,
     normalize_broker,
     normalize_status,
 )
+from src.application.config_loader import resolve_data_config_path
+from src.application.futu_portfolio_context import infer_futu_portfolio_settings
 from src.application.ledger.api import (
     ledger_store_payload,
     list_expiry_close_position_lots,
@@ -19,11 +21,16 @@ from src.application.ledger.api import (
     record_expired_position_closes,
     refresh_position_lot_projection,
 )
+from src.application.opend_fetch_config import resolve_opend_fetch_limits
+from src.application.opend_market_snapshot_fetching import get_spot_opend
+from src.application.opend_utils import normalize_underlier
 from src.application.positions.maintenance_receipt import (
     resolve_auto_close_receipt_config,
     safe_send_auto_close_receipt,
 )
+from src.application.runtime_config_freshness import infer_runtime_config_market
 from src.application.runtime_config_paths import resolve_data_config_ref
+from src.infrastructure.futu_gateway import build_ready_futu_gateway
 
 
 def _bool_config(data: dict[str, Any], key: str, default: bool) -> bool:
@@ -75,9 +82,12 @@ def _open_positions_for_account(
     *,
     account: str | None,
     broker: str | None,
+    market: str | None = None,
+    symbol_aliases: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     normalized_account = normalize_account(account) if account else None
     normalized_broker = normalize_broker(broker) if broker else None
+    normalized_market = _normalize_symbol_market(market)
     out: list[dict[str, Any]] = []
     for item in records:
         if not isinstance(item, dict):
@@ -89,6 +99,8 @@ def _open_positions_for_account(
             continue
         if normalized_broker and normalize_broker(fields.get("broker") or fields.get("market")) != normalized_broker:
             continue
+        if normalized_market and symbol_market(fields.get("symbol"), symbol_aliases=symbol_aliases) != normalized_market:
+            continue
         if normalize_status(fields.get("status")) != "open":
             continue
         if effective_contracts_open(fields) <= 0:
@@ -99,6 +111,29 @@ def _open_positions_for_account(
             row["record_id"] = record_id
         out.append(row)
     return out
+
+
+def _normalize_symbol_market(value: Any) -> str | None:
+    text = str(value or "").strip().upper()
+    if text in {"US", "HK"}:
+        return text
+    if text == "HKG":
+        return "HK"
+    return None
+
+
+def _auto_close_market_filter(cfg: dict[str, Any]) -> str | None:
+    inferred = infer_runtime_config_market(
+        config_path=cfg.get("config_source_path") if isinstance(cfg, dict) else None,
+        config=cfg if isinstance(cfg, dict) else None,
+    )
+    return _normalize_symbol_market(inferred)
+
+
+def _symbol_aliases(cfg: dict[str, Any]) -> dict[str, Any] | None:
+    intake = cfg.get("intake") if isinstance(cfg, dict) else None
+    aliases = intake.get("symbol_aliases") if isinstance(intake, dict) else None
+    return aliases if isinstance(aliases, dict) else None
 
 
 def _account_type(cfg: dict[str, Any], account: str | None) -> str:
@@ -131,6 +166,192 @@ def _mark_manual_expiry_review_required(
         )
         out.append(row)
     return out
+
+
+def _settings_value(settings: dict[str, Any], key: str, fallback: Any) -> Any:
+    value = settings.get(key)
+    return fallback if value in (None, "") else value
+
+
+def _requires_expiry_assignment_quote(
+    fields: dict[str, Any],
+    *,
+    eligible_record_ids: set[str] | None = None,
+) -> bool:
+    if eligible_record_ids is not None:
+        record_id = str(fields.get("record_id") or "").strip()
+        if record_id not in eligible_record_ids:
+            return False
+    if str(fields.get("_auto_close_skip_reason") or "").strip():
+        return False
+    option_type = str(fields.get("option_type") or "").strip().lower()
+    position_side = str(fields.get("side") or fields.get("position_side") or "").strip().lower()
+    symbol = str(fields.get("symbol") or "").strip()
+    return bool(symbol) and position_side == "short" and option_type in {"put", "call", "p", "c"}
+
+
+def _expiry_assignment_quote_symbols(
+    positions: list[dict[str, Any]],
+    *,
+    eligible_record_ids: set[str] | None = None,
+) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in positions:
+        if not isinstance(item, dict) or not _requires_expiry_assignment_quote(
+            item,
+            eligible_record_ids=eligible_record_ids,
+        ):
+            continue
+        symbol = str(item.get("symbol") or "").strip()
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        out.append(symbol)
+    return out
+
+
+def _enrich_positions_with_assignment_quotes(
+    positions: list[dict[str, Any]],
+    quote_by_symbol: dict[str, dict[str, Any]],
+    missing_symbols: set[str],
+    *,
+    eligible_record_ids: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for item in positions:
+        row = dict(item)
+        if _requires_expiry_assignment_quote(row, eligible_record_ids=eligible_record_ids):
+            symbol = str(row.get("symbol") or "").strip()
+            quote = quote_by_symbol.get(symbol)
+            if quote:
+                row["_auto_close_underlying_spot"] = float(quote["spot"])
+                row["_auto_close_underlier_code"] = quote.get("underlier_code")
+                row["_auto_close_quote_source"] = quote.get("quote_source") or "opend_realtime"
+                row["_auto_close_quote_status"] = quote.get("quote_status") or "fresh"
+                row["_auto_close_quote_time_ms"] = quote.get("quote_time_ms")
+            elif symbol in missing_symbols:
+                row["_auto_close_quote_source"] = "opend_realtime"
+                row["_auto_close_quote_status"] = "missing_quote"
+        out.append(row)
+    return out
+
+
+def _refresh_expiry_assignment_quote_evidence(
+    positions: list[dict[str, Any]],
+    *,
+    cfg: dict[str, Any],
+    account: str | None,
+    base: Path,
+    eligible_record_ids: set[str] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    symbols = _expiry_assignment_quote_symbols(positions, eligible_record_ids=eligible_record_ids)
+    diagnostics: dict[str, Any] = {
+        "enabled": True,
+        "quote_source": "opend_realtime",
+        "requested_symbols": symbols,
+        "refreshed_symbols": [],
+        "missing_symbols": [],
+        "errors": [],
+    }
+    if not symbols:
+        diagnostics["status"] = "skipped_no_assignment_quote_required"
+        return [dict(item) for item in positions], diagnostics
+
+    settings = infer_futu_portfolio_settings(cfg, account=account)
+    effective_host = str(_settings_value(settings, "host", "127.0.0.1"))
+    try:
+        effective_port = int(_settings_value(settings, "port", 11111))
+    except Exception:
+        effective_port = 11111
+    repo_root = Path(__file__).resolve().parents[3]
+    limits = resolve_opend_fetch_limits(cfg).market_snapshot
+    diagnostics["host"] = effective_host
+    diagnostics["port"] = effective_port
+
+    try:
+        gateway = build_ready_futu_gateway(
+            host=effective_host,
+            port=effective_port,
+            is_option_chain_cache_enabled=False,
+        )
+    except Exception as exc:
+        diagnostics["status"] = "source_unavailable"
+        diagnostics["missing_symbols"] = list(symbols)
+        diagnostics["errors"].append(
+            {
+                "stage": "gateway",
+                "error_code": type(exc).__name__,
+                "message": str(exc),
+            }
+        )
+        return _enrich_positions_with_assignment_quotes(
+            positions,
+            {},
+            set(symbols),
+            eligible_record_ids=eligible_record_ids,
+        ), diagnostics
+
+    quote_by_symbol: dict[str, dict[str, Any]] = {}
+    missing_symbols: set[str] = set()
+    errors: list[dict[str, Any]] = []
+    quote_time_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    try:
+        for symbol in symbols:
+            try:
+                underlier = normalize_underlier(symbol, base_dir=repo_root)
+                spot = get_spot_opend(
+                    gateway,
+                    underlier.code,
+                    base_dir=base,
+                    snapshot_max_wait_sec=limits.max_wait_sec,
+                    snapshot_window_sec=limits.window_sec,
+                    snapshot_max_calls=limits.max_calls,
+                    errors=errors,
+                )
+            except Exception as exc:
+                errors.append(
+                    {
+                        "stage": "underlier_snapshot",
+                        "code": symbol,
+                        "error_code": type(exc).__name__,
+                        "message": str(exc),
+                    }
+                )
+                spot = None
+                underlier = None
+            if spot is None:
+                missing_symbols.add(symbol)
+                continue
+            quote_by_symbol[symbol] = {
+                "spot": float(spot),
+                "underlier_code": getattr(underlier, "code", None),
+                "quote_time_ms": quote_time_ms,
+                "quote_source": "opend_realtime",
+                "quote_status": "fresh",
+            }
+            diagnostics["refreshed_symbols"].append(symbol)
+    finally:
+        try:
+            gateway.close()
+        except Exception:
+            pass
+
+    diagnostics["missing_symbols"] = list(missing_symbols)
+    diagnostics["errors"] = errors
+    diagnostics["quote_count"] = len(quote_by_symbol)
+    if quote_by_symbol and not missing_symbols:
+        diagnostics["status"] = "ok"
+    elif quote_by_symbol:
+        diagnostics["status"] = "partial"
+    else:
+        diagnostics["status"] = "missing_quote"
+    return _enrich_positions_with_assignment_quotes(
+        positions,
+        quote_by_symbol,
+        missing_symbols,
+        eligible_record_ids=eligible_record_ids,
+    ), diagnostics
 
 
 def _load_expiry_close_position_lots(repo: Any) -> list[dict[str, Any]]:
@@ -260,6 +481,22 @@ def _expired_close_run_payloads(value: Any) -> tuple[list[dict[str, Any]], list[
     )
 
 
+def _missing_assignment_spot_record_ids(decisions: list[dict[str, Any]]) -> set[str]:
+    out: set[str] = set()
+    for item in decisions:
+        if not isinstance(item, dict):
+            continue
+        if item.get("skip_reason") != "expiry_assignment_review_required":
+            continue
+        assignment_review = item.get("assignment_review")
+        if not isinstance(assignment_review, dict) or assignment_review.get("status") != "missing_spot":
+            continue
+        record_id = str(item.get("record_id") or "").strip()
+        if record_id:
+            out.add(record_id)
+    return out
+
+
 def run_expired_position_maintenance_for_account(
     *,
     base: Path,
@@ -328,12 +565,30 @@ def run_expired_position_maintenance_for_account(
         if dry_run
         else _refresh_position_projection_before_auto_close(repo)
     )
+    market_filter = _auto_close_market_filter(cfg)
     positions = _open_positions_for_account(
         _load_expiry_close_position_lots(repo),
         account=account,
         broker=effective_broker,
+        market=market_filter,
+        symbol_aliases=_symbol_aliases(cfg),
     )
     positions = _mark_manual_expiry_review_required(positions, cfg=cfg, account=account)
+    initial_decisions = [
+        _payload(item)
+        for item in plan_expired_position_closes(
+            positions,
+            as_of_ms=ts,
+            grace_days=int(auto_cfg["grace_days"]),
+        )
+    ]
+    positions, expiry_assignment_quote_refresh = _refresh_expiry_assignment_quote_evidence(
+        positions,
+        cfg=cfg,
+        account=account,
+        base=base,
+        eligible_record_ids=_missing_assignment_spot_record_ids(initial_decisions),
+    )
     if dry_run:
         decisions = [
             _payload(item)
@@ -374,6 +629,7 @@ def run_expired_position_maintenance_for_account(
             "manual_expiry_review_required",
             "lifecycle_assignment_pending",
             "lifecycle_stock_settlement_evidence_seen",
+            "expiry_assignment_review_required",
         }
     ]
     skipped_grace_pending = [
@@ -385,6 +641,7 @@ def run_expired_position_maintenance_for_account(
         "mode": "dry_run" if dry_run else "applied",
         "account": normalize_account(account) if account else None,
         "broker": normalize_broker(effective_broker) if effective_broker else None,
+        "market_filter": market_filter,
         "as_of_utc": datetime.fromtimestamp(ts / 1000, tz=timezone.utc).isoformat(),
         "grace_days": int(auto_cfg["grace_days"]),
         "max_close": int(auto_cfg["max_close"]),
@@ -399,6 +656,7 @@ def run_expired_position_maintenance_for_account(
         "errors": errors,
         "applied": applied,
         "ledger_store": ledger_store,
+        "expiry_assignment_quote_refresh": expiry_assignment_quote_refresh,
     }
     if projection_refresh is not None:
         result["projection_refresh"] = projection_refresh

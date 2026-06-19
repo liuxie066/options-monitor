@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -94,6 +95,242 @@ def test_position_maintenance_filters_account_and_broker_in_dry_run(monkeypatch,
     assert (report_dir / "auto_close_summary.txt").exists()
     assert result["receipt"]["status"] == "skipped"
     assert result["receipt"]["reason"] == "dry_run"
+
+
+@pytest.mark.parametrize(
+    ("market", "expected_record_ids"),
+    [
+        ("us", ["rec_us"]),
+        ("hk", ["rec_hk"]),
+    ],
+)
+def test_position_maintenance_filters_runtime_market_in_dry_run(
+    monkeypatch,
+    tmp_path: Path,
+    market: str,
+    expected_record_ids: list[str],
+) -> None:
+    from src.application.positions import maintenance as mod
+
+    data_config = tmp_path / "data.json"
+    data_config.write_text(json.dumps({"option_positions": {"sqlite_path": str(tmp_path / "pos.sqlite3")}}), encoding="utf-8")
+    report_dir = tmp_path / "reports"
+    fake_repo = object()
+    captured: dict[str, Any] = {}
+    records = [
+        {
+            "record_id": "rec_us",
+            "fields": {
+                "broker": "富途",
+                "account": "sy",
+                "symbol": "PDD",
+                "status": "open",
+                "contracts": 1,
+                "position_id": "PDD_20260618_85P_short",
+            },
+        },
+        {
+            "record_id": "rec_hk",
+            "fields": {
+                "broker": "富途",
+                "account": "sy",
+                "symbol": "0700.HK",
+                "status": "open",
+                "contracts": 1,
+                "position_id": "0700_HK_20260618_420P_short",
+            },
+        },
+    ]
+
+    monkeypatch.setattr(mod, "resolve_data_config_path", lambda **_kwargs: data_config)
+    monkeypatch.setattr(mod, "open_position_ledger", lambda _path: fake_repo)
+    monkeypatch.setattr(mod, "_load_expiry_close_position_lots", lambda _repo: records)
+
+    def _build_decisions(positions, **kwargs):
+        captured["positions"] = list(positions)
+        captured["kwargs"] = dict(kwargs)
+        return [
+            {
+                "record_id": item["record_id"],
+                "position_id": item["position_id"],
+                "should_close": True,
+                "expiration_ymd": "2026-06-18",
+            }
+            for item in positions
+        ]
+
+    monkeypatch.setattr(mod, "plan_expired_position_closes", _build_decisions)
+    monkeypatch.setattr(
+        mod,
+        "record_expired_position_closes",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("dry-run must not write")),
+    )
+
+    result = mod.run_expired_position_maintenance_for_account(
+        base=tmp_path,
+        cfg={
+            "_generated": {"market": market},
+            "portfolio": {"data_config": str(data_config), "broker": "富途"},
+            "option_positions": {"auto_close": {"grace_days": 1}},
+        },
+        account="sy",
+        broker="富途",
+        report_dir=report_dir,
+        as_of_ms=1781830827103,
+        dry_run=True,
+    )
+
+    assert result["market_filter"] == market.upper()
+    assert [p["record_id"] for p in captured["positions"]] == expected_record_ids
+    assert [item["record_id"] for item in result["decision_items"]] == expected_record_ids
+
+
+def test_position_maintenance_refreshes_assignment_quote_before_dry_run(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from domain.domain.option_position_lots import parse_exp_to_ms
+    from src.application.positions import maintenance as mod
+
+    data_config = tmp_path / "data.json"
+    data_config.write_text(json.dumps({"option_positions": {"sqlite_path": str(tmp_path / "pos.sqlite3")}}), encoding="utf-8")
+    report_dir = tmp_path / "reports"
+    fake_repo = object()
+    calls: list[dict[str, Any]] = []
+    exp_ms = parse_exp_to_ms("2026-06-18")
+    assert exp_ms is not None
+
+    class _Gateway:
+        def close(self) -> None:
+            calls.append({"stage": "close"})
+
+    class _Underlier:
+        code = "HK.00700"
+
+    monkeypatch.setattr(mod, "resolve_data_config_path", lambda **_kwargs: data_config)
+    monkeypatch.setattr(mod, "open_position_ledger", lambda _path: fake_repo)
+    monkeypatch.setattr(
+        mod,
+        "_load_expiry_close_position_lots",
+        lambda _repo: [
+            {
+                "record_id": "rec_0700",
+                "fields": {
+                    "broker": "富途",
+                    "account": "sy",
+                    "symbol": "0700.HK",
+                    "option_type": "put",
+                    "side": "short",
+                    "strike": 420,
+                    "status": "open",
+                    "contracts": 2,
+                    "contracts_open": 2,
+                    "expiration": exp_ms,
+                    "position_id": "0700_HK_20260618_420P_short",
+                },
+            }
+        ],
+    )
+    monkeypatch.setattr(mod, "build_ready_futu_gateway", lambda **_kwargs: _Gateway())
+    monkeypatch.setattr(mod, "normalize_underlier", lambda symbol, *, base_dir: _Underlier())
+
+    def _get_spot(_gateway: Any, code: str, **_kwargs: Any) -> float:
+        calls.append({"stage": "spot", "code": code})
+        return 430.0
+
+    monkeypatch.setattr(mod, "get_spot_opend", _get_spot)
+
+    result = mod.run_expired_position_maintenance_for_account(
+        base=tmp_path,
+        cfg={
+            "_generated": {"market": "hk"},
+            "portfolio": {"data_config": str(data_config), "broker": "富途"},
+            "option_positions": {"auto_close": {"grace_days": 1}},
+        },
+        account="sy",
+        broker="富途",
+        report_dir=report_dir,
+        as_of_ms=int(datetime(2026, 6, 19, 1, 0, tzinfo=timezone.utc).timestamp() * 1000),
+        dry_run=True,
+    )
+
+    assert calls[0] == {"stage": "spot", "code": "HK.00700"}
+    assert calls[-1] == {"stage": "close"}
+    assert result["expiry_assignment_quote_refresh"]["status"] == "ok"
+    assert result["expiry_assignment_quote_refresh"]["refreshed_symbols"] == ["0700.HK"]
+    assert result["candidates_should_close"] == 1
+    assert result["decision_items"][0]["should_close"] is True
+    assert result["decision_items"][0]["assignment_review"]["status"] == "otm_verified"
+    assert result["decision_items"][0]["assignment_review"]["spot"] == 430.0
+
+
+def test_position_maintenance_waits_for_assignment_when_assignment_quote_unavailable(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from domain.domain.option_position_lots import parse_exp_to_ms
+    from src.application.positions import maintenance as mod
+
+    data_config = tmp_path / "data.json"
+    data_config.write_text(json.dumps({"option_positions": {"sqlite_path": str(tmp_path / "pos.sqlite3")}}), encoding="utf-8")
+    report_dir = tmp_path / "reports"
+    fake_repo = object()
+    exp_ms = parse_exp_to_ms("2026-06-18")
+    assert exp_ms is not None
+
+    monkeypatch.setattr(mod, "resolve_data_config_path", lambda **_kwargs: data_config)
+    monkeypatch.setattr(mod, "open_position_ledger", lambda _path: fake_repo)
+    monkeypatch.setattr(
+        mod,
+        "_load_expiry_close_position_lots",
+        lambda _repo: [
+            {
+                "record_id": "rec_pdd",
+                "fields": {
+                    "broker": "富途",
+                    "account": "sy",
+                    "symbol": "PDD",
+                    "option_type": "put",
+                    "side": "short",
+                    "strike": 85,
+                    "status": "open",
+                    "contracts": 2,
+                    "contracts_open": 2,
+                    "expiration": exp_ms,
+                    "position_id": "PDD_20260618_85P_short",
+                },
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        mod,
+        "build_ready_futu_gateway",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("opend unavailable")),
+    )
+
+    result = mod.run_expired_position_maintenance_for_account(
+        base=tmp_path,
+        cfg={
+            "_generated": {"market": "us"},
+            "portfolio": {"data_config": str(data_config), "broker": "富途"},
+            "option_positions": {"auto_close": {"grace_days": 1}},
+        },
+        account="sy",
+        broker="富途",
+        report_dir=report_dir,
+        as_of_ms=int(datetime(2026, 6, 19, 4, 0, tzinfo=timezone.utc).timestamp() * 1000),
+        dry_run=True,
+        send_receipt=False,
+    )
+
+    assert result["expiry_assignment_quote_refresh"]["status"] == "source_unavailable"
+    assert result["expiry_assignment_quote_refresh"]["missing_symbols"] == ["PDD"]
+    assert result["candidates_should_close"] == 0
+    assert result["skipped_review_required"] == 1
+    assert result["decision_items"][0]["skip_reason"] == "expiry_assignment_review_required"
+    assert result["decision_items"][0]["assignment_review"]["status"] == "missing_spot"
+    assert "skipped_review_required: 1" in result["summary_text"]
+    assert "skip=expiry_assignment_review_required" in result["summary_text"]
 
 
 def test_position_maintenance_surfaces_grace_pending_expired_positions(monkeypatch, tmp_path: Path) -> None:

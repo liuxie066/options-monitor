@@ -217,7 +217,7 @@ sudo systemctl enable --now options-monitor-feishu-ws.service
 sudo systemctl enable --now options-monitor-upgrade.timer
 ```
 
-`options-monitor-auto-close-*.timer` 每天北京时间 09:00 运行一次 `./om option-positions auto-close-expired --apply --yes --quiet`，在 `grace_days=1` 的 00:00 UTC / 北京时间 08:00 cutoff 之后处理过期自动平仓。这里使用 `--yes` 是因为 systemd/launchd 属于非交互脚本，高风险写入必须显式确认并输出 `audit_id`。
+`options-monitor-auto-close-*.timer` 每天北京时间 09:00 运行一次 `./om option-positions auto-close-expired --apply --yes --quiet`。入口会按 runtime config 的 `_generated.market` 过滤 open lots，US/HK timer 只处理各自市场标的；`grace_days=1` 的到期 +1 天 cutoff 按标的市场本地日期计算，US 使用美东时间，HK 使用香港时间。短仓期权还必须有到期后的 OpenD spot 证明已经价外才会自动写入过期平仓；价内/平值或缺少 spot 时会进入 assignment review，等待指派/行权结果。这里使用 `--yes` 是因为 systemd/launchd 属于非交互脚本，高风险写入必须显式确认并输出 `audit_id`。
 `options-monitor-projection-verify.timer` 每天北京时间 09:30 运行一次 `./om option-positions verify-projection --mode auto`，用于校验 `trade_events -> position_lots` 并复用 checkpoint。
 `options-monitor-tick-us.timer` 使用 `OnCalendar=Mon..Fri *-*-* 09..16:00/10:00 America/New_York`，按美东时间 10 分钟整数边界唤醒。
 `options-monitor-tick-hk.timer` 使用 `OnCalendar=Mon..Fri *-*-* 09..16:00/10:00 Asia/Hong_Kong`，按香港时间 10 分钟整数边界唤醒；是否真正扫描/通知仍由 `tick-cron` scheduler 的 run points 决定。

@@ -525,6 +525,8 @@ python3 -m src.application.option_intake --config /var/lib/options-monitor/confi
 ./om option-positions auto-close-expired --config config.hk.json --accounts lx sy --confirm --no-send
 ```
 
+入口会按 runtime config 的 `_generated.market` 过滤 open lots：`config.us.json` 只处理 US 标的，`config.hk.json` 只处理 HK 标的；不会跨市场扫描同一账户下的全部期权 lot。到期 +N 天的 eligible cutoff 按标的市场本地日期计算，US 使用美东时间，HK 使用香港时间。短仓期权还必须有到期后的 OpenD spot 证明已经价外才会自动写入过期平仓；价内/平值或缺少 spot 时会进入 assignment review，等待指派/行权结果。
+
 月度收益报表：
 
 ```bash
@@ -764,7 +766,7 @@ README 只记录公开入口和边界。生产 cron id、长驻服务启停和�
 | Strategy Lab 证据记录 | `./om service render --include-strategy-lab-recorder ...` 生成的 `options-monitor-strategy-lab-*.timer` | 独立低频 timer | 写本地 Shadow Replay dataset、mark path、outcome facts、required-data cache 和 receipt；不发通知、不改生产配置 |
 | 调度状态检查 | `./om-agent run --tool scheduler_status --input-json '{"config_key":"us","account":"lx"}'` | 定时或人工检查 | 只读 |
 | 自动交易监听 / 入账 | `python3 -m src.application.trades.auto_intake --config config.us.json --mode apply --yes` | 长驻进程 | 写本地 `option_positions`、intake state/status，并按 receipt 配置发送回执 |
-| 过期自动平仓 | `./om option-positions auto-close-expired --config config.hk.json --accounts lx sy --confirm` | 低频定时或人工触发 | 写本地 `option_positions`、运行状态，并按 receipt 配置发送任务级回执 |
+| 过期自动平仓 | `./om option-positions auto-close-expired --config config.hk.json --accounts lx sy --confirm` | 低频定时或人工触发，按 runtime config market 只处理对应市场标的；短仓需有价外 spot 证据 | 写本地 `option_positions`、运行状态，并按 receipt 配置发送任务级回执 |
 | 版本检查 | `./om-agent run --tool version_check --input-json '{"remote_name":"origin"}'` | 低频只读 | 只读 |
 | 版本更新预览 | `./om-agent run --tool version_update --input-json '{"bump":"patch"}'` | dry-run | 不写 `VERSION` |
 

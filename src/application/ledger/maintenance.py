@@ -3,7 +3,9 @@ from __future__ import annotations
 import importlib
 import uuid
 from dataclasses import replace
+from datetime import datetime, time, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.ledger.position_fields import (
@@ -23,7 +25,9 @@ from domain.domain.ledger.position_fields import (
     normalize_status,
     now_ms,
     parse_exp_to_ms,
+    safe_float,
 )
+from domain.domain.symbol_identity import symbol_market
 from domain.domain.trade_contract_identity import canonical_contract_symbol
 from src.application.ledger.errors import LedgerPreflightError
 from src.application.ledger.lot_resolver import LotCloseResolutionError, resolve_explicit_close_target
@@ -152,6 +156,147 @@ def _auto_close_expiration_anchor(fields: dict[str, Any]) -> tuple[int | None, s
     return int(normalized_ms), exp_source, exp_ymd, int(exp_ms)
 
 
+def _auto_close_market_timezone(fields: dict[str, Any]) -> tuple[str | None, ZoneInfo | timezone]:
+    market = symbol_market(fields.get("symbol"))
+    if market == "US":
+        return market, ZoneInfo("America/New_York")
+    if market == "HK":
+        return market, ZoneInfo("Asia/Hong_Kong")
+    return market, timezone.utc
+
+
+def _auto_close_eligible_after_ms(
+    fields: dict[str, Any],
+    *,
+    exp_ms: int,
+    exp_ymd: str | None,
+    grace_days: int,
+) -> tuple[int, str | None, str]:
+    market, tz = _auto_close_market_timezone(fields)
+    if not exp_ymd:
+        return int(exp_ms) + int(grace_days) * 86400 * 1000, market, "UTC"
+    try:
+        exp_date = datetime.strptime(exp_ymd, "%Y-%m-%d").date()
+    except ValueError:
+        return int(exp_ms) + int(grace_days) * 86400 * 1000, market, "UTC"
+    eligible_local = datetime.combine(exp_date + timedelta(days=int(grace_days)), time.min, tzinfo=tz)
+    return int(eligible_local.astimezone(timezone.utc).timestamp() * 1000), market, str(getattr(tz, "key", "UTC"))
+
+
+_AUTO_CLOSE_VOLATILE_EVIDENCE_KEYS = (
+    "_auto_close_skip_reason",
+    "_auto_close_skip_message",
+    "_auto_close_underlying_spot",
+    "_auto_close_underlier_code",
+    "_auto_close_quote_source",
+    "_auto_close_quote_status",
+    "_auto_close_quote_time_ms",
+    "spot",
+    "underlying_spot",
+    "underlying_price",
+    "stock_price",
+)
+
+
+def _normalize_assignment_option_type(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"put", "p"}:
+        return "put"
+    if text in {"call", "c"}:
+        return "call"
+    return text
+
+
+def _auto_close_underlying_spot(fields: dict[str, Any]) -> float | None:
+    for key in ("_auto_close_underlying_spot", "spot", "underlying_spot", "underlying_price", "stock_price"):
+        value = safe_float(fields.get(key))
+        if value is not None and value > 0:
+            return float(value)
+    return None
+
+
+def _assignment_review_details(fields: dict[str, Any]) -> dict[str, Any] | None:
+    option_type = _normalize_assignment_option_type(fields.get("option_type"))
+    position_side = str(fields.get("side") or fields.get("position_side") or "").strip().lower()
+    if position_side != "short" or option_type not in {"put", "call"}:
+        return None
+
+    strike = effective_strike(fields)
+    spot = _auto_close_underlying_spot(fields)
+    details: dict[str, Any] = {
+        "position_side": position_side,
+        "option_type": option_type,
+        "strike": strike,
+        "spot": spot,
+        "quote_source": str(fields.get("_auto_close_quote_source") or "").strip() or None,
+        "quote_status": str(fields.get("_auto_close_quote_status") or "").strip() or None,
+        "quote_time_ms": safe_float(fields.get("_auto_close_quote_time_ms")),
+        "underlier_code": str(fields.get("_auto_close_underlier_code") or "").strip() or None,
+    }
+    if strike is None:
+        details.update(
+            {
+                "status": "missing_strike",
+                "moneyness": "unknown",
+                "block_auto_close": True,
+                "skip_reason": "expiry_assignment_review_required",
+                "reason": "short option expiry auto-close requires strike; assignment review required",
+            }
+        )
+        return details
+    if spot is None:
+        details.update(
+            {
+                "status": "missing_spot",
+                "moneyness": "unknown",
+                "block_auto_close": True,
+                "skip_reason": "expiry_assignment_review_required",
+                "reason": "short option expiry auto-close requires underlying spot; assignment review required",
+            }
+        )
+        return details
+
+    if option_type == "put":
+        otm_verified = float(spot) > float(strike)
+        intrinsic_value = max(0.0, float(strike) - float(spot))
+    else:
+        otm_verified = float(spot) < float(strike)
+        intrinsic_value = max(0.0, float(spot) - float(strike))
+    details["intrinsic_value"] = intrinsic_value
+    if otm_verified:
+        details.update(
+            {
+                "status": "otm_verified",
+                "moneyness": "otm",
+                "block_auto_close": False,
+            }
+        )
+        return details
+
+    details.update(
+        {
+            "status": "itm_or_atm",
+            "moneyness": "itm_or_atm",
+            "block_auto_close": True,
+            "skip_reason": "expiry_assignment_review_required",
+            "reason": (
+                f"short {option_type} expired in/at the money; wait for assignment outcome: "
+                f"spot={float(spot):g} strike={float(strike):g}"
+            ),
+        }
+    )
+    return details
+
+
+def _merge_auto_close_volatile_evidence(current: dict[str, Any], original: dict[str, Any]) -> dict[str, Any]:
+    out = dict(current)
+    for key in _AUTO_CLOSE_VOLATILE_EVIDENCE_KEYS:
+        value = original.get(key)
+        if value not in (None, ""):
+            out[key] = value
+    return out
+
+
 def _raise_if_legacy_position_lots_without_trade_events(repo: Any) -> None:
     candidate = require_option_positions_event_write_repo(repo)
     count_trade_events = getattr(candidate, "count_trade_events", None)
@@ -176,7 +321,6 @@ def build_expired_close_decisions(
     as_of_dt = exp_ms_to_datetime(as_of_ms)
     if as_of_dt is None:
         raise ValueError("invalid as_of_ms")
-    cutoff_ms = int((as_of_dt.timestamp() - int(grace_days) * 86400) * 1000)
 
     for item in positions:
         fields = dict(item)
@@ -245,7 +389,14 @@ def build_expired_close_decisions(
             )
             continue
 
-        should_close = int(exp_ms) <= cutoff_ms
+        eligible_after_ms, expiration_market, expiration_timezone = _auto_close_eligible_after_ms(
+            fields,
+            exp_ms=int(exp_ms),
+            exp_ymd=exp_ymd,
+            grace_days=grace_days,
+        )
+        eligible_after_dt = exp_ms_to_datetime(eligible_after_ms)
+        should_close = int(as_of_ms) >= int(eligible_after_ms)
         manual_skip_reason = str(fields.get("_auto_close_skip_reason") or "").strip()
         if should_close and manual_skip_reason:
             decisions.append(
@@ -265,8 +416,6 @@ def build_expired_close_decisions(
             )
             continue
         if not should_close:
-            eligible_after_ms = int(exp_ms) + int(grace_days) * 86400 * 1000
-            eligible_after_dt = exp_ms_to_datetime(eligible_after_ms)
             expired_but_waiting = int(exp_ms) <= int(as_of_ms)
             skip_reason = "grace_period_pending" if expired_but_waiting else "not_expired"
             reason_prefix = "expired but waiting grace cutoff" if expired_but_waiting else "not expired"
@@ -290,6 +439,34 @@ def build_expired_close_decisions(
                     details={
                         "eligible_after_ms": eligible_after_ms,
                         "eligible_after_utc": eligible_after_dt.isoformat() if eligible_after_dt else None,
+                        "expiration_market": expiration_market,
+                        "expiration_timezone": expiration_timezone,
+                    },
+                )
+            )
+            continue
+
+        assignment_review = _assignment_review_details(fields)
+        if assignment_review and bool(assignment_review.get("block_auto_close")):
+            decisions.append(
+                ExpiredCloseDecision(
+                    record_id=record_id,
+                    position_id=position_id,
+                    expiration_ms=int(exp_ms),
+                    raw_expiration_ms=raw_exp_ms,
+                    expiration_ymd=exp_ymd,
+                    effective_exp_source=exp_source,
+                    should_close=False,
+                    reason=str(assignment_review.get("reason") or "assignment review required"),
+                    skip_reason=str(assignment_review.get("skip_reason") or "expiry_assignment_review_required"),
+                    contracts_open=contracts_open,
+                    patch=None,
+                    details={
+                        "eligible_after_ms": eligible_after_ms,
+                        "eligible_after_utc": eligible_after_dt.isoformat() if eligible_after_dt else None,
+                        "expiration_market": expiration_market,
+                        "expiration_timezone": expiration_timezone,
+                        "assignment_review": assignment_review,
                     },
                 )
             )
@@ -320,6 +497,13 @@ def build_expired_close_decisions(
                 ),
                 contracts_open=contracts_open,
                 patch=patch_contract,
+                details={
+                    "eligible_after_ms": eligible_after_ms,
+                    "eligible_after_utc": eligible_after_dt.isoformat() if eligible_after_dt else None,
+                    "expiration_market": expiration_market,
+                    "expiration_timezone": expiration_timezone,
+                    **({"assignment_review": assignment_review} if assignment_review else {}),
+                },
             )
         )
     return decisions
@@ -380,6 +564,7 @@ def _fresh_auto_close_positions(repo: Any, positions: list[dict[str, Any]]) -> l
             if current_lot.get("position_id") in (None, "") and original.get("position_id") not in (None, ""):
                 current_lot = dict(current_lot)
                 current_lot["position_id"] = original.get("position_id")
+            current_lot = _merge_auto_close_volatile_evidence(current_lot, original)
             out.append(current_lot)
             continue
         try:
@@ -394,6 +579,7 @@ def _fresh_auto_close_positions(repo: Any, positions: list[dict[str, Any]]) -> l
         current["record_id"] = record_id
         if current.get("position_id") in (None, "") and original.get("position_id") not in (None, ""):
             current["position_id"] = original.get("position_id")
+        current = _merge_auto_close_volatile_evidence(current, original)
         out.append(current)
     return out
 
