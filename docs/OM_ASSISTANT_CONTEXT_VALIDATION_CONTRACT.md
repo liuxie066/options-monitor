@@ -141,7 +141,7 @@ Failure:
 
 ### 5. Tool Compatibility
 
-The validator checks structural compatibility:
+The validator checks structural fit:
 
 - referenced evidence source must be visible to the planner,
 - planned tool must be in the planner manifest,
@@ -236,12 +236,13 @@ The validator must not:
 | answer verifier / guard | factual claim verification |
 | context validator | safe use of prior conversation context |
 
-## Migration Notes
+## Compatibility Notes
 
-During migration, existing active-frame behavior may be represented as a
-synthetic recent turn and evidence ref. The validator should validate the
-planner's explicit reference to that synthetic projection. It should not call
-legacy `_conversation_followup_resolution` as the authority.
+Older audit/session artifacts or historical fixtures may still describe behavior
+that originally came from active-frame logic. If that context is needed, it must
+be represented as a projected recent turn or evidence ref. The validator
+validates the planner's explicit reference to that projection and must not call
+legacy `_conversation_followup_resolution` as an authority.
 
 ## Acceptance Criteria
 

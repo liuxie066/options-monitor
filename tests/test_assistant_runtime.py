@@ -28,6 +28,7 @@ from src.application.assistant.agent_loop import (
     _planner_input_text,
     _planner_tool_manifest,
     _synthesis_input_text,
+    _tool_loop_duplicate_signature,
     build_tool_observation,
     execute_tool_plan,
     parse_tool_plan_payload,
@@ -58,7 +59,7 @@ from src.application.assistant.llm_reply import LlmReplyResult, generate_general
 from src.application.assistant.renderer import render_canonical_tool_result
 from src.application.assistant.settings import PlannerSettings
 from src.application.assistant.session_store import AgentSessionStore, collect_assistant_trace
-from src.application.assistant.task_contract import build_task_contract
+from src.application.assistant.task_contract import TASK_CONTRACT_SCHEMA_VERSION, build_task_contract
 from src.application.assistant.tool_bindings import (
     assistant_tool_bindings,
     config_required_intent_names,
@@ -94,16 +95,44 @@ def _planner_trace(*, reason: str = "accepted", schema_version: str = TOOL_PLAN_
     }
 
 
+def _test_task_contract(
+    *,
+    goal: str = "test plan",
+    domain: str = "general",
+    task_mode: str = "summarize",
+    requested_effect: str = "read",
+    scope: dict[str, Any] | None = None,
+    required_answer: tuple[str, ...] = ("summary",),
+    required_evidence: tuple[str, ...] = ("current_state",),
+    answer_shape: tuple[str, ...] = ("conclusion",),
+    intent_families: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    return {
+        "schema_version": TASK_CONTRACT_SCHEMA_VERSION,
+        "goal": goal,
+        "domain": domain,
+        "task_mode": task_mode,
+        "requested_effect": requested_effect,
+        "intent_families": list(intent_families),
+        "scope": dict(scope or {}),
+        "required_answer": list(required_answer),
+        "required_evidence": list(required_evidence),
+        "answer_shape": list(answer_shape),
+    }
+
+
 def _plan_result(
     tool_name: str,
     arguments: dict[str, Any] | None = None,
     *,
     goal: str = "test plan",
     purpose: str = "",
+    task_contract: dict[str, Any] | None = None,
 ) -> LlmPlannerResult:
     return LlmPlannerResult(
         plan=PlannerPlan(
             goal=goal,
+            task_contract=task_contract or _test_task_contract(goal=goal),
             steps=(
                 PlannerPlanStep(
                     id="step_1",
@@ -542,6 +571,11 @@ def test_action_safety_allows_lowercase_symbol_edit_with_full_task_contract() ->
     question = "设置 tigr covered call min strike 6.5"
     plan = PlannerPlan(
         goal=question,
+        task_contract=_test_task_contract(
+            goal=question,
+            task_mode="preview_write",
+            requested_effect="preview_write",
+        ),
         steps=(
             PlannerPlanStep(
                 id="step_1",
@@ -1165,6 +1199,7 @@ def test_agent_loop_planner_catalog_matches_registry_backed_manifest() -> None:
     validate_tool_plan(
         PlannerPlan(
             goal="补升级操作时间线证据",
+            task_contract=_test_task_contract(goal="补升级操作时间线证据", domain="operation", task_mode="diagnose"),
             steps=(
                 PlannerPlanStep(
                     id="step_1",
@@ -1195,6 +1230,7 @@ def test_agent_loop_planner_catalog_matches_registry_backed_manifest() -> None:
     validate_tool_plan(
         PlannerPlan(
             goal="解释泡泡玛特候选过滤参数",
+            task_contract=_test_task_contract(goal="解释泡泡玛特候选过滤参数", domain="candidate", task_mode="diagnose"),
             steps=(
                 PlannerPlanStep(
                     id="step_1",
@@ -1320,6 +1356,7 @@ def test_agent_loop_planner_uses_context_projection_while_synthesis_excludes_pro
         "继续",
         plan=PlannerPlan(
             goal="继续分析",
+            task_contract=_test_task_contract(goal="继续分析", task_mode="analyze"),
             steps=(
                 PlannerPlanStep(
                     id="step_1",
@@ -1430,6 +1467,7 @@ def test_agent_loop_planner_input_keeps_explicit_account_message_ahead_of_projec
             question,
             plan=PlannerPlan(
                 goal="解释账户净收入",
+                task_contract=_test_task_contract(goal="解释账户净收入", domain="income", task_mode="explain"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -2272,6 +2310,12 @@ def test_assistant_runtime_agent_loop_prioritizes_bare_upgrade_confirm_over_plan
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="误判为立即升级",
+                task_contract=_test_task_contract(
+                    goal="误判为立即升级",
+                    domain="operation",
+                    task_mode="preview_write",
+                    requested_effect="preview_write",
+                ),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -3335,11 +3379,12 @@ def test_assistant_runtime_two_turn_candidate_net_income_followup_uses_projectio
             return LlmPlannerResult(
                 plan=PlannerPlan(
                     goal="解释泡泡玛特 sell_put 候选过滤参数",
-                    task_contract={
-                        "domain": "candidate",
-                        "task_mode": "diagnose",
-                        "intent_families": ["candidate_filter_explain"],
-                    },
+                    task_contract=_test_task_contract(
+                        goal="解释泡泡玛特 sell_put 候选过滤参数",
+                        domain="candidate",
+                        task_mode="diagnose",
+                        intent_families=("candidate_filter_explain",),
+                    ),
                     steps=(
                         PlannerPlanStep(
                             id="step_1",
@@ -3357,11 +3402,12 @@ def test_assistant_runtime_two_turn_candidate_net_income_followup_uses_projectio
             return LlmPlannerResult(
                 plan=PlannerPlan(
                     goal="解释候选合约净收入计算口径",
-                    task_contract={
-                        "domain": "candidate",
-                        "task_mode": "explain",
-                        "intent_families": ["analysis_query"],
-                    },
+                    task_contract=_test_task_contract(
+                        goal="解释候选合约净收入计算口径",
+                        domain="candidate",
+                        task_mode="explain",
+                        intent_families=("analysis_query",),
+                    ),
                     steps=(
                         PlannerPlanStep(
                             id="step_1",
@@ -3514,11 +3560,12 @@ def test_assistant_runtime_two_turn_account_net_income_override_suppresses_candi
             return LlmPlannerResult(
                 plan=PlannerPlan(
                     goal="解释泡泡玛特 sell_put 候选过滤参数",
-                    task_contract={
-                        "domain": "candidate",
-                        "task_mode": "diagnose",
-                        "intent_families": ["candidate_filter_explain"],
-                    },
+                    task_contract=_test_task_contract(
+                        goal="解释泡泡玛特 sell_put 候选过滤参数",
+                        domain="candidate",
+                        task_mode="diagnose",
+                        intent_families=("candidate_filter_explain",),
+                    ),
                     steps=(
                         PlannerPlanStep(
                             id="step_1",
@@ -3536,11 +3583,12 @@ def test_assistant_runtime_two_turn_account_net_income_override_suppresses_candi
             return LlmPlannerResult(
                 plan=PlannerPlan(
                     goal="解释账户净收入计算口径",
-                    task_contract={
-                        "domain": "income",
-                        "task_mode": "explain",
-                        "intent_families": ["analysis_query"],
-                    },
+                    task_contract=_test_task_contract(
+                        goal="解释账户净收入计算口径",
+                        domain="income",
+                        task_mode="explain",
+                        intent_families=("analysis_query",),
+                    ),
                     steps=(
                         PlannerPlanStep(
                             id="step_1",
@@ -3978,6 +4026,7 @@ def test_assistant_runtime_agent_loop_executes_planned_cashflow_detail(tmp_path:
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="分析 lx 2026-06 的净现金流明细",
+                task_contract=_test_task_contract(goal="分析 lx 2026-06 的净现金流明细"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -4102,6 +4151,7 @@ def test_assistant_runtime_agent_loop_satisfies_single_account_return_capability
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="查询 lx 2026-06 单账户收益",
+                task_contract=_test_task_contract(goal="查询 lx 2026-06 单账户收益"),
                 required_capabilities=("account_return",),
                 steps=(
                     PlannerPlanStep(
@@ -4207,6 +4257,7 @@ def test_assistant_runtime_agent_loop_injects_config_for_symbol_config_read(tmp_
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="查询泡泡玛特 sell put max strike",
+                task_contract=_test_task_contract(goal="查询泡泡玛特 sell put max strike"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -4316,6 +4367,7 @@ def test_assistant_runtime_agent_loop_injects_config_for_candidate_filter_explai
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="解释泡泡玛特候选过滤参数",
+                task_contract=_test_task_contract(goal="解释泡泡玛特候选过滤参数"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -4472,6 +4524,7 @@ def test_assistant_runtime_candidate_filter_metric_acronyms_do_not_trigger_rende
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="解释泡泡玛特候选过滤参数",
+                task_contract=_test_task_contract(goal="解释泡泡玛特候选过滤参数"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -4713,6 +4766,7 @@ def test_assistant_runtime_agent_loop_satisfies_position_read_tool_capabilities(
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="读取当前持仓明细",
+                task_contract=_test_task_contract(goal="读取当前持仓明细"),
                 required_capabilities=("option_positions", "read_only"),
                 steps=(
                     PlannerPlanStep(
@@ -4846,6 +4900,7 @@ def test_assistant_runtime_agent_loop_routes_assigned_stock_holding_pnl(tmp_path
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="查看 lx 指派正股持仓盈亏",
+                task_contract=_test_task_contract(goal="查看 lx 指派正股持仓盈亏"),
                 required_capabilities=("assigned_stock_positions", "read_only"),
                 steps=(
                     PlannerPlanStep(
@@ -4971,6 +5026,7 @@ def test_assistant_runtime_agent_loop_analyzes_assigned_stock_when_requested(tmp
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="分析 lx 指派正股持仓盈亏",
+                task_contract=_test_task_contract(goal="分析 lx 指派正股持仓盈亏"),
                 required_capabilities=("assigned_stock_positions", "read_only"),
                 steps=(
                     PlannerPlanStep(
@@ -5091,6 +5147,7 @@ def test_assistant_runtime_agent_loop_assigned_stock_falls_back_from_invented_am
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="查看 lx 指派正股持仓盈亏",
+                task_contract=_test_task_contract(goal="查看 lx 指派正股持仓盈亏"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -5200,6 +5257,7 @@ def test_assistant_runtime_agent_loop_grounded_positions_fall_back_from_wrong_co
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="分析当前持仓",
+                task_contract=_test_task_contract(goal="分析当前持仓"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -5306,6 +5364,7 @@ def test_assistant_runtime_agent_loop_reports_unsatisfied_combined_income_capabi
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="查询全部账户 2026-05 合并总收益",
+                task_contract=_test_task_contract(goal="查询全部账户 2026-05 合并总收益"),
                 required_capabilities=("combined_account_return",),
                 steps=(
                     PlannerPlanStep(
@@ -5436,6 +5495,7 @@ def test_assistant_runtime_agent_loop_canonical_income_uses_untruncated_fact_obs
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="查询全部账户 2026-06 合并收益",
+                task_contract=_test_task_contract(goal="查询全部账户 2026-06 合并收益"),
                 required_capabilities=("combined_account_return",),
                 steps=(
                     PlannerPlanStep(
@@ -5542,6 +5602,7 @@ def test_assistant_runtime_agent_loop_uses_canonical_fallback_when_synthesis_una
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="查询lx账户2026年6月的收益情况",
+                task_contract=_test_task_contract(goal="查询lx账户2026年6月的收益情况"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -5681,6 +5742,7 @@ def test_assistant_runtime_agent_loop_analysis_query_uses_task_shaped_fallback(t
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="对比 lx 和 sy 的账户收益",
+                task_contract=_test_task_contract(goal="对比 lx 和 sy 的账户收益"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -5899,6 +5961,7 @@ def test_agent_loop_replans_analysis_query_for_breakdown_gap(tmp_path: Path) -> 
             return LlmPlannerResult(
                 plan=PlannerPlan(
                     goal="分析 lx 和 sy 收益差异主要来自哪里",
+                    task_contract=_test_task_contract(goal="分析 lx 和 sy 收益差异主要来自哪里"),
                     steps=(
                         PlannerPlanStep(
                             id="step_2",
@@ -5919,6 +5982,7 @@ def test_agent_loop_replans_analysis_query_for_breakdown_gap(tmp_path: Path) -> 
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="分析 lx 和 sy 收益差异主要来自哪里",
+                task_contract=_test_task_contract(goal="分析 lx 和 sy 收益差异主要来自哪里"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -6043,6 +6107,7 @@ def test_agent_loop_replans_analysis_query_for_missing_account_coverage(tmp_path
             return LlmPlannerResult(
                 plan=PlannerPlan(
                     goal="对比 lx 和 sy 的账户收益",
+                    task_contract=_test_task_contract(goal="对比 lx 和 sy 的账户收益"),
                     steps=(
                         PlannerPlanStep(
                             id="step_2",
@@ -6063,6 +6128,7 @@ def test_agent_loop_replans_analysis_query_for_missing_account_coverage(tmp_path
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="对比 lx 和 sy 的账户收益",
+                task_contract=_test_task_contract(goal="对比 lx 和 sy 的账户收益"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -6201,6 +6267,7 @@ def test_agent_loop_followup_contract_limits_tools_to_recoverable_gap() -> None:
 
     wrong_operation_plan = PlannerPlan(
         goal="补查升级版本和回执",
+        task_contract=_test_task_contract(goal="补查升级版本和回执"),
         steps=(
             PlannerPlanStep(
                 id="step_2",
@@ -6216,6 +6283,7 @@ def test_agent_loop_followup_contract_limits_tools_to_recoverable_gap() -> None:
 
     catalog_plan = PlannerPlan(
         goal="查看分析字段",
+        task_contract=_test_task_contract(goal="查看分析字段"),
         steps=(PlannerPlanStep(id="step_2", tool_name="analysis_catalog", arguments={}),),
     )
     assert _followup_tool_allowlist_rejection(catalog_plan, evidence_gaps=[analysis_gap]) == ""
@@ -6254,6 +6322,7 @@ def test_agent_loop_rejects_duplicate_analysis_followup_query(tmp_path: Path) ->
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="分析 lx 和 sy 收益差异主要来自哪里",
+                task_contract=_test_task_contract(goal="分析 lx 和 sy 收益差异主要来自哪里"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -6287,6 +6356,25 @@ def test_agent_loop_rejects_duplicate_analysis_followup_query(tmp_path: Path) ->
     assert tool_plan_data["followup_decisions"][0]["status"] == "rejected"
     assert tool_plan_data["followup_decisions"][0]["reason"] == "follow-up plan duplicates the previous plan"
     assert tool_plan_data["evidence_gaps"][0]["kind"] == "analysis_missing_account_coverage"
+
+
+def test_tool_loop_duplicate_signature_ignores_system_injected_fields() -> None:
+    base = {"action": "list", "account": "lx", "status": "open"}
+    with_system_fields = {
+        **base,
+        "config_key": "us",
+        "config_path": "/private/tmp/config.us.json",
+        "audit_db": "/private/tmp/inbound.sqlite3",
+        "message_id": "msg_1",
+        "command_id": "cmd_1",
+    }
+
+    signature = _tool_loop_duplicate_signature("option_positions_read", with_system_fields)
+
+    assert signature == _tool_loop_duplicate_signature("option_positions_read", base)
+    assert "config_path" not in signature
+    assert "/private/tmp" not in signature
+    assert "audit_db" not in signature
 
 
 def test_agent_loop_repairs_analysis_query_unknown_column_preflight(tmp_path: Path) -> None:
@@ -6356,6 +6444,7 @@ def test_agent_loop_repairs_analysis_query_unknown_column_preflight(tmp_path: Pa
             return LlmPlannerResult(
                 plan=PlannerPlan(
                     goal="查询 lx 六月收益",
+                    task_contract=_test_task_contract(goal="查询 lx 六月收益"),
                     steps=(
                         PlannerPlanStep(
                             id="step_2",
@@ -6376,6 +6465,7 @@ def test_agent_loop_repairs_analysis_query_unknown_column_preflight(tmp_path: Pa
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="查询 lx 六月收益",
+                task_contract=_test_task_contract(goal="查询 lx 六月收益"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -6479,6 +6569,7 @@ def test_agent_loop_rejects_preflight_repair_without_suggested_field(tmp_path: P
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="查询 lx 六月收益",
+                task_contract=_test_task_contract(goal="查询 lx 六月收益"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -6545,6 +6636,7 @@ def test_agent_loop_followup_low_risk_clarification_downgrades_to_gap(tmp_path: 
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="查询收益",
+                task_contract=_test_task_contract(goal="查询收益"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -6725,6 +6817,7 @@ def test_assistant_runtime_agent_loop_answer_guard_rewrites_contradictory_income
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="查询历史以来总的净现金流",
+                task_contract=_test_task_contract(goal="查询历史以来总的净现金流"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -6860,6 +6953,7 @@ def test_assistant_runtime_agent_loop_answer_guard_falls_back_on_analysis_policy
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="分析 lx 收益率",
+                task_contract=_test_task_contract(goal="分析 lx 收益率"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -6977,6 +7071,7 @@ def test_assistant_runtime_agent_loop_answer_guard_falls_back_on_missing_diagnos
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="解释 NVDA 没出现在候选里的原因",
+                task_contract=_test_task_contract(goal="解释 NVDA 没出现在候选里的原因"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -7078,6 +7173,7 @@ def test_assistant_runtime_agent_loop_answer_guard_falls_back_on_unsupported_quo
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="解释 sy FUTU 指派正股为什么没有浮盈亏",
+                task_contract=_test_task_contract(goal="解释 sy FUTU 指派正股为什么没有浮盈亏"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -7190,6 +7286,7 @@ def test_assistant_runtime_agent_loop_answer_guard_rewrites_internal_ux_leak(tmp
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="对比 lx 和 sy 的账户收益",
+                task_contract=_test_task_contract(goal="对比 lx 和 sy 的账户收益"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -7320,6 +7417,7 @@ def test_assistant_runtime_agent_loop_answer_guard_accepts_derived_difference_re
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="对比 lx 和 sy 的账户收益",
+                task_contract=_test_task_contract(goal="对比 lx 和 sy 的账户收益"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -7437,6 +7535,7 @@ def test_assistant_runtime_agent_loop_answer_guard_rewrites_wrong_derived_rate(t
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="分析 lx 收益率",
+                task_contract=_test_task_contract(goal="分析 lx 收益率"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -7553,6 +7652,7 @@ def test_assistant_runtime_agent_loop_answer_guard_rewrites_wrong_contribution_s
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="分析 sy 六月收益贡献",
+                task_contract=_test_task_contract(goal="分析 sy 六月收益贡献"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -7719,6 +7819,7 @@ def test_assistant_runtime_agent_loop_grounded_income_falls_back_from_wrong_cont
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="查询 2026-06 收益组成",
+                task_contract=_test_task_contract(goal="查询 2026-06 收益组成"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -7835,6 +7936,7 @@ def test_assistant_runtime_agent_loop_grounded_income_returns_facts_when_llm_una
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="查询 2026-06 收益组成",
+                task_contract=_test_task_contract(goal="查询 2026-06 收益组成"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -7915,6 +8017,7 @@ def test_assistant_runtime_agent_loop_rejects_disallowed_plan_tool(tmp_path: Pat
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="非法升级",
+                task_contract=_test_task_contract(goal="非法升级"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -7991,6 +8094,7 @@ def test_assistant_runtime_agent_loop_plans_manual_trade_open_preview(monkeypatc
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="记录 sy 的腾讯开仓成交",
+                task_contract=_test_task_contract(goal="记录 sy 的腾讯开仓成交"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -8256,6 +8360,7 @@ def test_assistant_runtime_agent_loop_cancels_manual_trade_open_preview(monkeypa
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="记录 sy 的腾讯开仓成交",
+                task_contract=_test_task_contract(goal="记录 sy 的腾讯开仓成交"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -8390,6 +8495,7 @@ def test_assistant_runtime_agent_loop_rejects_read_plan_for_trade_preview_reques
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="误判为持仓查询",
+                task_contract=_test_task_contract(goal="误判为持仓查询"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -8454,6 +8560,7 @@ def test_assistant_runtime_agent_loop_action_safety_rejects_preview_for_read_req
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="错误地把只读收益问题规划成交易预览",
+                task_contract=_test_task_contract(goal="错误地把只读收益问题规划成交易预览"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -8519,6 +8626,7 @@ def test_assistant_runtime_agent_loop_rejects_confirm_plan(tmp_path: Path) -> No
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="非法确认",
+                task_contract=_test_task_contract(goal="非法确认"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -8572,12 +8680,13 @@ def test_plan_read_only_tools_treats_empty_steps_as_no_plan() -> None:
         calls.append(dict(kwargs))
         return {
             "output_text": json.dumps(
-                {
-                    "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-                    "goal": "无法安全规划",
-                    "required_capabilities": [],
-                    "steps": [],
-                }
+                    {
+                        "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+                        "goal": "无法安全规划",
+                        "task_contract": _test_task_contract(goal="无法安全规划"),
+                        "required_capabilities": [],
+                        "steps": [],
+                    }
             )
         }
 
@@ -8615,12 +8724,13 @@ def test_plan_read_only_tools_traces_context_projection() -> None:
         calls.append(dict(kwargs))
         return {
             "output_text": json.dumps(
-                {
-                    "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-                    "goal": "无法安全规划",
-                    "required_capabilities": [],
-                    "steps": [],
-                }
+                    {
+                        "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+                        "goal": "无法安全规划",
+                        "task_contract": _test_task_contract(goal="无法安全规划"),
+                        "required_capabilities": [],
+                        "steps": [],
+                    }
             )
         }
 
@@ -8659,6 +8769,7 @@ def test_parse_tool_plan_payload_defaults_missing_context_use() -> None:
         {
             "schema_version": TOOL_PLAN_SCHEMA_VERSION,
             "goal": "check runtime status",
+            "task_contract": _test_task_contract(goal="check runtime status"),
             "required_capabilities": [],
             "steps": [
                 {
@@ -8690,6 +8801,7 @@ def test_parse_tool_plan_payload_round_trips_context_use() -> None:
         {
             "schema_version": TOOL_PLAN_SCHEMA_VERSION,
             "goal": "explain candidate net income",
+            "task_contract": _test_task_contract(goal="explain candidate net income"),
             "required_capabilities": [],
             "context_use": {
                 "schema_version": PLANNER_CONTEXT_USE_SCHEMA_VERSION,
@@ -8731,11 +8843,12 @@ def test_plan_read_only_tools_accepts_valid_context_use_before_execution() -> No
         calls.append(dict(kwargs))
         return {
             "output_text": json.dumps(
-                {
-                    "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-                    "goal": "check runtime status",
-                    "required_capabilities": [],
-                    "context_use": {
+                    {
+                        "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+                        "goal": "check runtime status",
+                        "task_contract": _test_task_contract(goal="check runtime status"),
+                        "required_capabilities": [],
+                        "context_use": {
                         "schema_version": PLANNER_CONTEXT_USE_SCHEMA_VERSION,
                         "mode": "carry",
                         "referenced_turn_ids": ["turn_1"],
@@ -8803,11 +8916,12 @@ def test_plan_read_only_tools_blocks_invalid_context_after_failed_repair() -> No
         calls.append(dict(_kwargs))
         return {
             "output_text": json.dumps(
-                {
-                    "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-                    "goal": "continue previous scope",
-                    "required_capabilities": [],
-                    "context_use": {
+                    {
+                        "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+                        "goal": "continue previous scope",
+                        "task_contract": _test_task_contract(goal="continue previous scope"),
+                        "required_capabilities": [],
+                        "context_use": {
                         "schema_version": PLANNER_CONTEXT_USE_SCHEMA_VERSION,
                         "mode": "carry",
                         "referenced_turn_ids": [],
@@ -8895,11 +9009,12 @@ def test_plan_read_only_tools_repairs_blocked_context_before_accepting() -> None
         }
         return {
             "output_text": json.dumps(
-                {
-                    "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-                    "goal": "continue previous scope",
-                    "required_capabilities": [],
-                    "context_use": context_use,
+                    {
+                        "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+                        "goal": "continue previous scope",
+                        "task_contract": _test_task_contract(goal="continue previous scope"),
+                        "required_capabilities": [],
+                        "context_use": context_use,
                     "steps": [
                         {
                             "id": "step_1",
@@ -8965,11 +9080,12 @@ def test_plan_read_only_tools_asks_clarification_for_ambiguous_context_without_r
         calls.append(dict(kwargs))
         return {
             "output_text": json.dumps(
-                {
-                    "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-                    "goal": "continue ambiguous scope",
-                    "required_capabilities": [],
-                    "context_use": {
+                    {
+                        "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+                        "goal": "continue ambiguous scope",
+                        "task_contract": _test_task_contract(goal="continue ambiguous scope"),
+                        "required_capabilities": [],
+                        "context_use": {
                         "schema_version": PLANNER_CONTEXT_USE_SCHEMA_VERSION,
                         "mode": "carry",
                         "referenced_turn_ids": [],
@@ -9047,6 +9163,7 @@ def test_execute_tool_plan_blocks_invalid_context_before_tool_call(tmp_path: Pat
             plan_payload={
                 "schema_version": TOOL_PLAN_SCHEMA_VERSION,
                 "goal": "continue previous scope",
+                "task_contract": _test_task_contract(goal="continue previous scope"),
                 "required_capabilities": [],
                 "context_use": {
                     "schema_version": PLANNER_CONTEXT_USE_SCHEMA_VERSION,
@@ -9120,6 +9237,7 @@ def test_tool_plan_json_schema_exposes_optional_context_use() -> None:
 def test_validate_tool_plan_leaves_context_use_to_context_validator() -> None:
     plan = PlannerPlan(
         goal="check runtime status",
+        task_contract=_test_task_contract(goal="check runtime status"),
         steps=(
             PlannerPlanStep(
                 id="step_1",
@@ -9210,6 +9328,7 @@ def test_tool_plan_rejects_system_scoped_argument_families() -> None:
     for tool_name, arguments, expected_banned in cases:
         plan = PlannerPlan(
             goal="unsafe system argument",
+            task_contract=_test_task_contract(goal="unsafe system argument"),
             steps=(
                 PlannerPlanStep(
                     id="step_1",
@@ -9235,6 +9354,7 @@ def test_agent_loop_income_cashflow_eval_plan_guard() -> None:
             "text": "历史以来总的净现金流",
             "plan": PlannerPlan(
                 goal="查询历史以来总的净现金流",
+                task_contract=_test_task_contract(goal="查询历史以来总的净现金流"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -9250,6 +9370,7 @@ def test_agent_loop_income_cashflow_eval_plan_guard() -> None:
             "text": "所有账户累计净现金流",
             "plan": PlannerPlan(
                 goal="查询所有账户累计净现金流",
+                task_contract=_test_task_contract(goal="查询所有账户累计净现金流"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -9265,6 +9386,7 @@ def test_agent_loop_income_cashflow_eval_plan_guard() -> None:
             "text": "5月和6月的总收益",
             "plan": PlannerPlan(
                 goal="获取5月和6月的总收益",
+                task_contract=_test_task_contract(goal="获取5月和6月的总收益"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -9289,6 +9411,7 @@ def test_agent_loop_income_cashflow_eval_plan_guard() -> None:
             "text": "今年以来各账户收益对比",
             "plan": PlannerPlan(
                 goal="今年以来各账户收益对比",
+                task_contract=_test_task_contract(goal="今年以来各账户收益对比"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -9304,6 +9427,7 @@ def test_agent_loop_income_cashflow_eval_plan_guard() -> None:
             "text": "分析 lx 6月的净现金流明细，重点是明细",
             "plan": PlannerPlan(
                 goal="分析 lx 6月的净现金流明细",
+                task_contract=_test_task_contract(goal="分析 lx 6月的净现金流明细"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -9321,6 +9445,7 @@ def test_agent_loop_income_cashflow_eval_plan_guard() -> None:
             "text": "sy 2026-06 收益由什么组成",
             "plan": PlannerPlan(
                 goal="sy 2026-06 收益组成",
+                task_contract=_test_task_contract(goal="sy 2026-06 收益组成"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -9338,6 +9463,7 @@ def test_agent_loop_income_cashflow_eval_plan_guard() -> None:
             "text": "lx 6月权利金收入和已实现PnL分别是多少",
             "plan": PlannerPlan(
                 goal="lx 6月权利金和已实现PnL",
+                task_contract=_test_task_contract(goal="lx 6月权利金和已实现PnL"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -9353,6 +9479,7 @@ def test_agent_loop_income_cashflow_eval_plan_guard() -> None:
             "text": "6月收益分析",
             "plan": PlannerPlan(
                 goal="分析 6月收益",
+                task_contract=_test_task_contract(goal="分析 6月收益"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -9368,6 +9495,7 @@ def test_agent_loop_income_cashflow_eval_plan_guard() -> None:
             "text": "6月收益",
             "plan": PlannerPlan(
                 goal="6月收益",
+                task_contract=_test_task_contract(goal="6月收益"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -9435,7 +9563,7 @@ def test_assistant_runtime_agent_loop_empty_plan_uses_general_reply_for_non_busi
         _conversation_context: dict[str, Any] | None,
     ) -> LlmPlannerResult:
         return LlmPlannerResult(
-            plan=PlannerPlan(goal="无法安全规划", steps=()),
+            plan=PlannerPlan(goal="无法安全规划", task_contract=_test_task_contract(goal="无法安全规划"), steps=()),
             trace={
                 "enabled": True,
                 "attempted": True,

@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 1.2.311 - 2026-06-19
+
+### Added
+- Added the Assistant Tool Calling v2 system design, documenting the model-driven read loop, capability selection,
+  evidence-loop, clarification, risk, trace, and release rollout boundaries.
+- Added Assistant trace fields for capability selection risk/source, loop stop reason, repair attempts, and read-loop
+  guard decisions.
+
+### Changed
+- Made Assistant planner output require an explicit `task_contract`, and migrated assistant eval fixtures and tests to
+  the current planner contract shape without preserving the old planner path.
+- Tightened the automatic Assistant read loop with risk-class checks, read-only enforcement, duplicate-call prevention,
+  scoped evidence follow-up, and release-ready regression coverage.
+
 ## 1.2.310 - 2026-06-19
 
 ### Fixed

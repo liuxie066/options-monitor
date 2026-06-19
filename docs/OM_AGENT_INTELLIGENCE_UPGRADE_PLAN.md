@@ -6,6 +6,12 @@
 > [OM_ASSISTANT_ARCHITECTURE.md](OM_ASSISTANT_ARCHITECTURE.md): `./om-agent`
 > is the Tool Gateway, `./om assistant` is the Inbound Assistant, and
 > `AgentLoop` is an internal assistant planner loop.
+>
+> Current reading note: the current Tool Calling v2 direction is model-driven
+> read iteration with deterministic guardrails. Read older `CoverageVerifier`
+> and `AnswerVerifier` language below as post-check/fallback guardrails, not as
+> the primary loop driver, a second intelligence layer, or a preserved path for
+> old planner shapes.
 
 本文档记录历史上的智能化 1-7 阶段方案。它不是当前产品名，
 也不是替换现有 AgentLoop 的并行架构；它是在
@@ -103,6 +109,7 @@ Planner 输出结构：
   "schema_version": "om-tool-plan-v2",
   "task_contract": {
     "schema_version": "om-agent-task-contract-v1",
+    "goal": "分析 2026-06 收益来源",
     "domain": "income",
     "task_mode": "analyze",
     "requested_effect": "read",
@@ -128,16 +135,16 @@ Planner 输出结构：
 
 规则：
 
-- `task_contract` 可选兼容旧 planner 输出；缺失时由现有 deterministic
-  `build_task_contract` 反推。
+- `task_contract` 是 Planner 的必需合同；缺失应推动 fixture / provider
+  schema 更新，不保留旧 planner 输出路径。
 - Planner 不能输出 renderer、canonical、synthesis 或 response mode。
 - `requested_effect` 只表达意图，不授予权限。
 - AgentLoop 对 Planner 合同做裁剪、归一化和 trace 记录。
 
 验收：
 
-- Provider schema 接受 `task_contract`。
-- 旧测试和旧 planner fixture 继续可用。
+- Provider schema 必须接受并输出 `task_contract`。
+- 旧测试和旧 planner fixture 更新到新 schema，不保留旧输出路径。
 - AgentSession 可看到 Planner 声明的任务域、任务形态、证据需求和回答形态。
 
 ## Phase 3: Coverage From TaskContract
@@ -283,7 +290,7 @@ Release gate：
 建议按以下 PR / commit 切片执行：
 
 1. Eval + trace baseline。
-2. Planner schema 接入 `task_contract`，旧输出兼容。
+2. Planner schema 接入 `task_contract`，同步更新旧 fixture，不保留旧输出路径。
 3. `TaskContract` 增加 `domain`、`task_mode`、`requested_effect`、
    `required_evidence`、`answer_shape`。
 4. CoverageVerifier 消费 `required_evidence` 和 `task_mode`，扩展 summary-only
@@ -299,8 +306,8 @@ pending-operation 权限权威，并补足 trace / verify / eval，而不扩大�
 
 - `analysis_catalog` 暴露 `investigation_recipes`，让 Planner 能把任务契约和证据缺口映射到
   `analysis_query`、`operation_timeline`、`assistant_trace` 等通用调查工具。
-- Planner schema / trace 已接入 `selected_recipe`；新 planner 可显式声明 recipe，旧 planner
-  缺省时 runtime 会按 `task_contract` 推导，并写入 AgentSession plan revision。
+- Planner schema / trace 已接入 `selected_recipe`；当前 planner payload 可显式声明 recipe，
+  未声明时 runtime 会按 `task_contract` 推导，并写入 AgentSession plan revision。
 - preview / confirm / cancel / readback 的 AgentSession trace 携带 `action_lifecycle`，
   `operation_timeline` 也输出 phase / verify status，方便执行后用通用读回证据解释闭环。
 - CoverageVerifier 已消费 `selected_recipe.evidence_needs`：收益分析 recipe 会要求拆解/driver 证据，

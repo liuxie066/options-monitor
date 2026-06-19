@@ -6,6 +6,12 @@
 > [OM_ASSISTANT_ARCHITECTURE.md](OM_ASSISTANT_ARCHITECTURE.md): `./om-agent`
 > is the Tool Gateway, `./om assistant` is the Inbound Assistant, and
 > `AgentLoop` is an internal assistant planner loop.
+>
+> Current reading note: keep the high-level goal of bounded multi-tool answers,
+> but read older verifier/replan language as guardrail design. Current Tool
+> Calling v2 direction lets the model drive read-tool continuation while code
+> enforces scope, risk, budget, duplicate prevention, evidence, and trace. Do
+> not preserve old planner or answer paths as alternate contracts.
 
 This historical document recorded a path from the older OM Ops Copilot framing
 to a complete bounded assistant loop. It is not a new public surface. The
@@ -92,8 +98,8 @@ Current implementation status:
   contract-based verifier checks explicit `USD` / `HKD` / `CNY` amount claims,
   share/contract/row quantities, dates, symbols, and explicit status claims
   against EvidenceBundle facts and approved reconciliation sums. The older
-  targeted answer guard remains as compatibility protection for percentages and
-  scenario-specific checks.
+  targeted answer guard remains only as a narrow safety check for percentages
+  and scenario-specific protections while contract verification is the target.
 - Phase 6 is implemented: preview-write/admin responses include a unified
   `permission_request` object built from the existing pending-operation store,
   and operators can inspect durable Agent decisions with
@@ -339,8 +345,9 @@ Persistence policy:
 ### EvidenceBundle
 
 `EvidenceBundle` is the structured authority for final answers. It replaces
-single-step `AnswerEvidence` as the general internal model, while keeping
-`AnswerEvidence` as a compatibility adapter during migration.
+single-step `AnswerEvidence` as the general internal model. Do not keep a
+long-lived `AnswerEvidence` route switch; update callers toward
+`EvidenceBundle` as the answer source.
 
 Recommended shape:
 
@@ -406,6 +413,21 @@ goal, required capabilities, and tool steps:
   "schema_version": "om-tool-plan-v2",
   "goal": "explain assigned stock PnL for sy",
   "required_capabilities": ["positions", "quotes", "pnl"],
+  "task_contract": {
+    "schema_version": "om-agent-task-contract-v1",
+    "goal": "explain assigned stock PnL for sy",
+    "domain": "position",
+    "task_mode": "summarize",
+    "requested_effect": "read",
+    "scope": {
+      "accounts": ["sy"],
+      "symbols": [],
+      "config_keys": ["us"]
+    },
+    "required_answer": ["summary", "source_and_policy"],
+    "required_evidence": ["current_state", "quote_freshness", "source_policy"],
+    "answer_shape": ["conclusion", "evidence_boundary", "source_policy"]
+  },
   "steps": [
     {
       "tool_name": "option_positions_read",
@@ -521,8 +543,8 @@ Rules:
 
 ### Contract-Based Verification
 
-The current answer guard can remain as a compatibility layer, but the target
-verifier should be contract-based:
+The current answer guard should shrink to targeted safety checks while the
+target verifier becomes contract-based:
 
 ```text
 tool output contract
@@ -621,8 +643,9 @@ separate.
 
 The financial answer verifier checks explicit currency amounts,
 share/contract/row quantities, dates, symbols, and status claims against
-`EvidenceBundle` facts and approved reconciliation sums. Targeted legacy guards
-remain as compatibility checks for scenario-specific protections.
+`EvidenceBundle` facts and approved reconciliation sums. Older targeted guards
+may remain only as scenario-specific safety checks while contract verification
+absorbs those cases.
 
 ### Permission Request And Debug UX
 

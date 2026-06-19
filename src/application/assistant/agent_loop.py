@@ -44,7 +44,7 @@ from src.application.assistant.llm_common import (
 from src.application.assistant.renderer import render_canonical_tool_result, render_inbound_text
 from src.application.assistant.session import build_agent_session_snapshot
 from src.application.assistant.settings import AssistantLlmSettings, AssistantSettings
-from src.application.assistant.task_contract import build_task_contract
+from src.application.assistant.task_contract import TASK_CONTRACT_SCHEMA_VERSION, build_task_contract
 from src.application.assistant.tool_bindings import (
     planner_binding_for_tool,
     planner_config_scoped_tool_names,
@@ -72,6 +72,19 @@ TOOL_PLAN_SYNTHESIS_SCHEMA_VERSION = "om-tool-plan-synthesis-v1"
 PLANNER_CONTEXT_USE_SCHEMA_VERSION = "om-planner-context-use-v1"
 FOLLOWUP_DECISION_SCHEMA_VERSION = "om-agent-loop-followup-decision-v1"
 TOOL_CHECK_SCHEMA_VERSION = "om-agent-tool-check-v1"
+TASK_CONTRACT_REQUIRED_FIELDS = frozenset(
+    {
+        "schema_version",
+        "goal",
+        "domain",
+        "task_mode",
+        "requested_effect",
+        "scope",
+        "required_answer",
+        "required_evidence",
+        "answer_shape",
+    }
+)
 INTERNAL_TOOL_PLAN_NAME = "assistant.tool_plan"
 MAX_TOOL_PLAN_STEPS = 3
 MAX_AGENT_LOOP_ITERATIONS = 3
@@ -544,12 +557,14 @@ class ToolExecutor:
             tool_policy=DEFAULT_TOOL_POLICY,
         )
         action_policy_payload = action_policy.public_payload()
+        risk_class = _risk_class_from_action_policy(action_policy_payload)
         authorization_event = {
             "phase": "authorize_tool",
             "tool_name": tool_name,
             "allowed": bool(action_policy.allowed),
             "decision": action_policy_payload,
             "action_policy": action_policy_payload,
+            "risk_class": risk_class,
         }
         action_safety = assess_action_safety(
             question=request.text,
@@ -575,6 +590,29 @@ class ToolExecutor:
             error = action_policy.error or AgentToolError(
                 code="PERMISSION_DENIED",
                 message=action_policy.denied_reason or f"{tool_name} is not allowed through action policy",
+            )
+            authorization_event["allowed"] = False
+            authorization_event["error_code"] = error.code
+            return ToolExecutionOutcome(
+                authorization_event=authorization_event,
+                result_event=None,
+                result_payload=None,
+                tool_result=None,
+                observation=None,
+                fact_observation=None,
+                synthesis_observation=None,
+                precheck=precheck,
+                postcheck=None,
+                allowed=False,
+                ok=False,
+                error=error,
+                error_payload=build_error_payload(error),
+            )
+        if action_policy_payload.get("allowed_effect") != "read":
+            error = AgentToolError(
+                code="PERMISSION_DENIED",
+                message=f"{tool_name} is not allowed inside the automatic read tool loop",
+                details={"tool_name": tool_name, "risk_class": risk_class, "action_policy": action_policy_payload},
             )
             authorization_event["allowed"] = False
             authorization_event["error_code"] = error.code
@@ -813,6 +851,22 @@ def _pre_tool_check(
         "banned_arguments": planner_banned,
         "action_safety": dict(safety_payload) if safety_payload else {},
     }
+
+
+def _risk_class_from_action_policy(action_policy: dict[str, Any]) -> str:
+    effect = str(action_policy.get("allowed_effect") or "").strip()
+    risk = str(action_policy.get("risk_level") or "").strip()
+    if effect in {"read", "none"} and risk in {"read_only", ""}:
+        return "READ_AUTO"
+    if effect == "preview" or risk == "preview_write":
+        return "SOFT_WRITE_PREVIEW"
+    if risk in {"confirm_write", "local_write"}:
+        return "LEDGER_WRITE_CONFIRM"
+    if risk in {"admin", "live_ops"}:
+        return "ADMIN_CONFIRM"
+    if not risk:
+        return "UNKNOWN"
+    return risk.upper()
 
 
 def _scope_guard_status(*, payload: dict[str, Any], task_contract: dict[str, Any] | None) -> tuple[str, str | None]:
@@ -1214,8 +1268,16 @@ def _execute_read_plan_steps(
     if not ok:
         return ok, error_payload
     executor = ToolExecutor(execute_tool_fn=execute_tool_fn, source="agent_loop")
+    attempted_signatures = {
+        signature
+        for observation in observations
+        if isinstance(observation, dict)
+        for signature in [_tool_loop_duplicate_signature(str(observation.get("tool_name") or ""), observation.get("payload"))]
+        if signature
+    }
     for step in plan.steps:
         if len(observations) >= MAX_AGENT_LOOP_TOOL_CALLS:
+            skipped_payload = _inject_system_fields(step.arguments, request=request, tool_name=step.tool_name)
             error = AgentToolError(
                 code="TOOL_BUDGET_EXHAUSTED",
                 message=f"Agent loop 工具调用预算已用完（最多 {MAX_AGENT_LOOP_TOOL_CALLS} 次），未执行完整计划。",
@@ -1224,6 +1286,7 @@ def _execute_read_plan_steps(
                     "max_tool_calls": MAX_AGENT_LOOP_TOOL_CALLS,
                     "skipped_tool_name": step.tool_name,
                     "calls_used": len(observations),
+                    "duplicate_signature": _tool_loop_duplicate_signature(step.tool_name, skipped_payload),
                 },
             )
             tool_events.append(
@@ -1231,11 +1294,31 @@ def _execute_read_plan_steps(
                     "phase": "tool_budget_exhausted",
                     "max_tool_calls": MAX_AGENT_LOOP_TOOL_CALLS,
                     "skipped_tool_name": step.tool_name,
+                    "duplicate_signature": _tool_loop_duplicate_signature(step.tool_name, skipped_payload),
                 }
             )
             return False, build_error_payload(error)
         index = len(observations) + 1
         payload = _inject_system_fields(step.arguments, request=request, tool_name=step.tool_name)
+        guard = _read_tool_loop_guard(
+            step=step,
+            payload=payload,
+            task_contract=task_contract,
+            attempted_signatures=attempted_signatures,
+        )
+        tool_events.append({"phase": "tool_loop_guard", **guard})
+        if not guard["allowed"]:
+            error = AgentToolError(
+                code=str(guard.get("error_code") or "TOOL_LOOP_GUARD_REJECTED"),
+                message=str(guard.get("reason") or "tool loop guard rejected the tool call"),
+                details={
+                    "tool_name": step.tool_name,
+                    "decision": guard.get("decision"),
+                    "risk_class": guard.get("risk_class"),
+                    "duplicate_signature": guard.get("duplicate_signature"),
+                },
+            )
+            return False, build_error_payload(error)
         outcome = executor.execute_read_tool(
             request=request,
             task_contract=task_contract,
@@ -1244,6 +1327,7 @@ def _execute_read_plan_steps(
             payload=payload,
             plan_arguments=step.arguments,
         )
+        outcome.authorization_event["tool_loop_guard"] = dict(guard)
         tool_events.append(outcome.authorization_event)
         if not outcome.allowed:
             return False, outcome.error_payload
@@ -1259,7 +1343,86 @@ def _execute_read_plan_steps(
             tool_events.append(outcome.result_event)
         if not outcome.ok:
             return False, outcome.error_payload
+        if guard.get("duplicate_signature"):
+            attempted_signatures.add(str(guard["duplicate_signature"]))
     return ok, error_payload
+
+
+def _read_tool_loop_guard(
+    *,
+    step: PlannerPlanStep,
+    payload: dict[str, Any],
+    task_contract: dict[str, Any],
+    attempted_signatures: set[str],
+) -> dict[str, Any]:
+    tool_name = str(step.tool_name or "")
+    signature = _tool_loop_duplicate_signature(tool_name, payload)
+    kind = _plan_step_kind(tool_name)
+    if kind != "read":
+        return {
+            "schema_version": TOOL_CHECK_SCHEMA_VERSION,
+            "allowed": False,
+            "decision": "not_read_auto",
+            "reason": "automatic tool loop only executes READ_AUTO tools",
+            "tool_name": tool_name,
+            "risk_class": "SOFT_WRITE_PREVIEW" if kind == "preview" else "UNKNOWN",
+            "duplicate_signature": signature,
+            "scope_source": _scope_source_for_guard(task_contract),
+            "error_code": "PERMISSION_DENIED",
+        }
+    requested_effect = str(task_contract.get("requested_effect") or "read").strip()
+    if requested_effect != "read":
+        return {
+            "schema_version": TOOL_CHECK_SCHEMA_VERSION,
+            "allowed": False,
+            "decision": "write_boundary",
+            "reason": "task contract requested effect is not read",
+            "tool_name": tool_name,
+            "risk_class": "READ_AUTO",
+            "duplicate_signature": signature,
+            "scope_source": _scope_source_for_guard(task_contract),
+            "requested_effect": requested_effect,
+            "error_code": "PERMISSION_DENIED",
+        }
+    if signature and signature in attempted_signatures:
+        return {
+            "schema_version": TOOL_CHECK_SCHEMA_VERSION,
+            "allowed": False,
+            "decision": "duplicate_call",
+            "reason": "read tool call repeats an earlier normalized payload",
+            "tool_name": tool_name,
+            "risk_class": "READ_AUTO",
+            "duplicate_signature": signature,
+            "scope_source": _scope_source_for_guard(task_contract),
+            "error_code": "DUPLICATE_TOOL_CALL",
+        }
+    return {
+        "schema_version": TOOL_CHECK_SCHEMA_VERSION,
+        "allowed": True,
+        "decision": "allow",
+        "reason": "read_auto_in_scope",
+        "tool_name": tool_name,
+        "risk_class": "READ_AUTO",
+        "duplicate_signature": signature,
+        "scope_source": _scope_source_for_guard(task_contract),
+    }
+
+
+def _tool_loop_duplicate_signature(tool_name: str, payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return str(tool_name or "")
+    return _followup_step_signature(str(tool_name or ""), payload)
+
+
+def _scope_source_for_guard(task_contract: dict[str, Any]) -> str:
+    if not isinstance(task_contract, dict):
+        return "unknown"
+    if bool(task_contract.get("planner_declared")):
+        return "planner_declared"
+    scope = task_contract.get("scope")
+    if isinstance(scope, dict) and any(scope.values()):
+        return "task_contract"
+    return "system_injected"
 
 
 def _append_capability_observation(
@@ -1814,11 +1977,23 @@ def _followup_step_signature(tool_name: str, arguments: dict[str, Any]) -> str:
     comparable = {
         key: value
         for key, value in arguments.items()
-        if key not in {"config_key", "audit_db", "message_id", "command_id"}
+        if not _is_system_injected_signature_argument(str(key))
     }
     if not comparable:
         return str(tool_name or "")
     return f"{tool_name}:{json.dumps(comparable, ensure_ascii=False, sort_keys=True, default=str)}"
+
+
+def _is_system_injected_signature_argument(key: str) -> bool:
+    return _is_banned_plan_argument(key) or str(key or "") in {
+        "assistant_config_path",
+        "audit_db",
+        "command_id",
+        "config_key",
+        "config_path",
+        "data_config",
+        "message_id",
+    }
 
 
 def _normalized_sql(sql: str) -> str:
@@ -2782,7 +2957,7 @@ def parse_tool_plan_payload(payload: dict[str, Any]) -> PlannerPlan:
             message=f"tool plan has unsupported top-level fields: {', '.join(extra_keys)}",
             details={"extra_fields": extra_keys, "allowed_fields": sorted(allowed_keys)},
         )
-    required_keys = {"schema_version", "goal", "required_capabilities", "steps"}
+    required_keys = {"schema_version", "goal", "required_capabilities", "steps", "task_contract"}
     missing_keys = sorted(key for key in required_keys if key not in payload)
     if missing_keys:
         raise AgentToolError(
@@ -2833,7 +3008,11 @@ def parse_tool_plan_payload(payload: dict[str, Any]) -> PlannerPlan:
 
 def _normalized_planner_task_contract(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
-        return None
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message="tool plan task_contract must be a JSON object",
+            details={"missing_fields": sorted(TASK_CONTRACT_REQUIRED_FIELDS)},
+        )
     allowed = {
         "schema_version",
         "goal",
@@ -2849,8 +3028,42 @@ def _normalized_planner_task_contract(value: Any) -> dict[str, Any] | None:
         "constraints",
         "ambiguities",
     }
+    extra_keys = sorted(str(key) for key in value if str(key) not in allowed)
+    if extra_keys:
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message=f"tool plan task_contract has unsupported fields: {', '.join(extra_keys)}",
+            details={"extra_fields": extra_keys, "allowed_fields": sorted(allowed)},
+        )
     out = {str(key): value[key] for key in value if str(key) in allowed}
-    return out or None
+    missing = sorted(key for key in TASK_CONTRACT_REQUIRED_FIELDS if key not in out)
+    if missing:
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message=f"tool plan task_contract is missing required fields: {', '.join(missing)}",
+            details={"missing_fields": missing, "required_fields": sorted(TASK_CONTRACT_REQUIRED_FIELDS)},
+        )
+    schema_version = str(out.get("schema_version") or "").strip()
+    if schema_version != TASK_CONTRACT_SCHEMA_VERSION:
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message="unsupported task contract schema version",
+            details={"schema_version": schema_version, "expected": TASK_CONTRACT_SCHEMA_VERSION},
+        )
+    if not isinstance(out.get("scope"), dict):
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message="tool plan task_contract.scope must be a JSON object",
+            details={"field": "task_contract.scope"},
+        )
+    for key in ("required_answer", "required_evidence", "answer_shape"):
+        if not isinstance(out.get(key), list):
+            raise AgentToolError(
+                code="INPUT_ERROR",
+                message=f"tool plan task_contract.{key} must be a JSON array",
+                details={"field": f"task_contract.{key}"},
+            )
+    return out
 
 
 def _normalized_selected_recipe(value: Any) -> dict[str, Any] | None:
@@ -3624,7 +3837,7 @@ def tool_plan_json_schema() -> dict[str, Any]:
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
-                    "schema_version": {"type": "string", "enum": ["om-agent-task-contract-v1"]},
+                    "schema_version": {"type": "string", "enum": [TASK_CONTRACT_SCHEMA_VERSION]},
                     "goal": {"type": "string"},
                     "domain": {
                         "type": "string",
@@ -3647,6 +3860,7 @@ def tool_plan_json_schema() -> dict[str, Any]:
                             "months": {"type": "array", "items": {"type": "string"}},
                             "requested_months": {"type": "array", "items": {"type": "string"}},
                             "config_keys": {"type": "array", "items": {"type": "string"}},
+                            "operation_ids": {"type": "array", "items": {"type": "string"}},
                         },
                     },
                     "required_answer": {"type": "array", "items": {"type": "string"}},
@@ -3716,7 +3930,7 @@ def tool_plan_json_schema() -> dict[str, Any]:
                 },
             },
         },
-        "required": ["schema_version", "goal", "required_capabilities", "steps"],
+        "required": ["schema_version", "goal", "required_capabilities", "steps", "task_contract"],
     }
 
 
@@ -5369,7 +5583,7 @@ Return only JSON that matches the requested schema.
 
 Rules:
 - Produce 1 to 3 read-only tool calls, or exactly 1 preview-write capability call.
-- Also fill task_contract when you can safely infer it. The task_contract is your structured understanding of the user goal; the steps are your executable plan. If unsure, keep task_contract conservative rather than guessing.
+- Always fill task_contract. The task_contract is your structured understanding of the user goal; the steps are your executable plan. If unsure, use domain=general, requested_effect=read, conservative answer/evidence requirements, empty scope, and record uncertainty in ambiguities instead of omitting task_contract.
 - Also fill selected_recipe.name when one investigation recipe matches the task_contract and planned evidence path. Use income_analysis_breakdown for income analysis/breakdown, position_or_quote_diagnosis for position/runtime diagnosis, operation_status_readback for operation status/readback questions, strategy_replay_review for strategy/candidate replay or recommendation, and action_lifecycle_audit for preview-write lifecycle/audit questions.
 - task_contract.domain is one of income, position, candidate, config, operation, runtime, strategy, general. task_contract.task_mode is one of summarize, analyze, compare, diagnose, explain, recommend, preview_write.
 - Use task_mode=analyze for analysis/复盘/表现/来源/结构 questions, compare for same-scope comparisons, diagnose for why/missing/failure/abnormal status questions, explain for rules or accounting policies, recommend for advisory options, and preview_write only for approved preview operations.

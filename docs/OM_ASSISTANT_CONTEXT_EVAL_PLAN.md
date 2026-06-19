@@ -183,8 +183,8 @@ Target commands after implementation:
 ./om assistant eval-context --mode scenarios
 ```
 
-The current `eval-context` command can be retained during migration, but the
-new mode names should make the tested layer explicit.
+The default `eval-context` report is historical; explicit mode names are the
+current way to identify the tested layer.
 
 ## Success Criteria
 

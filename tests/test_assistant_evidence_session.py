@@ -7,7 +7,9 @@ from pathlib import Path
 import sqlite3
 from typing import Any
 
-from src.application.agent_tool_contracts import build_response
+import pytest
+
+from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.assistant import AssistantRequest, AssistantSettings, AssistantLlmSettings, handle_assistant_message
 from src.application.assistant.agent_loop import (
     LlmPlannerResult,
@@ -17,6 +19,7 @@ from src.application.assistant.agent_loop import (
     TOOL_CHECK_SCHEMA_VERSION,
     TOOL_PLAN_SCHEMA_VERSION,
     parse_tool_plan_payload,
+    tool_plan_json_schema,
 )
 from src.application.assistant.action_policy import ACTION_POLICY_SCHEMA_VERSION
 from src.application.assistant.action_safety import ACTION_SAFETY_SCHEMA_VERSION
@@ -83,6 +86,78 @@ P2_TRACE_ROUTE_MINIMUM_CASES: dict[str, set[str]] = {
         "trace_pass_release_workflow_published",
     },
 }
+
+
+def _test_task_contract(
+    *,
+    goal: str,
+    domain: str = "position",
+    task_mode: str = "summarize",
+    requested_effect: str = "read",
+    scope: dict[str, Any] | None = None,
+    required_answer: tuple[str, ...] = ("summary",),
+    required_evidence: tuple[str, ...] = ("current_state",),
+    answer_shape: tuple[str, ...] = ("conclusion", "evidence_boundary"),
+    intent_families: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    return {
+        "schema_version": TASK_CONTRACT_SCHEMA_VERSION,
+        "goal": goal,
+        "domain": domain,
+        "task_mode": task_mode,
+        "requested_effect": requested_effect,
+        "intent_families": list(intent_families),
+        "scope": dict(scope or {}),
+        "required_answer": list(required_answer),
+        "required_evidence": list(required_evidence),
+        "answer_shape": list(answer_shape),
+    }
+
+
+def _assigned_stock_pnl_task_contract(*, goal: str = "查看 lx 指派正股持仓盈亏") -> dict[str, Any]:
+    return _test_task_contract(
+        goal=goal,
+        domain="position",
+        task_mode="summarize",
+        scope={"requested_accounts": ["lx"], "requested_symbols": ["NVDA"]},
+        required_answer=("summary", "source_and_policy"),
+        required_evidence=("current_state", "quote_freshness"),
+        answer_shape=("conclusion", "evidence_boundary"),
+        intent_families=("assigned_stock_pnl",),
+    )
+
+
+def _operation_status_task_contract(*, goal: str, operation_ids: tuple[str, ...] = ()) -> dict[str, Any]:
+    return _test_task_contract(
+        goal=goal,
+        domain="operation",
+        task_mode="diagnose",
+        scope={"operation_ids": list(operation_ids)},
+        required_answer=("summary", "source_and_policy"),
+        required_evidence=("observed_status", "command_status"),
+        answer_shape=("observation", "evidence_boundary"),
+        intent_families=("upgrade_status",),
+    )
+
+
+def _income_analysis_task_contract(
+    *,
+    goal: str,
+    scope: dict[str, Any] | None = None,
+    required_answer: tuple[str, ...] = ("summary", "source_and_policy"),
+    required_evidence: tuple[str, ...] = ("summary", "driver_or_breakdown", "source_policy"),
+    answer_shape: tuple[str, ...] = ("conclusion", "drivers", "source_policy"),
+) -> dict[str, Any]:
+    return _test_task_contract(
+        goal=goal,
+        domain="income",
+        task_mode="analyze",
+        scope=scope or {"requested_months": ["2026-06"]},
+        required_answer=required_answer,
+        required_evidence=required_evidence,
+        answer_shape=answer_shape,
+        intent_families=("income_analysis",),
+    )
 
 
 def _load_trace_route_cases() -> list[dict[str, Any]]:
@@ -581,6 +656,16 @@ def test_task_contract_requires_release_status_for_release_publication_question(
 def test_coverage_marks_release_publication_status_missing_unrecoverable() -> None:
     plan = PlannerPlan(
         goal="检查远端 release 发布状态",
+        task_contract=_test_task_contract(
+            goal="检查远端 release 发布状态",
+            domain="operation",
+            task_mode="diagnose",
+            scope={"release_tags": ["v1.2.273"]},
+            required_answer=("release_status", "source_and_policy"),
+            required_evidence=("observed_status", "source_policy"),
+            answer_shape=("observation", "evidence_boundary", "next_step"),
+            intent_families=("upgrade_status",),
+        ),
         steps=(
             PlannerPlanStep(
                 id="step_1",
@@ -654,6 +739,16 @@ def test_coverage_marks_release_publication_status_missing_unrecoverable() -> No
 def test_coverage_accepts_release_publication_status_evidence() -> None:
     plan = PlannerPlan(
         goal="检查远端 release 发布状态",
+        task_contract=_test_task_contract(
+            goal="检查远端 release 发布状态",
+            domain="operation",
+            task_mode="diagnose",
+            scope={"release_tags": ["v1.2.273"]},
+            required_answer=("release_status", "source_and_policy"),
+            required_evidence=("observed_status", "source_policy"),
+            answer_shape=("observation", "evidence_boundary", "next_step"),
+            intent_families=("upgrade_status",),
+        ),
         steps=(
             PlannerPlanStep(
                 id="step_1",
@@ -806,6 +901,16 @@ def test_answer_verifier_allows_release_failure_when_failure_evidence_present() 
 def test_release_status_conflict_with_outcome_is_unrecoverable() -> None:
     plan = PlannerPlan(
         goal="检查远端 release 发布状态冲突",
+        task_contract=_test_task_contract(
+            goal="检查远端 release 发布状态冲突",
+            domain="operation",
+            task_mode="diagnose",
+            scope={"release_tags": ["v1.2.277"]},
+            required_answer=("release_status", "source_and_policy"),
+            required_evidence=("observed_status", "source_policy"),
+            answer_shape=("observation", "evidence_boundary", "next_step"),
+            intent_families=("upgrade_status",),
+        ),
         steps=(
             PlannerPlanStep(
                 id="step_1",
@@ -921,6 +1026,16 @@ def test_evidence_bundle_extracts_upgrade_missing_version_diagnostics() -> None:
 def test_coverage_marks_upgrade_missing_version_and_receipt_unrecoverable() -> None:
     plan = PlannerPlan(
         goal="检查升级版本和回执",
+        task_contract=_test_task_contract(
+            goal="检查升级版本和回执",
+            domain="operation",
+            task_mode="diagnose",
+            scope={"operation_ids": ["in_123"]},
+            required_answer=("current_version", "target_version", "receipt_status", "source_and_policy"),
+            required_evidence=("observed_status", "source_policy"),
+            answer_shape=("observation", "evidence_boundary", "next_step"),
+            intent_families=("upgrade_status",),
+        ),
         steps=(
             PlannerPlanStep(
                 id="step_1",
@@ -992,6 +1107,16 @@ def test_coverage_marks_upgrade_missing_version_and_receipt_unrecoverable() -> N
 def test_coverage_marks_upgrade_status_conflict_unrecoverable() -> None:
     plan = PlannerPlan(
         goal="检查升级状态冲突",
+        task_contract=_test_task_contract(
+            goal="检查升级状态冲突",
+            domain="operation",
+            task_mode="diagnose",
+            scope={"operation_ids": ["in_123"]},
+            required_answer=("status", "source_and_policy"),
+            required_evidence=("observed_status", "source_policy"),
+            answer_shape=("observation", "evidence_boundary", "next_step"),
+            intent_families=("upgrade_status",),
+        ),
         steps=(
             PlannerPlanStep(
                 id="step_1",
@@ -1061,6 +1186,16 @@ def test_coverage_marks_upgrade_status_conflict_unrecoverable() -> None:
 def test_coverage_allows_operation_timeline_followup_before_timeline_is_queried() -> None:
     plan = PlannerPlan(
         goal="检查升级版本和回执",
+        task_contract=_test_task_contract(
+            goal="检查升级版本和回执",
+            domain="operation",
+            task_mode="diagnose",
+            scope={"operation_ids": ["in_456"]},
+            required_answer=("current_version", "target_version", "receipt_status", "source_and_policy"),
+            required_evidence=("observed_status", "source_policy"),
+            answer_shape=("observation", "evidence_boundary", "next_step"),
+            intent_families=("upgrade_status",),
+        ),
         steps=(
             PlannerPlanStep(
                 id="step_1",
@@ -1109,6 +1244,16 @@ def test_coverage_allows_operation_timeline_followup_before_timeline_is_queried(
 def test_coverage_accepts_complete_upgrade_status_evidence() -> None:
     plan = PlannerPlan(
         goal="检查升级版本和回执",
+        task_contract=_test_task_contract(
+            goal="检查升级当前版本和目标版本",
+            domain="operation",
+            task_mode="diagnose",
+            scope={"operation_ids": ["in_123"]},
+            required_answer=("current_version", "target_version", "source_and_policy"),
+            required_evidence=("observed_status", "source_policy"),
+            answer_shape=("observation", "evidence_boundary", "next_step"),
+            intent_families=("upgrade_status",),
+        ),
         steps=(
             PlannerPlanStep(
                 id="step_1",
@@ -2283,6 +2428,16 @@ def test_evidence_bundle_records_cross_tool_reconciliation_views() -> None:
 def test_task_contract_and_coverage_detect_missing_account_comparison_scope() -> None:
     plan = PlannerPlan(
         goal="对比 lx 和 sy 的账户收益",
+        task_contract=_test_task_contract(
+            goal="对比 lx 和 sy 的账户收益",
+            domain="income",
+            task_mode="compare",
+            scope={"accounts": ["lx", "sy"]},
+            required_answer=("summary", "comparison_winner", "amount_difference", "source_and_policy"),
+            required_evidence=("same_scope_comparable_data", "source_policy"),
+            answer_shape=("conclusion", "same_scope_comparison", "difference", "source_policy"),
+            intent_families=("account_comparison",),
+        ),
         steps=(
             PlannerPlanStep(
                 id="step_1",
@@ -2407,6 +2562,107 @@ def test_planner_task_contract_payload_survives_plan_schema() -> None:
     assert "driver_or_breakdown" in contract.public_payload()["selected_recipe"]["evidence_needs"]
 
 
+def test_planner_payload_requires_task_contract() -> None:
+    payload = {
+        "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+        "goal": "分析 2026-06 收益来源",
+        "required_capabilities": ["analysis_query", "read_only"],
+        "steps": [
+            {
+                "id": "step_1",
+                "tool_name": "analysis_query",
+                "arguments": {
+                    "sql": "select month, account, net_income_cny from account_monthly_performance where month = '2026-06'",
+                    "limit": 20,
+                },
+                "purpose": "读取收益汇总",
+            }
+        ],
+    }
+
+    with pytest.raises(AgentToolError) as exc:
+        parse_tool_plan_payload(payload)
+
+    assert exc.value.code == "INPUT_ERROR"
+    assert "task_contract" in exc.value.message
+    assert "task_contract" in tool_plan_json_schema()["required"]
+
+
+def test_planner_task_contract_requires_current_schema_fields() -> None:
+    payload = {
+        "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+        "goal": "分析 2026-06 收益来源",
+        "task_contract": {
+            "schema_version": TASK_CONTRACT_SCHEMA_VERSION,
+            "goal": "分析 2026-06 收益来源",
+            "domain": "income",
+            "task_mode": "analyze",
+            "requested_effect": "read",
+            "scope": {"months": ["2026-06"], "accounts": ["lx", "sy"], "config_keys": ["us"]},
+            "required_answer": ["summary", "main_drivers", "source_and_policy"],
+            "required_evidence": ["summary", "driver_or_breakdown", "source_policy"],
+        },
+        "required_capabilities": ["analysis_query", "read_only"],
+        "steps": [
+            {
+                "id": "step_1",
+                "tool_name": "analysis_query",
+                "arguments": {
+                    "sql": "select month, account, net_income_cny from account_monthly_performance where month = '2026-06'",
+                    "limit": 20,
+                },
+                "purpose": "读取收益汇总",
+            }
+        ],
+    }
+
+    with pytest.raises(AgentToolError) as exc:
+        parse_tool_plan_payload(payload)
+
+    assert exc.value.code == "INPUT_ERROR"
+    assert "answer_shape" in exc.value.message
+
+
+def test_planner_task_contract_rejects_runtime_only_fields() -> None:
+    payload = {
+        "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+        "goal": "分析 2026-06 收益来源",
+        "task_contract": {
+            "schema_version": TASK_CONTRACT_SCHEMA_VERSION,
+            "question": "6月收益来自哪里",
+            "goal": "分析 2026-06 收益来源",
+            "domain": "income",
+            "task_mode": "analyze",
+            "requested_effect": "read",
+            "scope": {"months": ["2026-06"], "accounts": ["lx", "sy"], "config_keys": ["us"]},
+            "required_answer": ["summary", "main_drivers", "source_and_policy"],
+            "required_evidence": ["summary", "driver_or_breakdown", "source_policy"],
+            "answer_shape": ["conclusion", "drivers", "source_policy"],
+            "planner_declared": True,
+        },
+        "required_capabilities": ["analysis_query", "read_only"],
+        "steps": [
+            {
+                "id": "step_1",
+                "tool_name": "analysis_query",
+                "arguments": {
+                    "sql": "select month, account, net_income_cny from account_monthly_performance where month = '2026-06'",
+                    "limit": 20,
+                },
+                "purpose": "读取收益汇总",
+            }
+        ],
+    }
+
+    with pytest.raises(AgentToolError) as exc:
+        parse_tool_plan_payload(payload)
+
+    assert exc.value.code == "INPUT_ERROR"
+    assert "unsupported fields" in exc.value.message
+    assert "planner_declared" in exc.value.message
+    assert "question" in exc.value.message
+
+
 def test_analyze_task_contract_requires_breakdown_when_only_summary_view_is_covered() -> None:
     plan = PlannerPlan(
         goal="分析 2026-06 收益来源",
@@ -2487,6 +2743,7 @@ def test_selected_recipe_requires_income_breakdown_when_task_contract_is_weak() 
         "goal": "查看 2026-06 指标",
         "task_contract": {
             "schema_version": TASK_CONTRACT_SCHEMA_VERSION,
+            "goal": "查看 2026-06 指标",
             "domain": "income",
             "task_mode": "analyze",
             "requested_effect": "read",
@@ -2565,6 +2822,7 @@ def test_selected_recipe_operation_readback_gap_uses_planner_scope_operation_id(
         "goal": "检查操作状态和回执",
         "task_contract": {
             "schema_version": TASK_CONTRACT_SCHEMA_VERSION,
+            "goal": "检查操作状态和回执",
             "domain": "operation",
             "task_mode": "diagnose",
             "requested_effect": "read",
@@ -2602,6 +2860,7 @@ def test_selected_recipe_strategy_replay_gap_is_recoverable_by_read_surface() ->
         "goal": "评估 NVDA covered call 策略是否要调整",
         "task_contract": {
             "schema_version": TASK_CONTRACT_SCHEMA_VERSION,
+            "goal": "评估 NVDA covered call 策略是否要调整",
             "domain": "strategy",
             "task_mode": "recommend",
             "requested_effect": "read",
@@ -2683,6 +2942,7 @@ def test_selected_recipe_strategy_replay_gap_ignores_tool_name_without_read_surf
         "goal": "评估 NVDA covered call 策略是否要调整",
         "task_contract": {
             "schema_version": TASK_CONTRACT_SCHEMA_VERSION,
+            "goal": "评估 NVDA covered call 策略是否要调整",
             "domain": "strategy",
             "task_mode": "recommend",
             "requested_effect": "read",
@@ -2745,6 +3005,7 @@ def test_selected_recipe_strategy_replay_gap_requires_read_surface_evidence_colu
         "goal": "评估 NVDA covered call 策略是否要调整",
         "task_contract": {
             "schema_version": TASK_CONTRACT_SCHEMA_VERSION,
+            "goal": "评估 NVDA covered call 策略是否要调整",
             "domain": "strategy",
             "task_mode": "recommend",
             "requested_effect": "read",
@@ -2826,6 +3087,7 @@ def test_selected_recipe_strategy_replay_gap_is_satisfied_by_read_surface() -> N
         "goal": "评估 NVDA covered call 策略是否要调整",
         "task_contract": {
             "schema_version": TASK_CONTRACT_SCHEMA_VERSION,
+            "goal": "评估 NVDA covered call 策略是否要调整",
             "domain": "strategy",
             "task_mode": "recommend",
             "requested_effect": "read",
@@ -2956,6 +3218,16 @@ def test_selected_recipe_strategy_replay_gap_is_satisfied_by_read_surface() -> N
 def test_income_analysis_contract_accepts_monthly_detail_rows_as_breakdown_evidence() -> None:
     plan = PlannerPlan(
         goal="分析 2026-06 收益",
+        task_contract=_test_task_contract(
+            goal="分析 2026-06 收益",
+            domain="income",
+            task_mode="analyze",
+            scope={"months": ["2026-06"]},
+            required_answer=("summary", "main_drivers", "source_and_policy"),
+            required_evidence=("summary", "driver_or_breakdown", "source_policy"),
+            answer_shape=("conclusion", "drivers", "source_policy"),
+            intent_families=("breakdown",),
+        ),
         steps=(
             PlannerPlanStep(
                 id="step_1",
@@ -3054,6 +3326,16 @@ def test_answer_shape_requires_drivers_for_analysis_task() -> None:
 def test_task_contract_does_not_treat_month_digits_as_symbols() -> None:
     plan = PlannerPlan(
         goal="对比 lx 和 sy 2026-05 的账户收益",
+        task_contract=_test_task_contract(
+            goal="对比 lx 和 sy 2026-05 的账户收益",
+            domain="income",
+            task_mode="compare",
+            scope={"accounts": ["lx", "sy"], "months": ["2026-05"]},
+            required_answer=("summary", "comparison_winner", "amount_difference", "source_and_policy"),
+            required_evidence=("same_scope_comparable_data", "source_policy"),
+            answer_shape=("conclusion", "same_scope_comparison", "difference", "source_policy"),
+            intent_families=("account_comparison",),
+        ),
         steps=(
             PlannerPlanStep(
                 id="step_1",
@@ -3082,6 +3364,16 @@ def test_task_contract_does_not_treat_month_digits_as_symbols() -> None:
 def test_task_contract_normalizes_user_requested_symbol_aliases() -> None:
     plan = PlannerPlan(
         goal="诊断泡泡玛特 sell_put 过滤原因",
+        task_contract=_test_task_contract(
+            goal="诊断泡泡玛特 sell_put 过滤原因",
+            domain="candidate",
+            task_mode="diagnose",
+            scope={"accounts": ["lx"], "symbols": ["9992.HK"]},
+            required_answer=("summary", "root_cause", "source_and_policy"),
+            required_evidence=("observed_status", "diagnostic_evidence", "source_policy"),
+            answer_shape=("observation", "cause_chain", "evidence_boundary", "next_step"),
+            intent_families=("candidate_filter_diagnostic",),
+        ),
         steps=(
             PlannerPlanStep(
                 id="step_1",
@@ -3106,6 +3398,16 @@ def test_task_contract_normalizes_user_requested_symbol_aliases() -> None:
 def test_task_contract_does_not_treat_lowercase_words_as_symbols() -> None:
     plan = PlannerPlan(
         goal="diagnose candidate trace risk reason",
+        task_contract=_test_task_contract(
+            goal="diagnose candidate trace risk reason",
+            domain="candidate",
+            task_mode="diagnose",
+            scope={"symbols": ["FUTU"]},
+            required_answer=("summary", "root_cause", "source_and_policy"),
+            required_evidence=("observed_status", "diagnostic_evidence", "source_policy"),
+            answer_shape=("observation", "cause_chain", "evidence_boundary", "next_step"),
+            intent_families=("candidate_filter_diagnostic",),
+        ),
         steps=(
             PlannerPlanStep(
                 id="step_1",
@@ -3129,6 +3431,16 @@ def test_task_contract_does_not_treat_lowercase_words_as_symbols() -> None:
 def test_task_contract_matches_lowercase_user_symbol_to_planned_symbol() -> None:
     plan = PlannerPlan(
         goal="设置 tigr covered call min strike 6.5",
+        task_contract=_test_task_contract(
+            goal="设置 tigr covered call min strike 6.5",
+            domain="config",
+            task_mode="preview_write",
+            requested_effect="preview_write",
+            scope={"symbols": ["TIGR"]},
+            required_answer=("preview_receipt", "source_and_policy"),
+            required_evidence=("permission_request", "preview_receipt", "source_policy"),
+            answer_shape=("preview_summary", "risk", "confirmation_handle"),
+        ),
         steps=(
             PlannerPlanStep(
                 id="step_1",
@@ -3184,6 +3496,16 @@ def test_task_contract_keeps_planner_requested_scope_out_of_user_requested_scope
 def test_coverage_rejects_account_comparison_without_same_period_metric() -> None:
     plan = PlannerPlan(
         goal="对比 lx 和 sy 的账户收益",
+        task_contract=_test_task_contract(
+            goal="对比 lx 和 sy 的账户收益",
+            domain="income",
+            task_mode="compare",
+            scope={"accounts": ["lx", "sy"]},
+            required_answer=("summary", "comparison_winner", "amount_difference", "source_and_policy"),
+            required_evidence=("same_scope_comparable_data", "source_policy"),
+            answer_shape=("conclusion", "same_scope_comparison", "difference", "source_policy"),
+            intent_families=("account_comparison",),
+        ),
         steps=(
             PlannerPlanStep(
                 id="step_1",
@@ -3255,6 +3577,16 @@ def test_coverage_rejects_account_comparison_without_same_period_metric() -> Non
 def test_coverage_accepts_pivot_account_comparison_same_period_metric() -> None:
     plan = PlannerPlan(
         goal="对比 lx 和 sy 的账户收益",
+        task_contract=_test_task_contract(
+            goal="对比 lx 和 sy 的账户收益",
+            domain="income",
+            task_mode="compare",
+            scope={"accounts": ["lx", "sy"]},
+            required_answer=("summary", "comparison_winner", "amount_difference", "source_and_policy"),
+            required_evidence=("same_scope_comparable_data", "source_policy"),
+            answer_shape=("conclusion", "same_scope_comparison", "difference", "source_policy"),
+            intent_families=("account_comparison",),
+        ),
         steps=(
             PlannerPlanStep(
                 id="step_1",
@@ -3599,6 +3931,16 @@ def test_agent_loop_tool_result_contains_evidence_bundle_and_session(tmp_path: P
             plan=PlannerPlan(
                 goal="查看 lx 指派正股持仓盈亏",
                 required_capabilities=("assigned_stock_positions", "read_only"),
+                task_contract=_test_task_contract(
+                    goal="查看 lx 指派正股持仓盈亏",
+                    domain="position",
+                    task_mode="summarize",
+                    scope={"requested_accounts": ["lx"], "requested_symbols": ["NVDA"]},
+                    required_answer=("summary", "source_and_policy"),
+                    required_evidence=("current_state", "quote_freshness"),
+                    answer_shape=("conclusion", "evidence_boundary"),
+                    intent_families=("assigned_stock_pnl",),
+                ),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -3677,6 +4019,10 @@ def test_agent_loop_tool_result_contains_evidence_bundle_and_session(tmp_path: P
     assert session["capability_selection"]["schema_version"] == "om-agent-capability-selection-v1"
     assert session["capability_selection"]["selected_tools"] == ["option_positions_read"]
     assert session["capability_selection"]["selected"][0]["effect"] == "read"
+    assert session["capability_selection"]["selected"][0]["risk_class"] == "READ_AUTO"
+    assert session["capability_selection"]["selected"][0]["selection_source"] == "task_contract"
+    assert session["capability_selection"]["risk_classes"] == ["READ_AUTO"]
+    assert session["capability_selection"]["selection_sources"] == ["task_contract"]
     assert session["capability_selection"]["explanation"] == {
         "selection_source": "plan_revisions",
         "plan_sources": ["agent_loop"],
@@ -3684,6 +4030,8 @@ def test_agent_loop_tool_result_contains_evidence_bundle_and_session(tmp_path: P
         "followup_revision_count": 0,
         "selected_tool_count": 1,
         "selected_effects": ["read"],
+        "risk_classes": ["READ_AUTO"],
+        "selection_sources": ["task_contract"],
         "required_count": 2,
         "satisfied_count": 2,
         "rejected_count": 0,
@@ -3715,6 +4063,7 @@ def test_agent_loop_tool_result_contains_evidence_bundle_and_session(tmp_path: P
     }
     assert session["tool_transcript"][0]["tool_name"] == "option_positions_read"
     assert session["tool_transcript"][0]["authorization_reason"] == "pure_read_whitelist"
+    assert session["tool_transcript"][0]["risk_class"] == "READ_AUTO"
     assert session["tool_transcript"][0]["action_policy"]["schema_version"] == ACTION_POLICY_SCHEMA_VERSION
     assert session["tool_transcript"][0]["action_policy"]["decision"] == "allow_read"
     assert session["tool_transcript"][0]["action_safety"]["schema_version"] == ACTION_SAFETY_SCHEMA_VERSION
@@ -3737,6 +4086,8 @@ def test_agent_loop_tool_result_contains_evidence_bundle_and_session(tmp_path: P
     assert session["tool_transcript"][0]["evidence_summary"]["row_count"] == 1
     assert session["answer_trace"]["answer_route"] == "llm_composer"
     assert session["answer_trace"]["scope_source"] == "user_text"
+    assert session["answer_trace"]["loop_stop_reason"] == "model_or_renderer_answered"
+    assert session["answer_trace"]["repair_attempted"] is False
     assert "clarification_reason" not in session["answer_trace"]
 
     audit_db = tmp_path / "inbound.sqlite3"
@@ -4142,6 +4493,7 @@ def test_agent_loop_replans_read_only_followup_for_recoverable_quote_gap(tmp_pat
                 plan=PlannerPlan(
                     goal="查看 lx 指派正股持仓盈亏",
                     required_capabilities=("assigned_stock_positions", "read_only"),
+                    task_contract=_assigned_stock_pnl_task_contract(),
                     steps=(
                         PlannerPlanStep(
                             id="step_2",
@@ -4174,6 +4526,7 @@ def test_agent_loop_replans_read_only_followup_for_recoverable_quote_gap(tmp_pat
             plan=PlannerPlan(
                 goal="查看 lx 指派正股持仓盈亏",
                 required_capabilities=("assigned_stock_positions", "read_only"),
+                task_contract=_assigned_stock_pnl_task_contract(),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -4316,6 +4669,7 @@ def test_agent_loop_stops_after_one_followup_for_same_quote_gap(tmp_path: Path) 
                 plan=PlannerPlan(
                     goal="查看 lx 指派正股持仓盈亏",
                     required_capabilities=("assigned_stock_positions", "read_only"),
+                    task_contract=_assigned_stock_pnl_task_contract(),
                     steps=(
                         PlannerPlanStep(
                             id=f"step_followup_{len(planner_followup_contexts)}",
@@ -4331,6 +4685,7 @@ def test_agent_loop_stops_after_one_followup_for_same_quote_gap(tmp_path: Path) 
             plan=PlannerPlan(
                 goal="查看 lx 指派正股持仓盈亏",
                 required_capabilities=("assigned_stock_positions", "read_only"),
+                task_contract=_assigned_stock_pnl_task_contract(),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -4436,6 +4791,7 @@ def test_agent_loop_replans_operation_timeline_for_recoverable_upgrade_gap(tmp_p
                 plan=PlannerPlan(
                     goal="补查升级版本和回执",
                     required_capabilities=("operation_timeline", "read_only"),
+                    task_contract=_operation_status_task_contract(goal="补查升级版本和回执", operation_ids=("in_456",)),
                     steps=(
                         PlannerPlanStep(
                             id="step_2",
@@ -4451,6 +4807,7 @@ def test_agent_loop_replans_operation_timeline_for_recoverable_upgrade_gap(tmp_p
             plan=PlannerPlan(
                 goal="检查升级版本和回执",
                 required_capabilities=("healthcheck", "read_only"),
+                task_contract=_operation_status_task_contract(goal="检查升级版本和回执", operation_ids=("in_456",)),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -4572,6 +4929,7 @@ def test_agent_loop_replans_operation_timeline_for_recipe_readback_gap(tmp_path:
                 plan=PlannerPlan(
                     goal="补查操作 readback",
                     required_capabilities=("operation_timeline", "read_only"),
+                    task_contract=_operation_status_task_contract(goal="补查操作 readback", operation_ids=("op_recipe_1",)),
                     steps=(
                         PlannerPlanStep(
                             id="step_2",
@@ -4588,6 +4946,7 @@ def test_agent_loop_replans_operation_timeline_for_recipe_readback_gap(tmp_path:
                 goal="检查操作状态",
                 task_contract={
                     "schema_version": TASK_CONTRACT_SCHEMA_VERSION,
+                    "goal": "检查操作状态",
                     "domain": "operation",
                     "task_mode": "diagnose",
                     "requested_effect": "read",
@@ -4696,6 +5055,7 @@ def test_agent_loop_does_not_replan_unrecoverable_upgrade_gap(tmp_path: Path) ->
                 plan=PlannerPlan(
                     goal="补查升级状态",
                     required_capabilities=("operation_timeline", "read_only"),
+                    task_contract=_operation_status_task_contract(goal="补查升级状态", operation_ids=("in_123",)),
                     steps=(
                         PlannerPlanStep(
                             id="step_2",
@@ -4711,6 +5071,7 @@ def test_agent_loop_does_not_replan_unrecoverable_upgrade_gap(tmp_path: Path) ->
             plan=PlannerPlan(
                 goal="检查升级版本和回执",
                 required_capabilities=("analysis_query", "read_only"),
+                task_contract=_operation_status_task_contract(goal="检查升级版本和回执", operation_ids=("in_123",)),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -4830,6 +5191,13 @@ def test_agent_loop_contract_verifier_rejects_unsupported_currency_amount(tmp_pa
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="分析 lx 2026-06 的净现金流明细",
+                task_contract=_income_analysis_task_contract(
+                    goal="分析 lx 2026-06 的净现金流明细",
+                    scope={"requested_accounts": ["lx"], "requested_months": ["2026-06"]},
+                    required_answer=("summary", "source_and_policy"),
+                    required_evidence=("summary", "driver_or_breakdown", "source_policy"),
+                    answer_shape=("conclusion", "drivers", "source_policy"),
+                ),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -4966,6 +5334,7 @@ def test_agent_loop_monthly_income_composer_does_not_receive_fallback_renderer_t
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="分析 2026-06 收益",
+                task_contract=_income_analysis_task_contract(goal="分析 2026-06 收益"),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -5068,6 +5437,16 @@ def test_agent_loop_answer_shape_fallback_preserves_account_comparison(tmp_path:
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="对比 lx 和 sy 的账户收益",
+                task_contract=_test_task_contract(
+                    goal="对比 lx 和 sy 的账户收益",
+                    domain="income",
+                    task_mode="compare",
+                    scope={"requested_accounts": ["lx", "sy"]},
+                    required_answer=("summary", "comparison_winner", "amount_difference", "source_and_policy"),
+                    required_evidence=("same_scope_comparable_data", "summary"),
+                    answer_shape=("conclusion", "same_scope_comparison", "source_policy"),
+                    intent_families=("income_comparison",),
+                ),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -5183,6 +5562,7 @@ def test_message_less_local_agent_sessions_do_not_overwrite_each_other(tmp_path:
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="查看 lx 指派正股持仓盈亏",
+                task_contract=_assigned_stock_pnl_task_contract(),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
@@ -5262,6 +5642,7 @@ def test_agent_loop_returns_error_when_tool_budget_is_exhausted(tmp_path: Path) 
     ) -> LlmPlannerResult:
         followup = conversation_context.get("agent_loop_followup") if isinstance(conversation_context, dict) else None
         refresh = isinstance(followup, dict)
+        status_variants = ("open", "all", "close")
         steps = tuple(
             PlannerPlanStep(
                 id=f"step_{index}",
@@ -5269,15 +5650,19 @@ def test_agent_loop_returns_error_when_tool_budget_is_exhausted(tmp_path: Path) 
                 arguments={
                     "action": "assigned-stock",
                     "account": "lx",
-                    "status": "open",
+                    "status": status,
                     **({"refresh_quotes": True} if refresh else {}),
                 },
                 purpose="读取指派正股持仓盈亏",
             )
-            for index in range(1, 4)
+            for index, status in enumerate(status_variants, start=1)
         )
         return LlmPlannerResult(
-            plan=PlannerPlan(goal="查看 lx 指派正股持仓盈亏", steps=steps),
+            plan=PlannerPlan(
+                goal="查看 lx 指派正股持仓盈亏",
+                task_contract=_assigned_stock_pnl_task_contract(),
+                steps=steps,
+            ),
             trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
         )
 
@@ -5305,6 +5690,87 @@ def test_agent_loop_returns_error_when_tool_budget_is_exhausted(tmp_path: Path) 
     assert len(calls) == 5
     tool_plan_data = out["data"]["action"]["result"]["data"]
     assert any(event["phase"] == "tool_budget_exhausted" for event in tool_plan_data["tool_events"])
+
+
+def test_agent_loop_rejects_duplicate_initial_read_call(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "action": "assigned-stock",
+                "filters": {"account": "lx", "status": "open", "refresh_quotes": False},
+                "rows": [
+                    {
+                        "account": "lx",
+                        "symbol": "NVDA",
+                        "currency": "USD",
+                        "status": "open",
+                        "shares_remaining": 100,
+                        "spot": None,
+                        "quote_status": "missing_quote",
+                        "assigned_stock_unrealized_pnl": None,
+                    }
+                ],
+                "row_count": 1,
+                "quote_refresh": {"status": "missing_quote", "missing_symbols": ["NVDA"]},
+            },
+        )
+
+    def _plan(
+        _text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        duplicate_arguments = {"action": "assigned-stock", "account": "lx", "status": "open"}
+        return LlmPlannerResult(
+            plan=PlannerPlan(
+                goal="查看 lx 指派正股持仓盈亏",
+                task_contract=_assigned_stock_pnl_task_contract(),
+                steps=(
+                    PlannerPlanStep(
+                        id="step_1",
+                        tool_name="option_positions_read",
+                        arguments=dict(duplicate_arguments),
+                        purpose="读取指派正股持仓盈亏",
+                    ),
+                    PlannerPlanStep(
+                        id="step_2",
+                        tool_name="option_positions_read",
+                        arguments=dict(duplicate_arguments),
+                        purpose="重复读取同一持仓范围",
+                    ),
+                ),
+            ),
+            trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="查看 lx 指派正股持仓盈亏",
+            sender_id="local",
+            message_id="msg_agent_duplicate_initial_plan",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+    )
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "DUPLICATE_TOOL_CALL"
+    assert len(calls) == 1
+    tool_plan_data = out["data"]["action"]["result"]["data"]
+    guard_events = [event for event in tool_plan_data["tool_events"] if event["phase"] == "tool_loop_guard"]
+    assert [event["decision"] for event in guard_events] == ["allow", "duplicate_call"]
+    assert guard_events[0]["duplicate_signature"] == guard_events[1]["duplicate_signature"]
+    assert tool_plan_data["agent_session"]["answer_trace"]["loop_stop_reason"] == "tool_loop_guard_rejected"
 
 
 def test_agent_loop_rejects_unrelated_followup_plan_for_evidence_gap(tmp_path: Path) -> None:
@@ -5345,6 +5811,16 @@ def test_agent_loop_rejects_unrelated_followup_plan_for_evidence_gap(tmp_path: P
             return LlmPlannerResult(
                 plan=PlannerPlan(
                     goal="查看运行状态",
+                    task_contract=_test_task_contract(
+                        goal="查看运行状态",
+                        domain="runtime",
+                        task_mode="diagnose",
+                        scope={},
+                        required_answer=("summary",),
+                        required_evidence=("current_state",),
+                        answer_shape=("conclusion", "evidence_boundary"),
+                        intent_families=("runtime_status",),
+                    ),
                     steps=(PlannerPlanStep(id="step_2", tool_name="runtime_status", arguments={}, purpose="无关补查"),),
                 ),
                 trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
@@ -5352,6 +5828,7 @@ def test_agent_loop_rejects_unrelated_followup_plan_for_evidence_gap(tmp_path: P
         return LlmPlannerResult(
             plan=PlannerPlan(
                 goal="查看 lx 指派正股持仓盈亏",
+                task_contract=_assigned_stock_pnl_task_contract(),
                 steps=(
                     PlannerPlanStep(
                         id="step_1",
