@@ -7,7 +7,6 @@ from typing import Any
 import pytest
 
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.assistant.agent_loop import TOOL_PLAN_SCHEMA_VERSION, tool_plan_json_schema
 from src.application.assistant.diagnostics import check_llm_planner
 
 
@@ -179,7 +178,7 @@ def test_llm_check_reports_ready_deepseek_endpoint(tmp_path: Path) -> None:
     assert checks["live_probe"]["status"] == "skipped"
 
 
-def test_llm_check_live_probe_uses_read_only_structured_planning(tmp_path: Path) -> None:
+def test_llm_check_live_probe_uses_read_only_tool_call_planning(tmp_path: Path) -> None:
     calls: list[dict[str, Any]] = []
     cfg_path = _write_config(
         tmp_path,
@@ -196,25 +195,17 @@ def test_llm_check_live_probe_uses_read_only_structured_planning(tmp_path: Path)
     env_file = tmp_path / "options-monitor.env"
     env_file.write_text("OM_LLM_API_KEY=sk-test\n", encoding="utf-8")
 
-    def _create_response(**kwargs: Any) -> dict[str, Any]:
+    def _create_tool_call_response(**kwargs: Any) -> dict[str, Any]:
         calls.append(kwargs)
-        assert kwargs["json_schema"] == tool_plan_json_schema()
         return {
-            "output_text": json.dumps(
-                    {
-                        "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-                        "goal": "check runtime status",
-                        "required_capabilities": [],
-                        "steps": [
-                        {
-                            "id": "status",
-                            "tool_name": "runtime_status",
-                            "arguments": {},
-                            "purpose": "read runtime status",
-                        }
-                    ],
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_status_1",
+                    "name": "runtime_status",
+                    "arguments": "{}",
                 }
-            )
+            ]
         }
 
     out = check_llm_planner(
@@ -224,12 +215,15 @@ def test_llm_check_live_probe_uses_read_only_structured_planning(tmp_path: Path)
         include_local_env_file=False,
         live=True,
         live_text="状态",
-        create_response_fn=_create_response,
+        create_tool_call_response_fn=_create_tool_call_response,
     )
 
     assert out["summary"]["ok"] is True
     assert out["summary"]["live_checked"] is True
     assert calls[0]["api_key"] == "sk-test"
+    assert "tools" in calls[0]
+    assert calls[0]["tools"][0]["type"] == "function"
+    assert "json_schema" not in calls[0]
     checks = {item["name"]: item for item in out["checks"]}
     assert checks["live_probe"]["status"] == "ok"
     assert checks["live_probe"]["value"]["plan"]["steps"][0]["tool_name"] == "runtime_status"

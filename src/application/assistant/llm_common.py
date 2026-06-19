@@ -11,13 +11,14 @@ from src.application.assistant.llm_provider_registry import (
 )
 from src.application.assistant.settings import AssistantLlmSettings
 from src.application.settings import build_effective_env
-from src.infrastructure.openai_chat_completions import create_json_chat_completion
+from src.infrastructure.openai_chat_completions import create_json_chat_completion, create_tool_call_chat_completion
 from src.infrastructure.openai_chat_completions import resolve_chat_completions_url
-from src.infrastructure.openai_responses import create_structured_response
+from src.infrastructure.openai_responses import create_structured_response, create_tool_call_response
 from src.infrastructure.openai_responses import resolve_responses_url
 
 
 CreateStructuredResponseFn = Callable[..., dict[str, Any]]
+CreateToolCallResponseFn = Callable[..., dict[str, Any]]
 
 
 def unsupported_llm_provider_error(settings: AssistantLlmSettings, *, component: str) -> AgentToolError:
@@ -34,6 +35,12 @@ def provider_create_response_fn(provider: str) -> CreateStructuredResponseFn:
     if normalize_llm_provider(provider) == "deepseek":
         return create_json_chat_completion
     return create_structured_response
+
+
+def provider_create_tool_call_response_fn(provider: str) -> CreateToolCallResponseFn:
+    if provider_api_kind(provider) == "chat_completions":
+        return create_tool_call_chat_completion
+    return create_tool_call_response
 
 
 def provider_endpoint_url(settings: AssistantLlmSettings) -> str:

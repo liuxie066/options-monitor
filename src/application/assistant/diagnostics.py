@@ -6,7 +6,7 @@ from typing import Any, Callable
 from src.application.assistant.capability_catalog import llm_capability_manifest
 from src.application.assistant.config_loader import load_assistant_config
 from src.application.assistant.llm_common import (
-    CreateStructuredResponseFn,
+    CreateToolCallResponseFn,
     is_supported_llm_provider,
     normalize_llm_provider,
     provider_api_kind,
@@ -31,7 +31,7 @@ def check_llm_planner(
     include_local_env_file: bool = True,
     live: bool = False,
     live_text: str = DEFAULT_LIVE_PROBE_TEXT,
-    create_response_fn: CreateStructuredResponseFn | None = None,
+    create_tool_call_response_fn: CreateToolCallResponseFn | None = None,
 ) -> dict[str, Any]:
     explicit_config_path = bool(config_path is not None and str(config_path).strip())
     path, cfg = load_assistant_config(
@@ -57,7 +57,7 @@ def check_llm_planner(
         effective_env=effective_env.values,
         live=bool(live),
         live_text=live_text,
-        create_response_fn=create_response_fn,
+        create_tool_call_response_fn=create_tool_call_response_fn,
     )
     checks.append(live_probe)
 
@@ -251,7 +251,7 @@ def _live_probe_check(
     effective_env: dict[str, str],
     live: bool,
     live_text: str,
-    create_response_fn: CreateStructuredResponseFn | None,
+    create_tool_call_response_fn: CreateToolCallResponseFn | None,
 ) -> dict[str, Any]:
     if not live:
         return {
@@ -264,7 +264,7 @@ def _live_probe_check(
         runtime_settings,
         conversation_context=None,
         environ=effective_env,
-        create_response_fn=create_response_fn,
+        create_tool_call_response_fn=create_tool_call_response_fn,
     )
     if result.error is not None:
         return {

@@ -31,15 +31,15 @@ and this document win when terminology conflicts.
 | `./om` | Human/operator CLI for product workflows | Not a remote message agent |
 | `./om-agent` | Tool Gateway CLI for structured JSON tool calls | Not OM's autonomous/project Agent |
 | `./om assistant` | Inbound Assistant CLI namespace for local or remote messages | Not the full `./om-agent` manifest |
-| `AgentLoop` | Internal planner/evidence loop used by `./om assistant` when enabled | Not a public entry point |
+| `AgentLoop` | Internal planner/event/evidence loop used by `./om assistant` when enabled | Not a public entry point |
 
 Naming rules:
 
 - Do not call `./om-agent` "OM Agent" in current docs. Prefer "Tool Gateway"
   or "Agent Tool Gateway".
 - Use "Inbound Assistant" for the `./om assistant ...` message entrypoint.
-- Use "Assistant Planner Loop" or `AgentLoop` for the internal bounded planning,
-  evidence, coverage, and synthesis loop.
+- Use "Assistant Planner Loop", "Assistant Event Loop", or `AgentLoop` for the
+  internal bounded planning, tool-event, evidence, coverage, and synthesis loop.
 - When discussing future intelligence work, say it optimizes `./om assistant`
   capabilities, with `./om-agent` and tool metadata as support surfaces.
 
@@ -126,23 +126,30 @@ project Agent. The durable store remains the inbound audit SQLite
 `agent_sessions` trace table, and the authority path remains
 `./om assistant -> AgentLoop -> tool_execution -> agent_tool_registry`.
 
-## Tool Calling v2 Direction
+## Tool Calling Event Model Direction
 
 The next tool-calling design should borrow Claude Code's loop shape, not its
 full product permission model. The useful shape is: the model emits tool calls,
 observes results, and stops when it can answer. OM adds financial-operation
 guardrails around that loop.
 
+The current target system design is
+[OM_ASSISTANT_TOOL_CALLING_V2_SYSTEM_DESIGN.md](OM_ASSISTANT_TOOL_CALLING_V2_SYSTEM_DESIGN.md).
+That document supersedes the older text-JSON planner direction: the model
+should express tool intent through provider structured tool calls mapped to
+internal `ModelEvent` records, not by writing a full `TaskContract` and
+`ToolPlan` as ordinary assistant text.
+
 Target flow:
 
 ```text
 message
   -> request/context projection
-  -> model selects an allowed capability/tool
+  -> model emits a structured tool-call event
+  -> loop guard checks schema, scope, risk, budget, and duplicates
   -> tool_execution runs the deterministic tool
-  -> observation is added to the transcript/evidence bundle
-  -> model decides: another read tool, clarification, preview, or answer
-  -> loop guard checks scope, risk, budget, and duplicates
+  -> tool result is added to the transcript/evidence bundle
+  -> model decides: another read tool event, clarification, preview, or answer
   -> final answer verification and assistant_trace
 ```
 
@@ -151,9 +158,9 @@ The intelligence boundary is:
 - the model owns intent understanding, capability selection, result
   interpretation, deciding whether another read tool is useful, and composing
   the user-facing answer;
-- code owns the tool protocol, schema validation, scope injection, risk class,
-  loop budget, duplicate-call prevention, evidence extraction, missing-data
-  declarations, answer guardrails, and trace/audit.
+- code owns event protocol mapping, schema validation, scope injection, risk
+  class, loop budget, duplicate-call prevention, evidence extraction,
+  missing-data declarations, answer guardrails, and trace/audit.
 
 Loop continuation is allowed only when all of these are true:
 
@@ -166,9 +173,9 @@ Loop continuation is allowed only when all of these are true:
   release, service, or admin write boundaries.
 
 Preview/write routes exit the read loop and go through existing deterministic
-preview/confirm lifecycle. The model may request an approved preview operation,
-but it must never confirm, cancel, apply, send, or mutate state by continuing
-the tool loop.
+preview/confirm lifecycle. The model may request a preview event, but the
+deterministic operation handler owns pending-operation creation. The model must
+never confirm, cancel, apply, send, or mutate state by continuing the tool loop.
 
 `CoverageVerifier` and `AnswerVerifier` are guardrails, not the primary
 intelligence engine. If the model stops but verification detects one obvious,
@@ -180,20 +187,20 @@ and no new tool registry or public agent surface.
 
 ## Conversation Context State
 
-The current conversation-context path uses a bounded planner-facing projection
-of prior turns, then validates the planner's declared context use before
-execution. This follows the useful Claude Code boundary: code owns
+The current conversation-context path uses a bounded model-facing projection
+of prior turns, then validates the model's declared or derived context use
+before execution. This follows the useful Claude Code boundary: code owns
 conversation state, projection, budget, and compaction-like boundaries, while
 the model performs natural-language semantic continuity over the visible
 conversation view.
 
-OM adds deterministic validation because planner output can trigger financial
-and runtime read tools. The context layer should therefore be:
+OM adds deterministic validation because model-selected tool paths can trigger
+financial and runtime read tools. The context layer should therefore be:
 
 ```text
 transcript
   -> ContextProjection
-  -> Planner semantic judgement
+  -> Model semantic judgement
   -> ContextValidator
   -> policy/tool execution
 ```
@@ -230,10 +237,10 @@ roughly this way:
 |---|---|---|---|
 | Entrypoints and UI | `main.tsx`, `cli/`, `commands/`, `components/`, `screens/` | `./om`, `./om assistant`, CLI adapters | Keep entrypoints thin; do not place planning or tool policy in CLI parsing. |
 | Model loop and context | `query.ts`, `QueryEngine.ts`, `services/api/`, `services/compact/`, `services/contextCollapse/` | `AgentLoop`, `ContextProjection`, `ContextValidator` | Keep code responsible for projection, budget, and context boundaries; do not copy full compaction machinery unless context pressure proves it is needed. |
-| Tool protocol | `Tool.ts` | `agent_tools` metadata, output/evidence contracts, tool registry metadata | Strengthen deterministic metadata and result contracts instead of letting planner prose define tool semantics. |
-| Tool pool and visibility | `tools.ts`, `ToolSearchTool` | `capability_catalog`, planner-visible manifest, `AgentLoop` tool selection | Make the planner-visible capability view narrow, auditable, and explainable. Do not expose the full Tool Gateway manifest to Inbound Assistant. |
+| Tool protocol | `Tool.ts` | `agent_tools` metadata, output/evidence contracts, tool registry metadata | Strengthen deterministic metadata and result contracts instead of letting model prose define tool semantics. |
+| Tool pool and visibility | `tools.ts`, `ToolSearchTool` | `capability_catalog`, model-visible manifest, `AgentLoop` tool selection | Make the model-visible capability view narrow, auditable, and explainable. Do not expose the full Tool Gateway manifest to Inbound Assistant. |
 | Execution orchestration | `services/tools/toolExecution.ts`, `toolOrchestration.ts`, `StreamingToolExecutor.ts` | `tool_execution`, tool-loop guard, evidence bundle, answer verification | Preserve a validate -> policy -> execute -> observe pipeline where the model decides whether to continue and code enforces scope, risk, budget, and duplicate guards. |
-| Permissions and hooks | `utils/permissions/`, permission hooks | `agent_tools/permissions.py`, `action_safety`, `operation_lifecycle` | Keep write authority centralized and reason-coded. Planner output may request preview, but must not apply writes. |
+| Permissions and hooks | `utils/permissions/`, permission hooks | `agent_tools/permissions.py`, `action_safety`, `operation_lifecycle` | Keep write authority centralized and reason-coded. A model preview request may enter operation lifecycle, but must not apply writes. |
 | Tool implementations | `tools/*` | `src/application/agent_tools/*`, domain services | Keep tools deterministic, scoped, and evidence-oriented. Business rules remain in owning domain/application modules. |
 | Extension surfaces | `services/mcp/`, `services/plugins/`, `skills/` | Local Tool Gateway integration only, not Inbound core | Do not add remote extension/plugin authority to OM Assistant without a separate safety design. |
 
@@ -242,14 +249,14 @@ This mapping reinforces the existing OM boundary:
 ```text
 ./om assistant
   -> AgentLoop / policy / trace
-  -> planner-visible capability view
+  -> model-visible capability view
   -> tool_execution
   -> agent_tool_registry
   -> deterministic tool
 ```
 
 The next Claude Code-inspired improvement should therefore be a model-driven
-read-tool loop with capability selection explainability and planner manifest
+read-tool loop with capability selection explainability and model-visible manifest
 hygiene. It should not add a new public agent surface, second tool registry,
 global conversation state machine, or broader write/admin execution authority.
 
@@ -311,9 +318,10 @@ slash command.
 
 It may:
 
-- build a task contract,
+- derive and use a host-owned task contract,
 - run a bounded sequence of automatic read tool calls selected by the model,
-- create exactly one approved preview operation when policy allows,
+- request a preview event when policy allows, leaving pending-operation creation
+  to deterministic handlers,
 - collect evidence,
 - use coverage and answer verification as post-check guardrails,
 - perform at most one bounded repair/follow-up for an obvious recoverable gap,
@@ -334,7 +342,7 @@ The current optimization target is `./om assistant` capability quality:
 
 - better intent recognition,
 - better capability selection,
-- better task contract and coverage verification,
+- better host-derived task contract and coverage verification,
 - better model-driven read tool iteration,
 - better evidence extraction,
 - better answer quality,
@@ -349,7 +357,7 @@ project's autonomous Agent.
 The next assistant optimization should focus on capability selection
 explainability, not another context state machine. In practice that means:
 
-- keeping planner-visible capability manifests narrow and auditable,
+- keeping model-visible capability manifests narrow and auditable,
 - deriving selection reasons from message text, `ContextProjection`,
   open evidence gaps, and `task_contract.required_evidence`,
 - adding regression fixtures for selected tools/views and selection sources,
