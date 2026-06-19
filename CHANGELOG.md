@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 1.2.316 - 2026-06-19
+## 1.2.317 - 2026-06-19
 
 ### Added
 - Added Assistant preview support for Futu option assignment and expired-invalid lifecycle notices, routing them through
