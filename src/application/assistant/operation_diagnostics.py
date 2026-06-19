@@ -651,6 +651,10 @@ def _audit_operation_type(row: dict[str, Any]) -> str | None:
             return "manual_open"
         if intent_name in {"manual_trade_close", "manual_trade_cancel"}:
             return "manual_close"
+    if intent_name == "manual_assignment":
+        return "manual_assignment"
+    if intent_name == "manual_expiry":
+        return "manual_expiry"
     return None
 
 

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.316 - 2026-06-19
+
+### Added
+- Added Assistant preview support for Futu option assignment and expired-invalid lifecycle notices, routing them through
+  the existing `inbound.manual_trade` pending-operation confirmation flow.
+
+### Changed
+- Extended Assistant planner capability metadata, deterministic lifecycle notice detection, scope safety, and docs so
+  assignment and expiry notices create previews only and never bypass `确认记录` / `取消记录`.
+
 ## 1.2.315 - 2026-06-19
 
 ### Fixed

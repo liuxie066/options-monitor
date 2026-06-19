@@ -184,7 +184,8 @@ When `assistant.planner.enabled` is true, non-slash natural language enters the
 AgentLoop Planner. Slash commands remain command-first and never call LLM. The
 Planner may plan pure-read tools directly, or exactly one preview-write
 capability such as `manual_trade_open`, `manual_trade_close`,
-`manual_trade_update`, `symbol_edit`, `model_use`, or `upgrade_now`.
+`manual_assignment`, `manual_expiry`, `manual_trade_update`, `symbol_edit`,
+`model_use`, or `upgrade_now`.
 Preview-write plans create pending previews through the existing operation
 handlers only; they cannot confirm, cancel, apply, notify externally, write the
 ledger, write config directly, operate services, or send proactive messages.
@@ -665,6 +666,7 @@ Supported write commands:
 | Text | Preview intent | Confirm | Cancel |
 | --- | --- | --- | --- |
 | `记录开仓 ...` / `记录平仓 ...` | `manual_trade_*` | `确认记录 [operation_id]` | `取消记录 [operation_id]` |
+| 富途 `期权被指派通知` / `期权到期失效通知` | `manual_assignment` / `manual_expiry` | `确认记录 [operation_id]` | `取消记录 [operation_id]` |
 | `增加/修改/删除监控标的 ...` | `symbol_*` | `确认监控 [operation_id]` | `取消监控 [operation_id]` |
 | `立即升级` / `立即升级到 v<version>` | `upgrade_now` | `确认升级 [operation_id]` | `取消升级 [operation_id]` |
 | `/model use <name>` | `model_use` | `确认模型 [operation_id]` | `取消模型 [operation_id]` |

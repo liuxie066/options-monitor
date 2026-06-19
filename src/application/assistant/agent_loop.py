@@ -4167,7 +4167,7 @@ def _allowed_plan_arguments(tool_name: str) -> set[str]:
     if spec is None or not is_llm_planner_preview_spec(spec):
         return set()
     allowed = _filter_plan_arguments(spec.arguments)
-    if tool_name in {"manual_trade_open", "manual_trade_close"}:
+    if tool_name in {"manual_trade_open", "manual_trade_close", "manual_assignment", "manual_expiry"}:
         allowed.add("account")
     return allowed
 
@@ -4226,6 +4226,10 @@ def _question_requests_preview_operation(question: str) -> bool:
         "委托已全部成交",
         "成功卖出",
         "成功买入",
+        "期权被指派通知",
+        "已被指派",
+        "期权到期失效通知",
+        "已到期失效",
         "recordopen",
         "recordclose",
     )
@@ -6529,6 +6533,7 @@ Rules:
 - For all-history, cumulative, or total net cashflow questions, omit month so monthly_income_report reads all OM local ledger months.
 - For multiple explicit months, either call monthly_income_report once per month with matching arguments, or omit month and synthesize from all available rows; never duplicate one month while claiming another.
 - For "记录开仓", "记录平仓", Futu 成交提醒, 成功卖出/买入 option fills, use manual_trade_open or manual_trade_close with raw_text set to the original user message.
+- For Futu 期权被指派通知 / 已被指派, use manual_assignment with raw_text set to the original user message. For Futu 期权到期失效通知 / 已到期失效, use manual_expiry with raw_text set to the original user message.
 - For current monitored-symbol config questions such as "max strike 是多少", "当前配置", or "查询 sell_put.max_strike", use symbol_config_read with symbol plus optional strategy/field.
 - For user-provided company names, Chinese names, aliases, Futu codes, or uncertain market suffixes, use symbol_resolve when the user asks for identity resolution or when a later SQL-style analysis needs a canonical symbol. Symbol-aware tools may also receive the original alias/name and resolve it internally.
 - For single-symbol candidate filter/rejection questions such as "为什么 X 没出现在候选里", "X 被哪个参数过滤了", "why was X filtered", or "why missing candidate", use candidate_filter_explain with symbol plus optional account/function/run_id. Do not use analysis_query for that single-symbol root-cause shape unless the user asks to compare/group/trend across symbols, accounts, rules, or runs.
@@ -7014,7 +7019,7 @@ def _analysis_field_semantics_for_planner(field_semantics: dict[str, Any]) -> di
 
 
 def _planner_preview_input_schema(intent_name: str) -> dict[str, Any]:
-    if intent_name in {"manual_trade_open", "manual_trade_close"}:
+    if intent_name in {"manual_trade_open", "manual_trade_close", "manual_assignment", "manual_expiry"}:
         return {
             "raw_text": {
                 "type": "string",
@@ -7056,6 +7061,18 @@ def _planner_preview_notes(intent_name: str) -> list[str]:
         return [
             "Use for 记录平仓 and closing fill reminders.",
             "Set raw_text to the original user message.",
+            "Creates only a pending preview; it never writes the ledger until a deterministic confirm command is received.",
+        ]
+    if intent_name == "manual_assignment":
+        return [
+            "Use for Futu 期权被指派通知 or 已被指派 lifecycle notices.",
+            "Set raw_text to the original user message so the deterministic parser can extract account, symbol, expiration, strike, option type, contracts, and stock settlement.",
+            "Creates only a pending preview; it never writes the ledger until a deterministic confirm command is received.",
+        ]
+    if intent_name == "manual_expiry":
+        return [
+            "Use for Futu 期权到期失效通知 or 已到期失效 lifecycle notices.",
+            "Set raw_text to the original user message so the deterministic parser can extract account, symbol, expiration, strike, option type, and expired contracts.",
             "Creates only a pending preview; it never writes the ledger until a deterministic confirm command is received.",
         ]
     if intent_name == "manual_trade_update":
