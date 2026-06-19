@@ -85,6 +85,7 @@ AGENT_LOOP_SCHEMA_VERSION = "om-agent-loop-v1"
 TOOL_PLAN_SCHEMA_VERSION = "om-tool-plan-v2"
 TOOL_PLAN_SYNTHESIS_SCHEMA_VERSION = "om-tool-plan-synthesis-v1"
 PLANNER_CONTEXT_USE_SCHEMA_VERSION = "om-planner-context-use-v1"
+PLANNER_REPAIR_SCHEMA_VERSION = "om-planner-repair-v1"
 FOLLOWUP_DECISION_SCHEMA_VERSION = "om-agent-loop-followup-decision-v1"
 TOOL_CHECK_SCHEMA_VERSION = "om-agent-tool-check-v1"
 TASK_CONTRACT_REQUIRED_FIELDS = frozenset(
@@ -1065,14 +1066,43 @@ def run_read_only_agent_loop(
     steps = max(1, min(int(max_steps), MAX_TOOL_PLAN_STEPS))
     today = _planner_today(now_fn)
     loop_context = _with_temporal_context(conversation_context, today=today)
-    plan_result = (plan_tools_fn or plan_read_only_tools)(text, settings, loop_context)
+    planner = plan_tools_fn or plan_read_only_tools
+    plan_result = planner(text, settings, loop_context)
     plan_result = _normalize_tool_plan_result(plan_result, question=text, today=today)
     planning, planned_steps = _planning_outcome_from_tool_plan_result(
         plan_result,
         question=text,
         conversation_context=loop_context,
     )
+    planner_repair_trace: dict[str, Any] | None = None
+    if _planner_repair_allowed(planning.error):
+        repair_context = _conversation_context_with_planner_repair(
+            loop_context,
+            question=text,
+            error=planning.error,
+            initial_plan=plan_result.plan,
+        )
+        repair_result = planner(text, settings, repair_context)
+        repair_result = _normalize_tool_plan_result(repair_result, question=text, today=today)
+        repair_planning, repair_steps = _planning_outcome_from_tool_plan_result(
+            repair_result,
+            question=text,
+            conversation_context=repair_context,
+        )
+        planner_repair_trace = _planner_repair_trace(
+            initial_error=planning.error,
+            initial_plan=plan_result.plan,
+            repair_context=repair_context,
+            repair_result=repair_result,
+            repair_planning=repair_planning,
+        )
+        planning = repair_planning
+        plan_result = repair_result
+        planned_steps = repair_steps
+        loop_context = repair_context
     trace = dict(planning.trace or plan_result.trace)
+    if planner_repair_trace is not None:
+        trace["planner_repair"] = planner_repair_trace
     trace["agent_loop"] = {
         "schema_version": AGENT_LOOP_SCHEMA_VERSION,
         "enabled": True,
@@ -1090,6 +1120,124 @@ def run_read_only_agent_loop(
         ).public_payload(),
     }
     return AgentLoopResult(planning=planning, trace=trace, steps=planned_steps)
+
+
+def _planner_repair_allowed(error: AgentToolError | None) -> bool:
+    if error is None:
+        return False
+    return error.code == "PLAN_RISK_MISMATCH"
+
+
+def _conversation_context_with_planner_repair(
+    conversation_context: dict[str, Any] | None,
+    *,
+    question: str,
+    error: AgentToolError,
+    initial_plan: PlannerPlan | None,
+) -> dict[str, Any]:
+    context = dict(conversation_context or {})
+    context["planner_repair"] = _planner_repair_payload(question=question, error=error, initial_plan=initial_plan)
+    return context
+
+
+def _planner_repair_payload(*, question: str, error: AgentToolError, initial_plan: PlannerPlan | None) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "schema_version": PLANNER_REPAIR_SCHEMA_VERSION,
+        "source": "tool_validation",
+        "error_code": str(error.code),
+        "message": str(error.message),
+        "instruction": _planner_repair_instruction(question=question, error=error),
+        "max_attempts": 1,
+    }
+    if error.hint:
+        payload["hint"] = str(error.hint)
+    details = _planner_repair_error_details(error)
+    if details:
+        payload["details"] = details
+    if initial_plan is not None:
+        payload["rejected_plan"] = initial_plan.public_payload()
+    return payload
+
+
+def _planner_repair_instruction(*, question: str, error: AgentToolError) -> str:
+    compact = re.sub(r"\s+", "", str(question or "").strip().lower())
+    if error.code == "PLAN_RISK_MISMATCH" and ("期权被指派通知" in compact or "已被指派" in compact):
+        return (
+            "The previous tool call was rejected because the user message is a broker lifecycle notice that needs "
+            "a preview capability, not a read-only position query. For Futu 期权被指派通知 / 已被指派, call "
+            "manual_assignment with raw_text set to the original user message and set task_contract.requested_effect "
+            "to preview_write. Use "
+            "option_positions_read action=assigned-stock only for assigned-stock holding/PnL questions."
+        )
+    if error.code == "PLAN_RISK_MISMATCH" and ("期权到期失效通知" in compact or "已到期失效" in compact):
+        return (
+            "The previous tool call was rejected because the user message is a broker option-expiry lifecycle "
+            "notice that needs a preview capability, not a read-only position query. For Futu 期权到期失效通知 / "
+            "已到期失效, call manual_expiry with raw_text set to the original user message and set "
+            "task_contract.requested_effect to preview_write."
+        )
+    if error.code == "PLAN_RISK_MISMATCH" and any(token in compact for token in ("成交提醒", "成功卖出", "成功买入", "委托已全部成交")):
+        return (
+            "The previous tool call was rejected because the user message is a broker option fill notice that "
+            "needs a preview capability, not a read-only query. Use manual_trade_open for opening fills or "
+            "manual_trade_close for closing fills, with raw_text set to the original user message and "
+            "task_contract.requested_effect set to preview_write."
+        )
+    if error.code == "PLAN_RISK_MISMATCH":
+        return (
+            "The previous plan had the wrong effect for the user request. Return a corrected plan using exactly "
+            "one preview capability for explicit record/config/admin preview requests, or a read-only tool for "
+            "ordinary questions. Do not confirm, apply, notify externally, or mutate state."
+        )
+    return "Return a corrected bounded tool plan that satisfies the validation error without changing the user scope."
+
+
+def _planner_repair_error_details(error: AgentToolError) -> dict[str, Any]:
+    details = error.details if isinstance(error.details, dict) else {}
+    allowed = {
+        "planned_tools",
+        "preview_capabilities",
+        "read_steps",
+        "preview_steps",
+        "tool_name",
+        "allowed_tools",
+        "extra_arguments",
+        "allowed_arguments",
+    }
+    out: dict[str, Any] = {}
+    for key in sorted(allowed):
+        value = details.get(key)
+        if value not in (None, "", [], {}):
+            out[key] = value
+    return out
+
+
+def _planner_repair_trace(
+    *,
+    initial_error: AgentToolError | None,
+    initial_plan: PlannerPlan | None,
+    repair_context: dict[str, Any],
+    repair_result: LlmPlannerResult,
+    repair_planning: AgentLoopPlanningOutcome,
+) -> dict[str, Any]:
+    repair = repair_context.get("planner_repair") if isinstance(repair_context, dict) else None
+    status = "accepted" if repair_planning.perception is not None and repair_planning.error is None else "rejected"
+    if repair_result.error is not None:
+        status = "provider_error" if repair_result.error.code == "LLM_PROVIDER_ERROR" else "rejected"
+    payload: dict[str, Any] = {
+        "schema_version": "om-planner-repair-trace-v1",
+        "attempted": True,
+        "status": status,
+        "initial_error_code": initial_error.code if initial_error is not None else None,
+        "repair_error_code": repair_planning.error.code if repair_planning.error is not None else None,
+        "repair": dict(repair) if isinstance(repair, dict) else {},
+        "repair_trace": dict(repair_result.trace),
+    }
+    if initial_plan is not None:
+        payload["initial_plan"] = initial_plan.public_payload()
+    if repair_result.plan is not None:
+        payload["repair_plan"] = repair_result.plan.public_payload()
+    return {key: value for key, value in payload.items() if value not in (None, "", [], {})}
 
 
 def build_tool_observation(*, index: int, tool_name: str, payload: dict[str, Any], result: dict[str, Any]) -> ToolObservation:
@@ -4263,7 +4411,7 @@ def _planning_outcome_from_tool_plan_result(
     except AgentToolError as err:
         return AgentLoopPlanningOutcome(perception=None, trace={**dict(result.trace), "reason": "invalid_plan", "error_code": err.code}, error=err), ()
     planned_steps = tuple(
-        _agent_loop_step_from_plan_step(index=index, step=step, question=question)
+        _agent_loop_step_from_plan_step(index=index, step=step, question=question, task_contract=result.plan.task_contract)
         for index, step in enumerate(result.plan.steps, start=1)
     )
     precheck_error = _planned_step_precheck_error(planned_steps)
@@ -4317,7 +4465,13 @@ def _planned_step_precheck_error(steps: tuple[AgentLoopStep, ...]) -> AgentToolE
     return None
 
 
-def _agent_loop_step_from_plan_step(*, index: int, step: PlannerPlanStep, question: str = "") -> AgentLoopStep:
+def _agent_loop_step_from_plan_step(
+    *,
+    index: int,
+    step: PlannerPlanStep,
+    question: str = "",
+    task_contract: dict[str, Any] | None = None,
+) -> AgentLoopStep:
     kind = _plan_step_kind(step.tool_name)
     action_policy_payload: dict[str, Any] | None = None
     action_safety_payload: dict[str, Any] | None = None
@@ -4335,7 +4489,7 @@ def _agent_loop_step_from_plan_step(*, index: int, step: PlannerPlanStep, questi
         action_policy_payload = action_policy.public_payload()
         action_safety = assess_action_safety(
             question=question,
-            task_contract=None,
+            task_contract=task_contract,
             tool_name=step.tool_name,
             payload=dict(step.arguments),
             action_policy=action_policy_payload,
@@ -4346,7 +4500,7 @@ def _agent_loop_step_from_plan_step(*, index: int, step: PlannerPlanStep, questi
             tool_name=step.tool_name,
             payload=dict(step.arguments),
             plan_arguments=dict(step.arguments),
-            task_contract=None,
+            task_contract=task_contract,
             action_policy=action_policy_payload,
             action_safety=action_safety_payload,
         )
@@ -6417,6 +6571,9 @@ def _planner_input_payload(text: str, *, conversation_context: dict[str, Any] | 
         repair = conversation_context.get("context_validation_repair")
         if isinstance(repair, dict) and repair:
             context_payload["context_validation_repair"] = dict(repair)
+        planner_repair = conversation_context.get("planner_repair")
+        if isinstance(planner_repair, dict) and planner_repair:
+            context_payload["planner_repair"] = dict(planner_repair)
         payload["context"] = context_payload
     return payload
 
@@ -6491,6 +6648,7 @@ Do not write JSON plans in normal text. Do not wrap tool choices in Markdown.
 Rules:
 - For business, runtime, position, candidate, config, or income questions, call 1 to 3 suitable read-only tools when needed; prefer one tool when it is enough.
 - Use only tools exposed in the current tool list. Do not invent tool names.
+- If context.planner_repair is present, the previous tool call was rejected by host validation. Follow context.planner_repair.instruction and choose a corrected tool call once; do not repeat the rejected tool/effect.
 - Do not include system-scoped arguments such as config_key, config_path, paths, host, port, timeout, audit_db, report_path, run_dir, or output_dir. The host injects those.
 - For income analysis/review/performance/source/composition questions, call monthly_income_report and set include_rows=true.
 - For a month without a year such as "6月", resolve it from the current date in the input context.
@@ -6520,6 +6678,7 @@ Rules:
 - If open_evidence_gaps suggests relevant views/tools, treat them as recoverable evidence hints, not as facts.
 - If prior context is required but cannot be chosen safely, set context_use.mode=ambiguous, requires_clarification=true, provide a clarification_question, and return steps=[] rather than guessing.
 - Use only tools/capabilities in the provided manifest.
+- If context.planner_repair is present, the previous plan was rejected by host validation. Follow context.planner_repair.instruction and return one corrected bounded plan; do not repeat the rejected tool/effect.
 - Fill required_capabilities with the user's required answer capabilities from the tool manifest. Use [] only when the request needs no special capability beyond the planned tool call.
 - Preview-write capabilities only create a pending preview. They never apply writes, confirm pending operations, notify users externally, or mutate config/ledger directly.
 - Never plan confirm/cancel/apply actions. Confirm/cancel must be handled by deterministic user commands bound to a pending operation.

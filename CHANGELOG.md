@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.2.318 - 2026-06-19
+
+### Changed
+- Added a bounded Assistant planner repair pass for `PLAN_RISK_MISMATCH`, feeding validation errors back to the LLM so
+  broker lifecycle notices can be re-planned from mistaken read-only tools into the correct preview capabilities.
+- Passed planner `task_contract` effect into preview action-safety checks so `preview_write` plans remain preview-only
+  and still require the existing confirmation flow before any ledger mutation.
+
 ## 1.2.317 - 2026-06-19
 
 ### Added

@@ -341,6 +341,8 @@ def _requested_effect(*, text: str, contract: dict[str, Any]) -> str:
     explicit = str(contract.get("requested_effect") or "").strip().lower()
     if explicit in {"read", "preview", "confirm"}:
         return explicit
+    if explicit == "preview_write":
+        return "preview"
     compact = re.sub(r"\s+", "", str(text or "").lower())
     if not compact:
         return "read"
