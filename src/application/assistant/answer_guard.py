@@ -90,6 +90,14 @@ def verify_answer_guard(
                 "evidence": f"cashflow_row_count={facts['cashflow_row_count']}",
             }
         )
+    if facts["analysis_numeric_value_count"] > 0 and _claims_analysis_values_unavailable(compact):
+        violations.append(
+            {
+                "type": "contradicts_observed_analysis_rows",
+                "claim": "查询结果未展示具体数值",
+                "evidence": f"analysis_query numeric values observed={facts['analysis_numeric_value_count']}",
+            }
+        )
     for fact in facts["contract_facts"]:
         expected_contracts = _safe_float(fact.get("contracts"))
         if expected_contracts is None or expected_contracts == 1:
@@ -224,6 +232,7 @@ def _answer_guard_facts(observations: list[dict[str, Any]]) -> dict[str, Any]:
     all_tools_ok = True
     complete_for_query_scope = False
     cashflow_row_count = 0
+    analysis_numeric_value_count = 0
     contract_facts: list[dict[str, Any]] = []
     for item in observations:
         if not bool(item.get("ok", False)):
@@ -254,12 +263,15 @@ def _answer_guard_facts(observations: list[dict[str, Any]]) -> dict[str, Any]:
             contract_facts.extend(_monthly_income_contract_facts(data))
         if guard_profile == "position_rows" or str(item.get("tool_name") or "") == "option_positions_read":
             contract_facts.extend(_position_contract_facts(data))
+        if guard_profile == "analysis_result" or str(item.get("tool_name") or "") == "analysis_query":
+            analysis_numeric_value_count += _analysis_numeric_value_count(data)
     return {
         "months": sorted(months),
         "accounts": sorted(accounts),
         "all_tools_ok": all_tools_ok,
         "complete_for_query_scope": complete_for_query_scope,
         "cashflow_row_count": cashflow_row_count,
+        "analysis_numeric_value_count": analysis_numeric_value_count,
         "contract_facts": contract_facts,
     }
 
@@ -328,6 +340,53 @@ def _position_contract_facts(data: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     return facts
+
+
+def _analysis_numeric_value_count(data: dict[str, Any]) -> int:
+    rows = data.get("rows")
+    if not isinstance(rows, list):
+        return 0
+    count = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for value in _iter_leaf_values(row):
+            if _safe_float(value) is not None:
+                count += 1
+    return count
+
+
+def _iter_leaf_values(value: Any) -> list[Any]:
+    if isinstance(value, dict):
+        out: list[Any] = []
+        for item in value.values():
+            out.extend(_iter_leaf_values(item))
+        return out
+    if isinstance(value, (list, tuple, set)):
+        out: list[Any] = []
+        for item in value:
+            out.extend(_iter_leaf_values(item))
+        return out
+    return [value]
+
+
+def _claims_analysis_values_unavailable(compact: str) -> bool:
+    tokens = (
+        "rows被截断",
+        "row被截断",
+        "返回的rows被截断",
+        "未展示具体数值",
+        "未展示具体数字",
+        "没有实际数字",
+        "看不到具体数字",
+        "看不到具体数值",
+        "无法给出具体金额",
+        "无法给出具体数值",
+        "无法给出具体数字",
+        "需要你确认是否能看到",
+        "你能看到上面查询返回的具体数字吗",
+    )
+    return any(token in compact for token in tokens)
 
 
 _CURRENCY_NUMERIC_CLAIM_RE = re.compile(r"\b(?:USD|HKD|CNY)\s*([-+]?\d[\d,]*(?:\.\d+)?)", re.IGNORECASE)
