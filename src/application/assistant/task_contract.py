@@ -355,17 +355,142 @@ def _infer_task_mode(*, intent_families: list[str], text: str, full_text: str) -
 
 
 def _infer_requested_effect(text: str) -> str:
-    compact = re.sub(r"\s+", "", str(text or "").lower())
-    if preview_request_kind_from_text(text) is not None:
-        return "preview_write"
-    if any(token in compact for token in ("设置", "修改")):
+    if preview_effect_allowed_from_text(text):
         return "preview_write"
     return "read"
+
+
+def preview_effect_allowed_from_text(text: str) -> bool:
+    compact = re.sub(r"\s+", "", str(text or "").lower())
+    if not compact:
+        return False
+    if _looks_like_strong_preview_read_query(compact):
+        return False
+    if _looks_like_explicit_preview_write(compact):
+        return True
+    if _looks_like_preview_read_query(compact):
+        if not (
+            _looks_like_assignment_lifecycle_preview(compact)
+            or _looks_like_expiry_lifecycle_preview(compact)
+            or _looks_like_fill_notice_preview(compact)
+        ):
+            return False
+    if _looks_like_lifecycle_read_query(compact):
+        return False
+    if _looks_like_assignment_lifecycle_preview(compact) or _looks_like_expiry_lifecycle_preview(compact):
+        return True
+    if "改成" in compact and any(token in compact for token in ("premium", "权利金", "合约数", "张数", "close", "平仓价")):
+        return True
+    if (
+        ("设置" in compact or "修改监控" in compact or "配置标的" in compact)
+        and any(token in compact for token in ("coveredcall", "sellcall", "sellput", "minstrike", "maxstrike", "min_strike", "max_strike"))
+    ):
+        return True
+    if _looks_like_fill_notice_preview(compact):
+        return True
+    return any(
+        token in compact
+        for token in (
+            "记录开仓",
+            "记录平仓",
+            "recordopen",
+            "recordclose",
+            "记录交易",
+            "写入交易",
+            "补录",
+            "立即升级",
+            "upgrade_now",
+            "切换模型",
+            "使用模型",
+        )
+    )
+
+
+def _looks_like_explicit_preview_write(compact: str) -> bool:
+    if any(token in compact for token in ("记录", "写入", "补录")) and any(
+        token in compact
+        for token in (
+            "开仓",
+            "平仓",
+            "交易",
+            "成交",
+            "成交提醒",
+            "被指派",
+            "已被指派",
+            "到期被指派平仓",
+            "到期失效",
+            "已到期失效",
+        )
+    ):
+        return True
+    return any(
+        token in compact
+        for token in (
+            "记录开仓",
+            "记录平仓",
+            "recordopen",
+            "recordclose",
+            "记录交易",
+            "写入交易",
+            "补录",
+        )
+    )
+
+
+def _looks_like_strong_preview_read_query(compact: str) -> bool:
+    return any(
+        token in compact
+        for token in (
+            "解释",
+            "说明",
+            "含义",
+            "是什么意思",
+            "什么意思",
+            "什么是",
+            "怎么理解",
+            "怎么看",
+            "分析",
+            "收益",
+            "盈亏",
+            "浮盈",
+            "pnl",
+            "成本",
+            "复盘",
+            "表现",
+            "口径",
+            "规则",
+        )
+    )
+
+
+def _looks_like_preview_read_query(compact: str) -> bool:
+    return any(
+        token in compact
+        for token in (
+            "是否",
+            "有没有",
+            "是不是",
+            "查询",
+            "查一下",
+            "查看",
+            "看看",
+            "是多少",
+            "多少",
+            "当前",
+            "现在",
+            "目前",
+            "靠谱吗",
+            "是否靠谱",
+            "正常吗",
+        )
+    )
 
 
 def preview_request_kind_from_text(text: str) -> str | None:
     compact = re.sub(r"\s+", "", str(text or "").lower())
     if not compact:
+        return None
+    if not preview_effect_allowed_from_text(compact):
         return None
     if _looks_like_lifecycle_read_query(compact):
         return None
@@ -394,7 +519,7 @@ def preview_request_kind_from_text(text: str) -> str | None:
 
 
 def _looks_like_assignment_lifecycle_preview(compact: str) -> bool:
-    if "期权被指派通知" in compact:
+    if "期权被指派通知" in compact and "已被指派" in compact:
         return True
     if "衍生品提醒" in compact and "已被指派" in compact:
         return True
@@ -406,7 +531,7 @@ def _looks_like_assignment_lifecycle_preview(compact: str) -> bool:
 
 
 def _looks_like_expiry_lifecycle_preview(compact: str) -> bool:
-    if "期权到期失效通知" in compact:
+    if "期权到期失效通知" in compact and "已到期失效" in compact:
         return True
     if "衍生品提醒" in compact and "已到期失效" in compact:
         return True
@@ -415,6 +540,12 @@ def _looks_like_expiry_lifecycle_preview(compact: str) -> bool:
     ):
         return True
     return False
+
+
+def _looks_like_fill_notice_preview(compact: str) -> bool:
+    if "成交提醒" in compact and any(token in compact for token in ("已成交", "委托已全部成交", "成功卖出", "成功买入")):
+        return True
+    return any(token in compact for token in ("委托已全部成交", "成功卖出", "成功买入"))
 
 
 def _looks_like_lifecycle_read_query(compact: str) -> bool:

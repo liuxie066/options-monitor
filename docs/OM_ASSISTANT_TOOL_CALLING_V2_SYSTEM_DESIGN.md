@@ -637,21 +637,28 @@ Schema 约束：
 - confirm/cancel/apply 仍不能由模型产生，只能由 deterministic command
   绑定 pending operation。
 
-### 13.5 Manifest Budget by Effect
+### 13.5 Model-Driven Manifest Budget
 
-provider 一次输入不应同时塞入完整分析 manifest、长 context projection 和
-长 broker notice。
+provider 一次输入仍需要预算控制，但预算控制不能退回到“host 先替模型选择
+具体业务工具”。
 
-host 在构造 planner payload 前应先做轻量 effect/scope sketch：
+当前边界：
 
-- explicit preview / broker lifecycle notice：只暴露 preview capability 子集，
-  不暴露 analysis views；
-- read analysis：暴露 read tools 和按消息裁剪后的 analysis views；
-- confirm/cancel/apply：跳过 LLM，走 deterministic command；
-- 无法判断 effect：暴露最小 read/clarification schema，而不是最大 manifest。
+- 普通自然语言进入模型驱动 tool loop，provider-visible manifest 同时包含
+  按消息裁剪后的 read tools 和 preview capabilities；
+- host 可以给出 `preview_authority` 这类 effect-level policy hint，说明当前
+  消息是否具备创建 pending preview 的用户授权；
+- `preview_authority` 的判定先看解释、分析、收益、状态等 read intent；只有
+  explicit record/write/补录 或完整 broker lifecycle/fill notice 才允许 preview；
+- host 不再把 broker lifecycle notice 预先收窄成唯一
+  `manual_assignment` / `manual_expiry` 工具；
+- confirm/cancel/apply 仍跳过 LLM，走 deterministic command；
+- `raw_text` 仍由 host 注入，不进入 model-writable arguments。
+- 初始 planner manifest 保留 analysis view 字段清单和关键聚合警示；完整字段
+  语义按需通过 `analysis_catalog` 获取，避免 provider 输入重新膨胀。
 
-这样保持“模型选择工具”的方向，同时减少 malformed arguments、超 token 和
-错误工具选择。
+这样让模型负责 capability selection，同时保留 host 对 scope、effect、权限、
+预算和 trace 的硬边界。
 
 ## 14. Error Handling
 
@@ -880,7 +887,8 @@ answer_trace:
 | Slice 6: Remove Output Text JSON Plan Path | 已落地于默认 provider path | provider 普通文本 JSON 不解析；provider tool-call 不再映射到 `PlannerPlan` |
 | Slice 7: Regression / Release Gate | 已落地于外层 tool-call cutover | 补自然语言工具调用、lowercase/中文 alias 和 invalid model event 回归 |
 | Slice 8: Remove PlannerPlan Runtime Bridge | 已落地于 assistant 主包 | provider event 主路径是 event-native result；legacy JSON plan bridge 不再回到 runtime path |
-| Slice 9: Provider Argument / Preview Hardening | 待落地 | malformed tool arguments、host-owned preview payload、requested_effect 和 deterministic preview fallback |
+| Slice 9: Provider Argument / Preview Hardening | 已落地 | malformed tool arguments、host-owned preview payload、requested_effect 和 deterministic preview fallback |
+| Slice 10: Model-Driven Capability Selection | 已落地 | 自然语言不再 preview-only 收窄；模型在 read + preview manifest 中选择能力，host 只做 effect/scope/safety guard |
 
 ### Slice 1: Event Contract
 
@@ -1124,8 +1132,10 @@ python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_sm
      host-owned 且不要求模型填写。
    - preview notes 改为“select preview capability; host injects original
      user message as raw_text”。
-   - explicit preview / broker lifecycle notice 时只暴露 preview capability
-     子集，避免把 analysis views 和长 context 一起塞给 provider。
+   - Slice 9 曾先用 preview-only 子集降低 provider malformed 风险；
+     Slice 10 已将该策略升级为模型驱动 manifest：read tools 和 preview
+     capabilities 同时暴露，由模型选择，host 用 `preview_authority` 和
+     pre-tool guard 做 effect/scope 安全控制。
 3. `preview_request.py`
    - 保持从 `question` 注入 `raw_text` 的逻辑，并把它作为唯一权威来源。
    - 如果模型传了 `raw_text`，host 可忽略或覆盖为 request text。
@@ -1179,6 +1189,53 @@ python3 -m pytest tests/test_inbound_control.py tests/test_inbound_feishu_ws.py 
 4. `assistant_trace` 或 audit 能解释：
    LLM protocol error 是否发生、是否 deterministic fallback、最终 preview
    operation id、未 apply。
+
+### Slice 10: Model-Driven Capability Selection
+
+触发背景：
+
+- Slice 9 解决了 provider malformed arguments 和 preview fallback，但
+  `preview_request_kind_from_text(...)` 仍在 host 侧提前把自然语言收窄成
+  某一个 preview capability。
+- 这提高了稳定性，却削弱了模型“理解意图、选择工具、观察结果、继续决策”的
+  核心职责。
+
+目标：
+
+1. 普通自然语言默认进入模型驱动 tool loop。
+2. provider-visible manifest 同时包含 read tools 和 preview capabilities。
+3. host 不再用 broker notice classifier 选择具体 preview tool。
+4. host 只保留 effect-level preview authority、scope/safety guard、budget、
+   duplicate detection 和 trace。
+5. deterministic natural-language parser 降级为 preview 内部 normalizer 和
+   provider protocol malformed 的安全 fallback；显式 command 仍 deterministic。
+
+已落地边界：
+
+- `_planner_input_payload(...)` 不再生成 `preview_only` manifest。
+- provider tool-call schema 不再按 read-only-only 过滤 preview capabilities。
+- `manual_trade_open`、`manual_trade_close`、`manual_assignment`、
+  `manual_expiry` 的 provider-visible schema 仍不包含 `raw_text`。
+- `preview_authority` 只表达是否允许 pending preview，不选择具体 tool。
+- 普通 read 查询即使 manifest 中可见 preview capability，也会因
+  `preview_authority=false` 和 pre-tool safety 防止误创建 pending preview。
+- 解释/分析 broker notice 或 fill notice 的问题仍是 read intent；例如
+  `期权被指派通知是什么意思`、`成交提醒收益分析` 不会创建 pending preview。
+- analysis view manifest 默认压缩为字段清单和关键聚合提示，详细
+  `field_semantics` 由 `analysis_catalog` 作为 follow-up evidence 获取。
+
+回归重点：
+
+- broker assignment/expiry notice：模型可见 read + preview tools，并应选择
+  对应 preview capability。
+- assigned-stock 收益/状态问题：仍走 read evidence path，不被 preview
+  authority 误拦截。
+- notification explanation / fill analysis：保持 read-only，不被 raw notice
+  关键词误判为 preview-write。
+- model-driven manifest payload：常见收益分析、assignment notice、assigned-stock
+  分析输入保持在预算内，不回到 50k+ manifest。
+- provider malformed `arguments`：仍可使用 high-confidence deterministic
+  preview fallback，但不恢复普通文本 JSON plan。
 
 ## 17. Acceptance Criteria
 
