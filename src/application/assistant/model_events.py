@@ -389,9 +389,15 @@ def provider_tool_schema_from_manifest(
         key = str(raw_key or "").strip()
         if not key or key in omit_arguments:
             continue
-        description = str(raw_description or "").strip()
-        properties[key] = _tool_argument_json_schema(key=key, description=description)
-        if _tool_argument_is_required(description):
+        if _tool_argument_is_host_owned(raw_description):
+            continue
+        description = _tool_argument_description(raw_description)
+        properties[key] = _tool_argument_schema_from_manifest_value(
+            key=key,
+            value=raw_description,
+            description=description,
+        )
+        if _tool_argument_is_required(description) or _tool_argument_declares_required(raw_description):
             required.append(key)
 
     parameters: dict[str, Any] = {
@@ -592,7 +598,12 @@ def _provider_arguments(value: Any) -> dict[str, Any]:
             raise AgentToolError(
                 code="INVALID_MODEL_EVENT",
                 message="provider tool call arguments are not valid JSON",
-                details={"error": str(exc)},
+                details={
+                    "reason": "provider_arguments_malformed",
+                    "error": str(exc),
+                    "argument_type": "str",
+                    "argument_chars": len(text),
+                },
             ) from exc
         if not isinstance(parsed, dict):
             raise AgentToolError(code="INVALID_MODEL_EVENT", message="provider tool call arguments must be an object")
@@ -843,6 +854,48 @@ def _tool_argument_json_schema(*, key: str, description: str) -> dict[str, Any]:
     if description:
         schema["description"] = description
     return schema
+
+
+def _tool_argument_is_host_owned(value: Any) -> bool:
+    return isinstance(value, dict) and value.get("host_owned") is True
+
+
+def _tool_argument_schema_from_manifest_value(*, key: str, value: Any, description: str) -> dict[str, Any]:
+    if isinstance(value, dict):
+        schema = {
+            str(raw_key): _copy_value(item)
+            for raw_key, item in value.items()
+            if str(raw_key) in _TOOL_ARGUMENT_JSON_SCHEMA_KEYS and item not in (None, "", [], {})
+        }
+        if schema:
+            return schema
+    return _tool_argument_json_schema(key=key, description=description)
+
+
+_TOOL_ARGUMENT_JSON_SCHEMA_KEYS = frozenset(
+    {
+        "type",
+        "enum",
+        "items",
+        "properties",
+        "additionalProperties",
+        "description",
+        "minimum",
+        "maximum",
+        "minItems",
+        "maxItems",
+    }
+)
+
+
+def _tool_argument_description(value: Any) -> str:
+    if isinstance(value, dict):
+        return str(value.get("description") or "").strip()
+    return str(value or "").strip()
+
+
+def _tool_argument_declares_required(value: Any) -> bool:
+    return isinstance(value, dict) and value.get("required") is True
 
 
 def _tool_argument_is_array(*, key: str, description: str) -> bool:

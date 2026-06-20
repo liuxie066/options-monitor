@@ -83,7 +83,9 @@ user message
 - 不新增第二套工具注册表、权限系统或全局对话状态机。
 - 不恢复普通文本 JSON plan fallback。
 - 不新增 `legacy_json_plan_enabled`、`use_event_loop_v2` 等长期兼容开关。
-- 不用 deterministic natural-language parser 修 broker notice case。
+- 不把 deterministic natural-language parser 作为 broker notice 的主路由；
+  但 explicit preview / command 已经有高置信 deterministic candidate 时，
+  可以作为 provider protocol malformed 的安全兜底。
 - 不让模型自动确认、取消、apply、发通知、写 ledger、写 trade event、写 position、
   改配置或触碰 broker-facing state。
 
@@ -237,3 +239,28 @@ git diff --check
 - diagnostics live probe 不再把 legacy planner plan 当成功结果接受。
 - 新增 diagnostics 负向回归，确认 legacy planner plan 会报错并提示需要
   event-native tool loop。
+
+### 2026-06-20 远端 ClawBot 发现
+
+远端 `v1.2.320` 的 ClawBot 输入：
+
+```text
+记录sy 账户的到期被指派平仓 期权被指派通知: 您的保证金综合账户(2905) - 证券所持有的-2张PDD 260618 85.00P期权已被指派，详情请查看资金明细及持仓情况。【富途证券(香港)】
+```
+
+暴露了事件式 tool loop 的下一层问题：
+
+- 外层 JSON plan 已废弃，错误不是 `LLM planner returned invalid JSON`。
+- DeepSeek / Chat Completions 兼容 provider 的 tool-call `arguments`
+  仍是 JSON 字符串，模型输出 malformed arguments 时会触发
+  `provider tool call arguments are not valid JSON`。
+- 同一条消息 deterministic candidate 已能识别为 `manual_assignment`，
+  但候选仲裁选择了 LLM error，没有使用安全 preview fallback。
+- `requested_effect` 对 broker lifecycle notice 的 host 推断不完整，可能把
+  explicit preview 误判为 read，导致 `effect_mismatch`。
+- planner payload 过大，且要求模型复制完整 `raw_text`，增加 malformed
+  arguments 风险。
+
+后续方案已并入
+[OM_ASSISTANT_TOOL_CALLING_V2_SYSTEM_DESIGN.md](OM_ASSISTANT_TOOL_CALLING_V2_SYSTEM_DESIGN.md)
+的 Slice 9：Provider Argument / Preview Hardening。
