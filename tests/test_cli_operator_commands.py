@@ -510,7 +510,7 @@ def test_assistant_eval_context_command_renders_report(capsys) -> None:
     assert payload["tool_name"] == "assistant.eval_context"
     assert payload["ok"] is True
     assert payload["data"]["summary"]["mode"] == "scenarios"
-    assert payload["data"]["summary"]["total"] == 10
+    assert payload["data"]["summary"]["total"] == 17
     result = payload["data"]["results"][0]
     assert result["mode"] == "scenarios"
     assert result["actual"]["validation"]["context_validation"]["schema_version"] == "om-context-validation-v1"

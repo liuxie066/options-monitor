@@ -63,24 +63,32 @@ def test_context_eval_scenarios_mode_runs_real_followup_regression_fixture() -> 
 
     assert summary["mode"] == "scenarios"
     assert summary["ok"] is True
-    assert summary["total"] == 10
+    assert summary["total"] == 17
     assert summary["failed"] == 0
     assert summary["empty"] is False
     assert families == {
+        "assigned_stock_read",
+        "assignment_preview",
         "candidate_followup",
+        "candidate_standalone",
         "config_followup",
         "evidence_gap_carry",
+        "expiry_preview",
         "explicit_switch",
         "income_followup",
+        "income_metric_followup",
+        "income_standalone",
         "metric_followup",
         "multi_topic_ambiguity",
         "no_context",
+        "notice_explanation",
         "position_followup",
         "runtime_followup",
     }
 
     text = format_context_eval_text(report)
-    assert "assistant context eval: 10/10 passed" in text
+    assert "assistant context eval: 17/17 passed" in text
     assert "mode=scenarios" in text
     assert "family=income_followup" in text
+    assert "terminal=preview_request tool=manual_assignment" in text
     assert "validation=ask_clarification" in text

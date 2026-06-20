@@ -201,16 +201,16 @@ def handle_feishu_ws_event(
     reaction_fn: ReactionFn = add_message_reaction,
     channel_service: ChannelService | None = None,
     execute_tool_fn: ExecuteToolFn | None = None,
-    plan_tools_fn: Callable[..., Any] | None = None,
-    synthesize_response_fn: Callable[..., Any] | None = None,
+    model_turn_fn: Callable[..., Any] | None = None,
+    generate_reply_fn: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     inbound_kwargs: dict[str, Any] = {"allowed_senders": settings.allowed_senders}
     if execute_tool_fn is not None:
         inbound_kwargs["execute_tool_fn"] = execute_tool_fn
-    if plan_tools_fn is not None:
-        inbound_kwargs["plan_tools_fn"] = plan_tools_fn
-    if synthesize_response_fn is not None:
-        inbound_kwargs["synthesize_response_fn"] = synthesize_response_fn
+    if model_turn_fn is not None:
+        inbound_kwargs["model_turn_fn"] = model_turn_fn
+    if generate_reply_fn is not None:
+        inbound_kwargs["generate_reply_fn"] = generate_reply_fn
     service = channel_service or build_feishu_inbound_channel_service()
     inbound = service.handle_inbound(
         FEISHU_APP_NOTIFICATION_PROVIDER,
@@ -243,8 +243,8 @@ def serve_feishu_ws(
     reply_fn: ReplyFn = reply_text_message,
     reaction_fn: ReactionFn = add_message_reaction,
     execute_tool_fn: ExecuteToolFn | None = None,
-    plan_tools_fn: Callable[..., Any] | None = None,
-    synthesize_response_fn: Callable[..., Any] | None = None,
+    model_turn_fn: Callable[..., Any] | None = None,
+    generate_reply_fn: Callable[..., Any] | None = None,
     start_client_fn: StartClientFn = start_feishu_ws_client,
     lock_path: str | os.PathLike[str] | None = None,
 ) -> None:
@@ -255,8 +255,8 @@ def serve_feishu_ws(
             reply_fn=reply_fn,
             reaction_fn=reaction_fn,
             execute_tool_fn=execute_tool_fn,
-            plan_tools_fn=plan_tools_fn,
-            synthesize_response_fn=synthesize_response_fn,
+            model_turn_fn=model_turn_fn,
+            generate_reply_fn=generate_reply_fn,
         )
         worker.start()
         try:
@@ -277,15 +277,15 @@ class _FeishuWsWorker:
         reply_fn: ReplyFn,
         reaction_fn: ReactionFn,
         execute_tool_fn: ExecuteToolFn | None,
-        plan_tools_fn: Callable[..., Any] | None = None,
-        synthesize_response_fn: Callable[..., Any] | None = None,
+        model_turn_fn: Callable[..., Any] | None = None,
+        generate_reply_fn: Callable[..., Any] | None = None,
     ) -> None:
         self._settings = settings
         self._reply_fn = reply_fn
         self._reaction_fn = reaction_fn
         self._execute_tool_fn = execute_tool_fn
-        self._plan_tools_fn = plan_tools_fn
-        self._synthesize_response_fn = synthesize_response_fn
+        self._model_turn_fn = model_turn_fn
+        self._generate_reply_fn = generate_reply_fn
         self._queue: queue.Queue[dict[str, Any] | None] = queue.Queue(maxsize=max(1, int(settings.queue_size)))
         self._thread = threading.Thread(target=self._run, name="om-feishu-ws-worker", daemon=True)
 
@@ -314,8 +314,8 @@ class _FeishuWsWorker:
                     reply_fn=self._reply_fn,
                     reaction_fn=self._reaction_fn,
                     execute_tool_fn=self._execute_tool_fn,
-                    plan_tools_fn=self._plan_tools_fn,
-                    synthesize_response_fn=self._synthesize_response_fn,
+                    model_turn_fn=self._model_turn_fn,
+                    generate_reply_fn=self._generate_reply_fn,
                 )
             except Exception:
                 LOG.exception("failed to process Feishu WebSocket event")

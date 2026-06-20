@@ -9,7 +9,7 @@ from typing import Any
 from src.application.agent_tool_contracts import build_response
 from src.application.assistant import AssistantSettings
 from src.application.assistant.audit import InboundAuditStore
-from src.application.assistant.agent_loop import EventNativePlanningResult, LlmPlannerResult
+from src.application.assistant.agent_loop import EventNativePlanningResult, ModelTurnResult
 from src.application.assistant.model_events import ModelToolCallEvent
 from src.application.assistant.task_contract import TASK_CONTRACT_SCHEMA_VERSION
 from src.application.inbound.feishu_ws import (
@@ -60,16 +60,15 @@ def _test_task_contract(
     }
 
 
-def _event_plan_result(
+def _event_model_turn_result(
     *,
     goal: str,
     tool_name: str,
     arguments: dict[str, Any] | None,
     task_contract: dict[str, Any],
     purpose: str,
-) -> LlmPlannerResult:
-    return LlmPlannerResult(
-        plan=None,
+) -> ModelTurnResult:
+    return ModelTurnResult(
         trace={"enabled": True, "attempted": True, "reason": "accepted"},
         event_plan=EventNativePlanningResult(
             events=(
@@ -279,9 +278,9 @@ def test_feishu_ws_agent_loop_routes_cashflow_detail_plan(tmp_path: Path) -> Non
         text: str,
         _settings: AssistantSettings,
         _conversation_context: dict[str, Any] | None,
-    ) -> LlmPlannerResult:
+    ) -> ModelTurnResult:
         assert text == "分析 lx 6月的净现金流明细"
-        return _event_plan_result(
+        return _event_model_turn_result(
             goal="分析 lx 2026-06 的净现金流明细",
             tool_name="monthly_income_report",
             arguments={"account": "lx", "month": "2026-06", "include_rows": True},
@@ -309,7 +308,7 @@ def test_feishu_ws_agent_loop_routes_cashflow_detail_plan(tmp_path: Path) -> Non
         ),
         reply_fn=_reply,
         execute_tool_fn=_execute,
-        plan_tools_fn=_plan,
+        model_turn_fn=_plan,
     )
 
     inbound_result = out["data"]["inbound"]["data"]["inbound_result"]
@@ -364,9 +363,9 @@ def test_feishu_ws_agent_loop_degrades_when_conversation_context_fails(
         _text: str,
         _settings: AssistantSettings,
         conversation_context: dict[str, Any] | None,
-    ) -> LlmPlannerResult:
+    ) -> ModelTurnResult:
         contexts.append(conversation_context)
-        return _event_plan_result(
+        return _event_model_turn_result(
             goal="runtime status",
             tool_name="runtime_status",
             arguments={},
@@ -393,7 +392,7 @@ def test_feishu_ws_agent_loop_degrades_when_conversation_context_fails(
         ),
         reply_fn=_reply,
         execute_tool_fn=_execute,
-        plan_tools_fn=_plan,
+        model_turn_fn=_plan,
     )
 
     inbound_result = out["data"]["inbound"]["data"]["inbound_result"]
