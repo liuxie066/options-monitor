@@ -76,6 +76,7 @@ class ModelToolCallEvent:
     purpose: str = ""
     provider: str | None = None
     parent_event_id: str | None = None
+    protocol_error: dict[str, Any] | None = None
     schema_version: str = MODEL_EVENT_SCHEMA_VERSION
 
     @property
@@ -97,6 +98,8 @@ class ModelToolCallEvent:
             payload["provider"] = self.provider
         if self.parent_event_id:
             payload["parent_event_id"] = self.parent_event_id
+        if isinstance(self.protocol_error, dict) and self.protocol_error:
+            payload["protocol_error"] = _copy_mapping(self.protocol_error)
         return payload
 
 
@@ -240,19 +243,20 @@ def model_tool_call_from_provider_block(
         raise AgentToolError(code="INVALID_MODEL_EVENT", message="provider tool call block must be an object")
 
     block_type = str(block.get("type") or "").strip()
+    protocol_error: dict[str, Any] | None = None
     if block_type == "tool_use":
         tool_call_id = str(block.get("id") or "").strip()
         tool_name = str(block.get("name") or "").strip()
-        arguments = _provider_arguments(block.get("input"))
+        arguments, protocol_error = _provider_arguments_or_protocol_error(block.get("input"))
     elif block_type in {"function_call", "tool_call"}:
         tool_call_id = str(block.get("call_id") or block.get("id") or "").strip()
         tool_name = str(block.get("name") or "").strip()
-        arguments = _provider_arguments(block.get("arguments"))
+        arguments, protocol_error = _provider_arguments_or_protocol_error(block.get("arguments"))
     elif isinstance(block.get("function"), dict):
         function = block["function"]
         tool_call_id = str(block.get("id") or "").strip()
         tool_name = str(function.get("name") or "").strip()
-        arguments = _provider_arguments(function.get("arguments"))
+        arguments, protocol_error = _provider_arguments_or_protocol_error(function.get("arguments"))
     else:
         raise AgentToolError(
             code="INVALID_MODEL_EVENT",
@@ -272,6 +276,7 @@ def model_tool_call_from_provider_block(
         arguments=arguments,
         provider=provider,
         parent_event_id=parent_event_id,
+        protocol_error=protocol_error,
     )
 
 
@@ -506,6 +511,8 @@ def adapt_tool_result(
             "code": error_code,
             "message": str(error.get("message") or ""),
         }
+    if guard_decision is not None and not ok:
+        observation["guard_decision"] = _guard_decision_observation(guard_decision)
 
     evidence_delta = {
         "schema_version": EVIDENCE_DELTA_SCHEMA_VERSION,
@@ -544,6 +551,19 @@ def adapt_tool_result(
         parent_event_id=parent_event_id,
     )
     return ToolResultAdapterOutput(raw_result=_copy_mapping(raw_result), event=event)
+
+
+def _guard_decision_observation(event: ToolGuardDecisionEvent) -> dict[str, Any]:
+    payload = {
+        "tool_name": event.tool_name,
+        "allowed": bool(event.allowed),
+        "decision": event.decision,
+        "reason": event.reason,
+        "risk_class": event.risk_class,
+        "scope_source": event.scope_source,
+        "error_code": event.error_code,
+    }
+    return {key: value for key, value in payload.items() if value not in (None, "", [], {})}
 
 
 def event_transcript_payload(events: list[Any] | tuple[Any, ...]) -> list[dict[str, Any]]:
@@ -606,9 +626,36 @@ def _provider_arguments(value: Any) -> dict[str, Any]:
                 },
             ) from exc
         if not isinstance(parsed, dict):
-            raise AgentToolError(code="INVALID_MODEL_EVENT", message="provider tool call arguments must be an object")
+            raise AgentToolError(
+                code="INVALID_MODEL_EVENT",
+                message="provider tool call arguments must be an object",
+                details={"reason": "provider_arguments_not_object", "argument_type": type(parsed).__name__},
+            )
         return _copy_mapping(parsed)
-    raise AgentToolError(code="INVALID_MODEL_EVENT", message="provider tool call arguments must be an object")
+    raise AgentToolError(
+        code="INVALID_MODEL_EVENT",
+        message="provider tool call arguments must be an object",
+        details={"reason": "provider_arguments_not_object", "argument_type": type(value).__name__},
+    )
+
+
+def _provider_arguments_or_protocol_error(value: Any) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    try:
+        return _provider_arguments(value), None
+    except AgentToolError as err:
+        return {}, _agent_tool_error_payload(err)
+
+
+def _agent_tool_error_payload(err: AgentToolError) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "code": str(err.code or "INVALID_MODEL_EVENT"),
+        "message": str(err.message or "provider tool call protocol error"),
+    }
+    if err.hint:
+        payload["hint"] = str(err.hint)
+    if isinstance(err.details, dict) and err.details:
+        payload["details"] = _copy_mapping(err.details)
+    return payload
 
 
 def _provider_tool_call_blocks_from_response(response: dict[str, Any]) -> tuple[dict[str, Any], ...]:
@@ -868,8 +915,36 @@ def _tool_argument_schema_from_manifest_value(*, key: str, value: Any, descripti
             if str(raw_key) in _TOOL_ARGUMENT_JSON_SCHEMA_KEYS and item not in (None, "", [], {})
         }
         if schema:
-            return schema
-    return _tool_argument_json_schema(key=key, description=description)
+            return _provider_compatible_argument_schema(schema)
+    return _provider_compatible_argument_schema(_tool_argument_json_schema(key=key, description=description))
+
+
+def _provider_compatible_argument_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    out = _copy_mapping(schema)
+    raw_type = out.get("type")
+    if isinstance(raw_type, list):
+        non_null_types = [item for item in raw_type if item != "null"]
+        if len(non_null_types) == 1:
+            out["type"] = non_null_types[0]
+    raw_enum = out.get("enum")
+    if isinstance(raw_enum, list):
+        enum_values = [item for item in raw_enum if item is not None]
+        if enum_values:
+            out["enum"] = enum_values
+        else:
+            out.pop("enum", None)
+    properties = out.get("properties")
+    if isinstance(properties, dict):
+        out["properties"] = {
+            str(prop_name): _provider_compatible_argument_schema(prop_schema)
+            if isinstance(prop_schema, dict)
+            else _copy_value(prop_schema)
+            for prop_name, prop_schema in properties.items()
+        }
+    items = out.get("items")
+    if isinstance(items, dict):
+        out["items"] = _provider_compatible_argument_schema(items)
+    return out
 
 
 _TOOL_ARGUMENT_JSON_SCHEMA_KEYS = frozenset(

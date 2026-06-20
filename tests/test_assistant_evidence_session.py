@@ -13,7 +13,7 @@ from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.assistant import AssistantRequest, AssistantSettings, AssistantLlmSettings, handle_assistant_message
 from src.application.assistant.agent_loop import (
     EventNativePlanningResult,
-    LlmPlannerResult,
+    ModelTurnResult,
     PLANNER_CONTEXT_USE_SCHEMA_VERSION,
     TOOL_CHECK_SCHEMA_VERSION,
     TOOL_PLAN_SCHEMA_VERSION,
@@ -209,16 +209,15 @@ def _recipe_payload(name: str) -> dict[str, Any]:
     return dict(recipes[name])
 
 
-def _event_plan_result(
+def _event_model_turn_result(
     *,
     goal: str,
     tool_name: str,
     arguments: dict[str, Any],
     purpose: str,
     task_contract: dict[str, Any] | None = None,
-) -> LlmPlannerResult:
-    return LlmPlannerResult(
-        plan=None,
+) -> ModelTurnResult:
+    return ModelTurnResult(
         trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
         event_plan=EventNativePlanningResult(
             events=(
@@ -4065,8 +4064,8 @@ def test_message_less_local_agent_sessions_do_not_overwrite_each_other(tmp_path:
         _text: str,
         _settings: AssistantSettings,
         _conversation_context: dict[str, Any] | None,
-    ) -> LlmPlannerResult:
-        return _event_plan_result(
+    ) -> ModelTurnResult:
+        return _event_model_turn_result(
             goal="查看 lx 指派正股持仓盈亏",
             tool_name="option_positions_read",
             arguments={"action": "assigned-stock", "account": "lx", "status": "open", "refresh_quotes": True},
@@ -4081,13 +4080,13 @@ def test_message_less_local_agent_sessions_do_not_overwrite_each_other(tmp_path:
         AssistantRequest(text="查看 lx 指派正股持仓盈亏", sender_id="local", config_key="us", audit_db=str(audit_db)),
         execute_tool_fn=_execute,
         settings=settings,
-        plan_tools_fn=_plan,
+        model_turn_fn=_plan,
     )
     second = handle_assistant_message(
         AssistantRequest(text="查看 lx 指派正股持仓盈亏", sender_id="local", config_key="us", audit_db=str(audit_db)),
         execute_tool_fn=_execute,
         settings=settings,
-        plan_tools_fn=_plan,
+        model_turn_fn=_plan,
     )
 
     assert first["data"]["command_id"] != second["data"]["command_id"]

@@ -60,6 +60,21 @@ def openai_responses_continuation_input(
     ]
 
 
+def openai_responses_continuation_input_batch(
+    *,
+    results: tuple[tuple[ModelToolCallEvent, ToolResultEvent], ...],
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for model_event, tool_result_event in results:
+        out.extend(
+            openai_responses_continuation_input(
+                model_event=model_event,
+                tool_result_event=tool_result_event,
+            )
+        )
+    return out
+
+
 def chat_completions_continuation_messages(
     *,
     model_event: ModelToolCallEvent,
@@ -89,6 +104,36 @@ def chat_completions_continuation_messages(
     ]
 
 
+def chat_completions_continuation_messages_batch(
+    *,
+    results: tuple[tuple[ModelToolCallEvent, ToolResultEvent], ...],
+) -> list[dict[str, Any]]:
+    if not results:
+        return []
+    tool_calls: list[dict[str, Any]] = []
+    tool_messages: list[dict[str, Any]] = []
+    for model_event, tool_result_event in results:
+        _require_matching_tool_call(model_event=model_event, tool_result_event=tool_result_event)
+        tool_calls.append(
+            {
+                "id": model_event.tool_call_id,
+                "type": "function",
+                "function": {
+                    "name": model_event.tool_name,
+                    "arguments": _json_text(model_event.arguments),
+                },
+            }
+        )
+        tool_messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": tool_result_event.tool_call_id,
+                "content": _json_text(tool_result_event.provider_tool_result_payload()),
+            }
+        )
+    return [{"role": "assistant", "content": "", "tool_calls": tool_calls}, *tool_messages]
+
+
 def provider_continuation_payload(
     *,
     provider: str,
@@ -115,6 +160,27 @@ def provider_continuation_payload(
     return payload
 
 
+def provider_continuation_payload_batch(
+    *,
+    provider: str,
+    results: tuple[tuple[ModelToolCallEvent, ToolResultEvent], ...],
+    base_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if not results:
+        raise AgentToolError(code="INVALID_MODEL_EVENT", message="model continuation requires at least one tool result")
+    payload = _copy_mapping(base_payload or {})
+    if provider_api_kind(provider) == "chat_completions":
+        messages = payload.get("messages")
+        existing_messages = [_copy_mapping(item) for item in messages] if _is_dict_list(messages) else []
+        payload["messages"] = existing_messages + chat_completions_continuation_messages_batch(results=results)
+        return payload
+
+    input_value = payload.get("input")
+    existing_input = [_copy_mapping(item) for item in input_value] if _is_dict_list(input_value) else []
+    payload["input"] = existing_input + openai_responses_continuation_input_batch(results=results)
+    return payload
+
+
 def continue_model_after_tool_result(
     *,
     provider: str,
@@ -137,6 +203,35 @@ def continue_model_after_tool_result(
         response,
         provider=provider,
         parent_event_id=parent_event_id or tool_result_event.event_id,
+    )
+    return ModelContinuationOutcome(
+        provider=provider,
+        request_payload=request_payload,
+        response=_copy_mapping(response),
+        events=events,
+    )
+
+
+def continue_model_after_tool_results(
+    *,
+    provider: str,
+    create_response_fn: CreateModelContinuationResponseFn,
+    results: tuple[tuple[ModelToolCallEvent, ToolResultEvent], ...],
+    base_payload: dict[str, Any] | None = None,
+    parent_event_id: str | None = None,
+) -> ModelContinuationOutcome:
+    request_payload = provider_continuation_payload_batch(
+        provider=provider,
+        results=results,
+        base_payload=base_payload,
+    )
+    response = create_response_fn(_copy_mapping(request_payload))
+    if not isinstance(response, dict):
+        raise AgentToolError(code="INVALID_MODEL_EVENT", message="provider continuation response must be an object")
+    events = model_events_from_provider_response(
+        response,
+        provider=provider,
+        parent_event_id=parent_event_id or results[-1][1].event_id,
     )
     return ModelContinuationOutcome(
         provider=provider,
@@ -195,7 +290,11 @@ __all__ = [
     "CreateModelContinuationResponseFn",
     "ModelContinuationOutcome",
     "chat_completions_continuation_messages",
+    "chat_completions_continuation_messages_batch",
     "continue_model_after_tool_result",
+    "continue_model_after_tool_results",
     "openai_responses_continuation_input",
+    "openai_responses_continuation_input_batch",
     "provider_continuation_payload",
+    "provider_continuation_payload_batch",
 ]

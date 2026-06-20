@@ -67,24 +67,28 @@ def test_provider_function_call_arguments_are_structured_provider_payload_not_te
 
 
 def test_provider_tool_call_malformed_arguments_marks_protocol_reason() -> None:
-    with pytest.raises(AgentToolError) as excinfo:
-        model_tool_call_from_provider_block(
-            {
-                "id": "call_bad",
-                "type": "function",
-                "function": {
-                    "name": "manual_assignment",
-                    "arguments": '{"account"',
-                },
+    event = model_tool_call_from_provider_block(
+        {
+            "id": "call_bad",
+            "type": "function",
+            "function": {
+                "name": "manual_assignment",
+                "arguments": '{"account"',
             },
-            provider="deepseek",
-        )
+        },
+        provider="deepseek",
+    )
 
-    assert excinfo.value.code == "INVALID_MODEL_EVENT"
-    assert excinfo.value.message == "provider tool call arguments are not valid JSON"
-    assert excinfo.value.details["reason"] == "provider_arguments_malformed"
-    assert excinfo.value.details["argument_type"] == "str"
-    assert excinfo.value.details["argument_chars"] == len('{"account"')
+    assert event.tool_call_id == "call_bad"
+    assert event.tool_name == "manual_assignment"
+    assert event.arguments == {}
+    assert event.protocol_error is not None
+    assert event.protocol_error["code"] == "INVALID_MODEL_EVENT"
+    assert event.protocol_error["message"] == "provider tool call arguments are not valid JSON"
+    assert event.protocol_error["details"]["reason"] == "provider_arguments_malformed"
+    assert event.protocol_error["details"]["argument_type"] == "str"
+    assert event.protocol_error["details"]["argument_chars"] == len('{"account"')
+    assert event.public_payload()["protocol_error"]["details"]["reason"] == "provider_arguments_malformed"
 
 
 def test_plain_text_block_is_not_a_provider_tool_call() -> None:
@@ -236,9 +240,34 @@ def test_provider_tool_schema_omits_host_owned_arguments() -> None:
 
     properties = schema["parameters"]["properties"]
     assert set(properties) == {"account"}
-    assert properties["account"]["type"] == ["string", "null"]
-    assert properties["account"]["enum"] == ["lx", "sy", None]
+    assert properties["account"]["type"] == "string"
+    assert properties["account"]["enum"] == ["lx", "sy"]
     assert "raw_text" not in properties
+
+
+def test_provider_tool_schema_normalizes_nested_nullable_fields() -> None:
+    schema = provider_tool_schema_from_manifest(
+        {
+            "name": "nested_example",
+            "description": "Example.",
+            "capabilities": ["read_only"],
+            "input_schema": {
+                "query": {
+                    "type": ["object", "null"],
+                    "properties": {
+                        "symbol": {"type": ["string", "null"], "enum": ["PDD", None]},
+                        "tags": {"type": "array", "items": {"type": ["string", "null"]}},
+                    },
+                },
+            },
+        }
+    )
+
+    query = schema["parameters"]["properties"]["query"]
+    assert query["type"] == "object"
+    assert query["properties"]["symbol"]["type"] == "string"
+    assert query["properties"]["symbol"]["enum"] == ["PDD"]
+    assert query["properties"]["tags"]["items"]["type"] == "string"
 
 
 def test_provider_tool_schema_treats_pipe_enums_as_scalar_strings() -> None:

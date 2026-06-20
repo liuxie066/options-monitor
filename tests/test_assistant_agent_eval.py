@@ -16,7 +16,7 @@ from src.application.assistant.action_safety import assess_action_safety
 from src.application.assistant.agent_loop import (
     TOOL_PLAN_SCHEMA_VERSION,
     EventNativePlanningResult,
-    LlmPlannerResult,
+    ModelTurnResult,
     _planner_input_text,
     _planner_tool_manifest,
 )
@@ -454,9 +454,8 @@ def _event_planner_trace(event_plan: EventNativePlanningResult) -> dict[str, Any
     }
 
 
-def _planner_result_from_event_plan(event_plan: EventNativePlanningResult) -> LlmPlannerResult:
-    return LlmPlannerResult(
-        plan=None,
+def _model_turn_result_from_event_plan(event_plan: EventNativePlanningResult) -> ModelTurnResult:
+    return ModelTurnResult(
         trace=_event_planner_trace(event_plan),
         event_plan=event_plan,
     )
@@ -649,11 +648,11 @@ def test_assistant_agent_eval_uses_guarded_answer_evidence(case: dict[str, Any],
         text: str,
         _settings: AssistantSettings,
         _conversation_context: dict[str, Any] | None,
-    ) -> LlmPlannerResult:
+    ) -> ModelTurnResult:
         assert text == case["question"]
         followup = _conversation_context.get("agent_loop_followup") if isinstance(_conversation_context, dict) else None
         selected_payload = followup_payload if isinstance(followup, dict) and followup_payload is not None else plan_payload
-        return _planner_result_from_event_plan(_event_plan_from_payload(selected_payload))
+        return _model_turn_result_from_event_plan(_event_plan_from_payload(selected_payload))
 
     out = handle_assistant_message(
         AssistantRequest(
@@ -667,7 +666,7 @@ def test_assistant_agent_eval_uses_guarded_answer_evidence(case: dict[str, Any],
         settings=AssistantSettings(
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
-        plan_tools_fn=_plan,
+        model_turn_fn=_plan,
     )
 
     assert out["ok"] is True
@@ -781,9 +780,9 @@ def _run_planner_preview_case(case: dict[str, Any], *, tmp_path: Path, monkeypat
         text: str,
         _settings: AssistantSettings,
         _conversation_context: dict[str, Any] | None,
-    ) -> LlmPlannerResult:
+    ) -> ModelTurnResult:
         assert text == case["question"]
-        return _planner_result_from_event_plan(event_plan)
+        return _model_turn_result_from_event_plan(event_plan)
 
     out = handle_assistant_message(
         AssistantRequest(
@@ -799,7 +798,7 @@ def _run_planner_preview_case(case: dict[str, Any], *, tmp_path: Path, monkeypat
         settings=AssistantSettings(
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
-        plan_tools_fn=_plan,
+        model_turn_fn=_plan,
         now_fn=lambda: date(2026, 6, 4),
     )
 
@@ -818,6 +817,7 @@ def _run_planner_preview_case(case: dict[str, Any], *, tmp_path: Path, monkeypat
     assert permission["apply_allowed"] is False
     agent_loop = out["meta"]["assistant"]["llm"]["agent_loop"]
     step = agent_loop["steps"][0]
+    assert step["intent_name"] == case["expect_perception_intent"]
     assert step["action_policy"]["decision"] == "allow_preview"
     assert step["action_policy"]["apply_allowed"] is False
     assert step["action_safety"]["status"] == "allow_preview"

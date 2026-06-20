@@ -137,6 +137,7 @@ def _operation_action_result(
         command_id=command_id,
         store=store,
     )
+    operation_result = _with_operation_context(operation_result, operation_perception, resolution)
     data = dict(operation_result.get("data") or {})
     return ActionResult(
         executed=True,
@@ -148,6 +149,24 @@ def _operation_action_result(
         error=operation_result.get("error") if not bool(operation_result.get("ok", False)) else None,
         response_text=str(data.get("response_text") or ""),
     )
+
+
+def _with_operation_context(
+    operation_result: dict[str, Any],
+    perception: PerceptionResult,
+    resolution: ReasoningResolution,
+) -> dict[str, Any]:
+    data = operation_result.get("data") if isinstance(operation_result, dict) else None
+    if not isinstance(data, dict):
+        return operation_result
+    return {
+        **operation_result,
+        "data": {
+            **data,
+            "perception": perception.public_payload(),
+            "reasoning": resolution.public_payload(),
+        },
+    }
 
 
 def _tool_loop_preview_action_result(

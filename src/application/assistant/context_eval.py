@@ -293,6 +293,7 @@ def format_context_eval_text(report: dict[str, Any]) -> str:
             planner = actual.get("planner_context") if isinstance(actual.get("planner_context"), dict) else {}
             projection = actual.get("projection") if isinstance(actual.get("projection"), dict) else {}
             validation = actual.get("validation") if isinstance(actual.get("validation"), dict) else {}
+            decision = actual.get("decision") if isinstance(actual.get("decision"), dict) else {}
             planner_budget = planner.get("manifest_budget") if isinstance(planner.get("manifest_budget"), dict) else {}
             projection_trace = (
                 projection.get("context_projection") if isinstance(projection.get("context_projection"), dict) else {}
@@ -311,6 +312,8 @@ def format_context_eval_text(report: dict[str, Any]) -> str:
                         f"sources={_compact_list(planner_budget.get('selection_sources'))}",
                         f"refs={projection_trace.get('evidence_ref_count', 0)}",
                         f"gaps={projection_trace.get('open_gap_count', 0)}",
+                        f"terminal={decision.get('terminal') or '-'}",
+                        f"tool={decision.get('first_tool') or '-'}",
                     ]
                 )
             )
@@ -460,6 +463,13 @@ def _evaluate_context_checks(
             True,
             int(budget.get("analysis_views_included") or 0) <= int(case["expect_max_analysis_views_included"]),
         )
+    if case.get("expect_preview_authority_allowed") is not None:
+        _add_check(
+            checks,
+            "budget.preview_authority_allowed",
+            bool(case["expect_preview_authority_allowed"]),
+            bool(budget.get("preview_authority_allowed")),
+        )
     _add_context_expectation_checks(checks, case=case, context=context)
     return checks
 
@@ -600,6 +610,7 @@ def _evaluate_scenario_checks(
             "expect_analysis_views_absent": planner_expect.get("analysis_views_absent"),
             "expect_max_manifest_chars": planner_expect.get("max_manifest_chars"),
             "expect_max_analysis_views_included": planner_expect.get("max_analysis_views_included"),
+            "expect_preview_authority_allowed": planner_expect.get("preview_authority_allowed"),
         }
         checks.extend(
             _evaluate_context_checks(
@@ -621,10 +632,84 @@ def _evaluate_scenario_checks(
             )
         )
 
+    decision_expect = expect.get("decision") if isinstance(expect.get("decision"), dict) else {}
+    if decision_expect:
+        checks.extend(
+            _evaluate_decision_checks(
+                expect=decision_expect,
+                actual=_plan_decision_actual_payload(_case_plan_payload(case)),
+            )
+        )
+
     if expect.get("no_legacy_authority"):
         serialized = json.dumps(context, ensure_ascii=False, sort_keys=True)
         for key in ("active_frame", "frame_stack", "followup_resolution", "metric_glossary"):
             _add_check(checks, f"scenario.no_legacy_authority.{key}", True, key not in serialized)
+    return checks
+
+
+def _evaluate_decision_checks(*, expect: dict[str, Any], actual: dict[str, Any]) -> list[dict[str, Any]]:
+    checks: list[dict[str, Any]] = []
+    scalar_fields = (
+        "terminal",
+        "first_tool",
+        "first_tool_family",
+        "requested_effect",
+        "context_use_mode",
+        "requires_clarification",
+        "tool_call_count",
+    )
+    for field in scalar_fields:
+        if field in expect:
+            _add_check(checks, f"decision.{field}", expect[field], actual.get(field))
+    if expect.get("allowed_terminals") is not None:
+        _add_check(
+            checks,
+            "decision.allowed_terminals",
+            True,
+            str(actual.get("terminal") or "") in set(str(item) for item in expect.get("allowed_terminals") or ()),
+        )
+    for terminal in expect.get("forbidden_terminals") or ():
+        _add_check(
+            checks,
+            f"decision.forbidden_terminal.{terminal}",
+            True,
+            str(actual.get("terminal") or "") != str(terminal),
+        )
+    if expect.get("allowed_first_tools") is not None:
+        _add_check(
+            checks,
+            "decision.allowed_first_tools",
+            True,
+            str(actual.get("first_tool") or "") in set(str(item) for item in expect.get("allowed_first_tools") or ()),
+        )
+    tool_sequence = [str(item) for item in actual.get("tool_sequence") or ()]
+    for tool_name in expect.get("forbidden_tools") or ():
+        _add_check(
+            checks,
+            f"decision.forbidden_tool.{tool_name}",
+            True,
+            str(tool_name) not in set(tool_sequence),
+        )
+    if expect.get("tool_sequence") is not None:
+        _add_check(checks, "decision.tool_sequence", list(expect["tool_sequence"]), tool_sequence)
+    first_arguments = actual.get("first_arguments") if isinstance(actual.get("first_arguments"), dict) else {}
+    for key in expect.get("first_arguments_absent") or ():
+        _add_check(checks, f"decision.first_arguments_absent.{key}", True, str(key) not in first_arguments)
+    if isinstance(expect.get("first_arguments_contains"), dict):
+        for key_path, expected, actual_value in _mapping_subset_diffs(
+            dict(expect["first_arguments_contains"]),
+            first_arguments,
+            prefix="decision.first_arguments",
+        ):
+            _add_check(checks, key_path, expected, actual_value)
+    if expect.get("max_tool_calls") is not None:
+        _add_check(
+            checks,
+            "decision.max_tool_calls",
+            True,
+            int(actual.get("tool_call_count") or 0) <= int(expect["max_tool_calls"]),
+        )
     return checks
 
 
@@ -756,7 +841,81 @@ def _scenario_eval_actual_payload(
             analysis_views=analysis_views,
         ),
         "validation": _validation_eval_actual_payload(validation),
+        "decision": _plan_decision_actual_payload(_case_plan_payload(case)),
     }
+
+
+def _plan_decision_actual_payload(plan_payload: dict[str, Any]) -> dict[str, Any]:
+    plan = plan_payload if isinstance(plan_payload, dict) else {}
+    steps = [dict(item) for item in plan.get("steps") or [] if isinstance(item, dict)]
+    first = steps[0] if steps else {}
+    first_tool = str(first.get("tool_name") or "")
+    first_arguments = dict(first.get("arguments") or {}) if isinstance(first.get("arguments"), dict) else {}
+    contract = plan.get("task_contract") if isinstance(plan.get("task_contract"), dict) else {}
+    context_use = plan.get("context_use") if isinstance(plan.get("context_use"), dict) else {}
+    return {
+        "terminal": _plan_terminal_kind(plan=plan, steps=steps, first_tool=first_tool, context_use=context_use),
+        "tool_call_count": len(steps),
+        "tool_sequence": [str(step.get("tool_name") or "") for step in steps],
+        "first_tool": first_tool,
+        "first_tool_family": _tool_family(first_tool),
+        "first_arguments": first_arguments,
+        "first_argument_keys": sorted(str(key) for key in first_arguments),
+        "requested_effect": str(contract.get("requested_effect") or ""),
+        "context_use_mode": str(context_use.get("mode") or "none"),
+        "requires_clarification": bool(context_use.get("requires_clarification")),
+    }
+
+
+def _plan_terminal_kind(
+    *,
+    plan: dict[str, Any],
+    steps: list[dict[str, Any]],
+    first_tool: str,
+    context_use: dict[str, Any],
+) -> str:
+    if bool(context_use.get("requires_clarification")) or str(context_use.get("mode") or "") == "ambiguous":
+        return "clarification_request"
+    if first_tool in _PREVIEW_TOOL_NAMES:
+        return "preview_request"
+    if steps:
+        return "read_tool_call"
+    required_answer = [str(item) for item in plan.get("required_answer") or ()]
+    if "clarification_request" in required_answer:
+        return "clarification_request"
+    return "no_tool"
+
+
+_PREVIEW_TOOL_NAMES = frozenset(
+    {
+        "manual_trade_open",
+        "manual_trade_close",
+        "manual_assignment",
+        "manual_expiry",
+        "symbol_edit",
+        "model_use",
+        "upgrade_now",
+    }
+)
+
+
+def _tool_family(tool_name: str) -> str:
+    name = str(tool_name or "")
+    if name in {"monthly_income_report"}:
+        return "income"
+    if name in {"analysis_query", "analysis_catalog"}:
+        return "analysis"
+    if name in {"option_positions_read"}:
+        return "position"
+    if name in {"candidate_filter_explain"}:
+        return "candidate"
+    if name in {"symbol_config_read", "symbol_resolve"}:
+        return "config"
+    if name in _PREVIEW_TOOL_NAMES:
+        return "preview"
+    if name in {"runtime_status", "healthcheck", "scheduler_status"}:
+        return "runtime"
+    return name or "none"
 
 
 def _projection_eval_actual_payload(projection: dict[str, Any]) -> dict[str, Any]:

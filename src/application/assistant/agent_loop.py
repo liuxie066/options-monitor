@@ -59,7 +59,7 @@ from src.application.assistant.model_events import (
     model_events_from_provider_response,
     openai_responses_tools_payload,
 )
-from src.application.assistant.model_continuation import CreateModelContinuationResponseFn, continue_model_after_tool_result
+from src.application.assistant.model_continuation import CreateModelContinuationResponseFn, continue_model_after_tool_results
 from src.application.assistant.model_evidence import (
     ModelAnswerVerification,
     ModelEvidenceBundle,
@@ -99,7 +99,6 @@ from src.infrastructure.openai_responses import OpenAIResponsesError, extract_re
 AGENT_LOOP_SCHEMA_VERSION = "om-agent-loop-v1"
 TOOL_PLAN_SCHEMA_VERSION = "om-tool-plan-v2"
 PLANNER_CONTEXT_USE_SCHEMA_VERSION = "om-planner-context-use-v1"
-PLANNER_REPAIR_SCHEMA_VERSION = "om-planner-repair-v1"
 FOLLOWUP_DECISION_SCHEMA_VERSION = "om-agent-loop-followup-decision-v1"
 TOOL_CHECK_SCHEMA_VERSION = "om-agent-tool-check-v1"
 INTERNAL_TOOL_PLAN_NAME = "assistant.tool_plan"
@@ -108,7 +107,6 @@ MAX_TOOL_PLAN_STEPS = 3
 MAX_AGENT_LOOP_ITERATIONS = 3
 MAX_AGENT_LOOP_TOOL_CALLS = 5
 MAX_PLANNER_ANALYSIS_VIEWS = 12
-MAX_PLANNER_REPAIR_ATTEMPTS = 2
 PLANNER_CONTEXT_USE_MODES = ("none", "carry", "refine", "override", "ambiguous")
 _DEFAULT_PLANNER_ANALYSIS_VIEWS: tuple[str, ...] = (
     "account_monthly_performance",
@@ -347,6 +345,7 @@ class AgentLoopResult:
     planning: AgentLoopPlanningOutcome
     trace: dict[str, Any]
     steps: tuple["AgentLoopStep", ...] = ()
+    tool_loop_result: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -389,8 +388,7 @@ class AgentLoopStep:
 
 
 @dataclass(frozen=True)
-class LlmPlannerResult:
-    plan: Any | None
+class ModelTurnResult:
     trace: dict[str, Any]
     error: AgentToolError | None = None
     event_plan: "EventNativePlanningResult | None" = None
@@ -748,6 +746,33 @@ def execute_model_tool_call_event(
     signatures = attempted_signatures if attempted_signatures is not None else set()
     payload = _inject_system_fields(model_event.arguments, request=request, tool_name=model_event.tool_name)
     signature = _tool_loop_duplicate_signature(model_event.tool_name, payload)
+    protocol_error = _model_tool_call_protocol_error(model_event)
+    if protocol_error is not None:
+        kind = _plan_step_kind(model_event.tool_name)
+        guard = {
+            "schema_version": TOOL_CHECK_SCHEMA_VERSION,
+            "allowed": False,
+            "decision": "provider_protocol_error",
+            "reason": "model tool call arguments failed provider protocol parsing",
+            "tool_name": model_event.tool_name,
+            "risk_class": "READ_AUTO" if kind == "read" else ("SOFT_WRITE_PREVIEW" if kind == "preview" else "UNKNOWN"),
+            "duplicate_signature": signature,
+            "scope_source": _scope_source_for_guard(task_contract),
+            "error_code": "INVALID_MODEL_EVENT",
+        }
+        return _guard_denied_model_tool_call_execution(
+            model_event=model_event,
+            payload=payload,
+            guard=guard,
+            error=AgentToolError(
+                code=str(protocol_error.get("code") or "INVALID_MODEL_EVENT"),
+                message="model tool call arguments were malformed; retry with valid structured arguments",
+                details={
+                    "tool_name": model_event.tool_name,
+                    "provider_protocol_error": dict(protocol_error),
+                },
+            ),
+        )
     if int(tool_call_count) >= int(max_tool_calls):
         guard = _tool_budget_guard_payload(
             model_event=model_event,
@@ -883,6 +908,13 @@ def _guard_denied_model_tool_call_execution(
     )
 
 
+def _model_tool_call_protocol_error(model_event: ModelToolCallEvent) -> dict[str, Any] | None:
+    protocol_error = getattr(model_event, "protocol_error", None)
+    if isinstance(protocol_error, dict) and protocol_error:
+        return dict(protocol_error)
+    return None
+
+
 def _tool_guard_event_from_guard(
     *,
     model_event: ModelToolCallEvent,
@@ -991,6 +1023,7 @@ def run_assistant_tool_event_loop(
     pending_events: tuple[ModelToolCallEvent | ModelFinalAnswerEvent | AssistantEvent, ...] = tuple(initial_events)
     tool_call_count = 0
     continuation_count = 0
+    current_continuation_base_payload = dict(continuation_base_payload or {}) if continuation_base_payload is not None else None
 
     while True:
         if not pending_events:
@@ -1053,6 +1086,51 @@ def run_assistant_tool_event_loop(
 
         if isinstance(first, AssistantEvent) and first.event_type == "preview_request":
             transcript.append(first)
+            preview_precheck_error = _preview_request_loop_precheck_error(
+                event=first,
+                text=question,
+                task_contract=task_contract,
+                provider=provider,
+            )
+            if preview_precheck_error is not None:
+                error_payload = build_error_payload(preview_precheck_error)
+                if preview_precheck_error.code == "NEEDS_CLARIFICATION":
+                    clarification_request = (
+                        preview_precheck_error.details.get("clarification_request")
+                        if isinstance(preview_precheck_error.details, dict)
+                        else None
+                    )
+                    return _assistant_tool_loop_outcome(
+                        status="needs_clarification",
+                        stop_reason="clarification_request",
+                        question=question,
+                        task_contract=task_contract,
+                        transcript=transcript,
+                        tool_results=tool_results,
+                        clarification_request=(
+                            dict(clarification_request)
+                            if isinstance(clarification_request, dict)
+                            else _clarification_request_payload(preview_precheck_error.message)
+                        ),
+                        trace_extra={
+                            "planner_plan_used": False,
+                            "continuation_count": continuation_count,
+                            "preview_error": error_payload,
+                        },
+                    )
+                return _assistant_tool_loop_outcome(
+                    status="stopped",
+                    stop_reason=str(preview_precheck_error.code or "invalid_preview_request").lower(),
+                    question=question,
+                    task_contract=task_contract,
+                    transcript=transcript,
+                    tool_results=tool_results,
+                    trace_extra={
+                        "planner_plan_used": False,
+                        "continuation_count": continuation_count,
+                        "preview_error": error_payload,
+                    },
+                )
             return _assistant_tool_loop_outcome(
                 status="preview_requested",
                 stop_reason="preview_request",
@@ -1077,7 +1155,41 @@ def run_assistant_tool_event_loop(
                 trace_extra={"planner_plan_used": False, "continuation_count": continuation_count},
             )
 
-        continuation_requested = False
+        preview_terminal, preview_error = _preview_request_from_model_tool_call_turn(
+            question=question,
+            pending_events=pending_events,
+            tool_calls=tool_calls,
+        )
+        if preview_error is not None:
+            transcript.extend(pending_events)
+            return _assistant_tool_loop_outcome(
+                status="stopped",
+                stop_reason=str(preview_error.code or "invalid_preview_request").lower(),
+                question=question,
+                task_contract=task_contract,
+                transcript=transcript,
+                tool_results=tool_results,
+                trace_extra={
+                    "planner_plan_used": False,
+                    "continuation_count": continuation_count,
+                    "preview_error": build_error_payload(preview_error),
+                },
+            )
+        if preview_terminal is not None:
+            model_event, preview_event = preview_terminal
+            transcript.extend((model_event, preview_event))
+            return _assistant_tool_loop_outcome(
+                status="preview_requested",
+                stop_reason="preview_request",
+                question=question,
+                task_contract=task_contract,
+                transcript=transcript,
+                tool_results=tool_results,
+                preview_request=preview_event.public_payload(),
+                trace_extra={"planner_plan_used": False, "continuation_count": continuation_count},
+            )
+
+        turn_executions: list[GuardedModelToolCallExecution] = []
         for model_event in tool_calls:
             execution = execute_model_tool_call_event(
                 model_event=model_event,
@@ -1091,6 +1203,7 @@ def run_assistant_tool_event_loop(
             transcript.extend((execution.model_event, execution.guard_event, execution.result_adapter.event))
             tool_results.append(execution.result_adapter)
             tool_call_count += 1
+            turn_executions.append(execution)
 
             if not execution.ok:
                 recoverable = _assistant_tool_loop_error_recoverable(execution)
@@ -1130,17 +1243,14 @@ def run_assistant_tool_event_loop(
                         },
                     )
 
-            if create_continuation_response_fn is None:
-                continue
-
+        if create_continuation_response_fn is not None and turn_executions:
             try:
-                continuation = continue_model_after_tool_result(
+                continuation = continue_model_after_tool_results(
                     provider=provider,
                     create_response_fn=create_continuation_response_fn,
-                    model_event=execution.model_event,
-                    tool_result_event=execution.result_adapter.event,
-                    base_payload=continuation_base_payload,
-                    parent_event_id=execution.result_adapter.event.event_id,
+                    results=tuple((execution.model_event, execution.result_adapter.event) for execution in turn_executions),
+                    base_payload=current_continuation_base_payload,
+                    parent_event_id=turn_executions[-1].result_adapter.event.event_id,
                 )
             except (OpenAIResponsesError, OpenAIChatCompletionsError) as err:
                 continuation_error = AgentToolError(
@@ -1176,11 +1286,8 @@ def run_assistant_tool_event_loop(
                     },
                 )
             continuation_count += 1
+            current_continuation_base_payload = dict(continuation.request_payload)
             pending_events = tuple(continuation.events)
-            continuation_requested = True
-            break
-
-        if continuation_requested:
             if tool_call_count >= int(max_tool_calls) and any(
                 isinstance(event, ModelToolCallEvent) for event in pending_events
             ):
@@ -1210,6 +1317,41 @@ def run_assistant_tool_event_loop(
             ),
             trace_extra={"planner_plan_used": False, "continuation_count": continuation_count},
         )
+
+
+def _preview_request_from_model_tool_call_turn(
+    *,
+    question: str,
+    pending_events: tuple[ModelToolCallEvent | ModelFinalAnswerEvent | AssistantEvent, ...],
+    tool_calls: tuple[ModelToolCallEvent, ...],
+) -> tuple[tuple[ModelToolCallEvent, AssistantEvent] | None, AgentToolError | None]:
+    if len(pending_events) != 1 or len(tool_calls) != 1:
+        return None, None
+    model_event = tool_calls[0]
+    if _model_tool_call_protocol_error(model_event) is not None:
+        return None, None
+    if _plan_step_kind(model_event.tool_name) != "preview":
+        return None, None
+    if not _question_requests_preview_operation(question):
+        return None, AgentToolError(
+            code="PLAN_RISK_MISMATCH",
+            message="LLM 请求了写入预览，但用户原文不像写入预览请求。",
+            hint="preview-write 只能用于明确的记录、修改、升级或模型切换请求；普通查询必须规划为只读工具。",
+            details={"preview_capability": model_event.tool_name},
+        )
+    payload = {
+        "intent_name": model_event.tool_name,
+        "arguments": dict(model_event.arguments),
+        "reason": model_event.purpose or "model selected preview capability",
+    }
+    normalized_payload = normalized_preview_request_payload(payload, question=question)
+    preview_event = AssistantEvent(
+        event_id=f"preview_{model_event.tool_call_id}",
+        event_type="preview_request",
+        payload=normalized_payload,
+        parent_event_id=model_event.event_id,
+    )
+    return (model_event, preview_event), None
 
 
 def _assistant_tool_loop_outcome(
@@ -1379,15 +1521,15 @@ def _assistant_tool_loop_evidence(
 def _assistant_tool_loop_error_recoverable(execution: GuardedModelToolCallExecution) -> bool:
     code = str(execution.guard_event.error_code or "")
     decision = str(execution.guard_event.decision or "")
-    if code in {"PRE_TOOL_CHECK_FAILED", "DUPLICATE_TOOL_CALL"}:
+    if code in {"PRE_TOOL_CHECK_FAILED", "DUPLICATE_TOOL_CALL", "UNKNOWN_TOOL", "INVALID_MODEL_EVENT"}:
         return True
-    if decision in {"pre_tool_check_failed", "duplicate_call"}:
+    if decision in {"pre_tool_check_failed", "duplicate_call", "unknown_tool", "provider_protocol_error"}:
         return True
     if decision == "write_boundary" and str(execution.guard_event.risk_class or "") == "READ_AUTO":
         return True
     error_payload = execution.error_payload if isinstance(execution.error_payload, dict) else {}
     error_code = str(error_payload.get("code") or "")
-    return error_code in {"INPUT_ERROR", "SCHEMA_INVALID", "TOOL_RUNTIME_ERROR", "UNKNOWN_TOOL"}
+    return error_code in {"INPUT_ERROR", "SCHEMA_INVALID", "TOOL_RUNTIME_ERROR", "UNKNOWN_TOOL", "INVALID_MODEL_EVENT"}
 
 
 def _assistant_tool_loop_recoverable_error_signature(execution: GuardedModelToolCallExecution) -> str:
@@ -1411,6 +1553,9 @@ def execute_tool_loop_payload(
     conversation_context: dict[str, Any] | None,
     execute_tool_fn: Callable[[str, dict[str, Any]], dict[str, Any]],
 ) -> dict[str, Any]:
+    precomputed = loop_payload.get("_precomputed_tool_loop_result")
+    if isinstance(precomputed, dict):
+        return _precomputed_tool_loop_response(precomputed, command_id=command_id)
     events = _assistant_tool_loop_events_from_payload(loop_payload.get("events"))
     task_contract = _assistant_tool_loop_task_contract(
         question=question,
@@ -1443,6 +1588,32 @@ def execute_tool_loop_payload(
         create_continuation_response_fn=continuation_response_fn,
         continuation_base_payload=continuation_base_payload,
     )
+    return _build_tool_loop_response_from_outcome(
+        outcome=outcome,
+        question=question,
+        command_id=command_id,
+        task_contract=task_contract,
+    )
+
+
+def _precomputed_tool_loop_response(precomputed: dict[str, Any], *, command_id: str | None) -> dict[str, Any]:
+    response = dict(precomputed)
+    data = response.get("data")
+    if isinstance(data, dict):
+        patched_data = dict(data)
+        if command_id:
+            patched_data["command_id"] = command_id
+        response["data"] = patched_data
+    return response
+
+
+def _build_tool_loop_response_from_outcome(
+    *,
+    outcome: AssistantToolLoopOutcome,
+    question: str,
+    command_id: str | None,
+    task_contract: dict[str, Any],
+) -> dict[str, Any]:
     response_text = _assistant_tool_loop_response_text(outcome)
     ok = outcome.status in {"done", "stopped"} and any(result.event.ok for result in outcome.tool_results)
     final_response = {
@@ -1571,6 +1742,11 @@ def _assistant_tool_loop_event_from_payload(payload: dict[str, Any]) -> ModelToo
             purpose=str(payload.get("purpose") or ""),
             provider=str(payload.get("provider") or "") or None,
             parent_event_id=str(payload.get("parent_event_id") or "") or None,
+            protocol_error=(
+                dict(payload.get("protocol_error"))
+                if isinstance(payload.get("protocol_error"), dict)
+                else None
+            ),
             schema_version=str(payload.get("schema_version") or MODEL_EVENT_SCHEMA_VERSION),
         )
     if event_type == "model_final_answer":
@@ -1678,7 +1854,7 @@ class FinalResponsePlan:
         }
 
 
-AgentLoopPlanFn = Callable[[str, AssistantSettings, dict[str, Any] | None], LlmPlannerResult]
+ModelTurnFn = Callable[[str, AssistantSettings, dict[str, Any] | None], ModelTurnResult]
 
 
 def run_read_only_agent_loop(
@@ -1686,65 +1862,40 @@ def run_read_only_agent_loop(
     *,
     settings: AssistantSettings,
     conversation_context: dict[str, Any] | None,
-    plan_tools_fn: AgentLoopPlanFn | None = None,
+    model_turn_fn: ModelTurnFn | None = None,
+    request: AssistantRequest | None = None,
+    execute_tool_fn: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None,
     now_fn: Callable[[], date] | None = None,
     max_steps: int = MAX_TOOL_PLAN_STEPS,
 ) -> AgentLoopResult:
-    """Build a bounded assistant plan.
-
-    Pure-read plans route through the internal pseudo-tool. A single preview
-    operation plan routes back into the existing deterministic operation path
-    and still requires a later explicit confirm/apply step.
-    """
+    """Run or adapt the bounded assistant model-turn loop."""
     steps = max(1, min(int(max_steps), MAX_TOOL_PLAN_STEPS))
     today = _planner_today(now_fn)
     loop_context = _with_temporal_context(conversation_context, today=today)
-    planner = plan_tools_fn or plan_read_only_tools
-    plan_result = planner(text, settings, loop_context)
-    plan_result = _normalize_tool_plan_result(plan_result, question=text, today=today)
-    planning, planned_steps = _planning_outcome_from_tool_plan_result(
-        plan_result,
+    model_turn_entry_fn = model_turn_fn or create_model_turn_events
+    model_turn_result = model_turn_entry_fn(text, settings, loop_context)
+    model_turn_result = _normalize_model_turn_result(model_turn_result, question=text, today=today)
+    direct_result = _direct_model_turn_loop_result(
+        text=text,
+        request=request,
+        execute_tool_fn=execute_tool_fn,
+        settings=settings,
+        conversation_context=loop_context,
+        model_turn_result=model_turn_result,
+        max_steps=steps,
+    )
+    if direct_result is not None:
+        return direct_result
+    planning, planned_steps = _planning_outcome_from_model_turn_result(
+        model_turn_result,
         question=text,
         conversation_context=loop_context,
     )
-    planner_repair_attempts: list[dict[str, Any]] = []
-    while len(planner_repair_attempts) < MAX_PLANNER_REPAIR_ATTEMPTS and _planner_repair_allowed(planning.error):
-        repair_context = _conversation_context_with_planner_repair(
-            loop_context,
-            question=text,
-            error=planning.error,
-            initial_plan=plan_result.plan,
-            attempt=len(planner_repair_attempts) + 1,
-            max_attempts=MAX_PLANNER_REPAIR_ATTEMPTS,
-        )
-        repair_result = planner(text, settings, repair_context)
-        repair_result = _normalize_tool_plan_result(repair_result, question=text, today=today)
-        repair_planning, repair_steps = _planning_outcome_from_tool_plan_result(
-            repair_result,
-            question=text,
-            conversation_context=repair_context,
-        )
-        planner_repair_attempts.append(
-            _planner_repair_trace(
-                attempt=len(planner_repair_attempts) + 1,
-                initial_error=planning.error,
-                initial_plan=plan_result.plan,
-                repair_context=repair_context,
-                repair_result=repair_result,
-                repair_planning=repair_planning,
-            )
-        )
-        planning = repair_planning
-        plan_result = repair_result
-        planned_steps = repair_steps
-        loop_context = repair_context
-    trace = dict(planning.trace or plan_result.trace)
-    if planner_repair_attempts:
-        trace["planner_repair"] = _planner_repair_attempts_trace(planner_repair_attempts)
+    trace = dict(planning.trace or model_turn_result.trace)
     trace["agent_loop"] = {
         "schema_version": AGENT_LOOP_SCHEMA_VERSION,
         "enabled": True,
-        "planner": "llm_tool_plan",
+        "runtime": "model_turn_event_adapter",
         "max_steps": steps,
         "steps_used": len(planned_steps),
         "writes_allowed": False,
@@ -1760,214 +1911,352 @@ def run_read_only_agent_loop(
     return AgentLoopResult(planning=planning, trace=trace, steps=planned_steps)
 
 
-def _planner_repair_allowed(error: AgentToolError | None) -> bool:
-    if error is None:
-        return False
-    if error.code == "PLAN_RISK_MISMATCH":
-        return True
-    if error.code == "PRE_TOOL_CHECK_FAILED":
-        return _pre_tool_failure_repair_allowed(error)
-    return False
-
-
-def _pre_tool_failure_repair_allowed(error: AgentToolError) -> bool:
-    details = error.details if isinstance(error.details, dict) else {}
-    precheck = details.get("precheck") if isinstance(details.get("precheck"), dict) else {}
-    if precheck.get("status") != "fail":
-        return False
-    if precheck.get("banned_arguments"):
-        return False
-    checks = {str(item.get("name") or ""): str(item.get("status") or "") for item in precheck.get("checks") or [] if isinstance(item, dict)}
-    if checks.get("action_policy") == "deny" or checks.get("planner_argument_guard") == "fail" or checks.get("write_guard") == "fail":
-        return False
-    safety = precheck.get("action_safety") if isinstance(precheck.get("action_safety"), dict) else {}
-    safety_code = str(safety.get("code") or "")
-    if safety_code in {
-        "missing_account_scope",
-        "missing_symbol_scope",
-        "account_scope_expansion",
-        "symbol_scope_expansion",
-        "period_scope_expansion",
-        "effect_mismatch",
-    }:
-        return True
-    scope_check = next((item for item in precheck.get("checks") or [] if isinstance(item, dict) and item.get("name") == "scope_guard"), {})
-    scope_reason = str(scope_check.get("reason") or "") if isinstance(scope_check, dict) else ""
-    return checks.get("scope_guard") == "fail" and scope_reason.startswith("account_out_of_task_scope:")
-
-
-def _conversation_context_with_planner_repair(
+def _direct_model_turn_loop_result(
+    *,
+    text: str,
+    request: AssistantRequest | None,
+    execute_tool_fn: Callable[[str, dict[str, Any]], dict[str, Any]] | None,
+    settings: AssistantSettings,
     conversation_context: dict[str, Any] | None,
-    *,
-    question: str,
-    error: AgentToolError,
-    initial_plan: Any | None,
-    attempt: int,
-    max_attempts: int,
-) -> dict[str, Any]:
-    context = dict(conversation_context or {})
-    context["planner_repair"] = _planner_repair_payload(
-        question=question,
-        error=error,
-        initial_plan=initial_plan,
-        attempt=attempt,
-        max_attempts=max_attempts,
+    model_turn_result: ModelTurnResult,
+    max_steps: int,
+) -> AgentLoopResult | None:
+    event_plan = model_turn_result.event_plan
+    if request is None or execute_tool_fn is None or event_plan is None:
+        return None
+    provider = normalize_llm_provider(str(event_plan.provider or settings.llm.provider or "openai"))
+    if model_turn_result.error is not None:
+        trace = dict(model_turn_result.trace)
+        trace["agent_loop"] = _direct_model_turn_rejection_trace(
+            error=model_turn_result.error,
+            max_steps=max_steps,
+        )
+        return AgentLoopResult(
+            planning=AgentLoopPlanningOutcome(
+                perception=None,
+                trace=dict(trace),
+                error=model_turn_result.error,
+            ),
+            trace=trace,
+            steps=(),
+        )
+    continuation_response_fn = _assistant_tool_loop_continuation_response_fn(
+        provider=provider,
+        llm_settings=settings.llm,
     )
-    return context
-
-
-def _planner_repair_payload(
-    *,
-    question: str,
-    error: AgentToolError,
-    initial_plan: Any | None,
-    attempt: int,
-    max_attempts: int,
-) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "schema_version": PLANNER_REPAIR_SCHEMA_VERSION,
-        "source": "tool_validation",
-        "error_code": str(error.code),
-        "message": str(error.message),
-        "instruction": _planner_repair_instruction(question=question, error=error),
-        "attempt": int(attempt),
-        "max_attempts": int(max_attempts),
-    }
-    if error.hint:
-        payload["hint"] = str(error.hint)
-    details = _planner_repair_error_details(error)
-    if details:
-        payload["details"] = details
-    if initial_plan is not None:
-        rejected_plan = _plan_like_public_payload(initial_plan)
-        if rejected_plan:
-            payload["rejected_plan"] = rejected_plan
-    return payload
-
-
-def _planner_repair_instruction(*, question: str, error: AgentToolError) -> str:
-    if error.code == "PRE_TOOL_CHECK_FAILED":
-        return _pre_tool_repair_instruction(error)
-    compact = re.sub(r"\s+", "", str(question or "").strip().lower())
-    if error.code == "PLAN_RISK_MISMATCH" and ("期权被指派通知" in compact or "已被指派" in compact):
-        return (
-            "The previous tool call was rejected because the user message is a broker lifecycle notice that needs "
-            "a preview capability, not a read-only position query. For Futu 期权被指派通知 / 已被指派, call "
-            "manual_assignment with account when explicit and set task_contract.requested_effect to preview_write. "
-            "The host injects the original user message as raw_text. Use "
-            "option_positions_read action=assigned-stock only for assigned-stock holding/PnL questions."
+    task_contract = _assistant_tool_loop_task_contract(
+        question=text,
+        request=request,
+        loop_payload={"task_contract": dict(event_plan.task_contract or {})},
+        conversation_context=conversation_context,
+    )
+    validation_error = _direct_model_turn_validation_error(
+        text=text,
+        event_plan=event_plan,
+        recoverable_observation_enabled=continuation_response_fn is not None,
+    )
+    if validation_error is not None:
+        trace = dict(model_turn_result.trace)
+        trace["agent_loop"] = _direct_model_turn_rejection_trace(
+            error=validation_error,
+            max_steps=max_steps,
         )
-    if error.code == "PLAN_RISK_MISMATCH" and ("期权到期失效通知" in compact or "已到期失效" in compact):
-        return (
-            "The previous tool call was rejected because the user message is a broker option-expiry lifecycle "
-            "notice that needs a preview capability, not a read-only position query. For Futu 期权到期失效通知 / "
-            "已到期失效, call manual_expiry with account when explicit and set task_contract.requested_effect "
-            "to preview_write. The host injects the original user message as raw_text."
+        return AgentLoopResult(
+            planning=AgentLoopPlanningOutcome(
+                perception=None,
+                trace=dict(trace),
+                error=validation_error,
+            ),
+            trace=trace,
+            steps=(),
         )
-    if error.code == "PLAN_RISK_MISMATCH" and any(token in compact for token in ("成交提醒", "成功卖出", "成功买入", "委托已全部成交")):
-        return (
-            "The previous tool call was rejected because the user message is a broker option fill notice that "
-            "needs a preview capability, not a read-only query. Use manual_trade_open for opening fills or "
-            "manual_trade_close for closing fills, with account when explicit and task_contract.requested_effect "
-            "set to preview_write. The host injects the original user message as raw_text."
+    continuation_base_payload = (
+        _assistant_tool_loop_continuation_base_payload(
+            provider=provider,
+            question=text,
+            conversation_context=conversation_context,
+            llm_settings=settings.llm,
         )
-    if error.code == "PLAN_RISK_MISMATCH":
-        return (
-            "The previous plan had the wrong effect for the user request. Return a corrected plan using exactly "
-            "one preview capability for explicit record/config/admin preview requests, or a read-only tool for "
-            "ordinary questions. Do not confirm, apply, notify externally, or mutate state."
-        )
-    return "Return a corrected bounded tool plan that satisfies the validation error without changing the user scope."
-
-
-def _pre_tool_repair_instruction(error: AgentToolError) -> str:
-    details = error.details if isinstance(error.details, dict) else {}
-    precheck = details.get("precheck") if isinstance(details.get("precheck"), dict) else {}
-    safety = precheck.get("action_safety") if isinstance(precheck.get("action_safety"), dict) else {}
-    safety_code = str(safety.get("code") or "")
-    if safety_code in {"missing_account_scope", "missing_symbol_scope"}:
-        return (
-            "The previous plan selected a preview capability but missed a required user scope. If the current user "
-            "message explicitly contains the missing account or symbol, copy it into both the tool arguments and "
-            "task_contract.scope; otherwise return steps=[] with context_use.requires_clarification=true. Do not "
-            "invent scope, confirm, apply, notify externally, or mutate state."
-        )
-    if safety_code in {"account_scope_expansion", "symbol_scope_expansion", "period_scope_expansion"}:
-        return (
-            "The previous plan expanded beyond the user's requested scope. Return a corrected plan that keeps only "
-            "the account, symbol, and period explicitly requested by the current user message or safely inherited "
-            "context. Do not preserve out-of-scope tool arguments."
-        )
-    return (
-        "The previous plan failed pre-tool safety checks. Return one corrected bounded plan that preserves the user "
-        "scope, fixes missing or expanded arguments, and still uses only read-only tools or one preview capability. "
-        "Never plan confirm/cancel/apply or direct side effects."
+        if continuation_response_fn is not None
+        else None
+    )
+    outcome = run_assistant_tool_event_loop(
+        question=text,
+        request=request,
+        task_contract=task_contract,
+        initial_events=event_plan.events,
+        execute_tool_fn=execute_tool_fn,
+        provider=provider,
+        create_continuation_response_fn=continuation_response_fn,
+        continuation_base_payload=continuation_base_payload,
+    )
+    tool_loop_result = _build_tool_loop_response_from_outcome(
+        outcome=outcome,
+        question=text,
+        command_id=None,
+        task_contract=task_contract,
+    )
+    steps = _agent_loop_steps_from_model_events(
+        events=outcome.events,
+        question=text,
+        task_contract=task_contract,
+        provider=provider,
+    )
+    trace = dict(model_turn_result.trace)
+    trace["agent_loop"] = _direct_model_turn_agent_loop_trace(
+        outcome=outcome,
+        max_steps=max_steps,
+        steps=steps,
+        final_response=dict(tool_loop_result.get("data", {}).get("final_response") or {})
+        if isinstance(tool_loop_result.get("data"), dict)
+        else {},
+    )
+    planning = AgentLoopPlanningOutcome(
+        perception=PerceptionResult(
+            intent_name="tool_loop",
+            arguments={
+                "events": event_transcript_payload(event_plan.events),
+                "task_contract": task_contract,
+                "provider": provider,
+            },
+            source="agent_loop_events",
+            confidence=1.0,
+        ),
+        trace=dict(trace),
+    )
+    return AgentLoopResult(
+        planning=planning,
+        trace=trace,
+        steps=steps,
+        tool_loop_result=tool_loop_result,
     )
 
 
-def _planner_repair_error_details(error: AgentToolError) -> dict[str, Any]:
-    details = error.details if isinstance(error.details, dict) else {}
-    allowed = {
-        "planned_tools",
-        "preview_capabilities",
-        "read_steps",
-        "preview_steps",
-        "tool_name",
-        "precheck",
-        "allowed_tools",
-        "extra_arguments",
-        "allowed_arguments",
-    }
-    out: dict[str, Any] = {}
-    for key in sorted(allowed):
-        value = details.get(key)
-        if value not in (None, "", [], {}):
-            out[key] = value
-    return out
-
-
-def _planner_repair_trace(
+def _direct_model_turn_validation_error(
     *,
-    attempt: int,
-    initial_error: AgentToolError | None,
-    initial_plan: Any | None,
-    repair_context: dict[str, Any],
-    repair_result: LlmPlannerResult,
-    repair_planning: AgentLoopPlanningOutcome,
+    text: str,
+    event_plan: EventNativePlanningResult,
+    recoverable_observation_enabled: bool,
+) -> AgentToolError | None:
+    preview_events = tuple(
+        event for event in event_plan.events if isinstance(event, AssistantEvent) and event.event_type == "preview_request"
+    )
+    if preview_events and not _question_requests_preview_operation(text):
+        return AgentToolError(
+            code="PLAN_RISK_MISMATCH",
+            message="LLM 请求了写入预览，但用户原文不像写入预览请求。",
+            hint="preview-write 只能用于明确的记录、修改、升级或模型切换请求；普通查询必须规划为只读工具。",
+            details={
+                "preview_capabilities": [
+                    str(event.payload.get("intent_name") or event.payload.get("tool_name") or "")
+                    for event in preview_events
+                ]
+            },
+        )
+    if len(preview_events) == 1:
+        preview_precheck_error = _preview_request_precheck_error(
+            event=preview_events[0],
+            text=text,
+            event_plan=event_plan,
+        )
+        if preview_precheck_error is not None:
+            return preview_precheck_error
+    model_events = tuple(event for event in event_plan.events if isinstance(event, ModelToolCallEvent))
+    if not model_events:
+        return None
+    validation_error = _validate_model_tool_call_events(model_events, question=text)
+    if validation_error is None:
+        return None
+    if recoverable_observation_enabled and validation_error.code == "INPUT_ERROR":
+        return None
+    if recoverable_observation_enabled and _allow_model_turn_guard_observation(validation_error, question=text, events=model_events):
+        return None
+    return validation_error
+
+
+def _preview_request_precheck_error(
+    *,
+    event: AssistantEvent,
+    text: str,
+    event_plan: EventNativePlanningResult,
+) -> AgentToolError | None:
+    try:
+        perception = preview_request_perception_from_payload(
+            event.payload,
+            question=text,
+            source="agent_loop_events",
+        )
+    except AgentToolError as err:
+        return err
+    preview_model_event = ModelToolCallEvent(
+        event_id=f"{event.event_id}_tool_call",
+        tool_call_id=event.event_id,
+        tool_name=perception.intent_name,
+        arguments=dict(perception.arguments),
+        purpose=str(event.payload.get("reason") or event.payload.get("purpose") or "model requested preview lifecycle"),
+        provider=event_plan.provider or None,
+        parent_event_id=event.event_id,
+    )
+    step = _agent_loop_step_from_model_event(
+        index=1,
+        event=preview_model_event,
+        question=text,
+        task_contract=event_plan.task_contract,
+    )
+    precheck_error = _planned_step_precheck_error((step,))
+    if precheck_error is None:
+        return None
+    return _preview_precheck_clarification_error(step.precheck) or precheck_error
+
+
+def _preview_request_loop_precheck_error(
+    *,
+    event: AssistantEvent,
+    text: str,
+    task_contract: dict[str, Any],
+    provider: str | None,
+) -> AgentToolError | None:
+    if not _question_requests_preview_operation(text):
+        return AgentToolError(
+            code="PLAN_RISK_MISMATCH",
+            message="LLM 请求了写入预览，但用户原文不像写入预览请求。",
+            hint="preview-write 只能用于明确的记录、修改、升级或模型切换请求；普通查询必须规划为只读工具。",
+            details={
+                "preview_capability": str(event.payload.get("intent_name") or event.payload.get("tool_name") or "")
+            },
+        )
+    try:
+        perception = preview_request_perception_from_payload(
+            event.payload,
+            question=text,
+            source="agent_loop_events",
+        )
+    except AgentToolError as err:
+        return err
+    preview_model_event = ModelToolCallEvent(
+        event_id=f"{event.event_id}_tool_call",
+        tool_call_id=event.event_id,
+        tool_name=perception.intent_name,
+        arguments=dict(perception.arguments),
+        purpose=str(event.payload.get("reason") or event.payload.get("purpose") or "model requested preview lifecycle"),
+        provider=provider or None,
+        parent_event_id=event.event_id,
+    )
+    step = _agent_loop_step_from_model_event(
+        index=1,
+        event=preview_model_event,
+        question=text,
+        task_contract=task_contract,
+    )
+    precheck_error = _planned_step_precheck_error((step,))
+    if precheck_error is None:
+        return None
+    return _preview_precheck_clarification_error(step.precheck) or precheck_error
+
+
+def _agent_loop_steps_from_model_events(
+    *,
+    events: tuple[Any, ...],
+    question: str,
+    task_contract: dict[str, Any],
+    provider: str,
+) -> tuple[AgentLoopStep, ...]:
+    steps: list[AgentLoopStep] = []
+    preview_model_event_ids: set[str] = set()
+    for event in events:
+        model_event: ModelToolCallEvent | None = None
+        if isinstance(event, ModelToolCallEvent):
+            model_event = event
+            if _plan_step_kind(event.tool_name) == "preview" and event.event_id:
+                preview_model_event_ids.add(str(event.event_id))
+        elif isinstance(event, AssistantEvent) and event.event_type == "preview_request":
+            if event.parent_event_id and str(event.parent_event_id) in preview_model_event_ids:
+                continue
+            try:
+                perception = preview_request_perception_from_payload(
+                    event.payload,
+                    question=question,
+                    source="agent_loop_events",
+                )
+            except AgentToolError:
+                perception = None
+            if perception is not None:
+                model_event = ModelToolCallEvent(
+                    event_id=f"{event.event_id}_tool_call",
+                    tool_call_id=event.event_id,
+                    tool_name=perception.intent_name,
+                    arguments=dict(perception.arguments),
+                    purpose=str(event.payload.get("reason") or event.payload.get("purpose") or "model requested preview lifecycle"),
+                    provider=provider or None,
+                    parent_event_id=event.event_id,
+                )
+        if model_event is None:
+            continue
+        steps.append(
+            _agent_loop_step_from_model_event(
+                index=len(steps) + 1,
+                event=model_event,
+                question=question,
+                task_contract=task_contract,
+            )
+        )
+    return tuple(steps)
+
+
+def _direct_model_turn_agent_loop_trace(
+    *,
+    outcome: AssistantToolLoopOutcome,
+    max_steps: int,
+    steps: tuple[AgentLoopStep, ...],
+    final_response: dict[str, Any],
 ) -> dict[str, Any]:
-    repair = repair_context.get("planner_repair") if isinstance(repair_context, dict) else None
-    status = "accepted" if repair_planning.perception is not None and repair_planning.error is None else "rejected"
-    if repair_result.error is not None:
-        status = "provider_error" if repair_result.error.code == "LLM_PROVIDER_ERROR" else "rejected"
-    payload: dict[str, Any] = {
-        "schema_version": "om-planner-repair-trace-v1",
-        "attempted": True,
-        "attempt": int(attempt),
+    loop_trace = dict(outcome.trace)
+    continuation_count = int(loop_trace.get("continuation_count") or 0)
+    return {
+        **loop_trace,
+        "schema_version": AGENT_LOOP_SCHEMA_VERSION,
+        "enabled": True,
+        "runtime": "model_turn_loop",
+        "model_turns": 1 + continuation_count,
+        "max_steps": int(max_steps),
+        "steps_used": len(steps),
+        "writes_allowed": False,
+        "preview_operations_allowed": True,
+        "steps": [step.public_payload() for step in steps],
+        "final_response": final_response
+        or FinalResponsePlan(
+            status="rendered",
+            reason=outcome.stop_reason or outcome.status,
+            canonical_renderer_required=not bool(outcome.final_answer),
+            llm_may_summarize=bool(outcome.final_answer),
+        ).public_payload(),
+    }
+
+
+def _direct_model_turn_rejection_trace(
+    *,
+    error: AgentToolError,
+    max_steps: int,
+) -> dict[str, Any]:
+    status = "needs_clarification" if error.code == "NEEDS_CLARIFICATION" else "rejected"
+    return {
+        "schema_version": AGENT_LOOP_SCHEMA_VERSION,
+        "enabled": True,
+        "runtime": "model_turn_loop",
+        "model_turns": 1,
+        "max_steps": int(max_steps),
+        "steps_used": 0,
+        "writes_allowed": False,
+        "preview_operations_allowed": True,
+        "steps": [],
+        "loop_stop_reason": str(error.code or "validation_rejected").lower(),
         "status": status,
-        "initial_error_code": initial_error.code if initial_error is not None else None,
-        "repair_error_code": repair_planning.error.code if repair_planning.error is not None else None,
-        "repair": dict(repair) if isinstance(repair, dict) else {},
-        "repair_trace": dict(repair_result.trace),
+        "error_code": error.code,
+        "final_response": FinalResponsePlan(
+            status=status,
+            reason=str(error.message or error.code or "model turn rejected by host validation"),
+        ).public_payload(),
     }
-    if initial_plan is not None:
-        initial_plan_payload = _plan_like_public_payload(initial_plan)
-        if initial_plan_payload:
-            payload["initial_plan"] = initial_plan_payload
-    if repair_result.plan is not None:
-        repair_plan_payload = _plan_like_public_payload(repair_result.plan)
-        if repair_plan_payload:
-            payload["repair_plan"] = repair_plan_payload
-    return {key: value for key, value in payload.items() if value not in (None, "", [], {})}
-
-
-def _planner_repair_attempts_trace(attempts: list[dict[str, Any]]) -> dict[str, Any]:
-    final = dict(attempts[-1])
-    final["attempt_count"] = len(attempts)
-    final["attempts"] = [dict(item) for item in attempts]
-    first = attempts[0].get("initial_error_code")
-    if first:
-        final["first_error_code"] = first
-    return final
 
 
 def build_tool_observation(*, index: int, tool_name: str, payload: dict[str, Any], result: dict[str, Any]) -> ToolObservation:
@@ -1993,11 +2282,17 @@ def _pre_tool_check(
     action_safety: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     planner_banned = sorted(_banned_plan_argument_paths(plan_arguments)) if plan_arguments is not None else []
+    allowed_arguments = _allowed_plan_arguments(tool_name)
+    planner_extra = (
+        sorted(str(key) for key in (plan_arguments or {}) if allowed_arguments and str(key) not in allowed_arguments)
+        if plan_arguments is not None
+        else []
+    )
     action_status = "pass" if action_policy.get("allowed") else "deny"
     safety_payload = action_safety if isinstance(action_safety, dict) else {}
     safety_status = str(safety_payload.get("status") or "not_applicable")
     safety_check_status = "pass" if safety_status in {"allow", "allow_followup", "allow_preview"} else safety_status
-    planner_status = "fail" if planner_banned else ("pass" if plan_arguments is not None else "not_applicable")
+    planner_status = "fail" if planner_banned or planner_extra else ("pass" if plan_arguments is not None else "not_applicable")
     write_status = "pass" if str(action_policy.get("allowed_effect") or "") in {"read", "none", "preview"} else "fail"
     scope_status, scope_reason = _scope_guard_status(payload=payload, task_contract=task_contract)
     status = "pass"
@@ -2029,6 +2324,7 @@ def _pre_tool_check(
         "tool_name": str(tool_name or ""),
         "payload_keys": sorted(str(key) for key in (payload or {}).keys()),
         "banned_arguments": planner_banned,
+        "extra_arguments": planner_extra,
         "action_safety": dict(safety_payload) if safety_payload else {},
     }
 
@@ -2206,6 +2502,19 @@ def _read_tool_loop_guard(
     tool_name = str(tool_name or "")
     signature = _tool_loop_duplicate_signature(tool_name, payload)
     kind = _plan_step_kind(tool_name)
+    definition = get_tool_definition(tool_name)
+    if kind is None and definition is None:
+        return {
+            "schema_version": TOOL_CHECK_SCHEMA_VERSION,
+            "allowed": False,
+            "decision": "unknown_tool",
+            "reason": "model selected a tool that is not available in the assistant tool manifest",
+            "tool_name": tool_name,
+            "risk_class": "UNKNOWN",
+            "duplicate_signature": signature,
+            "scope_source": _scope_source_for_guard(task_contract),
+            "error_code": "UNKNOWN_TOOL",
+        }
     if kind != "read":
         return {
             "schema_version": TOOL_CHECK_SCHEMA_VERSION,
@@ -2379,15 +2688,15 @@ def _normalized_sql(sql: str) -> str:
     return re.sub(r"\s+", " ", str(sql or "").strip().lower())
 
 
-def plan_read_only_tools(
+def create_model_turn_events(
     text: str,
     settings: AssistantSettings,
     conversation_context: dict[str, Any] | None,
     *,
     create_tool_call_response_fn: CreateToolCallResponseFn | None = None,
     environ: dict[str, str] | None = None,
-) -> LlmPlannerResult:
-    return _plan_read_only_tools_model_events(
+) -> ModelTurnResult:
+    return _create_model_turn_events(
         text,
         settings,
         conversation_context,
@@ -2396,22 +2705,21 @@ def plan_read_only_tools(
     )
 
 
-def _plan_read_only_tools_model_events(
+def _create_model_turn_events(
     text: str,
     settings: AssistantSettings,
     conversation_context: dict[str, Any] | None,
     *,
     create_tool_call_response_fn: CreateToolCallResponseFn | None = None,
     environ: dict[str, str] | None = None,
-) -> LlmPlannerResult:
+) -> ModelTurnResult:
     llm_settings = settings.llm
     if not llm_settings.enabled:
-        return LlmPlannerResult(plan=None, trace=_llm_trace(llm_settings, attempted=False, reason="disabled"))
+        return ModelTurnResult(trace=_llm_trace(llm_settings, attempted=False, reason="disabled"))
 
     missing = missing_llm_config(llm_settings)
     if missing:
-        return LlmPlannerResult(
-            plan=None,
+        return ModelTurnResult(
             trace=_llm_trace(llm_settings, attempted=False, reason="missing_config", missing=missing),
             error=AgentToolError(
                 code="LLM_UNAVAILABLE",
@@ -2423,16 +2731,14 @@ def _plan_read_only_tools_model_events(
 
     provider = normalize_llm_provider(llm_settings.provider)
     if not is_supported_llm_provider(provider):
-        return LlmPlannerResult(
-            plan=None,
+        return ModelTurnResult(
             trace=_llm_trace(llm_settings, attempted=False, reason="unsupported_provider"),
             error=unsupported_llm_provider_error(llm_settings, component="planner"),
         )
 
     api_key = llm_api_key_value(llm_settings, environ=environ)
     if not api_key:
-        return LlmPlannerResult(
-            plan=None,
+        return ModelTurnResult(
             trace=_llm_trace(llm_settings, attempted=False, reason="missing_api_key", missing=["api_key"]),
             error=AgentToolError(
                 code="LLM_UNAVAILABLE",
@@ -2469,7 +2775,7 @@ def _plan_read_only_tools_model_events(
         "legacy_json_plan_used": False,
     }
     if attempt.error is not None:
-        return LlmPlannerResult(plan=None, trace=base_trace, error=attempt.error)
+        return ModelTurnResult(trace=base_trace, error=attempt.error)
 
     event_plan, event_error = _event_native_planning_from_model_events(
         text=text,
@@ -2485,17 +2791,17 @@ def _plan_read_only_tools_model_events(
             base_trace["planner_context_use"] = _safe_context_use_payload(event_plan.context_use)
             base_trace["context_validation"] = event_plan.context_validation
             base_trace["event_plan"] = event_plan.public_payload()
-        return LlmPlannerResult(plan=None, trace=base_trace, error=event_error, event_plan=event_plan)
+        return ModelTurnResult(trace=base_trace, error=event_error, event_plan=event_plan)
     if event_plan is None:
         error = _invalid_model_event_error("模型没有生成可执行工具调用，未执行工具。")
         base_trace["reason"] = "invalid_model_event"
         base_trace["error_code"] = error.code
-        return LlmPlannerResult(plan=None, trace=base_trace, error=error)
+        return ModelTurnResult(trace=base_trace, error=error)
 
     base_trace["planner_context_use"] = _safe_context_use_payload(event_plan.context_use)
     base_trace["context_validation"] = event_plan.context_validation
     base_trace["event_plan"] = event_plan.public_payload()
-    return LlmPlannerResult(plan=None, trace={**base_trace, "reason": "accepted"}, event_plan=event_plan)
+    return ModelTurnResult(trace={**base_trace, "reason": "accepted"}, event_plan=event_plan)
 
 
 def _model_event_provider_attempt(
@@ -2672,7 +2978,11 @@ def _event_native_planning_from_model_tool_calls(
     today = _planner_today_from_context(conversation_context)
     normalized_events = _normalize_model_tool_call_events(events, question=text, today=today)
     validation_error = _validate_model_tool_call_events(normalized_events, question=text)
-    if validation_error is not None:
+    if validation_error is not None and not _allow_model_turn_guard_observation(
+        validation_error,
+        question=text,
+        events=normalized_events,
+    ):
         return None, validation_error
 
     initial_payload = _model_tool_calls_plan_like_payload(
@@ -2720,6 +3030,30 @@ def _event_native_planning_from_model_tool_calls(
     if context_error is not None:
         return event_plan, context_error
     return event_plan, None
+
+
+def _allow_model_turn_guard_observation(
+    error: AgentToolError,
+    *,
+    question: str,
+    events: tuple[ModelToolCallEvent, ...],
+) -> bool:
+    if not events:
+        return False
+    if error.code == "INPUT_ERROR":
+        return True
+    if error.code == "PERMISSION_DENIED":
+        details = error.details if isinstance(error.details, dict) else {}
+        if details.get("banned_arguments"):
+            return True
+        tool_name = str(details.get("tool_name") or "").strip()
+        if tool_name and _plan_step_kind(tool_name) is None:
+            return True
+    if error.code != "PLAN_RISK_MISMATCH":
+        return False
+    if not _question_requests_preview_operation(question):
+        return False
+    return bool(events) and all(_plan_step_kind(event.tool_name) == "read" for event in events)
 
 
 def _model_tool_calls_plan_like_payload(
@@ -3203,7 +3537,7 @@ def _context_validation_error(validation: dict[str, Any] | None) -> AgentToolErr
             details={
                 "context_validation": dict(validation),
                 "requires_user_clarification": True,
-                "planner_repairable": False,
+                "model_turn_recoverable": False,
             },
         )
     if status == "blocked":
@@ -3214,13 +3548,13 @@ def _context_validation_error(validation: dict[str, Any] | None) -> AgentToolErr
             details={
                 "context_validation": dict(validation),
                 "requires_user_clarification": False,
-                "planner_repairable": True,
+                "model_turn_recoverable": True,
             },
         )
     return AgentToolError(
         code="PLAN_CONTEXT_INVALID",
         message="Planner 上下文校验未通过，已阻止执行工具。",
-        details={"context_validation": dict(validation), "planner_repairable": False},
+        details={"context_validation": dict(validation), "model_turn_recoverable": False},
     )
 
 
@@ -3394,8 +3728,8 @@ def _question_requests_preview_operation(question: str) -> bool:
     return preview_effect_allowed_from_text(question)
 
 
-def _planning_outcome_from_tool_plan_result(
-    result: LlmPlannerResult,
+def _planning_outcome_from_model_turn_result(
+    result: ModelTurnResult,
     *,
     question: str,
     conversation_context: dict[str, Any] | None,
@@ -3403,27 +3737,12 @@ def _planning_outcome_from_tool_plan_result(
     if result.error is not None:
         return AgentLoopPlanningOutcome(perception=None, trace=dict(result.trace), error=result.error), ()
     if result.event_plan is not None:
-        return _planning_outcome_from_event_plan_result(result, question=question)
-    if result.plan is None:
-        return AgentLoopPlanningOutcome(perception=None, trace=dict(result.trace)), ()
-    error = AgentToolError(
-        code="PLAN_UNSUPPORTED_COMPOSITION",
-        message="legacy JSON plan results are no longer executable by Assistant AgentLoop.",
-        hint="Planner providers must return event-native tool calls through assistant.tool_loop.",
-        details={"replacement": INTERNAL_TOOL_LOOP_NAME},
-    )
-    return (
-        AgentLoopPlanningOutcome(
-            perception=None,
-            trace={**dict(result.trace), "reason": "legacy_plan_unsupported", "error_code": error.code},
-            error=error,
-        ),
-        (),
-    )
+        return _planning_outcome_from_event_model_turn_result(result, question=question)
+    return AgentLoopPlanningOutcome(perception=None, trace=dict(result.trace)), ()
 
 
-def _planning_outcome_from_event_plan_result(
-    result: LlmPlannerResult,
+def _planning_outcome_from_event_model_turn_result(
+    result: ModelTurnResult,
     *,
     question: str,
 ) -> tuple[AgentLoopPlanningOutcome, tuple[AgentLoopStep, ...]]:
@@ -3542,7 +3861,7 @@ def _defer_preview_read_mismatch_to_tool_guard(
 
 
 def _planning_outcome_from_preview_request_event_result(
-    result: LlmPlannerResult,
+    result: ModelTurnResult,
     *,
     event: AssistantEvent,
     question: str,
@@ -3809,7 +4128,7 @@ def _with_temporal_context(conversation_context: dict[str, Any] | None, *, today
     return context
 
 
-def _normalize_tool_plan_result(result: LlmPlannerResult, *, question: str, today: date) -> LlmPlannerResult:
+def _normalize_model_turn_result(result: ModelTurnResult, *, question: str, today: date) -> ModelTurnResult:
     if result.event_plan is not None:
         event_plan = result.event_plan
         model_events = tuple(event for event in event_plan.events if isinstance(event, ModelToolCallEvent))
@@ -3821,8 +4140,7 @@ def _normalize_tool_plan_result(result: LlmPlannerResult, *, question: str, toda
                 for event in event_plan.events
             )
             if normalized_events != event_plan.events:
-                return LlmPlannerResult(
-                    plan=result.plan,
+                return ModelTurnResult(
                     trace=result.trace,
                     error=result.error,
                     event_plan=replace(event_plan, events=normalized_events),
@@ -4404,9 +4722,6 @@ def _planner_input_payload(text: str, *, conversation_context: dict[str, Any] | 
         repair = conversation_context.get("context_validation_repair")
         if isinstance(repair, dict) and repair:
             context_payload["context_validation_repair"] = dict(repair)
-        planner_repair = conversation_context.get("planner_repair")
-        if isinstance(planner_repair, dict) and planner_repair:
-            context_payload["planner_repair"] = dict(planner_repair)
         payload["context"] = context_payload
     return payload
 
@@ -4500,7 +4815,6 @@ Do not write JSON plans in normal text. Do not wrap tool choices in Markdown.
 Rules:
 - For business, runtime, position, candidate, config, or income questions, call 1 to 3 suitable read-only tools when needed; prefer one tool when it is enough.
 - Use only tools exposed in the current tool list. Do not invent tool names.
-- If context.planner_repair is present, the previous tool call was rejected by host validation. Follow context.planner_repair.instruction and choose a corrected tool call once; do not repeat the rejected tool/effect.
 - Do not include system-scoped arguments such as config_key, config_path, paths, host, port, timeout, audit_db, report_path, run_dir, or output_dir. The host injects those.
 - For income analysis/review/performance/source/composition questions, call monthly_income_report and set include_rows=true.
 - For a month without a year such as "6月", resolve it from the current date in the input context.
@@ -4531,7 +4845,6 @@ Rules:
 - If open_evidence_gaps suggests relevant views/tools, treat them as recoverable evidence hints, not as facts.
 - If prior context is required but cannot be chosen safely, set context_use.mode=ambiguous, requires_clarification=true, provide a clarification_question, and return steps=[] rather than guessing.
 - Use only tools/capabilities in the provided manifest.
-- If context.planner_repair is present, the previous plan was rejected by host validation. Follow context.planner_repair.instruction and return one corrected bounded plan; do not repeat the rejected tool/effect.
 - Fill required_capabilities with the user's required answer capabilities from the tool manifest. Use [] only when the request needs no special capability beyond the planned tool call.
 - Preview-write capabilities only create a pending preview. They never apply writes, confirm pending operations, notify users externally, or mutate config/ledger directly.
 - Never plan confirm/cancel/apply actions. Confirm/cancel must be handled by deterministic user commands bound to a pending operation.
@@ -5502,7 +5815,7 @@ __all__ = [
     "AGENT_LOOP_ALLOWED_TOOLS",
     "AgentLoopResult",
     "AgentLoopStep",
-    "AgentLoopPlanFn",
+    "ModelTurnFn",
     "AgentLoopPlanningOutcome",
     "AssistantToolLoopOutcome",
     "EventNativePlanningResult",
@@ -5511,7 +5824,7 @@ __all__ = [
     "GuardedModelToolCallExecution",
     "INTERNAL_TOOL_PLAN_NAME",
     "INTERNAL_TOOL_LOOP_NAME",
-    "LlmPlannerResult",
+    "ModelTurnResult",
     "MAX_TOOL_PLAN_STEPS",
     "TOOL_PLAN_SCHEMA_VERSION",
     "ToolExecutionOutcome",
@@ -5521,7 +5834,7 @@ __all__ = [
     "build_synthesis_observation",
     "execute_model_tool_call_event",
     "execute_tool_loop_payload",
-    "plan_read_only_tools",
+    "create_model_turn_events",
     "run_assistant_tool_event_loop",
     "run_read_only_agent_loop",
     "skipped_llm_trace",

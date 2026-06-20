@@ -5,7 +5,7 @@ import re
 from typing import Any, Callable
 
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.assistant.agent_loop import AgentLoopPlanFn, AgentLoopPlanningOutcome, run_read_only_agent_loop, skipped_llm_trace
+from src.application.assistant.agent_loop import ModelTurnFn, AgentLoopPlanningOutcome, run_read_only_agent_loop, skipped_llm_trace
 from src.application.assistant.audit import InboundAuditStore
 from src.application.assistant.command_parser import parse_assistant_command
 from src.application.assistant.capability_catalog import is_llm_planner_preview_spec, spec_by_intent
@@ -24,6 +24,7 @@ from src.application.assistant.settings import AssistantSettings
 from src.application.assistant.time_filters import extract_month_filter
 
 GenerateReplyFn = Callable[[str, AssistantSettings, dict[str, Any] | None], LlmReplyResult]
+ExecuteToolFn = Callable[[str, dict[str, Any]], dict[str, Any]]
 
 _COMMAND_SPECS_BY_INTENT = spec_by_intent()
 _BUSINESS_OR_WRITE_TOKENS = (
@@ -89,19 +90,22 @@ class PerceptionEngine:
         request: AssistantRequest,
         audit_store: InboundAuditStore,
         settings: AssistantSettings,
-        plan_tools_fn: AgentLoopPlanFn | None = None,
+        model_turn_fn: ModelTurnFn | None = None,
         generate_reply_fn: GenerateReplyFn | None = None,
+        execute_tool_fn: ExecuteToolFn | None = None,
     ) -> None:
         self._request = request
         self._audit_store = audit_store
         self._settings = settings
-        self._plan_tools_fn = plan_tools_fn
+        self._model_turn_fn = model_turn_fn
         self._generate_reply_fn = generate_reply_fn
+        self._execute_tool_fn = execute_tool_fn
         self.route = self._initial_route(request.text)
         skipped_reason = "command" if self.route == "command" else "not_needed"
         self.llm_trace = skipped_llm_trace(settings.llm, reason=skipped_reason)
         self.trace: PerceptionTrace | None = None
         self.last_conversation_context: dict[str, Any] | None = None
+        self.last_tool_loop_result: dict[str, Any] | None = None
 
     def perceive(self, text: str, parser_now_fn: Callable[[], date] | None) -> PerceptionResult:
         try:
@@ -375,7 +379,7 @@ class PerceptionEngine:
     def _conversation_context(self) -> dict[str, Any] | None:
         if (
             not self._settings.planner_enabled
-            and self._plan_tools_fn is None
+            and self._model_turn_fn is None
             and self._generate_reply_fn is None
         ):
             return None
@@ -421,7 +425,7 @@ class PerceptionEngine:
         conversation_context: dict[str, Any] | None,
         now_fn: Callable[[], date] | None,
     ) -> AgentLoopPlanningOutcome:
-        if not self._settings.planner_enabled and self._plan_tools_fn is None:
+        if not self._settings.planner_enabled and self._model_turn_fn is None:
             llm_result = AgentLoopPlanningOutcome(
                 perception=None,
                 trace=skipped_llm_trace(self._settings.llm, reason="planner_disabled"),
@@ -434,10 +438,13 @@ class PerceptionEngine:
             text,
             settings=self._settings,
             conversation_context=conversation_context,
-            plan_tools_fn=self._plan_tools_fn,
+            model_turn_fn=self._model_turn_fn,
+            request=self._request,
+            execute_tool_fn=self._execute_tool_fn,
             now_fn=now_fn,
         )
         self.llm_trace = dict(loop_result.trace)
+        self.last_tool_loop_result = dict(loop_result.tool_loop_result) if isinstance(loop_result.tool_loop_result, dict) else None
         return loop_result.planning
 
     def _llm_source(self) -> str:
@@ -600,23 +607,48 @@ def ensure_llm_perception_allowed(perception: PerceptionResult) -> None:
 
 
 def _llm_preview_conflict_error(perception: PerceptionResult, deterministic_candidate: Any) -> AgentToolError | None:
-    spec = _COMMAND_SPECS_BY_INTENT.get(perception.intent_name)
+    preview_intent_name = _llm_preview_intent_name(perception)
+    if not preview_intent_name:
+        return None
+    spec = _COMMAND_SPECS_BY_INTENT.get(preview_intent_name)
     if spec is None or not _is_llm_preview_perception_allowed(spec):
         return None
     deterministic_perception = getattr(deterministic_candidate, "perception", None)
     if not isinstance(deterministic_perception, PerceptionResult):
         return None
-    if deterministic_perception.intent_name == perception.intent_name:
+    if deterministic_perception.intent_name == preview_intent_name:
         return None
     return AgentToolError(
         code="NEEDS_CLARIFICATION",
         message="这句话同时像写入预览和其他操作，请确认要创建哪一种预览，或改成只读查询。",
         hint="写入预览只能创建待确认操作；确认、取消和应用必须使用明确的确认/取消命令。",
         details={
-            "llm_intent_name": perception.intent_name,
+            "llm_intent_name": preview_intent_name,
             "deterministic_intent_name": deterministic_perception.intent_name,
         },
     )
+
+
+def _llm_preview_intent_name(perception: PerceptionResult) -> str | None:
+    if perception.intent_name != "tool_loop":
+        return str(perception.intent_name or "")
+    events = perception.arguments.get("events") if isinstance(perception.arguments, dict) else None
+    if not isinstance(events, list):
+        return None
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        event_type = str(event.get("event_type") or "")
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        candidate = ""
+        if event_type == "preview_request":
+            candidate = str(payload.get("intent_name") or payload.get("tool_name") or "")
+        elif event_type == "model_tool_call":
+            candidate = str(event.get("tool_name") or "")
+        spec = _COMMAND_SPECS_BY_INTENT.get(candidate)
+        if spec is not None and _is_llm_preview_perception_allowed(spec):
+            return candidate
+    return None
 
 
 def _is_llm_preview_perception_allowed(spec: Any) -> bool:

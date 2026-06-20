@@ -20,7 +20,7 @@ from src.application.assistant.contracts import (
 )
 from src.application.assistant.agent_loop import (
     EventNativePlanningResult,
-    LlmPlannerResult,
+    ModelTurnResult,
     TOOL_PLAN_SCHEMA_VERSION,
 )
 from src.application.inbound.feishu import feishu_payload_to_inbound_request, handle_feishu_payload
@@ -51,7 +51,7 @@ def _planner_trace(*, reason: str = "accepted") -> dict[str, Any]:
     }
 
 
-def _plan_result(tool_name: str, arguments: dict[str, Any] | None = None) -> LlmPlannerResult:
+def _model_turn_result(tool_name: str, arguments: dict[str, Any] | None = None) -> ModelTurnResult:
     is_preview = tool_name in {spec.intent_name for spec in planner_preview_specs()}
     args = dict(arguments or {})
     preview_symbol = str(args.get("symbol") or "").strip().upper()
@@ -88,8 +88,7 @@ def _plan_result(tool_name: str, arguments: dict[str, Any] | None = None) -> Llm
         "required_evidence": ["permission_request", "preview_receipt"] if is_preview else ["current_state"],
         "answer_shape": ["preview_summary", "risk", "confirmation_handle"] if is_preview else ["conclusion"],
     }
-    return LlmPlannerResult(
-        plan=None,
+    return ModelTurnResult(
         trace=_planner_trace(),
         event_plan=EventNativePlanningResult(
             events=(event,),
@@ -506,10 +505,10 @@ def test_inbound_exit_analysis_routes_to_close_advice_read(tmp_path: Path) -> No
         text: str,
         _settings: AssistantSettings,
         conversation_context: dict[str, Any] | None,
-    ) -> LlmPlannerResult:
+    ) -> ModelTurnResult:
         assert text == "分析 long call 是不是应该平仓"
         assert conversation_context is not None
-        return _plan_result(
+        return _model_turn_result(
             "close_advice_read",
             {"query": {"status": "open", "option_type": "call", "side": "long", "limit": 50}},
         )
@@ -528,7 +527,7 @@ def test_inbound_exit_analysis_routes_to_close_advice_read(tmp_path: Path) -> No
         settings=AssistantSettings(
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
-        plan_tools_fn=_plan,
+        model_turn_fn=_plan,
     )
 
     assert out["ok"] is True
@@ -659,10 +658,10 @@ def test_inbound_symbol_config_query_executes_read_only_tool_via_llm(tmp_path: P
         text: str,
         _runtime_settings: AssistantSettings,
         conversation_context: dict[str, Any] | None,
-    ) -> LlmPlannerResult:
+    ) -> ModelTurnResult:
         assert text == "现在泡泡玛特 sell put的max strike是多少？"
         assert conversation_context is not None
-        return _plan_result("symbol_config_read", {"symbol": "泡泡玛特", "strategy": "sell_put", "field": "max_strike"})
+        return _model_turn_result("symbol_config_read", {"symbol": "泡泡玛特", "strategy": "sell_put", "field": "max_strike"})
 
     out = handle_assistant_message(
         AssistantRequest(
@@ -677,7 +676,7 @@ def test_inbound_symbol_config_query_executes_read_only_tool_via_llm(tmp_path: P
         settings=AssistantSettings(
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
-        plan_tools_fn=_plan,
+        model_turn_fn=_plan,
     )
 
     assert out["ok"] is True
@@ -2521,10 +2520,10 @@ def test_inbound_llm_symbol_edit_creates_preview_only(monkeypatch: pytest.Monkey
         text: str,
         _runtime_settings: AssistantSettings,
         conversation_context: dict[str, Any] | None,
-    ) -> LlmPlannerResult:
+    ) -> ModelTurnResult:
         assert text == "设置 NVDA covered call min strike 140"
         assert conversation_context is not None
-        return _plan_result(
+        return _model_turn_result(
             "symbol_edit",
             {
                 "symbol": "NVDA",
@@ -2546,7 +2545,7 @@ def test_inbound_llm_symbol_edit_creates_preview_only(monkeypatch: pytest.Monkey
         settings=AssistantSettings(
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
-        plan_tools_fn=_plan,
+        model_turn_fn=_plan,
     )
 
     assert out["ok"] is True
