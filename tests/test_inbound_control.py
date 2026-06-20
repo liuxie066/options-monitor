@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from src.application.agent_tool_contracts import AgentToolError, build_response
-from src.application.assistant.capability_catalog import command_specs
+from src.application.assistant.capability_catalog import command_specs, planner_preview_specs
 from src.application.assistant.command_parser import parse_assistant_command
 from src.application.assistant.contracts import (
     AssistantRequest,
@@ -19,10 +19,8 @@ from src.application.assistant.contracts import (
     ToolCall,
 )
 from src.application.assistant.agent_loop import (
+    EventNativePlanningResult,
     LlmPlannerResult,
-    PLANNER_CONTEXT_USE_SCHEMA_VERSION,
-    PlannerPlan,
-    PlannerPlanStep,
     TOOL_PLAN_SCHEMA_VERSION,
 )
 from src.application.inbound.feishu import feishu_payload_to_inbound_request, handle_feishu_payload
@@ -34,6 +32,7 @@ from src.application.assistant.runtime import handle_assistant_message
 from src.application.assistant.session_store import collect_assistant_trace
 from src.application.assistant.settings import AssistantSettings, AssistantLlmSettings
 from src.application.assistant.task_contract import TASK_CONTRACT_SCHEMA_VERSION
+from src.application.assistant.model_events import AssistantEvent, ModelToolCallEvent
 
 
 def _planner_trace(*, reason: str = "accepted") -> dict[str, Any]:
@@ -53,23 +52,63 @@ def _planner_trace(*, reason: str = "accepted") -> dict[str, Any]:
 
 
 def _plan_result(tool_name: str, arguments: dict[str, Any] | None = None) -> LlmPlannerResult:
-    return LlmPlannerResult(
-        plan=PlannerPlan(
-            goal="test plan",
-            task_contract={
-                "schema_version": TASK_CONTRACT_SCHEMA_VERSION,
-                "goal": "test plan",
-                "domain": "general",
-                "task_mode": "summarize",
-                "requested_effect": "read",
-                "scope": {},
-                "required_answer": ["summary"],
-                "required_evidence": ["current_state"],
-                "answer_shape": ["conclusion"],
+    is_preview = tool_name in {spec.intent_name for spec in planner_preview_specs()}
+    args = dict(arguments or {})
+    preview_symbol = str(args.get("symbol") or "").strip().upper()
+    event = (
+        AssistantEvent(
+            event_id="preview_request_1",
+            event_type="preview_request",
+            payload={
+                "intent_name": tool_name,
+                "arguments": args,
+                "reason": f"Preview {tool_name} for the current request.",
             },
-            steps=(PlannerPlanStep(id="step_1", tool_name=tool_name, arguments=dict(arguments or {})),),
-        ),
+            parent_event_id="user_message_1",
+        )
+        if is_preview
+        else ModelToolCallEvent(
+            event_id="model_tool_call_1",
+            tool_call_id="call_1",
+            tool_name=tool_name,
+            arguments=args,
+            purpose=f"Use {tool_name} for the current request.",
+            provider="openai",
+            parent_event_id="user_message_1",
+        )
+    )
+    task_contract = {
+        "schema_version": TASK_CONTRACT_SCHEMA_VERSION,
+        "goal": "test plan",
+        "domain": "operation" if is_preview else "general",
+        "task_mode": "preview_write" if is_preview else "summarize",
+        "requested_effect": "preview_write" if is_preview else "read",
+        "scope": {"requested_symbols": [preview_symbol]} if is_preview and preview_symbol else {},
+        "required_answer": ["preview_summary"] if is_preview else ["summary"],
+        "required_evidence": ["permission_request", "preview_receipt"] if is_preview else ["current_state"],
+        "answer_shape": ["preview_summary", "risk", "confirmation_handle"] if is_preview else ["conclusion"],
+    }
+    return LlmPlannerResult(
+        plan=None,
         trace=_planner_trace(),
+        event_plan=EventNativePlanningResult(
+            events=(event,),
+            task_contract=task_contract,
+            required_capabilities=("preview_operation",) if is_preview else (),
+            context_use={
+                "schema_version": "om-planner-context-use-v1",
+                "mode": "none",
+                "referenced_turn_ids": [],
+                "referenced_evidence_refs": [],
+                "inherited_slots": {},
+                "current_message_slots": {},
+                "override_slots": {},
+                "requires_clarification": False,
+                "clarification_question": None,
+            },
+            provider="openai",
+            goal="test plan",
+        ),
     )
 
 
@@ -503,8 +542,8 @@ def test_inbound_exit_analysis_routes_to_close_advice_read(tmp_path: Path) -> No
             },
         )
     ]
-    assert out["data"]["perception"]["intent_name"] == "tool_plan"
-    assert out["data"]["reasoning"]["tool_call"]["tool_name"] == "assistant.tool_plan"
+    assert out["data"]["perception"]["intent_name"] == "tool_loop"
+    assert out["data"]["reasoning"]["tool_call"]["tool_name"] == "assistant.tool_loop"
     assert "平仓建议分析" in out["data"]["response_text"]
     assert "继续持有 Call 凸性腿" in out["data"]["response_text"]
     assert "Call现值 820" in out["data"]["response_text"]
@@ -642,46 +681,36 @@ def test_inbound_symbol_config_query_executes_read_only_tool_via_llm(tmp_path: P
     )
 
     assert out["ok"] is True
-    assert out["tool_name"] == "assistant.tool_plan"
-    assert out["data"]["perception"]["intent_name"] == "tool_plan"
+    assert out["tool_name"] == "assistant.tool_loop"
+    assert out["data"]["perception"]["intent_name"] == "tool_loop"
     tool_call = out["data"]["reasoning"]["tool_call"]
-    assert tool_call["tool_name"] == "assistant.tool_plan"
+    assert tool_call["tool_name"] == "assistant.tool_loop"
     assert tool_call["payload"]["question"] == "现在泡泡玛特 sell put的max strike是多少？"
     assert tool_call["payload"]["config_path"] == str(cfg_path)
-    assert tool_call["payload"]["plan"] == {
-        "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+    assert tool_call["payload"]["task_contract"] == {
+        "schema_version": TASK_CONTRACT_SCHEMA_VERSION,
         "goal": "test plan",
-        "required_capabilities": [],
-        "context_use": {
-            "schema_version": PLANNER_CONTEXT_USE_SCHEMA_VERSION,
-            "mode": "none",
-            "referenced_turn_ids": [],
-            "referenced_evidence_refs": [],
-            "inherited_slots": {},
-            "current_message_slots": {},
-            "override_slots": {},
-            "requires_clarification": False,
-            "clarification_question": None,
-        },
-        "task_contract": {
-            "schema_version": TASK_CONTRACT_SCHEMA_VERSION,
-            "goal": "test plan",
-            "domain": "general",
-            "task_mode": "summarize",
-            "requested_effect": "read",
-            "scope": {},
-            "required_answer": ["summary"],
-            "required_evidence": ["current_state"],
-            "answer_shape": ["conclusion"],
-        },
-        "steps": [
-            {
-                "id": "step_1",
-                "tool_name": "symbol_config_read",
-                "arguments": {"symbol": "泡泡玛特", "strategy": "sell_put", "field": "max_strike"},
-            }
-        ],
+        "domain": "general",
+        "task_mode": "summarize",
+        "requested_effect": "read",
+        "scope": {},
+        "required_answer": ["summary"],
+        "required_evidence": ["current_state"],
+        "answer_shape": ["conclusion"],
     }
+    assert tool_call["payload"]["events"] == [
+        {
+            "schema_version": "om-assistant-model-event-v1",
+            "event_id": "model_tool_call_1",
+            "event_type": "model_tool_call",
+            "tool_call_id": "call_1",
+            "tool_name": "symbol_config_read",
+            "arguments": {"symbol": "泡泡玛特", "strategy": "sell_put", "field": "max_strike"},
+            "purpose": "Use symbol_config_read for the current request.",
+            "provider": "openai",
+            "parent_event_id": "user_message_1",
+        }
+    ]
     assert "operation_type" not in out["data"]
     assert "9992.HK" in out["data"]["response_text"]
     assert "sell_put.max_strike" in out["data"]["response_text"]
@@ -2522,7 +2551,7 @@ def test_inbound_llm_symbol_edit_creates_preview_only(monkeypatch: pytest.Monkey
 
     assert out["ok"] is True
     assert out["tool_name"] == "inbound.symbols"
-    assert out["data"]["perception"]["source"] == "agent_loop_plan"
+    assert out["data"]["perception"]["source"] == "agent_loop_events"
     assert out["data"]["perception"]["intent_name"] == "symbol_edit"
     assert out["data"]["reasoning"]["status"] == "preview_required"
     assert out["data"]["reasoning"]["safety_class"] == "write_preview"

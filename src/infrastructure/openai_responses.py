@@ -113,6 +113,31 @@ def create_tool_call_response(
     )
 
 
+def create_response_from_payload(
+    *,
+    api_key: str,
+    payload: dict[str, Any],
+    base_url: str | None = None,
+    timeout: int = 20,
+    http_post_json_fn: HttpPostJsonFn | None = None,
+) -> dict[str, Any]:
+    api_key_value = str(api_key or "").strip()
+    if not api_key_value:
+        raise ValueError("api_key is required")
+    if not isinstance(payload, dict):
+        raise ValueError("payload is required")
+
+    return (http_post_json_fn or _post_json)(
+        resolve_responses_url(base_url),
+        dict(payload),
+        headers={
+            "Authorization": f"Bearer {api_key_value}",
+            "Content-Type": "application/json",
+        },
+        timeout=int(timeout),
+    )
+
+
 def resolve_responses_url(base_url: str | None) -> str:
     value = str(base_url or "").strip()
     if not value:

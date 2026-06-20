@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from src.application.agent_tool_contracts import build_response
-from src.application.assistant.agent_loop import execute_model_tool_call_event
+from src.application.assistant.agent_loop import execute_model_tool_call_event, run_assistant_tool_event_loop
 from src.application.assistant.contracts import AssistantRequest
 from src.application.assistant.model_events import model_tool_call_from_provider_block
 
@@ -188,3 +188,253 @@ def test_execute_model_tool_call_event_rejects_budget_exhaustion() -> None:
     assert result.guard_event.decision == "tool_budget_exhausted"
     assert result.guard_event.error_code == "TOOL_BUDGET_EXHAUSTED"
     assert result.public_payload()["provider_tool_result"]["is_error"] is True
+
+
+def test_run_assistant_tool_event_loop_returns_event_outcome_without_planner_plan() -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={"row_count": 1, "rows": [{"account": "lx", "month": "2026-06", "net_income": 123.45}]},
+        )
+
+    event = model_tool_call_from_provider_block(
+        {
+            "type": "function_call",
+            "call_id": "call_income_1",
+            "name": "monthly_income_report",
+            "arguments": '{"account":"lx","month":"2026-06","include_rows":true}',
+        },
+        provider="openai",
+        event_id="model_tool_call_1",
+    )
+
+    outcome = run_assistant_tool_event_loop(
+        question="lx 6月收益分析",
+        request=AssistantRequest(text="lx 6月收益分析", sender_id="u1", config_key="us"),
+        task_contract={"requested_effect": "read", "scope": {"requested_accounts": ["lx"]}},
+        initial_events=(event,),
+        execute_tool_fn=_execute,
+    )
+
+    assert outcome.status == "stopped"
+    assert outcome.stop_reason == "awaiting_model_continuation"
+    assert calls == [
+        (
+            "monthly_income_report",
+            {"account": "lx", "month": "2026-06", "include_rows": True, "config_key": "us"},
+        )
+    ]
+    assert [event["event_type"] for event in outcome.public_payload()["events"]] == [
+        "model_tool_call",
+        "tool_guard_decision",
+        "tool_result",
+        "evidence_updated",
+    ]
+    trace = outcome.public_payload()["trace"]
+    assert trace["planner_plan_used"] is False
+    assert trace["loop_stop_reason"] == "awaiting_model_continuation"
+    assert trace["tool_call_count"] == 1
+    assert trace["repair_attempted"] is False
+    assert trace["capability_selection"]["selected"][0]["tool_name"] == "monthly_income_report"
+    assert outcome.evidence_bundle is not None
+
+
+def test_run_assistant_tool_event_loop_continues_to_final_answer() -> None:
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={"row_count": 1, "rows": [{"account": "lx", "month": "2026-06", "net_income": 123.45}]},
+        )
+
+    def _continue(_payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "output": [
+                {
+                    "type": "message",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "lx 2026-06 已实现收益为 123.45。",
+                        }
+                    ],
+                }
+            ]
+        }
+
+    event = model_tool_call_from_provider_block(
+        {
+            "type": "function_call",
+            "call_id": "call_income_1",
+            "name": "monthly_income_report",
+            "arguments": '{"account":"lx","month":"2026-06","include_rows":true}',
+        },
+        provider="openai",
+        event_id="model_tool_call_1",
+    )
+
+    outcome = run_assistant_tool_event_loop(
+        question="lx 6月收益分析",
+        request=AssistantRequest(text="lx 6月收益分析", sender_id="u1", config_key="us"),
+        task_contract={"requested_effect": "read", "scope": {"requested_accounts": ["lx"]}},
+        initial_events=(event,),
+        execute_tool_fn=_execute,
+        provider="openai",
+        create_continuation_response_fn=_continue,
+    )
+
+    assert outcome.status == "done"
+    assert outcome.stop_reason == "model_final_answer"
+    assert outcome.final_answer == "lx 2026-06 已实现收益为 123.45。"
+    assert [event["event_type"] for event in outcome.public_payload()["events"]] == [
+        "model_tool_call",
+        "tool_guard_decision",
+        "tool_result",
+        "evidence_updated",
+        "model_final_answer",
+    ]
+    trace = outcome.public_payload()["trace"]
+    assert trace["answer_verification"]["status"] == "passed"
+    assert trace["answer_route"] == "llm_from_tool_observation"
+    assert trace["loop_stop_reason"] == "model_final_answer"
+    assert trace["scope_source"] == "task_contract"
+
+
+def test_run_assistant_tool_event_loop_recovers_from_scope_denial_once() -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+    continuation_payloads: list[dict[str, Any]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={"row_count": 1, "rows": [{"account": "lx", "month": "2026-06", "net_income": 123.45}]},
+        )
+
+    def _continue(payload: dict[str, Any]) -> dict[str, Any]:
+        continuation_payloads.append(payload)
+        if len(continuation_payloads) == 1:
+            assert '"is_error": true' in payload["input"][-1]["output"]
+            assert "PRE_TOOL_CHECK_FAILED" in payload["input"][-1]["output"]
+            return {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_income_repair_1",
+                        "name": "monthly_income_report",
+                        "arguments": '{"account":"lx","month":"2026-06","include_rows":true}',
+                    }
+                ]
+            }
+        return {
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "lx 2026-06 已实现收益为 123.45。"}],
+                }
+            ]
+        }
+
+    wrong_scope_event = model_tool_call_from_provider_block(
+        {
+            "type": "function_call",
+            "call_id": "call_income_wrong_scope_1",
+            "name": "monthly_income_report",
+            "arguments": '{"account":"sy","month":"2026-06","include_rows":true}',
+        },
+        provider="openai",
+        event_id="model_tool_call_1",
+    )
+
+    outcome = run_assistant_tool_event_loop(
+        question="lx 6月收益分析",
+        request=AssistantRequest(text="lx 6月收益分析", sender_id="u1", config_key="us"),
+        task_contract={"requested_effect": "read", "scope": {"requested_accounts": ["lx"]}},
+        initial_events=(wrong_scope_event,),
+        execute_tool_fn=_execute,
+        provider="openai",
+        create_continuation_response_fn=_continue,
+    )
+
+    assert outcome.status == "done"
+    assert outcome.stop_reason == "model_final_answer"
+    assert calls == [
+        (
+            "monthly_income_report",
+            {"account": "lx", "month": "2026-06", "include_rows": True, "config_key": "us"},
+        )
+    ]
+    assert [event["event_type"] for event in outcome.public_payload()["events"]] == [
+        "model_tool_call",
+        "tool_guard_decision",
+        "tool_result",
+        "model_tool_call",
+        "tool_guard_decision",
+        "tool_result",
+        "evidence_updated",
+        "model_final_answer",
+    ]
+    assert outcome.public_payload()["events"][1]["error_code"] == "PRE_TOOL_CHECK_FAILED"
+    trace = outcome.public_payload()["trace"]
+    assert trace["continuation_count"] == 2
+    assert trace["repair_attempted"] is True
+    assert trace["capability_selection"]["selected_count"] == 2
+
+
+def test_run_assistant_tool_event_loop_stops_repeated_recoverable_denial() -> None:
+    continuation_payloads: list[dict[str, Any]] = []
+
+    def _continue(payload: dict[str, Any]) -> dict[str, Any]:
+        continuation_payloads.append(payload)
+        return {
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": f"call_income_wrong_scope_retry_{len(continuation_payloads)}",
+                    "name": "monthly_income_report",
+                    "arguments": '{"account":"sy","month":"2026-06","include_rows":true}',
+                }
+            ]
+        }
+
+    wrong_scope_event = model_tool_call_from_provider_block(
+        {
+            "type": "function_call",
+            "call_id": "call_income_wrong_scope_1",
+            "name": "monthly_income_report",
+            "arguments": '{"account":"sy","month":"2026-06","include_rows":true}',
+        },
+        provider="openai",
+        event_id="model_tool_call_1",
+    )
+
+    outcome = run_assistant_tool_event_loop(
+        question="lx 6月收益分析",
+        request=AssistantRequest(text="lx 6月收益分析", sender_id="u1", config_key="us"),
+        task_contract={"requested_effect": "read", "scope": {"requested_accounts": ["lx"]}},
+        initial_events=(wrong_scope_event,),
+        execute_tool_fn=lambda _tool_name, _payload: build_response(tool_name="monthly_income_report", ok=True, data={}),
+        provider="openai",
+        create_continuation_response_fn=_continue,
+    )
+
+    assert outcome.status == "stopped"
+    assert outcome.stop_reason == "repeated_recoverable_error"
+    assert len(continuation_payloads) == 1
+    assert [event["event_type"] for event in outcome.public_payload()["events"]] == [
+        "model_tool_call",
+        "tool_guard_decision",
+        "tool_result",
+        "model_tool_call",
+        "tool_guard_decision",
+        "tool_result",
+        "evidence_updated",
+    ]
+    trace = outcome.public_payload()["trace"]
+    assert trace["guard_denial_recoverable"] is True
+    assert trace["repair_attempted"] is True

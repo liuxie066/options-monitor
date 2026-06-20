@@ -276,13 +276,24 @@ def _live_probe_check(
                 "trace": dict(result.trace),
             },
         }
+    event_plan = result.event_plan.public_payload() if result.event_plan is not None else None
+    legacy_plan_present = result.plan is not None
+    accepted = event_plan is not None
     return {
         "name": "live_probe",
-        "status": "ok" if result.plan is not None else "error",
-        "message": "provider returned a valid planner plan" if result.plan is not None else "provider did not return a planner plan",
+        "status": "ok" if accepted else "error",
+        "message": "provider returned a valid event-native plan"
+        if event_plan is not None
+        else (
+            "provider returned a legacy planner plan; event-native tool loop is required"
+            if legacy_plan_present
+            else "provider did not return an event-native plan"
+        ),
         "value": {
             "trace": dict(result.trace),
-            "plan": result.plan.public_payload() if result.plan is not None else None,
+            "plan": None,
+            "legacy_plan_present": legacy_plan_present,
+            "event_plan": event_plan,
         },
     }
 

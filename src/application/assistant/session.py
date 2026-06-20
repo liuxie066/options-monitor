@@ -143,6 +143,185 @@ def build_agent_session_snapshot(
     )
 
 
+def build_event_loop_agent_session_snapshot(
+    *,
+    request: AssistantRequest,
+    command_id: str | None,
+    question: str,
+    result_data: dict[str, Any],
+    response: dict[str, Any],
+    assistant_context: dict[str, Any] | None = None,
+) -> AgentSessionSnapshot | None:
+    event_loop = result_data.get("event_loop") if isinstance(result_data.get("event_loop"), dict) else {}
+    transcript = result_data.get("event_transcript") if isinstance(result_data.get("event_transcript"), list) else []
+    model_steps = _event_loop_plan_steps(transcript)
+    if not model_steps:
+        return None
+    task_contract = result_data.get("task_contract") if isinstance(result_data.get("task_contract"), dict) else {}
+    evidence_bundle = _event_loop_evidence_trace(result_data.get("evidence_bundle"))
+    trace = event_loop.get("trace") if isinstance(event_loop.get("trace"), dict) else {}
+    final_response = result_data.get("final_response") if isinstance(result_data.get("final_response"), dict) else {}
+    goal = str(task_contract.get("goal") or question or "").strip()
+    plan = {
+        "goal": goal,
+        "plan_kind": "event_loop",
+        "required_capabilities": list(result_data.get("required_capabilities") or []),
+        "task_contract": dict(task_contract),
+        "steps": model_steps,
+    }
+    plan_revisions = (
+        {
+            "revision": 1,
+            "source": "agent_loop_events",
+            "reason": "event-native tool loop",
+            "plan": plan,
+        },
+    )
+    tool_events = [dict(item) for item in result_data.get("tool_events") or [] if isinstance(item, dict)]
+    tool_transcript = tuple(_event_loop_tool_transcript(transcript))
+    task_state = _task_state(ok=bool(response.get("ok", False)), final_response=final_response)
+    permission_state = {
+        "writes_allowed": False,
+        "preview_operations_allowed": True,
+        "pending_operation_ids": [],
+        "apply_allowed": False,
+    }
+    synthesis_trace = {
+        "reason": str(final_response.get("reason") or event_loop.get("stop_reason") or ""),
+        "event_loop": dict(trace),
+        "context": dict(assistant_context or {}),
+        "hook_results": [],
+    }
+    answer_trace = {
+        "final_response": dict(final_response),
+        "synthesis": synthesis_trace,
+        "followup_decisions": [],
+        "answer_route": str(trace.get("answer_route") or _answer_route(final_response=final_response, synthesis_trace=synthesis_trace)),
+        "scope_source": str(trace.get("scope_source") or _scope_source(task_contract)),
+        "loop_stop_reason": str(trace.get("loop_stop_reason") or event_loop.get("stop_reason") or final_response.get("reason") or ""),
+        "repair_attempted": bool(trace.get("repair_attempted", False)),
+    }
+    capability_selection = (
+        dict(trace.get("capability_selection"))
+        if isinstance(trace.get("capability_selection"), dict)
+        else _capability_selection_payload(plan_revisions=plan_revisions, tool_events=tool_events)
+    )
+    return AgentSessionSnapshot(
+        session_id=_session_id(request=request, command_id=command_id, goal=goal),
+        request=request.public_payload(),
+        goal=goal,
+        task_state=task_state,
+        capability_selection=capability_selection,
+        progress=_progress_payload(
+            task_state=task_state,
+            plan_revisions=plan_revisions,
+            tool_transcript=tool_transcript,
+            coverage={},
+            permission_state=permission_state,
+            answer_trace=answer_trace,
+            tool_events=tool_events,
+        ),
+        plan_revisions=plan_revisions,
+        tool_transcript=tool_transcript,
+        task_contract=dict(task_contract),
+        evidence_bundle=evidence_bundle,
+        coverage={},
+        permission_state=permission_state,
+        answer_trace=answer_trace,
+        audit_ref={
+            "channel": request.channel,
+            "message_id": request.message_id,
+            "conversation_id": request.conversation_id,
+        },
+    )
+
+
+def _event_loop_plan_steps(transcript: list[Any]) -> list[dict[str, Any]]:
+    steps: list[dict[str, Any]] = []
+    for event in transcript:
+        if not isinstance(event, dict) or event.get("event_type") != "model_tool_call":
+            continue
+        tool_name = str(event.get("tool_name") or "").strip()
+        if not tool_name:
+            continue
+        steps.append(
+            {
+                "id": event.get("tool_call_id") or event.get("event_id"),
+                "tool_name": tool_name,
+                "arguments": dict(event.get("arguments") or {}) if isinstance(event.get("arguments"), dict) else {},
+                "purpose": str(event.get("purpose") or ""),
+            }
+        )
+    return steps
+
+
+def _event_loop_tool_transcript(transcript: list[Any]) -> list[dict[str, Any]]:
+    calls: dict[str, dict[str, Any]] = {}
+    guards: dict[str, dict[str, Any]] = {}
+    results: list[dict[str, Any]] = []
+    for event in transcript:
+        if not isinstance(event, dict):
+            continue
+        call_id = str(event.get("tool_call_id") or event.get("event_id") or "").strip()
+        if event.get("event_type") == "model_tool_call" and call_id:
+            calls[call_id] = dict(event)
+        elif event.get("event_type") == "tool_guard_decision" and call_id:
+            guards[call_id] = dict(event)
+        elif event.get("event_type") == "tool_result":
+            results.append(dict(event))
+    out: list[dict[str, Any]] = []
+    for index, result in enumerate(results, start=1):
+        call_id = str(result.get("tool_call_id") or "").strip()
+        call = calls.get(call_id, {})
+        guard = guards.get(call_id, {})
+        observation = result.get("observation") if isinstance(result.get("observation"), dict) else {}
+        payload = observation.get("payload") if isinstance(observation.get("payload"), dict) else {}
+        summary = observation.get("summary") if isinstance(observation.get("summary"), dict) else {}
+        out.append(
+            {
+                "index": observation.get("index") or index,
+                "tool_name": str(result.get("tool_name") or call.get("tool_name") or observation.get("tool_name") or ""),
+                "payload": dict(payload or call.get("arguments") or {}),
+                "authorized": bool(guard.get("allowed", result.get("ok", False))),
+                "authorization_reason": guard.get("reason"),
+                "risk_class": str(guard.get("risk_class") or "READ_AUTO"),
+                "action_policy": {},
+                "action_safety": {},
+                "precheck": dict(guard),
+                "postcheck": {},
+                "hook_results": [],
+                "evidence_summary": dict(result.get("trace_payload") or {}) if isinstance(result.get("trace_payload"), dict) else {},
+                "ok": bool(result.get("ok", False)),
+                "error_code": result.get("error_code") or guard.get("error_code"),
+                "summary": dict(summary),
+            }
+        )
+    return out
+
+
+def _event_loop_evidence_trace(value: Any) -> dict[str, Any]:
+    evidence = value if isinstance(value, dict) else {}
+    datasets = [item for item in evidence.get("datasets") or [] if isinstance(item, dict)]
+    facts = [item for item in evidence.get("facts") or [] if isinstance(item, dict)]
+    diagnostics = [item for item in evidence.get("diagnostics") or [] if isinstance(item, dict)]
+    missing = [item for item in evidence.get("missing_data") or [] if isinstance(item, dict)]
+    conflicts = [item for item in evidence.get("conflicts") or [] if isinstance(item, dict)]
+    guard_contracts = [item for item in evidence.get("guard_contracts") or [] if isinstance(item, dict)]
+    return {
+        "schema_version": str(evidence.get("schema_version") or "om-agent-evidence-bundle-v1"),
+        "scope": dict(evidence.get("scope") or {}) if isinstance(evidence.get("scope"), dict) else {},
+        "fact_count": len(facts),
+        "dataset_count": len(datasets),
+        "diagnostic_count": len(diagnostics),
+        "missing_data_count": len(missing),
+        "conflict_count": len(conflicts),
+        "sources": sorted({str(item.get("source_label") or "") for item in datasets if str(item.get("source_label") or "")}),
+        "tools": sorted({str(item.get("tool_name") or "") for item in datasets if str(item.get("tool_name") or "")}),
+        "guard_profiles": sorted({str(item.get("guard_profile") or "") for item in guard_contracts if str(item.get("guard_profile") or "")}),
+        "diagnostic_domains": sorted({str(item.get("domain") or "") for item in diagnostics if str(item.get("domain") or "")}),
+    }
+
+
 def build_preview_agent_session_snapshot(
     *,
     request: AssistantRequest,

@@ -7,7 +7,9 @@ from typing import Any
 import pytest
 
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.assistant import diagnostics as assistant_diagnostics
 from src.application.assistant.diagnostics import check_llm_planner
+from src.application.assistant.agent_loop import LlmPlannerResult
 
 
 def _assistant_config(*, llm: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -226,4 +228,49 @@ def test_llm_check_live_probe_uses_read_only_tool_call_planning(tmp_path: Path) 
     assert "json_schema" not in calls[0]
     checks = {item["name"]: item for item in out["checks"]}
     assert checks["live_probe"]["status"] == "ok"
-    assert checks["live_probe"]["value"]["plan"]["steps"][0]["tool_name"] == "runtime_status"
+    assert checks["live_probe"]["value"]["plan"] is None
+    assert checks["live_probe"]["value"]["event_plan"]["steps"][0]["tool_name"] == "runtime_status"
+    assert checks["live_probe"]["value"]["event_plan"]["events"][0]["event_type"] == "model_tool_call"
+
+
+def test_llm_check_live_probe_rejects_legacy_planner_plan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg_path = _write_config(
+        tmp_path,
+        _assistant_config(
+            llm={
+                "enabled": True,
+                "provider": "openai",
+                "model": "gpt-5.2",
+                "api_key_env": "OM_LLM_API_KEY",
+                "confidence_min": 0.75,
+            }
+        ),
+    )
+    env_file = tmp_path / "options-monitor.env"
+    env_file.write_text("OM_LLM_API_KEY=sk-test\n", encoding="utf-8")
+
+    class _LegacyPlan:
+        def public_payload(self) -> dict[str, Any]:
+            return {"steps": [{"tool_name": "runtime_status"}]}
+
+    def _legacy_plan_read_only_tools(*args: Any, **kwargs: Any) -> LlmPlannerResult:
+        return LlmPlannerResult(plan=_LegacyPlan(), trace={"planner_plan_used": True}, event_plan=None)
+
+    monkeypatch.setattr(assistant_diagnostics, "plan_read_only_tools", _legacy_plan_read_only_tools)
+
+    out = check_llm_planner(
+        repo_root=tmp_path,
+        config_path=cfg_path,
+        env_file=env_file,
+        include_local_env_file=False,
+        live=True,
+        live_text="状态",
+    )
+
+    assert out["summary"]["ok"] is False
+    checks = {item["name"]: item for item in out["checks"]}
+    assert checks["live_probe"]["status"] == "error"
+    assert checks["live_probe"]["message"] == "provider returned a legacy planner plan; event-native tool loop is required"
+    assert checks["live_probe"]["value"]["plan"] is None
+    assert checks["live_probe"]["value"]["legacy_plan_present"] is True
+    assert checks["live_probe"]["value"]["event_plan"] is None

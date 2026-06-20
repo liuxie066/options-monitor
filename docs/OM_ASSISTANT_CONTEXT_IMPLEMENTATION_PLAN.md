@@ -177,19 +177,19 @@ Historical rollback:
 
 - Keep the default command path pointed at the legacy `planner_context` mode.
 
-## Slice 3: Planner Schema Extension In Shadow Mode (Complete)
+## Slice 3: Event Context Declaration In Shadow Mode (Complete)
 
-Goal: let planner output declare context use without requiring it yet.
+Goal: let model planning output declare context use without requiring it yet.
 
 Primary files:
 
 - `src/application/assistant/agent_loop.py`
-- planner plan normalization/parser tests in `tests/test_assistant_runtime.py`
-  or a smaller new planner-schema test file.
+- event-plan normalization/context tests in `tests/test_assistant_runtime.py`
+  or a smaller model-event context test file.
 
 Implementation notes:
 
-- Extend `PlannerPlan` parsing to accept optional `context_use`.
+- Event-native planning results accept optional `context_use`.
 - Normalize missing `context_use` to:
 
 ```json

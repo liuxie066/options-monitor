@@ -116,7 +116,7 @@ def _audit_context_item(row: dict[str, Any]) -> dict[str, Any]:
     intent_name = row.get("intent_name")
     tool_payload = _safe_tool_payload(row.get("tool_payload_json"))
     response_text = ""
-    if str(raw_tool_name or "").strip() == "assistant.tool_plan":
+    if str(raw_tool_name or "").strip() in {"assistant.tool_plan", "assistant.tool_loop"}:
         derived = _agent_loop_read_context(row)
         if derived is not None:
             tool_name = derived.get("tool_name") or tool_name
@@ -152,7 +152,7 @@ def _agent_loop_read_context(row: dict[str, Any]) -> dict[str, Any] | None:
         action_payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
         plan = action_payload.get("plan") if isinstance(action_payload.get("plan"), dict) else None
     if plan is None:
-        return None
+        return _agent_loop_event_read_context(payload=payload, response=response)
     steps = plan.get("steps") if isinstance(plan.get("steps"), list) else []
     for step in steps:
         if not isinstance(step, dict):
@@ -162,6 +162,42 @@ def _agent_loop_read_context(row: dict[str, Any]) -> dict[str, Any] | None:
             continue
         arguments = step.get("arguments") if isinstance(step.get("arguments"), dict) else {}
         task_contract = plan.get("task_contract") if isinstance(plan.get("task_contract"), dict) else {}
+        intent_families = task_contract.get("intent_families") if isinstance(task_contract.get("intent_families"), list) else []
+        intent_name = str(intent_families[0]) if intent_families else tool_name
+        return {
+            "intent_name": intent_name,
+            "tool_name": tool_name,
+            "tool_payload": _safe_tool_payload_from_dict(arguments),
+            "response_text": _extract_response_text(response),
+        }
+    return None
+
+
+def _agent_loop_event_read_context(*, payload: dict[str, Any], response: dict[str, Any]) -> dict[str, Any] | None:
+    events = payload.get("events") if isinstance(payload.get("events"), list) else []
+    if not events:
+        action_payload = _nested_dict(response, "data", "action", "payload")
+        events = action_payload.get("events") if isinstance(action_payload.get("events"), list) else []
+    if not events:
+        result_data = _nested_dict(response, "data", "action", "result", "data")
+        transcript = result_data.get("event_transcript") if isinstance(result_data.get("event_transcript"), list) else []
+        events = transcript
+    if not events:
+        return None
+    task_contract = payload.get("task_contract") if isinstance(payload.get("task_contract"), dict) else {}
+    if not task_contract:
+        action_payload = _nested_dict(response, "data", "action", "payload")
+        task_contract = action_payload.get("task_contract") if isinstance(action_payload.get("task_contract"), dict) else {}
+    if not task_contract:
+        result_data = _nested_dict(response, "data", "action", "result", "data")
+        task_contract = result_data.get("task_contract") if isinstance(result_data.get("task_contract"), dict) else {}
+    for event in events:
+        if not isinstance(event, dict) or event.get("event_type") != "model_tool_call":
+            continue
+        tool_name = str(event.get("tool_name") or "").strip()
+        if tool_name not in PURE_READ_TOOLS:
+            continue
+        arguments = event.get("arguments") if isinstance(event.get("arguments"), dict) else {}
         intent_families = task_contract.get("intent_families") if isinstance(task_contract.get("intent_families"), list) else []
         intent_name = str(intent_families[0]) if intent_families else tool_name
         return {

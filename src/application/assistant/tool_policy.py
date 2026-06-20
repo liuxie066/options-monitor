@@ -9,6 +9,7 @@ from src.application.assistant.contracts import ToolCall
 from src.application.tool_allowlist import PURE_READ_TOOLS
 
 INTERNAL_TOOL_PLAN_NAME = "assistant.tool_plan"
+INTERNAL_TOOL_LOOP_NAME = "assistant.tool_loop"
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,13 @@ class ToolPolicyEngine:
     def authorize_read_tool(self, call: ToolCall, *, source: str) -> ToolPolicyDecision:
         name = str(call.tool_name or "").strip()
         if name == INTERNAL_TOOL_PLAN_NAME:
+            raise AgentToolError(
+                code="PERMISSION_DENIED",
+                message="assistant.tool_plan is deprecated; use assistant.tool_loop event routing",
+                hint="Inbound Assistant no longer executes legacy JSON plan bridge payloads.",
+                details={"source": source, "replacement": INTERNAL_TOOL_LOOP_NAME},
+            )
+        if name == INTERNAL_TOOL_LOOP_NAME:
             if source not in {"agent_loop", "inbound"}:
                 raise AgentToolError(
                     code="PERMISSION_DENIED",
@@ -47,7 +55,7 @@ class ToolPolicyEngine:
                 allowed=True,
                 tool_name=name,
                 risk_level="read_only",
-                reason="internal_read_only_tool_plan" if source == "agent_loop" else "inbound_agent_loop_plan",
+                reason=_internal_tool_reason(name=name, source=source),
                 source=source,
             )
         definition = get_tool_definition(name)
@@ -87,4 +95,15 @@ class ToolPolicyEngine:
 DEFAULT_TOOL_POLICY = ToolPolicyEngine()
 
 
-__all__ = ["DEFAULT_TOOL_POLICY", "INTERNAL_TOOL_PLAN_NAME", "PURE_READ_TOOLS", "ToolPolicyDecision", "ToolPolicyEngine"]
+def _internal_tool_reason(*, name: str, source: str) -> str:
+    return "internal_read_only_tool_loop" if source == "agent_loop" else "inbound_agent_loop_tool_loop"
+
+
+__all__ = [
+    "DEFAULT_TOOL_POLICY",
+    "INTERNAL_TOOL_LOOP_NAME",
+    "INTERNAL_TOOL_PLAN_NAME",
+    "PURE_READ_TOOLS",
+    "ToolPolicyDecision",
+    "ToolPolicyEngine",
+]
