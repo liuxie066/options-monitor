@@ -3,9 +3,14 @@ from __future__ import annotations
 from typing import Any
 
 from src.application.agent_tool_contracts import build_response
-from src.application.assistant.agent_loop import execute_model_tool_call_event, run_assistant_tool_event_loop
+from src.application.assistant.agent_loop import (
+    execute_model_tool_call_event,
+    execute_tool_loop_payload,
+    run_assistant_tool_event_loop,
+)
 from src.application.assistant.contracts import AssistantRequest
-from src.application.assistant.model_events import model_tool_call_from_provider_block
+from src.application.assistant.model_events import AssistantEvent, model_tool_call_from_provider_block
+from src.application.assistant.settings import AssistantSettings
 
 
 def test_execute_model_tool_call_event_runs_read_tool_through_guard() -> None:
@@ -438,3 +443,72 @@ def test_run_assistant_tool_event_loop_stops_repeated_recoverable_denial() -> No
     trace = outcome.public_payload()["trace"]
     assert trace["guard_denial_recoverable"] is True
     assert trace["repair_attempted"] is True
+
+
+def test_execute_tool_loop_payload_preserves_provider_protocol_error() -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+    response = execute_tool_loop_payload(
+        question="记录 sy 期权被指派通知",
+        request=AssistantRequest(text="记录 sy 期权被指派通知", sender_id="u1", config_key="us"),
+        loop_payload={
+            "provider": "deepseek",
+            "task_contract": {
+                "requested_effect": "preview_write",
+                "scope": {"requested_accounts": ["sy"]},
+            },
+            "events": [
+                {
+                    "event_type": "model_tool_call",
+                    "event_id": "model_tool_call_1",
+                    "tool_call_id": "call_bad_args_1",
+                    "tool_name": "manual_assignment",
+                    "arguments": {},
+                    "protocol_error": {
+                        "code": "INVALID_MODEL_EVENT",
+                        "message": "provider tool call arguments are not valid JSON",
+                        "details": {"reason": "provider_arguments_malformed"},
+                    },
+                }
+            ],
+        },
+        settings=AssistantSettings(),
+        conversation_context=None,
+        execute_tool_fn=lambda tool_name, payload: calls.append((tool_name, payload)) or {},
+    )
+
+    assert response["ok"] is False
+    assert calls == []
+    events = response["data"]["event_loop"]["events"]
+    assert events[0]["protocol_error"]["details"]["reason"] == "provider_arguments_malformed"
+    assert events[1]["event_type"] == "tool_guard_decision"
+    assert events[1]["decision"] == "provider_protocol_error"
+    assert events[1]["error_code"] == "INVALID_MODEL_EVENT"
+
+
+def test_run_assistant_tool_event_loop_prechecks_direct_preview_request() -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+    event = AssistantEvent(
+        event_id="preview_request_1",
+        event_type="preview_request",
+        payload={
+            "intent_name": "manual_assignment",
+            "arguments": {},
+            "reason": "model selected assignment preview",
+        },
+    )
+
+    outcome = run_assistant_tool_event_loop(
+        question="记录期权被指派通知 PDD 已被指派",
+        request=AssistantRequest(text="记录期权被指派通知 PDD 已被指派", sender_id="u1", config_key="us"),
+        task_contract={"requested_effect": "preview_write", "scope": {"requested_accounts": []}},
+        initial_events=(event,),
+        execute_tool_fn=lambda tool_name, payload: calls.append((tool_name, payload)) or {},
+    )
+
+    assert outcome.status == "needs_clarification"
+    assert outcome.stop_reason == "clarification_request"
+    assert calls == []
+    assert outcome.clarification_request is not None
+    assert outcome.clarification_request["questions"][0]["slot"] == "account"
+    trace = outcome.public_payload()["trace"]
+    assert trace["preview_error"]["code"] == "NEEDS_CLARIFICATION"

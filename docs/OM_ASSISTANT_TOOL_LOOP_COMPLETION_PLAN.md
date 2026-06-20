@@ -233,18 +233,23 @@ git diff --check
 - `python3 -m pytest tests/test_assistant_evidence_session.py tests/test_assistant_agent_eval.py tests/test_assistant_diagnostics.py -q`: `130 passed`。
 - `python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py -q`: `97 passed`。
 - `python3 -m pytest tests/test_inbound_control.py tests/test_inbound_feishu_ws.py -q`: `91 passed`。
+  - 本轮曾发现 `test_inbound_llm_symbol_edit_creates_preview_only` 暴露
+    response 契约漂移：model-turn loop 已把 preview request 转成具体
+    operation preview，但外层仍返回内部 envelope `tool_loop`。
+  - 已修复：operation result 注入 effective perception/reasoning；assistant
+    decision execution contract 使用最终 concrete operation，trace 继续保留
+    `tool_loop` 解释 event-loop 承接来源。
 - `./om assistant eval-context --mode scenarios`: `10/10 passed`。
 - 用户场景子集：
-  `python3 -m pytest tests/test_assistant_runtime.py::test_assistant_runtime_previews_futu_assignment_notice tests/test_assistant_runtime.py::test_assistant_runtime_previews_futu_expiry_notice tests/test_assistant_runtime.py::test_assistant_runtime_provider_preview_request_creates_assignment_preview tests/test_assistant_runtime.py::test_assistant_runtime_provider_preview_request_creates_expiry_preview tests/test_assistant_runtime.py::test_assistant_runtime_provider_preview_request_missing_account_returns_clarification tests/test_assistant_runtime.py::test_assistant_runtime_agent_loop_repairs_assignment_notice_wrong_read_tool tests/test_assistant_runtime.py::test_assistant_runtime_agent_loop_repairs_expiry_notice_wrong_read_tool tests/test_assistant_runtime.py::test_plan_read_only_tools_uses_provider_tool_call_not_output_text_json_plan tests/test_assistant_runtime.py::test_plan_read_only_tools_rejects_plain_text_json_plan_as_invalid_model_event tests/test_assistant_runtime.py::test_plan_read_only_tools_candidate_alias_and_lowercase_symbol_use_tool_calls tests/test_assistant_runtime.py::test_assistant_runtime_tool_loop_continuation_preview_request_creates_assignment_preview -q`:
+  `python3 -m pytest tests/test_assistant_runtime.py::test_assistant_runtime_previews_futu_assignment_notice tests/test_assistant_runtime.py::test_assistant_runtime_previews_futu_expiry_notice tests/test_assistant_runtime.py::test_assistant_runtime_provider_preview_request_creates_assignment_preview tests/test_assistant_runtime.py::test_assistant_runtime_provider_preview_request_creates_expiry_preview tests/test_assistant_runtime.py::test_assistant_runtime_provider_preview_request_missing_account_returns_clarification tests/test_assistant_runtime.py::test_assistant_runtime_agent_loop_repairs_assignment_notice_wrong_read_tool tests/test_assistant_runtime.py::test_assistant_runtime_agent_loop_repairs_expiry_notice_wrong_read_tool tests/test_assistant_runtime.py::test_create_model_turn_events_uses_provider_tool_call_not_output_text_json_plan tests/test_assistant_runtime.py::test_create_model_turn_events_rejects_plain_text_json_plan_as_invalid_model_event tests/test_assistant_runtime.py::test_create_model_turn_events_candidate_alias_and_lowercase_symbol_use_tool_calls tests/test_assistant_runtime.py::test_assistant_runtime_tool_loop_continuation_preview_request_creates_assignment_preview -q`:
   `11 passed`。
 - `git diff --check`: passed。
 
 本轮还完成：
 
 - 当前文档中的 tool loop 状态收口为 event-native 主路径。
-- diagnostics live probe 不再把 legacy planner plan 当成功结果接受。
-- 新增 diagnostics 负向回归，确认 legacy planner plan 会报错并提示需要
-  event-native tool loop。
+- diagnostics live probe 不再存在 legacy planner plan 接受分支。
+- 新增 diagnostics 负向回归，确认没有 event-native event plan 时会报错。
 
 ### 2026-06-20 远端 ClawBot 发现
 
@@ -302,3 +307,110 @@ Slice 9 之后继续升级的核心变化：
   字段清单；需要完整字段语义时由模型调用 `analysis_catalog` 补证据。
 - malformed provider arguments 仍不能恢复普通文本 JSON plan，只能走 bounded
   repair、clarification 或安全 deterministic preview fallback。
+
+## 12. V4 Model-Turn Loop Cutover
+
+V4 已把生产主路径切成 bounded model-turn loop。旧的
+`planner_repair` 二次 planner 调用已经移出源码主路径；`agent_loop`
+trace 不再使用 `planner=llm_tool_plan` 描述成功执行。当前主路径是：
+
+```text
+user message
+  -> initial model turn
+  -> model emits tool call / preview / clarification / final answer
+  -> host validates schema, scope, safety, budget, duplicate
+  -> host executes or denies
+  -> model-visible observation is appended to transcript
+  -> next model turn
+  -> stop on final answer / preview / clarification / budget / unrecoverable denial
+```
+
+为了保持外层 action/response API 稳定，当前实现仍用
+`PerceptionResult(tool_loop)` 承接 event-loop outcome，但该 perception
+携带的是 precomputed loop result，`assistant.tool_loop` action wrapper 不会
+二次执行 provider events。若 loop terminal 是 preview operation，对外
+`data.perception` / `data.reasoning` 暴露具体 operation intent；`tool_loop`
+只作为 trace 和内部承接 envelope。
+
+### 12.1 必须迁移的旧抽象
+
+这些概念已经不再作为生产主路径的控制中心：
+
+- `planner_repair`：移除源码 helper、provider context 注入和 prompt 协议；
+  可恢复错误改由 `tool_result` / guard-denial observation 进入 continuation。
+- `ModelTurnFn`：替代旧 `AgentLoopPlanFn`，仅表示 model-turn event 入口。
+- `create_model_turn_events(...)`：输出 event-native `ModelTurnResult`；
+  不能表达“生成并执行 JSON plan”。
+- `ModelTurnResult.plan`：已删除，legacy JSON plan 不再有结果字段承载。
+- `trace.agent_loop.planner = llm_tool_plan`：已改为 `runtime=model_turn_loop`、
+  `model_turns`、`loop_stop_reason`。
+
+### 12.2 Observation 规则
+
+所有可恢复问题必须进入同一类 observation，而不是在 loop 外重写 plan：
+
+- schema / argument invalid；
+- scope expansion / missing high-risk scope；
+- effect mismatch / preview authority mismatch；
+- read tool runtime error；
+- duplicate tool call；
+- tool budget exhausted 前的最后一次可恢复拒绝。
+
+Observation 必须短、稳定、面向下一步决策：
+
+- 包含 `observation_type`、`recoverable`、`tool_name`、`reason_code`、
+  `summary`、`allowed_next_actions`；
+- 不暴露内部 traceback、raw provider payload、私有路径或 secrets；
+- 高风险缺槽可以直接 terminal clarification，不要求模型猜。
+
+### 12.3 Loop Stop Policy
+
+V4 主路径的一等停止原因：
+
+- `model_final_answer`：通过 evidence verifier 后回答；
+- `preview_requested`：host 创建 pending preview 后停止；
+- `clarification_request`：返回现有 clarification schema；
+- `tool_budget_exhausted`：基于已有 evidence / missing-data 回答；
+- `duplicate_call` 或 repeated recoverable error：停止重复，基于已有证据回答；
+- `unrecoverable_guard_denial`：权限或写边界拒绝，停止。
+
+### 12.4 实施切片
+
+1. 已引入 model-turn 语义的首轮 provider 调用，复用当前 tool-call provider
+   adapter 和轻量 manifest。
+2. `run_read_only_agent_loop(...)` 在生产 runtime 中直接驱动
+   `run_assistant_tool_event_loop(...)`；`tool_loop` perception 只承接
+   precomputed result。
+3. `planner_repair` error branches 已改为 guard-denial / error observation，
+   并由同一个 continuation 机制处理。
+4. preview event 已进入统一 loop terminal：模型选择 preview capability，
+   host 通过 preview normalizer 和 safety 生成 pending preview，然后停止。
+5. trace 和 diagnostics 已更新：主路径不出现 planner repair 成功状态；
+   trace 记录 model turns、observations、selected capabilities、stop reason。
+6. 成功路径测试已迁移到 model-turn loop、event transcript、observation、
+   preview terminal 和 final answer 语义。
+
+### 12.5 V4 验收用例
+
+已新增或迁移这些回归：
+
+- `analysis_catalog -> analysis_query -> final answer`，证明模型能多轮补字段语义。
+- 错选 read tool 处理 broker notice，被 guard observation 拦下后改选 preview。
+- provider tool-call `arguments` malformed 时，保留 tool name / call id，
+  形成 `protocol_error` observation，再由模型 continuation 修复 preview。
+- provider 首轮返回 unsupported arguments 时，不在 loop 外失败；pre-tool
+  guard 生成 error observation 后，模型可重发合法 tool call。
+- tool 返回缺数据后，模型补一个 read tool 或声明 missing-data。
+- duplicate tool call 后停止重复，并基于已有 evidence 回答。
+- preview requested 后 terminal，不继续 read/write。
+- `6月收益分析`、assignment notice、expiry notice、成交提醒解释、assigned-stock
+  收益、follow-up、scope expansion、lowercase symbol、中文 alias 仍通过。
+
+本轮验证：
+
+- `python3 -m py_compile src/application/assistant/action.py src/application/assistant/runtime.py`
+- `python3 -m pytest tests/test_assistant_runtime.py tests/test_assistant_model_events.py tests/test_assistant_model_continuation.py tests/test_assistant_event_executor.py tests/test_assistant_model_evidence.py tests/test_assistant_evidence_session.py tests/test_assistant_agent_eval.py tests/test_assistant_diagnostics.py -q`：353 passed。
+- `python3 -m pytest tests/test_inbound_control.py tests/test_inbound_feishu_ws.py -q`：91 passed。
+- `python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py -q`：97 passed。
+- `./om assistant eval-context --mode scenarios`：10/10 passed。
+- `git diff --check`：passed。

@@ -13,7 +13,7 @@ from src.application.assistant.llm_common import (
     provider_endpoint_url,
     supported_llm_providers,
 )
-from src.application.assistant.agent_loop import plan_read_only_tools
+from src.application.assistant.agent_loop import create_model_turn_events
 from src.application.assistant.settings import AssistantSettings, AssistantLlmSettings
 from src.application.settings import build_effective_env
 from src.infrastructure.openai_chat_completions import resolve_chat_completions_url
@@ -259,7 +259,7 @@ def _live_probe_check(
             "status": "skipped",
             "message": "provider call skipped; pass --live to run a read-only planner probe",
         }
-    result = plan_read_only_tools(
+    result = create_model_turn_events(
         str(live_text or DEFAULT_LIVE_PROBE_TEXT),
         runtime_settings,
         conversation_context=None,
@@ -277,22 +277,16 @@ def _live_probe_check(
             },
         }
     event_plan = result.event_plan.public_payload() if result.event_plan is not None else None
-    legacy_plan_present = result.plan is not None
     accepted = event_plan is not None
     return {
         "name": "live_probe",
         "status": "ok" if accepted else "error",
         "message": "provider returned a valid event-native plan"
         if event_plan is not None
-        else (
-            "provider returned a legacy planner plan; event-native tool loop is required"
-            if legacy_plan_present
-            else "provider did not return an event-native plan"
-        ),
+        else "provider did not return an event-native plan",
         "value": {
             "trace": dict(result.trace),
             "plan": None,
-            "legacy_plan_present": legacy_plan_present,
             "event_plan": event_plan,
         },
     }

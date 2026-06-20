@@ -4,7 +4,7 @@ from datetime import date
 from typing import Any, Callable
 
 from src.application.assistant.agent_loop import (
-    AgentLoopPlanFn,
+    ModelTurnFn,
     AGENT_LOOP_READ_TOOLS,
     INTERNAL_TOOL_LOOP_NAME,
     TOOL_CHECK_SCHEMA_VERSION,
@@ -44,7 +44,7 @@ def handle_assistant_message(
     allowed_senders: str | None = None,
     now_fn: Callable[[], date] | None = None,
     settings: AssistantSettings | None = None,
-    plan_tools_fn: AgentLoopPlanFn | None = None,
+    model_turn_fn: ModelTurnFn | None = None,
     generate_reply_fn: GenerateReplyFn | None = None,
 ) -> dict[str, Any]:
     runtime_settings = settings or AssistantSettings()
@@ -73,8 +73,9 @@ def handle_assistant_message(
         request=request,
         audit_store=store,
         settings=runtime_settings,
-        plan_tools_fn=plan_tools_fn,
+        model_turn_fn=model_turn_fn,
         generate_reply_fn=generate_reply_fn,
+        execute_tool_fn=execute_tool_fn,
     )
 
     router_execute_tool_fn = execute_tool_fn
@@ -83,8 +84,9 @@ def handle_assistant_message(
             execute_tool_fn=execute_tool_fn,
             request=request,
             settings=runtime_settings,
-            plan_tools_fn=plan_tools_fn,
+            model_turn_fn=model_turn_fn,
             conversation_context_fn=lambda: perception_engine.last_conversation_context,
+            precomputed_tool_loop_result_fn=lambda: perception_engine.last_tool_loop_result,
             tool_events=agent_loop_tool_events,
             observations=agent_loop_observations,
             should_trace=lambda: perception_engine.route == "agent_loop",
@@ -139,8 +141,9 @@ def _agent_loop_execute_tool_fn(
     execute_tool_fn: ExecuteToolFn,
     request: AssistantRequest,
     settings: AssistantSettings,
-    plan_tools_fn: AgentLoopPlanFn | None,
+    model_turn_fn: ModelTurnFn | None,
     conversation_context_fn: Callable[[], dict[str, Any] | None],
+    precomputed_tool_loop_result_fn: Callable[[], dict[str, Any] | None],
     tool_events: list[dict[str, Any]],
     observations: list[dict[str, Any]],
     should_trace: Callable[[], bool],
@@ -149,6 +152,9 @@ def _agent_loop_execute_tool_fn(
         if not should_trace():
             return execute_tool_fn(tool_name, dict(payload or {}))
         if str(tool_name or "") == INTERNAL_TOOL_LOOP_NAME:
+            precomputed = precomputed_tool_loop_result_fn()
+            if isinstance(precomputed, dict):
+                payload = {**dict(payload or {}), "_precomputed_tool_loop_result": precomputed}
             result = execute_tool_loop_payload(
                 question=str((payload or {}).get("question") or request.text),
                 request=request,
@@ -196,7 +202,6 @@ def _merge_agent_loop_tool_events(
     loop_raw = merged.get("agent_loop")
     loop: dict[str, Any] = dict(loop_raw) if isinstance(loop_raw, dict) else {}
     loop.setdefault("enabled", True)
-    loop.setdefault("planner", "llm_tool_plan")
     loop["tool_events"] = [dict(item) for item in tool_events]
     loop["observations"] = [dict(item) for item in observations]
     loop["tool_calls_used"] = sum(
@@ -537,14 +542,51 @@ def _with_assistant_meta(
     }
     if perception_trace is not None:
         assistant_meta["perception_trace"] = perception_trace.public_payload()
+    selected_perception = perception_trace.selected_perception if perception_trace else None
+    effective_perception = _effective_perception_from_response(response, fallback=selected_perception)
+    decision_trace = perception_trace
+    if perception_trace is not None and effective_perception is not None and effective_perception != selected_perception:
+        decision_trace = PerceptionTrace(
+            decision=perception_trace.decision,
+            selected_source=perception_trace.selected_source,
+            selected_perception=effective_perception,
+            candidates=perception_trace.candidates,
+        )
     assistant_meta["decision"] = build_assistant_decision(
         route=route,
-        perception_trace=perception_trace,
+        perception_trace=decision_trace,
         llm_trace=llm_meta,
-        intent_metadata=_intent_metadata(perception_trace.selected_perception if perception_trace else None),
+        intent_metadata=_intent_metadata(effective_perception),
     ).public_payload()
     meta["assistant"] = assistant_meta
     return {**response, "meta": meta}
+
+
+def _effective_perception_from_response(
+    response: dict[str, Any],
+    *,
+    fallback: PerceptionResult | None,
+) -> PerceptionResult | None:
+    data = response.get("data") if isinstance(response, dict) else None
+    payload = data.get("perception") if isinstance(data, dict) else None
+    if not isinstance(payload, dict):
+        return fallback
+    intent_name = str(payload.get("intent_name") or "").strip()
+    if not intent_name:
+        return fallback
+    arguments = payload.get("arguments") if isinstance(payload.get("arguments"), dict) else {}
+    evidence = payload.get("evidence") if isinstance(payload.get("evidence"), dict) else None
+    try:
+        confidence = float(payload.get("confidence", 1.0))
+    except (TypeError, ValueError):
+        confidence = 1.0
+    return PerceptionResult(
+        intent_name=intent_name,
+        arguments=dict(arguments),
+        source=str(payload.get("source") or "unknown"),
+        confidence=confidence,
+        evidence=dict(evidence) if evidence is not None else None,
+    )
 
 
 def _intent_metadata(perception: PerceptionResult | None) -> dict[str, Any]:

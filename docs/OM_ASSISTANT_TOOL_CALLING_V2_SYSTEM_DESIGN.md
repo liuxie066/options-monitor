@@ -5,7 +5,7 @@
 [OM_ASSISTANT_ARCHITECTURE.md](OM_ASSISTANT_ARCHITECTURE.md) 为准；
 能力、风险和可见工具边界以
 [OM_AGENT_CAPABILITY_MAP.md](OM_AGENT_CAPABILITY_MAP.md) 为准。
-待完成实施方案见
+实施状态和验收记录见
 [OM_ASSISTANT_TOOL_LOOP_COMPLETION_PLAN.md](OM_ASSISTANT_TOOL_LOOP_COMPLETION_PLAN.md)。
 
 本方案替换旧的 "LLM 输出完整 JSON plan，再由系统解析执行" 方向。
@@ -13,11 +13,11 @@
 作为兼容开关。
 文件名保留 `V2` 仅为保持已有链接稳定；本文档的当前语义是事件模型。
 
-## 0. 当前实现现实和差距
+## 0. 当前实现现实和边界
 
-当前源码已经完成主路径切换：默认 provider 规划入口使用结构化
+当前源码已经完成 model-turn loop cutover：默认 provider 规划入口使用结构化
 tool/function call，不再把 provider 的普通 `output_text` JSON 当作生产
-成功路径解析执行。当前 provider structured tool-call 主路径也已经不再经过
+成功路径解析执行。当前 provider structured tool-call 主路径已经不再经过
 下面这条旧桥：
 
 ```text
@@ -28,11 +28,27 @@ provider structured tool call
 -> evidence / answer / trace
 ```
 
-当前 provider path 已改为 `ModelToolCallEvent -> EventNativePlanningResult
--> assistant.tool_loop -> run_assistant_tool_event_loop(...)`。legacy JSON
-planner/parser/schema/executor、`PlannerPlan` runtime bridge 和旧 synthesis
-callback API 已从 `src/application/assistant` 当前主包清理；后续工作重点转为
-文档、诊断、eval 和回归门禁收口，防止旧心智模型回潮。
+当前 provider path 已改为：
+
+```text
+initial provider model turn
+-> ModelToolCallEvent / preview_request / clarification / final answer
+-> EventNativePlanningResult
+-> run_read_only_agent_loop(...)
+-> run_assistant_tool_event_loop(...)
+-> guarded tool result / guard-denial observation
+-> optional continuation model turn
+-> final answer / preview_request / clarification / bounded stop
+```
+
+为了保持外层 action/response API 稳定，`run_read_only_agent_loop(...)` 在
+执行完 event loop 后仍以 `PerceptionResult(tool_loop)` 承接，但会把
+precomputed loop result 交给 `assistant.tool_loop` action wrapper，避免二次
+执行。这个 `tool_loop` 是 loop terminal/result envelope，不再是旧式 JSON
+plan 执行桥。若 event loop terminal 是 preview operation，最终
+inbound response 必须暴露 concrete operation perception/reasoning
+（例如 `manual_assignment`、`manual_expiry`、`symbol_edit`），`tool_loop`
+只保留在 trace/assistant meta 中解释模型循环来源。
 
 因此本文档后续阶段的真实目标是：
 
@@ -42,7 +58,9 @@ callback API 已从 `src/application/assistant` 当前主包清理；后续工�
 - `tool_plan_json_schema()`、`parse_tool_plan_payload()`、legacy JSON planner
   不再回到 assistant 主包或 provider runtime path；
 - 可恢复的 schema/scope/safety/tool 错误以 event/tool-result observation
-  回喂模型一次，而不是在 plan 外层追加专用 repair 分支。
+  回喂模型，而不是在 plan 外层追加专用 repair 分支。
+- `run_read_only_agent_loop(...)` 直接驱动 model-turn loop；兼容
+  `tool_loop` perception 只承接已执行结果。
 
 ## 1. 背景
 
@@ -154,14 +172,16 @@ wire protocol 中使用 JSON 传输工具参数。OM 的边界是：
 - 只接受 provider 的结构化 tool/function call block；
 - tool arguments 仍必须能解析为对象，解析失败属于 provider protocol
   error，不属于旧 JSON plan fallback；
-- 对可恢复的 provider protocol error，host 可以要求模型重发结构化 tool
-  call，或在已有高置信 deterministic preview candidate 时使用该 candidate
-  兜底，但不能执行普通文本 JSON plan。
+- 对可恢复的 provider protocol error，host 应优先保留 tool name / call id，
+  形成 `protocol_error` event 和 model-visible error observation，让模型重发
+  结构化 tool call；只有无法形成可绑定 event 时，才允许高置信 deterministic
+  explicit command / preview candidate 兜底。
 
 因此用户不应再看到 `LLM planner returned invalid JSON.`；如果底层
 tool-call arguments malformed，用户也不应看到 `json.loads` 或
-`provider tool call arguments are not valid JSON`，而应进入 bounded repair、
-preview fallback、clarification 或清晰的无法完成说明。
+`provider tool call arguments are not valid JSON`，而应进入
+`protocol_error -> tool_result observation -> continuation`，或在无法形成
+可绑定事件时进入 clarification / 安全 preview fallback / 清晰的无法完成说明。
 
 ## 3. 目标和非目标
 
@@ -581,8 +601,9 @@ Provider transcript 和 OM 内部事件一一映射，不从 assistant
   校验，或标记 `invalid_model_event`；不能从文本中提取 JSON plan。
 - provider tool-call `arguments` 必须解析为对象。Chat Completions 兼容
   provider 的 `arguments` 是 JSON 字符串时，解析失败应记录为
-  `provider_arguments_malformed` / `invalid_model_event`，进入 bounded repair
-  或安全 fallback；不能把异常文案直接给用户。
+  `provider_arguments_malformed` / `invalid_model_event`，并在仍能识别
+  tool name / call id 时形成 `protocol_error` tool-call event，进入
+  model-visible `tool_result` observation continuation；不能把异常文案直接给用户。
 - 每个 `tool_result` 回 provider transcript 时必须绑定原始 tool call id，
   让模型能把 observation 或 error 对应到具体调用。
 - provider adapter 是窄模块，负责 block/event 转换；schema、scope、risk、
@@ -599,11 +620,12 @@ Provider transcript 和 OM 内部事件一一映射，不从 assistant
 - 本地 adapter 可把旧 plan fixture 转换成事件，用于迁移旧测试；
 - adapter 不作为生产 fallback，不提供 runtime mode flag。
 
-允许的安全 fallback 与旧 JSON plan fallback 不同：
+允许的安全 fallback 与旧 JSON plan fallback 不同，且不是 malformed
+tool-call 的默认路径：
 
-- 当 provider structured tool-call 本身 malformed，但 deterministic router
-  已经得到同一用户消息的高置信 explicit command / preview intent，host 可以
-  选择 deterministic candidate；
+- 当 provider response 无法形成可绑定 call id / tool name 的 model-visible
+  event，且 deterministic router 已经得到同一用户消息的高置信 explicit
+  command / preview intent，host 可以选择 deterministic candidate；
 - fallback 只允许走现有 operation preview / confirm / cancel 生命周期；
 - fallback 不从 provider 普通文本提取工具计划，不执行模型文本中的参数；
 - fallback 必须在 trace 中标记 `llm_protocol_error_fallback`，并保留 LLM
@@ -766,20 +788,18 @@ model_tool_call
    `provider`、`api_kind`、`tool_name`、`error_code`、`argument_shape`、
    `planner_input_chars`、`manifest_chars`、`max_output_tokens`。
    不记录 raw provider payload。
-2. 如果已有 deterministic candidate，且满足以下条件，直接走 deterministic
-   fallback：
+2. 如果 provider response 仍包含 tool name / call id，创建
+   `ModelToolCallEvent(arguments={}, protocol_error=...)`，再由 tool loop 生成
+   `tool_result is_error` observation，并做一次 bounded continuation。
+3. 只有无法形成可绑定 model-visible event，且已有 deterministic candidate
+   满足以下条件时，才走 deterministic fallback：
    - candidate 是 explicit command / preview intent；
    - intent 属于现有 preview lifecycle，例如 manual trade / assignment /
      expiry / symbol edit / model use / upgrade preview；
    - deterministic confidence 为 1.0，且 sender / operation policy 允许
      preview；
    - fallback 只创建 pending preview，不 apply。
-3. 如果没有安全 deterministic fallback，但 provider 支持 continuation 或
-   retry，host 可做一次 compact retry：
-   - 减少 manifest 到候选 effect 所需工具；
-   - preview-write 不要求模型输出 `raw_text`；
-   - 明确要求 `arguments` 为 object，不能输出 Markdown 或普通文本 JSON plan。
-4. retry 后仍 malformed，则停止，并给用户中文说明：
+4. continuation 后仍 malformed 或重复同类错误，则停止，并给用户中文说明：
    “模型没有生成可执行工具调用，未执行任何写入；请重试或改用明确命令。”
 
 禁止：
@@ -816,9 +836,11 @@ LLM-first 不表示 LLM-error-first。
 2. LLM 产出合法 event 且通过 host guard 时，优先走 AgentLoop。
 3. LLM 产出 preview intent 但缺少 host-owned payload，由 host 补 request
    context 后进入 preview lifecycle。
-4. LLM provider protocol error 且 deterministic 有同 intent 或高置信
-   explicit preview candidate 时，选 deterministic fallback，并在 trace 中
-   标记 `llm_protocol_error_fallback`。
+4. LLM provider protocol error 若仍能形成 tool call event，先进入
+   `protocol_error -> tool_result observation -> continuation`；只有无法形成
+   model-visible event 且 deterministic 有同 intent 或高置信 explicit
+   preview candidate 时，才选 deterministic fallback，并在 trace 中标记
+   `llm_protocol_error_fallback`。
 5. LLM safety/permission 明确拒绝且 deterministic 只是低置信猜测时，不
    fallback，返回 clarification 或 unsupported。
 
@@ -889,6 +911,8 @@ answer_trace:
 | Slice 8: Remove PlannerPlan Runtime Bridge | 已落地于 assistant 主包 | provider event 主路径是 event-native result；legacy JSON plan bridge 不再回到 runtime path |
 | Slice 9: Provider Argument / Preview Hardening | 已落地 | malformed tool arguments、host-owned preview payload、requested_effect 和 deterministic preview fallback |
 | Slice 10: Model-Driven Capability Selection | 已落地 | 自然语言不再 preview-only 收窄；模型在 read + preview manifest 中选择能力，host 只做 effect/scope/safety guard |
+| Slice 11: Model-Turn Loop Cutover | 已落地 | 主入口直接运行 bounded model-turn loop；`planner_repair` 已移出生产成功路径；兼容 `tool_loop` perception 只承接 precomputed result |
+| Slice 12: Intelligence Quality Hardening | 计划中 | 不再切架构；围绕工具选择质量、证据补全、低误澄清和 trace/eval 闭环做可量化改进 |
 
 ### Slice 1: Event Contract
 
@@ -990,7 +1014,7 @@ answer_trace:
 
 当前落地边界：
 
-- `plan_read_only_tools(...)` 默认调用 provider structured tool/function
+- `create_model_turn_events(...)` 默认调用 provider structured tool/function
   calling，不再向 provider 请求 `tool_plan_json_schema()`。
 - OpenAI Responses 默认请求使用 `tools` / `tool_choice=auto`。
 - Chat Completions 默认请求使用 `tools` / `tool_choice=auto`，不使用
@@ -1056,7 +1080,7 @@ python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_sm
 
 目标：
 
-- `plan_read_only_tools(...)` 的 provider structured path 返回 event-native
+- `create_model_turn_events(...)` 的 provider structured path 返回 event-native
   planning result，而不是 `PlannerPlan`。
 - provider `ModelToolCallEvent` 直接进入 guarded event executor。
 - `ToolGuardDecisionEvent`、`ToolResultEvent`、`EvidenceUpdatedEvent`
@@ -1126,7 +1150,8 @@ python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_sm
 1. `model_events.py`
    - 将 `_provider_arguments(...)` 的 JSON decode failure 标记为稳定
      details，例如 `reason=provider_arguments_malformed`、`argument_type=str`。
-   - 不尝试修复字符串，不解析普通文本，不改变成功路径。
+   - 保留 tool name / call id，生成带 `protocol_error` 的
+     `ModelToolCallEvent(arguments={})`；不尝试修复字符串，不解析普通文本。
 2. `agent_loop.py` / planner manifest
    - preview capability schema 中移除 model-writable `raw_text`，或标注为
      host-owned 且不要求模型填写。
@@ -1143,15 +1168,11 @@ python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_sm
    - `_infer_requested_effect(...)` 覆盖 broker lifecycle notice：
      `期权被指派通知`、`已被指派`、`期权到期失效通知`、`已到期失效`，
      但要避免把“被指派正股收益/持仓/PnL”查询误判为 preview。
-5. `perception.py`
-   - `_llm_error_allows_deterministic_fallback(...)` 增加
-     `INVALID_MODEL_EVENT` + `provider_arguments_malformed` + deterministic
-     preview candidate 的 fallback。
-   - fallback trace decision 使用
-     `deterministic_fallback_selected`，candidate reason 标记
-     `llm_protocol_error_fallback`。
-   - explicit `clarification_request`、permission denied、prompt injection
-     denial 不允许被 deterministic preview fallback 覆盖。
+5. `agent_loop.py`
+   - `protocol_error`、unsupported arguments、unknown tool、system-scoped
+     arguments 不在 event-plan 外层终止；统一由 guard/pre-tool check 生成
+     model-visible error observation。
+   - repeated recoverable error 仍停止，避免无限 loop。
 6. `runtime.py` / session trace
    - 即使 AgentLoop planning 在 provider protocol 层失败，也应尽量持久化
      compact session/audit trace，方便 `assistant_trace` 看到失败 route。
@@ -1187,8 +1208,8 @@ python3 -m pytest tests/test_inbound_control.py tests/test_inbound_feishu_ws.py 
    `记录sy 账户的到期被指派平仓 期权被指派通知: ... -2张PDD 260618 85.00P期权已被指派 ...`
 3. 期望返回交易记录预览，不写入账本，并提示“确认记录/取消记录”。
 4. `assistant_trace` 或 audit 能解释：
-   LLM protocol error 是否发生、是否 deterministic fallback、最终 preview
-   operation id、未 apply。
+   LLM protocol error 是否发生、是否通过 model-visible observation 修复、
+   是否 deterministic fallback、最终 preview operation id、未 apply。
 
 ### Slice 10: Model-Driven Capability Selection
 
@@ -1237,13 +1258,380 @@ python3 -m pytest tests/test_inbound_control.py tests/test_inbound_feishu_ws.py 
 - provider malformed `arguments`：仍可使用 high-confidence deterministic
   preview fallback，但不恢复普通文本 JSON plan。
 
+### Slice 11: Model-Turn Loop Cutover
+
+已落地状态：
+
+- 初始 provider call 和后续 continuation 都按 model turn 记录；
+- `run_read_only_agent_loop(...)` 在有 `request` 和 `execute_tool_fn` 的生产
+  runtime 中直接运行 `run_assistant_tool_event_loop(...)`；
+- 可恢复的 read/preview effect mismatch、pre-tool denial、duplicate 和
+  tool/runtime error 进入 event transcript，由 continuation 读取 observation；
+- 不可恢复的 validation failure 以 `agent_loop.runtime=model_turn_loop`
+  的 rejected trace 返回，不再回退到 legacy planning adapter；
+- trace 使用 `runtime`、`model_turns`、`loop_stop_reason`、`answer_route`、
+  `capability_selection`，不再写 `agent_loop.planner=llm_tool_plan`。
+
+当前目标：
+
+1. 初始 provider call 和后续 continuation 统一称为 model turn。
+2. `run_read_only_agent_loop(...)` 直接调用 `run_assistant_tool_event_loop(...)`，
+   由 loop 负责执行 read tools、terminal preview、clarification 和 final answer。
+3. schema invalid、scope expansion、effect mismatch、preview authority mismatch、
+   duplicate、tool runtime error 等可恢复问题，都作为 model-visible
+   observation 回灌下一轮，而不是走 `planner_repair`。
+4. preview request 是 loop terminal：host 创建 pending preview 后停止，不再
+   继续 read/write。
+5. diagnostics 和 trace 暴露 `model_turns`、`observations`、`stop_reason`、
+   `answer_route`，不再把成功路径描述为 planner repair。
+
+实现边界：
+
+- `create_model_turn_events(...)` 是 model-turn 入口：它只返回 provider
+  event transcript 派生的 `event_plan`、trace 或 error，不再暴露 JSON
+  plan 字段。
+- `_planning_outcome_from_event_model_turn_result(...)` 仅保留给缺少
+  `request` / `execute_tool_fn` 的 adapter 调用；生产 runtime 具备这两个
+  参数时直接进入 bounded model/tool loop。
+- 外层仍使用 `PerceptionResult(tool_loop)` 承接 precomputed event-loop
+  result，action wrapper 不会重新执行 provider events；但 preview
+  operation response 的 `data.perception` / `data.reasoning` / assistant
+  decision execution contract 必须切回 concrete operation，避免把内部
+  envelope 暴露成用户/API 语义。
+- explicit command（`/confirm`、`/cancel`、`/assigned-stock` 等）仍由
+  deterministic command path 处理；自然语言 broker notice 不回到
+  deterministic parser 作为主 broker。
+- host 继续拥有写权限硬闸、preview payload normalization、raw_text 注入、
+  account/symbol/effect safety 和 pending operation lifecycle。
+
+验收：
+
+- `6月收益分析` 可以执行 initial model turn、read tool、continuation
+  final answer，trace 中不出现成功态 `planner_repair`。
+- `analysis_catalog -> analysis_query -> final answer` 证明模型能基于证据缺口
+  决定下一步。
+- broker assignment/expiry notice 如果第一轮错选 read tool，应被 guard
+  observation 拦截，下一轮选择对应 preview capability。
+- duplicate/repeated recoverable failure 会停止，不会无限调用 provider。
+- preview requested 后 terminal，不再继续工具调用。
+- 现有 preview、read-only、follow-up、scope expansion、lowercase symbol、
+  中文 alias scenario regression 仍通过。
+
+已验证：
+
+- `python3 -m pytest tests/test_assistant_runtime.py -q`
+- `python3 -m pytest tests/test_assistant_model_events.py tests/test_assistant_model_continuation.py tests/test_assistant_event_executor.py tests/test_assistant_model_evidence.py -q`
+- `python3 -m pytest tests/test_assistant_evidence_session.py tests/test_assistant_agent_eval.py tests/test_assistant_diagnostics.py -q`
+- `./om assistant eval-context --mode scenarios`
+
+### Slice 12: Intelligence Quality Hardening
+
+Slice 12 的目标不是再做一次架构切换，而是在已经落地的 bounded
+model-turn loop 上提升智能质量。判断标准从“是否像 Claude Code 一样循环”
+转为“模型是否稳定选对工具、补齐证据、少误澄清、失败时可解释”。
+
+#### 12.1 问题定义
+
+当前机制已经具备：
+
+- 模型通过 provider structured tool call 选择 read tool 或 preview
+  capability；
+- host 每次执行前做 schema、scope、risk、effect、budget 和 duplicate guard；
+- 可恢复错误进入 model-visible observation，再给模型一次 continuation；
+- preview / clarification / final answer / budget 都是一等 terminal。
+
+剩余智能问题集中在四类：
+
+1. 工具选择质量：模型有时能看到正确工具，但 selection hint 不够聚焦，
+   容易在 `monthly_income_report`、`analysis_query`、
+   `option_positions_read`、preview capability 之间选错。
+2. 证据策略：模型知道可以继续调用工具，但不知道缺口应该由哪个 read tool
+   恢复，或在已有证据足够时仍重复调用。
+3. 误澄清：低风险 read 场景缺少可选 account、artifact 为空或 follow-up
+   能安全继承上下文时，不应进入 clarification。
+4. 诊断闭环：现在 trace 能记录 loop 过程，但还需要把“为什么选这个工具、
+   为什么停止、缺口是否可恢复”变成回归可检查的字段。
+
+#### 12.2 成功标准
+
+用户层面：
+
+- 用户继续用自然语言，不需要知道工具名。
+- read-only 分析类问题能自动调用 1 到 3 个只读工具并组织答案。
+- broker lifecycle notice 在具备 preview authority 时进入 pending preview；
+  解释、收益、持仓类问题保持 read-only。
+- 不把低风险缺数据变成追问；只在高风险写入 scope 缺失时澄清。
+- 出错时用户看到的是 missing-data、clarification 或 unsupported，不看到
+  provider JSON、planner、traceback、pre-tool safety internal error。
+
+工程层面：
+
+- 不新增 JSON plan、planner repair、runtime compatibility switch。
+- 不新增第二套工具注册表或自然语言 deterministic business router。
+- `AgentLoop` 仍只自动执行 `READ_AUTO`。
+- 每个 final answer 都能从 `EvidenceBundle`、tool observation 或
+  explicit missing-data 找到依据。
+- trace 中能检查 `capability_selection`、`evidence_gap`、
+  `allowed_next_actions`、`loop_stop_reason`、`answer_route`。
+
+#### 12.3 设计原则
+
+1. 模型负责智能决策：工具选择、是否继续、如何组织答案交给模型。
+2. 代码负责边界：schema、scope、risk、effect、预算、去重和 evidence
+   verification 仍由 host 执行。
+3. 提示和 manifest 只提供选择依据，不替模型硬编码业务路由。
+4. 所有增强必须能被 scenario/eval/trace 验证。
+5. 改动优先落在现有 owner：`capability_catalog.py`、`tool_bindings.py`、
+   `agent_loop.py`、`coverage_verifier.py`、`model_evidence.py`、
+   `diagnostics.py`、`context_eval.py`。
+
+#### 12.4 实施切片
+
+##### Slice 12A: Loop Scenario Matrix
+
+目标：先把“智能质量”变成可回归的场景，而不是靠体感。
+
+改动点：
+
+- 扩展现有 assistant scenario/eval fixture，覆盖用户真实入口：
+  - `6月收益分析`；
+  - `sy 6月收益来源`；
+  - `被指派正股现在盈亏`；
+  - `期权被指派通知...已被指派`；
+  - `期权到期失效通知...已到期失效`；
+  - `这个净收入怎么算` 这类 follow-up；
+  - `为什么 PDD 没进候选`；
+  - 中文 alias、lowercase symbol、账户缺省、scope expansion。
+- 每个场景记录最小期望：
+  - expected first tool family；
+  - allowed terminal：final answer / preview / clarification / unsupported；
+  - forbidden terminal：unexpected clarification、write mutation、legacy JSON
+    planner error；
+  - trace assertion：`loop_stop_reason`、`answer_route`、
+    `capability_selection.selected`。
+
+候选文件：
+
+- `tests/fixtures/assistant_context_scenarios.jsonl`
+- `src/application/assistant/context_eval.py`
+- `tests/test_assistant_agent_eval.py`
+- `tests/test_assistant_runtime.py`
+
+验收：
+
+- `./om assistant eval-context --mode scenarios`
+- 新增或更新的 scenario 能失败定位到 tool selection、evidence gap、
+  clarification gate 或 answer route。
+
+##### Slice 12B: Capability Selection Hints
+
+目标：让模型更容易选对工具，但不让 host 预先替模型选工具。
+
+改动点：
+
+- 在 provider-visible manifest 中补齐每个关键能力的选择边界：
+  - `monthly_income_report`：月度/累计收益、收入来源、现金流组成；
+  - `analysis_query`：跨账户、跨月份、分组、趋势、候选/交易/持仓组合分析；
+  - `analysis_catalog`：字段未知或 view 不确定时先查；
+  - `option_positions_read`：当前持仓、assigned stock、到期/指派后的持仓状态；
+  - `manual_assignment` / `manual_expiry`：只处理 broker lifecycle notice 或
+    explicit record preview，不处理解释/收益/持仓查询。
+- 每个工具补 `not_for` 或等价 selection note，减少相邻工具混淆。
+- `preview_authority` 继续是 effect-level hint，只说明是否允许 pending
+  preview，不指定具体 preview tool。
+- manifest 继续保持 bounded，不把完整 `./om-agent spec` 暴露给 assistant。
+
+候选文件：
+
+- `src/application/assistant/tool_bindings.py`
+- `src/application/assistant/capability_catalog.py`
+- `src/application/assistant/agent_loop.py`
+- `tests/test_assistant_runtime.py`
+
+验收：
+
+- notice 解释类问题不会创建 preview。
+- explicit lifecycle notice 能选择 preview capability。
+- 月度收益分析优先走 `monthly_income_report`，必要时再补
+  `analysis_query`。
+- 字段未知的 open-ended analysis 能先走 `analysis_catalog`，再走
+  `analysis_query`。
+
+##### Slice 12C: Evidence Gap Guidance
+
+目标：代码不替模型回答，但要把“缺什么证据、可由哪个工具恢复”反馈清楚。
+
+改动点：
+
+- 统一 evidence gap 结构：
+  - `gap_type`；
+  - `required_fact`；
+  - `current_evidence_refs`；
+  - `recoverable`；
+  - `suggested_tool`；
+  - `allowed_next_actions`。
+- `coverage_verifier.py` 只判断缺口和可恢复性，不直接生成下一步 plan。
+- `tool_result` observation 中压缩展示 gap summary，让 continuation 可以选择
+  下一步。
+- repeated same gap / same duplicate signature 后停止，避免无限补查。
+
+候选文件：
+
+- `src/application/assistant/coverage_verifier.py`
+- `src/application/assistant/model_evidence.py`
+- `src/application/assistant/agent_loop.py`
+- `tests/test_assistant_event_executor.py`
+- `tests/test_assistant_model_evidence.py`
+
+验收：
+
+- `monthly_income_report -> analysis_query -> final answer` 可以通过 gap
+  guidance 触发。
+- 工具结果为空时回答 missing-data，不误澄清。
+- duplicate 或 repeated recoverable error 不超过 bounded continuation。
+
+##### Slice 12D: Clarification False-positive Guard
+
+目标：澄清只拦高风险缺槽，不阻断普通 read 智能。
+
+改动点：
+
+- 按 risk class 审计 clarification gate：
+  - `READ_AUTO` 缺可选 account/month/symbol 时，优先用安全默认、上下文继承
+    或 missing-data；
+  - `SOFT_WRITE_PREVIEW` 缺 account、operation scope、broker notice raw text
+    等关键字段时才澄清；
+  - confirm/cancel/apply scope 不唯一必须澄清或拒绝。
+- trace 记录 `clarification_reason`、`blocking_fields`、`risk_class`。
+- eval 中新增 forbidden clarification 断言。
+
+候选文件：
+
+- `src/application/assistant/action_safety.py`
+- `src/application/assistant/task_contract.py`
+- `src/application/assistant/agent_loop.py`
+- `src/application/assistant/session_store.py`
+- `tests/test_assistant_runtime.py`
+
+验收：
+
+- 低风险 read 空结果不追问。
+- follow-up 能安全继承明确上一轮 scope。
+- 高风险 preview 缺 account 时返回现有 `clarification_request` schema。
+
+##### Slice 12E: Trace / Diagnostics Contract
+
+目标：把模型智能路径变成可审计资产，方便本地和远端 ClawBot 问题定位。
+
+改动点：
+
+- diagnostics/live probe 展示：
+  - selected capability；
+  - model turns；
+  - tool observations；
+  - evidence gaps；
+  - stop reason；
+  - answer route；
+  - preview receipt 或 clarification request。
+- `assistant_trace` compact view 保留用户可理解字段，不暴露 raw provider
+  payload。
+- 对 provider malformed / guard denial / preview fallback 记录稳定 reason
+  code，方便远端日志检索。
+
+候选文件：
+
+- `src/application/assistant/diagnostics.py`
+- `src/application/assistant/session.py`
+- `src/application/assistant/session_store.py`
+- `src/application/agent_tools/diagnostics.py`
+- `tests/test_assistant_diagnostics.py`
+- `tests/test_agent_plugin_contract.py`
+
+验收：
+
+- 远端出现用户反馈时，可以通过 trace 判断是 selection 错、schema 错、
+  guard 拒绝、evidence 缺口还是 provider protocol error。
+- trace schema 改动同步到 agent plugin contract 测试。
+
+#### 12.5 开工顺序
+
+1. 先做 Slice 12A，只补 eval/scenario 和 trace assertion，不改 runtime
+   行为。
+2. 根据失败场景进入 Slice 12B，最小调整 provider-visible manifest 和
+   selection hints。
+3. 如果失败来自“模型不知道下一步补什么”，再做 Slice 12C。
+4. 如果失败来自误澄清，再做 Slice 12D。
+5. 最后做 Slice 12E，把新字段纳入 diagnostics 和 contract。
+
+每一步都必须先有失败场景或真实远端反馈对应，不做泛化重构。
+
+#### 12.6 回归门禁
+
+Slice 12 每个提交前至少运行：
+
+```bash
+python3 -m pytest tests/test_assistant_runtime.py tests/test_assistant_event_executor.py tests/test_assistant_model_events.py tests/test_assistant_model_continuation.py tests/test_assistant_model_evidence.py -q
+python3 -m pytest tests/test_assistant_evidence_session.py tests/test_assistant_agent_eval.py tests/test_assistant_diagnostics.py -q
+python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py -q
+python3 -m pytest tests/test_inbound_control.py tests/test_inbound_feishu_ws.py -q
+./om assistant eval-context --mode scenarios
+git diff --check
+```
+
+如果只改文档，只需要：
+
+```bash
+git diff --check
+```
+
+#### 12.7 不做项
+
+- 不恢复普通文本 JSON plan。
+- 不恢复 `PlannerPlan` runtime bridge。
+- 不恢复 `planner_repair` 成功路径。
+- 不新增 `legacy_json_plan_enabled` 或 `use_event_loop_v2` 开关。
+- 不把 deterministic natural-language parser 提升为普通业务主路由。
+- 不让模型自动 confirm/cancel/apply、写 ledger、写 position、改 config、
+  发通知或操作 broker-facing state。
+- 不把完整 Tool Gateway manifest 暴露给 inbound assistant。
+
+#### 12.8 当前执行记录
+
+2026-06-20 已完成 Slice 12A 的最小落地：
+
+- `context_eval` scenario 输出新增 decision 摘要：
+  `terminal`、`tool_call_count`、`first_tool`、`first_tool_family`、
+  `requested_effect`、`requires_clarification` 和首个工具参数摘要。
+- scenario fixture 从 10 个扩展到 17 个，新增覆盖：
+  - `6月收益分析`；
+  - assignment broker notice preview；
+  - expiry broker notice preview；
+  - assignment notice explanation 保持 read/no-tool；
+  - assigned stock PnL read；
+  - standalone candidate filter diagnosis；
+  - `净收入` follow-up 继承 income scope。
+- 每个新增场景都声明 allowed / forbidden terminal、first tool 或 forbidden
+  tools，防止智能化升级回退成误澄清、误 preview 或错误 read 工具。
+- CLI 文本输出现在展示 `terminal=... tool=...`，远端 ClawBot 问题可以先用
+  `./om assistant eval-context --mode scenarios` 看离线路径是否符合预期。
+
+已验证：
+
+```bash
+python3 -m pytest tests/test_assistant_context_eval.py -q
+python3 -m pytest tests/test_cli_operator_commands.py::test_assistant_eval_context_command_renders_report -q
+python3 -m pytest tests/test_assistant_agent_eval.py::test_assistant_context_eval_report_covers_planner_context_decisions -q
+./om assistant eval-context --mode scenarios
+git diff --check
+```
+
 ## 17. Acceptance Criteria
 
 用户层面：
 
 - 用户可以用自然语言问复杂运营问题，不需要知道具体工具名。
-- assistant 能在一次初始 provider 响应中自动选择多个只读工具，并由
-  现有 AgentLoop 组织成一个答案。
+- assistant 能在 bounded model-turn loop 中自动选择一个或多个只读工具，
+  观察工具结果，再组织成一个答案。
 - `6月收益分析` 走模型工具调用路径，而不是 deterministic shortcut。
 - 不再暴露 `LLM planner returned invalid JSON.`。
 - 不再暴露 `provider tool call arguments are not valid JSON`。
@@ -1261,6 +1649,10 @@ python3 -m pytest tests/test_inbound_control.py tests/test_inbound_feishu_ws.py 
   `PlannerPlan` 作为执行合同。
 - `execute_tool_plan(plan_payload)` 不再是 provider structured tool-call
   read loop 的执行路径。
+- 生产成功路径不依赖 `planner_repair`；可恢复错误只能通过
+  model-visible observation continuation 处理。
+- 初始 provider call 和 continuation 使用同一 transcript 语义，trace 可显示
+  model turns 和 stop reason。
 - 所有用户可见事实都来自 `EvidenceBundle` 或明确 missing-data。
 - trace 能解释 event transcript、capability selection、scope、risk、
   loop stop reason 和 answer route。
@@ -1280,6 +1672,8 @@ python3 -m pytest tests/test_inbound_control.py tests/test_inbound_feishu_ws.py 
   capability 和低风险 slot。
 - provider protocol malformed 不恢复普通文本 JSON plan；只允许 bounded
   retry 或 high-confidence deterministic preview fallback。
+- 旧 `plan_read_only_tools(...)` facade 已移除；诊断和测试统一使用
+  `create_model_turn_events(...)`。
 
 仍开放：
 
@@ -1291,7 +1685,6 @@ python3 -m pytest tests/test_inbound_control.py tests/test_inbound_feishu_ws.py 
    还是先串行保持简单？
 4. provider malformed arguments 的 compact retry 是否应复用同一 provider
    conversation，还是重新发一个更小 planner payload？
-
 建议默认答案：
 
 - `TaskContract` 第一版只派生执行护栏必需字段，answer 需求继续由
