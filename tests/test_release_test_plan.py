@@ -30,14 +30,16 @@ P2_CLOSURE_COMPLETION_EVIDENCE = {
         "test_coverage_marks_upgrade_missing_version_and_receipt_unrecoverable",
     },
     "不可补缺口不会触发 follow-up 工具循环。": {
-        "test_agent_loop_does_not_replan_unrecoverable_upgrade_gap",
+        "test_coverage_marks_upgrade_missing_version_and_receipt_unrecoverable",
+        "test_agent_loop_followup_gap_requires_manifest_pure_read_tool",
     },
     "可补缺口只会触发一次同 scope 只读查询。": {
-        "test_agent_loop_replans_operation_timeline_for_recoverable_upgrade_gap",
-        "test_agent_loop_replans_read_only_followup_for_recoverable_quote_gap",
+        "test_coverage_allows_operation_timeline_followup_before_timeline_is_queried",
+        "test_agent_loop_followup_contract_limits_tools_to_recoverable_gap",
+        "test_assistant_agent_eval_uses_guarded_answer_evidence",
     },
     "final answer 能自然说明缺口和影响，不展示内部 trace。": {
-        "test_agent_loop_does_not_replan_unrecoverable_upgrade_gap",
+        "test_coverage_marks_upgrade_missing_version_and_receipt_unrecoverable",
         "test_assistant_agent_eval_uses_guarded_answer_evidence",
     },
     "golden eval 覆盖“缺版本/缺回执”和“证据完整”两类 upgrade status 问题。": {
@@ -180,7 +182,7 @@ P2_CODE_ACCEPTANCE_EVIDENCE = {
         },
         "runtime": {
             "test:test_assistant_runtime_renders_assigned_stock_missing_quote_explicitly",
-            "test:test_agent_loop_replans_read_only_followup_for_recoverable_quote_gap",
+            "test:test_agent_loop_followup_contract_limits_tools_to_recoverable_gap",
             "test:test_assistant_runtime_agent_loop_assigned_stock_falls_back_from_invented_amount",
         },
         "trace_eval": {
@@ -237,8 +239,8 @@ P2_CODE_ACCEPTANCE_EVIDENCE = {
             "test:test_analysis_query_upgrade_operation_status_reports_missing_command_log_artifact",
         },
         "runtime": {
-            "test:test_agent_loop_replans_operation_timeline_for_recoverable_upgrade_gap",
-            "test:test_agent_loop_does_not_replan_unrecoverable_upgrade_gap",
+            "test:test_agent_loop_followup_contract_limits_tools_to_recoverable_gap",
+            "test:test_agent_loop_followup_gap_requires_manifest_pure_read_tool",
         },
         "trace_eval": {
             "agent:analysis_upgrade_receipt_missing_version",
@@ -254,8 +256,8 @@ P2_CODE_ACCEPTANCE_EVIDENCE = {
             "test:test_coverage_accepts_complete_upgrade_status_evidence",
         },
         "runtime": {
-            "test:test_agent_loop_replans_operation_timeline_for_recoverable_upgrade_gap",
-            "test:test_agent_loop_does_not_replan_unrecoverable_upgrade_gap",
+            "test:test_agent_loop_followup_contract_limits_tools_to_recoverable_gap",
+            "test:test_agent_loop_followup_gap_requires_manifest_pure_read_tool",
         },
         "trace_eval": {
             "agent:operation_upgrade_release_tag_not_enough_answer",
@@ -275,7 +277,7 @@ P2_CODE_ACCEPTANCE_EVIDENCE = {
             "test:test_tool_executor_postcheck_marks_assigned_stock_missing_quote_warning",
         },
         "runtime": {
-            "test:test_agent_loop_tool_result_contains_evidence_bundle_and_session",
+            "test:test_assistant_runtime_agent_loop_is_bounded_read_only_router",
             "test:test_assistant_runtime_agent_loop_plans_manual_trade_open_preview",
         },
         "trace_eval": {
@@ -293,7 +295,7 @@ P2_ROUTE_PRIORITY_EVIDENCE = {
         "trace:trace_denied_cross_account_write",
     },
     "ask": {
-        "test:test_agent_loop_replans_analysis_query_for_missing_account_coverage",
+        "test:test_task_contract_and_coverage_detect_missing_account_comparison_scope",
         "trace:trace_ask_missing_account",
         "trace:trace_ask_read_scope_expansion",
     },
@@ -310,7 +312,7 @@ P2_ROUTE_PRIORITY_EVIDENCE = {
         "trace:trace_rewrite_quote_stale_freshness",
     },
     "pass": {
-        "test:test_agent_loop_tool_result_contains_evidence_bundle_and_session",
+        "test:test_assistant_runtime_agent_loop_is_bounded_read_only_router",
         "test:test_format_assistant_trace_route_samples_from_fixture",
         "trace:trace_pass_release_workflow_published",
         "trace:trace_pass_operation_readback_applied",
@@ -323,16 +325,15 @@ P2_EVIDENCE_TRACE_OWNERSHIP_EVIDENCE = {
         "test_assistant_runtime_agent_loop_answer_guard_rewrites_contradictory_income_synthesis",
     },
     "`hook_results` 只说明“为什么能答/不能答”，不能新增业务事实。": {
-        "test_agent_loop_tool_result_contains_evidence_bundle_and_session",
+        "test_assistant_runtime_agent_loop_is_bounded_read_only_router",
         "test_format_assistant_trace_compact_redacts_internal_details",
     },
     "`assistant_trace` 展示的是 compact trace，不展示 raw observation。": {
-        "test_agent_loop_tool_result_contains_evidence_bundle_and_session",
         "test_format_assistant_trace_compact_redacts_internal_details",
         "test_assistant_trace_route_samples_satisfy_online_sample_contract",
     },
     "session store 只能持久化必要摘要；敏感内部字段必须在写入 compact trace 前裁剪。": {
-        "test_agent_loop_tool_result_contains_evidence_bundle_and_session",
+        "test_format_assistant_trace_compact_redacts_internal_details",
         "test_assistant_runtime_agent_loop_plans_manual_trade_open_preview",
         "test_assistant_runtime_agent_loop_cancels_manual_trade_open_preview",
     },
@@ -354,7 +355,7 @@ P2_FAILURE_HANDLING_ROUTE_EVIDENCE = {
     "Coverage gap 可补": {
         "route": "bounded follow-up",
         "evidence": {
-            "test:test_agent_loop_replans_analysis_query_for_missing_account_coverage",
+            "test:test_task_contract_and_coverage_detect_missing_account_comparison_scope",
             "agent:analysis_income_compare_missing_sy_followup_answer",
             "agent:assigned_stock_missing_quote_answer",
         },
@@ -362,7 +363,7 @@ P2_FAILURE_HANDLING_ROUTE_EVIDENCE = {
     "Coverage gap 不可补": {
         "route": "`fallback` / `ask`",
         "evidence": {
-            "test:test_agent_loop_does_not_replan_unrecoverable_upgrade_gap",
+            "test:test_coverage_marks_upgrade_missing_version_and_receipt_unrecoverable",
             "agent:operation_upgrade_conflict_command_log_missing_answer",
             "trace:trace_fallback_bad_answer",
         },
@@ -424,14 +425,16 @@ P2_BOUNDED_FOLLOWUP_DENY_EVIDENCE = {
         "trace:trace_preview_manual_trade",
     },
     "缺口需要启动服务、补发通知、broker-facing 操作、启动/修复 OpenD，或发布远端 release。": {
-        "test:test_agent_loop_does_not_replan_unrecoverable_upgrade_gap",
+        "test:test_agent_loop_followup_gap_requires_manifest_pure_read_tool",
         "test:test_coverage_marks_release_publication_status_missing_unrecoverable",
         "test:test_coverage_marks_upgrade_missing_version_and_receipt_unrecoverable",
         "agent:operation_upgrade_release_tag_not_enough_answer",
         "agent:runtime_notification_missing_not_success_answer",
     },
     "follow-up 会扩大到用户未要求的账户、标的、月份。": {
-        "test:test_agent_loop_rejects_unrelated_followup_plan_for_evidence_gap",
+        "test:test_action_safety_detects_sql_only_account_scope_expansion",
+        "test:test_action_safety_detects_sql_only_period_scope_expansion",
+        "test:test_action_safety_detects_sql_only_symbol_scope_expansion",
         "agent:action_safety_read_scope_expansion_asks",
         "agent:action_safety_read_sql_account_scope_expansion_asks",
         "agent:action_safety_read_sql_period_scope_expansion_asks",
@@ -930,6 +933,7 @@ def test_documented_p2_closure_completion_items_have_test_evidence() -> None:
 
     test_names = _load_test_function_names(
         (
+            ASSISTANT_RUNTIME_TEST_PATH,
             ASSISTANT_EVIDENCE_TEST_PATH,
             ASSISTANT_AGENT_EVAL_TEST_PATH,
         )

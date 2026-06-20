@@ -1190,6 +1190,7 @@ def run_assistant_tool_event_loop(
             )
 
         turn_executions: list[GuardedModelToolCallExecution] = []
+        final_answer_only_continuation = False
         for model_event in tool_calls:
             execution = execute_model_tool_call_event(
                 model_event=model_event,
@@ -1210,9 +1211,9 @@ def run_assistant_tool_event_loop(
                 if recoverable:
                     error_signature = _assistant_tool_loop_recoverable_error_signature(execution)
                     recoverable_error_counts[error_signature] = recoverable_error_counts.get(error_signature, 0) + 1
-                    if (
-                        recoverable_error_counts[error_signature] > 1
-                        or str(execution.guard_event.error_code or "") == "DUPLICATE_TOOL_CALL"
+                    duplicate_call = str(execution.guard_event.error_code or "") == "DUPLICATE_TOOL_CALL"
+                    if recoverable_error_counts[error_signature] > 1 or (
+                        duplicate_call and create_continuation_response_fn is None
                     ):
                         return _assistant_tool_loop_outcome(
                             status="stopped",
@@ -1228,6 +1229,8 @@ def run_assistant_tool_event_loop(
                                 "repeated_error_signature": error_signature,
                             },
                         )
+                    if duplicate_call:
+                        final_answer_only_continuation = True
                 else:
                     return _assistant_tool_loop_outcome(
                         status="stopped",
@@ -1245,11 +1248,17 @@ def run_assistant_tool_event_loop(
 
         if create_continuation_response_fn is not None and turn_executions:
             try:
+                continuation_base_payload_for_turn = current_continuation_base_payload
+                if final_answer_only_continuation:
+                    continuation_base_payload_for_turn = _final_answer_only_continuation_base_payload(
+                        provider=provider,
+                        base_payload=current_continuation_base_payload,
+                    )
                 continuation = continue_model_after_tool_results(
                     provider=provider,
                     create_response_fn=create_continuation_response_fn,
                     results=tuple((execution.model_event, execution.result_adapter.event) for execution in turn_executions),
-                    base_payload=current_continuation_base_payload,
+                    base_payload=continuation_base_payload_for_turn,
                     parent_event_id=turn_executions[-1].result_adapter.event.event_id,
                 )
             except (OpenAIResponsesError, OpenAIChatCompletionsError) as err:
@@ -1533,6 +1542,15 @@ def _assistant_tool_loop_error_recoverable(execution: GuardedModelToolCallExecut
 
 
 def _assistant_tool_loop_recoverable_error_signature(execution: GuardedModelToolCallExecution) -> str:
+    if str(execution.guard_event.error_code or "") == "DUPLICATE_TOOL_CALL":
+        payload = {
+            "tool_name": execution.model_event.tool_name,
+            "tool_call_error_code": str(execution.guard_event.error_code or ""),
+            "tool_call_decision": str(execution.guard_event.decision or ""),
+            "duplicate_signature": str(execution.guard_event.duplicate_signature or ""),
+            "result_error_code": str(execution.result_adapter.event.error_code or ""),
+        }
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True)
     payload = {
         "tool_name": execution.model_event.tool_name,
         "tool_call_error_code": str(execution.guard_event.error_code or ""),
@@ -1687,6 +1705,24 @@ def _assistant_tool_loop_continuation_response_fn(
         )
 
     return _create_response
+
+
+def _final_answer_only_continuation_base_payload(*, provider: str, base_payload: dict[str, Any] | None) -> dict[str, Any]:
+    payload = dict(base_payload or {})
+    payload.pop("tools", None)
+    payload.pop("tool_choice", None)
+    instruction = (
+        "A requested tool call duplicated evidence that is already available. Do not call any more tools. "
+        "Produce one natural user-facing final answer using only the existing tool observations."
+    )
+    if provider_api_kind(provider) == "chat_completions":
+        messages = payload.get("messages")
+        existing = [dict(item) for item in messages] if isinstance(messages, list) else []
+        payload["messages"] = [*existing, {"role": "system", "content": instruction}]
+        return payload
+    existing_instructions = str(payload.get("instructions") or "").strip()
+    payload["instructions"] = f"{existing_instructions}\n\n{instruction}".strip()
+    return payload
 
 
 def _assistant_tool_loop_continuation_base_payload(
@@ -5594,12 +5630,21 @@ def _fact_data(tool_name: str, data: dict[str, Any]) -> dict[str, Any]:
 
 def _synthesis_data(tool_name: str, data: dict[str, Any]) -> dict[str, Any]:
     if tool_name == "analysis_query":
+        row_count = _optional_int(data.get("row_count"))
+        rows, rows_complete, row_preview_limit = _synthesis_rows_with_metadata(
+            data.get("rows"),
+            row_count=row_count,
+            default_limit=30,
+            truncated=bool(data.get("truncated", False)),
+        )
         return {
             "source_label": data.get("source_label") or "OM read-only analysis workspace",
             "query": dict(data.get("query") or {}) if isinstance(data.get("query"), dict) else {},
             "columns": list(data.get("columns") or []),
-            "rows": _clip_list(data.get("rows"), limit=30),
-            "row_count": data.get("row_count"),
+            "rows": rows,
+            "row_count": row_count if row_count is not None else data.get("row_count"),
+            "rows_complete": rows_complete,
+            "row_preview_limit": row_preview_limit,
             "truncated": bool(data.get("truncated", False)),
             "views_used": list(data.get("views_used") or []),
             "cell_refs": _clip_mapping(data.get("cell_refs"), limit=120) if isinstance(data.get("cell_refs"), dict) else {},
@@ -5609,10 +5654,33 @@ def _synthesis_data(tool_name: str, data: dict[str, Any]) -> dict[str, Any]:
         return _candidate_filter_synthesis_data(data)
     if tool_name == "monthly_income_report":
         coverage = _monthly_income_coverage(data)
+        summary_rows, summary_complete, summary_limit = _synthesis_rows_with_metadata(
+            data.get("summary"),
+            row_count=_optional_int(data.get("row_count")),
+            default_limit=8,
+        )
+        return_summary_rows, return_summary_complete, return_summary_limit = _synthesis_rows_with_metadata(
+            data.get("return_summary"),
+            row_count=None,
+            default_limit=8,
+        )
+        combined_return_summary_rows, combined_return_summary_complete, combined_return_summary_limit = (
+            _synthesis_rows_with_metadata(
+                data.get("combined_return_summary"),
+                row_count=None,
+                default_limit=8,
+            )
+        )
         out = {
-            "summary": _clip_list(data.get("summary"), limit=8),
-            "return_summary": _clip_list(data.get("return_summary"), limit=8),
-            "combined_return_summary": _clip_list(data.get("combined_return_summary"), limit=8),
+            "summary": summary_rows,
+            "summary_complete": summary_complete,
+            "summary_preview_limit": summary_limit,
+            "return_summary": return_summary_rows,
+            "return_summary_complete": return_summary_complete,
+            "return_summary_preview_limit": return_summary_limit,
+            "combined_return_summary": combined_return_summary_rows,
+            "combined_return_summary_complete": combined_return_summary_complete,
+            "combined_return_summary_preview_limit": combined_return_summary_limit,
             "diagnostics": _clip_list(data.get("diagnostics"), limit=4),
             "filters": dict(data.get("filters") or {}) if isinstance(data.get("filters"), dict) else {},
             "data_scope": "OM 本地账本",
@@ -5626,9 +5694,20 @@ def _synthesis_data(tool_name: str, data: dict[str, Any]) -> dict[str, Any]:
         for key in ("cashflow_rows", "realized_rows", "open_basis_rows", "premium_rows", "enhancement_rows"):
             rows = data.get(key)
             if isinstance(rows, list):
-                out[key] = _clip_list(rows, limit=20)
-                out[f"{key[:-1]}_count" if key.endswith("s") else f"{key}_count"] = len(rows)
-                if len(rows) > 20:
+                count_key = f"{key[:-1]}_count" if key.endswith("s") else f"{key}_count"
+                row_count = _optional_int(data.get(count_key))
+                if row_count is None:
+                    row_count = len(rows)
+                clipped_rows, rows_complete, row_preview_limit = _synthesis_rows_with_metadata(
+                    rows,
+                    row_count=row_count,
+                    default_limit=20,
+                )
+                out[key] = clipped_rows
+                out[count_key] = row_count
+                out[f"{key}_complete"] = rows_complete
+                out[f"{key}_preview_limit"] = row_preview_limit
+                if not rows_complete:
                     out[f"{key}_truncated"] = True
         return out
     if tool_name == "option_positions_read":
@@ -5748,6 +5827,42 @@ def _clip_list(value: Any, *, limit: int) -> list[Any]:
         else:
             out.append({"type": type(item).__name__})
     return out
+
+
+def _synthesis_rows_with_metadata(
+    value: Any,
+    *,
+    row_count: int | None,
+    default_limit: int,
+    truncated: bool = False,
+) -> tuple[list[Any], bool | None, int | None]:
+    if not isinstance(value, list) and row_count is None:
+        return [], None, None
+    limit = default_limit
+    if not truncated and isinstance(value, list):
+        observed_count = len(value)
+        if observed_count <= 50 and (row_count is None or row_count <= 50):
+            limit = max(observed_count, row_count or 0)
+    rows = _clip_list(value, limit=limit)
+    complete = _synthesis_rows_complete(rows=rows, row_count=row_count, truncated=truncated)
+    return rows, complete, limit
+
+
+def _synthesis_rows_complete(*, rows: list[Any], row_count: int | None, truncated: bool) -> bool:
+    if truncated:
+        return False
+    if row_count is not None:
+        return row_count <= len(rows)
+    return bool(rows)
+
+
+def _optional_int(value: Any) -> int | None:
+    try:
+        if value in (None, ""):
+            return None
+        return int(value)
+    except Exception:
+        return None
 
 
 _INTERNAL_SYNTHESIS_KEYS = frozenset(
