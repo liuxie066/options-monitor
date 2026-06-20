@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 1.2.319 - 2026-06-20
+## 1.2.320 - 2026-06-20
 
 ### Added
 - Added an Assistant tool-loop completion plan documenting the event-native runtime boundary, release gates, and
