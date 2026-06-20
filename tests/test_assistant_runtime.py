@@ -55,7 +55,12 @@ from src.application.assistant.llm_reply import LlmReplyResult, generate_general
 from src.application.assistant.renderer import render_canonical_tool_result
 from src.application.assistant.settings import PlannerSettings
 from src.application.assistant.session_store import AgentSessionStore, collect_assistant_trace
-from src.application.assistant.task_contract import TASK_CONTRACT_SCHEMA_VERSION, build_task_contract
+from src.application.assistant.task_contract import (
+    TASK_CONTRACT_SCHEMA_VERSION,
+    build_task_contract,
+    preview_effect_allowed_from_text,
+    preview_request_kind_from_text,
+)
 from src.application.assistant.tool_bindings import (
     assistant_tool_bindings,
     config_required_intent_names,
@@ -840,6 +845,53 @@ def test_task_contract_keeps_bare_assignment_analysis_read_only() -> None:
     assert contract.requested_effect == "read"
 
 
+def test_task_contract_keeps_notification_explanation_queries_read_only() -> None:
+    cases = [
+        "解释一下这条期权被指派通知",
+        "PDD 期权被指派通知是什么意思",
+        "帮我分析这条成交提醒的收益",
+        "成交提醒是什么意思",
+        "sy 衍生品提醒: 期权被指派通知是什么意思",
+        "记录交易是什么意思",
+        "补录规则是什么",
+    ]
+
+    for text in cases:
+        contract = build_task_contract(
+            question=text,
+            plan={},
+            request_context={"config_key": "us"},
+            today=date(2026, 6, 18),
+        )
+        assert contract.requested_effect == "read", text
+        assert preview_effect_allowed_from_text(text) is False, text
+        assert preview_request_kind_from_text(text) is None, text
+
+
+def test_task_contract_keeps_explicit_record_and_raw_broker_notice_as_preview_write() -> None:
+    cases = [
+        "记录 sy 成交提醒：PDD 260618 85P 已成交",
+        (
+            "sy 衍生品提醒: 期权被指派通知: 您的保证金综合账户(2905) - "
+            "证券所持有的-2张PDD 260618 85.00P期权已被指派，详情请查看资金明细及持仓情况。【富途证券(香港)】"
+        ),
+        (
+            "sy 衍生品提醒: 期权到期失效通知: 您的保证金综合账户(2905) - "
+            "证券所持有的-1张TCOM 260618 45.00P期权已到期失效，详情请查看持仓情况。【富途证券(香港)】"
+        ),
+    ]
+
+    for text in cases:
+        contract = build_task_contract(
+            question=text,
+            plan={},
+            request_context={"config_key": "us"},
+            today=date(2026, 6, 18),
+        )
+        assert contract.requested_effect == "preview_write", text
+        assert preview_effect_allowed_from_text(text) is True, text
+
+
 def test_action_safety_denies_symbol_edit_alias_scope_mismatch() -> None:
     call = ToolCall(tool_name="symbol_edit", payload={"symbol": "TSLA", "set": {"sell_call.min_strike": 85}})
     policy = decide_tool_action_policy(
@@ -1512,6 +1564,23 @@ def test_agent_loop_planner_input_scopes_analysis_views_for_income_questions() -
     assert "income" in budget["matched_view_groups"]
 
 
+def test_agent_loop_planner_input_keeps_model_driven_manifest_under_size_budget() -> None:
+    cases = [
+        "6月收益分析",
+        (
+            "sy 衍生品提醒: 期权被指派通知: 您的保证金综合账户(2905) - "
+            "证券所持有的-2张PDD 260618 85.00P期权已被指派，详情请查看资金明细及持仓情况。【富途证券(香港)】"
+        ),
+        "sy PDD 已被指派后的收益分析",
+    ]
+
+    for text in cases:
+        payload_text = _planner_input_text(text, conversation_context=None)
+        payload = json.loads(payload_text)
+        assert len(payload_text) < 45_000, text
+        assert payload["manifest_budget"]["manifest_chars"] < 42_000, text
+
+
 def test_agent_loop_planner_input_uses_last_read_context_for_short_followup() -> None:
     payload = json.loads(
         _planner_input_text(
@@ -1800,7 +1869,7 @@ def test_agent_loop_planner_manifest_hides_system_scoped_arguments() -> None:
             assert "_path_" not in normalized
 
 
-def test_agent_loop_preview_request_uses_preview_only_manifest() -> None:
+def test_agent_loop_preview_request_uses_model_driven_manifest() -> None:
     text = (
         "记录sy 账户的到期被指派平仓 期权被指派通知: 您的保证金综合账户(2905) - "
         "证券所持有的-2张PDD 260618 85.00P期权已被指派，详情请查看资金明细及持仓情况。【富途证券(香港)】"
@@ -1810,16 +1879,17 @@ def test_agent_loop_preview_request_uses_preview_only_manifest() -> None:
     tool_names = {tool["name"] for tool in payload["tools"]}
     assignment = next(tool for tool in payload["tools"] if tool["name"] == "manual_assignment")
 
-    assert payload["manifest_budget"]["mode"] == "preview_only"
-    assert payload["manifest_budget"]["preview_kind"] == "manual_assignment"
-    assert payload["manifest_budget"]["selected_preview_intents"] == ["manual_assignment"]
-    assert tool_names == {"manual_assignment"}
-    assert "analysis_query" not in tool_names
+    assert payload["manifest_budget"]["mode"] != "preview_only"
+    assert payload["manifest_budget"]["preview_authority_allowed"] is True
+    assert payload["preview_authority"]["allowed"] is True
+    assert "manual_assignment" in tool_names
+    assert "manual_expiry" in tool_names
+    assert "analysis_query" in tool_names
     assert "raw_text" not in assignment["input_schema"]
     assert set(assignment["input_schema"]) == {"account"}
 
 
-def test_agent_loop_expiry_request_uses_expiry_only_preview_manifest() -> None:
+def test_agent_loop_expiry_request_uses_model_driven_manifest() -> None:
     text = (
         "sy 衍生品提醒: 期权到期失效通知: 您的保证金综合账户(2905) - "
         "证券所持有的-1张TCOM 260618 45.00P期权已到期失效，详情请查看持仓情况。【富途证券(香港)】"
@@ -1828,10 +1898,12 @@ def test_agent_loop_expiry_request_uses_expiry_only_preview_manifest() -> None:
     payload = json.loads(_planner_input_text(text, conversation_context=None))
     tool_names = {tool["name"] for tool in payload["tools"]}
 
-    assert payload["manifest_budget"]["mode"] == "preview_only"
-    assert payload["manifest_budget"]["preview_kind"] == "manual_expiry"
-    assert payload["manifest_budget"]["selected_preview_intents"] == ["manual_expiry"]
-    assert tool_names == {"manual_expiry"}
+    assert payload["manifest_budget"]["mode"] != "preview_only"
+    assert payload["manifest_budget"]["preview_authority_allowed"] is True
+    assert payload["preview_authority"]["allowed"] is True
+    assert "manual_expiry" in tool_names
+    assert "manual_assignment" in tool_names
+    assert "analysis_query" in tool_names
 
 
 def test_agent_loop_assignment_status_question_keeps_read_manifest() -> None:
@@ -1839,6 +1911,8 @@ def test_agent_loop_assignment_status_question_keeps_read_manifest() -> None:
     tool_names = {tool["name"] for tool in payload["tools"]}
 
     assert payload["manifest_budget"]["mode"] != "preview_only"
+    assert payload["manifest_budget"]["preview_authority_allowed"] is False
+    assert payload["preview_authority"]["allowed"] is False
     assert "option_positions_read" in tool_names
     assert "manual_assignment" in tool_names
 
@@ -1848,8 +1922,26 @@ def test_agent_loop_bare_assignment_analysis_keeps_read_manifest() -> None:
     tool_names = {tool["name"] for tool in payload["tools"]}
 
     assert payload["manifest_budget"]["mode"] != "preview_only"
+    assert payload["manifest_budget"]["preview_authority_allowed"] is False
+    assert payload["preview_authority"]["allowed"] is False
     assert "option_positions_read" in tool_names
     assert "manual_assignment" in tool_names
+
+
+def test_agent_loop_notification_explanation_keeps_read_preview_authority() -> None:
+    for text in (
+        "解释一下这条期权被指派通知",
+        "PDD 期权被指派通知是什么意思",
+        "帮我分析这条成交提醒的收益",
+    ):
+        payload = json.loads(_planner_input_text(text, conversation_context=None))
+        tool_names = {tool["name"] for tool in payload["tools"]}
+
+        assert payload["manifest_budget"]["mode"] != "preview_only"
+        assert payload["manifest_budget"]["preview_authority_allowed"] is False
+        assert payload["preview_authority"]["allowed"] is False
+        assert "analysis_query" in tool_names
+        assert "manual_assignment" in tool_names
 
 
 def test_assistant_deterministic_commands_exclude_read_aliases() -> None:
@@ -7714,7 +7806,9 @@ def test_assistant_runtime_falls_back_to_deterministic_assignment_preview_on_pro
         tool_names = {tool["function"]["name"] for tool in kwargs["tools"]}
         assignment_tool = next(tool for tool in kwargs["tools"] if tool["function"]["name"] == "manual_assignment")
         assignment_properties = assignment_tool["function"]["parameters"]["properties"]
-        assert tool_names == {"manual_assignment"}
+        assert "manual_assignment" in tool_names
+        assert "manual_expiry" in tool_names
+        assert "analysis_query" in tool_names
         assert set(assignment_properties) == {"account"}
         assert "raw_text" not in assignment_properties
         return {

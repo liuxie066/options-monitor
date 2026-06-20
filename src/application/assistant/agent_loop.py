@@ -74,7 +74,7 @@ from src.application.assistant.preview_request import (
 from src.application.assistant.renderer import render_canonical_tool_result, render_inbound_text
 from src.application.assistant.session import build_agent_session_snapshot
 from src.application.assistant.settings import AssistantLlmSettings, AssistantSettings
-from src.application.assistant.task_contract import TASK_CONTRACT_SCHEMA_VERSION, build_task_contract, preview_request_kind_from_text
+from src.application.assistant.task_contract import TASK_CONTRACT_SCHEMA_VERSION, build_task_contract, preview_effect_allowed_from_text
 from src.application.assistant.tool_bindings import (
     planner_binding_for_tool,
     planner_config_scoped_tool_names,
@@ -2971,11 +2971,9 @@ def _model_tool_call_safe_slots_for_context(events: tuple[ModelToolCallEvent, ..
 
 def _provider_tool_call_tools(provider: str, planner_payload: dict[str, Any]) -> list[dict[str, Any]]:
     manifest = planner_payload.get("tools") if isinstance(planner_payload.get("tools"), list) else []
-    budget = planner_payload.get("manifest_budget") if isinstance(planner_payload.get("manifest_budget"), dict) else {}
-    read_only_only = str(budget.get("mode") or "").strip() != "preview_only"
     if provider_api_kind(provider) == "chat_completions":
-        return chat_completions_tools_payload(manifest, read_only_only=read_only_only)
-    return openai_responses_tools_payload(manifest, read_only_only=read_only_only)
+        return chat_completions_tools_payload(manifest, read_only_only=False)
+    return openai_responses_tools_payload(manifest, read_only_only=False)
 
 
 def _required_capabilities_for_model_tool_calls(events: tuple[ModelToolCallEvent, ...]) -> tuple[str, ...]:
@@ -3393,7 +3391,7 @@ def _is_banned_plan_argument(argument: str) -> bool:
 
 
 def _question_requests_preview_operation(question: str) -> bool:
-    return preview_request_kind_from_text(question) is not None
+    return preview_effect_allowed_from_text(question)
 
 
 def _planning_outcome_from_tool_plan_result(
@@ -4374,25 +4372,23 @@ def _trim_planner_projection_payload(payload: dict[str, Any]) -> None:
 
 
 def _planner_input_payload(text: str, *, conversation_context: dict[str, Any] | None) -> dict[str, Any]:
-    preview_kind = preview_request_kind_from_text(text)
-    preview_only = preview_kind is not None
-    preview_intents = _planner_preview_intents_for_kind(preview_kind)
-    selection = (
-        _planner_preview_only_selection(preview_kind=preview_kind, preview_intents=preview_intents)
-        if preview_only
-        else _planner_analysis_view_selection(text, conversation_context=conversation_context)
-    )
+    selection = _planner_analysis_view_selection(text, conversation_context=conversation_context)
     tools = _planner_tool_manifest(
         analysis_view_names=selection["selected_analysis_views"],
-        include_read_tools=not preview_only,
+        include_read_tools=True,
         include_preview_capabilities=True,
-        allowed_preview_intents=preview_intents,
     )
+    preview_authority = _planner_preview_authority(text)
     payload: dict[str, Any] = {
         "message": str(text or ""),
         "current_user_message": {"text": str(text or "")},
         "tools": tools,
-        "manifest_budget": _planner_manifest_budget(tools=tools, analysis_view_selection=selection),
+        "preview_authority": preview_authority,
+        "manifest_budget": _planner_manifest_budget(
+            tools=tools,
+            analysis_view_selection=selection,
+            preview_authority=preview_authority,
+        ),
     }
     if isinstance(conversation_context, dict):
         projection = _planner_context_projection(text, conversation_context=conversation_context)
@@ -4415,38 +4411,16 @@ def _planner_input_payload(text: str, *, conversation_context: dict[str, Any] | 
     return payload
 
 
-def _planner_preview_only_selection(*, preview_kind: str | None, preview_intents: tuple[str, ...]) -> dict[str, Any]:
+def _planner_preview_authority(text: str) -> dict[str, Any]:
     return {
-        "mode": "preview_only",
-        "selected_analysis_views": [],
-        "matched_view_groups": ["preview_operation"],
-        "selection_sources": ["message"],
-        "preview_kind": str(preview_kind or ""),
-        "selected_preview_intents": list(preview_intents),
+        "schema_version": "om-planner-preview-authority-v1",
+        "allowed": preview_effect_allowed_from_text(text),
+        "policy": (
+            "The model may select exactly one preview capability only when the current user message explicitly "
+            "asks to record/change/administer something or contains a broker lifecycle/fill notice. The host "
+            "injects raw_text and never lets the model confirm, apply, notify, or mutate state directly."
+        ),
     }
-
-
-def _planner_preview_intents_for_kind(preview_kind: str | None) -> tuple[str, ...]:
-    kind = str(preview_kind or "").strip()
-    if kind == "manual_assignment":
-        return ("manual_assignment",)
-    if kind == "manual_expiry":
-        return ("manual_expiry",)
-    if kind == "manual_trade_open":
-        return ("manual_trade_open",)
-    if kind == "manual_trade_close":
-        return ("manual_trade_close",)
-    if kind == "manual_trade":
-        return ("manual_trade_open", "manual_trade_close")
-    if kind == "manual_trade_update":
-        return ("manual_trade_update",)
-    if kind == "symbol_edit":
-        return ("symbol_edit",)
-    if kind == "model_use":
-        return ("model_use",)
-    if kind == "upgrade_now":
-        return ("upgrade_now",)
-    return ()
 
 
 def _planner_input_text(text: str, *, conversation_context: dict[str, Any] | None) -> str:
@@ -4488,12 +4462,18 @@ def _answer_context_trace(question: str, conversation_context: dict[str, Any] | 
     return payload
 
 
-def _planner_manifest_budget(*, tools: list[dict[str, Any]], analysis_view_selection: dict[str, Any]) -> dict[str, Any]:
+def _planner_manifest_budget(
+    *,
+    tools: list[dict[str, Any]],
+    analysis_view_selection: dict[str, Any],
+    preview_authority: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     selected = [
         str(item)
         for item in analysis_view_selection.get("selected_analysis_views") or []
         if str(item).strip()
     ]
+    preview = preview_authority if isinstance(preview_authority, dict) else {}
     return {
         "schema_version": "om-planner-manifest-budget-v1",
         "mode": analysis_view_selection.get("mode"),
@@ -4505,8 +4485,7 @@ def _planner_manifest_budget(*, tools: list[dict[str, Any]], analysis_view_selec
         "selected_analysis_views": selected,
         "matched_view_groups": list(analysis_view_selection.get("matched_view_groups") or []),
         "selection_sources": list(analysis_view_selection.get("selection_sources") or []),
-        "selected_preview_intents": list(analysis_view_selection.get("selected_preview_intents") or []),
-        "preview_kind": str(analysis_view_selection.get("preview_kind") or ""),
+        "preview_authority_allowed": bool(preview.get("allowed", False)),
         "fallback": "use analysis_catalog first when a needed analysis view or field is not included",
     }
 
@@ -5039,23 +5018,38 @@ def _analysis_views_for_planner_manifest(
 
 def _analysis_field_semantics_for_planner(field_semantics: dict[str, Any]) -> dict[str, dict[str, Any]]:
     allowed_keys = {
-        "type",
         "unit",
         "currency",
-        "formula",
         "aggregation",
-        "null_meaning",
-        "source",
-        "freshness",
         "do_not",
     }
     out: dict[str, dict[str, Any]] = {}
     for field, raw_meta in field_semantics.items():
         if not isinstance(raw_meta, dict):
             continue
+        if not _planner_field_semantics_keep(field):
+            continue
         meta = {key: value for key, value in raw_meta.items() if key in allowed_keys and value not in (None, "", [], {})}
         out[str(field)] = meta
     return out
+
+
+def _planner_field_semantics_keep(field: Any) -> bool:
+    name = str(field or "").strip().lower()
+    if not name:
+        return False
+    return any(
+        token in name
+        for token in (
+            "rate",
+            "pnl",
+            "income",
+            "cash_secured",
+            "amount",
+            "premium",
+            "proceeds",
+        )
+    )
 
 
 def _planner_preview_input_schema(intent_name: str) -> dict[str, Any]:

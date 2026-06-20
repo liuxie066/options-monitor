@@ -58,6 +58,10 @@ user message
 
 - 模型通过 provider structured tool call 表达工具意图，不写普通文本 JSON plan。
 - host 不从 Markdown、自然语言或 `output_text` 中提取 JSON plan。
+- 普通自然语言默认进入模型驱动 capability selection；host 不再提前把 broker
+  notice 收窄成唯一 preview tool。
+- provider-visible manifest 同时包含按消息裁剪后的 read tools 和 preview
+  capabilities，由模型选择工具。
 - 自动 tool loop 只执行 `READ_AUTO` 工具。
 - schema、scope、safety、duplicate、read-tool error 等可恢复问题进入 bounded
   observation，最多给模型一次修正机会。
@@ -86,6 +90,8 @@ user message
 - 不把 deterministic natural-language parser 作为 broker notice 的主路由；
   但 explicit preview / command 已经有高置信 deterministic candidate 时，
   可以作为 provider protocol malformed 的安全兜底。
+- 不用 preview-only manifest 作为自然语言业务路由；preview-only 只能作为
+  历史风险收敛阶段的实现细节，不是当前模型智能化方向。
 - 不让模型自动确认、取消、apply、发通知、写 ledger、写 trade event、写 position、
   改配置或触碰 broker-facing state。
 
@@ -264,3 +270,35 @@ git diff --check
 后续方案已并入
 [OM_ASSISTANT_TOOL_CALLING_V2_SYSTEM_DESIGN.md](OM_ASSISTANT_TOOL_CALLING_V2_SYSTEM_DESIGN.md)
 的 Slice 9：Provider Argument / Preview Hardening。
+
+## 11. V3 Model-Driven Capability Selection
+
+Slice 9 之后继续升级的核心变化：
+
+- `./om assistant` 的普通自然语言入口不再由 host-side
+  `preview_request_kind_from_text(...)` 决定具体业务 tool。
+- planner payload 中同时提供 read tools 和 preview capabilities。
+- host 只提供 `preview_authority`：这条消息是否具备创建 pending preview 的
+  用户授权；它不指定 `manual_assignment`、`manual_expiry` 等具体工具。
+- `preview_authority` 先尊重解释、分析、收益、状态等 read intent；只有
+  explicit record/write/补录 或完整 broker lifecycle/fill notice 才允许 pending
+  preview。
+- 模型负责选择 read tool、preview capability、clarification 或 final-answer
+  路径。
+- preview capability 是 terminal action：host 创建 pending preview 后停止
+  loop，后续 `/confirm` / `/cancel` 仍由 deterministic command 处理。
+- deterministic natural-language parser 降级为 preview normalizer 和 provider
+  protocol malformed fallback，不再是 broker notice 的主路由。
+
+验收差异：
+
+- broker notice 的 provider tool list 不再只有一个 preview tool；模型能看到
+  read + preview 能力面。
+- read 查询即使能看到 preview capabilities，也不能在没有
+  `preview_authority` 时创建 pending preview。
+- `期权被指派通知是什么意思`、`成交提醒收益分析` 等通知解释/分析问题必须保持
+  read-only。
+- planner manifest 保留 read + preview 能力面，但 analysis view 详情采用紧凑
+  字段清单；需要完整字段语义时由模型调用 `analysis_catalog` 补证据。
+- malformed provider arguments 仍不能恢复普通文本 JSON plan，只能走 bounded
+  repair、clarification 或安全 deterministic preview fallback。
