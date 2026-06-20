@@ -1059,26 +1059,79 @@ def _data_summary(data: dict[str, Any]) -> dict[str, Any]:
 
 def _provider_data_preview(*, tool_name: str, data: dict[str, Any]) -> dict[str, Any]:
     if tool_name == "analysis_query":
+        rows = data.get("rows")
+        row_count = _optional_int(data.get("row_count"))
+        truncated = bool(data.get("truncated", False))
+        row_limit = _analysis_preview_row_limit(rows=rows, row_count=row_count, truncated=truncated)
+        preview_rows = _preview_rows(rows, limit=row_limit)
         return _compact_preview(
             {
                 "source_label": data.get("source_label") or "OM read-only analysis workspace",
                 "columns": _preview_columns(data.get("columns")),
-                "rows": _preview_rows(data.get("rows"), limit=12),
-                "row_count": _optional_int(data.get("row_count")),
-                "truncated": bool(data.get("truncated", False)),
+                "rows": preview_rows,
+                "row_count": row_count,
+                "rows_complete": _preview_rows_complete(
+                    preview_rows=preview_rows,
+                    row_count=row_count,
+                    truncated=truncated,
+                ),
+                "row_preview_limit": row_limit,
+                "truncated": truncated,
                 "views_used": _preview_columns(data.get("views_used")),
-                "fallback_text": _preview_text(data.get("fallback_text"), limit=12000),
+                "fallback_text": "" if preview_rows else _preview_text(data.get("fallback_text"), limit=12000),
             }
         )
     if tool_name == "monthly_income_report":
+        summary_rows, summary_complete, summary_limit = _preview_rows_with_metadata(
+            data.get("summary"),
+            row_count=_optional_int(data.get("row_count")),
+            default_limit=8,
+        )
+        return_rows, return_complete, return_limit = _preview_rows_with_metadata(
+            data.get("return_summary"),
+            row_count=None,
+            default_limit=8,
+        )
+        combined_rows, combined_complete, combined_limit = _preview_rows_with_metadata(
+            data.get("combined_return_summary"),
+            row_count=None,
+            default_limit=4,
+        )
+        cashflow_rows, cashflow_complete, cashflow_limit = _preview_rows_with_metadata(
+            data.get("cashflow_rows"),
+            row_count=_optional_int(data.get("cashflow_row_count")),
+            default_limit=12,
+        )
+        realized_rows, realized_complete, realized_limit = _preview_rows_with_metadata(
+            data.get("realized_rows"),
+            row_count=_optional_int(data.get("realized_row_count")),
+            default_limit=12,
+        )
+        premium_rows, premium_complete, premium_limit = _preview_rows_with_metadata(
+            data.get("premium_rows"),
+            row_count=_optional_int(data.get("premium_row_count")),
+            default_limit=12,
+        )
         return _compact_preview(
             {
-                "summary": _preview_rows(data.get("summary"), limit=8),
-                "return_summary": _preview_rows(data.get("return_summary"), limit=8),
-                "combined_return_summary": _preview_rows(data.get("combined_return_summary"), limit=4),
-                "cashflow_rows": _preview_rows(data.get("cashflow_rows"), limit=12),
-                "realized_rows": _preview_rows(data.get("realized_rows"), limit=12),
-                "premium_rows": _preview_rows(data.get("premium_rows"), limit=12),
+                "summary": summary_rows,
+                "summary_complete": summary_complete,
+                "summary_preview_limit": summary_limit,
+                "return_summary": return_rows,
+                "return_summary_complete": return_complete,
+                "return_summary_preview_limit": return_limit,
+                "combined_return_summary": combined_rows,
+                "combined_return_summary_complete": combined_complete,
+                "combined_return_summary_preview_limit": combined_limit,
+                "cashflow_rows": cashflow_rows,
+                "cashflow_rows_complete": cashflow_complete,
+                "cashflow_rows_preview_limit": cashflow_limit,
+                "realized_rows": realized_rows,
+                "realized_rows_complete": realized_complete,
+                "realized_rows_preview_limit": realized_limit,
+                "premium_rows": premium_rows,
+                "premium_rows_complete": premium_complete,
+                "premium_rows_preview_limit": premium_limit,
                 "row_count": _optional_int(data.get("row_count")),
                 "premium_row_count": _optional_int(data.get("premium_row_count")),
                 "cashflow_row_count": _optional_int(data.get("cashflow_row_count")),
@@ -1086,6 +1139,44 @@ def _provider_data_preview(*, tool_name: str, data: dict[str, Any]) -> dict[str,
             }
         )
     return {}
+
+
+def _analysis_preview_row_limit(*, rows: Any, row_count: int | None, truncated: bool) -> int:
+    if truncated:
+        return 12
+    if isinstance(rows, list):
+        observed_count = len(rows)
+        if observed_count <= 50 and (row_count is None or row_count <= 50):
+            return max(observed_count, row_count or 0)
+    return 12
+
+
+def _preview_rows_with_metadata(
+    value: Any,
+    *,
+    row_count: int | None,
+    default_limit: int,
+    truncated: bool = False,
+) -> tuple[list[dict[str, Any]], bool | None, int | None]:
+    if not isinstance(value, list) and row_count is None:
+        return [], None, None
+    limit = _analysis_preview_row_limit(rows=value, row_count=row_count, truncated=truncated)
+    if limit == 12 and default_limit != 12:
+        limit = default_limit
+    rows = _preview_rows(value, limit=limit)
+    return (
+        rows,
+        _preview_rows_complete(preview_rows=rows, row_count=row_count, truncated=truncated),
+        limit,
+    )
+
+
+def _preview_rows_complete(*, preview_rows: list[dict[str, Any]], row_count: int | None, truncated: bool) -> bool:
+    if truncated:
+        return False
+    if row_count is not None:
+        return row_count <= len(preview_rows)
+    return bool(preview_rows)
 
 
 def _preview_columns(value: Any, *, limit: int = 24) -> list[str]:

@@ -4,6 +4,7 @@ from typing import Any
 
 from src.application.agent_tool_contracts import build_response
 from src.application.assistant.agent_loop import (
+    build_synthesis_observation,
     execute_model_tool_call_event,
     execute_tool_loop_payload,
     run_assistant_tool_event_loop,
@@ -389,6 +390,174 @@ def test_run_assistant_tool_event_loop_recovers_from_scope_denial_once() -> None
     assert trace["continuation_count"] == 2
     assert trace["repair_attempted"] is True
     assert trace["capability_selection"]["selected_count"] == 2
+
+
+def test_run_assistant_tool_event_loop_turns_duplicate_query_into_final_answer() -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+    continuation_payloads: list[dict[str, Any]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "schema_version": "analysis.query.output.v2",
+                "source_label": "OM read-only analysis workspace",
+                "columns": ["month", "account", "net_income_cny"],
+                "rows": [
+                    {"month": "2026-06", "account": "lx", "net_income_cny": 3000.27},
+                    {"month": "2026-06", "account": "sy", "net_income_cny": 11138.28},
+                ],
+                "row_count": 2,
+                "truncated": False,
+                "views_used": ["account_monthly_performance"],
+            },
+        )
+
+    def _continue(payload: dict[str, Any]) -> dict[str, Any]:
+        continuation_payloads.append(payload)
+        if len(continuation_payloads) == 1:
+            return {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_analysis_duplicate_1",
+                        "name": "analysis_query",
+                        "arguments": (
+                            '{"sql":"select month, account, net_income_cny from account_monthly_performance '
+                            "where month = '2026-06' order by account\","
+                            '"limit":200}'
+                        ),
+                    }
+                ]
+            }
+        assert "tools" not in payload
+        assert "tool_choice" not in payload
+        assert "DUPLICATE_TOOL_CALL" in payload["input"][-1]["output"]
+        assert "Do not call any more tools" in payload["instructions"]
+        return {
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "6月收益已基于已有查询结果完成总结。"}],
+                }
+            ]
+        }
+
+    event = model_tool_call_from_provider_block(
+        {
+            "type": "function_call",
+            "call_id": "call_analysis_1",
+            "name": "analysis_query",
+            "arguments": (
+                '{"sql":"select month, account, net_income_cny from account_monthly_performance '
+                "where month = '2026-06' order by account\"}"
+            ),
+        },
+        provider="openai",
+        event_id="model_tool_call_1",
+    )
+
+    outcome = run_assistant_tool_event_loop(
+        question="总结分析6月的收益情况",
+        request=AssistantRequest(text="总结分析6月的收益情况", sender_id="u1", config_key="us"),
+        task_contract={"requested_effect": "read", "scope": {"months": ["2026-06"]}},
+        initial_events=(event,),
+        execute_tool_fn=_execute,
+        provider="openai",
+        create_continuation_response_fn=_continue,
+    )
+
+    assert outcome.status == "done"
+    assert outcome.stop_reason == "model_final_answer"
+    assert outcome.final_answer == "6月收益已基于已有查询结果完成总结。"
+    assert calls == [
+        (
+            "analysis_query",
+            {
+                "sql": "select month, account, net_income_cny from account_monthly_performance where month = '2026-06' order by account",
+                "config_key": "us",
+            },
+        )
+    ]
+    assert len(continuation_payloads) == 2
+    trace = outcome.public_payload()["trace"]
+    assert trace["continuation_count"] == 2
+    assert trace["repair_attempted"] is True
+    assert trace["answer_route"] == "llm_from_tool_observation"
+
+
+def test_synthesis_observation_keeps_moderate_analysis_rows_complete() -> None:
+    result = build_response(
+        tool_name="analysis_query",
+        ok=True,
+        data={
+            "schema_version": "analysis.query.output.v2",
+            "source_label": "OM read-only analysis workspace",
+            "columns": ["month", "account", "symbol", "amount_gross"],
+            "rows": [
+                {
+                    "month": "2026-06",
+                    "account": "lx" if index % 2 == 0 else "sy",
+                    "symbol": f"SYM{index:02d}",
+                    "amount_gross": float(index),
+                }
+                for index in range(31)
+            ],
+            "row_count": 31,
+            "truncated": False,
+            "views_used": ["symbol_income_attribution"],
+        },
+    )
+
+    observation = build_synthesis_observation(
+        index=1,
+        tool_name="analysis_query",
+        payload={"config_key": "us", "sql": "select * from symbol_income_attribution"},
+        result=result,
+    )
+
+    data = observation["data"]
+    assert len(data["rows"]) == 31
+    assert data["rows_complete"] is True
+    assert data["row_preview_limit"] == 31
+
+
+def test_synthesis_observation_keeps_moderate_monthly_income_rows_complete() -> None:
+    rows = [
+        {
+            "month": "2026-06",
+            "account": "lx" if index % 2 == 0 else "sy",
+            "symbol": f"SYM{index:02d}",
+            "currency": "USD",
+            "net_cashflow_gross": float(index),
+        }
+        for index in range(31)
+    ]
+    result = build_response(
+        tool_name="monthly_income_report",
+        ok=True,
+        data={
+            "summary": [{"month": "2026-06", "account": "lx", "currency": "USD", "net_cashflow_gross": 12.0}],
+            "return_summary": [{"month": "2026-06", "account": "lx", "net_income_cny": 88.0}],
+            "cashflow_rows": rows,
+            "row_count": 1,
+            "cashflow_row_count": 31,
+        },
+    )
+
+    observation = build_synthesis_observation(
+        index=1,
+        tool_name="monthly_income_report",
+        payload={"config_key": "us", "month": "2026-06", "include_rows": True},
+        result=result,
+    )
+
+    data = observation["data"]
+    assert len(data["cashflow_rows"]) == 31
+    assert data["cashflow_rows_complete"] is True
+    assert data["cashflow_rows_preview_limit"] == 31
 
 
 def test_run_assistant_tool_event_loop_stops_repeated_recoverable_denial() -> None:

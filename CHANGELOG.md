@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.2.324 - 2026-06-20
+
+### Fixed
+- Preserved complete moderate-size Assistant analysis and income-report row previews for LLM synthesis so ClawBot can
+  summarize 6月收益 attribution instead of falling back to truncated detail tables.
+- Converted duplicate Assistant analysis tool calls into final-answer-only continuations so repeated queries reuse
+  existing evidence rather than stopping before the user-facing summary.
+
 ## 1.2.323 - 2026-06-20
 
 ### Fixed
