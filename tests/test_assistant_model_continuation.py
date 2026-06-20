@@ -55,6 +55,47 @@ def _income_tool_result(model_event: ModelToolCallEvent | None = None) -> ToolRe
     ).event
 
 
+def _analysis_tool_call() -> ModelToolCallEvent:
+    return model_tool_call_from_provider_block(
+        {
+            "type": "function_call",
+            "call_id": "call_analysis_1",
+            "name": "analysis_query",
+            "arguments": '{"sql":"select month, account, net_income_cny from account_monthly_performance","limit":20}',
+        },
+        provider="openai",
+        event_id="model_tool_call_analysis_1",
+    )
+
+
+def _analysis_tool_result(model_event: ModelToolCallEvent | None = None) -> ToolResultEvent:
+    event = model_event or _analysis_tool_call()
+    return adapt_tool_result(
+        event_id="result_call_analysis_1",
+        parent_event_id="guard_call_analysis_1",
+        tool_call_id=event.tool_call_id,
+        tool_name=event.tool_name,
+        normalized_payload={**event.arguments, "config_key": "us"},
+        raw_result=build_response(
+            tool_name=event.tool_name,
+            ok=True,
+            data={
+                "schema_version": "analysis.query.output.v2",
+                "source_label": "OM read-only analysis workspace",
+                "columns": ["month", "account", "net_income_cny"],
+                "rows": [
+                    {"month": "2026-06", "account": "lx", "net_income_cny": 2414.0},
+                    {"month": "2026-06", "account": "sy", "net_income_cny": 11138.0},
+                ],
+                "row_count": 2,
+                "truncated": False,
+                "views_used": ["account_monthly_performance"],
+                "fallback_text": "分析查询结果：2 行\n| month | account | net_income_cny |",
+            },
+        ),
+    ).event
+
+
 def test_openai_responses_continuation_input_binds_original_tool_call_id() -> None:
     call = _income_tool_call()
     result = _income_tool_result(call)
@@ -75,6 +116,20 @@ def test_openai_responses_continuation_input_binds_original_tool_call_id() -> No
     assert output["is_error"] is False
     assert output["content"]["tool_name"] == "monthly_income_report"
     assert output["content"]["data_summary"]["row_count"] == 1
+
+
+def test_continuation_observation_includes_analysis_query_rows_preview() -> None:
+    call = _analysis_tool_call()
+    result = _analysis_tool_result(call)
+
+    continuation = openai_responses_continuation_input(model_event=call, tool_result_event=result)
+
+    output = json.loads(continuation[1]["output"])
+    preview = output["content"]["data_preview"]
+    assert preview["columns"] == ["month", "account", "net_income_cny"]
+    assert preview["rows"][0] == {"month": "2026-06", "account": "lx", "net_income_cny": 2414.0}
+    assert preview["rows"][1]["net_income_cny"] == 11138.0
+    assert "sql" not in json.dumps(preview, ensure_ascii=False).lower()
 
 
 def test_chat_completions_continuation_messages_bind_tool_call_id() -> None:

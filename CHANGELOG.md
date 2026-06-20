@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.323 - 2026-06-20
+
+### Fixed
+- Fixed Assistant/ClawBot income-summary continuations so analysis query rows are visible to the model and the answer
+  guard rejects claims that observed numeric rows were unavailable.
+
 ## 1.2.322 - 2026-06-20
 
 ### Added

@@ -506,6 +506,9 @@ def adapt_tool_result(
         "missing_data": [_copy_mapping(item) for item in missing_data],
         "conflicts": [_copy_mapping(item) for item in conflicts],
     }
+    data_preview = _provider_data_preview(tool_name=tool_name, data=data)
+    if data_preview:
+        observation["data_preview"] = data_preview
     if error:
         observation["error"] = {
             "code": error_code,
@@ -1052,6 +1055,99 @@ def _data_summary(data: dict[str, Any]) -> dict[str, Any]:
             "source_label": str(output_contract.get("source_label") or ""),
         }
     return {key: value for key, value in summary.items() if value not in (None, "", [])}
+
+
+def _provider_data_preview(*, tool_name: str, data: dict[str, Any]) -> dict[str, Any]:
+    if tool_name == "analysis_query":
+        return _compact_preview(
+            {
+                "source_label": data.get("source_label") or "OM read-only analysis workspace",
+                "columns": _preview_columns(data.get("columns")),
+                "rows": _preview_rows(data.get("rows"), limit=12),
+                "row_count": _optional_int(data.get("row_count")),
+                "truncated": bool(data.get("truncated", False)),
+                "views_used": _preview_columns(data.get("views_used")),
+                "fallback_text": _preview_text(data.get("fallback_text"), limit=12000),
+            }
+        )
+    if tool_name == "monthly_income_report":
+        return _compact_preview(
+            {
+                "summary": _preview_rows(data.get("summary"), limit=8),
+                "return_summary": _preview_rows(data.get("return_summary"), limit=8),
+                "combined_return_summary": _preview_rows(data.get("combined_return_summary"), limit=4),
+                "cashflow_rows": _preview_rows(data.get("cashflow_rows"), limit=12),
+                "realized_rows": _preview_rows(data.get("realized_rows"), limit=12),
+                "premium_rows": _preview_rows(data.get("premium_rows"), limit=12),
+                "row_count": _optional_int(data.get("row_count")),
+                "premium_row_count": _optional_int(data.get("premium_row_count")),
+                "cashflow_row_count": _optional_int(data.get("cashflow_row_count")),
+                "realized_row_count": _optional_int(data.get("realized_row_count")),
+            }
+        )
+    return {}
+
+
+def _preview_columns(value: Any, *, limit: int = 24) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value[:limit] if str(item).strip()]
+
+
+def _preview_rows(value: Any, *, limit: int) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [_preview_mapping(item) for item in value[:limit] if isinstance(item, dict)]
+
+
+def _preview_mapping(value: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key, item in value.items():
+        key_text = str(key)
+        if _sensitive_preview_key(key_text):
+            continue
+        out[key_text] = _preview_value(item)
+    return out
+
+
+def _preview_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return _preview_mapping(value)
+    if isinstance(value, list):
+        return [_preview_value(item) for item in value[:8]]
+    if isinstance(value, tuple):
+        return [_preview_value(item) for item in value[:8]]
+    if isinstance(value, str):
+        return _preview_text(value, limit=1000)
+    return _copy_value(value)
+
+
+def _preview_text(value: Any, *, limit: int) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 16)].rstrip() + "...(truncated)"
+
+
+def _compact_preview(value: dict[str, Any]) -> dict[str, Any]:
+    return {key: item for key, item in value.items() if item not in (None, "", [], {})}
+
+
+def _sensitive_preview_key(key: str) -> bool:
+    lowered = key.lower()
+    if _sensitive_summary_key(lowered):
+        return True
+    return lowered in {
+        "artifact_path",
+        "event_id",
+        "position_key",
+        "record_id",
+        "source_deal_id",
+        "stock_lot_id",
+        "trace_id",
+    }
 
 
 def _dataset_summary(*, tool_name: str, data: dict[str, Any], raw_result: dict[str, Any]) -> dict[str, Any]:
