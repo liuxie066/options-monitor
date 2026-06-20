@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 1.2.321 - 2026-06-20
+## 1.2.322 - 2026-06-20
 
 ### Added
 - Added Assistant model-turn loop hardening so recoverable provider protocol, guard, duplicate, and tool-result errors
