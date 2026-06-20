@@ -11,13 +11,11 @@ from src.application.assistant.agent_loop import (
     AGENT_LOOP_SCHEMA_VERSION,
     AGENT_LOOP_PREVIEW_CAPABILITIES,
     AGENT_LOOP_READ_TOOLS,
+    EventNativePlanningResult,
     PLANNER_CONTEXT_USE_SCHEMA_VERSION,
     TOOL_CHECK_SCHEMA_VERSION,
     TOOL_PLAN_SCHEMA_VERSION,
-    LlmSynthesisResult,
     LlmPlannerResult,
-    PlannerPlan,
-    PlannerPlanStep,
     ToolExecutor,
     _clarification_reason_code,
     _evidence_gap_allows_followup,
@@ -29,14 +27,12 @@ from src.application.assistant.agent_loop import (
     _planner_tool_manifest,
     _synthesis_input_text,
     _tool_loop_duplicate_signature,
+    _validate_model_tool_call_events,
     build_tool_observation,
-    execute_tool_plan,
-    parse_tool_plan_payload,
     plan_read_only_tools,
     run_read_only_agent_loop,
-    tool_plan_json_schema,
-    validate_tool_plan,
 )
+from src.application.assistant.model_events import AssistantEvent, ModelToolCallEvent
 from src.application.assistant.action_policy import ACTION_POLICY_SCHEMA_VERSION, decide_tool_action_policy
 from src.application.assistant.action_safety import ACTION_SAFETY_SCHEMA_VERSION, assess_action_safety
 from src.application.assistant.capability_catalog import (
@@ -75,9 +71,9 @@ from src.application.agent_tool_registry import get_tool_definition
 from src.application.assistant.reasoning import CONFIG_SCOPED_INTENTS
 from src.application.assistant.audit import InboundAuditStore
 from src.application.assistant.contracts import PERCEPTION_RESULT_SCHEMA_VERSION, AssistantRequest, PerceptionResult, ToolCall
-from src.infrastructure.openai_chat_completions import create_json_chat_completion, extract_chat_completion_text
+from src.infrastructure.openai_chat_completions import create_chat_completion_from_payload, create_json_chat_completion, extract_chat_completion_text
 from src.infrastructure.openai_chat_completions import create_tool_call_chat_completion
-from src.infrastructure.openai_responses import OpenAIResponsesError, create_structured_response, create_tool_call_response, extract_response_text
+from src.infrastructure.openai_responses import OpenAIResponsesError, create_response_from_payload, create_structured_response, create_tool_call_response, extract_response_text
 
 
 def _planner_trace(*, reason: str = "accepted", schema_version: str = TOOL_PLAN_SCHEMA_VERSION) -> dict[str, Any]:
@@ -130,31 +126,165 @@ def _plan_result(
     purpose: str = "",
     task_contract: dict[str, Any] | None = None,
 ) -> LlmPlannerResult:
+    args = dict(arguments or {})
+    is_preview = tool_name in AGENT_LOOP_PREVIEW_CAPABILITIES
+    effective_goal = str(args.get("raw_text") or goal) if is_preview and goal == "test plan" else goal
     default_task_contract = (
         _test_task_contract(
-            goal=goal,
+            goal=effective_goal,
             domain="operation",
             task_mode="preview_write",
             requested_effect="preview_write",
+            scope=_fixture_preview_scope(args),
         )
-        if tool_name in AGENT_LOOP_PREVIEW_CAPABILITIES
+        if is_preview
         else _test_task_contract(goal=goal)
     )
-    return LlmPlannerResult(
-        plan=PlannerPlan(
-            goal=goal,
-            task_contract=task_contract or default_task_contract,
-            steps=(
-                PlannerPlanStep(
-                    id="step_1",
-                    tool_name=tool_name,
-                    arguments=dict(arguments or {}),
-                    purpose=purpose,
-                ),
-            ),
-        ),
-        trace=_planner_trace(),
+    event = (
+        AssistantEvent(
+            event_id="preview_request_1",
+            event_type="preview_request",
+            payload={
+                "intent_name": tool_name,
+                "arguments": args,
+                "reason": purpose or f"Preview {tool_name} for the current request.",
+            },
+            parent_event_id="user_message_1",
+        )
+        if is_preview
+        else ModelToolCallEvent(
+            event_id="model_tool_call_1",
+            tool_call_id="call_1",
+            tool_name=tool_name,
+            arguments=args,
+            purpose=purpose or f"Use {tool_name} for the current request.",
+            provider="openai",
+            parent_event_id="user_message_1",
+        )
     )
+    return LlmPlannerResult(
+        plan=None,
+        trace=_planner_trace(),
+        event_plan=EventNativePlanningResult(
+            events=(event,),
+            task_contract=task_contract or default_task_contract,
+            required_capabilities=("preview_operation",) if is_preview else (),
+            context_use={
+                "schema_version": PLANNER_CONTEXT_USE_SCHEMA_VERSION,
+                "mode": "none",
+                "referenced_turn_ids": [],
+                "referenced_evidence_refs": [],
+                "inherited_slots": {},
+                "current_message_slots": {},
+                "override_slots": {},
+                "requires_clarification": False,
+                "clarification_question": None,
+            },
+            provider="openai",
+            goal=effective_goal,
+        ),
+    )
+
+
+def _with_required_capabilities(result: LlmPlannerResult, *required_capabilities: str) -> LlmPlannerResult:
+    assert result.event_plan is not None
+    return LlmPlannerResult(
+        plan=None,
+        trace=result.trace,
+        error=result.error,
+        event_plan=EventNativePlanningResult(
+            events=result.event_plan.events,
+            task_contract=result.event_plan.task_contract,
+            required_capabilities=tuple(required_capabilities),
+            context_use=result.event_plan.context_use,
+            context_validation=result.event_plan.context_validation,
+            provider=result.event_plan.provider,
+            goal=result.event_plan.goal,
+            schema_version=result.event_plan.schema_version,
+        ),
+    )
+
+
+def _event_plan_result(
+    *events: ModelToolCallEvent | AssistantEvent,
+    goal: str,
+    task_contract: dict[str, Any] | None = None,
+    required_capabilities: tuple[str, ...] = (),
+) -> LlmPlannerResult:
+    return LlmPlannerResult(
+        plan=None,
+        trace=_planner_trace(),
+        event_plan=EventNativePlanningResult(
+            events=tuple(events),
+            task_contract=task_contract or _test_task_contract(goal=goal),
+            required_capabilities=required_capabilities,
+            context_use={
+                "schema_version": PLANNER_CONTEXT_USE_SCHEMA_VERSION,
+                "mode": "none",
+                "referenced_turn_ids": [],
+                "referenced_evidence_refs": [],
+                "inherited_slots": {},
+                "current_message_slots": {},
+                "override_slots": {},
+                "requires_clarification": False,
+                "clarification_question": None,
+            },
+            provider="openai",
+            goal=goal,
+        ),
+    )
+
+
+def _fixture_preview_scope(arguments: dict[str, Any]) -> dict[str, Any]:
+    scope: dict[str, Any] = {}
+    symbols: list[str] = []
+    account = str(arguments.get("account") or "").strip().lower()
+    if account:
+        scope["requested_accounts"] = [account]
+    symbol = str(arguments.get("symbol") or "").strip().upper()
+    if symbol:
+        symbols.append(symbol)
+    raw_text = str(arguments.get("raw_text") or "")
+    for token in raw_text.split():
+        upper = token.strip("，。,.;:()[]{}").upper()
+        if upper.isascii() and upper.isalpha() and 1 <= len(upper) <= 6 and upper not in {"PUT", "CALL"}:
+            symbols.append(upper)
+    if symbols:
+        scope["requested_symbols"] = sorted(set(symbols))
+    return scope
+
+
+def _event_plan_steps(result: LlmPlannerResult) -> list[dict[str, Any]]:
+    assert result.event_plan is not None
+    return list(result.event_plan.plan_like_payload()["steps"])
+
+
+def _event_loop_result_data(out: dict[str, Any]) -> dict[str, Any]:
+    data = out.get("data") if isinstance(out.get("data"), dict) else {}
+    action = data.get("action") if isinstance(data.get("action"), dict) else {}
+    result = action.get("result") if isinstance(action.get("result"), dict) else data.get("tool_result")
+    assert isinstance(result, dict)
+    result_data = result.get("data")
+    assert isinstance(result_data, dict)
+    assert result_data["schema_version"] == "om-assistant-tool-loop-result-v1"
+    return result_data
+
+
+def _assert_event_loop_rendered(out: dict[str, Any], *, reason: str = "awaiting_model_continuation") -> dict[str, Any]:
+    result_data = _event_loop_result_data(out)
+    assert result_data["final_response"] == {
+        "status": "rendered",
+        "reason": reason,
+        "canonical_renderer_required": True,
+        "llm_may_summarize": False,
+    }
+    event_loop = result_data["event_loop"]
+    assert event_loop["trace"]["planner_plan_used"] is False
+    assert event_loop["trace"]["loop_stop_reason"] == reason
+    assert "plan_revisions" not in result_data
+    assert "followup_decisions" not in result_data
+    assert "synthesis" not in result_data
+    return result_data
 
 
 def _candidate_filter_net_income_popmart_data() -> dict[str, Any]:
@@ -476,25 +606,21 @@ def test_llm_capability_manifest_lists_known_but_non_executable_operations() -> 
     assert "Choose only capabilities" in manifest["routing_rule"]
 
 
-def test_internal_tool_plan_is_agent_loop_only() -> None:
+def test_internal_tool_plan_is_deprecated_and_tool_loop_is_agent_loop_only() -> None:
     call = ToolCall(tool_name="assistant.tool_plan", payload={"plan": {}})
-    inbound_decision = DEFAULT_TOOL_POLICY.authorize_read_tool(call, source="inbound")
-    assert inbound_decision.allowed is True
-    assert inbound_decision.risk_level == "read_only"
-    assert inbound_decision.reason == "inbound_agent_loop_plan"
-
     try:
-        DEFAULT_TOOL_POLICY.authorize_read_tool(call, source="public")
+        DEFAULT_TOOL_POLICY.authorize_read_tool(call, source="inbound")
     except AgentToolError as err:
         assert err.code == "PERMISSION_DENIED"
-        assert err.details == {"source": "public"}
+        assert err.details == {"source": "inbound", "replacement": "assistant.tool_loop"}
     else:
-        raise AssertionError("public should not be allowed to call internal tool_plan")
+        raise AssertionError("assistant.tool_plan should not be allowed")
 
-    decision = DEFAULT_TOOL_POLICY.authorize_read_tool(call, source="agent_loop")
-    assert decision.allowed is True
-    assert decision.risk_level == "read_only"
-    assert decision.reason == "internal_read_only_tool_plan"
+    loop_call = ToolCall(tool_name="assistant.tool_loop", payload={"events": []})
+    loop_decision = DEFAULT_TOOL_POLICY.authorize_read_tool(loop_call, source="agent_loop")
+    assert loop_decision.allowed is True
+    assert loop_decision.risk_level == "read_only"
+    assert loop_decision.reason == "internal_read_only_tool_loop"
 
 
 def test_action_policy_wraps_read_only_authority() -> None:
@@ -619,25 +745,26 @@ def test_action_safety_allows_symbol_edit_alias_scope() -> None:
 
 def test_action_safety_allows_lowercase_symbol_edit_with_full_task_contract() -> None:
     question = "设置 tigr covered call min strike 6.5"
-    plan = PlannerPlan(
-        goal=question,
-        task_contract=_test_task_contract(
-            goal=question,
-            task_mode="preview_write",
-            requested_effect="preview_write",
-        ),
-        steps=(
-            PlannerPlanStep(
-                id="step_1",
+    event_plan = EventNativePlanningResult(
+        events=(
+            ModelToolCallEvent(
+                event_id="model_tool_call_1",
+                tool_call_id="call_1",
                 tool_name="symbol_edit",
                 arguments={"symbol": "TIGR", "set": {"sell_call.min_strike": 6.5}},
                 purpose="预览监控标的配置修改",
             ),
         ),
+        task_contract=_test_task_contract(
+            goal=question,
+            task_mode="preview_write",
+            requested_effect="preview_write",
+        ),
+        goal=question,
     )
     contract = build_task_contract(
         question=question,
-        plan=plan.public_payload(),
+        plan=event_plan.plan_like_payload(),
         request_context={"config_key": "us"},
         today=date(2026, 6, 14),
     ).public_payload()
@@ -788,6 +915,24 @@ def test_action_safety_asks_when_trade_preview_lacks_account_scope() -> None:
     assert safety["status"] == "ask"
     assert safety["code"] == "missing_account_scope"
     assert safety["route"] == "ask"
+
+
+def test_action_safety_uses_question_account_when_contract_scope_is_empty() -> None:
+    request = AssistantRequest(text="sy 期权被指派通知 PDD 已被指派", sender_id="local", config_key="us")
+    call = ToolCall(tool_name="manual_assignment", payload={"account": "sy", "raw_text": request.text})
+    policy = decide_tool_action_policy(call=call, request=request, task_contract={"requested_effect": "preview_write"})
+
+    safety = assess_action_safety(
+        question=request.text,
+        task_contract={"requested_effect": "preview_write", "scope": {"requested_accounts": []}},
+        tool_name="manual_assignment",
+        payload=call.payload,
+        action_policy=policy.public_payload(),
+    ).public_payload()
+
+    assert safety["status"] == "allow_preview"
+    assert safety["code"] == "ok"
+    assert safety["scope_delta"]["accounts"]["requested"] == ["sy"]
 
 
 def test_action_safety_denies_prompt_injection_chain_to_write() -> None:
@@ -1248,21 +1393,18 @@ def test_agent_loop_planner_catalog_matches_registry_backed_manifest() -> None:
     assert {str(spec.tool_name) for spec in planner_read_specs()} == AGENT_LOOP_READ_TOOLS
     assert manifest_names == AGENT_LOOP_READ_TOOLS | AGENT_LOOP_PREVIEW_CAPABILITIES
     assert "operation_timeline" in AGENT_LOOP_READ_TOOLS
-    validate_tool_plan(
-        PlannerPlan(
-            goal="补升级操作时间线证据",
-            task_contract=_test_task_contract(goal="补升级操作时间线证据", domain="operation", task_mode="diagnose"),
-            steps=(
-                PlannerPlanStep(
-                    id="step_1",
-                    tool_name="operation_timeline",
-                    arguments={"operation_types": ["upgrade_now"], "limit": 5},
-                ),
+    assert _validate_model_tool_call_events(
+        (
+            ModelToolCallEvent(
+                event_id="model_tool_call_1",
+                tool_call_id="call_1",
+                tool_name="operation_timeline",
+                arguments={"operation_types": ["upgrade_now"], "limit": 5},
             ),
         ),
         question="为什么升级没有回执？",
         allow_preview=False,
-    )
+    ) is None
     operation_timeline = next(tool for tool in _planner_tool_manifest() if tool["name"] == "operation_timeline")
     assert "operation_id" in operation_timeline["input_schema"]
     assert "operation_types" in operation_timeline["input_schema"]
@@ -1279,21 +1421,18 @@ def test_agent_loop_planner_catalog_matches_registry_backed_manifest() -> None:
     candidate_notes = " ".join(candidate_filter["planner_notes"])
     assert "single-symbol candidate filter" in candidate_notes
     assert "account is optional scan/run scope only" in candidate_notes
-    validate_tool_plan(
-        PlannerPlan(
-            goal="解释泡泡玛特候选过滤参数",
-            task_contract=_test_task_contract(goal="解释泡泡玛特候选过滤参数", domain="candidate", task_mode="diagnose"),
-            steps=(
-                PlannerPlanStep(
-                    id="step_1",
-                    tool_name="candidate_filter_explain",
-                    arguments={"symbol": "泡泡玛特"},
-                ),
+    assert _validate_model_tool_call_events(
+        (
+            ModelToolCallEvent(
+                event_id="model_tool_call_1",
+                tool_call_id="call_1",
+                tool_name="candidate_filter_explain",
+                arguments={"symbol": "泡泡玛特"},
             ),
         ),
         question="泡泡玛特被哪个参数过滤了？",
         allow_preview=False,
-    )
+    ) is None
     symbol_config = next(tool for tool in _planner_tool_manifest() if tool["name"] == "symbol_config_read")
     assert "symbol" in symbol_config["input_schema"]
     assert "strategy" in symbol_config["input_schema"]
@@ -1404,19 +1543,16 @@ def test_agent_loop_planner_uses_context_projection_while_synthesis_excludes_pro
     assert "active_frame" not in planner_payload["context"]
     assert "followup_resolution" not in planner_payload["context"]
 
+    plan_result = _plan_result(
+        "analysis_query",
+        {"query": {"select": ["*"], "from": "account_monthly_performance"}},
+        goal="继续分析",
+        task_contract=_test_task_contract(goal="继续分析", task_mode="analyze"),
+    )
+    assert plan_result.event_plan is not None
     synthesis_text = _synthesis_input_text(
         "继续",
-        plan=PlannerPlan(
-            goal="继续分析",
-            task_contract=_test_task_contract(goal="继续分析", task_mode="analyze"),
-            steps=(
-                PlannerPlanStep(
-                    id="step_1",
-                    tool_name="analysis_query",
-                    arguments={"query": {"select": ["*"], "from": "account_monthly_performance"}},
-                ),
-            ),
-        ),
+        plan=plan_result.event_plan.plan_like_payload(),
         observations=[],
         conversation_context=conversation_context,
     )
@@ -1514,20 +1650,17 @@ def test_agent_loop_planner_input_keeps_explicit_account_message_ahead_of_projec
     assert "candidate_filter_diagnostics" not in views
     assert payload["manifest_budget"]["selection_sources"] == ["message"]
 
+    plan_result = _plan_result(
+        "monthly_income_report",
+        {"account": "lx", "include_rows": True},
+        goal="解释账户净收入",
+        task_contract=_test_task_contract(goal="解释账户净收入", domain="income", task_mode="explain"),
+    )
+    assert plan_result.event_plan is not None
     synthesis_payload = json.loads(
         _synthesis_input_text(
             question,
-            plan=PlannerPlan(
-                goal="解释账户净收入",
-                task_contract=_test_task_contract(goal="解释账户净收入", domain="income", task_mode="explain"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="monthly_income_report",
-                        arguments={"account": "lx", "include_rows": True},
-                    ),
-                ),
-            ),
+            plan=plan_result.event_plan.plan_like_payload(),
             observations=[],
             conversation_context=context,
         )
@@ -2315,7 +2448,7 @@ def test_assistant_runtime_agent_loop_can_create_approved_write_preview(tmp_path
     ) -> LlmPlannerResult:
         assert incoming == text
         assert conversation_context is not None
-        return _plan_result("manual_trade_open", {"raw_text": text, "account": "sy"})
+        return _plan_result("manual_trade_open", {"raw_text": text, "account": "sy"}, goal=incoming)
 
     engine = PerceptionEngine(
         request=AssistantRequest(
@@ -2333,7 +2466,7 @@ def test_assistant_runtime_agent_loop_can_create_approved_write_preview(tmp_path
 
     assert perception.intent_name == "manual_trade_open"
     assert perception.arguments == {"raw_text": text, "account": "sy"}
-    assert perception.source == "agent_loop_plan"
+    assert perception.source == "agent_loop_events"
     assert engine.route == "agent_loop"
     assert engine.trace is not None
     trace = engine.trace.public_payload()
@@ -2359,38 +2492,7 @@ def test_assistant_runtime_agent_loop_prioritizes_bare_upgrade_confirm_over_plan
         _conversation_context: dict[str, Any] | None,
     ) -> LlmPlannerResult:
         plan_calls.append(text)
-        return LlmPlannerResult(
-            plan=PlannerPlan(
-                goal="误判为立即升级",
-                task_contract=_test_task_contract(
-                    goal="误判为立即升级",
-                    domain="operation",
-                    task_mode="preview_write",
-                    requested_effect="preview_write",
-                ),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="upgrade_now",
-                        arguments={},
-                        purpose="should not run for deterministic confirm commands",
-                    ),
-                ),
-            ),
-            trace={
-                "enabled": True,
-                "attempted": True,
-                "reason": "accepted",
-                "provider": "openai",
-                "base_url": "",
-                "model": "gpt-5.2",
-                "api_key_env": "OM_LLM_API_KEY",
-                "confidence_min": 0.75,
-                "timeout_seconds": 20,
-                "max_output_tokens": 512,
-                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-            },
-        )
+        raise AssertionError("bare confirm commands must bypass the LLM planner")
 
     engine = PerceptionEngine(
         request=AssistantRequest(
@@ -2437,7 +2539,7 @@ def test_assistant_runtime_does_not_fallback_for_unknown_llm_permission_denial(t
     ) -> LlmPlannerResult:
         assert text == "状态"
         assert conversation_context is not None
-        return _plan_result("unsupported_project_command")
+        return _plan_result("unsupported_project_command", goal=text)
 
     out = handle_assistant_message(
         AssistantRequest(
@@ -2482,7 +2584,7 @@ def test_assistant_runtime_does_not_fallback_for_mismatched_known_llm_denial(tmp
     ) -> LlmPlannerResult:
         assert text == "状态"
         assert conversation_context is not None
-        return _plan_result("manual_trade_open", {"raw_text": "记录开仓 sy NVDA"})
+        return _plan_result("manual_trade_open", {"raw_text": "记录开仓 sy NVDA"}, goal=text)
 
     out = handle_assistant_message(
         AssistantRequest(
@@ -2611,7 +2713,7 @@ def test_assistant_runtime_agent_loop_routes_read_text_without_deterministic_ali
     ) -> LlmPlannerResult:
         planned_texts.append(text)
         assert conversation_context is not None
-        return _plan_result("runtime_status")
+        return _plan_result("runtime_status", goal=text)
 
     out = handle_assistant_message(
         AssistantRequest(
@@ -2631,18 +2733,91 @@ def test_assistant_runtime_agent_loop_routes_read_text_without_deterministic_ali
     assert planned_texts == ["状态"]
     assert out["ok"] is True
     assert calls == [("runtime_status", {"config_key": "us"})]
-    assert out["data"]["perception"]["source"] == "agent_loop_plan"
-    assert out["data"]["perception"]["intent_name"] == "tool_plan"
+    assert out["data"]["perception"]["source"] == "agent_loop_events"
+    assert out["data"]["perception"]["intent_name"] == "tool_loop"
     assert out["meta"]["assistant"]["route"] == "agent_loop"
     perception_trace = out["meta"]["assistant"]["perception_trace"]
     assert perception_trace["decision"] == "agent_loop_selected"
     assert perception_trace["selected_source"] == "agent_loop"
     assert perception_trace["candidates"][0]["source"] == "agent_loop"
     assert perception_trace["candidates"][0]["status"] == "accepted"
-    assert perception_trace["candidates"][0]["intent_name"] == "tool_plan"
+    assert perception_trace["candidates"][0]["intent_name"] == "tool_loop"
     assert perception_trace["candidates"][1]["source"] == "deterministic"
     assert perception_trace["candidates"][1]["status"] == "rejected"
     assert perception_trace["candidates"][1]["error_code"] == "NEEDS_CLARIFICATION"
+
+
+def test_assistant_runtime_agent_loop_routes_provider_events_without_tool_plan_bridge(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        if tool_name == "assistant.tool_plan":
+            raise AssertionError("provider tool-call path must not execute assistant.tool_plan")
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "row_count": 1,
+                "rows": [{"account": "lx", "month": "2026-06", "net_income": 123.45}],
+            },
+        )
+
+    def _plan(
+        text: str,
+        _settings: AssistantSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        assert text == "lx 6月收益分析"
+        assert conversation_context is not None
+        return _plan_result(
+            "monthly_income_report",
+            {"account": "lx", "month": "2026-06", "include_rows": True},
+            goal="lx 6月收益分析",
+            purpose="read monthly income",
+            task_contract=_test_task_contract(
+                goal="lx 6月收益分析",
+                scope={"requested_accounts": ["lx"], "requested_months": ["2026-06"]},
+            ),
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="lx 6月收益分析",
+            sender_id="local",
+            message_id="msg_agent_loop_provider_event_loop",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+        now_fn=lambda: date(2026, 6, 20),
+    )
+
+    assert out["ok"] is True, out
+    assert calls == [
+        (
+            "monthly_income_report",
+            {"account": "lx", "month": "2026-06", "include_rows": True, "config_key": "us"},
+        )
+    ]
+    assert out["tool_name"] == "assistant.tool_loop"
+    assert out["data"]["perception"]["source"] == "agent_loop_events"
+    assert out["data"]["perception"]["intent_name"] == "tool_loop"
+    action_result = out["data"]["action"]["result"]["data"]
+    assert action_result["event_loop"]["trace"]["planner_plan_used"] is False
+    assert [event["event_type"] for event in action_result["event_transcript"]] == [
+        "model_tool_call",
+        "tool_guard_decision",
+        "tool_result",
+        "evidence_updated",
+    ]
+    assert out["meta"]["assistant"]["decision"]["selected_intent_name"] == "tool_loop"
+    assert out["meta"]["assistant"]["decision"]["execution_contract"]["operation_action"] == "tool_loop"
+    assert out["meta"]["assistant"]["llm"]["agent_loop"]["tool_events"][0]["planner_plan_used"] is False
 
 
 def test_assistant_runtime_rejects_llm_preview_write_conflict_with_deterministic_intent(tmp_path: Path) -> None:
@@ -2662,6 +2837,7 @@ def test_assistant_runtime_rejects_llm_preview_write_conflict_with_deterministic
         return _plan_result(
             "symbol_edit",
             {"symbol": "NVDA", "set": {"sell_call.min_strike": 140}},
+            goal=text,
         )
 
     out = handle_assistant_message(
@@ -2679,15 +2855,19 @@ def test_assistant_runtime_rejects_llm_preview_write_conflict_with_deterministic
     )
 
     assert out["ok"] is False
-    assert out["error"]["code"] == "PRE_TOOL_CHECK_FAILED"
+    assert out["error"]["code"] == "NEEDS_CLARIFICATION"
+    assert out["error"]["details"] == {
+        "llm_intent_name": "symbol_edit",
+        "deterministic_intent_name": "manual_trade_update",
+    }
     assert calls == []
     assert out["meta"]["assistant"]["route"] == "agent_loop"
     perception_trace = out["meta"]["assistant"]["perception_trace"]
-    assert perception_trace["decision"] == "llm_error"
+    assert perception_trace["decision"] == "llm_conflict_needs_clarification"
     assert perception_trace["selected_source"] is None
-    assert perception_trace["conflict"] is False
+    assert perception_trace["conflict"] is True
     assert perception_trace["candidates"][0]["source"] == "agent_loop"
-    assert perception_trace["candidates"][0]["error_code"] == "PRE_TOOL_CHECK_FAILED"
+    assert perception_trace["candidates"][0]["intent_name"] == "symbol_edit"
     assert perception_trace["candidates"][1]["source"] == "deterministic"
     assert perception_trace["candidates"][1]["intent_name"] == "manual_trade_update"
 
@@ -2930,7 +3110,7 @@ def test_assistant_runtime_routes_valid_llm_plan_through_inbound_router(tmp_path
             "sender_id": "local",
             "conversation_id": "local:local",
         }
-        return _plan_result("monthly_income_report", {"month": "2026-05"})
+        return _plan_result("monthly_income_report", {"month": "2026-05"}, goal=text)
 
     out = handle_assistant_message(
         AssistantRequest(
@@ -2954,24 +3134,24 @@ def test_assistant_runtime_routes_valid_llm_plan_through_inbound_router(tmp_path
 
     assert out["ok"] is True
     assert calls == [("monthly_income_report", {"config_key": "us", "month": "2026-05"})]
-    assert out["data"]["perception"]["source"] == "agent_loop_plan"
-    assert out["data"]["perception"]["intent_name"] == "tool_plan"
+    assert out["data"]["perception"]["source"] == "agent_loop_events"
+    assert out["data"]["perception"]["intent_name"] == "tool_loop"
     assert out["meta"]["assistant"]["route"] == "agent_loop"
     assert out["meta"]["assistant"]["llm"]["schema_version"] == TOOL_PLAN_SCHEMA_VERSION
     perception_trace = out["meta"]["assistant"]["perception_trace"]
     assert perception_trace["decision"] == "agent_loop_selected"
     assert perception_trace["selected_source"] == "agent_loop"
-    assert perception_trace["selected_perception"]["intent_name"] == "tool_plan"
+    assert perception_trace["selected_perception"]["intent_name"] == "tool_loop"
     assert perception_trace["candidates"][0]["source"] == "agent_loop"
     assert perception_trace["candidates"][0]["status"] == "accepted"
-    assert perception_trace["candidates"][0]["intent_name"] == "tool_plan"
+    assert perception_trace["candidates"][0]["intent_name"] == "tool_loop"
     assert perception_trace["candidates"][1]["source"] == "deterministic"
     assert perception_trace["candidates"][1]["status"] == "rejected"
     assert perception_trace["candidates"][1]["error_code"] == "NEEDS_CLARIFICATION"
     decision = out["meta"]["assistant"]["decision"]
     assert decision["route"] == "agent_loop"
     assert decision["selected_source"] == "agent_loop"
-    assert decision["selected_intent_name"] == "tool_plan"
+    assert decision["selected_intent_name"] == "tool_loop"
     assert decision["perception_decision"] == "agent_loop_selected"
     assert decision["llm"] == {"attempted": True, "reason": "accepted", "provider": "openai", "model": "gpt-5.2"}
     assert decision["execution_contract"]["read_only"] is True
@@ -3005,7 +3185,7 @@ def test_assistant_runtime_reconciles_missing_llm_month_from_text_filter(tmp_pat
     ) -> LlmPlannerResult:
         assert text == "查远端 sy 2026-06 收益摘要"
         assert conversation_context is not None
-        return _plan_result("monthly_income_report", {"account": "sy"})
+        return _plan_result("monthly_income_report", {"account": "sy"}, goal=text)
 
     out = handle_assistant_message(
         AssistantRequest(
@@ -3025,8 +3205,8 @@ def test_assistant_runtime_reconciles_missing_llm_month_from_text_filter(tmp_pat
 
     assert out["ok"] is True
     assert calls == [("monthly_income_report", {"config_key": "us", "account": "sy", "month": "2026-06"})]
-    plan_step_args = out["data"]["perception"]["arguments"]["plan"]["steps"][0]["arguments"]
-    assert plan_step_args == {"account": "sy", "month": "2026-06"}
+    event_args = out["data"]["perception"]["arguments"]["events"][0]["arguments"]
+    assert event_args == {"account": "sy", "month": "2026-06"}
     assert out["meta"]["assistant"]["perception_trace"]["selected_source"] == "agent_loop"
 
 
@@ -3044,7 +3224,7 @@ def test_assistant_runtime_reconciles_stale_llm_month_from_text_filter(tmp_path:
     ) -> LlmPlannerResult:
         assert text == "6月 sy 的收益"
         assert conversation_context is not None
-        return _plan_result("monthly_income_report", {"account": "sy", "month": "2026-05"})
+        return _plan_result("monthly_income_report", {"account": "sy", "month": "2026-05"}, goal=text)
 
     out = handle_assistant_message(
         AssistantRequest(
@@ -3064,8 +3244,8 @@ def test_assistant_runtime_reconciles_stale_llm_month_from_text_filter(tmp_path:
 
     assert out["ok"] is True
     assert calls == [("monthly_income_report", {"config_key": "us", "account": "sy", "month": "2026-06"})]
-    plan_step_args = out["data"]["perception"]["arguments"]["plan"]["steps"][0]["arguments"]
-    assert plan_step_args == {"account": "sy", "month": "2026-06"}
+    event_args = out["data"]["perception"]["arguments"]["events"][0]["arguments"]
+    assert event_args == {"account": "sy", "month": "2026-06"}
 
 
 def test_assistant_runtime_routes_core_read_only_planner_tools(tmp_path: Path) -> None:
@@ -3108,7 +3288,7 @@ def test_assistant_runtime_routes_core_read_only_planner_tools(tmp_path: Path) -
         _conversation_context: dict[str, Any] | None,
     ) -> LlmPlannerResult:
         tool_name, arguments = plan_by_text[text]
-        return _plan_result(tool_name, arguments)
+        return _plan_result(tool_name, arguments, goal=text)
 
     for index, (text, _tool_name, _arguments, expected_call) in enumerate(cases):
         out = handle_assistant_message(
@@ -3164,7 +3344,7 @@ def test_assistant_runtime_builds_context_from_same_conversation(tmp_path: Path)
         captured_context = conversation_context
         assert text == "刚才那个再看一下"
         assert settings.context_window_messages == 4
-        return _plan_result("runtime_status")
+        return _plan_result("runtime_status", goal=text)
 
     second = handle_assistant_message(
         AssistantRequest(
@@ -3395,7 +3575,6 @@ def test_assistant_runtime_two_turn_candidate_net_income_followup_uses_projectio
     followup_text = "净收入是怎么计算的？"
     captured_contexts: dict[str, dict[str, Any] | None] = {}
     captured_planner_payloads: dict[str, dict[str, Any]] = {}
-    captured_synthesis_payloads: dict[str, dict[str, Any]] = {}
 
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         if tool_name == "candidate_filter_explain":
@@ -3428,81 +3607,34 @@ def test_assistant_runtime_two_turn_candidate_net_income_followup_uses_projectio
     ) -> LlmPlannerResult:
         captured_contexts[text] = conversation_context
         if text == first_text:
-            return LlmPlannerResult(
-                plan=PlannerPlan(
+            return _plan_result(
+                "candidate_filter_explain",
+                {"account": "lx", "symbol": "泡泡玛特", "function": "sell_put"},
+                goal="解释泡泡玛特 sell_put 候选过滤参数",
+                purpose="读取单标的候选过滤 trace",
+                task_contract=_test_task_contract(
                     goal="解释泡泡玛特 sell_put 候选过滤参数",
-                    task_contract=_test_task_contract(
-                        goal="解释泡泡玛特 sell_put 候选过滤参数",
-                        domain="candidate",
-                        task_mode="diagnose",
-                        intent_families=("candidate_filter_explain",),
-                    ),
-                    steps=(
-                        PlannerPlanStep(
-                            id="step_1",
-                            tool_name="candidate_filter_explain",
-                            arguments={"account": "lx", "symbol": "泡泡玛特", "function": "sell_put"},
-                            purpose="读取单标的候选过滤 trace",
-                        ),
-                    ),
+                    domain="candidate",
+                    task_mode="diagnose",
+                    intent_families=("candidate_filter_explain",),
                 ),
-                trace=_planner_trace(),
             )
         if text == followup_text:
             payload = json.loads(_planner_input_text(text, conversation_context=conversation_context))
             captured_planner_payloads[text] = payload
-            return LlmPlannerResult(
-                plan=PlannerPlan(
+            return _plan_result(
+                "analysis_query",
+                {"query": "candidate_option_metrics net_income formula", "limit": 5},
+                goal="解释候选合约净收入计算口径",
+                purpose="读取候选过滤诊断视图以解释净收入口径",
+                task_contract=_test_task_contract(
                     goal="解释候选合约净收入计算口径",
-                    task_contract=_test_task_contract(
-                        goal="解释候选合约净收入计算口径",
-                        domain="candidate",
-                        task_mode="explain",
-                        intent_families=("analysis_query",),
-                    ),
-                    steps=(
-                        PlannerPlanStep(
-                            id="step_1",
-                            tool_name="analysis_query",
-                            arguments={
-                                "query": "candidate_option_metrics net_income formula",
-                                "limit": 5,
-                            },
-                            purpose="读取候选过滤诊断视图以解释净收入口径",
-                        ),
-                    ),
+                    domain="candidate",
+                    task_mode="explain",
+                    intent_families=("analysis_query",),
                 ),
-                trace=_planner_trace(),
             )
         raise AssertionError(text)
-
-    def _synthesize(
-        question: str,
-        settings: AssistantSettings,
-        plan: PlannerPlan,
-        observations: list[dict[str, Any]],
-        conversation_context: dict[str, Any] | None,
-    ) -> LlmSynthesisResult:
-        assert settings.enabled is True
-        if question == first_text:
-            return LlmSynthesisResult(
-                response_text="泡泡玛特 sell_put 被净收入非正过滤。",
-                trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
-            )
-        if question == followup_text:
-            captured_synthesis_payloads[question] = json.loads(
-                _synthesis_input_text(
-                    question,
-                    plan=plan,
-                    observations=observations,
-                    conversation_context=conversation_context,
-                )
-            )
-            return LlmSynthesisResult(
-                response_text="候选口径净收入 = gross_income - futu_fee。",
-                trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
-            )
-        raise AssertionError(question)
 
     first = handle_assistant_message(
         AssistantRequest(
@@ -3517,7 +3649,6 @@ def test_assistant_runtime_two_turn_candidate_net_income_followup_uses_projectio
         execute_tool_fn=_execute,
         settings=AssistantSettings(llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2")),
         plan_tools_fn=_plan,
-        synthesize_response_fn=_synthesize,
     )
     second = handle_assistant_message(
         AssistantRequest(
@@ -3531,7 +3662,6 @@ def test_assistant_runtime_two_turn_candidate_net_income_followup_uses_projectio
         execute_tool_fn=_execute,
         settings=AssistantSettings(llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2")),
         plan_tools_fn=_plan,
-        synthesize_response_fn=_synthesize,
     )
 
     assert first["ok"] is True
@@ -3558,11 +3688,6 @@ def test_assistant_runtime_two_turn_candidate_net_income_followup_uses_projectio
     assert "candidate_filter_diagnostics" in analysis_query["semantics"]["analysis_views"]
     assert planner_payload["manifest_budget"]["selection_sources"] == ["message", "context_projection.recent_evidence"]
 
-    synthesis_context = captured_synthesis_payloads[followup_text]["context"]
-    assert "active_frame" not in synthesis_context
-    assert "metric_glossary" not in synthesis_context
-    assert "followup_resolution" not in synthesis_context
-
     trace = collect_assistant_trace(audit_db=str(audit_db), command_id=second["data"]["command_id"])
     trace_context = trace["traces"][0]["context"]
     assert "active_frame" not in trace_context
@@ -3577,7 +3702,6 @@ def test_assistant_runtime_two_turn_account_net_income_override_suppresses_candi
     first_text = "lx 泡泡玛特 sell_put 被哪个参数过滤了？"
     override_text = "刚才泡泡玛特先放下，账户净收入怎么算？"
     captured_planner_payloads: dict[str, dict[str, Any]] = {}
-    captured_synthesis_payloads: dict[str, dict[str, Any]] = {}
 
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         if tool_name == "candidate_filter_explain":
@@ -3609,80 +3733,34 @@ def test_assistant_runtime_two_turn_account_net_income_override_suppresses_candi
         conversation_context: dict[str, Any] | None,
     ) -> LlmPlannerResult:
         if text == first_text:
-            return LlmPlannerResult(
-                plan=PlannerPlan(
+            return _plan_result(
+                "candidate_filter_explain",
+                {"account": "lx", "symbol": "泡泡玛特", "function": "sell_put"},
+                goal="解释泡泡玛特 sell_put 候选过滤参数",
+                purpose="读取单标的候选过滤 trace",
+                task_contract=_test_task_contract(
                     goal="解释泡泡玛特 sell_put 候选过滤参数",
-                    task_contract=_test_task_contract(
-                        goal="解释泡泡玛特 sell_put 候选过滤参数",
-                        domain="candidate",
-                        task_mode="diagnose",
-                        intent_families=("candidate_filter_explain",),
-                    ),
-                    steps=(
-                        PlannerPlanStep(
-                            id="step_1",
-                            tool_name="candidate_filter_explain",
-                            arguments={"account": "lx", "symbol": "泡泡玛特", "function": "sell_put"},
-                            purpose="读取单标的候选过滤 trace",
-                        ),
-                    ),
+                    domain="candidate",
+                    task_mode="diagnose",
+                    intent_families=("candidate_filter_explain",),
                 ),
-                trace=_planner_trace(),
             )
         if text == override_text:
             payload = json.loads(_planner_input_text(text, conversation_context=conversation_context))
             captured_planner_payloads[text] = payload
-            return LlmPlannerResult(
-                plan=PlannerPlan(
+            return _plan_result(
+                "analysis_query",
+                {"query": "account_income_metrics net_income_cny formula", "limit": 5},
+                goal="解释账户净收入计算口径",
+                purpose="读取账户收益口径视图",
+                task_contract=_test_task_contract(
                     goal="解释账户净收入计算口径",
-                    task_contract=_test_task_contract(
-                        goal="解释账户净收入计算口径",
-                        domain="income",
-                        task_mode="explain",
-                        intent_families=("analysis_query",),
-                    ),
-                    steps=(
-                        PlannerPlanStep(
-                            id="step_1",
-                            tool_name="analysis_query",
-                            arguments={
-                                "query": "account_income_metrics net_income_cny formula",
-                                "limit": 5,
-                            },
-                            purpose="读取账户收益口径视图",
-                        ),
-                    ),
+                    domain="income",
+                    task_mode="explain",
+                    intent_families=("analysis_query",),
                 ),
-                trace=_planner_trace(),
             )
         raise AssertionError(text)
-
-    def _synthesize(
-        question: str,
-        _settings: AssistantSettings,
-        plan: PlannerPlan,
-        observations: list[dict[str, Any]],
-        conversation_context: dict[str, Any] | None,
-    ) -> LlmSynthesisResult:
-        if question == first_text:
-            return LlmSynthesisResult(
-                response_text="泡泡玛特 sell_put 被净收入非正过滤。",
-                trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
-            )
-        if question == override_text:
-            captured_synthesis_payloads[question] = json.loads(
-                _synthesis_input_text(
-                    question,
-                    plan=plan,
-                    observations=observations,
-                    conversation_context=conversation_context,
-                )
-            )
-            return LlmSynthesisResult(
-                response_text="账户口径净收入是 net_income_cny。",
-                trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
-            )
-        raise AssertionError(question)
 
     first = handle_assistant_message(
         AssistantRequest(
@@ -3697,7 +3775,6 @@ def test_assistant_runtime_two_turn_account_net_income_override_suppresses_candi
         execute_tool_fn=_execute,
         settings=AssistantSettings(llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2")),
         plan_tools_fn=_plan,
-        synthesize_response_fn=_synthesize,
     )
     second = handle_assistant_message(
         AssistantRequest(
@@ -3711,7 +3788,6 @@ def test_assistant_runtime_two_turn_account_net_income_override_suppresses_candi
         execute_tool_fn=_execute,
         settings=AssistantSettings(llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2")),
         plan_tools_fn=_plan,
-        synthesize_response_fn=_synthesize,
     )
 
     assert first["ok"] is True
@@ -3727,11 +3803,6 @@ def test_assistant_runtime_two_turn_account_net_income_override_suppresses_candi
     assert "account_monthly_income_components" in analysis_query["semantics"]["analysis_views"]
     assert "candidate_filter_diagnostics" not in analysis_query["semantics"]["analysis_views"]
     assert planner_payload["manifest_budget"]["selection_sources"] == ["message"]
-
-    synthesis_context = captured_synthesis_payloads[override_text]["context"]
-    assert "active_frame" not in synthesis_context
-    assert "metric_glossary" not in synthesis_context
-    assert "followup_resolution" not in synthesis_context
 
     trace = collect_assistant_trace(audit_db=str(audit_db), command_id=second["data"]["command_id"])
     trace_context = trace["traces"][0]["context"]
@@ -3943,7 +4014,7 @@ def test_assistant_runtime_agent_loop_is_bounded_read_only_router(tmp_path: Path
         assert text == "帮我看一下状态"
         assert settings.enabled is True
         assert conversation_context is not None
-        return _plan_result("runtime_status")
+        return _plan_result("runtime_status", goal=text)
 
     out = handle_assistant_message(
         AssistantRequest(
@@ -3974,47 +4045,57 @@ def test_assistant_runtime_agent_loop_is_bounded_read_only_router(tmp_path: Path
     assert agent_loop["steps"] == [
         {
             "index": 1,
-            "phase": "plan_tool",
-            "status": "planned",
-            "intent_name": None,
-            "tool_name": "runtime_status",
-            "arguments": {},
-        }
-    ]
+                "phase": "model_event",
+                "status": "planned",
+                "intent_name": None,
+                "tool_name": "runtime_status",
+                "arguments": {},
+                "purpose": "Use runtime_status for the current request.",
+            }
+        ]
     assert agent_loop["tool_calls_used"] == 1
-    assert agent_loop["observations"] == [
-        {
-            "index": 1,
-            "tool_name": "runtime_status",
-            "payload": {"config_key": "us"},
-            "ok": True,
-            "error_code": None,
-            "summary": {"tool_name": "runtime_status", "warning_count": 0, "summary": {"ok": True}},
-        }
-    ]
+    assert len(agent_loop["observations"]) == 1
+    observation = agent_loop["observations"][0]
+    assert {
+        "index": observation["index"],
+        "tool_name": observation["tool_name"],
+        "payload": observation["payload"],
+        "ok": observation["ok"],
+        "error_code": observation.get("error_code"),
+    } == {
+        "index": 1,
+        "tool_name": "runtime_status",
+        "payload": {"config_key": "us"},
+        "ok": True,
+        "error_code": None,
+    }
     assert agent_loop["final_response"] == {
         "status": "rendered",
-        "reason": "deterministic fallback renderer used after agent composition was unavailable or unsafe",
+        "reason": "awaiting_model_continuation",
         "canonical_renderer_required": True,
-        "llm_may_summarize": True,
+        "llm_may_summarize": False,
     }
-    authorize_event = next(item for item in agent_loop["tool_events"] if item["phase"] == "authorize_tool")
+    model_event = next(item for item in agent_loop["tool_events"] if item["phase"] == "model_tool_call")
+    assert model_event["tool_name"] == "runtime_status"
+    assert model_event["tool_call_id"] == "call_1"
+    authorize_event = next(item for item in agent_loop["tool_events"] if item["phase"] == "tool_guard_decision")
     assert authorize_event["allowed"] is True
-    assert authorize_event["decision"]["source"] == "agent_loop"
-    assert authorize_event["action_policy"]["schema_version"] == ACTION_POLICY_SCHEMA_VERSION
-    assert authorize_event["action_policy"]["decision"] == "allow_read"
-    assert authorize_event["precheck"]["schema_version"] == TOOL_CHECK_SCHEMA_VERSION
-    assert authorize_event["precheck"]["status"] == "pass"
-    assert any(item["hook"] == "action_policy" and item["status"] == "pass" for item in authorize_event["hook_results"])
-    result_event = next(item for item in agent_loop["tool_events"] if item["phase"] == "observe_tool_result")
+    assert authorize_event["decision"] == "allow"
+    assert authorize_event["reason"] == "read_auto_in_scope"
+    assert authorize_event["risk_class"] == "READ_AUTO"
+    assert authorize_event["scope_source"] == "system_injected"
+    assert authorize_event["normalized_payload"] == {"config_key": "us"}
+    result_event = next(item for item in agent_loop["tool_events"] if item["phase"] == "tool_result")
     assert result_event["tool_name"] == "runtime_status"
     assert result_event["ok"] is True
-    assert result_event["error_code"] is None
-    assert result_event["postcheck"]["schema_version"] == TOOL_CHECK_SCHEMA_VERSION
-    assert result_event["postcheck"]["status"] == "pass"
-    assert any(item["hook"] == "result_status" and item["status"] == "pass" for item in result_event["hook_results"])
-    assert result_event["evidence_summary"]["source_label"] == "OM 本地 runtime_status"
-    assert result_event["evidence_summary"]["fact_field_count"] > 0
+    assert result_event.get("error_code") is None
+    assert result_event["trace_payload"]["schema_version"] == "om-assistant-tool-trace-payload-v1"
+    assert result_event["trace_payload"]["guard_decision"]["decision"] == "allow"
+    assert result_event["trace_payload"]["normalized_payload"] == {"config_key": "us"}
+    evidence_event = next(item for item in agent_loop["tool_events"] if item["phase"] == "evidence_updated")
+    evidence_bundle = evidence_event["payload"]["evidence_bundle"]
+    assert evidence_bundle["sources"] == ["OM 本地 runtime_status"]
+    assert evidence_bundle["fact_count"] > 0
 
 
 def test_assistant_runtime_agent_loop_executes_planned_cashflow_detail(tmp_path: Path) -> None:
@@ -4075,50 +4156,15 @@ def test_assistant_runtime_agent_loop_executes_planned_cashflow_detail(tmp_path:
             "current_date": "2026-06-03",
             "timezone": "Asia/Shanghai",
         }
-        return LlmPlannerResult(
-            plan=PlannerPlan(
+        return _plan_result(
+            "monthly_income_report",
+            {"account": "lx", "month": "2025-06"},
+            goal="分析 lx 2026-06 的净现金流明细",
+            purpose="需要 cashflow_rows 解释净现金流组成",
+            task_contract=_test_task_contract(
                 goal="分析 lx 2026-06 的净现金流明细",
-                task_contract=_test_task_contract(goal="分析 lx 2026-06 的净现金流明细"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="monthly_income_report",
-                        arguments={"account": "lx", "month": "2025-06"},
-                        purpose="需要 cashflow_rows 解释净现金流组成",
-                    ),
-                ),
+                scope={"requested_accounts": ["lx"], "requested_months": ["2026-06"]},
             ),
-            trace={
-                "enabled": True,
-                "attempted": True,
-                "reason": "accepted",
-                "provider": "openai",
-                "base_url": "",
-                "model": "gpt-5.2",
-                "api_key_env": "OM_LLM_API_KEY",
-                "confidence_min": 0.75,
-                "timeout_seconds": 20,
-                "max_output_tokens": 512,
-                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-            },
-        )
-
-    def _synthesize(
-        question: str,
-        settings: AssistantSettings,
-        plan: PlannerPlan,
-        observations: list[dict[str, Any]],
-        conversation_context: dict[str, Any] | None,
-    ) -> LlmSynthesisResult:
-        assert question == "分析 lx 6月的净现金流明细"
-        assert settings.enabled is True
-        assert conversation_context is not None
-        assert observations[0]["data"]["cashflow_rows"][0]["symbol"] == "0700.HK"
-        assert observations[-1]["tool_name"] == "assistant.answer_evidence"
-        assert observations[-1]["data"]["renderer_key"] == "monthly_income"
-        return LlmSynthesisResult(
-            response_text="lx 2026-06 净现金流明细\n- 0700.HK sell_open 流入 HKD 1,200",
-            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
         )
 
     out = handle_assistant_message(
@@ -4134,7 +4180,6 @@ def test_assistant_runtime_agent_loop_executes_planned_cashflow_detail(tmp_path:
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         plan_tools_fn=_plan,
-        synthesize_response_fn=_synthesize,
         now_fn=lambda: date(2026, 6, 3),
     )
 
@@ -4146,9 +4191,9 @@ def test_assistant_runtime_agent_loop_executes_planned_cashflow_detail(tmp_path:
         )
     ]
     text = out["data"]["response_text"]
-    assert text.startswith("lx 2026-06 净现金流明细")
-    assert "- 0700.HK sell_open 流入 HKD 1,200" in text
-    assert "数据来源：OM 本地账本" in text
+    assert text.startswith("收益统计完成（OM 本地账本）：")
+    assert "lx 2026-06 收益摘要" in text
+    assert "- 现金流 0700.HK 卖出开仓 1张 | 净现金流 HKD 1200 | lx" in text
     assert "口径：现金流率=净现金流/当前现金担保，不是账户总资产收益率。" in text
     assert "\n\n分析\n" not in text
     agent_loop = out["meta"]["assistant"]["llm"]["agent_loop"]
@@ -4163,10 +4208,10 @@ def test_assistant_runtime_agent_loop_executes_planned_cashflow_detail(tmp_path:
         "month": "2026-06",
     }
     assert agent_loop["final_response"] == {
-        "status": "synthesized",
-        "reason": "LLM composed the response from guarded tool evidence",
-        "canonical_renderer_required": False,
-        "llm_may_summarize": True,
+        "status": "rendered",
+        "reason": "awaiting_model_continuation",
+        "canonical_renderer_required": True,
+        "llm_may_summarize": False,
     }
 
 
@@ -4200,49 +4245,18 @@ def test_assistant_runtime_agent_loop_satisfies_single_account_return_capability
         _conversation_context: dict[str, Any] | None,
     ) -> LlmPlannerResult:
         assert text == "lx 6月 收益"
-        return LlmPlannerResult(
-            plan=PlannerPlan(
+        return _with_required_capabilities(
+            _plan_result(
+                "monthly_income_report",
+                {"account": "lx", "month": "2026-06"},
                 goal="查询 lx 2026-06 单账户收益",
-                task_contract=_test_task_contract(goal="查询 lx 2026-06 单账户收益"),
-                required_capabilities=("account_return",),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="monthly_income_report",
-                        arguments={"account": "lx", "month": "2026-06"},
-                        purpose="读取 lx 6月账户收益",
-                    ),
+                purpose="读取 lx 6月账户收益",
+                task_contract=_test_task_contract(
+                    goal="查询 lx 2026-06 单账户收益",
+                    scope={"requested_accounts": ["lx"], "requested_months": ["2026-06"]},
                 ),
             ),
-            trace={
-                "enabled": True,
-                "attempted": True,
-                "reason": "accepted",
-                "provider": "openai",
-                "base_url": "",
-                "model": "gpt-5.2",
-                "api_key_env": "OM_LLM_API_KEY",
-                "confidence_min": 0.75,
-                "timeout_seconds": 20,
-                "max_output_tokens": 512,
-                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-            },
-        )
-
-    def _synthesize(
-        question: str,
-        settings: AssistantSettings,
-        plan: PlannerPlan,
-        observations: list[dict[str, Any]],
-        conversation_context: dict[str, Any] | None,
-    ) -> LlmSynthesisResult:
-        assert question == "lx 6月 收益"
-        assert settings.enabled is True
-        assert plan.required_capabilities == ("account_return",)
-        assert observations[0]["data"]["return_summary"][0]["account"] == "lx"
-        return LlmSynthesisResult(
-            response_text="lx 2026-06 收益：净现金流 CNY 9,000，净收益率 3.00%。",
-            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+            "account_return",
         )
 
     out = handle_assistant_message(
@@ -4258,26 +4272,20 @@ def test_assistant_runtime_agent_loop_satisfies_single_account_return_capability
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         plan_tools_fn=_plan,
-        synthesize_response_fn=_synthesize,
         now_fn=lambda: date(2026, 6, 5),
     )
 
     assert out["ok"] is True
     assert calls == [("monthly_income_report", {"account": "lx", "config_key": "us", "month": "2026-06"})]
-    assert out["data"]["response_text"].startswith("lx 2026-06 收益")
-    assert "数据来源：OM 本地账本" in out["data"]["response_text"]
-    tool_plan_data = out["data"]["action"]["result"]["data"]
-    assert tool_plan_data["capability_status"] == {
-        "required": ["account_return"],
-        "satisfied": ["account_return"],
-        "gaps": [],
-    }
+    assert out["data"]["response_text"].startswith("收益统计完成（OM 本地账本）：")
+    assert "lx 2026-06 收益摘要" in out["data"]["response_text"]
+    assert "净现金流：CNY 9,000" in out["data"]["response_text"]
     agent_loop = out["meta"]["assistant"]["llm"]["agent_loop"]
     assert agent_loop["final_response"] == {
-        "status": "synthesized",
-        "reason": "LLM composed the response from guarded tool evidence",
-        "canonical_renderer_required": False,
-        "llm_may_summarize": True,
+        "status": "rendered",
+        "reason": "awaiting_model_continuation",
+        "canonical_renderer_required": True,
+        "llm_may_summarize": False,
     }
 
 
@@ -4306,32 +4314,11 @@ def test_assistant_runtime_agent_loop_injects_config_for_symbol_config_read(tmp_
         _settings: AssistantSettings,
         _conversation_context: dict[str, Any] | None,
     ) -> LlmPlannerResult:
-        return LlmPlannerResult(
-            plan=PlannerPlan(
-                goal="查询泡泡玛特 sell put max strike",
-                task_contract=_test_task_contract(goal="查询泡泡玛特 sell put max strike"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="symbol_config_read",
-                        arguments={"symbol": "泡泡玛特", "strategy": "sell_put", "field": "max_strike"},
-                        purpose="读取当前监控标的配置",
-                    ),
-                ),
-            ),
-            trace={
-                "enabled": True,
-                "attempted": True,
-                "reason": "accepted",
-                "provider": "openai",
-                "base_url": "",
-                "model": "gpt-5.2",
-                "api_key_env": "OM_LLM_API_KEY",
-                "confidence_min": 0.75,
-                "timeout_seconds": 20,
-                "max_output_tokens": 512,
-                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-            },
+        return _plan_result(
+            "symbol_config_read",
+            {"symbol": "泡泡玛特", "strategy": "sell_put", "field": "max_strike"},
+            goal="查询泡泡玛特 sell put max strike",
+            purpose="读取当前监控标的配置",
         )
 
     out = handle_assistant_message(
@@ -4363,7 +4350,6 @@ def test_assistant_runtime_agent_loop_injects_config_for_symbol_config_read(tmp_
         )
     ]
     assert out["data"]["response_text"].startswith("9992.HK sell_put.max_strike = 145。")
-    assert "数据来源：OM runtime symbol config" in out["data"]["response_text"]
     agent_loop = out["meta"]["assistant"]["llm"]["agent_loop"]
     assert agent_loop["observations"][0]["payload"] == {
         "symbol": "泡泡玛特",
@@ -4416,47 +4402,11 @@ def test_assistant_runtime_agent_loop_injects_config_for_candidate_filter_explai
         _settings: AssistantSettings,
         _conversation_context: dict[str, Any] | None,
     ) -> LlmPlannerResult:
-        return LlmPlannerResult(
-            plan=PlannerPlan(
-                goal="解释泡泡玛特候选过滤参数",
-                task_contract=_test_task_contract(goal="解释泡泡玛特候选过滤参数"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="candidate_filter_explain",
-                        arguments={"symbol": "泡泡玛特"},
-                        purpose="读取单标的候选过滤 trace",
-                    ),
-                ),
-            ),
-            trace={
-                "enabled": True,
-                "attempted": True,
-                "reason": "accepted",
-                "provider": "openai",
-                "base_url": "",
-                "model": "gpt-5.2",
-                "api_key_env": "OM_LLM_API_KEY",
-                "confidence_min": 0.75,
-                "timeout_seconds": 20,
-                "max_output_tokens": 512,
-                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-            },
-        )
-
-    def _synthesize(
-        question: str,
-        _settings: AssistantSettings,
-        _plan: PlannerPlan,
-        observations: list[dict[str, Any]],
-        _conversation_context: dict[str, Any] | None,
-    ) -> LlmSynthesisResult:
-        assert question == "泡泡玛特被哪个参数过滤了？"
-        assert observations[0]["data"]["functions"][0]["rejection_reasons"][0]["label"] == "价差不合格"
-        assert observations[-1]["tool_name"] == "assistant.answer_evidence"
-        return LlmSynthesisResult(
-            response_text="泡泡玛特（9992.HK）这次 sell_put 主要被价差不合格过滤；这是本次 trace 观察到的拒绝原因。",
-            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+        return _plan_result(
+            "candidate_filter_explain",
+            {"symbol": "泡泡玛特"},
+            goal="解释泡泡玛特候选过滤参数",
+            purpose="读取单标的候选过滤 trace",
         )
 
     out = handle_assistant_message(
@@ -4473,7 +4423,6 @@ def test_assistant_runtime_agent_loop_injects_config_for_candidate_filter_explai
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         plan_tools_fn=_plan,
-        synthesize_response_fn=_synthesize,
     )
 
     assert out["ok"] is True
@@ -4486,13 +4435,12 @@ def test_assistant_runtime_agent_loop_injects_config_for_candidate_filter_explai
             },
         )
     ]
-    assert out["data"]["response_text"].startswith("泡泡玛特（9992.HK）这次 sell_put 主要被价差不合格过滤")
-    assert "risk_spread" not in out["data"]["response_text"]
-    assert "候选过滤诊断：" not in out["data"]["response_text"]
+    assert out["data"]["response_text"].startswith("9992.HK 候选过滤诊断：1 条 trace 记录。")
+    assert "价差不合格" in out["data"]["response_text"]
     agent_loop = out["meta"]["assistant"]["llm"]["agent_loop"]
     assert agent_loop["observations"][0]["payload"] == {"symbol": "泡泡玛特"}
-    assert agent_loop["final_response"]["status"] == "synthesized"
-    assert agent_loop["final_response"]["reason"] == "LLM composed the response from guarded tool evidence"
+    assert agent_loop["final_response"]["status"] == "rendered"
+    assert agent_loop["final_response"]["reason"] == "awaiting_model_continuation"
 
 
 def test_assistant_runtime_candidate_filter_metric_acronyms_do_not_trigger_renderer_fallback(tmp_path: Path) -> None:
@@ -4573,37 +4521,11 @@ def test_assistant_runtime_candidate_filter_metric_acronyms_do_not_trigger_rende
         _settings: AssistantSettings,
         _conversation_context: dict[str, Any] | None,
     ) -> LlmPlannerResult:
-        return LlmPlannerResult(
-            plan=PlannerPlan(
-                goal="解释泡泡玛特候选过滤参数",
-                task_contract=_test_task_contract(goal="解释泡泡玛特候选过滤参数"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="candidate_filter_explain",
-                        arguments={"symbol": "泡泡玛特"},
-                        purpose="读取单标的候选过滤 trace",
-                    ),
-                ),
-            ),
-            trace=_planner_trace(),
-        )
-
-    def _synthesize(
-        question: str,
-        _settings: AssistantSettings,
-        _plan: PlannerPlan,
-        observations: list[dict[str, Any]],
-        _conversation_context: dict[str, Any] | None,
-    ) -> LlmSynthesisResult:
-        assert question == "泡泡玛特被哪个参数过滤了？"
-        assert observations[-1]["tool_name"] == "assistant.answer_evidence"
-        return LlmSynthesisResult(
-            response_text=(
-                "泡泡玛特（9992.HK）这次 sell_put 的过滤证据包括 IV/RV 不足、OI 不足、"
-                "DTE 不符合、Delta 过高、annualized_return_below_min 和 risk_spread。"
-            ),
-            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+        return _plan_result(
+            "candidate_filter_explain",
+            {"symbol": "泡泡玛特"},
+            goal="解释泡泡玛特候选过滤参数",
+            purpose="读取单标的候选过滤 trace",
         )
 
     out = handle_assistant_message(
@@ -4620,7 +4542,6 @@ def test_assistant_runtime_candidate_filter_metric_acronyms_do_not_trigger_rende
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         plan_tools_fn=_plan,
-        synthesize_response_fn=_synthesize,
     )
 
     assert out["ok"] is True
@@ -4634,23 +4555,11 @@ def test_assistant_runtime_candidate_filter_metric_acronyms_do_not_trigger_rende
         )
     ]
     text = out["data"]["response_text"]
-    assert text.startswith("泡泡玛特（9992.HK）这次 sell_put 的过滤证据包括 IV/RV 不足")
-    assert "候选过滤诊断：" not in text
-    tool_plan_data = out["data"]["action"]["result"]["data"]
-    synthesis = tool_plan_data["synthesis"]
-    assert synthesis["reason"] == "agent_composed_response"
-    assert synthesis["composer"]["attempted"] is True
-    assert synthesis["answer_guard"]["status"] == "passed"
-    assert synthesis["guard"]["status"] == "passed"
-    assert synthesis["answer_guard"]["violation_type"] is None
-    assert synthesis["guard"]["violation_type"] is None
-    assert tool_plan_data["final_response"]["status"] == "synthesized"
-    classifications = {item["claim"]: item for item in synthesis["answer_guard"]["claim_classification"]}
-    assert classifications["9992.HK"]["classification"] == "supported_symbol"
-    assert classifications["IV"]["classification"] == "domain_evidence_term"
-    assert classifications["RV"]["classification"] == "domain_evidence_term"
-    assert classifications["OI"]["classification"] == "domain_evidence_term"
-    assert classifications["DTE"]["classification"] == "domain_evidence_term"
+    assert text.startswith("9992.HK 候选过滤诊断：8 条 trace 记录。")
+    assert "IV/RV 不足" in text
+    assert "OI 不足" in text
+    assert "DTE 不符合" in text
+    assert "Delta 过高" in text
 
 
 def test_assistant_runtime_llm_intent_routes_symbol_config_to_market_sibling_config_path(tmp_path: Path) -> None:
@@ -4678,7 +4587,7 @@ def test_assistant_runtime_llm_intent_routes_symbol_config_to_market_sibling_con
         _settings: AssistantSettings,
         _conversation_context: dict[str, Any] | None,
     ) -> LlmPlannerResult:
-        return _plan_result("symbol_config_read", {"symbol": "泡泡玛特", "strategy": "sell_put", "field": "max_strike"})
+        return _plan_result("symbol_config_read", {"symbol": "泡泡玛特", "strategy": "sell_put", "field": "max_strike"}, goal=_text)
 
     out = handle_assistant_message(
         AssistantRequest(
@@ -4709,7 +4618,6 @@ def test_assistant_runtime_llm_intent_routes_symbol_config_to_market_sibling_con
         )
     ]
     assert out["data"]["response_text"].startswith("9992.HK sell_put.max_strike = 145。")
-    assert "数据来源：OM runtime symbol config" in out["data"]["response_text"]
 
 
 def test_assistant_runtime_llm_intent_routes_candidate_filter_to_market_sibling_config_path(tmp_path: Path) -> None:
@@ -4748,6 +4656,7 @@ def test_assistant_runtime_llm_intent_routes_candidate_filter_to_market_sibling_
         return _plan_result(
             "candidate_filter_explain",
             {"symbol": "泡泡玛特", "account": "lx", "function": "sell_put"},
+            goal=_text,
         )
 
     out = handle_assistant_message(
@@ -4815,58 +4724,15 @@ def test_assistant_runtime_agent_loop_satisfies_position_read_tool_capabilities(
         _conversation_context: dict[str, Any] | None,
     ) -> LlmPlannerResult:
         assert text == "持仓明晰"
-        return LlmPlannerResult(
-            plan=PlannerPlan(
+        return _with_required_capabilities(
+            _plan_result(
+                "option_positions_read",
+                {"action": "list", "query": {"status": "open"}},
                 goal="读取当前持仓明细",
-                task_contract=_test_task_contract(goal="读取当前持仓明细"),
-                required_capabilities=("option_positions", "read_only"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="option_positions_read",
-                        arguments={"action": "list", "query": {"status": "open"}},
-                        purpose="读取 open 期权持仓明细",
-                    ),
-                ),
+                purpose="读取 open 期权持仓明细",
             ),
-            trace={
-                "enabled": True,
-                "attempted": True,
-                "reason": "accepted",
-                "provider": "openai",
-                "base_url": "",
-                "model": "gpt-5.2",
-                "api_key_env": "OM_LLM_API_KEY",
-                "confidence_min": 0.75,
-                "timeout_seconds": 20,
-                "max_output_tokens": 512,
-                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-            },
-        )
-
-    def _synthesize(
-        question: str,
-        _settings: AssistantSettings,
-        plan: PlannerPlan,
-        observations: list[dict[str, Any]],
-        _conversation_context: dict[str, Any] | None,
-    ) -> LlmSynthesisResult:
-        assert question == "持仓明晰"
-        assert plan.required_capabilities == ("option_positions", "read_only")
-        assert observations[1]["tool_name"] == "assistant.capability_check"
-        assert observations[1]["data"]["capability_status"] == {
-            "required": ["option_positions", "read_only"],
-            "satisfied": ["option_positions", "read_only"],
-            "gaps": [],
-        }
-        assert observations[-1]["tool_name"] == "assistant.answer_evidence"
-        assert "fallback_renderer_text" not in observations[-1]["data"]
-        assert observations[0]["data"]["rows"][0]["symbol"] == "NVDA"
-        assert observations[0]["data"]["rows"][0]["contracts_open"] == 1
-        assert "record_id" not in json.dumps(observations[0]["data"], ensure_ascii=False)
-        return LlmSynthesisResult(
-            response_text="当前 open 期权持仓共 1 条。",
-            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+            "option_positions",
+            "read_only",
         )
 
     out = handle_assistant_message(
@@ -4882,27 +4748,20 @@ def test_assistant_runtime_agent_loop_satisfies_position_read_tool_capabilities(
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         plan_tools_fn=_plan,
-        synthesize_response_fn=_synthesize,
     )
 
     assert out["ok"] is True
     assert calls == [("option_positions_read", {"action": "list", "config_key": "us", "query": {"status": "open"}})]
     assert "当前只能部分满足" not in out["data"]["response_text"]
-    assert out["data"]["response_text"].startswith("当前 open 期权持仓共 1 条。")
-    assert "数据来源：OM 本地 SQLite position_lots" in out["data"]["response_text"]
+    assert "- NVDA short put 100 exp 2026-06-19 open 1" in out["data"]["response_text"]
+    assert "数据源：OM 本地 SQLite position_lots" in out["data"]["response_text"]
     assert "\n\n分析\n" not in out["data"]["response_text"]
     tool_plan_data = out["data"]["action"]["result"]["data"]
-    assert tool_plan_data["capability_status"] == {
-        "required": ["option_positions", "read_only"],
-        "satisfied": ["option_positions", "read_only"],
-        "gaps": [],
-    }
-    assert tool_plan_data["synthesis"]["reason"] == "agent_composed_response"
     assert tool_plan_data["final_response"] == {
-        "status": "synthesized",
-        "reason": "LLM composed the response from guarded tool evidence",
-        "canonical_renderer_required": False,
-        "llm_may_summarize": True,
+        "status": "rendered",
+        "reason": "awaiting_model_continuation",
+        "canonical_renderer_required": True,
+        "llm_may_summarize": False,
     }
 
 
@@ -4949,48 +4808,15 @@ def test_assistant_runtime_agent_loop_routes_assigned_stock_holding_pnl(tmp_path
         _conversation_context: dict[str, Any] | None,
     ) -> LlmPlannerResult:
         assert text == "查看 lx 指派正股持仓盈亏"
-        return LlmPlannerResult(
-            plan=PlannerPlan(
+        return _with_required_capabilities(
+            _plan_result(
+                "option_positions_read",
+                {"action": "assigned-stock", "account": "lx", "status": "open", "refresh_quotes": True},
                 goal="查看 lx 指派正股持仓盈亏",
-                task_contract=_test_task_contract(goal="查看 lx 指派正股持仓盈亏"),
-                required_capabilities=("assigned_stock_positions", "read_only"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="option_positions_read",
-                        arguments={"action": "assigned-stock", "account": "lx", "status": "open", "refresh_quotes": True},
-                        purpose="读取指派正股持仓盈亏",
-                    ),
-                ),
+                purpose="读取指派正股持仓盈亏",
             ),
-            trace={
-                "enabled": True,
-                "attempted": True,
-                "reason": "accepted",
-                "provider": "openai",
-                "base_url": "",
-                "model": "gpt-5.2",
-                "api_key_env": "OM_LLM_API_KEY",
-                "confidence_min": 0.75,
-                "timeout_seconds": 20,
-                "max_output_tokens": 512,
-                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-            },
-        )
-
-    def _synthesize(
-        question: str,
-        _settings: AssistantSettings,
-        plan: PlannerPlan,
-        observations: list[dict[str, Any]],
-        _conversation_context: dict[str, Any] | None,
-    ) -> LlmSynthesisResult:
-        assert question == "查看 lx 指派正股持仓盈亏"
-        assert observations[-1]["tool_name"] == "assistant.answer_evidence"
-        assert "stock_lot_id" not in json.dumps(observations[0]["data"], ensure_ascii=False)
-        return LlmSynthesisResult(
-            response_text="lx 当前有 1 笔指派正股持仓：NVDA 剩余 100 股，spot USD 98，正股浮盈亏 USD -200，生命周期PnL USD 50。",
-            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+            "assigned_stock_positions",
+            "read_only",
         )
 
     out = handle_assistant_message(
@@ -5006,7 +4832,6 @@ def test_assistant_runtime_agent_loop_routes_assigned_stock_holding_pnl(tmp_path
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         plan_tools_fn=_plan,
-        synthesize_response_fn=_synthesize,
     )
 
     assert out["ok"] is True
@@ -5017,19 +4842,14 @@ def test_assistant_runtime_agent_loop_routes_assigned_stock_holding_pnl(tmp_path
         )
     ]
     text = out["data"]["response_text"]
-    assert text.startswith("lx 当前有 1 笔指派正股持仓")
+    assert text.startswith("lx · open · 指派正股：1 条")
     assert "正股浮盈亏 USD -200" in text
-    assert "数据来源：OM 本地 SQLite assigned_stock_events + trade_events；spot=opend_realtime（ok）" in text
+    assert "报价刷新：ok source=opend_realtime" in text
+    assert "数据源：OM 本地 SQLite assigned_stock_events + trade_events" in text
     assert "口径：正股成本按真实交割价记录" in text
     assert "\n\n分析\n" not in text
     tool_plan_data = out["data"]["action"]["result"]["data"]
-    assert tool_plan_data["capability_status"] == {
-        "required": ["assigned_stock_positions", "read_only"],
-        "satisfied": ["assigned_stock_positions", "read_only"],
-        "gaps": [],
-    }
-    assert "response_mode" not in tool_plan_data["plan"]
-    assert tool_plan_data["final_response"]["reason"] == "LLM composed the response from guarded tool evidence"
+    assert tool_plan_data["final_response"]["reason"] == "awaiting_model_continuation"
 
 
 def test_assistant_runtime_agent_loop_analyzes_assigned_stock_when_requested(tmp_path: Path) -> None:
@@ -5075,50 +4895,15 @@ def test_assistant_runtime_agent_loop_analyzes_assigned_stock_when_requested(tmp
         _conversation_context: dict[str, Any] | None,
     ) -> LlmPlannerResult:
         assert text == "分析 lx 指派正股持仓盈亏"
-        return LlmPlannerResult(
-            plan=PlannerPlan(
+        return _with_required_capabilities(
+            _plan_result(
+                "option_positions_read",
+                {"action": "assigned-stock", "account": "lx", "status": "open", "refresh_quotes": True},
                 goal="分析 lx 指派正股持仓盈亏",
-                task_contract=_test_task_contract(goal="分析 lx 指派正股持仓盈亏"),
-                required_capabilities=("assigned_stock_positions", "read_only"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="option_positions_read",
-                        arguments={"action": "assigned-stock", "account": "lx", "status": "open", "refresh_quotes": True},
-                        purpose="读取指派正股持仓盈亏",
-                    ),
-                ),
+                purpose="读取指派正股持仓盈亏",
             ),
-            trace={
-                "enabled": True,
-                "attempted": True,
-                "reason": "accepted",
-                "provider": "openai",
-                "base_url": "",
-                "model": "gpt-5.2",
-                "api_key_env": "OM_LLM_API_KEY",
-                "confidence_min": 0.75,
-                "timeout_seconds": 20,
-                "max_output_tokens": 512,
-                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-            },
-        )
-
-    def _synthesize(
-        question: str,
-        _settings: AssistantSettings,
-        plan: PlannerPlan,
-        observations: list[dict[str, Any]],
-        _conversation_context: dict[str, Any] | None,
-    ) -> LlmSynthesisResult:
-        assert question == "分析 lx 指派正股持仓盈亏"
-        assert plan.required_capabilities == ("assigned_stock_positions", "read_only")
-        assert observations[-1]["tool_name"] == "assistant.answer_evidence"
-        assert "fallback_renderer_text" not in observations[-1]["data"]
-        assert observations[0]["data"]["rows"][0]["assigned_stock_unrealized_pnl"] == -200.0
-        return LlmSynthesisResult(
-            response_text="正股自身仍是浮亏，但生命周期PnL仍为正，下一步应重点看是否继续持有正股或卖 covered call。",
-            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+            "assigned_stock_positions",
+            "read_only",
         )
 
     out = handle_assistant_message(
@@ -5134,7 +4919,6 @@ def test_assistant_runtime_agent_loop_analyzes_assigned_stock_when_requested(tmp
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         plan_tools_fn=_plan,
-        synthesize_response_fn=_synthesize,
     )
 
     assert out["ok"] is True
@@ -5145,17 +4929,17 @@ def test_assistant_runtime_agent_loop_analyzes_assigned_stock_when_requested(tmp
         )
     ]
     text = out["data"]["response_text"]
-    assert text.startswith("正股自身仍是浮亏")
-    assert "数据来源：OM 本地 SQLite assigned_stock_events + trade_events；spot=opend_realtime（ok）" in text
+    assert text.startswith("lx · open · 指派正股：1 条")
+    assert "正股浮盈亏 USD -200" in text
+    assert "报价刷新：ok source=opend_realtime" in text
+    assert "数据源：OM 本地 SQLite assigned_stock_events + trade_events" in text
     assert "\n\n分析\n" not in text
     tool_plan_data = out["data"]["action"]["result"]["data"]
-    assert "response_mode" not in tool_plan_data["plan"]
-    assert tool_plan_data["final_response"]["reason"] == "LLM composed the response from guarded tool evidence"
+    assert tool_plan_data["final_response"]["reason"] == "awaiting_model_continuation"
 
 
 def test_assistant_runtime_agent_loop_assigned_stock_falls_back_from_invented_amount(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
-    synthesis_observation_counts: list[int] = []
 
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         calls.append((tool_name, payload))
@@ -5196,45 +4980,11 @@ def test_assistant_runtime_agent_loop_assigned_stock_falls_back_from_invented_am
         _settings: AssistantSettings,
         _conversation_context: dict[str, Any] | None,
     ) -> LlmPlannerResult:
-        return LlmPlannerResult(
-            plan=PlannerPlan(
-                goal="查看 lx 指派正股持仓盈亏",
-                task_contract=_test_task_contract(goal="查看 lx 指派正股持仓盈亏"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="option_positions_read",
-                        arguments={"action": "assigned-stock", "account": "lx", "status": "open", "refresh_quotes": True},
-                        purpose="读取指派正股持仓盈亏",
-                    ),
-                ),
-            ),
-            trace={
-                "enabled": True,
-                "attempted": True,
-                "reason": "accepted",
-                "provider": "openai",
-                "base_url": "",
-                "model": "gpt-5.2",
-                "api_key_env": "OM_LLM_API_KEY",
-                "confidence_min": 0.75,
-                "timeout_seconds": 20,
-                "max_output_tokens": 512,
-                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-            },
-        )
-
-    def _synthesize(
-        _question: str,
-        _settings: AssistantSettings,
-        _plan: PlannerPlan,
-        observations: list[dict[str, Any]],
-        _conversation_context: dict[str, Any] | None,
-    ) -> LlmSynthesisResult:
-        synthesis_observation_counts.append(len(observations))
-        return LlmSynthesisResult(
-            response_text="lx 当前有 1 笔 NVDA 指派正股，正股浮盈亏 USD -999。",
-            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+        return _plan_result(
+            "option_positions_read",
+            {"action": "assigned-stock", "account": "lx", "status": "open", "refresh_quotes": True},
+            goal="查看 lx 指派正股持仓盈亏",
+            purpose="读取指派正股持仓盈亏",
         )
 
     out = handle_assistant_message(
@@ -5250,7 +5000,6 @@ def test_assistant_runtime_agent_loop_assigned_stock_falls_back_from_invented_am
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         plan_tools_fn=_plan,
-        synthesize_response_fn=_synthesize,
     )
 
     assert out["ok"] is True
@@ -5260,21 +5009,15 @@ def test_assistant_runtime_agent_loop_assigned_stock_falls_back_from_invented_am
             {"action": "assigned-stock", "account": "lx", "status": "open", "refresh_quotes": True, "config_key": "us"},
         )
     ]
-    assert synthesis_observation_counts == [2, 3]
     text = out["data"]["response_text"]
     assert text.startswith("lx · open · 指派正股：1 条")
     assert "正股浮盈亏 USD -200" in text
     assert "USD -999" not in text
-    synthesis = out["data"]["action"]["result"]["data"]["synthesis"]
-    assert synthesis["reason"] == "agent_renderer_fallback"
-    assert synthesis["answer_guard"]["status"] == "failed_then_fallback"
-    assert synthesis["answer_guard"]["violations"][0]["type"] == "unsupported_assigned_stock_number"
-    assert synthesis["answer_guard"]["retry_violations"][0]["type"] == "unsupported_assigned_stock_number"
+    assert out["data"]["action"]["result"]["data"]["final_response"]["reason"] == "awaiting_model_continuation"
 
 
 def test_assistant_runtime_agent_loop_grounded_positions_fall_back_from_wrong_contract_quantity(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
-    synthesis_observation_counts: list[int] = []
 
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         calls.append((tool_name, payload))
@@ -5306,45 +5049,11 @@ def test_assistant_runtime_agent_loop_grounded_positions_fall_back_from_wrong_co
         _settings: AssistantSettings,
         _conversation_context: dict[str, Any] | None,
     ) -> LlmPlannerResult:
-        return LlmPlannerResult(
-            plan=PlannerPlan(
-                goal="分析当前持仓",
-                task_contract=_test_task_contract(goal="分析当前持仓"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="option_positions_read",
-                        arguments={"action": "list", "query": {"status": "open"}},
-                        purpose="读取 open 期权持仓并分析",
-                    ),
-                ),
-            ),
-            trace={
-                "enabled": True,
-                "attempted": True,
-                "reason": "accepted",
-                "provider": "openai",
-                "base_url": "",
-                "model": "gpt-5.2",
-                "api_key_env": "OM_LLM_API_KEY",
-                "confidence_min": 0.75,
-                "timeout_seconds": 20,
-                "max_output_tokens": 512,
-                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-            },
-        )
-
-    def _synthesize(
-        _question: str,
-        _settings: AssistantSettings,
-        _plan: PlannerPlan,
-        observations: list[dict[str, Any]],
-        _conversation_context: dict[str, Any] | None,
-    ) -> LlmSynthesisResult:
-        synthesis_observation_counts.append(len(observations))
-        return LlmSynthesisResult(
-            response_text="lx 的 NVDA 一张 put 当前 open。",
-            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+        return _plan_result(
+            "option_positions_read",
+            {"action": "list", "query": {"status": "open"}},
+            goal="分析当前持仓",
+            purpose="读取 open 期权持仓并分析",
         )
 
     out = handle_assistant_message(
@@ -5360,21 +5069,14 @@ def test_assistant_runtime_agent_loop_grounded_positions_fall_back_from_wrong_co
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         plan_tools_fn=_plan,
-        synthesize_response_fn=_synthesize,
     )
 
     assert out["ok"] is True
     assert calls == [("option_positions_read", {"action": "list", "config_key": "us", "query": {"status": "open"}})]
-    assert synthesis_observation_counts == [2, 3]
     text = out["data"]["response_text"]
     assert "- NVDA short put 100 exp 2026-06-19 open 2" in text
     assert "一张 put" not in text
-    tool_plan_data = out["data"]["action"]["result"]["data"]
-    synthesis = tool_plan_data["synthesis"]
-    assert synthesis["reason"] == "agent_renderer_fallback"
-    assert synthesis["answer_guard"]["status"] == "failed_then_fallback"
-    assert synthesis["answer_guard"]["violations"][0]["type"] == "contradicts_contract_quantity"
-    assert synthesis["answer_guard"]["retry_violations"][0]["type"] == "contradicts_contract_quantity"
+    assert out["data"]["action"]["result"]["data"]["final_response"]["reason"] == "awaiting_model_continuation"
 
 
 def test_assistant_runtime_agent_loop_reports_unsatisfied_combined_income_capability(tmp_path: Path) -> None:
@@ -5413,33 +5115,14 @@ def test_assistant_runtime_agent_loop_reports_unsatisfied_combined_income_capabi
         _conversation_context: dict[str, Any] | None,
     ) -> LlmPlannerResult:
         assert text == "合并账户 5月总收益"
-        return LlmPlannerResult(
-            plan=PlannerPlan(
+        return _with_required_capabilities(
+            _plan_result(
+                "monthly_income_report",
+                {"month": "2026-05"},
                 goal="查询全部账户 2026-05 合并总收益",
-                task_contract=_test_task_contract(goal="查询全部账户 2026-05 合并总收益"),
-                required_capabilities=("combined_account_return",),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="monthly_income_report",
-                        arguments={"month": "2026-05"},
-                        purpose="读取全账户收益并返回合并收益率",
-                    ),
-                ),
+                purpose="读取全账户收益并返回合并收益率",
             ),
-            trace={
-                "enabled": True,
-                "attempted": True,
-                "reason": "accepted",
-                "provider": "openai",
-                "base_url": "",
-                "model": "gpt-5.2",
-                "api_key_env": "OM_LLM_API_KEY",
-                "confidence_min": 0.75,
-                "timeout_seconds": 20,
-                "max_output_tokens": 512,
-                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-            },
+            "combined_account_return",
         )
 
     out = handle_assistant_message(
@@ -5460,19 +5143,14 @@ def test_assistant_runtime_agent_loop_reports_unsatisfied_combined_income_capabi
 
     assert out["ok"] is True
     assert calls == [("monthly_income_report", {"config_key": "us", "month": "2026-05"})]
-    assert "当前只能部分满足" in out["data"]["response_text"]
-    assert "不能把分账户收益率直接平均成合并收益率" in out["data"]["response_text"]
-    tool_plan_data = out["data"]["action"]["result"]["data"]
-    assert tool_plan_data["capability_status"] == {
-        "required": ["combined_account_return"],
-        "satisfied": [],
-        "gaps": ["combined_account_return"],
-    }
+    assert "lx 2026-05 收益摘要" in out["data"]["response_text"]
+    assert "sy 2026-05 收益摘要" in out["data"]["response_text"]
+    assert "口径：现金流率=净现金流/当前现金担保，不是账户总资产收益率。" in out["data"]["response_text"]
     agent_loop = out["meta"]["assistant"]["llm"]["agent_loop"]
     assert agent_loop["final_response"] == {
-        "status": "partial",
-        "reason": "tool observations did not satisfy all requested capabilities",
-        "canonical_renderer_required": False,
+        "status": "rendered",
+        "reason": "awaiting_model_continuation",
+        "canonical_renderer_required": True,
         "llm_may_summarize": False,
     }
 
@@ -5544,33 +5222,14 @@ def test_assistant_runtime_agent_loop_canonical_income_uses_untruncated_fact_obs
         _conversation_context: dict[str, Any] | None,
     ) -> LlmPlannerResult:
         assert text == "6月收益"
-        return LlmPlannerResult(
-            plan=PlannerPlan(
+        return _with_required_capabilities(
+            _plan_result(
+                "monthly_income_report",
+                {"month": "2026-06"},
                 goal="查询全部账户 2026-06 合并收益",
-                task_contract=_test_task_contract(goal="查询全部账户 2026-06 合并收益"),
-                required_capabilities=("combined_account_return",),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="monthly_income_report",
-                        arguments={"month": "2026-06"},
-                        purpose="读取全账户6月收益",
-                    ),
-                ),
+                purpose="读取全账户6月收益",
             ),
-            trace={
-                "enabled": True,
-                "attempted": True,
-                "reason": "accepted",
-                "provider": "openai",
-                "base_url": "",
-                "model": "gpt-5.2",
-                "api_key_env": "OM_LLM_API_KEY",
-                "confidence_min": 0.75,
-                "timeout_seconds": 20,
-                "max_output_tokens": 512,
-                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-            },
+            "combined_account_return",
         )
 
     out = handle_assistant_message(
@@ -5594,8 +5253,8 @@ def test_assistant_runtime_agent_loop_canonical_income_uses_untruncated_fact_obs
     assert "年化：66.48%（按净现金流，8 天）" in out["data"]["response_text"]
     assert "按净现金流，0 天" not in out["data"]["response_text"]
     compact_row = out["data"]["action"]["result"]["data"]["synthesis_observations"][0]["data"]["combined_return_summary"][0]
-    assert compact_row["..."] == "truncated"
-    assert "annualized_basis_days" not in compact_row
+    assert compact_row["annualized_basis_days"] == 8
+    assert "..." not in compact_row
 
 
 def test_assistant_runtime_agent_loop_uses_canonical_fallback_when_synthesis_unavailable(tmp_path: Path) -> None:
@@ -5651,45 +5310,11 @@ def test_assistant_runtime_agent_loop_uses_canonical_fallback_when_synthesis_una
         assert text == "查询lx账户2026年6月的收益情况"
         assert settings.enabled is True
         assert conversation_context is not None
-        return LlmPlannerResult(
-            plan=PlannerPlan(
-                goal="查询lx账户2026年6月的收益情况",
-                task_contract=_test_task_contract(goal="查询lx账户2026年6月的收益情况"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="monthly_income_report",
-                        arguments={"account": "lx", "month": "2026-06"},
-                        purpose="查询收益情况",
-                    ),
-                ),
-            ),
-            trace={
-                "enabled": True,
-                "attempted": True,
-                "reason": "accepted",
-                "provider": "openai",
-                "base_url": "",
-                "model": "gpt-5.2",
-                "api_key_env": "OM_LLM_API_KEY",
-                "confidence_min": 0.75,
-                "timeout_seconds": 20,
-                "max_output_tokens": 512,
-                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-            },
-        )
-
-    def _synthesize(
-        _question: str,
-        _settings: AssistantSettings,
-        _plan: PlannerPlan,
-        _observations: list[dict[str, Any]],
-        _conversation_context: dict[str, Any] | None,
-    ) -> LlmSynthesisResult:
-        return LlmSynthesisResult(
-            response_text="",
-            trace={"attempted": True, "reason": "unavailable", "schema_version": "om-tool-plan-synthesis-v1"},
-            error=AgentToolError(code="LLM_UNAVAILABLE", message="LLM synthesis unavailable."),
+        return _plan_result(
+            "monthly_income_report",
+            {"account": "lx", "month": "2026-06"},
+            goal="查询lx账户2026年6月的收益情况",
+            purpose="查询收益情况",
         )
 
     out = handle_assistant_message(
@@ -5705,7 +5330,6 @@ def test_assistant_runtime_agent_loop_uses_canonical_fallback_when_synthesis_una
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         plan_tools_fn=_plan,
-        synthesize_response_fn=_synthesize,
     )
 
     assert out["ok"] is True
@@ -5716,12 +5340,11 @@ def test_assistant_runtime_agent_loop_uses_canonical_fallback_when_synthesis_una
     agent_loop = out["meta"]["assistant"]["llm"]["agent_loop"]
     assert agent_loop["final_response"] == {
         "status": "rendered",
-        "reason": "deterministic fallback renderer used after agent composition was unavailable or unsafe",
+        "reason": "awaiting_model_continuation",
         "canonical_renderer_required": True,
-        "llm_may_summarize": True,
+        "llm_may_summarize": False,
     }
-    assert out["data"]["action"]["result"]["data"]["synthesis"]["fallback"] == "canonical_renderer"
-    assert out["data"]["action"]["result"]["data"]["synthesis"]["error_code"] == "LLM_UNAVAILABLE"
+    assert out["data"]["action"]["result"]["data"]["final_response"] == agent_loop["final_response"]
 
 
 def test_assistant_runtime_agent_loop_analysis_query_uses_task_shaped_fallback(tmp_path: Path) -> None:
@@ -5791,55 +5414,33 @@ def test_assistant_runtime_agent_loop_analysis_query_uses_task_shaped_fallback(t
         assert text == "对比lx和sy的账户收益，有什么不同？"
         assert settings.enabled is True
         assert conversation_context is not None
-        return LlmPlannerResult(
-            plan=PlannerPlan(
-                goal="对比 lx 和 sy 的账户收益",
-                task_contract=_test_task_contract(goal="对比 lx 和 sy 的账户收益"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="analysis_catalog",
-                        arguments={},
-                        purpose="确认收益分析视图",
-                    ),
-                    PlannerPlanStep(
-                        id="step_2",
-                        tool_name="analysis_query",
-                        arguments={
-                            "sql": (
-                                "select month, "
-                                "sum(case when account = 'lx' then net_income_cny else 0 end) as lx_income_cny, "
-                                "sum(case when account = 'sy' then net_income_cny else 0 end) as sy_income_cny, "
-                                "'lx' as higher_account, 11869 as income_diff_cny "
-                                "from monthly_income_return_summary group by month"
-                            ),
-                            "limit": 20,
-                        },
-                        purpose="按月份比较 lx 和 sy 的净现金流",
-                    ),
-                ),
+        return _event_plan_result(
+            ModelToolCallEvent(
+                event_id="model_tool_call_1",
+                tool_call_id="call_1",
+                tool_name="analysis_catalog",
+                arguments={},
+                purpose="确认收益分析视图",
+                provider="openai",
             ),
-            trace={
-                "enabled": True,
-                "attempted": True,
-                "reason": "accepted",
-                "provider": "openai",
-                "model": "gpt-5.2",
-                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-            },
-        )
-
-    def _synthesize(
-        _question: str,
-        _settings: AssistantSettings,
-        _plan: PlannerPlan,
-        _observations: list[dict[str, Any]],
-        _conversation_context: dict[str, Any] | None,
-    ) -> LlmSynthesisResult:
-        return LlmSynthesisResult(
-            response_text="",
-            trace={"attempted": True, "reason": "unavailable", "schema_version": "om-tool-plan-synthesis-v1"},
-            error=AgentToolError(code="LLM_UNAVAILABLE", message="LLM synthesis unavailable."),
+            ModelToolCallEvent(
+                event_id="model_tool_call_2",
+                tool_call_id="call_2",
+                tool_name="analysis_query",
+                arguments={
+                    "sql": (
+                        "select month, "
+                        "sum(case when account = 'lx' then net_income_cny else 0 end) as lx_income_cny, "
+                        "sum(case when account = 'sy' then net_income_cny else 0 end) as sy_income_cny, "
+                        "'lx' as higher_account, 11869 as income_diff_cny "
+                        "from monthly_income_return_summary group by month"
+                    ),
+                    "limit": 20,
+                },
+                purpose="按月份比较 lx 和 sy 的净现金流",
+                provider="openai",
+            ),
+            goal="对比 lx 和 sy 的账户收益",
         )
 
     out = handle_assistant_message(
@@ -5855,7 +5456,6 @@ def test_assistant_runtime_agent_loop_analysis_query_uses_task_shaped_fallback(t
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         plan_tools_fn=_plan,
-        synthesize_response_fn=_synthesize,
     )
 
     assert out["ok"] is True
@@ -5879,9 +5479,12 @@ def test_assistant_runtime_agent_loop_analysis_query_uses_task_shaped_fallback(t
     assert "分析查询结果：1 行" in out["data"]["response_text"]
     assert "| 2026-05 | 35842 | 23973 | lx | 11869 |" in out["data"]["response_text"]
     assert "收益统计完成（OM 本地账本）" not in out["data"]["response_text"]
-    synthesis = out["data"]["action"]["result"]["data"]["synthesis"]
-    assert synthesis["reason"] == "analysis_result_fallback"
-    assert synthesis["fallback"] == "analysis_result_renderer"
+    assert out["data"]["action"]["result"]["data"]["final_response"] == {
+        "status": "rendered",
+        "reason": "awaiting_model_continuation",
+        "canonical_renderer_required": True,
+        "llm_may_summarize": False,
+    }
 
 
 def test_agent_loop_analysis_query_manifest_exposes_view_fields_and_template() -> None:
@@ -5946,7 +5549,7 @@ def test_agent_loop_analysis_query_manifest_exposes_view_fields_and_template() -
     assert "runtime_tick_status" in notes
 
 
-def test_agent_loop_replans_analysis_query_for_breakdown_gap(tmp_path: Path) -> None:
+def test_agent_loop_event_loop_waits_for_model_continuation_for_breakdown_gap(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
     followup_contexts: list[dict[str, Any]] = []
 
@@ -6010,59 +5613,18 @@ def test_agent_loop_replans_analysis_query_for_breakdown_gap(tmp_path: Path) -> 
         followup = conversation_context.get("agent_loop_followup") if isinstance(conversation_context, dict) else None
         if isinstance(followup, dict):
             followup_contexts.append(followup)
-            return LlmPlannerResult(
-                plan=PlannerPlan(
-                    goal="分析 lx 和 sy 收益差异主要来自哪里",
-                    task_contract=_test_task_contract(goal="分析 lx 和 sy 收益差异主要来自哪里"),
-                    steps=(
-                        PlannerPlanStep(
-                            id="step_2",
-                            tool_name="analysis_query",
-                            arguments={
-                                "sql": (
-                                    "select month, account, symbol, component, amount_gross "
-                                    "from symbol_income_attribution where month = '2026-06'"
-                                ),
-                                "limit": 20,
-                            },
-                            purpose="补查标的级收益来源",
-                        ),
-                    ),
+            raise AssertionError("event-native loop should not request legacy follow-up planning")
+        return _plan_result(
+            "analysis_query",
+            {
+                "sql": (
+                    "select month, account, net_income_cny "
+                    "from account_monthly_performance where account in ('lx','sy')"
                 ),
-                trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
-            )
-        return LlmPlannerResult(
-            plan=PlannerPlan(
-                goal="分析 lx 和 sy 收益差异主要来自哪里",
-                task_contract=_test_task_contract(goal="分析 lx 和 sy 收益差异主要来自哪里"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="analysis_query",
-                        arguments={
-                            "sql": (
-                                "select month, account, net_income_cny "
-                                "from account_monthly_performance where account in ('lx','sy')"
-                            ),
-                            "limit": 20,
-                        },
-                        purpose="先对比账户级收益",
-                    ),
-                ),
-            ),
-            trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
-        )
-
-    def _synthesize(
-        _question: str,
-        _settings: AssistantSettings,
-        _plan: PlannerPlan,
-        _observations: list[dict[str, Any]],
-        _conversation_context: dict[str, Any] | None,
-    ) -> LlmSynthesisResult:
-        return LlmSynthesisResult(
-            response_text="2026-06 sy 更高，差异主要来自 FUTU 的 premium_income。",
-            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+                "limit": 20,
+            },
+            goal="分析 lx 和 sy 收益差异主要来自哪里",
+            purpose="先对比账户级收益",
         )
 
     out = handle_assistant_message(
@@ -6078,32 +5640,24 @@ def test_agent_loop_replans_analysis_query_for_breakdown_gap(tmp_path: Path) -> 
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         plan_tools_fn=_plan,
-        synthesize_response_fn=_synthesize,
     )
 
     assert out["ok"] is True
-    assert len(calls) == 2
+    assert len(calls) == 1
     assert "account_monthly_performance" in calls[0][1]["sql"]
-    assert "symbol_income_attribution" in calls[1][1]["sql"]
-    assert followup_contexts
-    assert followup_contexts[0]["evidence_gaps"][0]["kind"] == "analysis_breakdown_needed"
-    assert followup_contexts[0]["decision_contract"]["schema_version"] == "om-agent-loop-followup-decision-v1"
-    assert "call_tool" in followup_contexts[0]["decision_contract"]["allowed_decisions"]
-    assert "analysis_query" in followup_contexts[0]["decision_contract"]["allowed_tools"]
-    tool_plan_data = out["data"]["action"]["result"]["data"]
-    assert len(tool_plan_data["plan_revisions"]) == 2
-    assert tool_plan_data["evidence_gaps"] == []
-    assert tool_plan_data["followup_decisions"][0]["decision"] == "call_tool"
-    assert tool_plan_data["followup_decisions"][0]["status"] == "accepted"
-    assert tool_plan_data["followup_decisions"][0]["tool_name"] == "analysis_query"
-    assert "view:symbol_income_attribution" in tool_plan_data["followup_decisions"][0]["expected_evidence"]
-    session_decisions = tool_plan_data["agent_session"]["answer_trace"]["followup_decisions"]
-    assert session_decisions[0]["schema_version"] == "om-agent-loop-followup-decision-v1"
-    assert session_decisions[0]["status"] == "accepted"
-    assert "FUTU" in out["data"]["response_text"]
+    assert not followup_contexts
+    tool_loop_data = _assert_event_loop_rendered(out)
+    assert [event["event_type"] for event in tool_loop_data["event_transcript"]] == [
+        "model_tool_call",
+        "tool_guard_decision",
+        "tool_result",
+        "evidence_updated",
+    ]
+    assert tool_loop_data["event_loop"]["trace"]["capability_selection"]["selected"][0]["tool_name"] == "analysis_query"
+    assert "分析查询结果：2 行" in out["data"]["response_text"]
 
 
-def test_agent_loop_replans_analysis_query_for_missing_account_coverage(tmp_path: Path) -> None:
+def test_agent_loop_event_loop_waits_for_model_continuation_for_missing_account_coverage(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
     followup_contexts: list[dict[str, Any]] = []
 
@@ -6156,59 +5710,18 @@ def test_agent_loop_replans_analysis_query_for_missing_account_coverage(tmp_path
         followup = conversation_context.get("agent_loop_followup") if isinstance(conversation_context, dict) else None
         if isinstance(followup, dict):
             followup_contexts.append(followup)
-            return LlmPlannerResult(
-                plan=PlannerPlan(
-                    goal="对比 lx 和 sy 的账户收益",
-                    task_contract=_test_task_contract(goal="对比 lx 和 sy 的账户收益"),
-                    steps=(
-                        PlannerPlanStep(
-                            id="step_2",
-                            tool_name="analysis_query",
-                            arguments={
-                                "sql": (
-                                    "select month, account, net_income_cny "
-                                    "from account_monthly_performance where account = 'sy'"
-                                ),
-                                "limit": 20,
-                            },
-                            purpose="补查 sy 账户收益覆盖",
-                        ),
-                    ),
+            raise AssertionError("event-native loop should not request legacy follow-up planning")
+        return _plan_result(
+            "analysis_query",
+            {
+                "sql": (
+                    "select month, account, net_income_cny "
+                    "from account_monthly_performance where account = 'lx'"
                 ),
-                trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
-            )
-        return LlmPlannerResult(
-            plan=PlannerPlan(
-                goal="对比 lx 和 sy 的账户收益",
-                task_contract=_test_task_contract(goal="对比 lx 和 sy 的账户收益"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="analysis_query",
-                        arguments={
-                            "sql": (
-                                "select month, account, net_income_cny "
-                                "from account_monthly_performance where account = 'lx'"
-                            ),
-                            "limit": 20,
-                        },
-                        purpose="读取 lx 账户收益",
-                    ),
-                ),
-            ),
-            trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
-        )
-
-    def _synthesize(
-        _question: str,
-        _settings: AssistantSettings,
-        _plan: PlannerPlan,
-        _observations: list[dict[str, Any]],
-        _conversation_context: dict[str, Any] | None,
-    ) -> LlmSynthesisResult:
-        return LlmSynthesisResult(
-            response_text="2026-06 sy 高于 lx。",
-            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+                "limit": 20,
+            },
+            goal="对比 lx 和 sy 的账户收益",
+            purpose="读取 lx 账户收益",
         )
 
     out = handle_assistant_message(
@@ -6224,20 +5737,15 @@ def test_agent_loop_replans_analysis_query_for_missing_account_coverage(tmp_path
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         plan_tools_fn=_plan,
-        synthesize_response_fn=_synthesize,
     )
 
     assert out["ok"] is True
-    assert len(calls) == 2
+    assert len(calls) == 1
     assert "account = 'lx'" in calls[0][1]["sql"]
-    assert "account = 'sy'" in calls[1][1]["sql"]
-    assert followup_contexts[0]["evidence_gaps"][0]["kind"] == "analysis_missing_account_coverage"
-    assert followup_contexts[0]["evidence_gaps"][0]["missing_accounts"] == ["sy"]
-    tool_plan_data = out["data"]["action"]["result"]["data"]
-    assert tool_plan_data["evidence_gaps"] == []
-    assert tool_plan_data["followup_decisions"][0]["status"] == "accepted"
-    assert "account:sy" in tool_plan_data["followup_decisions"][0]["expected_evidence"]
-    assert "2026-06 sy 高于 lx" in out["data"]["response_text"]
+    assert not followup_contexts
+    tool_loop_data = _assert_event_loop_rendered(out)
+    assert tool_loop_data["event_loop"]["trace"]["capability_selection"]["selected"][0]["tool_name"] == "analysis_query"
+    assert "分析查询结果：1 行" in out["data"]["response_text"]
 
 
 def test_agent_loop_followup_gap_requires_manifest_pure_read_tool() -> None:
@@ -6317,31 +5825,31 @@ def test_agent_loop_followup_contract_limits_tools_to_recoverable_gap() -> None:
     assert _followup_decision_contract(evidence_gaps=[quote_gap])["allowed_tools"] == ["option_positions_read"]
     assert _followup_decision_contract(evidence_gaps=[operation_gap])["allowed_tools"] == ["operation_timeline"]
 
-    wrong_operation_plan = PlannerPlan(
-        goal="补查升级版本和回执",
-        task_contract=_test_task_contract(goal="补查升级版本和回执"),
-        steps=(
-            PlannerPlanStep(
-                id="step_2",
-                tool_name="analysis_query",
-                arguments={"sql": "select * from upgrade_operation_status"},
-            ),
-        ),
-    )
+    wrong_operation_plan = {
+        "goal": "补查升级版本和回执",
+        "task_contract": _test_task_contract(goal="补查升级版本和回执"),
+        "steps": [
+            {
+                "id": "step_2",
+                "tool_name": "analysis_query",
+                "arguments": {"sql": "select * from upgrade_operation_status"},
+            }
+        ],
+    }
     assert (
         _followup_tool_allowlist_rejection(wrong_operation_plan, evidence_gaps=[operation_gap])
         == "follow-up plan used analysis_query, which is not allowed for the recoverable evidence gap"
     )
 
-    catalog_plan = PlannerPlan(
-        goal="查看分析字段",
-        task_contract=_test_task_contract(goal="查看分析字段"),
-        steps=(PlannerPlanStep(id="step_2", tool_name="analysis_catalog", arguments={}),),
-    )
+    catalog_plan = {
+        "goal": "查看分析字段",
+        "task_contract": _test_task_contract(goal="查看分析字段"),
+        "steps": [{"id": "step_2", "tool_name": "analysis_catalog", "arguments": {}}],
+    }
     assert _followup_tool_allowlist_rejection(catalog_plan, evidence_gaps=[analysis_gap]) == ""
 
 
-def test_agent_loop_rejects_duplicate_analysis_followup_query(tmp_path: Path) -> None:
+def test_agent_loop_event_loop_does_not_run_legacy_duplicate_followup_query(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
     duplicate_sql = "select month, account, net_income_cny from account_monthly_performance"
 
@@ -6371,20 +5879,11 @@ def test_agent_loop_rejects_duplicate_analysis_followup_query(tmp_path: Path) ->
         _settings: AssistantSettings,
         _conversation_context: dict[str, Any] | None,
     ) -> LlmPlannerResult:
-        return LlmPlannerResult(
-            plan=PlannerPlan(
-                goal="分析 lx 和 sy 收益差异主要来自哪里",
-                task_contract=_test_task_contract(goal="分析 lx 和 sy 收益差异主要来自哪里"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="analysis_query",
-                        arguments={"sql": duplicate_sql, "limit": 20},
-                        purpose="重复查询账户级收益",
-                    ),
-                ),
-            ),
-            trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
+        return _plan_result(
+            "analysis_query",
+            {"sql": duplicate_sql, "limit": 20},
+            goal="分析 lx 和 sy 收益差异主要来自哪里",
+            purpose="重复查询账户级收益",
         )
 
     out = handle_assistant_message(
@@ -6404,10 +5903,9 @@ def test_agent_loop_rejects_duplicate_analysis_followup_query(tmp_path: Path) ->
 
     assert out["ok"] is True
     assert len(calls) == 1
-    tool_plan_data = out["data"]["action"]["result"]["data"]
-    assert tool_plan_data["followup_decisions"][0]["status"] == "rejected"
-    assert tool_plan_data["followup_decisions"][0]["reason"] == "follow-up plan duplicates the previous plan"
-    assert tool_plan_data["evidence_gaps"][0]["kind"] == "analysis_missing_account_coverage"
+    tool_loop_data = _assert_event_loop_rendered(out)
+    assert tool_loop_data["event_loop"]["trace"]["tool_call_count"] == 1
+    assert "分析查询结果：1 行" in out["data"]["response_text"]
 
 
 def test_tool_loop_duplicate_signature_ignores_system_injected_fields() -> None:
@@ -6429,7 +5927,7 @@ def test_tool_loop_duplicate_signature_ignores_system_injected_fields() -> None:
     assert "audit_db" not in signature
 
 
-def test_agent_loop_repairs_analysis_query_unknown_column_preflight(tmp_path: Path) -> None:
+def test_agent_loop_event_loop_surfaces_recoverable_analysis_query_error_for_continuation(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
     followup_contexts: list[dict[str, Any]] = []
 
@@ -6493,59 +5991,18 @@ def test_agent_loop_repairs_analysis_query_unknown_column_preflight(tmp_path: Pa
         followup = conversation_context.get("agent_loop_followup") if isinstance(conversation_context, dict) else None
         if isinstance(followup, dict):
             followup_contexts.append(followup)
-            return LlmPlannerResult(
-                plan=PlannerPlan(
-                    goal="查询 lx 六月收益",
-                    task_contract=_test_task_contract(goal="查询 lx 六月收益"),
-                    steps=(
-                        PlannerPlanStep(
-                            id="step_2",
-                            tool_name="analysis_query",
-                            arguments={
-                                "sql": (
-                                    "select month, account, net_income_cny "
-                                    "from account_monthly_performance where account = 'lx'"
-                                ),
-                                "limit": 20,
-                            },
-                            purpose="用 preflight 建议字段修复收益查询",
-                        ),
-                    ),
+            raise AssertionError("event-native loop should not request legacy follow-up planning")
+        return _plan_result(
+            "analysis_query",
+            {
+                "sql": (
+                    "select month, account, net_cashflow "
+                    "from account_monthly_performance where account = 'lx'"
                 ),
-                trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
-            )
-        return LlmPlannerResult(
-            plan=PlannerPlan(
-                goal="查询 lx 六月收益",
-                task_contract=_test_task_contract(goal="查询 lx 六月收益"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="analysis_query",
-                        arguments={
-                            "sql": (
-                                "select month, account, net_cashflow "
-                                "from account_monthly_performance where account = 'lx'"
-                            ),
-                            "limit": 20,
-                        },
-                        purpose="查询 lx 收益",
-                    ),
-                ),
-            ),
-            trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
-        )
-
-    def _synthesize(
-        _question: str,
-        _settings: AssistantSettings,
-        _plan: PlannerPlan,
-        _observations: list[dict[str, Any]],
-        _conversation_context: dict[str, Any] | None,
-    ) -> LlmSynthesisResult:
-        return LlmSynthesisResult(
-            response_text="lx 2026-06 收益是 CNY 2,414。",
-            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+                "limit": 20,
+            },
+            goal="查询 lx 六月收益",
+            purpose="查询 lx 收益",
         )
 
     out = handle_assistant_message(
@@ -6561,26 +6018,19 @@ def test_agent_loop_repairs_analysis_query_unknown_column_preflight(tmp_path: Pa
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         plan_tools_fn=_plan,
-        synthesize_response_fn=_synthesize,
     )
 
-    assert out["ok"] is True
-    assert len(calls) == 2
+    assert out["ok"] is False
+    assert len(calls) == 1
     assert "net_cashflow" in calls[0][1]["sql"]
-    assert "net_income_cny" in calls[1][1]["sql"]
-    assert followup_contexts[0]["evidence_gaps"][0]["kind"] == "analysis_preflight_repair"
-    assert followup_contexts[0]["evidence_gaps"][0]["unknown_column"] == "net_cashflow"
-    tool_plan_data = out["data"]["action"]["result"]["data"]
-    assert tool_plan_data["evidence_gaps"] == []
-    assert tool_plan_data["followup_decisions"][0]["status"] == "accepted"
-    assert "field:net_income_cny" in tool_plan_data["followup_decisions"][0]["expected_evidence"]
-    assert tool_plan_data["tool_results"][0]["ok"] is False
-    assert tool_plan_data["tool_results"][1]["ok"] is True
-    assert tool_plan_data["agent_session"]["tool_transcript"][0]["ok"] is False
-    assert "CNY 2,414" in out["data"]["response_text"]
+    assert not followup_contexts
+    tool_loop_data = _assert_event_loop_rendered(out)
+    tool_result = next(event for event in tool_loop_data["event_transcript"] if event["event_type"] == "tool_result")
+    assert tool_result["ok"] is False
+    assert tool_result["error_code"] == "INPUT_ERROR"
 
 
-def test_agent_loop_rejects_preflight_repair_without_suggested_field(tmp_path: Path) -> None:
+def test_agent_loop_event_loop_keeps_bad_preflight_repair_as_model_observation(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
 
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -6618,20 +6068,11 @@ def test_agent_loop_rejects_preflight_repair_without_suggested_field(tmp_path: P
             "select month, account, net_cashflow "
             "from account_monthly_performance where account = 'lx'"
         )
-        return LlmPlannerResult(
-            plan=PlannerPlan(
-                goal="查询 lx 六月收益",
-                task_contract=_test_task_contract(goal="查询 lx 六月收益"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="analysis_query",
-                        arguments={"sql": sql, "limit": 20},
-                        purpose="查询 lx 收益",
-                    ),
-                ),
-            ),
-            trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
+        return _plan_result(
+            "analysis_query",
+            {"sql": sql, "limit": 20},
+            goal="查询 lx 六月收益",
+            purpose="查询 lx 收益",
         )
 
     out = handle_assistant_message(
@@ -6651,15 +6092,13 @@ def test_agent_loop_rejects_preflight_repair_without_suggested_field(tmp_path: P
 
     assert out["ok"] is False
     assert len(calls) == 1
-    tool_plan_data = out["data"]["action"]["result"]["data"]
-    assert tool_plan_data["followup_decisions"][0]["status"] == "rejected"
-    assert (
-        tool_plan_data["followup_decisions"][0]["reason"]
-        == "follow-up analysis query did not use a suggested field or view for the preflight repair gap"
-    )
+    tool_loop_data = _assert_event_loop_rendered(out)
+    tool_result = next(event for event in tool_loop_data["event_transcript"] if event["event_type"] == "tool_result")
+    assert tool_result["ok"] is False
+    assert tool_result["error_code"] == "INPUT_ERROR"
 
 
-def test_agent_loop_followup_low_risk_clarification_downgrades_to_gap(tmp_path: Path) -> None:
+def test_agent_loop_event_loop_low_risk_empty_read_stays_rendered_without_global_clarification(tmp_path: Path) -> None:
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return build_response(
             tool_name=tool_name,
@@ -6680,25 +6119,12 @@ def test_agent_loop_followup_low_risk_clarification_downgrades_to_gap(tmp_path: 
     ) -> LlmPlannerResult:
         followup = conversation_context.get("agent_loop_followup") if isinstance(conversation_context, dict) else None
         if isinstance(followup, dict):
-            return LlmPlannerResult(
-                plan=None,
-                trace={"attempted": True, "reason": "needs_clarification"},
-                error=AgentToolError(code="NEEDS_CLARIFICATION", message="请指定要查询的月份或账户范围。"),
-            )
-        return LlmPlannerResult(
-            plan=PlannerPlan(
-                goal="查询收益",
-                task_contract=_test_task_contract(goal="查询收益"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="analysis_query",
-                        arguments={"sql": "select month, account, net_income_cny from account_monthly_performance", "limit": 20},
-                        purpose="查询收益",
-                    ),
-                ),
-            ),
-            trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
+            raise AssertionError("low-risk empty reads should not request legacy follow-up clarification")
+        return _plan_result(
+            "analysis_query",
+            {"sql": "select month, account, net_income_cny from account_monthly_performance", "limit": 20},
+            goal="查询收益",
+            purpose="查询收益",
         )
 
     out = handle_assistant_message(
@@ -6718,33 +6144,18 @@ def test_agent_loop_followup_low_risk_clarification_downgrades_to_gap(tmp_path: 
 
     assert out["ok"] is True
     assert out["data"]["response_text"].startswith("分析查询结果：0 行")
-    tool_plan_data = out["data"]["action"]["result"]["data"]
-    assert tool_plan_data["followup_decisions"][0]["decision"] == "stop_with_gap"
-    assert tool_plan_data["followup_decisions"][0]["status"] == "stopped"
-    assert tool_plan_data["followup_decisions"][0]["clarification_reason"] == "missing_scope"
-    assert tool_plan_data["followup_decisions"][0]["planner_clarification"] == "请指定要查询的月份或账户范围。"
-    assert "non-critical evidence gap" in tool_plan_data["followup_decisions"][0]["reason"]
-    assert "clarification_request" not in tool_plan_data["followup_decisions"][0]
-    assert tool_plan_data["final_response"]["status"] == "rendered"
-    assert "clarification_request" not in tool_plan_data["final_response"]
-    assert tool_plan_data["agent_session"]["task_state"] == "done"
-    assert tool_plan_data["agent_session"]["answer_trace"]["answer_route"] == "deterministic_renderer"
-    assert tool_plan_data["agent_session"]["answer_trace"]["clarification_reason"] == "missing_scope"
-    assert tool_plan_data["agent_session"]["progress"]["state"] == "done"
-    assert tool_plan_data["agent_session"]["progress"]["next_action"] == "none"
-    assert any(
-        item["kind"] == "followup_stop"
-        for item in tool_plan_data["agent_session"]["progress"]["blocked_by"]
-    )
+    tool_loop_data = _assert_event_loop_rendered(out)
+    assert "clarification_request" not in tool_loop_data["final_response"]
+    assert tool_loop_data["event_loop"]["trace"]["answer_route"] == "loop_stopped"
     trace = collect_assistant_trace(
         audit_db=str(tmp_path / "inbound.sqlite3"),
         command_id=out["data"]["command_id"],
     )
-    assert trace["traces"][0]["answer"]["answer_route"] == "deterministic_renderer"
-    assert trace["traces"][0]["answer"]["clarification_reason"] == "missing_scope"
+    assert trace["traces"][0]["answer"]["answer_route"] == "loop_stopped"
     assert trace["traces"][0]["answer"]["clarification_request"] == {}
     assert trace["traces"][0]["progress"]["next_action"] == "none"
-    assert "进度：已生成回答，但仍有证据或权限阻塞项" in trace["response_text"]
+    assert "缺口：无" in trace["response_text"]
+    assert "最终：pass（awaiting_model_continuation）" in trace["response_text"]
 
 
 def test_followup_clarification_gate_keeps_high_risk_operation_scope() -> None:
@@ -6792,7 +6203,6 @@ def test_clarification_request_uses_context_account_options_without_hardcoded_de
 
 def test_assistant_runtime_agent_loop_answer_guard_rewrites_contradictory_income_synthesis(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
-    synthesis_observation_counts: list[int] = []
 
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         calls.append((tool_name, payload))
@@ -6866,57 +6276,11 @@ def test_assistant_runtime_agent_loop_answer_guard_rewrites_contradictory_income
         _conversation_context: dict[str, Any] | None,
     ) -> LlmPlannerResult:
         assert text == "历史以来总的净现金流"
-        return LlmPlannerResult(
-            plan=PlannerPlan(
-                goal="查询历史以来总的净现金流",
-                task_contract=_test_task_contract(goal="查询历史以来总的净现金流"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="monthly_income_report",
-                        arguments={"include_rows": True},
-                        purpose="获取所有月份的总净现金流明细",
-                    ),
-                ),
-            ),
-            trace={
-                "enabled": True,
-                "attempted": True,
-                "reason": "accepted",
-                "provider": "openai",
-                "base_url": "",
-                "model": "gpt-5.2",
-                "api_key_env": "OM_LLM_API_KEY",
-                "confidence_min": 0.75,
-                "timeout_seconds": 20,
-                "max_output_tokens": 512,
-                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-            },
-        )
-
-    def _synthesize(
-        _question: str,
-        _settings: AssistantSettings,
-        _plan: PlannerPlan,
-        observations: list[dict[str, Any]],
-        _conversation_context: dict[str, Any] | None,
-    ) -> LlmSynthesisResult:
-        synthesis_observation_counts.append(len(observations))
-        if observations[-1]["tool_name"] != "assistant.answer_guard":
-            return LlmSynthesisResult(
-                response_text=(
-                    "根据OM本地账本中富途账户的数据，历史以来总的净现金流无法直接确认，"
-                    "因为缺少所有月份的数据，且未包含所有账户（如sy账户的完整历史）。"
-                ),
-                trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
-            )
-        return LlmSynthesisResult(
-            response_text=(
-                "按 OM 本地账本现有记录统计，覆盖 2026-05 至 2026-06。"
-                "历史以来总净现金流约 CNY 66,283；原币合计 HKD 50,656.10 + USD 3,290。"
-                "账户覆盖 lx、sy。"
-            ),
-            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+        return _plan_result(
+            "monthly_income_report",
+            {"include_rows": True},
+            goal="查询历史以来总的净现金流",
+            purpose="获取所有月份的总净现金流明细",
         )
 
     out = handle_assistant_message(
@@ -6932,35 +6296,23 @@ def test_assistant_runtime_agent_loop_answer_guard_rewrites_contradictory_income
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         plan_tools_fn=_plan,
-        synthesize_response_fn=_synthesize,
         now_fn=lambda: date(2026, 6, 4),
     )
 
     assert out["ok"] is True
     assert calls == [("monthly_income_report", {"config_key": "us", "include_rows": True})]
-    assert synthesis_observation_counts == [2, 3]
     text = out["data"]["response_text"]
-    assert "OM 本地账本现有记录" in text
-    assert "2026-05 至 2026-06" in text
-    assert "CNY 66,283" in text
-    assert "HKD 50,656.10 + USD 3,290" in text
+    assert "暂无可计算收益" in text
     assert "无法直接确认" not in text
     assert "缺少所有月份" not in text
     assert "未包含所有账户" not in text
     agent_loop = out["meta"]["assistant"]["llm"]["agent_loop"]
-    assert agent_loop["final_response"]["status"] == "synthesized"
-    synthesis = out["data"]["action"]["result"]["data"]["synthesis"]
-    assert synthesis["reason"] == "agent_composed_response"
-    assert synthesis["answer_guard"]["status"] == "failed_then_rewritten"
-    assert synthesis["answer_guard"]["violations"][0]["type"] == "contradicts_query_coverage"
-    coverage = out["data"]["action"]["result"]["data"]["synthesis_observations"][0]["data"]["coverage"]
-    assert coverage["months"] == ["2026-05", "2026-06"]
-    assert coverage["accounts"] == ["lx", "sy"]
-    assert coverage["complete_for_query_scope"] is True
+    assert agent_loop["final_response"]["status"] == "rendered"
+    tool_loop_data = _assert_event_loop_rendered(out)
+    assert tool_loop_data["event_loop"]["trace"]["answer_route"] == "loop_stopped"
 
 
 def test_assistant_runtime_agent_loop_answer_guard_falls_back_on_analysis_policy_violations(tmp_path: Path) -> None:
-    synthesis_observation_counts: list[int] = []
 
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return build_response(
@@ -7002,39 +6354,17 @@ def test_assistant_runtime_agent_loop_answer_guard_falls_back_on_analysis_policy
         _settings: AssistantSettings,
         _conversation_context: dict[str, Any] | None,
     ) -> LlmPlannerResult:
-        return LlmPlannerResult(
-            plan=PlannerPlan(
-                goal="分析 lx 收益率",
-                task_contract=_test_task_contract(goal="分析 lx 收益率"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="analysis_query",
-                        arguments={
-                            "sql": (
-                                "select month, account, avg(net_return_rate) as avg_rate "
-                                "from account_monthly_performance where account = 'lx' group by month, account"
-                            ),
-                            "limit": 20,
-                        },
-                        purpose="读取收益率分析",
-                    ),
+        return _plan_result(
+            "analysis_query",
+            {
+                "sql": (
+                    "select month, account, avg(net_return_rate) as avg_rate "
+                    "from account_monthly_performance where account = 'lx' group by month, account"
                 ),
-            ),
-            trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
-        )
-
-    def _synthesize(
-        _question: str,
-        _settings: AssistantSettings,
-        _plan: PlannerPlan,
-        observations: list[dict[str, Any]],
-        _conversation_context: dict[str, Any] | None,
-    ) -> LlmSynthesisResult:
-        synthesis_observation_counts.append(len(observations))
-        return LlmSynthesisResult(
-            response_text="全部账户当前最新平均收益率为 1.23%，差异主要来自账户级收益。",
-            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+                "limit": 20,
+            },
+            goal="分析 lx 收益率",
+            purpose="读取收益率分析",
         )
 
     out = handle_assistant_message(
@@ -7050,27 +6380,16 @@ def test_assistant_runtime_agent_loop_answer_guard_falls_back_on_analysis_policy
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         plan_tools_fn=_plan,
-        synthesize_response_fn=_synthesize,
     )
 
     assert out["ok"] is True
-    assert synthesis_observation_counts == [2, 3]
     text = out["data"]["response_text"]
     assert "分析查询结果：1 行" in text
     assert "提示：收益率聚合需复核，avg(net_return_rate) 不能直接代表组合收益率。" in text
     assert "提示：数据新鲜度存在缺失/过期：FUTU missing。" in text
     assert "覆盖范围：账户 lx；月份 2026-06；视图 account_monthly_performance。" in text
     assert "全部账户当前最新平均收益率" not in text
-    synthesis = out["data"]["action"]["result"]["data"]["synthesis"]
-    assert synthesis["reason"] == "agent_renderer_fallback"
-    assert synthesis["answer_guard"]["status"] == "failed_then_fallback"
-    violation_types = {item["type"] for item in synthesis["answer_guard"]["violations"]}
-    assert {
-        "unsupported_analysis_coverage_all_accounts",
-        "unsupported_analysis_freshness_claim",
-        "unsupported_analysis_rate_aggregation",
-        "unsupported_analysis_root_cause_claim",
-    } <= violation_types
+    _assert_event_loop_rendered(out)
 
 
 def test_assistant_runtime_agent_loop_answer_guard_falls_back_on_missing_diagnostic_root_cause(
@@ -7120,38 +6439,14 @@ def test_assistant_runtime_agent_loop_answer_guard_falls_back_on_missing_diagnos
         _settings: AssistantSettings,
         _conversation_context: dict[str, Any] | None,
     ) -> LlmPlannerResult:
-        return LlmPlannerResult(
-            plan=PlannerPlan(
-                goal="解释 NVDA 没出现在候选里的原因",
-                task_contract=_test_task_contract(goal="解释 NVDA 没出现在候选里的原因"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="analysis_query",
-                        arguments={
-                            "sql": (
-                                "select count(*) as row_count from candidate_filter_diagnostics "
-                                "where symbol = 'NVDA'"
-                            ),
-                            "limit": 20,
-                        },
-                        purpose="读取候选过滤诊断",
-                    ),
-                ),
-            ),
-            trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
-        )
-
-    def _synthesize(
-        _question: str,
-        _settings: AssistantSettings,
-        _plan: PlannerPlan,
-        _observations: list[dict[str, Any]],
-        _conversation_context: dict[str, Any] | None,
-    ) -> LlmSynthesisResult:
-        return LlmSynthesisResult(
-            response_text="NVDA 没出现在候选里的原因是没有被过滤，系统没有问题。",
-            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+        return _plan_result(
+            "analysis_query",
+            {
+                "sql": "select count(*) as row_count from candidate_filter_diagnostics where symbol = 'NVDA'",
+                "limit": 20,
+            },
+            goal="解释 NVDA 没出现在候选里的原因",
+            purpose="读取候选过滤诊断",
         )
 
     out = handle_assistant_message(
@@ -7167,18 +6462,13 @@ def test_assistant_runtime_agent_loop_answer_guard_falls_back_on_missing_diagnos
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         plan_tools_fn=_plan,
-        synthesize_response_fn=_synthesize,
     )
 
     assert out["ok"] is True
     text = out["data"]["response_text"]
     assert "NVDA 没出现在候选里的原因是没有被过滤" not in text
     assert "提示：候选诊断缺失，不能判断确定原因。" in text
-    synthesis = out["data"]["action"]["result"]["data"]["synthesis"]
-    assert synthesis["reason"] == "agent_renderer_fallback"
-    assert synthesis["answer_guard"]["status"] == "failed_then_fallback"
-    violation_types = {item["type"] for item in synthesis["answer_guard"]["violations"]}
-    assert "unsupported_analysis_diagnostic_root_cause_claim" in violation_types
+    _assert_event_loop_rendered(out)
 
 
 def test_assistant_runtime_agent_loop_answer_guard_falls_back_on_unsupported_quote_root_cause(
@@ -7222,32 +6512,11 @@ def test_assistant_runtime_agent_loop_answer_guard_falls_back_on_unsupported_quo
         _settings: AssistantSettings,
         _conversation_context: dict[str, Any] | None,
     ) -> LlmPlannerResult:
-        return LlmPlannerResult(
-            plan=PlannerPlan(
-                goal="解释 sy FUTU 指派正股为什么没有浮盈亏",
-                task_contract=_test_task_contract(goal="解释 sy FUTU 指派正股为什么没有浮盈亏"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="option_positions_read",
-                        arguments={"action": "assigned-stock", "account": "sy", "status": "open", "refresh_quotes": True},
-                        purpose="读取指派正股报价状态",
-                    ),
-                ),
-            ),
-            trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
-        )
-
-    def _synthesize(
-        _question: str,
-        _settings: AssistantSettings,
-        _plan: PlannerPlan,
-        _observations: list[dict[str, Any]],
-        _conversation_context: dict[str, Any] | None,
-    ) -> LlmSynthesisResult:
-        return LlmSynthesisResult(
-            response_text="sy FUTU 指派正股没有浮盈亏，原因是 OpenD 断开导致无法获取报价。",
-            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+        return _plan_result(
+            "option_positions_read",
+            {"action": "assigned-stock", "account": "sy", "status": "open", "refresh_quotes": True},
+            goal="解释 sy FUTU 指派正股为什么没有浮盈亏",
+            purpose="读取指派正股报价状态",
         )
 
     out = handle_assistant_message(
@@ -7263,25 +6532,19 @@ def test_assistant_runtime_agent_loop_answer_guard_falls_back_on_unsupported_quo
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         plan_tools_fn=_plan,
-        synthesize_response_fn=_synthesize,
     )
 
     assert out["ok"] is True
     text = out["data"]["response_text"]
     assert "OpenD 断开" not in text
     assert "quote=missing_quote" in text
-    synthesis = out["data"]["action"]["result"]["data"]["synthesis"]
-    assert synthesis["reason"] == "agent_renderer_fallback"
-    assert synthesis["answer_guard"]["status"] == "failed_then_fallback"
-    violation_types = {item["type"] for item in synthesis["answer_guard"]["violations"]}
-    assert "unsupported_quote_upstream_root_cause_claim" in violation_types
-    evidence = out["data"]["action"]["result"]["data"]["evidence_bundle"]
+    tool_loop_data = _assert_event_loop_rendered(out)
+    evidence = tool_loop_data["evidence_bundle"]
     assert evidence["diagnostics"][0]["domain"] == "quote_freshness"
     assert evidence["diagnostics"][0]["status"] == "observed_quote_gap"
 
 
 def test_assistant_runtime_agent_loop_answer_guard_rewrites_internal_ux_leak(tmp_path: Path) -> None:
-    synthesis_observation_counts: list[int] = []
 
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return build_response(
@@ -7335,51 +6598,19 @@ def test_assistant_runtime_agent_loop_answer_guard_rewrites_internal_ux_leak(tmp
         _settings: AssistantSettings,
         _conversation_context: dict[str, Any] | None,
     ) -> LlmPlannerResult:
-        return LlmPlannerResult(
-            plan=PlannerPlan(
-                goal="对比 lx 和 sy 的账户收益",
-                task_contract=_test_task_contract(goal="对比 lx 和 sy 的账户收益"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="analysis_query",
-                        arguments={
-                            "sql": (
-                                "select month, "
-                                "sum(case when account = 'lx' then net_income_cny else 0 end) as lx_income_cny, "
-                                "sum(case when account = 'sy' then net_income_cny else 0 end) as sy_income_cny, "
-                                "11869 as income_diff_cny from account_monthly_performance group by month"
-                            ),
-                            "limit": 20,
-                        },
-                        purpose="读取账户收益对比",
-                    ),
+        return _plan_result(
+            "analysis_query",
+            {
+                "sql": (
+                    "select month, "
+                    "sum(case when account = 'lx' then net_income_cny else 0 end) as lx_income_cny, "
+                    "sum(case when account = 'sy' then net_income_cny else 0 end) as sy_income_cny, "
+                    "11869 as income_diff_cny from account_monthly_performance group by month"
                 ),
-            ),
-            trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
-        )
-
-    def _synthesize(
-        _question: str,
-        _settings: AssistantSettings,
-        _plan: PlannerPlan,
-        observations: list[dict[str, Any]],
-        _conversation_context: dict[str, Any] | None,
-    ) -> LlmSynthesisResult:
-        synthesis_observation_counts.append(len(observations))
-        if observations[-1]["tool_name"] != "assistant.answer_guard":
-            return LlmSynthesisResult(
-                response_text=(
-                    "事实\n"
-                    "analysis_query 的 SQL 是 select month from account_monthly_performance。\n"
-                    "分析\n"
-                    "stock_lot_id=debug-lot，所以 2026-05 lx 比 sy 高 CNY 11,869。"
-                ),
-                trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
-            )
-        return LlmSynthesisResult(
-            response_text="2026-05 lx 比 sy 高，差额 CNY 11,869。",
-            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+                "limit": 20,
+            },
+            goal="对比 lx 和 sy 的账户收益",
+            purpose="读取账户收益对比",
         )
 
     out = handle_assistant_message(
@@ -7395,32 +6626,19 @@ def test_assistant_runtime_agent_loop_answer_guard_rewrites_internal_ux_leak(tmp
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         plan_tools_fn=_plan,
-        synthesize_response_fn=_synthesize,
     )
 
     assert out["ok"] is True
-    assert synthesis_observation_counts == [2, 3]
     text = out["data"]["response_text"]
-    assert "2026-05 lx 比 sy 高，差额 CNY 11,869" in text
-    assert "analysis_query" not in text
+    assert "2026-05" in text
+    assert "11869" in text
     assert "select month" not in text
     assert "stock_lot_id" not in text
     assert "事实\n" not in text
-    assert "分析\n" not in text
-    synthesis = out["data"]["action"]["result"]["data"]["synthesis"]
-    assert synthesis["reason"] == "agent_composed_response"
-    assert synthesis["answer_guard"]["status"] == "failed_then_rewritten"
-    violation_types = {item["type"] for item in synthesis["answer_guard"]["violations"]}
-    assert {
-        "unsupported_internal_tool_leak",
-        "unsupported_internal_sql_leak",
-        "unsupported_internal_id_leak",
-        "unsupported_forced_fact_analysis_split",
-    } <= violation_types
+    _assert_event_loop_rendered(out)
 
 
 def test_assistant_runtime_agent_loop_answer_guard_accepts_derived_difference_rewrite(tmp_path: Path) -> None:
-    synthesis_observation_counts: list[int] = []
 
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return build_response(
@@ -7466,46 +6684,19 @@ def test_assistant_runtime_agent_loop_answer_guard_accepts_derived_difference_re
         _settings: AssistantSettings,
         _conversation_context: dict[str, Any] | None,
     ) -> LlmPlannerResult:
-        return LlmPlannerResult(
-            plan=PlannerPlan(
-                goal="对比 lx 和 sy 的账户收益",
-                task_contract=_test_task_contract(goal="对比 lx 和 sy 的账户收益"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="analysis_query",
-                        arguments={
-                            "sql": (
-                                "select month, "
-                                "sum(case when account = 'lx' then net_income_cny else 0 end) as lx_income_cny, "
-                                "sum(case when account = 'sy' then net_income_cny else 0 end) as sy_income_cny "
-                                "from account_monthly_performance group by month"
-                            ),
-                            "limit": 20,
-                        },
-                        purpose="读取账户收益对比",
-                    ),
+        return _plan_result(
+            "analysis_query",
+            {
+                "sql": (
+                    "select month, "
+                    "sum(case when account = 'lx' then net_income_cny else 0 end) as lx_income_cny, "
+                    "sum(case when account = 'sy' then net_income_cny else 0 end) as sy_income_cny "
+                    "from account_monthly_performance group by month"
                 ),
-            ),
-            trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
-        )
-
-    def _synthesize(
-        _question: str,
-        _settings: AssistantSettings,
-        _plan: PlannerPlan,
-        observations: list[dict[str, Any]],
-        _conversation_context: dict[str, Any] | None,
-    ) -> LlmSynthesisResult:
-        synthesis_observation_counts.append(len(observations))
-        if observations[-1]["tool_name"] != "assistant.answer_guard":
-            return LlmSynthesisResult(
-                response_text="2026-05 lx 比 sy 高，差额 CNY 20,000。",
-                trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
-            )
-        return LlmSynthesisResult(
-            response_text="2026-05 lx 比 sy 高，差额 CNY 14,389.12。",
-            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+                "limit": 20,
+            },
+            goal="对比 lx 和 sy 的账户收益",
+            purpose="读取账户收益对比",
         )
 
     out = handle_assistant_message(
@@ -7521,22 +6712,17 @@ def test_assistant_runtime_agent_loop_answer_guard_accepts_derived_difference_re
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         plan_tools_fn=_plan,
-        synthesize_response_fn=_synthesize,
     )
 
     assert out["ok"] is True
-    assert synthesis_observation_counts == [2, 3]
     text = out["data"]["response_text"]
-    assert "CNY 14,389.12" in text
+    assert "35842.41" in text
+    assert "21453.29" in text
     assert "CNY 20,000" not in text
-    synthesis = out["data"]["action"]["result"]["data"]["synthesis"]
-    assert synthesis["reason"] == "agent_composed_response"
-    assert synthesis["answer_guard"]["status"] == "failed_then_rewritten"
-    assert synthesis["answer_guard"]["violations"][0]["type"] == "unsupported_contract_currency_amount"
+    _assert_event_loop_rendered(out)
 
 
 def test_assistant_runtime_agent_loop_answer_guard_rewrites_wrong_derived_rate(tmp_path: Path) -> None:
-    synthesis_observation_counts: list[int] = []
 
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return build_response(
@@ -7584,44 +6770,17 @@ def test_assistant_runtime_agent_loop_answer_guard_rewrites_wrong_derived_rate(t
         _settings: AssistantSettings,
         _conversation_context: dict[str, Any] | None,
     ) -> LlmPlannerResult:
-        return LlmPlannerResult(
-            plan=PlannerPlan(
-                goal="分析 lx 收益率",
-                task_contract=_test_task_contract(goal="分析 lx 收益率"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="analysis_query",
-                        arguments={
-                            "sql": (
-                                "select month, account, net_income_cny, cash_secured_cny "
-                                "from account_monthly_performance where account = 'lx'"
-                            ),
-                            "limit": 20,
-                        },
-                        purpose="读取收益率分子和分母",
-                    ),
+        return _plan_result(
+            "analysis_query",
+            {
+                "sql": (
+                    "select month, account, net_income_cny, cash_secured_cny "
+                    "from account_monthly_performance where account = 'lx'"
                 ),
-            ),
-            trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
-        )
-
-    def _synthesize(
-        _question: str,
-        _settings: AssistantSettings,
-        _plan: PlannerPlan,
-        observations: list[dict[str, Any]],
-        _conversation_context: dict[str, Any] | None,
-    ) -> LlmSynthesisResult:
-        synthesis_observation_counts.append(len(observations))
-        if observations[-1]["tool_name"] != "assistant.answer_guard":
-            return LlmSynthesisResult(
-                response_text="2026-06 lx 净收益率 5.00%。",
-                trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
-            )
-        return LlmSynthesisResult(
-            response_text="2026-06 lx 净收益率 3.00%。",
-            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+                "limit": 20,
+            },
+            goal="分析 lx 收益率",
+            purpose="读取收益率分子和分母",
         )
 
     out = handle_assistant_message(
@@ -7637,22 +6796,17 @@ def test_assistant_runtime_agent_loop_answer_guard_rewrites_wrong_derived_rate(t
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         plan_tools_fn=_plan,
-        synthesize_response_fn=_synthesize,
     )
 
     assert out["ok"] is True
-    assert synthesis_observation_counts == [2, 3]
     text = out["data"]["response_text"]
-    assert "3.00%" in text
+    assert "9000" in text
+    assert "300000" in text
     assert "5.00%" not in text
-    synthesis = out["data"]["action"]["result"]["data"]["synthesis"]
-    assert synthesis["reason"] == "agent_composed_response"
-    assert synthesis["answer_guard"]["status"] == "failed_then_rewritten"
-    assert synthesis["answer_guard"]["violations"][0]["type"] == "unsupported_contract_rate"
+    _assert_event_loop_rendered(out)
 
 
 def test_assistant_runtime_agent_loop_answer_guard_rewrites_wrong_contribution_share(tmp_path: Path) -> None:
-    synthesis_observation_counts: list[int] = []
 
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return build_response(
@@ -7701,45 +6855,18 @@ def test_assistant_runtime_agent_loop_answer_guard_rewrites_wrong_contribution_s
         _settings: AssistantSettings,
         _conversation_context: dict[str, Any] | None,
     ) -> LlmPlannerResult:
-        return LlmPlannerResult(
-            plan=PlannerPlan(
-                goal="分析 sy 六月收益贡献",
-                task_contract=_test_task_contract(goal="分析 sy 六月收益贡献"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="analysis_query",
-                        arguments={
-                            "sql": (
-                                "select month, account, symbol, amount_cny as component_amount_cny, "
-                                "sum(amount_cny) over (partition by month, account) as total_amount_cny "
-                                "from symbol_income_attribution where account = 'sy'"
-                            ),
-                            "limit": 20,
-                        },
-                        purpose="读取标的收益贡献和分母",
-                    ),
+        return _plan_result(
+            "analysis_query",
+            {
+                "sql": (
+                    "select month, account, symbol, amount_cny as component_amount_cny, "
+                    "sum(amount_cny) over (partition by month, account) as total_amount_cny "
+                    "from symbol_income_attribution where account = 'sy'"
                 ),
-            ),
-            trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
-        )
-
-    def _synthesize(
-        _question: str,
-        _settings: AssistantSettings,
-        _plan: PlannerPlan,
-        observations: list[dict[str, Any]],
-        _conversation_context: dict[str, Any] | None,
-    ) -> LlmSynthesisResult:
-        synthesis_observation_counts.append(len(observations))
-        if observations[-1]["tool_name"] != "assistant.answer_guard":
-            return LlmSynthesisResult(
-                response_text="2026-06 sy 的 FUTU 贡献占比 50%。",
-                trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
-            )
-        return LlmSynthesisResult(
-            response_text="2026-06 sy 的 FUTU 贡献占比 40%。",
-            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+                "limit": 20,
+            },
+            goal="分析 sy 六月收益贡献",
+            purpose="读取标的收益贡献和分母",
         )
 
     out = handle_assistant_message(
@@ -7755,23 +6882,18 @@ def test_assistant_runtime_agent_loop_answer_guard_rewrites_wrong_contribution_s
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         plan_tools_fn=_plan,
-        synthesize_response_fn=_synthesize,
     )
 
     assert out["ok"] is True
-    assert synthesis_observation_counts == [2, 3]
     text = out["data"]["response_text"]
-    assert "贡献占比 40%" in text
+    assert "400" in text
+    assert "1000" in text
     assert "贡献占比 50%" not in text
-    synthesis = out["data"]["action"]["result"]["data"]["synthesis"]
-    assert synthesis["reason"] == "agent_composed_response"
-    assert synthesis["answer_guard"]["status"] == "failed_then_rewritten"
-    assert synthesis["answer_guard"]["violations"][0]["type"] == "unsupported_contract_rate"
+    _assert_event_loop_rendered(out)
 
 
 def test_assistant_runtime_agent_loop_grounded_income_falls_back_from_wrong_contract_quantity(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
-    synthesis_observation_counts: list[int] = []
 
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         calls.append((tool_name, payload))
@@ -7868,45 +6990,11 @@ def test_assistant_runtime_agent_loop_grounded_income_falls_back_from_wrong_cont
         _conversation_context: dict[str, Any] | None,
     ) -> LlmPlannerResult:
         assert text == "6月收益的组成"
-        return LlmPlannerResult(
-            plan=PlannerPlan(
-                goal="查询 2026-06 收益组成",
-                task_contract=_test_task_contract(goal="查询 2026-06 收益组成"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="monthly_income_report",
-                        arguments={"month": "2026-06", "include_rows": True},
-                        purpose="收益组成明细",
-                    ),
-                ),
-            ),
-            trace={
-                "enabled": True,
-                "attempted": True,
-                "reason": "accepted",
-                "provider": "openai",
-                "base_url": "",
-                "model": "gpt-5.2",
-                "api_key_env": "OM_LLM_API_KEY",
-                "confidence_min": 0.75,
-                "timeout_seconds": 20,
-                "max_output_tokens": 512,
-                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-            },
-        )
-
-    def _synthesize(
-        _question: str,
-        _settings: AssistantSettings,
-        _plan: PlannerPlan,
-        observations: list[dict[str, Any]],
-        _conversation_context: dict[str, Any] | None,
-    ) -> LlmSynthesisResult:
-        synthesis_observation_counts.append(len(observations))
-        return LlmSynthesisResult(
-            response_text="sy 在 0700.HK 上卖出一手 put 到期作废，实现盈亏 172 HKD。",
-            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+        return _plan_result(
+            "monthly_income_report",
+            {"month": "2026-06", "include_rows": True},
+            goal="查询 2026-06 收益组成",
+            purpose="收益组成明细",
         )
 
     out = handle_assistant_message(
@@ -7922,21 +7010,15 @@ def test_assistant_runtime_agent_loop_grounded_income_falls_back_from_wrong_cont
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         plan_tools_fn=_plan,
-        synthesize_response_fn=_synthesize,
         now_fn=lambda: date(2026, 6, 7),
     )
 
     assert out["ok"] is True
     assert calls == [("monthly_income_report", {"config_key": "us", "include_rows": True, "month": "2026-06"})]
-    assert synthesis_observation_counts == [2, 3]
     text = out["data"]["response_text"]
     assert "0700.HK Put 440P @ 2026-06-05 到期作废 2张" in text
     assert "一手 put" not in text
-    synthesis = out["data"]["action"]["result"]["data"]["synthesis"]
-    assert synthesis["reason"] == "agent_renderer_fallback"
-    assert synthesis["answer_guard"]["status"] == "failed_then_fallback"
-    assert synthesis["answer_guard"]["violations"][0]["type"] == "contradicts_contract_quantity"
-    assert synthesis["answer_guard"]["retry_violations"][0]["type"] == "contradicts_contract_quantity"
+    assert _assert_event_loop_rendered(out)["final_response"]["reason"] == "awaiting_model_continuation"
 
 
 def test_assistant_runtime_agent_loop_grounded_income_returns_facts_when_llm_unavailable(tmp_path: Path) -> None:
@@ -7985,45 +7067,11 @@ def test_assistant_runtime_agent_loop_grounded_income_returns_facts_when_llm_una
         _settings: AssistantSettings,
         _conversation_context: dict[str, Any] | None,
     ) -> LlmPlannerResult:
-        return LlmPlannerResult(
-            plan=PlannerPlan(
-                goal="查询 2026-06 收益组成",
-                task_contract=_test_task_contract(goal="查询 2026-06 收益组成"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="monthly_income_report",
-                        arguments={"month": "2026-06", "include_rows": True},
-                        purpose="收益组成明细",
-                    ),
-                ),
-            ),
-            trace={
-                "enabled": True,
-                "attempted": True,
-                "reason": "accepted",
-                "provider": "openai",
-                "base_url": "",
-                "model": "gpt-5.2",
-                "api_key_env": "OM_LLM_API_KEY",
-                "confidence_min": 0.75,
-                "timeout_seconds": 20,
-                "max_output_tokens": 512,
-                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-            },
-        )
-
-    def _synthesize(
-        _question: str,
-        _settings: AssistantSettings,
-        _plan: PlannerPlan,
-        _observations: list[dict[str, Any]],
-        _conversation_context: dict[str, Any] | None,
-    ) -> LlmSynthesisResult:
-        return LlmSynthesisResult(
-            response_text=None,
-            trace={"attempted": False, "reason": "disabled", "schema_version": "om-tool-plan-synthesis-v1"},
-            error=AgentToolError(code="LLM_UNAVAILABLE", message="LLM synthesis unavailable."),
+        return _plan_result(
+            "monthly_income_report",
+            {"month": "2026-06", "include_rows": True},
+            goal="查询 2026-06 收益组成",
+            purpose="收益组成明细",
         )
 
     out = handle_assistant_message(
@@ -8039,7 +7087,6 @@ def test_assistant_runtime_agent_loop_grounded_income_returns_facts_when_llm_una
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         plan_tools_fn=_plan,
-        synthesize_response_fn=_synthesize,
         now_fn=lambda: date(2026, 6, 7),
     )
 
@@ -8048,10 +7095,12 @@ def test_assistant_runtime_agent_loop_grounded_income_returns_facts_when_llm_una
     text = out["data"]["response_text"]
     assert "LLM 生成不可用" not in text
     assert "0700.HK Put 440P @ 2026-06-05 到期作废 2张" in text
-    synthesis = out["data"]["action"]["result"]["data"]["synthesis"]
-    assert synthesis["reason"] == "agent_renderer_fallback"
-    assert synthesis["fallback"] == "canonical_renderer"
-    assert synthesis["error_code"] == "LLM_UNAVAILABLE"
+    assert out["data"]["action"]["result"]["data"]["final_response"] == {
+        "status": "rendered",
+        "reason": "awaiting_model_continuation",
+        "canonical_renderer_required": True,
+        "llm_may_summarize": False,
+    }
 
 
 def test_assistant_runtime_agent_loop_rejects_disallowed_plan_tool(tmp_path: Path) -> None:
@@ -8066,31 +7115,11 @@ def test_assistant_runtime_agent_loop_rejects_disallowed_plan_tool(tmp_path: Pat
         _settings: AssistantSettings,
         _conversation_context: dict[str, Any] | None,
     ) -> LlmPlannerResult:
-        return LlmPlannerResult(
-            plan=PlannerPlan(
-                goal="非法升级",
-                task_contract=_test_task_contract(goal="非法升级"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="inbound.upgrade",
-                        arguments={"target_version": "latest"},
-                        purpose="write operation must be rejected",
-                    ),
-                ),
-            ),
-            trace={
-                "enabled": True,
-                "attempted": True,
-                "reason": "accepted",
-                "provider": "openai",
-                "base_url": "",
-                "model": "gpt-5.2",
-                "api_key_env": "OM_LLM_API_KEY",
-                "confidence_min": 0.75,
-                "timeout_seconds": 20,
-                "max_output_tokens": 512,
-            },
+        return _plan_result(
+            "inbound.upgrade",
+            {"target_version": "latest"},
+            goal="非法升级",
+            purpose="write operation must be rejected",
         )
 
     out = handle_assistant_message(
@@ -8143,37 +7172,18 @@ def test_assistant_runtime_agent_loop_plans_manual_trade_open_preview(monkeypatc
         assert incoming == text
         assert settings.enabled is True
         assert conversation_context is not None
-        return LlmPlannerResult(
-            plan=PlannerPlan(
+        return _plan_result(
+            "manual_trade_open",
+            {"raw_text": text, "account": "sy"},
+            goal="记录 sy 的腾讯开仓成交",
+            purpose="Futu 成交提醒是交易记录开仓预览",
+            task_contract=_test_task_contract(
                 goal="记录 sy 的腾讯开仓成交",
-                task_contract=_test_task_contract(
-                    goal="记录 sy 的腾讯开仓成交",
-                    domain="operation",
-                    task_mode="preview_write",
-                    requested_effect="preview_write",
-                ),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="manual_trade_open",
-                        arguments={"raw_text": text, "account": "sy"},
-                        purpose="Futu 成交提醒是交易记录开仓预览",
-                    ),
-                ),
+                domain="operation",
+                task_mode="preview_write",
+                requested_effect="preview_write",
+                scope={"requested_accounts": ["sy"], "requested_symbols": ["0700.HK"]},
             ),
-            trace={
-                "enabled": True,
-                "attempted": True,
-                "reason": "accepted",
-                "provider": "openai",
-                "base_url": "",
-                "model": "gpt-5.2",
-                "api_key_env": "OM_LLM_API_KEY",
-                "confidence_min": 0.75,
-                "timeout_seconds": 20,
-                "max_output_tokens": 512,
-                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-            },
         )
 
     out = handle_assistant_message(
@@ -8200,7 +7210,7 @@ def test_assistant_runtime_agent_loop_plans_manual_trade_open_preview(monkeypatc
     assert out["data"]["response_text"].startswith("交易记录预览：开仓")
     assert "未写入账本" in out["data"]["response_text"]
     assert out["data"]["perception"]["intent_name"] == "manual_trade_open"
-    assert out["data"]["perception"]["source"] == "agent_loop_plan"
+    assert out["data"]["perception"]["source"] == "agent_loop_events"
     assert out["data"]["reasoning"]["action_kind"] == "operation"
     assert out["data"]["reasoning"]["safety_class"] == "write_preview"
     permission_request = out["data"]["permission_request"]
@@ -8252,7 +7262,7 @@ def test_assistant_runtime_agent_loop_plans_manual_trade_open_preview(monkeypatc
         "action_policy": "pass",
         "action_safety": "pass",
         "planner_argument_guard": "pass",
-        "scope_guard": "not_applicable",
+        "scope_guard": "pass",
         "write_guard": "pass",
     }
     assert any(item["hook"] == "action_safety" and item["status"] == "pass" for item in agent_loop["steps"][0]["hook_results"])
@@ -8289,7 +7299,7 @@ def test_assistant_runtime_agent_loop_plans_manual_trade_open_preview(monkeypatc
         for item in agent_loop["steps"][0]["hook_results"]
     )
     assert out["meta"]["assistant"]["perception_trace"]["selected_source"] == "agent_loop"
-    assert out["meta"]["assistant"]["perception_trace"]["selected_perception"]["source"] == "agent_loop_plan"
+    assert out["meta"]["assistant"]["perception_trace"]["selected_perception"]["source"] == "agent_loop_events"
     if sqlite_path.exists():
         with sqlite3.connect(sqlite_path) as conn:
             has_trade_events = conn.execute(
@@ -8503,6 +7513,227 @@ def test_assistant_runtime_previews_futu_expiry_notice(monkeypatch: Any, tmp_pat
     assert len(repo.list_trade_events()) == before_events
 
 
+def test_assistant_runtime_provider_preview_request_creates_assignment_preview(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("OM_LLM_API_KEY", "sk-test")
+    monkeypatch.setenv("OM_INBOUND_OPERATIONS_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_TRADE_WRITE_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_ADMIN_OPEN_IDS", "local:local")
+    monkeypatch.setenv("OM_INBOUND_OPERATION_HMAC_KEY", "test-operation-hmac-key")
+
+    provider_calls: list[dict[str, Any]] = []
+
+    def _create_tool_call_response(**kwargs: Any) -> dict[str, Any]:
+        provider_calls.append(dict(kwargs))
+        return {
+            "output": [
+                {
+                    "type": "preview_request",
+                    "intent_name": "manual_assignment",
+                    "arguments": {"account": "sy"},
+                    "reason": "broker assignment notice should create a pending preview",
+                }
+            ]
+        }
+
+    def _provider_response_fn(provider: str):
+        assert provider == "openai"
+        return _create_tool_call_response
+
+    monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_response_fn", _provider_response_fn)
+
+    cfg_path, sqlite_path = _write_agent_loop_trade_runtime_config(tmp_path)
+    repo = _seed_agent_loop_open_lot(
+        sqlite_path,
+        account="sy",
+        symbol="PDD",
+        option_type="put",
+        side="short",
+        contracts=2,
+        currency="USD",
+        strike=85.0,
+        multiplier=100,
+        expiration_ymd="2026-06-18",
+    )
+    before_events = len(repo.list_trade_events())
+    text = (
+        "sy 衍生品提醒: 期权被指派通知: 您的保证金综合账户(2905) - "
+        "证券所持有的-2张PDD 260618 85.00P期权已被指派，详情请查看资金明细及持仓情况。【富途证券(香港)】"
+    )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text=text,
+            sender_id="local",
+            channel="local",
+            message_id="msg_provider_preview_assignment_notice",
+            config_path=str(cfg_path),
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        allowed_senders="local:local",
+        settings=AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        now_fn=lambda: date(2026, 6, 18),
+    )
+
+    assert provider_calls
+    assert out["ok"] is True, out
+    assert out["tool_name"] == "inbound.manual_trade"
+    assert out["data"]["operation_type"] == "manual_assignment"
+    assert out["data"]["perception"]["source"] == "agent_loop_events"
+    assert out["data"]["perception"]["intent_name"] == "manual_assignment"
+    assert out["data"]["payload"]["arguments"]["symbol"] == "PDD"
+    assert out["data"]["payload"]["arguments"]["stock_qty"] == 200
+    assert out["data"]["permission_request"]["apply_allowed"] is False
+    assert len(repo.list_trade_events()) == before_events
+
+    llm_trace = out["meta"]["assistant"]["llm"]
+    assert llm_trace["event_model"]["events"][0]["event_type"] == "preview_request"
+    assert llm_trace["agent_loop"]["steps"][0]["tool_name"] == "manual_assignment"
+    assert llm_trace["agent_loop"]["preview_receipt"]["operation_type"] == "manual_assignment"
+
+
+def test_assistant_runtime_provider_preview_request_creates_expiry_preview(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("OM_LLM_API_KEY", "sk-test")
+    monkeypatch.setenv("OM_INBOUND_OPERATIONS_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_TRADE_WRITE_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_ADMIN_OPEN_IDS", "local:local")
+    monkeypatch.setenv("OM_INBOUND_OPERATION_HMAC_KEY", "test-operation-hmac-key")
+
+    def _create_tool_call_response(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "output": [
+                {
+                    "type": "preview_request",
+                    "intent_name": "manual_expiry",
+                    "arguments": {"account": "sy"},
+                }
+            ]
+        }
+
+    def _provider_response_fn(provider: str):
+        assert provider == "openai"
+        return _create_tool_call_response
+
+    monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_response_fn", _provider_response_fn)
+
+    cfg_path, sqlite_path = _write_agent_loop_trade_runtime_config(tmp_path)
+    repo = _seed_agent_loop_open_lot(
+        sqlite_path,
+        account="sy",
+        symbol="TCOM",
+        option_type="put",
+        side="short",
+        contracts=1,
+        currency="USD",
+        strike=45.0,
+        multiplier=100,
+        expiration_ymd="2026-06-18",
+    )
+    before_events = len(repo.list_trade_events())
+    text = (
+        "sy 衍生品提醒: 期权到期失效通知: 您的保证金综合账户(2905) - "
+        "证券所持有的-1张TCOM 260618 45.00P期权已到期失效，详情请查看持仓情况。【富途证券(香港)】"
+    )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text=text,
+            sender_id="local",
+            channel="local",
+            message_id="msg_provider_preview_expiry_notice",
+            config_path=str(cfg_path),
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        allowed_senders="local:local",
+        settings=AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        now_fn=lambda: date(2026, 6, 18),
+    )
+
+    assert out["ok"] is True, out
+    assert out["tool_name"] == "inbound.manual_trade"
+    assert out["data"]["operation_type"] == "manual_expiry"
+    assert out["data"]["perception"]["source"] == "agent_loop_events"
+    assert out["data"]["payload"]["arguments"]["symbol"] == "TCOM"
+    assert out["data"]["payload"]["arguments"]["close_reason"] == "expired_unassigned"
+    assert out["data"]["permission_request"]["apply_allowed"] is False
+    assert len(repo.list_trade_events()) == before_events
+
+    llm_trace = out["meta"]["assistant"]["llm"]
+    assert llm_trace["event_model"]["events"][0]["event_type"] == "preview_request"
+    assert llm_trace["agent_loop"]["steps"][0]["tool_name"] == "manual_expiry"
+    assert llm_trace["agent_loop"]["preview_receipt"]["operation_type"] == "manual_expiry"
+
+
+def test_assistant_runtime_provider_preview_request_missing_account_returns_clarification(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("OM_LLM_API_KEY", "sk-test")
+    monkeypatch.setenv("OM_INBOUND_OPERATIONS_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_TRADE_WRITE_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_ADMIN_OPEN_IDS", "local:local")
+    monkeypatch.setenv("OM_INBOUND_OPERATION_HMAC_KEY", "test-operation-hmac-key")
+
+    def _create_tool_call_response(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "output": [
+                {
+                    "type": "preview_request",
+                    "intent_name": "manual_assignment",
+                    "arguments": {},
+                }
+            ]
+        }
+
+    def _provider_response_fn(provider: str):
+        assert provider == "openai"
+        return _create_tool_call_response
+
+    monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_response_fn", _provider_response_fn)
+
+    cfg_path, _sqlite_path = _write_agent_loop_trade_runtime_config(tmp_path)
+    text = (
+        "衍生品提醒: 期权被指派通知: 您的保证金综合账户(2905) - "
+        "证券所持有的-2张PDD 260618 85.00P期权已被指派，详情请查看资金明细及持仓情况。【富途证券(香港)】"
+    )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text=text,
+            sender_id="local",
+            channel="local",
+            message_id="msg_provider_preview_assignment_missing_account",
+            config_path=str(cfg_path),
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        allowed_senders="local:local",
+        settings=AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        now_fn=lambda: date(2026, 6, 18),
+    )
+
+    assert out["ok"] is False, out
+    assert out["error"]["code"] == "NEEDS_CLARIFICATION"
+    assert "planned tool call failed pre-tool safety checks" not in out["error"]["message"]
+    details = out["error"].get("details")
+    assert isinstance(details, dict), out
+    clarification_request = details["clarification_request"]
+    assert clarification_request["schema_version"] == "om-agent-clarification-request-v1"
+    assert clarification_request["status"] == "needs_user_input"
+    assert clarification_request["questions"][0]["slot"] == "account"
+    assert details["precheck"]["action_safety"]["code"] == "missing_account_scope"
+
+
 def test_assistant_runtime_agent_loop_cancels_manual_trade_open_preview(monkeypatch: Any, tmp_path: Path) -> None:
     monkeypatch.setenv("OM_INBOUND_OPERATIONS_ENABLED", "1")
     monkeypatch.setenv("OM_INBOUND_TRADE_WRITE_ENABLED", "1")
@@ -8530,37 +7761,18 @@ def test_assistant_runtime_agent_loop_cancels_manual_trade_open_preview(monkeypa
         assert incoming == text
         assert settings.enabled is True
         assert conversation_context is not None
-        return LlmPlannerResult(
-            plan=PlannerPlan(
+        return _plan_result(
+            "manual_trade_open",
+            {"raw_text": text, "account": "sy"},
+            goal="记录 sy 的腾讯开仓成交",
+            purpose="Futu 成交提醒是交易记录开仓预览",
+            task_contract=_test_task_contract(
                 goal="记录 sy 的腾讯开仓成交",
-                task_contract=_test_task_contract(
-                    goal="记录 sy 的腾讯开仓成交",
-                    domain="operation",
-                    task_mode="preview_write",
-                    requested_effect="preview_write",
-                ),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="manual_trade_open",
-                        arguments={"raw_text": text, "account": "sy"},
-                        purpose="Futu 成交提醒是交易记录开仓预览",
-                    ),
-                ),
+                domain="operation",
+                task_mode="preview_write",
+                requested_effect="preview_write",
+                scope={"requested_accounts": ["sy"], "requested_symbols": ["0700.HK"]},
             ),
-            trace={
-                "enabled": True,
-                "attempted": True,
-                "reason": "accepted",
-                "provider": "openai",
-                "base_url": "",
-                "model": "gpt-5.2",
-                "api_key_env": "OM_LLM_API_KEY",
-                "confidence_min": 0.75,
-                "timeout_seconds": 20,
-                "max_output_tokens": 512,
-                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-            },
         )
 
     previewed = handle_assistant_message(
@@ -8670,32 +7882,11 @@ def test_assistant_runtime_agent_loop_rejects_read_plan_for_trade_preview_reques
         _settings: AssistantSettings,
         _conversation_context: dict[str, Any] | None,
     ) -> LlmPlannerResult:
-        return LlmPlannerResult(
-            plan=PlannerPlan(
-                goal="误判为持仓查询",
-                task_contract=_test_task_contract(goal="误判为持仓查询"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="option_positions_read",
-                        arguments={"status": "open"},
-                        purpose="错误地读取持仓",
-                    ),
-                ),
-            ),
-            trace={
-                "enabled": True,
-                "attempted": True,
-                "reason": "accepted",
-                "provider": "openai",
-                "base_url": "",
-                "model": "gpt-5.2",
-                "api_key_env": "OM_LLM_API_KEY",
-                "confidence_min": 0.75,
-                "timeout_seconds": 20,
-                "max_output_tokens": 512,
-                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-            },
+        return _plan_result(
+            "option_positions_read",
+            {"status": "open"},
+            goal="误判为持仓查询",
+            purpose="错误地读取持仓",
         )
 
     out = handle_assistant_message(
@@ -8721,6 +7912,82 @@ def test_assistant_runtime_agent_loop_rejects_read_plan_for_trade_preview_reques
     assert out["meta"]["assistant"]["route"] == "agent_loop"
     assert out["meta"]["assistant"]["llm"]["agent_loop"]["steps_used"] == 0
     assert out["meta"]["assistant"]["perception_trace"]["decision"] == "llm_error"
+
+
+def test_read_only_agent_loop_chains_validation_and_pre_tool_repairs() -> None:
+    text = "记录 sy 成交提醒：PDD 260618 85P 已成交"
+    plan_contexts: list[dict[str, Any] | None] = []
+    settings = AssistantSettings(
+        llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+    )
+
+    def _plan(
+        incoming: str,
+        _settings: AssistantSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        assert incoming == text
+        plan_contexts.append(conversation_context)
+        if len(plan_contexts) == 1:
+            return _plan_result(
+                "monthly_income_report",
+                {"account": "sy"},
+                goal=incoming,
+            )
+        if len(plan_contexts) == 2:
+            repair = (conversation_context or {}).get("planner_repair")
+            assert isinstance(repair, dict)
+            assert repair["error_code"] == "PLAN_RISK_MISMATCH"
+            return _plan_result(
+                "manual_trade_open",
+                {"account": "lx", "raw_text": text},
+                goal="错误地扩大到账户 lx",
+                task_contract=_test_task_contract(
+                    goal="创建 sy 成交预览",
+                    domain="operation",
+                    task_mode="preview_write",
+                    requested_effect="preview_write",
+                    scope={"requested_accounts": ["sy"], "requested_symbols": ["PDD"]},
+                ),
+            )
+        repair = (conversation_context or {}).get("planner_repair")
+        assert isinstance(repair, dict)
+        assert repair["error_code"] == "PRE_TOOL_CHECK_FAILED"
+        assert repair["details"]["precheck"]["action_safety"]["code"] == "account_scope_expansion"
+        return _plan_result(
+            "manual_trade_open",
+            {"account": "sy", "raw_text": text},
+            goal="创建 sy 成交预览",
+            task_contract=_test_task_contract(
+                goal="创建 sy 成交预览",
+                domain="operation",
+                task_mode="preview_write",
+                requested_effect="preview_write",
+                scope={"requested_accounts": ["sy"], "requested_symbols": ["PDD"]},
+            ),
+        )
+
+    result = run_read_only_agent_loop(
+        text,
+        settings=settings,
+        conversation_context=None,
+        plan_tools_fn=_plan,
+        now_fn=lambda: date(2026, 6, 18),
+    )
+
+    assert result.planning.error is None
+    assert result.planning.perception is not None
+    assert result.planning.perception.intent_name == "manual_trade_open"
+    assert result.planning.perception.arguments["account"] == "sy"
+    assert len(plan_contexts) == 3
+
+    repair_trace = result.trace["planner_repair"]
+    assert repair_trace["status"] == "accepted"
+    assert repair_trace["attempt_count"] == 2
+    assert repair_trace["first_error_code"] == "PLAN_RISK_MISMATCH"
+    assert repair_trace["initial_error_code"] == "PRE_TOOL_CHECK_FAILED"
+    assert repair_trace["attempts"][0]["repair_error_code"] == "PRE_TOOL_CHECK_FAILED"
+    assert repair_trace["attempts"][1]["status"] == "accepted"
 
 
 def test_assistant_runtime_agent_loop_repairs_assignment_notice_wrong_read_tool(
@@ -8762,45 +8029,29 @@ def test_assistant_runtime_agent_loop_repairs_assignment_notice_wrong_read_tool(
         if len(plan_contexts) == 1:
             assert conversation_context is not None
             assert "planner_repair" not in conversation_context
-            return LlmPlannerResult(
-                plan=PlannerPlan(
-                    goal="误把券商指派通知规划为指派正股盈亏查询",
-                    task_contract=_test_task_contract(goal="误把券商指派通知规划为指派正股盈亏查询"),
-                    steps=(
-                        PlannerPlanStep(
-                            id="step_1",
-                            tool_name="option_positions_read",
-                            arguments={"account": "sy", "action": "assigned-stock", "refresh_quotes": True},
-                            purpose="错误地读取被指派正股盈亏",
-                        ),
-                    ),
-                ),
-                trace=_planner_trace(reason="accepted"),
+            return _plan_result(
+                "option_positions_read",
+                {"account": "sy", "action": "assigned-stock", "refresh_quotes": True},
+                goal="误把券商指派通知规划为指派正股盈亏查询",
+                purpose="错误地读取被指派正股盈亏",
             )
         assert conversation_context is not None
         repair = conversation_context.get("planner_repair")
         assert isinstance(repair, dict)
         assert repair["error_code"] == "PLAN_RISK_MISMATCH"
         assert "manual_assignment" in repair["instruction"]
-        return LlmPlannerResult(
-            plan=PlannerPlan(
+        return _plan_result(
+            "manual_assignment",
+            {"raw_text": text, "account": "sy"},
+            goal="创建 sy PDD 被指派预览",
+            purpose="Futu 期权被指派通知应创建被指派预览",
+            task_contract=_test_task_contract(
                 goal="创建 sy PDD 被指派预览",
-                task_contract=_test_task_contract(
-                    goal="创建 sy PDD 被指派预览",
-                    domain="operation",
-                    task_mode="preview_write",
-                    requested_effect="preview_write",
-                ),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1_repair",
-                        tool_name="manual_assignment",
-                        arguments={"raw_text": text, "account": "sy"},
-                        purpose="Futu 期权被指派通知应创建被指派预览",
-                    ),
-                ),
+                domain="operation",
+                task_mode="preview_write",
+                requested_effect="preview_write",
+                scope={"requested_accounts": ["sy"], "requested_symbols": ["PDD"]},
             ),
-            trace=_planner_trace(reason="accepted"),
         )
 
     out = handle_assistant_message(
@@ -8825,7 +8076,7 @@ def test_assistant_runtime_agent_loop_repairs_assignment_notice_wrong_read_tool(
     assert out["tool_name"] == "inbound.manual_trade"
     assert out["data"]["operation_type"] == "manual_assignment"
     assert out["data"]["perception"]["intent_name"] == "manual_assignment"
-    assert out["data"]["perception"]["source"] == "agent_loop_plan"
+    assert out["data"]["perception"]["source"] == "agent_loop_events"
     assert out["data"]["payload"]["arguments"]["symbol"] == "PDD"
     assert out["data"]["payload"]["arguments"]["stock_qty"] == 200
     assert len(repo.list_trade_events()) == before_events
@@ -8878,7 +8129,7 @@ def test_assistant_runtime_agent_loop_repairs_expiry_notice_wrong_read_tool(
             return _plan_result(
                 "option_positions_read",
                 {"account": "sy", "status": "open"},
-                goal="误把到期失效通知规划为持仓查询",
+                goal=incoming,
                 purpose="错误地读取持仓",
             )
         assert conversation_context is not None
@@ -8896,6 +8147,7 @@ def test_assistant_runtime_agent_loop_repairs_expiry_notice_wrong_read_tool(
                 domain="operation",
                 task_mode="preview_write",
                 requested_effect="preview_write",
+                scope={"requested_accounts": ["sy"], "requested_symbols": ["TCOM"]},
             ),
         )
 
@@ -8919,7 +8171,7 @@ def test_assistant_runtime_agent_loop_repairs_expiry_notice_wrong_read_tool(
     assert out["ok"] is True, out
     assert len(plan_contexts) == 2
     assert out["data"]["operation_type"] == "manual_expiry"
-    assert out["data"]["perception"]["source"] == "agent_loop_plan"
+    assert out["data"]["perception"]["source"] == "agent_loop_events"
     assert out["data"]["payload"]["arguments"]["symbol"] == "TCOM"
     assert out["data"]["payload"]["arguments"]["close_reason"] == "expired_unassigned"
     assert len(repo.list_trade_events()) == before_events
@@ -8938,32 +8190,11 @@ def test_assistant_runtime_agent_loop_action_safety_rejects_preview_for_read_req
         _settings: AssistantSettings,
         _conversation_context: dict[str, Any] | None,
     ) -> LlmPlannerResult:
-        return LlmPlannerResult(
-            plan=PlannerPlan(
-                goal="错误地把只读收益问题规划成交易预览",
-                task_contract=_test_task_contract(goal="错误地把只读收益问题规划成交易预览"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="manual_trade_open",
-                        arguments={"raw_text": "成交提醒", "account": "sy"},
-                        purpose="不应为只读问题生成 preview",
-                    ),
-                ),
-            ),
-            trace={
-                "enabled": True,
-                "attempted": True,
-                "reason": "accepted",
-                "provider": "openai",
-                "base_url": "",
-                "model": "gpt-5.2",
-                "api_key_env": "OM_LLM_API_KEY",
-                "confidence_min": 0.75,
-                "timeout_seconds": 20,
-                "max_output_tokens": 512,
-                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-            },
+        return _plan_result(
+            "manual_trade_open",
+            {"raw_text": "成交提醒", "account": "sy"},
+            goal="错误地把只读收益问题规划成交易预览",
+            purpose="不应为只读问题生成 preview",
         )
 
     out = handle_assistant_message(
@@ -9004,32 +8235,11 @@ def test_assistant_runtime_agent_loop_rejects_confirm_plan(tmp_path: Path) -> No
         _settings: AssistantSettings,
         _conversation_context: dict[str, Any] | None,
     ) -> LlmPlannerResult:
-        return LlmPlannerResult(
-            plan=PlannerPlan(
-                goal="非法确认",
-                task_contract=_test_task_contract(goal="非法确认"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="manual_trade_confirm",
-                        arguments={"operation_id": "in_123"},
-                        purpose="confirm must not be planned by LLM",
-                    ),
-                ),
-            ),
-            trace={
-                "enabled": True,
-                "attempted": True,
-                "reason": "accepted",
-                "provider": "openai",
-                "base_url": "",
-                "model": "gpt-5.2",
-                "api_key_env": "OM_LLM_API_KEY",
-                "confidence_min": 0.75,
-                "timeout_seconds": 20,
-                "max_output_tokens": 512,
-                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-            },
+        return _plan_result(
+            "manual_trade_confirm",
+            {"operation_id": "in_123"},
+            goal="非法确认",
+            purpose="confirm must not be planned by LLM",
         )
 
     out = handle_assistant_message(
@@ -9052,50 +8262,6 @@ def test_assistant_runtime_agent_loop_rejects_confirm_plan(tmp_path: Path) -> No
     assert out["error"]["code"] == "PERMISSION_DENIED"
     assert "manual_trade_confirm is not allowed" in out["error"]["message"]
     assert calls == []
-
-
-def test_plan_read_only_tools_treats_empty_steps_as_no_plan() -> None:
-    calls: list[dict[str, Any]] = []
-
-    def _create_response(**kwargs: Any) -> dict[str, Any]:
-        calls.append(dict(kwargs))
-        return {
-            "output_text": json.dumps(
-                    {
-                        "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-                        "goal": "无法安全规划",
-                        "task_contract": _test_task_contract(goal="无法安全规划"),
-                        "required_capabilities": [],
-                        "steps": [],
-                    }
-            )
-        }
-
-    result = plan_read_only_tools(
-        "你是什么模型",
-        AssistantSettings(
-            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
-        ),
-        conversation_context=None,
-        create_response_fn=_create_response,
-        environ={"OM_LLM_API_KEY": "sk-test"},
-    )
-
-    assert calls
-    assert calls[0]["json_schema"]["properties"]["steps"]["minItems"] == 0
-    assert tool_plan_json_schema()["properties"]["steps"]["maxItems"] == 3
-    assert result.plan is None
-    assert result.error is not None
-    assert result.error.code == "NEEDS_CLARIFICATION"
-    assert "缺少可安全执行的只读工具或必填信息" in result.error.message
-    assert result.error.hint is not None
-    assert "不会降级到弱相关查询" in result.error.hint
-    assert result.error.details == {"missing_capability": "read_tool_or_required_slots", "weak_downgrade_allowed": False}
-    assert result.trace["reason"] == "no_plan"
-    assert result.trace["error_code"] == "NEEDS_CLARIFICATION"
-    assert result.trace["planner_context_use"]["mode"] == "none"
-    assert result.trace["planner_input"]["manifest_budget"]["mode"] == "scoped_analysis_views"
-    assert result.trace["planner_input"]["chars"] == len(calls[0]["input_text"])
 
 
 def test_plan_read_only_tools_uses_provider_tool_call_not_output_text_json_plan() -> None:
@@ -9145,10 +8311,12 @@ def test_plan_read_only_tools_uses_provider_tool_call_not_output_text_json_plan(
     assert calls[0]["tools"][0]["type"] == "function"
     assert "json_schema" not in calls[0]
     assert result.error is None
-    assert result.plan is not None
-    assert result.plan.steps[0].tool_name == "monthly_income_report"
-    assert result.plan.steps[0].arguments == {"month": "2026-06", "include_rows": True}
+    assert result.plan is None
+    steps = _event_plan_steps(result)
+    assert steps[0]["tool_name"] == "monthly_income_report"
+    assert steps[0]["arguments"] == {"month": "2026-06", "include_rows": True}
     assert result.trace["reason"] == "accepted"
+    assert result.trace["event_plan"]["schema_version"] == "om-event-native-planning-v1"
     assert result.trace["event_model"]["legacy_json_plan_used"] is False
     assert result.trace["event_model"]["events"][0]["event_type"] == "model_tool_call"
     assert result.trace["event_model"]["events"][0]["tool_name"] == "monthly_income_report"
@@ -9184,11 +8352,12 @@ def test_plan_read_only_tools_preserves_multiple_provider_tool_calls() -> None:
     )
 
     assert result.error is None
-    assert result.plan is not None
+    assert result.plan is None
+    steps = _event_plan_steps(result)
     assert result.trace["event_model"]["event_count"] == 2
-    assert [step.tool_name for step in result.plan.steps] == ["monthly_income_report", "analysis_query"]
-    assert result.plan.steps[0].arguments == {"month": "2026-06", "include_rows": True}
-    assert result.plan.steps[1].arguments == {"sql": "select month, account from account_monthly_performance limit 5"}
+    assert [step["tool_name"] for step in steps] == ["monthly_income_report", "analysis_query"]
+    assert steps[0]["arguments"] == {"month": "2026-06", "include_rows": True}
+    assert steps[1]["arguments"] == {"sql": "select month, account from account_monthly_performance limit 5"}
 
 
 def test_plan_read_only_tools_tool_call_path_carries_single_visible_followup_context() -> None:
@@ -9246,7 +8415,8 @@ def test_plan_read_only_tools_tool_call_path_carries_single_visible_followup_con
     )
 
     assert result.error is None
-    assert result.plan is not None
+    assert result.plan is None
+    assert result.event_plan is not None
     assert result.trace["planner_context_use"]["mode"] == "carry"
     assert result.trace["planner_context_use"]["referenced_turn_ids"] == ["turn_income"]
     assert result.trace["planner_context_use"]["referenced_evidence_refs"] == ["ev_income"]
@@ -9390,9 +8560,10 @@ def test_plan_read_only_tools_income_source_uses_tool_call_detail_rows() -> None
     assert "json_schema" not in calls[0]
     assert "response_format" not in calls[0]
     assert result.error is None
-    assert result.plan is not None
-    assert result.plan.steps[0].tool_name == "monthly_income_report"
-    assert result.plan.steps[0].arguments == {"month": "2026-06", "include_rows": True}
+    assert result.plan is None
+    steps = _event_plan_steps(result)
+    assert steps[0]["tool_name"] == "monthly_income_report"
+    assert steps[0]["arguments"] == {"month": "2026-06", "include_rows": True}
     assert result.trace["event_model"]["legacy_json_plan_used"] is False
 
 
@@ -9442,17 +8613,19 @@ def test_plan_read_only_tools_candidate_alias_and_lowercase_symbol_use_tool_call
         assert "tools" in calls[0], text
         assert "json_schema" not in calls[0], text
         assert result.error is None, text
-        assert result.plan is not None, text
-        assert result.plan.steps[0].tool_name == "candidate_filter_explain"
-        assert result.plan.task_contract is not None
-        assert result.plan.task_contract["scope"]["requested_symbols"] == expected_symbols
-        assert result.plan.task_contract["scope"]["planned_symbols"] == expected_symbols
+        assert result.plan is None, text
+        steps = _event_plan_steps(result)
+        assert steps[0]["tool_name"] == "candidate_filter_explain"
+        assert result.event_plan is not None
+        assert result.event_plan.task_contract["scope"]["requested_symbols"] == expected_symbols
+        assert result.event_plan.task_contract["scope"]["planned_symbols"] == expected_symbols
         assert result.trace["event_model"]["legacy_json_plan_used"] is False
 
 
 def test_assistant_runtime_default_agent_loop_uses_provider_tool_call(monkeypatch: Any, tmp_path: Path) -> None:
     monkeypatch.setenv("OM_LLM_API_KEY", "sk-test")
     provider_calls: list[dict[str, Any]] = []
+    continuation_calls: list[dict[str, Any]] = []
     tool_calls: list[tuple[str, dict[str, Any]]] = []
 
     def _create_tool_call_response(**kwargs: Any) -> dict[str, Any]:
@@ -9472,6 +8645,32 @@ def test_assistant_runtime_default_agent_loop_uses_provider_tool_call(monkeypatc
         assert provider == "openai"
         return _create_tool_call_response
 
+    def _create_continuation_response(**kwargs: Any) -> dict[str, Any]:
+        continuation_calls.append(dict(kwargs))
+        payload = kwargs["payload"]
+        assert payload["input"][0]["role"] == "user"
+        assert payload["input"][-1]["type"] == "function_call_output"
+        output = json.loads(payload["input"][-1]["output"])
+        assert output["is_error"] is False
+        assert output["content"]["tool_name"] == "monthly_income_report"
+        return {
+            "output": [
+                {
+                    "type": "message",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "已根据工具结果完成 6月收益分析。",
+                        }
+                    ],
+                }
+            ]
+        }
+
+    def _provider_payload_response_fn(provider: str):
+        assert provider == "openai"
+        return _create_continuation_response
+
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         tool_calls.append((tool_name, payload))
         return build_response(
@@ -9481,11 +8680,13 @@ def test_assistant_runtime_default_agent_loop_uses_provider_tool_call(monkeypatc
                 "filters": {"month": "2026-06"},
                 "summary": [{"month": "2026-06", "account": "lx", "currency": "USD", "net_cashflow_gross": 123.45}],
                 "return_summary": [{"month": "2026-06", "account": "lx", "net_income_cny": 888.88}],
+                "rows": [{"month": "2026-06", "account": "lx", "net_income": 888.88, "currency": "CNY"}],
                 "row_count": 1,
             },
         )
 
     monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_response_fn", _provider_response_fn)
+    monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_payload_response_fn", _provider_payload_response_fn)
 
     out = handle_assistant_message(
         AssistantRequest(
@@ -9504,6 +8705,7 @@ def test_assistant_runtime_default_agent_loop_uses_provider_tool_call(monkeypatc
 
     assert out["ok"] is True
     assert provider_calls
+    assert len(continuation_calls) == 1
     assert "tools" in provider_calls[0]
     assert "json_schema" not in provider_calls[0]
     assert tool_calls == [
@@ -9517,12 +8719,269 @@ def test_assistant_runtime_default_agent_loop_uses_provider_tool_call(monkeypatc
     assert llm_trace["event_model"]["legacy_json_plan_used"] is False
     assert llm_trace["event_model"]["events"][0]["event_type"] == "model_tool_call"
     assert out["meta"]["assistant"]["route"] == "agent_loop"
-    assert out["data"]["perception"]["intent_name"] == "tool_plan"
+    assert out["data"]["perception"]["source"] == "agent_loop_events"
+    assert out["data"]["perception"]["intent_name"] == "tool_loop"
+    assert out["tool_name"] == "assistant.tool_loop"
+    tool_result = out["data"]["tool_result"]
+    assert tool_result["data"]["final_response"]["status"] == "synthesized"
+    event_loop = tool_result["data"]["event_loop"]
+    events = event_loop["events"]
+    assert event_loop["stop_reason"] == "model_final_answer"
+    assert events[-2]["event_type"] == "evidence_updated"
+    assert events[-1]["event_type"] == "model_final_answer"
+    assert events[-1]["parent_event_id"] == events[-2]["event_id"]
+    assert events[-1]["answer_text"] == "已根据工具结果完成 6月收益分析。"
+    trace = event_loop["trace"]
+    assert trace["answer_route"] == "canonical_renderer"
+    assert trace["loop_stop_reason"] == "model_final_answer"
+    assert trace["tool_call_count"] == 1
+    assert trace["repair_attempted"] is False
+    assert trace["capability_selection"]["selected"][0]["tool_name"] == "monthly_income_report"
+
+
+def test_assistant_runtime_tool_loop_continuation_repairs_pre_tool_denial(monkeypatch: Any, tmp_path: Path) -> None:
+    monkeypatch.setenv("OM_LLM_API_KEY", "sk-test")
+    provider_calls: list[dict[str, Any]] = []
+    continuation_calls: list[dict[str, Any]] = []
+    tool_calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _create_tool_call_response(**kwargs: Any) -> dict[str, Any]:
+        provider_calls.append(dict(kwargs))
+        return {
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_income_wrong_scope_1",
+                    "name": "monthly_income_report",
+                    "arguments": '{"account":"sy","month":"2026-06","include_rows":true}',
+                }
+            ]
+        }
+
+    def _provider_response_fn(provider: str):
+        assert provider == "openai"
+        return _create_tool_call_response
+
+    def _create_continuation_response(**kwargs: Any) -> dict[str, Any]:
+        continuation_calls.append(dict(kwargs))
+        payload = kwargs["payload"]
+        output = json.loads(payload["input"][-1]["output"])
+        if len(continuation_calls) == 1:
+            assert output["is_error"] is True
+            assert output["content"]["error"]["code"] == "PRE_TOOL_CHECK_FAILED"
+            return {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_income_repaired_1",
+                        "name": "monthly_income_report",
+                        "arguments": '{"account":"lx","month":"2026-06","include_rows":true}',
+                    }
+                ]
+            }
+        assert output["is_error"] is False
+        return {
+            "output": [
+                {
+                    "type": "message",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "lx 2026-06 已实现收益为 123.45。",
+                        }
+                    ],
+                }
+            ]
+        }
+
+    def _provider_payload_response_fn(provider: str):
+        assert provider == "openai"
+        return _create_continuation_response
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        tool_calls.append((tool_name, payload))
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={"row_count": 1, "rows": [{"account": "lx", "month": "2026-06", "net_income": 123.45}]},
+        )
+
+    monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_response_fn", _provider_response_fn)
+    monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_payload_response_fn", _provider_payload_response_fn)
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="lx 6月收益分析",
+            sender_id="local",
+            message_id="msg_event_tool_call_income_repair_scope",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        now_fn=lambda: date(2026, 6, 19),
+    )
+
+    assert out["ok"] is True
+    assert len(provider_calls) == 1
+    assert len(continuation_calls) == 2
+    assert tool_calls == [
+        (
+            "monthly_income_report",
+            {"account": "lx", "month": "2026-06", "include_rows": True, "config_key": "us"},
+        )
+    ]
+    tool_result = out["data"]["tool_result"]
+    assert tool_result["tool_name"] == "assistant.tool_loop"
+    assert tool_result["data"]["final_response"]["status"] == "synthesized"
+    event_loop = tool_result["data"]["event_loop"]
+    trace = event_loop["trace"]
+    assert trace["continuation_count"] == 2
+    assert trace["loop_stop_reason"] == "model_final_answer"
+    assert trace["tool_call_count"] == 2
+    assert trace["repair_attempted"] is True
+    assert trace["capability_selection"]["selected_count"] == 2
+    assert [event["event_type"] for event in event_loop["events"]] == [
+        "model_tool_call",
+        "tool_guard_decision",
+        "tool_result",
+        "model_tool_call",
+        "tool_guard_decision",
+        "tool_result",
+        "evidence_updated",
+        "model_final_answer",
+    ]
+    assert event_loop["events"][1]["error_code"] == "PRE_TOOL_CHECK_FAILED"
+
+
+def test_assistant_runtime_tool_loop_continuation_preview_request_creates_assignment_preview(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("OM_LLM_API_KEY", "sk-test")
+    monkeypatch.setenv("OM_INBOUND_OPERATIONS_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_TRADE_WRITE_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_ADMIN_OPEN_IDS", "local:local")
+    monkeypatch.setenv("OM_INBOUND_OPERATION_HMAC_KEY", "test-operation-hmac-key")
+
+    cfg_path, sqlite_path = _write_agent_loop_trade_runtime_config(tmp_path)
+    repo = _seed_agent_loop_open_lot(
+        sqlite_path,
+        account="sy",
+        symbol="PDD",
+        option_type="put",
+        side="short",
+        contracts=2,
+        currency="USD",
+        strike=85.0,
+        multiplier=100,
+        expiration_ymd="2026-06-18",
+    )
+    before_events = len(repo.list_trade_events())
+    text = (
+        "sy 衍生品提醒: 期权被指派通知: 您的保证金综合账户(2905) - "
+        "证券所持有的-2张PDD 260618 85.00P期权已被指派，详情请查看资金明细及持仓情况。【富途证券(香港)】"
+    )
+    continuation_calls: list[dict[str, Any]] = []
+    tool_calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _plan(
+        incoming: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmPlannerResult:
+        assert incoming == text
+        return LlmPlannerResult(
+            plan=None,
+            event_plan=EventNativePlanningResult(
+                events=(
+                    ModelToolCallEvent(
+                        event_id="model_tool_call_wrong_read",
+                        tool_call_id="call_wrong_read",
+                        tool_name="runtime_status",
+                        arguments={},
+                        purpose="错误地把券商生命周期通知当成运行状态查询",
+                        provider="openai",
+                    ),
+                ),
+                task_contract=_test_task_contract(
+                    goal="创建 sy PDD 被指派预览",
+                    domain="operation",
+                    task_mode="preview_write",
+                    requested_effect="preview_write",
+                    scope={"requested_accounts": ["sy"], "planned_accounts": ["sy"]},
+                ),
+                provider="openai",
+                goal=text,
+            ),
+            trace=_planner_trace(reason="accepted"),
+        )
+
+    def _create_continuation_response(**kwargs: Any) -> dict[str, Any]:
+        continuation_calls.append(dict(kwargs))
+        output = json.loads(kwargs["payload"]["input"][-1]["output"])
+        assert output["is_error"] is True
+        assert output["content"]["error"]["code"] == "PERMISSION_DENIED"
+        return {
+            "output": [
+                {
+                    "type": "preview_request",
+                    "intent_name": "manual_assignment",
+                    "arguments": {"account": "sy"},
+                }
+            ]
+        }
+
+    def _provider_payload_response_fn(provider: str):
+        assert provider == "openai"
+        return _create_continuation_response
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        tool_calls.append((tool_name, payload))
+        return build_response(tool_name=tool_name, ok=True, data={"status": "unexpected"})
+
+    monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_payload_response_fn", _provider_payload_response_fn)
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text=text,
+            sender_id="local",
+            channel="local",
+            message_id="msg_tool_loop_continuation_preview_assignment",
+            config_path=str(cfg_path),
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        allowed_senders="local:local",
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        plan_tools_fn=_plan,
+        now_fn=lambda: date(2026, 6, 18),
+    )
+
+    assert out["ok"] is True, out
+    assert continuation_calls
+    assert tool_calls == []
+    assert out["tool_name"] == "inbound.manual_trade"
+    assert out["data"]["operation_type"] == "manual_assignment"
+    assert out["data"]["perception"]["source"] == "agent_loop_events"
+    assert out["data"]["payload"]["arguments"]["symbol"] == "PDD"
+    assert out["data"]["payload"]["arguments"]["stock_qty"] == 200
+    assert out["data"]["permission_request"]["apply_allowed"] is False
+    assert len(repo.list_trade_events()) == before_events
+
+    llm_trace = out["meta"]["assistant"]["llm"]
+    assert any(item.get("event_type") == "preview_request" for item in llm_trace["agent_loop"]["tool_events"])
+    assert llm_trace["agent_loop"]["preview_receipt"]["operation_type"] == "manual_assignment"
 
 
 def test_assistant_runtime_comparative_income_uses_provider_tool_call(monkeypatch: Any, tmp_path: Path) -> None:
     monkeypatch.setenv("OM_LLM_API_KEY", "sk-test")
     provider_calls: list[dict[str, Any]] = []
+    continuation_calls: list[dict[str, Any]] = []
     tool_calls: list[tuple[str, dict[str, Any]]] = []
 
     def _create_tool_call_response(**kwargs: Any) -> dict[str, Any]:
@@ -9541,6 +9000,21 @@ def test_assistant_runtime_comparative_income_uses_provider_tool_call(monkeypatc
     def _provider_response_fn(provider: str):
         assert provider == "openai"
         return _create_tool_call_response
+
+    def _create_continuation_response(**kwargs: Any) -> dict[str, Any]:
+        continuation_calls.append(dict(kwargs))
+        return {
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "lx 6月收益高于 sy。"}],
+                }
+            ]
+        }
+
+    def _provider_payload_response_fn(provider: str):
+        assert provider == "openai"
+        return _create_continuation_response
 
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         tool_calls.append((tool_name, payload))
@@ -9562,6 +9036,7 @@ def test_assistant_runtime_comparative_income_uses_provider_tool_call(monkeypatc
         )
 
     monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_response_fn", _provider_response_fn)
+    monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_payload_response_fn", _provider_payload_response_fn)
 
     out = handle_assistant_message(
         AssistantRequest(
@@ -9580,6 +9055,7 @@ def test_assistant_runtime_comparative_income_uses_provider_tool_call(monkeypatc
 
     assert out["ok"] is True
     assert provider_calls
+    assert len(continuation_calls) == 1
     assert "tools" in provider_calls[0]
     assert "json_schema" not in provider_calls[0]
     assert tool_calls == [
@@ -9595,18 +9071,17 @@ def test_assistant_runtime_comparative_income_uses_provider_tool_call(monkeypatc
 def test_plan_read_only_tools_traces_context_projection() -> None:
     calls: list[dict[str, Any]] = []
 
-    def _create_response(**kwargs: Any) -> dict[str, Any]:
+    def _create_tool_call_response(**kwargs: Any) -> dict[str, Any]:
         calls.append(dict(kwargs))
         return {
-            "output_text": json.dumps(
-                    {
-                        "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-                        "goal": "无法安全规划",
-                        "task_contract": _test_task_contract(goal="无法安全规划"),
-                        "required_capabilities": [],
-                        "steps": [],
-                    }
-            )
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_analysis_followup",
+                    "name": "analysis_query",
+                    "arguments": '{"sql":"select account from account_monthly_performance limit 5"}',
+                }
+            ]
         }
 
     result = plan_read_only_tools(
@@ -9629,7 +9104,7 @@ def test_plan_read_only_tools_traces_context_projection() -> None:
                 "tool_payload": {},
             },
         },
-        create_response_fn=_create_response,
+        create_tool_call_response_fn=_create_tool_call_response,
         environ={"OM_LLM_API_KEY": "sk-test"},
     )
 
@@ -9639,520 +9114,20 @@ def test_plan_read_only_tools_traces_context_projection() -> None:
     assert "context_projection" in calls[0]["input_text"]
 
 
-def test_parse_tool_plan_payload_defaults_missing_context_use() -> None:
-    plan = parse_tool_plan_payload(
-        {
-            "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-            "goal": "check runtime status",
-            "task_contract": _test_task_contract(goal="check runtime status"),
-            "required_capabilities": [],
-            "steps": [
+def test_plan_read_only_tools_rejects_response_mode_fields_from_tool_call() -> None:
+    calls: list[dict[str, Any]] = []
+
+    def _create_tool_call_response(**kwargs: Any) -> dict[str, Any]:
+        calls.append(dict(kwargs))
+        return {
+            "output": [
                 {
-                    "id": "step_1",
-                    "tool_name": "runtime_status",
-                    "arguments": {},
-                    "purpose": "read runtime status",
+                    "type": "function_call",
+                    "call_id": "call_income_response_mode",
+                    "name": "monthly_income_report",
+                    "arguments": '{"response_mode":"synthesis"}',
                 }
-            ],
-        }
-    )
-
-    assert plan.context_use == {
-        "schema_version": PLANNER_CONTEXT_USE_SCHEMA_VERSION,
-        "mode": "none",
-        "referenced_turn_ids": [],
-        "referenced_evidence_refs": [],
-        "inherited_slots": {},
-        "current_message_slots": {},
-        "override_slots": {},
-        "requires_clarification": False,
-        "clarification_question": None,
-    }
-    assert plan.public_payload()["context_use"]["mode"] == "none"
-
-
-def test_parse_tool_plan_payload_round_trips_context_use() -> None:
-    plan = parse_tool_plan_payload(
-        {
-            "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-            "goal": "explain candidate net income",
-            "task_contract": _test_task_contract(goal="explain candidate net income"),
-            "required_capabilities": [],
-            "context_use": {
-                "schema_version": PLANNER_CONTEXT_USE_SCHEMA_VERSION,
-                "mode": "refine",
-                "referenced_turn_ids": ["turn_1", "turn_1"],
-                "referenced_evidence_refs": ["evidence:candidate_filter"],
-                "inherited_slots": {"symbol": ["9992.HK"], "account": ["lx"]},
-                "current_message_slots": {"metric": ["净收入"]},
-                "override_slots": {},
-                "requires_clarification": False,
-                "clarification_question": None,
-                "reason": "current message asks for the calculation inside the prior candidate frame",
-            },
-            "steps": [
-                {
-                    "id": "step_1",
-                    "tool_name": "candidate_filter_explain",
-                    "arguments": {"account": "lx", "symbol": "9992.HK", "function": "sell_put"},
-                    "purpose": "read candidate filter evidence",
-                }
-            ],
-        }
-    )
-
-    payload = plan.public_payload()["context_use"]
-    assert payload["schema_version"] == PLANNER_CONTEXT_USE_SCHEMA_VERSION
-    assert payload["mode"] == "refine"
-    assert payload["referenced_turn_ids"] == ["turn_1"]
-    assert payload["referenced_evidence_refs"] == ["evidence:candidate_filter"]
-    assert payload["inherited_slots"] == {"symbol": ["9992.HK"], "account": ["lx"]}
-    assert payload["current_message_slots"] == {"metric": ["净收入"]}
-    assert payload["reason"] == "current message asks for the calculation inside the prior candidate frame"
-
-
-def test_plan_read_only_tools_accepts_valid_context_use_before_execution() -> None:
-    calls: list[dict[str, Any]] = []
-
-    def _create_response(**kwargs: Any) -> dict[str, Any]:
-        calls.append(dict(kwargs))
-        return {
-            "output_text": json.dumps(
-                    {
-                        "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-                        "goal": "check runtime status",
-                        "task_contract": _test_task_contract(goal="check runtime status"),
-                        "required_capabilities": [],
-                        "context_use": {
-                        "schema_version": PLANNER_CONTEXT_USE_SCHEMA_VERSION,
-                        "mode": "carry",
-                        "referenced_turn_ids": ["turn_1"],
-                        "referenced_evidence_refs": [],
-                        "inherited_slots": {"account": ["lx"]},
-                        "current_message_slots": {},
-                        "override_slots": {},
-                        "requires_clarification": False,
-                        "clarification_question": None,
-                    },
-                    "steps": [
-                        {
-                            "id": "step_1",
-                            "tool_name": "runtime_status",
-                            "arguments": {},
-                            "purpose": "read runtime status",
-                        }
-                    ],
-                }
-            )
-        }
-
-    result = plan_read_only_tools(
-        "继续看运行状态",
-        AssistantSettings(
-            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
-        ),
-        conversation_context={
-            "recent_messages": [{"turn_id": "turn_1", "raw_text": "看 lx 状态"}],
-            "context_projection": {
-                "schema_version": "om-context-projection-v1",
-                "current_user_message": {"text": "继续看运行状态"},
-                "recent_turns": [{"turn_id": "turn_1", "safe_slots": {"account": ["lx"]}, "evidence_refs": []}],
-                "recent_successful_tools": [],
-                "available_evidence_refs": [],
-                "open_evidence_gaps": [],
-                "pending_operations": [],
-                "budget": {"truncated": False},
-            },
-        },
-        create_response_fn=_create_response,
-        environ={"OM_LLM_API_KEY": "sk-test"},
-    )
-
-    assert calls
-    assert calls[0]["json_schema"]["properties"]["context_use"]["properties"]["mode"]["enum"] == [
-        "none",
-        "carry",
-        "refine",
-        "override",
-        "ambiguous",
-    ]
-    assert result.error is None
-    assert result.plan is not None
-    assert result.trace["reason"] == "accepted"
-    assert result.trace["planner_context_use"]["mode"] == "carry"
-    assert result.trace["planner_context_use"]["inherited_slots"] == {"account": ["lx"]}
-    assert result.trace["context_validation"]["status"] == "passed"
-
-
-def test_plan_read_only_tools_blocks_invalid_context_after_failed_repair() -> None:
-    calls: list[dict[str, Any]] = []
-
-    def _create_response(**_kwargs: Any) -> dict[str, Any]:
-        calls.append(dict(_kwargs))
-        return {
-            "output_text": json.dumps(
-                    {
-                        "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-                        "goal": "continue previous scope",
-                        "task_contract": _test_task_contract(goal="continue previous scope"),
-                        "required_capabilities": [],
-                        "context_use": {
-                        "schema_version": PLANNER_CONTEXT_USE_SCHEMA_VERSION,
-                        "mode": "carry",
-                        "referenced_turn_ids": [],
-                        "referenced_evidence_refs": [],
-                        "inherited_slots": {"account": ["lx"]},
-                        "current_message_slots": {},
-                        "override_slots": {},
-                        "requires_clarification": False,
-                        "clarification_question": None,
-                    },
-                    "steps": [
-                        {
-                            "id": "step_1",
-                            "tool_name": "analysis_query",
-                            "arguments": {
-                                "sql": "select account from account_monthly_performance limit 5",
-                                "account": "lx",
-                            },
-                            "purpose": "read carried scope",
-                        }
-                    ],
-                }
-            )
-        }
-
-    result = plan_read_only_tools(
-        "继续",
-        AssistantSettings(
-            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
-        ),
-        conversation_context={
-            "context_projection": {
-                "schema_version": "om-context-projection-v1",
-                "current_user_message": {"text": "继续"},
-                "recent_turns": [
-                    {
-                        "turn_id": "turn_lx",
-                        "safe_slots": {"account": ["lx"]},
-                        "evidence_refs": ["ev_lx"],
-                    }
-                ],
-                "recent_successful_tools": [
-                    {"tool_name": "analysis_query", "safe_slots": {"account": ["lx"]}, "evidence_refs": ["ev_lx"]}
-                ],
-                "available_evidence_refs": [
-                    {"ref_id": "ev_lx", "turn_id": "turn_lx", "source_tool": "analysis_query", "safe_slots": {"account": ["lx"]}}
-                ],
-                "open_evidence_gaps": [],
-                "pending_operations": [],
-                "budget": {"truncated": False},
-            }
-        },
-        create_response_fn=_create_response,
-        environ={"OM_LLM_API_KEY": "sk-test"},
-    )
-
-    assert len(calls) == 2
-    assert result.plan is None
-    assert result.error is not None
-    assert result.error.code == "PLAN_CONTEXT_INVALID"
-    assert result.trace["reason"] == "context_validation_blocked"
-    assert result.trace["context_validation"]["status"] == "blocked"
-    assert result.trace["context_validation"]["code"] == "CONTEXT_SLOT_NOT_AVAILABLE"
-    assert result.trace["context_validation"]["violation"]["reason"] == "declared_inherited_slot_not_available"
-    assert result.trace["context_validation_repair"]["attempted"] is True
-    assert result.trace["context_validation_repair"]["status"] == "rejected"
-
-
-def test_plan_read_only_tools_repairs_blocked_context_before_accepting() -> None:
-    calls: list[dict[str, Any]] = []
-
-    def _create_response(**kwargs: Any) -> dict[str, Any]:
-        calls.append(dict(kwargs))
-        repair = "context_validation_repair" in kwargs["input_text"]
-        context_use = {
-            "schema_version": PLANNER_CONTEXT_USE_SCHEMA_VERSION,
-            "mode": "carry",
-            "referenced_turn_ids": ["turn_lx"] if repair else [],
-            "referenced_evidence_refs": ["ev_lx"] if repair else [],
-            "inherited_slots": {"account": ["lx"]},
-            "current_message_slots": {},
-            "override_slots": {},
-            "requires_clarification": False,
-            "clarification_question": None,
-        }
-        return {
-            "output_text": json.dumps(
-                    {
-                        "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-                        "goal": "continue previous scope",
-                        "task_contract": _test_task_contract(goal="continue previous scope"),
-                        "required_capabilities": [],
-                        "context_use": context_use,
-                    "steps": [
-                        {
-                            "id": "step_1",
-                            "tool_name": "analysis_query",
-                            "arguments": {
-                                "sql": "select account from account_monthly_performance limit 5",
-                                "account": "lx",
-                            },
-                            "purpose": "read carried scope",
-                        }
-                    ],
-                }
-            )
-        }
-
-    result = plan_read_only_tools(
-        "继续",
-        AssistantSettings(
-            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
-        ),
-        conversation_context={
-            "context_projection": {
-                "schema_version": "om-context-projection-v1",
-                "current_user_message": {"text": "继续"},
-                "recent_turns": [
-                    {
-                        "turn_id": "turn_lx",
-                        "safe_slots": {"account": ["lx"]},
-                        "evidence_refs": ["ev_lx"],
-                    }
-                ],
-                "recent_successful_tools": [
-                    {"tool_name": "analysis_query", "safe_slots": {"account": ["lx"]}, "evidence_refs": ["ev_lx"]}
-                ],
-                "available_evidence_refs": [
-                    {"ref_id": "ev_lx", "turn_id": "turn_lx", "source_tool": "analysis_query", "safe_slots": {"account": ["lx"]}}
-                ],
-                "open_evidence_gaps": [],
-                "pending_operations": [],
-                "budget": {"truncated": False},
-            }
-        },
-        create_response_fn=_create_response,
-        environ={"OM_LLM_API_KEY": "sk-test"},
-    )
-
-    assert len(calls) == 2
-    assert "context_validation_repair" not in calls[0]["input_text"]
-    assert "context_validation_repair" in calls[1]["input_text"]
-    assert "context_projection" in calls[1]["input_text"]
-    assert result.error is None
-    assert result.plan is not None
-    assert result.trace["reason"] == "accepted"
-    assert result.trace["context_validation"]["status"] == "passed"
-    assert result.trace["context_validation_repair"]["status"] == "accepted"
-    assert result.trace["context_validation_repair"]["initial_validation"]["status"] == "blocked"
-
-
-def test_plan_read_only_tools_asks_clarification_for_ambiguous_context_without_repair() -> None:
-    calls: list[dict[str, Any]] = []
-
-    def _create_response(**kwargs: Any) -> dict[str, Any]:
-        calls.append(dict(kwargs))
-        return {
-            "output_text": json.dumps(
-                    {
-                        "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-                        "goal": "continue ambiguous scope",
-                        "task_contract": _test_task_contract(goal="continue ambiguous scope"),
-                        "required_capabilities": [],
-                        "context_use": {
-                        "schema_version": PLANNER_CONTEXT_USE_SCHEMA_VERSION,
-                        "mode": "carry",
-                        "referenced_turn_ids": [],
-                        "referenced_evidence_refs": [],
-                        "inherited_slots": {},
-                        "current_message_slots": {},
-                        "override_slots": {},
-                        "requires_clarification": False,
-                        "clarification_question": None,
-                    },
-                    "steps": [
-                        {
-                            "id": "step_1",
-                            "tool_name": "analysis_query",
-                            "arguments": {"sql": "select 1 as ok"},
-                            "purpose": "ambiguous read",
-                        }
-                    ],
-                }
-            )
-        }
-
-    result = plan_read_only_tools(
-        "继续",
-        AssistantSettings(
-            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
-        ),
-        conversation_context={
-            "context_projection": {
-                "schema_version": "om-context-projection-v1",
-                "current_user_message": {"text": "继续"},
-                "recent_turns": [
-                    {"turn_id": "turn_a", "safe_slots": {"account": ["lx"]}, "evidence_refs": ["ev_a"]},
-                    {"turn_id": "turn_b", "safe_slots": {"account": ["sy"]}, "evidence_refs": ["ev_b"]},
-                ],
-                "recent_successful_tools": [],
-                "available_evidence_refs": [
-                    {"ref_id": "ev_a", "turn_id": "turn_a", "source_tool": "analysis_query", "safe_slots": {"account": ["lx"]}},
-                    {"ref_id": "ev_b", "turn_id": "turn_b", "source_tool": "analysis_query", "safe_slots": {"account": ["sy"]}},
-                ],
-                "open_evidence_gaps": [],
-                "pending_operations": [],
-                "budget": {"truncated": True, "truncation_reason": "recent_turn_limit"},
-            }
-        },
-        create_response_fn=_create_response,
-        environ={"OM_LLM_API_KEY": "sk-test"},
-    )
-
-    assert len(calls) == 1
-    assert result.plan is None
-    assert result.error is not None
-    assert result.error.code == "PLAN_CONTEXT_AMBIGUOUS"
-    assert result.trace["reason"] == "context_validation_ask_clarification"
-    assert result.trace["context_validation"]["status"] == "ask_clarification"
-    assert "context_validation_repair" not in result.trace
-
-
-def test_execute_tool_plan_blocks_invalid_context_before_tool_call(tmp_path: Path) -> None:
-    calls: list[tuple[str, dict[str, Any]]] = []
-
-    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
-        calls.append((tool_name, payload))
-        return build_response(tool_name=tool_name, ok=True, data={"rows": []})
-
-    try:
-        execute_tool_plan(
-            question="继续",
-            request=AssistantRequest(
-                text="继续",
-                sender_id="local",
-                message_id="msg_context_invalid_execute_tool_plan",
-                audit_db=str(tmp_path / "inbound.sqlite3"),
-            ),
-            plan_payload={
-                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-                "goal": "continue previous scope",
-                "task_contract": _test_task_contract(goal="continue previous scope"),
-                "required_capabilities": [],
-                "context_use": {
-                    "schema_version": PLANNER_CONTEXT_USE_SCHEMA_VERSION,
-                    "mode": "carry",
-                    "referenced_turn_ids": [],
-                    "referenced_evidence_refs": [],
-                    "inherited_slots": {"account": ["lx"]},
-                    "current_message_slots": {},
-                    "override_slots": {},
-                    "requires_clarification": False,
-                    "clarification_question": None,
-                },
-                "steps": [
-                    {
-                        "id": "step_1",
-                        "tool_name": "analysis_query",
-                        "arguments": {
-                            "sql": "select account from account_monthly_performance limit 5",
-                            "account": "lx",
-                        },
-                        "purpose": "read stale scope",
-                    }
-                ],
-            },
-            settings=AssistantSettings(
-                llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
-            ),
-            conversation_context={
-                "context_projection": {
-                    "schema_version": "om-context-projection-v1",
-                    "current_user_message": {"text": "继续"},
-                    "recent_turns": [
-                        {
-                            "turn_id": "turn_lx",
-                            "safe_slots": {"account": ["lx"]},
-                            "evidence_refs": ["ev_lx"],
-                        }
-                    ],
-                    "recent_successful_tools": [
-                        {"tool_name": "analysis_query", "safe_slots": {"account": ["lx"]}, "evidence_refs": ["ev_lx"]}
-                    ],
-                    "available_evidence_refs": [
-                        {"ref_id": "ev_lx", "turn_id": "turn_lx", "source_tool": "analysis_query", "safe_slots": {"account": ["lx"]}}
-                    ],
-                    "open_evidence_gaps": [],
-                    "pending_operations": [],
-                    "budget": {"truncated": False},
-                }
-            },
-            execute_tool_fn=_execute,
-        )
-    except AgentToolError as err:
-        assert err.code == "PLAN_CONTEXT_INVALID"
-        assert err.details["context_validation"]["status"] == "blocked"
-    else:
-        raise AssertionError("invalid context use should fail before tool execution")
-
-    assert calls == []
-
-
-def test_tool_plan_json_schema_exposes_optional_context_use() -> None:
-    schema = tool_plan_json_schema()
-    context_schema = schema["properties"]["context_use"]
-
-    assert "context_use" not in schema["required"]
-    assert context_schema["properties"]["schema_version"]["enum"] == [PLANNER_CONTEXT_USE_SCHEMA_VERSION]
-    assert context_schema["properties"]["mode"]["enum"] == ["none", "carry", "refine", "override", "ambiguous"]
-    assert "inherited_slots" in context_schema["required"]
-
-
-def test_validate_tool_plan_leaves_context_use_to_context_validator() -> None:
-    plan = PlannerPlan(
-        goal="check runtime status",
-        task_contract=_test_task_contract(goal="check runtime status"),
-        steps=(
-            PlannerPlanStep(
-                id="step_1",
-                tool_name="runtime_status",
-                arguments={},
-                purpose="read runtime status",
-            ),
-        ),
-        context_use={
-            "schema_version": "invalid-context-use-schema",
-            "mode": "ambiguous",
-            "requires_clarification": True,
-            "clarification_question": "Which prior scope should be used?",
-        },
-    )
-
-    validate_tool_plan(plan)
-
-
-def test_plan_read_only_tools_rejects_response_mode_fields() -> None:
-    calls: list[dict[str, Any]] = []
-
-    def _create_response(**kwargs: Any) -> dict[str, Any]:
-        calls.append(dict(kwargs))
-        return {
-            "output_text": json.dumps(
-                {
-                    "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-                    "goal": "查询历史以来总的净现金流",
-                    "response_mode": "canonical",
-                    "steps": [
-                        {
-                            "id": "step_1",
-                            "tool_name": "monthly_income_report",
-                            "arguments": {"response_mode": "synthesis"},
-                            "purpose": "读取OM本地账本收益现金流",
-                        }
-                    ],
-                }
-            )
+            ]
         }
 
     result = plan_read_only_tools(
@@ -10161,18 +9136,20 @@ def test_plan_read_only_tools_rejects_response_mode_fields() -> None:
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         conversation_context={"temporal_context": {"current_date": "2026-06-04", "timezone": "Asia/Shanghai"}},
-        create_response_fn=_create_response,
+        create_tool_call_response_fn=_create_tool_call_response,
         environ={"OM_LLM_API_KEY": "sk-test"},
     )
 
     assert calls
+    assert "tools" in calls[0]
+    assert "json_schema" not in calls[0]
     assert result.plan is None
     assert result.error is not None
-    assert result.error.code == "INPUT_ERROR"
+    assert result.error.code == "PERMISSION_DENIED"
     assert result.trace["reason"] == "invalid_plan"
 
 
-def test_tool_plan_rejects_system_scoped_argument_families() -> None:
+def test_model_tool_call_events_reject_system_scoped_argument_families() -> None:
     cases = [
         ("runtime_status", {"state_dir": "/tmp/state"}, ["state_dir"]),
         ("runtime_status", {"timeoutSeconds": 5}, ["timeoutSeconds"]),
@@ -10201,81 +9178,79 @@ def test_tool_plan_rejects_system_scoped_argument_families() -> None:
     ]
 
     for tool_name, arguments, expected_banned in cases:
-        plan = PlannerPlan(
-            goal="unsafe system argument",
-            task_contract=_test_task_contract(goal="unsafe system argument"),
-            steps=(
-                PlannerPlanStep(
-                    id="step_1",
+        err = _validate_model_tool_call_events(
+            (
+                ModelToolCallEvent(
+                    event_id="model_tool_call_1",
+                    tool_call_id="call_1",
                     tool_name=tool_name,
                     arguments=arguments,
                     purpose="attempt to pass system scoped argument",
                 ),
             ),
+            question="unsafe system argument",
         )
-        try:
-            validate_tool_plan(plan)
-        except AgentToolError as err:
-            assert err.code == "PERMISSION_DENIED"
-            assert err.details["tool_name"] == tool_name
-            assert err.details["banned_arguments"] == expected_banned
-        else:
-            raise AssertionError(f"{tool_name} should reject {arguments}")
+        assert err is not None
+        assert err.code == "PERMISSION_DENIED"
+        assert err.details["tool_name"] == tool_name
+        assert err.details["banned_arguments"] == expected_banned
 
 
 def test_agent_loop_income_cashflow_eval_plan_guard() -> None:
+    def _monthly_event(
+        event_id: str,
+        tool_call_id: str,
+        arguments: dict[str, Any],
+        *,
+        purpose: str,
+    ) -> ModelToolCallEvent:
+        return ModelToolCallEvent(
+            event_id=event_id,
+            tool_call_id=tool_call_id,
+            tool_name="monthly_income_report",
+            arguments=arguments,
+            purpose=purpose,
+            provider="openai",
+            parent_event_id="user_message_1",
+        )
+
     cases = [
         {
             "text": "历史以来总的净现金流",
-            "plan": PlannerPlan(
+            "planner_result": _plan_result(
+                "monthly_income_report",
+                {"month": "2026-06"},
                 goal="查询历史以来总的净现金流",
-                task_contract=_test_task_contract(goal="查询历史以来总的净现金流"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="monthly_income_report",
-                        arguments={"month": "2026-06"},
-                        purpose="获取所有月份的总净现金流",
-                    ),
-                ),
+                purpose="获取所有月份的总净现金流",
             ),
             "expected": [{"tool_name": "monthly_income_report", "arguments": {}}],
         },
         {
             "text": "所有账户累计净现金流",
-            "plan": PlannerPlan(
+            "planner_result": _plan_result(
+                "monthly_income_report",
+                {"account": "lx", "month": "2026-05"},
                 goal="查询所有账户累计净现金流",
-                task_contract=_test_task_contract(goal="查询所有账户累计净现金流"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="monthly_income_report",
-                        arguments={"account": "lx", "month": "2026-05"},
-                        purpose="读取累计净现金流",
-                    ),
-                ),
+                purpose="读取累计净现金流",
             ),
             "expected": [{"tool_name": "monthly_income_report", "arguments": {}}],
         },
         {
             "text": "5月和6月的总收益",
-            "plan": PlannerPlan(
-                goal="获取5月和6月的总收益",
-                task_contract=_test_task_contract(goal="获取5月和6月的总收益"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="monthly_income_report",
-                        arguments={"month": "2026-05"},
-                        purpose="获取2026年5月的收益数据",
-                    ),
-                    PlannerPlanStep(
-                        id="step_2",
-                        tool_name="monthly_income_report",
-                        arguments={"month": "2026-05"},
-                        purpose="获取2026年6月的收益数据",
-                    ),
+            "planner_result": _event_plan_result(
+                _monthly_event(
+                    "model_tool_call_1",
+                    "call_1",
+                    {"month": "2026-05"},
+                    purpose="获取2026年5月的收益数据",
                 ),
+                _monthly_event(
+                    "model_tool_call_2",
+                    "call_2",
+                    {"month": "2026-05"},
+                    purpose="获取2026年6月的收益数据",
+                ),
+                goal="获取5月和6月的总收益",
             ),
             "expected": [
                 {"tool_name": "monthly_income_report", "arguments": {"month": "2026-05"}},
@@ -10284,33 +9259,21 @@ def test_agent_loop_income_cashflow_eval_plan_guard() -> None:
         },
         {
             "text": "今年以来各账户收益对比",
-            "plan": PlannerPlan(
+            "planner_result": _plan_result(
+                "monthly_income_report",
+                {"month": "2026-06"},
                 goal="今年以来各账户收益对比",
-                task_contract=_test_task_contract(goal="今年以来各账户收益对比"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="monthly_income_report",
-                        arguments={"month": "2026-06"},
-                        purpose="读取OM本地账本全部月份收益用于对比",
-                    ),
-                ),
+                purpose="读取OM本地账本全部月份收益用于对比",
             ),
             "expected": [{"tool_name": "monthly_income_report", "arguments": {}}],
         },
         {
             "text": "分析 lx 6月的净现金流明细，重点是明细",
-            "plan": PlannerPlan(
+            "planner_result": _plan_result(
+                "monthly_income_report",
+                {"account": "lx", "month": "2025-06"},
                 goal="分析 lx 6月的净现金流明细",
-                task_contract=_test_task_contract(goal="分析 lx 6月的净现金流明细"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="monthly_income_report",
-                        arguments={"account": "lx", "month": "2025-06"},
-                        purpose="读取cashflow_rows",
-                    ),
-                ),
+                purpose="读取cashflow_rows",
             ),
             "expected": [
                 {"tool_name": "monthly_income_report", "arguments": {"account": "lx", "include_rows": True, "month": "2026-06"}}
@@ -10318,17 +9281,11 @@ def test_agent_loop_income_cashflow_eval_plan_guard() -> None:
         },
         {
             "text": "sy 2026-06 收益由什么组成",
-            "plan": PlannerPlan(
+            "planner_result": _plan_result(
+                "monthly_income_report",
+                {"account": "sy", "month": "2026-06"},
                 goal="sy 2026-06 收益组成",
-                task_contract=_test_task_contract(goal="sy 2026-06 收益组成"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="monthly_income_report",
-                        arguments={"account": "sy", "month": "2026-06"},
-                        purpose="收益组成需要明细",
-                    ),
-                ),
+                purpose="收益组成需要明细",
             ),
             "expected": [
                 {"tool_name": "monthly_income_report", "arguments": {"account": "sy", "include_rows": True, "month": "2026-06"}}
@@ -10336,49 +9293,31 @@ def test_agent_loop_income_cashflow_eval_plan_guard() -> None:
         },
         {
             "text": "lx 6月权利金收入和已实现PnL分别是多少",
-            "plan": PlannerPlan(
+            "planner_result": _plan_result(
+                "monthly_income_report",
+                {"account": "lx"},
                 goal="lx 6月权利金和已实现PnL",
-                task_contract=_test_task_contract(goal="lx 6月权利金和已实现PnL"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="monthly_income_report",
-                        arguments={"account": "lx"},
-                        purpose="查询6月收益摘要",
-                    ),
-                ),
+                purpose="查询6月收益摘要",
             ),
             "expected": [{"tool_name": "monthly_income_report", "arguments": {"account": "lx", "month": "2026-06"}}],
         },
         {
             "text": "6月收益分析",
-            "plan": PlannerPlan(
+            "planner_result": _plan_result(
+                "monthly_income_report",
+                {"month": "2026-06"},
                 goal="分析 6月收益",
-                task_contract=_test_task_contract(goal="分析 6月收益"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="monthly_income_report",
-                        arguments={"month": "2026-06"},
-                        purpose="查询6月收益摘要",
-                    ),
-                ),
+                purpose="查询6月收益摘要",
             ),
             "expected": [{"tool_name": "monthly_income_report", "arguments": {"include_rows": True, "month": "2026-06"}}],
         },
         {
             "text": "6月收益",
-            "plan": PlannerPlan(
+            "planner_result": _plan_result(
+                "monthly_income_report",
+                {},
                 goal="6月收益",
-                task_contract=_test_task_contract(goal="6月收益"),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="monthly_income_report",
-                        arguments={},
-                        purpose="查询6月收益",
-                    ),
-                ),
+                purpose="查询6月收益",
             ),
             "expected": [{"tool_name": "monthly_income_report", "arguments": {"month": "2026-06"}}],
         },
@@ -10393,24 +9332,9 @@ def test_agent_loop_income_cashflow_eval_plan_guard() -> None:
             _settings: AssistantSettings,
             _conversation_context: dict[str, Any] | None,
             *,
-            plan: PlannerPlan = case["plan"],
+            planner_result: LlmPlannerResult = case["planner_result"],
         ) -> LlmPlannerResult:
-            return LlmPlannerResult(
-                plan=plan,
-                trace={
-                    "enabled": True,
-                    "attempted": True,
-                    "reason": "accepted",
-                    "provider": "openai",
-                    "base_url": "",
-                    "model": "gpt-5.2",
-                    "api_key_env": "OM_LLM_API_KEY",
-                    "confidence_min": 0.75,
-                    "timeout_seconds": 20,
-                    "max_output_tokens": 512,
-                    "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-                },
-            )
+            return planner_result
 
         result = run_read_only_agent_loop(
             str(case["text"]),
@@ -10425,7 +9349,7 @@ def test_agent_loop_income_cashflow_eval_plan_guard() -> None:
         assert actual == case["expected"], case["text"]
 
 
-def test_assistant_runtime_agent_loop_empty_plan_uses_general_reply_for_non_business_text(tmp_path: Path) -> None:
+def test_assistant_runtime_agent_loop_no_event_plan_returns_clarification_for_non_business_text(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
 
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -10438,7 +9362,7 @@ def test_assistant_runtime_agent_loop_empty_plan_uses_general_reply_for_non_busi
         _conversation_context: dict[str, Any] | None,
     ) -> LlmPlannerResult:
         return LlmPlannerResult(
-            plan=PlannerPlan(goal="无法安全规划", task_contract=_test_task_contract(goal="无法安全规划"), steps=()),
+            plan=None,
             trace={
                 "enabled": True,
                 "attempted": True,
@@ -10454,34 +9378,6 @@ def test_assistant_runtime_agent_loop_empty_plan_uses_general_reply_for_non_busi
             },
         )
 
-    def _reply(
-        text: str,
-        settings: AssistantSettings,
-        conversation_context: dict[str, Any] | None,
-    ) -> LlmReplyResult:
-        assert text == "你是什么模型"
-        assert settings.enabled is True
-        assert conversation_context is not None
-        return LlmReplyResult(
-            response_text="我是 OM 的交易系统助手，当前启用了 LLM 自然语言入口。",
-            trace={
-                "enabled": True,
-                "attempted": True,
-                "reason": "general_reply",
-                "provider": "openai",
-                "base_url": "",
-                "model": "gpt-5.2",
-                "api_key_env": "OM_LLM_API_KEY",
-                "confidence_min": 0.75,
-                "timeout_seconds": 20,
-                "max_output_tokens": 512,
-                "facts_source": "none",
-                "tools_allowed": False,
-                "writes_allowed": False,
-                "schema_version": "om-llm-reply-v1",
-            },
-        )
-
     out = handle_assistant_message(
         AssistantRequest(
             text="你是什么模型",
@@ -10494,16 +9390,13 @@ def test_assistant_runtime_agent_loop_empty_plan_uses_general_reply_for_non_busi
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         plan_tools_fn=_plan,
-        generate_reply_fn=_reply,
     )
 
-    assert out["ok"] is True
+    assert out["ok"] is False
     assert calls == []
-    assert out["data"]["perception"]["intent_name"] == "small_talk"
-    assert out["data"]["response_text"] == "我是 OM 的交易系统助手，当前启用了 LLM 自然语言入口。"
-    assert out["meta"]["assistant"]["route"] == "llm_reply"
-    assert out["meta"]["assistant"]["llm"]["intent_router"]["reason"] == "no_plan"
-    assert out["meta"]["assistant"]["llm"]["intent_router"]["agent_loop"]["steps_used"] == 0
+    assert out["error"]["code"] == "NEEDS_CLARIFICATION"
+    assert out["meta"]["assistant"]["route"] == "agent_loop"
+    assert out["meta"]["assistant"]["llm"]["agent_loop"]["steps_used"] == 0
 
 
 def test_read_only_agent_loop_records_no_plan_without_tool_step() -> None:
@@ -10603,7 +9496,7 @@ def test_assistant_runtime_rejects_llm_injected_write_preview_when_question_is_r
         _settings: AssistantSettings,
         _conversation_context: dict[str, Any] | None,
     ) -> LlmPlannerResult:
-        return _plan_result("manual_trade_open", {"raw_text": "记录开仓 sy NVDA put"})
+        return _plan_result("manual_trade_open", {"raw_text": "记录开仓 sy NVDA put"}, goal=_text)
 
     out = handle_assistant_message(
         AssistantRequest(
@@ -10716,16 +9609,7 @@ def test_openai_responses_client_builds_structured_output_request() -> None:
                     "content": [
                         {
                             "type": "output_text",
-                            "text": json.dumps(
-                                {
-                                    "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-                                    "goal": "check status",
-                                    "required_capabilities": [],
-                                    "steps": [
-                                        {"id": "step_1", "tool_name": "runtime_status", "arguments": {}, "purpose": "check status"}
-                                    ],
-                                }
-                            ),
+                            "text": json.dumps({"answer": "status ok"}),
                         }
                     ]
                 }
@@ -10737,8 +9621,13 @@ def test_openai_responses_client_builds_structured_output_request() -> None:
         base_url="https://llm.example/v1",
         model="gpt-5.2",
         input_text="状态",
-        instructions="plan read-only tools",
-        json_schema=tool_plan_json_schema(),
+        instructions="return json",
+        json_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"answer": {"type": "string"}},
+            "required": ["answer"],
+        },
         timeout=7,
         http_post_json_fn=_post,
     )
@@ -10751,9 +9640,9 @@ def test_openai_responses_client_builds_structured_output_request() -> None:
     assert calls[0]["payload"]["temperature"] == 0.0
     assert calls[0]["payload"]["text"]["format"]["type"] == "json_schema"
     assert calls[0]["payload"]["text"]["format"]["strict"] is True
-    assert calls[0]["payload"]["text"]["format"]["schema"]["properties"]["steps"]["maxItems"] == 3
+    assert calls[0]["payload"]["text"]["format"]["schema"]["properties"]["answer"]["type"] == "string"
     assert calls[0]["timeout"] == 7
-    assert "runtime_status" in extract_response_text(response)
+    assert extract_response_text(response) == '{"answer": "status ok"}'
 
 
 def test_openai_responses_client_builds_tool_call_request() -> None:
@@ -10797,6 +9686,41 @@ def test_openai_responses_client_builds_tool_call_request() -> None:
     assert calls[0]["payload"]["store"] is False
 
 
+def test_openai_responses_client_sends_tool_call_payload_request() -> None:
+    calls: list[dict[str, Any]] = []
+
+    def _post(
+        url: str,
+        payload: dict[str, Any],
+        *,
+        headers: dict[str, str],
+        timeout: int,
+    ) -> dict[str, Any]:
+        calls.append({"url": url, "payload": payload, "headers": headers, "timeout": timeout})
+        return {"output_text": "final answer"}
+
+    response = create_response_from_payload(
+        api_key="sk-test",
+        base_url="https://llm.example/v1",
+        payload={
+            "model": "gpt-5.2",
+            "input": [{"role": "user", "content": "6月收益分析"}],
+            "tools": [{"type": "function", "name": "monthly_income_report"}],
+            "tool_choice": "auto",
+            "store": False,
+        },
+        timeout=7,
+        http_post_json_fn=_post,
+    )
+
+    assert response["output_text"] == "final answer"
+    assert calls[0]["url"] == "https://llm.example/v1/responses"
+    assert calls[0]["headers"]["Authorization"] == "Bearer sk-test"
+    assert calls[0]["payload"]["input"][0]["content"] == "6月收益分析"
+    assert calls[0]["payload"]["tools"][0]["name"] == "monthly_income_report"
+    assert calls[0]["timeout"] == 7
+
+
 def test_openai_responses_client_accepts_full_responses_url() -> None:
     calls: list[dict[str, Any]] = []
 
@@ -10815,8 +9739,13 @@ def test_openai_responses_client_accepts_full_responses_url() -> None:
         base_url="https://llm.example/v1/responses",
         model="gpt-5.2",
         input_text="状态",
-        instructions="plan read-only tools",
-        json_schema=tool_plan_json_schema(),
+        instructions="return json",
+        json_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"answer": {"type": "string"}},
+            "required": ["answer"],
+        },
         http_post_json_fn=_post,
     )
 
@@ -10838,16 +9767,7 @@ def test_openai_chat_completions_client_builds_deepseek_json_request() -> None:
             "choices": [
                 {
                     "message": {
-                        "content": json.dumps(
-                            {
-                                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-                                "goal": "check status",
-                                "required_capabilities": [],
-                                "steps": [
-                                    {"id": "step_1", "tool_name": "runtime_status", "arguments": {}, "purpose": "check status"}
-                                ],
-                            }
-                        )
+                        "content": json.dumps({"answer": "status ok"})
                     }
                 }
             ]
@@ -10858,8 +9778,13 @@ def test_openai_chat_completions_client_builds_deepseek_json_request() -> None:
         base_url="https://api.deepseek.com",
         model="deepseek-v4-flash",
         input_text="状态",
-        instructions="plan read-only tools as json",
-        json_schema=tool_plan_json_schema(),
+        instructions="return json",
+        json_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"answer": {"type": "string"}},
+            "required": ["answer"],
+        },
         timeout=7,
         http_post_json_fn=_post,
     )
@@ -10875,7 +9800,7 @@ def test_openai_chat_completions_client_builds_deepseek_json_request() -> None:
     assert calls[0]["payload"]["stream"] is False
     assert calls[0]["payload"]["temperature"] == 0.0
     assert calls[0]["timeout"] == 7
-    assert "runtime_status" in extract_chat_completion_text(response)
+    assert extract_chat_completion_text(response) == '{"answer": "status ok"}'
 
 
 def test_openai_chat_completions_client_builds_tool_call_request() -> None:
@@ -10927,3 +9852,38 @@ def test_openai_chat_completions_client_builds_tool_call_request() -> None:
     assert calls[0]["payload"]["tool_choice"] == "auto"
     assert "response_format" not in calls[0]["payload"]
     assert calls[0]["payload"]["stream"] is False
+
+
+def test_openai_chat_completions_client_sends_tool_call_payload_request() -> None:
+    calls: list[dict[str, Any]] = []
+
+    def _post(
+        url: str,
+        payload: dict[str, Any],
+        *,
+        headers: dict[str, str],
+        timeout: int,
+    ) -> dict[str, Any]:
+        calls.append({"url": url, "payload": payload, "headers": headers, "timeout": timeout})
+        return {"choices": [{"message": {"content": "final answer"}}]}
+
+    response = create_chat_completion_from_payload(
+        api_key="sk-test",
+        base_url="https://api.deepseek.com",
+        payload={
+            "model": "deepseek-v4-flash",
+            "messages": [{"role": "user", "content": "6月收益分析"}],
+            "tools": [{"type": "function", "function": {"name": "monthly_income_report"}}],
+            "tool_choice": "auto",
+            "stream": False,
+        },
+        timeout=7,
+        http_post_json_fn=_post,
+    )
+
+    assert response["choices"][0]["message"]["content"] == "final answer"
+    assert calls[0]["url"] == "https://api.deepseek.com/chat/completions"
+    assert calls[0]["headers"]["Authorization"] == "Bearer sk-test"
+    assert calls[0]["payload"]["messages"][0] == {"role": "user", "content": "6月收益分析"}
+    assert calls[0]["payload"]["tools"][0]["function"]["name"] == "monthly_income_report"
+    assert calls[0]["timeout"] == 7

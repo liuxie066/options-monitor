@@ -726,7 +726,7 @@ Agent loop 约束：
 - follow-up 只能使用 `analysis_catalog` / `analysis_query`，且必须命中 evidence gap
   建议的 view；不允许借 follow-up 扩大到写工具或生产操作。
 - follow-up 决策会以 `om-agent-loop-followup-decision-v1` 写入
-  `assistant.tool_plan.followup_decisions` 和
+  `assistant.tool_loop.followup_decisions` 和
   `AgentSession.answer_trace.followup_decisions`，记录
   `call_tool`、`stop_with_gap`、rejected duplicate 等状态。
 

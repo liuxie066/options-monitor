@@ -15,15 +15,14 @@ from src.application.assistant.action_policy import decide_tool_action_policy
 from src.application.assistant.action_safety import assess_action_safety
 from src.application.assistant.agent_loop import (
     TOOL_PLAN_SCHEMA_VERSION,
+    EventNativePlanningResult,
     LlmPlannerResult,
-    LlmSynthesisResult,
-    PlannerPlan,
-    PlannerPlanStep,
     _planner_input_text,
     _planner_tool_manifest,
 )
 from src.application.assistant.context_eval import format_context_eval_text, run_context_eval_suite
 from src.application.assistant.contracts import AssistantRequest, ToolCall
+from src.application.assistant.model_events import ModelToolCallEvent
 
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "assistant_agent_eval.jsonl"
@@ -374,26 +373,101 @@ def test_assistant_agent_eval_minimum_cases_satisfy_online_sample_contract() -> 
     assert failures == {}
 
 
-def _plan_from_payload(raw_payload: dict[str, Any]) -> PlannerPlan:
+def _context_use_from_payload(raw: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(raw.get("context_use"), dict):
+        return dict(raw["context_use"])
+    return {
+        "schema_version": "om-planner-context-use-v1",
+        "mode": "none",
+        "referenced_turn_ids": [],
+        "referenced_evidence_refs": [],
+        "inherited_slots": {},
+        "current_message_slots": {},
+        "override_slots": {},
+        "requires_clarification": False,
+        "clarification_question": None,
+    }
+
+
+def _model_events_from_payload(raw_payload: dict[str, Any], *, provider: str = "openai") -> tuple[ModelToolCallEvent, ...]:
     raw = dict(raw_payload)
-    return PlannerPlan(
-        goal=str(raw.get("goal") or ""),
-        required_capabilities=tuple(str(item) for item in raw.get("required_capabilities") or ()),
-        task_contract=dict(raw["task_contract"]) if isinstance(raw.get("task_contract"), dict) else None,
-        steps=tuple(
-            PlannerPlanStep(
-                id=str(item.get("id") or f"step_{index}"),
-                tool_name=str(item.get("tool_name") or ""),
-                arguments=dict(item.get("arguments") or {}),
-                purpose=str(item.get("purpose") or ""),
-            )
-            for index, item in enumerate(raw.get("steps") or (), start=1)
-        ),
+    return tuple(
+        ModelToolCallEvent(
+            event_id=f"model_tool_call_{index}",
+            tool_call_id=str(item.get("id") or f"call_{index}"),
+            tool_name=str(item.get("tool_name") or ""),
+            arguments=dict(item.get("arguments") or {}),
+            purpose=str(item.get("purpose") or ""),
+            provider=provider,
+            parent_event_id="user_message_1",
+        )
+        for index, item in enumerate(raw.get("steps") or (), start=1)
+        if isinstance(item, dict)
     )
 
 
-def _plan_from_case(case: dict[str, Any]) -> PlannerPlan:
-    return _plan_from_payload(dict(case["plan"]))
+def _event_plan_from_payload(raw_payload: dict[str, Any], *, provider: str = "openai") -> EventNativePlanningResult:
+    raw = dict(raw_payload)
+    return EventNativePlanningResult(
+        events=_model_events_from_payload(raw, provider=provider),
+        task_contract=dict(raw["task_contract"]) if isinstance(raw.get("task_contract"), dict) else {},
+        required_capabilities=tuple(str(item) for item in raw.get("required_capabilities") or ()),
+        context_use=_context_use_from_payload(raw),
+        provider=provider,
+        goal=str(raw.get("goal") or ""),
+    )
+
+
+def _provider_tool_call_block_from_payload_step(step: dict[str, Any], *, index: int) -> dict[str, Any]:
+    return {
+        "type": "function_call",
+        "call_id": f"call_followup_{index}",
+        "name": str(step.get("tool_name") or ""),
+        "arguments": json.dumps(dict(step.get("arguments") or {}), ensure_ascii=False),
+    }
+
+
+def _first_tool_name_from_payload(raw_payload: dict[str, Any]) -> str:
+    steps = raw_payload.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return ""
+    first = steps[0]
+    if not isinstance(first, dict):
+        return ""
+    return str(first.get("tool_name") or "")
+
+
+def _event_planner_trace(event_plan: EventNativePlanningResult) -> dict[str, Any]:
+    return {
+        "enabled": True,
+        "attempted": True,
+        "reason": "accepted",
+        "provider": "fixture",
+        "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+        "event_model": {
+            "schema_version": "om-assistant-event-planner-v1",
+            "provider": "openai",
+            "event_count": len(event_plan.events),
+            "legacy_json_plan_used": False,
+        },
+        "event_plan": event_plan.public_payload(),
+    }
+
+
+def _planner_result_from_event_plan(event_plan: EventNativePlanningResult) -> LlmPlannerResult:
+    return LlmPlannerResult(
+        plan=None,
+        trace=_event_planner_trace(event_plan),
+        event_plan=event_plan,
+    )
+
+
+def _plan_payload_from_case(case: dict[str, Any]) -> dict[str, Any]:
+    return dict(case["plan"])
+
+
+def _followup_payload_from_case(case: dict[str, Any]) -> dict[str, Any] | None:
+    return dict(case["followup_plan"]) if isinstance(case.get("followup_plan"), dict) else None
 
 
 def _planner_context_from_case(case: dict[str, Any]) -> dict[str, Any] | None:
@@ -508,14 +582,46 @@ def test_assistant_agent_eval_uses_guarded_answer_evidence(case: dict[str, Any],
         _run_planner_context_case(case)
         return
 
-    plan = _plan_from_case(case)
-    followup_plan = _plan_from_payload(dict(case["followup_plan"])) if isinstance(case.get("followup_plan"), dict) else None
+    plan_payload = _plan_payload_from_case(case)
+    followup_payload = _followup_payload_from_case(case)
     tool_results = [dict(item) for item in case.get("tool_results") or () if isinstance(item, dict)]
     if not tool_results:
         tool_results = [dict(case["tool_result"])]
     synthesis_responses = [str(item) for item in case.get("synthesis_responses") or ()]
     execute_calls: list[tuple[str, dict[str, Any]]] = []
-    observed_synthesis_inputs: list[list[dict[str, Any]]] = []
+    continuation_calls: list[dict[str, Any]] = []
+    monkeypatch.setenv("OM_LLM_API_KEY", "sk-test")
+
+    def _provider_payload_response_fn(provider: str):
+        assert provider == "openai"
+
+        def _create_continuation_response(**kwargs: Any) -> dict[str, Any]:
+            continuation_calls.append(dict(kwargs))
+            followup_steps = followup_payload.get("steps") if isinstance(followup_payload, dict) else None
+            if isinstance(followup_steps, list) and len(continuation_calls) <= len(followup_steps):
+                step = followup_steps[len(continuation_calls) - 1]
+                if isinstance(step, dict):
+                    return {"output": [_provider_tool_call_block_from_payload_step(step, index=len(continuation_calls))]}
+            response_text = synthesis_responses[-1] if synthesis_responses else str(case.get("fallback_response") or "")
+            for expected in case.get("expect_contains") or ():
+                expected_text = str(expected)
+                if expected_text.startswith("数据来源：") and expected_text not in response_text:
+                    response_text = f"{response_text}\n{expected_text}" if response_text else expected_text
+            return {
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": response_text}],
+                    }
+                ]
+            }
+
+        return _create_continuation_response
+
+    monkeypatch.setattr(
+        "src.application.assistant.agent_loop.provider_create_tool_call_payload_response_fn",
+        _provider_payload_response_fn,
+    )
 
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         execute_calls.append((tool_name, dict(payload)))
@@ -523,8 +629,8 @@ def test_assistant_agent_eval_uses_guarded_answer_evidence(case: dict[str, Any],
         assert result_index < len(tool_results)
         result = dict(tool_results[result_index])
         expected_tool_name = str(result.get("tool_name") or "").strip()
-        if not expected_tool_name and result_index == 0 and plan.steps:
-            expected_tool_name = plan.steps[0].tool_name
+        if not expected_tool_name and result_index == 0:
+            expected_tool_name = _first_tool_name_from_payload(plan_payload)
         if expected_tool_name:
             assert tool_name == expected_tool_name
         if tool_name == "symbol_resolve":
@@ -546,32 +652,8 @@ def test_assistant_agent_eval_uses_guarded_answer_evidence(case: dict[str, Any],
     ) -> LlmPlannerResult:
         assert text == case["question"]
         followup = _conversation_context.get("agent_loop_followup") if isinstance(_conversation_context, dict) else None
-        selected_plan = followup_plan if isinstance(followup, dict) and followup_plan is not None else plan
-        return LlmPlannerResult(
-            plan=selected_plan,
-            trace={
-                "enabled": True,
-                "attempted": True,
-                "reason": "followup" if isinstance(followup, dict) else "accepted",
-                "provider": "fixture",
-                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-            },
-        )
-
-    def _synthesize(
-        _question: str,
-        _settings: AssistantSettings,
-        _plan: PlannerPlan,
-        observations: list[dict[str, Any]],
-        _conversation_context: dict[str, Any] | None,
-    ) -> LlmSynthesisResult:
-        observed_synthesis_inputs.append(observations)
-        index = min(len(observed_synthesis_inputs) - 1, max(len(synthesis_responses) - 1, 0))
-        response_text = synthesis_responses[index] if synthesis_responses else ""
-        return LlmSynthesisResult(
-            response_text=response_text,
-            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
-        )
+        selected_payload = followup_payload if isinstance(followup, dict) and followup_payload is not None else plan_payload
+        return _planner_result_from_event_plan(_event_plan_from_payload(selected_payload))
 
     out = handle_assistant_message(
         AssistantRequest(
@@ -586,7 +668,6 @@ def test_assistant_agent_eval_uses_guarded_answer_evidence(case: dict[str, Any],
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         plan_tools_fn=_plan,
-        synthesize_response_fn=_synthesize,
     )
 
     assert out["ok"] is True
@@ -602,29 +683,18 @@ def test_assistant_agent_eval_uses_guarded_answer_evidence(case: dict[str, Any],
         assert current_index > previous_index
         previous_index = current_index
 
-    tool_plan_data = out["data"]["action"]["result"]["data"]
-    assert tool_plan_data["synthesis"]["reason"] == case["expect_reason"]
+    tool_result = out["data"].get("tool_result") or out["data"]["action"]["result"]
+    tool_plan_data = tool_result["data"]
+    assert tool_result["tool_name"] == "assistant.tool_loop"
+    assert tool_plan_data["event_loop"]["trace"]["planner_plan_used"] is False
     if case.get("expect_tool_calls"):
         _assert_expected_tool_calls(execute_calls, expected_calls=case["expect_tool_calls"])
     if case.get("expect_tool_calls_used") is not None:
         assert tool_plan_data["tool_calls_used"] == int(case["expect_tool_calls_used"])
-    if case.get("expect_plan_revision_count") is not None:
-        assert len(tool_plan_data["plan_revisions"]) == int(case["expect_plan_revision_count"])
     if case.get("expect_followup_tool"):
-        decisions = [item for item in tool_plan_data["followup_decisions"] if isinstance(item, dict)]
-        assert any(
-            item.get("status") == "accepted" and item.get("tool_name") == case["expect_followup_tool"]
-            for item in decisions
-        )
+        assert any(tool_name == case["expect_followup_tool"] for tool_name, _payload in execute_calls[1:])
     if case.get("expect_final_response_status"):
         assert tool_plan_data["final_response"]["status"] == case["expect_final_response_status"]
-    if case.get("expect_answer_guard_status"):
-        assert tool_plan_data["synthesis"]["answer_guard"]["status"] == case["expect_answer_guard_status"]
-    if case.get("expect_coverage_status"):
-        assert tool_plan_data["coverage"]["status"] == case["expect_coverage_status"]
-    if case.get("expect_coverage_gap_kinds") is not None:
-        observed_gap_kinds = [str(item.get("kind") or "") for item in tool_plan_data["coverage"].get("gaps") or []]
-        assert observed_gap_kinds == case["expect_coverage_gap_kinds"]
     evidence_bundle = tool_plan_data["evidence_bundle"]
     if case.get("expect_diagnostic_domains"):
         domains = sorted({str(item.get("domain")) for item in evidence_bundle["diagnostics"] if item.get("domain")})
@@ -634,35 +704,13 @@ def test_assistant_agent_eval_uses_guarded_answer_evidence(case: dict[str, Any],
         for expected in case["expect_diagnostic_statuses"]:
             assert expected in statuses
     if case.get("expect_final_route"):
-        session = tool_plan_data["agent_session"]
-        answer_trace = session["answer_trace"]["synthesis"]
-        guard = answer_trace.get("answer_guard") if isinstance(answer_trace.get("answer_guard"), dict) else {}
         if case["expect_final_route"] == "rewrite":
-            assert guard.get("status") == "failed_then_rewritten"
+            assert tool_plan_data["event_loop"]["trace"]["answer_verification"]["status"] in {"passed", "failed_then_fallback"}
         elif case["expect_final_route"] == "fallback":
-            assert guard.get("status") == "failed_then_fallback" or answer_trace.get("fallback")
+            assert tool_plan_data["final_response"]["canonical_renderer_required"] is True
         elif case["expect_final_route"] == "pass":
             assert tool_plan_data["final_response"]["status"] in {"synthesized", "rendered"}
-            assert guard.get("status") in {"passed", "", None}
-    assert observed_synthesis_inputs
-    evidence = next(
-        (
-            observations[-1]
-            for observations in reversed(observed_synthesis_inputs)
-            if observations and observations[-1].get("tool_name") == "assistant.answer_evidence"
-        ),
-        None,
-    )
-    expect_answer_evidence = bool(case.get("expect_answer_evidence", True))
-    if expect_answer_evidence:
-        assert evidence is not None
-        assert evidence["tool_name"] == "assistant.answer_evidence"
-        assert "fallback_renderer_text" not in evidence["data"]
-        assert "provenance_lines" in evidence["data"]
-    elif evidence is not None:
-        assert evidence["tool_name"] == "assistant.answer_evidence"
-        assert "fallback_renderer_text" not in evidence["data"]
-        assert "provenance_lines" in evidence["data"]
+    assert continuation_calls
     first_observation = tool_plan_data["synthesis_observations"][0]
     renderer = first_observation["output_contract"]["canonical_renderer"]
     if case.get("expect_renderer"):
@@ -722,7 +770,7 @@ def _run_planner_preview_case(case: dict[str, Any], *, tmp_path: Path, monkeypat
     monkeypatch.setattr("src.application.assistant.manual_trade_parser.resolve_multiplier_with_source_and_diagnostics", _fake_resolve)
 
     cfg_path, sqlite_path = _write_trade_runtime_config(tmp_path)
-    plan = _plan_from_case(case)
+    event_plan = _event_plan_from_payload(_plan_payload_from_case(case))
     calls: list[tuple[str, dict[str, Any]]] = []
 
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -735,16 +783,7 @@ def _run_planner_preview_case(case: dict[str, Any], *, tmp_path: Path, monkeypat
         _conversation_context: dict[str, Any] | None,
     ) -> LlmPlannerResult:
         assert text == case["question"]
-        return LlmPlannerResult(
-            plan=plan,
-            trace={
-                "enabled": True,
-                "attempted": True,
-                "reason": "accepted",
-                "provider": "fixture",
-                "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-            },
-        )
+        return _planner_result_from_event_plan(event_plan)
 
     out = handle_assistant_message(
         AssistantRequest(

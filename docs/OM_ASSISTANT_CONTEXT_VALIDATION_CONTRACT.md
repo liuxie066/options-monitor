@@ -56,7 +56,7 @@ whether the declaration is consistent with the projection and plan.
 ```text
 current_user_message
 ContextProjection
-PlannerPlan
+ModelEvent / EventNativePlanningResult
 TaskContract
 ContextUse
 planner-visible tool manifest
@@ -246,9 +246,9 @@ legacy `_conversation_followup_resolution` as an authority.
 
 ## Acceptance Criteria
 
-- A planner plan that inherits context without a visible turn or evidence ref is
+- A model event that inherits context without a visible turn or evidence ref is
   blocked.
-- A plan that silently reuses old account, symbol, month, or operation scope
+- An event plan that silently reuses old account, symbol, month, or operation scope
   against explicit current-message slots is blocked.
 - Ambiguous multi-topic follow-ups ask clarification instead of executing a
   guessed tool.

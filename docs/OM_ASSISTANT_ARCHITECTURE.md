@@ -10,6 +10,8 @@ into one overloaded "agent" concept.
 - Current capability matrix: [OM_AGENT_CAPABILITY_MAP.md](OM_AGENT_CAPABILITY_MAP.md).
 - Current tool-calling system design:
   [OM_ASSISTANT_TOOL_CALLING_V2_SYSTEM_DESIGN.md](OM_ASSISTANT_TOOL_CALLING_V2_SYSTEM_DESIGN.md).
+- Current tool-loop completion plan:
+  [OM_ASSISTANT_TOOL_LOOP_COMPLETION_PLAN.md](OM_ASSISTANT_TOOL_LOOP_COMPLETION_PLAN.md).
 - Local tool invocation contract: [AGENT_INTEGRATION.md](AGENT_INTEGRATION.md).
 - Remote/message safety contract: [INBOUND_CONTROL.md](INBOUND_CONTROL.md).
 - Current conversation-context design:
@@ -126,6 +128,15 @@ project Agent. The durable store remains the inbound audit SQLite
 `agent_sessions` trace table, and the authority path remains
 `./om assistant -> AgentLoop -> tool_execution -> agent_tool_registry`.
 
+Implementation note: the current default provider path already uses structured
+tool/function calls instead of parsing ordinary assistant `output_text` JSON.
+It also routes provider tool-call events through an event-native planning result
+into `assistant.tool_loop` instead of converting them back into `PlannerPlan`.
+The old `PlannerPlan -> execute_tool_plan(plan_payload)` bridge has been
+removed from the assistant package. Current assistant code should treat
+`PlannerPlan` as historical terminology only; it must not be reintroduced as
+the provider structured runtime contract.
+
 ## Tool Calling Event Model Direction
 
 The next tool-calling design should borrow Claude Code's loop shape, not its
@@ -139,6 +150,13 @@ That document supersedes the older text-JSON planner direction: the model
 should express tool intent through provider structured tool calls mapped to
 internal `ModelEvent` records, not by writing a full `TaskContract` and
 `ToolPlan` as ordinary assistant text.
+
+The current implementation boundary is stricter than "provider tool calling":
+structured tool calls are the runtime execution contract directly, not an input
+that is converted back into `PlannerPlan`. New intelligence work should add
+bounded event-loop observations for recoverable schema, scope, safety, and
+read-tool errors rather than adding repair branches around historical plan
+objects.
 
 Target flow:
 
