@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 1.2.321 - 2026-06-20
+
+### Added
+- Added Assistant model-turn loop hardening so recoverable provider protocol, guard, duplicate, and tool-result errors
+  are returned to the model as bounded observations instead of using the removed planner-repair path.
+- Added Assistant scenario-eval decision checks for terminal route, selected tool, requested effect, and forbidden
+  preview/clarification/tool regressions across income, assignment, expiry, assigned-stock, candidate, and follow-up
+  workflows.
+
+### Changed
+- Switched the Assistant production loop to the bounded model-turn runtime path, keeping `tool_loop` as an internal
+  precomputed envelope while exposing concrete preview operations such as assignment, expiry, and symbol-edit responses.
+- Hardened inbound ClawBot and Feishu assistant responses so preview terminals preserve concrete operation
+  perception/reasoning while trace metadata still explains the model-loop route.
+- Updated Assistant tool-calling design and completion-plan docs to describe the model-turn cutover, observation stop
+  policy, and Slice 12 intelligence-quality regression plan.
+
 ## 1.2.320 - 2026-06-20
 
 ### Added
