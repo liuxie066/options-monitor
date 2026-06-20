@@ -791,6 +791,55 @@ def test_action_safety_allows_lowercase_symbol_edit_with_full_task_contract() ->
     assert safety["route"] == "preview"
 
 
+def test_task_contract_infers_broker_lifecycle_notice_as_preview_write() -> None:
+    text = (
+        "记录sy 账户的到期被指派平仓 期权被指派通知: 您的保证金综合账户(2905) - "
+        "证券所持有的-2张PDD 260618 85.00P期权已被指派，详情请查看资金明细及持仓情况。【富途证券(香港)】"
+    )
+
+    contract = build_task_contract(
+        question=text,
+        plan={},
+        request_context={"config_key": "us"},
+        today=date(2026, 6, 18),
+    )
+
+    assert contract.requested_effect == "preview_write"
+
+
+def test_task_contract_keeps_assigned_stock_pnl_query_read_only() -> None:
+    contract = build_task_contract(
+        question="sy 被指派正股收益怎么样",
+        plan={},
+        request_context={"config_key": "us"},
+        today=date(2026, 6, 18),
+    )
+
+    assert contract.requested_effect == "read"
+
+
+def test_task_contract_keeps_assignment_status_question_read_only() -> None:
+    contract = build_task_contract(
+        question="sy PDD 已被指派了吗？",
+        plan={},
+        request_context={"config_key": "us"},
+        today=date(2026, 6, 18),
+    )
+
+    assert contract.requested_effect == "read"
+
+
+def test_task_contract_keeps_bare_assignment_analysis_read_only() -> None:
+    contract = build_task_contract(
+        question="sy PDD 已被指派后的收益分析",
+        plan={},
+        request_context={"config_key": "us"},
+        today=date(2026, 6, 18),
+    )
+
+    assert contract.requested_effect == "read"
+
+
 def test_action_safety_denies_symbol_edit_alias_scope_mismatch() -> None:
     call = ToolCall(tool_name="symbol_edit", payload={"symbol": "TSLA", "set": {"sell_call.min_strike": 85}})
     policy = decide_tool_action_policy(
@@ -1749,6 +1798,58 @@ def test_agent_loop_planner_manifest_hides_system_scoped_arguments() -> None:
                 ("_path", "_paths", "_root", "_roots", "_dir", "_dirs", "_file", "_host", "_port")
             )
             assert "_path_" not in normalized
+
+
+def test_agent_loop_preview_request_uses_preview_only_manifest() -> None:
+    text = (
+        "记录sy 账户的到期被指派平仓 期权被指派通知: 您的保证金综合账户(2905) - "
+        "证券所持有的-2张PDD 260618 85.00P期权已被指派，详情请查看资金明细及持仓情况。【富途证券(香港)】"
+    )
+
+    payload = json.loads(_planner_input_text(text, conversation_context=None))
+    tool_names = {tool["name"] for tool in payload["tools"]}
+    assignment = next(tool for tool in payload["tools"] if tool["name"] == "manual_assignment")
+
+    assert payload["manifest_budget"]["mode"] == "preview_only"
+    assert payload["manifest_budget"]["preview_kind"] == "manual_assignment"
+    assert payload["manifest_budget"]["selected_preview_intents"] == ["manual_assignment"]
+    assert tool_names == {"manual_assignment"}
+    assert "analysis_query" not in tool_names
+    assert "raw_text" not in assignment["input_schema"]
+    assert set(assignment["input_schema"]) == {"account"}
+
+
+def test_agent_loop_expiry_request_uses_expiry_only_preview_manifest() -> None:
+    text = (
+        "sy 衍生品提醒: 期权到期失效通知: 您的保证金综合账户(2905) - "
+        "证券所持有的-1张TCOM 260618 45.00P期权已到期失效，详情请查看持仓情况。【富途证券(香港)】"
+    )
+
+    payload = json.loads(_planner_input_text(text, conversation_context=None))
+    tool_names = {tool["name"] for tool in payload["tools"]}
+
+    assert payload["manifest_budget"]["mode"] == "preview_only"
+    assert payload["manifest_budget"]["preview_kind"] == "manual_expiry"
+    assert payload["manifest_budget"]["selected_preview_intents"] == ["manual_expiry"]
+    assert tool_names == {"manual_expiry"}
+
+
+def test_agent_loop_assignment_status_question_keeps_read_manifest() -> None:
+    payload = json.loads(_planner_input_text("sy PDD 已被指派了吗？", conversation_context=None))
+    tool_names = {tool["name"] for tool in payload["tools"]}
+
+    assert payload["manifest_budget"]["mode"] != "preview_only"
+    assert "option_positions_read" in tool_names
+    assert "manual_assignment" in tool_names
+
+
+def test_agent_loop_bare_assignment_analysis_keeps_read_manifest() -> None:
+    payload = json.loads(_planner_input_text("sy PDD 已被指派后的收益分析", conversation_context=None))
+    tool_names = {tool["name"] for tool in payload["tools"]}
+
+    assert payload["manifest_budget"]["mode"] != "preview_only"
+    assert "option_positions_read" in tool_names
+    assert "manual_assignment" in tool_names
 
 
 def test_assistant_deterministic_commands_exclude_read_aliases() -> None:
@@ -7594,6 +7695,109 @@ def test_assistant_runtime_provider_preview_request_creates_assignment_preview(
     assert llm_trace["event_model"]["events"][0]["event_type"] == "preview_request"
     assert llm_trace["agent_loop"]["steps"][0]["tool_name"] == "manual_assignment"
     assert llm_trace["agent_loop"]["preview_receipt"]["operation_type"] == "manual_assignment"
+
+
+def test_assistant_runtime_falls_back_to_deterministic_assignment_preview_on_provider_malformed_arguments(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("OM_LLM_API_KEY", "sk-test")
+    monkeypatch.setenv("OM_INBOUND_OPERATIONS_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_TRADE_WRITE_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_ADMIN_OPEN_IDS", "local:local")
+    monkeypatch.setenv("OM_INBOUND_OPERATION_HMAC_KEY", "test-operation-hmac-key")
+
+    provider_calls: list[dict[str, Any]] = []
+
+    def _create_tool_call_response(**kwargs: Any) -> dict[str, Any]:
+        provider_calls.append(dict(kwargs))
+        tool_names = {tool["function"]["name"] for tool in kwargs["tools"]}
+        assignment_tool = next(tool for tool in kwargs["tools"] if tool["function"]["name"] == "manual_assignment")
+        assignment_properties = assignment_tool["function"]["parameters"]["properties"]
+        assert tool_names == {"manual_assignment"}
+        assert set(assignment_properties) == {"account"}
+        assert "raw_text" not in assignment_properties
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "tool_calls": [
+                            {
+                                "id": "call_bad_assignment",
+                                "type": "function",
+                                "function": {
+                                    "name": "manual_assignment",
+                                    "arguments": '{"account"',
+                                },
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+
+    def _provider_response_fn(provider: str):
+        assert provider == "deepseek"
+        return _create_tool_call_response
+
+    monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_response_fn", _provider_response_fn)
+
+    cfg_path, sqlite_path = _write_agent_loop_trade_runtime_config(tmp_path)
+    repo = _seed_agent_loop_open_lot(
+        sqlite_path,
+        account="sy",
+        symbol="PDD",
+        option_type="put",
+        side="short",
+        contracts=2,
+        currency="USD",
+        strike=85.0,
+        multiplier=100,
+        expiration_ymd="2026-06-18",
+    )
+    before_events = len(repo.list_trade_events())
+    text = (
+        "记录sy 账户的到期被指派平仓 期权被指派通知: 您的保证金综合账户(2905) - "
+        "证券所持有的-2张PDD 260618 85.00P期权已被指派，详情请查看资金明细及持仓情况。【富途证券(香港)】"
+    )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text=text,
+            sender_id="local",
+            channel="local",
+            message_id="msg_provider_malformed_assignment_fallback",
+            config_path=str(cfg_path),
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        allowed_senders="local:local",
+        settings=AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="deepseek", model="deepseek-chat"),
+        ),
+        now_fn=lambda: date(2026, 6, 18),
+    )
+
+    assert provider_calls
+    assert out["ok"] is True, out
+    assert out["tool_name"] == "inbound.manual_trade"
+    assert out["data"]["operation_type"] == "manual_assignment"
+    assert out["data"]["perception"]["intent_name"] == "manual_assignment"
+    assert out["data"]["payload"]["arguments"]["account"] == "sy"
+    assert out["data"]["payload"]["arguments"]["symbol"] == "PDD"
+    assert out["data"]["payload"]["arguments"]["stock_qty"] == 200
+    assert out["data"]["permission_request"]["apply_allowed"] is False
+    assert len(repo.list_trade_events()) == before_events
+
+    llm_trace = out["meta"]["assistant"]["llm"]
+    assert llm_trace["reason"] == "invalid_model_event"
+    assert llm_trace["error_code"] == "INVALID_MODEL_EVENT"
+    perception_trace = out["meta"]["assistant"]["perception_trace"]
+    assert perception_trace["decision"] == "deterministic_fallback_selected"
+    assert perception_trace["selected_source"] == "deterministic"
+    assert perception_trace["candidates"][0]["source"] == "agent_loop"
+    assert perception_trace["candidates"][0]["reason"] == "llm_protocol_error_fallback"
+    assert perception_trace["candidates"][0]["error_code"] == "INVALID_MODEL_EVENT"
+    assert perception_trace["candidates"][0]["error"]["details"]["reason"] == "provider_arguments_malformed"
 
 
 def test_assistant_runtime_provider_preview_request_creates_expiry_preview(

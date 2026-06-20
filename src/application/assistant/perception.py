@@ -250,7 +250,15 @@ class PerceptionEngine:
         conversation_context: dict[str, Any] | None,
     ) -> PerceptionResult:
         llm_source = self._llm_source()
-        llm_error_candidate = error_candidate(llm_source, llm_error, reason=str(self.llm_trace.get("reason") or ""))
+        llm_error_candidate = error_candidate(
+            llm_source,
+            llm_error,
+            reason=_llm_error_candidate_reason(
+                llm_error,
+                deterministic_perception,
+                default=str(self.llm_trace.get("reason") or ""),
+            ),
+        )
         if deterministic_perception is not None and _llm_error_allows_deterministic_fallback(
             llm_error,
             deterministic_perception,
@@ -755,10 +763,37 @@ def _llm_error_allows_deterministic_fallback(
         return True
     if err.code in {"LLM_UNAVAILABLE", "LLM_PROVIDER_ERROR"}:
         return True
+    if _llm_protocol_error_allows_preview_fallback(err, deterministic_perception):
+        return True
     return (
         err.code == "PERMISSION_DENIED"
         and details.get("llm_rejected_reason") == "known_non_executable_intent"
         and details.get("intent_name") == deterministic_perception.intent_name
+    )
+
+
+def _llm_error_candidate_reason(
+    err: AgentToolError,
+    deterministic_perception: PerceptionResult | None,
+    *,
+    default: str,
+) -> str:
+    if deterministic_perception is not None and _llm_protocol_error_allows_preview_fallback(err, deterministic_perception):
+        return "llm_protocol_error_fallback"
+    return default
+
+
+def _llm_protocol_error_allows_preview_fallback(
+    err: AgentToolError,
+    deterministic_perception: PerceptionResult,
+) -> bool:
+    details = err.details if isinstance(err.details, dict) else {}
+    deterministic_spec = _COMMAND_SPECS_BY_INTENT.get(deterministic_perception.intent_name)
+    return bool(
+        err.code == "INVALID_MODEL_EVENT"
+        and details.get("reason") == "provider_arguments_malformed"
+        and deterministic_spec is not None
+        and is_llm_planner_preview_spec(deterministic_spec)
     )
 
 

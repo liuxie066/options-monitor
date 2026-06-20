@@ -74,7 +74,7 @@ from src.application.assistant.preview_request import (
 from src.application.assistant.renderer import render_canonical_tool_result, render_inbound_text
 from src.application.assistant.session import build_agent_session_snapshot
 from src.application.assistant.settings import AssistantLlmSettings, AssistantSettings
-from src.application.assistant.task_contract import TASK_CONTRACT_SCHEMA_VERSION, build_task_contract
+from src.application.assistant.task_contract import TASK_CONTRACT_SCHEMA_VERSION, build_task_contract, preview_request_kind_from_text
 from src.application.assistant.tool_bindings import (
     planner_binding_for_tool,
     planner_config_scoped_tool_names,
@@ -1853,23 +1853,23 @@ def _planner_repair_instruction(*, question: str, error: AgentToolError) -> str:
         return (
             "The previous tool call was rejected because the user message is a broker lifecycle notice that needs "
             "a preview capability, not a read-only position query. For Futu 期权被指派通知 / 已被指派, call "
-            "manual_assignment with raw_text set to the original user message and set task_contract.requested_effect "
-            "to preview_write. Use "
+            "manual_assignment with account when explicit and set task_contract.requested_effect to preview_write. "
+            "The host injects the original user message as raw_text. Use "
             "option_positions_read action=assigned-stock only for assigned-stock holding/PnL questions."
         )
     if error.code == "PLAN_RISK_MISMATCH" and ("期权到期失效通知" in compact or "已到期失效" in compact):
         return (
             "The previous tool call was rejected because the user message is a broker option-expiry lifecycle "
             "notice that needs a preview capability, not a read-only position query. For Futu 期权到期失效通知 / "
-            "已到期失效, call manual_expiry with raw_text set to the original user message and set "
-            "task_contract.requested_effect to preview_write."
+            "已到期失效, call manual_expiry with account when explicit and set task_contract.requested_effect "
+            "to preview_write. The host injects the original user message as raw_text."
         )
     if error.code == "PLAN_RISK_MISMATCH" and any(token in compact for token in ("成交提醒", "成功卖出", "成功买入", "委托已全部成交")):
         return (
             "The previous tool call was rejected because the user message is a broker option fill notice that "
             "needs a preview capability, not a read-only query. Use manual_trade_open for opening fills or "
-            "manual_trade_close for closing fills, with raw_text set to the original user message and "
-            "task_contract.requested_effect set to preview_write."
+            "manual_trade_close for closing fills, with account when explicit and task_contract.requested_effect "
+            "set to preview_write. The host injects the original user message as raw_text."
         )
     if error.code == "PLAN_RISK_MISMATCH":
         return (
@@ -2971,9 +2971,11 @@ def _model_tool_call_safe_slots_for_context(events: tuple[ModelToolCallEvent, ..
 
 def _provider_tool_call_tools(provider: str, planner_payload: dict[str, Any]) -> list[dict[str, Any]]:
     manifest = planner_payload.get("tools") if isinstance(planner_payload.get("tools"), list) else []
+    budget = planner_payload.get("manifest_budget") if isinstance(planner_payload.get("manifest_budget"), dict) else {}
+    read_only_only = str(budget.get("mode") or "").strip() != "preview_only"
     if provider_api_kind(provider) == "chat_completions":
-        return chat_completions_tools_payload(manifest)
-    return openai_responses_tools_payload(manifest)
+        return chat_completions_tools_payload(manifest, read_only_only=read_only_only)
+    return openai_responses_tools_payload(manifest, read_only_only=read_only_only)
 
 
 def _required_capabilities_for_model_tool_calls(events: tuple[ModelToolCallEvent, ...]) -> tuple[str, ...]:
@@ -3391,36 +3393,7 @@ def _is_banned_plan_argument(argument: str) -> bool:
 
 
 def _question_requests_preview_operation(question: str) -> bool:
-    compact = re.sub(r"\s+", "", str(question or "").strip().lower())
-    if not compact:
-        return False
-    high_confidence_tokens = (
-        "记录开仓",
-        "记录平仓",
-        "记录交易",
-        "写入交易",
-        "成交提醒",
-        "委托已全部成交",
-        "成功卖出",
-        "成功买入",
-        "期权被指派通知",
-        "已被指派",
-        "期权到期失效通知",
-        "已到期失效",
-        "recordopen",
-        "recordclose",
-    )
-    if any(token in compact for token in high_confidence_tokens):
-        return True
-    symbol_setting_tokens = ("coveredcall", "sellcall", "sellput", "minstrike", "maxstrike", "min_strike", "max_strike")
-    trade_update_tokens = ("premium", "权利金", "合约数", "张数", "close", "平仓价")
-    if any(token in compact for token in ("是多少", "多少", "是什么", "当前", "现在", "目前", "查询", "查看")):
-        return False
-    if "改成" in compact and any(token in compact for token in trade_update_tokens):
-        return True
-    if ("设置" in compact or "修改监控" in compact or "配置标的" in compact) and any(token in compact for token in symbol_setting_tokens):
-        return True
-    return "立即升级" in compact or "切换模型" in compact or "使用模型" in compact
+    return preview_request_kind_from_text(question) is not None
 
 
 def _planning_outcome_from_tool_plan_result(
@@ -4401,8 +4374,20 @@ def _trim_planner_projection_payload(payload: dict[str, Any]) -> None:
 
 
 def _planner_input_payload(text: str, *, conversation_context: dict[str, Any] | None) -> dict[str, Any]:
-    selection = _planner_analysis_view_selection(text, conversation_context=conversation_context)
-    tools = _planner_tool_manifest(analysis_view_names=selection["selected_analysis_views"])
+    preview_kind = preview_request_kind_from_text(text)
+    preview_only = preview_kind is not None
+    preview_intents = _planner_preview_intents_for_kind(preview_kind)
+    selection = (
+        _planner_preview_only_selection(preview_kind=preview_kind, preview_intents=preview_intents)
+        if preview_only
+        else _planner_analysis_view_selection(text, conversation_context=conversation_context)
+    )
+    tools = _planner_tool_manifest(
+        analysis_view_names=selection["selected_analysis_views"],
+        include_read_tools=not preview_only,
+        include_preview_capabilities=True,
+        allowed_preview_intents=preview_intents,
+    )
     payload: dict[str, Any] = {
         "message": str(text or ""),
         "current_user_message": {"text": str(text or "")},
@@ -4428,6 +4413,40 @@ def _planner_input_payload(text: str, *, conversation_context: dict[str, Any] | 
             context_payload["planner_repair"] = dict(planner_repair)
         payload["context"] = context_payload
     return payload
+
+
+def _planner_preview_only_selection(*, preview_kind: str | None, preview_intents: tuple[str, ...]) -> dict[str, Any]:
+    return {
+        "mode": "preview_only",
+        "selected_analysis_views": [],
+        "matched_view_groups": ["preview_operation"],
+        "selection_sources": ["message"],
+        "preview_kind": str(preview_kind or ""),
+        "selected_preview_intents": list(preview_intents),
+    }
+
+
+def _planner_preview_intents_for_kind(preview_kind: str | None) -> tuple[str, ...]:
+    kind = str(preview_kind or "").strip()
+    if kind == "manual_assignment":
+        return ("manual_assignment",)
+    if kind == "manual_expiry":
+        return ("manual_expiry",)
+    if kind == "manual_trade_open":
+        return ("manual_trade_open",)
+    if kind == "manual_trade_close":
+        return ("manual_trade_close",)
+    if kind == "manual_trade":
+        return ("manual_trade_open", "manual_trade_close")
+    if kind == "manual_trade_update":
+        return ("manual_trade_update",)
+    if kind == "symbol_edit":
+        return ("symbol_edit",)
+    if kind == "model_use":
+        return ("model_use",)
+    if kind == "upgrade_now":
+        return ("upgrade_now",)
+    return ()
 
 
 def _planner_input_text(text: str, *, conversation_context: dict[str, Any] | None) -> str:
@@ -4486,6 +4505,8 @@ def _planner_manifest_budget(*, tools: list[dict[str, Any]], analysis_view_selec
         "selected_analysis_views": selected,
         "matched_view_groups": list(analysis_view_selection.get("matched_view_groups") or []),
         "selection_sources": list(analysis_view_selection.get("selection_sources") or []),
+        "selected_preview_intents": list(analysis_view_selection.get("selected_preview_intents") or []),
+        "preview_kind": str(analysis_view_selection.get("preview_kind") or ""),
         "fallback": "use analysis_catalog first when a needed analysis view or field is not included",
     }
 
@@ -4494,7 +4515,7 @@ def _model_event_planner_instructions() -> str:
     return """\
 You are the options-monitor assistant tool caller.
 
-Use the provided tool/function calling interface for read-only tool selection.
+Use the provided tool/function calling interface for read-only tool selection and host-approved preview capability selection.
 Do not write JSON plans in normal text. Do not wrap tool choices in Markdown.
 
 Rules:
@@ -4505,7 +4526,8 @@ Rules:
 - For income analysis/review/performance/source/composition questions, call monthly_income_report and set include_rows=true.
 - For a month without a year such as "6月", resolve it from the current date in the input context.
 - If the user asks a single-symbol candidate filtering/root-cause question, call candidate_filter_explain with the user-visible symbol.
-- If the request is write/admin/confirm/apply, do not call a read tool. Ask for clarification or return a preview_request only when the provider supports it.
+- If the request is write/admin/confirm/apply, do not call a read tool. If a preview capability is exposed in the current tool list, select that preview capability; otherwise ask for clarification or return a preview_request only when the provider supports it.
+- For manual trade preview capabilities, do not copy the original user message into arguments. Provide account only when explicit; the host injects raw_text.
 - If no safe read tool applies, do not guess.
 """
 
@@ -4543,8 +4565,8 @@ Rules:
 - For assigned stock / 被指派正股 / 指派正股 holding PnL, floating PnL, spot, cost basis, or lifecycle PnL questions, use option_positions_read with action="assigned-stock", status="open" unless the user asks all/closed, refresh_quotes=true for current holding PnL. AgentLoop decides the final answer path from tool evidence.
 - For all-history, cumulative, or total net cashflow questions, omit month so monthly_income_report reads all OM local ledger months.
 - For multiple explicit months, either call monthly_income_report once per month with matching arguments, or omit month and synthesize from all available rows; never duplicate one month while claiming another.
-- For "记录开仓", "记录平仓", Futu 成交提醒, 成功卖出/买入 option fills, use manual_trade_open or manual_trade_close with raw_text set to the original user message.
-- For Futu 期权被指派通知 / 已被指派, use manual_assignment with raw_text set to the original user message. For Futu 期权到期失效通知 / 已到期失效, use manual_expiry with raw_text set to the original user message.
+- For "记录开仓", "记录平仓", Futu 成交提醒, 成功卖出/买入 option fills, use manual_trade_open or manual_trade_close. Do not copy the original user message into arguments; the host injects raw_text.
+- For Futu 期权被指派通知 / 已被指派, use manual_assignment. For Futu 期权到期失效通知 / 已到期失效, use manual_expiry. Do not copy the original user message into arguments; the host injects raw_text.
 - For current monitored-symbol config questions such as "max strike 是多少", "当前配置", or "查询 sell_put.max_strike", use symbol_config_read with symbol plus optional strategy/field.
 - For user-provided company names, Chinese names, aliases, Futu codes, or uncertain market suffixes, use symbol_resolve when the user asks for identity resolution or when a later SQL-style analysis needs a canonical symbol. Symbol-aware tools may also receive the original alias/name and resolve it internally.
 - For single-symbol candidate filter/rejection questions such as "为什么 X 没出现在候选里", "X 被哪个参数过滤了", "why was X filtered", or "why missing candidate", use candidate_filter_explain with symbol plus optional account/function/run_id. Do not use analysis_query for that single-symbol root-cause shape unless the user asks to compare/group/trend across symbols, accounts, rules, or runs.
@@ -4809,9 +4831,13 @@ def _compact_json_for_planner_selection(value: Any) -> str:
 
 def _planner_tool_manifest(
     analysis_view_names: list[str] | tuple[str, ...] | set[str] | None = None,
+    *,
+    include_read_tools: bool = True,
+    include_preview_capabilities: bool = True,
+    allowed_preview_intents: tuple[str, ...] | set[str] | list[str] | None = None,
 ) -> list[dict[str, Any]]:
     tools: list[dict[str, Any]] = []
-    for name in sorted(AGENT_LOOP_READ_TOOLS):
+    for name in sorted(AGENT_LOOP_READ_TOOLS) if include_read_tools else ():
         definition = get_tool_definition(name)
         if definition is None:
             continue
@@ -4964,7 +4990,10 @@ def _planner_tool_manifest(
         if semantics:
             item["semantics"] = semantics
         tools.append(item)
-    for spec in planner_preview_specs():
+    allowed_preview = {str(item) for item in allowed_preview_intents or () if str(item).strip()}
+    for spec in planner_preview_specs() if include_preview_capabilities else ():
+        if allowed_preview and spec.intent_name not in allowed_preview:
+            continue
         item = {
             "name": spec.intent_name,
             "description": spec.summary,
@@ -5032,14 +5061,10 @@ def _analysis_field_semantics_for_planner(field_semantics: dict[str, Any]) -> di
 def _planner_preview_input_schema(intent_name: str) -> dict[str, Any]:
     if intent_name in {"manual_trade_open", "manual_trade_close", "manual_assignment", "manual_expiry"}:
         return {
-            "raw_text": {
-                "type": "string",
-                "description": "Original user message, including account label and broker fill text when present.",
-            },
             "account": {
                 "type": ["string", "null"],
                 "enum": [*ACCOUNT_VALUES, None],
-                "description": "Optional account label if explicitly present. Keep raw_text complete regardless.",
+                "description": "Optional account label if explicitly present. The host injects the original user message as raw_text.",
             },
         }
     if intent_name == "manual_trade_update":
@@ -5065,25 +5090,25 @@ def _planner_preview_notes(intent_name: str) -> list[str]:
     if intent_name == "manual_trade_open":
         return [
             "Use for 记录开仓, Futu 成交提醒, 成功卖出/买入 option opening fills.",
-            "Set raw_text to the original user message so the deterministic trade parser can extract symbol, expiration, strike, contracts, premium, and account.",
+            "Do not provide raw_text; the host injects the original user message so the deterministic trade parser can extract symbol, expiration, strike, contracts, premium, and account.",
             "Creates only a pending preview; it never writes the ledger until a deterministic confirm command is received.",
         ]
     if intent_name == "manual_trade_close":
         return [
             "Use for 记录平仓 and closing fill reminders.",
-            "Set raw_text to the original user message.",
+            "Do not provide raw_text; the host injects the original user message.",
             "Creates only a pending preview; it never writes the ledger until a deterministic confirm command is received.",
         ]
     if intent_name == "manual_assignment":
         return [
             "Use for Futu 期权被指派通知 or 已被指派 lifecycle notices.",
-            "Set raw_text to the original user message so the deterministic parser can extract account, symbol, expiration, strike, option type, contracts, and stock settlement.",
+            "Do not provide raw_text; the host injects the original user message so the deterministic parser can extract account, symbol, expiration, strike, option type, contracts, and stock settlement.",
             "Creates only a pending preview; it never writes the ledger until a deterministic confirm command is received.",
         ]
     if intent_name == "manual_expiry":
         return [
             "Use for Futu 期权到期失效通知 or 已到期失效 lifecycle notices.",
-            "Set raw_text to the original user message so the deterministic parser can extract account, symbol, expiration, strike, option type, and expired contracts.",
+            "Do not provide raw_text; the host injects the original user message so the deterministic parser can extract account, symbol, expiration, strike, option type, and expired contracts.",
             "Creates only a pending preview; it never writes the ledger until a deterministic confirm command is received.",
         ]
     if intent_name == "manual_trade_update":

@@ -142,6 +142,27 @@ loop_stopped
 模型仍可通过 tool call 的 `purpose`、`intent`、`scope_hint` 表达理解，
 但权限和 scope 权威在 host 派生的 `TaskContract`。
 
+### 2.4 Provider Tool Arguments 不是 JSON Plan
+
+废弃 JSON plan 不等于废弃 provider 协议里的结构化参数。
+
+Chat Completions 兼容 provider 的 function/tool call 通常把
+`arguments` 作为 JSON 字符串返回；Responses / tool-use provider 也可能在
+wire protocol 中使用 JSON 传输工具参数。OM 的边界是：
+
+- 不从普通文本、Markdown 或 `output_text` 中提取 `steps` plan；
+- 只接受 provider 的结构化 tool/function call block；
+- tool arguments 仍必须能解析为对象，解析失败属于 provider protocol
+  error，不属于旧 JSON plan fallback；
+- 对可恢复的 provider protocol error，host 可以要求模型重发结构化 tool
+  call，或在已有高置信 deterministic preview candidate 时使用该 candidate
+  兜底，但不能执行普通文本 JSON plan。
+
+因此用户不应再看到 `LLM planner returned invalid JSON.`；如果底层
+tool-call arguments malformed，用户也不应看到 `json.loads` 或
+`provider tool call arguments are not valid JSON`，而应进入 bounded repair、
+preview fallback、clarification 或清晰的无法完成说明。
+
 ## 3. 目标和非目标
 
 ### 3.1 目标
@@ -156,6 +177,8 @@ loop_stopped
 5. 所有用户可见事实可追溯到 `EvidenceBundle` 或明确 missing-data。
 6. trace 能解释工具选择、scope、risk、guard、tool transcript、
    loop stop reason 和 answer route。
+7. provider structured tool-call arguments malformed 时，不阻断已经可安全
+   处理的 explicit preview intent，也不把底层解析错误暴露给用户。
 
 ### 3.2 非目标
 
@@ -165,6 +188,8 @@ loop_stopped
 - 不允许模型运行 shell、Python、SQL 写入、broker 操作或通知发送。
 - 不照搬 Claude Code 的完整 MCP、文件权限 UI 或多 agent 系统。
 - 不保留旧 JSON plan 主路径或旧 planner mode 开关。
+- 不把 deterministic natural-language parser 变成普通业务问答的主路由；
+  它只能处理显式命令、confirm/cancel/apply、以及 explicit preview 的安全兜底。
 
 ## 4. Owner 边界
 
@@ -554,6 +579,10 @@ Provider transcript 和 OM 内部事件一一映射，不从 assistant
   `tool_use` 执行工具，文本块不参与工具解析。
 - provider 如果只返回普通文本，host 只能把它当候选 final answer
   校验，或标记 `invalid_model_event`；不能从文本中提取 JSON plan。
+- provider tool-call `arguments` 必须解析为对象。Chat Completions 兼容
+  provider 的 `arguments` 是 JSON 字符串时，解析失败应记录为
+  `provider_arguments_malformed` / `invalid_model_event`，进入 bounded repair
+  或安全 fallback；不能把异常文案直接给用户。
 - 每个 `tool_result` 回 provider transcript 时必须绑定原始 tool call id，
   让模型能把 observation 或 error 对应到具体调用。
 - provider adapter 是窄模块，负责 block/event 转换；schema、scope、risk、
@@ -570,11 +599,66 @@ Provider transcript 和 OM 内部事件一一映射，不从 assistant
 - 本地 adapter 可把旧 plan fixture 转换成事件，用于迁移旧测试；
 - adapter 不作为生产 fallback，不提供 runtime mode flag。
 
+允许的安全 fallback 与旧 JSON plan fallback 不同：
+
+- 当 provider structured tool-call 本身 malformed，但 deterministic router
+  已经得到同一用户消息的高置信 explicit command / preview intent，host 可以
+  选择 deterministic candidate；
+- fallback 只允许走现有 operation preview / confirm / cancel 生命周期；
+- fallback 不从 provider 普通文本提取工具计划，不执行模型文本中的参数；
+- fallback 必须在 trace 中标记 `llm_protocol_error_fallback`，并保留 LLM
+  error candidate 供诊断。
+
+### 13.4 Host-owned Preview Payload
+
+Preview-write 类能力不应要求模型复制完整用户原文。
+
+对于 `manual_trade_open`、`manual_trade_close`、`manual_assignment`、
+`manual_expiry`，模型只需要表达：
+
+- intent / preview capability；
+- 显式出现的低风险 slot，例如 `account`；
+- 必要时的澄清原因。
+
+host 负责把当前 `AssistantRequest.text` 注入为 `raw_text`，再交给现有
+manual trade parser / operation lifecycle 生成 pending preview。原因：
+
+1. `raw_text` 是 host 已拥有的 request context，不需要模型复述。
+2. 长 broker notice 放进 tool-call `arguments` 会增加 provider JSON 字符串
+   转义和截断风险，尤其是 Chat Completions 兼容 provider。
+3. manual trade parser 已经是 preview payload 的解析边界；模型重复抽取
+   symbol、expiration、strike、contracts 只会扩大幻觉面。
+
+Schema 约束：
+
+- provider-visible preview schema 中 `raw_text` 应标记为 host-owned，或从
+  model-writable arguments 中移除；
+- `account` 可由模型填写，但 host 仍以原文和 request scope 做校验；
+- confirm/cancel/apply 仍不能由模型产生，只能由 deterministic command
+  绑定 pending operation。
+
+### 13.5 Manifest Budget by Effect
+
+provider 一次输入不应同时塞入完整分析 manifest、长 context projection 和
+长 broker notice。
+
+host 在构造 planner payload 前应先做轻量 effect/scope sketch：
+
+- explicit preview / broker lifecycle notice：只暴露 preview capability 子集，
+  不暴露 analysis views；
+- read analysis：暴露 read tools 和按消息裁剪后的 analysis views；
+- confirm/cancel/apply：跳过 LLM，走 deterministic command；
+- 无法判断 effect：暴露最小 read/clarification schema，而不是最大 manifest。
+
+这样保持“模型选择工具”的方向，同时减少 malformed arguments、超 token 和
+错误工具选择。
+
 ## 14. Error Handling
 
 | 错误 | 处理 |
 |---|---|
-| invalid model event | 一次 repair；仍失败则安全停止，不执行工具 |
+| invalid model event | 区分 provider protocol error、无 tool call、非法 control event；可恢复时一次 repair 或 explicit preview fallback，仍失败则安全停止 |
+| provider arguments malformed | 不暴露 JSON 解析错误；压缩 manifest/context 后一次重试，或使用高置信 deterministic preview candidate |
 | unknown tool | 作为 guard denial 反馈给模型，若无合法下一步则 unsupported |
 | schema invalid | 要求模型修正参数；不猜测高风险参数 |
 | scope violation | read scope 可回喂模型收窄一次；write/admin scope 直接停止或澄清 |
@@ -664,6 +748,76 @@ model_tool_call
 - 部分完成时：已取得证据和剩余缺口。
 - 需要澄清时：一个具体问题。
 
+### 14.3 Provider Argument Malformation Recovery
+
+`provider tool call arguments are not valid JSON` 是 provider protocol 层错误，
+不是用户意图错误，也不是 JSON plan 回退入口。
+
+处理顺序：
+
+1. 记录 compact diagnostic：
+   `provider`、`api_kind`、`tool_name`、`error_code`、`argument_shape`、
+   `planner_input_chars`、`manifest_chars`、`max_output_tokens`。
+   不记录 raw provider payload。
+2. 如果已有 deterministic candidate，且满足以下条件，直接走 deterministic
+   fallback：
+   - candidate 是 explicit command / preview intent；
+   - intent 属于现有 preview lifecycle，例如 manual trade / assignment /
+     expiry / symbol edit / model use / upgrade preview；
+   - deterministic confidence 为 1.0，且 sender / operation policy 允许
+     preview；
+   - fallback 只创建 pending preview，不 apply。
+3. 如果没有安全 deterministic fallback，但 provider 支持 continuation 或
+   retry，host 可做一次 compact retry：
+   - 减少 manifest 到候选 effect 所需工具；
+   - preview-write 不要求模型输出 `raw_text`；
+   - 明确要求 `arguments` 为 object，不能输出 Markdown 或普通文本 JSON plan。
+4. retry 后仍 malformed，则停止，并给用户中文说明：
+   “模型没有生成可执行工具调用，未执行任何写入；请重试或改用明确命令。”
+
+禁止：
+
+- 从 malformed `arguments` 字符串里做括号补全、截断修复或正则抽参；
+- 从 provider 普通文本中恢复 `tool_name` / `arguments`；
+- 在 preview-write 上把缺失高风险字段由 host 猜出来并直接 apply。
+
+### 14.4 Requested Effect Repair
+
+`requested_effect` 是 safety 的核心输入，必须由 host 从用户原文优先派生。
+
+规则：
+
+- `记录开仓`、`记录平仓`、Futu 成交提醒、成功卖出/买入 option fill：
+  `preview_write`。
+- `期权被指派通知`、`已被指派` 且文本呈现 broker lifecycle notice，或用户
+  明确说“记录...被指派/到期被指派平仓”：`preview_write`。
+- `期权到期失效通知`、`已到期失效` 且文本呈现 broker lifecycle notice：
+  `preview_write`。
+- “被指派正股收益/持仓/浮盈/成本/分析”这类查询：`read`。
+
+当模型选择 preview capability 而 host-derived effect 是 `read` 时，优先
+检查 host effect inference 是否漏识别 explicit preview；不能立即把它当成
+模型越权。只有在原文确实是普通查询时，才拒绝 preview capability。
+
+### 14.5 Candidate Arbitration
+
+LLM-first 不表示 LLM-error-first。
+
+候选选择顺序应满足：
+
+1. deterministic confirm/cancel/apply 永远优先，LLM 不参与。
+2. LLM 产出合法 event 且通过 host guard 时，优先走 AgentLoop。
+3. LLM 产出 preview intent 但缺少 host-owned payload，由 host 补 request
+   context 后进入 preview lifecycle。
+4. LLM provider protocol error 且 deterministic 有同 intent 或高置信
+   explicit preview candidate 时，选 deterministic fallback，并在 trace 中
+   标记 `llm_protocol_error_fallback`。
+5. LLM safety/permission 明确拒绝且 deterministic 只是低置信猜测时，不
+   fallback，返回 clarification 或 unsupported。
+
+这条规则避免“模型协议失败覆盖正确 deterministic 候选”，同时不把
+deterministic parser 提升为普通业务问答主路径。
+
 ## 15. Trace 和审计
 
 `AgentSessionSnapshot` 需要覆盖事件循环全链路：
@@ -726,6 +880,7 @@ answer_trace:
 | Slice 6: Remove Output Text JSON Plan Path | 已落地于默认 provider path | provider 普通文本 JSON 不解析；provider tool-call 不再映射到 `PlannerPlan` |
 | Slice 7: Regression / Release Gate | 已落地于外层 tool-call cutover | 补自然语言工具调用、lowercase/中文 alias 和 invalid model event 回归 |
 | Slice 8: Remove PlannerPlan Runtime Bridge | 已落地于 assistant 主包 | provider event 主路径是 event-native result；legacy JSON plan bridge 不再回到 runtime path |
+| Slice 9: Provider Argument / Preview Hardening | 待落地 | malformed tool arguments、host-owned preview payload、requested_effect 和 deterministic preview fallback |
 
 ### Slice 1: Event Contract
 
@@ -933,6 +1088,98 @@ python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_sm
   `model_tool_call -> guard -> tool_result -> continuation -> final_answer`
   事件链。
 
+### Slice 9: Provider Argument / Preview Hardening
+
+触发背景：
+
+- 远端 ClawBot `deepseek` / Chat Completions 兼容 provider 返回 malformed
+  tool-call `arguments`，用户看到
+  `provider tool call arguments are not valid JSON`。
+- 同一条消息 deterministic candidate 已经正确识别
+  `manual_assignment(account=sy, raw_text=...)`，但候选仲裁选择了 LLM
+  error，导致正确 preview fallback 没有生效。
+- 初始 pre-tool safety 还把 explicit “记录...期权被指派通知”误判为
+  `requested_effect=read`，把 `manual_assignment` 当成越权 preview。
+- planner input 超过 60k chars，manifest 超过 56k chars，却仍要求模型在
+  `arguments` 中复述完整 broker notice，增加 provider JSON 字符串损坏风险。
+
+目标：
+
+1. provider tool-call arguments malformed 不再直接成为用户可见错误。
+2. preview-write 能力采用 host-owned `raw_text`，模型不再复制长 broker
+   notice。
+3. explicit broker lifecycle notice 的 `requested_effect` 由 host 派生为
+   `preview_write`。
+4. LLM provider protocol error 不覆盖高置信 deterministic preview candidate。
+5. 不恢复普通文本 JSON plan，不新增兼容开关。
+
+最小实施步骤：
+
+1. `model_events.py`
+   - 将 `_provider_arguments(...)` 的 JSON decode failure 标记为稳定
+     details，例如 `reason=provider_arguments_malformed`、`argument_type=str`。
+   - 不尝试修复字符串，不解析普通文本，不改变成功路径。
+2. `agent_loop.py` / planner manifest
+   - preview capability schema 中移除 model-writable `raw_text`，或标注为
+     host-owned 且不要求模型填写。
+   - preview notes 改为“select preview capability; host injects original
+     user message as raw_text”。
+   - explicit preview / broker lifecycle notice 时只暴露 preview capability
+     子集，避免把 analysis views 和长 context 一起塞给 provider。
+3. `preview_request.py`
+   - 保持从 `question` 注入 `raw_text` 的逻辑，并把它作为唯一权威来源。
+   - 如果模型传了 `raw_text`，host 可忽略或覆盖为 request text。
+4. `task_contract.py`
+   - `_infer_requested_effect(...)` 覆盖 broker lifecycle notice：
+     `期权被指派通知`、`已被指派`、`期权到期失效通知`、`已到期失效`，
+     但要避免把“被指派正股收益/持仓/PnL”查询误判为 preview。
+5. `perception.py`
+   - `_llm_error_allows_deterministic_fallback(...)` 增加
+     `INVALID_MODEL_EVENT` + `provider_arguments_malformed` + deterministic
+     preview candidate 的 fallback。
+   - fallback trace decision 使用
+     `deterministic_fallback_selected`，candidate reason 标记
+     `llm_protocol_error_fallback`。
+   - explicit `clarification_request`、permission denied、prompt injection
+     denial 不允许被 deterministic preview fallback 覆盖。
+6. `runtime.py` / session trace
+   - 即使 AgentLoop planning 在 provider protocol 层失败，也应尽量持久化
+     compact session/audit trace，方便 `assistant_trace` 看到失败 route。
+   - trace 只记录 compact diagnostics，不记录 raw provider payload。
+
+回归用例：
+
+- DeepSeek-style malformed `function_call.arguments` + deterministic
+  `manual_assignment` candidate：生成 pending preview，不显示 JSON 错误。
+- DeepSeek-style malformed `function_call.arguments` + 无 deterministic
+  candidate：中文提示模型未生成可执行工具调用，未执行工具。
+- `记录sy 账户的到期被指派平仓 ... 期权被指派通知 ...`：
+  `requested_effect=preview_write`，进入 `manual_assignment` preview。
+- `sy 期权被指派通知...` 不带“记录”但呈现 broker lifecycle notice：
+  得到 preview 或 clarification，不降级成 assigned-stock PnL read。
+- `sy 被指派正股收益怎么样`：仍是 read，走 assigned-stock evidence path。
+- provider `output_text` JSON plan：仍拒绝，不执行，不 fallback。
+- `raw_text` 不出现在 provider-visible preview arguments 的必要字段中，
+  trace / assistant_trace 不泄漏完整 raw broker notice。
+
+验收命令：
+
+```bash
+python3 -m pytest tests/test_assistant_model_events.py tests/test_assistant_runtime.py -k "provider_tool_call or manual_assignment or manual_expiry or requested_effect or deterministic_fallback" -q
+python3 -m pytest tests/test_inbound_control.py tests/test_inbound_feishu_ws.py -q
+./om assistant eval-context --mode scenarios
+```
+
+远端验收：
+
+1. 升级到包含 Slice 9 的版本。
+2. 在 ClawBot 输入：
+   `记录sy 账户的到期被指派平仓 期权被指派通知: ... -2张PDD 260618 85.00P期权已被指派 ...`
+3. 期望返回交易记录预览，不写入账本，并提示“确认记录/取消记录”。
+4. `assistant_trace` 或 audit 能解释：
+   LLM protocol error 是否发生、是否 deterministic fallback、最终 preview
+   operation id、未 apply。
+
 ## 17. Acceptance Criteria
 
 用户层面：
@@ -942,6 +1189,9 @@ python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_sm
   现有 AgentLoop 组织成一个答案。
 - `6月收益分析` 走模型工具调用路径，而不是 deterministic shortcut。
 - 不再暴露 `LLM planner returned invalid JSON.`。
+- 不再暴露 `provider tool call arguments are not valid JSON`。
+- broker lifecycle notice 可以生成 pending preview；失败时给 clarification
+  或“未执行工具”的中文说明。
 - 低风险 read 问题不频繁追问。
 - 写入、通知、服务、release 仍需要明确人工确认。
 
@@ -957,6 +1207,8 @@ python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_sm
 - 所有用户可见事实都来自 `EvidenceBundle` 或明确 missing-data。
 - trace 能解释 event transcript、capability selection、scope、risk、
   loop stop reason 和 answer route。
+- trace 能解释 provider protocol error、deterministic preview fallback、
+  host-owned `raw_text` 注入和 preview operation receipt。
 - 没有旧 planner/output/answer 的并行实现路径。
 
 ## 18. Open Questions
@@ -967,6 +1219,10 @@ python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_sm
 - provider continuation transcript adapter 拆到 `model_continuation.py`。
 - runtime 默认 event loop 已接入一次 bounded provider continuation；不加
   runtime compatibility switch。
+- preview-write 的长原文 payload 由 host 注入；模型只选择 preview
+  capability 和低风险 slot。
+- provider protocol malformed 不恢复普通文本 JSON plan；只允许 bounded
+  retry 或 high-confidence deterministic preview fallback。
 
 仍开放：
 
@@ -976,6 +1232,8 @@ python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_sm
    以减少模型直接写 SQL 的错误面？
 3. read-only 并发是否第一版只允许同一 model turn 里多个互不依赖 read tool，
    还是先串行保持简单？
+4. provider malformed arguments 的 compact retry 是否应复用同一 provider
+   conversation，还是重新发一个更小 planner payload？
 
 建议默认答案：
 
@@ -983,3 +1241,5 @@ python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_sm
   evidence/verifier 补齐。
 - `analysis_query` 先保持现状，但强制 view/column allowlist。
 - 第一版串行执行 read tool；确认稳定后再引入 read-only batch concurrency。
+- malformed arguments 第一版优先用更小 planner payload 重试一次；避免把
+  半损坏 provider response 继续带入下一轮。

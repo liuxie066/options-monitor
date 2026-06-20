@@ -66,6 +66,27 @@ def test_provider_function_call_arguments_are_structured_provider_payload_not_te
     }
 
 
+def test_provider_tool_call_malformed_arguments_marks_protocol_reason() -> None:
+    with pytest.raises(AgentToolError) as excinfo:
+        model_tool_call_from_provider_block(
+            {
+                "id": "call_bad",
+                "type": "function",
+                "function": {
+                    "name": "manual_assignment",
+                    "arguments": '{"account"',
+                },
+            },
+            provider="deepseek",
+        )
+
+    assert excinfo.value.code == "INVALID_MODEL_EVENT"
+    assert excinfo.value.message == "provider tool call arguments are not valid JSON"
+    assert excinfo.value.details["reason"] == "provider_arguments_malformed"
+    assert excinfo.value.details["argument_type"] == "str"
+    assert excinfo.value.details["argument_chars"] == len('{"account"')
+
+
 def test_plain_text_block_is_not_a_provider_tool_call() -> None:
     with pytest.raises(AgentToolError) as excinfo:
         model_tool_call_from_provider_block(
@@ -190,6 +211,34 @@ def test_provider_tool_schema_from_manifest_omits_system_scoped_arguments() -> N
     assert parameters["properties"]["include_rows"]["type"] == "boolean"
     assert "config_key" not in parameters["properties"]
     assert "config_path" not in parameters["properties"]
+
+
+def test_provider_tool_schema_omits_host_owned_arguments() -> None:
+    schema = provider_tool_schema_from_manifest(
+        {
+            "name": "manual_assignment",
+            "description": "Create assignment preview.",
+            "capabilities": ["preview_operation"],
+            "input_schema": {
+                "raw_text": {
+                    "type": "string",
+                    "description": "Original user message.",
+                    "host_owned": True,
+                },
+                "account": {
+                    "type": ["string", "null"],
+                    "enum": ["lx", "sy", None],
+                    "description": "Optional account label.",
+                },
+            },
+        }
+    )
+
+    properties = schema["parameters"]["properties"]
+    assert set(properties) == {"account"}
+    assert properties["account"]["type"] == ["string", "null"]
+    assert properties["account"]["enum"] == ["lx", "sy", None]
+    assert "raw_text" not in properties
 
 
 def test_provider_tool_schema_treats_pipe_enums_as_scalar_strings() -> None:
