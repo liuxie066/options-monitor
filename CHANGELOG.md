@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 1.2.319 - 2026-06-20
+
+### Added
+- Added an Assistant tool-loop completion plan documenting the event-native runtime boundary, release gates, and
+  user-facing regression scenarios for natural-language read and preview workflows.
+- Added diagnostics coverage that rejects legacy planner-plan live probes and requires event-native tool-loop output.
+
+### Changed
+- Completed the Assistant event-native tool-loop cutover by removing the legacy JSON/`PlannerPlan` runtime bridge and
+  obsolete synthesis callback API from the assistant package and tests.
+- Updated assistant architecture, tool-calling, context, and tool-reference docs so diagnostics and implementation
+  guidance point at event transcripts, tool guards, evidence, stop reasons, and answer routes instead of JSON plans.
+
 ## 1.2.318 - 2026-06-19
 
 ### Changed

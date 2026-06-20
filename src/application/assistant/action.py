@@ -8,9 +8,11 @@ from src.application.assistant.manual_trade_operations import handle_manual_trad
 from src.application.assistant.model_operations import handle_model_operation
 from src.application.assistant.operation_store import InboundOperationStore
 from src.application.assistant.policy import enforce_tool_allowed
+from src.application.assistant.preview_request import preview_request_perception_from_payload
+from src.application.assistant.reasoning import resolve_reasoning
 from src.application.assistant.renderer import HELP_TEXT, SMALL_TALK_TEXT, render_pending_operations
 from src.application.assistant.symbol_operations import handle_symbol_operation
-from src.application.assistant.tool_policy import INTERNAL_TOOL_PLAN_NAME
+from src.application.assistant.tool_policy import INTERNAL_TOOL_LOOP_NAME
 from src.application.assistant.upgrade_operations import handle_upgrade_operation
 from src.application.tool_execution import execute_tool
 
@@ -70,36 +72,28 @@ def perform_action(
             response_text=render_pending_operations(pending_operations),
         )
     if resolution.action_kind == "operation":
-        operation_perception = PerceptionResult(
-            intent_name=resolution.intent_name or "",
-            arguments=dict(call.payload),
-            source=perception.source if perception else "unknown",
-            confidence=perception.confidence if perception else 0.0,
-            evidence=perception.evidence if perception else None,
-        )
-        operation_result = _handle_operation(
-            call.tool_name,
-            operation_perception,
-            request,
+        return _operation_action_result(
+            perception=perception,
+            resolution=resolution,
+            request=request,
             command_id=command_id,
             store=operation_store,
         )
-        data = dict(operation_result.get("data") or {})
-        return ActionResult(
-            executed=True,
-            ok=bool(operation_result.get("ok", False)),
-            action_kind="operation",
-            tool_name=call.tool_name,
-            payload=call.payload,
-            result=operation_result,
-            error=operation_result.get("error") if not bool(operation_result.get("ok", False)) else None,
-            response_text=str(data.get("response_text") or ""),
-        )
     tool_decision = enforce_tool_allowed(call)
     payload = dict(call.payload)
-    if call.tool_name == INTERNAL_TOOL_PLAN_NAME:
+    if call.tool_name == INTERNAL_TOOL_LOOP_NAME:
         payload["_command_id"] = command_id
     tool_result = execute_tool_fn(call.tool_name, payload)
+    if call.tool_name == INTERNAL_TOOL_LOOP_NAME:
+        preview_action = _tool_loop_preview_action_result(
+            perception=perception,
+            tool_result=tool_result,
+            request=request,
+            command_id=command_id,
+            store=operation_store,
+        )
+        if preview_action is not None:
+            return preview_action
     data = dict(tool_result.get("data") or {}) if isinstance(tool_result.get("data"), dict) else {}
     return ActionResult(
         executed=True,
@@ -110,6 +104,86 @@ def perform_action(
         result={**tool_result, "_tool_decision": tool_decision},
         error=tool_result.get("error") if not bool(tool_result.get("ok", False)) else None,
         response_text=str(data.get("response_text") or ""),
+    )
+
+
+def _operation_action_result(
+    *,
+    perception: PerceptionResult | None,
+    resolution: ReasoningResolution,
+    request: AssistantRequest,
+    command_id: str,
+    store: InboundOperationStore,
+) -> ActionResult:
+    call = resolution.tool_call
+    if call is None:
+        return ActionResult(
+            executed=False,
+            ok=False,
+            action_kind="none",
+            error=build_error_payload_from_message("INPUT_ERROR", "operation resolution did not produce an action"),
+        )
+    operation_perception = PerceptionResult(
+        intent_name=resolution.intent_name or "",
+        arguments=dict(call.payload),
+        source=perception.source if perception else "unknown",
+        confidence=perception.confidence if perception else 0.0,
+        evidence=perception.evidence if perception else None,
+    )
+    operation_result = _handle_operation(
+        call.tool_name,
+        operation_perception,
+        request,
+        command_id=command_id,
+        store=store,
+    )
+    data = dict(operation_result.get("data") or {})
+    return ActionResult(
+        executed=True,
+        ok=bool(operation_result.get("ok", False)),
+        action_kind="operation",
+        tool_name=call.tool_name,
+        payload=call.payload,
+        result=operation_result,
+        error=operation_result.get("error") if not bool(operation_result.get("ok", False)) else None,
+        response_text=str(data.get("response_text") or ""),
+    )
+
+
+def _tool_loop_preview_action_result(
+    *,
+    perception: PerceptionResult | None,
+    tool_result: dict[str, Any],
+    request: AssistantRequest,
+    command_id: str,
+    store: InboundOperationStore,
+) -> ActionResult | None:
+    data = tool_result.get("data") if isinstance(tool_result, dict) else {}
+    if not isinstance(data, dict):
+        return None
+    task_contract = data.get("task_contract") if isinstance(data.get("task_contract"), dict) else {}
+    if str(task_contract.get("requested_effect") or "").strip() != "preview_write":
+        return None
+    event_loop = data.get("event_loop") if isinstance(data.get("event_loop"), dict) else {}
+    if str(event_loop.get("status") or "").strip() != "preview_requested":
+        return None
+    preview_request = event_loop.get("preview_request") if isinstance(event_loop.get("preview_request"), dict) else {}
+    if not preview_request:
+        return None
+    preview_perception = preview_request_perception_from_payload(
+        preview_request,
+        question=request.text,
+        source=perception.source if perception else "agent_loop_events",
+    )
+    preview_resolution = resolve_reasoning(preview_perception, request=request)
+    if preview_resolution.action_kind != "operation":
+        return None
+    return _operation_action_result(
+        perception=preview_perception,
+        resolution=preview_resolution,
+        request=request,
+        command_id=command_id,
+        store=store,
     )
 
 

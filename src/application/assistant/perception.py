@@ -287,7 +287,12 @@ class PerceptionEngine:
                 ],
             )
             return reply_perception
-        if deterministic_error is not None and llm_error.code == "NEEDS_CLARIFICATION":
+        llm_error_details = llm_error.details if isinstance(llm_error.details, dict) else {}
+        if (
+            deterministic_error is not None
+            and llm_error.code == "NEEDS_CLARIFICATION"
+            and "clarification_request" not in llm_error_details
+        ):
             self.route = "deterministic"
             self.trace = build_perception_trace(
                 decision="needs_clarification",
@@ -572,10 +577,10 @@ def general_reply_allowed(text: str, *, planning_error: AgentToolError) -> bool:
 
 
 def ensure_llm_perception_allowed(perception: PerceptionResult) -> None:
-    if perception.intent_name == "tool_plan" and perception.source == "agent_loop_plan":
+    if perception.intent_name == "tool_loop" and perception.source == "agent_loop_events":
         return
     spec = _COMMAND_SPECS_BY_INTENT.get(perception.intent_name)
-    if perception.source == "agent_loop_plan" and spec is not None and is_llm_planner_preview_spec(spec):
+    if perception.source in {"agent_loop_plan", "agent_loop_events"} and spec is not None and is_llm_planner_preview_spec(spec):
         return
     if spec is None or not spec.llm_allowed or not (spec.read_only or _is_llm_preview_perception_allowed(spec)):
         raise AgentToolError(
@@ -740,9 +745,16 @@ def _llm_error_allows_deterministic_fallback(
     err: AgentToolError,
     deterministic_perception: PerceptionResult,
 ) -> bool:
-    if err.code in {"LLM_UNAVAILABLE", "LLM_PROVIDER_ERROR", "NEEDS_CLARIFICATION"}:
-        return True
     details = err.details if isinstance(err.details, dict) else {}
+    deterministic_spec = _COMMAND_SPECS_BY_INTENT.get(deterministic_perception.intent_name)
+    if err.code == "NEEDS_CLARIFICATION":
+        if "clarification_request" in details:
+            return False
+        if deterministic_spec is not None and is_llm_planner_preview_spec(deterministic_spec):
+            return False
+        return True
+    if err.code in {"LLM_UNAVAILABLE", "LLM_PROVIDER_ERROR"}:
+        return True
     return (
         err.code == "PERMISSION_DENIED"
         and details.get("llm_rejected_reason") == "known_non_executable_intent"

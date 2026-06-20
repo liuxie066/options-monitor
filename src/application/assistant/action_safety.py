@@ -103,6 +103,7 @@ _PAYLOAD_SCOPE_TEXT_SKIP_KEYS = {
     "output_path",
     "path",
     "paths",
+    "raw_text",
 }
 
 
@@ -347,7 +348,20 @@ def _requested_effect(*, text: str, contract: dict[str, Any]) -> str:
     if not compact:
         return "read"
     if any(token in compact for token in ("为什么", "原因", "回执", "状态", "查询", "查看", "对比", "比较", "收益", "持仓", "盈亏")):
-        if not any(token in compact for token in ("立即升级", "记录开仓", "记录平仓", "写入交易", "成交提醒")):
+        if not any(
+            token in compact
+            for token in (
+                "立即升级",
+                "记录开仓",
+                "记录平仓",
+                "写入交易",
+                "成交提醒",
+                "期权被指派通知",
+                "已被指派",
+                "期权到期失效通知",
+                "已到期失效",
+            )
+        ):
             return "read"
     if any(token in compact for token in ("确认", "/confirm", "cancel", "/cancel", "取消")):
         return "confirm"
@@ -367,6 +381,10 @@ def _looks_like_preview_request(compact: str) -> bool:
         "委托已全部成交",
         "成功卖出",
         "成功买入",
+        "期权被指派通知",
+        "已被指派",
+        "期权到期失效通知",
+        "已到期失效",
         "recordopen",
         "recordclose",
         "立即升级",
@@ -419,20 +437,21 @@ def _is_apply_or_confirm(*, tool_name: str, action_policy: dict[str, Any]) -> bo
 
 def _scope_delta(*, contract: dict[str, Any], payload: dict[str, Any], text: str = "") -> dict[str, Any]:
     scope = contract.get("scope") if isinstance(contract.get("scope"), dict) else {}
-    requested_accounts = (
-        _normal_values(scope.get("requested_accounts"), lower=True)
-        if "requested_accounts" in scope
-        else _accounts_from_text(text)
+    requested_accounts = _scope_values_or_text(
+        scope=scope,
+        key="requested_accounts",
+        text_values=_accounts_from_text(text),
+        lower=True,
     )
-    requested_symbols = (
-        _normal_symbol_values(scope.get("requested_symbols"))
-        if "requested_symbols" in scope
-        else _symbols_from_text(text)
+    requested_symbols = _scope_symbols_or_text(
+        scope=scope,
+        key="requested_symbols",
+        text_values=_symbols_from_text(text),
     )
-    requested_months = (
-        _normal_values(scope.get("requested_months"))
-        if "requested_months" in scope
-        else _months_from_text(text)
+    requested_months = _scope_values_or_text(
+        scope=scope,
+        key="requested_months",
+        text_values=_months_from_text(text),
     )
     payload_text = "\n".join(_payload_scope_texts(payload))
     provided_accounts = _normal_values(
@@ -448,6 +467,26 @@ def _scope_delta(*, contract: dict[str, Any], payload: dict[str, Any], text: str
         "symbols": _scope_field_delta(requested=requested_symbols, provided=provided_symbols),
         "period": _scope_field_delta(requested=requested_months, provided=provided_months),
     }
+
+
+def _scope_values_or_text(
+    *,
+    scope: dict[str, Any],
+    key: str,
+    text_values: list[str],
+    lower: bool = False,
+) -> list[str]:
+    if key not in scope:
+        return text_values
+    values = _normal_values(scope.get(key), lower=lower)
+    return values or text_values
+
+
+def _scope_symbols_or_text(*, scope: dict[str, Any], key: str, text_values: list[str]) -> list[str]:
+    if key not in scope:
+        return text_values
+    values = _normal_symbol_values(scope.get(key))
+    return values or text_values
 
 
 def _accounts_from_text(text: str) -> list[str]:

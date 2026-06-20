@@ -9,7 +9,8 @@ from typing import Any
 from src.application.agent_tool_contracts import build_response
 from src.application.assistant import AssistantSettings
 from src.application.assistant.audit import InboundAuditStore
-from src.application.assistant.agent_loop import LlmSynthesisResult, LlmPlannerResult, PlannerPlan, PlannerPlanStep
+from src.application.assistant.agent_loop import EventNativePlanningResult, LlmPlannerResult
+from src.application.assistant.model_events import ModelToolCallEvent
 from src.application.assistant.task_contract import TASK_CONTRACT_SCHEMA_VERSION
 from src.application.inbound.feishu_ws import (
     FeishuWsSettings,
@@ -57,6 +58,47 @@ def _test_task_contract(
         "required_evidence": list(required_evidence),
         "answer_shape": list(answer_shape),
     }
+
+
+def _event_plan_result(
+    *,
+    goal: str,
+    tool_name: str,
+    arguments: dict[str, Any] | None,
+    task_contract: dict[str, Any],
+    purpose: str,
+) -> LlmPlannerResult:
+    return LlmPlannerResult(
+        plan=None,
+        trace={"enabled": True, "attempted": True, "reason": "accepted"},
+        event_plan=EventNativePlanningResult(
+            events=(
+                ModelToolCallEvent(
+                    event_id="model_tool_call_1",
+                    tool_call_id="call_1",
+                    tool_name=tool_name,
+                    arguments=dict(arguments or {}),
+                    purpose=purpose,
+                    provider="openai",
+                    parent_event_id="user_message_1",
+                ),
+            ),
+            task_contract=task_contract,
+            context_use={
+                "schema_version": "om-planner-context-use-v1",
+                "mode": "none",
+                "referenced_turn_ids": [],
+                "referenced_evidence_refs": [],
+                "inherited_slots": {},
+                "current_message_slots": {},
+                "override_slots": {},
+                "requires_clarification": False,
+                "clarification_question": None,
+            },
+            provider="openai",
+            goal=goal,
+        ),
+    )
 
 
 def test_feishu_ws_delegates_to_inbound_and_replies(tmp_path: Path) -> None:
@@ -239,52 +281,20 @@ def test_feishu_ws_agent_loop_routes_cashflow_detail_plan(tmp_path: Path) -> Non
         _conversation_context: dict[str, Any] | None,
     ) -> LlmPlannerResult:
         assert text == "分析 lx 6月的净现金流明细"
-        return LlmPlannerResult(
-            plan=PlannerPlan(
+        return _event_plan_result(
+            goal="分析 lx 2026-06 的净现金流明细",
+            tool_name="monthly_income_report",
+            arguments={"account": "lx", "month": "2026-06", "include_rows": True},
+            task_contract=_test_task_contract(
                 goal="分析 lx 2026-06 的净现金流明细",
-                task_contract=_test_task_contract(
-                    goal="分析 lx 2026-06 的净现金流明细",
-                    domain="income",
-                    task_mode="analyze",
-                    scope={"accounts": ["lx"], "months": ["2026-06"], "config_keys": ["us"]},
-                    required_answer=("summary", "main_drivers", "source_and_policy"),
-                    required_evidence=("summary", "driver_or_breakdown", "source_policy"),
-                    answer_shape=("conclusion", "drivers", "source_policy"),
-                ),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="monthly_income_report",
-                        arguments={"account": "lx", "month": "2026-06", "include_rows": True},
-                        purpose="cashflow detail",
-                    ),
-                ),
+                domain="income",
+                task_mode="analyze",
+                scope={"accounts": ["lx"], "months": ["2026-06"], "config_keys": ["us"]},
+                required_answer=("summary", "main_drivers", "source_and_policy"),
+                required_evidence=("summary", "driver_or_breakdown", "source_policy"),
+                answer_shape=("conclusion", "drivers", "source_policy"),
             ),
-            trace={
-                "enabled": True,
-                "attempted": True,
-                "reason": "accepted",
-                "provider": "openai",
-                "base_url": "",
-                "model": "gpt-5.2",
-                "api_key_env": "OM_LLM_API_KEY",
-                "confidence_min": 0.75,
-                "timeout_seconds": 20,
-                "max_output_tokens": 512,
-            },
-        )
-
-    def _synthesize(
-        _question: str,
-        _settings: AssistantSettings,
-        _plan: PlannerPlan,
-        observations: list[dict[str, Any]],
-        _conversation_context: dict[str, Any] | None,
-    ) -> LlmSynthesisResult:
-        assert observations[0]["data"]["cashflow_rows"][0]["symbol"] == "0700.HK"
-        return LlmSynthesisResult(
-            response_text="lx 2026-06 净现金流明细\n- 0700.HK sell_open HKD 1,200",
-            trace={"attempted": True, "reason": "synthesized", "schema_version": "om-tool-plan-synthesis-v1"},
+            purpose="cashflow detail",
         )
 
     out = handle_feishu_ws_event(
@@ -300,7 +310,6 @@ def test_feishu_ws_agent_loop_routes_cashflow_detail_plan(tmp_path: Path) -> Non
         reply_fn=_reply,
         execute_tool_fn=_execute,
         plan_tools_fn=_plan,
-        synthesize_response_fn=_synthesize,
     )
 
     inbound_result = out["data"]["inbound"]["data"]["inbound_result"]
@@ -311,14 +320,14 @@ def test_feishu_ws_agent_loop_routes_cashflow_detail_plan(tmp_path: Path) -> Non
             {"account": "lx", "config_key": "us", "include_rows": True, "month": "2026-06"},
         )
     ]
-    assert replies[0]["text"].startswith("lx 2026-06 净现金流明细")
-    assert "- 0700.HK sell_open HKD 1,200" in replies[0]["text"]
-    assert "数据来源：OM 本地账本" in replies[0]["text"]
+    assert "0700.HK" in replies[0]["text"]
+    assert "HKD 1200" in replies[0]["text"]
+    assert "OM 本地账本" in replies[0]["text"]
     assert "\n\n分析\n" not in replies[0]["text"]
     assert inbound_result["meta"]["assistant"]["route"] == "agent_loop"
     final_response = inbound_result["meta"]["assistant"]["llm"]["agent_loop"]["final_response"]
-    assert final_response["status"] == "synthesized"
-    assert final_response["canonical_renderer_required"] is False
+    assert final_response["status"] == "rendered"
+    assert final_response["canonical_renderer_required"] is True
 
 
 def test_feishu_ws_agent_loop_degrades_when_conversation_context_fails(
@@ -357,27 +366,19 @@ def test_feishu_ws_agent_loop_degrades_when_conversation_context_fails(
         conversation_context: dict[str, Any] | None,
     ) -> LlmPlannerResult:
         contexts.append(conversation_context)
-        return LlmPlannerResult(
-            plan=PlannerPlan(
+        return _event_plan_result(
+            goal="runtime status",
+            tool_name="runtime_status",
+            arguments={},
+            task_contract=_test_task_contract(
                 goal="runtime status",
-                task_contract=_test_task_contract(
-                    goal="runtime status",
-                    domain="runtime",
-                    task_mode="summarize",
-                    scope={"config_keys": ["us"]},
-                    required_evidence=("summary", "source_policy"),
-                    answer_shape=("direct_answer", "source_policy"),
-                ),
-                steps=(
-                    PlannerPlanStep(
-                        id="step_1",
-                        tool_name="runtime_status",
-                        arguments={},
-                        purpose="status",
-                    ),
-                ),
+                domain="runtime",
+                task_mode="summarize",
+                scope={"config_keys": ["us"]},
+                required_evidence=("summary", "source_policy"),
+                answer_shape=("direct_answer", "source_policy"),
             ),
-            trace={"enabled": True, "attempted": True, "reason": "accepted"},
+            purpose="status",
         )
 
     out = handle_feishu_ws_event(

@@ -14,7 +14,7 @@ from src.application.assistant.contracts import (
     ToolCall,
 )
 from src.application.assistant.position_query import PositionQuery
-from src.application.assistant.tool_policy import INTERNAL_TOOL_PLAN_NAME
+from src.application.assistant.tool_policy import INTERNAL_TOOL_LOOP_NAME
 from src.application.assistant.tool_bindings import binding_for_intent, config_required_intent_names
 
 
@@ -42,7 +42,9 @@ def resolve_reasoning(perception: PerceptionResult, *, request: AssistantRequest
             reason="local_help",
         )
     if perception.intent_name == "tool_plan":
-        return _internal_tool_plan_resolution(perception, request=request)
+        return _unsupported(perception, reason="tool_plan_deprecated", display_name="assistant.tool_plan")
+    if perception.intent_name == "tool_loop":
+        return _internal_tool_loop_resolution(perception, request=request)
 
     spec = _COMMAND_SPECS_BY_INTENT.get(perception.intent_name)
     if spec is None:
@@ -73,20 +75,24 @@ def resolve_reasoning(perception: PerceptionResult, *, request: AssistantRequest
     )
 
 
-def _internal_tool_plan_resolution(perception: PerceptionResult, *, request: AssistantRequest) -> ReasoningResolution:
-    if perception.source != "agent_loop_plan":
+def _internal_tool_loop_resolution(perception: PerceptionResult, *, request: AssistantRequest) -> ReasoningResolution:
+    if perception.source != "agent_loop_events":
         raise AgentToolError(
             code="PERMISSION_DENIED",
-            message="tool_plan is only allowed from agent_loop planning",
+            message="tool_loop is only allowed from agent_loop event planning",
             details={"source": perception.source},
         )
-    plan = perception.arguments.get("plan")
-    if not isinstance(plan, dict):
-        raise AgentToolError(code="INPUT_ERROR", message="tool_plan intent requires a structured plan")
+    events = perception.arguments.get("events")
+    if not isinstance(events, list) or not events:
+        raise AgentToolError(code="INPUT_ERROR", message="tool_loop intent requires structured model events")
     payload = {
         **_base_payload(request),
         "question": request.text,
-        "plan": dict(plan),
+        "events": [dict(item) for item in events if isinstance(item, dict)],
+        "task_contract": dict(perception.arguments.get("task_contract") or {})
+        if isinstance(perception.arguments.get("task_contract"), dict)
+        else {},
+        "provider": str(perception.arguments.get("provider") or "").strip(),
     }
     return ReasoningResolution(
         status="supported",
@@ -94,10 +100,10 @@ def _internal_tool_plan_resolution(perception: PerceptionResult, *, request: Ass
         arguments=dict(perception.arguments),
         safety_class="read",
         action_kind="tool",
-        tool_call=ToolCall(tool_name=INTERNAL_TOOL_PLAN_NAME, payload=payload),
+        tool_call=ToolCall(tool_name=INTERNAL_TOOL_LOOP_NAME, payload=payload),
         read_only=True,
         requires_confirmation=False,
-        reason="internal_agent_loop_plan",
+        reason="internal_agent_loop_events",
     )
 
 
@@ -187,15 +193,6 @@ def _tool_payload_from_perception(
         if arguments.get("month"):
             payload["month"] = arguments["month"]
         return payload
-    if intent_name == "tool_plan":
-        plan = arguments.get("plan")
-        if not isinstance(plan, dict):
-            raise AgentToolError(code="INPUT_ERROR", message="tool_plan intent requires a structured plan")
-        return {
-            **base,
-            "question": request.text,
-            "plan": dict(plan),
-        }
     if intent_name == "runtime_runs":
         return {"limit": int(arguments.get("limit") or 10)}
     if intent_name == "runtime_logs":

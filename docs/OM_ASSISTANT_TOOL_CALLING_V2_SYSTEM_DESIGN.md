@@ -5,24 +5,57 @@
 [OM_ASSISTANT_ARCHITECTURE.md](OM_ASSISTANT_ARCHITECTURE.md) 为准；
 能力、风险和可见工具边界以
 [OM_AGENT_CAPABILITY_MAP.md](OM_AGENT_CAPABILITY_MAP.md) 为准。
+待完成实施方案见
+[OM_ASSISTANT_TOOL_LOOP_COMPLETION_PLAN.md](OM_ASSISTANT_TOOL_LOOP_COMPLETION_PLAN.md)。
 
 本方案替换旧的 "LLM 输出完整 JSON plan，再由系统解析执行" 方向。
 后续实现以事件式 Tool Calling Loop 为主路径，不保留旧 JSON plan
 作为兼容开关。
 文件名保留 `V2` 仅为保持已有链接稳定；本文档的当前语义是事件模型。
 
+## 0. 当前实现现实和差距
+
+当前源码已经完成主路径切换：默认 provider 规划入口使用结构化
+tool/function call，不再把 provider 的普通 `output_text` JSON 当作生产
+成功路径解析执行。当前 provider structured tool-call 主路径也已经不再经过
+下面这条旧桥：
+
+```text
+provider structured tool call
+-> ModelToolCallEvent
+-> PlannerPlan
+-> execute_tool_plan(plan_payload)
+-> evidence / answer / trace
+```
+
+当前 provider path 已改为 `ModelToolCallEvent -> EventNativePlanningResult
+-> assistant.tool_loop -> run_assistant_tool_event_loop(...)`。legacy JSON
+planner/parser/schema/executor、`PlannerPlan` runtime bridge 和旧 synthesis
+callback API 已从 `src/application/assistant` 当前主包清理；后续工作重点转为
+文档、诊断、eval 和回归门禁收口，防止旧心智模型回潮。
+
+因此本文档后续阶段的真实目标是：
+
+- provider 普通文本 JSON plan 不再被解析或执行；
+- provider structured tool calls 不再映射成 `PlannerPlan` 作为生产执行合同；
+- `execute_tool_plan(plan_payload)` 不再是 provider structured tool-call 主路径；
+- `tool_plan_json_schema()`、`parse_tool_plan_payload()`、legacy JSON planner
+  不再回到 assistant 主包或 provider runtime path；
+- 可恢复的 schema/scope/safety/tool 错误以 event/tool-result observation
+  回喂模型一次，而不是在 plan 外层追加专用 repair 分支。
+
 ## 1. 背景
 
 当前 `./om assistant` 已经有 `AgentLoop`、`TaskContract`、
 `EvidenceBundle`、`AgentSessionSnapshot`、read-only tool policy、
 answer guard、answer verifier 和 `assistant_trace`。基础安全骨架已经存在，
-但当前模型工具调用仍偏向：
+旧的 legacy/custom plan 执行桥曾偏向：
 
 ```text
 UserMessage
--> LLM output_text JSON plan
--> json.loads / parse_tool_plan_payload
--> execute plan.steps
+-> legacy JSON fixture or custom planner result
+-> PlannerPlan
+-> execute_tool_plan(plan_payload)
 -> build evidence
 -> synthesize answer
 ```
@@ -71,6 +104,10 @@ LLM output_text -> JSON object with task_contract + steps -> parse -> execute
 边界是：**模型不再通过普通文本 JSON plan 表达工具计划**。
 模型应通过 provider 的结构化 tool call 能力，或内部等价的
 `ModelEvent` 通道，表达下一步动作。
+
+进一步的废弃边界是：**生产主路径也不再把结构化 tool call 重新包装成
+`PlannerPlan`**。`PlannerPlan` 现在只应作为历史名词出现在文档或负向测试
+说明中，不能承担 `AgentLoop` 的 runtime execution contract。
 
 ### 2.2 引入事件式 Tool Calling Loop
 
@@ -550,7 +587,27 @@ Provider transcript 和 OM 内部事件一一映射，不从 assistant
 | answer verification fail | 一次 repair；失败后 fallback |
 | high-risk missing scope | 输出 clarification_request |
 
-### 14.1 Recoverable Tool Error Feedback
+### 14.1 Pre-tool Safety Failure Feedback
+
+`planned tool call failed pre-tool safety checks` 这类错误不应直接暴露给用户。
+它说明 host 已经拿到模型的工具意图，但在 schema、scope、risk 或 requested
+effect 上无法安全执行。
+
+事件模型下的处理方式：
+
+```text
+model_tool_call
+-> tool_guard_decision allowed=false reason=scope_or_risk_mismatch
+-> tool_result ok=false is_error=true observation=...
+-> model continuation
+-> corrected model_tool_call / clarification_request / unsupported answer
+```
+
+这不是让模型绕过安全检查。host 仍然拥有最终权限；模型只获得一次机会，
+基于结构化 denial observation 选择更合适的只读工具、退出到 preview，
+或向用户提出高风险缺槽澄清。
+
+### 14.2 Recoverable Tool Error Feedback
 
 参考 Claude Code 的 `tool_result is_error` 形态，OM 不应把可恢复工具错误直接
 暴露给用户，也不应把它们转成 Python exception。可恢复错误应作为
@@ -661,13 +718,14 @@ answer_trace:
 | Slice | 状态 | 当前边界 |
 |---|---|---|
 | Slice 0: 方案切换 | 本文档 | 废弃 JSON plan 目标，确立事件模型 |
-| Slice 1: Event Contract | 已落地，未切生产主流程 | `model_events.py` 定义 model/tool/result/final-answer event |
-| Slice 2: Provider Tool Calling | 已落地，未切生产主流程 | provider structured tool-call/schema adapter；不解析 output_text JSON plan |
-| Slice 3: Guarded Event Executor | 已落地，未切生产主流程 | 复用现有 risk/scope/budget/duplicate guard 执行 event |
-| Slice 4: Model Continuation | 已落地，未切生产主流程 | `model_continuation.py` 支持一次 tool_result 回灌和下一事件解析 |
-| Slice 5: Evidence / Answer Verification | 已落地，未切生产主流程 | `model_evidence.py` 将 event tool result 接入现有 EvidenceBundle / answer guard |
-| Slice 6: Remove JSON Plan Path | 已落地，默认规划入口已切换 | 默认 provider 路径使用 structured tool call；旧 JSON planner 仅保留为显式测试/迁移 harness |
-| Slice 7: Regression / Release Gate | 已落地 | 补自然语言工具调用、lowercase/中文 alias 和 invalid model event 回归 |
+| Slice 1: Event Contract | 已落地 | `model_events.py` 定义 model/tool/result/final-answer event |
+| Slice 2: Provider Tool Calling | 已落地，外层默认入口已切换 | provider structured tool-call/schema adapter；不解析 output_text JSON plan |
+| Slice 3: Guarded Event Executor | 已切入生产 | provider structured read calls 走 `assistant.tool_loop` guarded event executor |
+| Slice 4: Model Continuation | 已切入生产默认 event loop | runtime 可将 tool result / recoverable denial 回灌 provider，并解析下一事件 |
+| Slice 5: Evidence / Answer Verification | 已切入生产默认 event loop | provider structured read path 从 event tool result 构造 evidence；answer guard 可验证 continuation final answer |
+| Slice 6: Remove Output Text JSON Plan Path | 已落地于默认 provider path | provider 普通文本 JSON 不解析；provider tool-call 不再映射到 `PlannerPlan` |
+| Slice 7: Regression / Release Gate | 已落地于外层 tool-call cutover | 补自然语言工具调用、lowercase/中文 alias 和 invalid model event 回归 |
+| Slice 8: Remove PlannerPlan Runtime Bridge | 已落地于 assistant 主包 | provider event 主路径是 event-native result；legacy JSON plan bridge 不再回到 runtime path |
 
 ### Slice 1: Event Contract
 
@@ -760,11 +818,11 @@ answer_trace:
 - unsupported claim 能被拦截或 fallback。
 - missing data 被明确说明。
 
-### Slice 6: Remove JSON Plan Path
+### Slice 6: Remove Output Text JSON Plan Path
 
 - 生产路径不再调用 `parse_tool_plan_payload` 作为 AgentLoop 主入口。
 - 删除 `LLM planner returned invalid JSON.` 用户可见错误。
-- 旧 planner tests 迁移到 event tests。
+- 旧 planner tests 迁移到 event tests 或负向拒绝测试。
 - 不添加 `legacy_json_plan_enabled` 之类开关。
 
 当前落地边界：
@@ -776,15 +834,15 @@ answer_trace:
   `response_format={"type":"json_object"}` 作为工具规划路径。
 - provider 返回普通 `output_text` JSON plan 时，不解析、不执行，记录为
   `invalid_model_event`。
-- 旧 JSON planner 只在测试或迁移 harness 显式传入 `create_response_fn`
-  时可用，不是 runtime 兼容开关。
+- legacy JSON planner/parser/schema/executor 不再作为 assistant 主包能力暴露，
+  也不是 runtime 兼容开关。
 - 当前阶段把同一 provider 响应中的 1-3 个 `ModelToolCallEvent`
-  映射到现有 `PlannerPlan` 执行桥，以复用已有 `execute_tool_plan`、
-  coverage、evidence、answer guard 和 session trace。
+  映射到 `EventNativePlanningResult`，并通过 `assistant.tool_loop`
+  执行 read tool；不再创建生产 `PlannerPlan`。
 - model tool-call path 仍由 host 派生 `context_use` 并执行
   `context_validation`；模糊追问不会因为没有 JSON plan 而绕过 scope
   authority。
-- 完整 event execution / continuation cutover 留给后续 Slice。
+- event execution / continuation 已由后续 Slice 接入默认 tool loop。
 
 验收：
 
@@ -831,6 +889,50 @@ python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_sm
 - 已跑最小 gate，并额外跑 `./om assistant eval-context --format json`、
   `py_compile`、`git diff --check`。
 
+### Slice 8: Remove PlannerPlan Runtime Bridge
+
+目标：
+
+- `plan_read_only_tools(...)` 的 provider structured path 返回 event-native
+  planning result，而不是 `PlannerPlan`。
+- provider `ModelToolCallEvent` 直接进入 guarded event executor。
+- `ToolGuardDecisionEvent`、`ToolResultEvent`、`EvidenceUpdatedEvent`
+  进入同一 transcript，并可作为 provider continuation 输入。
+- pre-tool safety denial、schema invalid、read scope violation、duplicate
+  read call、read tool runtime error 都作为 bounded error observation
+  回灌模型一次。
+- preview/write/admin 边界退出 event loop，进入现有
+  operation lifecycle；confirm/cancel/apply 仍是 deterministic command。
+- `execute_tool_plan(plan_payload)` 从 provider structured tool-call path
+  移除；legacy/custom planner results 只能被拒绝或作为历史/负向测试背景。
+
+最小迁移步骤：
+
+1. 在 `agent_loop.py` 增加 event-loop executor facade，与现有 plan bridge
+   并存，但 provider structured 入口只接收 `ModelEvent`。（已落地）
+2. 将只读 tool call 执行改为
+   `ModelToolCallEvent -> guard -> tool_execution -> ToolResultEvent`。（已落地）
+3. 把 evidence / answer verifier 接到 event transcript，而不是 plan step
+   transcript。
+4. 将 recoverable guard/tool error 作为 provider continuation observation
+   回灌一次；超过预算或重复失败则停止并说明缺口。
+5. 删除 production path 对 `PlannerPlan`、`parse_tool_plan_payload()`、
+   `tool_plan_json_schema()` 的依赖；旧测试完成迁移后不保留 runtime adapter。
+
+验收：
+
+- `sy ... 期权被指派通知...` 这类自然语言写意图不会被错误降级为只读；
+  如果缺少安全字段，应得到 preview 或 clarification，而不是
+  pre-tool safety raw error。
+- `6月收益分析`、`6月收益来源`、`对比 lx sy 6月收益` 可以由模型选择一个
+  或多个只读工具并基于 observation 回答。
+- provider 返回普通 JSON 文本时仍不解析、不执行。
+- provider structured tool call 不再转成 `PlannerPlan`。
+- recoverable read/scope/schema 错误最多 repair 一次；不形成无限 loop。
+- trace 可展示完整
+  `model_tool_call -> guard -> tool_result -> continuation -> final_answer`
+  事件链。
+
 ## 17. Acceptance Criteria
 
 用户层面：
@@ -848,6 +950,10 @@ python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_sm
 - 所有 tool calls 都经过 `tool_execution` 和 registry metadata。
 - 所有自动 tool calls 都是 `READ_AUTO`。
 - 生产 AgentLoop 不依赖 output_text JSON plan。
+- 生产 AgentLoop 不把 provider structured tool call 映射成
+  `PlannerPlan` 作为执行合同。
+- `execute_tool_plan(plan_payload)` 不再是 provider structured tool-call
+  read loop 的执行路径。
 - 所有用户可见事实都来自 `EvidenceBundle` 或明确 missing-data。
 - trace 能解释 event transcript、capability selection、scope、risk、
   loop stop reason 和 answer route。
@@ -859,7 +965,8 @@ python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_sm
 
 - provider event adapter 拆到 `model_events.py`。
 - provider continuation transcript adapter 拆到 `model_continuation.py`。
-- 当前阶段不接生产主流程，不加 runtime compatibility switch。
+- runtime 默认 event loop 已接入一次 bounded provider continuation；不加
+  runtime compatibility switch。
 
 仍开放：
 

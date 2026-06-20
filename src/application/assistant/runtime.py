@@ -5,12 +5,11 @@ from typing import Any, Callable
 
 from src.application.assistant.agent_loop import (
     AgentLoopPlanFn,
-    AgentLoopSynthesizeFn,
     AGENT_LOOP_READ_TOOLS,
-    INTERNAL_TOOL_PLAN_NAME,
+    INTERNAL_TOOL_LOOP_NAME,
     TOOL_CHECK_SCHEMA_VERSION,
     ToolExecutor,
-    execute_tool_plan,
+    execute_tool_loop_payload,
     skipped_llm_trace,
 )
 from src.application.assistant.perception_trace import (
@@ -25,6 +24,7 @@ from src.application.assistant.contracts import AssistantRequest, PerceptionResu
 from src.application.assistant.audit import InboundAuditStore
 from src.application.assistant.router import ExecuteToolFn, handle_assistant_request
 from src.application.assistant.session import (
+    build_event_loop_agent_session_snapshot,
     build_operation_readback_agent_session_snapshot,
     build_preview_agent_session_snapshot,
 )
@@ -45,7 +45,6 @@ def handle_assistant_message(
     now_fn: Callable[[], date] | None = None,
     settings: AssistantSettings | None = None,
     plan_tools_fn: AgentLoopPlanFn | None = None,
-    synthesize_response_fn: AgentLoopSynthesizeFn | None = None,
     generate_reply_fn: GenerateReplyFn | None = None,
 ) -> dict[str, Any]:
     runtime_settings = settings or AssistantSettings()
@@ -86,7 +85,6 @@ def handle_assistant_message(
             settings=runtime_settings,
             plan_tools_fn=plan_tools_fn,
             conversation_context_fn=lambda: perception_engine.last_conversation_context,
-            synthesize_response_fn=synthesize_response_fn,
             tool_events=agent_loop_tool_events,
             observations=agent_loop_observations,
             should_trace=lambda: perception_engine.route == "agent_loop",
@@ -143,7 +141,6 @@ def _agent_loop_execute_tool_fn(
     settings: AssistantSettings,
     plan_tools_fn: AgentLoopPlanFn | None,
     conversation_context_fn: Callable[[], dict[str, Any] | None],
-    synthesize_response_fn: AgentLoopSynthesizeFn | None,
     tool_events: list[dict[str, Any]],
     observations: list[dict[str, Any]],
     should_trace: Callable[[], bool],
@@ -151,17 +148,15 @@ def _agent_loop_execute_tool_fn(
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         if not should_trace():
             return execute_tool_fn(tool_name, dict(payload or {}))
-        if str(tool_name or "") == INTERNAL_TOOL_PLAN_NAME:
-            result = execute_tool_plan(
+        if str(tool_name or "") == INTERNAL_TOOL_LOOP_NAME:
+            result = execute_tool_loop_payload(
                 question=str((payload or {}).get("question") or request.text),
                 request=request,
-                plan_payload=dict((payload or {}).get("plan") or {}),
+                loop_payload=dict(payload or {}),
                 command_id=str((payload or {}).get("_command_id") or "").strip() or None,
                 settings=settings,
                 conversation_context=conversation_context_fn(),
                 execute_tool_fn=execute_tool_fn,
-                plan_tools_fn=plan_tools_fn,
-                synthesize_response_fn=synthesize_response_fn,
             )
             data = result.get("data") if isinstance(result, dict) else {}
             if isinstance(data, dict):
@@ -204,7 +199,11 @@ def _merge_agent_loop_tool_events(
     loop.setdefault("planner", "llm_tool_plan")
     loop["tool_events"] = [dict(item) for item in tool_events]
     loop["observations"] = [dict(item) for item in observations]
-    loop["tool_calls_used"] = sum(1 for item in tool_events if item.get("phase") == "observe_tool_result")
+    loop["tool_calls_used"] = sum(
+        1
+        for item in tool_events
+        if item.get("phase") in {"observe_tool_result", "tool_result"}
+    )
     loop["writes_allowed"] = False
     final_response_raw = loop.get("final_response")
     final_response: dict[str, Any] = dict(final_response_raw) if isinstance(final_response_raw, dict) else {}
@@ -228,7 +227,7 @@ def _merge_agent_loop_tool_events(
 def _merge_agent_loop_preview_receipt(llm_trace: dict[str, Any], response: dict[str, Any]) -> dict[str, Any]:
     data = response.get("data") if isinstance(response.get("data"), dict) else {}
     perception = data.get("perception") if isinstance(data.get("perception"), dict) else {}
-    if perception.get("source") != "agent_loop_plan":
+    if perception.get("source") not in {"agent_loop_plan", "agent_loop_events"}:
         return llm_trace
     permission_request = data.get("permission_request") if isinstance(data.get("permission_request"), dict) else None
     if permission_request is None:
@@ -396,6 +395,13 @@ def _agent_session_payload_from_response(*, request: AssistantRequest, response:
     session = result_data.get("agent_session") if isinstance(result_data.get("agent_session"), dict) else None
     if isinstance(session, dict):
         return dict(session)
+    event_loop_session = _event_loop_agent_session_payload_from_response(
+        request=request,
+        response=response,
+        result_data=result_data,
+    )
+    if event_loop_session is not None:
+        return event_loop_session
     operation_postcheck = _operation_readback_postcheck(response=response)
     if operation_postcheck:
         operation_session = build_operation_readback_agent_session_snapshot(
@@ -419,6 +425,31 @@ def _agent_session_payload_from_response(*, request: AssistantRequest, response:
         response=response,
     )
     return preview_session.public_payload() if preview_session is not None else None
+
+
+def _event_loop_agent_session_payload_from_response(
+    *,
+    request: AssistantRequest,
+    response: dict[str, Any],
+    result_data: dict[str, Any],
+) -> dict[str, Any] | None:
+    event_loop = result_data.get("event_loop") if isinstance(result_data.get("event_loop"), dict) else None
+    transcript = result_data.get("event_transcript") if isinstance(result_data.get("event_transcript"), list) else None
+    if event_loop is None or transcript is None:
+        return None
+    data = response.get("data") if isinstance(response.get("data"), dict) else {}
+    meta = response.get("meta") if isinstance(response.get("meta"), dict) else {}
+    assistant = meta.get("assistant") if isinstance(meta.get("assistant"), dict) else {}
+    assistant_context = assistant.get("context") if isinstance(assistant.get("context"), dict) else {}
+    session = build_event_loop_agent_session_snapshot(
+        request=request,
+        command_id=str(data.get("command_id") or "").strip() or None,
+        question=str(request.text or ""),
+        result_data=result_data,
+        response=response,
+        assistant_context=assistant_context,
+    )
+    return session.public_payload() if session is not None else None
 
 
 def _operation_readback_postcheck(*, response: dict[str, Any]) -> dict[str, Any] | None:
@@ -521,6 +552,8 @@ def _intent_metadata(perception: PerceptionResult | None) -> dict[str, Any]:
         return {}
     if perception.intent_name == "tool_plan":
         return _tool_plan_metadata(perception)
+    if perception.intent_name == "tool_loop":
+        return _tool_loop_metadata(perception)
     spec = _COMMAND_SPECS_BY_INTENT.get(perception.intent_name)
     if spec is None:
         return {}
@@ -545,6 +578,21 @@ def _tool_plan_metadata(perception: PerceptionResult) -> dict[str, Any]:
         "risk_level": "read_only" if read_only else "unknown",
         "operation_action": "tool_plan",
         "operation_target": "assistant_read_tools",
+        "llm_allowed": read_only,
+        "supported": read_only,
+    }
+
+
+def _tool_loop_metadata(perception: PerceptionResult) -> dict[str, Any]:
+    arguments = perception.arguments if isinstance(perception.arguments, dict) else {}
+    events = arguments.get("events") if isinstance(arguments.get("events"), list) else []
+    tool_names = [str(event.get("tool_name") or "").strip() for event in events if isinstance(event, dict)]
+    read_only = bool(tool_names) and all(name in AGENT_LOOP_READ_TOOLS for name in tool_names)
+    return {
+        "read_only": read_only if tool_names else None,
+        "risk_level": "read_only" if read_only else "unknown",
+        "operation_action": "tool_loop",
+        "operation_target": "assistant_event_loop",
         "llm_allowed": read_only,
         "supported": read_only,
     }
