@@ -132,6 +132,90 @@ def test_continuation_observation_includes_analysis_query_rows_preview() -> None
     assert "sql" not in json.dumps(preview, ensure_ascii=False).lower()
 
 
+def test_continuation_analysis_preview_keeps_moderate_result_rows_complete() -> None:
+    call = _analysis_tool_call()
+    result = adapt_tool_result(
+        event_id="result_call_analysis_1",
+        parent_event_id="guard_call_analysis_1",
+        tool_call_id=call.tool_call_id,
+        tool_name=call.tool_name,
+        normalized_payload={**call.arguments, "config_key": "us"},
+        raw_result=build_response(
+            tool_name=call.tool_name,
+            ok=True,
+            data={
+                "schema_version": "analysis.query.output.v2",
+                "source_label": "OM read-only analysis workspace",
+                "columns": ["month", "account", "symbol", "amount_gross"],
+                "rows": [
+                    {
+                        "month": "2026-06",
+                        "account": "lx" if index % 2 == 0 else "sy",
+                        "symbol": f"SYM{index:02d}",
+                        "amount_gross": float(index),
+                    }
+                    for index in range(31)
+                ],
+                "row_count": 31,
+                "truncated": False,
+                "views_used": ["symbol_income_attribution"],
+                "fallback_text": "分析查询结果：31 行\n其余 19 行已省略。",
+            },
+        ),
+    ).event
+
+    continuation = openai_responses_continuation_input(model_event=call, tool_result_event=result)
+
+    output = json.loads(continuation[1]["output"])
+    preview = output["content"]["data_preview"]
+    assert len(preview["rows"]) == 31
+    assert preview["rows_complete"] is True
+    assert preview["row_preview_limit"] == 31
+    assert "fallback_text" not in preview
+
+
+def test_continuation_monthly_income_preview_keeps_moderate_detail_rows_complete() -> None:
+    call = _income_tool_call()
+    rows = [
+        {
+            "month": "2026-06",
+            "account": "lx" if index % 2 == 0 else "sy",
+            "symbol": f"SYM{index:02d}",
+            "currency": "USD",
+            "net_cashflow_gross": float(index),
+        }
+        for index in range(31)
+    ]
+    result = adapt_tool_result(
+        event_id="result_call_income_1",
+        parent_event_id="guard_call_income_1",
+        tool_call_id=call.tool_call_id,
+        tool_name=call.tool_name,
+        normalized_payload={**call.arguments, "config_key": "us"},
+        raw_result=build_response(
+            tool_name=call.tool_name,
+            ok=True,
+            data={
+                "summary": [
+                    {"month": "2026-06", "account": "lx", "currency": "USD", "net_cashflow_gross": 12.0}
+                ],
+                "return_summary": [{"month": "2026-06", "account": "lx", "net_income_cny": 88.0}],
+                "cashflow_rows": rows,
+                "row_count": 1,
+                "cashflow_row_count": 31,
+            },
+        ),
+    ).event
+
+    continuation = openai_responses_continuation_input(model_event=call, tool_result_event=result)
+
+    output = json.loads(continuation[1]["output"])
+    preview = output["content"]["data_preview"]
+    assert len(preview["cashflow_rows"]) == 31
+    assert preview["cashflow_rows_complete"] is True
+    assert preview["cashflow_rows_preview_limit"] == 31
+
+
 def test_chat_completions_continuation_messages_bind_tool_call_id() -> None:
     call = _income_tool_call()
     result = _income_tool_result(call)
