@@ -37,7 +37,7 @@ def preview_request_perception_from_payload(
     if "account" in payload and "account" not in arguments:
         arguments["account"] = payload["account"]
     if intent_name in _MANUAL_TRADE_PREVIEW_INTENTS:
-        raw_text = str(question or arguments.get("raw_text") or "").strip()
+        raw_text = str(question or "").strip() or str(arguments.get("raw_text") or "").strip()
         if raw_text:
             arguments["raw_text"] = raw_text
 

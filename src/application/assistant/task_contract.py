@@ -356,9 +356,131 @@ def _infer_task_mode(*, intent_families: list[str], text: str, full_text: str) -
 
 def _infer_requested_effect(text: str) -> str:
     compact = re.sub(r"\s+", "", str(text or "").lower())
-    if any(token in compact for token in ("记录开仓", "记录平仓", "设置", "修改", "切换模型", "立即升级", "upgrade_now")):
+    if preview_request_kind_from_text(text) is not None:
+        return "preview_write"
+    if any(token in compact for token in ("设置", "修改")):
         return "preview_write"
     return "read"
+
+
+def preview_request_kind_from_text(text: str) -> str | None:
+    compact = re.sub(r"\s+", "", str(text or "").lower())
+    if not compact:
+        return None
+    if _looks_like_lifecycle_read_query(compact):
+        return None
+    if _looks_like_assignment_lifecycle_preview(compact):
+        return "manual_assignment"
+    if _looks_like_expiry_lifecycle_preview(compact):
+        return "manual_expiry"
+    if "记录开仓" in compact or "recordopen" in compact:
+        return "manual_trade_open"
+    if "记录平仓" in compact or "recordclose" in compact:
+        return "manual_trade_close"
+    if any(token in compact for token in ("成交提醒", "委托已全部成交", "成功卖出", "成功买入", "记录交易", "写入交易", "补录")):
+        return "manual_trade"
+    if "改成" in compact and any(token in compact for token in ("premium", "权利金", "合约数", "张数", "close", "平仓价")):
+        return "manual_trade_update"
+    if "立即升级" in compact or "upgrade_now" in compact:
+        return "upgrade_now"
+    if "切换模型" in compact or "使用模型" in compact:
+        return "model_use"
+    if (
+        ("设置" in compact or "修改监控" in compact or "配置标的" in compact)
+        and any(token in compact for token in ("coveredcall", "sellcall", "sellput", "minstrike", "maxstrike", "min_strike", "max_strike"))
+    ):
+        return "symbol_edit"
+    return None
+
+
+def _looks_like_assignment_lifecycle_preview(compact: str) -> bool:
+    if "期权被指派通知" in compact:
+        return True
+    if "衍生品提醒" in compact and "已被指派" in compact:
+        return True
+    if any(token in compact for token in ("记录", "写入", "补录")) and any(
+        token in compact for token in ("被指派", "已被指派", "到期被指派平仓")
+    ):
+        return True
+    return False
+
+
+def _looks_like_expiry_lifecycle_preview(compact: str) -> bool:
+    if "期权到期失效通知" in compact:
+        return True
+    if "衍生品提醒" in compact and "已到期失效" in compact:
+        return True
+    if any(token in compact for token in ("记录", "写入", "补录")) and any(
+        token in compact for token in ("到期失效", "已到期失效")
+    ):
+        return True
+    return False
+
+
+def _looks_like_lifecycle_read_query(compact: str) -> bool:
+    if not any(token in compact for token in ("被指派", "已被指派", "到期失效", "已到期失效")):
+        return False
+    if any(token in compact for token in ("期权被指派通知", "期权到期失效通知", "衍生品提醒")):
+        return False
+    if any(token in compact for token in ("记录", "写入", "补录")):
+        return False
+    return _looks_like_assigned_stock_read_query(compact) or any(
+        token in compact
+        for token in (
+            "吗",
+            "是否",
+            "有没有",
+            "是不是",
+            "了吗",
+            "查询",
+            "查看",
+            "状态",
+            "收益",
+            "盈亏",
+            "浮盈",
+            "pnl",
+            "成本",
+            "持仓",
+            "分析",
+            "表现",
+            "怎么样",
+            "多少",
+            "明细",
+            "复盘",
+        )
+    )
+
+
+def _looks_like_assigned_stock_read_query(compact: str) -> bool:
+    assigned_stock_focus = any(
+        token in compact
+        for token in (
+            "指派正股",
+            "被指派正股",
+            "已被指派正股",
+            "assignedstock",
+            "assigned-stock",
+        )
+    )
+    if not assigned_stock_focus:
+        return False
+    return any(
+        token in compact
+        for token in (
+            "收益",
+            "盈亏",
+            "浮盈",
+            "pnl",
+            "成本",
+            "持仓",
+            "分析",
+            "表现",
+            "怎么样",
+            "多少",
+            "查询",
+            "查看",
+        )
+    )
 
 
 def _default_required_evidence(*, domain: str, task_mode: str, intent_families: list[str]) -> list[str]:
