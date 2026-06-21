@@ -6,7 +6,11 @@ from typing import Any
 
 from domain.domain.engine import CandidateScoreWeights, explain_candidate_rank
 
-from src.application.candidate_filter_trace import read_candidate_filter_trace
+from src.application.candidate_filter_trace import (
+    build_candidate_replay_fields,
+    infer_trace_scope_from_path,
+    read_candidate_filter_trace,
+)
 from src.application.shadow_replay.analysis import analyze_rows
 from src.application.shadow_replay.common import (
     CANDIDATE_SNAPSHOT_SCHEMA_VERSION,
@@ -194,12 +198,15 @@ def accepted_candidate_snapshots(paths: list[Path], *, base: Path) -> list[dict[
 def filter_decision_rows(trace_paths: list[Path], reject_log_paths: list[Path], *, base: Path) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for path in trace_paths:
+        scope = infer_trace_scope_from_path(path)
         for row_number, row in enumerate(read_candidate_filter_trace(path), start=1):
             item = dict(row)
             item["schema_version"] = FILTER_DECISION_SCHEMA_VERSION
             item["source_kind"] = "candidate_filter_trace"
             item["source_path"] = safe_rel(path, base=base)
             item["source_row_number"] = row_number
+            item["run_id"] = text(item.get("run_id") or scope.get("run_id")) or None
+            item["account"] = text(item.get("account") or scope.get("account")).lower() or None
             item["status"] = normal_status(item.get("status") or "rejected")
             item["symbol"] = text(item.get("symbol") or item.get("underlying_symbol")).upper() or None
             item["rule"] = text(item.get("rule") or item.get("reject_rule") or item.get("reject_reason")) or None
@@ -207,29 +214,80 @@ def filter_decision_rows(trace_paths: list[Path], reject_log_paths: list[Path], 
     for path in reject_log_paths:
         strategy = strategy_hint(path)
         mode = strategy_mode(strategy)
+        scope = infer_trace_scope_from_path(path)
         account = account_hint(path)
         for row_number, row in enumerate(read_csv_rows(path), start=1):
-            out.append(
-                {
-                    "schema_version": FILTER_DECISION_SCHEMA_VERSION,
-                    "source_kind": "reject_log_csv",
-                    "source_path": safe_rel(path, base=base),
-                    "source_row_number": row_number,
-                    "run_id": text(row.get("run_id")) or None,
-                    "account": text(row.get("account") or account).lower() or None,
-                    "symbol": text(row.get("symbol") or row.get("underlying_symbol")).upper() or None,
-                    "contract_symbol": text(row.get("contract_symbol") or row.get("option_symbol")) or None,
-                    "function": text(row.get("function") or strategy) or None,
-                    "mode": text(row.get("mode") or row.get("option_type")).lower() or mode,
-                    "status": normal_status(row.get("status") or "rejected"),
-                    "stage": text(row.get("engine_reject_stage") or row.get("reject_stage") or row.get("stage")) or None,
-                    "rule": text(row.get("engine_reject_reason") or row.get("reject_rule") or row.get("reject_reason") or row.get("rule")) or None,
-                    "metric_value": text(row.get("metric_value")) or None,
-                    "threshold": text(row.get("threshold")) or None,
-                    "message": text(row.get("message")) or None,
-                }
-            )
-    return out
+            item = {
+                "schema_version": FILTER_DECISION_SCHEMA_VERSION,
+                "source_kind": "reject_log_csv",
+                "source_path": safe_rel(path, base=base),
+                "source_row_number": row_number,
+                "run_id": text(row.get("run_id") or scope.get("run_id")) or None,
+                "account": text(row.get("account") or account or scope.get("account")).lower() or None,
+                "symbol": text(row.get("symbol") or row.get("underlying_symbol")).upper() or None,
+                "contract_symbol": text(row.get("contract_symbol") or row.get("option_symbol")) or None,
+                "function": text(row.get("function") or strategy) or None,
+                "mode": text(row.get("mode") or row.get("option_type")).lower() or mode,
+                "status": normal_status(row.get("status") or "rejected"),
+                "stage": text(row.get("engine_reject_stage") or row.get("reject_stage") or row.get("stage")) or None,
+                "rule": text(row.get("engine_reject_reason") or row.get("reject_rule") or row.get("reject_reason") or row.get("rule")) or None,
+                "metric_value": text(row.get("metric_value")) or None,
+                "threshold": text(row.get("threshold")) or None,
+                "message": text(row.get("message")) or None,
+            }
+            item.update(build_candidate_replay_fields(row))
+            out.append(item)
+    return _merge_filter_decision_rows(out)
+
+
+def _merge_filter_decision_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    by_key: dict[tuple[str, ...], dict[str, Any]] = {}
+    for row in rows:
+        key = _filter_decision_merge_key(row)
+        if not key:
+            merged.append(row)
+            continue
+        existing = by_key.get(key)
+        if existing is None:
+            by_key[key] = row
+            merged.append(row)
+            continue
+        _fill_missing_decision_values(existing, row)
+    return merged
+
+
+def _filter_decision_merge_key(row: dict[str, Any]) -> tuple[str, ...] | None:
+    contract = text(row.get("contract_symbol") or row.get("option_symbol")).upper()
+    symbol = text(row.get("symbol") or row.get("underlying_symbol")).upper()
+    rule = text(row.get("rule") or row.get("reject_rule") or row.get("reject_reason"))
+    if not rule or not (contract or symbol):
+        return None
+    return (
+        text(row.get("run_id")),
+        text(row.get("account")).lower(),
+        symbol,
+        contract,
+        text(row.get("mode") or row.get("option_type")).lower(),
+        normal_status(row.get("status") or "rejected"),
+        rule,
+    )
+
+
+def _fill_missing_decision_values(target: dict[str, Any], source: dict[str, Any]) -> None:
+    for key, value in source.items():
+        if key in {"schema_version", "source_kind", "source_path", "source_row_number"}:
+            continue
+        if _decision_value_missing(target.get(key)) and not _decision_value_missing(value):
+            target[key] = value
+
+
+def _decision_value_missing(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str) and not value.strip():
+        return True
+    return False
 
 
 def candidate_snapshots_from_filter_decisions(decisions: list[dict[str, Any]]) -> list[dict[str, Any]]:

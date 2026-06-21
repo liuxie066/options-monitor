@@ -206,6 +206,64 @@ def test_candidate_impact_uses_canonical_schema(tmp_path: Path) -> None:
     assert result["candidate_impact"]["allowed"] is True
 
 
+def test_candidate_impact_merges_reject_log_replay_fields_into_trace_rows(tmp_path: Path) -> None:
+    from src.application.shadow_replay import run_shadow_replay_candidate_impact
+
+    account_dir = tmp_path / "output_runs" / "20260602T010000Z-run" / "accounts" / "lx"
+    account_dir.mkdir(parents=True)
+    _write_jsonl(
+        account_dir / "candidate_filter_trace.jsonl",
+        [
+            {
+                "schema_version": "candidate_filter_trace.v1",
+                "run_id": "20260602T010000Z-run",
+                "account": "lx",
+                "symbol": "NVDA",
+                "function": "sell_put",
+                "mode": "put",
+                "option_type": "put",
+                "strategy_family": "sell_put",
+                "strategy_profile": "short_vol",
+                "status": "rejected",
+                "stage": "stage3_risk_filter",
+                "rule": "vol_edge_ratio_below_min",
+                "contract_symbol": "NVDA260619P00100000",
+                "expiration": "2026-06-19",
+                "strike": 100,
+                "metric_value": 1.12,
+                "threshold": 1.25,
+            }
+        ],
+    )
+    (account_dir / "nvda_sell_put_candidates_reject_log.csv").write_text(
+        (
+            "reject_stage,reject_rule,metric_value,threshold,symbol,contract_symbol,expiration,strike,mode,"
+            "dte,delta,abs_delta,iv_rv_ratio,iv_minus_rv,annualized_return,spread_ratio,"
+            "open_interest,volume,net_income,multiplier,engine_reject_stage,engine_reject_reason\n"
+            "step3_risk_gate,vol_edge_ratio_below_min,1.12,1.25,NVDA,NVDA260619P00100000,"
+            "2026-06-19,100,put,30,-0.2,0.2,1.12,0.06,0.20,0.10,120,20,100,100,"
+            "stage3_risk_filter,vol_edge_ratio_below_min\n"
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_shadow_replay_candidate_impact(
+        repo_root=tmp_path,
+        runs_root=tmp_path / "output_runs",
+        start_date="2026-06-02",
+        end_date="2026-06-02",
+        params=_params(),
+        min_sample=1,
+    )
+
+    assert result["summary"]["underwriting_candidate_count"] == 1
+    assert result["evidence_quality"]["complete_candidate_count"] == 1
+    assert result["evidence_quality"]["missing_required_fields"] == []
+    assert result["variants"][0]["accepted_count"] == 1
+    assert result["variants"][0]["newly_accepted_count"] == 1
+    assert result["variants"][0]["newly_accepted_samples"][0]["symbol"] == "NVDA"
+
+
 def test_candidate_impact_date_window_reports_missing_prefix_data(tmp_path: Path) -> None:
     from src.application.shadow_replay import run_shadow_replay_candidate_impact
 

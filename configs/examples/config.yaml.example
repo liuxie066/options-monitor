@@ -6,6 +6,12 @@ accounts:
     type: external_holdings
     holdings_account: sy
 
+templates:
+  put_base:
+    sell_put:
+      min_annualized_net_return: 0.10
+      min_net_income: 50.0
+
 markets:
   us:
     accounts: [lx, sy]
