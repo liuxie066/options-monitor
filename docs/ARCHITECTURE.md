@@ -127,9 +127,9 @@ transport request.
 pending-operation store, and durable operator trace in the inbound SQLite
 `agent_sessions` table. It is not a separate runtime service or a second
 pending-operation store.
-Command parsing, optional LLM-first natural-language routing, deterministic
-fallback parsing, bounded agent-loop tracing, sender allowlist checks, SQLite audit,
-preview/confirm operations, and user-facing rendering are owned by
+Protocol command parsing, bound permission responses, natural-language
+AgentLoop routing, sender allowlist checks, SQLite audit, preview/confirm
+operations, and user-facing rendering are owned by
 `src.application.assistant`.
 
 The current implementation path still contains files named `runtime.py`,
@@ -137,7 +137,8 @@ The current implementation path still contains files named `runtime.py`,
 `observation.py`; those are implementation handles inside one Agent loop, not
 separate product runtime layers. `assistant.mode` is retired and unsupported;
 the active product path is controlled by `assistant.enabled` and
-`assistant.planner.enabled`.
+`assistant.agent_loop.enabled`. `assistant.planner.enabled` is a deprecated
+compatibility alias only.
 
 LLM providers are optional. In `agent_loop`, they may plan bounded read tools
 plus exactly one approved preview-write capability. Deterministic OM tools own
@@ -150,21 +151,21 @@ Model selection is a control-plane concern. `config.yaml` may define multiple
 tool execution must not depend on model profiles or choose models per message.
 
 Inbound uses one internal Agent-loop contract. Slash commands enter through the
-command parser and never call LLM. Non-slash natural language enters the
-AgentLoop `Understand` step, where the Planner may use an LLM when
-`assistant.planner.enabled` is true. Deterministic code is limited to explicit
-command aliases and operation workflow phrases: local helper messages, pending
-operations, preview creation, and confirm/cancel authority. Objective slot
-repair is handled by small focused helpers such as month filters or
-position-query filters, not by a generic natural-language parser.
-The AgentLoop Planner may plan read tools or exactly one preview capability from
+ProtocolGate command parser and never call LLM. Bound confirm/cancel phrases
+such as `确认升级` enter PermissionResponseGate only when they match an
+existing pending operation in the same sender/channel/conversation scope.
+All other non-slash natural language enters AgentLoop. Deterministic code is
+limited to protocol parsing, permission binding, tool execution, validators,
+renderers, and operation apply boundaries; it must not recover natural-language
+business intent through keyword fallback. Objective slot repair is handled by
+small focused helpers such as month filters or position-query filters, not by a
+generic natural-language parser.
+AgentLoop may plan read tools or exactly one preview capability from
 `manual_trade_open`, `manual_trade_close`, `manual_assignment`, `manual_expiry`,
 `manual_trade_update`, `symbol_edit`, `model_use`, or `upgrade_now`. Any preview-write result can only enter an
 existing pending-operation path. Confirm, cancel, apply, notifications, direct
 config writes, ledger/trade writes, and service operations remain outside model
-authority. If deterministic command aliases accept a different preview intent
-for the same text, Inbound stops and asks for clarification instead of creating
-a preview.
+authority.
 
 ```text
 Perceive   -> AssistantRequest / channel context
@@ -174,12 +175,12 @@ Act        -> ActionResult / ToolResult / PendingOperation
 Observe    -> ObservationResponse / audited reply
 ```
 
-The command parser, deterministic command aliases, and LLM planner must only
-emit `PerceptionResult` or a bounded Planner `tool_plan`. Tool-name selection,
+ProtocolGate, PermissionResponseGate, and AgentLoop must only emit
+`PerceptionResult` or bounded model tool-call events. Tool-name selection,
 config-scoped payload construction, capability support, safety class
 validation, and confirmation requirements are owned by
-`src.application.assistant.reasoning` and planner validation. Execution is owned
-by `src.application.assistant.action`, and response shaping is owned by
+`src.application.assistant.reasoning` and AgentLoop validation. Execution is
+owned by `src.application.assistant.action`, and response shaping is owned by
 `src.application.assistant.observation`.
 
 ## Runtime Tick Flow

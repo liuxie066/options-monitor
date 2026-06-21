@@ -103,7 +103,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         read_only=False,
         llm_allowed=False,
         risk_level="confirm_write",
-        examples=("确认记录", "/confirm trade|symbol|upgrade|model [operation_id]"),
+        examples=("/confirm trade [operation_id]", "确认记录"),
         summary="confirm a pending manual trade preview",
         operation_action="confirm",
         operation_target="trade",
@@ -118,7 +118,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         read_only=False,
         llm_allowed=False,
         risk_level="confirm_write",
-        examples=("取消记录", "/cancel trade|symbol|upgrade|model [operation_id]"),
+        examples=("/cancel trade [operation_id]", "取消记录"),
         summary="cancel a pending manual trade preview",
         operation_action="cancel",
         operation_target="trade",
@@ -197,13 +197,13 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
     AssistantCommandSpec(
         intent_name="manual_trade_update",
         tool_name="inbound.manual_trade",
-        commands=(),
+        commands=("/record-update",),
         display_name="修改待确认交易",
         arguments=("operation_id", "operation_resolution", "updates"),
         read_only=False,
         llm_allowed=False,
         risk_level="preview_write",
-        examples=("<字段>改成<值> [operation_id]", "<field>=<value> [operation_id]"),
+        examples=("/record-update <field>=<value> [operation_id]",),
         summary="update a pending manual trade preview",
         operation_action="preview",
         operation_target="trade",
@@ -217,7 +217,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         read_only=False,
         llm_allowed=False,
         risk_level="confirm_write",
-        examples=("确认监控", "/confirm trade|symbol|upgrade|model [operation_id]"),
+        examples=("/confirm symbol [operation_id]", "确认监控"),
         summary="confirm a pending symbol preview",
         operation_action="confirm",
         operation_target="symbol",
@@ -232,7 +232,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         read_only=False,
         llm_allowed=False,
         risk_level="confirm_write",
-        examples=("取消监控", "/cancel trade|symbol|upgrade|model [operation_id]"),
+        examples=("/cancel symbol [operation_id]", "取消监控"),
         summary="cancel a pending symbol preview",
         operation_action="cancel",
         operation_target="symbol",
@@ -241,13 +241,13 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
     AssistantCommandSpec(
         intent_name="symbol_add",
         tool_name="inbound.symbols",
-        commands=(),
+        commands=("/symbol", "/symbols"),
         display_name="增加监控标的",
         arguments=("symbol", "sell_put_enabled", "sell_call_enabled"),
         read_only=False,
         llm_allowed=False,
         risk_level="preview_write",
-        examples=("增加监控标的 <symbol> [put|call]",),
+        examples=("/symbol add <symbol> [put|call]",),
         summary="preview adding a monitored symbol",
         operation_action="preview",
         operation_target="symbol",
@@ -255,13 +255,13 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
     AssistantCommandSpec(
         intent_name="symbol_edit",
         tool_name="inbound.symbols",
-        commands=(),
+        commands=("/symbol", "/symbols"),
         display_name="修改监控标的",
         arguments=("symbol", "set", "ensure_use"),
         read_only=False,
         llm_allowed=True,
         risk_level="preview_write",
-        examples=("设置 09898 covered call min strike 85", "修改监控标的 <symbol> <field>=<value>"),
+        examples=("/symbol edit <symbol> <field>=<value>",),
         summary="preview editing covered-call or sell-put monitored-symbol settings",
         operation_action="preview",
         operation_target="symbol",
@@ -269,13 +269,13 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
     AssistantCommandSpec(
         intent_name="symbol_remove",
         tool_name="inbound.symbols",
-        commands=(),
+        commands=("/symbol", "/symbols"),
         display_name="删除监控标的",
         arguments=("symbol",),
         read_only=False,
         llm_allowed=False,
         risk_level="preview_write",
-        examples=("删除监控标的 <symbol>",),
+        examples=("/symbol remove <symbol>",),
         summary="preview removing a monitored symbol",
         operation_action="preview",
         operation_target="symbol",
@@ -289,7 +289,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         read_only=False,
         llm_allowed=False,
         risk_level="confirm_write",
-        examples=("确认升级", "/confirm trade|symbol|upgrade|model [operation_id]"),
+        examples=("/confirm upgrade [operation_id]", "确认升级"),
         summary="confirm a pending upgrade preview",
         operation_action="confirm",
         operation_target="upgrade",
@@ -304,7 +304,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         read_only=False,
         llm_allowed=False,
         risk_level="confirm_write",
-        examples=("取消升级", "/cancel trade|symbol|upgrade|model [operation_id]"),
+        examples=("/cancel upgrade [operation_id]", "取消升级"),
         summary="cancel a pending upgrade preview",
         operation_action="cancel",
         operation_target="upgrade",
@@ -319,7 +319,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         read_only=False,
         llm_allowed=False,
         risk_level="confirm_write",
-        examples=("确认模型", "/confirm trade|symbol|upgrade|model [operation_id]"),
+        examples=("/confirm model [operation_id]", "确认模型"),
         summary="confirm a pending assistant model switch",
         operation_action="confirm",
         operation_target="model",
@@ -334,7 +334,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         read_only=False,
         llm_allowed=False,
         risk_level="confirm_write",
-        examples=("取消模型", "/cancel trade|symbol|upgrade|model [operation_id]"),
+        examples=("/cancel model [operation_id]", "取消模型"),
         summary="cancel a pending assistant model switch",
         operation_action="cancel",
         operation_target="model",
@@ -343,13 +343,13 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
     AssistantCommandSpec(
         intent_name="upgrade_now",
         tool_name="inbound.upgrade",
-        commands=(),
+        commands=("/upgrade",),
         display_name="立即升级",
         arguments=("target_version",),
         read_only=False,
         llm_allowed=False,
         risk_level="preview_admin",
-        examples=("立即升级", "立即升级到 v<version>"),
+        examples=("/upgrade", "/upgrade v<version>"),
         summary="preview a software upgrade operation",
         operation_action="preview",
         operation_target="upgrade",
@@ -642,12 +642,8 @@ def command_help_text() -> str:
     confirm_shortcuts = _non_slash_examples(
         item for item in specs if not item["read_only"] and item["intent_name"].endswith("_confirm")
     )
-    confirm_command = _first_slash_example(
-        item for item in specs if not item["read_only"] and item["intent_name"].endswith("_confirm")
-    )
-    cancel_command = _first_slash_example(
-        item for item in specs if not item["read_only"] and item["intent_name"].endswith("_cancel")
-    )
+    confirm_command = _operation_command_hint(specs, action="confirm")
+    cancel_command = _operation_command_hint(specs, action="cancel")
     command_line = "、".join(_read_only_slash_commands(read_only))
 
     lines = [
@@ -709,13 +705,17 @@ def _non_slash_examples(items: Any) -> list[str]:
     )
 
 
-def _first_slash_example(items: Any) -> str:
-    for item in items:
-        for example in item.get("examples") or ():
-            value = str(example or "").strip()
-            if value.startswith("/"):
-                return value
-    return ""
+def _operation_command_hint(items: list[dict[str, Any]], *, action: str) -> str:
+    targets = _unique(
+        str(item.get("operation_target") or "").strip()
+        for item in items
+        if str(item.get("operation_action") or "").strip() == action
+        and str(item.get("operation_target") or "").strip()
+    )
+    if not targets:
+        return ""
+    command = "/confirm" if action == "confirm" else "/cancel"
+    return f"{command} {'|'.join(targets)} [operation_id]"
 
 
 def _unique(values: Any) -> list[str]:

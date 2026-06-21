@@ -77,7 +77,7 @@ def generate_general_reply(
             error=AgentToolError(
                 code="LLM_UNAVAILABLE",
                 message="LLM reply is enabled but not fully configured.",
-                hint="Set assistant.llm.provider, assistant.llm.model, and assistant.llm.api_key_env, or disable assistant.planner.enabled.",
+                hint="Set assistant.llm.provider, assistant.llm.model, and assistant.llm.api_key_env, or disable assistant.agent_loop.enabled.",
                 details={"missing": missing},
             ),
         )

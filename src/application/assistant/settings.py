@@ -21,6 +21,14 @@ class PlannerSettings:
 
 
 @dataclass(frozen=True)
+class AgentLoopSettings:
+    enabled: bool = True
+
+    def public_payload(self) -> dict[str, Any]:
+        return {"enabled": bool(self.enabled)}
+
+
+@dataclass(frozen=True)
 class AssistantLlmSettings:
     enabled: bool = False
     provider: str = ""
@@ -49,6 +57,7 @@ class AssistantSettings:
     enabled: bool | None = None
     context_window_messages: int = DEFAULT_CONTEXT_WINDOW_MESSAGES
     default_market_scope: str = DEFAULT_MARKET_SCOPE
+    agent_loop: AgentLoopSettings = AgentLoopSettings()
     planner: PlannerSettings = PlannerSettings()
     llm: AssistantLlmSettings = AssistantLlmSettings()
 
@@ -57,18 +66,29 @@ class AssistantSettings:
 
     @property
     def llm_enabled(self) -> bool:
-        return bool(self.enabled and self.planner.enabled and self.llm.enabled)
+        return bool(self.enabled and self.agent_loop.enabled and self.llm.enabled)
+
+    @property
+    def agent_loop_enabled(self) -> bool:
+        return bool(self.enabled and self.agent_loop.enabled)
 
     @property
     def planner_enabled(self) -> bool:
-        return bool(self.enabled and self.planner.enabled)
+        return self.agent_loop_enabled
 
     @classmethod
     def from_runtime_config(cls, cfg: dict[str, Any]) -> "AssistantSettings":
         assistant_cfg = _dict(cfg.get("assistant"))
         enabled = _assistant_enabled(assistant_cfg)
         planner_cfg = _dict(assistant_cfg.get("planner"))
-        planner = PlannerSettings(enabled=_bool(planner_cfg.get("enabled"), default=True))
+        agent_loop_cfg = _dict(assistant_cfg.get("agent_loop"))
+        agent_loop = AgentLoopSettings(
+            enabled=_bool(
+                agent_loop_cfg.get("enabled") if "enabled" in agent_loop_cfg else planner_cfg.get("enabled"),
+                default=True,
+            )
+        )
+        legacy_planner = PlannerSettings(enabled=agent_loop.enabled)
         llm_cfg = _dict(assistant_cfg.get("llm"))
         return cls(
             enabled=enabled,
@@ -79,8 +99,9 @@ class AssistantSettings:
                 maximum=20,
             ),
             default_market_scope=_market_scope(assistant_cfg.get("default_market_scope")),
-            planner=planner,
-            llm=_llm_settings(llm_cfg, enabled=bool(enabled and planner.enabled)),
+            agent_loop=agent_loop,
+            planner=legacy_planner,
+            llm=_llm_settings(llm_cfg, enabled=bool(enabled and agent_loop.enabled)),
         )
 
     def public_payload(self) -> dict[str, Any]:
@@ -88,7 +109,8 @@ class AssistantSettings:
             "enabled": bool(self.enabled),
             "context_window_messages": int(self.context_window_messages),
             "default_market_scope": self.default_market_scope,
-            "planner": self.planner.public_payload(),
+            "agent_loop": self.agent_loop.public_payload(),
+            "planner": {"enabled": bool(self.agent_loop.enabled)},
             "llm": self.llm.public_payload(),
         }
 

@@ -410,15 +410,15 @@ def _candidate_hint(prefix: str, candidates: Any) -> str:
 
 def _manual_trade_candidate_hint(action: str, candidates: Any) -> str:
     if action in {"确认", "取消"}:
-        return _candidate_hint("确认记录" if action == "确认" else "取消记录", candidates)
+        return _candidate_hint("/confirm trade" if action == "确认" else "/cancel trade", candidates)
     return _update_candidate_hint(candidates)
 
 
 def _update_candidate_hint(candidates: Any) -> str:
     candidate_lines = operation_candidate_summary_lines(candidates, prefix="")
     if not candidate_lines:
-        return "请在修改内容后带 operation_id，例如：premium 改成 2.35 <operation_id>"
-    return "请在修改内容后带 operation_id，例如：premium 改成 2.35 <operation_id>\n候选交易：\n" + "\n".join(candidate_lines)
+        return "请使用 /record-update premium_per_share=2.35 <operation_id>"
+    return "请使用 /record-update premium_per_share=2.35 <operation_id>\n候选交易：\n" + "\n".join(candidate_lines)
 
 
 def _format_patch_summary(patch: dict[str, Any]) -> str:
@@ -719,10 +719,10 @@ def render_manual_trade_response(
             [
                 "",
                 "未写入账本。",
-                "确认写入请回复：确认记录",
-                "取消请回复：取消记录",
+                f"确认写入请回复：/confirm trade {operation_id}",
+                f"取消请回复：/cancel trade {operation_id}",
                 f"operation_id：{operation_id}",
-                f"如同时有多条待确认，请回复：确认记录 {operation_id}",
+                "同一对话只有一条待确认交易时，也可以回复：确认记录 / 取消记录",
             ]
         )
         if expires_at:

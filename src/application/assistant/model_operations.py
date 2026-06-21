@@ -211,7 +211,7 @@ def _resolve_model_operation(
 
 
 def _model_candidate_hint(action: str, candidates: Any) -> str:
-    return operation_candidate_hint("确认模型" if action == "确认" else "取消模型", candidates, heading="候选切换")
+    return operation_candidate_hint("/confirm model" if action == "确认" else "/cancel model", candidates, heading="候选切换")
 
 
 def _build_model_payload(operation_type: str, arguments: dict[str, Any], *, request: AssistantRequest) -> dict[str, Any]:
@@ -329,10 +329,10 @@ def render_model_response(
             [
                 "",
                 "未写入配置。",
-                "确认切换请回复：确认模型",
-                "取消请回复：取消模型",
+                f"确认切换请回复：/confirm model {operation_id}",
+                f"取消请回复：/cancel model {operation_id}",
                 f"operation_id：{operation_id}",
-                f"如同时有多条待确认，请回复：确认模型 {operation_id}",
+                "同一对话只有一条待确认模型切换时，也可以回复：确认模型 / 取消模型",
             ]
         )
         if expires_at:

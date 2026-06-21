@@ -142,6 +142,9 @@
     "assistant": {
       "enabled": true,
       "context_window_messages": 8,
+      "agent_loop": {
+        "enabled": true
+      },
       "planner": {
         "enabled": true
       },

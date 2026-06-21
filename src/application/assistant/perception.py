@@ -1,18 +1,18 @@
 from __future__ import annotations
 
 from datetime import date
-import re
 from typing import Any, Callable
 
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.assistant.agent_loop import ModelTurnFn, AgentLoopPlanningOutcome, run_read_only_agent_loop, skipped_llm_trace
 from src.application.assistant.audit import InboundAuditStore
-from src.application.assistant.command_parser import parse_assistant_command
 from src.application.assistant.capability_catalog import is_llm_planner_preview_spec, spec_by_intent
+from src.application.assistant.command_parser import parse_assistant_command
 from src.application.assistant.contracts import AssistantRequest, PerceptionResult
 from src.application.assistant.conversation_context import build_conversation_context, context_trace
-from src.application.assistant.deterministic_commands import parse_deterministic_text
 from src.application.assistant.llm_reply import LlmReplyResult, generate_general_reply
+from src.application.assistant.operation_store import InboundOperationStore
+from src.application.assistant.permission_response import parse_permission_response
 from src.application.assistant.perception_trace import (
     PerceptionTrace,
     accepted_candidate,
@@ -117,268 +117,124 @@ class PerceptionEngine:
                 selected_perception=None,
                 candidates=[
                     error_candidate("command", err),
-                    skipped_candidate("deterministic", "command_error"),
-                    skipped_candidate("llm", "command_error"),
+                    skipped_candidate("permission_response", "command_error"),
+                    skipped_candidate("agent_loop", "command_error"),
                 ],
             )
             raise
         if command_perception is not None:
+            self.route = "command"
             self.trace = build_perception_trace(
                 decision="command_selected",
                 selected_source="command",
                 selected_perception=command_perception,
                 candidates=[
                     accepted_candidate("command", command_perception),
-                    skipped_candidate("deterministic", "command_selected"),
-                    skipped_candidate("llm", "command_selected"),
+                    skipped_candidate("permission_response", "command_selected"),
+                    skipped_candidate("agent_loop", "command_selected"),
                 ],
             )
             return command_perception
-        if self._llm_first_enabled():
-            return self._perceive_llm_first(text, parser_now_fn)
-        return self._perceive_deterministic_first(text, parser_now_fn)
+
+        operation_store = InboundOperationStore(self._audit_store.path)
+        try:
+            permission_perception = parse_permission_response(
+                text,
+                request=self._request,
+                store=operation_store,
+            )
+        except AgentToolError as err:
+            self.route = "permission_response"
+            self.trace = build_perception_trace(
+                decision="permission_response_error",
+                selected_source=None,
+                selected_perception=None,
+                candidates=[
+                    skipped_candidate("command", "not_command"),
+                    error_candidate("permission_response", err),
+                    skipped_candidate("agent_loop", "permission_response_error"),
+                ],
+            )
+            raise
+        if permission_perception is not None:
+            self.route = "permission_response"
+            self.llm_trace = skipped_llm_trace(self._settings.llm, reason="permission_response")
+            self.trace = build_perception_trace(
+                decision="permission_response_selected",
+                selected_source="permission_response",
+                selected_perception=permission_perception,
+                candidates=[
+                    skipped_candidate("command", "not_command"),
+                    accepted_candidate("permission_response", permission_perception),
+                    skipped_candidate("agent_loop", "permission_response_selected"),
+                ],
+            )
+            return permission_perception
+
+        if not self._agent_loop_available():
+            err = AgentToolError(
+                code="AGENT_LOOP_DISABLED",
+                message="自然语言请求需要进入 AgentLoop，但当前未启用。",
+                hint="启用 assistant.agent_loop.enabled，或使用明确 slash command，例如 /status、/pending。",
+            )
+            self.route = "agent_loop_disabled"
+            self.llm_trace = skipped_llm_trace(self._settings.llm, reason="agent_loop_disabled")
+            self.trace = build_perception_trace(
+                decision="agent_loop_disabled",
+                selected_source=None,
+                selected_perception=None,
+                candidates=[
+                    skipped_candidate("command", "not_command"),
+                    skipped_candidate("permission_response", "not_permission_response"),
+                    error_candidate("agent_loop", err),
+                ],
+            )
+            raise err
+        return self._perceive_agent_loop(text, parser_now_fn)
 
     def _initial_route(self, text: str) -> str:
         if looks_like_command(text):
             return "command"
-        if self._settings.planner_enabled:
+        if self._agent_loop_available():
             return "agent_loop"
-        return "deterministic"
+        return "agent_loop_disabled"
 
-    def _llm_first_enabled(self) -> bool:
-        return self._settings.planner_enabled
-
-    def _perceive_deterministic_first(self, text: str, parser_now_fn: Callable[[], date] | None) -> PerceptionResult:
-        try:
-            deterministic_perception = parse_deterministic_text(text, now_fn=parser_now_fn)
-            self.trace = build_perception_trace(
-                decision="deterministic_selected",
-                selected_source="deterministic",
-                selected_perception=deterministic_perception,
-                candidates=[
-                    accepted_candidate("deterministic", deterministic_perception),
-                    skipped_candidate("llm", "deterministic_selected"),
-                ],
-            )
-            return deterministic_perception
-        except AgentToolError as err:
-            return self._handle_deterministic_error(text, err, parser_now_fn=parser_now_fn)
-
-    def _perceive_llm_first(self, text: str, parser_now_fn: Callable[[], date] | None) -> PerceptionResult:
-        deterministic_candidate, deterministic_perception, deterministic_error = self._deterministic_candidate(
-            text,
-            parser_now_fn,
+    def _agent_loop_available(self) -> bool:
+        return bool(
+            self._settings.agent_loop_enabled
+            or self._model_turn_fn is not None
+            or self._generate_reply_fn is not None
         )
-        if deterministic_perception is not None and _deterministic_operation_command_has_priority(deterministic_perception):
-            llm_source = self._llm_source()
-            self.llm_trace = skipped_llm_trace(self._settings.llm, reason="deterministic_operation_command")
-            return self._handle_deterministic_fallback(
-                deterministic_perception,
-                candidates=[
-                    deterministic_candidate,
-                    skipped_candidate(llm_source, "deterministic_operation_command"),
-                ],
-            )
 
+    def _perceive_agent_loop(self, text: str, parser_now_fn: Callable[[], date] | None) -> PerceptionResult:
         conversation_context = self._conversation_context()
         llm_result = self._plan_with_llm(text, conversation_context=conversation_context, now_fn=parser_now_fn)
         if "context" not in self.llm_trace:
             self.llm_trace["context"] = context_trace(conversation_context)
         if llm_result.perception is not None:
-            return self._handle_llm_perception(
+            return self._handle_agent_loop_perception(
                 llm_result.perception,
-                deterministic_candidate,
-                llm_first=True,
                 text=text,
                 now_fn=parser_now_fn,
             )
         if llm_result.error is not None:
-            return self._handle_llm_first_error(
-                text,
-                llm_result.error,
-                deterministic_candidate,
-                deterministic_perception,
-                deterministic_error,
-                conversation_context,
-            )
-        llm_source = self._llm_source()
-        llm_candidate = skipped_candidate(llm_source, str(self.llm_trace.get("reason") or "no_intent"))
-        if deterministic_perception is not None:
-            return self._handle_deterministic_fallback(
-                deterministic_perception,
-                candidates=[llm_candidate, deterministic_candidate],
-            )
-        self.trace = build_perception_trace(
-            decision="needs_clarification",
-            selected_source=None,
-            selected_perception=None,
-            candidates=[llm_candidate, deterministic_candidate],
-        )
-        if deterministic_error is not None:
-            raise deterministic_error
-        raise AgentToolError(code="NEEDS_CLARIFICATION", message="没有识别出可执行的只读命令。")
-
-    def _deterministic_candidate(
-        self,
-        text: str,
-        parser_now_fn: Callable[[], date] | None,
-    ) -> tuple[Any, PerceptionResult | None, AgentToolError | None]:
-        try:
-            perception = parse_deterministic_text(text, now_fn=parser_now_fn)
-        except AgentToolError as err:
-            return error_candidate("deterministic", err), None, err
-        return accepted_candidate("deterministic", perception), perception, None
-
-    def _handle_deterministic_fallback(
-        self,
-        perception: PerceptionResult,
-        *,
-        candidates: list[Any],
-    ) -> PerceptionResult:
-        self.route = "deterministic"
-        self.trace = build_perception_trace(
-            decision="deterministic_fallback_selected",
-            selected_source="deterministic",
-            selected_perception=perception,
-            candidates=candidates,
-        )
-        return perception
-
-    def _handle_llm_first_error(
-        self,
-        text: str,
-        llm_error: AgentToolError,
-        deterministic_candidate: Any,
-        deterministic_perception: PerceptionResult | None,
-        deterministic_error: AgentToolError | None,
-        conversation_context: dict[str, Any] | None,
-    ) -> PerceptionResult:
-        llm_source = self._llm_source()
-        llm_error_candidate = error_candidate(
-            llm_source,
-            llm_error,
-            reason=_llm_error_candidate_reason(
-                llm_error,
-                deterministic_perception,
-                default=str(self.llm_trace.get("reason") or ""),
-            ),
-        )
-        if deterministic_perception is not None and _llm_error_allows_deterministic_fallback(
-            llm_error,
-            deterministic_perception,
-        ):
-            return self._handle_deterministic_fallback(
-                deterministic_perception,
-                candidates=[llm_error_candidate, deterministic_candidate],
-            )
-        reply_result = self._maybe_generate_general_reply(
-            text,
-            planning_error=llm_error,
-            conversation_context=conversation_context,
-        )
-        if reply_result.response_text:
-            self.route = "llm_reply"
-            self.llm_trace = dict(reply_result.trace)
-            reply_perception = PerceptionResult(
-                intent_name="small_talk",
-                arguments={
-                    "kind": "llm_reply",
-                    "response_text": reply_result.response_text,
-                },
-                source="llm_reply",
-                confidence=1.0,
-            )
-            self.trace = build_perception_trace(
-                decision="llm_reply_selected",
-                selected_source="llm_reply",
-                selected_perception=reply_perception,
-                candidates=[
-                    llm_error_candidate,
-                    deterministic_candidate,
-                    accepted_candidate("llm_reply", reply_perception),
-                ],
-            )
-            return reply_perception
-        llm_error_details = llm_error.details if isinstance(llm_error.details, dict) else {}
-        if (
-            deterministic_error is not None
-            and llm_error.code == "NEEDS_CLARIFICATION"
-            and "clarification_request" not in llm_error_details
-        ):
-            self.route = "deterministic"
-            self.trace = build_perception_trace(
-                decision="needs_clarification",
-                selected_source=None,
-                selected_perception=None,
-                candidates=[llm_error_candidate, deterministic_candidate],
-            )
-            raise deterministic_error
-        self.trace = build_perception_trace(
-            decision="llm_error",
-            selected_source=None,
-            selected_perception=None,
-            candidates=[llm_error_candidate, deterministic_candidate],
-        )
-        raise llm_error
-
-    def _handle_deterministic_error(
-        self,
-        text: str,
-        err: AgentToolError,
-        *,
-        parser_now_fn: Callable[[], date] | None,
-    ) -> PerceptionResult:
-        deterministic_candidate = error_candidate("deterministic", err)
-        if err.code != "NEEDS_CLARIFICATION":
-            self.trace = build_perception_trace(
-                decision="deterministic_error",
-                selected_source=None,
-                selected_perception=None,
-                candidates=[
-                    deterministic_candidate,
-                    skipped_candidate("llm", "deterministic_error"),
-                ],
-            )
-            raise err
-        if looks_like_command(text):
-            self.trace = build_perception_trace(
-                decision="command_error",
-                selected_source=None,
-                selected_perception=None,
-                candidates=[
-                    skipped_candidate("command", "command_prefix"),
-                    deterministic_candidate,
-                    skipped_candidate("llm", "command_error"),
-                ],
-            )
-            raise err
-        conversation_context = self._conversation_context()
-        llm_result = self._plan_with_llm(text, conversation_context=conversation_context, now_fn=parser_now_fn)
-        if "context" not in self.llm_trace:
-            self.llm_trace["context"] = context_trace(conversation_context)
-        if llm_result.perception is not None:
-            return self._handle_llm_perception(
-                llm_result.perception,
-                deterministic_candidate,
-                text=text,
-                now_fn=parser_now_fn,
-            )
-        if llm_result.error is not None:
-            return self._handle_llm_error(text, llm_result.error, deterministic_candidate, conversation_context)
+            return self._handle_agent_loop_error(text, llm_result.error, conversation_context)
+        err = AgentToolError(code="NEEDS_CLARIFICATION", message="AgentLoop 没有识别出可执行请求。")
         self.trace = build_perception_trace(
             decision="needs_clarification",
             selected_source=None,
             selected_perception=None,
             candidates=[
-                deterministic_candidate,
-                skipped_candidate("agent_loop", str(self.llm_trace.get("reason") or "not_available")),
+                error_candidate("agent_loop", err, reason=str(self.llm_trace.get("reason") or "no_intent")),
+                skipped_candidate("command", "not_command"),
+                skipped_candidate("permission_response", "not_permission_response"),
             ],
         )
         raise err
 
     def _conversation_context(self) -> dict[str, Any] | None:
         if (
-            not self._settings.planner_enabled
+            not self._agent_loop_available()
             and self._model_turn_fn is None
             and self._generate_reply_fn is None
         ):
@@ -404,7 +260,7 @@ class PerceptionEngine:
                 "semantics": {
                     "explicit_message_wins": True,
                     "context_is_hint_only": True,
-                    "confirmation_must_be_deterministic": True,
+                    "confirmation_must_be_permission_response": True,
                 },
                 "recent_messages": [],
                 "last_successful_read": None,
@@ -425,10 +281,10 @@ class PerceptionEngine:
         conversation_context: dict[str, Any] | None,
         now_fn: Callable[[], date] | None,
     ) -> AgentLoopPlanningOutcome:
-        if not self._settings.planner_enabled and self._model_turn_fn is None:
+        if not self._agent_loop_available() and self._model_turn_fn is None:
             llm_result = AgentLoopPlanningOutcome(
                 perception=None,
-                trace=skipped_llm_trace(self._settings.llm, reason="planner_disabled"),
+                trace=skipped_llm_trace(self._settings.llm, reason="agent_loop_disabled"),
             )
             self.llm_trace = dict(llm_result.trace)
             return llm_result
@@ -447,64 +303,54 @@ class PerceptionEngine:
         self.last_tool_loop_result = dict(loop_result.tool_loop_result) if isinstance(loop_result.tool_loop_result, dict) else None
         return loop_result.planning
 
-    def _llm_source(self) -> str:
-        return "agent_loop"
-
-    def _handle_llm_perception(
+    def _handle_agent_loop_perception(
         self,
         perception: PerceptionResult,
-        deterministic_candidate: Any,
         *,
-        llm_first: bool = False,
         text: str = "",
         now_fn: Callable[[], date] | None = None,
     ) -> PerceptionResult:
         self.route = "agent_loop"
-        if llm_first:
-            perception = _reconcile_llm_read_perception(
-                perception,
-                deterministic_candidate,
-                text=text,
-                today=now_fn() if now_fn is not None else date.today(),
-            )
+        perception = _reconcile_month_slot_from_text(
+            perception,
+            text=text,
+            today=now_fn() if now_fn is not None else date.today(),
+        )
         llm_candidate = accepted_candidate(self.route, perception)
-        candidates = [llm_candidate, deterministic_candidate] if llm_first else [deterministic_candidate, llm_candidate]
+        candidates = [
+            llm_candidate,
+            skipped_candidate("command", "not_command"),
+            skipped_candidate("permission_response", "not_permission_response"),
+        ]
         try:
             ensure_llm_perception_allowed(perception)
         except AgentToolError as policy_err:
             self.trace = build_perception_trace(
-                decision="llm_denied_by_policy",
+                decision="agent_loop_denied_by_policy",
                 selected_source=None,
                 selected_perception=None,
                 candidates=[*candidates, error_candidate("policy", policy_err)],
             )
             raise
-        conflict_err = _llm_preview_conflict_error(perception, deterministic_candidate)
-        if conflict_err is not None:
-            self.trace = build_perception_trace(
-                decision="llm_conflict_needs_clarification",
-                selected_source=None,
-                selected_perception=None,
-                candidates=[*candidates, error_candidate("policy", conflict_err)],
-            )
-            raise conflict_err
         self.trace = build_perception_trace(
-            decision=f"{self.route}_selected",
-            selected_source=self.route,
+            decision="agent_loop_selected",
+            selected_source="agent_loop",
             selected_perception=perception,
             candidates=candidates,
         )
         return perception
 
-    def _handle_llm_error(
+    def _handle_agent_loop_error(
         self,
         text: str,
         llm_error: AgentToolError,
-        deterministic_candidate: Any,
         conversation_context: dict[str, Any] | None,
     ) -> PerceptionResult:
-        llm_source = "agent_loop"
-        llm_error_candidate = error_candidate(llm_source, llm_error, reason=str(self.llm_trace.get("reason") or ""))
+        llm_error_candidate = error_candidate(
+            "agent_loop",
+            llm_error,
+            reason=str(self.llm_trace.get("reason") or ""),
+        )
         reply_result = self._maybe_generate_general_reply(
             text,
             planning_error=llm_error,
@@ -527,17 +373,22 @@ class PerceptionEngine:
                 selected_source="llm_reply",
                 selected_perception=reply_perception,
                 candidates=[
-                    deterministic_candidate,
                     llm_error_candidate,
                     accepted_candidate("llm_reply", reply_perception),
+                    skipped_candidate("command", "not_command"),
+                    skipped_candidate("permission_response", "not_permission_response"),
                 ],
             )
             return reply_perception
         self.trace = build_perception_trace(
-            decision="llm_error",
+            decision="agent_loop_error",
             selected_source=None,
             selected_perception=None,
-            candidates=[deterministic_candidate, llm_error_candidate],
+            candidates=[
+                llm_error_candidate,
+                skipped_candidate("command", "not_command"),
+                skipped_candidate("permission_response", "not_permission_response"),
+            ],
         )
         raise llm_error
 
@@ -600,33 +451,10 @@ def ensure_llm_perception_allowed(perception: PerceptionResult) -> None:
     if spec is None or not spec.llm_allowed or not (spec.read_only or _is_llm_preview_perception_allowed(spec)):
         raise AgentToolError(
             code="PERMISSION_DENIED",
-            message=f"LLM is not allowed to route intent: {perception.intent_name}",
-            hint="AgentLoop planning is restricted to read-only capabilities plus explicitly allowed preview capabilities; confirm/apply operations require deterministic commands.",
+            message=f"AgentLoop is not allowed to route intent: {perception.intent_name}",
+            hint="AgentLoop planning is restricted to read-only capabilities plus explicitly allowed preview capabilities; confirm/apply operations require permission responses.",
             details={"intent_name": perception.intent_name},
         )
-
-
-def _llm_preview_conflict_error(perception: PerceptionResult, deterministic_candidate: Any) -> AgentToolError | None:
-    preview_intent_name = _llm_preview_intent_name(perception)
-    if not preview_intent_name:
-        return None
-    spec = _COMMAND_SPECS_BY_INTENT.get(preview_intent_name)
-    if spec is None or not _is_llm_preview_perception_allowed(spec):
-        return None
-    deterministic_perception = getattr(deterministic_candidate, "perception", None)
-    if not isinstance(deterministic_perception, PerceptionResult):
-        return None
-    if deterministic_perception.intent_name == preview_intent_name:
-        return None
-    return AgentToolError(
-        code="NEEDS_CLARIFICATION",
-        message="这句话同时像写入预览和其他操作，请确认要创建哪一种预览，或改成只读查询。",
-        hint="写入预览只能创建待确认操作；确认、取消和应用必须使用明确的确认/取消命令。",
-        details={
-            "llm_intent_name": preview_intent_name,
-            "deterministic_intent_name": deterministic_perception.intent_name,
-        },
-    )
 
 
 def _llm_preview_intent_name(perception: PerceptionResult) -> str | None:
@@ -653,43 +481,6 @@ def _llm_preview_intent_name(perception: PerceptionResult) -> str | None:
 
 def _is_llm_preview_perception_allowed(spec: Any) -> bool:
     return bool(is_llm_planner_preview_spec(spec))
-
-
-def _reconcile_llm_read_perception(
-    perception: PerceptionResult,
-    deterministic_candidate: Any,
-    *,
-    text: str,
-    today: date,
-) -> PerceptionResult:
-    deterministic_perception = getattr(deterministic_candidate, "perception", None)
-    if not isinstance(deterministic_perception, PerceptionResult):
-        return _reconcile_month_slot_from_text(perception, text=text, today=today)
-    if deterministic_perception.intent_name != perception.intent_name:
-        return _reconcile_month_slot_from_text(perception, text=text, today=today)
-    spec = _COMMAND_SPECS_BY_INTENT.get(perception.intent_name)
-    if spec is None or not spec.read_only:
-        return _reconcile_month_slot_from_text(perception, text=text, today=today)
-
-    merged, changes = _merge_argument_slots(
-        llm_arguments=dict(perception.arguments or {}),
-        deterministic_arguments=dict(deterministic_perception.arguments or {}),
-    )
-    if not changes:
-        return _reconcile_month_slot_from_text(perception, text=text, today=today)
-    evidence = dict(perception.evidence or {})
-    evidence["argument_reconciliation"] = {
-        "source": "deterministic_shadow",
-        "filled": changes["filled"],
-        "overridden": changes["overridden"],
-    }
-    return PerceptionResult(
-        intent_name=perception.intent_name,
-        arguments=merged,
-        source=perception.source,
-        confidence=perception.confidence,
-        evidence=evidence,
-    )
 
 
 def _reconcile_month_slot_from_text(perception: PerceptionResult, *, text: str, today: date) -> PerceptionResult:
@@ -734,43 +525,6 @@ def _with_perception_temporal_context(
     return context
 
 
-def _merge_argument_slots(
-    *,
-    llm_arguments: dict[str, Any],
-    deterministic_arguments: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, dict[str, Any]] | None]:
-    merged = dict(llm_arguments)
-    filled: dict[str, Any] = {}
-    overridden: dict[str, Any] = {}
-    for key, deterministic_value in deterministic_arguments.items():
-        if _is_empty_slot(deterministic_value):
-            continue
-        if key not in merged or _is_empty_slot(merged.get(key)):
-            merged[key] = deterministic_value
-            filled[key] = deterministic_value
-            continue
-        llm_value = merged.get(key)
-        if isinstance(llm_value, dict) and isinstance(deterministic_value, dict):
-            nested, nested_changes = _merge_argument_slots(
-                llm_arguments=llm_value,
-                deterministic_arguments=deterministic_value,
-            )
-            if nested_changes:
-                merged[key] = nested
-                if nested_changes["filled"]:
-                    filled[key] = nested_changes["filled"]
-                if nested_changes["overridden"]:
-                    overridden[key] = nested_changes["overridden"]
-            continue
-        if llm_value != deterministic_value:
-            merged[key] = deterministic_value
-            overridden[key] = {"llm": llm_value, "deterministic": deterministic_value}
-
-    if not filled and not overridden:
-        return merged, None
-    return merged, {"filled": filled, "overridden": overridden}
-
-
 def _is_empty_slot(value: Any) -> bool:
     if value is None:
         return True
@@ -779,59 +533,6 @@ def _is_empty_slot(value: Any) -> bool:
     if isinstance(value, dict) and not any(not _is_empty_slot(item) for item in value.values()):
         return True
     return False
-
-
-def _llm_error_allows_deterministic_fallback(
-    err: AgentToolError,
-    deterministic_perception: PerceptionResult,
-) -> bool:
-    details = err.details if isinstance(err.details, dict) else {}
-    deterministic_spec = _COMMAND_SPECS_BY_INTENT.get(deterministic_perception.intent_name)
-    if err.code == "NEEDS_CLARIFICATION":
-        if "clarification_request" in details:
-            return False
-        if deterministic_spec is not None and is_llm_planner_preview_spec(deterministic_spec):
-            return False
-        return True
-    if err.code in {"LLM_UNAVAILABLE", "LLM_PROVIDER_ERROR"}:
-        return True
-    if _llm_protocol_error_allows_preview_fallback(err, deterministic_perception):
-        return True
-    return (
-        err.code == "PERMISSION_DENIED"
-        and details.get("llm_rejected_reason") == "known_non_executable_intent"
-        and details.get("intent_name") == deterministic_perception.intent_name
-    )
-
-
-def _llm_error_candidate_reason(
-    err: AgentToolError,
-    deterministic_perception: PerceptionResult | None,
-    *,
-    default: str,
-) -> str:
-    if deterministic_perception is not None and _llm_protocol_error_allows_preview_fallback(err, deterministic_perception):
-        return "llm_protocol_error_fallback"
-    return default
-
-
-def _llm_protocol_error_allows_preview_fallback(
-    err: AgentToolError,
-    deterministic_perception: PerceptionResult,
-) -> bool:
-    details = err.details if isinstance(err.details, dict) else {}
-    deterministic_spec = _COMMAND_SPECS_BY_INTENT.get(deterministic_perception.intent_name)
-    return bool(
-        err.code == "INVALID_MODEL_EVENT"
-        and details.get("reason") == "provider_arguments_malformed"
-        and deterministic_spec is not None
-        and is_llm_planner_preview_spec(deterministic_spec)
-    )
-
-
-def _deterministic_operation_command_has_priority(perception: PerceptionResult) -> bool:
-    spec = _COMMAND_SPECS_BY_INTENT.get(perception.intent_name)
-    return bool(spec is not None and spec.operation_action in {"confirm", "cancel"})
 
 
 __all__ = [

@@ -79,7 +79,7 @@ def handle_assistant_message(
     )
 
     router_execute_tool_fn = execute_tool_fn
-    if runtime_settings.planner_enabled:
+    if runtime_settings.agent_loop_enabled:
         router_execute_tool_fn = _agent_loop_execute_tool_fn(
             execute_tool_fn=execute_tool_fn,
             request=request,
@@ -534,11 +534,12 @@ def _with_assistant_meta(
     context_meta = llm_meta.pop("context", {"provided": False})
     assistant_meta = {
         "enabled": bool(settings.enabled),
-        "planner": settings.planner.public_payload(),
+        "agent_loop": settings.agent_loop.public_payload(),
+        "planner": {"enabled": bool(settings.agent_loop.enabled)},
         "route": route,
         "llm": llm_meta,
         "context": dict(context_meta) if isinstance(context_meta, dict) else {"provided": False},
-        "langgraph": "optional" if settings.planner_enabled else "disabled",
+        "langgraph": "optional" if settings.agent_loop_enabled else "disabled",
     }
     if perception_trace is not None:
         assistant_meta["perception_trace"] = perception_trace.public_payload()
