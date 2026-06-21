@@ -105,9 +105,12 @@ This names the authority path:
   pending-operation context. It is not a separate runtime service or a second
   pending-operation store.
 - `Perceive` normalizes the channel message into the current request context.
-- `Understand` may use slash commands or deterministic alias parsing as safety
-  components, or enter the AgentLoop structured event path. It only describes
-  intent or produces model tool-call events; it does not execute tools.
+- `ProtocolGate` handles explicit slash commands.
+- `PermissionResponseGate` handles confirm/cancel replies only after binding to
+  an existing pending operation in the same sender/channel/conversation scope.
+- `Understand` sends all other non-slash natural language into the AgentLoop
+  structured event path. It only describes intent or produces model tool-call
+  events; it does not execute tools.
 - `Decide` owns permission, safety class, capability support, config-scope
   injection, and preview/confirm boundaries. Its conceptual decisions are
   `allow`, `preview`, `ask`, `deny`, or `defer`.
@@ -309,7 +312,8 @@ The assistant should not use them as default evidence paths.
   LLM tool-call planning, but it should remain tested against the public
   capability catalog.
 - `assistant.mode` is retired and unsupported. The active product controls are
-  `assistant.enabled` and `assistant.planner.enabled`. The runtime
+  `assistant.enabled` and `assistant.agent_loop.enabled`;
+  `assistant.planner.enabled` is a deprecated compatibility alias. The runtime
   target is one `AgentSession` boundary + `AgentLoop` with structured model
   tool-call events, deterministic guard/execution, and durable operator trace
   in `agent_sessions`.

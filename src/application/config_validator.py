@@ -100,6 +100,7 @@ INLINE_SECRET_CONFIG_KEYS = {
 }
 ASSISTANT_CONFIG_KEYS = {
     'active_model',
+    'agent_loop',
     'context_window_messages',
     'default_market_scope',
     'enabled',
@@ -279,6 +280,11 @@ def _validate_assistant_config(cfg: dict) -> None:
         die('assistant.planner must be an object')
     if isinstance(planner, dict) and 'enabled' in planner and planner.get('enabled') is not None and not isinstance(planner.get('enabled'), bool):
         die('assistant.planner.enabled must be a boolean')
+    agent_loop = assistant.get('agent_loop') or {}
+    if agent_loop and not isinstance(agent_loop, dict):
+        die('assistant.agent_loop must be an object')
+    if isinstance(agent_loop, dict) and 'enabled' in agent_loop and agent_loop.get('enabled') is not None and not isinstance(agent_loop.get('enabled'), bool):
+        die('assistant.agent_loop.enabled must be a boolean')
     if 'context_window_messages' in assistant and assistant.get('context_window_messages') is not None:
         validate_non_negative_integer(assistant.get('context_window_messages'), 'assistant.context_window_messages')
         if int(assistant.get('context_window_messages')) > 20:
@@ -292,12 +298,12 @@ def _validate_assistant_config(cfg: dict) -> None:
     if not isinstance(llm, dict):
         die('assistant.llm must be an object')
     if 'enabled' in llm:
-        die('assistant.llm.enabled is retired; use assistant.planner.enabled')
+        die('assistant.llm.enabled is retired; use assistant.agent_loop.enabled')
     _validate_llm_config(
         llm,
         path='assistant.llm',
         enabled=False,
-        required_reason='assistant planner uses LLM',
+        required_reason='assistant AgentLoop uses LLM',
     )
 
     if 'agent' in cfg:

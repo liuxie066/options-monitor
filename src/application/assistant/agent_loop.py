@@ -2759,8 +2759,8 @@ def _create_model_turn_events(
             trace=_llm_trace(llm_settings, attempted=False, reason="missing_config", missing=missing),
             error=AgentToolError(
                 code="LLM_UNAVAILABLE",
-                message="LLM planner is enabled but not fully configured.",
-                hint="Set assistant.llm.provider, assistant.llm.model, and assistant.llm.api_key_env, or disable assistant.planner.enabled.",
+                message="LLM AgentLoop is enabled but not fully configured.",
+                hint="Set assistant.llm.provider, assistant.llm.model, and assistant.llm.api_key_env, or disable assistant.agent_loop.enabled.",
                 details={"missing": missing},
             ),
         )

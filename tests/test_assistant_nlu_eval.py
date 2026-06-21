@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from src.application.agent_tool_contracts import AgentToolError
 from src.application.assistant.command_parser import parse_assistant_command
 from src.application.assistant.contracts import AssistantRequest, PerceptionResult
 from src.application.assistant.deterministic_commands import parse_deterministic_text
@@ -49,6 +50,14 @@ def _trace_eval_case(perception: PerceptionResult) -> dict[str, Any]:
 
 @pytest.mark.parametrize("case", _load_cases(), ids=lambda case: str(case["id"]))
 def test_assistant_nlu_eval_cases(case: dict[str, Any]) -> None:
+    if case.get("expected_error"):
+        with pytest.raises(AgentToolError) as exc:
+            _parse(str(case["text"]))
+        assert exc.value.code == case["expected_error"]
+        if case.get("expected_message_contains"):
+            assert str(case["expected_message_contains"]) in exc.value.message
+        return
+
     perception = _parse(str(case["text"]))
     trace = _trace_eval_case(perception)
     expected_source = str(case["expected_source"])

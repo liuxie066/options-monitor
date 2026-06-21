@@ -276,10 +276,12 @@ assistant:
 def test_inbound_command_surface_maps_core_read_only_commands() -> None:
     assert parse_assistant_command("/status").intent_name == "runtime_status"
     assert parse_assistant_command("/health").intent_name == "healthcheck"
-    assert parse_deterministic_text("待确认").intent_name == "pending_operations"
-    assert parse_deterministic_text("pending").intent_name == "pending_operations"
+    assert parse_deterministic_text("/pending").intent_name == "pending_operations"
+    assert parse_assistant_command("/pending").intent_name == "pending_operations"
 
     for text in (
+        "待确认",
+        "pending",
         "状态",
         "持仓 sy",
         "收益 本月",
@@ -346,7 +348,7 @@ def test_inbound_parser_requires_clarification_for_unknown_command() -> None:
         parse_deterministic_text("查一下")
 
     assert exc.value.code == "NEEDS_CLARIFICATION"
-    assert "没有识别" in exc.value.message
+    assert "自然语言请求不能通过 deterministic parser 处理" in exc.value.message
 
 
 def test_inbound_model_command_lists_configured_profiles(tmp_path: Path) -> None:
@@ -559,83 +561,72 @@ def test_command_catalog_read_tool_names_match_inbound_policy() -> None:
 
 
 def test_inbound_parser_maps_manual_trade_and_symbol_operations() -> None:
-    open_intent = parse_deterministic_text("记录开仓 sy 0700.HK short put strike 450 exp 2026-05-28 6张 premium 2.35 multiplier 100")
+    open_intent = parse_assistant_command("/record-open sy 0700.HK short put strike 450 exp 2026-05-28 6张 premium 2.35 multiplier 100")
+    assert open_intent is not None
     assert open_intent.intent_name == "manual_trade_open"
     assert open_intent.arguments == {
         "raw_text": "记录开仓 sy 0700.HK short put strike 450 exp 2026-05-28 6张 premium 2.35 multiplier 100",
-        "account": "sy",
     }
 
-    close_intent = parse_deterministic_text("记录平仓 sy 0700.HK short put strike 450 exp 2026-05-28 2张 close 1.2")
+    close_intent = parse_assistant_command("/record-close sy 0700.HK short put strike 450 exp 2026-05-28 2张 close 1.2")
+    assert close_intent is not None
     assert close_intent.intent_name == "manual_trade_close"
     assert close_intent.arguments == {
         "raw_text": "记录平仓 sy 0700.HK short put strike 450 exp 2026-05-28 2张 close 1.2",
-        "account": "sy",
     }
 
-    assert parse_deterministic_text("确认记录 in_abc123").arguments == {
+    confirm_intent = parse_assistant_command("/confirm trade in_abc123")
+    assert confirm_intent is not None
+    assert confirm_intent.arguments == {
         "operation_id": "in_abc123",
         "operation_resolution": "explicit",
     }
-    english_confirm = parse_deterministic_text("confirm trade in_abc123")
-    assert english_confirm.intent_name == "manual_trade_confirm"
-    assert english_confirm.arguments == {
-        "operation_id": "in_abc123",
-        "operation_resolution": "explicit",
-    }
-    assert parse_deterministic_text("确认记录").arguments == {
+    latest_confirm = parse_assistant_command("/confirm trade")
+    assert latest_confirm is not None
+    assert latest_confirm.arguments == {
         "operation_id": None,
         "operation_resolution": "latest_pending",
     }
-    assert parse_deterministic_text("取消记录 in_abc123").intent_name == "manual_trade_cancel"
-    assert parse_deterministic_text("取消交易 in_abc123").intent_name == "manual_trade_cancel"
-    trade_update = parse_deterministic_text("premium 改成 2.75")
-    assert trade_update.intent_name == "manual_trade_update"
-    assert trade_update.arguments == {
-        "operation_id": None,
-        "operation_resolution": "latest_pending",
-        "updates": {"premium_per_share": 2.75},
-    }
-    trade_update_with_id = parse_deterministic_text("合约数改成2 in_abc123")
-    assert trade_update_with_id.arguments == {
-        "operation_id": "in_abc123",
-        "operation_resolution": "explicit",
-        "updates": {"contracts": 2},
-    }
-    with pytest.raises(AgentToolError) as decimal_contracts:
-        parse_deterministic_text("合约数改成1.9")
-    assert decimal_contracts.value.code == "INPUT_ERROR"
-    assert "整数参数不能写小数" in decimal_contracts.value.message
+    cancel_intent = parse_assistant_command("/cancel trade in_abc123")
+    assert cancel_intent is not None
+    assert cancel_intent.intent_name == "manual_trade_cancel"
 
     assert parse_assistant_command("/symbols").intent_name == "symbol_list"
-    symbol_add = parse_deterministic_text("增加监控标的 700 put")
+    symbol_add = parse_assistant_command("/symbol add 700 put")
+    assert symbol_add is not None
     assert symbol_add.intent_name == "symbol_add"
     assert symbol_add.arguments == {"symbol": "700", "sell_put_enabled": True, "sell_call_enabled": False}
-    symbol_edit = parse_deterministic_text("修改监控标的 HK.00700 sell_put.max_strike=480")
+    symbol_edit = parse_assistant_command("/symbol edit HK.00700 sell_put.max_strike=480")
+    assert symbol_edit is not None
     assert symbol_edit.intent_name == "symbol_edit"
     assert symbol_edit.arguments == {"symbol": "HK.00700", "set": {"sell_put.max_strike": 480}}
-    covered_call_edit = parse_deterministic_text("配置标的，为tigr做covered call的设置，min strike=6.5")
-    assert covered_call_edit.intent_name == "symbol_edit"
-    assert covered_call_edit.arguments == {
-        "symbol": "tigr",
-        "set": {"sell_call.enabled": True, "sell_call.min_strike": 6.5},
-        "ensure_use": ["call_base"],
-    }
-    covered_call_setting = parse_deterministic_text("设置 09898 covered call min strike 85")
+    covered_call_setting = parse_assistant_command("/symbol edit 09898 sell_call.enabled=true sell_call.min_strike=85 ensure_use=call_base")
+    assert covered_call_setting is not None
     assert covered_call_setting.intent_name == "symbol_edit"
     assert covered_call_setting.arguments == {
         "symbol": "09898",
         "set": {"sell_call.enabled": True, "sell_call.min_strike": 85.0},
         "ensure_use": ["call_base"],
     }
-    assert parse_deterministic_text("删除监控标的 腾讯").arguments == {"symbol": "腾讯"}
-    assert parse_deterministic_text("确认监控 in_abc123").intent_name == "symbol_confirm"
-    assert parse_deterministic_text("cancel monitor in_abc123").intent_name == "symbol_cancel"
-    upgrade = parse_deterministic_text("立即升级到 v1.2.111")
+    symbol_remove = parse_assistant_command("/symbol remove 腾讯")
+    assert symbol_remove is not None
+    assert symbol_remove.arguments == {"symbol": "腾讯"}
+    symbol_confirm = parse_assistant_command("/confirm symbol in_abc123")
+    assert symbol_confirm is not None
+    assert symbol_confirm.intent_name == "symbol_confirm"
+    symbol_cancel = parse_assistant_command("/cancel symbol in_abc123")
+    assert symbol_cancel is not None
+    assert symbol_cancel.intent_name == "symbol_cancel"
+    upgrade = parse_assistant_command("/upgrade v1.2.111")
+    assert upgrade is not None
     assert upgrade.intent_name == "upgrade_now"
     assert upgrade.arguments == {"target_version": "1.2.111"}
-    assert parse_deterministic_text("确认升级 in_abc123").intent_name == "upgrade_confirm"
-    assert parse_deterministic_text("取消升级").intent_name == "upgrade_cancel"
+    upgrade_confirm = parse_assistant_command("/confirm upgrade in_abc123")
+    assert upgrade_confirm is not None
+    assert upgrade_confirm.intent_name == "upgrade_confirm"
+    upgrade_cancel = parse_assistant_command("/cancel upgrade")
+    assert upgrade_cancel is not None
+    assert upgrade_cancel.intent_name == "upgrade_cancel"
 
 
 def test_inbound_symbol_config_query_executes_read_only_tool_via_llm(tmp_path: Path) -> None:
@@ -746,7 +737,7 @@ def test_inbound_manual_trade_preview_and_confirm_open(monkeypatch: pytest.Monke
 
     preview = handle_assistant_request(
         AssistantRequest(
-            text="记录开仓 sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
+            text="/record-open sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_open_preview",
@@ -782,7 +773,7 @@ def test_inbound_manual_trade_preview_and_confirm_open(monkeypatch: pytest.Monke
 
     assert confirmed["ok"] is True
     assert confirmed["data"]["operation_id"] == operation_id
-    assert confirmed["data"]["operation_resolution"] == "latest_pending"
+    assert confirmed["data"]["operation_resolution"] == "explicit"
     assert confirmed["data"]["resolved_operation_id"] == operation_id
     assert "交易已写入 OM 本地账本：开仓" in confirmed["data"]["response_text"]
     assert confirmed["data"]["reasoning"]["tool_call"]["tool_name"] == "inbound.manual_trade"
@@ -802,11 +793,11 @@ def test_inbound_manual_trade_preview_and_confirm_open(monkeypatch: pytest.Monke
         ).fetchall()
     audit_plans = {row[0]: json.loads(row[1]) for row in rows}
     assert audit_plans["msg_open_preview"]["reason"] == "write_preview_operation"
-    assert audit_plans["msg_open_preview"]["arguments"]["account"] == "sy"
+    assert "记录开仓 sy NVDA" in audit_plans["msg_open_preview"]["arguments"]["raw_text"]
     assert audit_plans["msg_open_confirm"]["reason"] == "confirmed_write_operation"
     assert audit_plans["msg_open_confirm"]["arguments"] == {
-        "operation_id": None,
-        "operation_resolution": "latest_pending",
+        "operation_id": operation_id,
+        "operation_resolution": "permission_response",
     }
     timeline_out = run_tool("operation_timeline", {"audit_db": str(audit_db), "operation_id": operation_id})
     assert timeline_out["ok"] is True
@@ -1007,7 +998,7 @@ def test_inbound_manual_trade_confirm_rejects_signature_mismatch(monkeypatch: py
 
     preview = handle_assistant_request(
         AssistantRequest(
-            text="记录开仓 sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
+            text="/record-open sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_open_preview_signed",
@@ -1217,7 +1208,7 @@ def test_inbound_manual_trade_update_pending_preview_then_confirm(monkeypatch: p
 
     preview = handle_assistant_request(
         AssistantRequest(
-            text="记录开仓 sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
+            text="/record-open sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_update_open_preview",
@@ -1230,7 +1221,7 @@ def test_inbound_manual_trade_update_pending_preview_then_confirm(monkeypatch: p
 
     updated = handle_assistant_request(
         AssistantRequest(
-            text="premium 改成 2.75",
+            text="/record-update premium_per_share=2.75",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_update_open_premium",
@@ -1276,7 +1267,7 @@ def test_inbound_pending_operations_lists_current_conversation(monkeypatch: pyte
 
     trade_preview = handle_assistant_request(
         AssistantRequest(
-            text="记录开仓 sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
+            text="/record-open sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_pending_trade_preview",
@@ -1289,7 +1280,7 @@ def test_inbound_pending_operations_lists_current_conversation(monkeypatch: pyte
 
     pending = handle_assistant_request(
         AssistantRequest(
-            text="待确认",
+            text="/pending",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_pending_list_one",
@@ -1310,12 +1301,12 @@ def test_inbound_pending_operations_lists_current_conversation(monkeypatch: pyte
     assert "当前待确认：1 条" in pending["data"]["response_text"]
     assert "交易开仓" in pending["data"]["response_text"]
     assert "NVDA 2026-06-19 100.0P short put 1张 premium 2.5" in pending["data"]["response_text"]
-    assert f"确认：确认记录 {trade_id}" in pending["data"]["response_text"]
-    assert f"取消：取消记录 {trade_id}" in pending["data"]["response_text"]
+    assert f"确认：/confirm trade {trade_id}" in pending["data"]["response_text"]
+    assert f"取消：/cancel trade {trade_id}" in pending["data"]["response_text"]
 
     symbol_preview = handle_assistant_request(
         AssistantRequest(
-            text="增加监控标的 TIGR put",
+            text="/symbol add TIGR put",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_pending_symbol_preview",
@@ -1327,7 +1318,7 @@ def test_inbound_pending_operations_lists_current_conversation(monkeypatch: pyte
     )
     pending_two = handle_assistant_request(
         AssistantRequest(
-            text="pending operations",
+            text="/pending",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_pending_list_two",
@@ -1344,8 +1335,8 @@ def test_inbound_pending_operations_lists_current_conversation(monkeypatch: pyte
     assert "当前待确认：2 条" in pending_two["data"]["response_text"]
     assert "监控新增" in pending_two["data"]["response_text"]
     assert "add TIGR put" in pending_two["data"]["response_text"]
-    assert f"确认：确认监控 {symbol_id}" in pending_two["data"]["response_text"]
-    assert f"确认：确认记录 {trade_id}" in pending_two["data"]["response_text"]
+    assert f"确认：/confirm symbol {symbol_id}" in pending_two["data"]["response_text"]
+    assert f"确认：/confirm trade {trade_id}" in pending_two["data"]["response_text"]
 
 
 def test_inbound_upgrade_preview_and_confirm(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1398,7 +1389,7 @@ def test_inbound_upgrade_preview_and_confirm(monkeypatch: pytest.MonkeyPatch, tm
 
     preview = handle_assistant_request(
         AssistantRequest(
-            text="立即升级",
+            text="/upgrade",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_upgrade_preview",
@@ -1433,7 +1424,7 @@ def test_inbound_upgrade_preview_and_confirm(monkeypatch: pytest.MonkeyPatch, tm
 
     assert confirmed["ok"] is True
     assert confirmed["data"]["operation_id"] == operation_id
-    assert confirmed["data"]["operation_resolution"] == "latest_pending"
+    assert confirmed["data"]["operation_resolution"] == "explicit"
     assert "已收到升级确认" in confirmed["data"]["response_text"]
     assert "当前版本：1.2.110" in confirmed["data"]["response_text"]
     assert "目标版本：1.2.111" in confirmed["data"]["response_text"]
@@ -1505,7 +1496,7 @@ def test_inbound_upgrade_cancel_persists_readback_trace(monkeypatch: pytest.Monk
 
     preview = handle_assistant_message(
         AssistantRequest(
-            text="立即升级",
+            text="/upgrade",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_upgrade_cancel_preview",
@@ -1605,7 +1596,7 @@ def test_inbound_upgrade_confirm_receipt_uses_payload_and_version_check_fallback
 
     preview = handle_assistant_request(
         AssistantRequest(
-            text="立即升级",
+            text="/upgrade",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_upgrade_preview",
@@ -1705,7 +1696,7 @@ def test_inbound_upgrade_worker_retries_final_receipt(monkeypatch: pytest.Monkey
 
     preview = handle_assistant_request(
         AssistantRequest(
-            text="立即升级",
+            text="/upgrade",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_upgrade_preview",
@@ -1802,7 +1793,7 @@ def test_inbound_upgrade_worker_sends_wechat_clawbot_final_receipt(
 
     preview = handle_assistant_request(
         AssistantRequest(
-            text="立即升级",
+            text="/upgrade",
             sender_id="user_1",
             channel="wechat",
             message_id="msg_upgrade_preview",
@@ -1915,7 +1906,7 @@ def test_inbound_upgrade_returns_no_upgrade_without_pending_operation(monkeypatc
 
     preview = handle_assistant_request(
         AssistantRequest(
-            text="立即升级",
+            text="/upgrade",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_upgrade_noop",
@@ -1935,7 +1926,7 @@ def test_inbound_upgrade_returns_no_upgrade_without_pending_operation(monkeypatc
 
     pending = handle_assistant_request(
         AssistantRequest(
-            text="待确认",
+            text="/pending",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_upgrade_noop_pending",
@@ -1980,7 +1971,7 @@ def test_inbound_upgrade_reconfirm_hides_internal_status(monkeypatch: pytest.Mon
 
     preview = handle_assistant_request(
         AssistantRequest(
-            text="立即升级",
+            text="/upgrade",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_upgrade_preview",
@@ -2107,7 +2098,7 @@ def test_inbound_manual_trade_bare_confirm_requires_unique_pending(monkeypatch: 
 
     first = handle_assistant_request(
         AssistantRequest(
-            text="记录开仓 sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
+            text="/record-open sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_ambiguous_open_1",
@@ -2118,7 +2109,7 @@ def test_inbound_manual_trade_bare_confirm_requires_unique_pending(monkeypatch: 
     )
     second = handle_assistant_request(
         AssistantRequest(
-            text="记录开仓 sy NVDA short put strike 101 exp 2026-06-19 1张 premium 2.4 multiplier 100",
+            text="/record-open sy NVDA short put strike 101 exp 2026-06-19 1张 premium 2.4 multiplier 100",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_ambiguous_open_2",
@@ -2143,13 +2134,13 @@ def test_inbound_manual_trade_bare_confirm_requires_unique_pending(monkeypatch: 
     assert out["ok"] is False
     assert out["error"]["code"] == "NEEDS_CLARIFICATION"
     assert "有多条待确认的交易记录" in out["data"]["response_text"]
-    assert "请带 operation_id。\n候选交易：" in out["data"]["response_text"]
+    assert "请带 operation_id。\n候选交易记录：" in out["data"]["response_text"]
     assert first["data"]["operation_id"] in out["data"]["response_text"]
     assert second["data"]["operation_id"] in out["data"]["response_text"]
     assert "候选交易" in out["data"]["response_text"]
     assert "NVDA 2026-06-19 100.0P short put 1张 premium 2.5" in out["data"]["response_text"]
     assert "NVDA 2026-06-19 101.0P short put 1张 premium 2.4" in out["data"]["response_text"]
-    assert f"回复：确认记录 {first['data']['operation_id']}" in out["data"]["response_text"]
+    assert f"回复：/confirm trade {first['data']['operation_id']}" in out["data"]["response_text"]
     repo = ledger_repository.SQLiteOptionPositionsRepository(sqlite_path)
     assert repo.list_trade_events() == []
 
@@ -2163,7 +2154,7 @@ def test_inbound_manual_trade_update_requires_unique_pending(monkeypatch: pytest
 
     first = handle_assistant_request(
         AssistantRequest(
-            text="记录开仓 sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
+            text="/record-open sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_ambiguous_update_open_1",
@@ -2174,7 +2165,7 @@ def test_inbound_manual_trade_update_requires_unique_pending(monkeypatch: pytest
     )
     second = handle_assistant_request(
         AssistantRequest(
-            text="记录开仓 sy NVDA short put strike 101 exp 2026-06-19 1张 premium 2.4 multiplier 100",
+            text="/record-open sy NVDA short put strike 101 exp 2026-06-19 1张 premium 2.4 multiplier 100",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_ambiguous_update_open_2",
@@ -2186,7 +2177,7 @@ def test_inbound_manual_trade_update_requires_unique_pending(monkeypatch: pytest
 
     out = handle_assistant_request(
         AssistantRequest(
-            text="premium 改成 2.75",
+            text="/record-update premium_per_share=2.75",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_ambiguous_update",
@@ -2199,14 +2190,14 @@ def test_inbound_manual_trade_update_requires_unique_pending(monkeypatch: pytest
     assert out["ok"] is False
     assert out["error"]["code"] == "NEEDS_CLARIFICATION"
     assert "有多条待修改的交易记录" in out["data"]["response_text"]
-    assert "请在修改内容后带 operation_id" in out["data"]["response_text"]
+    assert "请使用 /record-update premium_per_share=2.35 <operation_id>" in out["data"]["response_text"]
     assert "\n候选交易：" in out["data"]["response_text"]
     assert first["data"]["operation_id"] in out["data"]["response_text"]
     assert second["data"]["operation_id"] in out["data"]["response_text"]
     assert "候选交易" in out["data"]["response_text"]
     assert "premium 2.5" in out["data"]["response_text"]
     assert "premium 2.4" in out["data"]["response_text"]
-    assert "premium 改成 2.35 <operation_id>" in out["data"]["response_text"]
+    assert "/record-update premium_per_share=2.35 <operation_id>" in out["data"]["response_text"]
     repo = ledger_repository.SQLiteOptionPositionsRepository(sqlite_path)
     assert repo.list_trade_events() == []
 
@@ -2221,7 +2212,7 @@ def test_inbound_bare_symbol_confirm_does_not_confirm_manual_trade(monkeypatch: 
 
     preview = handle_assistant_request(
         AssistantRequest(
-            text="记录开仓 sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
+            text="/record-open sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_cross_family_trade_preview",
@@ -2260,7 +2251,7 @@ def test_inbound_bare_confirm_is_scoped_to_conversation(monkeypatch: pytest.Monk
 
     preview = handle_assistant_request(
         AssistantRequest(
-            text="记录开仓 sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
+            text="/record-open sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_conversation_preview",
@@ -2274,7 +2265,7 @@ def test_inbound_bare_confirm_is_scoped_to_conversation(monkeypatch: pytest.Monk
 
     wrong_chat_pending = handle_assistant_request(
         AssistantRequest(
-            text="待确认",
+            text="/pending",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_conversation_wrong_chat_pending",
@@ -2290,7 +2281,7 @@ def test_inbound_bare_confirm_is_scoped_to_conversation(monkeypatch: pytest.Monk
 
     right_chat_pending = handle_assistant_request(
         AssistantRequest(
-            text="当前预览",
+            text="/pending",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_conversation_right_chat_pending",
@@ -2349,7 +2340,7 @@ def test_inbound_manual_trade_preview_canonicalizes_symbol_and_keeps_diagnostics
 
     preview = handle_assistant_request(
         AssistantRequest(
-            text="记录开仓 sy 腾讯 short put strike 450 exp 2026-05-28 6张 premium 2.35",
+            text="/record-open sy 腾讯 short put strike 450 exp 2026-05-28 6张 premium 2.35",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_open_tencent_preview",
@@ -2381,7 +2372,7 @@ def test_inbound_manual_trade_preview_and_confirm_close(monkeypatch: pytest.Monk
 
     open_preview = handle_assistant_request(
         AssistantRequest(
-            text="记录开仓 sy 0700.HK short put strike 450 exp 2026-06-19 2张 premium 2.5 multiplier 500",
+            text="/record-open sy 0700.HK short put strike 450 exp 2026-06-19 2张 premium 2.5 multiplier 500",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_close_open_preview",
@@ -2405,7 +2396,7 @@ def test_inbound_manual_trade_preview_and_confirm_close(monkeypatch: pytest.Monk
 
     close_preview = handle_assistant_request(
         AssistantRequest(
-            text="记录平仓 sy HK.00700 short put strike 450 exp 2026-06-19 1张 close 1.0",
+            text="/record-close sy HK.00700 short put strike 450 exp 2026-06-19 1张 close 1.0",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_close_preview",
@@ -2453,7 +2444,7 @@ def test_inbound_symbol_add_edit_remove_preview_and_confirm(monkeypatch: pytest.
     assert "当前监控标的" in listed["data"]["response_text"]
 
     add_preview = handle_assistant_request(
-        AssistantRequest(text="增加监控标的 700 put", sender_id="ou_1", channel="feishu", message_id="msg_symbol_add", config_path=str(cfg_path), audit_db=str(audit_db)),
+        AssistantRequest(text="/symbol add 700 put", sender_id="ou_1", channel="feishu", message_id="msg_symbol_add", config_path=str(cfg_path), audit_db=str(audit_db)),
         allowed_senders="feishu:ou_1",
     )
     assert add_preview["ok"] is True
@@ -2465,11 +2456,11 @@ def test_inbound_symbol_add_edit_remove_preview_and_confirm(monkeypatch: pytest.
     )
     assert add_confirm["ok"] is True
     assert add_confirm["data"]["operation_id"] == add_id
-    assert add_confirm["data"]["operation_resolution"] == "latest_pending"
+    assert add_confirm["data"]["operation_resolution"] == "explicit"
     assert add_confirm["data"]["resolved_operation_id"] == add_id
 
     edit_preview = handle_assistant_request(
-        AssistantRequest(text="修改监控标的 HK.00700 sell_put.max_strike=480", sender_id="ou_1", channel="feishu", message_id="msg_symbol_edit", config_path=str(cfg_path), audit_db=str(audit_db)),
+        AssistantRequest(text="/symbol edit HK.00700 sell_put.max_strike=480", sender_id="ou_1", channel="feishu", message_id="msg_symbol_edit", config_path=str(cfg_path), audit_db=str(audit_db)),
         allowed_senders="feishu:ou_1",
     )
     edit_id = edit_preview["data"]["operation_id"]
@@ -2480,7 +2471,7 @@ def test_inbound_symbol_add_edit_remove_preview_and_confirm(monkeypatch: pytest.
     assert edit_confirm["ok"] is True
 
     covered_call_preview = handle_assistant_request(
-        AssistantRequest(text="配置标的，为NVDA做covered call的设置，min strike=140", sender_id="ou_1", channel="feishu", message_id="msg_symbol_covered_call", config_path=str(cfg_path), audit_db=str(audit_db)),
+        AssistantRequest(text="/symbol edit NVDA sell_call.enabled=true sell_call.min_strike=140 ensure_use=call_base", sender_id="ou_1", channel="feishu", message_id="msg_symbol_covered_call", config_path=str(cfg_path), audit_db=str(audit_db)),
         allowed_senders="feishu:ou_1",
     )
     assert covered_call_preview["ok"] is True
@@ -2492,7 +2483,7 @@ def test_inbound_symbol_add_edit_remove_preview_and_confirm(monkeypatch: pytest.
     assert covered_call_confirm["ok"] is True
 
     remove_preview = handle_assistant_request(
-        AssistantRequest(text="删除监控标的 腾讯", sender_id="ou_1", channel="feishu", message_id="msg_symbol_remove", config_path=str(cfg_path), audit_db=str(audit_db)),
+        AssistantRequest(text="/symbol remove 腾讯", sender_id="ou_1", channel="feishu", message_id="msg_symbol_remove", config_path=str(cfg_path), audit_db=str(audit_db)),
         allowed_senders="feishu:ou_1",
     )
     remove_id = remove_preview["data"]["operation_id"]
@@ -2606,7 +2597,7 @@ def test_inbound_symbol_write_uses_symbol_market_over_default_us_config(monkeypa
 
     preview = handle_assistant_request(
         AssistantRequest(
-            text="修改监控标的 HK.00700 sell_put.max_strike=480",
+            text="/symbol edit HK.00700 sell_put.max_strike=480",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_symbol_hk_edit",
@@ -2669,7 +2660,7 @@ markets:
 
     preview = handle_assistant_request(
         AssistantRequest(
-            text="设置 09898 covered call min strike 85",
+            text="/symbol edit 09898 sell_call.enabled=true sell_call.min_strike=85 ensure_use=call_base",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_yaml_symbol_setting",
@@ -2715,7 +2706,7 @@ def test_inbound_write_operations_are_disabled_by_default(tmp_path: Path) -> Non
 
     trade_out = handle_assistant_request(
         AssistantRequest(
-            text="记录开仓 sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
+            text="/record-open sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_disabled_trade",
@@ -2726,7 +2717,7 @@ def test_inbound_write_operations_are_disabled_by_default(tmp_path: Path) -> Non
     )
     symbol_out = handle_assistant_request(
         AssistantRequest(
-            text="增加监控标的 700 put",
+            text="/symbol add 700 put",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_disabled_symbol",
@@ -4031,7 +4022,7 @@ def test_assistant_cli_pending_and_audit_diagnostics(monkeypatch: pytest.MonkeyP
     audit_db = tmp_path / "inbound.sqlite3"
     preview = handle_assistant_request(
         AssistantRequest(
-            text="记录开仓 sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
+            text="/record-open sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_cli_pending_preview",
@@ -4086,7 +4077,7 @@ def test_assistant_cli_pending_and_audit_diagnostics(monkeypatch: pytest.MonkeyP
     pending_text = capsys.readouterr().out
     assert text_rc == 0
     assert "Inbound pending：1 条" in pending_text
-    assert f"确认：确认记录 {preview['data']['operation_id']}" in pending_text
+    assert f"确认：/confirm trade {preview['data']['operation_id']}" in pending_text
 
     audit_rc = cli.main(
         [

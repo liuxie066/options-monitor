@@ -133,7 +133,7 @@ def test_validate_config_rejects_invalid_assistant_llm_config() -> None:
         mod.validate_config(cfg)
         raise AssertionError("expected SystemExit")
     except SystemExit as exc:
-        assert "assistant.llm.enabled is retired; use assistant.planner.enabled" in str(exc)
+        assert "assistant.llm.enabled is retired; use assistant.agent_loop.enabled" in str(exc)
 
     cfg = _base_cfg()
     cfg["assistant"] = {"llm": {"provider": ["openai"]}}

@@ -26,7 +26,7 @@ def preview_request_perception_from_payload(
         raise AgentToolError(
             code="PERMISSION_DENIED",
             message=f"{intent_name or 'missing'} is not an allowed assistant preview capability.",
-            hint="Model preview requests may only target planner-allowed preview capabilities; confirm/apply must use deterministic commands.",
+            hint="Model preview requests may only target AgentLoop-approved preview capabilities; confirm/apply must use permission responses.",
             details={"intent_name": intent_name, "allowed_preview_intents": _allowed_preview_intents()},
         )
 

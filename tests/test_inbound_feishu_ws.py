@@ -487,7 +487,7 @@ def test_feishu_ws_replies_when_allowed_sender_hits_write_gate(monkeypatch, tmp_
     out = handle_feishu_ws_event(
         _message_payload(
             sender="ou_1",
-            text="记录开仓 sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
+            text="/record-open sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
         ),
         settings=FeishuWsSettings(
             allowed_senders="feishu:ou_1",

@@ -14,9 +14,10 @@ from src.application.assistant.contracts import (
     PerceptionResult,
     ReasoningResolution,
 )
-from src.application.assistant.deterministic_commands import parse_deterministic_text
+from src.application.assistant.command_parser import parse_assistant_command
 from src.application.assistant.observation import build_observation
 from src.application.assistant.operation_store import InboundOperationStore
+from src.application.assistant.permission_response import parse_permission_response
 from src.application.assistant.policy import enforce_sender_allowed
 from src.application.assistant.reasoning import resolve_reasoning
 from src.application.assistant.renderer import render_inbound_text
@@ -88,7 +89,12 @@ def handle_assistant_request(
             sender_id=normalized_request.sender_id,
             allowed_senders=allowed_senders,
         )
-        perception = _parse_perception(normalized_request.text, now_fn=now_fn, parse_perception_fn=parse_perception_fn)
+        perception = _parse_perception(
+            normalized_request,
+            store=store,
+            now_fn=now_fn,
+            parse_perception_fn=parse_perception_fn,
+        )
         resolution = resolve_reasoning(perception, request=normalized_request)
         action = perform_action(
             perception=perception,
@@ -131,14 +137,29 @@ def handle_assistant_request(
 
 
 def _parse_perception(
-    text: str,
+    request: AssistantRequest,
     *,
+    store: InboundAuditStore,
     now_fn: Callable[[], date] | None,
     parse_perception_fn: ParsePerceptionFn | None,
 ) -> PerceptionResult:
     if parse_perception_fn is not None:
-        return parse_perception_fn(text, now_fn)
-    return parse_deterministic_text(text, now_fn=now_fn)
+        return parse_perception_fn(request.text, now_fn)
+    command = parse_assistant_command(request.text, now_fn=now_fn)
+    if command is not None:
+        return command
+    permission_response = parse_permission_response(
+        request.text,
+        request=request,
+        store=InboundOperationStore(store.path),
+    )
+    if permission_response is not None:
+        return permission_response
+    raise AgentToolError(
+        code="AGENT_LOOP_REQUIRED",
+        message="自然语言请求必须通过 Assistant AgentLoop 处理。",
+        hint="请使用 handle_assistant_message，或改用明确 slash command，例如 /status、/pending。",
+    )
 
 
 def _success_response(

@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 1.2.325 - 2026-06-22
+
+### Changed
+- Split Inbound Assistant routing into explicit slash protocol commands, bound pending-operation permission responses,
+  and AgentLoop natural-language handling so ordinary Chinese analysis/query text no longer falls back to keyword
+  business-tool parsing.
+- Made `assistant.agent_loop.enabled` the primary Assistant loop switch while keeping `assistant.planner.enabled` as a
+  deprecated compatibility alias in config/status payloads.
+
+### Fixed
+- Updated manual trade, symbol, upgrade, and model preview receipts to show canonical `/confirm ...` and `/cancel ...`
+  commands while still accepting short Chinese confirmation replies only when they bind to an existing pending
+  operation.
+
 ## 1.2.324 - 2026-06-20
 
 ### Fixed

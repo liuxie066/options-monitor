@@ -62,12 +62,17 @@ The current code still uses names such as `AssistantRequest`,
 `ObservationResponse`, and `AgentSessionSnapshot`. Treat them as
 implementation handles inside the same Agent loop, not as separate runtime
 layers. `assistant.mode` is retired and unsupported; the active product controls
-are `assistant.enabled` and `assistant.planner.enabled`.
+are `assistant.enabled` and `assistant.agent_loop.enabled`.
+`assistant.planner.enabled` is accepted only as a deprecated compatibility
+alias.
 
 The authority split is:
 
-- `Understand` may parse commands, use deterministic parsing as a safety
-  component, or ask the AgentLoop Planner for a bounded plan.
+- `ProtocolGate` owns explicit slash commands and never calls LLM.
+- `PermissionResponseGate` owns confirm/cancel phrases only when they bind to an
+  existing pending operation in the same sender/channel/conversation scope.
+- `Understand` sends every other non-slash natural-language message into
+  AgentLoop.
 - `Decide` owns sender checks, capability support, policy, risk class, and
   whether the next action is `allow`, `preview`, `ask`, `deny`, or `defer`.
 - `Act` may execute read/local tools or create a `PendingOperation`.
@@ -99,8 +104,8 @@ Slash commands are the deterministic read surface. They do not call LLM:
 | `/logs <run_id>` | `runtime_logs` |
 | `/symbols` | monitored symbols |
 
-Natural-language read requests are planner territory when
-`assistant.planner.enabled=true`. For example, `状态`, `持仓 sy`, `这个月赚了多少`,
+Natural-language read requests are AgentLoop territory when
+`assistant.agent_loop.enabled=true`. For example, `状态`, `持仓 sy`, `这个月赚了多少`,
 `指派正股持仓盈亏`, `分析 long call 是不是应该平仓`, and `现在泡泡玛特 sell put 的 max strike 是多少`
 must be planned as bounded read-only capabilities such as
 `runtime_status`, `option_positions_read`, `monthly_income_report`,
@@ -146,17 +151,16 @@ For long-running Feishu WS, `config.assistant.json` currently controls the Inbou
 ```yaml
 assistant:
   enabled: true
-  planner:
+  agent_loop:
     enabled: false
   context_window_messages: 8
 ```
 
 This keeps OM Copilot enabled while disabling model planning. Unknown slash
-commands return clarification; non-slash messages are limited to local helper
-aliases, pending-operation aliases, and explicit preview/confirm/cancel
-phrases. Natural-language read requests return clarification unless planner
-routing is enabled. Supported active states are `assistant.enabled=true|false`
-and `assistant.planner.enabled=true|false`.
+commands return clarification; non-slash messages require AgentLoop and return
+clarification/error when `assistant.agent_loop.enabled=false`. Supported active
+states are `assistant.enabled=true|false` and
+`assistant.agent_loop.enabled=true|false`.
 
 By default, `default_market_scope` is intentionally unset. Feishu WS should receive an explicit `--config-key us|hk` or `--config-path` when it is bound to one market. Only set `assistant.default_market_scope: us|hk|all` when that default is an explicit product decision for Inbound.
 
@@ -180,20 +184,20 @@ assistant:
       max_output_tokens: 512
 ```
 
-When `assistant.planner.enabled` is true, non-slash natural language enters the
-AgentLoop Planner. Slash commands remain command-first and never call LLM. The
-Planner may plan pure-read tools directly, or exactly one preview-write
+When `assistant.agent_loop.enabled` is true, non-slash natural language enters
+AgentLoop. Slash commands remain command-first and never call LLM. AgentLoop may
+plan pure-read tools directly, or exactly one preview-write
 capability such as `manual_trade_open`, `manual_trade_close`,
 `manual_assignment`, `manual_expiry`, `manual_trade_update`, `symbol_edit`,
 `model_use`, or `upgrade_now`.
 Preview-write plans create pending previews through the existing operation
 handlers only; they cannot confirm, cancel, apply, notify externally, write the
 ledger, write config directly, operate services, or send proactive messages.
-Deterministic command aliases stay as fallback/shadow evidence for local helper
-messages, pending operations, and preview/confirm/cancel phrases. Slash commands
-remain command-first. Natural-language read queries should be handled by the
-Planner or rejected with clarification; they should not be recovered through
-keyword fallback.
+PermissionResponseGate handles confirm/cancel phrases only after binding them
+to an existing pending operation. Slash commands remain command-first.
+Natural-language read and preview requests should be handled by AgentLoop or
+rejected with clarification; they should not be recovered through keyword
+fallback.
 
 The command surface authority is `src/application/assistant/capability_catalog.py`. Slash command metadata, the LLM tool surface, and inbound help text should use that catalog instead of maintaining separate command lists.
 
@@ -210,7 +214,7 @@ Supported providers:
 - `deepseek`: uses DeepSeek's OpenAI-compatible Chat Completions API. Leave `base_url` empty or set `https://api.deepseek.com`; OM calls `/chat/completions` and requests `response_format: {"type":"json_object"}`.
 
 To enable it, set the API key in the local env file or deployment env file, then
-enable `assistant.planner.enabled` and choose `assistant.active_model` in
+enable `assistant.agent_loop.enabled` and choose `assistant.active_model` in
 `config.yaml`:
 
 ```bash
@@ -548,19 +552,20 @@ The rendered `options-monitor-wechat-clawbot.service` passes `--lock-path` so on
 ## LLM Translator
 
 LLM planning is opt-in and inactive unless `assistant.enabled` and
-`assistant.planner.enabled` are both true. In that state, non-slash natural
-language is routed through the AgentLoop Planner first; deterministic parsing is
-fallback/shadow evidence and the authority for command/confirm/cancel/apply
-messages. Slash commands are resolved by the Inbound command catalog before LLM
-and do not call the Planner.
+`assistant.agent_loop.enabled` are both true. In that state, non-slash natural
+language is routed through AgentLoop. Deterministic code is the authority for
+slash protocol commands, bound permission responses, tool execution, verifier
+fallbacks, and confirm/cancel/apply operation boundaries. It is not a
+natural-language fallback router. Slash commands are resolved by the Inbound
+command catalog before LLM and do not call AgentLoop.
 
 The current provider adapters use OpenAI Responses API for `openai` and Chat
 Completions JSON output for `deepseek`. They produce an `om-tool-plan-v2`
 capability plan for the AgentLoop. The plan describes the goal, required
 capabilities, and tool steps; AgentLoop decides the final answer path from the
-task, tool contracts, and gathered evidence. Planner read steps still go
-through the read whitelist before execution. Planner preview-write steps are
-converted back into the same operation preview path as deterministic commands, so
+task, tool contracts, and gathered evidence. AgentLoop read steps still go
+through the read whitelist before execution. AgentLoop preview-write steps are
+converted back into the same operation preview path as explicit commands, so
 sender allowlist, operation gates, preview storage, audit, idempotency, and later
 explicit confirmation still apply. Low-confidence or incomplete requests must
 return clarification.
@@ -655,20 +660,21 @@ Write actions use:
 request -> preview -> command_id -> explicit confirmation -> re-validate -> execute -> receipt
 ```
 
-The preview may be initiated by a deterministic slash/natural-language command
-or by an approved `agent_loop` Planner preview capability. Confirmation is not
-planner-visible: it must come from a deterministic confirm command, match an
-existing pending operation, and pass the configured sender, env, HMAC, TTL, and
-operation-family gates.
+The preview may be initiated by an explicit slash command or by an approved
+AgentLoop preview capability. Confirmation is not model-visible: it must come
+from ProtocolGate (`/confirm ...` / `/cancel ...`) or PermissionResponseGate
+(`确认记录`, `取消升级`, and similar bound replies), match an existing pending
+operation, and pass the configured sender, env, HMAC, TTL, and operation-family
+gates.
 
 Supported write commands:
 
 | Text | Preview intent | Confirm | Cancel |
 | --- | --- | --- | --- |
-| `记录开仓 ...` / `记录平仓 ...` | `manual_trade_*` | `确认记录 [operation_id]` | `取消记录 [operation_id]` |
-| 富途 `期权被指派通知` / `期权到期失效通知` | `manual_assignment` / `manual_expiry` | `确认记录 [operation_id]` | `取消记录 [operation_id]` |
-| `增加/修改/删除监控标的 ...` | `symbol_*` | `确认监控 [operation_id]` | `取消监控 [operation_id]` |
-| `立即升级` / `立即升级到 v<version>` | `upgrade_now` | `确认升级 [operation_id]` | `取消升级 [operation_id]` |
-| `/model use <name>` | `model_use` | `确认模型 [operation_id]` | `取消模型 [operation_id]` |
+| `/record-open ...` / `/record-close ...` or AgentLoop preview | `manual_trade_*` | `/confirm trade [operation_id]` or bound `确认记录` | `/cancel trade [operation_id]` or bound `取消记录` |
+| Futu assignment/expiry notice via AgentLoop preview | `manual_assignment` / `manual_expiry` | `/confirm trade [operation_id]` or bound `确认记录` | `/cancel trade [operation_id]` or bound `取消记录` |
+| `/symbol add|edit|remove ...` or AgentLoop preview | `symbol_*` | `/confirm symbol [operation_id]` or bound `确认监控` | `/cancel symbol [operation_id]` or bound `取消监控` |
+| `/upgrade [v<version>]` or AgentLoop preview | `upgrade_now` | `/confirm upgrade [operation_id]` or bound `确认升级` | `/cancel upgrade [operation_id]` or bound `取消升级` |
+| `/model use <name>` | `model_use` | `/confirm model [operation_id]` or bound `确认模型` | `/cancel model [operation_id]` or bound `取消模型` |
 
 `立即升级` delegates to the same service upgrade path as `./om update apply --auto --confirm`. The preview does not switch releases. Confirmation only records the confirmation and starts an independent `assistant upgrade-worker`; the worker runs the upgrade, writes the final applied/failed result, and sends the final Feishu receipt after service restarts.

@@ -200,7 +200,7 @@ def _candidate_hint(prefix: str, candidates: Any) -> str:
 
 
 def _symbol_candidate_hint(action: str, candidates: Any) -> str:
-    return _candidate_hint("确认监控" if action == "确认" else "取消监控", candidates)
+    return _candidate_hint("/confirm symbol" if action == "确认" else "/cancel symbol", candidates)
 
 
 def _build_operation_payload(
@@ -643,10 +643,10 @@ def render_symbol_response(
             [
                 "",
                 "未写入配置。",
-                "确认写入请回复：确认监控",
-                "取消请回复：取消监控",
+                f"确认写入请回复：/confirm symbol {operation_id}",
+                f"取消请回复：/cancel symbol {operation_id}",
                 f"operation_id：{operation_id}",
-                f"如同时有多条待确认，请回复：确认监控 {operation_id}",
+                "同一对话只有一条待确认监控变更时，也可以回复：确认监控 / 取消监控",
             ]
         )
         if expires_at:
