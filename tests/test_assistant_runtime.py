@@ -53,7 +53,7 @@ from src.application.assistant.perception_trace import ASSISTANT_DECISION_SCHEMA
 from src.application.assistant.llm_common import provider_api_kind, provider_endpoint_url, supported_llm_providers
 from src.application.assistant.llm_reply import LlmReplyResult, generate_general_reply
 from src.application.assistant.renderer import render_canonical_tool_result
-from src.application.assistant.settings import PlannerSettings
+from src.application.assistant.settings import AgentLoopSettings
 from src.application.assistant.session_store import AgentSessionStore, collect_assistant_trace
 from src.application.assistant.task_contract import (
     TASK_CONTRACT_SCHEMA_VERSION,
@@ -76,6 +76,7 @@ from src.application.agent_tool_registry import get_tool_definition
 from src.application.assistant.reasoning import CONFIG_SCOPED_INTENTS
 from src.application.assistant.audit import InboundAuditStore
 from src.application.assistant.contracts import PERCEPTION_RESULT_SCHEMA_VERSION, AssistantRequest, PerceptionResult, ToolCall
+from src.application.assistant.operation_store import InboundOperationStore
 from src.infrastructure.openai_chat_completions import create_chat_completion_from_payload, create_json_chat_completion, extract_chat_completion_text
 from src.infrastructure.openai_chat_completions import create_tool_call_chat_completion
 from src.infrastructure.openai_responses import OpenAIResponsesError, create_response_from_payload, create_structured_response, create_tool_call_response, extract_response_text
@@ -547,9 +548,9 @@ def test_assistant_command_catalog_drives_llm_allowed_surface() -> None:
     assert "只读查询" in payload["help_text"]
     assert "记录开仓：记录开仓" in payload["help_text"]
     assert "收益 [账户] [YYYY-MM|6月|本月|上月]" in payload["help_text"]
-    assert "立即升级到 v<version>" in payload["help_text"]
+    assert "/upgrade v<version>" in payload["help_text"]
     assert "收益 sy 2026-05" not in payload["help_text"]
-    assert "立即升级到 v1.2.111" not in payload["help_text"]
+    assert "/upgrade v1.2.111" not in payload["help_text"]
     assert "确认记录、确认监控、确认升级" in payload["help_text"]
     assert "写操作只会先返回预览" in payload["help_text"]
 
@@ -1944,23 +1945,22 @@ def test_agent_loop_notification_explanation_keeps_read_preview_authority() -> N
 def test_assistant_deterministic_commands_exclude_read_aliases() -> None:
     from src.application.assistant.deterministic_commands import parse_deterministic_text
 
-    assert parse_deterministic_text("我能做什么").intent_name == "help"
-    assert parse_deterministic_text("有哪些功能").intent_name == "help"
-    assert parse_deterministic_text("pending").intent_name == "pending_operations"
+    assert parse_deterministic_text("/help").intent_name == "help"
+    assert parse_deterministic_text("/pending").intent_name == "pending_operations"
 
-    for text in ("自检", "配置是否正常", "config", "positions", "income", "runs", "最近任务", "symbols", "监控标的有哪些"):
+    for text in ("我能做什么", "有哪些功能", "自检", "配置是否正常", "config", "positions", "income", "runs", "最近任务", "symbols", "监控标的有哪些"):
         try:
             parse_deterministic_text(text)
         except AgentToolError as err:
             assert err.code == "NEEDS_CLARIFICATION"
-            assert "/status" in str(err.hint)
+            assert "AgentLoop" in str(err.hint)
         else:
-            raise AssertionError(f"{text} should use slash command or assistant planner")
+            raise AssertionError(f"{text} should use slash command or AgentLoop")
 
     try:
         parse_deterministic_text("查一下")
     except AgentToolError as err:
-        assert "/positions" in str(err.hint)
+        assert "AgentLoop" in str(err.hint)
     else:
         raise AssertionError("unknown input should request clarification")
 
@@ -2466,7 +2466,18 @@ def test_assistant_runtime_does_not_deterministically_fallback_for_read_text(tmp
 
     assert out["ok"] is False
     assert out["error"]["code"] == "NEEDS_CLARIFICATION"
-    assert "/status" in out["error"]["hint"]
+    assert out["meta"]["assistant"]["route"] == "agent_loop"
+    perception_trace = out["meta"]["assistant"]["perception_trace"]
+    assert perception_trace["decision"] == "needs_clarification"
+    assert perception_trace["selected_source"] is None
+    assert perception_trace["candidates"][0]["source"] == "agent_loop"
+    assert perception_trace["candidates"][0]["error_code"] == "NEEDS_CLARIFICATION"
+    assert perception_trace["candidates"][1] == {"source": "command", "status": "skipped", "reason": "not_command"}
+    assert perception_trace["candidates"][2] == {
+        "source": "permission_response",
+        "status": "skipped",
+        "reason": "not_permission_response",
+    }
     assert calls == []
 
 
@@ -2525,10 +2536,10 @@ def test_agent_loop_mode_does_not_mark_deterministic_command_as_loop_tool_use(tm
     assert perception_trace["selected_perception"]["intent_name"] == "runtime_status"
     assert perception_trace["candidates"][0]["source"] == "command"
     assert perception_trace["candidates"][0]["status"] == "accepted"
-    assert perception_trace["candidates"][-1] == {"source": "llm", "status": "skipped", "reason": "command_selected"}
+    assert perception_trace["candidates"][-1] == {"source": "agent_loop", "status": "skipped", "reason": "command_selected"}
 
 
-def test_assistant_runtime_records_deterministic_pending_trace_in_audit(tmp_path: Path) -> None:
+def test_assistant_runtime_records_command_pending_trace_in_audit(tmp_path: Path) -> None:
     audit_db = tmp_path / "inbound.sqlite3"
     calls: list[tuple[str, dict[str, Any]]] = []
 
@@ -2538,7 +2549,7 @@ def test_assistant_runtime_records_deterministic_pending_trace_in_audit(tmp_path
 
     out = handle_assistant_message(
         AssistantRequest(
-            text="待确认",
+            text="/pending",
             sender_id="local",
             message_id="msg_deterministic_perception_trace",
             config_key="us",
@@ -2550,28 +2561,30 @@ def test_assistant_runtime_records_deterministic_pending_trace_in_audit(tmp_path
     assert out["ok"] is True
     assert calls == []
     perception_trace = out["meta"]["assistant"]["perception_trace"]
-    assert perception_trace["decision"] == "deterministic_fallback_selected"
-    assert perception_trace["selected_source"] == "deterministic"
+    assert perception_trace["decision"] == "command_selected"
+    assert perception_trace["selected_source"] == "command"
     assert perception_trace["selected_perception"]["intent_name"] == "pending_operations"
-    assert perception_trace["conflict"] is False
-    assert perception_trace["candidates"][0]["source"] == "agent_loop"
-    assert perception_trace["candidates"][0]["status"] == "skipped"
-    assert perception_trace["candidates"][0]["reason"] == "disabled"
-    assert perception_trace["candidates"][1] == {
-        "source": "deterministic",
+    assert perception_trace["candidates"][0] == {
+        "source": "command",
         "status": "accepted",
         "perception": {
             "schema_version": PERCEPTION_RESULT_SCHEMA_VERSION,
             "intent_name": "pending_operations",
             "arguments": {},
-            "source": "deterministic",
+            "source": "command",
             "confidence": 1.0,
             "evidence": {},
         },
         "intent_name": "pending_operations",
-        "perception_source": "deterministic",
+        "perception_source": "command",
         "confidence": 1.0,
     }
+    assert perception_trace["candidates"][1] == {
+        "source": "permission_response",
+        "status": "skipped",
+        "reason": "command_selected",
+    }
+    assert perception_trace["candidates"][2] == {"source": "agent_loop", "status": "skipped", "reason": "command_selected"}
 
     recent = InboundAuditStore(audit_db).list_recent(limit=1)
     assert len(recent) == 1
@@ -2579,16 +2592,16 @@ def test_assistant_runtime_records_deterministic_pending_trace_in_audit(tmp_path
     assert audited_response["meta"]["assistant"]["perception_trace"] == perception_trace
     decision = out["meta"]["assistant"]["decision"]
     assert decision["schema_version"] == ASSISTANT_DECISION_SCHEMA_VERSION
-    assert decision["route"] == "deterministic"
-    assert decision["selected_source"] == "deterministic"
+    assert decision["route"] == "command"
+    assert decision["selected_source"] == "command"
     assert decision["selected_intent_name"] == "pending_operations"
-    assert decision["perception_decision"] == "deterministic_fallback_selected"
+    assert decision["perception_decision"] == "command_selected"
     assert decision["execution_contract"]["read_only"] is True
     assert decision["execution_contract"]["direct_writes_allowed"] is False
     assert audited_response["meta"]["assistant"]["decision"] == decision
 
 
-def test_assistant_runtime_falls_back_to_deterministic_when_llm_unavailable(tmp_path: Path) -> None:
+def test_assistant_runtime_does_not_fallback_when_llm_unavailable(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
 
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -2608,21 +2621,24 @@ def test_assistant_runtime_falls_back_to_deterministic_when_llm_unavailable(tmp_
         ),
     )
 
-    assert out["ok"] is True
+    assert out["ok"] is False
+    assert out["error"]["code"] == "LLM_UNAVAILABLE"
     assert calls == []
-    assert out["data"]["perception"]["intent_name"] == "small_talk"
-    assert out["meta"]["assistant"]["route"] == "deterministic"
+    assert out["meta"]["assistant"]["route"] == "agent_loop"
     assert out["meta"]["assistant"]["llm"]["reason"] == "missing_api_key"
     perception_trace = out["meta"]["assistant"]["perception_trace"]
-    assert perception_trace["decision"] == "deterministic_fallback_selected"
-    assert perception_trace["selected_source"] == "deterministic"
+    assert perception_trace["decision"] == "agent_loop_error"
+    assert perception_trace["selected_source"] is None
     assert perception_trace["candidates"][0]["source"] == "agent_loop"
     assert perception_trace["candidates"][0]["status"] == "rejected"
     assert perception_trace["candidates"][0]["reason"] == "missing_api_key"
     assert perception_trace["candidates"][0]["error_code"] == "LLM_UNAVAILABLE"
-    assert perception_trace["candidates"][1]["source"] == "deterministic"
-    assert perception_trace["candidates"][1]["status"] == "accepted"
-    assert perception_trace["candidates"][1]["intent_name"] == "small_talk"
+    assert perception_trace["candidates"][1] == {"source": "command", "status": "skipped", "reason": "not_command"}
+    assert perception_trace["candidates"][2] == {
+        "source": "permission_response",
+        "status": "skipped",
+        "reason": "not_permission_response",
+    }
 
 
 def test_assistant_runtime_agent_loop_can_create_approved_write_preview(tmp_path: Path) -> None:
@@ -2665,14 +2681,31 @@ def test_assistant_runtime_agent_loop_can_create_approved_write_preview(tmp_path
     assert trace["candidates"][0]["source"] == "agent_loop"
     assert trace["candidates"][0]["status"] == "accepted"
     assert trace["candidates"][0]["intent_name"] == "manual_trade_open"
-    assert trace["candidates"][1]["source"] == "deterministic"
-    assert trace["candidates"][1]["status"] == "accepted"
-    assert trace["candidates"][1]["intent_name"] == "manual_trade_open"
+    assert trace["candidates"][1] == {"source": "command", "status": "skipped", "reason": "not_command"}
+    assert trace["candidates"][2] == {
+        "source": "permission_response",
+        "status": "skipped",
+        "reason": "not_permission_response",
+    }
 
 
 def test_assistant_runtime_agent_loop_prioritizes_bare_upgrade_confirm_over_planner(tmp_path: Path) -> None:
     settings = AssistantSettings(
         llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+    )
+    audit_db = tmp_path / "inbound.sqlite3"
+    operation_id = "in_upgrade_test_1"
+    InboundOperationStore(audit_db).save_preview(
+        operation_id=operation_id,
+        command_id="cmd_upgrade_preview",
+        channel="local",
+        sender_id="local",
+        conversation_id="local:local",
+        operation_type="upgrade_now",
+        payload_hash="hash_upgrade_test_1",
+        payload={"target_version": "v1.2.325"},
+        preview={"summary": "upgrade preview"},
+        ttl_seconds=600,
     )
     plan_calls: list[str] = []
 
@@ -2689,9 +2722,9 @@ def test_assistant_runtime_agent_loop_prioritizes_bare_upgrade_confirm_over_plan
             text="确认升级",
             sender_id="local",
             message_id="msg_bare_upgrade_confirm_deterministic_priority",
-            audit_db=str(tmp_path / "inbound.sqlite3"),
+            audit_db=str(audit_db),
         ),
-        audit_store=InboundAuditStore(tmp_path / "inbound.sqlite3"),
+        audit_store=InboundAuditStore(audit_db),
         settings=settings,
         model_turn_fn=_plan,
     )
@@ -2700,19 +2733,23 @@ def test_assistant_runtime_agent_loop_prioritizes_bare_upgrade_confirm_over_plan
 
     assert plan_calls == []
     assert perception.intent_name == "upgrade_confirm"
-    assert perception.arguments == {"operation_id": None, "operation_resolution": "latest_pending"}
-    assert perception.source == "deterministic"
-    assert engine.route == "deterministic"
-    assert engine.llm_trace["reason"] == "deterministic_operation_command"
+    assert perception.arguments == {"operation_id": operation_id, "operation_resolution": "permission_response"}
+    assert perception.source == "permission_response"
+    assert engine.route == "permission_response"
+    assert engine.llm_trace["reason"] == "permission_response"
     assert engine.trace is not None
     trace = engine.trace.public_payload()
-    assert trace["decision"] == "deterministic_fallback_selected"
-    assert trace["selected_source"] == "deterministic"
-    assert trace["candidates"][0]["source"] == "deterministic"
-    assert trace["candidates"][0]["status"] == "accepted"
-    assert trace["candidates"][1]["source"] == "agent_loop"
-    assert trace["candidates"][1]["status"] == "skipped"
-    assert trace["candidates"][1]["reason"] == "deterministic_operation_command"
+    assert trace["decision"] == "permission_response_selected"
+    assert trace["selected_source"] == "permission_response"
+    assert trace["candidates"][0] == {"source": "command", "status": "skipped", "reason": "not_command"}
+    assert trace["candidates"][1]["source"] == "permission_response"
+    assert trace["candidates"][1]["status"] == "accepted"
+    assert trace["candidates"][1]["intent_name"] == "upgrade_confirm"
+    assert trace["candidates"][2] == {
+        "source": "agent_loop",
+        "status": "skipped",
+        "reason": "permission_response_selected",
+    }
 
 
 def test_assistant_runtime_does_not_fallback_for_unknown_llm_permission_denial(tmp_path: Path) -> None:
@@ -2750,13 +2787,16 @@ def test_assistant_runtime_does_not_fallback_for_unknown_llm_permission_denial(t
     assert out["error"]["details"]["tool_name"] == "unsupported_project_command"
     assert out["meta"]["assistant"]["route"] == "agent_loop"
     perception_trace = out["meta"]["assistant"]["perception_trace"]
-    assert perception_trace["decision"] == "llm_error"
+    assert perception_trace["decision"] == "agent_loop_error"
     assert perception_trace["selected_source"] is None
     assert perception_trace["candidates"][0]["source"] == "agent_loop"
     assert perception_trace["candidates"][0]["error_code"] == "PERMISSION_DENIED"
-    assert perception_trace["candidates"][1]["source"] == "deterministic"
-    assert perception_trace["candidates"][1]["status"] == "rejected"
-    assert perception_trace["candidates"][1]["error_code"] == "NEEDS_CLARIFICATION"
+    assert perception_trace["candidates"][1] == {"source": "command", "status": "skipped", "reason": "not_command"}
+    assert perception_trace["candidates"][2] == {
+        "source": "permission_response",
+        "status": "skipped",
+        "reason": "not_permission_response",
+    }
     assert calls == []
 
 
@@ -2795,13 +2835,16 @@ def test_assistant_runtime_does_not_fallback_for_mismatched_known_llm_denial(tmp
     assert out["error"]["details"]["preview_capabilities"] == ["manual_trade_open"]
     assert out["meta"]["assistant"]["route"] == "agent_loop"
     perception_trace = out["meta"]["assistant"]["perception_trace"]
-    assert perception_trace["decision"] == "llm_error"
+    assert perception_trace["decision"] == "agent_loop_error"
     assert perception_trace["selected_source"] is None
     assert perception_trace["candidates"][0]["source"] == "agent_loop"
     assert perception_trace["candidates"][0]["error_code"] == "PLAN_RISK_MISMATCH"
-    assert perception_trace["candidates"][1]["source"] == "deterministic"
-    assert perception_trace["candidates"][1]["status"] == "rejected"
-    assert perception_trace["candidates"][1]["error_code"] == "NEEDS_CLARIFICATION"
+    assert perception_trace["candidates"][1] == {"source": "command", "status": "skipped", "reason": "not_command"}
+    assert perception_trace["candidates"][2] == {
+        "source": "permission_response",
+        "status": "skipped",
+        "reason": "not_permission_response",
+    }
     assert calls == []
 
 
@@ -2866,7 +2909,7 @@ def test_assistant_runtime_keeps_llm_disabled_for_unrecognized_text(tmp_path: Pa
     assert out["meta"]["assistant"]["llm"]["reason"] == "disabled"
 
 
-def test_assistant_runtime_skips_agent_loop_when_planner_is_disabled(tmp_path: Path) -> None:
+def test_assistant_runtime_skips_agent_loop_when_agent_loop_is_disabled(tmp_path: Path) -> None:
     out = handle_assistant_message(
         AssistantRequest(
             text="查一下",
@@ -2875,17 +2918,18 @@ def test_assistant_runtime_skips_agent_loop_when_planner_is_disabled(tmp_path: P
             audit_db=str(tmp_path / "inbound.sqlite3"),
         ),
         settings=AssistantSettings(
-            planner=PlannerSettings(enabled=False),
+            agent_loop=AgentLoopSettings(enabled=False),
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
     )
 
     assert out["ok"] is False
-    assert out["error"]["code"] == "NEEDS_CLARIFICATION"
-    assert out["meta"]["assistant"]["route"] == "deterministic"
+    assert out["error"]["code"] == "AGENT_LOOP_DISABLED"
+    assert out["meta"]["assistant"]["route"] == "agent_loop_disabled"
+    assert out["meta"]["assistant"]["agent_loop"]["enabled"] is False
     assert out["meta"]["assistant"]["planner"]["enabled"] is False
     assert out["meta"]["assistant"]["llm"]["attempted"] is False
-    assert out["meta"]["assistant"]["llm"]["reason"] == "planner_disabled"
+    assert out["meta"]["assistant"]["llm"]["reason"] == "agent_loop_disabled"
 
 
 def test_assistant_runtime_agent_loop_routes_read_text_without_deterministic_alias(tmp_path: Path) -> None:
@@ -2932,9 +2976,12 @@ def test_assistant_runtime_agent_loop_routes_read_text_without_deterministic_ali
     assert perception_trace["candidates"][0]["source"] == "agent_loop"
     assert perception_trace["candidates"][0]["status"] == "accepted"
     assert perception_trace["candidates"][0]["intent_name"] == "tool_loop"
-    assert perception_trace["candidates"][1]["source"] == "deterministic"
-    assert perception_trace["candidates"][1]["status"] == "rejected"
-    assert perception_trace["candidates"][1]["error_code"] == "NEEDS_CLARIFICATION"
+    assert perception_trace["candidates"][1] == {"source": "command", "status": "skipped", "reason": "not_command"}
+    assert perception_trace["candidates"][2] == {
+        "source": "permission_response",
+        "status": "skipped",
+        "reason": "not_permission_response",
+    }
 
 
 def test_assistant_runtime_agent_loop_routes_provider_events_without_tool_plan_bridge(tmp_path: Path) -> None:
@@ -3010,7 +3057,7 @@ def test_assistant_runtime_agent_loop_routes_provider_events_without_tool_plan_b
     assert out["meta"]["assistant"]["llm"]["agent_loop"]["tool_events"][0]["planner_plan_used"] is False
 
 
-def test_assistant_runtime_rejects_llm_preview_write_conflict_with_deterministic_intent(tmp_path: Path) -> None:
+def test_assistant_runtime_slash_record_update_bypasses_agent_loop(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
 
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -3018,21 +3065,15 @@ def test_assistant_runtime_rejects_llm_preview_write_conflict_with_deterministic
         return build_response(tool_name=tool_name, ok=True, data={})
 
     def _plan(
-        text: str,
+        _text: str,
         _runtime_settings: AssistantSettings,
-        conversation_context: dict[str, Any] | None,
+        _conversation_context: dict[str, Any] | None,
     ) -> ModelTurnResult:
-        assert text == "premium 改成 2.75"
-        assert conversation_context is not None
-        return _model_turn_result(
-            "symbol_edit",
-            {"symbol": "NVDA", "set": {"sell_call.min_strike": 140}},
-            goal=text,
-        )
+        raise AssertionError("slash protocol commands must bypass AgentLoop")
 
     out = handle_assistant_message(
         AssistantRequest(
-            text="premium 改成 2.75",
+            text="/record-update premium_per_share=2.75",
             sender_id="local",
             message_id="msg_llm_symbol_edit_conflicts_with_trade_update",
             audit_db=str(tmp_path / "inbound.sqlite3"),
@@ -3045,21 +3086,22 @@ def test_assistant_runtime_rejects_llm_preview_write_conflict_with_deterministic
     )
 
     assert out["ok"] is False
-    assert out["error"]["code"] == "NEEDS_CLARIFICATION"
-    assert out["error"]["details"] == {
-        "llm_intent_name": "symbol_edit",
-        "deterministic_intent_name": "manual_trade_update",
-    }
+    assert out["error"]["code"] == "PERMISSION_DENIED"
     assert calls == []
-    assert out["meta"]["assistant"]["route"] == "agent_loop"
+    assert out["meta"]["assistant"]["route"] == "command"
+    assert out["meta"]["assistant"]["llm"]["reason"] == "command"
     perception_trace = out["meta"]["assistant"]["perception_trace"]
-    assert perception_trace["decision"] == "llm_conflict_needs_clarification"
-    assert perception_trace["selected_source"] is None
-    assert perception_trace["conflict"] is True
-    assert perception_trace["candidates"][0]["source"] == "agent_loop"
-    assert perception_trace["candidates"][0]["intent_name"] == "tool_loop"
-    assert perception_trace["candidates"][1]["source"] == "deterministic"
-    assert perception_trace["candidates"][1]["intent_name"] == "manual_trade_update"
+    assert perception_trace["decision"] == "command_selected"
+    assert perception_trace["selected_source"] == "command"
+    assert perception_trace["candidates"][0]["source"] == "command"
+    assert perception_trace["candidates"][0]["status"] == "accepted"
+    assert perception_trace["candidates"][0]["intent_name"] == "manual_trade_update"
+    assert perception_trace["candidates"][1] == {
+        "source": "permission_response",
+        "status": "skipped",
+        "reason": "command_selected",
+    }
+    assert perception_trace["candidates"][2] == {"source": "agent_loop", "status": "skipped", "reason": "command_selected"}
 
 
 def test_assistant_runtime_uses_llm_reply_for_non_business_text_after_low_confidence(tmp_path: Path) -> None:
@@ -3198,7 +3240,7 @@ def test_assistant_runtime_does_not_use_llm_reply_for_context_validation_error(t
     assert out["ok"] is False
     assert out["error"]["code"] == "PLAN_CONTEXT_AMBIGUOUS"
     assert out["meta"]["assistant"]["route"] == "agent_loop"
-    assert out["meta"]["assistant"]["perception_trace"]["decision"] == "llm_error"
+    assert out["meta"]["assistant"]["perception_trace"]["decision"] == "agent_loop_error"
 
 
 def test_assistant_runtime_does_not_use_llm_reply_for_write_like_text(tmp_path: Path) -> None:
@@ -3235,7 +3277,7 @@ def test_assistant_runtime_does_not_use_llm_reply_for_write_like_text(tmp_path: 
 
     assert out["ok"] is False
     assert out["error"]["code"] == "NEEDS_CLARIFICATION"
-    assert out["meta"]["assistant"]["route"] == "deterministic"
+    assert out["meta"]["assistant"]["route"] == "agent_loop"
     assert out["meta"]["assistant"]["llm"]["reason"] == "invalid_payload"
 
 
@@ -3332,9 +3374,12 @@ def test_assistant_runtime_routes_valid_llm_plan_through_inbound_router(tmp_path
     assert perception_trace["candidates"][0]["source"] == "agent_loop"
     assert perception_trace["candidates"][0]["status"] == "accepted"
     assert perception_trace["candidates"][0]["intent_name"] == "tool_loop"
-    assert perception_trace["candidates"][1]["source"] == "deterministic"
-    assert perception_trace["candidates"][1]["status"] == "rejected"
-    assert perception_trace["candidates"][1]["error_code"] == "NEEDS_CLARIFICATION"
+    assert perception_trace["candidates"][1] == {"source": "command", "status": "skipped", "reason": "not_command"}
+    assert perception_trace["candidates"][2] == {
+        "source": "permission_response",
+        "status": "skipped",
+        "reason": "not_permission_response",
+    }
     decision = out["meta"]["assistant"]["decision"]
     assert decision["route"] == "agent_loop"
     assert decision["selected_source"] == "agent_loop"
@@ -7331,7 +7376,7 @@ def test_assistant_runtime_agent_loop_rejects_disallowed_plan_tool(tmp_path: Pat
     assert calls == []
     assert out["meta"]["assistant"]["route"] == "agent_loop"
     assert out["meta"]["assistant"]["llm"]["agent_loop"]["steps_used"] == 0
-    assert out["meta"]["assistant"]["perception_trace"]["decision"] == "llm_error"
+    assert out["meta"]["assistant"]["perception_trace"]["decision"] == "agent_loop_error"
 
 
 def test_assistant_runtime_agent_loop_plans_manual_trade_open_preview(monkeypatch: Any, tmp_path: Path) -> None:
@@ -7613,6 +7658,15 @@ def test_assistant_runtime_previews_futu_assignment_notice(monkeypatch: Any, tmp
         "证券所持有的-2张PDD 260618 85.00P期权已被指派，详情请查看资金明细及持仓情况。【富途证券(香港)】"
     )
 
+    def _plan(
+        incoming: str,
+        _settings: AssistantSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> ModelTurnResult:
+        assert incoming == text
+        assert conversation_context is not None
+        return _model_turn_result("manual_assignment", {"account": "sy"}, goal=incoming)
+
     out = handle_assistant_message(
         AssistantRequest(
             text=text,
@@ -7623,6 +7677,10 @@ def test_assistant_runtime_previews_futu_assignment_notice(monkeypatch: Any, tmp
             audit_db=str(tmp_path / "inbound.sqlite3"),
         ),
         allowed_senders="local:local",
+        settings=AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        model_turn_fn=_plan,
         now_fn=lambda: date(2026, 6, 18),
     )
 
@@ -7632,6 +7690,7 @@ def test_assistant_runtime_previews_futu_assignment_notice(monkeypatch: Any, tmp
     assert out["data"]["response_text"].startswith("交易记录预览：被指派")
     assert "未写入账本" in out["data"]["response_text"]
     assert out["data"]["perception"]["intent_name"] == "manual_assignment"
+    assert out["meta"]["assistant"]["route"] == "agent_loop"
     permission_request = out["data"]["permission_request"]
     assert permission_request["operation_type"] == "manual_assignment"
     assert permission_request["apply_allowed"] is False
@@ -7672,6 +7731,15 @@ def test_assistant_runtime_previews_futu_expiry_notice(monkeypatch: Any, tmp_pat
         "证券所持有的-1张TCOM 260618 45.00P期权已到期失效，详情请查看持仓情况。【富途证券(香港)】"
     )
 
+    def _plan(
+        incoming: str,
+        _settings: AssistantSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> ModelTurnResult:
+        assert incoming == text
+        assert conversation_context is not None
+        return _model_turn_result("manual_expiry", {"account": "sy"}, goal=incoming)
+
     out = handle_assistant_message(
         AssistantRequest(
             text=text,
@@ -7682,6 +7750,10 @@ def test_assistant_runtime_previews_futu_expiry_notice(monkeypatch: Any, tmp_pat
             audit_db=str(tmp_path / "inbound.sqlite3"),
         ),
         allowed_senders="local:local",
+        settings=AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        model_turn_fn=_plan,
         now_fn=lambda: date(2026, 6, 18),
     )
 
@@ -7691,6 +7763,7 @@ def test_assistant_runtime_previews_futu_expiry_notice(monkeypatch: Any, tmp_pat
     assert out["data"]["response_text"].startswith("交易记录预览：到期失效")
     assert "未写入账本" in out["data"]["response_text"]
     assert out["data"]["perception"]["intent_name"] == "manual_expiry"
+    assert out["meta"]["assistant"]["route"] == "agent_loop"
     permission_request = out["data"]["permission_request"]
     assert permission_request["operation_type"] == "manual_expiry"
     assert permission_request["apply_allowed"] is False
@@ -8251,7 +8324,7 @@ def test_assistant_runtime_agent_loop_rejects_read_plan_for_trade_preview_reques
     assert calls == []
     assert out["meta"]["assistant"]["route"] == "agent_loop"
     assert out["meta"]["assistant"]["llm"]["agent_loop"]["steps_used"] == 0
-    assert out["meta"]["assistant"]["perception_trace"]["decision"] == "llm_error"
+    assert out["meta"]["assistant"]["perception_trace"]["decision"] == "agent_loop_error"
 
 
 def test_read_only_agent_loop_uses_observation_continuation_for_preview_mismatch(monkeypatch: Any) -> None:
@@ -8591,7 +8664,7 @@ def test_assistant_runtime_agent_loop_action_safety_rejects_preview_for_read_req
     agent_loop = out["meta"]["assistant"]["llm"]["agent_loop"]
     assert agent_loop["steps_used"] == 0
     assert agent_loop["steps"] == []
-    assert out["meta"]["assistant"]["perception_trace"]["decision"] == "llm_error"
+    assert out["meta"]["assistant"]["perception_trace"]["decision"] == "agent_loop_error"
     assert out["meta"]["assistant"]["perception_trace"]["candidates"][0]["error_code"] == "PLAN_RISK_MISMATCH"
 
 
@@ -10233,18 +10306,22 @@ def test_assistant_runtime_rejects_llm_injected_write_preview_when_question_is_r
     assert "preview-write" in out["error"]["hint"]
     assert out["meta"]["assistant"]["route"] == "agent_loop"
     perception_trace = out["meta"]["assistant"]["perception_trace"]
-    assert perception_trace["decision"] == "llm_error"
+    assert perception_trace["decision"] == "agent_loop_error"
     assert perception_trace["selected_source"] is None
     assert perception_trace["candidates"][0]["source"] == "agent_loop"
     assert perception_trace["candidates"][0]["status"] == "rejected"
     assert perception_trace["candidates"][0]["error_code"] == "PLAN_RISK_MISMATCH"
-    assert perception_trace["candidates"][1]["source"] == "deterministic"
-    assert perception_trace["candidates"][1]["error_code"] == "NEEDS_CLARIFICATION"
+    assert perception_trace["candidates"][1] == {"source": "command", "status": "skipped", "reason": "not_command"}
+    assert perception_trace["candidates"][2] == {
+        "source": "permission_response",
+        "status": "skipped",
+        "reason": "not_permission_response",
+    }
     decision = out["meta"]["assistant"]["decision"]
     assert decision["route"] == "agent_loop"
     assert decision["selected_source"] is None
     assert decision["selected_intent_name"] is None
-    assert decision["perception_decision"] == "llm_error"
+    assert decision["perception_decision"] == "agent_loop_error"
     assert decision["execution_contract"]["direct_writes_allowed"] is False
     assert decision["execution_contract"]["llm_write_allowed"] is False
     assert calls == []

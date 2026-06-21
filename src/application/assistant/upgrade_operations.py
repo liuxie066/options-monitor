@@ -210,7 +210,7 @@ def _candidate_hint(prefix: str, candidates: Any) -> str:
 
 
 def _upgrade_candidate_hint(action: str, candidates: Any) -> str:
-    return _candidate_hint("确认升级" if action == "确认" else "取消升级", candidates)
+    return _candidate_hint("/confirm upgrade" if action == "确认" else "/cancel upgrade", candidates)
 
 
 def _build_operation_payload(operation_type: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -821,8 +821,9 @@ def render_upgrade_response(
             [
                 "",
                 "未执行升级。",
-                f"确认执行请回复：确认升级 {operation_id}",
-                f"取消请回复：取消升级 {operation_id}",
+                f"确认执行请回复：/confirm upgrade {operation_id}",
+                f"取消请回复：/cancel upgrade {operation_id}",
+                "同一对话只有一条待确认升级时，也可以回复：确认升级 / 取消升级",
             ]
         )
         if expires_at:

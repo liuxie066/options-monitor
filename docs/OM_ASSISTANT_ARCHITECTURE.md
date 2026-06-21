@@ -315,14 +315,20 @@ message, normalizes it, applies policy, and returns an audited response.
 
 It owns:
 
-- slash command and deterministic message handling,
-- natural-language capability recognition,
+- explicit slash command handling through ProtocolGate,
+- bound confirm/cancel handling through PermissionResponseGate,
+- natural-language capability recognition through AgentLoop,
 - capability catalog filtering,
 - optional bounded AgentLoop planning,
 - sender allowlist and idempotency,
 - pending preview creation,
 - confirm/cancel routing for existing pending operations,
 - audit and durable assistant trace.
+
+It must not route ordinary non-slash natural language through keyword-based
+business-tool fallback. If AgentLoop is disabled or unavailable, non-slash
+requests should return clarification/error instead of selecting a nearby
+deterministic business command.
 
 It must not expose the full `./om-agent` manifest to remote messages. The
 assistant capability catalog is intentionally narrower than the local Tool

@@ -15,6 +15,7 @@ _MONTH_RE = re.compile(r"^(20\d{2})[-/.](0[1-9]|1[0-2])$")
 _YEAR_MONTH_CN_RE = re.compile(r"^(20\d{2})年(1[0-2]|0?[1-9]|十[一二]?|[一二三四五六七八九])月$")
 _MONTH_CN_RE = re.compile(r"^(1[0-2]|0?[1-9]|十[一二]?|[一二三四五六七八九])月$")
 _OPERATION_ID_RE = re.compile(r"^in_[A-Za-z0-9_.:-]+$")
+_VERSION_RE = re.compile(r"^v?(\d+\.\d+\.\d+(?:[-+][A-Za-z0-9_.-]+)?)$")
 _ACCOUNTS = frozenset({"lx", "sy"})
 _COMMANDS = commands_by_intent()
 _CONFIRM_TARGETS = operation_target_intents("confirm")
@@ -65,9 +66,8 @@ def parse_assistant_command(text: str, *, now_fn: Callable[[], date] | None = No
         return _parse_runs(command, args)
     if command in _COMMANDS["runtime_logs"]:
         return _parse_logs(command, args)
-    if command in _COMMANDS["symbol_list"]:
-        _reject_extra(command, args)
-        return _intent("symbol_list")
+    if command in _COMMANDS["symbol_list"] or command in _COMMANDS["symbol_add"]:
+        return _parse_symbol_command(command, args)
     if command in _COMMANDS["pending_operations"]:
         _reject_extra(command, args)
         return _intent("pending_operations")
@@ -89,10 +89,14 @@ def parse_assistant_command(text: str, *, now_fn: Callable[[], date] | None = No
             action_prefix="记录平仓",
             hint="格式：/record-close record_id=<record_id> <张数>张 close <平仓价>。",
         )
+    if command in _COMMANDS["manual_trade_update"]:
+        return _parse_manual_trade_update_command(command, args)
     if command in _COMMANDS["manual_trade_confirm"]:
         return _parse_operation_command(command, args, target_map=_CONFIRM_TARGETS, action_label="确认")
     if command in _COMMANDS["manual_trade_cancel"]:
         return _parse_operation_command(command, args, target_map=_CANCEL_TARGETS, action_label="取消")
+    if command in _COMMANDS["upgrade_now"]:
+        return _parse_upgrade_command(command, args)
 
     raise AgentToolError(
         code="NEEDS_CLARIFICATION",
@@ -182,6 +186,114 @@ def _parse_manual_trade_preview_command(
         raise _bad_arg(command, "", hint)
     raw_text = f"{action_prefix} {' '.join(args)}"
     return _intent(intent_name, {"raw_text": raw_text})
+
+
+def _parse_symbol_command(command: str, args: list[str]) -> PerceptionResult:
+    if not args:
+        return _intent("symbol_list")
+    action = args[0].lower()
+    if action in {"list", "ls", "show"}:
+        if len(args) != 1:
+            raise _bad_arg(command, " ".join(args[1:]), "支持：/symbols、/symbol add <symbol>、/symbol edit <symbol> <field>=<value>、/symbol remove <symbol>。")
+        return _intent("symbol_list")
+    if action in {"add", "new"}:
+        if len(args) < 2:
+            raise _bad_arg(command, "", "格式：/symbol add <symbol> [put|call] [use=<name>] [limit_exp=<n>]。")
+        return _intent("symbol_add", _symbol_add_args(args[1:]))
+    if action in {"edit", "set"}:
+        if len(args) < 3:
+            raise _bad_arg(command, "", "格式：/symbol edit <symbol> <field>=<value> [field=value ...]。")
+        return _intent("symbol_edit", _symbol_edit_args(args[1:]))
+    if action in {"remove", "rm", "delete", "del"}:
+        if len(args) != 2:
+            raise _bad_arg(command, " ".join(args[1:]), "格式：/symbol remove <symbol>。")
+        return _intent("symbol_remove", {"symbol": args[1]})
+    raise _bad_arg(command, args[0], "支持：/symbols、/symbol add、/symbol edit、/symbol remove。")
+
+
+def _symbol_add_args(args: list[str]) -> dict[str, object]:
+    symbol = args[0]
+    out: dict[str, object] = {
+        "symbol": symbol,
+        "sell_put_enabled": False,
+        "sell_call_enabled": False,
+    }
+    accounts: list[str] = []
+    for raw in args[1:]:
+        normalized = raw.lower()
+        if normalized in {"put", "sell_put"}:
+            out["sell_put_enabled"] = True
+        elif normalized in {"call", "sell_call", "covered_call"}:
+            out["sell_call_enabled"] = True
+        elif "=" in raw:
+            key, value = _split_key_value(raw)
+            if key == "use":
+                out["use"] = value
+            elif key in {"limit_exp", "limit_expirations"}:
+                out["limit_expirations"] = _positive_int(value, key)
+            elif key == "accounts":
+                accounts.extend(item.strip() for item in value.split(",") if item.strip())
+            else:
+                raise AgentToolError(code="NEEDS_CLARIFICATION", message=f"无法识别 symbol add 参数：{raw}", hint="格式：/symbol add <symbol> [put|call] [use=<name>] [limit_exp=<n>]。")
+        else:
+            raise AgentToolError(code="NEEDS_CLARIFICATION", message=f"无法识别 symbol add 参数：{raw}", hint="格式：/symbol add <symbol> [put|call] [use=<name>] [limit_exp=<n>]。")
+    if accounts:
+        out["accounts"] = accounts
+    return out
+
+
+def _symbol_edit_args(args: list[str]) -> dict[str, object]:
+    symbol = args[0]
+    values: dict[str, object] = {}
+    ensure_use: list[str] = []
+    for raw in args[1:]:
+        key, value = _split_key_value(raw)
+        if key == "ensure_use":
+            ensure_use.extend(item.strip() for item in value.split(",") if item.strip())
+            continue
+        values[key] = _parse_scalar(value)
+    out: dict[str, object] = {"symbol": symbol, "set": values}
+    if ensure_use:
+        out["ensure_use"] = ensure_use
+    return out
+
+
+def _parse_upgrade_command(command: str, args: list[str]) -> PerceptionResult:
+    if len(args) > 2:
+        raise _bad_arg(command, " ".join(args), "支持：/upgrade 或 /upgrade v<version>。")
+    tokens = [arg for arg in args if arg.lower() not in {"now", "check"}]
+    if len(tokens) > 1:
+        raise _bad_arg(command, " ".join(args), "支持：/upgrade 或 /upgrade v<version>。")
+    payload: dict[str, object] = {}
+    if tokens:
+        match = _VERSION_RE.match(tokens[0])
+        if not match:
+            raise _bad_arg(command, tokens[0], "target version 必须类似 v1.2.345。")
+        payload["target_version"] = match.group(1)
+    return _intent("upgrade_now", payload)
+
+
+def _parse_manual_trade_update_command(command: str, args: list[str]) -> PerceptionResult:
+    if not args:
+        raise _bad_arg(command, "", "格式：/record-update <field>=<value> [operation_id]。")
+    operation_id: str | None = None
+    updates: dict[str, object] = {}
+    for raw in args:
+        if _OPERATION_ID_RE.match(raw):
+            operation_id = raw
+            continue
+        key, value = _split_key_value(raw)
+        updates[key] = _parse_scalar(value)
+    if not updates:
+        raise _bad_arg(command, "", "至少提供一个 field=value。")
+    return _intent(
+        "manual_trade_update",
+        {
+            "operation_id": operation_id,
+            "operation_resolution": "explicit" if operation_id else "latest_pending",
+            "updates": updates,
+        },
+    )
 
 
 def _parse_income(command: str, args: list[str], *, today: date) -> PerceptionResult:
@@ -287,6 +399,41 @@ def _parse_operation_command(
             "operation_resolution": "explicit" if operation_id else "latest_pending",
         },
     )
+
+
+def _split_key_value(raw: str) -> tuple[str, str]:
+    if "=" not in raw:
+        raise AgentToolError(code="NEEDS_CLARIFICATION", message=f"参数需要使用 key=value：{raw}")
+    key, value = raw.split("=", 1)
+    key = key.strip()
+    value = value.strip()
+    if not key or not value:
+        raise AgentToolError(code="NEEDS_CLARIFICATION", message=f"参数需要使用 key=value：{raw}")
+    return key, value
+
+
+def _parse_scalar(value: str) -> object:
+    lower = value.lower()
+    if lower in {"true", "yes", "on", "1"}:
+        return True
+    if lower in {"false", "no", "off", "0"}:
+        return False
+    try:
+        if "." in value:
+            return float(value)
+        return int(value)
+    except ValueError:
+        return value
+
+
+def _positive_int(value: str, name: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise AgentToolError(code="INPUT_ERROR", message=f"{name} must be an integer") from exc
+    if parsed <= 0:
+        raise AgentToolError(code="INPUT_ERROR", message=f"{name} must be positive")
+    return parsed
 
 
 def _previous_month(today: date) -> str:

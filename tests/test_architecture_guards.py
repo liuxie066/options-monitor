@@ -330,7 +330,10 @@ def test_assistant_runtime_delegates_perception() -> None:
     offenders = [token for token in forbidden_runtime_tokens if token in runtime_text]
     assert offenders == []
 
-    for token in forbidden_runtime_tokens:
+    perception_tokens = tuple(token for token in forbidden_runtime_tokens if token != "parse_deterministic_text") + (
+        "parse_permission_response",
+    )
+    for token in perception_tokens:
         assert token in perception_text
     assert "translate_inbound_intent" not in perception_text
 

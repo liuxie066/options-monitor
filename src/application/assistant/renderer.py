@@ -89,12 +89,12 @@ def render_pending_operations(operations: list[dict[str, Any]]) -> str:
 
 def _pending_operation_commands(operation_type: str) -> tuple[str, str]:
     if operation_type.startswith("symbol_"):
-        return "确认监控", "取消监控"
+        return "/confirm symbol", "/cancel symbol"
     if operation_type.startswith("upgrade_"):
-        return "确认升级", "取消升级"
+        return "/confirm upgrade", "/cancel upgrade"
     if operation_type.startswith("model_"):
-        return "确认模型", "取消模型"
-    return "确认记录", "取消记录"
+        return "/confirm model", "/cancel model"
+    return "/confirm trade", "/cancel trade"
 
 
 def _pending_operation_label(operation_type: str) -> str:
