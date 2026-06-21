@@ -8,6 +8,7 @@ import yaml
 
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.config_defaults import DEFAULT_CONFIG, DEFAULT_CONFIG_REF
+from src.application.config_profiles import apply_profiles
 from src.application.config_validator import validate_config
 from src.application.config_yaml import (
     RESOLVED_KEY,
@@ -18,6 +19,7 @@ from src.application.config_yaml import (
 )
 from src.application.config_yaml_init import init_yaml_config
 from src.application.config_yaml_symbols import set_yaml_symbol_config
+from src.application.pipeline_watchlist import resolve_watchlist_item_runtime_config
 from src.application.runtime_config_freshness import GENERATED_KEY
 
 
@@ -150,6 +152,47 @@ def test_yaml_config_resolves_user_overrides_and_defaults(tmp_path: Path) -> Non
     assert cfg[RESOLVED_KEY]["market"] == "us"
     assert cfg[RESOLVED_KEY]["default_source"] == DEFAULT_CONFIG_REF
 
+    validate_config(json.loads(json.dumps(cfg)))
+
+
+def test_yaml_config_keeps_explicit_sell_put_underwriting_thresholds(tmp_path: Path) -> None:
+    config_path = _write_yaml(
+        tmp_path / "config.yaml",
+        """\
+accounts:
+  lx:
+    type: futu
+templates:
+  put_base:
+    sell_put:
+      min_annualized_net_return: 0.10
+      min_net_income: 50.0
+markets:
+  us:
+    accounts: [lx]
+    symbols: [NVDA]
+    overrides:
+      NVDA:
+        use: put_base
+        sell_put:
+          max_strike: 150
+""",
+    )
+
+    cfg, _meta = resolve_yaml_runtime_config(repo_root=REPO_ROOT, market="us", config_path=config_path)
+
+    template = cfg["templates"]["put_base"]["sell_put"]
+    assert template["min_annualized_net_return"] == 0.10
+    assert template["min_net_income"] == 50.0
+
+    resolved = resolve_watchlist_item_runtime_config(
+        item=cfg["symbols"][0],
+        profiles=cfg["templates"],
+        apply_profiles_fn=apply_profiles,
+    )
+    assert resolved["sell_put"]["min_annualized_net_return"] == 0.10
+    assert resolved["sell_put"]["min_net_income"] == 50.0
+    assert resolved["_global_sell_put_liquidity"]["min_net_income"] == 50.0
     validate_config(json.loads(json.dumps(cfg)))
 
 
