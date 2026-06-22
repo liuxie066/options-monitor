@@ -15,11 +15,16 @@ the planner can trigger deterministic tools, OM needs a structural guard before
 execution.
 
 The validator checks whether the plan's declared context use is legal. It does
-not interpret business language itself.
+not interpret business language itself. In the provider structured tool-call
+path, tool-call `arguments` are the model turn's explicit execution intent;
+the validator must not reclassify normalized explicit arguments as inherited
+context merely because their serialized value does not appear verbatim in the
+current user message.
 
-## Planner ContextUse Declaration
+## ContextUse Declaration
 
-Planner output should include an optional `context_use` object:
+Planner output, or the event-native host adapter for provider structured
+tool-call paths, should include a `context_use` object:
 
 ```json
 {
@@ -48,8 +53,19 @@ Allowed `mode` values:
 | `override` | current message explicitly replaces prior scope |
 | `ambiguous` | planner cannot safely choose one context |
 
-These are planner declarations, not resolver outputs. The validator only checks
-whether the declaration is consistent with the projection and plan.
+These declarations are not resolver outputs. The validator only checks whether
+the declaration is consistent with the projection and plan.
+
+In provider structured tool-call mode, `context_use` may be host-derived because
+the provider gives the host tool-call arguments rather than a full JSON plan.
+That derivation is only for tracing and validating actual inherited context. It
+must not turn current-turn normalized arguments into inherited slots simply
+because host text extraction did not produce the same serialized value.
+
+`safe_slots` in `ContextProjection` are projection and audit metadata. They are
+not a second natural-language parser. `context_use.inherited_slots` should be
+populated only for scope or filter values intentionally carried from referenced
+prior context.
 
 ## Validation Inputs
 
@@ -86,11 +102,19 @@ Failure:
 
 ### 2. Slot Source
 
-Every inherited slot in tool arguments must be declared in
+Every tool argument that is treated as inherited context must be declared in
 `context_use.inherited_slots`.
 
 Every declared inherited slot must be present in the referenced turn or evidence
 ref.
+
+Tool arguments that belong to the current model turn do not become inherited
+slots only because the user used a synonym, alias, Chinese wording, or spacing
+that the model normalized into an internal enum. For example, a current-message
+candidate diagnostic for `0700.HK` may include `function="sell_put"` while the
+user wrote `sell put`; if the required current scope is present, `function`
+remains a current tool argument unless the model explicitly carries it from a
+referenced prior turn.
 
 Failure:
 

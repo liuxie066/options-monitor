@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 1.2.327 - 2026-06-22
+
+### Fixed
+- Fixed Assistant model tool-call context attribution so explicit current-message scope is not misclassified as inherited
+  context when optional filters such as `sell put` are normalized to internal values like `sell_put`.
+- Preserved context validation for truly inherited execution scope such as carried `run_id` values.
+
+### Changed
+- Documented the Assistant context authority boundary between current user messages, provider structured tool-call
+  arguments, `ContextProjection.safe_slots`, `context_use.inherited_slots`, and host guards.
+- Added scenario and runtime regressions for the 0700.HK sell put candidate-diagnostic path.
+
 ## 1.2.326 - 2026-06-22
 
 ### Changed

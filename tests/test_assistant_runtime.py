@@ -8943,6 +8943,150 @@ def test_create_model_turn_events_tool_call_path_carries_single_visible_followup
     assert result.trace["context_validation"]["status"] == "passed"
 
 
+def test_create_model_turn_events_tool_call_path_current_required_scope_overrides_history() -> None:
+    def _create_tool_call_response(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_candidate_filter_1",
+                    "name": "candidate_filter_explain",
+                    "arguments": '{"symbol":"0700.HK","function":"sell_put"}',
+                }
+            ]
+        }
+
+    result = create_model_turn_events(
+        "今天早上的港股监控，为什么0700 腾讯没有sell put 推荐",
+        AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        conversation_context={
+            "temporal_context": {"current_date": "2026-06-22", "timezone": "Asia/Shanghai"},
+            "context_projection": {
+                "schema_version": "om-context-projection-v1",
+                "current_user_message": {"text": "今天早上的港股监控，为什么0700 腾讯没有sell put 推荐"},
+                "recent_turns": [
+                    {
+                        "turn_id": "turn_popmart",
+                        "safe_slots": {"symbol": ["9992.HK"], "function": ["sell_put"]},
+                        "evidence_refs": ["ev_popmart"],
+                    },
+                    {
+                        "turn_id": "turn_nvda",
+                        "safe_slots": {"symbol": ["NVDA"], "function": ["sell_put"]},
+                        "evidence_refs": ["ev_nvda"],
+                    },
+                ],
+                "recent_successful_tools": [
+                    {
+                        "tool_name": "candidate_filter_explain",
+                        "safe_slots": {"symbol": ["9992.HK"], "function": ["sell_put"]},
+                        "evidence_refs": ["ev_popmart"],
+                    },
+                    {
+                        "tool_name": "candidate_filter_explain",
+                        "safe_slots": {"symbol": ["NVDA"], "function": ["sell_put"]},
+                        "evidence_refs": ["ev_nvda"],
+                    },
+                ],
+                "available_evidence_refs": [
+                    {
+                        "ref_id": "ev_popmart",
+                        "turn_id": "turn_popmart",
+                        "source_tool": "candidate_filter_explain",
+                        "safe_slots": {"symbol": ["9992.HK"], "function": ["sell_put"]},
+                    },
+                    {
+                        "ref_id": "ev_nvda",
+                        "turn_id": "turn_nvda",
+                        "source_tool": "candidate_filter_explain",
+                        "safe_slots": {"symbol": ["NVDA"], "function": ["sell_put"]},
+                    },
+                ],
+                "open_evidence_gaps": [],
+                "pending_operations": [],
+                "budget": {"truncated": False},
+            },
+        },
+        create_tool_call_response_fn=_create_tool_call_response,
+        environ={"OM_LLM_API_KEY": "sk-test"},
+    )
+
+    assert result.error is None
+    assert result.event_plan is not None
+    assert result.trace["planner_context_use"]["mode"] == "none"
+    assert result.trace["planner_context_use"]["current_message_slots"] == {"symbol": ["0700.HK"]}
+    assert result.trace["planner_context_use"]["inherited_slots"] == {}
+    assert result.trace["context_validation"]["status"] == "passed"
+    steps = _event_plan_steps(result)
+    assert steps[0]["tool_name"] == "candidate_filter_explain"
+    assert steps[0]["arguments"] == {"symbol": "0700.HK", "function": "sell_put"}
+
+
+def test_create_model_turn_events_current_required_scope_still_validates_inherited_run_id() -> None:
+    def _create_tool_call_response(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_candidate_filter_1",
+                    "name": "candidate_filter_explain",
+                    "arguments": '{"symbol":"0700.HK","run_id":"hk-20260622-am"}',
+                }
+            ]
+        }
+
+    result = create_model_turn_events(
+        "今天早上的港股监控，为什么0700 腾讯没有推荐",
+        AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        conversation_context={
+            "temporal_context": {"current_date": "2026-06-22", "timezone": "Asia/Shanghai"},
+            "context_projection": {
+                "schema_version": "om-context-projection-v1",
+                "current_user_message": {"text": "今天早上的港股监控，为什么0700 腾讯没有推荐"},
+                "recent_turns": [
+                    {
+                        "turn_id": "turn_hk_morning",
+                        "safe_slots": {"run_id": ["hk-20260622-am"]},
+                        "evidence_refs": ["ev_hk_morning"],
+                    }
+                ],
+                "recent_successful_tools": [
+                    {
+                        "tool_name": "runtime_status",
+                        "safe_slots": {"run_id": ["hk-20260622-am"]},
+                        "evidence_refs": ["ev_hk_morning"],
+                    }
+                ],
+                "available_evidence_refs": [
+                    {
+                        "ref_id": "ev_hk_morning",
+                        "turn_id": "turn_hk_morning",
+                        "source_tool": "runtime_status",
+                        "safe_slots": {"run_id": ["hk-20260622-am"]},
+                    }
+                ],
+                "open_evidence_gaps": [],
+                "pending_operations": [],
+                "budget": {"truncated": False},
+            },
+        },
+        create_tool_call_response_fn=_create_tool_call_response,
+        environ={"OM_LLM_API_KEY": "sk-test"},
+    )
+
+    assert result.error is None
+    assert result.event_plan is not None
+    assert result.trace["planner_context_use"]["mode"] == "carry"
+    assert result.trace["planner_context_use"]["current_message_slots"] == {"symbol": ["0700.HK"]}
+    assert result.trace["planner_context_use"]["inherited_slots"] == {"run_id": ["hk-20260622-am"]}
+    assert result.trace["planner_context_use"]["referenced_evidence_refs"] == ["ev_hk_morning"]
+    assert result.trace["context_validation"]["status"] == "passed"
+
+
 def test_create_model_turn_events_tool_call_path_asks_for_ambiguous_followup_context() -> None:
     def _create_tool_call_response(**_kwargs: Any) -> dict[str, Any]:
         return {
