@@ -77,6 +77,7 @@ class ModelToolCallEvent:
     provider: str | None = None
     parent_event_id: str | None = None
     protocol_error: dict[str, Any] | None = None
+    provider_metadata: dict[str, Any] | None = None
     schema_version: str = MODEL_EVENT_SCHEMA_VERSION
 
     @property
@@ -277,6 +278,7 @@ def model_tool_call_from_provider_block(
         provider=provider,
         parent_event_id=parent_event_id,
         protocol_error=protocol_error,
+        provider_metadata=_provider_metadata_from_tool_call_block(block),
     )
 
 
@@ -738,12 +740,22 @@ def _top_level_tool_call_blocks(response: dict[str, Any]) -> list[dict[str, Any]
 
 def _chat_message_tool_call_blocks(message: dict[str, Any], *, choice_index: int) -> list[dict[str, Any]]:
     blocks: list[dict[str, Any]] = []
+    metadata = _chat_message_provider_metadata(message)
     tool_calls = message.get("tool_calls")
     if isinstance(tool_calls, list):
-        blocks.extend(block for block in tool_calls if isinstance(block, dict) and _is_provider_tool_call_block(block))
+        blocks.extend(
+            _tool_call_block_with_metadata(block, metadata)
+            for block in tool_calls
+            if isinstance(block, dict) and _is_provider_tool_call_block(block)
+        )
     function_call = message.get("function_call")
     if isinstance(function_call, dict):
-        blocks.append(_legacy_function_call_block(function_call, fallback_id=f"function_call_choice_{choice_index}"))
+        blocks.append(
+            _tool_call_block_with_metadata(
+                _legacy_function_call_block(function_call, fallback_id=f"function_call_choice_{choice_index}"),
+                metadata,
+            )
+        )
     content = message.get("content")
     if isinstance(content, list):
         blocks.extend(block for block in content if isinstance(block, dict) and _is_provider_tool_call_block(block))
@@ -766,6 +778,34 @@ def _is_provider_tool_call_block(block: dict[str, Any]) -> bool:
 
 def _is_provider_control_block(block: dict[str, Any]) -> bool:
     return str(block.get("type") or "").strip() in {"clarification_request", "preview_request"}
+
+
+def _chat_message_provider_metadata(message: dict[str, Any]) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    reasoning_content = message.get("reasoning_content")
+    if isinstance(reasoning_content, str) and reasoning_content:
+        metadata["reasoning_content"] = reasoning_content
+    return metadata
+
+
+def _tool_call_block_with_metadata(block: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
+    if not metadata:
+        return block
+    out = _copy_mapping(block)
+    out["provider_metadata"] = _copy_mapping(metadata)
+    return out
+
+
+def _provider_metadata_from_tool_call_block(block: dict[str, Any]) -> dict[str, Any] | None:
+    metadata = block.get("provider_metadata")
+    if not isinstance(metadata, dict):
+        return None
+    out = {
+        key: value
+        for key, value in _copy_mapping(metadata).items()
+        if key in {"reasoning_content"} and isinstance(value, str) and value
+    }
+    return out or None
 
 
 def _provider_text_from_response(response: dict[str, Any]) -> str:

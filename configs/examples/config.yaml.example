@@ -51,6 +51,14 @@ assistant:
       confidence_min: 0.75
       timeout_seconds: 20
       max_output_tokens: 512
+    kimi-code:
+      provider: kimi
+      base_url: "https://api.moonshot.cn/v1"
+      model: kimi-k2.7-code
+      api_key_env: MOONSHOT_API_KEY
+      confidence_min: 0.75
+      timeout_seconds: 20
+      max_output_tokens: 512
     openai-default:
       provider: openai
       base_url: ""

@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 1.2.328 - 2026-06-22
+
+### Added
+- Added a Kimi/Moonshot Assistant provider profile using the OpenAI-compatible Chat Completions API with
+  `MOONSHOT_API_KEY` and Kimi Code model defaults.
+
+### Changed
+- Adjusted Chat Completions provider payload construction so Kimi requests omit DeepSeek-only `thinking` and
+  temperature parameters while DeepSeek keeps its existing deterministic defaults.
+- Preserved Kimi `reasoning_content` through tool-call continuation messages without exposing it in public Assistant
+  event payloads.
+- Updated Assistant environment diagnostics, examples, and inbound-control docs for `MOONSHOT_API_KEY` support.
+
 ## 1.2.327 - 2026-06-22
 
 ### Fixed

@@ -37,6 +37,7 @@ from src.application.assistant.llm_common import (
     CreateToolCallResponseFn,
     is_supported_llm_provider,
     llm_api_key_value,
+    chat_completions_payload_options,
     missing_llm_config,
     normalize_llm_provider,
     provider_api_kind,
@@ -1737,7 +1738,7 @@ def _assistant_tool_loop_continuation_base_payload(
     planner_input_text = json.dumps(planner_payload, ensure_ascii=False, sort_keys=True)
     tools = _provider_tool_call_tools(provider, planner_payload)
     if provider_api_kind(provider) == "chat_completions":
-        return {
+        payload = {
             "model": str(llm_settings.model or "").strip(),
             "messages": [
                 {"role": "system", "content": _model_event_planner_instructions()},
@@ -1746,10 +1747,12 @@ def _assistant_tool_loop_continuation_base_payload(
             "tools": tools,
             "tool_choice": "auto",
             "max_tokens": int(llm_settings.max_output_tokens),
-            "thinking": {"type": "disabled"},
             "stream": False,
-            "temperature": 0.0,
         }
+        for key, value in chat_completions_payload_options(provider).items():
+            if value is not None:
+                payload[key] = value
+        return payload
     return {
         "model": str(llm_settings.model or "").strip(),
         "instructions": _model_event_planner_instructions(),

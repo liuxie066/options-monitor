@@ -227,6 +227,8 @@ def inspect_effective_settings(
         "OM_INBOUND_CONFIRM_TTL_SECONDS",
         "OM_AGENT_ENABLE_WRITE_TOOLS",
         "OM_LLM_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "MOONSHOT_API_KEY",
     ]
     entries: dict[str, dict[str, Any]] = {}
     for key in keys:

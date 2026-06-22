@@ -214,7 +214,7 @@ def test_validate_config_rejects_invalid_assistant_llm_config() -> None:
         mod.validate_config(cfg)
         raise AssertionError("expected SystemExit")
     except SystemExit as exc:
-        assert "assistant.llm.provider must be one of: openai, deepseek" in str(exc)
+        assert "assistant.llm.provider must be one of: openai, deepseek, kimi" in str(exc)
 
 
 def test_validate_config_rejects_legacy_assistant_modes_and_accepts_planner_config() -> None:

@@ -231,6 +231,45 @@ def test_chat_completions_continuation_messages_bind_tool_call_id() -> None:
     assert json.loads(messages[1]["content"])["tool_call_id"] == "call_income_1"
 
 
+def test_chat_completions_continuation_messages_preserve_kimi_reasoning_content() -> None:
+    events = model_events_from_provider_response(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "reasoning_content": "internal reasoning token",
+                        "tool_calls": [
+                            {
+                                "id": "call_status_1",
+                                "type": "function",
+                                "function": {"name": "runtime_status", "arguments": "{}"},
+                            }
+                        ],
+                    }
+                }
+            ]
+        },
+        provider="kimi",
+    )
+    call = events[0]
+    assert isinstance(call, ModelToolCallEvent)
+    result = _income_tool_result(
+        ModelToolCallEvent(
+            event_id=call.event_id,
+            tool_call_id=call.tool_call_id,
+            tool_name=call.tool_name,
+            arguments=call.arguments,
+            provider=call.provider,
+            provider_metadata=call.provider_metadata,
+        )
+    )
+
+    messages = chat_completions_continuation_messages(model_event=call, tool_result_event=result)
+
+    assert messages[0]["reasoning_content"] == "internal reasoning token"
+    assert "provider_metadata" not in call.public_payload()
+
+
 def test_provider_continuation_payload_preserves_base_payload_by_provider_kind() -> None:
     call = _income_tool_call()
     result = _income_tool_result(call)
