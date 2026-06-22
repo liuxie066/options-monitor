@@ -35,6 +35,9 @@ assistant capability:
 - The planner declares context use through `context_use`.
 - A deterministic validator checks references and inherited slots before tool
   execution.
+- Provider structured tool-call arguments are treated as current model-turn
+  execution intent unless the planner or host-derived `context_use` explicitly
+  marks a value as inherited from visible prior context.
 - Ambiguous follow-ups ask clarification instead of guessing from keywords.
 - Adding a new follow-up domain usually adds fixtures or tool metadata, not a
   new branch in `agent_loop.py`.
@@ -63,8 +66,8 @@ The current path is:
 AssistantRequest
   -> build_conversation_context
   -> build_context_projection
-  -> planner input
-  -> planner context_use declaration
+  -> planner/model input
+  -> planner-declared or host-derived context_use
   -> validate_context_use
   -> existing action policy / tool execution
   -> evidence / coverage / answer verification
@@ -77,6 +80,43 @@ state. It is not the business resolver. Its output becomes input to
 
 The slices below are preserved as implementation history. They should not be
 expanded for new capability work.
+
+## Post-Cutover Context Authority Convergence
+
+After Slice 8, the remaining risk was not a missing business case. It was an
+authority mismatch between provider structured tool-call arguments and
+host-side slot-source validation:
+
+```text
+current message says "0700 Tencent sell put"
+model normalizes tool args to {"symbol": "0700.HK", "function": "sell_put"}
+history also contains safe_slots.function = "sell_put"
+host incorrectly treats "function" as inherited context
+```
+
+The converged rule is:
+
+- tool-call arguments are the current model-turn execution intent;
+- `safe_slots` are model-visible history and audit metadata, not a parser;
+- `inherited_slots` means a value was intentionally carried from referenced
+  visible context;
+- when required current scope is present in the current message, optional
+  normalized filters such as `function` or `strategy` do not require a
+  historical source match;
+- truly inherited execution scope, such as a carried `run_id`, still requires a
+  referenced turn or evidence ref and must pass validation.
+
+This is not a new Slice 9. It is a post-cutover boundary clarification that
+keeps the completed context architecture from drifting back into case-specific
+slot matching.
+
+Regression coverage:
+
+- `tests/test_assistant_runtime.py` covers explicit current scope overriding
+  candidate history and the counter-case where inherited `run_id` still
+  validates as carried context.
+- `tests/fixtures/assistant_context_scenarios.jsonl` includes
+  `scenario_explicit_current_scope_overrides_candidate_history`.
 
 ## Slice 1: Projection Builder In Shadow Mode (Complete)
 

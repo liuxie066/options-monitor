@@ -218,12 +218,39 @@ financial and runtime read tools. The context layer should therefore be:
 ```text
 transcript
   -> ContextProjection
-  -> Model semantic judgement
-  -> ContextValidator
+  -> model structured tool call / semantic judgement
+  -> ContextValidator for declared inherited context
   -> policy/tool execution
 ```
 
-It should not grow as a collection of business-specific follow-up branches.
+Provider structured tool-call `arguments` are the current model turn's execution
+intent. The host must validate them for schema, scope, risk, budget, duplicate
+calls, hidden arguments, and tool policy, but it must not use literal
+safe-slot matching to prove that every normalized argument appeared verbatim in
+the current user message. That would make host-side slot extraction a second
+NLU authority and can falsely convert explicit current requests into inherited
+context.
+
+Authority is split this way:
+
+| Surface | Authority | Not Authority |
+|---|---|---|
+| current user message | explicit current scope and overrides | hidden defaults or historical carry |
+| provider structured tool-call arguments | current model-turn execution intent | proof that an argument came from history |
+| `ContextProjection.safe_slots` | bounded model-visible history and audit metadata | a second natural-language parser |
+| `context_use.inherited_slots` | values intentionally carried from referenced visible context | normalized synonyms in the current message |
+| host guards | schema, scope, risk, budget, duplicates, hidden args, policy | business-language interpretation by keyword |
+
+`ContextProjection.safe_slots` remains model-visible context and trace/audit
+metadata. `context_use.inherited_slots` is only for values actually carried
+from a referenced prior turn or evidence ref. When a tool call's required
+current scope is supplied by the current message, optional normalized
+arguments such as strategy/function filters should not force a prior-context
+source match just because their internal enum form differs from the user's
+wording.
+
+The context layer should not grow as a collection of business-specific
+follow-up branches.
 Detailed contracts and rollout plan live in:
 
 - [OM_ASSISTANT_CONTEXT_PROJECTION_CONTRACT.md](OM_ASSISTANT_CONTEXT_PROJECTION_CONTRACT.md)

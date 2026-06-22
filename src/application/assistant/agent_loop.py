@@ -107,6 +107,7 @@ MAX_TOOL_PLAN_STEPS = 5
 MAX_AGENT_LOOP_ITERATIONS = 3
 MAX_AGENT_LOOP_TOOL_CALLS = 10
 MAX_PLANNER_ANALYSIS_VIEWS = 12
+_CURRENT_SCOPE_OPTIONAL_FILTER_SLOTS = frozenset({"function", "strategy"})
 PLANNER_CONTEXT_USE_MODES = ("none", "carry", "refine", "override", "ambiguous")
 _DEFAULT_PLANNER_ANALYSIS_VIEWS: tuple[str, ...] = (
     "account_monthly_performance",
@@ -3291,6 +3292,8 @@ def _context_use_for_model_tool_calls(
     )
     context_use["current_message_slots"] = current_slots
     inherited_slots = _slot_delta(plan_slots, current_slots)
+    if _model_tool_calls_have_current_required_scope(events=events, current_slots=current_slots):
+        inherited_slots = _slots_requiring_context_source(inherited_slots)
     if not inherited_slots:
         return context_use
 
@@ -3337,6 +3340,37 @@ def _model_tool_call_safe_slots_for_context(events: tuple[ModelToolCallEvent, ..
             for item in _context_slot_values(value):
                 _add_context_slot(slots, slot_key, item)
     return slots
+
+
+def _model_tool_calls_have_current_required_scope(
+    *,
+    events: tuple[ModelToolCallEvent, ...],
+    current_slots: dict[str, list[Any]],
+) -> bool:
+    saw_required_scope = False
+    for event in events:
+        required_slots = _required_safe_slots_for_model_tool_call(event)
+        if not required_slots:
+            continue
+        saw_required_scope = True
+        if not all(current_slots.get(slot_key) for slot_key in required_slots):
+            return False
+    return saw_required_scope
+
+
+def _slots_requiring_context_source(slots: dict[str, list[Any]]) -> dict[str, list[Any]]:
+    return {
+        key: list(values)
+        for key, values in slots.items()
+        if key not in _CURRENT_SCOPE_OPTIONAL_FILTER_SLOTS and values
+    }
+
+
+def _required_safe_slots_for_model_tool_call(event: ModelToolCallEvent) -> tuple[str, ...]:
+    binding = planner_binding_for_tool(str(event.tool_name or "").strip())
+    if binding is None:
+        return ()
+    return tuple(str(key) for key in binding.required_arguments if str(key) in SAFE_SLOT_KEYS)
 
 
 def _provider_tool_call_tools(provider: str, planner_payload: dict[str, Any]) -> list[dict[str, Any]]:
