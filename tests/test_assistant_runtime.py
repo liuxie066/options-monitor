@@ -4272,7 +4272,7 @@ def test_assistant_runtime_agent_loop_is_bounded_read_only_router(tmp_path: Path
     assert agent_loop["schema_version"] == AGENT_LOOP_SCHEMA_VERSION
     assert agent_loop["runtime"] == "model_turn_loop"
     assert agent_loop["loop_stop_reason"] == "awaiting_model_continuation"
-    assert agent_loop["max_steps"] == 3
+    assert agent_loop["max_steps"] == 5
     assert agent_loop["steps_used"] == 1
     assert agent_loop["writes_allowed"] is False
     assert agent_loop["steps"] == [
@@ -4432,7 +4432,7 @@ def test_assistant_runtime_agent_loop_executes_planned_cashflow_detail(tmp_path:
     agent_loop = out["meta"]["assistant"]["llm"]["agent_loop"]
     assert agent_loop["runtime"] == "model_turn_loop"
     assert agent_loop["loop_stop_reason"] == "awaiting_model_continuation"
-    assert agent_loop["max_steps"] == 3
+    assert agent_loop["max_steps"] == 5
     assert agent_loop["steps_used"] == 1
     assert agent_loop["steps"][0]["tool_name"] == "monthly_income_report"
     assert agent_loop["observations"][0]["payload"] == {
@@ -10214,7 +10214,7 @@ def test_read_only_agent_loop_records_no_plan_without_tool_step() -> None:
         "schema_version": AGENT_LOOP_SCHEMA_VERSION,
         "enabled": True,
         "runtime": "model_turn_event_adapter",
-        "max_steps": 3,
+        "max_steps": 5,
         "steps_used": 0,
         "writes_allowed": False,
         "preview_operations_allowed": True,

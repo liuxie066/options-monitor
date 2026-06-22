@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.326 - 2026-06-22
+
+### Changed
+- Raised Assistant Agent Loop budgets so one model-planned batch can contain up to 5 tool calls and the full loop can
+  execute up to 10 tool calls before budget exhaustion.
+
 ## 1.2.325 - 2026-06-22
 
 ### Changed
