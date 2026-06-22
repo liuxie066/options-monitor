@@ -10477,10 +10477,11 @@ def test_assistant_runtime_rejects_llm_injected_write_preview_when_question_is_r
 
 
 def test_llm_provider_selection_is_centralized() -> None:
-    assert supported_llm_providers() == ("openai", "deepseek", "kimi")
+    assert supported_llm_providers() == ("openai", "deepseek", "kimi", "kimi-code")
     assert provider_api_kind("openai") == "responses"
     assert provider_api_kind("deepseek") == "chat_completions"
     assert provider_api_kind("kimi") == "chat_completions"
+    assert provider_api_kind("kimi-code") == "chat_completions"
     assert provider_endpoint_url(
         AssistantLlmSettings(enabled=True, provider="openai", base_url="https://llm.example/v1")
     ) == "https://llm.example/v1/responses"
@@ -10490,6 +10491,9 @@ def test_llm_provider_selection_is_centralized() -> None:
     assert provider_endpoint_url(
         AssistantLlmSettings(enabled=True, provider="kimi", base_url="https://api.moonshot.ai/v1")
     ) == "https://api.moonshot.ai/v1/chat/completions"
+    assert provider_endpoint_url(
+        AssistantLlmSettings(enabled=True, provider="kimi-code", base_url="https://api.kimi.com/coding/v1")
+    ) == "https://api.kimi.com/coding/v1/chat/completions"
 
 
 def test_llm_reply_calls_provider_with_constrained_general_reply_prompt() -> None:
@@ -10863,5 +10867,37 @@ def test_kimi_provider_tool_call_request_omits_deepseek_only_parameters() -> Non
     assert response["choices"][0]["message"]["content"] == "final answer"
     assert calls[0]["url"] == "https://api.moonshot.ai/v1/chat/completions"
     assert calls[0]["payload"]["model"] == "kimi-k2.7-code"
+    assert "thinking" not in calls[0]["payload"]
+    assert "temperature" not in calls[0]["payload"]
+
+
+def test_kimi_code_provider_tool_call_request_uses_coding_endpoint() -> None:
+    calls: list[dict[str, Any]] = []
+
+    def _post(
+        url: str,
+        payload: dict[str, Any],
+        *,
+        headers: dict[str, str],
+        timeout: int,
+    ) -> dict[str, Any]:
+        calls.append({"url": url, "payload": payload, "headers": headers, "timeout": timeout})
+        return {"choices": [{"message": {"content": "final answer"}}]}
+
+    response_fn = provider_create_tool_call_response_fn("kimi-code")
+    response = response_fn(
+        api_key="sk-test",
+        base_url="https://api.kimi.com/coding/v1",
+        model="kimi-for-coding",
+        input_text="状态",
+        instructions="use tools",
+        tools=[{"type": "function", "function": {"name": "runtime_status"}}],
+        timeout=7,
+        http_post_json_fn=_post,
+    )
+
+    assert response["choices"][0]["message"]["content"] == "final answer"
+    assert calls[0]["url"] == "https://api.kimi.com/coding/v1/chat/completions"
+    assert calls[0]["payload"]["model"] == "kimi-for-coding"
     assert "thinking" not in calls[0]["payload"]
     assert "temperature" not in calls[0]["payload"]

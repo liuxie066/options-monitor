@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.330 - 2026-06-22
+
+### Added
+- Added a separate `kimi-code` Assistant provider for Kimi Code's OpenAI-compatible coding endpoint
+  `https://api.kimi.com/coding/v1`, defaulting to `KIMI_API_KEY` and `kimi-for-coding`.
+
+### Changed
+- Updated Assistant model examples, diagnostics, and service environment pass-through so OM can select Kimi Code API
+  without changing the existing Moonshot-compatible `kimi` provider.
+
 ## 1.2.329 - 2026-06-22
 
 ### Fixed
