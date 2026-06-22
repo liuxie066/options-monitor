@@ -46,7 +46,7 @@ PROVIDER_SPECS: dict[str, LlmProviderSpec] = {
         provider_id="kimi",
         display_name="Kimi",
         api_kind="chat_completions",
-        default_base_url="https://api.moonshot.cn/v1",
+        default_base_url="https://api.moonshot.ai/v1",
         default_api_key_env="MOONSHOT_API_KEY",
         recommended_models=("kimi-k2.7-code", "kimi-k2.7-code-highspeed", "kimi-k2.6"),
     ),

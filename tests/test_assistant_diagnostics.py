@@ -187,7 +187,7 @@ def test_llm_check_reports_ready_kimi_endpoint(tmp_path: Path) -> None:
             llm={
                 "enabled": True,
                 "provider": "kimi",
-                "base_url": "https://api.moonshot.cn/v1",
+                "base_url": "https://api.moonshot.ai/v1",
                 "model": "kimi-k2.7-code",
                 "api_key_env": "MOONSHOT_API_KEY",
                 "confidence_min": 0.75,
@@ -208,13 +208,13 @@ def test_llm_check_reports_ready_kimi_endpoint(tmp_path: Path) -> None:
 
     assert out["summary"]["ok"] is True
     assert out["summary"]["status"] == "ready"
-    assert out["llm"]["endpoint_url"] == "https://api.moonshot.cn/v1/chat/completions"
+    assert out["llm"]["endpoint_url"] == "https://api.moonshot.ai/v1/chat/completions"
     assert out["llm"]["responses_url"] is None
-    assert out["llm"]["chat_completions_url"] == "https://api.moonshot.cn/v1/chat/completions"
+    assert out["llm"]["chat_completions_url"] == "https://api.moonshot.ai/v1/chat/completions"
     assert out["llm"]["api_key_configured"] is True
     checks = {item["name"]: item for item in out["checks"]}
     assert checks["provider"]["value"] == "kimi"
-    assert checks["base_url"]["value"]["endpoint_url"] == "https://api.moonshot.cn/v1/chat/completions"
+    assert checks["base_url"]["value"]["endpoint_url"] == "https://api.moonshot.ai/v1/chat/completions"
 
 
 def test_llm_check_live_probe_uses_read_only_tool_call_planning(tmp_path: Path) -> None:
