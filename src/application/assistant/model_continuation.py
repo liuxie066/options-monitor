@@ -81,21 +81,23 @@ def chat_completions_continuation_messages(
     tool_result_event: ToolResultEvent,
 ) -> list[dict[str, Any]]:
     _require_matching_tool_call(model_event=model_event, tool_result_event=tool_result_event)
+    assistant_message = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": model_event.tool_call_id,
+                "type": "function",
+                "function": {
+                    "name": model_event.tool_name,
+                    "arguments": _json_text(model_event.arguments),
+                },
+            }
+        ],
+    }
+    _attach_chat_reasoning_content(assistant_message, (model_event,))
     return [
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {
-                    "id": model_event.tool_call_id,
-                    "type": "function",
-                    "function": {
-                        "name": model_event.tool_name,
-                        "arguments": _json_text(model_event.arguments),
-                    },
-                }
-            ],
-        },
+        assistant_message,
         {
             "role": "tool",
             "tool_call_id": tool_result_event.tool_call_id,
@@ -131,7 +133,9 @@ def chat_completions_continuation_messages_batch(
                 "content": _json_text(tool_result_event.provider_tool_result_payload()),
             }
         )
-    return [{"role": "assistant", "content": "", "tool_calls": tool_calls}, *tool_messages]
+    assistant_message = {"role": "assistant", "content": "", "tool_calls": tool_calls}
+    _attach_chat_reasoning_content(assistant_message, tuple(model_event for model_event, _tool_result in results))
+    return [assistant_message, *tool_messages]
 
 
 def provider_continuation_payload(
@@ -264,6 +268,15 @@ def _require_matching_tool_call(*, model_event: ModelToolCallEvent, tool_result_
 
 def _json_text(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def _attach_chat_reasoning_content(message: dict[str, Any], model_events: tuple[ModelToolCallEvent, ...]) -> None:
+    for model_event in model_events:
+        metadata = model_event.provider_metadata if isinstance(model_event.provider_metadata, dict) else {}
+        reasoning_content = metadata.get("reasoning_content")
+        if isinstance(reasoning_content, str) and reasoning_content:
+            message["reasoning_content"] = reasoning_content
+            return
 
 
 def _is_dict_list(value: Any) -> bool:

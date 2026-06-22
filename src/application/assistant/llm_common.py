@@ -7,6 +7,7 @@ from src.application.assistant.llm_provider_registry import (
     is_supported_llm_provider,
     normalize_llm_provider,
     provider_api_kind,
+    provider_chat_completion_payload_options,
     supported_llm_providers,
 )
 from src.application.assistant.settings import AssistantLlmSettings
@@ -37,14 +38,16 @@ def unsupported_llm_provider_error(settings: AssistantLlmSettings, *, component:
 
 
 def provider_create_response_fn(provider: str) -> CreateStructuredResponseFn:
-    if normalize_llm_provider(provider) == "deepseek":
-        return create_json_chat_completion
+    normalized = normalize_llm_provider(provider)
+    if provider_api_kind(normalized) == "chat_completions":
+        return _chat_completions_response_fn(create_json_chat_completion, provider=normalized)
     return create_structured_response
 
 
 def provider_create_tool_call_response_fn(provider: str) -> CreateToolCallResponseFn:
-    if provider_api_kind(provider) == "chat_completions":
-        return create_tool_call_chat_completion
+    normalized = normalize_llm_provider(provider)
+    if provider_api_kind(normalized) == "chat_completions":
+        return _chat_completions_response_fn(create_tool_call_chat_completion, provider=normalized)
     return create_tool_call_response
 
 
@@ -60,6 +63,22 @@ def provider_endpoint_url(settings: AssistantLlmSettings) -> str:
         if provider_api_kind(settings.provider) == "chat_completions"
         else resolve_responses_url(settings.base_url)
     )
+
+
+def chat_completions_payload_options(provider: str) -> dict[str, Any]:
+    return provider_chat_completion_payload_options(provider)
+
+
+def _chat_completions_response_fn(fn: Callable[..., dict[str, Any]], *, provider: str) -> Callable[..., dict[str, Any]]:
+    options = provider_chat_completion_payload_options(provider)
+
+    def _create(**kwargs: Any) -> dict[str, Any]:
+        call_kwargs = dict(kwargs)
+        for key, value in options.items():
+            call_kwargs.setdefault(key, value)
+        return fn(**call_kwargs)
+
+    return _create
 
 
 def strip_json_code_fence(text: str) -> str:
