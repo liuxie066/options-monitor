@@ -183,6 +183,22 @@ tool-call arguments malformed，用户也不应看到 `json.loads` 或
 `protocol_error -> tool_result observation -> continuation`，或在无法形成
 可绑定事件时进入 clarification / 安全 preview fallback / 清晰的无法完成说明。
 
+### 2.5 Tool-Call Path 的 Context Authority
+
+provider structured tool-call 参数是当前模型轮次的执行意图，不是旧 JSON
+plan，也不是历史上下文来源证明。host 仍然派生 `TaskContract` 和
+`context_use`，但这个派生只用于 schema/scope/risk/budget/duplicate/
+hidden-arg/tool-policy guard，以及识别真正继承的上下文。
+
+具体边界：
+
+- 当前消息给出必需 scope 时，模型把自然语言规范化为 tool argument
+  是允许的，例如 `sell put` -> `function="sell_put"`。
+- `ContextProjection.safe_slots` 只说明历史里可见过哪些安全槽位；不能因为
+  历史里也有同名 enum，就把当前 tool argument 判成 inherited。
+- `context_use.inherited_slots` 只记录从 referenced turn/evidence ref 继承
+  的值；真正继承的 `run_id`、账户、月份、标的等仍需通过 validator。
+
 ## 3. 目标和非目标
 
 ### 3.1 目标
@@ -1027,8 +1043,10 @@ answer_trace:
   映射到 `EventNativePlanningResult`，并通过 `assistant.tool_loop`
   执行 read tool；不再创建生产 `PlannerPlan`。
 - model tool-call path 仍由 host 派生 `context_use` 并执行
-  `context_validation`；模糊追问不会因为没有 JSON plan 而绕过 scope
-  authority。
+  `context_validation`；该派生只用于识别真正继承的上下文，不能把
+  provider structured tool-call `arguments` 反向当成需要逐字槽位匹配
+  的 NLU 输出。模糊追问不会因为没有 JSON plan 而绕过 scope authority，
+  但显式当前请求也不会因为历史 `safe_slots` 多源而被误判为继承上下文。
 - event execution / continuation 已由后续 Slice 接入默认 tool loop。
 
 验收：
@@ -1071,6 +1089,8 @@ python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_sm
   tool call。
 - 补充 model tool-call path 的 follow-up context 回归，避免
   `context_use=none` 绕过模糊追问澄清。
+- 补充显式当前 scope 压过历史上下文的回归，避免 `sell put` 等自然语言
+  被模型规范化为 `sell_put` 后又被 host 误判成 inherited slot。
 - `TaskContract` 仅在 planner 的 `symbol` / `symbols` 参数值内允许
   lowercase ticker 归一化，普通英文短语仍不会被当作 symbol。
 - 已跑最小 gate，并额外跑 `./om assistant eval-context --format json`、
