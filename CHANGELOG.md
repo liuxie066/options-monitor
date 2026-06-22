@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.329 - 2026-06-22
+
+### Fixed
+- Updated Kimi/Moonshot provider defaults, examples, and docs to use the official Kimi Open Platform endpoint
+  `https://api.moonshot.ai/v1` so `MOONSHOT_API_KEY` credentials authenticate against the correct API host.
+
 ## 1.2.328 - 2026-06-22
 
 ### Added

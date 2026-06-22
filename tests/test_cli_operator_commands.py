@@ -283,7 +283,7 @@ def test_assistant_model_catalog_command_renders_provider_catalog(capsys) -> Non
     assert providers["deepseek"]["api_kind"] == "chat_completions"
     assert providers["deepseek"]["default_api_key_env"] == "DEEPSEEK_API_KEY"
     assert providers["kimi"]["api_kind"] == "chat_completions"
-    assert providers["kimi"]["default_base_url"] == "https://api.moonshot.cn/v1"
+    assert providers["kimi"]["default_base_url"] == "https://api.moonshot.ai/v1"
     assert providers["kimi"]["default_api_key_env"] == "MOONSHOT_API_KEY"
     assert providers["openai"]["api_kind"] == "responses"
 

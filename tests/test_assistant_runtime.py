@@ -10488,8 +10488,8 @@ def test_llm_provider_selection_is_centralized() -> None:
         AssistantLlmSettings(enabled=True, provider="deepseek", base_url="https://api.deepseek.com")
     ) == "https://api.deepseek.com/chat/completions"
     assert provider_endpoint_url(
-        AssistantLlmSettings(enabled=True, provider="kimi", base_url="https://api.moonshot.cn/v1")
-    ) == "https://api.moonshot.cn/v1/chat/completions"
+        AssistantLlmSettings(enabled=True, provider="kimi", base_url="https://api.moonshot.ai/v1")
+    ) == "https://api.moonshot.ai/v1/chat/completions"
 
 
 def test_llm_reply_calls_provider_with_constrained_general_reply_prompt() -> None:
@@ -10851,7 +10851,7 @@ def test_kimi_provider_tool_call_request_omits_deepseek_only_parameters() -> Non
     response_fn = provider_create_tool_call_response_fn("kimi")
     response = response_fn(
         api_key="sk-test",
-        base_url="https://api.moonshot.cn/v1",
+        base_url="https://api.moonshot.ai/v1",
         model="kimi-k2.7-code",
         input_text="状态",
         instructions="use tools",
@@ -10861,7 +10861,7 @@ def test_kimi_provider_tool_call_request_omits_deepseek_only_parameters() -> Non
     )
 
     assert response["choices"][0]["message"]["content"] == "final answer"
-    assert calls[0]["url"] == "https://api.moonshot.cn/v1/chat/completions"
+    assert calls[0]["url"] == "https://api.moonshot.ai/v1/chat/completions"
     assert calls[0]["payload"]["model"] == "kimi-k2.7-code"
     assert "thinking" not in calls[0]["payload"]
     assert "temperature" not in calls[0]["payload"]
