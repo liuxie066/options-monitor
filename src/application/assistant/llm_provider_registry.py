@@ -50,6 +50,14 @@ PROVIDER_SPECS: dict[str, LlmProviderSpec] = {
         default_api_key_env="MOONSHOT_API_KEY",
         recommended_models=("kimi-k2.7-code", "kimi-k2.7-code-highspeed", "kimi-k2.6"),
     ),
+    "kimi-code": LlmProviderSpec(
+        provider_id="kimi-code",
+        display_name="Kimi Code",
+        api_kind="chat_completions",
+        default_base_url="https://api.kimi.com/coding/v1",
+        default_api_key_env="KIMI_API_KEY",
+        recommended_models=("kimi-for-coding",),
+    ),
 }
 
 
@@ -94,7 +102,7 @@ def provider_api_kind(provider: str) -> str:
 
 def provider_chat_completion_payload_options(provider: str) -> dict[str, Any]:
     normalized = normalize_llm_provider(provider)
-    if normalized == "kimi":
+    if normalized in {"kimi", "kimi-code"}:
         return {
             "temperature": None,
             "thinking": None,

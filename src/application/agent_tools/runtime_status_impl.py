@@ -42,6 +42,7 @@ DEFAULT_PROFILE_NAMES = ("openclaw.profile.json", ".openclaw-profile.json")
 SERVICE_INJECTED_ENV_SENTINELS = (
     "DEEPSEEK_API_KEY",
     "MOONSHOT_API_KEY",
+    "KIMI_API_KEY",
     "OM_LLM_API_KEY",
     "OM_FEISHU_APP_ID",
     "OM_FEISHU_APP_SECRET",

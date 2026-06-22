@@ -229,6 +229,7 @@ def inspect_effective_settings(
         "OM_LLM_API_KEY",
         "DEEPSEEK_API_KEY",
         "MOONSHOT_API_KEY",
+        "KIMI_API_KEY",
     ]
     entries: dict[str, dict[str, Any]] = {}
     for key in keys:

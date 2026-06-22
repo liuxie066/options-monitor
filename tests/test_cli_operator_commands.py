@@ -285,6 +285,9 @@ def test_assistant_model_catalog_command_renders_provider_catalog(capsys) -> Non
     assert providers["kimi"]["api_kind"] == "chat_completions"
     assert providers["kimi"]["default_base_url"] == "https://api.moonshot.ai/v1"
     assert providers["kimi"]["default_api_key_env"] == "MOONSHOT_API_KEY"
+    assert providers["kimi-code"]["api_kind"] == "chat_completions"
+    assert providers["kimi-code"]["default_base_url"] == "https://api.kimi.com/coding/v1"
+    assert providers["kimi-code"]["default_api_key_env"] == "KIMI_API_KEY"
     assert providers["openai"]["api_kind"] == "responses"
 
 

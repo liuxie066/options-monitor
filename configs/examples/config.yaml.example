@@ -52,10 +52,10 @@ assistant:
       timeout_seconds: 20
       max_output_tokens: 512
     kimi-code:
-      provider: kimi
-      base_url: "https://api.moonshot.ai/v1"
-      model: kimi-k2.7-code
-      api_key_env: MOONSHOT_API_KEY
+      provider: kimi-code
+      base_url: "https://api.kimi.com/coding/v1"
+      model: kimi-for-coding
+      api_key_env: KIMI_API_KEY
       confidence_min: 0.75
       timeout_seconds: 20
       max_output_tokens: 512
