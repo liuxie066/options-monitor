@@ -213,6 +213,7 @@ Supported providers:
 - `openai`: uses OpenAI Responses API. Leave `base_url` empty for `https://api.openai.com/v1/responses`, or set a full Responses-compatible base URL.
 - `deepseek`: uses DeepSeek's OpenAI-compatible Chat Completions API. Leave `base_url` empty or set `https://api.deepseek.com`; OM calls `/chat/completions` and requests `response_format: {"type":"json_object"}`.
 - `kimi`: uses Kimi/Moonshot's OpenAI-compatible Chat Completions API. Leave `base_url` empty or set `https://api.moonshot.ai/v1`; OM calls `/chat/completions` and omits DeepSeek-only `thinking: disabled` / `temperature: 0.0` parameters for Kimi Code models.
+- `kimi-code`: uses Kimi Code's OpenAI-compatible coding endpoint. Leave `base_url` empty or set `https://api.kimi.com/coding/v1`; OM calls `/chat/completions` with `kimi-for-coding` and omits DeepSeek-only `thinking: disabled` / `temperature: 0.0` parameters.
 
 To enable it, set the API key in the local env file or deployment env file, then
 enable `assistant.agent_loop.enabled` and choose `assistant.active_model` in
@@ -267,7 +268,7 @@ assistant:
 Kimi Code example:
 
 ```bash
-MOONSHOT_API_KEY='sk-...'
+KIMI_API_KEY='sk-...'
 ```
 
 ```yaml
@@ -279,10 +280,10 @@ assistant:
   active_model: kimi-code
   models:
     kimi-code:
-      provider: kimi
-      base_url: "https://api.moonshot.ai/v1"
-      model: kimi-k2.7-code
-      api_key_env: MOONSHOT_API_KEY
+      provider: kimi-code
+      base_url: "https://api.kimi.com/coding/v1"
+      model: kimi-for-coding
+      api_key_env: KIMI_API_KEY
       confidence_min: 0.75
       timeout_seconds: 20
       max_output_tokens: 512
@@ -296,7 +297,7 @@ The API key stays in environment settings; assistant config only names which env
 ./om assistant model catalog
 ./om assistant model list
 ./om assistant model add deepseek-default --provider deepseek --model deepseek-chat --api-key-env DEEPSEEK_API_KEY --apply
-./om assistant model add kimi-code --provider kimi --model kimi-k2.7-code --api-key-env MOONSHOT_API_KEY --apply
+./om assistant model add kimi-code --provider kimi-code --model kimi-for-coding --api-key-env KIMI_API_KEY --apply
 ./om assistant model use deepseek-default --apply
 ./om assistant model current
 ./om assistant model check --active --live
