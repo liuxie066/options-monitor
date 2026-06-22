@@ -212,7 +212,7 @@ Supported providers:
 
 - `openai`: uses OpenAI Responses API. Leave `base_url` empty for `https://api.openai.com/v1/responses`, or set a full Responses-compatible base URL.
 - `deepseek`: uses DeepSeek's OpenAI-compatible Chat Completions API. Leave `base_url` empty or set `https://api.deepseek.com`; OM calls `/chat/completions` and requests `response_format: {"type":"json_object"}`.
-- `kimi`: uses Kimi/Moonshot's OpenAI-compatible Chat Completions API. Leave `base_url` empty or set `https://api.moonshot.cn/v1`; OM calls `/chat/completions` and omits DeepSeek-only `thinking: disabled` / `temperature: 0.0` parameters for Kimi Code models.
+- `kimi`: uses Kimi/Moonshot's OpenAI-compatible Chat Completions API. Leave `base_url` empty or set `https://api.moonshot.ai/v1`; OM calls `/chat/completions` and omits DeepSeek-only `thinking: disabled` / `temperature: 0.0` parameters for Kimi Code models.
 
 To enable it, set the API key in the local env file or deployment env file, then
 enable `assistant.agent_loop.enabled` and choose `assistant.active_model` in
@@ -280,7 +280,7 @@ assistant:
   models:
     kimi-code:
       provider: kimi
-      base_url: "https://api.moonshot.cn/v1"
+      base_url: "https://api.moonshot.ai/v1"
       model: kimi-k2.7-code
       api_key_env: MOONSHOT_API_KEY
       confidence_min: 0.75
