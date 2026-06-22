@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 
 DEFAULT_DEEPSEEK_CHAT_COMPLETIONS_URL = "https://api.deepseek.com/chat/completions"
+DEFAULT_CHAT_COMPLETIONS_THINKING = {"type": "disabled"}
 
 HttpPostJsonFn = Callable[..., dict[str, Any]]
 
@@ -34,6 +35,7 @@ def create_json_chat_completion(
     timeout: int = 20,
     max_output_tokens: int = 512,
     temperature: float | None = 0.0,
+    thinking: dict[str, Any] | None = DEFAULT_CHAT_COMPLETIONS_THINKING,
     http_post_json_fn: HttpPostJsonFn | None = None,
 ) -> dict[str, Any]:
     api_key_value = str(api_key or "").strip()
@@ -54,9 +56,10 @@ def create_json_chat_completion(
         ],
         "max_tokens": int(max_output_tokens),
         "response_format": {"type": "json_object"},
-        "thinking": {"type": "disabled"},
         "stream": False,
     }
+    if thinking is not None:
+        payload["thinking"] = dict(thinking)
     if temperature is not None:
         payload["temperature"] = float(temperature)
     return (http_post_json_fn or _post_json)(
@@ -81,6 +84,7 @@ def create_tool_call_chat_completion(
     timeout: int = 20,
     max_output_tokens: int = 512,
     temperature: float | None = 0.0,
+    thinking: dict[str, Any] | None = DEFAULT_CHAT_COMPLETIONS_THINKING,
     http_post_json_fn: HttpPostJsonFn | None = None,
 ) -> dict[str, Any]:
     api_key_value = str(api_key or "").strip()
@@ -99,9 +103,10 @@ def create_tool_call_chat_completion(
         "tools": list(tools or []),
         "tool_choice": "auto",
         "max_tokens": int(max_output_tokens),
-        "thinking": {"type": "disabled"},
         "stream": False,
     }
+    if thinking is not None:
+        payload["thinking"] = dict(thinking)
     if temperature is not None:
         payload["temperature"] = float(temperature)
     return (http_post_json_fn or _post_json)(

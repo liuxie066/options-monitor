@@ -282,6 +282,9 @@ def test_assistant_model_catalog_command_renders_provider_catalog(capsys) -> Non
     providers = {item["provider"]: item for item in payload["data"]["providers"]}
     assert providers["deepseek"]["api_kind"] == "chat_completions"
     assert providers["deepseek"]["default_api_key_env"] == "DEEPSEEK_API_KEY"
+    assert providers["kimi"]["api_kind"] == "chat_completions"
+    assert providers["kimi"]["default_base_url"] == "https://api.moonshot.cn/v1"
+    assert providers["kimi"]["default_api_key_env"] == "MOONSHOT_API_KEY"
     assert providers["openai"]["api_kind"] == "responses"
 
 
@@ -510,7 +513,7 @@ def test_assistant_eval_context_command_renders_report(capsys) -> None:
     assert payload["tool_name"] == "assistant.eval_context"
     assert payload["ok"] is True
     assert payload["data"]["summary"]["mode"] == "scenarios"
-    assert payload["data"]["summary"]["total"] == 17
+    assert payload["data"]["summary"]["total"] == 18
     result = payload["data"]["results"][0]
     assert result["mode"] == "scenarios"
     assert result["actual"]["validation"]["context_validation"]["schema_version"] == "om-context-validation-v1"

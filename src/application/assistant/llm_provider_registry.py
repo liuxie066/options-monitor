@@ -42,6 +42,14 @@ PROVIDER_SPECS: dict[str, LlmProviderSpec] = {
         default_api_key_env="DEEPSEEK_API_KEY",
         recommended_models=("deepseek-chat", "deepseek-reasoner"),
     ),
+    "kimi": LlmProviderSpec(
+        provider_id="kimi",
+        display_name="Kimi",
+        api_kind="chat_completions",
+        default_base_url="https://api.moonshot.cn/v1",
+        default_api_key_env="MOONSHOT_API_KEY",
+        recommended_models=("kimi-k2.7-code", "kimi-k2.7-code-highspeed", "kimi-k2.6"),
+    ),
 }
 
 
@@ -84,6 +92,19 @@ def provider_api_kind(provider: str) -> str:
     return spec.api_kind if spec is not None else "responses"
 
 
+def provider_chat_completion_payload_options(provider: str) -> dict[str, Any]:
+    normalized = normalize_llm_provider(provider)
+    if normalized == "kimi":
+        return {
+            "temperature": None,
+            "thinking": None,
+        }
+    return {
+        "temperature": 0.0,
+        "thinking": {"type": "disabled"},
+    }
+
+
 def provider_catalog_payload() -> dict[str, Any]:
     providers = [spec.public_payload() for spec in provider_specs()]
     return {
@@ -99,6 +120,7 @@ __all__ = [
     "LlmProviderSpec",
     "is_supported_llm_provider",
     "normalize_llm_provider",
+    "provider_chat_completion_payload_options",
     "provider_api_kind",
     "provider_catalog_payload",
     "provider_spec",

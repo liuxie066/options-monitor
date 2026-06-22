@@ -180,6 +180,43 @@ def test_llm_check_reports_ready_deepseek_endpoint(tmp_path: Path) -> None:
     assert checks["live_probe"]["status"] == "skipped"
 
 
+def test_llm_check_reports_ready_kimi_endpoint(tmp_path: Path) -> None:
+    cfg_path = _write_config(
+        tmp_path,
+        _assistant_config(
+            llm={
+                "enabled": True,
+                "provider": "kimi",
+                "base_url": "https://api.moonshot.cn/v1",
+                "model": "kimi-k2.7-code",
+                "api_key_env": "MOONSHOT_API_KEY",
+                "confidence_min": 0.75,
+                "timeout_seconds": 9,
+                "max_output_tokens": 777,
+            }
+        ),
+    )
+    env_file = tmp_path / "options-monitor.env"
+    env_file.write_text("MOONSHOT_API_KEY=sk-test\n", encoding="utf-8")
+
+    out = check_llm_planner(
+        repo_root=tmp_path,
+        config_path=cfg_path,
+        env_file=env_file,
+        include_local_env_file=False,
+    )
+
+    assert out["summary"]["ok"] is True
+    assert out["summary"]["status"] == "ready"
+    assert out["llm"]["endpoint_url"] == "https://api.moonshot.cn/v1/chat/completions"
+    assert out["llm"]["responses_url"] is None
+    assert out["llm"]["chat_completions_url"] == "https://api.moonshot.cn/v1/chat/completions"
+    assert out["llm"]["api_key_configured"] is True
+    checks = {item["name"]: item for item in out["checks"]}
+    assert checks["provider"]["value"] == "kimi"
+    assert checks["base_url"]["value"]["endpoint_url"] == "https://api.moonshot.cn/v1/chat/completions"
+
+
 def test_llm_check_live_probe_uses_read_only_tool_call_planning(tmp_path: Path) -> None:
     calls: list[dict[str, Any]] = []
     cfg_path = _write_config(
