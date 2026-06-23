@@ -687,6 +687,8 @@ def _operation_summary_text(operation_type: str, operation: dict[str, Any]) -> s
         return _upgrade_operation_summary(operation)
     if operation_type == "model_use":
         return _model_operation_summary(args, operation)
+    if operation_type == "monitor_run_now":
+        return _monitor_run_operation_summary(args, operation)
     return operation_type or "-"
 
 
@@ -770,6 +772,18 @@ def _model_operation_summary(args: dict[str, Any], operation: dict[str, Any]) ->
     source = str(summary_map.get("from") or "-")
     target = str(summary_map.get("to") or args.get("model_profile") or "-")
     return f"{source} -> {target}"
+
+
+def _monitor_run_operation_summary(args: dict[str, Any], operation: dict[str, Any]) -> str:
+    preview = operation.get("preview")
+    preview_map = preview if isinstance(preview, dict) else {}
+    summary = preview_map.get("summary")
+    summary_map = summary if isinstance(summary, dict) else {}
+    market = str(summary_map.get("market") or args.get("market") or "-")
+    accounts_raw = summary_map.get("accounts") or args.get("accounts") or []
+    accounts = [str(item) for item in accounts_raw] if isinstance(accounts_raw, list) else []
+    timeout_seconds = summary_map.get("timeout_seconds") or args.get("timeout_seconds") or "-"
+    return f"{market} tick-cron accounts {','.join(accounts) if accounts else '-'} timeout {timeout_seconds}"
 
 
 def _json(value: Any) -> str:

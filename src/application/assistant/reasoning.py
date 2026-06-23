@@ -211,7 +211,7 @@ def _tool_payload_from_perception(
             "sender_id": request.sender_id,
             "conversation_id": request.conversation_id,
         }
-    if tool_name in {"inbound.manual_trade", "inbound.symbols", "inbound.upgrade", "inbound.model"}:
+    if tool_name in {"inbound.manual_trade", "inbound.symbols", "inbound.upgrade", "inbound.model", "inbound.monitor_run"}:
         return dict(arguments)
     raise AgentToolError(
         code="INPUT_ERROR",
@@ -264,7 +264,7 @@ def _resolution_reason(risk_level: str | None, *, read_only: bool) -> str:
 def _action_kind(tool_name: str) -> str:
     if tool_name == "inbound.pending":
         return "pending"
-    if tool_name in {"inbound.manual_trade", "inbound.symbols", "inbound.upgrade", "inbound.model"}:
+    if tool_name in {"inbound.manual_trade", "inbound.symbols", "inbound.upgrade", "inbound.model", "inbound.monitor_run"}:
         return "operation"
     return "tool"
 

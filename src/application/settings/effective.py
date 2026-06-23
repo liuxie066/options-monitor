@@ -223,6 +223,7 @@ def inspect_effective_settings(
         "OM_INBOUND_TRADE_WRITE_ENABLED",
         "OM_INBOUND_SYMBOL_WRITE_ENABLED",
         "OM_INBOUND_UPGRADE_WRITE_ENABLED",
+        "OM_INBOUND_MONITOR_RUN_ENABLED",
         "OM_INBOUND_ADMIN_OPEN_IDS",
         "OM_INBOUND_CONFIRM_TTL_SECONDS",
         "OM_AGENT_ENABLE_WRITE_TOOLS",
@@ -365,6 +366,7 @@ def diagnose_effective_settings(
         "trade_write_enabled": _truthy(effective.get("OM_INBOUND_TRADE_WRITE_ENABLED")),
         "symbol_write_enabled": _truthy(effective.get("OM_INBOUND_SYMBOL_WRITE_ENABLED")),
         "upgrade_write_enabled": _truthy(effective.get("OM_INBOUND_UPGRADE_WRITE_ENABLED")),
+        "monitor_run_enabled": _truthy(effective.get("OM_INBOUND_MONITOR_RUN_ENABLED")),
         "agent_write_tools_enabled": _truthy(effective.get("OM_AGENT_ENABLE_WRITE_TOOLS")),
     }
     add("write_gates", "info", "write gates are explicit settings and default to disabled", write_gates)
@@ -408,6 +410,26 @@ def diagnose_effective_settings(
         )
     else:
         add("inbound_upgrade_write_readiness", "ok", "inbound immediate upgrade write gates are enabled")
+    missing_monitor_run = [
+        name
+        for name, enabled in (
+            ("OM_INBOUND_OPERATIONS_ENABLED", write_gates["operations_enabled"]),
+            ("OM_INBOUND_MONITOR_RUN_ENABLED", write_gates["monitor_run_enabled"]),
+        )
+        if not enabled
+    ]
+    if missing_monitor_run:
+        add(
+            "inbound_monitor_run_readiness",
+            "warn",
+            "inbound monitor run is not enabled",
+            {
+                "missing_enabled_env": missing_monitor_run,
+                "action": "set OM_INBOUND_OPERATIONS_ENABLED=1 and OM_INBOUND_MONITOR_RUN_ENABLED=1 only after confirming the sender allowlist/admin sender",
+            },
+        )
+    else:
+        add("inbound_monitor_run_readiness", "ok", "inbound monitor run gates are enabled")
 
     error_count = sum(1 for item in checks if item.get("status") == "error")
     warning_count = sum(1 for item in checks if item.get("status") == "warn")
@@ -513,6 +535,7 @@ def _setting_key_to_env_name(key: str) -> str:
         "inbound.trade_write_enabled": "OM_INBOUND_TRADE_WRITE_ENABLED",
         "inbound.symbol_write_enabled": "OM_INBOUND_SYMBOL_WRITE_ENABLED",
         "inbound.upgrade_write_enabled": "OM_INBOUND_UPGRADE_WRITE_ENABLED",
+        "inbound.monitor_run_enabled": "OM_INBOUND_MONITOR_RUN_ENABLED",
         "inbound.admin_open_ids": "OM_INBOUND_ADMIN_OPEN_IDS",
         "inbound.confirm_ttl_seconds": "OM_INBOUND_CONFIRM_TTL_SECONDS",
         "agent.write_tools_enabled": "OM_AGENT_ENABLE_WRITE_TOOLS",
