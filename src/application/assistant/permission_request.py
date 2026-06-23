@@ -44,7 +44,7 @@ def build_permission_request(
 
 
 def _risk_class(operation_type: str) -> str:
-    if operation_type == "upgrade_now":
+    if operation_type in {"upgrade_now", "monitor_run_now"}:
         return "preview_admin"
     return "preview_write"
 
@@ -89,6 +89,8 @@ def _operation_command_family(operation_type: str) -> str:
         return "upgrade"
     if operation_type == "model_use":
         return "model"
+    if operation_type == "monitor_run_now":
+        return "monitor-run"
     return "operation"
 
 

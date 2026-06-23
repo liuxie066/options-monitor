@@ -97,6 +97,8 @@ def parse_assistant_command(text: str, *, now_fn: Callable[[], date] | None = No
         return _parse_operation_command(command, args, target_map=_CANCEL_TARGETS, action_label="取消")
     if command in _COMMANDS["upgrade_now"]:
         return _parse_upgrade_command(command, args)
+    if command in _COMMANDS["monitor_run_now"]:
+        return _parse_monitor_run_command(command, args)
 
     raise AgentToolError(
         code="NEEDS_CLARIFICATION",
@@ -273,6 +275,44 @@ def _parse_upgrade_command(command: str, args: list[str]) -> PerceptionResult:
     return _intent("upgrade_now", payload)
 
 
+def _parse_monitor_run_command(command: str, args: list[str]) -> PerceptionResult:
+    if not args:
+        raise _bad_arg(command, "", "格式：/monitor-run hk [accounts=lx,sy] [timeout=600]。")
+    market: str | None = None
+    accounts: list[str] = []
+    timeout_seconds: int | None = None
+    for raw in args:
+        normalized = raw.lower()
+        if normalized in {"hk", "港股", "香港"}:
+            if market is not None and market != "hk":
+                raise _bad_arg(command, raw, "只能指定一个市场：hk 或 us。")
+            market = "hk"
+        elif normalized in {"us", "usa", "美股", "美国"}:
+            if market is not None and market != "us":
+                raise _bad_arg(command, raw, "只能指定一个市场：hk 或 us。")
+            market = "us"
+        elif normalized in _ACCOUNTS:
+            accounts.append(normalized)
+        elif "=" in raw:
+            key, value = _split_key_value(raw)
+            if key == "accounts":
+                accounts.extend(item.strip().lower() for item in re.split(r"[\s,，]+", value) if item.strip())
+            elif key in {"timeout", "timeout_seconds"}:
+                timeout_seconds = _positive_int(value, key)
+            else:
+                raise _bad_arg(command, raw, "支持：/monitor-run hk [accounts=lx,sy] [timeout=600]。")
+        else:
+            raise _bad_arg(command, raw, "支持：/monitor-run hk [accounts=lx,sy] [timeout=600]。")
+    if market is None:
+        raise _bad_arg(command, "", "请明确市场：hk/港股 或 us/美股。")
+    payload: dict[str, object] = {"market": market}
+    if accounts:
+        payload["accounts"] = accounts
+    if timeout_seconds is not None:
+        payload["timeout_seconds"] = timeout_seconds
+    return _intent("monitor_run_now", payload)
+
+
 def _parse_manual_trade_update_command(command: str, args: list[str]) -> PerceptionResult:
     if not args:
         raise _bad_arg(command, "", "格式：/record-update <field>=<value> [operation_id]。")
@@ -375,18 +415,18 @@ def _parse_operation_command(
         raise AgentToolError(
             code="NEEDS_CLARIFICATION",
             message=f"请指定要{action_label}的操作类型。",
-            hint=f"示例：{command} trade in_xxx、{command} symbol in_xxx、{command} upgrade in_xxx、{command} model in_xxx。",
+            hint=f"示例：{command} trade in_xxx、{command} symbol in_xxx、{command} upgrade in_xxx、{command} model in_xxx、{command} monitor-run in_xxx。",
         )
     target = args[0].lower()
     if _OPERATION_ID_RE.match(args[0]):
         raise AgentToolError(
             code="NEEDS_CLARIFICATION",
             message=f"请指定这个 operation_id 属于哪类操作后再{action_label}。",
-            hint=f"示例：{command} trade {args[0]}、{command} symbol {args[0]}、{command} upgrade {args[0]}。",
+            hint=f"示例：{command} trade {args[0]}、{command} symbol {args[0]}、{command} upgrade {args[0]}、{command} monitor-run {args[0]}。",
         )
     intent_name = target_map.get(target)
     if not intent_name:
-        raise _bad_arg(command, args[0], "操作类型只支持 trade、symbol、upgrade、model。")
+        raise _bad_arg(command, args[0], "操作类型只支持 trade、symbol、upgrade、model、monitor-run。")
     if len(args) > 2:
         raise _bad_arg(command, " ".join(args[2:]), f"支持：{command} {args[0]} 或 {command} {args[0]} in_xxx。")
     operation_id = args[1] if len(args) == 2 else None

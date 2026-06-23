@@ -17,6 +17,7 @@ class InboundOperationPolicy:
     symbol_write_enabled: bool
     upgrade_write_enabled: bool
     model_write_enabled: bool
+    monitor_run_enabled: bool
     admin_senders: tuple[str, ...]
     confirm_ttl_seconds: int = DEFAULT_CONFIRM_TTL_SECONDS
 
@@ -29,6 +30,7 @@ def load_operation_policy_from_env() -> InboundOperationPolicy:
         symbol_write_enabled=_truthy(env.get("OM_INBOUND_SYMBOL_WRITE_ENABLED")),
         upgrade_write_enabled=_truthy(env.get("OM_INBOUND_UPGRADE_WRITE_ENABLED")),
         model_write_enabled=_truthy(env.get("OM_INBOUND_MODEL_WRITE_ENABLED")),
+        monitor_run_enabled=_truthy(env.get("OM_INBOUND_MONITOR_RUN_ENABLED")),
         admin_senders=_parse_sender_entries(env.get("OM_INBOUND_ADMIN_OPEN_IDS")),
         confirm_ttl_seconds=_positive_int(
             env.get("OM_INBOUND_CONFIRM_TTL_SECONDS"),
@@ -98,6 +100,22 @@ def enforce_model_write_allowed(
         enabled_field="model_write_enabled",
         message="inbound assistant model switching is disabled",
         hint="Set OM_INBOUND_MODEL_WRITE_ENABLED=1 for inbound assistant model switch operations.",
+    )
+
+
+def enforce_monitor_run_allowed(
+    *,
+    channel: str,
+    sender_id: str,
+    policy: InboundOperationPolicy | None = None,
+) -> InboundOperationPolicy:
+    return _enforce_write_allowed(
+        channel=channel,
+        sender_id=sender_id,
+        policy=policy,
+        enabled_field="monitor_run_enabled",
+        message="inbound monitor run is disabled",
+        hint="Set OM_INBOUND_MONITOR_RUN_ENABLED=1 for inbound monitor tick previews.",
     )
 
 

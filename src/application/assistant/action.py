@@ -6,6 +6,7 @@ from src.application.agent_tool_contracts import build_error_payload
 from src.application.assistant.contracts import ActionResult, AssistantRequest, PerceptionResult, ReasoningResolution
 from src.application.assistant.manual_trade_operations import handle_manual_trade_operation
 from src.application.assistant.model_operations import handle_model_operation
+from src.application.assistant.monitor_run_operations import handle_monitor_run_operation
 from src.application.assistant.operation_store import InboundOperationStore
 from src.application.assistant.policy import enforce_tool_allowed
 from src.application.assistant.preview_request import preview_request_perception_from_payload
@@ -247,6 +248,8 @@ def _handle_operation(
         return handle_upgrade_operation(perception, request, command_id=command_id, store=store)
     if tool_name == "inbound.model":
         return handle_model_operation(perception, request, command_id=command_id, store=store)
+    if tool_name == "inbound.monitor_run":
+        return handle_monitor_run_operation(perception, request, command_id=command_id, store=store)
     return {
         "tool_name": tool_name,
         "ok": False,

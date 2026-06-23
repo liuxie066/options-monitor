@@ -277,6 +277,7 @@ def test_assistant_tool_names_are_registry_or_inbound_surfaces() -> None:
     inbound_operation_surfaces = {
         "inbound.manual_trade",
         "inbound.model",
+        "inbound.monitor_run",
         "inbound.pending",
         "inbound.symbols",
         "inbound.upgrade",

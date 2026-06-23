@@ -72,6 +72,17 @@ _FAMILIES: tuple[_PermissionFamily, ...] = (
         wrong_family_message="这不是模型切换操作，不能用确认模型/取消模型处理。",
         not_found_message="找不到待确认的模型切换操作。",
     ),
+    _PermissionFamily(
+        key="monitor-run",
+        operation_types=frozenset({"monitor_run_now"}),
+        confirm_intent="monitor_run_confirm",
+        cancel_intent="monitor_run_cancel",
+        subject="监控执行",
+        aliases=frozenset({"运行监控", "跑监控", "执行监控", "tick", "monitor-run", "monitor_run", "run-monitor"}),
+        retry_hint="请先生成监控执行预览，或使用 /pending 查看待确认操作。",
+        wrong_family_message="这不是监控执行，不能用确认运行监控/取消运行监控处理。",
+        not_found_message="找不到待确认的监控执行。",
+    ),
 )
 _FAMILY_BY_OPERATION_TYPE = {
     operation_type: family

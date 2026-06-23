@@ -545,6 +545,8 @@ def test_assistant_command_catalog_drives_llm_allowed_surface() -> None:
     assert capabilities["symbol_edit"]["llm_recognizable"] is True
     assert capabilities["symbol_edit"]["llm_executable"] is False
     assert capabilities["upgrade_now"]["risk_level"] == "preview_admin"
+    assert capabilities["monitor_run_now"]["risk_level"] == "preview_admin"
+    assert capabilities["monitor_run_now"]["operation_target"] == "monitor_run"
     assert capabilities["manual_trade_confirm"]["operation_action"] == "confirm"
     assert capabilities["manual_trade_confirm"]["operation_target"] == "trade"
     assert "record" in capabilities["manual_trade_confirm"]["operation_target_aliases"]
@@ -893,6 +895,32 @@ def test_task_contract_keeps_explicit_record_and_raw_broker_notice_as_preview_wr
         )
         assert contract.requested_effect == "preview_write", text
         assert preview_effect_allowed_from_text(text) is True, text
+
+
+def test_task_contract_treats_explicit_monitor_run_as_preview_admin() -> None:
+    text = "跑一次港股监控"
+    contract = build_task_contract(
+        question=text,
+        plan={},
+        request_context={"config_key": "us"},
+        today=date(2026, 6, 23),
+    )
+
+    assert contract.requested_effect == "preview_write"
+    assert preview_effect_allowed_from_text(text) is True
+    assert preview_request_kind_from_text(text) == "monitor_run_now"
+
+    read_text = "今天早上的港股监控，为什么0700 腾讯没有推荐"
+    read_contract = build_task_contract(
+        question=read_text,
+        plan={},
+        request_context={"config_key": "hk"},
+        today=date(2026, 6, 23),
+    )
+
+    assert read_contract.requested_effect == "read"
+    assert preview_effect_allowed_from_text(read_text) is False
+    assert preview_request_kind_from_text(read_text) is None
 
 
 def test_action_safety_denies_symbol_edit_alias_scope_mismatch() -> None:
@@ -1485,6 +1513,7 @@ def test_agent_loop_planner_preview_capabilities_are_exactly_bounded() -> None:
         "symbol_edit",
         "model_use",
         "upgrade_now",
+        "monitor_run_now",
     }
 
     assert {spec.intent_name for spec in planner_preview_specs()} == expected
@@ -7863,6 +7892,91 @@ def test_assistant_runtime_provider_preview_request_creates_assignment_preview(
     assert llm_trace["event_model"]["events"][0]["event_type"] == "preview_request"
     assert llm_trace["agent_loop"]["steps"][0]["tool_name"] == "manual_assignment"
     assert llm_trace["agent_loop"]["preview_receipt"]["operation_type"] == "manual_assignment"
+
+
+def test_assistant_runtime_provider_preview_request_creates_monitor_run_preview(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("OM_LLM_API_KEY", "sk-test")
+    monkeypatch.setenv("OM_INBOUND_OPERATIONS_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_MONITOR_RUN_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_ADMIN_OPEN_IDS", "local:local")
+    monkeypatch.setenv("OM_INBOUND_OPERATION_HMAC_KEY", "test-operation-hmac-key")
+
+    provider_calls: list[dict[str, Any]] = []
+
+    def _create_tool_call_response(**kwargs: Any) -> dict[str, Any]:
+        provider_calls.append(dict(kwargs))
+        tool_names = {
+            (tool.get("function") if isinstance(tool.get("function"), dict) else tool).get("name")
+            for tool in kwargs["tools"]
+        }
+        assert "monitor_run_now" in tool_names
+        return {
+            "output": [
+                {
+                    "type": "preview_request",
+                    "intent_name": "monitor_run_now",
+                    "arguments": {"market": "hk"},
+                    "reason": "operator asked to run one HK monitor cycle",
+                }
+            ]
+        }
+
+    def _provider_response_fn(provider: str):
+        assert provider == "openai"
+        return _create_tool_call_response
+
+    monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_response_fn", _provider_response_fn)
+
+    hk_cfg_path, _sqlite_path = _write_agent_loop_trade_runtime_config(tmp_path)
+    us_cfg_path = tmp_path / "config.us.json"
+    us_cfg = json.loads(hk_cfg_path.read_text(encoding="utf-8"))
+    us_cfg["_generated"]["market"] = "us"
+    us_cfg["_resolved"]["market"] = "us"
+    us_cfg["symbols"][0]["symbol"] = "NVDA"
+    us_cfg_path.write_text(json.dumps(us_cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="跑一次港股监控",
+            sender_id="local",
+            channel="local",
+            message_id="msg_provider_preview_monitor_run",
+            conversation_id="local:local",
+            config_key="us",
+            config_path=str(us_cfg_path),
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        allowed_senders="local:local",
+        settings=AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        now_fn=lambda: date(2026, 6, 23),
+    )
+
+    assert provider_calls
+    assert out["ok"] is True, out
+    assert out["tool_name"] == "inbound.monitor_run"
+    assert out["data"]["operation_type"] == "monitor_run_now"
+    assert out["data"]["perception"]["source"] == "agent_loop_events"
+    assert out["data"]["perception"]["intent_name"] == "monitor_run_now"
+    assert out["data"]["payload"]["arguments"]["market"] == "hk"
+    assert out["data"]["payload"]["arguments"]["accounts"] == ["sy"]
+    assert out["data"]["payload"]["arguments"]["config_path"] == str(hk_cfg_path)
+    assert "./om run tick-cron --market hk --accounts sy --timeout 600" in out["data"]["response_text"]
+    assert "未执行 tick，未发送通知" in out["data"]["response_text"]
+    permission_request = out["data"]["permission_request"]
+    assert permission_request["risk_class"] == "preview_admin"
+    assert permission_request["apply_allowed"] is False
+    assert permission_request["confirm_hint"].startswith("/confirm monitor-run ")
+
+    llm_trace = out["meta"]["assistant"]["llm"]
+    assert llm_trace["event_model"]["events"][0]["event_type"] == "preview_request"
+    assert llm_trace["agent_loop"]["steps"][0]["tool_name"] == "monitor_run_now"
+    assert llm_trace["agent_loop"]["preview_receipt"]["operation_type"] == "monitor_run_now"
+    assert llm_trace["agent_loop"]["preview_receipt"]["handler_tool"] == "inbound.monitor_run"
 
 
 def test_assistant_runtime_repairs_provider_malformed_assignment_arguments_via_tool_observation(

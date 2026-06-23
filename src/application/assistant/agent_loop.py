@@ -4894,6 +4894,7 @@ Rules:
 - If the user asks a single-symbol candidate filtering/root-cause question, call candidate_filter_explain with the user-visible symbol.
 - If the request is write/admin/confirm/apply, do not call a read tool. If a preview capability is exposed in the current tool list, select that preview capability; otherwise ask for clarification or return a preview_request only when the provider supports it.
 - For manual trade preview capabilities, do not copy the original user message into arguments. Provide account only when explicit; the host injects raw_text.
+- For requests to run/trigger one US/HK monitor cycle such as "跑一次港股监控", use monitor_run_now with market=hk/us. This creates only a pending admin preview; never call runtime read tools as a substitute and never execute tick directly.
 - If no safe read tool applies, do not guess.
 """
 
@@ -4939,6 +4940,7 @@ Rules:
 - For analysis_query, use only columns listed in the tool manifest analysis_views. Never invent SQL columns. If the needed fields are not clear from the manifest, plan analysis_catalog before analysis_query.
 - For monitored-symbol setting changes such as covered call min strike 85, use symbol_edit. Do not use symbol_edit for questions about the current value.
 - For model switch requests, use model_use. For immediate software upgrade requests, use upgrade_now.
+- For "跑一次/执行一次/运行一次/触发一次" plus "港股/美股" plus "监控/tick/扫描", use monitor_run_now with market=hk/us. This only creates a pending admin preview. Do not use runtime_status, runtime_runs, or runtime_logs for this execution request, and never plan the live tick itself.
 - Do not include answer-rendering fields such as response_mode, canonical, synthesis, or renderer choices. AgentLoop decides the final answer path, verifies evidence, and owns deterministic fallback.
 - If there is no safe plan, or required slots are missing and the capability cannot safely handle them, return steps=[] instead of guessing.
 """
@@ -5463,6 +5465,19 @@ def _planner_preview_input_schema(intent_name: str) -> dict[str, Any]:
         return {"model_profile": {"type": "string"}}
     if intent_name == "upgrade_now":
         return {"target_version": {"type": ["string", "null"]}}
+    if intent_name == "monitor_run_now":
+        return {
+            "market": {
+                "type": "string",
+                "enum": ["hk", "us"],
+                "description": "Required explicit market from the user message. Use hk for 港股/HK, us for 美股/US.",
+            },
+            "accounts": {
+                "type": ["array", "null"],
+                "items": {"type": "string", "enum": list(ACCOUNT_VALUES)},
+                "description": "Optional accounts only when explicitly present; otherwise omit and the host reads runtime config accounts.",
+            },
+        }
     return {}
 
 
@@ -5505,6 +5520,12 @@ def _planner_preview_notes(intent_name: str) -> list[str]:
         return ["Use for assistant model switch requests. Creates only a pending model-switch preview."]
     if intent_name == "upgrade_now":
         return ["Use for immediate software upgrade requests. Creates only a pending admin preview."]
+    if intent_name == "monitor_run_now":
+        return [
+            "Use for explicit run/trigger-one-cycle monitor requests such as 跑一次港股监控 or run HK tick once.",
+            "Requires market hk or us from the user message.",
+            "Creates only a pending admin preview. The host will require deterministic confirmation before running tick-cron, which may send real notifications.",
+        ]
     return []
 
 

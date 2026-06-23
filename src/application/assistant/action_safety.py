@@ -390,13 +390,25 @@ def _looks_like_preview_request(compact: str) -> bool:
         "立即升级",
         "切换模型",
         "使用模型",
+        "跑一次港股监控",
+        "跑一次美股监控",
     )
     if any(token in compact for token in high_confidence):
+        return True
+    if _looks_like_monitor_run_preview(compact):
         return True
     setting_tokens = ("coveredcall", "sellcall", "sellput", "minstrike", "maxstrike", "min_strike", "max_strike")
     if ("设置" in compact or "修改监控" in compact or "配置标的" in compact) and any(token in compact for token in setting_tokens):
         return True
     return False
+
+
+def _looks_like_monitor_run_preview(compact: str) -> bool:
+    market = any(token in compact for token in ("港股", "香港", "hk", "美股", "美国", "us"))
+    monitor = any(token in compact for token in ("监控", "monitor", "tick", "扫描", "scan"))
+    run_once = any(token in compact for token in ("跑一次", "执行一次", "运行一次", "触发一次", "跑一遍", "runonce"))
+    run_verb = any(token in compact for token in ("运行", "执行", "触发", "启动", "run", "start"))
+    return bool(market and monitor and (run_once or run_verb))
 
 
 def _proposed_effect(*, tool_name: str, action_policy: dict[str, Any]) -> str:

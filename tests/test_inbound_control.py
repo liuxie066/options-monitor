@@ -225,6 +225,13 @@ def _enable_inbound_model_write(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OM_INBOUND_OPERATION_HMAC_KEY", "test-operation-hmac-key")
 
 
+def _enable_inbound_monitor_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OM_INBOUND_OPERATIONS_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_MONITOR_RUN_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_ADMIN_OPEN_IDS", "feishu:ou_1")
+    monkeypatch.setenv("OM_INBOUND_OPERATION_HMAC_KEY", "test-operation-hmac-key")
+
+
 def _write_assistant_model_config(tmp_path: Path) -> tuple[Path, Path]:
     config_yaml = tmp_path / "config.yaml"
     assistant_config = tmp_path / "config.assistant.json"
@@ -2700,6 +2707,130 @@ markets:
     assert item["sell_call"]["min_strike"] == 85.0
 
 
+def test_inbound_monitor_run_preview_requires_run_specific_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _enable_inbound_monitor_run(monkeypatch)
+    cfg_path = _write_symbols_runtime_config(tmp_path)
+    audit_db = tmp_path / "inbound.sqlite3"
+    calls: list[dict[str, Any]] = []
+
+    class _Proc:
+        returncode = 0
+        stdout = "mock tick completed"
+        stderr = ""
+
+    def _runner(command: list[str], *, cwd: Path, timeout_seconds: int) -> _Proc:
+        calls.append({"command": command, "cwd": cwd, "timeout_seconds": timeout_seconds})
+        return _Proc()
+
+    monkeypatch.setattr("src.application.assistant.monitor_run_operations.MONITOR_RUNNER", _runner)
+
+    preview = handle_assistant_request(
+        AssistantRequest(
+            text="/monitor-run hk",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_monitor_run_preview",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert preview["ok"] is True
+    assert preview["tool_name"] == "inbound.monitor_run"
+    assert preview["data"]["status"] == "previewed"
+    assert preview["data"]["payload"]["arguments"]["market"] == "hk"
+    assert preview["data"]["payload"]["arguments"]["accounts"] == ["sy"]
+    assert preview["data"]["preview"]["summary"]["will_send_notifications"] is True
+    assert "未执行 tick，未发送通知" in preview["data"]["response_text"]
+    assert "命令：./om run tick-cron --market hk --accounts sy --timeout 600" in preview["data"]["response_text"]
+    assert calls == []
+
+    wrong_confirm = handle_assistant_request(
+        AssistantRequest(
+            text="确认监控",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_monitor_run_wrong_confirm",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert wrong_confirm["ok"] is False
+    assert wrong_confirm["error"]["code"] == "NEEDS_CLARIFICATION"
+    assert "监控标的变更" in wrong_confirm["error"]["message"]
+    assert calls == []
+
+    confirmed = handle_assistant_request(
+        AssistantRequest(
+            text="确认运行监控",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_monitor_run_confirm",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert confirmed["ok"] is True
+    assert confirmed["data"]["status"] == "applied"
+    assert confirmed["data"]["result"]["returncode"] == 0
+    assert confirmed["data"]["result"]["command"] == "./om run tick-cron --market hk --accounts sy --timeout 600"
+    assert len(calls) == 1
+    assert calls[0]["command"][1:] == ["run", "tick-cron", "--market", "hk", "--accounts", "sy", "--timeout", "600"]
+    assert calls[0]["timeout_seconds"] == 630
+
+
+def test_inbound_monitor_run_cancel_does_not_execute_runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _enable_inbound_monitor_run(monkeypatch)
+    cfg_path = _write_symbols_runtime_config(tmp_path)
+    audit_db = tmp_path / "inbound.sqlite3"
+    calls: list[list[str]] = []
+
+    def _runner(command: list[str], *, cwd: Path, timeout_seconds: int) -> object:
+        calls.append(command)
+        raise AssertionError("monitor run runner should not be called on cancel")
+
+    monkeypatch.setattr("src.application.assistant.monitor_run_operations.MONITOR_RUNNER", _runner)
+
+    preview = handle_assistant_request(
+        AssistantRequest(
+            text="/monitor-run hk accounts=lx,sy timeout=900",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_monitor_run_cancel_preview",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+    operation_id = preview["data"]["operation_id"]
+
+    cancelled = handle_assistant_request(
+        AssistantRequest(
+            text=f"/cancel monitor-run {operation_id}",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_monitor_run_cancel",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert cancelled["ok"] is True
+    assert cancelled["data"]["status"] == "cancelled"
+    assert cancelled["data"]["operation_id"] == operation_id
+    assert "未运行 tick" in cancelled["data"]["response_text"]
+    assert calls == []
+
+
 def test_inbound_write_operations_are_disabled_by_default(tmp_path: Path) -> None:
     cfg_path = _write_symbols_runtime_config(tmp_path)
     audit_db = tmp_path / "inbound.sqlite3"
@@ -2726,11 +2857,24 @@ def test_inbound_write_operations_are_disabled_by_default(tmp_path: Path) -> Non
         ),
         allowed_senders="feishu:ou_1",
     )
+    monitor_run_out = handle_assistant_request(
+        AssistantRequest(
+            text="/monitor-run hk",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_disabled_monitor_run",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
 
     assert trade_out["ok"] is False
     assert trade_out["error"]["code"] == "PERMISSION_DENIED"
     assert symbol_out["ok"] is False
     assert symbol_out["error"]["code"] == "PERMISSION_DENIED"
+    assert monitor_run_out["ok"] is False
+    assert monitor_run_out["error"]["code"] == "PERMISSION_DENIED"
 
 
 def test_inbound_handle_executes_read_only_tool_and_replays_duplicate_message(tmp_path: Path) -> None:
