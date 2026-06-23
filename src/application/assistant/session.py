@@ -575,6 +575,7 @@ def _preview_goal(*, question: str, data: dict[str, Any], receipt: dict[str, Any
     label = {
         "manual_open": "记录开仓预览",
         "manual_close": "记录平仓预览",
+        "monitor_run_now": "监控执行预览",
     }.get(operation_type, "写入预览")
     if target:
         return f"{label}：{target}"
@@ -695,6 +696,7 @@ def _operation_goal(*, operation_type: str, payload: dict[str, Any], preview: di
         "symbol_remove": "监控标的预览",
         "model_use": "模型切换预览",
         "upgrade_now": "升级预览",
+        "monitor_run_now": "监控执行预览",
     }.get(operation_type, "写入预览")
     return f"{label}：{target}" if target else label
 

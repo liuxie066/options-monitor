@@ -388,6 +388,8 @@ def preview_effect_allowed_from_text(text: str) -> bool:
         return True
     if _looks_like_fill_notice_preview(compact):
         return True
+    if _looks_like_monitor_run_preview(compact):
+        return True
     return any(
         token in compact
         for token in (
@@ -510,6 +512,8 @@ def preview_request_kind_from_text(text: str) -> str | None:
         return "upgrade_now"
     if "切换模型" in compact or "使用模型" in compact:
         return "model_use"
+    if _looks_like_monitor_run_preview(compact):
+        return "monitor_run_now"
     if (
         ("设置" in compact or "修改监控" in compact or "配置标的" in compact)
         and any(token in compact for token in ("coveredcall", "sellcall", "sellput", "minstrike", "maxstrike", "min_strike", "max_strike"))
@@ -546,6 +550,14 @@ def _looks_like_fill_notice_preview(compact: str) -> bool:
     if "成交提醒" in compact and any(token in compact for token in ("已成交", "委托已全部成交", "成功卖出", "成功买入")):
         return True
     return any(token in compact for token in ("委托已全部成交", "成功卖出", "成功买入"))
+
+
+def _looks_like_monitor_run_preview(compact: str) -> bool:
+    market = any(token in compact for token in ("港股", "香港", "hk", "美股", "美国", "us"))
+    monitor = any(token in compact for token in ("监控", "monitor", "tick", "扫描", "scan"))
+    run_once = any(token in compact for token in ("跑一次", "执行一次", "运行一次", "触发一次", "跑一遍", "runonce"))
+    run_verb = any(token in compact for token in ("运行", "执行", "触发", "启动", "run", "start"))
+    return bool(market and monitor and (run_once or run_verb))
 
 
 def _looks_like_lifecycle_read_query(compact: str) -> bool:

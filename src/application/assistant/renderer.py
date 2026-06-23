@@ -94,6 +94,8 @@ def _pending_operation_commands(operation_type: str) -> tuple[str, str]:
         return "/confirm upgrade", "/cancel upgrade"
     if operation_type.startswith("model_"):
         return "/confirm model", "/cancel model"
+    if operation_type.startswith("monitor_run"):
+        return "/confirm monitor-run", "/cancel monitor-run"
     return "/confirm trade", "/cancel trade"
 
 
@@ -106,6 +108,7 @@ def _pending_operation_label(operation_type: str) -> str:
         "symbol_remove": "监控删除",
         "upgrade_now": "立即升级",
         "model_use": "模型切换",
+        "monitor_run_now": "监控执行",
     }.get(operation_type, operation_type or "待确认操作")
 
 
