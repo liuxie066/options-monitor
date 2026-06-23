@@ -9,7 +9,6 @@ def test_healthcheck_runner_returns_structured_result(monkeypatch, tmp_path: Pat
 
     config_path = tmp_path / "config.us.json"
     data_path = tmp_path / "portfolio.feishu.json"
-    cron_path = tmp_path / "jobs.json"
     monkeypatch.setenv("OM_FEISHU_APP_ID", "app")
     monkeypatch.setenv("OM_FEISHU_APP_SECRET", "secret")
     monkeypatch.setenv("OM_FEISHU_HOLDINGS_TABLE", "hold_app/hold_tbl")
@@ -36,11 +35,6 @@ def test_healthcheck_runner_returns_structured_result(monkeypatch, tmp_path: Pat
         ),
         encoding="utf-8",
     )
-    cron_path.write_text(
-        json.dumps({"jobs": [{"name": "options-monitor auto tick", "state": {"lastRunAtMs": 1, "lastRunStatus": "ok"}}]}),
-        encoding="utf-8",
-    )
-
     monkeypatch.setattr(runner, "validate_config", lambda _cfg: None)
     monkeypatch.setattr(runner, "get_tenant_access_token", lambda _app_id, _app_secret: "token")
 
@@ -61,7 +55,7 @@ def test_healthcheck_runner_returns_structured_result(monkeypatch, tmp_path: Pat
     monkeypatch.setattr(runner, "bitable_fields", _fields)
     monkeypatch.setattr(runner, "run_scheduler", _run_scheduler)
 
-    result = runner.run_healthcheck_runner(config=config_path, base=tmp_path, cron_path=cron_path)
+    result = runner.run_healthcheck_runner(config=config_path, base=tmp_path)
 
     assert result["ok"] is True
     assert result["accounts"] == ["lx"]
@@ -71,7 +65,6 @@ def test_healthcheck_runner_returns_structured_result(monkeypatch, tmp_path: Pat
         "config_validation",
         "feishu_schema",
         "scheduler_decision",
-        "cron_state",
     ]
     feishu_schema = next(item for item in result["checks"] if item["name"] == "feishu_schema")
     assert "value" not in feishu_schema
@@ -84,7 +77,6 @@ def test_healthcheck_runner_checks_holdings_schema_only(monkeypatch, tmp_path: P
 
     config_path = tmp_path / "config.us.json"
     data_path = tmp_path / "portfolio.feishu.json"
-    cron_path = tmp_path / "jobs.json"
     monkeypatch.setenv("OM_FEISHU_APP_ID", "app")
     monkeypatch.setenv("OM_FEISHU_APP_SECRET", "secret")
     monkeypatch.setenv("OM_FEISHU_HOLDINGS_TABLE", "hold_app/hold_tbl")
@@ -111,8 +103,6 @@ def test_healthcheck_runner_checks_holdings_schema_only(monkeypatch, tmp_path: P
         ),
         encoding="utf-8",
     )
-    cron_path.write_text(json.dumps({"jobs": []}), encoding="utf-8")
-
     monkeypatch.setattr(runner, "validate_config", lambda _cfg: None)
     monkeypatch.setattr(runner, "get_tenant_access_token", lambda _app_id, _app_secret: "token")
 
@@ -126,7 +116,7 @@ def test_healthcheck_runner_checks_holdings_schema_only(monkeypatch, tmp_path: P
     monkeypatch.setattr(runner, "bitable_fields", _fields)
     monkeypatch.setattr(runner, "run_scheduler", lambda **_kwargs: None)
 
-    result = runner.run_healthcheck_runner(config=config_path, base=tmp_path, cron_path=cron_path)
+    result = runner.run_healthcheck_runner(config=config_path, base=tmp_path)
 
     assert result["ok"] is True
     assert seen_tables == ["hold_tbl"]
@@ -141,7 +131,7 @@ def test_healthcheck_report_keeps_legacy_human_sections() -> None:
         {
             "utc": "2026-05-11T00:00:00+00:00",
             "errors": ["bad config"],
-            "warnings": ["cron missing"],
+            "warnings": ["service warning"],
         }
     )
 
@@ -149,4 +139,4 @@ def test_healthcheck_report_keeps_legacy_human_sections() -> None:
     assert "## CRITICAL" in report
     assert "- bad config" in report
     assert "## WARN" in report
-    assert "- cron missing" in report
+    assert "- service warning" in report

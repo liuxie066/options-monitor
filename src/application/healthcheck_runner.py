@@ -73,7 +73,6 @@ def run_healthcheck_runner(
     config: str | Path,
     accounts: list[str] | None = None,
     base: str | Path | None = None,
-    cron_path: str | Path | None = None,
 ) -> dict[str, Any]:
     repo_base = Path(base).resolve() if base is not None else _repo_base()
     cfg_path = _resolve_config_path(config, base=repo_base)
@@ -177,41 +176,6 @@ def run_healthcheck_runner(
         msg = f"scheduler checks skipped: {exc}"
         warnings.append(msg)
         _add_check(checks, name="scheduler_decision", status="warn", message=msg)
-
-    try:
-        cron_state_path = Path(cron_path) if cron_path is not None else Path.home() / ".openclaw" / "cron" / "jobs.json"
-        if cron_state_path.exists():
-            data = _read_json(cron_state_path)
-            job: dict[str, Any] | None = None
-            for item in data.get("jobs", []):
-                if isinstance(item, dict) and item.get("name") == "options-monitor auto tick":
-                    job = item
-                    break
-            if job:
-                raw_state = job.get("state")
-                cron_job_state: dict[str, Any] = raw_state if isinstance(raw_state, dict) else {}
-                last = cron_job_state.get("lastRunAtMs")
-                status = cron_job_state.get("lastRunStatus") or cron_job_state.get("lastStatus")
-                if status != "ok":
-                    warnings.append(f"cron last status: {status}")
-                    _add_check(checks, name="cron_state", status="warn", message=f"cron last status: {status}")
-                elif last is None:
-                    warnings.append("cron never ran yet")
-                    _add_check(checks, name="cron_state", status="warn", message="cron never ran yet")
-                else:
-                    _add_check(checks, name="cron_state", status="ok", message="cron last run ok")
-            else:
-                msg = "cron job not found: options-monitor auto tick"
-                warnings.append(msg)
-                _add_check(checks, name="cron_state", status="warn", message=msg)
-        else:
-            msg = "cron jobs.json not found"
-            warnings.append(msg)
-            _add_check(checks, name="cron_state", status="warn", message=msg)
-    except Exception as exc:
-        msg = f"cron state check failed: {exc}"
-        warnings.append(msg)
-        _add_check(checks, name="cron_state", status="warn", message=msg)
 
     return {
         "ok": not errors,

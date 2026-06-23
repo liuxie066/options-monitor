@@ -38,7 +38,6 @@ PROFILE_TRIGGER_KEYS = (
     "timeout_seconds",
     "timeoutSeconds",
 )
-DEFAULT_PROFILE_NAMES = ("openclaw.profile.json", ".openclaw-profile.json")
 SERVICE_INJECTED_ENV_SENTINELS = (
     "DEEPSEEK_API_KEY",
     "MOONSHOT_API_KEY",
@@ -262,19 +261,19 @@ def _read_json_object(path: Path) -> dict[str, Any]:
     except Exception as exc:
         raise AgentToolError(
             code="CONFIG_ERROR",
-            message=f"failed to parse OpenClaw profile: {path.name}",
+            message=f"failed to parse service profile: {path.name}",
             details={"error": f"{type(exc).__name__}: {exc}"},
         ) from exc
     if not isinstance(payload, dict):
-        raise AgentToolError(code="CONFIG_ERROR", message=f"OpenClaw profile must be a JSON object: {path.name}")
+        raise AgentToolError(code="CONFIG_ERROR", message=f"service profile must be a JSON object: {path.name}")
     return payload
 
 
-def _profile_path_from_payload(payload: dict[str, Any], *, base: Path) -> Path | None:
+def _service_profile_path_from_payload(payload: dict[str, Any], *, base: Path) -> Path | None:
     if "openclaw_profile_path" in payload and str(payload.get("openclaw_profile_path") or "").strip():
         raise AgentToolError(
             code="INPUT_ERROR",
-            message="openclaw_profile_path has been removed; use profile_path",
+            message="openclaw_profile_path has been removed; use service profile_path",
         )
     raw = str(payload.get("profile_path") or "").strip()
     if raw:
@@ -282,10 +281,6 @@ def _profile_path_from_payload(payload: dict[str, Any], *, base: Path) -> Path |
         if not path.is_absolute():
             path = (base / path).resolve()
         return path
-    for name in DEFAULT_PROFILE_NAMES:
-        candidate = (base / name).resolve()
-        if candidate.exists():
-            return candidate
     return None
 
 
@@ -293,7 +288,6 @@ def _profile_meta(profile: dict[str, Any], *, profile_path: Path, base: Path) ->
     return {
         "path": _relative_path(profile_path, base=base),
         "loaded": True,
-        "cron_job_count": len(profile.get("cron_jobs") or []) if isinstance(profile.get("cron_jobs"), list) else 0,
         "service_provider": profile.get("service_provider"),
         "service_count": len(profile.get("services") or []) if isinstance(profile.get("services"), list) else 0,
     }
@@ -329,10 +323,6 @@ def _merge_service_profile_payload(payload: dict[str, Any], *, profile: dict[str
                 merged[key] = paths[key]
             elif key in profile:
                 merged[key] = profile[key]
-    if "cron_jobs" not in merged and isinstance(profile.get("cron_jobs"), list):
-        merged["cron_jobs"] = profile["cron_jobs"]
-    if "include_cron_status" not in merged and "include_cron_status" in profile:
-        merged["include_cron_status"] = profile["include_cron_status"]
     for key in (
         "service_provider",
         "repo_root",
@@ -354,14 +344,14 @@ def _merge_service_profile_payload(payload: dict[str, Any], *, profile: dict[str
     return merged
 
 
-def _merge_openclaw_profile(payload: dict[str, Any], *, base: Path) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    profile_path = _profile_path_from_payload(payload, base=base)
+def _merge_explicit_service_profile(payload: dict[str, Any], *, base: Path) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    profile_path = _service_profile_path_from_payload(payload, base=base)
     if profile_path is None:
         return dict(payload), None
     if not profile_path.exists():
         raise AgentToolError(
             code="CONFIG_ERROR",
-            message=f"OpenClaw profile not found: {profile_path.name}",
+            message=f"service profile not found: {profile_path.name}",
             hint="Remove profile_path or create the referenced JSON profile.",
         )
     profile = _read_json_object(profile_path)
@@ -1802,7 +1792,7 @@ def runtime_status_tool(
     mask_path: Callable[[Any], str | None],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     base = repo_base().resolve()
-    payload, profile_meta = _merge_openclaw_profile(payload, base=base)
+    payload, profile_meta = _merge_explicit_service_profile(payload, base=base)
     config_path, cfg = load_runtime_config(
         config_key=payload.get("config_key"),
         config_path=payload.get("config_path"),
@@ -2110,6 +2100,10 @@ def runtime_status_tool(
         base=base,
         mask_path=mask_path,
     )
+    service_profile = _service_profile_summary(payload)
+    if profile_meta is not None:
+        service_profile["profile"] = profile_meta
+
     data: dict[str, Any] = {
         "config": {
             "config_path": mask_path(config_path),
@@ -2154,8 +2148,7 @@ def runtime_status_tool(
         "channel_health": channel_health,
         "account_summary": {},
         "freshness": {},
-        "openclaw_profile": profile_meta or {"loaded": False},
-        "service_profile": _service_profile_summary(payload),
+        "service_profile": service_profile,
         "assistant_runtime": assistant_runtime,
         "summary": {
             "ok": not warnings,
