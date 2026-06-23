@@ -576,6 +576,37 @@ For Linux systemd rendering:
 
 The rendered `options-monitor-wechat-clawbot.service` passes `--lock-path` so only one poller consumes a ClawBot state directory. Configure `inbound.wechat_clawbot.allowed_senders` in `config.yaml`, or pass `--wechat-clawbot-allowed-senders` as an explicit render-time override. There is no wildcard default. Use `./om channel status --runtime-root <runtime> --profile-path <runtime>/service.profile.json` for the unified Feishu + WeChat channel read surface; it reports configured/available booleans and redacted paths, not ClawBot tokens or allowlist text. When the allowlist comes from `config.yaml`, `service.profile.json` records only `allowed_senders_configured/source`.
 
+WeChat ClawBot has two different outbound contexts:
+
+- `reply` sends a response to the current inbound message. It uses the
+  `to_user_id`, `context_token`, and optional `group_id` carried by that inbound
+  message.
+- `send` proactively delivers OM notifications, receipts, and alerts. It uses
+  the durable binding selected by `notifications.target`, for example
+  `wechat:default:ops`, from the ClawBot `bindings.json` state file.
+
+This means a same-message reply can work while proactive notifications fail if
+the saved binding context has expired or no longer matches the active iLink
+conversation. A `sendmessage` response such as `{"ret": -2}` is therefore a
+proactive-delivery failure signal, not evidence that the ClawBot poller or
+same-message reply path is unavailable.
+
+The intended recovery contract is reply-success binding refresh:
+
+- The poller may refresh the configured proactive notification binding only
+  after an allowed sender receives a successful same-message reply.
+- The refresh target must be the existing `wechat_clawbot` notification route
+  target from runtime config, such as `wechat:default:ops`; the poller must not
+  infer or create a new target name from arbitrary chat content.
+- The refreshed binding may update `to_user_id`, `context_token`, `group_id`,
+  `chat_key`, `last_message_id`, and `last_text` from the inbound message.
+- The refresh must record audit fields such as
+  `refreshed_from_reply_at_utc`, `last_inbound_message_id`, and
+  `reply_message_id` so later runtime diagnosis can distinguish an explicit
+  reply-backed recovery from manual QR rebinding.
+- A refresh does not resend historical notifications. It only makes subsequent
+  proactive notifications use the latest verified reply context.
+
 ## LLM Translator
 
 LLM planning is opt-in and inactive unless `assistant.enabled` and

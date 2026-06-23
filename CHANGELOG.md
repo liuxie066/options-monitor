@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 1.2.331 - 2026-06-23
+
+### Fixed
+- Refreshed the configured WeChat ClawBot proactive notification binding after a successful allowed same-message reply,
+  recording reply-backed audit fields so expired proactive `context_token` state can recover without QR rebinding.
+- Kept reply-backed binding refresh scoped to the existing `wechat_clawbot` notification target and skipped refreshes for
+  failed replies, unauthorized senders, or failed inbound handling.
+
+### Changed
+- Documented the ClawBot reply-vs-proactive-send context split and the `SEND_UNCONFIRMED` / `ret=-2` diagnostic path.
+
 ## 1.2.330 - 2026-06-22
 
 ### Added

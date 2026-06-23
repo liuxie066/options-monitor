@@ -18,6 +18,7 @@ from src.application.channels.wechat_clawbot.message import (
 )
 from src.application.channels.wechat_clawbot.state import (
     DEFAULT_WECHAT_CLAWBOT_LABEL,
+    resolve_wechat_clawbot_target,
     resolve_wechat_clawbot_state_dir,
 )
 from src.application.channels.wechat_clawbot.state_store import WechatClawbotStateStore
@@ -275,6 +276,97 @@ def refresh_wechat_clawbot_bindings_from_message(
         "updated_bindings": updated_names,
         "reason": "refreshed",
     }
+
+
+def refresh_wechat_clawbot_binding_from_reply(
+    *,
+    base: Path,
+    target: str,
+    message: dict[str, Any],
+    reply_status: dict[str, Any],
+    notifications: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    user_id = message_user_id(message)
+    context_token = message_context_token(message)
+    if not user_id or not context_token:
+        return {"attempted": False, "updated_count": 0, "reason": "missing_context"}
+    if not (bool(reply_status.get("attempted")) and bool(reply_status.get("ok"))):
+        return {"attempted": False, "updated_count": 0, "reason": "reply_not_successful"}
+
+    resolved = resolve_wechat_clawbot_target(target, notifications=notifications)
+    state_dir = resolve_wechat_clawbot_state_dir(base=base, label=resolved.label, notifications=notifications)
+    store = WechatClawbotStateStore(state_dir)
+    bindings_payload = _load_store_json(store.load_bindings, default={"bindings": {}})
+    bindings = bindings_payload.get("bindings") if isinstance(bindings_payload.get("bindings"), dict) else {}
+    raw_binding = bindings.get(resolved.binding_name)
+    if not isinstance(raw_binding, dict):
+        return {
+            "attempted": True,
+            "updated_count": 0,
+            "target": resolved.raw,
+            "reason": "binding_not_found",
+        }
+
+    now = utc_now()
+    inbound_message_id = message_id(message) or None
+    refreshed = {
+        **raw_binding,
+        "to_user_id": user_id,
+        "context_token": context_token,
+        "group_id": message_group_id(message) or None,
+        "chat_key": message_chat_key(message) or None,
+        "last_message_id": inbound_message_id or raw_binding.get("last_message_id"),
+        "last_text": message_text(message)[:500],
+        "updated_at_utc": now,
+        "refreshed_from_reply_at_utc": now,
+        "last_inbound_message_id": inbound_message_id,
+        "reply_message_id": _reply_message_id(reply_status),
+    }
+    if refreshed == raw_binding:
+        return {
+            "attempted": True,
+            "updated_count": 0,
+            "target": resolved.raw,
+            "reason": "unchanged",
+        }
+
+    next_bindings = dict(bindings)
+    next_bindings[resolved.binding_name] = refreshed
+    bindings_payload["bindings"] = next_bindings
+    bindings_payload["updated_at_utc"] = now
+    store.save_bindings(bindings_payload)
+    return {
+        "attempted": True,
+        "updated_count": 1,
+        "updated_bindings": [resolved.binding_name],
+        "target": resolved.raw,
+        "reason": "refreshed_from_reply",
+    }
+
+
+def _reply_message_id(reply_status: dict[str, Any]) -> str | None:
+    for key in ("reply_message_id", "outbound_message_id", "message_id"):
+        value = reply_status.get(key)
+        if value:
+            return str(value)
+    api_response = reply_status.get("api_response")
+    if isinstance(api_response, dict):
+        return _extract_message_id(api_response)
+    return None
+
+
+def _extract_message_id(response: dict[str, Any]) -> str | None:
+    for key in ("message_id", "messageId", "id", "client_msg_id"):
+        value = response.get(key)
+        if value:
+            return str(value)
+    data = response.get("data")
+    if isinstance(data, dict):
+        return _extract_message_id(data)
+    result = response.get("result")
+    if isinstance(result, dict):
+        return _extract_message_id(result)
+    return None
 
 
 def _binding_matches_message(

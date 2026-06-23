@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, cast
 
 from domain.domain.multi_tick import WECHAT_CLAWBOT_NOTIFICATION_PROVIDER
+from src.application.agent_tool_config import load_runtime_config
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response, mask_path
 from src.application.assistant.audit import InboundAuditStore
 from src.application.assistant.contracts import AssistantRequest
@@ -24,7 +25,7 @@ from src.application.channels.reply_decision import (
 )
 from src.application.channels.service import ChannelService
 from src.application.channels.wechat_clawbot.adapter import build_wechat_clawbot_inbound_channel_service
-from src.application.channels.wechat_clawbot.binding import refresh_wechat_clawbot_bindings_from_message
+from src.application.channels.wechat_clawbot.binding import refresh_wechat_clawbot_binding_from_reply
 from src.application.channels.wechat_clawbot.ilink_client import DEFAULT_ILINK_BASE_URL, WechatClawbotClient
 from src.application.channels.wechat_clawbot.message import (
     extract_first_string,
@@ -332,6 +333,11 @@ def poll_wechat_clawbot_once(
     cursor_after = extract_first_string(response, ("get_updates_buf", "getUpdatesBuf"))
     messages = extract_messages(response)
     service = channel_service or build_wechat_clawbot_inbound_channel_service()
+    binding_refresh_route = _resolve_binding_refresh_route(
+        state_dir=state_dir,
+        config_key=config_key,
+        config_path=config_path,
+    )
     results: list[dict[str, Any]] = []
     processed_count = 0
     reply_count = 0
@@ -358,12 +364,6 @@ def poll_wechat_clawbot_once(
         try:
             inbound = service.handle_inbound(WECHAT_CLAWBOT_NOTIFICATION_PROVIDER, message, **inbound_kwargs)
             data = _dict(inbound.get("data"))
-            binding_refresh = _refresh_bound_context_from_message(
-                base=base,
-                label=label,
-                state_dir=state_dir,
-                message=message,
-            )
             reply_status = _maybe_reply(
                 message=message,
                 inbound=inbound,
@@ -372,6 +372,14 @@ def poll_wechat_clawbot_once(
                 max_reply_chars=max_reply_chars,
             )
             _record_reply_receipt(inbound=inbound, audit_db=audit_db, reply_status=reply_status)
+            binding_refresh = _refresh_bound_context_from_reply(
+                base=base,
+                inbound=inbound,
+                route=binding_refresh_route,
+                message=message,
+                reply_status=reply_status,
+                allowed_senders=allowed_senders,
+            )
         finally:
             stop_status = _maybe_stop_typing(message=message, client=client, typing_status=typing_status)
             typing_status = {**typing_status, "stop": stop_status}
@@ -420,22 +428,95 @@ def poll_wechat_clawbot_once(
     )
 
 
-def _refresh_bound_context_from_message(
+def _resolve_binding_refresh_route(
+    *,
+    state_dir: str | None,
+    config_key: str | None,
+    config_path: str | None,
+) -> dict[str, Any]:
+    from src.application.notification_delivery_route import resolve_notification_delivery_route
+
+    try:
+        _loaded_path, cfg = load_runtime_config(
+            config_key=config_key,
+            config_path=config_path,
+            require_identity=False,
+        )
+        route = resolve_notification_delivery_route(config=cfg)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "provider": None,
+            "target": None,
+            "notifications": {"wechat_clawbot_state_dir": state_dir} if state_dir else {},
+            "reason": "notification_route_unavailable",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    notifications = route.get("notifications") if isinstance(route.get("notifications"), dict) else {}
+    notifications = dict(notifications)
+    if state_dir:
+        notifications["wechat_clawbot_state_dir"] = state_dir
+    provider = str(route.get("provider") or "").strip()
+    target = str(route.get("target") or "").strip()
+    if provider != WECHAT_CLAWBOT_NOTIFICATION_PROVIDER:
+        return {
+            "ok": False,
+            "provider": provider or None,
+            "target": target or None,
+            "notifications": notifications,
+            "reason": "notification_route_not_wechat_clawbot",
+        }
+    if not target:
+        return {
+            "ok": False,
+            "provider": provider,
+            "target": None,
+            "notifications": notifications,
+            "reason": "notification_route_target_missing",
+        }
+    return {
+        "ok": True,
+        "provider": provider,
+        "target": target,
+        "notifications": notifications,
+        "reason": "notification_route_ready",
+    }
+
+
+def _refresh_bound_context_from_reply(
     *,
     base: Path,
-    label: str,
-    state_dir: str | None,
+    inbound: dict[str, Any],
+    route: dict[str, Any],
     message: dict[str, Any],
+    reply_status: dict[str, Any],
+    allowed_senders: str | None,
 ) -> dict[str, Any]:
+    if not (bool(reply_status.get("attempted")) and bool(reply_status.get("ok"))):
+        return {"attempted": False, "updated_count": 0, "reason": "reply_not_successful"}
+    sender_id = message_user_id(message)
+    sender_decision = check_sender_allowed(channel="wechat", sender_id=sender_id or "", allowed_senders=allowed_senders)
+    if not sender_decision.allowed:
+        return {"attempted": False, "updated_count": 0, "reason": sender_decision.reason}
+    if not bool(inbound.get("ok")):
+        return {"attempted": False, "updated_count": 0, "reason": "inbound_not_successful"}
+    if not bool(route.get("ok")):
+        return {
+            "attempted": False,
+            "updated_count": 0,
+            "reason": str(route.get("reason") or "notification_route_unavailable"),
+            **({"error": route.get("error")} if route.get("error") else {}),
+        }
     try:
-        return refresh_wechat_clawbot_bindings_from_message(
+        return refresh_wechat_clawbot_binding_from_reply(
             base=base,
-            label=label,
-            state_dir=state_dir,
+            target=str(route.get("target") or ""),
             message=message,
+            reply_status=reply_status,
+            notifications=_dict(route.get("notifications")),
         )
     except Exception as exc:
-        LOG.warning("failed to refresh WeChat ClawBot binding context from inbound message", exc_info=True)
+        LOG.warning("failed to refresh WeChat ClawBot binding context from successful reply", exc_info=True)
         return {
             "attempted": True,
             "updated_count": 0,
