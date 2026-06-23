@@ -1418,7 +1418,7 @@ def test_option_positions_read_open_assigned_stock_includes_partially_sold(monke
     assert closed_rows["data"]["row_count"] == 0
 
 
-def test_runtime_status_summarizes_openclaw_runtime_files(tmp_path: Path) -> None:
+def test_runtime_status_summarizes_runtime_files(tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
     cfg_path = tmp_path / "config.us.json"
@@ -2145,7 +2145,8 @@ def test_runtime_status_auto_loads_runtime_service_profile_paths(tmp_path: Path)
     assert data["shared"]["notification"]["exists"] is True
     assert str(data["shared"]["last_run"]["path"]).endswith("last_run.json")
     assert str(data["shared"]["notification"]["path"]).endswith("symbols_notification.txt")
-    assert data["openclaw_profile"]["loaded"] is True
+    assert "openclaw_profile" not in data
+    assert data["service_profile"]["profile"]["loaded"] is True
     assert data["service_profile"]["loaded"] is True
     assert "No last_run.json found under output_shared/state or output_shared/state." not in warnings
     assert "No symbols_notification.txt found under output_shared/reports or output_accounts/<account>/reports." not in warnings
@@ -2665,7 +2666,7 @@ def test_runtime_status_notification_diagnosis_uses_shared_last_run_counts(tmp_p
     assert diagnosis["send_confirmed_count"] == 2
 
 
-def test_runtime_status_loads_openclaw_profile_and_masks_external_paths(tmp_path: Path) -> None:
+def test_runtime_status_loads_service_profile_and_masks_external_paths(tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
     cfg_path = tmp_path / "config.us.json"
@@ -2680,12 +2681,14 @@ def test_runtime_status_loads_openclaw_profile_and_masks_external_paths(tmp_path
     (accounts_root / "user1" / "state" / "last_run.json").write_text(json.dumps({"status": "account_ok"}), encoding="utf-8")
     (accounts_root / "user1" / "reports" / "symbols_notification.txt").write_text("account notification\n", encoding="utf-8")
 
-    profile_path = tmp_path / "openclaw.profile.json"
+    profile_path = tmp_path / "service.profile.json"
     profile_path.write_text(
         json.dumps(
-            {
-                "config_path": str(cfg_path),
-                "accounts": ["user1"],
+                {
+                    "service_provider": "systemd",
+                    "services": [],
+                    "config_path": str(cfg_path),
+                    "accounts": ["user1"],
                 "paths": {
                     "report_dir": str(report_dir),
                     "shared_state_dir": str(shared_state_dir),
@@ -2707,7 +2710,8 @@ def test_runtime_status_loads_openclaw_profile_and_masks_external_paths(tmp_path
 
     assert out["ok"] is True
     assert out["warnings"] == ["Outer delivery.mode is none; the task runner will not announce run output."]
-    assert out["data"]["openclaw_profile"]["loaded"] is True
+    assert "openclaw_profile" not in out["data"]
+    assert out["data"]["service_profile"]["profile"]["loaded"] is True
     assert out["data"]["trigger_context"]["source"] == "om_direct"
     assert out["data"]["trigger_context"]["job_id"] == "hk-direct-11"
     assert out["data"]["trigger_context"]["delivery_mode"] == "none"
@@ -2789,152 +2793,6 @@ def test_runtime_logs_rejects_removed_file_alias(tmp_path: Path) -> None:
     assert out["ok"] is False
     assert out["error"]["code"] == "INPUT_ERROR"
     assert "log_file" in out["error"]["message"]
-
-
-def test_openclaw_readiness_combines_status_and_healthcheck(monkeypatch, tmp_path: Path) -> None:
-    from src.application.tool_execution import execute_tool as run_tool
-
-    cfg_path = tmp_path / "config.us.json"
-    secrets_dir = tmp_path / "secrets"
-    secrets_dir.mkdir()
-    (tmp_path / "portfolio.runtime.json").write_text(
-        json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    cfg_path.write_text(
-        json.dumps(_public_cfg_with_futu("portfolio.runtime.json"), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
-    shared_state_dir = tmp_path / "output_shared" / "state"
-    report_dir = tmp_path / "output_shared" / "reports"
-    accounts_root = tmp_path / "output_accounts"
-    for path in (shared_state_dir, report_dir, accounts_root / "user1" / "reports"):
-        path.mkdir(parents=True, exist_ok=True)
-    (shared_state_dir / "last_run.json").write_text(json.dumps({"status": "ok"}), encoding="utf-8")
-    (report_dir / "symbols_notification.txt").write_text("ready\n", encoding="utf-8")
-
-    _patch_healthcheck_context(monkeypatch)
-
-    out = run_tool(
-        "openclaw_readiness",
-        {
-            "config_path": str(cfg_path),
-            "shared_state_dir": str(shared_state_dir),
-            "report_dir": str(report_dir),
-            "accounts_root": str(accounts_root),
-        },
-    )
-
-    assert out["ok"] is True
-    assert out["data"]["summary"]["ready"] is True
-    checks = {item["name"]: item for item in out["data"]["checks"]}
-    assert checks["runtime_status"]["status"] == "ok"
-    assert checks["healthcheck"]["status"] == "warn"
-    assert checks["openclaw_binary"]["status"] in {"ok", "warn"}
-
-
-def test_openclaw_readiness_reports_profile_cron_notification_and_next_actions(tmp_path: Path) -> None:
-    from src.application.agent_tool_openclaw import openclaw_readiness_tool
-
-    def _runtime_status(_payload):
-        return (
-            {
-                "config": {"config_path": ".../config.us.json"},
-                "summary": {"ok": True},
-                "freshness": {"status": "fresh", "stale": False},
-            },
-            [],
-            {},
-        )
-
-    def _healthcheck(_payload):
-        return ({"summary": {"ok": True}}, [], {})
-
-    def _load_runtime_config(**_kwargs):
-        return (
-            tmp_path / "config.us.json",
-            {"notifications": {"channel": "wechat_clawbot", "target": "clawbot:test-room"}},
-        )
-
-    class _Proc:
-        def __init__(self, stdout: str):
-            self.returncode = 0
-            self.stdout = stdout
-            self.stderr = ""
-
-    def _run_cmd(cmd, **_kwargs):
-        if cmd[-1] == "list":
-            return _Proc("job-1 options-monitor auto tick enabled")
-        return _Proc("last run ok")
-
-    data, warnings, meta = openclaw_readiness_tool(
-        {
-            "config_key": "us",
-            "cron_jobs": [{"id": "job-1", "name": "options-monitor auto tick"}],
-            "include_cron_status": True,
-        },
-        runtime_status_tool_fn=_runtime_status,
-        healthcheck_tool_fn=_healthcheck,
-        load_runtime_config=_load_runtime_config,
-        repo_base=lambda: tmp_path,
-        which=lambda _name: "/usr/local/bin/openclaw",
-        run_cmd=_run_cmd,
-    )
-
-    checks = {item["name"]: item for item in data["checks"]}
-    assert warnings == []
-    assert meta["config_path"] == ".../config.us.json"
-    assert checks["openclaw_binary"]["value"]["path"] == ".../openclaw"
-    assert checks["openclaw_cron"]["status"] == "ok"
-    assert checks["openclaw_cron"]["value"]["configured_jobs"][0]["found"] is True
-    assert checks["notification_route"]["status"] == "ok"
-    assert checks["notification_route"]["value"]["transport_channel"] == "wechat_clawbot"
-    assert data["next_actions"]["safe_next_actions"][0]["action"] == "no_read_only_followup_needed"
-
-
-def test_openclaw_readiness_next_actions_preserve_profile_path(tmp_path: Path) -> None:
-    from src.application.agent_tool_openclaw import openclaw_readiness_tool
-
-    profile_path = tmp_path / "openclaw.profile.json"
-    profile_path.write_text(json.dumps({"config_key": "hk", "accounts": ["lx"]}), encoding="utf-8")
-
-    def _runtime_status(_payload):
-        return (
-            {
-                "config": {"config_path": ".../config.hk.json"},
-                "summary": {"ok": False},
-                "freshness": {"status": "stale", "stale": True},
-            },
-            ["runtime output is missing"],
-            {},
-        )
-
-    def _healthcheck(_payload):
-        return ({"summary": {"ok": True}}, [], {})
-
-    data, warnings, _meta = openclaw_readiness_tool(
-        {"profile_path": str(profile_path)},
-        runtime_status_tool_fn=_runtime_status,
-        healthcheck_tool_fn=_healthcheck,
-        repo_base=lambda: tmp_path,
-        which=lambda _name: None,
-    )
-
-    safe_actions = data["next_actions"]["safe_next_actions"]
-    inspect_action = next(item for item in safe_actions if item["action"] == "inspect_runtime_status")
-    input_json = json.loads(inspect_action["command"][-1])
-    assert input_json == {"profile_path": str(profile_path), "config_key": "hk"}
-    assert data["next_actions"]["blocked_actions"][0]["command"] == [
-        "./om",
-        "run",
-        "tick",
-        "--config",
-        "config.hk.json",
-        "--accounts",
-        "lx",
-    ]
-    assert "runtime output is missing" in warnings
 
 
 def test_close_advice_reads_cached_context_and_required_data(monkeypatch, tmp_path: Path) -> None:

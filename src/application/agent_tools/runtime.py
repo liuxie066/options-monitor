@@ -170,7 +170,7 @@ RUNTIME_RUNS_TOOL = build_agent_tool(
     capabilities=("runs", "read_only", "runtime_artifacts"),
     input_schema={
         "runs_root": "optional run history root; defaults to output_runs",
-        "profile_path": "optional OpenClaw/service profile JSON path",
+        "profile_path": "optional service.profile.json path",
         "limit": "optional number of recent runs to return; defaults to 10; <=0 returns all",
         "run_id": "optional output_runs run id to inspect",
         "run_dir": "optional explicit run directory to inspect",
@@ -196,7 +196,7 @@ RUNTIME_LOGS_TOOL = build_agent_tool(
     input_schema={
         "runs_root": "optional run history root; defaults to output_runs",
         "logs_root": "optional service log root; defaults to logs or profile runtime_root/logs",
-        "profile_path": "optional OpenClaw/service profile JSON path",
+        "profile_path": "optional service.profile.json path",
         "run_id": "optional output_runs run id to inspect",
         "run_dir": "optional explicit run directory to inspect",
         "kind": "optional all|audit|tool|tick|service; defaults all",

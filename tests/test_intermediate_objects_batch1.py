@@ -33,7 +33,7 @@ def test_snapshot_decision_delivery_plan_roundtrip() -> None:
         {
             "schema_kind": "delivery_plan",
             "schema_version": "1.0",
-            "channel": "openclaw",
+            "channel": "wechat_clawbot",
             "target": "user:abc",
             "account_messages": {"lx": "hello"},
             "should_send": True,
@@ -50,7 +50,7 @@ def test_delivery_plan_validation_blocks_empty_target() -> None:
             {
                 "schema_kind": "delivery_plan",
                 "schema_version": "1.0",
-                "channel": "openclaw",
+                "channel": "wechat_clawbot",
                 "target": "",
                 "account_messages": {"lx": "hello"},
                 "should_send": True,
@@ -121,7 +121,7 @@ def test_delivery_plan_schema_error_has_stable_error_code_for_message_type() -> 
             {
                 "schema_kind": "delivery_plan",
                 "schema_version": "1.0",
-                "channel": "openclaw",
+                    "channel": "wechat_clawbot",
                 "target": "user:abc",
                 "account_messages": {"lx": 1},
                 "should_send": True,

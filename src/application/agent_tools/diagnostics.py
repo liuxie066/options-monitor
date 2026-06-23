@@ -161,22 +161,6 @@ def _assistant_trace_tool(
     return data, warnings, {"audit_db": data.get("audit_db")}
 
 
-def _openclaw_readiness_tool(
-    ctx: AgentToolContext,
-    payload: dict[str, Any],
-) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    from src.application.agent_tools.openclaw_impl import openclaw_readiness_tool
-
-    return openclaw_readiness_tool(
-        payload,
-        runtime_status_tool_fn=lambda inner_payload: _runtime_status_tool(ctx, inner_payload),
-        healthcheck_tool_fn=lambda inner_payload: _healthcheck_tool(ctx, inner_payload),
-        load_runtime_config=ctx.load_runtime_config,
-        repo_base=ctx.repo_base,
-        mask_path=ctx.mask_path,
-    )
-
-
 HEALTHCHECK_TOOL = build_agent_tool(
     name="healthcheck",
     description="Validate runtime config and summarize local readiness without sending notifications or writing remote data.",
@@ -209,9 +193,9 @@ HEALTHCHECK_TOOL = build_agent_tool(
 
 RUNTIME_STATUS_TOOL = build_agent_tool(
     name="runtime_status",
-    description="Summarize existing OpenClaw/runtime output files without running pipelines or sending notifications.",
+    description="Summarize existing runtime output files without running pipelines or sending notifications.",
     requires=("runtime_config",),
-    capabilities=("status", "read_only", "openclaw"),
+    capabilities=("status", "read_only"),
     input_schema={
         "config_key": "us|hk",
         "config_path": "optional explicit config path",
@@ -225,7 +209,7 @@ RUNTIME_STATUS_TOOL = build_agent_tool(
         "run_dir": "optional explicit run directory to inspect instead of the last_run_dir pointer",
         "max_notification_chars": "optional int, capped at 20000",
         "max_run_age_minutes": "optional freshness threshold; defaults to 60",
-        "profile_path": "optional OpenClaw profile JSON path",
+        "profile_path": "optional service.profile.json path",
         "include_service_status": "optional bool; inspect configured systemd/launchd service status when a service profile is loaded",
         "trigger_source": "optional outer runner source such as cron or om_direct",
         "trigger_job_id": "optional outer runner job id",
@@ -301,39 +285,11 @@ ASSISTANT_TRACE_TOOL = build_agent_tool(
     output_contract=_ASSISTANT_TRACE_OUTPUT_CONTRACT,
 )
 
-OPENCLAW_READINESS_TOOL = build_agent_tool(
-    name="openclaw_readiness",
-    description="OpenClaw-oriented readiness summary combining runtime_status, healthcheck, and local openclaw command availability.",
-    requires=("runtime_config",),
-    capabilities=("diagnostics", "read_only", "openclaw"),
-    input_schema={
-        "config_key": "us|hk",
-        "config_path": "optional explicit config path",
-        "accounts": "optional list[str]",
-        "data_config": "optional explicit data config path for healthcheck",
-        "timeout_sec": "optional int for healthcheck OpenD readiness probe",
-        "max_notification_chars": "optional int, forwarded to runtime_status",
-        "max_run_age_minutes": "optional freshness threshold for runtime_status",
-        "profile_path": "optional OpenClaw profile JSON path",
-        "cron_jobs": "optional list of OpenClaw cron jobs with id/name/schedule",
-        "include_cron_status": "optional bool; run read-only openclaw cron list/runs when true",
-        "openclaw_command_timeout_sec": "optional int timeout for read-only openclaw CLI checks",
-        "delivery": "optional outer runner delivery object, forwarded to runtime_status",
-        "delivery_mode": "optional outer runner delivery mode, forwarded to runtime_status",
-        "timeoutSeconds": "optional outer runner timeout in seconds, forwarded to runtime_status",
-    },
-    handler=_openclaw_readiness_tool,
-    pure_read=True,
-    safe_default_input={},
-    examples=({"input": {"config_key": "us", "timeout_sec": 20}},),
-)
-
 TOOLS: tuple[AgentTool, ...] = (
     HEALTHCHECK_TOOL,
     RUNTIME_STATUS_TOOL,
     OPERATION_TIMELINE_TOOL,
     ASSISTANT_TRACE_TOOL,
-    OPENCLAW_READINESS_TOOL,
 )
 
 

@@ -123,7 +123,7 @@ def build_agent_spec(*, write_tools_enabled: bool | None = None) -> dict[str, An
         "config": {
             "output_dir_env": "OM_OUTPUT_DIR",
             "write_tools_env": "OM_AGENT_ENABLE_WRITE_TOOLS",
-            "openclaw_profile_names": ["openclaw.profile.json", ".openclaw-profile.json"],
+            "service_profile_name": "service.profile.json",
         },
         "defaults": {
             "write_tools_enabled": bool(write_tools_enabled),

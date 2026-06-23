@@ -16,7 +16,7 @@ from src.application.settings import build_effective_env
 
 
 ServiceTarget = Literal["systemd", "launchd"]
-ServiceProvider = Literal["systemd", "launchd", "manual", "openclaw"]
+ServiceProvider = Literal["systemd", "launchd", "manual"]
 
 DEFAULT_MARKETS: tuple[str, ...] = ("us", "hk")
 DEFAULT_ACCOUNTS: tuple[str, ...] = ("lx", "sy")

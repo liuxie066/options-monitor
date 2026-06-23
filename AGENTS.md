@@ -103,7 +103,7 @@ Research evidence handoff for MacBook Codex:
 | Position workflows | `src/application/positions/` | Feishu `option_positions` is mirror/sync, not source of truth |
 | Trade intake/review | `src/application/trades/` | Preserve idempotency, review, void, and repair semantics |
 | Tick orchestration | `src/application/multi_account_tick.py`, `src/application/multi_tick/` | Keep helper modules narrow |
-| Runtime status / readiness | `src/application/agent_tool_openclaw.py`, `src/application/healthcheck.py` | Prefer extending read surfaces over adding hidden side effects |
+| Runtime status / readiness | `src/application/agent_tools/runtime_status_impl.py`, `src/application/healthcheck.py` | Prefer extending read surfaces over adding hidden side effects |
 | Research evidence | `src/application/research/` | Online side collects redacted evidence only; Codex performs analysis locally |
 | Config validation | `src/application/config_validator.py`, `src/application/layered_config.py` | Do not weaken production config checks |
 | Agent tools | `src/application/agent_tools/`, `src/application/agent_tool_registry.py` | Tool implementation/metadata live in domain `TOOLS`; registry collects them; write gates live in `agent_tools/permissions.py` |

@@ -308,7 +308,7 @@ global conversation state machine, or broader write/admin execution authority.
 ## `./om-agent` Boundary
 
 `./om-agent` is a stable local machine interface for external agents, scripts,
-OpenClaw, Codex, or operators that need structured OM tool calls.
+Codex, or operators that need structured OM tool calls.
 
 It owns:
 

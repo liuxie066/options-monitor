@@ -11,7 +11,7 @@ domain rules, external adapters, and local state repositories.
 | Interfaces | `src/interfaces/` | Human CLI, Tool Gateway, and Inbound Assistant request/response adaptation |
 | Application | `src/application/` | Use-case orchestration, config assembly, pipeline execution, notification flow |
 | Domain | `domain/domain/` | Deterministic strategy, scheduler, notification, position, and schema decisions |
-| Infrastructure | `src/infrastructure/` | OpenD/Futu, Feishu, OpenClaw, exchange-rate and subprocess adapters |
+| Infrastructure | `src/infrastructure/` | OpenD/Futu, Feishu, WeChat ClawBot, exchange-rate and subprocess adapters |
 | Storage | `domain/storage/` | Local path conventions and repository-style reads/writes for run state and reports |
 
 Rules:

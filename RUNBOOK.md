@@ -33,7 +33,7 @@ trade_events -> projection -> position_lots
 ## 日常运行（prod）
 
 ```bash
-cd /home/node/.openclaw/workspace/options-monitor-prod
+cd /var/lib/options-monitor/current
 ./om run tick --config config.us.json --accounts lx sy
 ```
 
@@ -55,7 +55,6 @@ cd /home/node/.openclaw/workspace/options-monitor-prod
 | `./om-agent run --tool config_validate ...` | 否 | 否 | 否 | 只做纯配置语义校验 |
 | `./om-agent run --tool healthcheck ...` | 否 | 否 | 否 | 检查 runtime readiness |
 | `./om-agent run --tool runtime_status ...` | 否 | 否 | 否 | 只读汇总现有输出 |
-| `./om-agent run --tool openclaw_readiness ...` | 否 | 否 | 否 | 只读汇总 runtime / healthcheck / 可选 cron 状态 |
 | `./om run tick --config ... --no-send` | 是 | 可能 | 否 | 会写本地运行产物，但禁发通知 |
 | `./om run tick --config ...` | 是 | 可能 | 是 | 正式扫描/通知入口 |
 | `python3 -m src.application.auto_trade_intake --mode apply` | 是 | 否 | 是 | 会写本地 option_positions / intake state/status，并默认发送入账回执 |
@@ -65,32 +64,24 @@ cd /home/node/.openclaw/workspace/options-monitor-prod
 - 只想确认配置或状态时，优先 `config_validate` / `healthcheck` / `runtime_status`
 - 只要命令会写本地、写远端或发通知，就不要把它当成“只读检查”来使用
 
-## 定时任务（OpenClaw cron）
+## 定时任务（systemd / launchd）
 
-新 Linux / Mac 部署优先使用 `./om service render` 生成 systemd / launchd 服务。OpenClaw cron 仍可作为已有环境的调度器，但不要再把 runtime 路径隐含在仓库目录。
+Linux / Mac 部署使用 `./om service render` 生成 systemd / launchd 服务；OpenClaw cron/readiness/profile 路径已退役，不再作为推荐运行面。
 
-Cron Job:
-- name: `options-monitor auto tick`
-- id: `9cba60f7-407b-4427-9120-0a176b818de9`
-- schedule: `*/10 9-16 * * 1-5` @ `America/New_York`
+生产 service profile 固定为 `$RUNTIME/service.profile.json`。只读状态优先看：
+
+```bash
+./om service status --profile-path "$RUNTIME/service.profile.json" --include-service-status
+./om-agent run --tool runtime_status --input-json "{\"profile_path\":\"$RUNTIME/service.profile.json\"}"
+```
 
 “过期自动平仓维护”cron 应触发专用入口，不再借用 tick。例如每天 `00:10` 唤醒一次：
 
 ```bash
-flock -n /tmp/om-auto-close-expired.lock bash -lc 'set -euo pipefail; cd /home/node/.openclaw/workspace/options-monitor; timeout 600s ./om option-positions auto-close-expired --config config.hk.json --accounts lx sy --apply --quiet' || { rc=$?; if [ "$rc" -eq 1 ]; then echo SKIP_LOCKED; exit 0; else echo EXEC_FAILED_RC_$rc; exit $rc; fi; }
+flock -n /tmp/om-auto-close-expired.lock bash -lc 'set -euo pipefail; cd "$REPO_ROOT"; timeout 600s ./om option-positions auto-close-expired --config "$RUNTIME/config.hk.json" --accounts lx sy --apply --quiet' || { rc=$?; if [ "$rc" -eq 1 ]; then echo SKIP_LOCKED; exit 0; else echo EXEC_FAILED_RC_$rc; exit $rc; fi; }
 ```
 
 专用入口会写入 `output_runs/<run_id>/accounts/<account>/state/expired_position_maintenance.json` 和 `output_shared/state/auto_close_expired.json`；回执按账户、券商、业务日和平仓记录生成 `receipt_key`，同一天已确认发送的回执不会因为人工重跑或 cron 重试而重复发送，未确认回执会按 `option_positions.auto_close.receipt.retry_unconfirmed` 重试。
-
-常用命令：
-
-```bash
-openclaw cron list
-openclaw cron runs
-openclaw cron disable 9cba60f7-407b-4427-9120-0a176b818de9
-openclaw cron enable  9cba60f7-407b-4427-9120-0a176b818de9
-openclaw cron run 9cba60f7-407b-4427-9120-0a176b818de9 --expect-final --timeout 120000
-```
 
 线上定时执行入口：`./om run tick --config config.us.json --accounts lx sy`
 
@@ -109,40 +100,37 @@ openclaw cron run 9cba60f7-407b-4427-9120-0a176b818de9 --expect-final --timeout 
 
 ## 值班三步检查（先做这个）
 
-Agent / OpenClaw 优先使用只读聚合入口：
+Agent 优先使用只读入口：
 
 ```bash
-./om-agent run --tool openclaw_readiness --input-json '{"config_key":"us"}'
+./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
 ./om-agent run --tool runtime_status --input-json '{"config_key":"us"}'
 ```
 
-如果生产路径或 cron id 不想每次手填，可以复制并维护：
+如果生产路径不想每次手填，使用 service profile：
 
 ```bash
-cp configs/examples/openclaw.profile.example.json openclaw.profile.json
-./om-agent run --tool openclaw_readiness --input-json '{"profile_path":"openclaw.profile.json"}'
+./om-agent run --tool runtime_status --input-json '{"profile_path":"/var/lib/options-monitor/service.profile.json"}'
 ```
-
-`openclaw.profile.json` 只放路径、账户、cron id 和 freshness 阈值，不放密钥。
 
 人工直接查看文件时，再用下面三步：
 
 1. 查看是否在跑：
 
 ```bash
-openclaw cron runs
+./om service status --profile-path /var/lib/options-monitor/service.profile.json --include-service-status
 ```
 
 2. 查看上次运行结果（最重要）：
 
 ```bash
-cat /home/node/.openclaw/workspace/options-monitor-prod/output_shared/state/last_run.json
+cat /var/lib/options-monitor/output_shared/state/last_run.json
 ```
 
 3. 查看最新通知内容：
 
 ```bash
-cat /home/node/.openclaw/workspace/options-monitor-prod/<report_dir>/symbols_notification.txt
+cat /var/lib/options-monitor/output_shared/reports/symbols_notification.txt
 ```
 
 统一 tick 的账户级状态和报告位于 `output_accounts/<account>/`，共享运行状态位于 `output_runs/<run_id>/`。
@@ -169,7 +157,8 @@ cat /home/node/.openclaw/workspace/options-monitor-prod/<report_dir>/symbols_not
 ## 应急控制
 
 - 立即停定时监控：
-  - `openclaw cron disable 9cba60f7-407b-4427-9120-0a176b818de9`
+  - systemd: `systemctl stop 'options-monitor*.timer'`
+  - launchd: `launchctl bootout gui/$UID ~/Library/LaunchAgents/com.options-monitor.*.plist`
 
 ## 维护入口（手动）
 

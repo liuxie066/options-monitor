@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 693 (`src`: 403, `domain`: 52, `scripts`: 7, `tests`: 231)
-- Internal import edges: 3709 total, 1738 production/script edges excluding tests
+- Python files scanned: 692 (`src`: 402, `domain`: 52, `scripts`: 7, `tests`: 231)
+- Internal import edges: 3709 total, 1741 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -31,7 +31,7 @@ flowchart LR
   domain_services["domain.services"]
   domain["domain.domain"]
   storage["domain.storage"]
-  application -->|227| domain
+  application -->|226| domain
   application -->|2| domain_services
   application -->|108| infrastructure
   application -->|34| storage
@@ -44,7 +44,7 @@ flowchart LR
   scripts -->|1| infrastructure
   scripts -->|2| storage
   storage -->|1| domain
-  tests -->|1364| application
+  tests -->|1361| application
   tests -->|292| domain
   tests -->|2| domain_services
   tests -->|96| infrastructure
@@ -57,7 +57,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| application | domain | 227 |
+| application | domain | 226 |
 | interfaces | application | 110 |
 | application | infrastructure | 108 |
 | application | storage | 34 |
@@ -75,7 +75,7 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 1364 |
+| tests | application | 1361 |
 | tests | domain | 292 |
 | tests | interfaces | 173 |
 | tests | infrastructure | 96 |
@@ -89,7 +89,7 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 
 | from | to | imports |
 |---|---|---|
-| src.application | domain.domain | 119 |
+| src.application | domain.domain | 118 |
 | src.interfaces | src.application | 90 |
 | src.application | src.infrastructure | 78 |
 | src.application.ledger | domain.domain.ledger | 29 |
@@ -179,14 +179,14 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.infrastructure.io_utils | 42 |
 | domain.domain.ledger.position_fields | 42 |
 | domain.domain.symbol_identity | 37 |
-| src.application.assistant.contracts | 29 |
-| src.application.agent_tool_config | 27 |
+| src.application.assistant.contracts | 30 |
+| src.application.agent_tool_config | 28 |
 | src.application.config_loader | 26 |
 | src.application.settings | 25 |
 | src.application.ledger.api | 23 |
+| src.application.account_config | 20 |
 | domain.domain.trade_contract_identity | 20 |
 | src.application.runtime_cli_format | 20 |
-| src.application.account_config | 19 |
 | domain.domain.engine | 18 |
 | src.application.shadow_replay.common | 18 |
 | domain.storage.repositories | 17 |

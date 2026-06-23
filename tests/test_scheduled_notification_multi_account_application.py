@@ -212,7 +212,7 @@ def test_execute_per_account_delivery_timeout_is_account_isolated(fake_runlog_fa
 
     def _send_fn(*, message: str, **_kwargs):
         if message == "msg-lx":
-            raise subprocess.TimeoutExpired(cmd=["openclaw", "message", "send"], timeout=60)
+            raise subprocess.TimeoutExpired(cmd=["wechat_clawbot", "message", "send"], timeout=60)
         return SimpleNamespace(returncode=0, stdout='{"message_id":"sy-1"}', stderr="")
 
     out = mod.execute_per_account_delivery(

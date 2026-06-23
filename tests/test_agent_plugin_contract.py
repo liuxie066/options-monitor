@@ -33,7 +33,7 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "runtime_logs" in tool_names
     assert "operation_timeline" in tool_names
     assert "assistant_trace" in tool_names
-    assert "openclaw_readiness" in tool_names
+    assert "openclaw_readiness" not in tool_names
     assert "version_update" in tool_names
     assert "candidate_rank_explain" in tool_names
     assert "candidate_filter_explain" in tool_names
@@ -166,7 +166,6 @@ def test_agent_registry_manifest_and_tool_objects_stay_in_sync() -> None:
         "runtime_logs",
         "operation_timeline",
         "assistant_trace",
-        "openclaw_readiness",
     } <= migrated_names
     for name in migrated_names:
         definition = get_tool_definition(name)
@@ -498,4 +497,5 @@ def test_agent_cli_spec_prints_json_manifest() -> None:
     assert payload["launcher"]["edit_account_command"][0:2] == ["./om-agent", "edit-account"]
     assert payload["launcher"]["remove_account_command"][0:2] == ["./om-agent", "remove-account"]
     assert "--dry-run" in payload["launcher"]["add_account_command"]
-    assert payload["config"]["openclaw_profile_names"] == ["openclaw.profile.json", ".openclaw-profile.json"]
+    assert payload["config"]["service_profile_name"] == "service.profile.json"
+    assert "openclaw_profile_names" not in payload["config"]

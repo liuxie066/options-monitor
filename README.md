@@ -179,7 +179,6 @@ om-agent run --tool config_validate --input-json '{"config_key":"us"}'
 om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
 om doctor --config-key us
 om-agent run --tool runtime_status --input-json '{"config_key":"us"}'
-om-agent run --tool openclaw_readiness --input-json '{"config_key":"us"}'
 ```
 
 解释某个配置值来自哪里：
@@ -812,7 +811,7 @@ README 只记录公开入口和边界。生产 cron id、长驻服务启停和�
 | 配置校验失败 | `CONFIGS.md`、`CONFIGURATION_GUIDE.md`、`./om config explain` |
 | 某个 symbol 没进候选 | `candidate_filter_explain`、对应 `candidate_filter_trace.jsonl` |
 | 两个账户结果看起来串了 | `scheduler_status`、账户级 source 配置、账户级状态文件 |
-| 通知没发出来 | `preview_notification`、`notifications.channel`、secret 文件、OpenClaw route |
+| 通知没发出来 | `preview_notification`、`notifications.channel`、secret 文件、通知 route |
 | 自动交易监听没有回执 | `runtime_status` 的 `trade_intake.summary`、`auto_trade_intake_status.json`、`trade_intake.receipt.enabled`、通知 route |
 | 过期自动平仓没有回执 | `runtime_status` 最新 run 里的 `auto_close_receipt` / `expired_position_maintenance`、`option_positions.auto_close.receipt.enabled`、通知 route；每日维护 cron 重跑时还要看 `receipt_key` 是否已确认发送 |
 | 平仓建议异常 | `prepare_close_advice_inputs`、本地 `option_positions`、required data |

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.332 - 2026-06-23
+
+### Removed
+- Retired the Tool Gateway `openclaw_readiness` surface and removed the legacy OpenClaw profile/cron documentation path.
+
 ## 1.2.331 - 2026-06-23
 
 ### Fixed

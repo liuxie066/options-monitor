@@ -5,7 +5,7 @@
 Enable hooks once:
 
 ```bash
-cd /home/node/.openclaw/workspace/options-monitor
+cd /var/lib/options-monitor/current
 bash scripts/setup_git_hooks.sh
 ```
 
