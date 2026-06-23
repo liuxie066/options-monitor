@@ -129,7 +129,6 @@ markets:
 - `configs/examples/user.example.us.json`
 - `configs/examples/user.example.hk.json`
 - `configs/examples/portfolio.runtime.example.json`
-- `configs/examples/openclaw.profile.example.json`
 - `configs/examples/config.yaml.example`
 
 ### 最小配置和补充配置怎么区分？
@@ -295,14 +294,13 @@ markets:
 | `./om config validate --config-path ... --market us|hk` | 校验生成后的 runtime config、市场 schedule 时区契约和生成指纹 | OpenD 是否在线、环境变量是否已注入、runtime 输出是否健康 |
 | `config_validate` | 基础 runtime config 结构校验 | OpenD 是否在线、环境变量是否已注入、生成指纹是否最新 |
 | `healthcheck` | runtime config 可读、SQLite store、Feishu env readiness、OpenD readiness、option_positions bootstrap 状态 | 不负责替代主配置语义文档 |
-| `runtime_status` | 只读汇总现有 runtime / OpenClaw 输出文件 | 不校验配置语义，不检查 OpenD |
-| `openclaw_readiness` | 组合 `runtime_status` + `healthcheck` + 本地 openclaw 可用性 | 不替代 `config_validate` 的纯配置语义检查 |
+| `runtime_status` | 只读汇总现有 runtime / service 输出文件 | 不校验配置语义，不检查 OpenD |
 
 判断规则很简单：
 - YAML authoring 写得对不对，看 `./om config validate --source yaml --market us|hk`
 - runtime config 是否由最新 `config.yaml` 或 legacy user config 生成，看 `./om config validate --config-path ... --market us|hk`
 - 基础 runtime JSON 结构是否可读，看 `config_validate`
-- 环境能不能跑起来，看 `healthcheck` / `openclaw_readiness`
+- 环境能不能跑起来，看 `healthcheck`
 - 历史运行结果长什么样，看 `runtime_status`
 
 ### 4.1 accounts：账户列表
@@ -875,7 +873,7 @@ alert_policy:
 ## 7) 实战期：最短排障三件套
 
 ```bash
-openclaw cron runs
-cat /home/node/.openclaw/workspace/options-monitor-prod/output_shared/state/last_run.json
-cat /home/node/.openclaw/workspace/options-monitor-prod/<report_dir>/symbols_notification.txt  # 默认 report_dir=output_shared/reports
+./om service status --profile-path /var/lib/options-monitor/service.profile.json --include-service-status
+cat /var/lib/options-monitor/output_shared/state/last_run.json
+cat /var/lib/options-monitor/output_shared/reports/symbols_notification.txt
 ```

@@ -13,7 +13,7 @@
 
 ## Tool Gateway / Inbound Assistant
 - [../AGENTS.md](../AGENTS.md)：本地 agent 首屏说明书、安全红线、入口层级、模块归属（静态前缀，Prompt Cache 友好）
-- [../CLAUDE.md](../CLAUDE.md)：Claude / OpenClaw 特有补充指令
+- [../CLAUDE.md](../CLAUDE.md)：Claude 特有补充指令
 - [OM_ASSISTANT_ARCHITECTURE.md](OM_ASSISTANT_ARCHITECTURE.md)：当前权威术语和架构边界；说明 `./om-agent`、`./om assistant`、`AgentLoop` 不是同一维度
 - [AGENT_INTEGRATION.md](AGENT_INTEGRATION.md)：`./om-agent` Tool Gateway JSON 集成合同
 - [AGENT_GETTING_STARTED.md](AGENT_GETTING_STARTED.md)：本地 Tool Gateway 工具快速开始

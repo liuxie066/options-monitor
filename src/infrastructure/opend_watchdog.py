@@ -171,7 +171,9 @@ def get_global_state(host: str, port: int, *, retry_once: bool = True, ensure: b
 
 
 def try_start_opend() -> tuple[bool, str]:
-    start_sh = os.environ.get("OPEND_START_SCRIPT", "/home/node/.openclaw/workspace/skills/futu-agent/scripts/start.sh")
+    start_sh = str(os.environ.get("OPEND_START_SCRIPT") or "").strip()
+    if not start_sh:
+        return (False, "OPEND_START_SCRIPT is not configured")
     try:
         proc = subprocess.run(["bash", start_sh], capture_output=True, text=True, timeout=20)
         out = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()

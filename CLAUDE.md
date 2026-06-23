@@ -1,16 +1,17 @@
 你永远叫我棒棒的liuxie
 
-# Claude / OpenClaw Supplement
+# Claude Supplement
 
-> This file contains Claude- and OpenClaw-specific instructions only.
+> This file contains Claude-specific instructions only.
 > All general agent rules (safety, entry points, module map) live in `AGENTS.md`.
 
-## OpenClaw Readiness
+## Readiness
 
-In OpenClaw environments, use this as the first-pass readiness check:
+Use the standard read-only checks first:
 
 ```bash
-./om-agent run --tool openclaw_readiness --input-json '{"config_key":"us"}'
+./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
+./om-agent run --tool runtime_status --input-json '{"config_key":"us"}'
 ```
 
 After that, follow the standard hierarchy in `AGENTS.md`:

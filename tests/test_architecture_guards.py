@@ -598,14 +598,15 @@ def test_feishu_payload_adapter_public_signature_uses_assistant_naming() -> None
     assert "agent_runtime" not in source
 
 
-def test_runtime_status_tool_is_not_owned_by_openclaw_module() -> None:
-    openclaw_text = (ROOT / "src" / "application" / "agent_tools" / "openclaw_impl.py").read_text(encoding="utf-8")
+def test_openclaw_readiness_tool_is_retired() -> None:
     runtime_text = (ROOT / "src" / "application" / "agent_tools" / "runtime_status_impl.py").read_text(encoding="utf-8")
     runtime_shim_text = (ROOT / "src" / "application" / "agent_tool_runtime_status.py").read_text(encoding="utf-8")
     diagnostics_text = (ROOT / "src" / "application" / "agent_tools" / "diagnostics.py").read_text(encoding="utf-8")
 
-    assert "def runtime_status_tool(" not in openclaw_text
+    assert not (ROOT / "src" / "application" / "agent_tools" / "openclaw_impl.py").exists()
+    assert not (ROOT / "src" / "application" / "agent_tool_openclaw.py").exists()
     assert "def runtime_status_tool(" in runtime_text
+    assert "openclaw_readiness" not in diagnostics_text
     assert "_impl.runtime_status_tool" in runtime_shim_text
     assert "service_status_from_profile = _impl.service_status_from_profile" in runtime_shim_text
     assert "from src.application.agent_tools.runtime_status_impl import runtime_status_tool" in diagnostics_text

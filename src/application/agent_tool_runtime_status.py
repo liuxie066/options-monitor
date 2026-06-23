@@ -4,7 +4,6 @@ from typing import Any
 
 from src.application.agent_tools import runtime_status_impl as _impl
 
-_merge_openclaw_profile = _impl._merge_openclaw_profile
 _relative_path = _impl._relative_path
 service_status_from_profile = _impl.service_status_from_profile
 
@@ -14,7 +13,6 @@ def runtime_status_tool(*args: Any, **kwargs: Any) -> tuple[dict[str, Any], list
     return _impl.runtime_status_tool(*args, **kwargs)
 
 __all__ = [
-    "_merge_openclaw_profile",
     "_relative_path",
     "runtime_status_tool",
     "service_status_from_profile",

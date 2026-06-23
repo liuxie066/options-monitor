@@ -3,7 +3,7 @@
 The public Tool Gateway launcher is `./om-agent`.
 
 `./om-agent` is a structured local tool-call entrypoint for external agents,
-scripts, OpenClaw, Codex, or operators. It is not OM's autonomous/project
+scripts, Codex, or operators. It is not OM's autonomous/project
 Agent, and it should not own multi-step planning or message conversation
 state. Current terminology is defined in
 [OM_ASSISTANT_ARCHITECTURE.md](OM_ASSISTANT_ARCHITECTURE.md).
@@ -193,10 +193,10 @@ For the full Feishu loop, run the long-connection service:
 
 The long-connection client receives Feishu events through the authenticated SDK connection, delegates text messages to Inbound control, optionally adds the configured Inbound `inbound.feishu_ws.ack_reaction`, and replies through the Feishu message reply API. Render it as a long-running service with `./om service render --include-feishu-ws ...`; no public callback URL or reverse proxy is required.
 
-Treat `openclaw_readiness` as OpenClaw-specific. It is safe to call outside OpenClaw, but the
-`openclaw_binary` check may return `warn` when the `openclaw` command is not installed.
+`openclaw_readiness` has been retired. Use `healthcheck` for environment readiness and
+`runtime_status` for existing runtime artifacts.
 
-## OpenClaw
+## Service Deployment
 
 Treat `./om-agent` as a local Tool Gateway command.
 
@@ -206,24 +206,14 @@ Recommended environment:
 - complete first-time initialization with `./om config init --output config.yaml --runtime-output-dir .`
 - use explicit `config_path` input only when you intentionally want to override the default repo-local config
 - keep `OM_AGENT_ENABLE_WRITE_TOOLS` unset unless you explicitly want config writes
-- optionally copy `configs/examples/openclaw.profile.example.json` to `openclaw.profile.json`
-  and fill in production paths/accounts/cron job ids
+- use `$RUNTIME/service.profile.json` from `./om service render` when production paths are not repo-local
 
 Recommended first commands:
 
 ```bash
+./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
 ./om-agent run --tool runtime_status --input-json '{"config_key":"us"}'
-./om-agent run --tool openclaw_readiness --input-json '{"config_key":"us"}'
 ```
-
-Use `openclaw_readiness` when you need a one-shot readiness summary. It combines:
-
-- `runtime_status`
-- existing `healthcheck`
-- local `openclaw` command availability
-- optional profile-backed cron checks
-- notification route shape checks
-- machine-readable next actions
 
 Use `runtime_status` when you only want to inspect existing runtime files. It does not run a pipeline, send
 notifications, or write state. It summarizes:
@@ -240,18 +230,13 @@ If the production layout uses non-default paths, pass them explicitly:
 
 ```bash
 ./om-agent run --tool runtime_status --input-json '{
-  "config_path": "/home/node/.openclaw/workspace/options-monitor-prod/config.us.json",
-  "report_dir": "/home/node/.openclaw/workspace/options-monitor-prod/output_shared/reports",
-  "state_dir": "/home/node/.openclaw/workspace/options-monitor-prod/output_shared/state",
-  "shared_state_dir": "/home/node/.openclaw/workspace/options-monitor-prod/output_shared/state",
-  "accounts_root": "/home/node/.openclaw/workspace/options-monitor-prod/output_accounts",
-  "runs_root": "/home/node/.openclaw/workspace/options-monitor-prod/output_runs"
+  "profile_path": "/var/lib/options-monitor/service.profile.json"
 }'
 ```
 
-Default OpenClaw safety posture:
+Default service safety posture:
 
-- Prefer `openclaw_readiness` or `runtime_status` before any runtime command.
+- Prefer `healthcheck` or `runtime_status` before any runtime command.
 - Do not run `./om run tick` or notification send commands unless the user explicitly asks for a live run.
 - Keep real writes behind both `OM_AGENT_ENABLE_WRITE_TOOLS=true` and a payload-level confirmation such as `confirm=true`.
 - `add-account` / `edit-account` / `remove-account` are write-capable commands; use `--dry-run`
@@ -301,5 +286,4 @@ OM_AGENT_ENABLE_WRITE_TOOLS=true
 - `list` 永远允许
 - 真正写入需要环境变量 + 显式确认
 
-OpenClaw integration in this public repo is local-tool oriented. Private cron/deploy workflows are not part
-of the public plugin contract.
+OpenClaw cron/readiness/profile workflows are retired from the public plugin contract.

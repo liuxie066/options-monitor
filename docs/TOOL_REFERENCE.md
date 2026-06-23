@@ -92,7 +92,6 @@ om-agent run --tool runtime_status --env-file /etc/options-monitor/options-monit
 | `runtime_runs` | `om runs` |
 | `runtime_logs` | `om logs` |
 | `assistant_trace` | `om assistant` inbound audit/session trace diagnostic |
-| `openclaw_readiness` | Tool Gateway-only OpenClaw readiness summary |
 | Research / Shadow Replay | `om research collect` / `om research shadow-replay ...` (not an `om-agent` tool) |
 | `get_close_advice` | `om close-advice` |
 | `query_cash_headroom` | `om sell-put-cash` / `src.application.cash_headroom_query::query_sell_put_cash(...)` |
@@ -104,7 +103,7 @@ om-agent run --tool runtime_status --env-file /etc/options-monitor/options-monit
 - `om` 更适合人工操作
 - `om-agent` 的 CLI 由 `src/interfaces/agent/cli.py` 维护；工具实现和 manifest metadata 归属 `src/application/agent_tools/<domain>.py`，其中较重的历史实现位于同目录 `*_impl.py`；`src/application/agent_tool_registry.py` 只负责收集、去重和输出 manifest；根层 `src/application/agent_tool_*.py` 除 config / contract / registry helper 外只保留兼容 re-export；写入门禁归属 `src/application/agent_tools/permissions.py`；runtime config helper 由 `src/application/agent_tool_config.py` / `src/application/agent_tool_init_local.py` 维护。
 
-配置优先级和 `config_validate` / `healthcheck` / `runtime_status` / `openclaw_readiness` 的正式边界，请以根目录 `CONFIGURATION_GUIDE.md` 为准。这里只保留工具说明，不再重复完整配置规则。
+配置优先级和 `config_validate` / `healthcheck` / `runtime_status` 的正式边界，请以根目录 `CONFIGURATION_GUIDE.md` 为准。这里只保留工具说明，不再重复完整配置规则。
 
 ### 远程消息入口
 
@@ -858,12 +857,11 @@ om-agent run --tool preview_notification --input-json '{"alerts_path":"output_sh
 ## 5.15 `runtime_status`
 
 用途：
-- 只读汇总现有 runtime / OpenClaw 输出文件
+- 只读汇总现有 runtime / service 输出文件
 - 暴露 `config_authority`，用于确认 `config.yaml` 到 `config.<market>.json` 的生成来源、sha256、身份和 freshness
 - 不运行 pipeline
 - 不发送通知
-- 可读取 `openclaw.profile.json` / `.openclaw-profile.json` 或 payload 里的
-  `profile_path` 作为 OpenClaw 或 service profile 路径、账户和 freshness 阈值
+- 可读取 payload 里的 `profile_path` 作为 service profile 路径、账户和 freshness 阈值
 - service profile 会提供 `service_provider`、`repo_root`、`runtime_root`、
   `config_paths` 和 `services` 摘要
 - 可读取可选的外层任务上下文，例如 `trigger_source`、`trigger_job_id`、
@@ -879,7 +877,7 @@ om runs --limit 10
 om runs --run-id 20260515T182459Z-474761
 om logs --run-id 20260515T182459Z-474761 --kind tool --lines 20
 om-agent run --tool runtime_status --input-json '{"config_key":"us"}'
-om-agent run --tool runtime_status --input-json '{"profile_path":"openclaw.profile.json"}'
+om-agent run --tool runtime_status --input-json '{"profile_path":"/var/lib/options-monitor/service.profile.json"}'
 om-agent run --tool runtime_runs --input-json '{"limit":10}'
 om-agent run --tool runtime_logs --input-json '{"run_id":"20260515T182459Z-474761","kind":"tool","lines":20}'
 ```
@@ -910,27 +908,7 @@ om-agent run --tool assistant_trace --input-json '{"command_id":"<command-id>","
 
 ---
 
-## 5.16 `openclaw_readiness`
-
-用途：
-- 面向 OpenClaw 的一站式 readiness 摘要
-- 组合 `runtime_status`、`healthcheck` 和本地 `openclaw` 命令可用性
-- 读取可选 OpenClaw profile，输出 `next_actions.safe_next_actions` 和
-  `next_actions.blocked_actions`
-- profile 或 payload 提供 `cron_jobs` / `include_cron_status=true` 时，会运行只读
-  `openclaw cron list` / `openclaw cron runs`
-- 检查通知 route 是否已配置，且不会返回完整通知 target
-
-示例：
-
-```bash
-om-agent run --tool openclaw_readiness --input-json '{"config_key":"us"}'
-om-agent run --tool openclaw_readiness --input-json '{"profile_path":"openclaw.profile.json"}'
-```
-
----
-
-## 5.17 Research / Shadow Replay / Strategy Lab
+## 5.16 Research / Shadow Replay / Strategy Lab
 
 产品分层：Research 是证据基础设施，Shadow Replay 是反事实复盘引擎，Strategy Lab 是策略进化产品入口。Strategy Lab 会按 strategy domain adapter 区分 Sell Put、Covered Call 和 Combo Yield；统一的是证据和实验 workflow，分开的是决策单元、目标函数、可调参数、硬约束和 proposal target。Combo Yield 必须按 group-level decision instance 评估，不能被拆成独立单腿参数实验。当前 Strategy Lab 已提供 update、readiness、experiment、proposal 和 llm-context 入口；`update` 默认 dry-run，显式 `--build-dataset --write` 时从 latest scanned run 构建本地 replay dataset，显式 `--write` 时才执行本地 mark / settle data-plan。完整模块设计和安全边界见 [STRATEGY_LAB_DESIGN.md](STRATEGY_LAB_DESIGN.md)。
 

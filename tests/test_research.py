@@ -93,7 +93,7 @@ def test_research_reports_scheduler_failure(tmp_path: Path) -> None:
             "config_path": str(tmp_path / "config.us.json"),
             "write_outputs": False,
             "scheduler_evidence": {
-                "provider": "openclaw",
+                "provider": "systemd",
                 "job_name": "us-tick",
                 "last_triggered_at": "2026-05-16T01:00:00Z",
                 "last_status": "failed",
@@ -319,7 +319,7 @@ def test_research_collects_candidate_evidence_for_handoff(tmp_path: Path) -> Non
             "candidate_report_dir": str(report_dir),
             "write_outputs": False,
             "scheduler_evidence": {
-                "provider": "openclaw",
+                "provider": "systemd",
                 "job_name": "us-tick",
                 "last_triggered_at": "2026-05-16T01:00:00Z",
                 "last_status": "success",
@@ -433,7 +433,7 @@ def test_research_shadow_replay_uses_mark_and_outcome_paths(tmp_path: Path) -> N
             "shadow_replay_min_sample": 2,
             "write_outputs": False,
             "scheduler_evidence": {
-                "provider": "openclaw",
+                "provider": "systemd",
                 "job_name": "us-tick",
                 "last_triggered_at": "2026-05-16T01:00:00Z",
                 "last_status": "success",
@@ -513,7 +513,7 @@ def test_research_collects_candidate_evidence_from_profile_runtime_root(tmp_path
             "profile_path": str(profile_path),
             "write_outputs": False,
             "scheduler_evidence": {
-                "provider": "openclaw",
+                "provider": "systemd",
                 "job_name": "us-tick",
                 "last_triggered_at": "2026-05-16T01:00:00Z",
                 "last_status": "success",
@@ -553,7 +553,7 @@ def test_research_builds_redacted_bundle_and_handoff(tmp_path: Path) -> None:
             "config_path": str(tmp_path / "config.us.json"),
             "write_outputs": False,
             "scheduler_evidence": {
-                "provider": "openclaw",
+                "provider": "systemd",
                 "job_name": "us-tick",
                 "last_triggered_at": "2026-05-16T01:00:00Z",
                 "last_status": "success",
@@ -613,7 +613,7 @@ def test_research_ledger_quality_uses_projection_verify_evidence(tmp_path: Path)
             "config_path": str(tmp_path / "config.us.json"),
             "write_outputs": False,
             "scheduler_evidence": {
-                "provider": "openclaw",
+                "provider": "systemd",
                 "job_name": "us-tick",
                 "last_triggered_at": "2026-05-16T01:00:00Z",
                 "last_status": "success",
@@ -666,7 +666,7 @@ def test_research_can_include_redacted_healthcheck_snapshot(tmp_path: Path) -> N
             "include_healthcheck": True,
             "write_outputs": False,
             "scheduler_evidence": {
-                "provider": "openclaw",
+                "provider": "systemd",
                 "job_name": "us-tick",
                 "last_triggered_at": "2026-05-16T01:00:00Z",
                 "last_status": "success",
@@ -725,7 +725,7 @@ def test_research_healthcheck_loads_env_file_from_service_profile(monkeypatch, t
             "include_healthcheck": True,
             "write_outputs": False,
             "scheduler_evidence": {
-                "provider": "openclaw",
+                "provider": "systemd",
                 "job_name": "us-tick",
                 "last_triggered_at": "2026-05-16T01:00:00Z",
                 "last_status": "success",
@@ -757,7 +757,7 @@ def test_research_writes_bundle_and_handoff(tmp_path: Path) -> None:
             "research_output_dir": str(tmp_path / "research"),
             "research_current_dir": str(tmp_path / "current"),
             "scheduler_evidence": {
-                "provider": "openclaw",
+                "provider": "systemd",
                 "job_name": "us-tick",
                 "last_triggered_at": "2026-05-16T01:00:00Z",
                 "last_status": "success",
@@ -792,7 +792,7 @@ def test_research_defaults_to_no_output_writes(tmp_path: Path) -> None:
         {
             "config_path": str(tmp_path / "config.us.json"),
             "scheduler_evidence": {
-                "provider": "openclaw",
+                "provider": "systemd",
                 "job_name": "us-tick",
                 "last_triggered_at": "2026-05-16T01:00:00Z",
                 "last_status": "success",
@@ -821,7 +821,7 @@ def test_research_rejects_output_paths_outside_repo(tmp_path: Path) -> None:
                 "write_outputs": True,
                 "research_output_dir": str(tmp_path.parent / "outside-research"),
                 "scheduler_evidence": {
-                    "provider": "openclaw",
+                    "provider": "systemd",
                     "job_name": "us-tick",
                     "last_triggered_at": "2026-05-16T01:00:00Z",
                     "last_status": "success",
@@ -926,7 +926,7 @@ def test_research_collect_runs_with_local_runtime_artifacts(tmp_path: Path) -> N
             "runs_root": str(runs_root),
             "write_outputs": False,
             "scheduler_evidence": {
-                "provider": "openclaw",
+                "provider": "systemd",
                 "job_name": "us-tick",
                 "last_triggered_at": "2026-05-16T01:00:00Z",
                 "last_status": "success",
