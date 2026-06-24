@@ -281,7 +281,7 @@ om channel status --runtime-root /var/lib/options-monitor --profile-path /var/li
 cat /var/lib/options-monitor/output_runs/<run_id>/state/tick_metrics.json
 ```
 
-恢复优先级是让允许名单内用户发送一条普通聊天消息，并在同条消息回复成功后刷新当前 `wechat_clawbot` 通知路由指向的既有 binding。实现必须只刷新配置里的既有 target，不创建新 target，不补发历史通知，并在 binding 状态中留下 `refreshed_from_reply_at_utc`、`last_inbound_message_id`、`reply_message_id` 等审计字段。重新扫码绑定只是备用恢复方案。
+恢复优先级是让允许名单内用户发送一条普通聊天消息；poller 收到该消息后会先刷新当前 `wechat_clawbot` 通知路由指向的既有 binding，不依赖同条消息的回复是否成功。实现必须只刷新配置里的既有 target，不创建新 target，不补发历史通知，并在 binding 状态中留下 `refreshed_from_inbound_at_utc`、`last_inbound_message_id` 等审计字段；若同条消息回复成功，还会补充 `refreshed_from_reply_at_utc`、`reply_message_id`，方便区分入站刷新和回复确认。重新扫码绑定只是备用恢复方案。
 
 `service drift` 会用当前 release 的 `render_service_bundle()` 重新生成期望 service/timer，再和 `$RUNTIME/service.profile.json` 以及 systemd unit 文件对比。默认只读；带 `--confirm` 或 `--yes` 时只写入缺失 unit/profile、执行 `systemctl daemon-reload`，并 `enable --now` 缺失 timer，不会自动启用或重启新增长期 service。`runtime_status` 同样会暴露 service drift 摘要；缺失 `options-monitor-projection-verify.timer` 这类维护 timer 会作为 warning/error 返回。
 

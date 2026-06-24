@@ -25,7 +25,10 @@ from src.application.channels.reply_decision import (
 )
 from src.application.channels.service import ChannelService
 from src.application.channels.wechat_clawbot.adapter import build_wechat_clawbot_inbound_channel_service
-from src.application.channels.wechat_clawbot.binding import refresh_wechat_clawbot_binding_from_reply
+from src.application.channels.wechat_clawbot.binding import (
+    refresh_wechat_clawbot_binding_from_inbound_message,
+    refresh_wechat_clawbot_binding_from_reply,
+)
 from src.application.channels.wechat_clawbot.ilink_client import DEFAULT_ILINK_BASE_URL, WechatClawbotClient
 from src.application.channels.wechat_clawbot.message import (
     extract_first_string,
@@ -369,6 +372,12 @@ def poll_wechat_clawbot_once(
         try:
             inbound = service.handle_inbound(WECHAT_CLAWBOT_NOTIFICATION_PROVIDER, message, **inbound_kwargs)
             data = _dict(inbound.get("data"))
+            binding_refresh = _refresh_bound_context_from_inbound(
+                base=base,
+                route=binding_refresh_route,
+                message=message,
+                allowed_senders=allowed_senders,
+            )
             reply_status = _maybe_reply(
                 message=message,
                 inbound=inbound,
@@ -377,7 +386,7 @@ def poll_wechat_clawbot_once(
                 max_reply_chars=max_reply_chars,
             )
             _record_reply_receipt(inbound=inbound, audit_db=audit_db, reply_status=reply_status)
-            binding_refresh = _refresh_bound_context_from_reply(
+            reply_binding_refresh = _refresh_bound_context_from_reply(
                 base=base,
                 inbound=inbound,
                 route=binding_refresh_route,
@@ -385,6 +394,8 @@ def poll_wechat_clawbot_once(
                 reply_status=reply_status,
                 allowed_senders=allowed_senders,
             )
+            if bool(reply_binding_refresh.get("attempted")):
+                binding_refresh = reply_binding_refresh
         finally:
             stop_status = _maybe_stop_typing(message=message, client=client, typing_status=typing_status)
             typing_status = {**typing_status, "stop": stop_status}
@@ -522,6 +533,41 @@ def _refresh_bound_context_from_reply(
         )
     except Exception as exc:
         LOG.warning("failed to refresh WeChat ClawBot binding context from successful reply", exc_info=True)
+        return {
+            "attempted": True,
+            "updated_count": 0,
+            "reason": "refresh_failed",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
+def _refresh_bound_context_from_inbound(
+    *,
+    base: Path,
+    route: dict[str, Any],
+    message: dict[str, Any],
+    allowed_senders: str | None,
+) -> dict[str, Any]:
+    sender_id = message_user_id(message)
+    sender_decision = check_sender_allowed(channel="wechat", sender_id=sender_id or "", allowed_senders=allowed_senders)
+    if not sender_decision.allowed:
+        return {"attempted": False, "updated_count": 0, "reason": sender_decision.reason}
+    if not bool(route.get("ok")):
+        return {
+            "attempted": False,
+            "updated_count": 0,
+            "reason": str(route.get("reason") or "notification_route_unavailable"),
+            **({"error": route.get("error")} if route.get("error") else {}),
+        }
+    try:
+        return refresh_wechat_clawbot_binding_from_inbound_message(
+            base=base,
+            target=str(route.get("target") or ""),
+            message=message,
+            notifications=_dict(route.get("notifications")),
+        )
+    except Exception as exc:
+        LOG.warning("failed to refresh WeChat ClawBot binding context from inbound message", exc_info=True)
         return {
             "attempted": True,
             "updated_count": 0,

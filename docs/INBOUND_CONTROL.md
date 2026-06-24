@@ -591,21 +591,24 @@ conversation. A `sendmessage` response such as `{"ret": -2}` is therefore a
 proactive-delivery failure signal, not evidence that the ClawBot poller or
 same-message reply path is unavailable.
 
-The intended recovery contract is reply-success binding refresh:
+The intended recovery contract is allowed-inbound binding refresh:
 
-- The poller may refresh the configured proactive notification binding only
-  after an allowed sender receives a successful same-message reply.
+- The poller may refresh the configured proactive notification binding after
+  receiving an inbound message from an allowed sender. This refresh does not
+  depend on same-message reply success.
 - The refresh target must be the existing `wechat_clawbot` notification route
   target from runtime config, such as `wechat:default:ops`; the poller must not
   infer or create a new target name from arbitrary chat content.
 - The refreshed binding may update `to_user_id`, `context_token`, `group_id`,
   `chat_key`, `last_message_id`, and `last_text` from the inbound message.
-- The refresh must record audit fields such as
-  `refreshed_from_reply_at_utc`, `last_inbound_message_id`, and
-  `reply_message_id` so later runtime diagnosis can distinguish an explicit
-  reply-backed recovery from manual QR rebinding.
+- The inbound refresh must record audit fields such as
+  `refreshed_from_inbound_at_utc` and `last_inbound_message_id`. If a
+  same-message reply succeeds, the poller also records
+  `refreshed_from_reply_at_utc` and `reply_message_id` so later runtime
+  diagnosis can distinguish reply-backed confirmation from inbound-only
+  recovery.
 - A refresh does not resend historical notifications. It only makes subsequent
-  proactive notifications use the latest verified reply context.
+  proactive notifications use the latest observed inbound context.
 
 ## LLM Translator
 

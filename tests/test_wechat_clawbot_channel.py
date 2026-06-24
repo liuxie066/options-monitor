@@ -203,6 +203,60 @@ def test_wechat_clawbot_refreshes_matching_binding_from_inbound_message(tmp_path
     assert bindings["other"]["context_token"] == "ctx_other"
 
 
+def test_wechat_clawbot_refreshes_notification_binding_from_inbound_message(tmp_path: Path) -> None:
+    from src.application.channels.wechat_clawbot.binding import refresh_wechat_clawbot_binding_from_inbound_message
+
+    state_dir = tmp_path / "wechat-state"
+    state_dir.mkdir()
+    (state_dir / "bindings.json").write_text(
+        json.dumps(
+            {
+                "bindings": {
+                    "ops": {
+                        "to_user_id": "stale_user",
+                        "context_token": "stale_ctx",
+                        "group_id": "stale_group",
+                        "chat_key": "stale_chat",
+                        "last_message_id": "msg_old",
+                    },
+                    "other": {
+                        "to_user_id": "stale_other",
+                        "context_token": "other_ctx",
+                    },
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    out = refresh_wechat_clawbot_binding_from_inbound_message(
+        base=tmp_path,
+        target="wechat:ops",
+        notifications={"wechat_clawbot_state_dir": str(state_dir)},
+        message={
+            "from_user_id": "user_1",
+            "group_id": "group_1",
+            "context_token": "ctx_1",
+            "message_id": "msg_1",
+            "item_list": [{"type": 1, "text_item": {"text": "/status"}}],
+        },
+    )
+
+    assert out["reason"] == "refreshed_from_inbound"
+    assert out["updated_bindings"] == ["ops"]
+    bindings = json.loads((state_dir / "bindings.json").read_text(encoding="utf-8"))["bindings"]
+    assert bindings["ops"]["to_user_id"] == "user_1"
+    assert bindings["ops"]["context_token"] == "ctx_1"
+    assert bindings["ops"]["group_id"] == "group_1"
+    assert bindings["ops"]["chat_key"] == "group_1"
+    assert bindings["ops"]["last_message_id"] == "msg_1"
+    assert bindings["ops"]["last_text"] == "/status"
+    assert bindings["ops"]["refreshed_from_inbound_at_utc"]
+    assert bindings["ops"]["last_inbound_message_id"] == "msg_1"
+    assert bindings["other"]["context_token"] == "other_ctx"
+
+
 def test_wechat_clawbot_refreshes_notification_binding_from_successful_reply(tmp_path: Path) -> None:
     from src.application.channels.wechat_clawbot.binding import refresh_wechat_clawbot_binding_from_reply
 
@@ -569,10 +623,13 @@ def test_wechat_clawbot_poll_once_persists_failed_reply_receipt(tmp_path: Path) 
     assert out["data"]["processed_count"] == 1
     assert out["data"]["reply_count"] == 0
     assert out["data"]["results"][0]["reply"]["reason"] == "reply_failed"
-    assert out["data"]["results"][0]["binding_refresh"]["reason"] == "reply_not_successful"
+    assert out["data"]["results"][0]["binding_refresh"]["reason"] == "refreshed_from_inbound"
     bindings = json.loads((state_dir / "bindings.json").read_text(encoding="utf-8"))["bindings"]
-    assert bindings["ops"]["to_user_id"] == "stale_user"
-    assert bindings["ops"]["context_token"] == "ctx_old"
+    assert bindings["ops"]["to_user_id"] == "user_1"
+    assert bindings["ops"]["context_token"] == "ctx_1"
+    assert bindings["ops"]["last_message_id"] == "msg_1"
+    assert bindings["ops"]["refreshed_from_inbound_at_utc"]
+    assert bindings["ops"]["last_inbound_message_id"] == "msg_1"
     assert "refreshed_from_reply_at_utc" not in bindings["ops"]
     audited = InboundAuditStore(str(tmp_path / "audit.sqlite3")).find_by_message(
         channel="wechat",
@@ -722,7 +779,7 @@ def test_wechat_clawbot_poll_once_stays_silent_for_unauthorized_sender(tmp_path:
     assert out["data"]["processed_count"] == 1
     assert out["data"]["reply_count"] == 0
     assert out["data"]["results"][0]["reply"]["reason"] == "permission_denied"
-    assert out["data"]["results"][0]["binding_refresh"]["reason"] == "reply_not_successful"
+    assert out["data"]["results"][0]["binding_refresh"]["reason"] == "sender_not_allowed"
     assert replies == []
     bindings = json.loads((state_dir / "bindings.json").read_text(encoding="utf-8"))["bindings"]
     assert bindings["ops"]["to_user_id"] == "stale_user"
@@ -811,11 +868,14 @@ def test_wechat_clawbot_poll_once_replies_to_non_silent_permission_denied(tmp_pa
     assert out["ok"] is False
     assert out["data"]["reply_count"] == 1
     assert out["data"]["results"][0]["reply"]["reason"] == "permission_denied_sent"
-    assert out["data"]["results"][0]["binding_refresh"]["reason"] == "inbound_not_successful"
+    assert out["data"]["results"][0]["binding_refresh"]["reason"] == "refreshed_from_inbound"
     assert replies[0]["text"] == "写入权限未开启 请先确认。"
     bindings = json.loads((state_dir / "bindings.json").read_text(encoding="utf-8"))["bindings"]
-    assert bindings["ops"]["to_user_id"] == "stale_user"
-    assert bindings["ops"]["context_token"] == "ctx_old"
+    assert bindings["ops"]["to_user_id"] == "user_1"
+    assert bindings["ops"]["context_token"] == "ctx_1"
+    assert bindings["ops"]["last_message_id"] == "msg_1"
+    assert bindings["ops"]["refreshed_from_inbound_at_utc"]
+    assert bindings["ops"]["last_inbound_message_id"] == "msg_1"
     assert "refreshed_from_reply_at_utc" not in bindings["ops"]
 
 
