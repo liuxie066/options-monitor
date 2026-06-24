@@ -112,6 +112,51 @@ def test_context_projection_bounds_and_redacts_text_excerpts() -> None:
     assert symbol.endswith("...")
 
 
+def test_context_projection_exposes_symbol_config_setting_slots() -> None:
+    projection = build_context_projection(
+        current_user_message="改为90",
+        conversation_context={},
+        recent_sessions=[
+            {
+                "session_id": "s_symbol_config",
+                "created_at": "2026-06-23T22:09:00+08:00",
+                "updated_at": "2026-06-23T22:10:00+08:00",
+                "raw_text": "FUTU sell put的max strike设置的是多少？",
+                "response_text": "FUTU sell_put.max_strike = 120。",
+                "snapshot": {
+                    "tool_transcript": [
+                        {
+                            "tool_name": "symbol_config_read",
+                            "payload": {"symbol": "FUTU", "strategy": "sell_put", "field": "max_strike"},
+                            "ok": True,
+                            "summary": {
+                                "canonical_symbol": "FUTU",
+                                "strategy": "sell_put",
+                                "field": "max_strike",
+                                "path": "sell_put.max_strike",
+                                "value": 120.0,
+                                "found": True,
+                            },
+                        }
+                    ]
+                },
+            }
+        ],
+    )
+
+    ref = projection["available_evidence_refs"][0]
+    assert ref["source_tool"] == "symbol_config_read"
+    assert ref["safe_slots"] == {
+        "symbol": ["FUTU"],
+        "strategy": ["sell_put"],
+        "setting_path": ["sell_put.max_strike"],
+        "setting_field": ["max_strike"],
+    }
+    assert ref["data_shape"]["kind"] == "single_symbol_setting"
+    assert ref["data_shape"]["setting_path"] == "sell_put.max_strike"
+    assert ref["data_shape"]["value_type"] == "float"
+
+
 def test_build_conversation_context_attaches_shadow_projection(tmp_path: Path) -> None:
     audit_db = tmp_path / "inbound.sqlite3"
     store = InboundAuditStore(audit_db)

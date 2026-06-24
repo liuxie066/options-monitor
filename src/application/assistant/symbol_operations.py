@@ -237,9 +237,18 @@ def _build_yaml_operation_payload(
     if settings is None:
         raise AgentToolError(
             code="NEEDS_CLARIFICATION",
-            message="IM config.yaml 设置目前只支持 covered call 开关、covered call 最低行权价、sell put 开关。",
-            hint="示例：设置 09898 covered call min strike 85，或使用 covered_call.min_strike=85 / sell_put.enabled=false。",
-            details={"supported_fields": ["sell_call.enabled", "covered_call.enabled", "sell_call.min_strike", "covered_call.min_strike", "sell_put.enabled"]},
+            message="IM config.yaml 设置目前只支持 covered call 开关、covered call 最低行权价、sell put 开关、sell put 最高行权价。",
+            hint="示例：设置 09898 covered call min strike 85，或使用 covered_call.min_strike=85 / sell_put.enabled=false / sell_put.max_strike=90。",
+            details={
+                "supported_fields": [
+                    "sell_call.enabled",
+                    "covered_call.enabled",
+                    "sell_call.min_strike",
+                    "covered_call.min_strike",
+                    "sell_put.enabled",
+                    "sell_put.max_strike",
+                ]
+            },
         )
     config_doc = load_yaml_config_file(config_yaml_path)
     market = _yaml_symbol_market(arguments, config_doc=config_doc, request=request)
@@ -359,6 +368,7 @@ def _run_yaml_symbol_set(payload: dict[str, Any], *, apply: bool) -> dict[str, A
         covered_call_enabled=_optional_bool(settings.get("covered_call_enabled"), "covered_call_enabled"),
         covered_call_min_strike=_optional_float(settings.get("covered_call_min_strike"), "covered_call_min_strike"),
         sell_put_enabled=_optional_bool(settings.get("sell_put_enabled"), "sell_put_enabled"),
+        sell_put_max_strike=_optional_float(settings.get("sell_put_max_strike"), "sell_put_max_strike"),
         rebuild_runtime_root=runtime_root,
         apply=apply,
         backup=True,
@@ -671,6 +681,7 @@ def _yaml_symbol_settings_from_edit(arguments: dict[str, Any]) -> dict[str, Any]
         "sell_call.min_strike",
         "covered_call.min_strike",
         "sell_put.enabled",
+        "sell_put.max_strike",
     }
     if any(key not in supported for key in normalized):
         return None
@@ -685,6 +696,8 @@ def _yaml_symbol_settings_from_edit(arguments: dict[str, Any]) -> dict[str, Any]
         out["covered_call_min_strike"] = _optional_float(normalized["covered_call.min_strike"], "covered_call.min_strike")
     if "sell_put.enabled" in normalized:
         out["sell_put_enabled"] = _optional_bool(normalized["sell_put.enabled"], "sell_put.enabled")
+    if "sell_put.max_strike" in normalized:
+        out["sell_put_max_strike"] = _optional_float(normalized["sell_put.max_strike"], "sell_put.max_strike")
     return out or None
 
 

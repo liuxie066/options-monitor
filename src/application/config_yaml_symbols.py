@@ -31,15 +31,21 @@ def set_yaml_symbol_config(
     covered_call_enabled: bool | None = None,
     covered_call_min_strike: float | None = None,
     sell_put_enabled: bool | None = None,
+    sell_put_max_strike: float | None = None,
     rebuild_runtime_root: str | Path | None = None,
     apply: bool = False,
     backup: bool = True,
 ) -> dict[str, Any]:
-    if covered_call_enabled is None and covered_call_min_strike is None and sell_put_enabled is None:
+    if (
+        covered_call_enabled is None
+        and covered_call_min_strike is None
+        and sell_put_enabled is None
+        and sell_put_max_strike is None
+    ):
         raise AgentToolError(
             code="INPUT_ERROR",
             message="at least one symbol setting is required",
-            hint="Pass --covered-call-enabled, --covered-call-min-strike, or --sell-put-enabled.",
+            hint="Pass --covered-call-enabled, --covered-call-min-strike, --sell-put-enabled, or --sell-put-max-strike.",
         )
     config_yaml_path = resolve_config_path(config_path, default=default_yaml_config_path(repo_root=repo_root))
     market_key = normalize_config_market(market)
@@ -51,6 +57,7 @@ def set_yaml_symbol_config(
         covered_call_enabled=covered_call_enabled,
         covered_call_min_strike=covered_call_min_strike,
         sell_put_enabled=sell_put_enabled,
+        sell_put_max_strike=sell_put_max_strike,
     )
     validation = _validate_doc(repo_root=repo_root, config_doc=after_doc, markets=_markets_in_doc(after_doc))
     backup_path = None
@@ -92,6 +99,7 @@ def _mutate_symbol_config(
     covered_call_enabled: bool | None,
     covered_call_min_strike: float | None,
     sell_put_enabled: bool | None,
+    sell_put_max_strike: float | None,
 ) -> dict[str, Any]:
     market_doc = _market_doc(config_doc, market=market)
     calibration = require_calibrated_symbol(symbol, config=config_doc, error_factory=_input_error)
@@ -139,6 +147,14 @@ def _mutate_symbol_config(
         if sell_put.get("enabled") is not bool(sell_put_enabled):
             sell_put["enabled"] = bool(sell_put_enabled)
             changed_paths.append(f"markets.{market}.overrides.{canonical_symbol}.sell_put.enabled")
+    if sell_put_max_strike is not None:
+        sell_put = override.get("sell_put")
+        if not isinstance(sell_put, dict):
+            sell_put = {}
+            override["sell_put"] = sell_put
+        if sell_put.get("max_strike") != sell_put_max_strike:
+            sell_put["max_strike"] = sell_put_max_strike
+            changed_paths.append(f"markets.{market}.overrides.{canonical_symbol}.sell_put.max_strike")
 
     call_key = _covered_call_authoring_key(override)
     if call_enabled_effective is not None or covered_call_min_strike is not None:

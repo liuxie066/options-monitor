@@ -80,5 +80,117 @@ def test_context_validation_passes_without_projection_as_shadow_warning() -> Non
     assert validation["warnings"][0]["code"] == "CONTEXT_PROJECTION_MISSING"
 
 
+def test_context_validation_accepts_symbol_config_followup_setting_edit() -> None:
+    projection = _symbol_config_projection()
+
+    validation = validate_context_use(
+        current_user_message="改为90",
+        context_projection=projection,
+        plan_payload={
+            "context_use": {
+                "mode": "carry",
+                "referenced_turn_ids": ["session:s_symbol_config"],
+                "referenced_evidence_refs": ["ev_001"],
+                "inherited_slots": {
+                    "symbol": ["FUTU"],
+                    "strategy": ["sell_put"],
+                    "setting_path": ["sell_put.max_strike"],
+                    "setting_field": ["max_strike"],
+                },
+                "current_message_slots": {"setting_new_value": [90]},
+                "override_slots": {},
+                "requires_clarification": False,
+                "clarification_question": None,
+            },
+            "steps": [
+                {
+                    "id": "step_1",
+                    "tool_name": "symbol_edit",
+                    "arguments": {"symbol": "FUTU", "set": {"sell_put.max_strike": 90}},
+                    "purpose": "preview config change from visible setting context",
+                }
+            ],
+        },
+        planner_manifest=_planner_tool_manifest(),
+    )
+
+    assert validation["status"] == "passed"
+    assert validation["code"] == "ok"
+
+
+def test_context_validation_blocks_followup_setting_path_drift() -> None:
+    projection = _symbol_config_projection()
+
+    validation = validate_context_use(
+        current_user_message="改为90",
+        context_projection=projection,
+        plan_payload={
+            "context_use": {
+                "mode": "carry",
+                "referenced_turn_ids": ["session:s_symbol_config"],
+                "referenced_evidence_refs": ["ev_001"],
+                "inherited_slots": {
+                    "symbol": ["FUTU"],
+                    "strategy": ["sell_call"],
+                    "setting_path": ["sell_call.min_strike"],
+                    "setting_field": ["min_strike"],
+                },
+                "current_message_slots": {"setting_new_value": [90]},
+                "override_slots": {},
+                "requires_clarification": False,
+                "clarification_question": None,
+            },
+            "steps": [
+                {
+                    "id": "step_1",
+                    "tool_name": "symbol_edit",
+                    "arguments": {"symbol": "FUTU", "set": {"sell_call.min_strike": 90}},
+                    "purpose": "preview config change from wrong setting context",
+                }
+            ],
+        },
+        planner_manifest=_planner_tool_manifest(),
+    )
+
+    assert validation["status"] == "blocked"
+    assert validation["code"] == "CONTEXT_SLOT_NOT_AVAILABLE"
+    assert validation["violation"]["slot"] == "strategy"
+
+
 def _fixture_cases() -> list[dict]:
     return [json.loads(line) for line in FIXTURE_PATH.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _symbol_config_projection() -> dict:
+    return {
+        "schema_version": "om-context-projection-v1",
+        "recent_turns": [
+            {
+                "turn_id": "session:s_symbol_config",
+                "safe_slots": {
+                    "symbol": ["FUTU"],
+                    "strategy": ["sell_put"],
+                    "setting_path": ["sell_put.max_strike"],
+                    "setting_field": ["max_strike"],
+                },
+                "evidence_refs": ["ev_001"],
+            }
+        ],
+        "recent_successful_tools": [],
+        "available_evidence_refs": [
+            {
+                "ref_id": "ev_001",
+                "turn_id": "session:s_symbol_config",
+                "source_type": "tool_result",
+                "source_tool": "symbol_config_read",
+                "safe_slots": {
+                    "symbol": ["FUTU"],
+                    "strategy": ["sell_put"],
+                    "setting_path": ["sell_put.max_strike"],
+                    "setting_field": ["max_strike"],
+                },
+                "data_shape": {"kind": "single_symbol_setting", "setting_path": "sell_put.max_strike"},
+            }
+        ],
+        "budget": {"truncated": False},
+    }
