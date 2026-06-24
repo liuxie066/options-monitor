@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 1.2.337 - 2026-06-25
+
+### Fixed
+- Refreshed the configured WeChat ClawBot proactive notification binding from allowed inbound messages before same-message
+  reply delivery, so expired proactive `context_token` state can recover even when reply delivery fails.
+- Kept inbound binding refresh scoped to the existing `wechat_clawbot` notification target and sender allowlist, leaving
+  unauthorized senders unable to update durable notification context.
+
+### Changed
+- Documented the allowed-inbound ClawBot binding recovery contract and the inbound-vs-reply audit fields used for
+  diagnosis.
+
 ## 1.2.336 - 2026-06-24
 
 ### Added
