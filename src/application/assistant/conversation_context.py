@@ -8,6 +8,7 @@ from src.application.assistant.audit import InboundAuditStore
 from src.application.assistant.operation_store import InboundOperationStore
 from src.application.assistant.contracts import AssistantRequest
 from src.application.assistant.context_projection import build_context_projection, context_projection_trace
+from src.application.assistant.memory import assistant_memory_trace, load_assistant_memory_context
 from src.application.assistant.session_store import AgentSessionStore
 from src.application.assistant.user_profile import load_user_profile_context, user_profile_trace
 from src.application.conversation_scope import normalize_conversation_scope
@@ -22,6 +23,7 @@ def build_conversation_context(
     max_messages: int,
     max_pending: int = 5,
     user_profile_path: str | Path | None = None,
+    assistant_memory_path: str | Path | None = None,
 ) -> dict[str, Any]:
     window = max(0, min(int(max_messages or 0), 20))
     pending_limit = max(0, min(int(max_pending or 0), 10))
@@ -82,6 +84,10 @@ def build_conversation_context(
         "last_successful_read": _last_successful_read(recent_messages),
         "pending_operations": pending_operations,
         "user_profile": load_user_profile_context(user_profile_path),
+        "assistant_memory": load_assistant_memory_context(
+            path=assistant_memory_path,
+            query=request.text,
+        ),
     }
     context["context_projection"] = build_context_projection(
         current_user_message=request.text,
@@ -105,6 +111,9 @@ def context_trace(context: dict[str, Any] | None) -> dict[str, Any]:
         "pending_count": len(pending) if isinstance(pending, list) else 0,
         "user_profile": user_profile_trace(
             context.get("user_profile") if isinstance(context.get("user_profile"), dict) else None
+        ),
+        "assistant_memory": assistant_memory_trace(
+            context.get("assistant_memory") if isinstance(context.get("assistant_memory"), dict) else None
         ),
     }
     projection_trace = context_projection_trace(

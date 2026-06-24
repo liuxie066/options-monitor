@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 from typing import Any, Callable
 
 from src.application.assistant.agent_loop import (
@@ -21,6 +22,10 @@ from src.application.assistant.settings import AssistantSettings
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.assistant.capability_catalog import spec_by_intent
 from src.application.assistant.contracts import AssistantRequest, PerceptionResult
+from src.application.assistant.memory_proposals import (
+    MEMORY_PROPOSAL_SCHEMA_VERSION,
+    suggest_memory_proposals_from_text,
+)
 from src.application.assistant.audit import InboundAuditStore
 from src.application.assistant.router import ExecuteToolFn, handle_assistant_request
 from src.application.assistant.session import (
@@ -46,6 +51,7 @@ def handle_assistant_message(
     settings: AssistantSettings | None = None,
     model_turn_fn: ModelTurnFn | None = None,
     generate_reply_fn: GenerateReplyFn | None = None,
+    memory_suggestion_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     runtime_settings = settings or AssistantSettings()
     request = _request_with_default_market_scope(request, runtime_settings)
@@ -110,6 +116,11 @@ def handle_assistant_message(
         settings=runtime_settings,
         llm_trace=llm_trace,
         perception_trace=perception_engine.trace,
+    )
+    response = _with_memory_suggestion(
+        response,
+        request=request,
+        memory_dir=memory_suggestion_dir,
     )
     _persist_agent_session(store=store, request=request, response=response)
     _update_audit_response(store=store, response=response)
@@ -350,6 +361,164 @@ def _append_hook_results(existing: Any, hooks: list[dict[str, Any]]) -> list[dic
     out = [dict(item) for item in existing or [] if isinstance(item, dict)]
     out.extend(dict(item) for item in hooks if isinstance(item, dict))
     return out
+
+
+def _with_memory_suggestion(
+    response: dict[str, Any],
+    *,
+    request: AssistantRequest,
+    memory_dir: str | Path | None,
+) -> dict[str, Any]:
+    meta = response.get("meta") if isinstance(response.get("meta"), dict) else {}
+    if bool(meta.get("idempotent_replay")):
+        return response
+    if not _memory_suggestion_allowed_response(response):
+        return response
+    data = response.get("data") if isinstance(response.get("data"), dict) else {}
+    command_id = str(data.get("command_id") or "").strip() or None
+    try:
+        suggestion = suggest_memory_proposals_from_text(
+            text=request.text,
+            memory_dir=memory_dir,
+            source_turn=command_id,
+            max_suggestions=1,
+            write=True,
+        )
+    except AgentToolError as exc:
+        public = {
+            "schema_version": MEMORY_PROPOSAL_SCHEMA_VERSION,
+            "source": "explicit_turn_text",
+            "status": "failed",
+            "error": {
+                "code": exc.code,
+                "message": exc.message,
+            },
+        }
+    except Exception as exc:
+        public = {
+            "schema_version": MEMORY_PROPOSAL_SCHEMA_VERSION,
+            "source": "explicit_turn_text",
+            "status": "failed",
+            "error": {
+                "code": type(exc).__name__,
+                "message": str(exc),
+            },
+        }
+    else:
+        public = _public_memory_suggestion(suggestion)
+        if public is None:
+            return response
+
+    updated = dict(response)
+    updated_data = dict(data)
+    updated_data["memory_suggestion"] = public
+    updated_text = _response_text_with_memory_suggestion(
+        str(updated_data.get("response_text") or ""),
+        public,
+    )
+    if updated_text:
+        updated_data["response_text"] = updated_text
+        observation = updated_data.get("observation")
+        if isinstance(observation, dict):
+            updated_observation = dict(observation)
+            updated_observation["response_text"] = updated_text
+            updated_data["observation"] = updated_observation
+    updated["data"] = updated_data
+    updated_meta = dict(meta)
+    assistant_meta = dict(updated_meta.get("assistant") or {})
+    assistant_meta["memory_suggestion"] = public
+    updated_meta["assistant"] = assistant_meta
+    updated["meta"] = updated_meta
+    return updated
+
+
+def _memory_suggestion_allowed_response(response: dict[str, Any]) -> bool:
+    if not bool(response.get("ok")):
+        return False
+    data = response.get("data") if isinstance(response.get("data"), dict) else {}
+    decision = data.get("decision") if isinstance(data.get("decision"), dict) else {}
+    sender = decision.get("sender") if isinstance(decision.get("sender"), dict) else {}
+    if sender and bool(sender.get("allowed")) is False:
+        return False
+    return True
+
+
+def _public_memory_suggestion(suggestion: dict[str, Any]) -> dict[str, Any] | None:
+    skipped = suggestion.get("skipped") if isinstance(suggestion.get("skipped"), list) else []
+    reasons = [
+        str(item.get("reason") or "").strip()
+        for item in skipped
+        if isinstance(item, dict) and str(item.get("reason") or "").strip()
+    ]
+    if reasons == ["missing_explicit_memory_signal"]:
+        return None
+    proposals = suggestion.get("proposals") if isinstance(suggestion.get("proposals"), list) else []
+    public_proposals = [
+        {
+            "proposal_id": str(item.get("proposal_id") or ""),
+            "memory_id": str(item.get("memory_id") or ""),
+            "type": str(item.get("type") or ""),
+            "title": str(item.get("title") or ""),
+            "status": str(item.get("status") or ""),
+        }
+        for item in proposals
+        if isinstance(item, dict)
+    ]
+    status = "proposed" if public_proposals else "skipped"
+    return {
+        "schema_version": MEMORY_PROPOSAL_SCHEMA_VERSION,
+        "source": "explicit_turn_text",
+        "status": status,
+        "proposal_count": len(public_proposals),
+        "proposals": public_proposals,
+        "skipped_reasons": reasons,
+        "write_applied": bool(suggestion.get("write_applied")),
+        "requires_accept": True,
+        "accept_hint": "./om assistant memory accept <proposal_id>",
+    }
+
+
+def _response_text_with_memory_suggestion(response_text: str, suggestion: dict[str, Any]) -> str:
+    note = _memory_suggestion_response_note(suggestion)
+    if not note:
+        return response_text
+    text = str(response_text or "").strip()
+    return f"{text}\n\n{note}".strip() if text else note
+
+
+def _memory_suggestion_response_note(suggestion: dict[str, Any]) -> str:
+    status = str(suggestion.get("status") or "").strip()
+    proposals = suggestion.get("proposals") if isinstance(suggestion.get("proposals"), list) else []
+    if status == "proposed" and proposals:
+        proposal = proposals[0] if isinstance(proposals[0], dict) else {}
+        proposal_id = str(proposal.get("proposal_id") or "").strip()
+        memory_type = str(proposal.get("type") or "").strip()
+        if proposal_id:
+            return (
+                f"记忆建议已创建：{proposal_id}"
+                f"{f'（{memory_type}）' if memory_type else ''}。"
+                "需显式 accept 后才会生效。"
+            )
+    if status == "skipped":
+        reasons = suggestion.get("skipped_reasons") if isinstance(suggestion.get("skipped_reasons"), list) else []
+        reason = str(reasons[0] if reasons else "").strip()
+        if reason:
+            return f"未创建记忆建议：{_memory_suggestion_skip_reason_text(reason)}。"
+    if status == "failed":
+        error = suggestion.get("error") if isinstance(suggestion.get("error"), dict) else {}
+        code = str(error.get("code") or "failed").strip()
+        return f"记忆建议创建失败：{code}。"
+    return ""
+
+
+def _memory_suggestion_skip_reason_text(reason: str) -> str:
+    return {
+        "runtime_or_market_fact": "内容像当前市场或运行态事实，应通过 OM 工具查询",
+        "config_or_parameter_value": "内容像具体配置或参数值，不应作为长期记忆",
+        "sensitive_material": "内容包含疑似敏感材料",
+        "too_short": "内容过短",
+        "limit_zero": "建议数量限制为 0",
+    }.get(reason, reason)
 
 
 def _update_audit_response(*, store: InboundAuditStore, response: dict[str, Any]) -> None:
