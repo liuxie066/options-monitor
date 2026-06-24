@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 1.2.336 - 2026-06-24
+
+### Added
+- Added hint-only Assistant memory loading from `assistant_memory/*.md`, projecting bounded relevant memories into
+  planner context without granting tool evidence or write authority.
+- Added deterministic Assistant memory proposal commands for propose, suggest, list, accept, and reject lifecycle
+  management under `assistant_memory/proposals/`.
+- Added turn-level memory suggestion sidecars for explicit remember/preference/correction Assistant requests, requiring
+  explicit accept before accepted memory becomes active.
+
+### Changed
+- Documented the OM Assistant memory model, authority rules, proposal lifecycle, and safety budget.
+- Refreshed Assistant architecture and capability documentation for the memory read/proposal surfaces.
+
+### Fixed
+- Prevented failed or unauthorized Assistant requests from creating memory proposal sidecars.
+- Redacted sensitive Assistant memory frontmatter fields before projection and rejected sensitive proposal tags.
+
 ## 1.2.335 - 2026-06-24
 
 ### Added

@@ -113,6 +113,43 @@ def test_context_projection_bounds_and_redacts_text_excerpts() -> None:
     assert symbol.endswith("...")
 
 
+def test_context_projection_includes_sanitized_relevant_memories() -> None:
+    projection = build_context_projection(
+        current_user_message="怎么优化参数",
+        conversation_context={
+            "assistant_memory": {
+                "provided": True,
+                "source": "assistant_memory",
+                "format": "markdown_topic_files",
+                "memory_count": 1,
+                "memories": [
+                    {
+                        "memory_id": "parameter-tuning",
+                        "type": "parameter_tuning_preference",
+                        "title": "参数调优偏好",
+                        "summary": "用户希望先看候选过滤证据。",
+                        "content": "先看 replay 和候选过滤证据。\ntoken: sk-should-not-leak",
+                        "tags": ["参数", "候选"],
+                        "relevance": {"score": "2", "matched_terms": ["参数", "候选"]},
+                    }
+                ],
+            }
+        },
+    )
+
+    memories = projection["relevant_memories"]
+    assert len(memories) == 1
+    assert memories[0]["memory_id"] == "parameter-tuning"
+    assert memories[0]["type"] == "parameter_tuning_preference"
+    assert memories[0]["relevance"]["score"] == 2
+    assert "sk-should-not-leak" not in json.dumps(projection, ensure_ascii=False, sort_keys=True)
+    assert "[redacted sensitive line]" in memories[0]["content"]
+    assert projection["policy"]["memory_is_hint"] is True
+    assert projection["policy"]["tool_evidence_wins_memory"] is True
+    assert projection["policy"]["memory_cannot_authorize_writes"] is True
+    assert context_projection_trace(projection)["relevant_memory_count"] == 1
+
+
 def test_context_projection_exposes_symbol_config_setting_slots() -> None:
     projection = build_context_projection(
         current_user_message="改为90",
