@@ -381,6 +381,8 @@ def preview_effect_allowed_from_text(text: str) -> bool:
         return True
     if "改成" in compact and any(token in compact for token in ("premium", "权利金", "合约数", "张数", "close", "平仓价")):
         return True
+    if _looks_like_scalar_setting_delta(compact):
+        return True
     if (
         ("设置" in compact or "修改监控" in compact or "配置标的" in compact)
         and any(token in compact for token in ("coveredcall", "sellcall", "sellput", "minstrike", "maxstrike", "min_strike", "max_strike"))
@@ -437,6 +439,12 @@ def _looks_like_explicit_preview_write(compact: str) -> bool:
             "补录",
         )
     )
+
+
+def _looks_like_scalar_setting_delta(compact: str) -> bool:
+    if not any(token in compact for token in ("改为", "改成", "设为", "设置成", "调到", "改到", "降到", "升到")):
+        return False
+    return re.search(r"(改为|改成|设为|设置成|调到|改到|降到|升到)(true|false|on|off|[0-9]+(?:\.[0-9]+)?)", compact) is not None
 
 
 def _looks_like_strong_preview_read_query(compact: str) -> bool:

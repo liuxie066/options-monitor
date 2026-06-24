@@ -30,6 +30,9 @@ SAFE_SLOT_KEYS = {
     "side",
     "expiration",
     "strike",
+    "setting_path",
+    "setting_field",
+    "setting_new_value",
     "operation_id",
     "run_id",
 }
@@ -208,7 +211,7 @@ def _turn_from_session_row(
         tool_name = str(item.get("tool_name") or "").strip()
         if not tool_name:
             continue
-        slots = _safe_slots(item.get("payload") if isinstance(item.get("payload"), dict) else {})
+        slots = _tool_safe_slots(item)
         safe_slots = _merge_slots(safe_slots, slots)
         if item.get("ok") is not True or tool_name not in PURE_READ_TOOLS:
             continue
@@ -300,7 +303,7 @@ def _successful_tool_summary(*, item: dict[str, Any], turn_id: str, evidence_ref
         "tool_name": str(item.get("tool_name") or ""),
         "purpose": _clip(_first_text(item.get("purpose"), item.get("tool_name")), 120),
         "safe_payload": _safe_payload(payload),
-        "safe_slots": _safe_slots(payload),
+        "safe_slots": _tool_safe_slots(item),
         "evidence_refs": list(evidence_refs),
         "data_shape": _data_shape(item),
         "result_status": "ok",
@@ -428,6 +431,45 @@ def _safe_slots(payload: Any) -> dict[str, list[Any]]:
     return out
 
 
+def _tool_safe_slots(item: dict[str, Any]) -> dict[str, list[Any]]:
+    payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+    slots = _safe_slots(payload)
+    tool_name = str(item.get("tool_name") or "").strip()
+    if tool_name != "symbol_config_read":
+        return slots
+    summary = item.get("summary") if isinstance(item.get("summary"), dict) else {}
+    evidence = item.get("evidence_summary") if isinstance(item.get("evidence_summary"), dict) else {}
+    data = item.get("data") if isinstance(item.get("data"), dict) else {}
+    source = _merged_read_setting_summary(payload=payload, summary=summary, evidence=evidence, data=data)
+    for key in ("symbol", "market", "strategy", "setting_path", "setting_field"):
+        if source.get(key) is not None:
+            _add_slot_value(slots, key, source[key])
+    return slots
+
+
+def _merged_read_setting_summary(
+    *,
+    payload: dict[str, Any],
+    summary: dict[str, Any],
+    evidence: dict[str, Any],
+    data: dict[str, Any],
+) -> dict[str, Any]:
+    strategy = _first_value(summary.get("strategy"), evidence.get("strategy"), data.get("strategy"), payload.get("strategy"))
+    field = _first_value(summary.get("field"), evidence.get("field"), data.get("field"), payload.get("field"))
+    path = _first_value(summary.get("path"), evidence.get("path"), data.get("path"))
+    if path is None and strategy is not None and field is not None:
+        field_text = str(field).strip()
+        path = field_text if "." in field_text else f"{strategy}.{field_text}"
+    setting_field = str(field).strip().split(".")[-1] if field is not None else None
+    return {
+        "symbol": _first_value(summary.get("canonical_symbol"), data.get("canonical_symbol"), payload.get("symbol")),
+        "market": _first_value(summary.get("market"), evidence.get("market"), data.get("market"), payload.get("market")),
+        "strategy": strategy,
+        "setting_path": path,
+        "setting_field": setting_field,
+    }
+
+
 def _canonical_slot_key(key: Any) -> str:
     text = str(key or "").strip()
     return _SAFE_SLOT_ALIASES.get(text, text)
@@ -472,8 +514,10 @@ def _clip_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _data_shape(item: dict[str, Any]) -> dict[str, Any]:
+    tool_name = str(item.get("tool_name") or "").strip()
     summary = item.get("summary") if isinstance(item.get("summary"), dict) else {}
     evidence = item.get("evidence_summary") if isinstance(item.get("evidence_summary"), dict) else {}
+    data = item.get("data") if isinstance(item.get("data"), dict) else {}
     out: dict[str, Any] = {}
     row_count = _first_value(summary.get("row_count"), evidence.get("row_count"), summary.get("count"), evidence.get("count"))
     if row_count is not None:
@@ -486,6 +530,19 @@ def _data_shape(item: dict[str, Any]) -> dict[str, Any]:
         out["views_used"] = views[:20]
     if summary.get("truncated") is not None or evidence.get("truncated") is not None:
         out["truncated"] = bool(_first_value(summary.get("truncated"), evidence.get("truncated")))
+    if tool_name == "symbol_config_read":
+        setting = _merged_read_setting_summary(
+            payload=item.get("payload") if isinstance(item.get("payload"), dict) else {},
+            summary=summary,
+            evidence=evidence,
+            data=data,
+        )
+        if setting.get("setting_path"):
+            out["kind"] = "single_symbol_setting"
+            out["setting_path"] = setting["setting_path"]
+        value = _first_value(summary.get("value"), data.get("value"))
+        if value is not None:
+            out["value_type"] = type(value).__name__
     return out
 
 

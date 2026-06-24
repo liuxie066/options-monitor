@@ -2041,6 +2041,7 @@ def _direct_model_turn_loop_result(
         question=text,
         task_contract=task_contract,
         provider=provider,
+        context_validation=event_plan.context_validation,
     )
     trace = dict(model_turn_result.trace)
     trace["agent_loop"] = _direct_model_turn_agent_loop_trace(
@@ -2142,6 +2143,7 @@ def _preview_request_precheck_error(
         event=preview_model_event,
         question=text,
         task_contract=event_plan.task_contract,
+        context_validation=event_plan.context_validation,
     )
     precheck_error = _planned_step_precheck_error((step,))
     if precheck_error is None:
@@ -2200,6 +2202,7 @@ def _agent_loop_steps_from_model_events(
     question: str,
     task_contract: dict[str, Any],
     provider: str,
+    context_validation: dict[str, Any] | None = None,
 ) -> tuple[AgentLoopStep, ...]:
     steps: list[AgentLoopStep] = []
     preview_model_event_ids: set[str] = set()
@@ -2238,6 +2241,7 @@ def _agent_loop_steps_from_model_events(
                 event=model_event,
                 question=question,
                 task_contract=task_contract,
+                context_validation=context_validation,
             )
         )
     return tuple(steps)
@@ -3159,10 +3163,31 @@ def _model_tool_call_plan_step_payload(event: ModelToolCallEvent) -> dict[str, A
     payload: dict[str, Any] = {
         "id": event.tool_call_id or event.event_id,
         "tool_name": event.tool_name,
-        "arguments": _safe_tool_payload(dict(event.arguments)),
+        "arguments": _safe_plan_arguments_for_context(event),
     }
     if event.purpose:
         payload["purpose"] = event.purpose
+    return payload
+
+
+def _safe_plan_arguments_for_context(event: ModelToolCallEvent) -> dict[str, Any]:
+    arguments = dict(event.arguments)
+    payload = _safe_tool_payload(arguments)
+    if event.tool_name == "symbol_edit":
+        sets = arguments.get("set")
+        if isinstance(sets, dict):
+            safe_sets = {
+                str(key): value
+                for key, value in sets.items()
+                if str(key).strip() and (isinstance(value, (str, int, float, bool)) or value is None)
+            }
+            if safe_sets:
+                payload["set"] = safe_sets
+        ensure_use = arguments.get("ensure_use")
+        if isinstance(ensure_use, list):
+            safe_use = [str(item) for item in ensure_use if str(item).strip()][:8]
+            if safe_use:
+                payload["ensure_use"] = safe_use
     return payload
 
 
@@ -3342,7 +3367,35 @@ def _model_tool_call_safe_slots_for_context(events: tuple[ModelToolCallEvent, ..
                 continue
             for item in _context_slot_values(value):
                 _add_context_slot(slots, slot_key, item)
+        if event.tool_name == "symbol_edit":
+            slots = _merge_context_slots(slots, _symbol_edit_setting_slots_for_context(dict(event.arguments or {})))
     return slots
+
+
+def _symbol_edit_setting_slots_for_context(arguments: dict[str, Any]) -> dict[str, list[Any]]:
+    sets = arguments.get("set") if isinstance(arguments.get("set"), dict) else {}
+    slots: dict[str, list[Any]] = {}
+    for raw_path, value in sets.items():
+        path = str(raw_path or "").strip()
+        if not path:
+            continue
+        _add_context_slot(slots, "setting_path", path)
+        parts = [part for part in path.split(".") if part]
+        if parts:
+            _add_context_slot(slots, "setting_field", parts[-1])
+        if len(parts) >= 2:
+            _add_context_slot(slots, "strategy", parts[0])
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            _add_context_slot(slots, "setting_new_value", value)
+    return slots
+
+
+def _merge_context_slots(left: dict[str, list[Any]], right: dict[str, list[Any]]) -> dict[str, list[Any]]:
+    out = {key: list(values) for key, values in left.items()}
+    for key, values in right.items():
+        for value in values:
+            _add_context_slot(out, key, value)
+    return out
 
 
 def _model_tool_calls_have_current_required_scope(
@@ -3503,6 +3556,14 @@ def _question_is_contextual_followup(question: str) -> bool:
         "怎么算",
         "为什么",
         "原因",
+        "改为",
+        "改成",
+        "设置成",
+        "设为",
+        "调到",
+        "改到",
+        "降到",
+        "升到",
     )
     return any(token in compact for token in tokens) or compact in {"继续", "继续分析", "继续解释"}
 
@@ -3849,7 +3910,13 @@ def _planning_outcome_from_event_model_turn_result(
             (),
         )
     planned_steps = tuple(
-        _agent_loop_step_from_model_event(index=index, event=event, question=question, task_contract=event_plan.task_contract)
+        _agent_loop_step_from_model_event(
+            index=index,
+            event=event,
+            question=question,
+            task_contract=event_plan.task_contract,
+            context_validation=event_plan.context_validation,
+        )
         for index, event in enumerate(model_tool_calls, start=1)
     )
     preview_events = tuple(event for event in model_tool_calls if _plan_step_kind(event.tool_name) == "preview")
@@ -3986,6 +4053,7 @@ def _planning_outcome_from_preview_request_event_result(
                 event=preview_model_event,
                 question=question,
                 task_contract=event_plan.task_contract,
+                context_validation=event_plan.context_validation,
             ),
     )
     precheck_error = _planned_step_precheck_error(planned_steps)
@@ -4057,6 +4125,7 @@ def _agent_loop_step_from_model_event(
     event: ModelToolCallEvent,
     question: str = "",
     task_contract: dict[str, Any] | None = None,
+    context_validation: dict[str, Any] | None = None,
 ) -> AgentLoopStep:
     kind = _plan_step_kind(event.tool_name)
     action_policy_payload: dict[str, Any] | None = None
@@ -4079,6 +4148,7 @@ def _agent_loop_step_from_model_event(
             tool_name=event.tool_name,
             payload=dict(event.arguments),
             action_policy=action_policy_payload,
+            context_validation=context_validation,
             source="agent_loop_events",
         )
         action_safety_payload = action_safety.public_payload()
@@ -4351,6 +4421,11 @@ def _safe_result_summary(result: dict[str, Any]) -> dict[str, Any]:
         "warning_count": len(warnings) if isinstance(warnings, list) else 0,
     }
     if isinstance(data, dict):
+        if str(result.get("tool_name") or "") == "symbol_config_read":
+            for key in ("canonical_symbol", "market", "strategy", "field", "path", "value", "found"):
+                value = data.get(key)
+                if isinstance(value, (str, int, float, bool)) or value is None:
+                    summary[key] = value
         if isinstance(data.get("summary"), dict):
             summary["summary"] = _clip_mapping(data["summary"])
         elif isinstance(data.get("summary"), list):

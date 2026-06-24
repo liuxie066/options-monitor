@@ -439,12 +439,41 @@ def _evidence_by_id(projection: dict[str, Any]) -> dict[str, dict[str, Any]]:
 def _plan_safe_argument_slots(steps: list[dict[str, Any]]) -> dict[str, list[Any]]:
     out: dict[str, list[Any]] = {}
     for step in steps:
+        tool_name = str(step.get("tool_name") or "").strip()
         arguments = step.get("arguments") if isinstance(step.get("arguments"), dict) else {}
         for key, value in arguments.items():
             slot_key = str(key)
             if slot_key in SAFE_SLOT_KEYS:
                 for item in _value_list(value):
                     _add_slot(out, slot_key, item)
+        if tool_name == "symbol_edit":
+            out = _merge_plan_slots(out, _symbol_edit_setting_slots(arguments))
+    return out
+
+
+def _symbol_edit_setting_slots(arguments: dict[str, Any]) -> dict[str, list[Any]]:
+    sets = arguments.get("set") if isinstance(arguments.get("set"), dict) else {}
+    out: dict[str, list[Any]] = {}
+    for raw_path, value in sets.items():
+        path = str(raw_path or "").strip()
+        if not path:
+            continue
+        _add_slot(out, "setting_path", path)
+        parts = [part for part in path.split(".") if part]
+        if parts:
+            _add_slot(out, "setting_field", parts[-1])
+        if len(parts) >= 2:
+            _add_slot(out, "strategy", parts[0])
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            _add_slot(out, "setting_new_value", value)
+    return out
+
+
+def _merge_plan_slots(left: dict[str, list[Any]], right: dict[str, list[Any]]) -> dict[str, list[Any]]:
+    out = {key: list(values) for key, values in left.items()}
+    for key, values in right.items():
+        for value in values:
+            _add_slot(out, key, value)
     return out
 
 
