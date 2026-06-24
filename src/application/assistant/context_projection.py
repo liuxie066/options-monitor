@@ -81,6 +81,21 @@ def build_context_projection(
         evidence_refs.extend(refs)
         open_gaps.extend(gaps)
 
+    recent_system_events = context.get("recent_system_events") if isinstance(context.get("recent_system_events"), list) else []
+    system_event_items: list[dict[str, Any]] = []
+    for rank, item in enumerate(recent_system_events, start=1):
+        turn, ref, system_event = _turn_from_system_event(
+            item if isinstance(item, dict) else {},
+            rank=rank,
+            ref_allocator=ref_allocator,
+        )
+        if turn:
+            turn_items.append(turn)
+        if ref:
+            evidence_refs.append(ref)
+        if system_event:
+            system_event_items.append(system_event)
+
     recent_messages = context.get("recent_messages") if isinstance(context.get("recent_messages"), list) else []
     for rank, item in enumerate(recent_messages, start=1):
         turn, tool, ref = _turn_from_audit_item(item if isinstance(item, dict) else {}, rank=rank, ref_allocator=ref_allocator)
@@ -149,7 +164,7 @@ def build_context_projection(
             "truncated": False,
             "truncation_reason": None,
         },
-        "system_events": [],
+        "system_events": system_event_items[:max_turns],
     }
     _filter_evidence_refs(projection, evidence_refs)
     truncated_reasons: list[str] = []
@@ -175,6 +190,7 @@ def context_projection_trace(projection: dict[str, Any] | None) -> dict[str, Any
         "evidence_ref_count": len(projection.get("available_evidence_refs") or []),
         "open_gap_count": len(projection.get("open_evidence_gaps") or []),
         "pending_operation_count": len(projection.get("pending_operations") or []),
+        "system_event_count": len(projection.get("system_events") or []),
         "truncated": bool(budget.get("truncated")),
         "truncation_reason": budget.get("truncation_reason"),
     }
@@ -296,6 +312,50 @@ def _turn_from_audit_item(
     return _strip_empty(turn), _strip_empty(tool), ref
 
 
+def _turn_from_system_event(
+    item: dict[str, Any],
+    *,
+    rank: int,
+    ref_allocator: _RefAllocator,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None]:
+    created = _first_text(item.get("created_at_utc"), item.get("event_at_utc"), str(rank))
+    event_kind = str(item.get("event_kind") or "notification_event").strip()
+    run_id = str(item.get("run_id") or rank).strip()
+    turn_id = _turn_id("system", f"{created}:{event_kind}:{run_id}:{rank}")
+    slots = _safe_slots(item.get("safe_slots") if isinstance(item.get("safe_slots"), dict) else item)
+    ref = _evidence_ref(
+        ref_id=ref_allocator.next(),
+        turn_id=turn_id,
+        source_tool="notification_perception",
+        label="notification perception event",
+        safe_slots=slots,
+        data_shape=_system_event_shape(item),
+        source_type="system_event",
+    )
+    summary = _text_excerpt(_first_text(item.get("summary"), event_kind), 240)
+    turn = {
+        "turn_id": turn_id,
+        "created_at": created,
+        "user_summary": "",
+        "assistant_summary": summary,
+        "tools": [],
+        "safe_slots": slots,
+        "evidence_refs": [ref["ref_id"]],
+        "result_status": "ok",
+        "event_type": "system_event",
+    }
+    event = {
+        "schema_version": CONVERSATION_EVENT_SCHEMA_VERSION,
+        "event_id": turn_id,
+        "event_type": "notification_perception",
+        "event_kind": event_kind,
+        "summary": summary,
+        "safe_slots": slots,
+        "evidence_refs": [ref["ref_id"]],
+    }
+    return _strip_empty(turn), ref, _strip_empty(event)
+
+
 def _successful_tool_summary(*, item: dict[str, Any], turn_id: str, evidence_refs: list[str]) -> dict[str, Any]:
     payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
     return {
@@ -318,16 +378,35 @@ def _evidence_ref(
     label: str,
     safe_slots: dict[str, list[Any]],
     data_shape: dict[str, Any],
+    source_type: str = "tool_result",
 ) -> dict[str, Any]:
     return {
         "ref_id": ref_id,
         "turn_id": turn_id,
-        "source_type": "tool_result",
+        "source_type": source_type,
         "source_tool": source_tool,
         "label": label,
         "safe_slots": safe_slots,
         "data_shape": data_shape,
     }
+
+
+def _system_event_shape(item: dict[str, Any]) -> dict[str, Any]:
+    delivery = item.get("delivery") if isinstance(item.get("delivery"), dict) else {}
+    send_summary = item.get("send_summary") if isinstance(item.get("send_summary"), dict) else {}
+    out: dict[str, Any] = {}
+    for key in ("message_count", "notify_candidate_count", "threshold_met", "used_heartbeat"):
+        if item.get(key) is not None:
+            out[key] = item.get(key)
+    if delivery.get("action") is not None:
+        out["delivery_action"] = delivery.get("action")
+    if delivery.get("reason") is not None:
+        out["delivery_reason"] = delivery.get("reason")
+    if send_summary.get("send_confirmed_count") is not None:
+        out["send_confirmed_count"] = send_summary.get("send_confirmed_count")
+    if send_summary.get("failure_count") is not None:
+        out["failure_count"] = send_summary.get("failure_count")
+    return out
 
 
 def _gaps_from_session(*, row: dict[str, Any], snapshot: dict[str, Any], start_index: int) -> list[dict[str, Any]]:

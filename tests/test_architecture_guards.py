@@ -414,6 +414,20 @@ def test_perception_producers_do_not_plan_or_execute_tools() -> None:
     assert offenders == {}
 
 
+def test_notification_perception_path_does_not_call_assistant_message_runtime() -> None:
+    checked = [
+        ROOT / "src" / "application" / "tick_notification_flow.py",
+        ROOT / "src" / "application" / "multi_tick" / "assistant_perception_event.py",
+    ]
+    offenders: list[str] = []
+    for path in checked:
+        text = path.read_text(encoding="utf-8")
+        if "handle_assistant_message" in text:
+            offenders.append(str(path.relative_to(ROOT)))
+
+    assert offenders == []
+
+
 def test_legacy_assistant_frame_and_tool_plan_are_removed() -> None:
     assert not (ROOT / "src" / "application" / "assistant" / "commands.py").exists()
     assert not (ROOT / "src" / "application" / "assistant" / "parser.py").exists()

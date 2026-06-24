@@ -157,6 +157,59 @@ def test_context_validation_blocks_followup_setting_path_drift() -> None:
     assert validation["violation"]["slot"] == "strategy"
 
 
+def test_context_validation_accepts_notification_system_event_reference_for_read_tool() -> None:
+    projection = {
+        "schema_version": "om-context-projection-v1",
+        "recent_turns": [
+            {
+                "turn_id": "system:notification",
+                "safe_slots": {"run_id": ["run_1"], "action": ["notification_delivery_decided"]},
+                "evidence_refs": ["ev_001"],
+            }
+        ],
+        "recent_successful_tools": [],
+        "available_evidence_refs": [
+            {
+                "ref_id": "ev_001",
+                "turn_id": "system:notification",
+                "source_type": "system_event",
+                "source_tool": "notification_perception",
+                "safe_slots": {"run_id": ["run_1"], "action": ["notification_delivery_decided"]},
+                "data_shape": {"delivery_action": "skip_no_send"},
+            }
+        ],
+        "budget": {"truncated": False},
+    }
+
+    validation = validate_context_use(
+        current_user_message="刚才那条为什么没发？",
+        context_projection=projection,
+        plan_payload={
+            "context_use": {
+                "mode": "carry",
+                "referenced_turn_ids": ["system:notification"],
+                "referenced_evidence_refs": ["ev_001"],
+                "inherited_slots": {"run_id": ["run_1"]},
+                "current_message_slots": {},
+                "override_slots": {},
+                "requires_clarification": False,
+            },
+            "steps": [
+                {
+                    "id": "step_1",
+                    "tool_name": "notification_perception_read",
+                    "arguments": {"run_id": "run_1", "limit": 3},
+                    "purpose": "inspect visible notification perception evidence",
+                }
+            ],
+        },
+        planner_manifest=_planner_tool_manifest(),
+    )
+
+    assert validation["status"] == "passed"
+    assert validation["code"] == "ok"
+
+
 def _fixture_cases() -> list[dict]:
     return [json.loads(line) for line in FIXTURE_PATH.read_text(encoding="utf-8").splitlines() if line.strip()]
 

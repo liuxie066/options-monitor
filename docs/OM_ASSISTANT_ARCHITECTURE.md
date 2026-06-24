@@ -90,6 +90,50 @@ The actual call relationships are:
 `AgentLoop` therefore sits inside the `./om assistant` path. It is not a peer
 of `./om-agent` or `./om assistant`.
 
+## Response And Perception Modes
+
+`./om assistant` now has two input modes that share conversation context but do
+not share authority:
+
+```text
+response mode:
+  user message
+  -> AssistantRequest
+  -> perception/reasoning/action
+  -> optional AgentLoop
+  -> user-visible response
+
+perception mode:
+  tick notification event
+  -> assistant_perception audit event
+  -> compressed system-event context card
+  -> available evidence for later user follow-up
+```
+
+Perception mode is not a hidden user request. Tick notification code must not
+call `handle_assistant_message`, must not ask the model to generate a message,
+and must not make send/skip decisions through Assistant. The authoritative
+notification path remains `tick_notification_flow -> scheduled_notification ->
+delivery adapter`.
+
+Only compressed, safe context cards enter Assistant context. They may contain
+run id, account/symbol summaries, delivery action/reason, counts, and message
+hashes. They must not contain raw notification text, webhook URLs, tokens, or
+credentials. These cards can anchor follow-ups such as "刚才那条为什么没发",
+but they do not grant write permission, confirmation authority, broker access,
+or notification-send authority.
+
+For WeChat ClawBot, conversation scope is window-level:
+
+```text
+channel = wechat
+conversation_id = wechat:<chat_key-or-group_id>
+sender_id = <human identity for allowlist/permission only>
+```
+
+This lets multiple messages in the same ClawBot window share context while
+preserving sender identity for permission checks.
+
 ## Current Assistant Intelligence Loop
 
 The current assistant intelligence upgrade connects trace, capability

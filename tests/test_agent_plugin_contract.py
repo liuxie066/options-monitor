@@ -31,6 +31,7 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "runtime_status" in tool_names
     assert "runtime_runs" in tool_names
     assert "runtime_logs" in tool_names
+    assert "notification_perception_read" in tool_names
     assert "operation_timeline" in tool_names
     assert "assistant_trace" in tool_names
     assert "openclaw_readiness" not in tool_names
@@ -65,6 +66,13 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "lines" in runtime_logs["input_schema"]
     assert "log_file" in runtime_logs["input_schema"]
     assert "file" not in runtime_logs["input_schema"]
+    notification_perception = next(item for item in spec["tools"] if item["name"] == "notification_perception_read")
+    assert notification_perception["risk_level"] == "read_only"
+    assert notification_perception["requires_confirm"] is False
+    assert notification_perception["safe_default_input"] == {"limit": 10}
+    assert "run_id" in notification_perception["input_schema"]
+    assert "conversation_id" in notification_perception["input_schema"]
+    assert "audit_path" not in notification_perception["input_schema"]
     operation_timeline = next(item for item in spec["tools"] if item["name"] == "operation_timeline")
     assert operation_timeline["risk_level"] == "read_only"
     assert operation_timeline["requires_confirm"] is False
@@ -164,6 +172,7 @@ def test_agent_registry_manifest_and_tool_objects_stay_in_sync() -> None:
         "version_check",
         "runtime_runs",
         "runtime_logs",
+        "notification_perception_read",
         "operation_timeline",
         "assistant_trace",
     } <= migrated_names
@@ -193,6 +202,7 @@ def test_agent_tool_output_contracts_advertise_canonical_renderers() -> None:
     assert tools["healthcheck"]["output_contract"]["canonical_renderer"] == "healthcheck"
     assert tools["runtime_runs"]["output_contract"]["canonical_renderer"] == "runtime_runs"
     assert tools["runtime_logs"]["output_contract"]["canonical_renderer"] == "runtime_logs"
+    assert tools["notification_perception_read"]["output_contract"]["canonical_renderer"] == "notification_perception"
     assert tools["assistant_trace"]["output_contract"]["canonical_renderer"] == "assistant_trace"
     assistant_trace_fields = tools["assistant_trace"]["output_contract"]["fact_fields"]
     assert "traces[].capability_selection.selected_tools[]" in assistant_trace_fields
@@ -297,6 +307,7 @@ def test_pure_read_allowlist_is_derived_from_registry_metadata() -> None:
     assert "version_check" in PURE_READ_TOOLS
     assert "runtime_runs" in PURE_READ_TOOLS
     assert "runtime_logs" in PURE_READ_TOOLS
+    assert "notification_perception_read" in PURE_READ_TOOLS
     assert "symbol_resolve" in PURE_READ_TOOLS
     assert "symbol_config_read" in PURE_READ_TOOLS
     assert "candidate_filter_explain" in PURE_READ_TOOLS

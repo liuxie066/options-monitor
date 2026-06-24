@@ -261,6 +261,14 @@ READ_TOOL_BINDINGS: tuple[AssistantToolBinding, ...] = (
         summary="show runtime logs for a run",
     ),
     AssistantToolBinding(
+        intent_name="notification_perception_read",
+        tool_name="notification_perception_read",
+        display_name="通知感知",
+        arguments=("run_id", "conversation_id", "event_kind", "limit"),
+        examples=("刚才通知发生了什么", "最近一次通知为什么没发", "查看这个 run 的通知感知事件"),
+        summary="read compressed tick notification perception events from audit artifacts",
+    ),
+    AssistantToolBinding(
         intent_name="symbol_list",
         tool_name="inbound.symbols",
         commands=("/symbols",),

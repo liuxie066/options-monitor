@@ -12,6 +12,7 @@ from src.application.assistant.context_projection import (
 from src.application.assistant.conversation_context import build_conversation_context, context_trace
 from src.application.assistant.audit import InboundAuditStore
 from src.application.assistant.contracts import AssistantRequest
+from src.application.assistant.operation_store import InboundOperationStore
 
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "assistant_context_projection.jsonl"
@@ -203,6 +204,137 @@ def test_build_conversation_context_attaches_shadow_projection(tmp_path: Path) -
     assert trace["context_projection"]["recent_turn_count"] == 1
     assert trace["context_projection"]["recent_successful_tool_count"] == 1
     assert context_projection_trace(projection)["evidence_ref_count"] == 1
+
+
+def test_build_conversation_context_uses_wechat_window_history_across_senders(tmp_path: Path) -> None:
+    audit_db = tmp_path / "inbound.sqlite3"
+    store = InboundAuditStore(audit_db)
+    store.record_result(
+        {
+            "command_id": "in_symbol_config",
+            "channel": "wechat",
+            "sender_id": "user_a",
+            "conversation_id": "wechat:group_1",
+            "message_id": "msg_symbol_config",
+            "raw_text": "FUTU sell put的max strike设置的是多少？",
+            "parser": "llm",
+            "intent_name": "symbol_config_query",
+            "tool_name": "symbol_config_read",
+            "tool_payload": {"symbol": "FUTU", "strategy": "sell_put", "field": "max_strike"},
+            "decision": "allowed",
+            "result_ok": True,
+            "response": {"data": {"response_text": "FUTU sell_put.max_strike = 120"}},
+            "created_at": "2026-06-23T22:09:00+08:00",
+            "finished_at": "2026-06-23T22:09:01+08:00",
+        }
+    )
+    InboundOperationStore(audit_db).save_preview(
+        operation_id="op_user_a",
+        command_id="in_symbol_edit",
+        channel="wechat",
+        sender_id="user_a",
+        conversation_id="wechat:group_1",
+        operation_type="symbol_edit",
+        payload_hash="hash_user_a",
+        payload={"symbol": "FUTU"},
+        preview={"summary": "edit FUTU"},
+        ttl_seconds=600,
+        created_at="2026-06-23T22:10:00+08:00",
+    )
+
+    context = build_conversation_context(
+        AssistantRequest(
+            text="改为90",
+            sender_id="user_b",
+            channel="wechat",
+            conversation_id="wechat:group_1",
+            audit_db=str(audit_db),
+        ),
+        audit_store=store,
+        max_messages=4,
+    )
+
+    assert [item["intent_name"] for item in context["recent_messages"]] == ["symbol_config_query"]
+    assert context["scope"]["sender_id"] == "user_b"
+    assert context["pending_operations"] == []
+    ref = context["context_projection"]["available_evidence_refs"][0]
+    assert ref["safe_slots"]["symbol"] == ["FUTU"]
+
+
+def test_context_projection_includes_notification_system_event_refs() -> None:
+    projection = build_context_projection(
+        current_user_message="刚才那条为什么没发？",
+        conversation_context={
+            "recent_system_events": [
+                {
+                    "created_at_utc": "2026-06-23T14:00:00+00:00",
+                    "event_kind": "notification_delivery_decided",
+                    "run_id": "run_1",
+                    "summary": "notification_delivery_decided accounts=lx reason=no_send",
+                    "safe_slots": {"run_id": ["run_1"], "account": ["lx"], "action": ["skip_no_send"]},
+                    "delivery": {"action": "skip_no_send", "reason": "no_send", "should_send": False},
+                    "message_count": 1,
+                    "notify_candidate_count": 3,
+                    "threshold_met": True,
+                }
+            ]
+        },
+    )
+
+    turn = projection["recent_turns"][0]
+    ref = projection["available_evidence_refs"][0]
+    assert turn["event_type"] == "system_event"
+    assert turn["evidence_refs"] == [ref["ref_id"]]
+    assert ref["source_type"] == "system_event"
+    assert ref["source_tool"] == "notification_perception"
+    assert ref["safe_slots"]["run_id"] == ["run_1"]
+    assert ref["data_shape"]["delivery_action"] == "skip_no_send"
+    assert projection["system_events"][0]["event_type"] == "notification_perception"
+
+
+def test_build_conversation_context_reads_notification_system_events(tmp_path: Path) -> None:
+    audit_db = tmp_path / "inbound.sqlite3"
+    store = InboundAuditStore(audit_db)
+    audit = tmp_path / "output_shared" / "state" / "audit_events.jsonl"
+    audit.parent.mkdir(parents=True)
+    audit.write_text(
+        json.dumps(
+            {
+                "event_type": "assistant_perception",
+                "action": "notification_prepared",
+                "run_id": "run_context",
+                "event_at_utc": "2026-06-23T14:00:00+00:00",
+                "extra": {
+                    "event_kind": "notification_prepared",
+                    "run_id": "run_context",
+                    "created_at_utc": "2026-06-23T14:00:00+00:00",
+                    "conversation_scope": {"channel": "wechat", "conversation_id": "wechat:group_1"},
+                    "safe_slots": {"run_id": ["run_context"], "action": ["notification_prepared"]},
+                    "summary": "notification prepared",
+                },
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    context = build_conversation_context(
+        AssistantRequest(
+            text="刚才那条",
+            sender_id="user_1",
+            channel="wechat",
+            conversation_id="wechat:group_1",
+            audit_db=str(audit_db),
+            reply_context={"base": str(tmp_path)},
+        ),
+        audit_store=store,
+        max_messages=4,
+    )
+
+    assert context["recent_system_events"][0]["run_id"] == "run_context"
+    assert context["context_projection"]["available_evidence_refs"][0]["source_type"] == "system_event"
+    assert context_trace(context)["system_event_count"] == 1
 
 
 def _fixture_case(case_id: str) -> dict[str, Any]:

@@ -275,7 +275,7 @@ def test_wechat_clawbot_message_adapter_builds_assistant_request(tmp_path: Path)
         sender_id="user_1",
         channel="wechat",
         message_id="msg_1",
-        conversation_id="wechat:group_1:user_1",
+        conversation_id="wechat:group_1",
         config_key="us",
         audit_db=str(tmp_path / "audit.sqlite3"),
         reply_context={

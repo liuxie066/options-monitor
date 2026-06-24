@@ -3694,6 +3694,102 @@ def test_assistant_runtime_builds_context_from_same_conversation(tmp_path: Path)
     assert second["meta"]["assistant"]["context"]["recent_count"] == 1
 
 
+def test_assistant_runtime_injects_conversation_for_notification_perception_read(tmp_path: Path) -> None:
+    audit_db = tmp_path / "inbound.sqlite3"
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "summary": {"ok": True, "returned_count": 0},
+                "events": [],
+            },
+        )
+
+    def _plan(
+        text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> ModelTurnResult:
+        assert text == "刚才通知发生了什么"
+        return _model_turn_result("notification_perception_read", goal=text)
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="刚才通知发生了什么",
+            sender_id="user_1",
+            channel="wechat",
+            conversation_id="wechat:group_1",
+            message_id="msg_notification_perception",
+            config_key="us",
+            audit_db=str(audit_db),
+        ),
+        execute_tool_fn=_execute,
+        allowed_senders="wechat:user_1",
+        settings=AssistantSettings(
+            context_window_messages=4,
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        model_turn_fn=_plan,
+    )
+
+    assert out["ok"] is True
+    assert calls == [("notification_perception_read", {"conversation_id": "wechat:group_1"})]
+
+
+def test_assistant_runtime_overrides_notification_perception_conversation(tmp_path: Path) -> None:
+    audit_db = tmp_path / "inbound.sqlite3"
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "summary": {"ok": True, "returned_count": 0},
+                "events": [],
+            },
+        )
+
+    def _plan(
+        text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> ModelTurnResult:
+        assert text == "刚才通知发生了什么"
+        return _model_turn_result(
+            "notification_perception_read",
+            {"conversation_id": "wechat:other_group", "limit": 5},
+            goal=text,
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="刚才通知发生了什么",
+            sender_id="user_1",
+            channel="wechat",
+            conversation_id="wechat:group_1",
+            message_id="msg_notification_perception",
+            config_key="us",
+            audit_db=str(audit_db),
+        ),
+        execute_tool_fn=_execute,
+        allowed_senders="wechat:user_1",
+        settings=AssistantSettings(
+            context_window_messages=4,
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        model_turn_fn=_plan,
+    )
+
+    assert out["ok"] is True
+    assert calls == [("notification_perception_read", {"conversation_id": "wechat:group_1", "limit": 5})]
+
+
 def test_assistant_runtime_last_successful_read_ignores_write_tool_context(tmp_path: Path) -> None:
     audit_db = tmp_path / "inbound.sqlite3"
     store = InboundAuditStore(audit_db)

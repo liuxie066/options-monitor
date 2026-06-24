@@ -40,6 +40,7 @@ from src.application.channels.wechat_clawbot.message import (
 from src.application.channels.wechat_clawbot.state import DEFAULT_WECHAT_CLAWBOT_LABEL, resolve_wechat_clawbot_state_dir
 from src.application.channels.wechat_clawbot.reply import reply_wechat_clawbot_text
 from src.application.channels.wechat_clawbot.state_store import WechatClawbotStateStore
+from src.application.conversation_scope import wechat_window_conversation_id
 from src.infrastructure.io_utils import utc_now
 
 
@@ -293,7 +294,11 @@ def wechat_clawbot_message_to_assistant_request(
         sender_id=sender_id,
         channel="wechat",
         message_id=message_id(payload) or None,
-        conversation_id=f"wechat:{chat_key}:{sender_id}" if chat_key else None,
+        conversation_id=wechat_window_conversation_id(
+            chat_key=chat_key,
+            group_id=group_id,
+            sender_id=sender_id,
+        ),
         config_key=config_key,
         config_path=config_path,
         audit_db=audit_db,
