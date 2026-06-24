@@ -2,11 +2,14 @@
 
 ## Unreleased
 
-## 1.2.333 - 2026-06-24
+## 1.2.334 - 2026-06-24
 
 ### Added
 - Added YAML authority support for `sell_put.max_strike` symbol edits, keeping ClawBot/IM changes in the existing
   preview-confirm workflow and rebuilding runtime configs only after confirmation.
+
+### Changed
+- Refreshed dependency-graph release metadata for the Assistant context-composed config edit rollout.
 
 ### Fixed
 - Let Assistant config-edit follow-ups such as `改为90` compose intent from the visible conversation context when a
