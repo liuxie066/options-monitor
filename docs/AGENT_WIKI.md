@@ -329,8 +329,18 @@ preserving `not_evaluable` rows, and formatting CSV/text output.
 - Per-account content: `src/application/notify_symbols.py`
 - Multi-account wrapper: `src/application/multi_tick/notify_format.py`
 - Preview tool: `preview_notification`
+- Perception audit card: `assistant_perception` events written by
+  `src/application/tick_notification_flow.py`
+- Read tool: `notification_perception_read`
 
 Notification text should remain Markdown-friendly and operationally direct. Do not send live notifications unless the user explicitly asks.
+
+Notification perception events are compressed system evidence for Assistant
+follow-ups. They record delivery action/reason, accounts, symbol summaries,
+message lengths and hashes, but not raw notification text or webhook secrets.
+They may enter ClawBot conversation context as `system_event` evidence; they
+must not be treated as user messages or as authorization to write config, send
+notifications, or mutate broker-facing state.
 
 ### Configuration
 

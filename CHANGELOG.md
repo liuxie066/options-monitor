@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 1.2.335 - 2026-06-24
+
+### Added
+- Added compressed Assistant perception events to the tick notification flow so notification prepare, delivery decision,
+  skip, and completion facts can be reused as evidence-only Assistant context.
+- Added a read-only `notification_perception_read` tool for inspecting recent notification perception audit events by
+  run, event kind, or conversation scope.
+
+### Changed
+- Scoped WeChat ClawBot Assistant conversation history to the visible chat window while keeping pending confirmations
+  sender-scoped.
+- Projected notification perception events into Assistant context as system-event evidence without exposing raw message
+  bodies or granting write authority.
+
+### Fixed
+- Forced Assistant-initiated `notification_perception_read` calls to the current conversation scope so model-supplied
+  arguments cannot read another ClawBot window by default.
+
 ## 1.2.334 - 2026-06-24
 
 ### Added

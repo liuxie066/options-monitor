@@ -10,6 +10,8 @@ from src.application.assistant.contracts import AssistantRequest
 from src.application.assistant.context_projection import build_context_projection, context_projection_trace
 from src.application.assistant.session_store import AgentSessionStore
 from src.application.assistant.user_profile import load_user_profile_context, user_profile_trace
+from src.application.conversation_scope import normalize_conversation_scope
+from src.application.notification_perception_read import read_notification_perception_events
 from src.application.tool_allowlist import PURE_READ_TOOLS
 
 
@@ -27,13 +29,15 @@ def build_conversation_context(
 
     recent_messages = []
     recent_sessions = []
+    recent_system_events = []
     if window > 0:
+        history_sender_id = _history_sender_id(normalized)
         recent_messages = [
             _audit_context_item(row)
             for row in reversed(
                 audit_store.list_recent(
                     channel=normalized["channel"],
-                    sender_id=normalized["sender_id"],
+                    sender_id=history_sender_id,
                     conversation_id=normalized["conversation_id"],
                     limit=window,
                 )
@@ -41,7 +45,12 @@ def build_conversation_context(
         ]
         recent_sessions = AgentSessionStore(audit_store.path).list_recent(
             channel=normalized["channel"],
-            sender_id=normalized["sender_id"],
+            sender_id=history_sender_id,
+            conversation_id=normalized["conversation_id"],
+            limit=window,
+        )
+        recent_system_events = _recent_system_events(
+            request=request,
             conversation_id=normalized["conversation_id"],
             limit=window,
         )
@@ -69,6 +78,7 @@ def build_conversation_context(
             "confirmation_must_be_deterministic": True,
         },
         "recent_messages": recent_messages,
+        "recent_system_events": recent_system_events,
         "last_successful_read": _last_successful_read(recent_messages),
         "pending_operations": pending_operations,
         "user_profile": load_user_profile_context(user_profile_path),
@@ -85,11 +95,13 @@ def context_trace(context: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(context, dict):
         return {"provided": False}
     recent = context.get("recent_messages")
+    system_events = context.get("recent_system_events")
     pending = context.get("pending_operations")
     trace = {
         "provided": True,
         "window_messages": int(context.get("window_messages") or 0),
         "recent_count": len(recent) if isinstance(recent, list) else 0,
+        "system_event_count": len(system_events) if isinstance(system_events, list) else 0,
         "pending_count": len(pending) if isinstance(pending, list) else 0,
         "user_profile": user_profile_trace(
             context.get("user_profile") if isinstance(context.get("user_profile"), dict) else None
@@ -104,10 +116,40 @@ def context_trace(context: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def _normalized_scope(request: AssistantRequest) -> dict[str, str]:
-    channel = str(request.channel or "local").strip().lower() or "local"
-    sender_id = str(request.sender_id or "").strip()
-    conversation_id = str(request.conversation_id or "").strip() or f"{channel}:{sender_id}"
-    return {"channel": channel, "sender_id": sender_id, "conversation_id": conversation_id}
+    return normalize_conversation_scope(
+        channel=request.channel,
+        sender_id=request.sender_id,
+        conversation_id=request.conversation_id,
+    )
+
+
+def _history_sender_id(scope: dict[str, str]) -> str | None:
+    channel = str(scope.get("channel") or "").strip().lower()
+    conversation_id = str(scope.get("conversation_id") or "").strip()
+    if channel == "wechat" and conversation_id.startswith("wechat:"):
+        return None
+    return str(scope.get("sender_id") or "").strip()
+
+
+def _recent_system_events(*, request: AssistantRequest, conversation_id: str, limit: int) -> list[dict[str, Any]]:
+    try:
+        data = read_notification_perception_events(
+            repo_root=_context_repo_root(request),
+            conversation_id=conversation_id,
+            limit=limit,
+        )
+    except Exception:
+        return []
+    events = data.get("events") if isinstance(data, dict) else []
+    return [event for event in events if isinstance(event, dict)]
+
+
+def _context_repo_root(request: AssistantRequest) -> Path:
+    reply_context = request.reply_context if isinstance(request.reply_context, dict) else {}
+    base = str(reply_context.get("base") or "").strip()
+    if base:
+        return Path(base).expanduser().resolve()
+    return Path.cwd().resolve()
 
 
 def _audit_context_item(row: dict[str, Any]) -> dict[str, Any]:

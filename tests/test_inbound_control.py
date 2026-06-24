@@ -1805,7 +1805,7 @@ def test_inbound_upgrade_worker_sends_wechat_clawbot_final_receipt(
             sender_id="user_1",
             channel="wechat",
             message_id="msg_upgrade_preview",
-            conversation_id="wechat:group_1:user_1",
+            conversation_id="wechat:group_1",
             audit_db=str(audit_db),
             reply_context={
                 "provider": "wechat_clawbot",
@@ -1826,7 +1826,7 @@ def test_inbound_upgrade_worker_sends_wechat_clawbot_final_receipt(
             sender_id="user_1",
             channel="wechat",
             message_id="msg_upgrade_confirm",
-            conversation_id="wechat:group_1:user_1",
+            conversation_id="wechat:group_1",
             audit_db=str(audit_db),
             reply_context={
                 "provider": "wechat_clawbot",
