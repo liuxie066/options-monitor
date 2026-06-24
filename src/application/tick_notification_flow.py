@@ -28,6 +28,7 @@ from src.application.cron_runtime import (
 )
 from src.application.multi_tick.cash_footer import query_cash_footer
 from src.application.multi_tick.misc import _safe_runlog_data, parse_hhmm
+from src.application.multi_tick.assistant_perception_event import build_notification_perception_event
 from src.application.multi_tick.notify_format import build_account_message, build_account_message_compact
 from src.application.multi_tick_finalization import (
     finalize_multi_tick_run,
@@ -126,7 +127,43 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
     prepared_messages = notification_prep.prepared_messages
     account_messages = prepared_messages.messages_by_account
 
+    route_hint = _notification_perception_route_hint(request.base_cfg)
+
     if not bool(prepared_messages.threshold_met):
+        _audit_notification_perception(
+            request,
+            build_notification_perception_event(
+                event_kind="notification_prepared",
+                run_id=request.run_id,
+                results_count=notification_prep.results_count,
+                notify_candidates=notification_prep.notify_candidates,
+                account_messages=account_messages,
+                threshold_met=prepared_messages.threshold_met,
+                used_heartbeat=prepared_messages.used_heartbeat,
+                heartbeat_accounts=prepared_messages.heartbeat_accounts,
+                provider=route_hint.get("provider"),
+                channel=route_hint.get("channel"),
+                target=route_hint.get("target"),
+                no_send=request.no_send,
+            ),
+        )
+        _audit_notification_perception(
+            request,
+            build_notification_perception_event(
+                event_kind="no_account_notification",
+                run_id=request.run_id,
+                results_count=notification_prep.results_count,
+                notify_candidates=notification_prep.notify_candidates,
+                account_messages=account_messages,
+                threshold_met=prepared_messages.threshold_met,
+                used_heartbeat=prepared_messages.used_heartbeat,
+                heartbeat_accounts=prepared_messages.heartbeat_accounts,
+                provider=route_hint.get("provider"),
+                channel=route_hint.get("channel"),
+                target=route_hint.get("target"),
+                no_send=request.no_send,
+            ),
+        )
         return finish_success(
             lambda: finalize_no_account_notification(
                 base=request.base,
@@ -174,6 +211,31 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
     provider = notify_route.get("provider")
     channel = notify_route.get("channel")
     target = notify_route.get("target")
+    perception_scope = _notification_perception_conversation_scope(
+        provider=provider,
+        channel=channel,
+        target=target,
+        base=process_root,
+        notifications=notif_cfg,
+    )
+    _audit_notification_perception(
+        request,
+        build_notification_perception_event(
+            event_kind="notification_prepared",
+            run_id=request.run_id,
+            results_count=notification_prep.results_count,
+            notify_candidates=notification_prep.notify_candidates,
+            account_messages=account_messages,
+            threshold_met=prepared_messages.threshold_met,
+            used_heartbeat=prepared_messages.used_heartbeat,
+            heartbeat_accounts=prepared_messages.heartbeat_accounts,
+            provider=provider,
+            channel=channel,
+            target=target,
+            no_send=request.no_send,
+            conversation_scope=perception_scope,
+        ),
+    )
     quiet_hours = notif_cfg.get("quiet_hours_beijing")
     dnd_decision = evaluate_dnd_quiet_hours(
         quiet_hours=quiet_hours,
@@ -217,10 +279,50 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
             "target_set": bool(target),
         },
     )
+    _audit_notification_perception(
+        request,
+        build_notification_perception_event(
+            event_kind="notification_delivery_decided",
+            run_id=request.run_id,
+            results_count=notification_prep.results_count,
+            notify_candidates=notification_prep.notify_candidates,
+            account_messages=account_messages,
+            threshold_met=prepared_messages.threshold_met,
+            used_heartbeat=prepared_messages.used_heartbeat,
+            heartbeat_accounts=prepared_messages.heartbeat_accounts,
+            provider=provider,
+            channel=channel,
+            target=target,
+            no_send=request.no_send,
+            quiet_hours=quiet_hours,
+            delivery_decision=notify_delivery,
+            conversation_scope=perception_scope,
+        ),
+    )
     if str(notify_delivery.get("action") or "") == "skip_quiet_hours":
         quiet_window = str(notify_delivery.get("quiet_window") or "")
         request.runlog.safe_event("notify", "skip", message=f"in quiet hours ({quiet_window})")
         print(f"[SKIP] Currently in quiet hours (DND). Target was: {target}")
+        _audit_notification_perception(
+            request,
+            build_notification_perception_event(
+                event_kind="quiet_hours_skipped",
+                run_id=request.run_id,
+                results_count=notification_prep.results_count,
+                notify_candidates=notification_prep.notify_candidates,
+                account_messages=account_messages,
+                threshold_met=prepared_messages.threshold_met,
+                used_heartbeat=prepared_messages.used_heartbeat,
+                heartbeat_accounts=prepared_messages.heartbeat_accounts,
+                provider=provider,
+                channel=channel,
+                target=target,
+                no_send=request.no_send,
+                quiet_hours=quiet_hours,
+                delivery_decision=notify_delivery,
+                conversation_scope=perception_scope,
+            ),
+        )
         request.audit_helper.guard_mark_success()
         request.complete_tick_idempotency_fn(status="skipped", message="quiet_hours")
         return 0
@@ -303,6 +405,31 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
         sent_accounts = list(account_messages.keys())
         request.runlog.safe_event("notify", "skip", message="no_send mode")
 
+    _audit_notification_perception(
+        request,
+        build_notification_perception_event(
+            event_kind="notification_delivery_completed",
+            run_id=request.run_id,
+            results_count=notification_prep.results_count,
+            notify_candidates=notification_prep.notify_candidates,
+            account_messages=account_messages,
+            threshold_met=prepared_messages.threshold_met,
+            used_heartbeat=prepared_messages.used_heartbeat,
+            heartbeat_accounts=prepared_messages.heartbeat_accounts,
+            provider=provider,
+            channel=channel,
+            target=target,
+            no_send=request.no_send,
+            quiet_hours=quiet_hours,
+            delivery_decision=notify_delivery,
+            conversation_scope=perception_scope,
+            sent_accounts=sent_accounts,
+            notify_failures=notify_failures,
+            send_attempted_count=send_attempted_count,
+            send_confirmed_count=send_confirmed_count,
+        ),
+    )
+
     if not request.no_send:
         try:
             mark_accounts_notified(
@@ -371,3 +498,56 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
             on_success=request.audit_helper.guard_mark_success,
         )
     )
+
+
+def _audit_notification_perception(request: TickNotificationRequest, event: dict[str, Any]) -> None:
+    try:
+        request.audit_helper.audit(
+            "assistant_perception",
+            str(event.get("event_kind") or "notification_event"),
+            run_id=request.run_id,
+            status="ok",
+            extra=event,
+        )
+    except Exception:
+        pass
+
+
+def _notification_perception_route_hint(config: dict[str, Any]) -> dict[str, Any]:
+    notifications = config.get("notifications") if isinstance(config, dict) else {}
+    notif_cfg = notifications if isinstance(notifications, dict) else {}
+    provider = notif_cfg.get("provider") or notif_cfg.get("channel") or "wechat_clawbot"
+    channel = notif_cfg.get("channel") or provider
+    return {
+        "provider": provider,
+        "channel": channel,
+        "target": notif_cfg.get("target"),
+    }
+
+
+def _notification_perception_conversation_scope(
+    *,
+    provider: Any,
+    channel: Any,
+    target: Any,
+    base: Path,
+    notifications: dict[str, Any],
+) -> dict[str, str | None]:
+    if str(provider or "").strip() == "wechat_clawbot" or str(channel or "").strip().lower() == "wechat":
+        try:
+            from src.application.channels.wechat_clawbot.state import load_wechat_clawbot_binding
+            from src.application.conversation_scope import wechat_window_conversation_id
+
+            binding = load_wechat_clawbot_binding(base=base, target=str(target or ""), notifications=notifications)
+            conversation_id = wechat_window_conversation_id(
+                chat_key=getattr(binding, "chat_key", None),
+                group_id=getattr(binding, "group_id", None),
+                sender_id=getattr(binding, "to_user_id", None),
+            )
+            if conversation_id:
+                return {"channel": "wechat", "conversation_id": conversation_id}
+        except Exception:
+            pass
+    from src.application.conversation_scope import conversation_scope_from_notification_route
+
+    return conversation_scope_from_notification_route(provider=provider, channel=channel, target=target)

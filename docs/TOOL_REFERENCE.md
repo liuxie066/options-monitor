@@ -88,6 +88,7 @@ om-agent run --tool runtime_status --env-file /etc/options-monitor/options-monit
 | `scan_opportunities` | `om scan` / `om scan-pipeline` |
 | `candidate_rank_explain` | Tool Gateway-only read existing candidate CSV ranking explanations |
 | `preview_notification` | `om notify preview` |
+| `notification_perception_read` | Tool Gateway-only read notification perception audit events |
 | `runtime_status` | `om status` or raw assistant/runtime artifact summary |
 | `runtime_runs` | `om runs` |
 | `runtime_logs` | `om logs` |
@@ -904,6 +905,25 @@ om-agent run --tool runtime_logs --input-json '{"run_id":"20260515T182459Z-47476
 ```bash
 om-agent run --tool assistant_trace --input-json '{"limit":10}'
 om-agent run --tool assistant_trace --input-json '{"command_id":"<command-id>","include_snapshot":true}'
+```
+
+---
+
+## 5.15.2 `notification_perception_read`
+
+用途：
+- 只读 tick audit 里的 `assistant_perception` 通知感知事件
+- 诊断最近一次通知准备、no-account 早退、delivery decision、quiet-hours skip 或发送完成摘要
+- 返回压缩事件：`run_id`、账户/标的摘要、delivery action/reason、消息长度和 sha256
+- 不返回原始通知正文、webhook、token 或 credentials
+- 不运行 tick，不发送通知，不创建 Assistant session
+
+示例：
+
+```bash
+om-agent run --tool notification_perception_read --input-json '{"limit":10}'
+om-agent run --tool notification_perception_read --input-json '{"run_id":"20260515T182459Z-474761"}'
+om-agent run --tool notification_perception_read --input-json '{"conversation_id":"wechat:<chat_key>","limit":3}'
 ```
 
 ---

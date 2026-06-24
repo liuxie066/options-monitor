@@ -4635,6 +4635,8 @@ def _inject_system_fields(arguments: dict[str, Any], *, request: AssistantReques
     if tool_name == "runtime_logs":
         payload.setdefault("kind", "all")
         payload.setdefault("lines", 50)
+    if tool_name == "notification_perception_read" and request.conversation_id:
+        payload["conversation_id"] = request.conversation_id
     return payload
 
 
