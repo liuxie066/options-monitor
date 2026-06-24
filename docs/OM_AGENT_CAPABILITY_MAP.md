@@ -43,6 +43,9 @@ Rules:
 
 - Facts come from deterministic OM tools, current code, config, runtime
   artifacts, tests, git state, or explicit tool output.
+- Assistant memory is a hint-only context source for collaboration, OM usage,
+  and parameter-tuning preferences. It is not evidence, market data, runtime
+  state, config authority, or write authorization.
 - LLM may classify intent, choose evidence paths, plan bounded tool calls, and
   summarize observations. LLM is not a factual source.
 - For analytical answers, use the Data Analysis-style boundary: LLM plans the

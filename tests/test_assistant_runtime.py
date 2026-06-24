@@ -1731,6 +1731,14 @@ def test_agent_loop_planner_uses_context_projection_while_synthesis_excludes_pro
             "recent_turns": [{"turn_id": "session:previous", "user_summary": "previous"}],
             "recent_successful_tools": [{"tool_name": "analysis_query"}],
             "available_evidence_refs": [{"ref_id": "ev_001"}],
+            "relevant_memories": [
+                {
+                    "memory_id": "parameter-tuning",
+                    "type": "parameter_tuning_preference",
+                    "title": "参数调优偏好",
+                    "summary": "先看候选过滤证据。",
+                }
+            ],
         },
     }
 
@@ -1739,7 +1747,9 @@ def test_agent_loop_planner_uses_context_projection_while_synthesis_excludes_pro
     assert "context_projection" in planner_text
     assert planner_payload["context"]["context_projection"]["recent_turns"][0]["turn_id"] == "session:previous"
     assert planner_payload["context"]["context_projection"]["available_evidence_refs"][0]["ref_id"] == "ev_001"
+    assert planner_payload["context"]["context_projection"]["relevant_memories"][0]["memory_id"] == "parameter-tuning"
     assert planner_payload["context"]["context_policy"]["current_message_wins"] is True
+    assert planner_payload["context"]["context_policy"]["memory_cannot_authorize_writes"] is True
     assert "active_frame" not in planner_payload["context"]
     assert "followup_resolution" not in planner_payload["context"]
 
@@ -3279,6 +3289,178 @@ def test_assistant_runtime_uses_llm_reply_for_non_business_text_after_low_confid
     assert out["meta"]["assistant"]["llm"]["writes_allowed"] is False
 
 
+def test_assistant_runtime_creates_memory_suggestion_sidecar_for_explicit_preference(tmp_path: Path) -> None:
+    memory_dir = tmp_path / "assistant_memory"
+
+    def _plan(
+        _text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> ModelTurnResult:
+        return ModelTurnResult(
+            trace={**_planner_trace(reason="invalid_payload"), "error_code": "NEEDS_CLARIFICATION"},
+            error=AgentToolError(code="NEEDS_CLARIFICATION", message="LLM planner could not produce a safe plan."),
+        )
+
+    def _reply(
+        _text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmReplyResult:
+        return LlmReplyResult(
+            response_text="收到。",
+            trace={
+                **_planner_trace(reason="general_reply"),
+                "facts_source": "none",
+                "tools_allowed": False,
+                "writes_allowed": False,
+                "schema_version": "om-llm-reply-v1",
+            },
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="请记住：调参时先看 replay 和拒绝原因。",
+            sender_id="local",
+            message_id="msg_memory_suggest",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        settings=AssistantSettings(llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2")),
+        model_turn_fn=_plan,
+        generate_reply_fn=_reply,
+        memory_suggestion_dir=memory_dir,
+    )
+
+    assert out["ok"] is True
+    suggestion = out["data"]["memory_suggestion"]
+    assert suggestion["status"] == "proposed"
+    assert suggestion["proposal_count"] == 1
+    assert suggestion["proposals"][0]["type"] == "parameter_tuning_preference"
+    assert suggestion["requires_accept"] is True
+    assert out["meta"]["assistant"]["memory_suggestion"] == suggestion
+    assert "记忆建议已创建：" in out["data"]["response_text"]
+    assert "需显式 accept 后才会生效" in out["data"]["response_text"]
+    assert not (memory_dir / "parameter-tuning-preference.md").exists()
+    proposal_files = list((memory_dir / "proposals").glob("*.json"))
+    assert len(proposal_files) == 1
+
+    rows = InboundAuditStore(tmp_path / "inbound.sqlite3").list_recent(limit=1)
+    audited = json.loads(rows[0]["response_json"])
+    assert audited["data"]["memory_suggestion"]["status"] == "proposed"
+
+
+def test_assistant_runtime_memory_suggestion_skips_runtime_fact(tmp_path: Path) -> None:
+    memory_dir = tmp_path / "assistant_memory"
+
+    def _plan(
+        _text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> ModelTurnResult:
+        return ModelTurnResult(
+            trace={**_planner_trace(reason="invalid_payload"), "error_code": "NEEDS_CLARIFICATION"},
+            error=AgentToolError(code="NEEDS_CLARIFICATION", message="LLM planner could not produce a safe plan."),
+        )
+
+    def _reply(
+        _text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmReplyResult:
+        return LlmReplyResult(response_text="收到。", trace={**_planner_trace(reason="general_reply")})
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="请记住：今天 NVDA 当前价格是 180。",
+            sender_id="local",
+            message_id="msg_memory_suggest_runtime_fact",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        settings=AssistantSettings(llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2")),
+        model_turn_fn=_plan,
+        generate_reply_fn=_reply,
+        memory_suggestion_dir=memory_dir,
+    )
+
+    suggestion = out["data"]["memory_suggestion"]
+    assert suggestion["status"] == "skipped"
+    assert suggestion["proposal_count"] == 0
+    assert suggestion["skipped_reasons"] == ["runtime_or_market_fact"]
+    assert "未创建记忆建议：内容像当前市场或运行态事实" in out["data"]["response_text"]
+    assert list((memory_dir / "proposals").glob("*.json")) == []
+
+
+def test_assistant_runtime_memory_suggestion_skips_permission_denied_response(tmp_path: Path) -> None:
+    memory_dir = tmp_path / "assistant_memory"
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="请记住：以后调参先看 replay 和拒绝原因。",
+            sender_id="bad_sender",
+            channel="feishu",
+            message_id="msg_memory_suggest_denied",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        allowed_senders="feishu:allowed_sender",
+        memory_suggestion_dir=memory_dir,
+    )
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "PERMISSION_DENIED"
+    assert "memory_suggestion" not in out["data"]
+    assert list((memory_dir / "proposals").glob("*.json")) == []
+
+
+def test_assistant_runtime_memory_suggestion_idempotent_replay_does_not_duplicate_proposal(tmp_path: Path) -> None:
+    memory_dir = tmp_path / "assistant_memory"
+    audit_db = tmp_path / "inbound.sqlite3"
+
+    def _plan(
+        _text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> ModelTurnResult:
+        return ModelTurnResult(
+            trace={**_planner_trace(reason="invalid_payload"), "error_code": "NEEDS_CLARIFICATION"},
+            error=AgentToolError(code="NEEDS_CLARIFICATION", message="LLM planner could not produce a safe plan."),
+        )
+
+    def _reply(
+        _text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmReplyResult:
+        return LlmReplyResult(response_text="收到。", trace={**_planner_trace(reason="general_reply")})
+
+    request = AssistantRequest(
+        text="请记住：调参时先看 replay 和拒绝原因。",
+        sender_id="local",
+        message_id="msg_memory_suggest_replay",
+        audit_db=str(audit_db),
+    )
+    settings = AssistantSettings(llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"))
+
+    first = handle_assistant_message(
+        request,
+        settings=settings,
+        model_turn_fn=_plan,
+        generate_reply_fn=_reply,
+        memory_suggestion_dir=memory_dir,
+    )
+    second = handle_assistant_message(
+        request,
+        settings=settings,
+        model_turn_fn=_plan,
+        generate_reply_fn=_reply,
+        memory_suggestion_dir=memory_dir,
+    )
+
+    assert first["data"]["memory_suggestion"]["status"] == "proposed"
+    assert second["meta"]["idempotent_replay"] is True
+    assert second["data"]["memory_suggestion"]["status"] == "proposed"
+    assert len(list((memory_dir / "proposals").glob("*.json"))) == 1
+
+
 def test_assistant_runtime_does_not_use_llm_reply_for_context_validation_error(tmp_path: Path) -> None:
     def _plan(
         _text: str,
@@ -4372,6 +4554,52 @@ def test_conversation_context_reads_user_md_as_hint_only_profile(tmp_path: Path)
         "chars": len(profile["content"]),
         "truncated": False,
         "redacted_line_count": 1,
+    }
+
+
+def test_conversation_context_reads_assistant_memory_as_hint_only_context(tmp_path: Path) -> None:
+    memory_dir = tmp_path / "assistant_memory"
+    memory_dir.mkdir()
+    (memory_dir / "parameter-tuning.md").write_text(
+        """\
+---
+type: parameter_tuning_preference
+title: 参数调优偏好
+summary: 用户希望先看候选过滤证据。
+tags: [参数, 候选]
+---
+优化参数时先看 replay、候选过滤和拒绝原因。
+""",
+        encoding="utf-8",
+    )
+    audit_db = tmp_path / "inbound.sqlite3"
+    store = InboundAuditStore(audit_db)
+
+    context = build_conversation_context(
+        AssistantRequest(
+            text="帮我优化参数",
+            sender_id="ou_1",
+            channel="feishu",
+            conversation_id="feishu:chat_a:ou_1",
+            audit_db=str(audit_db),
+        ),
+        audit_store=store,
+        max_messages=4,
+        assistant_memory_path=memory_dir,
+    )
+
+    memory = context["assistant_memory"]
+    assert memory["provided"] is True
+    assert memory["memory_count"] == 1
+    assert memory["policy"]["memory_cannot_authorize_writes"] is True
+    assert context["context_projection"]["relevant_memories"][0]["memory_id"] == "parameter-tuning"
+    assert context["context_projection"]["policy"]["tool_evidence_wins_memory"] is True
+    assert context_trace(context)["assistant_memory"] == {
+        "provided": True,
+        "source": "assistant_memory",
+        "format": "markdown_topic_files",
+        "memory_count": 1,
+        "types": ["parameter_tuning_preference"],
     }
 
 

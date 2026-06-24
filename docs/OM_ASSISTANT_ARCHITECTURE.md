@@ -18,6 +18,8 @@ into one overloaded "agent" concept.
   [OM_ASSISTANT_CONVERSATION_CONTEXT_DESIGN.md](OM_ASSISTANT_CONVERSATION_CONTEXT_DESIGN.md).
 - Current conversation-context implementation plan:
   [OM_ASSISTANT_CONTEXT_IMPLEMENTATION_PLAN.md](OM_ASSISTANT_CONTEXT_IMPLEMENTATION_PLAN.md).
+- Current assistant memory design:
+  [OM_ASSISTANT_MEMORY_DESIGN.md](OM_ASSISTANT_MEMORY_DESIGN.md).
 
 Historical design notes such as `OM_AGENT_COMPLETION_DESIGN.md`,
 `OM_AGENT_INTELLIGENCE_UPGRADE_PLAN.md`,
@@ -282,6 +284,7 @@ Authority is split this way:
 | current user message | explicit current scope and overrides | hidden defaults or historical carry |
 | provider structured tool-call arguments | current model-turn execution intent | proof that an argument came from history |
 | `ContextProjection.safe_slots` | bounded model-visible history and audit metadata | a second natural-language parser |
+| `ContextProjection.relevant_memories` | hint-only collaboration, OM usage, and parameter-tuning preferences | market data, ledger state, runtime config, evidence, or write authorization |
 | `context_use.inherited_slots` | values intentionally carried from referenced visible context | normalized synonyms in the current message |
 | host guards | schema, scope, risk, budget, duplicates, hidden args, policy | business-language interpretation by keyword |
 
@@ -297,6 +300,7 @@ The context layer should not grow as a collection of business-specific
 follow-up branches.
 Detailed contracts and rollout plan live in:
 
+- [OM_ASSISTANT_MEMORY_DESIGN.md](OM_ASSISTANT_MEMORY_DESIGN.md)
 - [OM_ASSISTANT_CONTEXT_PROJECTION_CONTRACT.md](OM_ASSISTANT_CONTEXT_PROJECTION_CONTRACT.md)
 - [OM_ASSISTANT_CONTEXT_VALIDATION_CONTRACT.md](OM_ASSISTANT_CONTEXT_VALIDATION_CONTRACT.md)
 - [OM_ASSISTANT_CONTEXT_EVAL_PLAN.md](OM_ASSISTANT_CONTEXT_EVAL_PLAN.md)

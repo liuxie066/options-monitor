@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from src.application.assistant.memory import assistant_memory_trace
 from src.application.assistant.user_profile import user_profile_trace
 from src.application.tool_allowlist import PURE_READ_TOOLS
 
@@ -13,8 +14,10 @@ CONTEXT_PROJECTION_SCHEMA_VERSION = "om-context-projection-v1"
 DEFAULT_MAX_RECENT_TURNS = 6
 DEFAULT_MAX_SUCCESSFUL_TOOLS = 5
 DEFAULT_MAX_OPEN_GAPS = 5
+DEFAULT_MAX_RELEVANT_MEMORIES = 5
 DEFAULT_MAX_CHARS = 12000
 DEFAULT_MAX_TEXT_EXCERPT_CHARS = 360
+DEFAULT_MAX_MEMORY_CONTENT_CHARS = 600
 DEFAULT_MAX_PAYLOAD_CHARS = 1000
 
 SAFE_SLOT_KEYS = {
@@ -137,6 +140,9 @@ def build_context_projection(
     max_turns = max(0, min(int(max_recent_turns or 0), 20))
     max_tools = max(0, min(int(max_successful_tools or 0), 20))
     max_gaps = max(0, min(int(max_open_gaps or 0), 20))
+    relevant_memories = _projection_relevant_memories(context.get("assistant_memory"))[
+        :DEFAULT_MAX_RELEVANT_MEMORIES
+    ]
     projection = {
         "schema_version": CONTEXT_PROJECTION_SCHEMA_VERSION,
         "current_user_message": {
@@ -148,18 +154,24 @@ def build_context_projection(
         "open_evidence_gaps": open_gaps[:max_gaps],
         "pending_operations": _pending_operations(context.get("pending_operations")),
         "user_profile": _projection_user_profile(context.get("user_profile")),
+        "relevant_memories": relevant_memories,
         "policy": {
             "current_message_wins": True,
             "context_is_hint": True,
             "ask_when_ambiguous": True,
             "declare_context_use": True,
+            "memory_is_hint": True,
+            "tool_evidence_wins_memory": True,
+            "memory_cannot_authorize_writes": True,
         },
         "budget": {
             "max_recent_turns": max_turns,
             "max_successful_tools": max_tools,
             "max_open_gaps": max_gaps,
+            "max_relevant_memories": DEFAULT_MAX_RELEVANT_MEMORIES,
             "max_chars": max(1, int(max_chars or DEFAULT_MAX_CHARS)),
             "max_text_excerpt_chars": DEFAULT_MAX_TEXT_EXCERPT_CHARS,
+            "max_memory_content_chars": DEFAULT_MAX_MEMORY_CONTENT_CHARS,
             "max_payload_chars": DEFAULT_MAX_PAYLOAD_CHARS,
             "truncated": False,
             "truncation_reason": None,
@@ -190,6 +202,7 @@ def context_projection_trace(projection: dict[str, Any] | None) -> dict[str, Any
         "evidence_ref_count": len(projection.get("available_evidence_refs") or []),
         "open_gap_count": len(projection.get("open_evidence_gaps") or []),
         "pending_operation_count": len(projection.get("pending_operations") or []),
+        "relevant_memory_count": len(projection.get("relevant_memories") or []),
         "system_event_count": len(projection.get("system_events") or []),
         "truncated": bool(budget.get("truncated")),
         "truncation_reason": budget.get("truncation_reason"),
@@ -480,6 +493,61 @@ def _projection_user_profile(value: Any) -> dict[str, Any]:
     return trace
 
 
+def _projection_relevant_memories(value: Any) -> list[dict[str, Any]]:
+    memory = value if isinstance(value, dict) else {}
+    trace = assistant_memory_trace(memory)
+    if not trace.get("provided"):
+        return []
+    memories = memory.get("memories") if isinstance(memory.get("memories"), list) else []
+    out: list[dict[str, Any]] = []
+    for item in memories:
+        if not isinstance(item, dict):
+            continue
+        relevance = item.get("relevance") if isinstance(item.get("relevance"), dict) else {}
+        compact = _strip_empty(
+            {
+                "memory_id": _text_excerpt(item.get("memory_id"), 120),
+                "type": _text_excerpt(item.get("type"), 80),
+                "title": _text_excerpt(item.get("title"), 160),
+                "summary": _text_excerpt(item.get("summary"), 240),
+                "content": _text_excerpt(item.get("content"), DEFAULT_MAX_MEMORY_CONTENT_CHARS),
+                "tags": _projection_memory_strings(item.get("tags"), limit=8, chars=80),
+                "relevance": _strip_empty(
+                    {
+                        "score": _projection_memory_score(relevance.get("score")),
+                        "matched_terms": _projection_memory_strings(
+                            relevance.get("matched_terms"),
+                            limit=8,
+                            chars=80,
+                        ),
+                    }
+                ),
+            }
+        )
+        if compact:
+            out.append(compact)
+    return out
+
+
+def _projection_memory_score(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _projection_memory_strings(value: Any, *, limit: int, chars: int) -> list[str]:
+    items = value if isinstance(value, list) else []
+    out: list[str] = []
+    for item in items:
+        if len(out) >= max(0, int(limit)):
+            break
+        text = _text_excerpt(item, chars)
+        if text:
+            out.append(text)
+    return out
+
+
 def _safe_payload(payload: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in payload.items():
@@ -638,7 +706,9 @@ def _enforce_char_budget(projection: dict[str, Any], truncated_reasons: list[str
     max_chars = int(projection.get("budget", {}).get("max_chars") or DEFAULT_MAX_CHARS)
     all_refs = list(projection.get("available_evidence_refs") or [])
     while len(_compact_json(projection)) > max_chars:
-        if projection.get("recent_turns"):
+        if projection.get("relevant_memories"):
+            projection["relevant_memories"].pop()
+        elif projection.get("recent_turns"):
             projection["recent_turns"].pop()
         elif projection.get("recent_successful_tools"):
             projection["recent_successful_tools"].pop()

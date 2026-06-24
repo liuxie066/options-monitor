@@ -27,6 +27,17 @@ from src.application.assistant.llm_model_profiles import (
     switch_active_model_profile,
     write_model_config_update,
 )
+from src.application.assistant.memory import ASSISTANT_MEMORY_TYPES
+from src.application.assistant.memory_proposals import (
+    MEMORY_PROPOSAL_STATUSES,
+    accept_memory_proposal,
+    format_memory_proposals_text,
+    format_memory_suggestions_text,
+    list_memory_proposals,
+    reject_memory_proposal,
+    save_memory_proposal,
+    suggest_memory_proposals_from_text,
+)
 from src.application.assistant.operation_diagnostics import collect_pending_operations, collect_recent_audit
 from src.application.assistant.runtime import handle_assistant_message
 from src.application.assistant.settings import AssistantSettings
@@ -108,6 +119,47 @@ def add_assistant_commands(parser: argparse.ArgumentParser) -> None:
     assistant_context_eval.add_argument("--case-id", action="append", default=None)
     assistant_context_eval.add_argument("--mode", choices=CONTEXT_EVAL_MODES, default="planner_context")
     assistant_context_eval.add_argument("--format", choices=("json", "text"), default="text")
+    assistant_memory = assistant_sub.add_parser("memory", help="manage assistant memory proposals")
+    assistant_memory_sub = assistant_memory.add_subparsers(dest="assistant_memory_command", required=True)
+    assistant_memory_propose = assistant_memory_sub.add_parser("propose", help="create one assistant memory proposal")
+    assistant_memory_propose.add_argument("--type", required=True, choices=sorted(ASSISTANT_MEMORY_TYPES))
+    assistant_memory_propose.add_argument("--title", required=True)
+    assistant_memory_propose.add_argument("--summary", required=True)
+    assistant_memory_propose.add_argument("--content", required=True)
+    assistant_memory_propose.add_argument("--memory-id", default=None)
+    assistant_memory_propose.add_argument("--proposal-id", default=None)
+    assistant_memory_propose.add_argument("--tag", action="append", dest="tags", default=None)
+    assistant_memory_propose.add_argument("--source-turn", default=None)
+    assistant_memory_propose.add_argument("--why-remember", default=None)
+    assistant_memory_propose.add_argument("--risk-check", default=None)
+    assistant_memory_propose.add_argument("--memory-dir", default=None)
+    assistant_memory_propose.add_argument("--format", choices=("json", "text"), default="json")
+    assistant_memory_suggest = assistant_memory_sub.add_parser(
+        "suggest",
+        help="suggest assistant memory proposals from explicit text",
+    )
+    assistant_memory_suggest.add_argument("--text", required=True)
+    assistant_memory_suggest.add_argument("--source-turn", default=None)
+    assistant_memory_suggest.add_argument("--limit", type=int, default=3)
+    assistant_memory_suggest.add_argument("--no-write", action="store_true")
+    assistant_memory_suggest.add_argument("--memory-dir", default=None)
+    assistant_memory_suggest.add_argument("--format", choices=("json", "text"), default="json")
+    assistant_memory_list = assistant_memory_sub.add_parser("list-proposals", help="list assistant memory proposals")
+    assistant_memory_list.add_argument("--status", choices=["all", *sorted(MEMORY_PROPOSAL_STATUSES)], default="proposed")
+    assistant_memory_list.add_argument("--limit", type=int, default=50)
+    assistant_memory_list.add_argument("--memory-dir", default=None)
+    assistant_memory_list.add_argument("--format", choices=("json", "text"), default="json")
+    assistant_memory_accept = assistant_memory_sub.add_parser("accept", help="accept one proposal into assistant_memory")
+    assistant_memory_accept.add_argument("proposal_id")
+    assistant_memory_accept.add_argument("--memory-id", default=None)
+    assistant_memory_accept.add_argument("--memory-dir", default=None)
+    assistant_memory_accept.add_argument("--replace", action="store_true")
+    assistant_memory_accept.add_argument("--format", choices=("json", "text"), default="json")
+    assistant_memory_reject = assistant_memory_sub.add_parser("reject", help="reject one assistant memory proposal")
+    assistant_memory_reject.add_argument("proposal_id")
+    assistant_memory_reject.add_argument("--reason", default=None)
+    assistant_memory_reject.add_argument("--memory-dir", default=None)
+    assistant_memory_reject.add_argument("--format", choices=("json", "text"), default="json")
     assistant_llm_check = assistant_sub.add_parser(
         "llm-check",
         help="check optional LLM planner configuration",
@@ -253,6 +305,21 @@ def _llm_text(raw: Any) -> str:
     model = str(llm.get("model") or "").strip() or "-"
     base_url = str(llm.get("base_url") or "").strip()
     return f"{provider}/{model}" + (f" base_url={base_url}" if base_url else "")
+
+
+def _assistant_memory_text(data: dict[str, Any], *, command: str) -> str:
+    if command == "list-proposals":
+        return str(data.get("response_text") or "").strip()
+    proposal = data.get("proposal") if isinstance(data.get("proposal"), dict) else {}
+    if command == "propose":
+        return f"Proposed assistant memory: {proposal.get('proposal_id')} status={proposal.get('status')}"
+    if command == "suggest":
+        return format_memory_suggestions_text(data)
+    if command == "accept":
+        return f"Accepted assistant memory: {data.get('memory_id')} path={data.get('memory_path')}"
+    if command == "reject":
+        return f"Rejected assistant memory proposal: {proposal.get('proposal_id')}"
+    return _dumps(data).strip()
 
 
 def _check_assistant_model_profile(
@@ -428,6 +495,73 @@ def handle_assistant_command(
                 ok=bool(data.get("summary", {}).get("ok", True)),
                 data=data,
             ))
+
+    if args.assistant_command == "memory":
+        if args.assistant_memory_command == "propose":
+            data = save_memory_proposal(
+                memory_type=args.type,
+                title=args.title,
+                summary=args.summary,
+                content=args.content,
+                memory_dir=args.memory_dir,
+                memory_id=args.memory_id,
+                proposal_id=args.proposal_id,
+                tags=args.tags,
+                source_turn=args.source_turn,
+                why_remember=args.why_remember,
+                risk_check=args.risk_check,
+            )
+            if args.format == "text":
+                sys.stdout.write(_assistant_memory_text(data, command="propose") + "\n")
+                return 0
+            return _print(build_response(tool_name="assistant.memory.propose", ok=True, data=data))
+
+        if args.assistant_memory_command == "suggest":
+            data = suggest_memory_proposals_from_text(
+                text=args.text,
+                memory_dir=args.memory_dir,
+                source_turn=args.source_turn,
+                max_suggestions=int(args.limit),
+                write=not bool(args.no_write),
+            )
+            if args.format == "text":
+                sys.stdout.write(_assistant_memory_text(data, command="suggest") + "\n")
+                return 0
+            return _print(build_response(tool_name="assistant.memory.suggest", ok=True, data=data))
+
+        if args.assistant_memory_command == "list-proposals":
+            data = list_memory_proposals(
+                memory_dir=args.memory_dir,
+                status=args.status,
+                limit=int(args.limit),
+            )
+            if args.format == "text":
+                sys.stdout.write(format_memory_proposals_text(data.get("proposals") or [], status=str(data.get("status") or "all")) + "\n")
+                return 0
+            return _print(build_response(tool_name="assistant.memory.list_proposals", ok=True, data=data))
+
+        if args.assistant_memory_command == "accept":
+            data = accept_memory_proposal(
+                proposal_id=args.proposal_id,
+                memory_dir=args.memory_dir,
+                memory_id=args.memory_id,
+                replace=bool(args.replace),
+            )
+            if args.format == "text":
+                sys.stdout.write(_assistant_memory_text(data, command="accept") + "\n")
+                return 0
+            return _print(build_response(tool_name="assistant.memory.accept", ok=True, data=data))
+
+        if args.assistant_memory_command == "reject":
+            data = reject_memory_proposal(
+                proposal_id=args.proposal_id,
+                memory_dir=args.memory_dir,
+                reason=args.reason,
+            )
+            if args.format == "text":
+                sys.stdout.write(_assistant_memory_text(data, command="reject") + "\n")
+                return 0
+            return _print(build_response(tool_name="assistant.memory.reject", ok=True, data=data))
 
     if args.assistant_command in {"commands", "capabilities"}:
         data = (

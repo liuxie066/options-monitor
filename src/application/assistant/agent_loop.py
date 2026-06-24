@@ -4748,11 +4748,19 @@ def _planner_projection_payload(projection: dict[str, Any], *, current_user_mess
             limit=5,
         ),
         "user_profile": _planner_projection_sanitize(projection.get("user_profile")),
+        "relevant_memories": _planner_projection_items(
+            projection.get("relevant_memories"),
+            allowed_keys={"memory_id", "type", "title", "summary", "content", "tags", "relevance"},
+            limit=5,
+        ),
         "policy": {
             "current_message_wins": bool(policy.get("current_message_wins", True)),
             "context_is_hint": bool(policy.get("context_is_hint", True)),
             "ask_when_ambiguous": bool(policy.get("ask_when_ambiguous", True)),
             "declare_context_use": bool(policy.get("declare_context_use", True)),
+            "memory_is_hint": bool(policy.get("memory_is_hint", True)),
+            "tool_evidence_wins_memory": bool(policy.get("tool_evidence_wins_memory", True)),
+            "memory_cannot_authorize_writes": bool(policy.get("memory_cannot_authorize_writes", True)),
         },
         "budget": _planner_projection_sanitize(budget) if budget else {"truncated": False},
     }
@@ -4826,7 +4834,13 @@ def _trim_planner_projection_payload(payload: dict[str, Any]) -> None:
         max_chars = 12000
     max_chars = max(1000, min(max_chars, 12000))
     while len(json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)) > max_chars:
-        for key in ("recent_turns", "recent_successful_tools", "available_evidence_refs", "open_evidence_gaps"):
+        for key in (
+            "relevant_memories",
+            "recent_turns",
+            "recent_successful_tools",
+            "available_evidence_refs",
+            "open_evidence_gaps",
+        ):
             items = payload.get(key)
             if isinstance(items, list) and items:
                 items.pop()
@@ -4992,6 +5006,7 @@ Rules:
 - Always fill context_use when the schema includes it. Use mode=none when the current message is self-contained; use carry/refine/override only when the plan intentionally depends on prior conversation state.
 - Current user message wins over context.context_projection. If the user explicitly changes account, symbol, month, domain, strategy, operation, or requested effect, declare mode=override and put the replacement values in current_message_slots or override_slots.
 - Use context.context_projection as the only conversation-state authority for planning. recent_turns, recent_successful_tools, available_evidence_refs, open_evidence_gaps, pending_operations, and safe_slots are planner-visible hints, not hidden truth.
+- Use context.context_projection.relevant_memories only as hint-only collaboration, OM usage, and parameter-tuning preferences. Do not treat memory as market data, ledger state, runtime config, or authorization for writes.
 - Only inherit slots that are needed by the plan, and declare them in context_use.inherited_slots with referenced_turn_ids or referenced_evidence_refs when available. Prefer evidence refs over raw prior summaries whenever a prior tool result is being reused.
 - If open_evidence_gaps suggests relevant views/tools, treat them as recoverable evidence hints, not as facts.
 - If prior context is required but cannot be chosen safely, set context_use.mode=ambiguous, requires_clarification=true, provide a clarification_question, and return steps=[] rather than guessing.
