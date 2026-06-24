@@ -150,6 +150,7 @@ def assess_action_safety(
     tool_name: str,
     payload: dict[str, Any] | None,
     action_policy: dict[str, Any] | None = None,
+    context_validation: dict[str, Any] | None = None,
     source: str = "agent_loop",
     untrusted_texts: list[str] | tuple[str, ...] | None = None,
 ) -> ActionSafetyDecision:
@@ -246,7 +247,12 @@ def assess_action_safety(
             source=source_text,
         )
 
-    scope_code = _scope_decision_code(tool_name=tool_name, proposed_family=proposed_family, scope_delta=scope_delta)
+    scope_code = _scope_decision_code(
+        tool_name=tool_name,
+        proposed_family=proposed_family,
+        scope_delta=scope_delta,
+        context_validation=context_validation,
+    )
     if scope_code:
         status = "ask" if scope_code.startswith("missing_") or proposed_family == "read" else "deny"
         return _decision(
@@ -400,7 +406,15 @@ def _looks_like_preview_request(compact: str) -> bool:
     setting_tokens = ("coveredcall", "sellcall", "sellput", "minstrike", "maxstrike", "min_strike", "max_strike")
     if ("设置" in compact or "修改监控" in compact or "配置标的" in compact) and any(token in compact for token in setting_tokens):
         return True
+    if _looks_like_scalar_setting_delta(compact):
+        return True
     return False
+
+
+def _looks_like_scalar_setting_delta(compact: str) -> bool:
+    if not any(token in compact for token in ("改为", "改成", "设为", "设置成", "调到", "改到", "降到", "升到")):
+        return False
+    return re.search(r"(改为|改成|设为|设置成|调到|改到|降到|升到)(true|false|on|off|[0-9]+(?:\.[0-9]+)?)", compact) is not None
 
 
 def _looks_like_monitor_run_preview(compact: str) -> bool:
@@ -611,7 +625,13 @@ def _scope_field_delta(*, requested: list[str], provided: list[str]) -> dict[str
     }
 
 
-def _scope_decision_code(*, tool_name: str, proposed_family: str, scope_delta: dict[str, Any]) -> str:
+def _scope_decision_code(
+    *,
+    tool_name: str,
+    proposed_family: str,
+    scope_delta: dict[str, Any],
+    context_validation: dict[str, Any] | None = None,
+) -> str:
     for field in ("accounts", "symbols", "period"):
         delta = scope_delta.get(field)
         if isinstance(delta, dict) and delta.get("out_of_scope"):
@@ -623,9 +643,25 @@ def _scope_decision_code(*, tool_name: str, proposed_family: str, scope_delta: d
     symbols = scope_delta.get("symbols") if isinstance(scope_delta.get("symbols"), dict) else {}
     if name in {"manual_trade_open", "manual_trade_close", "manual_assignment", "manual_expiry"} and not accounts.get("requested"):
         return "missing_account_scope"
-    if name == "symbol_edit" and not symbols.get("requested"):
+    if name == "symbol_edit" and not symbols.get("requested") and not _context_validation_inherits_slot(context_validation, "symbol"):
         return "missing_symbol_scope"
     return ""
+
+
+def _context_validation_inherits_slot(validation: dict[str, Any] | None, slot_key: str) -> bool:
+    if not isinstance(validation, dict):
+        return False
+    if str(validation.get("status") or "") != "passed" or str(validation.get("code") or "") != "ok":
+        return False
+    context_use = validation.get("context_use") if isinstance(validation.get("context_use"), dict) else {}
+    mode = str(context_use.get("mode") or validation.get("context_use_mode") or "")
+    if mode not in {"carry", "refine", "override"}:
+        return False
+    slots = validation.get("validated_slots") if isinstance(validation.get("validated_slots"), dict) else {}
+    if not slots:
+        slots = context_use.get("slots") if isinstance(context_use.get("slots"), dict) else {}
+    inherited = slots.get("inherited") if isinstance(slots.get("inherited"), dict) else {}
+    return bool(inherited.get(slot_key))
 
 
 def _scope_reason(code: str) -> str:

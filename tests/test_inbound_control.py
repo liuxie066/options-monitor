@@ -19,6 +19,7 @@ from src.application.assistant.contracts import (
     ToolCall,
 )
 from src.application.assistant.agent_loop import (
+    create_model_turn_events,
     EventNativePlanningResult,
     ModelTurnResult,
     TOOL_PLAN_SCHEMA_VERSION,
@@ -2705,6 +2706,198 @@ markets:
     assert item["sell_put"]["enabled"] is False
     assert item["sell_call"]["enabled"] is True
     assert item["sell_call"]["min_strike"] == 85.0
+
+
+def test_inbound_symbol_setting_writes_yaml_sell_put_max_strike(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from src.application.config_yaml import build_yaml_runtime_config_file
+
+    _enable_inbound_symbol_write(monkeypatch)
+    config_yaml = tmp_path / "config.yaml"
+    config_yaml.write_text(
+        """\
+accounts:
+  lx:
+    type: futu
+markets:
+  us:
+    accounts: [lx]
+    symbols: [FUTU]
+    overrides:
+      FUTU:
+        sell_put:
+          enabled: true
+          max_strike: 120
+""",
+        encoding="utf-8",
+    )
+    us_cfg_path = tmp_path / "config.us.json"
+    build_yaml_runtime_config_file(repo_root=Path(__file__).resolve().parents[1], market="us", config_path=config_yaml, output_config_path=us_cfg_path)
+    audit_db = tmp_path / "inbound.sqlite3"
+
+    preview = handle_assistant_request(
+        AssistantRequest(
+            text="/symbol edit FUTU sell_put.max_strike=90",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_yaml_symbol_sell_put_max_strike",
+            config_path=str(us_cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert preview["ok"] is True
+    assert preview["data"]["payload"]["config"]["source_format"] == "yaml"
+    assert preview["data"]["payload"]["config"]["config_yaml_path"] == str(config_yaml)
+    assert preview["data"]["payload"]["yaml_symbol_set"]["sell_put_max_strike"] == 90.0
+    assert "markets.us.overrides.FUTU.sell_put.max_strike" in preview["data"]["response_text"]
+    assert "max_strike: 120" in config_yaml.read_text(encoding="utf-8")
+
+    confirmed = handle_assistant_request(
+        AssistantRequest(
+            text="确认监控",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_yaml_symbol_sell_put_max_strike_confirm",
+            config_path=str(us_cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert confirmed["ok"] is True
+    assert "max_strike: 90" in config_yaml.read_text(encoding="utf-8")
+    current_us = json.loads(us_cfg_path.read_text(encoding="utf-8"))
+    item = next(row for row in current_us["symbols"] if row["symbol"] == "FUTU")
+    assert item["sell_put"]["max_strike"] == 90.0
+
+
+def test_inbound_llm_context_composed_symbol_edit_preview_only(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from src.application.config_yaml import build_yaml_runtime_config_file
+
+    _enable_inbound_symbol_write(monkeypatch)
+    config_yaml = tmp_path / "config.yaml"
+    config_yaml.write_text(
+        """\
+accounts:
+  lx:
+    type: futu
+markets:
+  us:
+    accounts: [lx]
+    symbols: [FUTU]
+    overrides:
+      FUTU:
+        sell_put:
+          enabled: true
+          max_strike: 120
+""",
+        encoding="utf-8",
+    )
+    us_cfg_path = tmp_path / "config.us.json"
+    build_yaml_runtime_config_file(repo_root=Path(__file__).resolve().parents[1], market="us", config_path=config_yaml, output_config_path=us_cfg_path)
+    audit_db = tmp_path / "inbound.sqlite3"
+
+    def _first_plan(
+        _text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> ModelTurnResult:
+        return _model_turn_result(
+            "symbol_config_read",
+            {"symbol": "FUTU", "strategy": "sell_put", "field": "max_strike"},
+        )
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        assert tool_name == "symbol_config_read"
+        assert payload["symbol"] == "FUTU"
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "schema_version": "symbol_config_read.v1",
+                "symbol": "FUTU",
+                "canonical_symbol": "FUTU",
+                "found": True,
+                "strategy": "sell_put",
+                "field": "max_strike",
+                "path": "sell_put.max_strike",
+                "value": 120.0,
+            },
+        )
+
+    first = handle_assistant_message(
+        AssistantRequest(
+            text="FUTU sell put的max strike设置的是多少？",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_context_config_read",
+            config_path=str(us_cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        model_turn_fn=_first_plan,
+    )
+    assert first["ok"] is True
+
+    def _second_plan(
+        text: str,
+        settings: AssistantSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> ModelTurnResult:
+        assert text == "改为90"
+        assert conversation_context is not None
+        projection = conversation_context["context_projection"]
+        assert projection["available_evidence_refs"][0]["safe_slots"]["setting_path"] == ["sell_put.max_strike"]
+
+        def _create_tool_call_response(**_kwargs: Any) -> dict[str, Any]:
+            return {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_symbol_edit",
+                        "name": "symbol_edit",
+                        "arguments": '{"symbol":"FUTU","set":{"sell_put.max_strike":90}}',
+                    }
+                ]
+            }
+
+        return create_model_turn_events(
+            text,
+            settings,
+            conversation_context,
+            create_tool_call_response_fn=_create_tool_call_response,
+            environ={"OM_LLM_API_KEY": "sk-test"},
+        )
+
+    before_yaml = config_yaml.read_text(encoding="utf-8")
+    preview = handle_assistant_message(
+        AssistantRequest(
+            text="改为90",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_context_config_edit_preview",
+            config_path=str(us_cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+        settings=AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        model_turn_fn=_second_plan,
+    )
+
+    assert preview["ok"] is True
+    assert preview["tool_name"] == "inbound.symbols"
+    assert preview["data"]["status"] == "previewed"
+    assert preview["data"]["payload"]["yaml_symbol_set"]["sell_put_max_strike"] == 90.0
+    assert "未写入配置" in preview["data"]["response_text"]
+    assert "确认监控" in preview["data"]["response_text"]
+    assert config_yaml.read_text(encoding="utf-8") == before_yaml
 
 
 def test_inbound_monitor_run_preview_requires_run_specific_confirmation(

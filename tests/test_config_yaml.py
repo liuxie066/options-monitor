@@ -324,6 +324,28 @@ def test_yaml_symbol_set_adds_hk_call_only_symbol_as_dry_run(tmp_path: Path) -> 
     assert config_path.read_text(encoding="utf-8") == before
 
 
+def test_yaml_symbol_set_updates_sell_put_max_strike_as_dry_run(tmp_path: Path) -> None:
+    config_path = _write_yaml(tmp_path / "config.yaml", _minimal_yaml())
+    before = config_path.read_text(encoding="utf-8")
+
+    out = set_yaml_symbol_config(
+        repo_root=REPO_ROOT,
+        market="us",
+        symbol="FUTU",
+        config_path=config_path,
+        sell_put_max_strike=90,
+        apply=False,
+    )
+
+    assert out["dry_run"] is True
+    assert out["write_applied"] is False
+    assert out["summary"]["canonical_symbol"] == "FUTU"
+    assert out["summary"]["changed_paths"] == ["markets.us.overrides.FUTU.sell_put.max_strike"]
+    assert out["summary"]["entry"]["sell_put"]["max_strike"] == 90.0
+    assert out["validation"]["us"]["ok"] is True
+    assert config_path.read_text(encoding="utf-8") == before
+
+
 def test_yaml_symbol_set_apply_rebuilds_runtime_configs(tmp_path: Path) -> None:
     config_path = _write_yaml(tmp_path / "config.yaml", _minimal_yaml())
     runtime_root = tmp_path / "runtime"

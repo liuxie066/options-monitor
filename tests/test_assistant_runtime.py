@@ -49,6 +49,7 @@ from src.application.assistant.capability_catalog import (
 )
 from src.application.assistant.command_parser import parse_assistant_command
 from src.application.assistant.conversation_context import build_conversation_context, context_trace
+from src.application.assistant.context_projection import build_context_projection
 from src.application.assistant.perception_trace import ASSISTANT_DECISION_SCHEMA_VERSION, PERCEPTION_TRACE_SCHEMA_VERSION
 from src.application.assistant.llm_common import (
     provider_api_kind,
@@ -799,6 +800,55 @@ def test_action_safety_allows_lowercase_symbol_edit_with_full_task_contract() ->
     assert safety["status"] == "allow_preview"
     assert safety["code"] == "ok"
     assert safety["route"] == "preview"
+
+
+def test_action_safety_allows_symbol_edit_with_valid_inherited_symbol_scope() -> None:
+    question = "改为90"
+    call = ToolCall(tool_name="symbol_edit", payload={"symbol": "FUTU", "set": {"sell_put.max_strike": 90}})
+    policy = decide_tool_action_policy(
+        call=call,
+        request=None,
+        task_contract={"requested_effect": "preview"},
+        source="agent_loop_plan",
+    )
+
+    without_context = assess_action_safety(
+        question=question,
+        task_contract={"requested_effect": "preview", "scope": {}},
+        tool_name=call.tool_name,
+        payload=call.payload,
+        action_policy=policy.public_payload(),
+        source="agent_loop_plan",
+    ).public_payload()
+    assert without_context["status"] == "ask"
+    assert without_context["code"] == "missing_symbol_scope"
+
+    with_context = assess_action_safety(
+        question=question,
+        task_contract={"requested_effect": "preview", "scope": {}},
+        tool_name=call.tool_name,
+        payload=call.payload,
+        action_policy=policy.public_payload(),
+        context_validation={
+            "status": "passed",
+            "code": "ok",
+            "context_use_mode": "carry",
+            "validated_slots": {
+                "inherited": {
+                    "symbol": ["FUTU"],
+                    "strategy": ["sell_put"],
+                    "setting_path": ["sell_put.max_strike"],
+                },
+                "current_message": {"setting_new_value": [90]},
+                "override": {},
+            },
+        },
+        source="agent_loop_plan",
+    ).public_payload()
+
+    assert with_context["status"] == "allow_preview"
+    assert with_context["code"] == "ok"
+    assert with_context["route"] == "preview"
 
 
 def test_task_contract_infers_broker_lifecycle_notice_as_preview_write() -> None:
@@ -8883,6 +8933,178 @@ def test_create_model_turn_events_uses_provider_tool_call_not_output_text_json_p
     assert result.trace["event_model"]["legacy_json_plan_used"] is False
     assert result.trace["event_model"]["events"][0]["event_type"] == "model_tool_call"
     assert result.trace["event_model"]["events"][0]["tool_name"] == "monthly_income_report"
+
+
+def test_create_model_turn_events_context_composes_symbol_config_edit_followup() -> None:
+    projection = build_context_projection(
+        current_user_message="改为90",
+        conversation_context={},
+        recent_sessions=[
+            {
+                "session_id": "s_symbol_config",
+                "created_at": "2026-06-23T22:09:00+08:00",
+                "updated_at": "2026-06-23T22:10:00+08:00",
+                "raw_text": "FUTU sell put的max strike设置的是多少？",
+                "response_text": "FUTU sell_put.max_strike = 120。",
+                "snapshot": {
+                    "tool_transcript": [
+                        {
+                            "tool_name": "symbol_config_read",
+                            "payload": {"symbol": "FUTU", "strategy": "sell_put", "field": "max_strike"},
+                            "ok": True,
+                            "summary": {
+                                "canonical_symbol": "FUTU",
+                                "strategy": "sell_put",
+                                "field": "max_strike",
+                                "path": "sell_put.max_strike",
+                                "value": 120.0,
+                                "found": True,
+                            },
+                        }
+                    ]
+                },
+            }
+        ],
+    )
+
+    def _create_tool_call_response(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_symbol_edit",
+                    "name": "symbol_edit",
+                    "arguments": '{"symbol":"FUTU","set":{"sell_put.max_strike":90}}',
+                }
+            ]
+        }
+
+    result = create_model_turn_events(
+        "改为90",
+        AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        conversation_context={
+            "temporal_context": {"current_date": "2026-06-24", "timezone": "Asia/Shanghai"},
+            "context_projection": projection,
+        },
+        create_tool_call_response_fn=_create_tool_call_response,
+        environ={"OM_LLM_API_KEY": "sk-test"},
+    )
+
+    assert result.error is None
+    assert result.event_plan is not None
+    assert _event_plan_steps(result) == [
+        {
+            "id": "call_symbol_edit",
+            "tool_name": "symbol_edit",
+            "arguments": {"set": {"sell_put.max_strike": 90}, "symbol": "FUTU"},
+        }
+    ]
+    assert result.event_plan.context_use == {
+        "schema_version": PLANNER_CONTEXT_USE_SCHEMA_VERSION,
+        "mode": "carry",
+        "referenced_turn_ids": ["session:s_symbol_config"],
+        "referenced_evidence_refs": ["ev_001"],
+        "inherited_slots": {
+            "symbol": ["FUTU"],
+            "setting_path": ["sell_put.max_strike"],
+            "setting_field": ["max_strike"],
+            "strategy": ["sell_put"],
+        },
+        "current_message_slots": {"setting_new_value": [90]},
+        "override_slots": {},
+        "requires_clarification": False,
+        "clarification_question": None,
+    }
+    assert result.event_plan.context_validation is not None
+    assert result.event_plan.context_validation["status"] == "passed"
+    assert result.event_plan.context_validation["code"] == "ok"
+
+
+def test_create_model_turn_events_context_composes_from_non_adjacent_visible_setting_ref() -> None:
+    projection = build_context_projection(
+        current_user_message="改为90",
+        conversation_context={},
+        recent_sessions=[
+            {
+                "session_id": "s_runtime_status",
+                "created_at": "2026-06-23T22:11:00+08:00",
+                "updated_at": "2026-06-23T22:11:00+08:00",
+                "raw_text": "状态",
+                "response_text": "runtime ok",
+                "snapshot": {
+                    "tool_transcript": [
+                        {
+                            "tool_name": "runtime_status",
+                            "payload": {"status": "ok"},
+                            "ok": True,
+                            "summary": {"status": "ok"},
+                        }
+                    ]
+                },
+            },
+            {
+                "session_id": "s_symbol_config",
+                "created_at": "2026-06-23T22:09:00+08:00",
+                "updated_at": "2026-06-23T22:10:00+08:00",
+                "raw_text": "FUTU sell put的max strike设置的是多少？",
+                "response_text": "FUTU sell_put.max_strike = 120。",
+                "snapshot": {
+                    "tool_transcript": [
+                        {
+                            "tool_name": "symbol_config_read",
+                            "payload": {"symbol": "FUTU", "strategy": "sell_put", "field": "max_strike"},
+                            "ok": True,
+                            "summary": {
+                                "canonical_symbol": "FUTU",
+                                "strategy": "sell_put",
+                                "field": "max_strike",
+                                "path": "sell_put.max_strike",
+                                "value": 120.0,
+                                "found": True,
+                            },
+                        }
+                    ]
+                },
+            },
+        ],
+    )
+
+    def _create_tool_call_response(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_symbol_edit",
+                    "name": "symbol_edit",
+                    "arguments": '{"symbol":"FUTU","set":{"sell_put.max_strike":90}}',
+                }
+            ]
+        }
+
+    result = create_model_turn_events(
+        "改为90",
+        AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        conversation_context={
+            "temporal_context": {"current_date": "2026-06-24", "timezone": "Asia/Shanghai"},
+            "context_projection": projection,
+        },
+        create_tool_call_response_fn=_create_tool_call_response,
+        environ={"OM_LLM_API_KEY": "sk-test"},
+    )
+
+    assert result.error is None
+    assert result.event_plan is not None
+    assert result.event_plan.context_use is not None
+    assert result.event_plan.context_use["mode"] == "carry"
+    assert result.event_plan.context_use["referenced_turn_ids"] == ["session:s_symbol_config"]
+    assert result.event_plan.context_use["referenced_evidence_refs"] == ["ev_002"]
+    assert result.event_plan.context_validation is not None
+    assert result.event_plan.context_validation["status"] == "passed"
+    assert result.event_plan.context_validation["code"] == "ok"
 
 
 def test_create_model_turn_events_preserves_multiple_provider_tool_calls() -> None:
