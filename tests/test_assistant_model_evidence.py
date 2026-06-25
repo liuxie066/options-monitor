@@ -110,6 +110,40 @@ def _analysis_adapter():
     )
 
 
+def _analysis_catalog_adapter():
+    guard = ToolGuardDecisionEvent(
+        event_id="guard_analysis_catalog_1",
+        tool_call_id="call_analysis_catalog_1",
+        tool_name="analysis_catalog",
+        allowed=True,
+        decision="allow",
+        reason="read_auto_in_scope",
+        risk_class="READ_AUTO",
+        scope_source="host_task_contract",
+        normalized_payload={"config_key": "us"},
+    )
+    data = {
+        "view_count": 1,
+        "views": {
+            "account_monthly_performance": {
+                "description": "monthly account performance",
+                "fields": ["month", "account", "net_income_cny"],
+                "recommended_filters": ["month", "account"],
+            }
+        },
+        "sql_rules": {"allowed_statements": ["SELECT", "WITH"], "writes_allowed": False},
+    }
+    return adapt_tool_result(
+        event_id="result_analysis_catalog_1",
+        parent_event_id=guard.event_id,
+        tool_call_id="call_analysis_catalog_1",
+        tool_name="analysis_catalog",
+        normalized_payload=guard.normalized_payload,
+        guard_decision=guard,
+        raw_result=build_response(tool_name="analysis_catalog", ok=True, data=data),
+    )
+
+
 def test_event_tool_result_builds_existing_evidence_bundle_with_output_contract() -> None:
     adapter = _income_adapter()
 
@@ -225,3 +259,11 @@ def test_canonical_fallback_prefers_existing_renderer() -> None:
 
     assert fallback
     assert "USD" in fallback
+
+
+def test_canonical_fallback_skips_internal_catalog_renderer() -> None:
+    adapter = _analysis_catalog_adapter()
+
+    fallback = canonical_fallback_from_tool_results([adapter])
+
+    assert fallback == ""

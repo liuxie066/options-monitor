@@ -4,13 +4,14 @@ from typing import Any
 
 from src.application.agent_tool_contracts import build_response
 from src.application.assistant.agent_loop import (
+    _assistant_tool_loop_response_text,
     build_synthesis_observation,
     execute_model_tool_call_event,
     execute_tool_loop_payload,
     run_assistant_tool_event_loop,
 )
 from src.application.assistant.contracts import AssistantRequest
-from src.application.assistant.model_events import AssistantEvent, model_tool_call_from_provider_block
+from src.application.assistant.model_events import AssistantEvent, ModelToolCallEvent, model_tool_call_from_provider_block
 from src.application.assistant.settings import AssistantSettings
 
 
@@ -308,6 +309,65 @@ def test_run_assistant_tool_event_loop_continues_to_final_answer() -> None:
     assert trace["answer_route"] == "llm_from_tool_observation"
     assert trace["loop_stop_reason"] == "model_final_answer"
     assert trace["scope_source"] == "task_contract"
+
+
+def test_run_assistant_tool_event_loop_skips_internal_catalog_fallback_on_budget_exhaustion() -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "view_count": 1,
+                "views": {
+                    "account_monthly_performance": {
+                        "fields": ["month", "account", "net_income_cny"],
+                        "recommended_filters": ["month", "account"],
+                    }
+                },
+                "sql_rules": {"allowed_statements": ["SELECT", "WITH"], "writes_allowed": False},
+            },
+        )
+
+    def _continue(_payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_analysis_query_1",
+                    "name": "analysis_query",
+                    "arguments": '{"sql":"select month from account_monthly_performance","limit":20}',
+                }
+            ]
+        }
+
+    event = ModelToolCallEvent(
+        event_id="model_tool_call_1",
+        tool_call_id="call_analysis_catalog_1",
+        tool_name="analysis_catalog",
+        arguments={},
+        purpose="Inspect analysis catalog before querying fields",
+        provider="openai",
+    )
+
+    outcome = run_assistant_tool_event_loop(
+        question="查看分析目录",
+        request=AssistantRequest(text="查看分析目录", sender_id="u1", config_key="us"),
+        task_contract={"requested_effect": "read", "scope": {"requested_accounts": ["lx"]}},
+        initial_events=(event,),
+        execute_tool_fn=_execute,
+        provider="openai",
+        create_continuation_response_fn=_continue,
+        max_tool_calls=1,
+    )
+
+    assert calls == [("analysis_catalog", {"config_key": "us"})]
+    assert outcome.status == "stopped"
+    assert outcome.stop_reason == "tool_budget_exhausted"
+    assert outcome.final_answer is None
+    assert _assistant_tool_loop_response_text(outcome) == "已完成工具调用，但当前结果没有可渲染的文本。"
 
 
 def test_run_assistant_tool_event_loop_recovers_from_scope_denial_once() -> None:

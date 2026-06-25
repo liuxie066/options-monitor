@@ -162,6 +162,8 @@ def canonical_fallback_from_tool_results(
         data = raw_result.get("data") if isinstance(raw_result.get("data"), dict) else {}
         payload = _normalized_payload(event)
         output_contract = _output_contract_for_tool(event.tool_name, payload)
+        if not _output_contract_allows_final_answer(output_contract):
+            continue
         renderer_key = str(output_contract.get("canonical_renderer") or "").strip()
         if not renderer_key:
             continue
@@ -173,6 +175,13 @@ def canonical_fallback_from_tool_results(
         if rendered:
             return rendered
     return ""
+
+
+def _output_contract_allows_final_answer(output_contract: dict[str, Any]) -> bool:
+    answer_surface = str(output_contract.get("answer_surface") or "").strip().lower()
+    if not answer_surface:
+        return True
+    return answer_surface in {"answer", "final", "user"}
 
 
 def _evidence_plan(*, question: str, task_contract: dict[str, Any] | None) -> dict[str, Any]:
