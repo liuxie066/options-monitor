@@ -216,6 +216,7 @@ def test_agent_tool_output_contracts_advertise_canonical_renderers() -> None:
     assert tools["symbol_config_read"]["output_contract"]["canonical_renderer"] == "symbol_config"
     assert tools["close_advice_read"]["output_contract"]["canonical_renderer"] == "position_exit_analysis"
     assert tools["analysis_catalog"]["output_contract"]["canonical_renderer"] == "analysis_catalog"
+    assert tools["analysis_catalog"]["output_contract"]["answer_surface"] == "internal"
     assert "view_names[]" in tools["analysis_catalog"]["output_contract"]["fact_fields"]
     assert "investigation_recipes[].name" in tools["analysis_catalog"]["output_contract"]["fact_fields"]
 

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.2.338 - 2026-06-25
+
+### Fixed
+- Prevented internal analysis catalog renderers from being promoted into final answers when the assistant loop runs out
+  of tool budget, so catalog UI text no longer leaks as the user-facing reply.
+- Kept task-shaped analytical fallbacks for user-facing result renderers such as analysis query tables and income
+  summaries unchanged.
+
 ## 1.2.337 - 2026-06-25
 
 ### Fixed
