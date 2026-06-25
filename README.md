@@ -11,21 +11,6 @@
 
 它不是自动交易系统，也不会替你下单。它的输出是 advisory-only，给出便于人工复核的候选、拒绝原因、平仓建议和复盘证据。
 
-## 当前版本与最近更新
-
-当前 release：`v1.2.339`（见 [`VERSION`](../VERSION) 和 [`CHANGELOG.md`](../CHANGELOG.md)）。
-
-近期值得关注的更新：
-
-- **Assistant Memory**：支持从 `assistant_memory/*.md` 加载有界提示记忆，并提供 propose / suggest / list / accept / reject 生命周期管理，辅助 Inbound Assistant 在显式确认前记住用户偏好与纠正。
-- **Notification Perception**：tick 通知流会生成压缩的感知事件，支持只读复盘通知准备、跳过、送达与完成状态，不暴露原始消息体。
-- **WeChat ClawBot 绑定恢复**：当主动通知的 `context_token` 过期且回复送达失败时，可在允许的入站消息中刷新绑定，恢复远端通知能力。
-- **YAML 配置实时编辑**：支持通过 `config.yaml` 以 preview-confirm 工作流修改 symbol 级配置（如 `sell_put.max_strike`），并自动重建运行时 JSON 快照。
-- **Kimi / Moonshot 支持**：新增 OpenAI-compatible Chat Completions provider 配置，支持 `MOONSHOT_API_KEY`。
-- **Shadow Replay / Strategy Lab**：离线证据与策略实验链路已落地，支持从已有扫描 run 构建 dataset、参数影响评估和 advisory-only proposal 生成。
-
-完整历史记录见 [`CHANGELOG.md`](../CHANGELOG.md)。
-
 ## 产品框架
 
 完整产品域、模块定义和模块依赖见 [docs/PRODUCT_ARCHITECTURE.md](docs/PRODUCT_ARCHITECTURE.md)。
