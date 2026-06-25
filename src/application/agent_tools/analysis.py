@@ -4008,6 +4008,8 @@ ANALYSIS_CATALOG_TOOL = build_agent_tool(
     output_contract={
         "schema_version": "analysis_catalog.output.v2",
         "canonical_renderer": "analysis_catalog",
+        # Catalog output is evidence for follow-up planning, not a final answer surface.
+        "answer_surface": "internal",
         "source_label": "OM read-only analysis workspace",
         "guard_profile": "analysis_catalog",
         "primary_rows": "views",
