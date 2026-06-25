@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.339 - 2026-06-25
+
+### Changed
+- Bumped release version.
+
 ## 1.2.338 - 2026-06-25
 
 ### Fixed
