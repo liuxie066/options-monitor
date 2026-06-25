@@ -11,6 +11,21 @@
 
 它不是自动交易系统，也不会替你下单。它的输出是 advisory-only，给出便于人工复核的候选、拒绝原因、平仓建议和复盘证据。
 
+## 当前版本与最近更新
+
+当前 release：`v1.2.339`（见 [`VERSION`](../VERSION) 和 [`CHANGELOG.md`](../CHANGELOG.md)）。
+
+近期值得关注的更新：
+
+- **Assistant Memory**：支持从 `assistant_memory/*.md` 加载有界提示记忆，并提供 propose / suggest / list / accept / reject 生命周期管理，辅助 Inbound Assistant 在显式确认前记住用户偏好与纠正。
+- **Notification Perception**：tick 通知流会生成压缩的感知事件，支持只读复盘通知准备、跳过、送达与完成状态，不暴露原始消息体。
+- **WeChat ClawBot 绑定恢复**：当主动通知的 `context_token` 过期且回复送达失败时，可在允许的入站消息中刷新绑定，恢复远端通知能力。
+- **YAML 配置实时编辑**：支持通过 `config.yaml` 以 preview-confirm 工作流修改 symbol 级配置（如 `sell_put.max_strike`），并自动重建运行时 JSON 快照。
+- **Kimi / Moonshot 支持**：新增 OpenAI-compatible Chat Completions provider 配置，支持 `MOONSHOT_API_KEY`。
+- **Shadow Replay / Strategy Lab**：离线证据与策略实验链路已落地，支持从已有扫描 run 构建 dataset、参数影响评估和 advisory-only proposal 生成。
+
+完整历史记录见 [`CHANGELOG.md`](../CHANGELOG.md)。
+
 ## 产品框架
 
 完整产品域、模块定义和模块依赖见 [docs/PRODUCT_ARCHITECTURE.md](docs/PRODUCT_ARCHITECTURE.md)。
@@ -76,11 +91,11 @@ curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scri
 om setup check
 ```
 
-无参数安装会解析并安装最新 GitHub release，例如 `v1.2.118`；不会安装浮动 `main` 分支。需要复现、回滚或固定生产版本时，显式指定 release tag：
+无参数安装会解析并安装最新 GitHub release，例如 `v1.2.339`；不会安装浮动 `main` 分支。需要复现、回滚或固定生产版本时，显式指定 release tag：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh -o /tmp/options-monitor-install.sh
-bash /tmp/options-monitor-install.sh --version v1.2.118 --prefix "$HOME/apps/options-monitor"
+bash /tmp/options-monitor-install.sh --version v1.2.339 --prefix "$HOME/apps/options-monitor"
 ```
 
 安装脚本会下载代码、checkout 指定 release、创建 `.venv`、安装依赖、更新 `current` symlink，并默认在 `$HOME/.local/bin` 创建 `om` / `om-agent` 用户级 wrapper。它不会写配置、不会写 secrets、不会启动服务、不会创建定时任务。
@@ -320,7 +335,7 @@ om run tick --config config.us.json --accounts lx sy
 
 ### Strategy Lab 策略进化设计
 
-Strategy Lab 是正在落地的策略进化产品入口，定位在 Research / Shadow Replay 之上。固定分层是：`Research = 证据基础设施`，`Shadow Replay = 反事实复盘引擎`，`Strategy Lab = 策略进化产品入口`。
+Strategy Lab 是策略进化产品入口，定位在 Research / Shadow Replay 之上。固定分层是：`Research = 证据基础设施`，`Shadow Replay = 反事实复盘引擎`，`Strategy Lab = 策略进化产品入口`。
 
 目标用户链路会收敛成 `update evidence -> run experiment -> review proposal`。它以 strategy domain adapters 区分 Sell Put、Covered Call 和 Combo Yield，实验对象是 `decision_instance`，不是单一 candidate row。统一的是证据、实验、scorecard 和 proposal workflow；分开的是真正的决策单元、目标函数、可调参数、硬约束和 proposal target。它可以生成参数 hypotheses、复用 candidate-impact 做反事实评估、产出 scorecard 和 dry-run proposal，但不能自动修改 runtime config、交易状态或通知，也不能让 LLM 绕过 readiness gate。当前设计和实现状态见 [docs/STRATEGY_LAB_DESIGN.md](docs/STRATEGY_LAB_DESIGN.md)。
 
@@ -818,11 +833,14 @@ README 只记录公开入口和边界。生产 cron id、长驻服务启停和�
 
 ## 文档导航
 
+- [docs/INDEX.md](docs/INDEX.md)：文档总索引，找不到入口时先看这里
 - [CONFIGS.md](CONFIGS.md)：canonical config、配置来源和构建规则
 - [CONFIGURATION_GUIDE.md](CONFIGURATION_GUIDE.md)：字段说明、数据来源和配置边界
 - [RUNBOOK.md](RUNBOOK.md)：运维巡检、定时任务、应急操作
+- [docs/RELEASE_PROCESS.md](docs/RELEASE_PROCESS.md)：版本发布流程
 - [docs/INSTALL.md](docs/INSTALL.md)：安装方式、release 目录布局和 installer 安全契约
 - [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md)：普通用户首次运行路径
+- [docs/DEPLOY_LINUX_MAC.md](docs/DEPLOY_LINUX_MAC.md)：Linux / macOS 服务化部署
 - [docs/AGENT_GETTING_STARTED.md](docs/AGENT_GETTING_STARTED.md)：Tool Gateway 快速开始
 - [docs/AGENT_WIKI.md](docs/AGENT_WIKI.md)：本地 agent 任务手册
 - [docs/OM_ASSISTANT_ARCHITECTURE.md](docs/OM_ASSISTANT_ARCHITECTURE.md)：Tool Gateway、Inbound Assistant 和 AgentLoop 的当前架构边界
