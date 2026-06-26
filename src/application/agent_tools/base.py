@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from src.application.tool_input_schema import build_tool_input_json_schema, validate_tool_input_payload
+
 ToolHandlerResult = tuple[dict[str, Any], list[str], dict[str, Any]]
 ToolHandler = Callable[["AgentToolContext", dict[str, Any]], ToolHandlerResult]
 InputValidator = Callable[[dict[str, Any]], None]
@@ -78,7 +80,7 @@ class AgentTool:
     description: str
     requires: tuple[str, ...]
     capabilities: tuple[str, ...]
-    input_schema: dict[str, str]
+    input_schema: dict[str, Any]
     handler: ToolHandler = field(repr=False, compare=False)
     enabled: bool = True
     side_effects: tuple[str, ...] = ()
@@ -115,12 +117,28 @@ class AgentTool:
         return bool(self.side_effects or self.requires_confirm or self.resolved_risk_level() != "read_only")
 
     def validate_input(self, payload: dict[str, Any]) -> None:
+        schema = self.execution_input_json_schema()
+        validate_tool_input_payload(
+            tool_name=self.name,
+            payload=payload,
+            schema=schema,
+            enforce_required=False,
+        )
         if self.input_validator is not None:
             self.input_validator(payload)
 
     def call(self, ctx: AgentToolContext, payload: dict[str, Any]) -> ToolHandlerResult:
         self.validate_input(payload)
         return self.handler(ctx, payload)
+
+    def input_json_schema(self) -> dict[str, Any]:
+        return build_tool_input_json_schema(self.input_schema)
+
+    def execution_input_json_schema(self) -> dict[str, Any]:
+        return build_tool_input_json_schema(
+            self.input_schema,
+            additional_properties=True,
+        )
 
     def resolve_answer_policy(self, payload: dict[str, Any]) -> str:
         if self.answer_policy_resolver is not None:
@@ -148,6 +166,7 @@ class AgentTool:
             "side_effects": side_effects,
             "annotations": _manifest_annotations(self),
             "input_schema": dict(self.input_schema),
+            "input_json_schema": self.input_json_schema(),
             "input_schema_version": "om-tool-input-v1",
             "output_schema": {},
             "risk_level": self.resolved_risk_level(),
@@ -213,7 +232,7 @@ def build_agent_tool(
     description: str,
     requires: tuple[str, ...],
     capabilities: tuple[str, ...],
-    input_schema: dict[str, str],
+    input_schema: dict[str, Any],
     handler: ToolHandler,
     enabled: bool = True,
     pure_read: bool = False,

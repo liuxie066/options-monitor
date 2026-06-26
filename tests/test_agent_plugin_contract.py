@@ -94,8 +94,11 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     option_positions_read = next(item for item in spec["tools"] if item["name"] == "option_positions_read")
     assert option_positions_read["risk_level"] == "read_only"
     assert option_positions_read["safe_default_input"]["action"] == "list"
-    assert "history" in option_positions_read["input_schema"]["action"]
-    assert "assigned-stock" in option_positions_read["input_schema"]["action"]
+    action_schema = option_positions_read["input_schema"]["action"]
+    action_description = action_schema["description"] if isinstance(action_schema, dict) else action_schema
+    assert "history" in action_description
+    assert "assigned-stock" in action_description
+    assert option_positions_read["input_json_schema"]["properties"]["action"]["type"] == ["string", "array"]
     assert "quote_snapshots" in option_positions_read["input_schema"]
     assert "refresh_quotes" in option_positions_read["input_schema"]
     assert "opend_host" in option_positions_read["input_schema"]
@@ -125,6 +128,15 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert manage_symbols["risk_level"] == "local_write"
     assert manage_symbols["requires_confirm"] is True
     assert manage_symbols["safe_default_input"]["action"] == "list"
+    manage_symbols_set_schema = manage_symbols["input_json_schema"]["properties"]["set"]
+    assert manage_symbols_set_schema["propertyNames"]["pattern"] == r"^[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+$"
+    assert manage_symbols_set_schema["additionalProperties"]["type"] == [
+        "string",
+        "number",
+        "integer",
+        "boolean",
+        "null",
+    ]
     candidate_rank_explain = next(item for item in spec["tools"] if item["name"] == "candidate_rank_explain")
     assert candidate_rank_explain["risk_level"] == "read_only"
     assert candidate_rank_explain["requires_confirm"] is False
@@ -425,6 +437,45 @@ def test_agent_run_unknown_tool_returns_structured_error() -> None:
     assert out["ok"] is False
     assert out["error"]["code"] == "INPUT_ERROR"
     assert out["schema_version"] == "1.0"
+
+
+def test_agent_tool_execution_rejects_nested_symbol_set_before_handler() -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    out = run_tool(
+        "manage_symbols",
+        {
+            "config_key": "hk",
+            "action": "edit",
+            "symbol": "0883.HK",
+            "set": {"sell_put": {"max_strike": 18}},
+            "dry_run": True,
+        },
+    )
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "INPUT_ERROR"
+    assert out["error"]["details"]["schema_errors"][0]["path"] == "set.sell_put"
+
+
+def test_agent_tool_execution_rejects_non_dot_symbol_set_key_before_handler() -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    out = run_tool(
+        "manage_symbols",
+        {
+            "config_key": "hk",
+            "action": "edit",
+            "symbol": "0883.HK",
+            "set": {"sell_put": 18},
+            "dry_run": True,
+        },
+    )
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "INPUT_ERROR"
+    assert out["error"]["details"]["schema_errors"][0]["path"] == "set.sell_put"
+    assert "property name matching" in out["error"]["details"]["schema_errors"][0]["expected"]
 
 
 def test_removed_strategy_replay_tool_returns_unknown_tool(monkeypatch) -> None:
