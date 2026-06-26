@@ -68,6 +68,15 @@ _SYMBOL_RESOLVE_OUTPUT_CONTRACT: dict[str, Any] = {
     ],
 }
 
+_SCALAR_SETTING_VALUE_SCHEMA: dict[str, Any] = {"type": ["string", "number", "integer", "boolean", "null"]}
+_MANAGE_SYMBOLS_SET_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "description": "edit-only flat dot-path map, for example {'sell_put.max_strike': 90}; nested objects are not accepted",
+    "additionalProperties": _SCALAR_SETTING_VALUE_SCHEMA,
+    "propertyNames": {"pattern": r"^[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+$"},
+    "minProperties": 1,
+}
+
 
 def _mask_path_str(ctx: AgentToolContext, value: Any) -> str:
     return ctx.mask_path(value) or "..."
@@ -404,7 +413,7 @@ MANAGE_SYMBOLS_TOOL = build_agent_tool(
         "config_path": "optional explicit config path",
         "action": "list|add|edit|remove",
         "symbol": "required for add/edit/remove",
-        "set": "edit-only object of dot-path -> value",
+        "set": _MANAGE_SYMBOLS_SET_SCHEMA,
         "dry_run": "optional bool",
         "confirm": "required true for non-dry-run writes",
     },

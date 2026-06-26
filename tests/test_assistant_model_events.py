@@ -288,7 +288,7 @@ def test_provider_tool_schema_treats_pipe_enums_as_scalar_strings() -> None:
     assert properties["action"]["type"] == "string"
     assert properties["action"]["enum"] == ["list", "events", "history", "inspect", "assigned-stock"]
     assert properties["status"]["type"] == "string"
-    assert properties["quote_snapshots"]["type"] == "array"
+    assert properties["quote_snapshots"]["type"] == ["array", "object"]
 
 
 def test_provider_tools_payloads_expose_only_allowed_read_tool_subset() -> None:

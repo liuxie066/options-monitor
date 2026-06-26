@@ -5,6 +5,12 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.tool_input_schema import (
+    provider_compatible_argument_schema as _provider_compatible_input_schema,
+    tool_argument_declares_required as _tool_input_declares_required,
+    tool_argument_description as _tool_input_description,
+    tool_argument_schema_from_value as _tool_input_schema_from_value,
+)
 
 
 MODEL_EVENT_SCHEMA_VERSION = "om-assistant-model-event-v1"
@@ -398,13 +404,11 @@ def provider_tool_schema_from_manifest(
             continue
         if _tool_argument_is_host_owned(raw_description):
             continue
-        description = _tool_argument_description(raw_description)
-        properties[key] = _tool_argument_schema_from_manifest_value(
-            key=key,
-            value=raw_description,
-            description=description,
+        description = _tool_input_description(raw_description)
+        properties[key] = _provider_compatible_input_schema(
+            _tool_input_schema_from_value(key=key, value=raw_description, description=description)
         )
-        if _tool_argument_is_required(description) or _tool_argument_declares_required(raw_description):
+        if _tool_input_declares_required(raw_description):
             required.append(key)
 
     parameters: dict[str, Any] = {
@@ -924,123 +928,8 @@ def _manifest_item_is_read_auto(item: dict[str, Any]) -> bool:
     return "read_only" in capabilities
 
 
-def _tool_argument_json_schema(*, key: str, description: str) -> dict[str, Any]:
-    lowered = f"{key} {description}".lower()
-    enum = _tool_argument_enum(description)
-    if enum:
-        schema: dict[str, Any] = {"type": "string", "enum": enum}
-    elif " bool" in lowered or "boolean" in lowered or lowered.endswith(" bool"):
-        schema = {"type": "boolean"}
-    elif " int" in lowered or "integer" in lowered or lowered.endswith(" int"):
-        schema = {"type": "integer"}
-    elif "numeric" in lowered or " number" in lowered or lowered.endswith(" number"):
-        schema = {"type": "number"}
-    elif " object" in lowered or "structured" in lowered:
-        schema = {"type": "object"}
-    elif _tool_argument_is_array(key=key, description=description):
-        schema = {"type": "array", "items": {"type": "string"}}
-    else:
-        schema = {"type": "string"}
-    if description:
-        schema["description"] = description
-    return schema
-
-
 def _tool_argument_is_host_owned(value: Any) -> bool:
     return isinstance(value, dict) and value.get("host_owned") is True
-
-
-def _tool_argument_schema_from_manifest_value(*, key: str, value: Any, description: str) -> dict[str, Any]:
-    if isinstance(value, dict):
-        schema = {
-            str(raw_key): _copy_value(item)
-            for raw_key, item in value.items()
-            if str(raw_key) in _TOOL_ARGUMENT_JSON_SCHEMA_KEYS and item not in (None, "", [], {})
-        }
-        if schema:
-            return _provider_compatible_argument_schema(schema)
-    return _provider_compatible_argument_schema(_tool_argument_json_schema(key=key, description=description))
-
-
-def _provider_compatible_argument_schema(schema: dict[str, Any]) -> dict[str, Any]:
-    out = _copy_mapping(schema)
-    raw_type = out.get("type")
-    if isinstance(raw_type, list):
-        non_null_types = [item for item in raw_type if item != "null"]
-        if len(non_null_types) == 1:
-            out["type"] = non_null_types[0]
-    raw_enum = out.get("enum")
-    if isinstance(raw_enum, list):
-        enum_values = [item for item in raw_enum if item is not None]
-        if enum_values:
-            out["enum"] = enum_values
-        else:
-            out.pop("enum", None)
-    properties = out.get("properties")
-    if isinstance(properties, dict):
-        out["properties"] = {
-            str(prop_name): _provider_compatible_argument_schema(prop_schema)
-            if isinstance(prop_schema, dict)
-            else _copy_value(prop_schema)
-            for prop_name, prop_schema in properties.items()
-        }
-    items = out.get("items")
-    if isinstance(items, dict):
-        out["items"] = _provider_compatible_argument_schema(items)
-    return out
-
-
-_TOOL_ARGUMENT_JSON_SCHEMA_KEYS = frozenset(
-    {
-        "type",
-        "enum",
-        "items",
-        "properties",
-        "additionalProperties",
-        "description",
-        "minimum",
-        "maximum",
-        "minItems",
-        "maxItems",
-    }
-)
-
-
-def _tool_argument_description(value: Any) -> str:
-    if isinstance(value, dict):
-        return str(value.get("description") or "").strip()
-    return str(value or "").strip()
-
-
-def _tool_argument_declares_required(value: Any) -> bool:
-    return isinstance(value, dict) and value.get("required") is True
-
-
-def _tool_argument_is_array(*, key: str, description: str) -> bool:
-    tokens = f"{key} {description}".lower().replace("/", " ").replace(",", " ").replace(";", " ").split()
-    return "array" in tokens or "list" in tokens
-
-
-def _tool_argument_is_required(description: str) -> bool:
-    lowered = description.lower()
-    return "required" in lowered and "optional" not in lowered
-
-
-def _tool_argument_enum(description: str) -> list[str]:
-    text = description.strip()
-    lowered = text.lower()
-    if lowered.startswith("optional "):
-        text = text[len("optional ") :].strip()
-    if " " in text or "|" not in text:
-        return []
-    values = [item.strip() for item in text.split("|") if item.strip()]
-    if len(values) < 2:
-        return []
-    return values if all(_enum_value_is_simple(value) for value in values) else []
-
-
-def _enum_value_is_simple(value: str) -> bool:
-    return bool(value) and all(ch.isalnum() or ch in {"_", "-", "."} for ch in value)
 
 
 def _openai_responses_tool_payload(schema: dict[str, Any]) -> dict[str, Any]:

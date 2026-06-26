@@ -91,6 +91,7 @@ from src.application.assistant.verifier_hooks import (
 from src.application.assistant.time_filters import extract_month_filter
 from src.application.assistant.tool_policy import DEFAULT_TOOL_POLICY
 from src.application.assistant.user_profile import user_profile_trace
+from src.application.tool_input_schema import build_tool_input_json_schema, validate_tool_input_payload
 from src.infrastructure.openai_chat_completions import (
     OpenAIChatCompletionsError,
     extract_chat_completion_text,
@@ -236,6 +237,25 @@ _ANALYSIS_VIEW_GROUPS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] 
         ),
     ),
 )
+_SYMBOL_EDIT_SET_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "description": (
+        "Flat map of supported monitored-symbol setting dot paths to scalar values. "
+        "Use sell_put.max_strike, sell_put.enabled, sell_call.min_strike, "
+        "sell_call.enabled, covered_call.min_strike, or covered_call.enabled. "
+        "Do not nest strategy objects inside set."
+    ),
+    "additionalProperties": False,
+    "minProperties": 1,
+    "properties": {
+        "sell_put.enabled": {"type": "boolean"},
+        "sell_put.max_strike": {"type": "number"},
+        "sell_call.enabled": {"type": "boolean"},
+        "sell_call.min_strike": {"type": "number"},
+        "covered_call.enabled": {"type": "boolean"},
+        "covered_call.min_strike": {"type": "number"},
+    },
+}
 _PLANNER_CONTEXT_TOOL_HINTS: dict[str, tuple[str, ...]] = {
     "monthly_income_report": ("income", "收益", "现金流", "权利金", "return", "cashflow"),
     "candidate_filter_explain": ("candidate", "候选", "过滤", "filter", "diagnostic"),
@@ -2332,6 +2352,13 @@ def _pre_tool_check(
         if plan_arguments is not None
         else []
     )
+    schema_payload = _plan_schema_payload(tool_name, plan_arguments if plan_arguments is not None else payload or {})
+    schema_error = _plan_tool_input_schema_error(
+        tool_name=tool_name,
+        payload=schema_payload,
+        enforce_required=_plan_step_kind(tool_name) == "preview",
+    )
+    schema_status = "fail" if schema_error is not None else ("pass" if schema_payload else "not_applicable")
     action_status = "pass" if action_policy.get("allowed") else "deny"
     safety_payload = action_safety if isinstance(action_safety, dict) else {}
     safety_status = str(safety_payload.get("status") or "not_applicable")
@@ -2344,6 +2371,7 @@ def _pre_tool_check(
         status = "deny"
     if (
         planner_status == "fail"
+        or schema_status == "fail"
         or write_status == "fail"
         or scope_status == "fail"
         or safety_check_status in {"deny", "ask", "suspicious", "fail"}
@@ -2362,6 +2390,11 @@ def _pre_tool_check(
                 "route": safety_payload.get("route"),
             },
             {"name": "planner_argument_guard", "status": planner_status},
+            {
+                "name": "input_schema",
+                "status": schema_status,
+                "error": build_error_payload(schema_error) if schema_error is not None else None,
+            },
             {"name": "scope_guard", "status": scope_status, "reason": scope_reason},
             {"name": "write_guard", "status": write_status},
         ],
@@ -2369,6 +2402,7 @@ def _pre_tool_check(
         "payload_keys": sorted(str(key) for key in (payload or {}).keys()),
         "banned_arguments": planner_banned,
         "extra_arguments": planner_extra,
+        "schema_error": build_error_payload(schema_error) if schema_error is not None else None,
         "action_safety": dict(safety_payload) if safety_payload else {},
     }
 
@@ -3271,6 +3305,13 @@ def _validate_model_tool_call_events(
                 message=f"model tool call has unsupported arguments for {event.tool_name}: {', '.join(extra)}",
                 details={"tool_name": event.tool_name, "allowed_arguments": sorted(allowed_args), "extra_arguments": extra},
             )
+        schema_error = _plan_tool_input_schema_error(
+            tool_name=event.tool_name,
+            payload=_plan_schema_payload(event.tool_name, event.arguments),
+            enforce_required=step_kind == "preview",
+        )
+        if schema_error is not None:
+            return schema_error
     preview_count = sum(1 for kind in kinds if kind == "preview")
     read_count = sum(1 for kind in kinds if kind == "read")
     if preview_count:
@@ -3814,7 +3855,56 @@ def _allowed_plan_arguments(tool_name: str) -> set[str]:
     allowed = _filter_plan_arguments(spec.arguments)
     if tool_name in {"manual_trade_open", "manual_trade_close", "manual_assignment", "manual_expiry"}:
         allowed.add("account")
+        allowed.add("raw_text")
     return allowed
+
+
+def _plan_tool_input_schema(tool_name: str) -> dict[str, Any]:
+    if tool_name in AGENT_LOOP_READ_TOOLS:
+        definition = get_tool_definition(tool_name)
+        return (
+            build_tool_input_json_schema(
+                definition.input_schema,
+                additional_properties=True,
+            )
+            if definition is not None
+            else {}
+        )
+    spec = _COMMAND_SPECS_BY_INTENT.get(tool_name)
+    if spec is None or not is_llm_planner_preview_spec(spec):
+        return {}
+    return build_tool_input_json_schema(
+        _planner_preview_input_schema(tool_name),
+        additional_properties=True,
+    )
+
+
+def _plan_schema_payload(tool_name: str, payload: dict[str, Any] | None) -> dict[str, Any]:
+    out = dict(payload or {})
+    if tool_name in {"manual_trade_open", "manual_trade_close", "manual_assignment", "manual_expiry"}:
+        out.pop("raw_text", None)
+    return out
+
+
+def _plan_tool_input_schema_error(
+    *,
+    tool_name: str,
+    payload: dict[str, Any],
+    enforce_required: bool = False,
+) -> AgentToolError | None:
+    schema = _plan_tool_input_schema(tool_name)
+    if not schema:
+        return None
+    try:
+        validate_tool_input_payload(
+            tool_name=tool_name,
+            payload=_plan_schema_payload(tool_name, payload),
+            schema=schema,
+            enforce_required=enforce_required,
+        )
+    except AgentToolError as err:
+        return err
+    return None
 
 
 def _filter_plan_arguments(arguments: Any) -> set[str]:
@@ -5549,8 +5639,8 @@ def _planner_preview_input_schema(intent_name: str) -> dict[str, Any]:
         }
     if intent_name == "symbol_edit":
         return {
-            "symbol": {"type": "string"},
-            "set": {"type": "object"},
+            "symbol": {"type": "string", "required": True},
+            "set": {**_SYMBOL_EDIT_SET_SCHEMA, "required": True},
             "ensure_use": {"type": ["array", "null"], "items": {"type": "string"}},
         }
     if intent_name == "model_use":

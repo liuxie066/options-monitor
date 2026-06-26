@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.340 - 2026-06-26
+
+### Fixed
+- Added shared Tool Gateway and Assistant tool-input schema validation so malformed tool arguments are rejected before
+  handlers run.
+- Stopped inferring required tool fields from description text, keeping conditional fields such as symbol-edit
+  confirmation arguments out of provider-level required lists.
+- Enforced flat dot-path scalar maps for `manage_symbols.set` payloads while keeping legacy single-item list
+  compatibility scoped to `option_positions_read`.
+
 ## 1.2.339 - 2026-06-25
 
 ### Changed

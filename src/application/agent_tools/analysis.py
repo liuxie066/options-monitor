@@ -3999,7 +3999,11 @@ ANALYSIS_CATALOG_TOOL = build_agent_tool(
         "config_key": "us|hk",
         "config_path": "optional explicit config path",
         "view": "optional single view name",
-        "views": "optional list of view names",
+        "views": {
+            "type": ["string", "array"],
+            "items": {"type": "string"},
+            "description": "optional comma-separated view names or list of view names",
+        },
     },
     handler=_analysis_catalog_tool,
     pure_read=True,
