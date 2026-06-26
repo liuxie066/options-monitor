@@ -531,9 +531,11 @@ def preview_request_kind_from_text(text: str) -> str | None:
 
 
 def _looks_like_assignment_lifecycle_preview(compact: str) -> bool:
-    if "期权被指派通知" in compact and "已被指派" in compact:
+    if any(token in compact for token in ("期权被指派通知", "期权提前被指派通知")) and any(
+        token in compact for token in ("已被指派", "已提前被指派")
+    ):
         return True
-    if "衍生品提醒" in compact and "已被指派" in compact:
+    if "衍生品提醒" in compact and any(token in compact for token in ("已被指派", "已提前被指派")):
         return True
     if any(token in compact for token in ("记录", "写入", "补录")) and any(
         token in compact for token in ("被指派", "已被指派", "到期被指派平仓")

@@ -867,6 +867,23 @@ def test_task_contract_infers_broker_lifecycle_notice_as_preview_write() -> None
     assert contract.requested_effect == "preview_write"
 
 
+def test_task_contract_routes_early_assignment_notice_as_manual_assignment() -> None:
+    text = (
+        "sy 衍生品提醒: 期权提前被指派通知: 您的保证金综合账户(2905) - "
+        "证券所持有的-1张PDD 260626 78.00P期权已提前被指派，详情请查看资金明细及持仓情况。【富途证券(香港)】"
+    )
+
+    contract = build_task_contract(
+        question=text,
+        plan={},
+        request_context={"config_key": "us"},
+        today=date(2026, 6, 26),
+    )
+
+    assert contract.requested_effect == "preview_write"
+    assert preview_request_kind_from_text(text) == "manual_assignment"
+
+
 def test_task_contract_keeps_assigned_stock_pnl_query_read_only() -> None:
     contract = build_task_contract(
         question="sy 被指派正股收益怎么样",

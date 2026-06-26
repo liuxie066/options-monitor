@@ -483,7 +483,17 @@ def _extract_futu_lifecycle_notice_values(text: str, *, accounts: list[str] | tu
 
 
 def _looks_like_futu_lifecycle_notice(text: str) -> bool:
-    return any(token in text for token in ("期权被指派通知", "已被指派", "期权到期失效通知", "已到期失效"))
+    return any(
+        token in text
+        for token in (
+            "期权被指派通知",
+            "期权提前被指派通知",
+            "已被指派",
+            "已提前被指派",
+            "期权到期失效通知",
+            "已到期失效",
+        )
+    )
 
 
 def _parse_yymmdd(text: str) -> str | None:
