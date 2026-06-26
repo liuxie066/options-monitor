@@ -32,7 +32,7 @@ from src.application.assistant.agent_loop import (
     create_model_turn_events,
     run_read_only_agent_loop,
 )
-from src.application.assistant.model_events import AssistantEvent, ModelToolCallEvent
+from src.application.assistant.model_events import AssistantEvent, ModelToolCallEvent, provider_tool_schema_from_manifest
 from src.application.assistant.action_policy import ACTION_POLICY_SCHEMA_VERSION, decide_tool_action_policy
 from src.application.assistant.action_safety import ACTION_SAFETY_SCHEMA_VERSION, assess_action_safety
 from src.application.assistant.capability_catalog import (
@@ -1644,6 +1644,37 @@ def test_agent_loop_planner_catalog_matches_registry_backed_manifest() -> None:
     assert "持仓明晰" in position_notes
     assert "required_capabilities should be []" in position_notes
     assert position_read["semantics"]["answer_capabilities"]["option_positions"]
+
+
+def test_agent_loop_symbol_edit_provider_schema_requires_flat_setting_paths() -> None:
+    symbol_edit = next(tool for tool in _planner_tool_manifest() if tool["name"] == "symbol_edit")
+    provider_schema = provider_tool_schema_from_manifest(symbol_edit)
+    set_schema = provider_schema["parameters"]["properties"]["set"]
+
+    assert provider_schema["parameters"]["additionalProperties"] is False
+    assert {"symbol", "set"} <= set(provider_schema["parameters"]["required"])
+    assert set_schema["additionalProperties"] is False
+    assert "sell_put.max_strike" in set_schema["properties"]
+    assert "sell_put" not in set_schema["properties"]
+
+
+def test_agent_loop_symbol_edit_rejects_nested_setting_object() -> None:
+    err = _validate_model_tool_call_events(
+        (
+            ModelToolCallEvent(
+                event_id="model_tool_call_1",
+                tool_call_id="call_symbol_edit",
+                tool_name="symbol_edit",
+                arguments={"symbol": "中国海洋石油", "set": {"sell_put": {"max_strike": 18}}},
+            ),
+        ),
+        question="把中国海洋石油 sell put的max strike 设为 18",
+    )
+
+    assert err is not None
+    assert err.code == "INPUT_ERROR"
+    assert err.details is not None
+    assert err.details["schema_errors"][0]["path"] == "set.sell_put"
 
 
 def test_agent_loop_planner_input_scopes_analysis_views_for_income_questions() -> None:
@@ -7922,6 +7953,7 @@ def test_assistant_runtime_agent_loop_plans_manual_trade_open_preview(monkeypatc
     assert {item["name"]: item["status"] for item in step_precheck["checks"]} == {
         "action_policy": "pass",
         "action_safety": "pass",
+        "input_schema": "pass",
         "planner_argument_guard": "pass",
         "scope_guard": "pass",
         "write_guard": "pass",
