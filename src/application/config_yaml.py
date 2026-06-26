@@ -44,6 +44,7 @@ PASSTHROUGH_KEYS = {
     "option_positions",
     "outputs",
     "portfolio",
+    "project_guard",
     "runtime",
     "symbol_defaults",
     "templates",
