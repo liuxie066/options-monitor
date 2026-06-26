@@ -215,6 +215,40 @@ def test_manual_trade_draft_parses_futu_assignment_notice(tmp_path: Path) -> Non
     assert diagnostics["missing_fields"] == []
 
 
+def test_manual_trade_draft_parses_futu_early_assignment_notice(tmp_path: Path) -> None:
+    message = (
+        "记录一张被指派平仓，sy账户，衍生品提醒: 期权提前被指派通知: 您的保证金综合账户(2905) - "
+        "证券所持有的-1张PDD 260626 78.00P期权已提前被指派，详情请查看资金明细及持仓情况。【富途证券(香港)】"
+    )
+
+    draft = build_manual_trade_draft(
+        "manual_assignment",
+        raw_text=message,
+        accounts=("lx", "sy"),
+        config_key="us",
+        config_path=None,
+        runtime_config=_runtime_config(),
+        repo_base=tmp_path,
+        allow_opend_refresh=False,
+    )
+
+    assert draft["arguments"] == {
+        "broker": "富途",
+        "account": "sy",
+        "symbol": "PDD",
+        "option_type": "put",
+        "position_side": "short",
+        "contracts_to_close": 1,
+        "strike": 78.0,
+        "expiration_ymd": "2026-06-26",
+        "stock_side": "buy",
+        "stock_qty": 100,
+        "stock_price": 78.0,
+    }
+    assert draft["diagnostics"]["fill_parser_source"] == "futu_lifecycle_notice"
+    assert draft["diagnostics"]["missing_fields"] == []
+
+
 def test_manual_trade_draft_parses_futu_expiry_notice(tmp_path: Path) -> None:
     message = (
         "sy 衍生品提醒: 期权到期失效通知: 您的保证金综合账户(2905) - "
