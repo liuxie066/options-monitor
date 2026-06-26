@@ -3856,6 +3856,10 @@ def _allowed_plan_arguments(tool_name: str) -> set[str]:
     if tool_name in {"manual_trade_open", "manual_trade_close", "manual_assignment", "manual_expiry"}:
         allowed.add("account")
         allowed.add("raw_text")
+    if tool_name == "manual_assignment":
+        allowed.update(_LIFECYCLE_ASSIGNMENT_MODEL_SCHEMA)
+    if tool_name == "manual_expiry":
+        allowed.update(_LIFECYCLE_EXPIRY_MODEL_SCHEMA)
     return allowed
 
 
@@ -5622,14 +5626,47 @@ def _planner_field_semantics_keep(field: Any) -> bool:
     )
 
 
+_LIFECYCLE_ASSIGNMENT_MODEL_SCHEMA: dict[str, Any] = {
+    "symbol": {"type": ["string", "null"], "description": "Canonical symbol if known, e.g. 0700.HK for 腾讯."},
+    "option_type": {"type": ["string", "null"], "enum": ["put", "call", "p", "c", "沽", "购", None]},
+    "position_side": {"type": ["string", "null"], "enum": ["short", "long", None]},
+    "contracts_to_close": {"type": ["integer", "null"]},
+    "strike": {"type": ["number", "null"]},
+    "expiration_ymd": {"type": ["string", "null"], "description": "YYYY-MM-DD."},
+    "stock_side": {"type": ["string", "null"], "enum": ["buy", "sell", None]},
+    "stock_qty": {"type": ["integer", "null"], "description": "Settled shares. Host validates this against matched open lots."},
+    "stock_price": {"type": ["number", "null"], "description": "Usually the strike for assignment settlement."},
+    "record_id": {"type": ["string", "null"]},
+    "as_of_ms": {"type": ["integer", "null"]},
+}
+_LIFECYCLE_EXPIRY_MODEL_SCHEMA: dict[str, Any] = {
+    "symbol": {"type": ["string", "null"]},
+    "option_type": {"type": ["string", "null"], "enum": ["put", "call", "p", "c", "沽", "购", None]},
+    "position_side": {"type": ["string", "null"], "enum": ["short", "long", None]},
+    "contracts_to_close": {"type": ["integer", "null"]},
+    "strike": {"type": ["number", "null"]},
+    "expiration_ymd": {"type": ["string", "null"], "description": "YYYY-MM-DD."},
+    "event_time_ms": {"type": ["integer", "null"]},
+    "close_reason": {"type": ["string", "null"]},
+}
+
+
 def _planner_preview_input_schema(intent_name: str) -> dict[str, Any]:
     if intent_name in {"manual_trade_open", "manual_trade_close", "manual_assignment", "manual_expiry"}:
+        extra = (
+            _LIFECYCLE_ASSIGNMENT_MODEL_SCHEMA
+            if intent_name == "manual_assignment"
+            else _LIFECYCLE_EXPIRY_MODEL_SCHEMA
+            if intent_name == "manual_expiry"
+            else {}
+        )
         return {
             "account": {
                 "type": ["string", "null"],
                 "enum": [*ACCOUNT_VALUES, None],
                 "description": "Optional account label if explicitly present. The host injects the original user message as raw_text.",
             },
+            **extra,
         }
     if intent_name == "manual_trade_update":
         return {
@@ -5679,13 +5716,15 @@ def _planner_preview_notes(intent_name: str) -> list[str]:
     if intent_name == "manual_assignment":
         return [
             "Use for Futu 期权被指派通知 or 已被指派 lifecycle notices.",
-            "Do not provide raw_text; the host injects the original user message so the deterministic parser can extract account, symbol, expiration, strike, option type, contracts, and stock settlement.",
+            "Extract visible lifecycle fields such as symbol, option_type, position_side, contracts_to_close, strike, expiration_ymd, stock_side, stock_qty, and stock_price; omit uncertain fields.",
+            "Do not provide raw_text; the host injects the original user message and validates your structured fields against open lots before creating a preview.",
             "Creates only a pending preview; it never writes the ledger until a deterministic confirm command is received.",
         ]
     if intent_name == "manual_expiry":
         return [
             "Use for Futu 期权到期失效通知 or 已到期失效 lifecycle notices.",
-            "Do not provide raw_text; the host injects the original user message so the deterministic parser can extract account, symbol, expiration, strike, option type, and expired contracts.",
+            "Extract visible lifecycle fields such as symbol, option_type, position_side, contracts_to_close, strike, and expiration_ymd; omit uncertain fields.",
+            "Do not provide raw_text; the host injects the original user message and validates your structured fields against open lots before creating a preview.",
             "Creates only a pending preview; it never writes the ledger until a deterministic confirm command is received.",
         ]
     if intent_name == "manual_trade_update":

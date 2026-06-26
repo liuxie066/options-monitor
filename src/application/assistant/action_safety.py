@@ -26,6 +26,7 @@ _NON_SYMBOL_TOKENS = {
     "ASC",
     "AVG",
     "BY",
+    "BUY",
     "CALL",
     "CASE",
     "CANDIDATE",

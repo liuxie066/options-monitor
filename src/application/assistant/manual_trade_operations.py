@@ -4,6 +4,7 @@ import re
 from dataclasses import asdict, is_dataclass
 from typing import Any, cast
 
+from domain.domain.symbol_identity import canonical_symbol
 from src.application.agent_tool_config import load_runtime_config, repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_response, mask_path
 from src.application.assistant.contracts import AssistantRequest, PerceptionResult
@@ -31,6 +32,7 @@ from src.application.positions.workflows import (
     execute_manual_open,
 )
 from src.application.strategy_policy import resolve_position_strategy
+from src.application.symbol_aliases import symbol_aliases_from_config
 
 
 PREVIEW_INTENTS = frozenset({"manual_trade_open", "manual_trade_close", "manual_assignment", "manual_expiry"})
@@ -60,6 +62,44 @@ MANUAL_CLOSE_UPDATE_FIELDS = frozenset(
         "close_reason",
     }
 )
+MANUAL_ASSIGNMENT_MODEL_FIELDS = frozenset(
+    {
+        "record_id",
+        "account",
+        "symbol",
+        "option_type",
+        "position_side",
+        "contracts_to_close",
+        "strike",
+        "expiration_ymd",
+        "stock_side",
+        "stock_qty",
+        "stock_price",
+        "as_of_ms",
+    }
+)
+MANUAL_EXPIRY_MODEL_FIELDS = frozenset(
+    {
+        "account",
+        "symbol",
+        "option_type",
+        "position_side",
+        "contracts_to_close",
+        "strike",
+        "expiration_ymd",
+        "event_time_ms",
+        "close_reason",
+    }
+)
+MANUAL_MODEL_FIELD_ALIASES = {
+    "side": "position_side",
+    "contracts": "contracts_to_close",
+    "qty": "contracts_to_close",
+    "exp": "expiration_ymd",
+    "expiration": "expiration_ymd",
+    "shares": "stock_qty",
+    "event_time": "event_time_ms",
+}
 FIELD_LABELS = {
     "contracts": "合约数",
     "contracts_to_close": "平仓数量",
@@ -139,7 +179,15 @@ def handle_manual_trade_operation(
         )
         payload = _build_operation_payload(
             "manual_assignment",
-            _manual_assignment_args(draft["arguments"]),
+            _manual_assignment_args(
+                _with_model_trade_fields(
+                    "manual_assignment",
+                    draft["arguments"],
+                    intent.arguments,
+                    runtime_config=cfg,
+                    diagnostics=draft["diagnostics"],
+                )
+            ),
             request=request,
             config_path=config_path,
             diagnostics=draft["diagnostics"],
@@ -159,7 +207,15 @@ def handle_manual_trade_operation(
         )
         payload = _build_operation_payload(
             "manual_expiry",
-            _manual_expiry_args(draft["arguments"]),
+            _manual_expiry_args(
+                _with_model_trade_fields(
+                    "manual_expiry",
+                    draft["arguments"],
+                    intent.arguments,
+                    runtime_config=cfg,
+                    diagnostics=draft["diagnostics"],
+                )
+            ),
             request=request,
             config_path=config_path,
             diagnostics=draft["diagnostics"],
@@ -366,6 +422,100 @@ def _normalize_manual_trade_patch(operation_type: str, updates: dict[str, Any]) 
     if not patch:
         raise AgentToolError(code="NEEDS_CLARIFICATION", message="没有识别出要修改的交易字段。", hint="格式：<字段>改成<值>，或 <field>=<value> [operation_id]。")
     return patch
+
+
+def _with_model_trade_fields(
+    operation_type: str,
+    args: dict[str, Any],
+    model_args: dict[str, Any],
+    *,
+    runtime_config: dict[str, Any],
+    diagnostics: dict[str, Any],
+) -> dict[str, Any]:
+    if operation_type == "manual_assignment":
+        allowed = MANUAL_ASSIGNMENT_MODEL_FIELDS
+    elif operation_type == "manual_expiry":
+        allowed = MANUAL_EXPIRY_MODEL_FIELDS
+    else:
+        return args
+    patch: dict[str, Any] = {}
+    for raw_key, value in dict(model_args or {}).items():
+        key = MANUAL_MODEL_FIELD_ALIASES.get(str(raw_key).strip(), str(raw_key).strip())
+        if key not in allowed or key == "raw_text" or value in (None, ""):
+            continue
+        patch[key] = _normalize_model_trade_value(key, value, runtime_config=runtime_config)
+    if operation_type == "manual_assignment":
+        _fill_assignment_model_defaults(patch)
+    if not patch:
+        return args
+    out = dict(args)
+    out.update(patch)
+    diagnostics["model_extracted_fields"] = sorted(patch)
+    diagnostics["missing_fields"] = [
+        key for key in diagnostics.get("missing_fields", []) if out.get(str(key)) in (None, "")
+    ]
+    return out
+
+
+def _fill_assignment_model_defaults(patch: dict[str, Any]) -> None:
+    option_type = str(patch.get("option_type") or "").strip().lower()
+    position_side = str(patch.get("position_side") or "").strip().lower()
+    if not patch.get("stock_side") and position_side == "short":
+        if option_type == "put":
+            patch["stock_side"] = "buy"
+        elif option_type == "call":
+            patch["stock_side"] = "sell"
+    if not patch.get("stock_price") and patch.get("strike") is not None:
+        patch["stock_price"] = patch["strike"]
+
+
+def _normalize_model_trade_value(field_name: str, value: Any, *, runtime_config: dict[str, Any]) -> Any:
+    if field_name in {"contracts_to_close", "stock_qty", "as_of_ms", "event_time_ms"}:
+        return _positive_int(value, field_name)
+    if field_name in {"strike", "stock_price"}:
+        return _positive_float(value, field_name)
+    if field_name in {"expiration_ymd"}:
+        text = _required_text(value, field_name)
+        if not re_match_date(text):
+            raise AgentToolError(code="INPUT_ERROR", message=f"{field_name} must be YYYY-MM-DD")
+        return text
+    if field_name == "option_type":
+        return _normalize_model_option_type(value)
+    if field_name == "position_side":
+        return _normalize_model_position_side(value)
+    if field_name == "stock_side":
+        return _normalize_model_stock_side(value)
+    if field_name == "symbol":
+        text = _required_text(value, field_name)
+        return canonical_symbol(text, symbol_aliases=symbol_aliases_from_config(runtime_config)) or text
+    return _required_text(value, field_name)
+
+
+def _normalize_model_option_type(value: Any) -> str:
+    text = _required_text(value, "option_type").lower()
+    if text in {"p", "put"} or "沽" in text or "跌" in text:
+        return "put"
+    if text in {"c", "call"} or "购" in text or "涨" in text:
+        return "call"
+    raise AgentToolError(code="INPUT_ERROR", message="option_type must be put or call")
+
+
+def _normalize_model_position_side(value: Any) -> str:
+    text = _required_text(value, "position_side").lower()
+    if text in {"short", "sell"} or "卖" in text or "空" in text:
+        return "short"
+    if text in {"long", "buy"} or "买" in text or "多" in text:
+        return "long"
+    raise AgentToolError(code="INPUT_ERROR", message="position_side must be short or long")
+
+
+def _normalize_model_stock_side(value: Any) -> str:
+    text = _required_text(value, "stock_side").lower()
+    if text in {"buy", "b"} or "买" in text or "接" in text:
+        return "buy"
+    if text in {"sell", "s"} or "卖" in text:
+        return "sell"
+    raise AgentToolError(code="INPUT_ERROR", message="stock_side must be buy or sell")
 
 
 def _manual_trade_patch_target_key(operation_type: str, key: str) -> str:

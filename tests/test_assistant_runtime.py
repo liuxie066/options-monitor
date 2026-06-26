@@ -2026,7 +2026,18 @@ def test_agent_loop_preview_request_uses_model_driven_manifest() -> None:
     assert "manual_expiry" in tool_names
     assert "analysis_query" in tool_names
     assert "raw_text" not in assignment["input_schema"]
-    assert set(assignment["input_schema"]) == {"account"}
+    assert {
+        "account",
+        "symbol",
+        "option_type",
+        "position_side",
+        "contracts_to_close",
+        "strike",
+        "expiration_ymd",
+        "stock_side",
+        "stock_qty",
+        "stock_price",
+    }.issubset(set(assignment["input_schema"]))
 
 
 def test_agent_loop_expiry_request_uses_model_driven_manifest() -> None:
@@ -8163,6 +8174,87 @@ def test_assistant_runtime_previews_futu_assignment_notice(monkeypatch: Any, tmp
     assert len(repo.list_trade_events()) == before_events
 
 
+def test_assistant_runtime_uses_model_extracted_assignment_fields(monkeypatch: Any, tmp_path: Path) -> None:
+    monkeypatch.setenv("OM_INBOUND_OPERATIONS_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_TRADE_WRITE_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_ADMIN_OPEN_IDS", "local:local")
+    monkeypatch.setenv("OM_INBOUND_OPERATION_HMAC_KEY", "test-operation-hmac-key")
+
+    cfg_path, sqlite_path = _write_agent_loop_trade_runtime_config(tmp_path)
+    repo = _seed_agent_loop_open_lot(
+        sqlite_path,
+        account="sy",
+        symbol="0700.HK",
+        option_type="put",
+        side="short",
+        contracts=1,
+        currency="HKD",
+        strike=440.0,
+        multiplier=100,
+        expiration_ymd="2026-06-29",
+    )
+    before_events = len(repo.list_trade_events())
+    text = (
+        "记录一张被指派平仓，sy账户，衍生品提醒: 期权提前被指派通知: "
+        "您的保证金综合账户(2905) - 证券所持有的-1张腾讯 260629 440.00 沽"
+    )
+
+    def _plan(
+        incoming: str,
+        _settings: AssistantSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> ModelTurnResult:
+        assert incoming == text
+        assert conversation_context is not None
+        return _model_turn_result(
+            "manual_assignment",
+            {
+                "account": "sy",
+                "symbol": "腾讯",
+                "option_type": "沽",
+                "position_side": "short",
+                "contracts_to_close": 1,
+                "strike": 440,
+                "expiration_ymd": "2026-06-29",
+                "stock_side": "buy",
+                "stock_qty": 100,
+                "stock_price": 440,
+            },
+            goal=incoming,
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text=text,
+            sender_id="local",
+            channel="local",
+            message_id="msg_model_extracted_assignment_preview",
+            config_path=str(cfg_path),
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        allowed_senders="local:local",
+        settings=AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        model_turn_fn=_plan,
+        now_fn=lambda: date(2026, 6, 26),
+    )
+
+    assert out["ok"] is True
+    args = out["data"]["payload"]["arguments"]
+    assert args["symbol"] == "0700.HK"
+    assert args["option_type"] == "put"
+    assert args["position_side"] == "short"
+    assert args["contracts_to_close"] == 1
+    assert args["strike"] == 440.0
+    assert args["expiration_ymd"] == "2026-06-29"
+    assert args["stock_side"] == "buy"
+    assert args["stock_qty"] == 100
+    assert args["stock_price"] == 440.0
+    assert out["data"]["payload"]["diagnostics"]["model_extracted_fields"]
+    assert len(repo.list_trade_events()) == before_events
+
+
 def test_assistant_runtime_previews_futu_expiry_notice(monkeypatch: Any, tmp_path: Path) -> None:
     monkeypatch.setenv("OM_INBOUND_OPERATIONS_ENABLED", "1")
     monkeypatch.setenv("OM_INBOUND_TRADE_WRITE_ENABLED", "1")
@@ -8423,7 +8515,18 @@ def test_assistant_runtime_repairs_provider_malformed_assignment_arguments_via_t
         assert "manual_assignment" in tool_names
         assert "manual_expiry" in tool_names
         assert "analysis_query" in tool_names
-        assert set(assignment_properties) == {"account"}
+        assert {
+            "account",
+            "symbol",
+            "option_type",
+            "position_side",
+            "contracts_to_close",
+            "strike",
+            "expiration_ymd",
+            "stock_side",
+            "stock_qty",
+            "stock_price",
+        }.issubset(set(assignment_properties))
         assert "raw_text" not in assignment_properties
         return {
             "choices": [
