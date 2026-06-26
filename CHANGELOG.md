@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.2.341 - 2026-06-26
+
+### Fixed
+- Let Assistant manual assignment and expiry previews accept model-extracted lifecycle fields, then normalize and validate
+  them against the existing preview and open-lot flow before any ledger write.
+- Prevented assignment `stock_side=buy` from expanding the action-safety symbol scope.
+
 ## 1.2.340 - 2026-06-26
 
 ### Fixed
