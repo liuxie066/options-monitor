@@ -226,6 +226,9 @@ def test_agent_tool_output_contracts_advertise_canonical_renderers() -> None:
     assert tools["symbol_resolve"]["output_contract"]["result_shape"] == "scalar"
     assert "canonical_symbol" in tools["symbol_resolve"]["output_contract"]["fact_fields"]
     assert tools["symbol_config_read"]["output_contract"]["canonical_renderer"] == "symbol_config"
+    assert tools["query_cash_headroom"]["risk_level"] == "read_only"
+    assert tools["query_cash_headroom"]["side_effects"] == []
+    assert tools["query_cash_headroom"]["output_contract"]["canonical_renderer"] == "cash_headroom"
     assert tools["close_advice_read"]["output_contract"]["canonical_renderer"] == "position_exit_analysis"
     assert tools["analysis_catalog"]["output_contract"]["canonical_renderer"] == "analysis_catalog"
     assert tools["analysis_catalog"]["output_contract"]["answer_surface"] == "internal"
@@ -323,6 +326,7 @@ def test_pure_read_allowlist_is_derived_from_registry_metadata() -> None:
     assert "notification_perception_read" in PURE_READ_TOOLS
     assert "symbol_resolve" in PURE_READ_TOOLS
     assert "symbol_config_read" in PURE_READ_TOOLS
+    assert "query_cash_headroom" in PURE_READ_TOOLS
     assert "candidate_filter_explain" in PURE_READ_TOOLS
     assert "operation_timeline" in PURE_READ_TOOLS
     assert "assistant_trace" in PURE_READ_TOOLS

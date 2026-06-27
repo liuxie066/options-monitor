@@ -231,6 +231,7 @@ def get_exchange_rates_or_fetch_latest(
     max_age_hours: int | None = None,
     write_through_path: Path | None = None,
     log: Callable[[str], None] | None = None,
+    write_cache: bool = True,
 ) -> dict | None:
     cached = get_cached_exchange_rates(cache_path=cache_path, max_age_hours=max_age_hours)
     if cached is not None:
@@ -244,7 +245,7 @@ def get_exchange_rates_or_fetch_latest(
     latest = fetch_latest_exchange_rates(log=log)
     if latest is not None:
         rates = latest.get('rates')
-        if isinstance(rates, dict):
+        if write_cache and isinstance(rates, dict):
             _save_rates(Path(write_through_path or cache_path), rates, log=log)
         return latest
     if stale is not None:

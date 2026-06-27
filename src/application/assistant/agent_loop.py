@@ -3129,6 +3129,9 @@ def _allow_model_turn_guard_observation(
             return True
     if error.code != "PLAN_RISK_MISMATCH":
         return False
+    details = error.details if isinstance(error.details, dict) else {}
+    if details.get("required_tool") in {"symbol_config_read", "query_cash_headroom"}:
+        return True
     if not _question_requests_preview_operation(question):
         return False
     return bool(events) and all(_plan_step_kind(event.tool_name) == "read" for event in events)
@@ -3312,6 +3315,32 @@ def _validate_model_tool_call_events(
         )
         if schema_error is not None:
             return schema_error
+    if question is not None and _question_requests_symbol_config_read(question):
+        planned_tools = [event.tool_name for event in events]
+        if "analysis_query" in planned_tools and "symbol_config_read" not in planned_tools:
+            return AgentToolError(
+                code="PLAN_RISK_MISMATCH",
+                message="当前问题是在查询监控标的配置字段，但 LLM 规划成了通用分析查询。",
+                hint="请改用 symbol_config_read，并传入 symbol、strategy 和 field。",
+                details={
+                    "planned_tools": planned_tools,
+                    "required_tool": "symbol_config_read",
+                    "misused_tool": "analysis_query",
+                },
+            )
+    if question is not None and _question_requests_cash_headroom(question):
+        planned_tools = [event.tool_name for event in events]
+        if "query_cash_headroom" not in planned_tools:
+            return AgentToolError(
+                code="PLAN_RISK_MISMATCH",
+                message="当前问题是在判断 sell put 担保金是否超过现金加货基，但 LLM 没有规划现金余量查询。",
+                hint="请改用 query_cash_headroom，并传入 account。",
+                details={
+                    "planned_tools": planned_tools,
+                    "required_tool": "query_cash_headroom",
+                    "misused_tool": planned_tools[0] if planned_tools else None,
+                },
+            )
     preview_count = sum(1 for kind in kinds if kind == "preview")
     read_count = sum(1 for kind in kinds if kind == "read")
     if preview_count:
@@ -3954,6 +3983,37 @@ def _is_banned_plan_argument(argument: str) -> bool:
 
 def _question_requests_preview_operation(question: str) -> bool:
     return preview_effect_allowed_from_text(question)
+
+
+def _question_requests_symbol_config_read(question: str) -> bool:
+    if _question_requests_preview_operation(question):
+        return False
+    compact = re.sub(r"\s+", "", str(question or "").lower())
+    if any(token in compact for token in ("maxstrike", "max_strike", "minstrike", "min_strike")):
+        return True
+    option_strategy = any(
+        token in compact
+        for token in ("sellput", "sellcall", "coveredcall", "sell_put", "sell_call", "covered_call", "卖put", "卖call")
+    )
+    if option_strategy and any(token in compact for token in ("最大行权价", "最高行权价", "最低行权价", "最小行权价", "行权价上限", "行权价下限")):
+        return True
+    return bool(
+        any(token in compact for token in ("当前配置", "现在配置", "配置是多少", "配置的是多少"))
+        and option_strategy
+    )
+
+
+def _question_requests_cash_headroom(question: str) -> bool:
+    compact = re.sub(r"\s+", "", str(question or "").lower())
+    if not any(token in compact for token in ("sellput", "sell_put", "卖put", "卖出put", "shortput")):
+        return False
+    return any(token in compact for token in ("现金加货基", "现金类", "担保金", "现金担保", "资金", "cash", "超过", "余量", "缺口"))
+
+
+def _planner_omitted_read_tools_for_question(question: str) -> frozenset[str]:
+    if _question_requests_cash_headroom(question):
+        return frozenset()
+    return frozenset({"query_cash_headroom"})
 
 
 def _planning_outcome_from_model_turn_result(
@@ -4953,6 +5013,7 @@ def _planner_input_payload(text: str, *, conversation_context: dict[str, Any] | 
         analysis_view_names=selection["selected_analysis_views"],
         include_read_tools=True,
         include_preview_capabilities=True,
+        omit_read_tools=_planner_omitted_read_tools_for_question(text),
     )
     preview_authority = _planner_preview_authority(text)
     payload: dict[str, Any] = {
@@ -5387,10 +5448,14 @@ def _planner_tool_manifest(
     *,
     include_read_tools: bool = True,
     include_preview_capabilities: bool = True,
+    omit_read_tools: tuple[str, ...] | set[str] | list[str] | frozenset[str] | None = None,
     allowed_preview_intents: tuple[str, ...] | set[str] | list[str] | None = None,
 ) -> list[dict[str, Any]]:
     tools: list[dict[str, Any]] = []
+    omitted_read_tools = {str(item) for item in omit_read_tools or () if str(item).strip()}
     for name in sorted(AGENT_LOOP_READ_TOOLS) if include_read_tools else ():
+        if name in omitted_read_tools:
+            continue
         definition = get_tool_definition(name)
         if definition is None:
             continue

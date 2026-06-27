@@ -77,6 +77,50 @@ def test_query_sell_put_cash_uses_futu_portfolio_context_when_runtime_config_all
     assert result["cash_power_source"] == "futu_net_cash_power"
 
 
+def test_query_sell_put_cash_can_run_without_writing_cache(tmp_path: Path) -> None:
+    import src.application.cash_headroom_query as m
+
+    out_dir = tmp_path / "cash_headroom_state"
+
+    def fake_load_account_portfolio_context(**kwargs):  # type: ignore[no-untyped-def]
+        assert kwargs.get("write_cache") is False
+        assert not out_dir.exists()
+        return {"cash_by_currency": {"CNY": 130000.0}, "stocks_by_symbol": {}, "portfolio_source_name": "holdings"}
+
+    old_load_portfolio = m.load_account_portfolio_context
+    old_open_position_ledger = m.open_position_ledger
+    old_load_option_position_records = m._load_option_position_records
+    old_build_context = m.build_option_positions_context
+    try:
+        m.load_account_portfolio_context = fake_load_account_portfolio_context
+        m.open_position_ledger = lambda *_a, **_k: object()  # type: ignore[assignment]
+        m._load_option_position_records = lambda *_a, **_k: []  # type: ignore[assignment]
+        m.build_option_positions_context = lambda *_a, **_k: {  # type: ignore[assignment]
+            "cash_secured_by_symbol_by_ccy": {"NVDA": {"CNY": 72000.0}},
+            "cash_secured_total_by_ccy": {"CNY": 72000.0},
+            "cash_secured_total_cny": 72000.0,
+        }
+        result = m.query_sell_put_cash(
+            config="config.us.json",
+            market="富途",
+            account="lx",
+            out_dir=str(out_dir),
+            base_dir=BASE,
+            runtime_config={"portfolio": {"source": "auto", "base_currency": "CNY"}},
+            no_exchange_rates=True,
+            write_cache=False,
+        )
+    finally:
+        m.load_account_portfolio_context = old_load_portfolio
+        m.open_position_ledger = old_open_position_ledger  # type: ignore[assignment]
+        m._load_option_position_records = old_load_option_position_records  # type: ignore[assignment]
+        m.build_option_positions_context = old_build_context  # type: ignore[assignment]
+
+    assert result["cash_secured_used_cny"] == 72000.0
+    assert result["cash_available_total_cny"] == 130000.0
+    assert not out_dir.exists()
+
+
 def test_query_sell_put_cash_uses_account_scoped_portfolio_source_override() -> None:
     import src.application.cash_headroom_query as m
 

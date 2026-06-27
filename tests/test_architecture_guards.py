@@ -169,6 +169,7 @@ def test_agent_loop_planner_surface_keeps_read_only_and_preview_limited() -> Non
     assert AGENT_LOOP_READ_TOOLS == read_tool_names - {"inbound.pending", "inbound.symbols"}
     assert "close_advice_read" in AGENT_LOOP_READ_TOOLS
     assert "symbol_config_read" in AGENT_LOOP_READ_TOOLS
+    assert "query_cash_headroom" in AGENT_LOOP_READ_TOOLS
     assert "symbol_edit" in AGENT_LOOP_PREVIEW_CAPABILITIES
     assert "manual_trade_open" in AGENT_LOOP_PREVIEW_CAPABILITIES
     assert "manual_trade_confirm" not in AGENT_LOOP_PREVIEW_CAPABILITIES
@@ -192,6 +193,9 @@ def test_planner_tool_metadata_lives_on_agent_tool_definitions() -> None:
     from src.application.assistant.tool_bindings import AssistantToolBinding
 
     binding_fields = {field.name for field in fields(AssistantToolBinding)}
+    assert "description" not in binding_fields
+    assert "input_schema" not in binding_fields
+    assert "output_contract" not in binding_fields
     assert "planner_notes" not in binding_fields
     assert "planner_semantics" not in binding_fields
 
@@ -201,6 +205,7 @@ def test_planner_tool_metadata_lives_on_agent_tool_definitions() -> None:
         "analysis_catalog",
         "analysis_query",
         "option_positions_read",
+        "query_cash_headroom",
         "symbol_config_read",
         "symbol_resolve",
         "candidate_filter_explain",

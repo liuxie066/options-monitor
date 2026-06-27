@@ -96,6 +96,7 @@ def load_account_portfolio_context(
     fetch_futu_portfolio_context_fn: Callable[..., dict[str, Any]],
     is_fresh_fn: FreshnessChecker,
     load_json_fn: JsonLoader,
+    write_cache: bool = True,
 ) -> dict[str, Any]:
     port_path = (state_dir / "portfolio_context.json").resolve()
     plan = build_account_portfolio_source_plan(runtime_config, account=account, portfolio_source=portfolio_source)
@@ -154,8 +155,9 @@ def load_account_portfolio_context(
             if not _validate_portfolio_context_account(ctx, requested_account=expected_account, log=log, source="futu_direct"):
                 raise ValueError("futu_direct account mismatch")
             ctx = with_context_source(ctx, "futu_direct")
-            port_path.parent.mkdir(parents=True, exist_ok=True)
-            port_path.write_text(json.dumps(ctx, ensure_ascii=False, indent=2), encoding="utf-8")
+            if write_cache:
+                port_path.parent.mkdir(parents=True, exist_ok=True)
+                port_path.write_text(json.dumps(ctx, ensure_ascii=False, indent=2), encoding="utf-8")
             log(f"[CTX] portfolio_context source=futu_direct account={account or '-'}")
             return ctx
         except Exception as exc:
@@ -165,7 +167,8 @@ def load_account_portfolio_context(
 
     holdings_account = plan.holdings_account
     shared_root = (shared_state_dir or state_dir).resolve()
-    shared_root.mkdir(parents=True, exist_ok=True)
+    if write_cache:
+        shared_root.mkdir(parents=True, exist_ok=True)
     shared_path = (shared_root / "portfolio_context.shared.json").resolve()
 
     try:
@@ -184,21 +187,24 @@ def load_account_portfolio_context(
                     sliced = dict(sliced)
                     sliced["portfolio_source_name"] = holdings_source_name
                     sliced = with_context_source(sliced, "shared_slice")
-                    port_path.parent.mkdir(parents=True, exist_ok=True)
-                    port_path.write_text(json.dumps(sliced, ensure_ascii=False, indent=2), encoding="utf-8")
+                    if write_cache:
+                        port_path.parent.mkdir(parents=True, exist_ok=True)
+                        port_path.write_text(json.dumps(sliced, ensure_ascii=False, indent=2), encoding="utf-8")
                     log(f"[CTX] portfolio_context source=shared_slice account={holdings_account or '-'}")
                     return sliced
     except Exception:
         pass
 
-    for shared_out, context_source in ((shared_path, "shared_refresh"), (None, "direct_fetch")):
+    refresh_sources = ((shared_path, "shared_refresh"), (None, "direct_fetch")) if write_cache else ((None, "direct_fetch"),)
+    for shared_out, context_source in refresh_sources:
         try:
             if shared_out is not None:
                 shared_ctx = load_holdings_portfolio_shared_context(
                     data_config_path=Path(data_config),
                     broker=str(market),
                 )
-                shared_out.write_text(json.dumps(shared_ctx, ensure_ascii=False, indent=2), encoding="utf-8")
+                if write_cache:
+                    shared_out.write_text(json.dumps(shared_ctx, ensure_ascii=False, indent=2), encoding="utf-8")
                 ctx = dict(slice_shared_context_for_account(shared_ctx, holdings_account) or {})
             else:
                 ctx = load_holdings_portfolio_context(
@@ -217,8 +223,9 @@ def load_account_portfolio_context(
                 raise ValueError(f"{context_source} account mismatch")
             ctx["portfolio_source_name"] = holdings_source_name
             ctx = with_context_source(ctx, context_source)
-            port_path.parent.mkdir(parents=True, exist_ok=True)
-            port_path.write_text(json.dumps(ctx, ensure_ascii=False, indent=2), encoding="utf-8")
+            if write_cache:
+                port_path.parent.mkdir(parents=True, exist_ok=True)
+                port_path.write_text(json.dumps(ctx, ensure_ascii=False, indent=2), encoding="utf-8")
             log(f"[CTX] portfolio_context source={context_source} account={holdings_account or '-'}")
             return ctx
         except Exception:
