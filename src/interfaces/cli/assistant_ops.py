@@ -615,14 +615,12 @@ def handle_assistant_command(
             audit_db=args.audit_db,
         )
         turn = handle_assistant_turn_fn(request, settings=assistant_settings)
-        out = dict(
-            turn.legacy_response
-            or build_response(
-                tool_name="assistant.handle",
-                ok=turn.ok,
-                data=turn.public_payload(),
-                error=turn.error if not turn.ok else None,
-            )
+        out = build_response(
+            tool_name="assistant.handle",
+            ok=turn.ok,
+            data=turn.public_payload(),
+            error=turn.error if not turn.ok else None,
+            meta=dict(turn.meta or {}),
         )
         if args.format == "text":
             text = turn.response_text.strip() or _dumps(out)

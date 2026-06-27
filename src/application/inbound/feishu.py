@@ -58,7 +58,7 @@ def handle_feishu_payload(
 
     kwargs["settings"] = settings
     turn = handle_assistant_turn(request, **kwargs)
-    inbound_result = dict(turn.legacy_response or {})
+    inbound_result = turn.public_payload()
     return build_response(
         tool_name="inbound.feishu",
         ok=turn.ok,
@@ -70,7 +70,7 @@ def handle_feishu_payload(
             "inbound_result": inbound_result,
         },
         error=turn.error if not turn.ok else None,
-        meta=dict(inbound_result.get("meta") or {}),
+        meta=dict(turn.meta or {}),
     )
 
 

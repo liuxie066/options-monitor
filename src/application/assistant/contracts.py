@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Literal
 
 
@@ -156,6 +156,7 @@ class AssistantTurnResult:
     render_route: str
     ok: bool
     status: str
+    tool_name: str = "assistant.handle"
     error: dict[str, Any] | None = None
     permission_request: dict[str, Any] | None = None
     operation_id: str | None = None
@@ -163,7 +164,8 @@ class AssistantTurnResult:
     tool_calls: tuple[dict[str, Any], ...] = ()
     evidence: dict[str, Any] | None = None
     trace: dict[str, Any] | None = None
-    legacy_response: dict[str, Any] | None = field(default=None, repr=False, compare=False)
+    data: dict[str, Any] | None = None
+    meta: dict[str, Any] | None = None
 
     def public_payload(self) -> dict[str, Any]:
         return {
@@ -172,6 +174,7 @@ class AssistantTurnResult:
             "render_route": self.render_route,
             "ok": bool(self.ok),
             "status": self.status,
+            "tool_name": self.tool_name,
             "error": dict(self.error or {}),
             "permission_request": dict(self.permission_request or {}),
             "operation_id": self.operation_id,
@@ -179,6 +182,8 @@ class AssistantTurnResult:
             "tool_calls": [dict(item) for item in self.tool_calls],
             "evidence": dict(self.evidence or {}),
             "trace": dict(self.trace or {}),
+            "data": dict(self.data or {}),
+            "meta": dict(self.meta or {}),
         }
 
 

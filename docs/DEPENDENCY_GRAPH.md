@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 706 (`src`: 410, `domain`: 52, `scripts`: 7, `tests`: 237)
-- Internal import edges: 3766 total, 1773 production/script edges excluding tests
+- Python files scanned: 707 (`src`: 411, `domain`: 52, `scripts`: 7, `tests`: 237)
+- Internal import edges: 3767 total, 1774 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -179,7 +179,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.infrastructure.io_utils | 43 |
 | domain.domain.ledger.position_fields | 42 |
 | domain.domain.symbol_identity | 38 |
-| src.application.assistant.contracts | 30 |
+| src.application.assistant.contracts | 31 |
 | src.application.agent_tool_config | 29 |
 | src.application.config_loader | 26 |
 | src.application.settings | 25 |
@@ -207,9 +207,9 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | src.application.pipeline_runtime | 20 |
 | src.application.agent_tools.runtime_status_impl | 18 |
 | src.application.sell_put_steps | 17 |
+| src.application.assistant.runtime | 16 |
 | src.application.assistant.symbol_operations | 16 |
 | src.application.trades.auto_intake | 16 |
-| src.application.account_run | 15 |
 
 ## Reading
 

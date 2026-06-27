@@ -41,10 +41,6 @@ __all__ = [
 
 
 def __getattr__(name: str):
-    if name == "handle_assistant_message":
-        from src.application.assistant.runtime import handle_assistant_message
-
-        return handle_assistant_message
     if name == "handle_assistant_turn":
         from src.application.assistant.runtime import handle_assistant_turn
 

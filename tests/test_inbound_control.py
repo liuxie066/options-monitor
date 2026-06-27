@@ -30,7 +30,7 @@ from src.application.assistant.deterministic_commands import parse_deterministic
 from src.application.assistant.policy import PURE_READ_TOOLS, check_sender_allowed, enforce_tool_allowed
 from src.application.assistant.renderer import render_inbound_text
 from src.application.assistant.router import handle_assistant_request
-from src.application.assistant.runtime import handle_assistant_message
+from src.application.assistant.runtime import handle_assistant_turn
 from src.application.assistant.session_store import collect_assistant_trace
 from src.application.assistant.settings import AssistantSettings, AssistantLlmSettings
 from src.application.assistant.task_contract import TASK_CONTRACT_SCHEMA_VERSION
@@ -114,18 +114,24 @@ def _model_turn_result(tool_name: str, arguments: dict[str, Any] | None = None) 
 
 
 def _assistant_turn_response(response_text: str = "状态查询完成。") -> AssistantTurnResult:
-    legacy_response = build_response(
-        tool_name="assistant.handle",
-        ok=True,
-        data={"response_text": response_text},
-        meta={"assistant": {"route": "command"}},
-    )
     return AssistantTurnResult(
         response_text=response_text,
         render_route="router",
         ok=True,
         status="ok",
-        legacy_response=legacy_response,
+        data={"response_text": response_text},
+        meta={"assistant": {"route": "command"}},
+    )
+
+
+def handle_assistant_response(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    turn = handle_assistant_turn(*args, **kwargs)
+    return build_response(
+        tool_name=turn.tool_name,
+        ok=turn.ok,
+        data=dict(turn.data or turn.public_payload()),
+        error=turn.error if not turn.ok else None,
+        meta=dict(turn.meta or {}),
     )
 
 
@@ -540,7 +546,7 @@ def test_inbound_exit_analysis_routes_to_close_advice_read(tmp_path: Path) -> No
             {"query": {"status": "open", "option_type": "call", "side": "long", "limit": 50}},
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="分析 long call 是不是应该平仓",
             sender_id="local",
@@ -679,7 +685,7 @@ def test_inbound_symbol_config_query_executes_read_only_tool_via_llm(tmp_path: P
         assert conversation_context is not None
         return _model_turn_result("symbol_config_read", {"symbol": "泡泡玛特", "strategy": "sell_put", "field": "max_strike"})
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="现在泡泡玛特 sell put的max strike是多少？",
             sender_id="local",
@@ -1519,7 +1525,7 @@ def test_inbound_upgrade_cancel_persists_readback_trace(monkeypatch: pytest.Monk
         lambda operation_id, audit_db: pytest.fail(f"unexpected upgrade worker: {operation_id}"),
     )
 
-    preview = handle_assistant_message(
+    preview = handle_assistant_response(
         AssistantRequest(
             text="/upgrade",
             sender_id="ou_1",
@@ -1537,7 +1543,7 @@ def test_inbound_upgrade_cancel_persists_readback_trace(monkeypatch: pytest.Monk
     assert preview["data"]["payload"]["arguments"] == {"target_version": "1.2.111", "release_tag": "v1.2.111"}
     operation_id = preview["data"]["operation_id"]
 
-    cancelled = handle_assistant_message(
+    cancelled = handle_assistant_response(
         AssistantRequest(
             text=f"取消升级 {operation_id}",
             sender_id="ou_1",
@@ -2548,7 +2554,7 @@ def test_inbound_llm_symbol_edit_creates_preview_only(monkeypatch: pytest.Monkey
             },
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="设置 NVDA covered call min strike 140",
             sender_id="ou_1",
@@ -2843,7 +2849,7 @@ markets:
             },
         )
 
-    first = handle_assistant_message(
+    first = handle_assistant_response(
         AssistantRequest(
             text="FUTU sell put的max strike设置的是多少？",
             sender_id="ou_1",
@@ -2892,7 +2898,7 @@ markets:
         )
 
     before_yaml = config_yaml.read_text(encoding="utf-8")
-    preview = handle_assistant_message(
+    preview = handle_assistant_response(
         AssistantRequest(
             text="改为90",
             sender_id="ou_1",

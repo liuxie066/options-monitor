@@ -244,7 +244,7 @@ def handle_wechat_clawbot_message(
 
     kwargs["settings"] = settings
     turn = handle_assistant_turn(request, **kwargs)
-    inbound_result = dict(turn.legacy_response or {})
+    inbound_result = turn.public_payload()
     return build_response(
         tool_name="inbound.wechat_clawbot",
         ok=turn.ok,
@@ -255,7 +255,7 @@ def handle_wechat_clawbot_message(
             "inbound_result": inbound_result,
         },
         error=turn.error if not turn.ok else None,
-        meta=dict(inbound_result.get("meta") or {}),
+        meta=dict(turn.meta or {}),
     )
 
 

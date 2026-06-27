@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from src.application.agent_tool_contracts import AgentToolError, build_response
-from src.application.assistant import AssistantRequest, AssistantSettings, AssistantLlmSettings, handle_assistant_message
+from src.application.assistant import AssistantRequest, AssistantSettings, AssistantLlmSettings, handle_assistant_turn
 from src.application.assistant.agent_loop import (
     EventNativePlanningResult,
     ModelTurnResult,
@@ -29,6 +29,17 @@ from src.application.assistant.task_contract import TASK_CONTRACT_SCHEMA_VERSION
 from src.application.assistant.verifier_hooks import HOOK_RESULT_SCHEMA_VERSION
 from src.application.agent_tool_registry import get_tool_definition
 from src.application.tool_execution import execute_tool as run_tool
+
+
+def handle_assistant_response(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    turn = handle_assistant_turn(*args, **kwargs)
+    return build_response(
+        tool_name=turn.tool_name,
+        ok=turn.ok,
+        data=dict(turn.data or turn.public_payload()),
+        error=turn.error if not turn.ok else None,
+        meta=dict(turn.meta or {}),
+    )
 
 
 TRACE_ROUTE_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "assistant_trace_route_samples.jsonl"
@@ -4076,13 +4087,13 @@ def test_message_less_local_agent_sessions_do_not_overwrite_each_other(tmp_path:
     settings = AssistantSettings(
         llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
     )
-    first = handle_assistant_message(
+    first = handle_assistant_response(
         AssistantRequest(text="查看 lx 指派正股持仓盈亏", sender_id="local", config_key="us", audit_db=str(audit_db)),
         execute_tool_fn=_execute,
         settings=settings,
         model_turn_fn=_plan,
     )
-    second = handle_assistant_message(
+    second = handle_assistant_response(
         AssistantRequest(text="查看 lx 指派正股持仓盈亏", sender_id="local", config_key="us", audit_db=str(audit_db)),
         execute_tool_fn=_execute,
         settings=settings,
