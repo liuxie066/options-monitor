@@ -69,6 +69,46 @@ def test_execute_model_tool_call_event_runs_read_tool_through_guard() -> None:
     assert result.result_adapter.raw_result["data"]["row_count"] == 1
 
 
+def test_execute_model_tool_call_event_projects_contract_preview_to_model_observation() -> None:
+    def _execute(tool_name: str, _payload: dict[str, Any]) -> dict[str, Any]:
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "symbol": "中国海洋石油",
+                "canonical_symbol": "0883.HK",
+                "found": True,
+                "strategies": {
+                    "sell_put": {"enabled": True, "min_dte": 7, "max_dte": 90, "max_strike": 20},
+                    "sell_call": {"enabled": True, "min_strike": 30},
+                },
+            },
+        )
+
+    event = model_tool_call_from_provider_block(
+        {
+            "type": "function_call",
+            "call_id": "call_symbol_config",
+            "name": "symbol_config_read",
+            "arguments": '{"symbol":"中国海洋石油"}',
+        },
+        provider="openai",
+        event_id="model_tool_call_1",
+    )
+    result = execute_model_tool_call_event(
+        model_event=event,
+        request=AssistantRequest(text="中国海洋石油 sell put max strike 是多少？", sender_id="u1", config_key="hk"),
+        task_contract={"requested_effect": "read", "scope": {"symbols": ["中国海洋石油"]}},
+        execute_tool_fn=_execute,
+    )
+
+    provider_result = result.public_payload()["provider_tool_result"]
+
+    assert provider_result["is_error"] is False
+    assert provider_result["content"]["data_preview"]["canonical_symbol"] == "0883.HK"
+    assert provider_result["content"]["data_preview"]["strategies"]["sell_put"]["max_strike"] == 20
+
+
 def test_execute_model_tool_call_event_blocks_write_tool_before_execution() -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
     event = model_tool_call_from_provider_block(

@@ -498,6 +498,8 @@ def test_wechat_clawbot_poll_once_routes_inbound_and_replies(tmp_path: Path) -> 
     assert replies[0]["context_token"] == "ctx_1"
     assert replies[0]["group_id"] == "group_1"
     assert str(replies[0]["text"]).strip()
+    inbound_result = out["data"]["results"][0]["inbound"]["data"]["inbound_result"]
+    assert inbound_result["meta"]["assistant"]["turn_result"]["response_text"] == replies[0]["text"]
     assert typing_calls == [
         {"method": "get_config", "ilink_user_id": "user_1", "context_token": "ctx_1"},
         {"method": "send_typing", "ilink_user_id": "user_1", "typing_ticket": "typing_ticket_1", "status": 1},

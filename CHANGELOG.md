@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 1.2.344 - 2026-06-28
+
+### Changed
+- Promoted `AssistantTurnResult` as the typed Assistant turn API while keeping the legacy response shape only as a
+  compatibility bridge.
+- Moved Feishu, WeChat ClawBot, and CLI Assistant entry points onto `handle_assistant_turn`.
+- Centralized Assistant tool output contracts so model previews, evidence extraction, and canonical render routing share
+  the Tool Gateway facts source.
+
+### Fixed
+- Prevented config/max-strike and cash-headroom replies from falling back to raw tool observations when a canonical
+  renderer is required.
+
 ## 1.2.343 - 2026-06-27
 
 ### Changed

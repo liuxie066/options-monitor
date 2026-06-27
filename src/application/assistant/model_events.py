@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.assistant.tool_contracts import project_model_preview
 from src.application.tool_input_schema import (
     provider_compatible_argument_schema as _provider_compatible_input_schema,
     tool_argument_declares_required as _tool_input_declares_required,
@@ -491,6 +492,7 @@ def adapt_tool_result(
     raw_result: dict[str, Any],
     normalized_payload: dict[str, Any] | None = None,
     guard_decision: ToolGuardDecisionEvent | None = None,
+    output_contract: dict[str, Any] | None = None,
     parent_event_id: str | None = None,
 ) -> ToolResultAdapterOutput:
     if not isinstance(raw_result, dict):
@@ -512,7 +514,11 @@ def adapt_tool_result(
         "missing_data": [_copy_mapping(item) for item in missing_data],
         "conflicts": [_copy_mapping(item) for item in conflicts],
     }
-    data_preview = _provider_data_preview(tool_name=tool_name, data=data)
+    data_preview = _provider_data_preview(
+        tool_name=tool_name,
+        data=data,
+        output_contract=output_contract if isinstance(output_contract, dict) else {},
+    )
     if data_preview:
         observation["data_preview"] = data_preview
     if error:
@@ -986,7 +992,7 @@ def _data_summary(data: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in summary.items() if value not in (None, "", [])}
 
 
-def _provider_data_preview(*, tool_name: str, data: dict[str, Any]) -> dict[str, Any]:
+def _provider_data_preview(*, tool_name: str, data: dict[str, Any], output_contract: dict[str, Any]) -> dict[str, Any]:
     if tool_name == "analysis_query":
         rows = data.get("rows")
         row_count = _optional_int(data.get("row_count"))
@@ -1067,6 +1073,9 @@ def _provider_data_preview(*, tool_name: str, data: dict[str, Any]) -> dict[str,
                 "realized_row_count": _optional_int(data.get("realized_row_count")),
             }
         )
+    contract_preview = project_model_preview(data, output_contract)
+    if contract_preview:
+        return contract_preview
     return {}
 
 
@@ -1124,7 +1133,7 @@ def _preview_mapping(value: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, item in value.items():
         key_text = str(key)
-        if _sensitive_preview_key(key_text):
+        if key_text.startswith("_") or _sensitive_preview_key(key_text):
             continue
         out[key_text] = _preview_value(item)
     return out

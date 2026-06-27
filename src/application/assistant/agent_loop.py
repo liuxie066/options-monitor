@@ -83,6 +83,7 @@ from src.application.assistant.tool_bindings import (
     symbol_market_config_tool_names,
     tool_name_for_intent,
 )
+from src.application.assistant.tool_contracts import resolve_output_contract
 from src.application.assistant.verifier_hooks import (
     hook_results_from_answer_trace,
     hook_results_from_coverage,
@@ -877,6 +878,7 @@ def execute_model_tool_call_event(
         tool_name=model_event.tool_name,
         normalized_payload=_safe_tool_payload(payload),
         guard_decision=guard_event,
+        output_contract=resolve_output_contract(model_event.tool_name, payload),
         raw_result=raw_result,
     )
     if outcome.ok and guard.get("duplicate_signature"):
@@ -917,6 +919,7 @@ def _guard_denied_model_tool_call_execution(
         tool_name=model_event.tool_name,
         normalized_payload=_safe_tool_payload(payload),
         guard_decision=guard_event,
+        output_contract=resolve_output_contract(model_event.tool_name, payload),
         raw_result=_guard_error_tool_result(tool_name=model_event.tool_name, error_payload=error_payload, guard=guard),
     )
     return GuardedModelToolCallExecution(
@@ -2453,7 +2456,7 @@ def _payload_accounts(payload: dict[str, Any]) -> list[str]:
 
 
 def _post_tool_check(*, tool_name: str, payload: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
-    output_contract = _output_contract_for_tool(tool_name, payload)
+    output_contract = resolve_output_contract(tool_name, payload)
     ok = bool(result.get("ok", False)) if isinstance(result, dict) else False
     evidence_summary = _tool_evidence_summary(tool_name=tool_name, payload=payload, result=result)
     data = result.get("data") if isinstance(result, dict) else None
@@ -2531,7 +2534,7 @@ def _freshness_check_status(*, output_contract: dict[str, Any], data: Any) -> st
 
 
 def _tool_evidence_summary(*, tool_name: str, payload: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
-    output_contract = _output_contract_for_tool(tool_name, payload)
+    output_contract = resolve_output_contract(tool_name, payload)
     data = result.get("data") if isinstance(result, dict) else None
     primary_rows = str(output_contract.get("primary_rows") or "").strip()
     row_count_field = str(output_contract.get("row_count_field") or "").strip()
@@ -4532,7 +4535,7 @@ def _month_filter_number(raw: str) -> int | None:
 def build_synthesis_observation(*, index: int, tool_name: str, payload: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
     error = result.get("error") if isinstance(result, dict) else None
     data = result.get("data") if isinstance(result, dict) else None
-    output_contract = _output_contract_for_tool(tool_name, payload)
+    output_contract = resolve_output_contract(tool_name, payload)
     item: dict[str, Any] = {
         "index": int(index),
         "tool_name": str(tool_name or ""),
@@ -4550,7 +4553,7 @@ def build_synthesis_observation(*, index: int, tool_name: str, payload: dict[str
 def build_fact_observation(*, index: int, tool_name: str, payload: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
     error = result.get("error") if isinstance(result, dict) else None
     data = result.get("data") if isinstance(result, dict) else None
-    output_contract = _output_contract_for_tool(tool_name, payload)
+    output_contract = resolve_output_contract(tool_name, payload)
     item: dict[str, Any] = {
         "index": int(index),
         "tool_name": str(tool_name or ""),
@@ -4741,14 +4744,6 @@ def _unique_strings(values: list[str]) -> list[str]:
         seen.add(text)
         out.append(text)
     return out
-
-
-def _output_contract_for_tool(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
-    definition = get_tool_definition(str(tool_name or ""))
-    if definition is None:
-        return {}
-    contract = definition.resolve_output_contract(dict(payload or {}))
-    return contract if isinstance(contract, dict) else {}
 
 
 def _safe_float(value: Any) -> float | None:

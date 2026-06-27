@@ -220,6 +220,7 @@ def _manifest_evidence_contract(output_contract: dict[str, Any]) -> dict[str, An
         "freshness_fields",
         "missing_data_fields",
         "calculation_fields",
+        "model_preview_fields",
     }
     return {key: deepcopy(value) for key, value in output_contract.items() if key in evidence_keys}
 

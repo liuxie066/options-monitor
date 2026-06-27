@@ -113,7 +113,7 @@ perception mode:
 ```
 
 Perception mode is not a hidden user request. Tick notification code must not
-call `handle_assistant_message`, must not ask the model to generate a message,
+call `handle_assistant_turn`, must not ask the model to generate a message,
 and must not make send/skip decisions through Assistant. The authoritative
 notification path remains `tick_notification_flow -> scheduled_notification ->
 delivery adapter`.

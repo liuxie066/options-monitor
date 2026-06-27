@@ -240,22 +240,21 @@ def handle_wechat_clawbot_message(
         kwargs["generate_reply_fn"] = generate_reply_fn
     settings = assistant_settings or _assistant_settings(assistant_config_path=assistant_config_path)
 
-    from src.application.assistant.runtime import handle_assistant_message
+    from src.application.assistant.runtime import handle_assistant_turn
 
     kwargs["settings"] = settings
-    inbound_result = handle_assistant_message(request, **kwargs)
-    data_raw = inbound_result.get("data")
-    data = cast(dict[str, Any], data_raw) if isinstance(data_raw, dict) else {}
+    turn = handle_assistant_turn(request, **kwargs)
+    inbound_result = dict(turn.legacy_response or {})
     return build_response(
         tool_name="inbound.wechat_clawbot",
-        ok=bool(inbound_result.get("ok", False)),
+        ok=turn.ok,
         data={
             "kind": "message",
             "request": request.public_payload(),
-            "response_text": str(data.get("response_text") or ""),
+            "response_text": turn.response_text,
             "inbound_result": inbound_result,
         },
-        error=inbound_result.get("error") if not bool(inbound_result.get("ok", False)) else None,
+        error=turn.error if not turn.ok else None,
         meta=dict(inbound_result.get("meta") or {}),
     )
 

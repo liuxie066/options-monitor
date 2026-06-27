@@ -8,7 +8,13 @@ from typing import Any
 
 import pytest
 
-from src.application.assistant import AssistantSettings, AssistantLlmSettings, PerceptionEngine, handle_assistant_message
+from src.application.assistant import (
+    AssistantSettings,
+    AssistantLlmSettings,
+    PerceptionEngine,
+    handle_assistant_message,
+    handle_assistant_turn,
+)
 from src.application.assistant.agent_loop import (
     AGENT_LOOP_SCHEMA_VERSION,
     AGENT_LOOP_PREVIEW_CAPABILITIES,
@@ -5170,12 +5176,68 @@ def test_assistant_runtime_agent_loop_injects_config_for_symbol_config_read(tmp_
         )
     ]
     assert out["data"]["response_text"].startswith("9992.HK sell_put.max_strike = 145。")
+    turn_result = out["meta"]["assistant"]["turn_result"]
+    assert turn_result["response_text"].startswith("9992.HK sell_put.max_strike = 145。")
+    assert turn_result["render_route"] == "canonical_renderer"
     agent_loop = out["meta"]["assistant"]["llm"]["agent_loop"]
     assert agent_loop["observations"][0]["payload"] == {
         "symbol": "泡泡玛特",
         "strategy": "sell_put",
         "field": "max_strike",
     }
+
+
+def test_assistant_turn_result_preserves_legacy_response_without_public_leak(tmp_path: Path) -> None:
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "schema_version": "symbol_config_read.v1",
+                "symbol": "泡泡玛特",
+                "canonical_symbol": "9992.HK",
+                "found": True,
+                "strategy": "sell_put",
+                "field": "max_strike",
+                "path": "sell_put.max_strike",
+                "value": 145,
+            },
+        )
+
+    def _plan(
+        _text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> ModelTurnResult:
+        return _model_turn_result(
+            "symbol_config_read",
+            {"symbol": "泡泡玛特", "strategy": "sell_put", "field": "max_strike"},
+            goal="查询泡泡玛特 sell put max strike",
+        )
+
+    turn = handle_assistant_turn(
+        AssistantRequest(
+            text="现在泡泡玛特 sell put的max strike是多少？",
+            sender_id="local",
+            message_id="msg_assistant_turn_result_symbol_config_read",
+            config_key="us",
+            config_path=str(tmp_path / "config.us.json"),
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        model_turn_fn=_plan,
+    )
+
+    assert turn.ok is True
+    assert turn.response_text.startswith("9992.HK sell_put.max_strike = 145。")
+    assert turn.render_route == "canonical_renderer"
+    assert turn.legacy_response is not None
+    assert turn.legacy_response["data"]["response_text"] == turn.response_text
+    assert turn.legacy_response["meta"]["assistant"]["turn_result"]["response_text"] == turn.response_text
+    assert "legacy_response" not in turn.public_payload()
 
 
 def test_assistant_runtime_agent_loop_answers_cash_headroom_question(tmp_path: Path) -> None:

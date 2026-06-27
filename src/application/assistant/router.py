@@ -158,7 +158,7 @@ def _parse_perception(
     raise AgentToolError(
         code="AGENT_LOOP_REQUIRED",
         message="自然语言请求必须通过 Assistant AgentLoop 处理。",
-        hint="请使用 handle_assistant_message，或改用明确 slash command，例如 /status、/pending。",
+        hint="请使用 handle_assistant_turn，或改用明确 slash command，例如 /status、/pending。",
     )
 
 

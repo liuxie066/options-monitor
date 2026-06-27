@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 
@@ -9,6 +9,7 @@ PERCEPTION_RESULT_SCHEMA_VERSION = "om-perception-result-v1"
 REASONING_RESOLUTION_SCHEMA_VERSION = "om-reasoning-resolution-v1"
 ACTION_RESULT_SCHEMA_VERSION = "om-action-result-v1"
 OBSERVATION_RESPONSE_SCHEMA_VERSION = "om-observation-response-v1"
+ASSISTANT_TURN_RESULT_SCHEMA_VERSION = "om-assistant-turn-result-v1"
 
 AssistantSafetyClass = Literal["read", "write_preview", "write_apply", "admin_preview", "local"]
 ReasoningStatus = Literal["supported", "preview_required", "unsupported", "clarify", "denied", "failed"]
@@ -149,8 +150,41 @@ class ObservationResponse:
         }
 
 
+@dataclass(frozen=True)
+class AssistantTurnResult:
+    response_text: str
+    render_route: str
+    ok: bool
+    status: str
+    error: dict[str, Any] | None = None
+    permission_request: dict[str, Any] | None = None
+    operation_id: str | None = None
+    command_id: str | None = None
+    tool_calls: tuple[dict[str, Any], ...] = ()
+    evidence: dict[str, Any] | None = None
+    trace: dict[str, Any] | None = None
+    legacy_response: dict[str, Any] | None = field(default=None, repr=False, compare=False)
+
+    def public_payload(self) -> dict[str, Any]:
+        return {
+            "schema_version": ASSISTANT_TURN_RESULT_SCHEMA_VERSION,
+            "response_text": self.response_text,
+            "render_route": self.render_route,
+            "ok": bool(self.ok),
+            "status": self.status,
+            "error": dict(self.error or {}),
+            "permission_request": dict(self.permission_request or {}),
+            "operation_id": self.operation_id,
+            "command_id": self.command_id,
+            "tool_calls": [dict(item) for item in self.tool_calls],
+            "evidence": dict(self.evidence or {}),
+            "trace": dict(self.trace or {}),
+        }
+
+
 __all__ = [
     "ACTION_RESULT_SCHEMA_VERSION",
+    "ASSISTANT_TURN_RESULT_SCHEMA_VERSION",
     "MESSAGE_SCHEMA_VERSION",
     "OBSERVATION_RESPONSE_SCHEMA_VERSION",
     "PERCEPTION_RESULT_SCHEMA_VERSION",
@@ -159,6 +193,7 @@ __all__ = [
     "ActionResult",
     "AssistantRequest",
     "AssistantSafetyClass",
+    "AssistantTurnResult",
     "ObservationResponse",
     "PerceptionResult",
     "ReasoningResolution",
