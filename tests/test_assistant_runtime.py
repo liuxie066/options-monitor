@@ -6,6 +6,8 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from src.application.assistant import AssistantSettings, AssistantLlmSettings, PerceptionEngine, handle_assistant_message
 from src.application.assistant.agent_loop import (
     AGENT_LOOP_SCHEMA_VERSION,
@@ -536,6 +538,11 @@ def test_assistant_command_catalog_drives_llm_allowed_surface() -> None:
     assert capabilities["runtime_status"]["display_name"] == "状态"
     assert capabilities["symbol_config_query"]["tool_name"] == "symbol_config_read"
     assert capabilities["symbol_config_query"]["llm_executable"] is True
+    assert capabilities["cash_headroom_query"]["tool_name"] == "query_cash_headroom"
+    assert capabilities["cash_headroom_query"]["llm_recognizable"] is True
+    assert capabilities["cash_headroom_query"]["llm_executable"] is False
+    assert capabilities["cash_headroom_query"]["planner_allowed"] is True
+    assert capabilities["cash_headroom_query"]["direct_executable"] is False
     assert capabilities["position_exit_analysis"]["supported"] is True
     assert capabilities["position_exit_analysis"]["llm_recognizable"] is True
     assert capabilities["position_exit_analysis"]["llm_executable"] is True
@@ -579,6 +586,7 @@ def test_assistant_tool_bindings_drive_read_capability_surfaces() -> None:
     assert CONFIG_SCOPED_INTENTS == config_required_intent_names()
     assert "candidate_filter_explain" not in CONFIG_SCOPED_INTENTS
     assert "candidate_filter_explain" in planner_config_scoped_tool_names()
+    assert "query_cash_headroom" in planner_config_scoped_tool_names()
     assert symbol_market_config_tool_names() >= {
         "symbol_config_read",
         "symbol_resolve",
@@ -606,6 +614,12 @@ def test_llm_capability_manifest_lists_known_but_non_executable_operations() -> 
     assert "tool_plan" not in capabilities
     assert capabilities["runtime_status"]["llm_executable"] is True
     assert capabilities["symbol_config_query"]["llm_executable"] is True
+    assert capabilities["cash_headroom_query"]["llm_recognizable"] is True
+    assert capabilities["cash_headroom_query"]["llm_executable"] is False
+    assert capabilities["version_check"]["planner_allowed"] is False
+    assert capabilities["version_check"]["llm_executable"] is False
+    assert capabilities["assistant_trace"]["planner_allowed"] is False
+    assert capabilities["assistant_trace"]["llm_executable"] is False
     assert capabilities["manual_trade_open"]["llm_executable"] is False
     assert capabilities["manual_trade_close"]["llm_executable"] is False
     assert capabilities["manual_trade_update"]["llm_executable"] is False
@@ -1548,10 +1562,16 @@ def test_assistant_capability_catalog_has_safe_llm_invariants() -> None:
         assert item["commands"] or item["examples"]
         if item["llm_allowed"] and item["read_only"]:
             assert item["llm_recognizable"] is True
-        if item["llm_allowed"] and item["supported"] and item["tool_name"] is not None and item["read_only"]:
+        if (
+            item["llm_allowed"]
+            and item["supported"]
+            and item["tool_name"] is not None
+            and item["read_only"]
+            and item["direct_executable"]
+        ):
             assert item["llm_executable"] is True
         if item["llm_recognizable"] and not item["llm_executable"]:
-            assert item["capability_id"] in {"help", "symbol_edit"}
+            assert item["capability_id"] in {"help", "symbol_edit"} or item["direct_executable"] is False
             if item["capability_id"] == "symbol_edit":
                 assert item["risk_level"] == "preview_write"
                 assert item["operation_action"] == "preview"
@@ -1567,6 +1587,7 @@ def test_assistant_capability_catalog_has_safe_llm_invariants() -> None:
                 or item["llm_allowed"] is False
                 or item["supported"] is False
                 or item["tool_name"] is None
+                or item["direct_executable"] is False
             )
 
 
@@ -1593,6 +1614,7 @@ def test_agent_loop_planner_catalog_matches_registry_backed_manifest() -> None:
     assert {str(spec.tool_name) for spec in planner_read_specs()} == AGENT_LOOP_READ_TOOLS
     assert manifest_names == AGENT_LOOP_READ_TOOLS | AGENT_LOOP_PREVIEW_CAPABILITIES
     assert "operation_timeline" in AGENT_LOOP_READ_TOOLS
+    assert "query_cash_headroom" in AGENT_LOOP_READ_TOOLS
     assert _validate_model_tool_call_events(
         (
             ModelToolCallEvent(
@@ -1638,12 +1660,29 @@ def test_agent_loop_planner_catalog_matches_registry_backed_manifest() -> None:
     assert "strategy" in symbol_config["input_schema"]
     assert "config_path" not in symbol_config["input_schema"]
     assert "current monitored-symbol config" in " ".join(symbol_config["planner_notes"])
+    cash_headroom = next(tool for tool in _planner_tool_manifest() if tool["name"] == "query_cash_headroom")
+    assert "account" in cash_headroom["input_schema"]
+    assert "cash/cash-like" in " ".join(cash_headroom["planner_notes"])
     position_read = next(tool for tool in _planner_tool_manifest() if tool["name"] == "option_positions_read")
     position_notes = " ".join(position_read["planner_notes"])
     assert "持仓明细" in position_notes
     assert "持仓明晰" in position_notes
     assert "required_capabilities should be []" in position_notes
     assert position_read["semantics"]["answer_capabilities"]["option_positions"]
+
+
+def test_agent_loop_planner_input_includes_cash_headroom_only_for_cash_questions() -> None:
+    cash_payload = json.loads(
+        _planner_input_text("lx账户sell put需要的资金是不是已经超过了账户现有的现金加货基？", conversation_context=None)
+    )
+    chinese_cash_payload = json.loads(
+        _planner_input_text("lx账户卖put需要的资金是不是已经超过了账户现有的现金加货基？", conversation_context=None)
+    )
+    income_payload = json.loads(_planner_input_text("6月收益分析", conversation_context=None))
+
+    assert "query_cash_headroom" in {tool["name"] for tool in cash_payload["tools"]}
+    assert "query_cash_headroom" in {tool["name"] for tool in chinese_cash_payload["tools"]}
+    assert "query_cash_headroom" not in {tool["name"] for tool in income_payload["tools"]}
 
 
 def test_agent_loop_symbol_edit_provider_schema_requires_flat_setting_paths() -> None:
@@ -1675,6 +1714,63 @@ def test_agent_loop_symbol_edit_rejects_nested_setting_object() -> None:
     assert err.code == "INPUT_ERROR"
     assert err.details is not None
     assert err.details["schema_errors"][0]["path"] == "set.sell_put"
+
+
+def test_agent_loop_rejects_analysis_query_for_symbol_config_question() -> None:
+    err = _validate_model_tool_call_events(
+        (
+            ModelToolCallEvent(
+                event_id="model_tool_call_1",
+                tool_call_id="call_analysis",
+                tool_name="analysis_query",
+                arguments={"sql": "select broker from monitored_symbols limit 1"},
+            ),
+        ),
+        question="现在中国海洋石油的 sell put的max strike是多少？",
+    )
+
+    assert err is not None
+    assert err.code == "PLAN_RISK_MISMATCH"
+    assert err.details is not None
+    assert err.details["required_tool"] == "symbol_config_read"
+    assert err.details["misused_tool"] == "analysis_query"
+
+    chinese_err = _validate_model_tool_call_events(
+        (
+            ModelToolCallEvent(
+                event_id="model_tool_call_2",
+                tool_call_id="call_analysis_cn",
+                tool_name="analysis_query",
+                arguments={"sql": "select broker from monitored_symbols limit 1"},
+            ),
+        ),
+        question="现在中国海洋石油的卖put最大行权价是多少？",
+    )
+
+    assert chinese_err is not None
+    assert chinese_err.code == "PLAN_RISK_MISMATCH"
+    assert chinese_err.details is not None
+    assert chinese_err.details["required_tool"] == "symbol_config_read"
+
+
+def test_agent_loop_rejects_wrong_tool_for_cash_headroom_question() -> None:
+    for tool_name in ("healthcheck", "analysis_query"):
+        err = _validate_model_tool_call_events(
+            (
+                ModelToolCallEvent(
+                    event_id=f"model_tool_call_{tool_name}",
+                    tool_call_id=f"call_{tool_name}",
+                    tool_name=tool_name,
+                    arguments={"sql": "select 1"} if tool_name == "analysis_query" else {},
+                ),
+            ),
+            question="lx账户sell put需要的资金是不是已经超过了账户现有的现金加货基？",
+        )
+
+        assert err is not None
+        assert err.code == "PLAN_RISK_MISMATCH"
+        assert err.details is not None
+        assert err.details["required_tool"] == "query_cash_headroom"
 
 
 def test_agent_loop_planner_input_scopes_analysis_views_for_income_questions() -> None:
@@ -2539,6 +2635,29 @@ def test_assistant_runtime_renders_analysis_result_diagnostic_warnings() -> None
     assert "提示：候选诊断缺失，不能判断确定原因。" in text
     assert "覆盖范围：视图 candidate_filter_diagnostics。" in text
     assert text.endswith("数据来源：OM read-only analysis workspace")
+
+
+def test_assistant_runtime_renders_cash_headroom_conclusion() -> None:
+    text = render_canonical_tool_result(
+        renderer_key="cash_headroom",
+        data={
+            "account": "lx",
+            "cash_secured_used_cny": 312127.76,
+            "cash_available_total_cny": 300000.0,
+            "cash_free_total_cny": -12127.76,
+            "cash_secured_total_by_ccy": {"HKD": 262000.0, "USD": 12500.0},
+            "cash_secured_usage_reliable": True,
+            "cash_source": "futu_cash_like_assets",
+        },
+        tool_result=build_response(tool_name="query_cash_headroom", ok=True),
+    )
+
+    assert text.startswith("lx 账户 sell put 担保金已经超过账户现有现金加货基。")
+    assert "Sell Put 已占用担保金：CNY 312,127.76" in text
+    assert "现金加货基（全币种折算）：CNY 300,000" in text
+    assert "缺口：CNY 12,127.76" in text
+    assert "数据来源：OM cash headroom query" in text
+    assert "| broker |" not in text
 
 
 def test_assistant_runtime_renders_analysis_catalog_without_sql_examples() -> None:
@@ -5057,6 +5176,59 @@ def test_assistant_runtime_agent_loop_injects_config_for_symbol_config_read(tmp_
         "strategy": "sell_put",
         "field": "max_strike",
     }
+
+
+def test_assistant_runtime_agent_loop_answers_cash_headroom_question(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "account": "lx",
+                "cash_secured_used_cny": 312127.76,
+                "cash_available_total_cny": 300000.0,
+                "cash_free_total_cny": -12127.76,
+                "cash_secured_total_by_ccy": {"HKD": 262000.0, "USD": 12500.0},
+                "cash_secured_usage_reliable": True,
+                "cash_source": "futu_cash_like_assets",
+            },
+        )
+
+    def _plan(
+        _text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> ModelTurnResult:
+        return _model_turn_result(
+            "query_cash_headroom",
+            {"account": "lx"},
+            goal="判断 lx sell put 担保金是否超过现金加货基",
+            purpose="读取 sell put 现金担保和现金类资产",
+        )
+
+    out = handle_assistant_message(
+        AssistantRequest(
+            text="lx账户sell put需要的资金是不是已经超过了账户现有的现金加货基？",
+            sender_id="local",
+            message_id="msg_agent_loop_cash_headroom",
+            config_key="us",
+            config_path=str(tmp_path / "config.us.json"),
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        model_turn_fn=_plan,
+    )
+
+    assert out["ok"] is True
+    assert calls == [("query_cash_headroom", {"account": "lx", "config_path": str(tmp_path / "config.us.json")})]
+    assert out["data"]["response_text"].startswith("lx 账户 sell put 担保金已经超过账户现有现金加货基。")
+    assert "健康检查" not in out["data"]["response_text"]
 
 
 def test_assistant_runtime_agent_loop_injects_config_for_candidate_filter_explain(tmp_path: Path) -> None:

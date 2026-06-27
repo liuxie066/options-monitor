@@ -108,12 +108,13 @@ def _load_runtime_config(
     return _normalize_runtime_config(cfg)
 
 
-def _load_exchange_rate_payload(*, cache_path: Path, enabled: bool) -> dict:
+def _load_exchange_rate_payload(*, cache_path: Path, enabled: bool, write_cache: bool = True) -> dict:
     if not enabled:
         return {}
     payload = get_exchange_rates_or_fetch_latest(
         cache_path=cache_path,
         max_age_hours=24,
+        write_cache=write_cache,
     )
     return payload if isinstance(payload, dict) else {}
 
@@ -151,6 +152,7 @@ def query_sell_put_cash(
     out_dir: str | Path = 'output_shared/state',
     base_dir: Path | None = None,
     runtime_config: dict | None = None,
+    write_cache: bool = True,
 ) -> dict:
     """执行卖 put 现金占用查询并按指定格式输出。"""
     base = (base_dir or Path(__file__).resolve().parents[2]).resolve()
@@ -161,7 +163,8 @@ def query_sell_put_cash(
     out_dir_path = Path(out_dir)
     if not out_dir_path.is_absolute():
         out_dir_path = (base / out_dir_path).resolve()
-    out_dir_path.mkdir(parents=True, exist_ok=True)
+    if write_cache:
+        out_dir_path.mkdir(parents=True, exist_ok=True)
 
     portfolio = load_account_portfolio_context(
         base=base,
@@ -177,12 +180,14 @@ def query_sell_put_cash(
         fetch_futu_portfolio_context_fn=fetch_futu_portfolio_context,
         is_fresh_fn=lambda _path, _ttl_sec: False,
         load_json_fn=load_json,
+        write_cache=write_cache,
     )
 
     option_records = _load_option_position_records(data_config_path)
     exchange_rate_payload = _load_exchange_rate_payload(
         cache_path=(out_dir_path / 'rate_cache.json').resolve(),
         enabled=(not no_exchange_rates),
+        write_cache=write_cache,
     )
     opt = build_option_positions_context(
         option_records,

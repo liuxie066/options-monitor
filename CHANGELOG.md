@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 1.2.343 - 2026-06-27
+
+### Changed
+- Rebuilt Assistant read-tool bindings from the Tool Gateway registry while keeping direct-executable capability metadata
+  scoped to intents the inbound reasoning layer can actually run.
+- Made the sell-put cash-headroom query a pure read tool for Assistant use, avoiding local report/cache writes on that
+  path.
+
+### Fixed
+- Routed sell-put cash sufficiency questions to the cash-headroom tool instead of healthcheck or generic analysis output.
+- Added a canonical cash-headroom renderer so ClawBot answers with the exceed/not-exceed conclusion rather than raw tool
+  tables.
+- Guarded max-strike/config questions from being answered through generic analysis queries, including common Chinese
+  phrasing such as "卖 put 最大行权价".
+
 ## 1.2.342 - 2026-06-27
 
 ### Changed

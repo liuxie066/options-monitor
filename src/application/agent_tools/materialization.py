@@ -120,6 +120,42 @@ def _get_close_advice_tool(
     )
 
 
+_CASH_HEADROOM_OUTPUT_CONTRACT = {
+    "schema_version": "query_cash_headroom.output.v1",
+    "canonical_renderer": "cash_headroom",
+    "guard_profile": "cash_headroom",
+    "source_label": "OM cash headroom query",
+    "result_shape": "scalar",
+    "fact_fields": [
+        "account",
+        "cash_secured_used_cny",
+        "cash_available_total_cny",
+        "cash_free_total_cny",
+        "cash_secured_total_by_ccy",
+        "cash_secured_usage_reliable",
+    ],
+    "missing_data_fields": ["cash_secured_unavailable_by_symbol", "cash_secured_unavailable_reason"],
+}
+
+_CASH_HEADROOM_PLANNER_NOTES = (
+    "Use for sell put collateral vs account cash/cash-like sufficiency questions.",
+    "Do not use healthcheck for cash sufficiency; healthcheck only reports system readiness.",
+)
+
+_CASH_HEADROOM_PLANNER_SEMANTICS = {
+    "answers": [
+        "sell put cash-secured collateral currently used",
+        "cash plus cash-like assets converted to CNY",
+        "whether used collateral exceeds cash-like assets",
+    ],
+    "not_promised": [
+        "candidate recommendation ranking",
+        "config max strike thresholds",
+        "notification delivery health",
+    ],
+}
+
+
 SCAN_OPPORTUNITIES_TOOL = build_agent_tool(
     name="scan_opportunities",
     description="Run the symbols scan pipeline and return normalized summary rows.",
@@ -146,7 +182,6 @@ QUERY_CASH_HEADROOM_TOOL = build_agent_tool(
     description="Return sell-put cash usage and available/free cash summary.",
     requires=("runtime_config", "sqlite_data_config", "opend"),
     capabilities=("cash_query", "read_only"),
-    side_effects=("writes_local_reports",),
     input_schema={
         "config_key": "us|hk",
         "config_path": "optional explicit config path",
@@ -157,13 +192,15 @@ QUERY_CASH_HEADROOM_TOOL = build_agent_tool(
         "no_exchange_rates": "optional bool",
     },
     handler=_query_cash_headroom_tool,
-    read_only=True,
-    risk_level="local_write",
+    pure_read=True,
     safe_default_input={},
     examples=(
         {"input": {"config_key": "us", "account": "lx"}},
         {"input": {"config_key": "us", "account": "sy"}},
     ),
+    output_contract=_CASH_HEADROOM_OUTPUT_CONTRACT,
+    planner_notes=_CASH_HEADROOM_PLANNER_NOTES,
+    planner_semantics=_CASH_HEADROOM_PLANNER_SEMANTICS,
 )
 
 GET_PORTFOLIO_CONTEXT_TOOL = build_agent_tool(

@@ -57,6 +57,7 @@ def render_inbound_text(*, intent: PerceptionResult | None, tool_result: dict[st
         "symbol_config_query": "symbol_config",
         "symbol_resolve": "symbol_resolve",
         "candidate_filter_explain": "candidate_filter_explain",
+        "cash_headroom_query": "cash_headroom",
     }.get(name)
     if renderer_key:
         rendered = render_canonical_tool_result(renderer_key=renderer_key, data=data, tool_result=tool_result)
@@ -276,6 +277,50 @@ def _render_analysis_result(data: dict[str, Any], tool_result: dict[str, Any]) -
         lines.append(f"其余 {len(rows) - 12} 行已省略。")
     lines.extend(warning_lines)
     lines.append("数据来源：OM read-only analysis workspace")
+    return "\n".join(lines)
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _render_cash_headroom(data: dict[str, Any], _tool_result: dict[str, Any]) -> str:
+    account = _value(data.get("account"))
+    account_prefix = "" if account == "-" else f"{account} 账户 "
+    unavailable_reason = str(data.get("cash_secured_unavailable_reason") or "").strip()
+    if data.get("cash_secured_usage_reliable") is False:
+        reason = f"：{unavailable_reason}" if unavailable_reason else "。"
+        return f"{account_prefix}sell put 担保金是否超过现金加货基暂时不能确认{reason}\n数据来源：OM cash headroom query".strip()
+
+    used = _float_or_none(data.get("cash_secured_used_cny"))
+    available = _float_or_none(data.get("cash_available_total_cny"))
+    if used is None or available is None:
+        return (
+            f"{account_prefix}sell put 担保金是否超过现金加货基暂时不能确认：缺少 CNY 折算后的担保金或现金类资产。\n"
+            "数据来源：OM cash headroom query"
+        ).strip()
+
+    free = _float_or_none(data.get("cash_free_total_cny"))
+    if free is None:
+        free = available - used
+    exceeds = used > available
+    conclusion = "已经超过" if exceeds else "没有超过"
+    gap_label = "缺口" if exceeds else "余量"
+    gap_value = abs(free)
+    lines = [f"{account_prefix}sell put 担保金{conclusion}账户现有现金加货基。".strip()]
+    lines.append(f"- Sell Put 已占用担保金：{_money(used, 'CNY')}")
+    lines.append(f"- 现金加货基（全币种折算）：{_money(available, 'CNY')}")
+    lines.append(f"- {gap_label}：{_money(gap_value, 'CNY')}")
+    by_ccy = data.get("cash_secured_total_by_ccy")
+    if isinstance(by_ccy, dict) and by_ccy:
+        lines.append(f"- 担保金原币合计：{_format_ccy_amounts(by_ccy)}")
+    source = str(data.get("cash_source") or "").strip()
+    if source:
+        lines.append(f"- 现金口径：{source}")
+    lines.append("数据来源：OM cash headroom query")
     return "\n".join(lines)
 
 
@@ -1743,4 +1788,5 @@ _CANONICAL_RENDERERS: dict[str, _CanonicalRenderer] = {
     "symbol_config": lambda data, _tool_result: _render_symbol_config(data),
     "symbol_resolve": lambda data, _tool_result: _render_symbol_resolve(data),
     "candidate_filter_explain": lambda data, _tool_result: _render_candidate_filter_explain(data),
+    "cash_headroom": _render_cash_headroom,
 }
