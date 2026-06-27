@@ -12,7 +12,6 @@ from src.application.assistant import (
     AssistantSettings,
     AssistantLlmSettings,
     PerceptionEngine,
-    handle_assistant_message,
     handle_assistant_turn,
 )
 from src.application.assistant.agent_loop import (
@@ -94,6 +93,17 @@ from src.application.assistant.operation_store import InboundOperationStore
 from src.infrastructure.openai_chat_completions import create_chat_completion_from_payload, create_json_chat_completion, extract_chat_completion_text
 from src.infrastructure.openai_chat_completions import create_tool_call_chat_completion
 from src.infrastructure.openai_responses import OpenAIResponsesError, create_response_from_payload, create_structured_response, create_tool_call_response, extract_response_text
+
+
+def handle_assistant_response(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    turn = handle_assistant_turn(*args, **kwargs)
+    return build_response(
+        tool_name=turn.tool_name,
+        ok=turn.ok,
+        data=dict(turn.data or turn.public_payload()),
+        error=turn.error if not turn.ok else None,
+        meta=dict(turn.meta or {}),
+    )
 
 
 def _planner_trace(*, reason: str = "accepted", schema_version: str = TOOL_PLAN_SCHEMA_VERSION) -> dict[str, Any]:
@@ -2255,7 +2265,7 @@ def test_assistant_runtime_executes_slash_command_through_inbound_router(tmp_pat
         calls.append((tool_name, payload))
         return build_response(tool_name=tool_name, ok=True, data={"summary": {"ok": True}})
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="/status",
             sender_id="local",
@@ -2367,7 +2377,7 @@ def test_assistant_runtime_executes_assigned_stock_slash_command(tmp_path: Path)
             },
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="/assigned-stock lx NVDA",
             sender_id="local",
@@ -2713,8 +2723,8 @@ def test_assistant_runtime_does_not_overwrite_original_audit_on_duplicate_replay
         audit_db=str(audit_db),
     )
 
-    first = handle_assistant_message(request, execute_tool_fn=_execute)
-    second = handle_assistant_message(request, execute_tool_fn=_execute)
+    first = handle_assistant_response(request, execute_tool_fn=_execute)
+    second = handle_assistant_response(request, execute_tool_fn=_execute)
 
     assert first["ok"] is True
     assert second["meta"]["idempotent_replay"] is True
@@ -2731,7 +2741,7 @@ def test_assistant_runtime_does_not_deterministically_fallback_for_read_text(tmp
         calls.append((tool_name, payload))
         return build_response(tool_name=tool_name, ok=True, data={"summary": {"ok": True}})
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="状态",
             sender_id="local",
@@ -2766,7 +2776,7 @@ def test_assistant_runtime_requires_config_scope_for_runtime_status(tmp_path: Pa
         calls.append((tool_name, payload))
         return build_response(tool_name=tool_name, ok=True, data={"summary": {"ok": True}})
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="/status",
             sender_id="local",
@@ -2789,7 +2799,7 @@ def test_agent_loop_mode_does_not_mark_deterministic_command_as_loop_tool_use(tm
         calls.append((tool_name, payload))
         return build_response(tool_name=tool_name, ok=True, data={"summary": {"ok": True}})
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="/status",
             sender_id="local",
@@ -2825,7 +2835,7 @@ def test_assistant_runtime_records_command_pending_trace_in_audit(tmp_path: Path
         calls.append((tool_name, payload))
         return build_response(tool_name=tool_name, ok=True, data={"summary": {"ok": True}})
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="/pending",
             sender_id="local",
@@ -2886,7 +2896,7 @@ def test_assistant_runtime_does_not_fallback_when_llm_unavailable(tmp_path: Path
         calls.append((tool_name, payload))
         return build_response(tool_name=tool_name, ok=True, data={"summary": {"ok": True}})
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="你好",
             sender_id="local",
@@ -3046,7 +3056,7 @@ def test_assistant_runtime_does_not_fallback_for_unknown_llm_permission_denial(t
         assert conversation_context is not None
         return _model_turn_result("unsupported_project_command", goal=text)
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="状态",
             sender_id="local",
@@ -3094,7 +3104,7 @@ def test_assistant_runtime_does_not_fallback_for_mismatched_known_llm_denial(tmp
         assert conversation_context is not None
         return _model_turn_result("manual_trade_open", {"raw_text": "记录开仓 sy NVDA"}, goal=text)
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="状态",
             sender_id="local",
@@ -3127,7 +3137,7 @@ def test_assistant_runtime_does_not_fallback_for_mismatched_known_llm_denial(tmp
 
 
 def test_assistant_runtime_unknown_slash_command_returns_clarification(tmp_path: Path) -> None:
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="/unknown",
             sender_id="local",
@@ -3150,7 +3160,7 @@ def test_assistant_runtime_unknown_slash_command_does_not_call_llm(tmp_path: Pat
     ) -> ModelTurnResult:
         raise AssertionError("slash commands are resolved only by the command catalog")
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="/not-a-command",
             sender_id="local",
@@ -3171,7 +3181,7 @@ def test_assistant_runtime_unknown_slash_command_does_not_call_llm(tmp_path: Pat
 
 
 def test_assistant_runtime_keeps_llm_disabled_for_unrecognized_text(tmp_path: Path) -> None:
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="查一下",
             sender_id="local",
@@ -3188,7 +3198,7 @@ def test_assistant_runtime_keeps_llm_disabled_for_unrecognized_text(tmp_path: Pa
 
 
 def test_assistant_runtime_skips_agent_loop_when_agent_loop_is_disabled(tmp_path: Path) -> None:
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="查一下",
             sender_id="local",
@@ -3227,7 +3237,7 @@ def test_assistant_runtime_agent_loop_routes_read_text_without_deterministic_ali
         assert conversation_context is not None
         return _model_turn_result("runtime_status", goal=text)
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="状态",
             sender_id="local",
@@ -3296,7 +3306,7 @@ def test_assistant_runtime_agent_loop_routes_provider_events_without_tool_plan_b
             ),
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="lx 6月收益分析",
             sender_id="local",
@@ -3349,7 +3359,7 @@ def test_assistant_runtime_slash_record_update_bypasses_agent_loop(tmp_path: Pat
     ) -> ModelTurnResult:
         raise AssertionError("slash protocol commands must bypass AgentLoop")
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="/record-update premium_per_share=2.75",
             sender_id="local",
@@ -3440,7 +3450,7 @@ def test_assistant_runtime_uses_llm_reply_for_non_business_text_after_low_confid
             },
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="你是什么模型",
             sender_id="local",
@@ -3502,7 +3512,7 @@ def test_assistant_runtime_creates_memory_suggestion_sidecar_for_explicit_prefer
             },
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="请记住：调参时先看 replay 和拒绝原因。",
             sender_id="local",
@@ -3553,7 +3563,7 @@ def test_assistant_runtime_memory_suggestion_skips_runtime_fact(tmp_path: Path) 
     ) -> LlmReplyResult:
         return LlmReplyResult(response_text="收到。", trace={**_planner_trace(reason="general_reply")})
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="请记住：今天 NVDA 当前价格是 180。",
             sender_id="local",
@@ -3577,7 +3587,7 @@ def test_assistant_runtime_memory_suggestion_skips_runtime_fact(tmp_path: Path) 
 def test_assistant_runtime_memory_suggestion_skips_permission_denied_response(tmp_path: Path) -> None:
     memory_dir = tmp_path / "assistant_memory"
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="请记住：以后调参先看 replay 和拒绝原因。",
             sender_id="bad_sender",
@@ -3624,14 +3634,14 @@ def test_assistant_runtime_memory_suggestion_idempotent_replay_does_not_duplicat
     )
     settings = AssistantSettings(llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"))
 
-    first = handle_assistant_message(
+    first = handle_assistant_response(
         request,
         settings=settings,
         model_turn_fn=_plan,
         generate_reply_fn=_reply,
         memory_suggestion_dir=memory_dir,
     )
-    second = handle_assistant_message(
+    second = handle_assistant_response(
         request,
         settings=settings,
         model_turn_fn=_plan,
@@ -3673,7 +3683,7 @@ def test_assistant_runtime_does_not_use_llm_reply_for_context_validation_error(t
     ) -> LlmReplyResult:
         raise AssertionError("context validation errors must not fall back to general LLM reply")
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="你是什么模型",
             sender_id="local",
@@ -3711,7 +3721,7 @@ def test_assistant_runtime_does_not_use_llm_reply_for_write_like_text(tmp_path: 
     ) -> LlmReplyResult:
         raise AssertionError("write-like input must not use general LLM reply")
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="记录一笔开仓",
             sender_id="local",
@@ -3732,7 +3742,7 @@ def test_assistant_runtime_does_not_use_llm_reply_for_write_like_text(tmp_path: 
 
 
 def test_assistant_runtime_disabled_setting_skips_command_facade(tmp_path: Path) -> None:
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="/status",
             sender_id="local",
@@ -3750,7 +3760,7 @@ def test_assistant_runtime_disabled_setting_skips_command_facade(tmp_path: Path)
 
 
 def test_assistant_runtime_reports_llm_unavailable_when_enabled_without_provider(tmp_path: Path) -> None:
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="帮我看看现在怎么样",
             sender_id="local",
@@ -3791,7 +3801,7 @@ def test_assistant_runtime_routes_valid_llm_plan_through_inbound_router(tmp_path
         }
         return _model_turn_result("monthly_income_report", {"month": "2026-05"}, goal=text)
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="帮我看看这个月赚了多少",
             sender_id="local",
@@ -3869,7 +3879,7 @@ def test_assistant_runtime_reconciles_missing_llm_month_from_text_filter(tmp_pat
         assert conversation_context is not None
         return _model_turn_result("monthly_income_report", {"account": "sy"}, goal=text)
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="查远端 sy 2026-06 收益摘要",
             sender_id="local",
@@ -3908,7 +3918,7 @@ def test_assistant_runtime_reconciles_stale_llm_month_from_text_filter(tmp_path:
         assert conversation_context is not None
         return _model_turn_result("monthly_income_report", {"account": "sy", "month": "2026-05"}, goal=text)
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="6月 sy 的收益",
             sender_id="local",
@@ -3973,7 +3983,7 @@ def test_assistant_runtime_routes_core_read_only_planner_tools(tmp_path: Path) -
         return _model_turn_result(tool_name, arguments, goal=text)
 
     for index, (text, _tool_name, _arguments, expected_call) in enumerate(cases):
-        out = handle_assistant_message(
+        out = handle_assistant_response(
             AssistantRequest(
                 text=text,
                 sender_id="local",
@@ -4002,7 +4012,7 @@ def test_assistant_runtime_builds_context_from_same_conversation(tmp_path: Path)
         calls.append((tool_name, payload))
         return build_response(tool_name=tool_name, ok=True, data={"summary": {"ok": True}})
 
-    first = handle_assistant_message(
+    first = handle_assistant_response(
         AssistantRequest(
             text="/status",
             sender_id="ou_1",
@@ -4028,7 +4038,7 @@ def test_assistant_runtime_builds_context_from_same_conversation(tmp_path: Path)
         assert settings.context_window_messages == 4
         return _model_turn_result("runtime_status", goal=text)
 
-    second = handle_assistant_message(
+    second = handle_assistant_response(
         AssistantRequest(
             text="刚才那个再看一下",
             sender_id="ou_1",
@@ -4083,7 +4093,7 @@ def test_assistant_runtime_injects_conversation_for_notification_perception_read
         assert text == "刚才通知发生了什么"
         return _model_turn_result("notification_perception_read", goal=text)
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="刚才通知发生了什么",
             sender_id="user_1",
@@ -4133,7 +4143,7 @@ def test_assistant_runtime_overrides_notification_perception_conversation(tmp_pa
             goal=text,
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="刚才通知发生了什么",
             sender_id="user_1",
@@ -4414,7 +4424,7 @@ def test_assistant_runtime_two_turn_candidate_net_income_followup_uses_projectio
             )
         raise AssertionError(text)
 
-    first = handle_assistant_message(
+    first = handle_assistant_response(
         AssistantRequest(
             text=first_text,
             sender_id="local",
@@ -4428,7 +4438,7 @@ def test_assistant_runtime_two_turn_candidate_net_income_followup_uses_projectio
         settings=AssistantSettings(llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2")),
         model_turn_fn=_plan,
     )
-    second = handle_assistant_message(
+    second = handle_assistant_response(
         AssistantRequest(
             text=followup_text,
             sender_id="local",
@@ -4540,7 +4550,7 @@ def test_assistant_runtime_two_turn_account_net_income_override_suppresses_candi
             )
         raise AssertionError(text)
 
-    first = handle_assistant_message(
+    first = handle_assistant_response(
         AssistantRequest(
             text=first_text,
             sender_id="local",
@@ -4554,7 +4564,7 @@ def test_assistant_runtime_two_turn_account_net_income_override_suppresses_candi
         settings=AssistantSettings(llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2")),
         model_turn_fn=_plan,
     )
-    second = handle_assistant_message(
+    second = handle_assistant_response(
         AssistantRequest(
             text=override_text,
             sender_id="local",
@@ -4840,7 +4850,7 @@ def test_assistant_runtime_agent_loop_is_bounded_read_only_router(tmp_path: Path
         assert conversation_context is not None
         return _model_turn_result("runtime_status", goal=text)
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="帮我看一下状态",
             sender_id="local",
@@ -4992,7 +5002,7 @@ def test_assistant_runtime_agent_loop_executes_planned_cashflow_detail(tmp_path:
             ),
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="分析 lx 6月的净现金流明细",
             sender_id="local",
@@ -5085,7 +5095,7 @@ def test_assistant_runtime_agent_loop_satisfies_single_account_return_capability
             "account_return",
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="lx 6月 收益",
             sender_id="local",
@@ -5147,7 +5157,7 @@ def test_assistant_runtime_agent_loop_injects_config_for_symbol_config_read(tmp_
             purpose="读取当前监控标的配置",
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="现在泡泡玛特 sell put的max strike是多少？",
             sender_id="local",
@@ -5187,7 +5197,7 @@ def test_assistant_runtime_agent_loop_injects_config_for_symbol_config_read(tmp_
     }
 
 
-def test_assistant_turn_result_preserves_legacy_response_without_public_leak(tmp_path: Path) -> None:
+def test_assistant_turn_result_exposes_structured_data_without_legacy_response(tmp_path: Path) -> None:
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return build_response(
             tool_name=tool_name,
@@ -5234,9 +5244,10 @@ def test_assistant_turn_result_preserves_legacy_response_without_public_leak(tmp
     assert turn.ok is True
     assert turn.response_text.startswith("9992.HK sell_put.max_strike = 145。")
     assert turn.render_route == "canonical_renderer"
-    assert turn.legacy_response is not None
-    assert turn.legacy_response["data"]["response_text"] == turn.response_text
-    assert turn.legacy_response["meta"]["assistant"]["turn_result"]["response_text"] == turn.response_text
+    assert turn.data is not None
+    assert turn.data["response_text"] == turn.response_text
+    assert turn.meta is not None
+    assert turn.meta["assistant"]["turn_result"]["response_text"] == turn.response_text
     assert "legacy_response" not in turn.public_payload()
 
 
@@ -5271,7 +5282,7 @@ def test_assistant_runtime_agent_loop_answers_cash_headroom_question(tmp_path: P
             purpose="读取 sell put 现金担保和现金类资产",
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="lx账户sell put需要的资金是不是已经超过了账户现有的现金加货基？",
             sender_id="local",
@@ -5344,7 +5355,7 @@ def test_assistant_runtime_agent_loop_injects_config_for_candidate_filter_explai
             purpose="读取单标的候选过滤 trace",
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="泡泡玛特被哪个参数过滤了？",
             sender_id="local",
@@ -5463,7 +5474,7 @@ def test_assistant_runtime_candidate_filter_metric_acronyms_do_not_trigger_rende
             purpose="读取单标的候选过滤 trace",
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="泡泡玛特被哪个参数过滤了？",
             sender_id="local",
@@ -5524,7 +5535,7 @@ def test_assistant_runtime_llm_intent_routes_symbol_config_to_market_sibling_con
     ) -> ModelTurnResult:
         return _model_turn_result("symbol_config_read", {"symbol": "泡泡玛特", "strategy": "sell_put", "field": "max_strike"}, goal=_text)
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="现在泡泡玛特 sell put的max strike是多少？",
             sender_id="local",
@@ -5594,7 +5605,7 @@ def test_assistant_runtime_llm_intent_routes_candidate_filter_to_market_sibling_
             goal=_text,
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="lx 泡泡玛特 sell_put 被哪个参数过滤了？",
             sender_id="local",
@@ -5670,7 +5681,7 @@ def test_assistant_runtime_agent_loop_satisfies_position_read_tool_capabilities(
             "read_only",
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="持仓明晰",
             sender_id="local",
@@ -5754,7 +5765,7 @@ def test_assistant_runtime_agent_loop_routes_assigned_stock_holding_pnl(tmp_path
             "read_only",
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="查看 lx 指派正股持仓盈亏",
             sender_id="local",
@@ -5841,7 +5852,7 @@ def test_assistant_runtime_agent_loop_analyzes_assigned_stock_when_requested(tmp
             "read_only",
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="分析 lx 指派正股持仓盈亏",
             sender_id="local",
@@ -5922,7 +5933,7 @@ def test_assistant_runtime_agent_loop_assigned_stock_falls_back_from_invented_am
             purpose="读取指派正股持仓盈亏",
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="查看 lx 指派正股持仓盈亏",
             sender_id="local",
@@ -5991,7 +6002,7 @@ def test_assistant_runtime_agent_loop_grounded_positions_fall_back_from_wrong_co
             purpose="读取 open 期权持仓并分析",
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="分析当前持仓",
             sender_id="local",
@@ -6060,7 +6071,7 @@ def test_assistant_runtime_agent_loop_reports_unsatisfied_combined_income_capabi
             "combined_account_return",
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="合并账户 5月总收益",
             sender_id="local",
@@ -6167,7 +6178,7 @@ def test_assistant_runtime_agent_loop_canonical_income_uses_untruncated_fact_obs
             "combined_account_return",
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="6月收益",
             sender_id="local",
@@ -6252,7 +6263,7 @@ def test_assistant_runtime_agent_loop_uses_canonical_fallback_when_synthesis_una
             purpose="查询收益情况",
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="查询lx账户2026年6月的收益情况",
             sender_id="local",
@@ -6378,7 +6389,7 @@ def test_assistant_runtime_agent_loop_analysis_query_uses_task_shaped_fallback(t
             goal="对比 lx 和 sy 的账户收益",
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="对比lx和sy的账户收益，有什么不同？",
             sender_id="local",
@@ -6562,7 +6573,7 @@ def test_agent_loop_event_loop_waits_for_model_continuation_for_breakdown_gap(tm
             purpose="先对比账户级收益",
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="分析 lx 和 sy 收益差异主要来自哪里",
             sender_id="local",
@@ -6659,7 +6670,7 @@ def test_agent_loop_event_loop_waits_for_model_continuation_for_missing_account_
             purpose="读取 lx 账户收益",
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="对比 lx 和 sy 的账户收益",
             sender_id="local",
@@ -6821,7 +6832,7 @@ def test_agent_loop_event_loop_does_not_run_legacy_duplicate_followup_query(tmp_
             purpose="重复查询账户级收益",
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="分析 lx 和 sy 收益差异主要来自哪里",
             sender_id="local",
@@ -6940,7 +6951,7 @@ def test_agent_loop_event_loop_surfaces_recoverable_analysis_query_error_for_con
             purpose="查询 lx 收益",
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="查询 lx 六月收益",
             sender_id="local",
@@ -7010,7 +7021,7 @@ def test_agent_loop_event_loop_keeps_bad_preflight_repair_as_model_observation(t
             purpose="查询 lx 收益",
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="查询 lx 六月收益",
             sender_id="local",
@@ -7062,7 +7073,7 @@ def test_agent_loop_event_loop_low_risk_empty_read_stays_rendered_without_global
             purpose="查询收益",
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="查询收益",
             sender_id="local",
@@ -7218,7 +7229,7 @@ def test_assistant_runtime_agent_loop_answer_guard_rewrites_contradictory_income
             purpose="获取所有月份的总净现金流明细",
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="历史以来总的净现金流",
             sender_id="local",
@@ -7302,7 +7313,7 @@ def test_assistant_runtime_agent_loop_answer_guard_falls_back_on_analysis_policy
             purpose="读取收益率分析",
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="分析 lx 收益率",
             sender_id="local",
@@ -7384,7 +7395,7 @@ def test_assistant_runtime_agent_loop_answer_guard_falls_back_on_missing_diagnos
             purpose="读取候选过滤诊断",
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="为什么 NVDA 没出现在候选里？",
             sender_id="local",
@@ -7454,7 +7465,7 @@ def test_assistant_runtime_agent_loop_answer_guard_falls_back_on_unsupported_quo
             purpose="读取指派正股报价状态",
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="为什么 sy FUTU 指派正股没有浮盈亏？",
             sender_id="local",
@@ -7548,7 +7559,7 @@ def test_assistant_runtime_agent_loop_answer_guard_rewrites_internal_ux_leak(tmp
             purpose="读取账户收益对比",
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="对比 lx 和 sy 的账户收益",
             sender_id="local",
@@ -7634,7 +7645,7 @@ def test_assistant_runtime_agent_loop_answer_guard_accepts_derived_difference_re
             purpose="读取账户收益对比",
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="对比 lx 和 sy 的账户收益",
             sender_id="local",
@@ -7718,7 +7729,7 @@ def test_assistant_runtime_agent_loop_answer_guard_rewrites_wrong_derived_rate(t
             purpose="读取收益率分子和分母",
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="分析 lx 收益率",
             sender_id="local",
@@ -7804,7 +7815,7 @@ def test_assistant_runtime_agent_loop_answer_guard_rewrites_wrong_contribution_s
             purpose="读取标的收益贡献和分母",
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="分析 sy 六月收益贡献",
             sender_id="local",
@@ -7932,7 +7943,7 @@ def test_assistant_runtime_agent_loop_grounded_income_falls_back_from_wrong_cont
             purpose="收益组成明细",
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="6月收益的组成",
             sender_id="local",
@@ -8009,7 +8020,7 @@ def test_assistant_runtime_agent_loop_grounded_income_returns_facts_when_llm_una
             purpose="收益组成明细",
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="6月收益的组成",
             sender_id="local",
@@ -8057,7 +8068,7 @@ def test_assistant_runtime_agent_loop_rejects_disallowed_plan_tool(tmp_path: Pat
             purpose="write operation must be rejected",
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="直接帮我升级远端",
             sender_id="local",
@@ -8121,7 +8132,7 @@ def test_assistant_runtime_agent_loop_plans_manual_trade_open_preview(monkeypatc
             ),
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text=text,
             sender_id="local",
@@ -8279,7 +8290,7 @@ def test_assistant_runtime_agent_loop_plans_manual_trade_open_preview(monkeypatc
     assert "raw_text" not in trace_text
     assert "成交提醒】成功卖出" not in trace_text
 
-    confirmed = handle_assistant_message(
+    confirmed = handle_assistant_response(
         AssistantRequest(
             text="确认记录",
             sender_id="local",
@@ -8369,7 +8380,7 @@ def test_assistant_runtime_previews_futu_assignment_notice(monkeypatch: Any, tmp
         assert conversation_context is not None
         return _model_turn_result("manual_assignment", {"account": "sy"}, goal=incoming)
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text=text,
             sender_id="local",
@@ -8457,7 +8468,7 @@ def test_assistant_runtime_uses_model_extracted_assignment_fields(monkeypatch: A
             goal=incoming,
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text=text,
             sender_id="local",
@@ -8523,7 +8534,7 @@ def test_assistant_runtime_previews_futu_expiry_notice(monkeypatch: Any, tmp_pat
         assert conversation_context is not None
         return _model_turn_result("manual_expiry", {"account": "sy"}, goal=incoming)
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text=text,
             sender_id="local",
@@ -8610,7 +8621,7 @@ def test_assistant_runtime_provider_preview_request_creates_assignment_preview(
         "证券所持有的-2张PDD 260618 85.00P期权已被指派，详情请查看资金明细及持仓情况。【富途证券(香港)】"
     )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text=text,
             sender_id="local",
@@ -8687,7 +8698,7 @@ def test_assistant_runtime_provider_preview_request_creates_monitor_run_preview(
     us_cfg["symbols"][0]["symbol"] = "NVDA"
     us_cfg_path.write_text(json.dumps(us_cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="跑一次港股监控",
             sender_id="local",
@@ -8845,7 +8856,7 @@ def test_assistant_runtime_repairs_provider_malformed_assignment_arguments_via_t
         "证券所持有的-2张PDD 260618 85.00P期权已被指派，详情请查看资金明细及持仓情况。【富途证券(香港)】"
     )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text=text,
             sender_id="local",
@@ -8934,7 +8945,7 @@ def test_assistant_runtime_provider_preview_request_creates_expiry_preview(
         "证券所持有的-1张TCOM 260618 45.00P期权已到期失效，详情请查看持仓情况。【富途证券(香港)】"
     )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text=text,
             sender_id="local",
@@ -8998,7 +9009,7 @@ def test_assistant_runtime_provider_preview_request_missing_account_returns_clar
         "证券所持有的-2张PDD 260618 85.00P期权已被指派，详情请查看资金明细及持仓情况。【富途证券(香港)】"
     )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text=text,
             sender_id="local",
@@ -9067,7 +9078,7 @@ def test_assistant_runtime_agent_loop_cancels_manual_trade_open_preview(monkeypa
             ),
         )
 
-    previewed = handle_assistant_message(
+    previewed = handle_assistant_response(
         AssistantRequest(
             text=text,
             sender_id="local",
@@ -9094,7 +9105,7 @@ def test_assistant_runtime_agent_loop_cancels_manual_trade_open_preview(monkeypa
     assert preview_trace["trace_count"] == 1
     assert preview_trace["traces"][0]["task"]["state"] == "waiting_for_permission"
 
-    cancelled = handle_assistant_message(
+    cancelled = handle_assistant_response(
         AssistantRequest(
             text="取消记录",
             sender_id="local",
@@ -9181,7 +9192,7 @@ def test_assistant_runtime_agent_loop_rejects_read_plan_for_trade_preview_reques
             purpose="错误地读取持仓",
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text=text,
             sender_id="local",
@@ -9358,7 +9369,7 @@ def test_assistant_runtime_agent_loop_repairs_assignment_notice_wrong_read_tool(
 
     monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_payload_response_fn", _provider_payload_response_fn)
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text=text,
             sender_id="local",
@@ -9470,7 +9481,7 @@ def test_assistant_runtime_agent_loop_repairs_expiry_notice_wrong_read_tool(
 
     monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_payload_response_fn", _provider_payload_response_fn)
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text=text,
             sender_id="local",
@@ -9521,7 +9532,7 @@ def test_assistant_runtime_agent_loop_action_safety_rejects_preview_for_read_req
             purpose="不应为只读问题生成 preview",
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="查看 sy 账户收益",
             sender_id="local",
@@ -9566,7 +9577,7 @@ def test_assistant_runtime_agent_loop_rejects_confirm_plan(tmp_path: Path) -> No
             purpose="confirm must not be planned by LLM",
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="执行这个待办 in_123",
             sender_id="local",
@@ -10398,7 +10409,7 @@ def test_assistant_runtime_default_agent_loop_uses_provider_tool_call(monkeypatc
     monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_response_fn", _provider_response_fn)
     monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_payload_response_fn", _provider_payload_response_fn)
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="6月收益分析",
             sender_id="local",
@@ -10519,7 +10530,7 @@ def test_assistant_runtime_tool_loop_continuation_repairs_pre_tool_denial(monkey
     monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_response_fn", _provider_response_fn)
     monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_payload_response_fn", _provider_payload_response_fn)
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="lx 6月收益分析",
             sender_id="local",
@@ -10631,7 +10642,7 @@ def test_assistant_runtime_provider_unsupported_arguments_repaired_via_observati
     monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_response_fn", _provider_response_fn)
     monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_payload_response_fn", _provider_payload_response_fn)
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text=text,
             sender_id="local",
@@ -10927,7 +10938,7 @@ def test_assistant_runtime_tool_loop_continuation_preview_request_creates_assign
 
     monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_payload_response_fn", _provider_payload_response_fn)
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text=text,
             sender_id="local",
@@ -11021,7 +11032,7 @@ def test_assistant_runtime_comparative_income_uses_provider_tool_call(monkeypatc
     monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_response_fn", _provider_response_fn)
     monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_payload_response_fn", _provider_payload_response_fn)
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="对比 lx sy 6月收益",
             sender_id="local",
@@ -11363,7 +11374,7 @@ def test_assistant_runtime_agent_loop_no_event_plan_returns_clarification_for_no
             },
         )
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="你是什么模型",
             sender_id="local",
@@ -11482,7 +11493,7 @@ def test_assistant_runtime_rejects_llm_injected_write_preview_when_question_is_r
     ) -> ModelTurnResult:
         return _model_turn_result("manual_trade_open", {"raw_text": "记录开仓 sy NVDA put"}, goal=_text)
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text="帮我看一下状态",
             sender_id="local",

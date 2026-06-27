@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.2.345 - 2026-06-28
+
+### Changed
+- Removed the legacy `handle_assistant_message` API after moving production and test callers to typed Assistant turns.
+- Replaced `AssistantTurnResult.legacy_response` with explicit `data` and `meta` fields for structured turn details.
+- Moved Assistant turn-result projection into a small dedicated module, shrinking the runtime entrypoint.
+
 ## 1.2.344 - 2026-06-28
 
 ### Changed

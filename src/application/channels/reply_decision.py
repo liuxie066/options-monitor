@@ -82,7 +82,7 @@ def inbound_error_code(inbound_result: dict[str, Any]) -> str | None:
 
 def inbound_command_id(inbound_result: dict[str, Any]) -> str | None:
     data = _dict(inbound_result.get("data"))
-    return _first_text(data.get("command_id"))
+    return _first_text(inbound_result.get("command_id"), data.get("command_id"))
 
 
 def permission_denied_should_stay_silent(inbound_result: dict[str, Any]) -> bool:
