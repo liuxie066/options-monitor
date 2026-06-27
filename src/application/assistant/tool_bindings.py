@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Literal
+from dataclasses import dataclass
+from typing import Literal
 
 
 ScopePolicy = Literal[
@@ -35,8 +35,6 @@ class AssistantToolBinding:
     scope_policy: ScopePolicy = "none"
     renderer_key: str | None = None
     required_arguments: tuple[str, ...] = ()
-    planner_notes: tuple[str, ...] = ()
-    planner_semantics: dict[str, Any] = field(default_factory=dict)
     primary_for_tool: bool = True
 
 
@@ -96,27 +94,6 @@ READ_TOOL_BINDINGS: tuple[AssistantToolBinding, ...] = (
         examples=("泡泡玛特是什么 symbol", "POP 对应哪个标的", "HK.09992 解析成什么"),
         summary="resolve a user-provided symbol/name/alias/Futu code to canonical OM symbol identity",
         scope_policy="symbol_market_config_required",
-        planner_notes=(
-            "Use when the user asks what a symbol/name/alias maps to, or before SQL-style analysis that needs a canonical symbol.",
-            "The tool resolves Chinese names, configured aliases, Futu codes, HK numeric codes, and canonical US/HK symbols.",
-            "This tool only resolves identity; it does not answer whether the symbol was filtered, held, profitable, or configured.",
-        ),
-        planner_semantics={
-            "data_source": "OM symbol identity resolver plus runtime config aliases when scoped config is injected",
-            "answer_capabilities": {
-                "symbol_resolve": "maps a raw symbol/name/alias to canonical_symbol, market, currency, and futu_code",
-                "read_only": "does not mutate config or runtime state",
-            },
-            "scope_semantics": {
-                "config injected": "runtime config aliases are included; HK/US sibling config may be selected from the symbol market",
-                "config omitted": "built-in canonicalization and fallback aliases only",
-            },
-            "not_promised": [
-                "market data lookup",
-                "watchlist membership",
-                "candidate filter diagnosis",
-            ],
-        },
     ),
     AssistantToolBinding(
         intent_name="candidate_filter_explain",
@@ -127,35 +104,6 @@ READ_TOOL_BINDINGS: tuple[AssistantToolBinding, ...] = (
         examples=("泡泡玛特被哪个参数过滤了？", "为什么 NVDA 没出现在候选里？", "lx NVDA sell_put 为什么被过滤？"),
         summary="explain a single symbol's observed candidate filter/rejection/missing trace rows from runtime candidate_filter_trace artifacts",
         scope_policy="symbol_market_config_optional",
-        planner_notes=(
-            "Use for single-symbol candidate filter, rejection, missing-candidate, or 被哪个参数过滤 questions.",
-            "symbol can be canonical, Chinese name, Futu code, or alias such as 泡泡玛特; the tool resolves it before matching trace rows.",
-            "account is optional scan/run scope only, not business semantics for symbol identity.",
-            "For aggregation/comparison/trend across many symbols, rules, accounts, or runs, use analysis_query over candidate_filter_diagnostics instead.",
-        ),
-        planner_semantics={
-            "data_source": "candidate_filter_trace.jsonl artifacts discovered from runtime root/latest output_runs",
-            "answer_capabilities": {
-                "filter_explain": "explains observed accepted/rejected/post-filtered/not-observed candidate trace rows for one symbol",
-                "candidate_filter_trace": "uses scan-time trace artifacts as the fact source",
-                "read_only": "does not run scans, fetch market data, send notifications, or write reports",
-            },
-            "scope_semantics": {
-                "account": "scan/run scope only; omit to search all account trace artifacts in scope",
-                "function": "optional filter function such as sell_put, sell_call, cash_reserve, or share_coverage",
-                "run_id omitted": "searches runtime last-run pointer, recent output_runs, and shared trace fallbacks; pass run_id when a specific run is required",
-            },
-            "not_promised": [
-                "inferring root cause when trace rows are missing",
-                "rerunning candidate scans",
-                "aggregated rule comparisons across runs",
-            ],
-            "answer_rules": [
-                "If trace_count is zero, say the candidate diagnostic is missing and cannot determine the exact filtering parameter.",
-                "Use rule, metric_value, threshold, status, stage, contract_symbol, expiration, and strike from tool events as evidence.",
-                "Do not present account as symbol identity or business ownership.",
-            ],
-        },
     ),
     AssistantToolBinding(
         intent_name="analysis_catalog",

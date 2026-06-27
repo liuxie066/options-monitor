@@ -192,6 +192,69 @@ def _option_positions_output_contract(payload: dict[str, Any]) -> dict[str, Any]
     return None
 
 
+_MONTHLY_INCOME_PLANNER_NOTES: tuple[str, ...] = (
+    "Set include_rows=true for income analysis/review/performance, cashflow details, composition, source, 分析, 复盘, 表现, 明细, 组成, 构成, 来源, or 由什么组成.",
+    "When include_rows=true, canonical factual rows are rendered by the system; synthesis should only add analysis.",
+    "Data comes from OM local ledger, not broker realtime cash statements.",
+    "If month is omitted, the tool reads all months currently available in the OM local ledger.",
+    "If account is omitted, the tool reads all ledger accounts available for the selected broker/config.",
+    "For combined/all-account return questions, require capability combined_account_return; the response must use combined_return_summary when available.",
+)
+
+_MONTHLY_INCOME_PLANNER_SEMANTICS: dict[str, Any] = {
+    "data_source": "OM local ledger",
+    "answer_capabilities": {
+        "account_return": "single-account monthly return_summary rows",
+        "all_accounts_breakdown": "per-account return_summary rows when account is omitted",
+        "combined_account_return": "combined_return_summary rows; compute rates as summed CNY numerator divided by summed CNY cash-secured denominator",
+        "cashflow_detail": "cashflow_rows when include_rows=true",
+    },
+    "scope_semantics": {
+        "month omitted": "all months currently available in the OM local ledger",
+        "account omitted": "all available ledger accounts for the selected broker/config",
+        "include_rows": "include detail rows for income analysis, composition, or source questions",
+    },
+    "not_promised": [
+        "complete broker account history before OM ledger ingestion",
+        "realtime broker cash statement",
+    ],
+    "answer_rules": [
+        "For 历史以来, 累计, or 总净现金流, answer over the OM local ledger coverage returned by the tool.",
+        "Do not claim missing history solely because coverage contains only some months.",
+        "Do not claim an account is missing if coverage.accounts includes it.",
+    ],
+}
+
+_OPTION_POSITIONS_PLANNER_NOTES: tuple[str, ...] = (
+    "Use for current option position list/detail requests, including 持仓明细, 持仓明晰, 持仓详情, 当前仓位, or current positions.",
+    "For assigned stock / 被指派正股 / 指派正股 holding PnL, use action=assigned-stock with status=open by default and refresh_quotes=true when the user asks current 盈亏, spot, 浮盈亏, or 持仓盈亏; use synthesis so the Agent composer can answer from tool evidence.",
+    "For ordinary position list/detail requests, required_capabilities should be [] because option_positions_read itself provides option_positions/read_only.",
+    "Use action=list for current lots; use action=history or action=inspect only when the user explicitly asks for event history, projection, repair, or ledger diagnostics.",
+    "For action=list or action=assigned-stock, tool rows are evidence; deterministic renderers are fallback/provenance, not the default user-visible mode.",
+)
+
+_OPTION_POSITIONS_PLANNER_SEMANTICS: dict[str, Any] = {
+    "data_source": "local option position ledger",
+    "answer_capabilities": {
+        "option_positions": "successful option_positions_read observations provide option position rows",
+        "assigned_stock_positions": "action=assigned-stock provides Sell Put assignment stock lots, cost basis, spot status, realized/unrealized stock PnL, and lifecycle PnL",
+        "read_only": "option_positions_read is registry-declared read-only",
+        "ledger_diagnostics": "history or inspect actions provide ledger diagnostic context when explicitly requested",
+    },
+    "scope_semantics": {
+        "status omitted": "open option positions",
+        "assigned-stock status omitted": "use open assigned-stock lots for holding PnL unless the user asks all/closed",
+        "account omitted": "all available accounts for the selected config",
+        "detail words": "明细, 明晰, 详情, and current positions are ordinary list/detail reads",
+    },
+    "not_promised": [
+        "broker realtime statement outside the local OM ledger",
+        "ordinary option profit or return calculations; use monthly_income_report for monthly income questions",
+        "close advice; use close_advice_read for should-close or take-profit analysis",
+    ],
+}
+
+
 MONTHLY_INCOME_REPORT_TOOL = build_agent_tool(
     name="monthly_income_report",
     description=(
@@ -217,6 +280,8 @@ MONTHLY_INCOME_REPORT_TOOL = build_agent_tool(
     answer_policy_resolver=_monthly_income_answer_policy,
     output_contract={"schema_version": "monthly_income_report.output", "payload_dependent": True},
     output_contract_resolver=_monthly_income_output_contract,
+    planner_notes=_MONTHLY_INCOME_PLANNER_NOTES,
+    planner_semantics=_MONTHLY_INCOME_PLANNER_SEMANTICS,
 )
 
 OPTION_POSITIONS_READ_TOOL = build_agent_tool(
@@ -271,6 +336,8 @@ OPTION_POSITIONS_READ_TOOL = build_agent_tool(
     answer_policy_resolver=_option_positions_answer_policy,
     output_contract={"schema_version": "option_positions_read.output", "payload_dependent": True},
     output_contract_resolver=_option_positions_output_contract,
+    planner_notes=_OPTION_POSITIONS_PLANNER_NOTES,
+    planner_semantics=_OPTION_POSITIONS_PLANNER_SEMANTICS,
 )
 
 TOOLS: tuple[AgentTool, ...] = (

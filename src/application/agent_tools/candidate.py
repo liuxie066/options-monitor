@@ -123,6 +123,37 @@ CANDIDATE_RANK_EXPLAIN_TOOL = build_agent_tool(
     ),
 )
 
+_CANDIDATE_FILTER_PLANNER_NOTES: tuple[str, ...] = (
+    "Use for single-symbol candidate filter, rejection, missing-candidate, or 被哪个参数过滤 questions.",
+    "symbol can be canonical, Chinese name, Futu code, or alias such as 泡泡玛特; the tool resolves it before matching trace rows.",
+    "account is optional scan/run scope only, not business semantics for symbol identity.",
+    "For aggregation/comparison/trend across many symbols, rules, accounts, or runs, use analysis_query over candidate_filter_diagnostics instead.",
+)
+
+_CANDIDATE_FILTER_PLANNER_SEMANTICS: dict[str, Any] = {
+    "data_source": "candidate_filter_trace.jsonl artifacts discovered from runtime root/latest output_runs",
+    "answer_capabilities": {
+        "filter_explain": "explains observed accepted/rejected/post-filtered/not-observed candidate trace rows for one symbol",
+        "candidate_filter_trace": "uses scan-time trace artifacts as the fact source",
+        "read_only": "does not run scans, fetch market data, send notifications, or write reports",
+    },
+    "scope_semantics": {
+        "account": "scan/run scope only; omit to search all account trace artifacts in scope",
+        "function": "optional filter function such as sell_put, sell_call, cash_reserve, or share_coverage",
+        "run_id omitted": "searches runtime last-run pointer, recent output_runs, and shared trace fallbacks; pass run_id when a specific run is required",
+    },
+    "not_promised": [
+        "inferring root cause when trace rows are missing",
+        "rerunning candidate scans",
+        "aggregated rule comparisons across runs",
+    ],
+    "answer_rules": [
+        "If trace_count is zero, say the candidate diagnostic is missing and cannot determine the exact filtering parameter.",
+        "Use rule, metric_value, threshold, status, stage, contract_symbol, expiration, and strike from tool events as evidence.",
+        "Do not present account as symbol identity or business ownership.",
+    ],
+}
+
 CANDIDATE_FILTER_EXPLAIN_TOOL = build_agent_tool(
     name="candidate_filter_explain",
     description=(
@@ -164,6 +195,8 @@ CANDIDATE_FILTER_EXPLAIN_TOOL = build_agent_tool(
         {"input": {"trace_path": "output_shared/reports/candidate_filter_trace.jsonl", "symbol": "NVDA"}},
     ),
     output_contract=_CANDIDATE_FILTER_OUTPUT_CONTRACT,
+    planner_notes=_CANDIDATE_FILTER_PLANNER_NOTES,
+    planner_semantics=_CANDIDATE_FILTER_PLANNER_SEMANTICS,
 )
 
 TOOLS: tuple[AgentTool, ...] = (

@@ -359,6 +359,43 @@ SCHEDULER_STATUS_TOOL = build_agent_tool(
     examples=({"input": {"config_key": "us", "account": "lx"}},),
 )
 
+_SYMBOL_CONFIG_READ_PLANNER_NOTES: tuple[str, ...] = (
+    "Use for current monitored-symbol config questions, for example sell_put.max_strike, covered_call.min_strike, or enabled state.",
+    "symbol is required; strategy can be sell_put, sell_call/covered_call, or combo_yield; field can be enabled, min_strike, max_strike, min_dte, or max_dte.",
+    "Do not use this for setting changes; use the symbol_edit preview capability for changes.",
+)
+
+_SYMBOL_CONFIG_READ_PLANNER_SEMANTICS: dict[str, Any] = {
+    "data_source": "selected runtime config",
+    "answer_capabilities": {
+        "symbol_config_read": "reads current monitored-symbol strategy config without mutating config",
+    },
+    "missing_behavior": "If symbol, strategy, or field is not configured, return the missing reason instead of planning a weakly related tool.",
+}
+
+_SYMBOL_RESOLVE_PLANNER_NOTES: tuple[str, ...] = (
+    "Use when the user asks what a symbol/name/alias maps to, or before SQL-style analysis that needs a canonical symbol.",
+    "The tool resolves Chinese names, configured aliases, Futu codes, HK numeric codes, and canonical US/HK symbols.",
+    "This tool only resolves identity; it does not answer whether the symbol was filtered, held, profitable, or configured.",
+)
+
+_SYMBOL_RESOLVE_PLANNER_SEMANTICS: dict[str, Any] = {
+    "data_source": "OM symbol identity resolver plus runtime config aliases when scoped config is injected",
+    "answer_capabilities": {
+        "symbol_resolve": "maps a raw symbol/name/alias to canonical_symbol, market, currency, and futu_code",
+        "read_only": "does not mutate config or runtime state",
+    },
+    "scope_semantics": {
+        "config injected": "runtime config aliases are included; HK/US sibling config may be selected from the symbol market",
+        "config omitted": "built-in canonicalization and fallback aliases only",
+    },
+    "not_promised": [
+        "market data lookup",
+        "watchlist membership",
+        "candidate filter diagnosis",
+    ],
+}
+
 SYMBOL_CONFIG_READ_TOOL = build_agent_tool(
     name="symbol_config_read",
     description="Read the current monitored-symbol strategy config for a symbol, strategy, or field.",
@@ -379,6 +416,8 @@ SYMBOL_CONFIG_READ_TOOL = build_agent_tool(
         {"input": {"config_key": "us", "symbol": "NVDA", "strategy": "sell_call"}},
     ),
     output_contract=_SYMBOL_CONFIG_OUTPUT_CONTRACT,
+    planner_notes=_SYMBOL_CONFIG_READ_PLANNER_NOTES,
+    planner_semantics=_SYMBOL_CONFIG_READ_PLANNER_SEMANTICS,
 )
 
 SYMBOL_RESOLVE_TOOL = build_agent_tool(
@@ -400,6 +439,8 @@ SYMBOL_RESOLVE_TOOL = build_agent_tool(
         {"input": {"symbol": "NVDA"}},
     ),
     output_contract=_SYMBOL_RESOLVE_OUTPUT_CONTRACT,
+    planner_notes=_SYMBOL_RESOLVE_PLANNER_NOTES,
+    planner_semantics=_SYMBOL_RESOLVE_PLANNER_SEMANTICS,
 )
 
 MANAGE_SYMBOLS_TOOL = build_agent_tool(
