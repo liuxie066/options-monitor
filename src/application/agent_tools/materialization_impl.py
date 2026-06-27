@@ -319,6 +319,7 @@ def query_cash_headroom_tool(
         out_dir=str(out_dir),
         base_dir=repo_base(),
         runtime_config=cfg,
+        write_cache=False,
     )
     return result, [], {"config_path": mask_path(config_path), "output_dir": mask_path(out_dir)}
 

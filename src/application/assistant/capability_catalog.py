@@ -589,7 +589,7 @@ def _spec_payload(spec: AssistantCommandSpec) -> dict[str, Any]:
 
 
 def _is_llm_executable_spec(spec: AssistantCommandSpec) -> bool:
-    return bool(spec.read_only and spec.llm_allowed and spec.supported and spec.tool_name is not None)
+    return bool(spec.read_only and spec.llm_allowed and spec.supported and spec.tool_name is not None and _direct_executable(spec))
 
 
 def _is_llm_recognizable_spec(spec: AssistantCommandSpec) -> bool:
