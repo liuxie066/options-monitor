@@ -13,6 +13,7 @@ from src.application.assistant.capability_catalog import command_specs, planner_
 from src.application.assistant.command_parser import parse_assistant_command
 from src.application.assistant.contracts import (
     AssistantRequest,
+    AssistantTurnResult,
     PERCEPTION_RESULT_SCHEMA_VERSION,
     REASONING_RESOLUTION_SCHEMA_VERSION,
     PerceptionResult,
@@ -109,6 +110,22 @@ def _model_turn_result(tool_name: str, arguments: dict[str, Any] | None = None) 
             provider="openai",
             goal="test plan",
         ),
+    )
+
+
+def _assistant_turn_response(response_text: str = "状态查询完成。") -> AssistantTurnResult:
+    legacy_response = build_response(
+        tool_name="assistant.handle",
+        ok=True,
+        data={"response_text": response_text},
+        meta={"assistant": {"route": "command"}},
+    )
+    return AssistantTurnResult(
+        response_text=response_text,
+        render_route="router",
+        ok=True,
+        status="ok",
+        legacy_response=legacy_response,
     )
 
 
@@ -4083,16 +4100,11 @@ def test_feishu_payload_adapter_assistant_reads_assistant_config(monkeypatch: py
     }
     seen: list[dict] = []
 
-    def _handle_assistant_message(request: AssistantRequest, **kwargs) -> dict:
+    def _handle_assistant_turn(request: AssistantRequest, **kwargs) -> AssistantTurnResult:
         seen.append({"request": request, "kwargs": kwargs})
-        return build_response(
-            tool_name="assistant.handle",
-            ok=True,
-            data={"response_text": "状态查询完成。"},
-            meta={"assistant": {"route": "command"}},
-        )
+        return _assistant_turn_response()
 
-    monkeypatch.setattr("src.application.assistant.runtime.handle_assistant_message", _handle_assistant_message)
+    monkeypatch.setattr("src.application.assistant.runtime.handle_assistant_turn", _handle_assistant_turn)
 
     out = handle_feishu_payload(
         payload,
@@ -4144,16 +4156,11 @@ def test_feishu_payload_adapter_defaults_to_assistant_from_assistant_config(monk
     }
     seen: list[dict] = []
 
-    def _handle_assistant_message(request: AssistantRequest, **kwargs) -> dict:
+    def _handle_assistant_turn(request: AssistantRequest, **kwargs) -> AssistantTurnResult:
         seen.append({"request": request, "kwargs": kwargs})
-        return build_response(
-            tool_name="assistant.handle",
-            ok=True,
-            data={"response_text": "状态查询完成。"},
-            meta={"assistant": {"route": "command"}},
-        )
+        return _assistant_turn_response()
 
-    monkeypatch.setattr("src.application.assistant.runtime.handle_assistant_message", _handle_assistant_message)
+    monkeypatch.setattr("src.application.assistant.runtime.handle_assistant_turn", _handle_assistant_turn)
 
     out = handle_feishu_payload(
         payload,
@@ -4190,16 +4197,12 @@ def test_assistant_cli_handle_wires_request(monkeypatch, capsys, tmp_path: Path)
 
     seen: list[AssistantRequest] = []
 
-    def _handle(request: AssistantRequest, **kwargs) -> dict:
+    def _handle(request: AssistantRequest, **kwargs) -> AssistantTurnResult:
         del kwargs
         seen.append(request)
-        return build_response(
-            tool_name="assistant.handle",
-            ok=True,
-            data={"response_text": "状态查询完成。"},
-        )
+        return _assistant_turn_response()
 
-    monkeypatch.setattr(cli, "handle_assistant_message", _handle)
+    monkeypatch.setattr(cli, "handle_assistant_turn", _handle)
 
     rc = cli.main(
         [
@@ -4262,15 +4265,11 @@ def test_assistant_cli_handle_loads_settings_from_config(monkeypatch, capsys, tm
     }}, ensure_ascii=False, indent=2), encoding="utf-8")
     seen = []
 
-    def _handle_assistant(request: AssistantRequest, **kwargs) -> dict:
+    def _handle_assistant(request: AssistantRequest, **kwargs) -> AssistantTurnResult:
         seen.append({"request": request, "settings": kwargs.get("settings")})
-        return build_response(
-            tool_name="assistant.handle",
-            ok=True,
-            data={"response_text": "状态查询完成。"},
-        )
+        return _assistant_turn_response()
 
-    monkeypatch.setattr(cli, "handle_assistant_message", _handle_assistant)
+    monkeypatch.setattr(cli, "handle_assistant_turn", _handle_assistant)
 
     rc = cli.main(
         [
@@ -4316,15 +4315,11 @@ def test_assistant_cli_handle_uses_planner_disabled_config(monkeypatch, capsys, 
     )
     seen = []
 
-    def _handle_assistant(request: AssistantRequest, **kwargs) -> dict:
+    def _handle_assistant(request: AssistantRequest, **kwargs) -> AssistantTurnResult:
         seen.append({"request": request, "settings": kwargs.get("settings")})
-        return build_response(
-            tool_name="assistant.handle",
-            ok=True,
-            data={"response_text": "状态查询完成。"},
-        )
+        return _assistant_turn_response()
 
-    monkeypatch.setattr(cli, "handle_assistant_message", _handle_assistant)
+    monkeypatch.setattr(cli, "handle_assistant_turn", _handle_assistant)
 
     rc = cli.main(
         [

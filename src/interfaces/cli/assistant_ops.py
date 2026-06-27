@@ -16,7 +16,7 @@ from src.application.assistant import (
 )
 from src.application.assistant.config_loader import load_assistant_config
 from src.application.assistant.context_eval import CONTEXT_EVAL_MODES, format_context_eval_text, run_context_eval_suite
-from src.application.assistant.contracts import AssistantRequest
+from src.application.assistant.contracts import AssistantRequest, AssistantTurnResult
 from src.application.assistant.diagnostics import check_llm_planner
 from src.application.assistant.llm_model_profiles import (
     add_model_profile_to_config,
@@ -39,7 +39,7 @@ from src.application.assistant.memory_proposals import (
     suggest_memory_proposals_from_text,
 )
 from src.application.assistant.operation_diagnostics import collect_pending_operations, collect_recent_audit
-from src.application.assistant.runtime import handle_assistant_message
+from src.application.assistant.runtime import handle_assistant_turn
 from src.application.assistant.settings import AssistantSettings
 from src.application.assistant.upgrade_operations import run_confirmed_upgrade_operation
 from src.application.config_yaml import default_yaml_config_path, load_yaml_config_file
@@ -377,7 +377,7 @@ def handle_assistant_command(
     *,
     repo_base_fn: Callable[[], Path] = repo_base,
     check_llm_planner_fn: Callable[..., dict[str, Any]] = check_llm_planner,
-    handle_assistant_message_fn: Callable[..., dict[str, Any]] = handle_assistant_message,
+    handle_assistant_turn_fn: Callable[..., AssistantTurnResult] = handle_assistant_turn,
 ) -> int:
     if args.assistant_command == "llm-check":
         data = check_llm_planner_fn(
@@ -614,13 +614,20 @@ def handle_assistant_command(
             config_path=args.config_path,
             audit_db=args.audit_db,
         )
-        out = handle_assistant_message_fn(request, settings=assistant_settings)
+        turn = handle_assistant_turn_fn(request, settings=assistant_settings)
+        out = dict(
+            turn.legacy_response
+            or build_response(
+                tool_name="assistant.handle",
+                ok=turn.ok,
+                data=turn.public_payload(),
+                error=turn.error if not turn.ok else None,
+            )
+        )
         if args.format == "text":
-            data_raw = out.get("data")
-            data: dict[str, Any] = data_raw if isinstance(data_raw, dict) else {}
-            text = str(data.get("response_text") or "").strip() or _dumps(out)
+            text = turn.response_text.strip() or _dumps(out)
             sys.stdout.write(text + "\n")
-            return 0 if out.get("ok", True) else 2
+            return 0 if turn.ok else 2
         return _print(out)
 
     if args.assistant_command == "pending" and args.assistant_pending_command == "list":

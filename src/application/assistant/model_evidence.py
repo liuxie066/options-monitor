@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from src.application.agent_tool_contracts import build_response
-from src.application.agent_tool_registry import get_tool_definition
 from src.application.assistant.answer_guard import answer_guard_trace_payload, verify_answer_guard
 from src.application.assistant.evidence import EvidenceBundle, build_evidence_bundle
 from src.application.assistant.model_events import (
@@ -15,6 +14,7 @@ from src.application.assistant.model_events import (
     ToolResultEvent,
 )
 from src.application.assistant.renderer import render_canonical_tool_result
+from src.application.assistant.tool_contracts import resolve_output_contract
 
 
 MODEL_EVIDENCE_SCHEMA_VERSION = "om-assistant-model-evidence-v1"
@@ -108,7 +108,7 @@ def event_observation_from_tool_result(adapter: ToolResultAdapterOutput, *, inde
     event = adapter.event
     data = _result_data(raw_result, event=event)
     payload = _normalized_payload(event)
-    output_contract = _output_contract_for_tool(event.tool_name, payload)
+    output_contract = resolve_output_contract(event.tool_name, payload)
     observation: dict[str, Any] = {
         "index": int(index),
         "tool_name": event.tool_name,
@@ -161,7 +161,7 @@ def canonical_fallback_from_tool_results(
         event = adapter.event
         data = raw_result.get("data") if isinstance(raw_result.get("data"), dict) else {}
         payload = _normalized_payload(event)
-        output_contract = _output_contract_for_tool(event.tool_name, payload)
+        output_contract = resolve_output_contract(event.tool_name, payload)
         if not _output_contract_allows_final_answer(output_contract):
             continue
         renderer_key = str(output_contract.get("canonical_renderer") or "").strip()
@@ -234,14 +234,6 @@ def _normalized_payload(event: ToolResultEvent) -> dict[str, Any]:
     trace_payload = event.trace_payload if isinstance(event.trace_payload, dict) else {}
     payload = trace_payload.get("normalized_payload")
     return _copy_mapping(payload) if isinstance(payload, dict) else {}
-
-
-def _output_contract_for_tool(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
-    definition = get_tool_definition(str(tool_name or ""))
-    if definition is None:
-        return {}
-    contract = definition.resolve_output_contract(dict(payload or {}))
-    return contract if isinstance(contract, dict) else {}
 
 
 def _dedupe_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:

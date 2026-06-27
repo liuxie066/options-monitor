@@ -395,6 +395,76 @@ def test_tool_result_adapter_splits_raw_result_from_model_observation() -> None:
     assert event_payload["evidence_delta"]["datasets"][0]["tool_name"] == "monthly_income_report"
 
 
+def test_tool_result_adapter_previews_symbol_config_values_for_model() -> None:
+    adapted = adapt_tool_result(
+        event_id="result_1",
+        tool_call_id="call_symbol_config",
+        tool_name="symbol_config_read",
+        normalized_payload={"symbol": "中国海洋石油"},
+        output_contract={
+            "canonical_renderer": "symbol_config",
+            "model_preview_fields": ["symbol", "canonical_symbol", "found", "strategies"],
+        },
+        raw_result={
+            "schema_version": "1.0",
+            "tool_name": "symbol_config_read",
+            "ok": True,
+            "data": {
+                "symbol": "中国海洋石油",
+                "canonical_symbol": "0883.HK",
+                "found": True,
+                "strategies": {
+                    "sell_put": {"enabled": True, "min_dte": 7, "max_dte": 90, "max_strike": 20},
+                    "sell_call": {"enabled": True, "min_strike": 30},
+                    "combo_yield": {"enabled": False, "_explicit_fields": ["enabled"]},
+                },
+            },
+        },
+    )
+
+    observation = adapted.event.provider_tool_result_payload()["content"]
+
+    assert observation["data_summary"]["keys"] == ["canonical_symbol", "found", "strategies", "symbol"]
+    assert observation["data_preview"]["canonical_symbol"] == "0883.HK"
+    assert observation["data_preview"]["strategies"]["sell_put"]["max_strike"] == 20
+    assert "_explicit_fields" not in observation["data_preview"]["strategies"]["combo_yield"]
+
+
+def test_tool_result_adapter_uses_scalar_fact_fields_as_model_preview() -> None:
+    adapted = adapt_tool_result(
+        event_id="result_1",
+        tool_call_id="call_symbol_resolve",
+        tool_name="symbol_resolve",
+        normalized_payload={"symbol": "中国海洋石油"},
+        output_contract={
+            "result_shape": "scalar",
+            "fact_fields": ["symbol", "canonical_symbol", "market", "currency"],
+        },
+        raw_result={
+            "schema_version": "1.0",
+            "tool_name": "symbol_resolve",
+            "ok": True,
+            "data": {
+                "symbol": "中国海洋石油",
+                "canonical_symbol": "0883.HK",
+                "market": "HK",
+                "currency": "HKD",
+                "config_path": "/private/runtime/config.hk.json",
+            },
+        },
+    )
+
+    observation = adapted.event.provider_tool_result_payload()["content"]
+
+    assert observation["data_preview"] == {
+        "symbol": "中国海洋石油",
+        "canonical_symbol": "0883.HK",
+        "market": "HK",
+        "currency": "HKD",
+    }
+    assert "config_path" not in observation["data_preview"]
+
+
 def test_event_transcript_payload_preserves_order_for_minimal_tool_loop() -> None:
     call = model_tool_call_from_provider_block(
         {

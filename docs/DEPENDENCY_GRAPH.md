@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 705 (`src`: 409, `domain`: 52, `scripts`: 7, `tests`: 237)
-- Internal import edges: 3762 total, 1769 production/script edges excluding tests
+- Python files scanned: 706 (`src`: 410, `domain`: 52, `scripts`: 7, `tests`: 237)
+- Internal import edges: 3766 total, 1773 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -196,7 +196,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 | module | outgoing imports |
 |---|---|
 | src.application.agent_tools.base | 32 |
-| src.application.assistant.agent_loop | 30 |
+| src.application.assistant.agent_loop | 31 |
 | src.application.multi_account_tick | 26 |
 | src.application.channels.wechat_clawbot.inbound | 23 |
 | src.application.tick_notification_flow | 22 |

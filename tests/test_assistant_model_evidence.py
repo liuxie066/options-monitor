@@ -252,6 +252,35 @@ def test_event_observation_uses_normalized_payload_for_payload_dependent_contrac
     assert observation["output_contract"]["schema_version"] == "monthly_income_report.output.v1"
 
 
+def test_symbol_config_evidence_uses_registered_contract_for_fallback() -> None:
+    adapter = adapt_tool_result(
+        event_id="result_symbol_config_1",
+        tool_call_id="call_symbol_config_1",
+        tool_name="symbol_config_read",
+        normalized_payload={"symbol": "中国海洋石油", "strategy": "sell_put", "field": "max_strike"},
+        raw_result=build_response(
+            tool_name="symbol_config_read",
+            ok=True,
+            data={
+                "symbol": "中国海洋石油",
+                "canonical_symbol": "0883.HK",
+                "found": True,
+                "strategy": "sell_put",
+                "field": "max_strike",
+                "path": "sell_put.max_strike",
+                "value": 20,
+            },
+        ),
+    )
+
+    observation = event_observation_from_tool_result(adapter, index=1)
+    fallback = canonical_fallback_from_tool_results([adapter])
+
+    assert observation["output_contract"]["canonical_renderer"] == "symbol_config"
+    assert "value" in observation["output_contract"]["model_preview_fields"]
+    assert fallback == "0883.HK sell_put.max_strike = 20。"
+
+
 def test_canonical_fallback_prefers_existing_renderer() -> None:
     adapter = _income_adapter()
 

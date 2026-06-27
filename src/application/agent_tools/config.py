@@ -44,6 +44,19 @@ _SYMBOL_CONFIG_OUTPUT_CONTRACT: dict[str, Any] = {
         "strategy_config",
         "strategies",
     ],
+    "model_preview_fields": [
+        "symbol",
+        "canonical_symbol",
+        "found",
+        "missing_reason",
+        "message",
+        "strategy",
+        "field",
+        "path",
+        "value",
+        "strategy_config",
+        "strategies",
+    ],
 }
 
 _SYMBOL_RESOLVE_OUTPUT_CONTRACT: dict[str, Any] = {
@@ -65,6 +78,17 @@ _SYMBOL_RESOLVE_OUTPUT_CONTRACT: dict[str, Any] = {
     ],
     "missing_data_fields": [
         "canonical_symbol",
+    ],
+    "model_preview_fields": [
+        "symbol",
+        "raw_input",
+        "canonical_symbol",
+        "market",
+        "currency",
+        "futu_code",
+        "source_kind",
+        "status",
+        "message",
     ],
 }
 
