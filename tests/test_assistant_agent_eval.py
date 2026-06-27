@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from src.application.agent_tool_contracts import build_response
-from src.application.assistant import AssistantSettings, AssistantLlmSettings, handle_assistant_message
+from src.application.assistant import AssistantSettings, AssistantLlmSettings, handle_assistant_turn
 from src.application.assistant.action_policy import decide_tool_action_policy
 from src.application.assistant.action_safety import assess_action_safety
 from src.application.assistant.agent_loop import (
@@ -23,6 +23,17 @@ from src.application.assistant.agent_loop import (
 from src.application.assistant.context_eval import format_context_eval_text, run_context_eval_suite
 from src.application.assistant.contracts import AssistantRequest, ToolCall
 from src.application.assistant.model_events import ModelToolCallEvent
+
+
+def handle_assistant_response(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    turn = handle_assistant_turn(*args, **kwargs)
+    return build_response(
+        tool_name=turn.tool_name,
+        ok=turn.ok,
+        data=dict(turn.data or turn.public_payload()),
+        error=turn.error if not turn.ok else None,
+        meta=dict(turn.meta or {}),
+    )
 
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "assistant_agent_eval.jsonl"
@@ -654,7 +665,7 @@ def test_assistant_agent_eval_uses_guarded_answer_evidence(case: dict[str, Any],
         selected_payload = followup_payload if isinstance(followup, dict) and followup_payload is not None else plan_payload
         return _model_turn_result_from_event_plan(_event_plan_from_payload(selected_payload))
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text=str(case["question"]),
             sender_id="local",
@@ -784,7 +795,7 @@ def _run_planner_preview_case(case: dict[str, Any], *, tmp_path: Path, monkeypat
         assert text == case["question"]
         return _model_turn_result_from_event_plan(event_plan)
 
-    out = handle_assistant_message(
+    out = handle_assistant_response(
         AssistantRequest(
             text=str(case["question"]),
             sender_id="local",
