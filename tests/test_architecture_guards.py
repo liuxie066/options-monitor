@@ -184,6 +184,37 @@ def test_agent_loop_planner_surface_keeps_read_only_and_preview_limited() -> Non
         assert definition.requires_confirm is False
 
 
+def test_planner_tool_metadata_lives_on_agent_tool_definitions() -> None:
+    from dataclasses import fields
+
+    from src.application.agent_tool_registry import get_tool_definition
+    from src.application.assistant.agent_loop import _planner_tool_manifest
+    from src.application.assistant.tool_bindings import AssistantToolBinding
+
+    binding_fields = {field.name for field in fields(AssistantToolBinding)}
+    assert "planner_notes" not in binding_fields
+    assert "planner_semantics" not in binding_fields
+
+    manifest_by_name = {str(item["name"]): item for item in _planner_tool_manifest()}
+    for tool_name in (
+        "monthly_income_report",
+        "analysis_catalog",
+        "analysis_query",
+        "option_positions_read",
+        "symbol_config_read",
+        "symbol_resolve",
+        "candidate_filter_explain",
+    ):
+        definition = get_tool_definition(tool_name)
+        assert definition is not None, tool_name
+        assert definition.planner_notes, tool_name
+        assert definition.resolve_planner_semantics({"analysis_view_names": None}), tool_name
+        assert manifest_by_name[tool_name]["planner_notes"] == list(definition.planner_notes)
+        assert manifest_by_name[tool_name]["semantics"] == definition.resolve_planner_semantics(
+            {"analysis_view_names": None}
+        )
+
+
 def test_read_tool_allowlist_has_neutral_owner() -> None:
     from src.application import tool_allowlist
     from src.application.assistant import policy as assistant_policy

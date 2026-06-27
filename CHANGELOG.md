@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 1.2.342 - 2026-06-27
+
+### Changed
+- Moved Assistant planner tool notes and semantics onto the Tool Gateway `AgentTool` definitions so tool metadata has a
+  single source of truth shared by registry manifests and planner manifests.
+- Kept Assistant intent bindings focused on command, scope, and routing metadata instead of duplicating tool capability
+  semantics.
+
+### Fixed
+- Passed `project_guard` through YAML runtime config generation.
+
 ## 1.2.341 - 2026-06-26
 
 ### Fixed
