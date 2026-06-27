@@ -348,7 +348,16 @@ def test_assistant_owns_command_catalog_and_interaction_contracts() -> None:
     feishu_text = (ROOT / "src" / "application" / "inbound" / "feishu.py").read_text(encoding="utf-8")
     assert "src.application.agent_runtime.command_catalog" not in feishu_text
     assert "src.application.agent_runtime import handle_agent_message" not in feishu_text
-    assert "src.application.assistant.runtime import handle_assistant_message" in feishu_text
+    assert "src.application.assistant.runtime import handle_assistant_turn" in feishu_text
+
+    wechat_text = (ROOT / "src" / "application" / "channels" / "wechat_clawbot" / "inbound.py").read_text(encoding="utf-8")
+    assert "src.application.assistant.runtime import handle_assistant_turn" in wechat_text
+
+    main_text = (ROOT / "src" / "interfaces" / "cli" / "main.py").read_text(encoding="utf-8")
+    assistant_cli_text = (ROOT / "src" / "interfaces" / "cli" / "assistant_ops.py").read_text(encoding="utf-8")
+    assert "handle_assistant_turn_fn" in assistant_cli_text
+    assert "handle_assistant_message_fn" not in assistant_cli_text
+    assert "handle_assistant_message" not in main_text
 
 
 def test_assistant_runtime_delegates_perception() -> None:

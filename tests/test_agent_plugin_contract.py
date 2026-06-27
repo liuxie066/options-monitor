@@ -226,6 +226,8 @@ def test_agent_tool_output_contracts_advertise_canonical_renderers() -> None:
     assert tools["symbol_resolve"]["output_contract"]["result_shape"] == "scalar"
     assert "canonical_symbol" in tools["symbol_resolve"]["output_contract"]["fact_fields"]
     assert tools["symbol_config_read"]["output_contract"]["canonical_renderer"] == "symbol_config"
+    assert "strategies" in tools["symbol_config_read"]["output_contract"]["model_preview_fields"]
+    assert "strategies" in tools["symbol_config_read"]["evidence_contract"]["model_preview_fields"]
     assert tools["query_cash_headroom"]["risk_level"] == "read_only"
     assert tools["query_cash_headroom"]["side_effects"] == []
     assert tools["query_cash_headroom"]["output_contract"]["canonical_renderer"] == "cash_headroom"

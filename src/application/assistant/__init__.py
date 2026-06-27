@@ -11,7 +11,7 @@ from src.application.assistant.capability_catalog import (
     operation_specs,
     operation_target_intents,
 )
-from src.application.assistant.contracts import AssistantRequest, PerceptionResult, ToolCall
+from src.application.assistant.contracts import AssistantRequest, AssistantTurnResult, PerceptionResult, ToolCall
 from src.application.assistant.perception import PerceptionEngine
 from src.application.assistant.perception_trace import AssistantDecision, PerceptionCandidate, PerceptionTrace
 from src.application.assistant.settings import AssistantSettings, AssistantLlmSettings
@@ -23,6 +23,7 @@ __all__ = [
     "AssistantRequest",
     "AssistantSettings",
     "AssistantLlmSettings",
+    "AssistantTurnResult",
     "PerceptionCandidate",
     "PerceptionEngine",
     "PerceptionResult",
@@ -35,7 +36,7 @@ __all__ = [
     "command_specs",
     "operation_specs",
     "operation_target_intents",
-    "handle_assistant_message",
+    "handle_assistant_turn",
 ]
 
 
@@ -44,4 +45,8 @@ def __getattr__(name: str):
         from src.application.assistant.runtime import handle_assistant_message
 
         return handle_assistant_message
+    if name == "handle_assistant_turn":
+        from src.application.assistant.runtime import handle_assistant_turn
+
+        return handle_assistant_turn
     raise AttributeError(name)

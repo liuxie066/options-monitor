@@ -21,7 +21,7 @@ from src.interfaces.cli.assistant_ops import (
     add_assistant_commands,
     check_llm_planner,
     handle_assistant_command,
-    handle_assistant_message,
+    handle_assistant_turn,
 )
 from src.interfaces.cli.channel_ops import add_channel_commands, handle_channel_command
 from src.interfaces.cli.inbound_ops import (
@@ -221,7 +221,7 @@ def main(argv: list[str] | None = None) -> int:
                 args,
                 repo_base_fn=repo_base,
                 check_llm_planner_fn=check_llm_planner,
-                handle_assistant_message_fn=handle_assistant_message,
+                handle_assistant_turn_fn=handle_assistant_turn,
             )
 
         if args.command == "inbound":
