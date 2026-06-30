@@ -118,6 +118,47 @@ def test_context_validation_accepts_symbol_config_followup_setting_edit() -> Non
     assert validation["code"] == "ok"
 
 
+def test_context_validation_accepts_frame_delta_using_frame_reference_only() -> None:
+    projection = _symbol_config_projection()
+
+    validation = validate_context_use(
+        current_user_message="改为90",
+        context_projection=projection,
+        plan_payload={
+            "context_use": {
+                "mode": "frame_delta",
+                "referenced_turn_ids": [],
+                "referenced_evidence_refs": [],
+                "referenced_frame_ids": ["frame_ev_001"],
+                "inherited_slots": {
+                    "symbol": ["FUTU"],
+                    "strategy": ["sell_put"],
+                    "setting_path": ["sell_put.max_strike"],
+                    "setting_field": ["max_strike"],
+                },
+                "current_message_slots": {"setting_new_value": [90]},
+                "override_slots": {},
+                "delta": {"type": "set_value", "value": 90},
+                "requires_clarification": False,
+                "clarification_question": None,
+            },
+            "steps": [
+                {
+                    "id": "step_1",
+                    "tool_name": "symbol_edit",
+                    "arguments": {"symbol": "FUTU", "set": {"sell_put.max_strike": 90}},
+                    "purpose": "preview config change from active setting frame",
+                }
+            ],
+        },
+        planner_manifest=_planner_tool_manifest(),
+    )
+
+    assert validation["status"] == "passed"
+    assert validation["code"] == "ok"
+    assert validation["referenced_frame_ids"] == ["frame_ev_001"]
+
+
 def test_context_validation_blocks_followup_setting_path_drift() -> None:
     projection = _symbol_config_projection()
 
@@ -243,6 +284,21 @@ def _symbol_config_projection() -> dict:
                     "setting_field": ["max_strike"],
                 },
                 "data_shape": {"kind": "single_symbol_setting", "setting_path": "sell_put.max_strike"},
+            }
+        ],
+        "active_frames": [
+            {
+                "frame_id": "frame_ev_001",
+                "type": "symbol_setting",
+                "source_tool": "symbol_config_read",
+                "source_ref_id": "ev_001",
+                "turn_id": "session:s_symbol_config",
+                "symbol": "FUTU",
+                "strategy": "sell_put",
+                "setting_path": "sell_put.max_strike",
+                "setting_field": "max_strike",
+                "current_value": 120.0,
+                "allowed_deltas": ["set_value", "explain"],
             }
         ],
         "budget": {"truncated": False},

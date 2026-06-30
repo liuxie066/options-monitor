@@ -111,7 +111,7 @@ MAX_AGENT_LOOP_ITERATIONS = 3
 MAX_AGENT_LOOP_TOOL_CALLS = 10
 MAX_PLANNER_ANALYSIS_VIEWS = 12
 _CURRENT_SCOPE_OPTIONAL_FILTER_SLOTS = frozenset({"function", "strategy"})
-PLANNER_CONTEXT_USE_MODES = ("none", "carry", "refine", "override", "ambiguous")
+PLANNER_CONTEXT_USE_MODES = ("none", "carry", "refine", "override", "frame_delta", "ambiguous")
 _DEFAULT_PLANNER_ANALYSIS_VIEWS: tuple[str, ...] = (
     "account_monthly_performance",
     "account_monthly_income_components",
@@ -2830,6 +2830,15 @@ def _create_model_turn_events(
         )
 
     planner_payload = _planner_input_payload(text, conversation_context=conversation_context)
+    frame_delta_result = _model_turn_result_from_frame_delta(
+        text=text,
+        settings=settings,
+        conversation_context=conversation_context,
+        planner_payload=planner_payload,
+        provider=provider,
+    )
+    if frame_delta_result is not None:
+        return frame_delta_result
     response_fn = create_tool_call_response_fn or provider_create_tool_call_response_fn(provider)
     attempt = _model_event_provider_attempt(
         planner_payload=planner_payload,
@@ -2883,6 +2892,171 @@ def _create_model_turn_events(
     base_trace["context_validation"] = event_plan.context_validation
     base_trace["event_plan"] = event_plan.public_payload()
     return ModelTurnResult(trace={**base_trace, "reason": "accepted"}, event_plan=event_plan)
+
+
+def _model_turn_result_from_frame_delta(
+    *,
+    text: str,
+    settings: AssistantSettings,
+    conversation_context: dict[str, Any] | None,
+    planner_payload: dict[str, Any],
+    provider: str,
+) -> ModelTurnResult | None:
+    value = _short_scalar_set_value(text)
+    if value is _NO_FRAME_DELTA_VALUE:
+        return None
+    projection = _planner_payload_context_projection(planner_payload)
+    frames = [
+        frame
+        for frame in projection.get("active_frames") or []
+        if isinstance(frame, dict)
+        and frame.get("type") == "symbol_setting"
+        and "set_value" in {str(item) for item in frame.get("allowed_deltas") or []}
+    ]
+    if not frames:
+        return None
+    planner_input = _planner_input_trace(planner_payload, json.dumps(planner_payload, ensure_ascii=False, sort_keys=True))
+    if len(frames) != 1:
+        context_use = _ambiguous_context_use(
+            current_slots={"setting_new_value": [value]},
+            reason="multiple_active_setting_frames",
+            question="当前追问可能引用多个配置项，请明确要修改哪个标的和字段。",
+        )
+        validation = validate_context_use(
+            current_user_message=text,
+            context_projection=projection,
+            plan_payload={"context_use": context_use, "steps": []},
+            planner_manifest=planner_payload.get("tools") if isinstance(planner_payload.get("tools"), list) else [],
+        )
+        error = _context_validation_error(validation) or AgentToolError(
+            code="PLAN_CONTEXT_AMBIGUOUS",
+            message="当前追问可能引用多个配置项，请明确要修改哪个标的和字段。",
+        )
+        trace = _llm_trace(
+            settings.llm,
+            attempted=False,
+            reason=_planner_error_trace_reason(error),
+            error_code=error.code,
+            conversation_context=conversation_context,
+            planner_input=planner_input,
+        )
+        trace["planner_context_use"] = _safe_context_use_payload(context_use)
+        trace["context_validation"] = validation
+        return ModelTurnResult(trace=trace, error=error)
+
+    frame = frames[0]
+    symbol = str(frame.get("symbol") or "").strip()
+    setting_path = str(frame.get("setting_path") or "").strip()
+    if not symbol or not setting_path:
+        return None
+    arguments = {"symbol": symbol, "set": {setting_path: value}}
+    event = ModelToolCallEvent(
+        event_id="host_frame_delta_symbol_edit",
+        tool_call_id="host_frame_delta_symbol_edit",
+        tool_name="symbol_edit",
+        arguments=arguments,
+        purpose="apply scalar follow-up to active symbol setting frame",
+        provider="host",
+        parent_event_id="user_message_1",
+    )
+    validation_error = _validate_model_tool_call_events((event,), question=text)
+    if validation_error is not None:
+        return None
+
+    context_use = _context_use_for_frame_delta(frame=frame, value=value)
+    plan_payload = _model_tool_calls_plan_like_payload(
+        goal=text,
+        events=(event,),
+        required_capabilities=_required_capabilities_for_model_tool_calls((event,)),
+        task_contract=None,
+        context_use=context_use,
+    )
+    today = _planner_today_from_context(conversation_context)
+    host_contract = build_task_contract(question=text, plan=plan_payload, request_context=None, today=today)
+    task_contract = _planner_task_contract_from_host_contract(host_contract.public_payload())
+    event_plan = EventNativePlanningResult(
+        events=(event,),
+        task_contract=task_contract,
+        required_capabilities=_required_capabilities_for_model_tool_calls((event,)),
+        context_use=context_use,
+        provider=provider,
+        goal=str(text or "").strip(),
+    )
+    validation = validate_context_use(
+        current_user_message=text,
+        context_projection=projection,
+        plan_payload=event_plan.plan_like_payload(),
+        planner_manifest=planner_payload.get("tools") if isinstance(planner_payload.get("tools"), list) else [],
+    )
+    event_plan = replace(event_plan, context_validation=validation)
+    context_error = _context_validation_error(validation)
+    trace = _llm_trace(
+        settings.llm,
+        attempted=False,
+        reason="frame_delta",
+        schema_version=TOOL_PLAN_SCHEMA_VERSION,
+        conversation_context=conversation_context,
+        planner_input=planner_input,
+    )
+    trace["event_model"] = {
+        "schema_version": "om-assistant-event-planner-v1",
+        "provider": "host",
+        "api_kind": "deterministic",
+        "event_count": 1,
+        "events": event_transcript_payload((event,)),
+        "legacy_json_plan_used": False,
+    }
+    trace["planner_context_use"] = _safe_context_use_payload(event_plan.context_use)
+    trace["context_validation"] = event_plan.context_validation
+    trace["event_plan"] = event_plan.public_payload()
+    if context_error is not None:
+        trace["reason"] = _planner_error_trace_reason(context_error)
+        trace["error_code"] = context_error.code
+        return ModelTurnResult(trace=trace, error=context_error, event_plan=event_plan)
+    return ModelTurnResult(trace={**trace, "reason": "accepted"}, event_plan=event_plan)
+
+
+_NO_FRAME_DELTA_VALUE = object()
+
+
+def _short_scalar_set_value(text: str) -> object:
+    compact = re.sub(r"\s+", "", str(text or "").lower())
+    match = re.fullmatch(r"(改为|改成|设为|设置成|调到|改到|降到|升到)(true|false|on|off|[0-9]+(?:\.[0-9]+)?)", compact)
+    if not match:
+        return _NO_FRAME_DELTA_VALUE
+    raw = match.group(2)
+    if raw in {"true", "on"}:
+        return True
+    if raw in {"false", "off"}:
+        return False
+    return float(raw) if "." in raw else int(raw)
+
+
+def _planner_payload_context_projection(planner_payload: dict[str, Any]) -> dict[str, Any]:
+    context = planner_payload.get("context") if isinstance(planner_payload.get("context"), dict) else {}
+    projection = context.get("context_projection") if isinstance(context.get("context_projection"), dict) else {}
+    return projection
+
+
+def _context_use_for_frame_delta(*, frame: dict[str, Any], value: object) -> dict[str, Any]:
+    inherited_slots: dict[str, list[Any]] = {}
+    for key in ("symbol", "market", "strategy", "setting_path", "setting_field"):
+        item = frame.get(key)
+        if item not in (None, ""):
+            inherited_slots[key] = [item]
+    return {
+        "schema_version": PLANNER_CONTEXT_USE_SCHEMA_VERSION,
+        "mode": "frame_delta",
+        "referenced_turn_ids": [str(frame.get("turn_id"))] if frame.get("turn_id") else [],
+        "referenced_evidence_refs": [str(frame.get("source_ref_id"))] if frame.get("source_ref_id") else [],
+        "referenced_frame_ids": [str(frame.get("frame_id"))] if frame.get("frame_id") else [],
+        "inherited_slots": inherited_slots,
+        "current_message_slots": {"setting_new_value": [value]},
+        "override_slots": {},
+        "delta": {"type": "set_value", "value": value},
+        "requires_clarification": False,
+        "clarification_question": None,
+    }
 
 
 def _model_event_provider_attempt(
@@ -3793,9 +3967,11 @@ def _default_context_use() -> dict[str, Any]:
         "mode": "none",
         "referenced_turn_ids": [],
         "referenced_evidence_refs": [],
+        "referenced_frame_ids": [],
         "inherited_slots": {},
         "current_message_slots": {},
         "override_slots": {},
+        "delta": {},
         "requires_clarification": False,
         "clarification_question": None,
     }
@@ -3810,9 +3986,17 @@ def _normalized_context_use(value: Any) -> dict[str, Any]:
         out["mode"] = mode
     out["referenced_turn_ids"] = _context_use_string_list(value.get("referenced_turn_ids"))
     out["referenced_evidence_refs"] = _context_use_string_list(value.get("referenced_evidence_refs"))
+    out["referenced_frame_ids"] = _context_use_string_list(value.get("referenced_frame_ids"))
     out["inherited_slots"] = _context_use_slots(value.get("inherited_slots"))
     out["current_message_slots"] = _context_use_slots(value.get("current_message_slots"))
     out["override_slots"] = _context_use_slots(value.get("override_slots"))
+    delta = value.get("delta") if isinstance(value.get("delta"), dict) else {}
+    delta_type = str(delta.get("type") or "").strip()
+    if delta_type:
+        out["delta"] = {
+            "type": _clip_context_use_text(delta_type, 80),
+            "value": delta.get("value") if isinstance(delta.get("value"), (str, int, float, bool)) or delta.get("value") is None else None,
+        }
     out["requires_clarification"] = bool(value.get("requires_clarification"))
     clarification = str(value.get("clarification_question") or "").strip()
     out["clarification_question"] = _clip_context_use_text(clarification, 240) if clarification else None
@@ -4877,6 +5061,24 @@ def _planner_projection_payload(projection: dict[str, Any], *, current_user_mess
             allowed_keys={"ref_id", "turn_id", "source_type", "source_tool", "label", "safe_slots", "data_shape"},
             limit=12,
         ),
+        "active_frames": _planner_projection_items(
+            projection.get("active_frames"),
+            allowed_keys={
+                "frame_id",
+                "type",
+                "source_tool",
+                "source_ref_id",
+                "turn_id",
+                "symbol",
+                "market",
+                "strategy",
+                "setting_path",
+                "setting_field",
+                "current_value",
+                "allowed_deltas",
+            },
+            limit=5,
+        ),
         "open_evidence_gaps": _planner_projection_items(
             projection.get("open_evidence_gaps"),
             allowed_keys={
@@ -5153,7 +5355,8 @@ Rules:
 - Use task_mode=analyze for analysis/复盘/表现/来源/结构 questions, compare for same-scope comparisons, diagnose for why/missing/failure/abnormal status questions, explain for rules or accounting policies, recommend for advisory options, and preview_write only for approved preview operations.
 - task_contract.required_evidence should name evidence categories needed to complete the answer, not tool names. Examples: summary, driver_or_breakdown, same_scope_comparable_data, observed_status, diagnostic_evidence, rule_or_config_source, current_state, constraints, risk_premise, source_policy.
 - task_contract.answer_shape should name what the final answer must cover, such as conclusion, drivers, same_scope_comparison, cause_chain, evidence_boundary, risk, premise, options, source_policy.
-- Always fill context_use when the schema includes it. Use mode=none when the current message is self-contained; use carry/refine/override only when the plan intentionally depends on prior conversation state.
+- Always fill context_use when the schema includes it. Use mode=none when the current message is self-contained; use carry/refine/override/frame_delta only when the plan intentionally depends on prior conversation state.
+- When context.context_projection.active_frames has one relevant frame and the current message is a short delta such as a new scalar value, use mode=frame_delta with referenced_frame_ids and delta. If multiple frames fit, ask clarification.
 - Current user message wins over context.context_projection. If the user explicitly changes account, symbol, month, domain, strategy, operation, or requested effect, declare mode=override and put the replacement values in current_message_slots or override_slots.
 - Use context.context_projection as the only conversation-state authority for planning. recent_turns, recent_successful_tools, available_evidence_refs, open_evidence_gaps, pending_operations, and safe_slots are planner-visible hints, not hidden truth.
 - Use context.context_projection.relevant_memories only as hint-only collaboration, OM usage, and parameter-tuning preferences. Do not treat memory as market data, ledger state, runtime config, or authorization for writes.

@@ -192,7 +192,61 @@ def test_context_projection_exposes_symbol_config_setting_slots() -> None:
     }
     assert ref["data_shape"]["kind"] == "single_symbol_setting"
     assert ref["data_shape"]["setting_path"] == "sell_put.max_strike"
+    assert ref["data_shape"]["current_value"] == 120.0
     assert ref["data_shape"]["value_type"] == "float"
+    assert projection["active_frames"] == [
+        {
+            "frame_id": "frame_ev_001",
+            "type": "symbol_setting",
+            "source_tool": "symbol_config_read",
+            "source_ref_id": "ev_001",
+            "turn_id": "session:s_symbol_config",
+            "symbol": "FUTU",
+            "strategy": "sell_put",
+            "setting_path": "sell_put.max_strike",
+            "setting_field": "max_strike",
+            "current_value": 120.0,
+            "allowed_deltas": ["set_value", "explain"],
+        }
+    ]
+    assert context_projection_trace(projection)["active_frame_count"] == 1
+
+
+def test_context_projection_symbol_setting_frame_prefers_canonical_symbol() -> None:
+    projection = build_context_projection(
+        current_user_message="改为16",
+        conversation_context={},
+        recent_sessions=[
+            {
+                "session_id": "s_symbol_config",
+                "created_at": "2026-06-23T22:09:00+08:00",
+                "updated_at": "2026-06-23T22:10:00+08:00",
+                "raw_text": "中国海洋石油 sell put的max strike是多少？",
+                "response_text": "中国海洋石油（0883.HK）sell_put.max_strike = 18。",
+                "snapshot": {
+                    "tool_transcript": [
+                        {
+                            "tool_name": "symbol_config_read",
+                            "payload": {"symbol": "中国海洋石油", "strategy": "sell_put", "field": "max_strike"},
+                            "ok": True,
+                            "summary": {
+                                "canonical_symbol": "0883.HK",
+                                "strategy": "sell_put",
+                                "field": "max_strike",
+                                "path": "sell_put.max_strike",
+                                "value": 18.0,
+                                "found": True,
+                            },
+                        }
+                    ]
+                },
+            }
+        ],
+    )
+
+    assert projection["available_evidence_refs"][0]["safe_slots"]["symbol"] == ["中国海洋石油", "0883.HK"]
+    assert projection["available_evidence_refs"][0]["data_shape"]["canonical_symbol"] == "0883.HK"
+    assert projection["active_frames"][0]["symbol"] == "0883.HK"
 
 
 def test_build_conversation_context_attaches_shadow_projection(tmp_path: Path) -> None:
