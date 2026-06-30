@@ -7,8 +7,8 @@ from src.application.assistant.context_projection import SAFE_SLOT_KEYS
 
 CONTEXT_VALIDATION_SCHEMA_VERSION = "om-context-validation-v1"
 PLANNER_CONTEXT_USE_SCHEMA_VERSION = "om-planner-context-use-v1"
-CONTEXT_USE_MODES = ("none", "carry", "refine", "override", "ambiguous")
-CONTEXT_USING_MODES = {"carry", "refine", "override"}
+CONTEXT_USE_MODES = ("none", "carry", "refine", "override", "frame_delta", "ambiguous")
+CONTEXT_USING_MODES = {"carry", "refine", "override", "frame_delta"}
 CONTEXT_VALIDATION_STATUSES = ("passed", "blocked", "ask_clarification")
 
 _HIDDEN_ARGUMENT_KEYS = frozenset(
@@ -71,6 +71,7 @@ def validate_context_use(
     steps = [dict(item) for item in plan.get("steps") or [] if isinstance(item, dict)]
     referenced_turn_ids = _string_list(context_use.get("referenced_turn_ids"))
     referenced_evidence_refs = _string_list(context_use.get("referenced_evidence_refs"))
+    referenced_frame_ids = _string_list(context_use.get("referenced_frame_ids"))
     inherited_slots = _slot_mapping(context_use.get("inherited_slots"))
     current_slots = _slot_mapping(context_use.get("current_message_slots"))
     override_slots = _slot_mapping(context_use.get("override_slots"))
@@ -106,6 +107,20 @@ def validate_context_use(
             violation={"reason": "planner_declared_ambiguity"},
         )
 
+    frame_violation = _frame_reference_violation(
+        projection=projection,
+        context_use=context_use,
+        referenced_frame_ids=referenced_frame_ids,
+    )
+    if frame_violation is not None:
+        return _validation_payload(
+            status="blocked",
+            code=str(frame_violation.pop("code")),
+            context_use=context_use,
+            warnings=warnings,
+            violation=frame_violation,
+        )
+
     ref_violation = _reference_violation(
         projection=projection,
         referenced_turn_ids=referenced_turn_ids,
@@ -124,6 +139,7 @@ def validate_context_use(
         projection=projection,
         referenced_turn_ids=referenced_turn_ids,
         referenced_evidence_refs=referenced_evidence_refs,
+        referenced_frame_ids=referenced_frame_ids,
     )
     slot_violation = _slot_source_violation(
         inherited_slots=inherited_slots,
@@ -147,6 +163,7 @@ def validate_context_use(
         mode=str(context_use["mode"]),
         referenced_turn_ids=referenced_turn_ids,
         referenced_evidence_refs=referenced_evidence_refs,
+        referenced_frame_ids=referenced_frame_ids,
     )
     if ambiguity is not None:
         return _validation_payload(
@@ -195,6 +212,7 @@ def _validation_payload(
         "context_use_mode": context_use["mode"],
         "referenced_turn_ids": _string_list(context_use.get("referenced_turn_ids")),
         "referenced_evidence_refs": _string_list(context_use.get("referenced_evidence_refs")),
+        "referenced_frame_ids": _string_list(context_use.get("referenced_frame_ids")),
         "validated_slots": {
             "inherited": _slot_mapping(context_use.get("inherited_slots")),
             "current_message": _slot_mapping(context_use.get("current_message_slots")),
@@ -217,12 +235,26 @@ def _normalized_context_use(value: Any) -> dict[str, Any]:
         "mode": mode,
         "referenced_turn_ids": _string_list(raw.get("referenced_turn_ids")),
         "referenced_evidence_refs": _string_list(raw.get("referenced_evidence_refs")),
+        "referenced_frame_ids": _string_list(raw.get("referenced_frame_ids")),
         "inherited_slots": _slot_mapping(raw.get("inherited_slots")),
         "current_message_slots": _slot_mapping(raw.get("current_message_slots")),
         "override_slots": _slot_mapping(raw.get("override_slots")),
+        "delta": _frame_delta(raw.get("delta")),
         "requires_clarification": bool(raw.get("requires_clarification")),
         "clarification_question": raw.get("clarification_question") if raw.get("clarification_question") else None,
     }
+
+
+def _frame_delta(value: Any) -> dict[str, Any]:
+    raw = value if isinstance(value, dict) else {}
+    delta_type = str(raw.get("type") or "").strip()
+    out: dict[str, Any] = {}
+    if delta_type:
+        out["type"] = delta_type
+    delta_value = raw.get("value")
+    if isinstance(delta_value, (str, int, float, bool)) or delta_value is None:
+        out["value"] = delta_value
+    return out
 
 
 def _manifest_by_tool(planner_manifest: list[dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
@@ -322,6 +354,41 @@ def _reference_violation(
     return None
 
 
+def _frame_reference_violation(
+    *,
+    projection: dict[str, Any],
+    context_use: dict[str, Any],
+    referenced_frame_ids: list[str],
+) -> dict[str, Any] | None:
+    mode = str(context_use.get("mode") or "")
+    frames = _frames_by_id(projection)
+    missing = sorted(frame_id for frame_id in referenced_frame_ids if frame_id not in frames)
+    if missing:
+        return {"code": "CONTEXT_FRAME_NOT_FOUND", "reason": "referenced_frame_missing", "missing_frame_ids": missing}
+    if mode != "frame_delta":
+        return None
+    if len(referenced_frame_ids) != 1:
+        return {
+            "code": "CONTEXT_FRAME_AMBIGUOUS",
+            "reason": "frame_delta_requires_exactly_one_frame",
+            "referenced_frame_ids": referenced_frame_ids,
+        }
+    delta = context_use.get("delta") if isinstance(context_use.get("delta"), dict) else {}
+    delta_type = str(delta.get("type") or "").strip()
+    frame = frames[referenced_frame_ids[0]]
+    allowed = _string_list(frame.get("allowed_deltas"))
+    if not delta_type:
+        return {"code": "CONTEXT_FRAME_DELTA_INVALID", "reason": "missing_delta_type"}
+    if delta_type not in allowed:
+        return {
+            "code": "CONTEXT_FRAME_DELTA_INVALID",
+            "reason": "delta_not_allowed_for_frame",
+            "delta_type": delta_type,
+            "allowed_deltas": allowed,
+        }
+    return None
+
+
 def _slot_source_violation(
     *,
     inherited_slots: dict[str, list[Any]],
@@ -380,10 +447,11 @@ def _ambiguity_violation(
     mode: str,
     referenced_turn_ids: list[str],
     referenced_evidence_refs: list[str],
+    referenced_frame_ids: list[str],
 ) -> dict[str, Any] | None:
     if mode not in CONTEXT_USING_MODES:
         return None
-    has_reference = bool(referenced_turn_ids or referenced_evidence_refs)
+    has_reference = bool(referenced_turn_ids or referenced_evidence_refs or referenced_frame_ids)
     budget = projection.get("budget") if isinstance(projection.get("budget"), dict) else {}
     if bool(budget.get("truncated")) and not has_reference:
         return {"reason": "context_projection_truncated_without_reference"}
@@ -399,6 +467,7 @@ def _source_slots(
     projection: dict[str, Any],
     referenced_turn_ids: list[str],
     referenced_evidence_refs: list[str],
+    referenced_frame_ids: list[str],
 ) -> dict[str, list[Any]]:
     out: dict[str, list[Any]] = {}
     turns = _turns_by_id(projection)
@@ -413,7 +482,18 @@ def _source_slots(
         tool_refs = set(_string_list(tool.get("evidence_refs")))
         if tool_refs.intersection(referenced_evidence_refs):
             _merge_slots(out, tool.get("safe_slots"))
+    frames = _frames_by_id(projection)
+    for frame_id in referenced_frame_ids:
+        _merge_frame_slots(out, frames.get(frame_id, {}))
     return out
+
+
+def _merge_frame_slots(out: dict[str, list[Any]], frame: dict[str, Any]) -> None:
+    if not isinstance(frame, dict):
+        return
+    for key in ("symbol", "market", "strategy", "setting_path", "setting_field"):
+        if key in SAFE_SLOT_KEYS:
+            _add_slot(out, key, frame.get(key))
 
 
 def _turns_by_id(projection: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -433,6 +513,16 @@ def _evidence_by_id(projection: dict[str, Any]) -> dict[str, dict[str, Any]]:
             ref_id = str(ref.get("ref_id") or "").strip()
             if ref_id:
                 out[ref_id] = ref
+    return out
+
+
+def _frames_by_id(projection: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for frame in projection.get("active_frames") or []:
+        if isinstance(frame, dict):
+            frame_id = str(frame.get("frame_id") or "").strip()
+            if frame_id:
+                out[frame_id] = frame
     return out
 
 
