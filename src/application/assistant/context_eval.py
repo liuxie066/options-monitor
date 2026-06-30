@@ -642,9 +642,8 @@ def _evaluate_scenario_checks(
         )
 
     if expect.get("no_legacy_authority"):
-        serialized = json.dumps(context, ensure_ascii=False, sort_keys=True)
         for key in ("active_frame", "frame_stack", "followup_resolution", "metric_glossary"):
-            _add_check(checks, f"scenario.no_legacy_authority.{key}", True, key not in serialized)
+            _add_check(checks, f"scenario.no_legacy_authority.{key}", True, not _contains_mapping_key(context, key))
     return checks
 
 
@@ -769,9 +768,19 @@ def _add_context_expectation_checks(
             str(source_tool) in set(refs),
         )
     if case.get("expect_context_projection_no_legacy_authority"):
-        _add_check(checks, "context.no_active_frame_authority", True, "active_frame" not in context)
-        _add_check(checks, "context.no_frame_stack_authority", True, "frame_stack" not in context)
-        _add_check(checks, "context.no_followup_authority", True, "followup_resolution" not in context)
+        _add_check(checks, "context.no_active_frame_authority", True, not _contains_mapping_key(context, "active_frame"))
+        _add_check(checks, "context.no_frame_stack_authority", True, not _contains_mapping_key(context, "frame_stack"))
+        _add_check(checks, "context.no_followup_authority", True, not _contains_mapping_key(context, "followup_resolution"))
+
+
+def _contains_mapping_key(value: Any, key: str) -> bool:
+    if isinstance(value, dict):
+        if key in value:
+            return True
+        return any(_contains_mapping_key(item, key) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_mapping_key(item, key) for item in value)
+    return False
 
 
 def _mapping_subset_diffs(

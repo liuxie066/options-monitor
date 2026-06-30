@@ -151,6 +151,7 @@ def build_context_projection(
         "recent_turns": turn_items[:max_turns],
         "recent_successful_tools": tool_items[:max_tools],
         "available_evidence_refs": [],
+        "active_frames": [],
         "open_evidence_gaps": open_gaps[:max_gaps],
         "pending_operations": _pending_operations(context.get("pending_operations")),
         "user_profile": _projection_user_profile(context.get("user_profile")),
@@ -187,6 +188,7 @@ def build_context_projection(
     if len(open_gaps) > max_gaps:
         truncated_reasons.append("open_gap_limit")
     _enforce_char_budget(projection, truncated_reasons)
+    projection["active_frames"] = _active_frames_from_evidence_refs(projection.get("available_evidence_refs") or [])
     return projection
 
 
@@ -200,6 +202,7 @@ def context_projection_trace(projection: dict[str, Any] | None) -> dict[str, Any
         "recent_turn_count": len(projection.get("recent_turns") or []),
         "recent_successful_tool_count": len(projection.get("recent_successful_tools") or []),
         "evidence_ref_count": len(projection.get("available_evidence_refs") or []),
+        "active_frame_count": len(projection.get("active_frames") or []),
         "open_gap_count": len(projection.get("open_evidence_gaps") or []),
         "pending_operation_count": len(projection.get("pending_operations") or []),
         "relevant_memory_count": len(projection.get("relevant_memories") or []),
@@ -684,13 +687,55 @@ def _data_shape(item: dict[str, Any]) -> dict[str, Any]:
             evidence=evidence,
             data=data,
         )
+        if setting.get("symbol"):
+            out["canonical_symbol"] = setting["symbol"]
         if setting.get("setting_path"):
             out["kind"] = "single_symbol_setting"
             out["setting_path"] = setting["setting_path"]
         value = _first_value(summary.get("value"), data.get("value"))
         if value is not None:
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                out["current_value"] = value
             out["value_type"] = type(value).__name__
     return out
+
+
+def _active_frames_from_evidence_refs(evidence_refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    frames: list[dict[str, Any]] = []
+    for ref in evidence_refs:
+        if not isinstance(ref, dict) or str(ref.get("source_tool") or "") != "symbol_config_read":
+            continue
+        data_shape = ref.get("data_shape") if isinstance(ref.get("data_shape"), dict) else {}
+        if data_shape.get("kind") != "single_symbol_setting":
+            continue
+        slots = ref.get("safe_slots") if isinstance(ref.get("safe_slots"), dict) else {}
+        symbol = data_shape.get("canonical_symbol") or _first_slot(slots, "symbol")
+        setting_path = _first_slot(slots, "setting_path") or data_shape.get("setting_path")
+        if not symbol or not setting_path:
+            continue
+        frame = {
+            "frame_id": f"frame_{ref.get('ref_id')}",
+            "type": "symbol_setting",
+            "source_tool": "symbol_config_read",
+            "source_ref_id": ref.get("ref_id"),
+            "turn_id": ref.get("turn_id"),
+            "symbol": symbol,
+            "market": _first_slot(slots, "market"),
+            "strategy": _first_slot(slots, "strategy"),
+            "setting_path": setting_path,
+            "setting_field": _first_slot(slots, "setting_field"),
+            "current_value": data_shape.get("current_value"),
+            "allowed_deltas": ["set_value", "explain"],
+        }
+        frames.append(_strip_empty(frame) or {})
+    return [frame for frame in frames if frame]
+
+
+def _first_slot(slots: dict[str, Any], key: str) -> Any:
+    values = slots.get(key)
+    if isinstance(values, list) and values:
+        return values[0]
+    return None
 
 
 def _filter_evidence_refs(projection: dict[str, Any], evidence_refs: list[dict[str, Any]]) -> None:

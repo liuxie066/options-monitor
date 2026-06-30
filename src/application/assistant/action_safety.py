@@ -656,7 +656,7 @@ def _context_validation_inherits_slot(validation: dict[str, Any] | None, slot_ke
         return False
     context_use = validation.get("context_use") if isinstance(validation.get("context_use"), dict) else {}
     mode = str(context_use.get("mode") or validation.get("context_use_mode") or "")
-    if mode not in {"carry", "refine", "override"}:
+    if mode not in {"carry", "refine", "override", "frame_delta"}:
         return False
     slots = validation.get("validated_slots") if isinstance(validation.get("validated_slots"), dict) else {}
     if not slots:
