@@ -166,6 +166,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 "reply_enabled": True,
                 "max_reply_chars": 3500,
                 "poll_interval_sec": 3.0,
+                "keepalive_interval_sec": 1800.0,
                 "timeout_sec": 20,
             }
         },

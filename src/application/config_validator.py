@@ -262,6 +262,7 @@ def _validate_inbound_config(cfg: dict) -> None:
                 if key in wechat_clawbot and wechat_clawbot.get(key) is not None:
                     validate_positive_integer(wechat_clawbot.get(key), f'inbound.wechat_clawbot.{key}')
             _validate_optional_non_negative_number(wechat_clawbot, 'poll_interval_sec', 'inbound.wechat_clawbot')
+            _validate_optional_non_negative_number(wechat_clawbot, 'keepalive_interval_sec', 'inbound.wechat_clawbot')
 
 
 def _validate_assistant_config(cfg: dict) -> None:
