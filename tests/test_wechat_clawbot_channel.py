@@ -726,6 +726,54 @@ def test_wechat_clawbot_poll_once_accepts_empty_sendmessage_response(tmp_path: P
     assert "delivery_confirmed" not in receipt
 
 
+def test_wechat_clawbot_poll_once_keepalives_bound_context_without_messages(tmp_path: Path) -> None:
+    from src.application.channels.wechat_clawbot.inbound import poll_wechat_clawbot_once
+
+    state_dir = tmp_path / "wechat-state"
+    state_dir.mkdir()
+    (state_dir / "state.json").write_text(
+        json.dumps({"bot_token": "bot_1", "base_url": "https://example.invalid", "get_updates_buf": "buf_1"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (state_dir / "bindings.json").write_text(
+        json.dumps({"bindings": {"ops": {"to_user_id": "user_1", "context_token": "ctx_1"}}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    get_config_calls: list[dict[str, object]] = []
+
+    class FakeClient:
+        def __init__(self, *, bot_token: str, base_url: str, timeout: int) -> None:
+            del timeout
+            assert bot_token == "bot_1"
+            assert base_url == "https://example.invalid"
+
+        def get_updates(self, *, get_updates_buf: str):  # type: ignore[no-untyped-def]
+            assert get_updates_buf == "buf_1"
+            return {"ret": 0, "get_updates_buf": "buf_2", "msgs": []}
+
+        def get_config(self, **kwargs):  # type: ignore[no-untyped-def]
+            get_config_calls.append(dict(kwargs))
+            return {"ret": 0, "typing_ticket": "typing_ticket_1"}
+
+    out = poll_wechat_clawbot_once(
+        base=tmp_path,
+        label="ops",
+        state_dir=str(state_dir),
+        keepalive_interval_sec=1,
+        client_factory=FakeClient,
+    )
+
+    assert out["ok"] is True
+    assert out["data"]["processed_count"] == 0
+    assert out["data"]["keepalive"]["reason"] == "ok"
+    assert out["data"]["keepalive"]["binding_count"] == 1
+    assert get_config_calls == [{"ilink_user_id": "user_1", "context_token": "ctx_1"}]
+    state = json.loads((state_dir / "state.json").read_text(encoding="utf-8"))
+    assert state["get_updates_buf"] == "buf_2"
+    assert state["keepalive"]["last_ok"] is True
+    assert state["keepalive"]["last_success_at_utc"]
+
+
 def test_wechat_clawbot_poll_once_stays_silent_for_unauthorized_sender(tmp_path: Path) -> None:
     from src.application.channels.wechat_clawbot.inbound import poll_wechat_clawbot_once
 
@@ -1198,6 +1246,7 @@ def test_wechat_clawbot_serve_settings_reads_behavior_from_assistant_config(tmp_
                         "reply_enabled": False,
                         "max_reply_chars": 1200,
                         "poll_interval_sec": 0.75,
+                        "keepalive_interval_sec": 60,
                         "timeout_sec": 9,
                     }
                 },
@@ -1216,6 +1265,7 @@ def test_wechat_clawbot_serve_settings_reads_behavior_from_assistant_config(tmp_
     assert settings.reply_enabled is False
     assert settings.max_reply_chars == 1200
     assert settings.poll_interval_sec == 0.75
+    assert settings.keepalive_interval_sec == 60
     assert settings.timeout_sec == 9
 
     overridden = build_wechat_clawbot_serve_settings(
@@ -1226,6 +1276,7 @@ def test_wechat_clawbot_serve_settings_reads_behavior_from_assistant_config(tmp_
         reply_enabled=True,
         max_reply_chars=88,
         poll_interval_sec=0.25,
+        keepalive_interval_sec=30,
         timeout_sec=7,
     )
 
@@ -1234,6 +1285,7 @@ def test_wechat_clawbot_serve_settings_reads_behavior_from_assistant_config(tmp_
     assert overridden.reply_enabled is True
     assert overridden.max_reply_chars == 88
     assert overridden.poll_interval_sec == 0.25
+    assert overridden.keepalive_interval_sec == 30
     assert overridden.timeout_sec == 7
 
 
@@ -1256,6 +1308,7 @@ def test_wechat_clawbot_serve_polls_until_stop_condition(tmp_path: Path) -> None
         reply_enabled=False,
         max_reply_chars=88,
         poll_interval_sec=0.25,
+        keepalive_interval_sec=30,
         timeout_sec=7,
     )
 
@@ -1281,6 +1334,7 @@ def test_wechat_clawbot_serve_polls_until_stop_condition(tmp_path: Path) -> None
     assert calls[0]["allowed_senders"] == "wechat:user_1"
     assert calls[0]["reply_enabled"] is False
     assert calls[0]["max_reply_chars"] == 88
+    assert calls[0]["keepalive_interval_sec"] == 30
     assert calls[0]["timeout_sec"] == 7
 
 

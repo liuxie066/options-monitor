@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.2.346 - 2026-06-30
+
+### Added
+- Added Assistant frame-delta follow-up handling for ongoing ClawBot conversations.
+- Added low-frequency WeChat ClawBot context keepalive in the existing inbound polling service.
+- Added `inbound.wechat_clawbot.keepalive_interval_sec` with a 30-minute default and validation.
+
 ## 1.2.345 - 2026-06-28
 
 ### Changed

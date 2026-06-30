@@ -465,6 +465,7 @@ inbound:
     assert cfg["inbound"]["wechat_clawbot"]["reply_enabled"] is True
     assert cfg["inbound"]["wechat_clawbot"]["max_reply_chars"] == 3500
     assert cfg["inbound"]["wechat_clawbot"]["poll_interval_sec"] == 0.5
+    assert cfg["inbound"]["wechat_clawbot"]["keepalive_interval_sec"] == 1800.0
 
 
 def test_yaml_assistant_config_unwraps_explicit_system_defaults(tmp_path: Path) -> None:
