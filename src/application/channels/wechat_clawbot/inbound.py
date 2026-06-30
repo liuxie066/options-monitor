@@ -7,6 +7,7 @@ import shlex
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, cast
 
@@ -51,6 +52,7 @@ ExecuteToolFn = Callable[[str, dict[str, Any]], dict[str, Any]]
 ClientFactory = Callable[..., WechatClawbotClient]
 DEFAULT_WECHAT_REPLY_MAX_CHARS = 3500
 DEFAULT_WECHAT_POLL_INTERVAL_SEC = 3.0
+DEFAULT_WECHAT_KEEPALIVE_INTERVAL_SEC = 1800.0
 
 LOG = logging.getLogger(__name__)
 
@@ -68,6 +70,7 @@ class WechatClawbotServeSettings:
     reply_enabled: bool = True
     max_reply_chars: int = DEFAULT_WECHAT_REPLY_MAX_CHARS
     poll_interval_sec: float = DEFAULT_WECHAT_POLL_INTERVAL_SEC
+    keepalive_interval_sec: float = DEFAULT_WECHAT_KEEPALIVE_INTERVAL_SEC
     timeout_sec: int = 20
 
     def validate_for_serve(self) -> None:
@@ -92,6 +95,8 @@ class WechatClawbotServeSettings:
             )
         if self.poll_interval_sec < 0:
             raise AgentToolError(code="CONFIG_ERROR", message="wechat_clawbot poll_interval_sec must be >= 0")
+        if self.keepalive_interval_sec < 0:
+            raise AgentToolError(code="CONFIG_ERROR", message="wechat_clawbot keepalive_interval_sec must be >= 0")
 
     def connect_command_template(self, *, name: str = "ops") -> str:
         command = ["./om", "channel", "wechat-clawbot", "connect", "--label", self.label, "--name", str(name or "ops")]
@@ -120,6 +125,7 @@ class WechatClawbotServeSettings:
             "reply_enabled": bool(self.reply_enabled),
             "max_reply_chars": int(self.max_reply_chars),
             "poll_interval_sec": float(self.poll_interval_sec),
+            "keepalive_interval_sec": float(self.keepalive_interval_sec),
             "timeout_sec": int(self.timeout_sec),
         }
 
@@ -137,6 +143,7 @@ def build_wechat_clawbot_serve_settings(
     reply_enabled: bool | None = None,
     max_reply_chars: int | None = None,
     poll_interval_sec: float | None = None,
+    keepalive_interval_sec: float | None = None,
     timeout_sec: int | None = None,
 ) -> WechatClawbotServeSettings:
     from src.application.assistant.settings import AssistantSettings
@@ -168,6 +175,11 @@ def build_wechat_clawbot_serve_settings(
             poll_interval_sec,
             behavior_cfg.get("poll_interval_sec"),
             default=DEFAULT_WECHAT_POLL_INTERVAL_SEC,
+        ),
+        keepalive_interval_sec=_config_non_negative_float(
+            keepalive_interval_sec,
+            behavior_cfg.get("keepalive_interval_sec"),
+            default=DEFAULT_WECHAT_KEEPALIVE_INTERVAL_SEC,
         ),
         timeout_sec=_config_positive_int(timeout_sec, behavior_cfg.get("timeout_sec"), default=20),
     )
@@ -321,6 +333,7 @@ def poll_wechat_clawbot_once(
     allowed_senders: str | None = None,
     reply_enabled: bool = True,
     max_reply_chars: int = DEFAULT_WECHAT_REPLY_MAX_CHARS,
+    keepalive_interval_sec: float = 0.0,
     timeout_sec: int = 20,
     client_factory: ClientFactory = WechatClawbotClient,
     channel_service: ChannelService | None = None,
@@ -416,12 +429,23 @@ def poll_wechat_clawbot_once(
             }
         )
 
+    keepalive_status = _maybe_keepalive_bound_context(
+        store=store,
+        state=state,
+        client=client,
+        interval_sec=keepalive_interval_sec,
+    )
+    keepalive_state_changed = bool(keepalive_status.pop("_state_changed", False))
+
     cursor_updated = False
+    state_changed = False
     if cursor_after:
         state["get_updates_buf"] = cursor_after
         state["updated_at_utc"] = utc_now()
-        store.save_state(state)
+        state_changed = True
         cursor_updated = cursor_after != cursor_before
+    if state_changed or keepalive_state_changed:
+        store.save_state(state)
 
     all_ok = all(bool(item.get("ok")) and bool(_dict(item.get("reply")).get("ok", True)) for item in results)
     return build_response(
@@ -436,6 +460,7 @@ def poll_wechat_clawbot_once(
             "cursor_before": cursor_before,
             "cursor_after": cursor_after or cursor_before,
             "cursor_updated": cursor_updated,
+            "keepalive": keepalive_status,
             "results": results,
         },
         error=None if all_ok else {"code": "INBOUND_PROCESSING_FAILED", "message": "one or more WeChat ClawBot inbound messages failed"},
@@ -599,6 +624,7 @@ def serve_wechat_clawbot(
                     allowed_senders=settings.allowed_senders,
                     reply_enabled=settings.reply_enabled,
                     max_reply_chars=settings.max_reply_chars,
+                    keepalive_interval_sec=settings.keepalive_interval_sec,
                     timeout_sec=settings.timeout_sec,
                 )
             except Exception:
@@ -607,6 +633,134 @@ def serve_wechat_clawbot(
             if stop_after_batches is not None and batches >= stop_after_batches:
                 return
             sleep_fn(settings.poll_interval_sec)
+
+
+def _maybe_keepalive_bound_context(
+    *,
+    store: WechatClawbotStateStore,
+    state: dict[str, Any],
+    client: WechatClawbotClient,
+    interval_sec: float,
+) -> dict[str, Any]:
+    interval = max(0.0, float(interval_sec or 0.0))
+    if interval <= 0:
+        return {"attempted": False, "ok": True, "reason": "disabled"}
+
+    previous = _dict(state.get("keepalive"))
+    now = datetime.now(timezone.utc)
+    last_attempt = _parse_utc_datetime(previous.get("last_attempt_at_utc"))
+    if last_attempt is not None and (now - last_attempt).total_seconds() < interval:
+        return {
+            "attempted": False,
+            "ok": True,
+            "reason": "throttled",
+            "last_attempt_at_utc": previous.get("last_attempt_at_utc"),
+            "binding_count": previous.get("binding_count"),
+        }
+
+    try:
+        payload = _load_store_json(store.load_bindings, default={"bindings": {}})
+        bindings = payload.get("bindings") if isinstance(payload.get("bindings"), dict) else {}
+    except Exception as exc:
+        return _record_keepalive_state(
+            state=state,
+            previous=previous,
+            now=now,
+            ok=False,
+            reason="bindings_unavailable",
+            binding_count=0,
+            ok_count=0,
+            failed_bindings=(),
+            error=f"{type(exc).__name__}: {exc}",
+        )
+
+    targets: list[tuple[str, str, str]] = []
+    for name, value in sorted(bindings.items(), key=lambda item: str(item[0])):
+        binding = _dict(value)
+        to_user_id = _first_text(binding.get("to_user_id"))
+        context_token = _first_text(binding.get("context_token"))
+        if to_user_id and context_token:
+            targets.append((str(name), to_user_id, context_token))
+    if not targets:
+        return {"attempted": False, "ok": True, "reason": "no_bound_context", "binding_count": 0}
+
+    ok_count = 0
+    failures: list[str] = []
+    last_error: str | None = None
+    for name, to_user_id, context_token in targets:
+        try:
+            response = client.get_config(ilink_user_id=to_user_id, context_token=context_token)
+            if _response_success(response):
+                ok_count += 1
+                continue
+            failures.append(name)
+            last_error = f"{name}: response={json.dumps(response, ensure_ascii=False)[-300:]}"
+        except Exception as exc:
+            failures.append(name)
+            last_error = f"{name}: {type(exc).__name__}: {exc}"
+
+    ok = not failures
+    return _record_keepalive_state(
+        state=state,
+        previous=previous,
+        now=now,
+        ok=ok,
+        reason="ok" if ok else "failed",
+        binding_count=len(targets),
+        ok_count=ok_count,
+        failed_bindings=tuple(failures),
+        error=last_error,
+    )
+
+
+def _record_keepalive_state(
+    *,
+    state: dict[str, Any],
+    previous: dict[str, Any],
+    now: datetime,
+    ok: bool,
+    reason: str,
+    binding_count: int,
+    ok_count: int,
+    failed_bindings: tuple[str, ...],
+    error: str | None,
+) -> dict[str, Any]:
+    now_text = now.isoformat()
+    saved = dict(previous)
+    saved.update(
+        {
+            "last_attempt_at_utc": now_text,
+            "last_ok": bool(ok),
+            "last_reason": reason,
+            "binding_count": int(binding_count),
+            "ok_count": int(ok_count),
+        }
+    )
+    if ok:
+        saved["last_success_at_utc"] = now_text
+        saved.pop("last_error", None)
+        saved.pop("failed_bindings", None)
+    else:
+        if error:
+            saved["last_error"] = error
+        if failed_bindings:
+            saved["failed_bindings"] = list(failed_bindings)
+    state["keepalive"] = saved
+
+    out: dict[str, Any] = {
+        "attempted": True,
+        "ok": bool(ok),
+        "reason": reason,
+        "binding_count": int(binding_count),
+        "ok_count": int(ok_count),
+        "last_attempt_at_utc": now_text,
+        "_state_changed": True,
+    }
+    if failed_bindings:
+        out["failed_bindings"] = list(failed_bindings)
+    if error:
+        out["error"] = error
+    return out
 
 
 def _maybe_start_typing(
@@ -903,6 +1057,19 @@ def _config_non_negative_float(explicit: float | None, configured: Any, *, defau
     except Exception:
         value = default
     return max(0.0, value)
+
+
+def _parse_utc_datetime(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 @contextmanager
