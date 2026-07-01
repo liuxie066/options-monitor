@@ -176,4 +176,6 @@ def test_resolve_trade_broker_assigned_stock_sale_ambiguous_lot_is_unresolved(tm
     assert result.action == "assigned_stock_sale"
     assert result.reason == "ambiguous_assigned_stock_sale"
     assert result.diagnostics["viable_count"] == 2
+    assert {item["stock_cost_per_share"] for item in result.diagnostics["candidates"]} == {100.0}
+    assert all(item.get("source_assignment_event_id") for item in result.diagnostics["candidates"])
     assert repo.list_assigned_stock_events() == []

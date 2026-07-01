@@ -206,7 +206,8 @@ manual trade / trade-intake 会优先使用 runtime root 或 runtime config 路�
 assigned-stock lot 时，trade-intake 会返回 `action=assigned_stock_sale`，只写本地
 `assigned_stock_events`，并用券商 `deal_id` 作为 `source_deal_id` 幂等。没有匹配
 assigned-stock lot 的普通股票卖出仍返回 `skipped/not_option_deal`；多个候选 lot 或
-数量/时间无法安全匹配时返回 unresolved，需要人工指定目标 lot。
+数量/时间无法安全匹配时返回 unresolved，需要人工指定目标 lot。多个候选 lot 的回执会展示
+候选项并标记为待确认，确认前不会自动写入。
 重放已进入 `failed_deal_ids` 的单笔成交时，需要使用显式修复入口：
 `om run trade-intake --config config.us.json --mode apply --confirm --deal-json <payload.json> --retry-failed`。
 该入口只允许配合 `--deal-json` 使用，不会放开已成功处理成交的重复写入。
