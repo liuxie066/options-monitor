@@ -49,7 +49,6 @@ ModelEventType = Literal[
     "evidence_updated",
     "model_final_answer",
     "clarification_request",
-    "preview_request",
     "loop_stopped",
 ]
 
@@ -787,7 +786,7 @@ def _is_provider_tool_call_block(block: dict[str, Any]) -> bool:
 
 
 def _is_provider_control_block(block: dict[str, Any]) -> bool:
-    return str(block.get("type") or "").strip() in {"clarification_request", "preview_request"}
+    return str(block.get("type") or "").strip() == "clarification_request"
 
 
 def _chat_message_provider_metadata(message: dict[str, Any]) -> dict[str, Any]:

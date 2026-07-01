@@ -170,27 +170,14 @@ def _model_turn_result(
         if is_preview
         else _test_task_contract(goal=goal)
     )
-    event = (
-        AssistantEvent(
-            event_id="preview_request_1",
-            event_type="preview_request",
-            payload={
-                "intent_name": tool_name,
-                "arguments": args,
-                "reason": purpose or f"Preview {tool_name} for the current request.",
-            },
-            parent_event_id="user_message_1",
-        )
-        if is_preview
-        else ModelToolCallEvent(
-            event_id="model_tool_call_1",
-            tool_call_id="call_1",
-            tool_name=tool_name,
-            arguments=args,
-            purpose=purpose or f"Use {tool_name} for the current request.",
-            provider="openai",
-            parent_event_id="user_message_1",
-        )
+    event = ModelToolCallEvent(
+        event_id="model_tool_call_1",
+        tool_call_id="call_1",
+        tool_name=tool_name,
+        arguments=args,
+        purpose=purpose or f"Use {tool_name} for the current request.",
+        provider="openai",
+        parent_event_id="user_message_1",
     )
     return ModelTurnResult(
         trace=_planner_trace(),
@@ -213,6 +200,15 @@ def _model_turn_result(
             goal=effective_goal,
         ),
     )
+
+
+def _provider_function_call(tool_name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {
+        "type": "function_call",
+        "call_id": f"call_{tool_name}",
+        "name": tool_name,
+        "arguments": dict(arguments or {}),
+    }
 
 
 def _with_required_capabilities(result: ModelTurnResult, *required_capabilities: str) -> ModelTurnResult:
@@ -2981,13 +2977,18 @@ def test_assistant_runtime_agent_loop_can_create_approved_write_preview(tmp_path
         audit_store=InboundAuditStore(tmp_path / "inbound.sqlite3"),
         settings=settings,
         model_turn_fn=_plan,
+        execute_tool_fn=lambda _tool_name, _payload: pytest.fail("preview tool should be intercepted before execution"),
     )
 
     perception = engine.perceive(text, None)
 
-    assert perception.intent_name == "manual_trade_open"
-    assert perception.arguments == {"raw_text": text, "account": "sy"}
+    assert perception.intent_name == "tool_loop"
     assert perception.source == "agent_loop_events"
+    assert engine.last_tool_loop_result is not None
+    event_loop = engine.last_tool_loop_result["data"]["event_loop"]
+    assert event_loop["status"] == "preview_requested"
+    assert event_loop["preview_gate"]["intent_name"] == "manual_trade_open"
+    assert event_loop["preview_gate"]["arguments"]["account"] == "sy"
     assert engine.route == "agent_loop"
     assert engine.trace is not None
     trace = engine.trace.public_payload()
@@ -2995,7 +2996,7 @@ def test_assistant_runtime_agent_loop_can_create_approved_write_preview(tmp_path
     assert trace["selected_source"] == "agent_loop"
     assert trace["candidates"][0]["source"] == "agent_loop"
     assert trace["candidates"][0]["status"] == "accepted"
-    assert trace["candidates"][0]["intent_name"] == "manual_trade_open"
+    assert trace["candidates"][0]["intent_name"] == "tool_loop"
     assert trace["candidates"][1] == {"source": "command", "status": "skipped", "reason": "not_command"}
     assert trace["candidates"][2] == {
         "source": "permission_response",
@@ -3150,10 +3151,12 @@ def test_assistant_runtime_does_not_fallback_for_mismatched_known_llm_denial(tmp
     assert out["error"]["details"]["preview_capabilities"] == ["manual_trade_open"]
     assert out["meta"]["assistant"]["route"] == "agent_loop"
     perception_trace = out["meta"]["assistant"]["perception_trace"]
-    assert perception_trace["decision"] == "agent_loop_error"
-    assert perception_trace["selected_source"] is None
-    assert perception_trace["candidates"][0]["source"] == "agent_loop"
-    assert perception_trace["candidates"][0]["error_code"] == "PLAN_RISK_MISMATCH"
+    assert perception_trace["decision"] == "agent_loop_selected"
+    assert perception_trace["selected_source"] == "agent_loop"
+    assert any(
+        event.get("decision") == "risk_mismatch"
+        for event in out["meta"]["assistant"]["llm"]["agent_loop"]["tool_events"]
+    )
     assert perception_trace["candidates"][1] == {"source": "command", "status": "skipped", "reason": "not_command"}
     assert perception_trace["candidates"][2] == {
         "source": "permission_response",
@@ -8216,7 +8219,7 @@ def test_assistant_runtime_agent_loop_plans_manual_trade_open_preview(monkeypatc
     assert args["multiplier"] == 500.0
     agent_loop = out["meta"]["assistant"]["llm"]["agent_loop"]
     assert agent_loop["runtime"] == "model_turn_loop"
-    assert agent_loop["loop_stop_reason"] == "preview_request"
+    assert agent_loop["loop_stop_reason"] == "preview_gate"
     assert agent_loop["steps_used"] == 1
     assert agent_loop["steps"][0]["intent_name"] == "manual_trade_open"
     assert agent_loop["steps"][0]["tool_name"] == "manual_trade_open"
@@ -8614,12 +8617,7 @@ def test_assistant_runtime_provider_preview_request_creates_assignment_preview(
         provider_calls.append(dict(kwargs))
         return {
             "output": [
-                {
-                    "type": "preview_request",
-                    "intent_name": "manual_assignment",
-                    "arguments": {"account": "sy"},
-                    "reason": "broker assignment notice should create a pending preview",
-                }
+                _provider_function_call("manual_assignment", {"account": "sy"})
             ]
         }
 
@@ -8676,7 +8674,8 @@ def test_assistant_runtime_provider_preview_request_creates_assignment_preview(
     assert len(repo.list_trade_events()) == before_events
 
     llm_trace = out["meta"]["assistant"]["llm"]
-    assert llm_trace["event_model"]["events"][0]["event_type"] == "preview_request"
+    assert llm_trace["event_model"]["events"][0]["event_type"] == "model_tool_call"
+    assert llm_trace["agent_loop"]["loop_stop_reason"] == "preview_gate"
     assert llm_trace["agent_loop"]["steps"][0]["tool_name"] == "manual_assignment"
     assert llm_trace["agent_loop"]["preview_receipt"]["operation_type"] == "manual_assignment"
 
@@ -8702,12 +8701,7 @@ def test_assistant_runtime_provider_preview_request_creates_monitor_run_preview(
         assert "monitor_run_now" in tool_names
         return {
             "output": [
-                {
-                    "type": "preview_request",
-                    "intent_name": "monitor_run_now",
-                    "arguments": {"market": "hk"},
-                    "reason": "operator asked to run one HK monitor cycle",
-                }
+                _provider_function_call("monitor_run_now", {"market": "hk"})
             ]
         }
 
@@ -8760,7 +8754,8 @@ def test_assistant_runtime_provider_preview_request_creates_monitor_run_preview(
     assert permission_request["confirm_hint"].startswith("/confirm monitor-run ")
 
     llm_trace = out["meta"]["assistant"]["llm"]
-    assert llm_trace["event_model"]["events"][0]["event_type"] == "preview_request"
+    assert llm_trace["event_model"]["events"][0]["event_type"] == "model_tool_call"
+    assert llm_trace["agent_loop"]["loop_stop_reason"] == "preview_gate"
     assert llm_trace["agent_loop"]["steps"][0]["tool_name"] == "monitor_run_now"
     assert llm_trace["agent_loop"]["preview_receipt"]["operation_type"] == "monitor_run_now"
     assert llm_trace["agent_loop"]["preview_receipt"]["handler_tool"] == "inbound.monitor_run"
@@ -8916,7 +8911,7 @@ def test_assistant_runtime_repairs_provider_malformed_assignment_arguments_via_t
     assert llm_trace["reason"] == "accepted"
     assert llm_trace["event_model"]["events"][0]["protocol_error"]["details"]["reason"] == "provider_arguments_malformed"
     assert llm_trace["agent_loop"]["runtime"] == "model_turn_loop"
-    assert llm_trace["agent_loop"]["loop_stop_reason"] == "preview_request"
+    assert llm_trace["agent_loop"]["loop_stop_reason"] == "preview_gate"
     assert llm_trace["agent_loop"]["repair_attempted"] is True
     assert llm_trace["agent_loop"]["tool_call_count"] == 2
     assert [step["tool_name"] for step in llm_trace["agent_loop"]["steps"]] == [
@@ -8942,11 +8937,7 @@ def test_assistant_runtime_provider_preview_request_creates_expiry_preview(
         calls.append(dict(kwargs))
         return {
             "output": [
-                {
-                    "type": "preview_request",
-                    "intent_name": "manual_expiry",
-                    "arguments": {"account": "sy"},
-                }
+                _provider_function_call("manual_expiry", {"account": "sy"})
             ]
         }
 
@@ -9001,7 +8992,8 @@ def test_assistant_runtime_provider_preview_request_creates_expiry_preview(
     assert len(repo.list_trade_events()) == before_events
 
     llm_trace = out["meta"]["assistant"]["llm"]
-    assert llm_trace["event_model"]["events"][0]["event_type"] == "preview_request"
+    assert llm_trace["event_model"]["events"][0]["event_type"] == "model_tool_call"
+    assert llm_trace["agent_loop"]["loop_stop_reason"] == "preview_gate"
     assert llm_trace["agent_loop"]["steps"][0]["tool_name"] == "manual_expiry"
     assert llm_trace["agent_loop"]["preview_receipt"]["operation_type"] == "manual_expiry"
 
@@ -9022,11 +9014,7 @@ def test_assistant_runtime_provider_preview_request_missing_account_returns_clar
         calls.append(dict(kwargs))
         return {
             "output": [
-                {
-                    "type": "preview_request",
-                    "intent_name": "manual_assignment",
-                    "arguments": {},
-                }
+                _provider_function_call("manual_assignment", {})
             ]
         }
 
@@ -9246,8 +9234,12 @@ def test_assistant_runtime_agent_loop_rejects_read_plan_for_trade_preview_reques
     assert out["error"]["code"] == "PLAN_RISK_MISMATCH"
     assert calls == []
     assert out["meta"]["assistant"]["route"] == "agent_loop"
-    assert out["meta"]["assistant"]["llm"]["agent_loop"]["steps_used"] == 0
-    assert out["meta"]["assistant"]["perception_trace"]["decision"] == "agent_loop_error"
+    assert out["meta"]["assistant"]["llm"]["agent_loop"]["steps_used"] == 1
+    assert any(
+        event.get("decision") == "read_for_preview_request"
+        for event in out["meta"]["assistant"]["llm"]["agent_loop"]["tool_events"]
+    )
+    assert "LLM 规划" not in out["data"]["response_text"]
 
 
 def test_read_only_agent_loop_uses_observation_continuation_for_preview_mismatch(monkeypatch: Any) -> None:
@@ -9283,14 +9275,10 @@ def test_read_only_agent_loop_uses_observation_continuation_for_preview_mismatch
         continuation_calls.append(dict(kwargs))
         output = json.loads(kwargs["payload"]["input"][-1]["output"])
         assert output["is_error"] is True
-        assert output["content"]["error"]["code"] == "PERMISSION_DENIED"
+        assert output["content"]["error"]["code"] == "PLAN_RISK_MISMATCH"
         return {
             "output": [
-                {
-                    "type": "preview_request",
-                    "intent_name": "manual_trade_open",
-                    "arguments": {"account": "sy"},
-                }
+                _provider_function_call("manual_trade_open", {"account": "sy"})
             ]
         }
 
@@ -9317,12 +9305,12 @@ def test_read_only_agent_loop_uses_observation_continuation_for_preview_mismatch
     assert continuation_calls
     assert "planner_repair" not in result.trace
     assert result.trace["agent_loop"]["runtime"] == "model_turn_loop"
-    assert result.trace["agent_loop"]["loop_stop_reason"] == "preview_request"
+    assert result.trace["agent_loop"]["loop_stop_reason"] == "preview_gate"
     assert result.trace["agent_loop"]["repair_attempted"] is True
     assert result.tool_loop_result is not None
     event_loop = result.tool_loop_result["data"]["event_loop"]
     assert event_loop["status"] == "preview_requested"
-    assert any(event["event_type"] == "preview_request" for event in event_loop["events"])
+    assert event_loop["preview_gate"]["intent_name"] == "manual_trade_open"
 
 
 def test_assistant_runtime_agent_loop_repairs_assignment_notice_wrong_read_tool(
@@ -9385,14 +9373,10 @@ def test_assistant_runtime_agent_loop_repairs_assignment_notice_wrong_read_tool(
         continuation_calls.append(dict(kwargs))
         output = json.loads(kwargs["payload"]["input"][-1]["output"])
         assert output["is_error"] is True
-        assert output["content"]["error"]["code"] == "PERMISSION_DENIED"
+        assert output["content"]["error"]["code"] == "PLAN_RISK_MISMATCH"
         return {
             "output": [
-                {
-                    "type": "preview_request",
-                    "intent_name": "manual_assignment",
-                    "arguments": {"account": "sy"},
-                }
+                _provider_function_call("manual_assignment", {"account": "sy"})
             ]
         }
 
@@ -9433,9 +9417,12 @@ def test_assistant_runtime_agent_loop_repairs_assignment_notice_wrong_read_tool(
     llm_trace = out["meta"]["assistant"]["llm"]
     assert "planner_repair" not in llm_trace
     assert llm_trace["agent_loop"]["runtime"] == "model_turn_loop"
-    assert llm_trace["agent_loop"]["loop_stop_reason"] == "preview_request"
+    assert llm_trace["agent_loop"]["loop_stop_reason"] == "preview_gate"
     assert llm_trace["agent_loop"]["repair_attempted"] is True
-    assert any(item.get("event_type") == "preview_request" for item in llm_trace["agent_loop"]["tool_events"])
+    assert any(
+        event.get("event_type") == "model_tool_call" and event.get("tool_name") == "manual_assignment"
+        for event in llm_trace["agent_loop"]["tool_events"]
+    )
     assert out["meta"]["assistant"]["perception_trace"]["selected_source"] == "agent_loop"
 
 
@@ -9497,14 +9484,10 @@ def test_assistant_runtime_agent_loop_repairs_expiry_notice_wrong_read_tool(
         continuation_calls.append(dict(kwargs))
         output = json.loads(kwargs["payload"]["input"][-1]["output"])
         assert output["is_error"] is True
-        assert output["content"]["error"]["code"] == "PERMISSION_DENIED"
+        assert output["content"]["error"]["code"] == "PLAN_RISK_MISMATCH"
         return {
             "output": [
-                {
-                    "type": "preview_request",
-                    "intent_name": "manual_expiry",
-                    "arguments": {"account": "sy"},
-                }
+                _provider_function_call("manual_expiry", {"account": "sy"})
             ]
         }
 
@@ -9542,8 +9525,11 @@ def test_assistant_runtime_agent_loop_repairs_expiry_notice_wrong_read_tool(
     llm_trace = out["meta"]["assistant"]["llm"]
     assert "planner_repair" not in llm_trace
     assert llm_trace["agent_loop"]["runtime"] == "model_turn_loop"
-    assert llm_trace["agent_loop"]["loop_stop_reason"] == "preview_request"
-    assert any(item.get("event_type") == "preview_request" for item in llm_trace["agent_loop"]["tool_events"])
+    assert llm_trace["agent_loop"]["loop_stop_reason"] == "preview_gate"
+    assert any(
+        event.get("event_type") == "model_tool_call" and event.get("tool_name") == "manual_expiry"
+        for event in llm_trace["agent_loop"]["tool_events"]
+    )
 
 
 def test_assistant_runtime_agent_loop_action_safety_rejects_preview_for_read_request(tmp_path: Path) -> None:
@@ -9585,10 +9571,9 @@ def test_assistant_runtime_agent_loop_action_safety_rejects_preview_for_read_req
     assert out["error"]["code"] == "PLAN_RISK_MISMATCH"
     assert calls == []
     agent_loop = out["meta"]["assistant"]["llm"]["agent_loop"]
-    assert agent_loop["steps_used"] == 0
-    assert agent_loop["steps"] == []
-    assert out["meta"]["assistant"]["perception_trace"]["decision"] == "agent_loop_error"
-    assert out["meta"]["assistant"]["perception_trace"]["candidates"][0]["error_code"] == "PLAN_RISK_MISMATCH"
+    assert agent_loop["steps_used"] == 1
+    assert agent_loop["steps"][0]["tool_name"] == "manual_trade_open"
+    assert any(event.get("decision") == "risk_mismatch" for event in agent_loop["tool_events"])
 
 
 def test_assistant_runtime_agent_loop_rejects_confirm_plan(tmp_path: Path) -> None:
@@ -11091,14 +11076,10 @@ def test_assistant_runtime_tool_loop_continuation_preview_request_creates_assign
         continuation_calls.append(dict(kwargs))
         output = json.loads(kwargs["payload"]["input"][-1]["output"])
         assert output["is_error"] is True
-        assert output["content"]["error"]["code"] == "PERMISSION_DENIED"
+        assert output["content"]["error"]["code"] == "PLAN_RISK_MISMATCH"
         return {
             "output": [
-                {
-                    "type": "preview_request",
-                    "intent_name": "manual_assignment",
-                    "arguments": {"account": "sy"},
-                }
+                _provider_function_call("manual_assignment", {"account": "sy"})
             ]
         }
 
@@ -11142,7 +11123,10 @@ def test_assistant_runtime_tool_loop_continuation_preview_request_creates_assign
     assert len(repo.list_trade_events()) == before_events
 
     llm_trace = out["meta"]["assistant"]["llm"]
-    assert any(item.get("event_type") == "preview_request" for item in llm_trace["agent_loop"]["tool_events"])
+    assert any(
+        event.get("event_type") == "model_tool_call" and event.get("tool_name") == "manual_assignment"
+        for event in llm_trace["agent_loop"]["tool_events"]
+    )
     assert llm_trace["agent_loop"]["preview_receipt"]["operation_type"] == "manual_assignment"
 
 
@@ -11512,6 +11496,8 @@ def test_agent_loop_income_cashflow_eval_plan_guard() -> None:
             settings=settings,
             conversation_context=None,
             model_turn_fn=_plan,
+            request=AssistantRequest(text=str(case["text"]), sender_id="local", config_key="us"),
+            execute_tool_fn=lambda tool_name, _payload: build_response(tool_name=tool_name, ok=True, data={}),
             now_fn=lambda: date(2026, 6, 4),
         )
 
@@ -11590,22 +11576,11 @@ def test_read_only_agent_loop_records_no_plan_without_tool_step() -> None:
 
     assert result.planning.perception is None
     assert result.steps == ()
-    assert result.trace["agent_loop"] == {
-        "schema_version": AGENT_LOOP_SCHEMA_VERSION,
-        "enabled": True,
-        "runtime": "model_turn_event_adapter",
-        "max_steps": 5,
-        "steps_used": 0,
-        "writes_allowed": False,
-        "preview_operations_allowed": True,
-        "steps": [],
-        "final_response": {
-            "status": "no_plan",
-            "reason": "planner did not produce an executable assistant capability",
-            "canonical_renderer_required": True,
-            "llm_may_summarize": False,
-        },
-    }
+    assert result.planning.error is not None
+    assert result.planning.error.code == "NEEDS_CLARIFICATION"
+    assert result.trace["agent_loop"]["runtime"] == "model_turn_loop"
+    assert result.trace["agent_loop"]["loop_stop_reason"] == "needs_clarification"
+    assert result.trace["agent_loop"]["steps_used"] == 0
 
 
 def test_agent_loop_tool_observation_sanitizes_payload_and_summarizes_result() -> None:
@@ -11686,11 +11661,12 @@ def test_assistant_runtime_rejects_llm_injected_write_preview_when_question_is_r
     assert "preview-write" in out["error"]["hint"]
     assert out["meta"]["assistant"]["route"] == "agent_loop"
     perception_trace = out["meta"]["assistant"]["perception_trace"]
-    assert perception_trace["decision"] == "agent_loop_error"
-    assert perception_trace["selected_source"] is None
-    assert perception_trace["candidates"][0]["source"] == "agent_loop"
-    assert perception_trace["candidates"][0]["status"] == "rejected"
-    assert perception_trace["candidates"][0]["error_code"] == "PLAN_RISK_MISMATCH"
+    assert perception_trace["decision"] == "agent_loop_selected"
+    assert perception_trace["selected_source"] == "agent_loop"
+    assert any(
+        event.get("decision") == "risk_mismatch"
+        for event in out["meta"]["assistant"]["llm"]["agent_loop"]["tool_events"]
+    )
     assert perception_trace["candidates"][1] == {"source": "command", "status": "skipped", "reason": "not_command"}
     assert perception_trace["candidates"][2] == {
         "source": "permission_response",
@@ -11699,9 +11675,9 @@ def test_assistant_runtime_rejects_llm_injected_write_preview_when_question_is_r
     }
     decision = out["meta"]["assistant"]["decision"]
     assert decision["route"] == "agent_loop"
-    assert decision["selected_source"] is None
-    assert decision["selected_intent_name"] is None
-    assert decision["perception_decision"] == "agent_loop_error"
+    assert decision["selected_source"] == "agent_loop"
+    assert decision["selected_intent_name"] == "tool_loop"
+    assert decision["perception_decision"] == "agent_loop_selected"
     assert decision["execution_contract"]["direct_writes_allowed"] is False
     assert decision["execution_contract"]["llm_write_allowed"] is False
     assert calls == []
