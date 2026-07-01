@@ -71,6 +71,7 @@ from src.application.assistant.session_store import AgentSessionStore, collect_a
 from src.application.assistant.task_contract import (
     TASK_CONTRACT_SCHEMA_VERSION,
     build_task_contract,
+    preview_authority_from_text,
     preview_effect_allowed_from_text,
     preview_request_kind_from_text,
 )
@@ -1043,6 +1044,22 @@ def test_task_contract_treats_explicit_monitor_run_as_preview_admin() -> None:
     assert preview_request_kind_from_text(read_text) is None
 
 
+def test_task_contract_treats_ambiguous_update_as_planner_upgrade_authority() -> None:
+    authority = preview_authority_from_text("立即更新")
+
+    assert authority["allowed"] is True
+    assert authority["mode"] == "ambiguous"
+    assert authority["allowed_preview_intents"] == ["upgrade_now"]
+    assert preview_effect_allowed_from_text("立即更新") is True
+    assert preview_request_kind_from_text("立即更新") is None
+    assert preview_request_kind_from_text("立即升级") == "upgrade_now"
+
+    for text in ("为什么今天没更新", "查看更新状态", "更新了吗"):
+        assert preview_authority_from_text(text)["allowed"] is False
+        assert preview_effect_allowed_from_text(text) is False
+        assert preview_request_kind_from_text(text) is None
+
+
 def test_action_safety_denies_symbol_edit_alias_scope_mismatch() -> None:
     call = ToolCall(tool_name="symbol_edit", payload={"symbol": "TSLA", "set": {"sell_call.min_strike": 85}})
     policy = decide_tool_action_policy(
@@ -1710,6 +1727,38 @@ def test_agent_loop_planner_catalog_matches_registry_backed_manifest() -> None:
     assert position_read["semantics"]["answer_capabilities"]["option_positions"]
 
 
+def test_agent_loop_ambiguous_update_allows_only_upgrade_preview_tool() -> None:
+    assert _validate_model_tool_call_events(
+        (
+            ModelToolCallEvent(
+                event_id="model_tool_call_1",
+                tool_call_id="call_upgrade",
+                tool_name="upgrade_now",
+                arguments={},
+            ),
+        ),
+        question="立即更新",
+    ) is None
+
+    err = _validate_model_tool_call_events(
+        (
+            ModelToolCallEvent(
+                event_id="model_tool_call_2",
+                tool_call_id="call_symbol_edit",
+                tool_name="symbol_edit",
+                arguments={"symbol": "0700.HK", "set": {"sell_put.max_strike": 18}},
+            ),
+        ),
+        question="立即更新",
+    )
+
+    assert err is not None
+    assert err.code == "PLAN_RISK_MISMATCH"
+    assert err.details is not None
+    assert err.details["allowed_preview_intents"] == ["upgrade_now"]
+    assert err.details["disallowed_preview_capabilities"] == ["symbol_edit"]
+
+
 def test_agent_loop_planner_input_includes_cash_headroom_only_for_cash_questions() -> None:
     cash_payload = json.loads(
         _planner_input_text("lx账户sell put需要的资金是不是已经超过了账户现有的现金加货基？", conversation_context=None)
@@ -2228,6 +2277,20 @@ def test_agent_loop_notification_explanation_keeps_read_preview_authority() -> N
         assert payload["preview_authority"]["allowed"] is False
         assert "analysis_query" in tool_names
         assert "manual_assignment" in tool_names
+
+
+def test_agent_loop_ambiguous_update_manifest_exposes_only_upgrade_preview() -> None:
+    payload = json.loads(_planner_input_text("立即更新", conversation_context=None))
+    tool_names = {tool["name"] for tool in payload["tools"]}
+
+    assert payload["manifest_budget"]["preview_authority_allowed"] is True
+    assert payload["manifest_budget"]["preview_authority_mode"] == "ambiguous"
+    assert payload["manifest_budget"]["allowed_preview_intents"] == ["upgrade_now"]
+    assert payload["preview_authority"]["allowed"] is True
+    assert payload["preview_authority"]["mode"] == "ambiguous"
+    assert payload["preview_authority"]["allowed_preview_intents"] == ["upgrade_now"]
+    assert "analysis_query" in tool_names
+    assert (tool_names & AGENT_LOOP_PREVIEW_CAPABILITIES) == {"upgrade_now"}
 
 
 def test_assistant_deterministic_commands_exclude_read_aliases() -> None:

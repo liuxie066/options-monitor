@@ -71,7 +71,7 @@ from src.application.assistant.model_evidence import (
 from src.application.assistant.renderer import render_canonical_tool_result, render_inbound_text
 from src.application.assistant.session import build_agent_session_snapshot
 from src.application.assistant.settings import AssistantLlmSettings, AssistantSettings
-from src.application.assistant.task_contract import TASK_CONTRACT_SCHEMA_VERSION, build_task_contract, preview_effect_allowed_from_text
+from src.application.assistant.task_contract import TASK_CONTRACT_SCHEMA_VERSION, build_task_contract, preview_authority_from_text
 from src.application.assistant.tool_bindings import (
     planner_binding_for_tool,
     planner_config_scoped_tool_names,
@@ -1069,12 +1069,25 @@ def _preview_gate_error(
             message="model tool call arguments were malformed; retry with valid structured arguments",
             details={"tool_name": model_event.tool_name, "provider_protocol_error": dict(protocol_error)},
         )
-    if not _question_requests_preview_operation(request.text):
+    authority = _preview_authority_for_question(request.text)
+    if not bool(authority.get("allowed", False)):
         return AgentToolError(
             code="PLAN_RISK_MISMATCH",
             message="这是只读问题，不能进入写入预览流程。",
             hint="Do not use preview-write tools for ordinary questions; write tools are only for explicit record, edit, upgrade, model-switch, or monitor-run requests.",
             details={"write_tool": model_event.tool_name, "preview_capabilities": [model_event.tool_name]},
+        )
+    allowed_preview_intents = _allowed_preview_intents_from_authority(authority)
+    if allowed_preview_intents and model_event.tool_name not in allowed_preview_intents:
+        return AgentToolError(
+            code="PLAN_RISK_MISMATCH",
+            message="当前消息只授权有限的写入预览能力，不能使用其它预览工具。",
+            hint="Use the exposed preview capability or ask the user to clarify the operation.",
+            details={
+                "write_tool": model_event.tool_name,
+                "preview_capabilities": [model_event.tool_name],
+                "allowed_preview_intents": sorted(allowed_preview_intents),
+            },
         )
     step = _agent_loop_step_from_model_event(
         index=1,
@@ -3378,6 +3391,7 @@ def _validate_model_tool_call_events(
     *,
     question: str | None = None,
     allow_preview: bool = True,
+    preview_authority: dict[str, Any] | None = None,
 ) -> AgentToolError | None:
     if not events:
         return _no_tool_plan_error()
@@ -3443,6 +3457,8 @@ def _validate_model_tool_call_events(
             )
     preview_count = sum(1 for kind in kinds if kind == "preview")
     read_count = sum(1 for kind in kinds if kind == "read")
+    authority = _preview_authority_for_question(question, preview_authority=preview_authority)
+    allowed_preview_intents = _allowed_preview_intents_from_authority(authority)
     if preview_count:
         if not allow_preview:
             return AgentToolError(
@@ -3450,12 +3466,25 @@ def _validate_model_tool_call_events(
                 message="preview-write capabilities cannot be executed through assistant.tool_loop",
                 details={"preview_capabilities": sorted(event.tool_name for event in events if _plan_step_kind(event.tool_name) == "preview")},
             )
-        if question is not None and not _question_requests_preview_operation(question):
+        preview_tools = sorted(event.tool_name for event in events if _plan_step_kind(event.tool_name) == "preview")
+        if question is not None and not bool(authority.get("allowed", False)):
             return AgentToolError(
                 code="PLAN_RISK_MISMATCH",
                 message="这不是明确的写入预览请求，不能进入预览确认流程。",
                 hint="preview-write 只能用于明确的记录、修改、升级或模型切换请求；普通查询必须规划为只读工具。",
-                details={"preview_capabilities": sorted(event.tool_name for event in events if _plan_step_kind(event.tool_name) == "preview")},
+                details={"preview_capabilities": preview_tools},
+            )
+        disallowed_preview_tools = [tool_name for tool_name in preview_tools if allowed_preview_intents and tool_name not in allowed_preview_intents]
+        if disallowed_preview_tools:
+            return AgentToolError(
+                code="PLAN_RISK_MISMATCH",
+                message="当前消息只授权有限的写入预览能力，不能使用其它预览工具。",
+                hint="请改用授权的 preview capability，或先向用户澄清。",
+                details={
+                    "preview_capabilities": preview_tools,
+                    "allowed_preview_intents": sorted(allowed_preview_intents),
+                    "disallowed_preview_capabilities": disallowed_preview_tools,
+                },
             )
         if preview_count > 1 or read_count:
             return AgentToolError(
@@ -4092,7 +4121,27 @@ def _is_banned_plan_argument(argument: str) -> bool:
 
 
 def _question_requests_preview_operation(question: str) -> bool:
-    return preview_effect_allowed_from_text(question)
+    return _preview_authority_requires_preview(_preview_authority_for_question(question))
+
+
+def _preview_authority_for_question(
+    question: str | None,
+    *,
+    preview_authority: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if isinstance(preview_authority, dict) and preview_authority:
+        return dict(preview_authority)
+    if question is None:
+        return {"allowed": False, "mode": "read", "allowed_preview_intents": []}
+    return preview_authority_from_text(question)
+
+
+def _preview_authority_requires_preview(authority: dict[str, Any]) -> bool:
+    return bool(authority.get("allowed", False)) and str(authority.get("mode") or "") == "explicit"
+
+
+def _allowed_preview_intents_from_authority(authority: dict[str, Any]) -> set[str]:
+    return {str(item) for item in authority.get("allowed_preview_intents") or () if str(item).strip()}
 
 
 def _question_requests_symbol_config_read(question: str) -> bool:
@@ -4923,13 +4972,14 @@ def _trim_planner_projection_payload(payload: dict[str, Any]) -> None:
 
 def _planner_input_payload(text: str, *, conversation_context: dict[str, Any] | None) -> dict[str, Any]:
     selection = _planner_analysis_view_selection(text, conversation_context=conversation_context)
+    preview_authority = _planner_preview_authority(text)
     tools = _planner_tool_manifest(
         analysis_view_names=selection["selected_analysis_views"],
         include_read_tools=True,
         include_preview_capabilities=True,
         omit_read_tools=_planner_omitted_read_tools_for_question(text),
+        allowed_preview_intents=preview_authority.get("allowed_preview_intents"),
     )
-    preview_authority = _planner_preview_authority(text)
     payload: dict[str, Any] = {
         "message": str(text or ""),
         "current_user_message": {"text": str(text or "")},
@@ -4960,13 +5010,15 @@ def _planner_input_payload(text: str, *, conversation_context: dict[str, Any] | 
 
 
 def _planner_preview_authority(text: str) -> dict[str, Any]:
+    authority = preview_authority_from_text(text)
     return {
+        **authority,
         "schema_version": "om-planner-preview-authority-v1",
-        "allowed": preview_effect_allowed_from_text(text),
         "policy": (
             "The model may select exactly one preview capability only when the current user message explicitly "
-            "asks to record/change/administer something or contains a broker lifecycle/fill notice. The host "
-            "injects raw_text and never lets the model confirm, apply, notify, or mutate state directly."
+            "asks to record/change/administer something or contains a broker lifecycle/fill notice. Ambiguous "
+            "admin update wording may select only the exposed preview capability or ask for clarification. The "
+            "host injects raw_text and never lets the model confirm, apply, notify, or mutate state directly."
         ),
     }
 
@@ -5034,6 +5086,8 @@ def _planner_manifest_budget(
         "matched_view_groups": list(analysis_view_selection.get("matched_view_groups") or []),
         "selection_sources": list(analysis_view_selection.get("selection_sources") or []),
         "preview_authority_allowed": bool(preview.get("allowed", False)),
+        "preview_authority_mode": str(preview.get("mode") or ""),
+        "allowed_preview_intents": list(preview.get("allowed_preview_intents") or []),
         "fallback": "use analysis_catalog first when a needed analysis view or field is not included",
     }
 

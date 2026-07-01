@@ -361,9 +361,40 @@ def _infer_requested_effect(text: str) -> str:
 
 
 def preview_effect_allowed_from_text(text: str) -> bool:
+    return bool(preview_authority_from_text(text).get("allowed", False))
+
+
+def preview_authority_from_text(text: str) -> dict[str, Any]:
     compact = re.sub(r"\s+", "", str(text or "").lower())
+    denied = {
+        "schema_version": "om-preview-authority-v1",
+        "allowed": False,
+        "mode": "read",
+        "allowed_preview_intents": [],
+        "reason": "read_or_query",
+    }
     if not compact:
-        return False
+        return denied
+    if _looks_like_ambiguous_update_request(compact):
+        return {
+            "schema_version": "om-preview-authority-v1",
+            "allowed": True,
+            "mode": "ambiguous",
+            "allowed_preview_intents": ["upgrade_now"],
+            "reason": "ambiguous_update_admin_request",
+        }
+    if _preview_effect_allowed_from_compact(compact):
+        return {
+            "schema_version": "om-preview-authority-v1",
+            "allowed": True,
+            "mode": "explicit",
+            "allowed_preview_intents": [],
+            "reason": "explicit_preview_request",
+        }
+    return denied
+
+
+def _preview_effect_allowed_from_compact(compact: str) -> bool:
     if _looks_like_strong_preview_read_query(compact):
         return False
     if _looks_like_explicit_preview_write(compact):
@@ -408,6 +439,47 @@ def preview_effect_allowed_from_text(text: str) -> bool:
             "使用模型",
         )
     )
+
+
+def _looks_like_ambiguous_update_request(compact: str) -> bool:
+    normalized = compact.strip(" \t\r\n，。,.!！?？")
+    if "更新" not in normalized:
+        return False
+    if any(
+        token in normalized
+        for token in (
+            "为什么",
+            "为何",
+            "原因",
+            "没更新",
+            "没有更新",
+            "不更新",
+            "更新了吗",
+            "是否更新",
+            "有没有更新",
+            "查看",
+            "查询",
+            "状态",
+            "回执",
+            "日志",
+            "失败",
+            "报错",
+        )
+    ):
+        return False
+    return normalized in {
+        "立即更新",
+        "立刻更新",
+        "马上更新",
+        "现在更新",
+        "执行更新",
+        "开始更新",
+        "进行更新",
+        "更新一下",
+        "帮我更新",
+        "请更新",
+        "请立即更新",
+    }
 
 
 def _looks_like_explicit_preview_write(compact: str) -> bool:
