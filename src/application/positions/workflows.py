@@ -245,12 +245,15 @@ def _safe_non_negative_float(value: Any) -> float | None:
 def _assigned_stock_candidate_summary(lot: dict[str, Any], *, reject_reasons: list[str] | None = None) -> dict[str, Any]:
     return {
         "stock_lot_id": lot.get("stock_lot_id"),
+        "source_assignment_event_id": lot.get("source_assignment_event_id"),
         "account": lot.get("account"),
         "broker": lot.get("broker"),
         "symbol": lot.get("symbol"),
         "currency": lot.get("currency"),
         "opened_at_ms": lot.get("opened_at_ms"),
         "shares_remaining": lot.get("shares_remaining"),
+        "stock_cost_per_share": lot.get("stock_cost_per_share"),
+        "assignment_price": lot.get("assignment_price"),
         "status": lot.get("status"),
         "reject_reasons": list(reject_reasons or []),
     }

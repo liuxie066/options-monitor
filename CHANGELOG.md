@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 1.2.348 - 2026-07-02
+
+### Added
+- Added symbol-scoped monitor-run previews so Assistant update requests can stay within the requested symbol.
+- Added protocolized Assistant final-answer event evidence for model tool-loop responses.
+
+### Changed
+- Allowed short natural-language upgrade/update requests to converge on the controlled `upgrade_now` preview capability.
+
+### Fixed
+- Marked ambiguous assigned-stock sale intake receipts as pending confirmation and listed candidate lots before any ledger write.
+- Included assigned-stock lot cost and source assignment details in ambiguous sale diagnostics.
+
 ## 1.2.347 - 2026-07-01
 
 ### Changed
