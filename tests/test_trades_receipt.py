@@ -199,6 +199,50 @@ def test_build_trade_intake_receipt_message_marks_unresolved() -> None:
     assert "9992.HK" in msg
 
 
+def test_build_trade_intake_receipt_message_marks_ambiguous_assigned_stock_sale_as_pending_confirmation() -> None:
+    msg = build_trade_intake_receipt_message(
+        deal=None,
+        result={
+            "status": "unresolved",
+            "reason": "ambiguous_assigned_stock_sale",
+            "deal_id": "deal-stock-1",
+            "account": "lx",
+            "action": "assigned_stock_sale",
+            "diagnostics": {
+                "candidates": [
+                    {
+                        "stock_lot_id": "assigned-stock-a",
+                        "symbol": "FUTU",
+                        "currency": "USD",
+                        "shares_remaining": 100,
+                        "stock_cost_per_share": 120.0,
+                        "opened_at_ms": 1779167311000,
+                        "reject_reasons": [],
+                    },
+                    {
+                        "stock_lot_id": "assigned-stock-b",
+                        "symbol": "FUTU",
+                        "currency": "USD",
+                        "shares_remaining": 100,
+                        "stock_cost_per_share": 117.45,
+                        "opened_at_ms": 1779253711000,
+                        "reject_reasons": [],
+                    },
+                ]
+            },
+        },
+        payload={"symbol": "FUTU", "qty": 100, "price": 100.0},
+    )
+
+    assert "[待确认]" in msg
+    assert "状态：待确认" in msg
+    assert "确认前不会自动写入" in msg
+    assert "A：FUTU USD；剩余 100 股；成本 120.0/股" in msg
+    assert "B：FUTU USD；剩余 100 股；成本 117.45/股" in msg
+    assert "请确认要匹配的选项，例如：选择 A" in msg
+    assert "[未记录]" not in msg
+
+
 def test_build_trade_intake_receipt_message_marks_projection_verification_failure() -> None:
     msg = build_trade_intake_receipt_message(
         deal=None,

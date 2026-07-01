@@ -160,8 +160,13 @@ def build_trade_intake_receipt_message(
     status = str(result.get("status") or "").strip().lower()
     reason = str(result.get("reason") or "").strip() or "-"
     applied = status == "applied"
+    diagnostics_raw = result.get("diagnostics")
+    diagnostics = cast(dict[str, Any], diagnostics_raw) if isinstance(diagnostics_raw, dict) else {}
+    needs_lot_confirmation = status == "unresolved" and reason == "ambiguous_assigned_stock_sale"
     if status == "failed" and reason == "projection_verification_failed":
         title = "[写入异常] 成交事件已写入但持仓投影未确认"
+    elif needs_lot_confirmation:
+        title = "[待确认] 成交未写入 option_positions"
     else:
         title = "[已记录] 成交已写入 option_positions" if applied else "[未记录] 成交未写入 option_positions"
     account = _value("account", deal, result, payload) or "-"
@@ -177,8 +182,6 @@ def build_trade_intake_receipt_message(
     ledger_store_raw = result.get("ledger_store")
     ledger_store = cast(dict[str, Any], ledger_store_raw) if isinstance(ledger_store_raw, dict) else {}
     projection_status = str(result.get("projection_status") or "").strip()
-    diagnostics_raw = result.get("diagnostics")
-    diagnostics = cast(dict[str, Any], diagnostics_raw) if isinstance(diagnostics_raw, dict) else {}
     verification_raw = diagnostics.get("post_write_projection_verification")
     verification = cast(dict[str, Any], verification_raw) if isinstance(verification_raw, dict) else {}
     checks_raw = verification.get("checks")
@@ -201,7 +204,15 @@ def build_trade_intake_receipt_message(
         lines.append(f"成交价：{price}")
     if trade_time:
         lines.append(f"成交时间：{trade_time}")
-    status_text = "已记录" if applied else "写入异常" if status == "failed" and reason == "projection_verification_failed" else "未记录"
+    status_text = (
+        "已记录"
+        if applied
+        else "写入异常"
+        if status == "failed" and reason == "projection_verification_failed"
+        else "待确认"
+        if needs_lot_confirmation
+        else "未记录"
+    )
     lines.append(f"状态：{status_text}")
     if projection_status:
         lines.append(f"投影状态：{projection_status}")
@@ -214,6 +225,14 @@ def build_trade_intake_receipt_message(
     if ledger_store:
         lines.append(f"账本：{ledger_store.get('sqlite_path') or '-'}")
     lines.append(f"原因：{reason}")
+    if needs_lot_confirmation:
+        candidate_lines = _assigned_stock_candidate_lines(diagnostics)
+        if candidate_lines:
+            lines.append("")
+            lines.append("需要确认本次卖出对应哪一批 assigned-stock lot；确认前不会自动写入。")
+            lines.append("候选 lot：")
+            lines.extend(candidate_lines)
+            lines.append("请确认要匹配的选项，例如：选择 A。")
     lines.append(f"deal_id：{deal_id}")
     return "\n".join(lines)
 
@@ -279,6 +298,34 @@ def _option_type_text(value: str | None) -> str | None:
     if raw == "call":
         return "Call"
     return _optional_str(value)
+
+
+def _assigned_stock_candidate_lines(diagnostics: dict[str, Any]) -> list[str]:
+    candidates_raw = diagnostics.get("candidates")
+    candidates = candidates_raw if isinstance(candidates_raw, list) else []
+    lines: list[str] = []
+    for idx, item in enumerate(candidates[:10]):
+        if not isinstance(item, dict):
+            continue
+        label = chr(ord("A") + idx)
+        symbol = _optional_str(item.get("symbol")) or "-"
+        currency = _optional_str(item.get("currency")) or "-"
+        shares = _optional_str(item.get("shares_remaining")) or "-"
+        cost = _optional_str(item.get("stock_cost_per_share")) or _optional_str(item.get("assignment_price"))
+        opened = format_trade_time_beijing(item.get("opened_at_ms"))
+        lot_id = _optional_str(item.get("stock_lot_id")) or "-"
+        parts = [f"{label}：{symbol} {currency}", f"剩余 {shares} 股"]
+        if cost:
+            parts.append(f"成本 {cost}/股")
+        if opened:
+            parts.append(f"指派时间 {opened}")
+        parts.append(f"lot_id={lot_id}")
+        reject_reasons_raw = item.get("reject_reasons")
+        reject_reasons = [str(reason) for reason in reject_reasons_raw] if isinstance(reject_reasons_raw, list) else []
+        if reject_reasons:
+            parts.append(f"不符合：{', '.join(reject_reasons)}")
+        lines.append("；".join(parts))
+    return lines
 
 
 def _optional_str(value: Any) -> str | None:
