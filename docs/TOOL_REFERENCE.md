@@ -146,10 +146,12 @@ om run tick --config config.us.json --accounts lx sy
 ```bash
 om run tick-cron --market hk --accounts lx sy --timeout 600
 om run tick-cron --market us --accounts lx sy --timeout 600
+om run tick-cron --market us --symbols PDD --timeout 600 --dry-run-command
 ```
 
 `tick-cron` 会按 market 推导 canonical config、lock path 和 `OM_TRIGGER_*`
-诊断环境变量；`--dry-run-command` 可只查看将执行的 tick 命令。返回码语义：
+诊断环境变量；`--dry-run-command` 可只查看将执行的 tick 命令。带 `--symbols`
+的单标运行会收窄扫描范围，并强制 `--no-send`。返回码语义：
 `SKIP_LOCKED` 返回 `0`，表示上一轮还在跑；真实执行失败返回原始非零码并输出
 `EXEC_FAILED_RC_<rc>`；超时返回 `124` 并输出 `EXEC_TIMEOUT_RC_124`。
 

@@ -25,6 +25,7 @@ def add_run_commands(subparsers: Any) -> None:
     tick = run_sub.add_parser("tick", help="multi-account tick orchestration")
     tick.add_argument("--config", required=True)
     tick.add_argument("--accounts", nargs="+", default=None)
+    tick.add_argument("--symbols", nargs="+", default=None)
     tick.add_argument("--default-account", default=None)
     tick.add_argument("--market-config", default="auto", choices=["auto", "hk", "us", "all"])
     tick.add_argument("--no-send", action="store_true")
@@ -36,6 +37,7 @@ def add_run_commands(subparsers: Any) -> None:
     tick_cron = run_sub.add_parser("tick-cron", help="cron-safe tick wrapper with lock, timeout, and trigger diagnostics")
     tick_cron.add_argument("--market", required=True, choices=("us", "hk"))
     tick_cron.add_argument("--accounts", nargs="+", default=None)
+    tick_cron.add_argument("--symbols", nargs="+", default=None)
     tick_cron.add_argument("--timeout", dest="timeout_seconds", type=int, default=600)
     tick_cron.add_argument("--config", default=None)
     tick_cron.add_argument("--lock-path", default=None)
@@ -72,6 +74,8 @@ def _tick_argv(args: argparse.Namespace) -> list[str]:
     tick_argv: list[str] = ["--config", str(args.config)]
     if args.accounts:
         tick_argv.extend(["--accounts", *[str(x) for x in args.accounts]])
+    if args.symbols:
+        tick_argv.extend(["--symbols", ",".join(str(x) for x in args.symbols)])
     if args.default_account:
         tick_argv.extend(["--default-account", str(args.default_account)])
     if args.market_config:
@@ -144,6 +148,7 @@ def handle_run_command(
         out = run_tick_cron_fn(
             market=args.market,
             accounts=args.accounts,
+            symbols=args.symbols,
             timeout_seconds=args.timeout_seconds,
             config_path=args.config,
             lock_path=args.lock_path,

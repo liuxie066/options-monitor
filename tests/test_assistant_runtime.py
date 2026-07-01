@@ -1031,6 +1031,17 @@ def test_task_contract_treats_explicit_monitor_run_as_preview_admin() -> None:
     assert preview_effect_allowed_from_text(text) is True
     assert preview_request_kind_from_text(text) == "monitor_run_now"
 
+    symbol_text = "单独跑一次 PDD 的监控"
+    symbol_contract = build_task_contract(
+        question=symbol_text,
+        plan={},
+        request_context={"config_key": "us"},
+        today=date(2026, 6, 23),
+    )
+    assert symbol_contract.requested_effect == "preview_write"
+    assert preview_effect_allowed_from_text(symbol_text) is True
+    assert preview_request_kind_from_text(symbol_text) == "monitor_run_now"
+
     read_text = "今天早上的港股监控，为什么0700 腾讯没有推荐"
     read_contract = build_task_contract(
         question=read_text,
@@ -8822,6 +8833,80 @@ def test_assistant_runtime_provider_preview_request_creates_monitor_run_preview(
     assert llm_trace["agent_loop"]["steps"][0]["tool_name"] == "monitor_run_now"
     assert llm_trace["agent_loop"]["preview_receipt"]["operation_type"] == "monitor_run_now"
     assert llm_trace["agent_loop"]["preview_receipt"]["handler_tool"] == "inbound.monitor_run"
+
+
+def test_assistant_runtime_provider_symbol_monitor_run_preview_is_no_send(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("OM_LLM_API_KEY", "sk-test")
+    monkeypatch.setenv("OM_INBOUND_OPERATIONS_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_MONITOR_RUN_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_ADMIN_OPEN_IDS", "local:local")
+    monkeypatch.setenv("OM_INBOUND_OPERATION_HMAC_KEY", "test-operation-hmac-key")
+
+    provider_calls: list[dict[str, Any]] = []
+
+    def _create_tool_call_response(**kwargs: Any) -> dict[str, Any]:
+        provider_calls.append(dict(kwargs))
+        tool_names = {
+            (tool.get("function") if isinstance(tool.get("function"), dict) else tool).get("name")
+            for tool in kwargs["tools"]
+        }
+        assert "monitor_run_now" in tool_names
+        return {"output": [_provider_function_call("monitor_run_now", {"symbols": ["PDD"]})]}
+
+    def _provider_response_fn(provider: str):
+        assert provider == "openai"
+        return _create_tool_call_response
+
+    monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_response_fn", _provider_response_fn)
+
+    hk_cfg_path, _sqlite_path = _write_agent_loop_trade_runtime_config(tmp_path)
+    us_cfg_path = tmp_path / "config.us.json"
+    us_cfg = json.loads(hk_cfg_path.read_text(encoding="utf-8"))
+    us_cfg["_generated"]["market"] = "us"
+    us_cfg["_resolved"]["market"] = "us"
+    us_cfg["symbols"][0]["symbol"] = "PDD"
+    us_cfg_path.write_text(json.dumps(us_cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    out = handle_assistant_response(
+        AssistantRequest(
+            text="单独跑一次 PDD 的监控",
+            sender_id="local",
+            channel="local",
+            message_id="msg_provider_preview_monitor_run_symbol",
+            conversation_id="local:local",
+            config_key="us",
+            config_path=str(us_cfg_path),
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        allowed_senders="local:local",
+        settings=AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        now_fn=lambda: date(2026, 6, 23),
+    )
+
+    assert provider_calls
+    assert out["ok"] is True, out
+    assert out["tool_name"] == "inbound.monitor_run"
+    args = out["data"]["payload"]["arguments"]
+    assert args["market"] == "us"
+    assert args["symbols"] == ["PDD"]
+    assert args["no_send"] is True
+    assert out["data"]["preview"]["summary"]["will_send_notifications"] is False
+    assert "./om run tick-cron --market us --accounts sy --symbols PDD --timeout 600 --no-send" in out["data"]["response_text"]
+    assert "标的：PDD" in out["data"]["response_text"]
+    assert "通知：不会发送" in out["data"]["response_text"]
+    permission_request = out["data"]["permission_request"]
+    assert permission_request["risk_class"] == "preview_admin"
+    assert permission_request["apply_allowed"] is False
+
+    llm_trace = out["meta"]["assistant"]["llm"]
+    assert llm_trace["agent_loop"]["loop_stop_reason"] == "preview_gate"
+    assert llm_trace["agent_loop"]["steps"][0]["tool_name"] == "monitor_run_now"
+    assert llm_trace["agent_loop"]["preview_receipt"]["operation_type"] == "monitor_run_now"
 
 
 def test_assistant_runtime_repairs_provider_malformed_assignment_arguments_via_tool_observation(

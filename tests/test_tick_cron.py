@@ -35,6 +35,28 @@ def test_build_tick_cron_plan_sets_hk_defaults() -> None:
     ]
 
 
+def test_build_tick_cron_plan_symbol_scope_forces_no_send() -> None:
+    from src.application.tick_cron import build_tick_cron_plan
+
+    plan = build_tick_cron_plan(market="us", accounts=["sy"], symbols=["PDD"], no_send=False)
+
+    assert plan.symbols == ["PDD"]
+    assert plan.tick_argv == [
+        "./om",
+        "run",
+        "tick",
+        "--config",
+        "config.us.json",
+        "--market-config",
+        "us",
+        "--accounts",
+        "sy",
+        "--symbols",
+        "PDD",
+        "--no-send",
+    ]
+
+
 def test_run_tick_cron_invokes_tick_with_trigger_environment(tmp_path) -> None:
     from src.application.tick_cron import run_tick_cron
 

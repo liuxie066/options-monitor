@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable
 
+from domain.domain.symbol_identity import symbol_market
 from src.application.account_config import accounts_from_config, normalize_accounts
 from src.application.agent_tool_config import load_runtime_config, repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response, mask_path
@@ -21,6 +22,7 @@ from src.application.assistant.operation_lifecycle import (
 from src.application.assistant.operation_policy import enforce_monitor_run_allowed
 from src.application.assistant.operation_store import InboundOperationStore
 from src.application.assistant.operation_status_text import cannot_repeat_message, operation_candidate_hint
+from src.application.symbol_mutations import normalize_symbol_read
 
 
 PREVIEW_INTENTS = frozenset({"monitor_run_now"})
@@ -232,12 +234,17 @@ def _monitor_run_candidate_hint(action: str, candidates: Any) -> str:
 
 
 def _build_operation_payload(operation_type: str, arguments: dict[str, Any], *, request: AssistantRequest) -> dict[str, Any]:
-    market = _resolve_market(arguments, request=request)
+    symbols = _normalize_symbols_arg(arguments.get("symbols") or arguments.get("symbol"))
+    market = _resolve_market(arguments, request=request, symbols=symbols)
     timeout_seconds = _normalize_timeout(arguments.get("timeout_seconds") or arguments.get("timeout"))
     accounts = _normalize_accounts_arg(arguments.get("accounts"))
     config_path: str | None = None
-    if not accounts:
+    cfg: dict[str, Any] | None = None
+    if not accounts or symbols:
         config_path, cfg = _load_market_runtime_config(market, request=request)
+    if symbols and cfg is not None:
+        symbols = _validate_monitor_symbols(symbols, cfg=cfg)
+    if not accounts and cfg is not None:
         accounts = accounts_from_config(cfg, fallback=())
     if not accounts:
         raise AgentToolError(
@@ -245,11 +252,20 @@ def _build_operation_payload(operation_type: str, arguments: dict[str, Any], *, 
             message=f"{market} runtime config has no accounts for monitor run",
             hint="请在 runtime config 顶层 accounts 配置要执行的账号，或在命令中显式提供 accounts。",
         )
-    plan = _monitor_run_plan(market=market, accounts=accounts, timeout_seconds=timeout_seconds)
+    no_send = bool(symbols)
+    plan = _monitor_run_plan(
+        market=market,
+        accounts=accounts,
+        symbols=symbols,
+        timeout_seconds=timeout_seconds,
+        no_send=no_send,
+    )
     args: dict[str, Any] = {
         "market": market,
         "accounts": accounts,
+        "symbols": symbols,
         "timeout_seconds": timeout_seconds,
+        "no_send": no_send,
     }
     if config_path:
         args["config_path"] = config_path
@@ -266,15 +282,18 @@ def _preview_operation(payload: dict[str, Any]) -> dict[str, Any]:
     plan = _monitor_run_plan(
         market=_required_text(args.get("market"), "market"),
         accounts=_normalize_accounts_arg(args.get("accounts")),
+        symbols=_normalize_symbols_arg(args.get("symbols")),
         timeout_seconds=_normalize_timeout(args.get("timeout_seconds")),
+        no_send=bool(args.get("no_send") or _normalize_symbols_arg(args.get("symbols"))),
     )
     return {
         "summary": {
             "operation": "tick-cron",
             "market": plan["market"],
             "accounts": list(plan["accounts"]),
+            "symbols": list(plan["symbols"]),
             "timeout_seconds": plan["timeout_seconds"],
-            "will_send_notifications": True,
+            "will_send_notifications": not bool(plan["no_send"]),
             "confirmed": False,
         },
         "command": plan,
@@ -287,7 +306,9 @@ def _apply_operation(payload: dict[str, Any]) -> dict[str, Any]:
     plan = _monitor_run_plan(
         market=_required_text(args.get("market"), "market"),
         accounts=_normalize_accounts_arg(args.get("accounts")),
+        symbols=_normalize_symbols_arg(args.get("symbols")),
         timeout_seconds=timeout_seconds,
+        no_send=bool(args.get("no_send") or _normalize_symbols_arg(args.get("symbols"))),
     )
     command = _actual_tick_cron_command(plan)
     root = repo_base()
@@ -296,6 +317,8 @@ def _apply_operation(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "market": plan["market"],
         "accounts": list(plan["accounts"]),
+        "symbols": list(plan["symbols"]),
+        "no_send": bool(plan["no_send"]),
         "timeout_seconds": timeout_seconds,
         "command": plan["display_command"],
         "actual_command": command,
@@ -334,45 +357,56 @@ def render_monitor_run_response(
     market = str(data.get("market") or "-")
     label = "港股" if market == "hk" else ("美股" if market == "us" else market)
     accounts = ", ".join(str(item) for item in data.get("accounts") or []) or "-"
+    symbols = ", ".join(str(item) for item in data.get("symbols") or []) or "-"
     command = str(data.get("command") or "-")
+    no_send = bool(data.get("no_send"))
     if status == "previewed":
+        single_symbol = bool(data.get("symbols"))
         lines = [
-            f"{label}监控执行预览：tick-cron",
+            f"{label}{'单标' if single_symbol else ''}监控执行预览：tick-cron",
             f"市场：{market}",
             f"账户：{accounts}",
+            f"通知：{'不会发送' if no_send else '确认后可能发送'}",
             f"命令：{command}",
             "",
             "未执行 tick，未发送通知。",
-            "确认后会运行真实监控，可能发送真实通知并写入运行产物。",
+            "确认后会运行真实监控，写入运行产物。"
+            if no_send
+            else "确认后会运行真实监控，可能发送真实通知并写入运行产物。",
             f"确认执行请回复：/confirm monitor-run {operation_id}",
             f"取消请回复：/cancel monitor-run {operation_id}",
             "同一对话只有一条待确认监控执行时，也可以回复：确认运行监控 / 取消运行监控",
         ]
+        if single_symbol:
+            lines.insert(3, f"标的：{symbols}")
         if expires_at:
             lines.append("有效期：10 分钟。")
         return "\n".join(lines)
     if status == "applied":
-        return "\n".join(
-            [
-                f"{label}监控执行完成。",
-                f"市场：{market}",
-                f"账户：{accounts}",
-                f"命令：{command}",
-                f"returncode：{int((result or {}).get('returncode') or 0)}",
-                f"command_id: {operation_id}",
-            ]
-        )
+        lines = [
+            f"{label}监控执行完成。",
+            f"市场：{market}",
+            f"账户：{accounts}",
+            f"通知：{'未发送' if no_send else '按监控规则处理'}",
+            f"命令：{command}",
+            f"returncode：{int((result or {}).get('returncode') or 0)}",
+            f"command_id: {operation_id}",
+        ]
+        if symbols != "-":
+            lines.insert(3, f"标的：{symbols}")
+        return "\n".join(lines)
     if status == "failed":
-        return "\n".join(
-            [
-                f"{label}监控执行失败。",
-                f"市场：{market}",
-                f"账户：{accounts}",
-                f"命令：{command}",
-                f"returncode：{(result or {}).get('returncode', '-')}",
-                f"command_id: {operation_id}",
-            ]
-        )
+        lines = [
+            f"{label}监控执行失败。",
+            f"市场：{market}",
+            f"账户：{accounts}",
+            f"命令：{command}",
+            f"returncode：{(result or {}).get('returncode', '-')}",
+            f"command_id: {operation_id}",
+        ]
+        if symbols != "-":
+            lines.insert(3, f"标的：{symbols}")
+        return "\n".join(lines)
     if status == "cancelled":
         return f"监控执行已取消，未运行 tick。\ncommand_id: {operation_id}"
     return f"监控执行状态：{status}\ncommand_id: {operation_id}"
@@ -386,33 +420,50 @@ def _monitor_response_data(
 ) -> dict[str, Any]:
     out: dict[str, Any] = {}
     args = _payload_arguments(payload)
-    out.update({key: args.get(key) for key in ("market", "accounts", "timeout_seconds") if key in args})
+    out.update({key: args.get(key) for key in ("market", "accounts", "symbols", "timeout_seconds", "no_send") if key in args})
     if isinstance(preview, dict):
         command = preview.get("command")
         if isinstance(command, dict):
             out.setdefault("command", command.get("display_command"))
             out.setdefault("market", command.get("market"))
             out.setdefault("accounts", command.get("accounts"))
+            out.setdefault("symbols", command.get("symbols"))
+            out.setdefault("no_send", command.get("no_send"))
             out.setdefault("timeout_seconds", command.get("timeout_seconds"))
     if isinstance(result, dict):
-        out.update({key: result.get(key) for key in ("market", "accounts", "timeout_seconds", "command") if key in result})
+        out.update({key: result.get(key) for key in ("market", "accounts", "symbols", "no_send", "timeout_seconds", "command") if key in result})
     if "command" not in out and isinstance(payload.get("command"), dict):
         out["command"] = payload["command"].get("display_command")
     return out
 
 
-def _monitor_run_plan(*, market: str, accounts: list[str], timeout_seconds: int) -> dict[str, Any]:
+def _monitor_run_plan(
+    *,
+    market: str,
+    accounts: list[str],
+    symbols: list[str],
+    timeout_seconds: int,
+    no_send: bool,
+) -> dict[str, Any]:
     market_key = _market_from_value(market)
     if market_key is None:
         raise AgentToolError(code="NEEDS_CLARIFICATION", message="请明确要执行美股还是港股监控。")
     normalized_accounts = normalize_accounts(accounts, fallback=())
+    normalized_symbols = _normalize_symbols_arg(symbols)
+    no_send = bool(no_send or normalized_symbols)
     display_argv = ["./om", "run", "tick-cron", "--market", market_key]
     if normalized_accounts:
         display_argv.extend(["--accounts", *normalized_accounts])
+    if normalized_symbols:
+        display_argv.extend(["--symbols", ",".join(normalized_symbols)])
     display_argv.extend(["--timeout", str(timeout_seconds)])
+    if no_send:
+        display_argv.append("--no-send")
     return {
         "market": market_key,
         "accounts": normalized_accounts,
+        "symbols": normalized_symbols,
+        "no_send": no_send,
         "timeout_seconds": timeout_seconds,
         "display_argv": display_argv,
         "display_command": shlex.join(display_argv),
@@ -448,9 +499,10 @@ def _runtime_config_path_for_market(market: str, *, request: AssistantRequest) -
     return None
 
 
-def _resolve_market(arguments: dict[str, Any], *, request: AssistantRequest) -> str:
+def _resolve_market(arguments: dict[str, Any], *, request: AssistantRequest, symbols: list[str]) -> str:
     explicit = _market_from_value(arguments.get("market") or arguments.get("config_key"))
     text_market = _market_from_text(str(arguments.get("raw_text") or request.text or ""))
+    symbols_market = _market_from_symbols(symbols)
     if explicit and text_market and explicit != text_market:
         raise AgentToolError(
             code="NEEDS_CLARIFICATION",
@@ -458,14 +510,50 @@ def _resolve_market(arguments: dict[str, Any], *, request: AssistantRequest) -> 
             hint="请明确使用 hk/港股 或 us/美股。",
             details={"argument_market": explicit, "text_market": text_market},
         )
-    market = explicit or text_market
+    if explicit and symbols_market and explicit != symbols_market:
+        raise AgentToolError(
+            code="NEEDS_CLARIFICATION",
+            message="监控执行的标的市场和指定市场不一致。",
+            hint="请明确使用 hk/港股 或 us/美股，并确认标的。",
+            details={"argument_market": explicit, "symbols_market": symbols_market, "symbols": symbols},
+        )
+    if text_market and symbols_market and text_market != symbols_market:
+        raise AgentToolError(
+            code="NEEDS_CLARIFICATION",
+            message="监控执行的标的市场和文本市场不一致。",
+            hint="请明确使用 hk/港股 或 us/美股，并确认标的。",
+            details={"text_market": text_market, "symbols_market": symbols_market, "symbols": symbols},
+        )
+    market = explicit or text_market or symbols_market
     if market is None:
         raise AgentToolError(
             code="NEEDS_CLARIFICATION",
             message="请明确要执行美股还是港股监控。",
-            hint="例如：跑一次港股监控，或 /monitor-run hk。",
+            hint="例如：跑一次港股监控、单独跑一次 PDD 的监控，或 /monitor-run hk。",
         )
     return market
+
+
+def _market_from_symbols(symbols: list[str]) -> str | None:
+    markets = {
+        str(symbol_market(symbol) or "").strip().lower()
+        for symbol in symbols
+        if str(symbol or "").strip()
+    }
+    markets.discard("")
+    mapped = {"hk" if item == "hk" else "us" if item == "us" else item for item in markets}
+    if not mapped:
+        return None
+    if mapped <= {"hk"}:
+        return "hk"
+    if mapped <= {"us"}:
+        return "us"
+    raise AgentToolError(
+        code="NEEDS_CLARIFICATION",
+        message="一次监控执行不能混合美股和港股标的。",
+        hint="请拆成美股和港股两次执行。",
+        details={"symbols": symbols, "markets": sorted(mapped)},
+    )
 
 
 def _market_from_text(text: str) -> str | None:
@@ -505,6 +593,42 @@ def _normalize_accounts_arg(value: Any) -> list[str]:
     else:
         raw_items = []
     return normalize_accounts(raw_items, fallback=())
+
+
+def _normalize_symbols_arg(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw_items = re.split(r"[\s,，]+", value)
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = list(value)
+    else:
+        raw_items = []
+    out: list[str] = []
+    for raw in raw_items:
+        symbol = normalize_symbol_read(raw)
+        if symbol and symbol not in out:
+            out.append(symbol)
+    return out
+
+
+def _validate_monitor_symbols(symbols: list[str], *, cfg: dict[str, Any]) -> list[str]:
+    requested = [normalize_symbol_read(item, config=cfg) for item in symbols if str(item).strip()]
+    requested = [item for item in requested if item]
+    configured = {
+        normalize_symbol_read(item.get("symbol"), config=cfg): str(item.get("symbol") or "").strip()
+        for item in (cfg.get("symbols") or [])
+        if isinstance(item, dict)
+    }
+    missing = [item for item in requested if item not in configured]
+    if missing:
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message="这些标的不在当前 runtime config 的监控列表中：" + ", ".join(missing),
+            hint="请先增加监控标的，或确认要运行的市场/配置。",
+            details={"missing_symbols": missing, "configured_symbols": sorted(k for k in configured if k)},
+        )
+    return list(dict.fromkeys(requested))
 
 
 def _normalize_timeout(value: Any) -> int:

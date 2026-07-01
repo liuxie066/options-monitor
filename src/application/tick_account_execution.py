@@ -122,6 +122,7 @@ class TickAccountExecutionRequest:
     runlog: Any
     audit_helper: Any
     repo_root: Path | None = None
+    symbols_arg: str | None = None
 
 
 @dataclass(frozen=True)
@@ -165,6 +166,7 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                 prefetch_lock=shared_prefetch_lock,
                 prefetch_state=shared_prefetch_state,
                 scan_decision_by_account=request.scan_decision_by_account,
+                symbols_arg=request.symbols_arg,
             ),
             runlog=request.runlog,
             audit_fn=request.audit_helper.audit,

@@ -22,6 +22,7 @@ class TickCronPlan:
     market: str
     config_path: str
     accounts: list[str]
+    symbols: list[str]
     timeout_seconds: int
     lock_path: str
     trigger_env: dict[str, str]
@@ -62,6 +63,15 @@ def _normalize_accounts(accounts: list[str] | tuple[str, ...] | None) -> list[st
     return out
 
 
+def _normalize_symbols(symbols: list[str] | tuple[str, ...] | None) -> list[str]:
+    out: list[str] = []
+    for item in symbols or []:
+        symbol = str(item or "").strip()
+        if symbol:
+            out.append(symbol)
+    return out
+
+
 def _normalize_timeout(timeout_seconds: int | str | None) -> int:
     try:
         out = int(timeout_seconds or 600)
@@ -74,6 +84,7 @@ def build_tick_cron_plan(
     *,
     market: str,
     accounts: list[str] | tuple[str, ...] | None = None,
+    symbols: list[str] | tuple[str, ...] | None = None,
     timeout_seconds: int | str | None = 600,
     config_path: str | None = None,
     lock_path: str | None = None,
@@ -88,9 +99,11 @@ def build_tick_cron_plan(
     market_key = _normalize_market(market)
     defaults = _MARKET_DEFAULTS[market_key]
     account_values = _normalize_accounts(accounts)
+    symbol_values = _normalize_symbols(symbols)
     timeout_value = _normalize_timeout(timeout_seconds)
     resolved_config = str(config_path or defaults["config_path"])
     resolved_lock = str(lock_path or defaults["lock_path"])
+    no_send = bool(no_send or symbol_values)
 
     tick_argv = [
         "./om",
@@ -103,6 +116,8 @@ def build_tick_cron_plan(
     ]
     if account_values:
         tick_argv.extend(["--accounts", *account_values])
+    if symbol_values:
+        tick_argv.extend(["--symbols", ",".join(symbol_values)])
     if no_send:
         tick_argv.append("--no-send")
     if force:
@@ -127,6 +142,7 @@ def build_tick_cron_plan(
         market=market_key,
         config_path=resolved_config,
         accounts=account_values,
+        symbols=symbol_values,
         timeout_seconds=timeout_value,
         lock_path=resolved_lock,
         trigger_env=trigger_env,
@@ -188,6 +204,7 @@ def run_tick_cron(
     *,
     market: str,
     accounts: list[str] | tuple[str, ...] | None = None,
+    symbols: list[str] | tuple[str, ...] | None = None,
     timeout_seconds: int | str | None = 600,
     config_path: str | None = None,
     lock_path: str | None = None,
@@ -209,6 +226,7 @@ def run_tick_cron(
     plan = build_tick_cron_plan(
         market=market,
         accounts=accounts,
+        symbols=symbols,
         timeout_seconds=timeout_seconds,
         config_path=config_path,
         lock_path=lock_path,
@@ -225,6 +243,7 @@ def run_tick_cron(
             "market": plan.market,
             "config_path": plan.config_path,
             "accounts": plan.accounts,
+            "symbols": plan.symbols,
             "timeout_seconds": plan.timeout_seconds,
             "lock_path": plan.lock_path,
             "trigger_env": dict(plan.trigger_env),
