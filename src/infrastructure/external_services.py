@@ -84,6 +84,7 @@ def run_pipeline_script(
     mode: str = 'scheduled',
     shared_required_data: Path | None = None,
     shared_context_dir: Path | None = None,
+    symbols_arg: str | None = None,
     capture_output: bool = False,
     text: bool = False,
     env: dict[str, str] | None = None,
@@ -106,6 +107,8 @@ def run_pipeline_script(
         cmd.extend(['--shared-required-data', str(shared_required_data)])
     if shared_context_dir is not None:
         cmd.extend(['--shared-context-dir', str(shared_context_dir)])
+    if str(symbols_arg or '').strip():
+        cmd.extend(['--symbols', str(symbols_arg).strip()])
     return run_command(
         cmd,
         cwd=base,

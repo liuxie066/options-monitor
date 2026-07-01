@@ -114,6 +114,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description='Multi-account tick with per-account notifications')
     ap.add_argument('--config', required=True)
     ap.add_argument('--accounts', nargs='+', default=None)
+    ap.add_argument('--symbols', nargs='+', default=None, help='Comma-separated or space-separated symbol whitelist for this tick.')
     ap.add_argument('--default-account', default=None)
     ap.add_argument('--market-config', default='auto', choices=['auto', 'hk', 'us', 'all'], help='Select symbols by market at config-load time (auto=by session).')
     ap.add_argument('--no-send', action='store_true', help='Do not send messages (for smoke tests / debugging).')
@@ -129,6 +130,7 @@ def main(argv: list[str] | None = None) -> int:
     no_send = bool(getattr(args, 'no_send', False))
     smoke = bool(getattr(args, 'smoke', False))
     force_mode = bool(getattr(args, 'force', False))
+    symbols_arg = ",".join(str(item) for item in (getattr(args, 'symbols', None) or []) if str(item).strip()) or None
 
     repo_root = Path(__file__).resolve().parents[2]
     runtime_resolution = resolve_runtime_root(repo_root=repo_root)
@@ -201,6 +203,7 @@ def main(argv: list[str] | None = None) -> int:
         data=_safe_runlog_data({
             'accounts': [str(a).strip().lower() for a in (args.accounts or []) if str(a).strip()],
             'symbols_count': len([x for x in syms0 if isinstance(x, dict)]),
+            'symbols_arg': symbols_arg,
             'source_selections': src_counts,
             'market_config': str(getattr(args, 'market_config', 'auto') or 'auto'),
             'config_source_path': contract_info.get('resolved_path'),
@@ -439,6 +442,7 @@ def main(argv: list[str] | None = None) -> int:
             scheduler_schedule_key=str(scheduler_schedule_key),
             runlog=runlog,
             audit_helper=audit_helper,
+            symbols_arg=symbols_arg,
         )
     )
     tick_metrics['accounts'].extend(account_execution.account_metrics)

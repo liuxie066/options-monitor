@@ -19,6 +19,7 @@ from domain.domain.tool_boundary import normalize_pipeline_subprocess_output
 from src.application.candidate_reject_summary import append_candidate_reject_summary_to_text
 from src.application.config_loader import resolve_watchlist_config, set_watchlist_config
 from src.application.close_advice_runner import run_close_advice
+from src.application.symbol_mutations import normalize_symbol_read
 from src.infrastructure.external_services import run_pipeline_script
 from src.infrastructure.io_utils import utc_now
 from src.application.multi_tick.misc import (
@@ -57,6 +58,7 @@ class AccountRunRequest:
     prefetch_state: dict[str, Any] | None = None
     scan_decision_by_account: dict[str, dict[str, Any]] | None = None
     repo_root: Path | None = None
+    symbols_arg: str | None = None
 
 
 @dataclass(frozen=True)
@@ -143,6 +145,17 @@ def _resolve_account_scan_decision(
     return should_run, reason
 
 
+def _symbol_whitelist(symbols_arg: str | None, *, cfg: dict[str, Any]) -> set[str] | None:
+    if not str(symbols_arg or "").strip():
+        return None
+    out = {
+        normalize_symbol_read(item, config=cfg)
+        for item in str(symbols_arg or "").split(",")
+        if str(item).strip()
+    }
+    return {item for item in out if item} or None
+
+
 def run_one_account(
     *,
     request: AccountRunRequest,
@@ -173,6 +186,12 @@ def run_one_account(
         syms = resolve_watchlist_config(cfg)
         if request.markets_to_run:
             syms = [it for it in syms if isinstance(it, dict) and (it.get("broker") in request.markets_to_run)]
+        whitelist = _symbol_whitelist(request.symbols_arg, cfg=cfg)
+        if whitelist is not None:
+            syms = [
+                it for it in syms
+                if isinstance(it, dict) and normalize_symbol_read(it.get("symbol"), config=cfg) in whitelist
+            ]
         set_watchlist_config(cfg, syms)
     except Exception:
         pass
@@ -481,6 +500,7 @@ def run_one_account(
         state_dir=acct_state_dir,
         shared_required_data=request.shared_required,
         shared_context_dir=run_repo.get_run_state_dir(request.base, request.run_id),
+        symbols_arg=request.symbols_arg,
         capture_output=True,
         text=True,
         env=dict(os.environ, PYTHONPATH=str(repo_root)),

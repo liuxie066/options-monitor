@@ -96,6 +96,38 @@ def test_cli_run_tick_cron_dry_run_outputs_plan(capsys) -> None:
     ]
 
 
+def test_cli_run_tick_cron_symbol_dry_run_forces_no_send(capsys) -> None:
+    from src.interfaces.cli import main as cli_main
+
+    rc = cli_main.main(
+        [
+            "run",
+            "tick-cron",
+            "--market",
+            "us",
+            "--symbols",
+            "PDD",
+            "--dry-run-command",
+        ]
+    )
+
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)["data"]
+    assert data["symbols"] == ["PDD"]
+    assert data["command"] == [
+        "./om",
+        "run",
+        "tick",
+        "--config",
+        "config.us.json",
+        "--market-config",
+        "us",
+        "--symbols",
+        "PDD",
+        "--no-send",
+    ]
+
+
 def test_legacy_tick_script_entrypoints_are_removed() -> None:
     assert not (ROOT / "scripts" / "send_if_needed.py").exists()
     assert not (ROOT / "scripts" / "send_if_needed_multi.py").exists()

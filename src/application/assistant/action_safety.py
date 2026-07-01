@@ -423,7 +423,15 @@ def _looks_like_monitor_run_preview(compact: str) -> bool:
     monitor = any(token in compact for token in ("监控", "monitor", "tick", "扫描", "scan"))
     run_once = any(token in compact for token in ("跑一次", "执行一次", "运行一次", "触发一次", "跑一遍", "runonce"))
     run_verb = any(token in compact for token in ("运行", "执行", "触发", "启动", "run", "start"))
-    return bool(market and monitor and (run_once or run_verb))
+    return bool((market or _has_symbolish_monitor_scope(compact)) and monitor and (run_once or run_verb))
+
+
+def _has_symbolish_monitor_scope(compact: str) -> bool:
+    non_symbol = _NON_SYMBOL_TOKENS | {"MONITOR", "ONCE", "RUN", "RUNONCE", "SCAN", "START", "TICK"}
+    for match in re.finditer(r"[a-z]{1,8}(?:\.[a-z]{1,4})?|\d{3,5}(?:\.hk)?", compact):
+        if match.group(0).upper() not in non_symbol:
+            return True
+    return False
 
 
 def _proposed_effect(*, tool_name: str, action_policy: dict[str, Any]) -> str:
