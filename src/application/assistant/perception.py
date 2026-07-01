@@ -218,6 +218,22 @@ class PerceptionEngine:
                 now_fn=parser_now_fn,
             )
         if llm_result.error is not None:
+            details = llm_result.error.details if isinstance(llm_result.error.details, dict) else {}
+            if (
+                llm_result.error.code == "NEEDS_CLARIFICATION"
+                and details.get("missing_capability") == "read_tool_or_required_slots"
+            ):
+                self.trace = build_perception_trace(
+                    decision="needs_clarification",
+                    selected_source=None,
+                    selected_perception=None,
+                    candidates=[
+                        error_candidate("agent_loop", llm_result.error, reason=str(self.llm_trace.get("reason") or "no_intent")),
+                        skipped_candidate("command", "not_command"),
+                        skipped_candidate("permission_response", "not_permission_response"),
+                    ],
+                )
+                raise llm_result.error
             return self._handle_agent_loop_error(text, llm_result.error, conversation_context)
         err = AgentToolError(code="NEEDS_CLARIFICATION", message="AgentLoop 没有识别出可执行请求。")
         self.trace = build_perception_trace(
@@ -467,11 +483,8 @@ def _llm_preview_intent_name(perception: PerceptionResult) -> str | None:
         if not isinstance(event, dict):
             continue
         event_type = str(event.get("event_type") or "")
-        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
         candidate = ""
-        if event_type == "preview_request":
-            candidate = str(payload.get("intent_name") or payload.get("tool_name") or "")
-        elif event_type == "model_tool_call":
+        if event_type == "model_tool_call":
             candidate = str(event.get("tool_name") or "")
         spec = _COMMAND_SPECS_BY_INTENT.get(candidate)
         if spec is not None and _is_llm_preview_perception_allowed(spec):

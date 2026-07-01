@@ -9,7 +9,6 @@ from src.application.assistant.model_operations import handle_model_operation
 from src.application.assistant.monitor_run_operations import handle_monitor_run_operation
 from src.application.assistant.operation_store import InboundOperationStore
 from src.application.assistant.policy import enforce_tool_allowed
-from src.application.assistant.preview_request import preview_request_perception_from_payload
 from src.application.assistant.reasoning import resolve_reasoning
 from src.application.assistant.renderer import HELP_TEXT, SMALL_TALK_TEXT, render_pending_operations
 from src.application.assistant.symbol_operations import handle_symbol_operation
@@ -187,12 +186,11 @@ def _tool_loop_preview_action_result(
     event_loop = data.get("event_loop") if isinstance(data.get("event_loop"), dict) else {}
     if str(event_loop.get("status") or "").strip() != "preview_requested":
         return None
-    preview_request = event_loop.get("preview_request") if isinstance(event_loop.get("preview_request"), dict) else {}
-    if not preview_request:
+    preview_gate = event_loop.get("preview_gate") if isinstance(event_loop.get("preview_gate"), dict) else {}
+    if not preview_gate:
         return None
-    preview_perception = preview_request_perception_from_payload(
-        preview_request,
-        question=request.text,
+    preview_perception = _preview_gate_perception(
+        preview_gate,
         source=perception.source if perception else "agent_loop_events",
     )
     preview_resolution = resolve_reasoning(preview_perception, request=request)
@@ -204,6 +202,15 @@ def _tool_loop_preview_action_result(
         request=request,
         command_id=command_id,
         store=store,
+    )
+
+
+def _preview_gate_perception(preview_gate: dict[str, Any], *, source: str) -> PerceptionResult:
+    return PerceptionResult(
+        intent_name=str(preview_gate.get("intent_name") or "").strip(),
+        arguments=dict(preview_gate.get("arguments") or {}) if isinstance(preview_gate.get("arguments"), dict) else {},
+        source=source,
+        confidence=1.0,
     )
 
 

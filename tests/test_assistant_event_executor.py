@@ -754,16 +754,15 @@ def test_execute_tool_loop_payload_preserves_provider_protocol_error() -> None:
     assert events[1]["error_code"] == "INVALID_MODEL_EVENT"
 
 
-def test_run_assistant_tool_event_loop_prechecks_direct_preview_request() -> None:
+def test_run_assistant_tool_event_loop_prechecks_direct_preview_tool_call() -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
-    event = AssistantEvent(
-        event_id="preview_request_1",
-        event_type="preview_request",
-        payload={
-            "intent_name": "manual_assignment",
-            "arguments": {},
-            "reason": "model selected assignment preview",
-        },
+    event = ModelToolCallEvent(
+        event_id="model_tool_call_1",
+        tool_call_id="call_assignment_1",
+        tool_name="manual_assignment",
+        arguments={},
+        purpose="model selected assignment preview",
+        provider="openai",
     )
 
     outcome = run_assistant_tool_event_loop(

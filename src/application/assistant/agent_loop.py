@@ -68,10 +68,6 @@ from src.application.assistant.model_evidence import (
     canonical_fallback_from_tool_results,
     verify_model_final_answer,
 )
-from src.application.assistant.preview_request import (
-    normalized_preview_request_payload,
-    preview_request_perception_from_payload,
-)
 from src.application.assistant.renderer import render_canonical_tool_result, render_inbound_text
 from src.application.assistant.session import build_agent_session_snapshot
 from src.application.assistant.settings import AssistantLlmSettings, AssistantSettings
@@ -513,6 +509,7 @@ class GuardedModelToolCallExecution:
     fact_observation: dict[str, Any] | None = None
     synthesis_observation: dict[str, Any] | None = None
     error_payload: dict[str, Any] | None = None
+    preview_gate: dict[str, Any] | None = None
     schema_version: str = "om-guarded-model-tool-call-execution-v1"
 
     @property
@@ -530,6 +527,8 @@ class GuardedModelToolCallExecution:
         }
         if self.legacy_result_event is not None:
             payload["legacy_result_event"] = dict(self.legacy_result_event)
+        if self.preview_gate is not None:
+            payload["preview_gate"] = dict(self.preview_gate)
         if self.error_payload is not None:
             payload["error"] = dict(self.error_payload)
         return payload
@@ -545,7 +544,7 @@ class AssistantToolLoopOutcome:
     final_answer_event: ModelFinalAnswerEvent | None = None
     answer_verification: ModelAnswerVerification | None = None
     clarification_request: dict[str, Any] | None = None
-    preview_request: dict[str, Any] | None = None
+    preview_gate: dict[str, Any] | None = None
     stop_reason: str = ""
     trace: dict[str, Any] | None = None
     schema_version: str = "om-assistant-tool-loop-outcome-v1"
@@ -571,8 +570,8 @@ class AssistantToolLoopOutcome:
             payload["answer_verification"] = self.answer_verification.public_payload()
         if self.clarification_request is not None:
             payload["clarification_request"] = dict(self.clarification_request)
-        if self.preview_request is not None:
-            payload["preview_request"] = dict(self.preview_request)
+        if self.preview_gate is not None:
+            payload["preview_gate"] = dict(self.preview_gate)
         return payload
 
 
@@ -682,7 +681,7 @@ class ToolExecutor:
         if precheck.get("status") == "fail":
             error = AgentToolError(
                 code="PRE_TOOL_CHECK_FAILED",
-                message="tool call failed pre-tool safety checks",
+                message="该请求未通过执行前安全检查。",
                 details={"tool_name": tool_name, "precheck": precheck},
             )
             authorization_event["allowed"] = False
@@ -761,6 +760,7 @@ def execute_model_tool_call_event(
     request: AssistantRequest,
     task_contract: dict[str, Any],
     execute_tool_fn: Callable[[str, dict[str, Any]], dict[str, Any]],
+    context_validation: dict[str, Any] | None = None,
     attempted_signatures: set[str] | None = None,
     tool_call_count: int = 0,
     max_tool_calls: int = MAX_AGENT_LOOP_TOOL_CALLS,
@@ -794,6 +794,38 @@ def execute_model_tool_call_event(
                     "tool_name": model_event.tool_name,
                     "provider_protocol_error": dict(protocol_error),
                 },
+            ),
+        )
+    if _plan_step_kind(model_event.tool_name) == "preview":
+        return _preview_gate_model_tool_call_execution(
+            model_event=model_event,
+            request=request,
+            task_contract=task_contract,
+            context_validation=context_validation,
+            payload=payload,
+            duplicate_signature=signature,
+        )
+    if _plan_step_kind(model_event.tool_name) == "read" and _question_requests_preview_operation(request.text):
+        guard = {
+            "schema_version": TOOL_CHECK_SCHEMA_VERSION,
+            "allowed": False,
+            "decision": "read_for_preview_request",
+            "reason": "write preview request cannot be handled by a read tool",
+            "tool_name": model_event.tool_name,
+            "risk_class": "READ_AUTO",
+            "duplicate_signature": signature,
+            "scope_source": _scope_source_for_guard(task_contract),
+            "error_code": "PLAN_RISK_MISMATCH",
+        }
+        return _guard_denied_model_tool_call_execution(
+            model_event=model_event,
+            payload=payload,
+            guard=guard,
+            error=AgentToolError(
+                code="PLAN_RISK_MISMATCH",
+                message="这像写入预览请求，不能用只读查询替代。",
+                hint="请进入对应的预览确认流程。",
+                details={"planned_tool": model_event.tool_name},
             ),
         )
     if int(tool_call_count) >= int(max_tool_calls):
@@ -933,6 +965,160 @@ def _guard_denied_model_tool_call_execution(
     )
 
 
+def _preview_gate_model_tool_call_execution(
+    *,
+    model_event: ModelToolCallEvent,
+    request: AssistantRequest,
+    task_contract: dict[str, Any],
+    context_validation: dict[str, Any] | None,
+    payload: dict[str, Any],
+    duplicate_signature: str,
+) -> GuardedModelToolCallExecution:
+    error = _preview_gate_error(
+        model_event=model_event,
+        request=request,
+        task_contract=task_contract,
+        context_validation=context_validation,
+    )
+    guard = {
+        "schema_version": TOOL_CHECK_SCHEMA_VERSION,
+        "allowed": error is None,
+        "decision": "preview_gate" if error is None else _preview_gate_denial_decision(error),
+        "reason": "write tool intercepted before execution; host will create a pending preview"
+        if error is None
+        else str(error.message or error.code or "preview gate rejected tool call"),
+        "tool_name": model_event.tool_name,
+        "risk_class": "SOFT_WRITE_PREVIEW",
+        "duplicate_signature": duplicate_signature,
+        "scope_source": _scope_source_for_guard(task_contract),
+        "error_code": None if error is None else str(error.code or "PREVIEW_GATE_REJECTED"),
+    }
+    if error is not None:
+        return _guard_denied_model_tool_call_execution(
+            model_event=model_event,
+            payload=payload,
+            guard=guard,
+            error=error,
+        )
+
+    preview_gate = _preview_gate_payload(model_event=model_event, request=request, payload=payload)
+    guard_event = _tool_guard_event_from_guard(
+        model_event=model_event,
+        guard=guard,
+        normalized_payload=_safe_tool_payload(payload),
+    )
+    raw_result = build_response(
+        tool_name=model_event.tool_name,
+        ok=True,
+        data={
+            "status": "preview_requested",
+            "preview_gate": preview_gate,
+            "response_text": "这看起来是写入请求，已进入预览确认流程。",
+            "writes_allowed": False,
+            "apply_allowed": False,
+        },
+    )
+    result_adapter = adapt_tool_result(
+        event_id=f"result_{model_event.tool_call_id}",
+        parent_event_id=guard_event.event_id,
+        tool_call_id=model_event.tool_call_id,
+        tool_name=model_event.tool_name,
+        normalized_payload=_safe_tool_payload(payload),
+        guard_decision=guard_event,
+        output_contract=resolve_output_contract(model_event.tool_name, payload),
+        raw_result=raw_result,
+    )
+    return GuardedModelToolCallExecution(
+        model_event=model_event,
+        guard_event=guard_event,
+        result_adapter=result_adapter,
+        allowed=True,
+        ok=True,
+        authorization_event={"phase": "preview_gate", **dict(guard)},
+        legacy_result_event={
+            "phase": "preview_gate",
+            "tool_name": model_event.tool_name,
+            "ok": True,
+            "preview_gate": preview_gate,
+        },
+        tool_result={
+            "index": 1,
+            "tool_name": model_event.tool_name,
+            "ok": True,
+            "preview_gate": preview_gate,
+        },
+        observation=build_tool_observation(index=1, tool_name=model_event.tool_name, payload=payload, result=raw_result).public_payload(),
+        fact_observation=build_fact_observation(index=1, tool_name=model_event.tool_name, payload=payload, result=raw_result),
+        synthesis_observation=build_synthesis_observation(index=1, tool_name=model_event.tool_name, payload=payload, result=raw_result),
+        error_payload=None,
+        preview_gate=preview_gate,
+    )
+
+
+def _preview_gate_error(
+    *,
+    model_event: ModelToolCallEvent,
+    request: AssistantRequest,
+    task_contract: dict[str, Any],
+    context_validation: dict[str, Any] | None,
+) -> AgentToolError | None:
+    if _model_tool_call_protocol_error(model_event) is not None:
+        protocol_error = _model_tool_call_protocol_error(model_event) or {}
+        return AgentToolError(
+            code=str(protocol_error.get("code") or "INVALID_MODEL_EVENT"),
+            message="model tool call arguments were malformed; retry with valid structured arguments",
+            details={"tool_name": model_event.tool_name, "provider_protocol_error": dict(protocol_error)},
+        )
+    if not _question_requests_preview_operation(request.text):
+        return AgentToolError(
+            code="PLAN_RISK_MISMATCH",
+            message="这是只读问题，不能进入写入预览流程。",
+            hint="Do not use preview-write tools for ordinary questions; write tools are only for explicit record, edit, upgrade, model-switch, or monitor-run requests.",
+            details={"write_tool": model_event.tool_name, "preview_capabilities": [model_event.tool_name]},
+        )
+    step = _agent_loop_step_from_model_event(
+        index=1,
+        event=model_event,
+        question=request.text,
+        task_contract=task_contract,
+        context_validation=context_validation,
+    )
+    precheck_error = _planned_step_precheck_error((step,))
+    if precheck_error is None:
+        return None
+    return _preview_precheck_clarification_error(step.precheck) or precheck_error
+
+
+def _preview_gate_denial_decision(error: AgentToolError) -> str:
+    if error.code == "NEEDS_CLARIFICATION":
+        return "needs_clarification"
+    if error.code == "PLAN_RISK_MISMATCH":
+        return "risk_mismatch"
+    return "preview_gate_denied"
+
+
+def _preview_gate_payload(
+    *,
+    model_event: ModelToolCallEvent,
+    request: AssistantRequest,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    arguments = dict(payload or {})
+    if model_event.tool_name in {"manual_trade_open", "manual_trade_close", "manual_assignment", "manual_expiry"}:
+        arguments["raw_text"] = request.text
+    return {
+        "schema_version": "om-assistant-preview-gate-v1",
+        "status": "preview_requested",
+        "source": "tool_pre_execution_gate",
+        "intent_name": model_event.tool_name,
+        "tool_call_id": model_event.tool_call_id,
+        "arguments": arguments,
+        "reason": model_event.purpose or "write tool intercepted before execution",
+        "requires_confirmation": True,
+        "apply_allowed": False,
+    }
+
+
 def _model_tool_call_protocol_error(model_event: ModelToolCallEvent) -> dict[str, Any] | None:
     protocol_error = getattr(model_event, "protocol_error", None)
     if isinstance(protocol_error, dict) and protocol_error:
@@ -1034,6 +1220,7 @@ def run_assistant_tool_event_loop(
     task_contract: dict[str, Any],
     initial_events: tuple[ModelToolCallEvent | ModelFinalAnswerEvent | AssistantEvent, ...],
     execute_tool_fn: Callable[[str, dict[str, Any]], dict[str, Any]],
+    context_validation: dict[str, Any] | None = None,
     provider: str = "openai",
     create_continuation_response_fn: CreateModelContinuationResponseFn | None = None,
     continuation_base_payload: dict[str, Any] | None = None,
@@ -1109,64 +1296,6 @@ def run_assistant_tool_event_loop(
                 trace_extra={"planner_plan_used": False, "continuation_count": continuation_count},
             )
 
-        if isinstance(first, AssistantEvent) and first.event_type == "preview_request":
-            transcript.append(first)
-            preview_precheck_error = _preview_request_loop_precheck_error(
-                event=first,
-                text=question,
-                task_contract=task_contract,
-                provider=provider,
-            )
-            if preview_precheck_error is not None:
-                error_payload = build_error_payload(preview_precheck_error)
-                if preview_precheck_error.code == "NEEDS_CLARIFICATION":
-                    clarification_request = (
-                        preview_precheck_error.details.get("clarification_request")
-                        if isinstance(preview_precheck_error.details, dict)
-                        else None
-                    )
-                    return _assistant_tool_loop_outcome(
-                        status="needs_clarification",
-                        stop_reason="clarification_request",
-                        question=question,
-                        task_contract=task_contract,
-                        transcript=transcript,
-                        tool_results=tool_results,
-                        clarification_request=(
-                            dict(clarification_request)
-                            if isinstance(clarification_request, dict)
-                            else _clarification_request_payload(preview_precheck_error.message)
-                        ),
-                        trace_extra={
-                            "planner_plan_used": False,
-                            "continuation_count": continuation_count,
-                            "preview_error": error_payload,
-                        },
-                    )
-                return _assistant_tool_loop_outcome(
-                    status="stopped",
-                    stop_reason=str(preview_precheck_error.code or "invalid_preview_request").lower(),
-                    question=question,
-                    task_contract=task_contract,
-                    transcript=transcript,
-                    tool_results=tool_results,
-                    trace_extra={
-                        "planner_plan_used": False,
-                        "continuation_count": continuation_count,
-                        "preview_error": error_payload,
-                    },
-                )
-            return _assistant_tool_loop_outcome(
-                status="preview_requested",
-                stop_reason="preview_request",
-                question=question,
-                task_contract=task_contract,
-                transcript=transcript,
-                tool_results=tool_results,
-                preview_request=first.public_payload(),
-                trace_extra={"planner_plan_used": False, "continuation_count": continuation_count},
-            )
-
         tool_calls = tuple(event for event in pending_events if isinstance(event, ModelToolCallEvent))
         if not tool_calls:
             transcript.extend(pending_events)
@@ -1180,40 +1309,6 @@ def run_assistant_tool_event_loop(
                 trace_extra={"planner_plan_used": False, "continuation_count": continuation_count},
             )
 
-        preview_terminal, preview_error = _preview_request_from_model_tool_call_turn(
-            question=question,
-            pending_events=pending_events,
-            tool_calls=tool_calls,
-        )
-        if preview_error is not None:
-            transcript.extend(pending_events)
-            return _assistant_tool_loop_outcome(
-                status="stopped",
-                stop_reason=str(preview_error.code or "invalid_preview_request").lower(),
-                question=question,
-                task_contract=task_contract,
-                transcript=transcript,
-                tool_results=tool_results,
-                trace_extra={
-                    "planner_plan_used": False,
-                    "continuation_count": continuation_count,
-                    "preview_error": build_error_payload(preview_error),
-                },
-            )
-        if preview_terminal is not None:
-            model_event, preview_event = preview_terminal
-            transcript.extend((model_event, preview_event))
-            return _assistant_tool_loop_outcome(
-                status="preview_requested",
-                stop_reason="preview_request",
-                question=question,
-                task_contract=task_contract,
-                transcript=transcript,
-                tool_results=tool_results,
-                preview_request=preview_event.public_payload(),
-                trace_extra={"planner_plan_used": False, "continuation_count": continuation_count},
-            )
-
         turn_executions: list[GuardedModelToolCallExecution] = []
         final_answer_only_continuation = False
         for model_event in tool_calls:
@@ -1222,6 +1317,7 @@ def run_assistant_tool_event_loop(
                 request=request,
                 task_contract=task_contract,
                 execute_tool_fn=execute_tool_fn,
+                context_validation=context_validation,
                 attempted_signatures=attempted_signatures,
                 tool_call_count=tool_call_count,
                 max_tool_calls=max_tool_calls,
@@ -1231,7 +1327,34 @@ def run_assistant_tool_event_loop(
             tool_call_count += 1
             turn_executions.append(execution)
 
+            if execution.preview_gate is not None:
+                return _assistant_tool_loop_outcome(
+                    status="preview_requested",
+                    stop_reason="preview_gate",
+                    question=question,
+                    task_contract=task_contract,
+                    transcript=transcript,
+                    tool_results=tool_results,
+                    preview_gate=execution.preview_gate,
+                    trace_extra={"planner_plan_used": False, "continuation_count": continuation_count},
+                )
+
             if not execution.ok:
+                if isinstance(execution.error_payload, dict) and execution.error_payload.get("code") == "NEEDS_CLARIFICATION":
+                    return _assistant_tool_loop_outcome(
+                        status="needs_clarification",
+                        stop_reason="clarification_request",
+                        question=question,
+                        task_contract=task_contract,
+                        transcript=transcript,
+                        tool_results=tool_results,
+                        clarification_request=_clarification_request_payload(str(execution.error_payload.get("message") or "")),
+                        trace_extra={
+                            "planner_plan_used": False,
+                            "continuation_count": continuation_count,
+                            "preview_error": dict(execution.error_payload),
+                        },
+                    )
                 recoverable = _assistant_tool_loop_error_recoverable(execution)
                 if recoverable:
                     error_signature = _assistant_tool_loop_recoverable_error_signature(execution)
@@ -1353,41 +1476,6 @@ def run_assistant_tool_event_loop(
         )
 
 
-def _preview_request_from_model_tool_call_turn(
-    *,
-    question: str,
-    pending_events: tuple[ModelToolCallEvent | ModelFinalAnswerEvent | AssistantEvent, ...],
-    tool_calls: tuple[ModelToolCallEvent, ...],
-) -> tuple[tuple[ModelToolCallEvent, AssistantEvent] | None, AgentToolError | None]:
-    if len(pending_events) != 1 or len(tool_calls) != 1:
-        return None, None
-    model_event = tool_calls[0]
-    if _model_tool_call_protocol_error(model_event) is not None:
-        return None, None
-    if _plan_step_kind(model_event.tool_name) != "preview":
-        return None, None
-    if not _question_requests_preview_operation(question):
-        return None, AgentToolError(
-            code="PLAN_RISK_MISMATCH",
-            message="LLM 请求了写入预览，但用户原文不像写入预览请求。",
-            hint="preview-write 只能用于明确的记录、修改、升级或模型切换请求；普通查询必须规划为只读工具。",
-            details={"preview_capability": model_event.tool_name},
-        )
-    payload = {
-        "intent_name": model_event.tool_name,
-        "arguments": dict(model_event.arguments),
-        "reason": model_event.purpose or "model selected preview capability",
-    }
-    normalized_payload = normalized_preview_request_payload(payload, question=question)
-    preview_event = AssistantEvent(
-        event_id=f"preview_{model_event.tool_call_id}",
-        event_type="preview_request",
-        payload=normalized_payload,
-        parent_event_id=model_event.event_id,
-    )
-    return (model_event, preview_event), None
-
-
 def _assistant_tool_loop_outcome(
     *,
     status: str,
@@ -1401,7 +1489,7 @@ def _assistant_tool_loop_outcome(
     final_answer_event: ModelFinalAnswerEvent | None = None,
     answer_verification: ModelAnswerVerification | None = None,
     clarification_request: dict[str, Any] | None = None,
-    preview_request: dict[str, Any] | None = None,
+    preview_gate: dict[str, Any] | None = None,
     trace_extra: dict[str, Any] | None = None,
 ) -> AssistantToolLoopOutcome:
     resolved_evidence = evidence
@@ -1450,7 +1538,7 @@ def _assistant_tool_loop_outcome(
         final_answer_event=final_answer_event,
         answer_verification=answer_verification,
         clarification_request=clarification_request,
-        preview_request=preview_request,
+        preview_gate=preview_gate,
         trace=trace,
     )
 
@@ -1555,6 +1643,10 @@ def _assistant_tool_loop_evidence(
 def _assistant_tool_loop_error_recoverable(execution: GuardedModelToolCallExecution) -> bool:
     code = str(execution.guard_event.error_code or "")
     decision = str(execution.guard_event.decision or "")
+    if code == "PLAN_RISK_MISMATCH":
+        return True
+    if code == "PERMISSION_DENIED" and decision == "write_boundary":
+        return True
     if code in {"PRE_TOOL_CHECK_FAILED", "DUPLICATE_TOOL_CALL", "UNKNOWN_TOOL", "INVALID_MODEL_EVENT"}:
         return True
     if decision in {"pre_tool_check_failed", "duplicate_call", "unknown_tool", "provider_protocol_error"}:
@@ -1689,11 +1781,26 @@ def _build_tool_loop_response_from_outcome(
     }
     error = None
     if not ok:
+        error_details: dict[str, Any] = {"status": outcome.status, "stop_reason": outcome.stop_reason}
+        trace = outcome.trace if isinstance(outcome.trace, dict) else {}
+        preview_error = trace.get("preview_error") if isinstance(trace.get("preview_error"), dict) else {}
+        if not preview_error:
+            preview_error = _last_tool_result_error_payload(outcome.tool_results)
+        preview_error_details = (
+            preview_error.get("details")
+            if isinstance(preview_error.get("details"), dict)
+            else {}
+        )
+        error_hint = str(preview_error.get("hint") or "").strip() if isinstance(preview_error, dict) else ""
+        error_details.update(dict(preview_error_details))
+        if outcome.clarification_request is not None:
+            error_details.setdefault("clarification_request", dict(outcome.clarification_request))
         error = build_error_payload(
             AgentToolError(
                 code=_assistant_tool_loop_error_code(outcome),
                 message=_assistant_tool_loop_error_message(outcome),
-                details={"status": outcome.status, "stop_reason": outcome.stop_reason},
+                hint=error_hint or None,
+                details=error_details,
             )
         )
     return build_response(
@@ -1702,6 +1809,15 @@ def _build_tool_loop_response_from_outcome(
         data=data,
         error=error,
     )
+
+
+def _last_tool_result_error_payload(tool_results: tuple[ToolResultAdapterOutput, ...]) -> dict[str, Any]:
+    for adapter in reversed(tuple(tool_results)):
+        raw_result = adapter.raw_result if isinstance(adapter.raw_result, dict) else {}
+        error = raw_result.get("error") if isinstance(raw_result.get("error"), dict) else {}
+        if error:
+            return dict(error)
+    return {}
 
 
 def _assistant_tool_loop_continuation_response_fn(
@@ -1820,7 +1936,7 @@ def _assistant_tool_loop_event_from_payload(payload: dict[str, Any]) -> ModelToo
             parent_event_id=str(payload.get("parent_event_id") or "") or None,
             schema_version=str(payload.get("schema_version") or MODEL_EVENT_SCHEMA_VERSION),
         )
-    if event_type in {"clarification_request", "preview_request", "loop_stopped", "context_projected", "user_message"}:
+    if event_type in {"clarification_request", "loop_stopped", "context_projected", "user_message"}:
         return AssistantEvent(
             event_id=str(payload.get("event_id") or event_type),
             event_type=event_type,  # type: ignore[arg-type]
@@ -1888,6 +2004,12 @@ def _assistant_tool_loop_tool_events(outcome: AssistantToolLoopOutcome) -> list[
 
 
 def _assistant_tool_loop_error_code(outcome: AssistantToolLoopOutcome) -> str:
+    if outcome.status == "needs_clarification":
+        return "NEEDS_CLARIFICATION"
+    for adapter in reversed(tuple(outcome.tool_results)):
+        error_code = str(adapter.event.error_code or "").strip()
+        if error_code:
+            return error_code
     if outcome.stop_reason:
         return str(outcome.stop_reason).upper()
     return "TOOL_LOOP_STOPPED"
@@ -1938,7 +2060,42 @@ def run_read_only_agent_loop(
     model_turn_entry_fn = model_turn_fn or create_model_turn_events
     model_turn_result = model_turn_entry_fn(text, settings, loop_context)
     model_turn_result = _normalize_model_turn_result(model_turn_result, question=text, today=today)
-    direct_result = _direct_model_turn_loop_result(
+    if model_turn_result.event_plan is None:
+        error = model_turn_result.error or _no_tool_plan_error()
+        trace = dict(model_turn_result.trace)
+        trace["agent_loop"] = _direct_model_turn_rejection_trace(
+            error=error,
+            max_steps=steps,
+        )
+        return AgentLoopResult(
+            planning=AgentLoopPlanningOutcome(
+                perception=None,
+                trace=dict(trace),
+                error=error,
+            ),
+            trace=trace,
+            steps=(),
+        )
+    if request is None or execute_tool_fn is None:
+        error = AgentToolError(
+            code="TOOL_LOOP_CONTEXT_MISSING",
+            message="assistant tool_call event loop requires request and execute_tool_fn.",
+        )
+        trace = dict(model_turn_result.trace)
+        trace["agent_loop"] = _direct_model_turn_rejection_trace(
+            error=error,
+            max_steps=steps,
+        )
+        return AgentLoopResult(
+            planning=AgentLoopPlanningOutcome(
+                perception=None,
+                trace=dict(trace),
+                error=error,
+            ),
+            trace=trace,
+            steps=(),
+        )
+    return _direct_model_turn_loop_result(
         text=text,
         request=request,
         execute_tool_fn=execute_tool_fn,
@@ -1947,46 +2104,21 @@ def run_read_only_agent_loop(
         model_turn_result=model_turn_result,
         max_steps=steps,
     )
-    if direct_result is not None:
-        return direct_result
-    planning, planned_steps = _planning_outcome_from_model_turn_result(
-        model_turn_result,
-        question=text,
-        conversation_context=loop_context,
-    )
-    trace = dict(planning.trace or model_turn_result.trace)
-    trace["agent_loop"] = {
-        "schema_version": AGENT_LOOP_SCHEMA_VERSION,
-        "enabled": True,
-        "runtime": "model_turn_event_adapter",
-        "max_steps": steps,
-        "steps_used": len(planned_steps),
-        "writes_allowed": False,
-        "preview_operations_allowed": True,
-        "steps": [step.public_payload() for step in planned_steps],
-        "final_response": FinalResponsePlan(
-            status="pending_tool_execution" if planning.perception is not None else "no_plan",
-            reason="canonical renderer will own factual output"
-            if planning.perception is not None
-            else "planner did not produce an executable assistant capability",
-        ).public_payload(),
-    }
-    return AgentLoopResult(planning=planning, trace=trace, steps=planned_steps)
 
 
 def _direct_model_turn_loop_result(
     *,
     text: str,
-    request: AssistantRequest | None,
-    execute_tool_fn: Callable[[str, dict[str, Any]], dict[str, Any]] | None,
+    request: AssistantRequest,
+    execute_tool_fn: Callable[[str, dict[str, Any]], dict[str, Any]],
     settings: AssistantSettings,
     conversation_context: dict[str, Any] | None,
     model_turn_result: ModelTurnResult,
     max_steps: int,
-) -> AgentLoopResult | None:
+) -> AgentLoopResult:
     event_plan = model_turn_result.event_plan
-    if request is None or execute_tool_fn is None or event_plan is None:
-        return None
+    if event_plan is None:
+        raise AssertionError("event_plan is required for assistant tool_call event loop")
     provider = normalize_llm_provider(str(event_plan.provider or settings.llm.provider or "openai"))
     if model_turn_result.error is not None:
         trace = dict(model_turn_result.trace)
@@ -2049,6 +2181,7 @@ def _direct_model_turn_loop_result(
         task_contract=task_contract,
         initial_events=event_plan.events,
         execute_tool_fn=execute_tool_fn,
+        context_validation=event_plan.context_validation,
         provider=provider,
         create_continuation_response_fn=continuation_response_fn,
         continuation_base_payload=continuation_base_payload,
@@ -2102,34 +2235,17 @@ def _direct_model_turn_validation_error(
     event_plan: EventNativePlanningResult,
     recoverable_observation_enabled: bool,
 ) -> AgentToolError | None:
-    preview_events = tuple(
-        event for event in event_plan.events if isinstance(event, AssistantEvent) and event.event_type == "preview_request"
-    )
-    if preview_events and not _question_requests_preview_operation(text):
-        return AgentToolError(
-            code="PLAN_RISK_MISMATCH",
-            message="LLM 请求了写入预览，但用户原文不像写入预览请求。",
-            hint="preview-write 只能用于明确的记录、修改、升级或模型切换请求；普通查询必须规划为只读工具。",
-            details={
-                "preview_capabilities": [
-                    str(event.payload.get("intent_name") or event.payload.get("tool_name") or "")
-                    for event in preview_events
-                ]
-            },
-        )
-    if len(preview_events) == 1:
-        preview_precheck_error = _preview_request_precheck_error(
-            event=preview_events[0],
-            text=text,
-            event_plan=event_plan,
-        )
-        if preview_precheck_error is not None:
-            return preview_precheck_error
     model_events = tuple(event for event in event_plan.events if isinstance(event, ModelToolCallEvent))
     if not model_events:
         return None
     validation_error = _validate_model_tool_call_events(model_events, question=text)
     if validation_error is None:
+        return None
+    if validation_error.code == "PLAN_RISK_MISMATCH" and _defer_preview_boundary_mismatch_to_tool_guard(
+        validation_error,
+        text=text,
+        event_plan=event_plan,
+    ):
         return None
     if recoverable_observation_enabled and validation_error.code == "INPUT_ERROR":
         return None
@@ -2138,85 +2254,19 @@ def _direct_model_turn_validation_error(
     return validation_error
 
 
-def _preview_request_precheck_error(
+def _defer_preview_boundary_mismatch_to_tool_guard(
+    error: AgentToolError,
     *,
-    event: AssistantEvent,
     text: str,
     event_plan: EventNativePlanningResult,
-) -> AgentToolError | None:
-    try:
-        perception = preview_request_perception_from_payload(
-            event.payload,
-            question=text,
-            source="agent_loop_events",
-        )
-    except AgentToolError as err:
-        return err
-    preview_model_event = ModelToolCallEvent(
-        event_id=f"{event.event_id}_tool_call",
-        tool_call_id=event.event_id,
-        tool_name=perception.intent_name,
-        arguments=dict(perception.arguments),
-        purpose=str(event.payload.get("reason") or event.payload.get("purpose") or "model requested preview lifecycle"),
-        provider=event_plan.provider or None,
-        parent_event_id=event.event_id,
-    )
-    step = _agent_loop_step_from_model_event(
-        index=1,
-        event=preview_model_event,
-        question=text,
-        task_contract=event_plan.task_contract,
-        context_validation=event_plan.context_validation,
-    )
-    precheck_error = _planned_step_precheck_error((step,))
-    if precheck_error is None:
-        return None
-    return _preview_precheck_clarification_error(step.precheck) or precheck_error
-
-
-def _preview_request_loop_precheck_error(
-    *,
-    event: AssistantEvent,
-    text: str,
-    task_contract: dict[str, Any],
-    provider: str | None,
-) -> AgentToolError | None:
-    if not _question_requests_preview_operation(text):
-        return AgentToolError(
-            code="PLAN_RISK_MISMATCH",
-            message="LLM 请求了写入预览，但用户原文不像写入预览请求。",
-            hint="preview-write 只能用于明确的记录、修改、升级或模型切换请求；普通查询必须规划为只读工具。",
-            details={
-                "preview_capability": str(event.payload.get("intent_name") or event.payload.get("tool_name") or "")
-            },
-        )
-    try:
-        perception = preview_request_perception_from_payload(
-            event.payload,
-            question=text,
-            source="agent_loop_events",
-        )
-    except AgentToolError as err:
-        return err
-    preview_model_event = ModelToolCallEvent(
-        event_id=f"{event.event_id}_tool_call",
-        tool_call_id=event.event_id,
-        tool_name=perception.intent_name,
-        arguments=dict(perception.arguments),
-        purpose=str(event.payload.get("reason") or event.payload.get("purpose") or "model requested preview lifecycle"),
-        provider=provider or None,
-        parent_event_id=event.event_id,
-    )
-    step = _agent_loop_step_from_model_event(
-        index=1,
-        event=preview_model_event,
-        question=text,
-        task_contract=task_contract,
-    )
-    precheck_error = _planned_step_precheck_error((step,))
-    if precheck_error is None:
-        return None
-    return _preview_precheck_clarification_error(step.precheck) or precheck_error
+) -> bool:
+    details = error.details if isinstance(error.details, dict) else {}
+    if details.get("preview_capabilities"):
+        return True
+    if _question_requests_preview_operation(text):
+        return True
+    task_contract = event_plan.task_contract if isinstance(event_plan.task_contract, dict) else {}
+    return str(task_contract.get("requested_effect") or "").strip() in {"preview", "preview_write"}
 
 
 def _agent_loop_steps_from_model_events(
@@ -2228,34 +2278,10 @@ def _agent_loop_steps_from_model_events(
     context_validation: dict[str, Any] | None = None,
 ) -> tuple[AgentLoopStep, ...]:
     steps: list[AgentLoopStep] = []
-    preview_model_event_ids: set[str] = set()
     for event in events:
         model_event: ModelToolCallEvent | None = None
         if isinstance(event, ModelToolCallEvent):
             model_event = event
-            if _plan_step_kind(event.tool_name) == "preview" and event.event_id:
-                preview_model_event_ids.add(str(event.event_id))
-        elif isinstance(event, AssistantEvent) and event.event_type == "preview_request":
-            if event.parent_event_id and str(event.parent_event_id) in preview_model_event_ids:
-                continue
-            try:
-                perception = preview_request_perception_from_payload(
-                    event.payload,
-                    question=question,
-                    source="agent_loop_events",
-                )
-            except AgentToolError:
-                perception = None
-            if perception is not None:
-                model_event = ModelToolCallEvent(
-                    event_id=f"{event.event_id}_tool_call",
-                    tool_call_id=event.event_id,
-                    tool_name=perception.intent_name,
-                    arguments=dict(perception.arguments),
-                    purpose=str(event.payload.get("reason") or event.payload.get("purpose") or "model requested preview lifecycle"),
-                    provider=provider or None,
-                    parent_event_id=event.event_id,
-                )
         if model_event is None:
             continue
         steps.append(
@@ -2589,7 +2615,7 @@ def _read_tool_loop_guard(
             "schema_version": TOOL_CHECK_SCHEMA_VERSION,
             "allowed": False,
             "decision": "unknown_tool",
-            "reason": "model selected a tool that is not available in the assistant tool manifest",
+            "reason": "requested tool is not available in the assistant tool manifest",
             "tool_name": tool_name,
             "risk_class": "UNKNOWN",
             "duplicate_signature": signature,
@@ -3158,68 +3184,9 @@ def _event_native_planning_from_model_events(
             message=str(first.payload.get("question") or first.payload.get("message") or "需要补充查询范围。"),
             details={"clarification_request": first.public_payload()},
         )
-    if isinstance(first, AssistantEvent) and first.event_type == "preview_request":
-        return _event_native_planning_from_preview_request_event(
-            text=text,
-            event=first,
-            conversation_context=conversation_context,
-            provider=provider,
-        )
     if isinstance(first, ModelFinalAnswerEvent):
         return None, _invalid_model_event_error("模型直接回答但没有调用只读工具，未执行工具。")
     return None, _invalid_model_event_error("模型没有生成可执行工具调用，未执行工具。")
-
-
-def _event_native_planning_from_preview_request_event(
-    *,
-    text: str,
-    event: AssistantEvent,
-    conversation_context: dict[str, Any] | None,
-    provider: str,
-) -> tuple[EventNativePlanningResult | None, AgentToolError | None]:
-    try:
-        normalized_payload = normalized_preview_request_payload(event.payload, question=text)
-    except AgentToolError as err:
-        return None, err
-    perception = preview_request_perception_from_payload(normalized_payload, question=text)
-    if not _question_requests_preview_operation(text):
-        return None, AgentToolError(
-            code="PLAN_RISK_MISMATCH",
-            message="LLM 请求了写入预览，但用户原文不像写入预览请求。",
-            hint="preview-write 只能用于明确的记录、修改、升级或模型切换请求；普通查询必须规划为只读工具。",
-            details={"preview_capability": perception.intent_name},
-        )
-
-    today = _planner_today_from_context(conversation_context)
-    plan_payload = _preview_request_plan_like_payload(
-        goal=text,
-        intent_name=perception.intent_name,
-        arguments=dict(perception.arguments),
-        context_use=_default_context_use(),
-        task_contract=None,
-    )
-    host_contract = build_task_contract(
-        question=text,
-        plan=plan_payload,
-        request_context=None,
-        today=today,
-    )
-    task_contract = _planner_task_contract_from_host_contract(host_contract.public_payload())
-    task_contract["domain"] = "operation"
-    task_contract["task_mode"] = "preview_write"
-    task_contract["requested_effect"] = "preview_write"
-    context_use = _default_context_use()
-    normalized_event = replace(event, payload=normalized_payload)
-    event_plan = EventNativePlanningResult(
-        events=(normalized_event,),
-        task_contract=task_contract,
-        required_capabilities=("preview_operation",),
-        context_use=context_use,
-        context_validation=None,
-        provider=provider,
-        goal=str(text or "").strip(),
-    )
-    return event_plan, None
 
 
 def _event_native_planning_from_model_tool_calls(
@@ -3306,12 +3273,7 @@ def _allow_model_turn_guard_observation(
             return True
     if error.code != "PLAN_RISK_MISMATCH":
         return False
-    details = error.details if isinstance(error.details, dict) else {}
-    if details.get("required_tool") in {"symbol_config_read", "query_cash_headroom"}:
-        return True
-    if not _question_requests_preview_operation(question):
-        return False
-    return bool(events) and all(_plan_step_kind(event.tool_name) == "read" for event in events)
+    return True
 
 
 def _model_tool_calls_plan_like_payload(
@@ -3331,45 +3293,6 @@ def _model_tool_calls_plan_like_payload(
     }
     if isinstance(task_contract, dict) and task_contract:
         payload["task_contract"] = _safe_task_contract_payload(task_contract)
-    return payload
-
-
-def _preview_request_plan_like_payload(
-    *,
-    goal: str,
-    intent_name: str,
-    arguments: dict[str, Any],
-    context_use: dict[str, Any] | None,
-    task_contract: dict[str, Any] | None,
-) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "schema_version": "om-event-native-planning-v1",
-        "goal": str(goal or "").strip(),
-        "required_capabilities": ["preview_operation"],
-        "context_use": _safe_context_use_payload(context_use),
-        "steps": [
-            {
-                "id": "preview_request_1",
-                "tool_name": intent_name,
-                "arguments": _safe_tool_payload(dict(arguments)),
-                "purpose": "model requested preview lifecycle",
-            }
-        ],
-        "task_contract": {
-            "schema_version": TASK_CONTRACT_SCHEMA_VERSION,
-            "goal": str(goal or "").strip(),
-            "domain": "operation",
-            "task_mode": "preview_write",
-            "requested_effect": "preview_write",
-            "intent_families": ["operation_preview"],
-            "scope": {},
-            "required_answer": ["preview_summary"],
-            "required_evidence": ["permission_request", "preview_receipt"],
-            "answer_shape": ["preview_summary", "risk", "confirmation_handle"],
-        },
-    }
-    if isinstance(task_contract, dict) and task_contract:
-        payload["task_contract"].update(_safe_task_contract_payload(task_contract))
     return payload
 
 
@@ -3497,7 +3420,7 @@ def _validate_model_tool_call_events(
         if "analysis_query" in planned_tools and "symbol_config_read" not in planned_tools:
             return AgentToolError(
                 code="PLAN_RISK_MISMATCH",
-                message="当前问题是在查询监控标的配置字段，但 LLM 规划成了通用分析查询。",
+                message="当前问题需要查询监控标的配置字段，不能用通用分析查询替代。",
                 hint="请改用 symbol_config_read，并传入 symbol、strategy 和 field。",
                 details={
                     "planned_tools": planned_tools,
@@ -3510,7 +3433,7 @@ def _validate_model_tool_call_events(
         if "query_cash_headroom" not in planned_tools:
             return AgentToolError(
                 code="PLAN_RISK_MISMATCH",
-                message="当前问题是在判断 sell put 担保金是否超过现金加货基，但 LLM 没有规划现金余量查询。",
+                message="当前问题需要现金余量证据，不能用其他查询替代。",
                 hint="请改用 query_cash_headroom，并传入 account。",
                 details={
                     "planned_tools": planned_tools,
@@ -3530,7 +3453,7 @@ def _validate_model_tool_call_events(
         if question is not None and not _question_requests_preview_operation(question):
             return AgentToolError(
                 code="PLAN_RISK_MISMATCH",
-                message="LLM 规划了写入预览，但用户原文不像写入预览请求。",
+                message="这不是明确的写入预览请求，不能进入预览确认流程。",
                 hint="preview-write 只能用于明确的记录、修改、升级或模型切换请求；普通查询必须规划为只读工具。",
                 details={"preview_capabilities": sorted(event.tool_name for event in events if _plan_step_kind(event.tool_name) == "preview")},
             )
@@ -3544,7 +3467,7 @@ def _validate_model_tool_call_events(
     elif question is not None and _question_requests_preview_operation(question):
         return AgentToolError(
             code="PLAN_RISK_MISMATCH",
-            message="这句话像写入预览请求，但 LLM 规划成了只读查询。",
+            message="这像写入预览请求，需要进入对应的预览确认流程。",
             hint="请重新规划为对应的 preview capability；不要把记录交易、成交提醒或配置修改降级成持仓/收益查询。",
             details={"planned_tools": [event.tool_name for event in events]},
         )
@@ -4203,229 +4126,6 @@ def _planner_omitted_read_tools_for_question(question: str) -> frozenset[str]:
     return frozenset({"query_cash_headroom"})
 
 
-def _planning_outcome_from_model_turn_result(
-    result: ModelTurnResult,
-    *,
-    question: str,
-    conversation_context: dict[str, Any] | None,
-) -> tuple[AgentLoopPlanningOutcome, tuple[AgentLoopStep, ...]]:
-    if result.error is not None:
-        return AgentLoopPlanningOutcome(perception=None, trace=dict(result.trace), error=result.error), ()
-    if result.event_plan is not None:
-        return _planning_outcome_from_event_model_turn_result(result, question=question)
-    return AgentLoopPlanningOutcome(perception=None, trace=dict(result.trace)), ()
-
-
-def _planning_outcome_from_event_model_turn_result(
-    result: ModelTurnResult,
-    *,
-    question: str,
-) -> tuple[AgentLoopPlanningOutcome, tuple[AgentLoopStep, ...]]:
-    event_plan = result.event_plan
-    if event_plan is None:
-        return AgentLoopPlanningOutcome(perception=None, trace=dict(result.trace)), ()
-    model_tool_calls = tuple(event for event in event_plan.events if isinstance(event, ModelToolCallEvent))
-    if not model_tool_calls:
-        preview_events = tuple(
-            event for event in event_plan.events if isinstance(event, AssistantEvent) and event.event_type == "preview_request"
-        )
-        if len(preview_events) == 1 and len(event_plan.events) == 1:
-            return _planning_outcome_from_preview_request_event_result(
-                result,
-                event=preview_events[0],
-                question=question,
-            )
-        return AgentLoopPlanningOutcome(perception=None, trace={**dict(result.trace), "reason": "no_event_plan"}, error=_no_tool_plan_error()), ()
-    validation_error = _validate_model_tool_call_events(model_tool_calls, question=question)
-    if validation_error is not None and not _defer_preview_read_mismatch_to_tool_guard(
-        validation_error,
-        event_plan=event_plan,
-        model_tool_calls=model_tool_calls,
-    ):
-        return (
-            AgentLoopPlanningOutcome(
-                perception=None,
-                trace={**dict(result.trace), "reason": "invalid_event_plan", "error_code": validation_error.code},
-                error=validation_error,
-            ),
-            (),
-        )
-    planned_steps = tuple(
-        _agent_loop_step_from_model_event(
-            index=index,
-            event=event,
-            question=question,
-            task_contract=event_plan.task_contract,
-            context_validation=event_plan.context_validation,
-        )
-        for index, event in enumerate(model_tool_calls, start=1)
-    )
-    preview_events = tuple(event for event in model_tool_calls if _plan_step_kind(event.tool_name) == "preview")
-    read_events = tuple(event for event in model_tool_calls if _plan_step_kind(event.tool_name) == "read")
-    if len(preview_events) == 1 and len(model_tool_calls) == 1:
-        preview_event = preview_events[0]
-        precheck_error = _planned_step_precheck_error(planned_steps)
-        if precheck_error is not None:
-            clarification_error = _preview_precheck_clarification_error(planned_steps[0].precheck)
-            if clarification_error is not None:
-                return (
-                    AgentLoopPlanningOutcome(
-                        perception=None,
-                        trace={**dict(result.trace), "reason": "needs_clarification", "error_code": clarification_error.code},
-                        error=clarification_error,
-                    ),
-                    planned_steps,
-                )
-            return (
-                AgentLoopPlanningOutcome(
-                    perception=None,
-                    trace={**dict(result.trace), "reason": "pre_tool_check_failed", "error_code": precheck_error.code},
-                    error=precheck_error,
-                ),
-                planned_steps,
-            )
-        return (
-            AgentLoopPlanningOutcome(
-                perception=PerceptionResult(
-                    intent_name=preview_event.tool_name,
-                    arguments=dict(preview_event.arguments),
-                    source="agent_loop_events",
-                    confidence=1.0,
-                ),
-                trace=dict(result.trace),
-            ),
-            planned_steps,
-        )
-    if len(read_events) == len(model_tool_calls):
-        return (
-            AgentLoopPlanningOutcome(
-                perception=PerceptionResult(
-                    intent_name="tool_loop",
-                    arguments={
-                        "events": event_transcript_payload(event_plan.events),
-                        "task_contract": dict(event_plan.task_contract or {}),
-                        "provider": event_plan.provider,
-                    },
-                    source="agent_loop_events",
-                    confidence=1.0,
-                ),
-                trace=dict(result.trace),
-            ),
-            planned_steps,
-        )
-    return (
-        AgentLoopPlanningOutcome(
-            perception=None,
-            trace={**dict(result.trace), "reason": "invalid_event_plan", "error_code": "PLAN_UNSUPPORTED_COMPOSITION"},
-            error=AgentToolError(
-                code="PLAN_UNSUPPORTED_COMPOSITION",
-                message="一次聊天计划只能包含纯只读分析，或一个写入预览操作。",
-            ),
-        ),
-        planned_steps,
-    )
-
-
-def _defer_preview_read_mismatch_to_tool_guard(
-    error: AgentToolError,
-    *,
-    event_plan: EventNativePlanningResult,
-    model_tool_calls: tuple[ModelToolCallEvent, ...],
-) -> bool:
-    if error.code != "PLAN_RISK_MISMATCH":
-        return False
-    task_contract = event_plan.task_contract if isinstance(event_plan.task_contract, dict) else {}
-    requested_effect = str(task_contract.get("requested_effect") or "").strip()
-    if requested_effect not in {"preview", "preview_write"}:
-        return False
-    return bool(model_tool_calls) and all(_plan_step_kind(event.tool_name) == "read" for event in model_tool_calls)
-
-
-def _planning_outcome_from_preview_request_event_result(
-    result: ModelTurnResult,
-    *,
-    event: AssistantEvent,
-    question: str,
-) -> tuple[AgentLoopPlanningOutcome, tuple[AgentLoopStep, ...]]:
-    event_plan = result.event_plan
-    if event_plan is None:
-        return AgentLoopPlanningOutcome(perception=None, trace=dict(result.trace)), ()
-    if not _question_requests_preview_operation(question):
-        return (
-            AgentLoopPlanningOutcome(
-                perception=None,
-                trace={**dict(result.trace), "reason": "risk_mismatch", "error_code": "PLAN_RISK_MISMATCH"},
-                error=AgentToolError(
-                    code="PLAN_RISK_MISMATCH",
-                    message="LLM 请求了写入预览，但用户原文不像写入预览请求。",
-                    hint="preview-write 只能用于明确的记录、修改、升级或模型切换请求；普通查询必须规划为只读工具。",
-                    details={"preview_capabilities": [str(event.payload.get("intent_name") or event.payload.get("tool_name") or "")]},
-                ),
-            ),
-            (),
-        )
-    try:
-        perception = preview_request_perception_from_payload(
-            event.payload,
-            question=question,
-            source="agent_loop_events",
-        )
-    except AgentToolError as err:
-        return (
-            AgentLoopPlanningOutcome(
-                perception=None,
-                trace={**dict(result.trace), "reason": "invalid_preview_request", "error_code": err.code},
-                error=err,
-            ),
-            (),
-        )
-    preview_model_event = ModelToolCallEvent(
-        event_id=f"{event.event_id}_tool_call",
-        tool_call_id=event.event_id,
-        tool_name=perception.intent_name,
-        arguments=dict(perception.arguments),
-        purpose=str(event.payload.get("reason") or event.payload.get("purpose") or "model requested preview lifecycle"),
-        provider=event_plan.provider or None,
-        parent_event_id=event.event_id,
-    )
-    planned_steps = (
-            _agent_loop_step_from_model_event(
-                index=1,
-                event=preview_model_event,
-                question=question,
-                task_contract=event_plan.task_contract,
-                context_validation=event_plan.context_validation,
-            ),
-    )
-    precheck_error = _planned_step_precheck_error(planned_steps)
-    if precheck_error is not None:
-        clarification_error = _preview_precheck_clarification_error(planned_steps[0].precheck)
-        if clarification_error is not None:
-            return (
-                AgentLoopPlanningOutcome(
-                    perception=None,
-                    trace={**dict(result.trace), "reason": "needs_clarification", "error_code": clarification_error.code},
-                    error=clarification_error,
-                ),
-                planned_steps,
-            )
-        return (
-            AgentLoopPlanningOutcome(
-                perception=None,
-                trace={**dict(result.trace), "reason": "pre_tool_check_failed", "error_code": precheck_error.code},
-                error=precheck_error,
-            ),
-            planned_steps,
-        )
-    return (
-        AgentLoopPlanningOutcome(
-            perception=perception,
-            trace=dict(result.trace),
-        ),
-        planned_steps,
-    )
-
-
 def _preview_precheck_clarification_error(precheck: dict[str, Any] | None) -> AgentToolError | None:
     if not isinstance(precheck, dict) or precheck.get("status") != "fail":
         return None
@@ -4454,7 +4154,7 @@ def _planned_step_precheck_error(steps: tuple[AgentLoopStep, ...]) -> AgentToolE
             continue
         return AgentToolError(
             code="PRE_TOOL_CHECK_FAILED",
-            message="planned tool call failed pre-tool safety checks",
+            message="该请求未通过执行前安全检查。",
             details={"tool_name": step.tool_name, "precheck": precheck},
         )
     return None
@@ -4523,6 +4223,7 @@ def _safe_tool_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "broker",
         "config_key",
         "account",
+        "accounts",
         "status",
         "assigned_stock_status",
         "stock_lot_id",
@@ -4539,13 +4240,29 @@ def _safe_tool_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "view",
         "views",
         "symbol",
+        "set",
         "strategy",
         "field",
         "function",
+        "market",
+        "model_profile",
+        "target_version",
+        "operation_id",
+        "operation_resolution",
+        "updates",
         "option_type",
         "side",
+        "position_side",
+        "contracts_to_close",
         "strike",
         "expiration",
+        "expiration_ymd",
+        "stock_side",
+        "stock_qty",
+        "stock_price",
+        "event_time_ms",
+        "as_of_ms",
+        "record_id",
     }
     return {key: payload[key] for key in sorted(allowed) if key in payload}
 
@@ -5335,7 +5052,7 @@ Rules:
 - For income analysis/review/performance/source/composition questions, call monthly_income_report and set include_rows=true.
 - For a month without a year such as "6月", resolve it from the current date in the input context.
 - If the user asks a single-symbol candidate filtering/root-cause question, call candidate_filter_explain with the user-visible symbol.
-- If the request is write/admin/confirm/apply, do not call a read tool. If a preview capability is exposed in the current tool list, select that preview capability; otherwise ask for clarification or return a preview_request only when the provider supports it.
+- If the request is write/admin/confirm/apply, do not call a read tool. If a preview capability is exposed in the current tool list, select that preview capability through the tool/function calling interface; otherwise ask for clarification.
 - For manual trade preview capabilities, do not copy the original user message into arguments. Provide account only when explicit; the host injects raw_text.
 - For requests to run/trigger one US/HK monitor cycle such as "跑一次港股监控", use monitor_run_now with market=hk/us. This creates only a pending admin preview; never call runtime read tools as a substitute and never execute tick directly.
 - If no safe read tool applies, do not guess.

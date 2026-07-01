@@ -32,13 +32,13 @@ provider structured tool call
 
 ```text
 initial provider model turn
--> ModelToolCallEvent / preview_request / clarification / final answer
+-> ModelToolCallEvent / clarification / final answer
 -> EventNativePlanningResult
 -> run_read_only_agent_loop(...)
 -> run_assistant_tool_event_loop(...)
 -> guarded tool result / guard-denial observation
 -> optional continuation model turn
--> final answer / preview_request / clarification / bounded stop
+-> final answer / preview_gate / clarification / bounded stop
 ```
 
 为了保持外层 action/response API 稳定，`run_read_only_agent_loop(...)` 在
@@ -265,7 +265,6 @@ AgentLoop -> tool_execution -> agent_tool_registry -> deterministic tool
 | `evidence_updated` | host | EvidenceBundle 增量更新 |
 | `model_final_answer` | model | 模型基于证据给出最终回答 |
 | `clarification_request` | model or host | 需要用户补充高风险 scope |
-| `preview_request` | model | 模型识别到 preview-write intent，退出 read loop |
 | `loop_stopped` | host | 预算、重复、权限、完成或失败导致循环停止 |
 
 ### 5.2 ModelToolCall
@@ -315,7 +314,7 @@ Inbound message
      -> model_tool_call
      -> model_final_answer
      -> clarification_request
-     -> preview_request
+     -> preview capability model_tool_call
   -> ToolCallGuard
      -> schema check
      -> risk check
@@ -441,7 +440,8 @@ normalized_payload: ...
 规则：
 
 1. 自动循环只执行 `READ_AUTO`。
-2. 模型识别到 preview-write intent 时只能产生 `preview_request`，由现有
+2. 模型识别到 preview-write intent 时只能选择对应 preview capability 的
+   `model_tool_call`；host 在执行前通过 `preview_gate` 拦截，并由现有
    deterministic operation handler 创建 pending operation。
 3. confirm/cancel/apply 必须 deterministic-only，并绑定已有 pending operation。
 4. 工具 metadata 是风险事实来源，模型不能通过语言声明降低风险等级。
@@ -474,7 +474,8 @@ normalized_payload: ...
 停止条件：
 
 - 模型给出 `model_final_answer`。
-- 模型给出 `preview_request`。
+- 模型给出 preview capability `model_tool_call`，host `preview_gate` 创建
+  pending preview。
 - 模型或 host 给出高风险 `clarification_request`。
 - guard 拒绝不可恢复工具调用，或可恢复错误已回喂一次仍失败。
 - 预算耗尽。
@@ -589,7 +590,6 @@ host 从 provider 取：
 - `model_tool_call`；
 - `model_final_answer`；
 - `clarification_request`；
-- `preview_request`。
 
 ### 13.2 Provider Transcript Mapping
 
@@ -607,7 +607,7 @@ Provider transcript 和 OM 内部事件一一映射，不从 assistant
 | deterministic tool output | `tool_result` + `evidence_updated` | 经过 Tool Result Adapter 后再进入 transcript |
 | provider `tool_result` message | next model turn input | 包含 observation 或 error observation，绑定 tool call id |
 | model asks user a question | `clarification_request` | 使用现有 response schema |
-| model identifies preview-write intent | `preview_request` | 退出 read loop，交给 operation lifecycle |
+| model selects preview-write capability | `model_tool_call` + host `preview_gate` | 不执行写工具；交给 operation lifecycle 创建 pending preview |
 
 映射规则：
 
@@ -763,7 +763,7 @@ model_tool_call
 
 | Error | 处理 |
 |---|---|
-| `write_boundary` | 停止 read loop；如适用转 preview_request，否则说明不能自动执行 |
+| `write_boundary` | 停止 read loop；如适用由模型改选 preview capability，否则说明不能自动执行 |
 | `admin_boundary` | 停止；提示需要 operator 显式操作或 read-only preflight |
 | `missing_high_risk_scope` | 输出 clarification_request |
 | mutation permission denied | 停止；记录 guard decision，不继续越权 |
@@ -1181,8 +1181,10 @@ python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_sm
      Slice 10 已将该策略升级为模型驱动 manifest：read tools 和 preview
      capabilities 同时暴露，由模型选择，host 用 `preview_authority` 和
      pre-tool guard 做 effect/scope 安全控制。
-3. `preview_request.py`
-   - 保持从 `question` 注入 `raw_text` 的逻辑，并把它作为唯一权威来源。
+3. `agent_loop.py` preview gate
+   - preview capability 只能以 `model_tool_call` 进入 host。
+   - manual trade/lifecycle preview 的 `raw_text` 由 host 从 `question` 注入，
+     并把它作为唯一权威来源。
    - 如果模型传了 `raw_text`，host 可忽略或覆盖为 request text。
 4. `task_contract.py`
    - `_infer_requested_effect(...)` 覆盖 broker lifecycle notice：
@@ -1235,8 +1237,8 @@ python3 -m pytest tests/test_inbound_control.py tests/test_inbound_feishu_ws.py 
 
 触发背景：
 
-- Slice 9 解决了 provider malformed arguments 和 preview fallback，但
-  `preview_request_kind_from_text(...)` 仍在 host 侧提前把自然语言收窄成
+- Slice 9 解决了 provider malformed arguments 和 preview fallback；当时
+  `preview_request_kind_from_text(...)` 曾在 host 侧提前把自然语言收窄成
   某一个 preview capability。
 - 这提高了稳定性，却削弱了模型“理解意图、选择工具、观察结果、继续决策”的
   核心职责。
@@ -1310,9 +1312,9 @@ python3 -m pytest tests/test_inbound_control.py tests/test_inbound_feishu_ws.py 
 - `create_model_turn_events(...)` 是 model-turn 入口：它只返回 provider
   event transcript 派生的 `event_plan`、trace 或 error，不再暴露 JSON
   plan 字段。
-- `_planning_outcome_from_event_model_turn_result(...)` 仅保留给缺少
-  `request` / `execute_tool_fn` 的 adapter 调用；生产 runtime 具备这两个
-  参数时直接进入 bounded model/tool loop。
+- 缺少 `request` / `execute_tool_fn` 时不再使用 event-plan adapter；当前路径
+  直接拒绝为 `TOOL_LOOP_CONTEXT_MISSING`，生产 runtime 具备这两个参数时直接
+  进入 bounded model/tool loop。
 - 外层仍使用 `PerceptionResult(tool_loop)` 承接 precomputed event-loop
   result，action wrapper 不会重新执行 provider events；但 preview
   operation response 的 `data.perception` / `data.reasoning` / assistant

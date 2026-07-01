@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.347 - 2026-07-01
+
+### Changed
+- Moved Assistant write-preview handling onto model tool calls intercepted by the host preview gate.
+- Removed the legacy Assistant PlannerPlan execution fallback so model turns run through the event tool loop.
+
+### Fixed
+- Returned recoverable Assistant guard mismatches to the model as tool observations instead of exposing internal planner errors.
+- Preserved verified frame-delta context for short symbol-setting follow-ups such as "改为90" while still rejecting read-only prompts that select write-preview tools.
+
 ## 1.2.346 - 2026-06-30
 
 ### Added

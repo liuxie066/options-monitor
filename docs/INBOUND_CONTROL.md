@@ -76,7 +76,7 @@ The authority split is:
 - `Decide` owns sender checks, capability support, policy, risk class, and
   whether the next action is `allow`, `preview`, `ask`, `deny`, or `defer`.
 - `Act` may execute read/local tools or create a `PendingOperation`.
-- LLM-originated plans may never confirm, cancel, apply, send notifications,
+- LLM-originated tool calls may never confirm, cancel, apply, send notifications,
   write config, write ledger/trade state, operate services, or bypass pending
   operation gates.
 
@@ -186,13 +186,14 @@ assistant:
 
 When `assistant.agent_loop.enabled` is true, non-slash natural language enters
 AgentLoop. Slash commands remain command-first and never call LLM. AgentLoop may
-plan pure-read tools directly, or exactly one preview-write
-capability such as `manual_trade_open`, `manual_trade_close`,
+select pure-read tools directly through model tool calls, or exactly one
+preview-write capability call such as `manual_trade_open`, `manual_trade_close`,
 `manual_assignment`, `manual_expiry`, `manual_trade_update`, `symbol_edit`,
 `model_use`, or `upgrade_now`.
-Preview-write plans create pending previews through the existing operation
-handlers only; they cannot confirm, cancel, apply, notify externally, write the
-ledger, write config directly, operate services, or send proactive messages.
+Preview-write tool calls are intercepted by the host preview gate before tool
+execution and create pending previews through the existing operation handlers
+only; they cannot confirm, cancel, apply, notify externally, write the ledger,
+write config directly, operate services, or send proactive messages.
 PermissionResponseGate handles confirm/cancel phrases only after binding them
 to an existing pending operation. Slash commands remain command-first.
 Natural-language read and preview requests should be handled by AgentLoop or
@@ -334,9 +335,10 @@ Check the planner control plane before enabling it in Feishu:
 
 `assistant commands` renders the slash-command help surface. `assistant
 capabilities` renders the full assistant capability catalog used by the
-AgentLoop Planner manifest: read-only capabilities are executable, approved
-preview-write capabilities may create pending previews, and confirm/cancel/apply
-capabilities are intentionally absent from the Planner manifest. The default
+AgentLoop tool-call manifest: read-only capabilities are executable, approved
+preview-write capabilities are intercepted before execution to create pending
+previews, and confirm/cancel/apply capabilities are intentionally absent from
+the tool-call manifest. The default
 LLM check validates `config.assistant.json`, the effective env file, redacted
 API-key presence, the resolved provider endpoint URL, and the current capability
 routing surface. `--live` sends one read-only structured planning probe to the
@@ -623,15 +625,20 @@ command catalog before LLM and do not call AgentLoop.
 The current provider adapters use OpenAI Responses API for `openai` and Chat
 Completions JSON output for `deepseek`. They produce an `om-tool-plan-v2`
 capability plan for the AgentLoop. The plan describes the goal, required
-capabilities, and tool steps; AgentLoop decides the final answer path from the
-task, tool contracts, and gathered evidence. AgentLoop read steps still go
-through the read whitelist before execution. AgentLoop preview-write steps are
-converted back into the same operation preview path as explicit commands, so
-sender allowlist, operation gates, preview storage, audit, idempotency, and later
-explicit confirmation still apply. Low-confidence or incomplete requests must
-return clarification.
+capabilities, and tool calls; AgentLoop decides the final answer path from the
+task, tool contracts, and gathered evidence. AgentLoop read calls still go
+through the read whitelist before execution. AgentLoop preview-write tool calls
+are intercepted by the host preview gate and converted back into the same
+operation preview path as explicit commands, so sender allowlist, operation
+gates, preview storage, audit, idempotency, and later explicit confirmation
+still apply. Low-confidence or incomplete requests must return clarification.
 
-`agent_loop` is the current bounded Planner lane inside the Agent loop. It may plan read tools or one preview-write operation, but deterministic execution, factual rendering, preview storage, confirm/apply, and audit ownership remain outside model authority. If a write-like request such as a Futu fill alert is planned as a read query, OM rejects the plan instead of silently returning nearby holdings or income data.
+`agent_loop` is the current bounded Planner lane inside the Agent loop. It may
+select read tools or one preview-write tool call, but deterministic execution,
+factual rendering, preview storage, confirm/apply, and audit ownership remain
+outside model authority. If a write-like request such as a Futu fill alert is
+planned as a read query, OM rejects the call instead of silently returning nearby
+holdings or income data.
 
 ### Agent Analytical Answers
 
@@ -723,7 +730,8 @@ request -> preview -> command_id -> explicit confirmation -> re-validate -> exec
 ```
 
 The preview may be initiated by an explicit slash command or by an approved
-AgentLoop preview capability. Confirmation is not model-visible: it must come
+AgentLoop preview tool call intercepted by the host preview gate.
+Confirmation is not model-visible: it must come
 from ProtocolGate (`/confirm ...` / `/cancel ...`) or PermissionResponseGate
 (`确认记录`, `取消升级`, and similar bound replies), match an existing pending
 operation, and pass the configured sender, env, HMAC, TTL, and operation-family
@@ -733,10 +741,10 @@ Supported write commands:
 
 | Text | Preview intent | Confirm | Cancel |
 | --- | --- | --- | --- |
-| `/record-open ...` / `/record-close ...` or AgentLoop preview | `manual_trade_*` | `/confirm trade [operation_id]` or bound `确认记录` | `/cancel trade [operation_id]` or bound `取消记录` |
-| Futu assignment/expiry notice via AgentLoop preview | `manual_assignment` / `manual_expiry` | `/confirm trade [operation_id]` or bound `确认记录` | `/cancel trade [operation_id]` or bound `取消记录` |
-| `/symbol add|edit|remove ...` or AgentLoop preview | `symbol_*` | `/confirm symbol [operation_id]` or bound `确认监控` | `/cancel symbol [operation_id]` or bound `取消监控` |
-| `/upgrade [v<version>]` or AgentLoop preview | `upgrade_now` | `/confirm upgrade [operation_id]` or bound `确认升级` | `/cancel upgrade [operation_id]` or bound `取消升级` |
+| `/record-open ...` / `/record-close ...` or AgentLoop preview tool call | `manual_trade_*` | `/confirm trade [operation_id]` or bound `确认记录` | `/cancel trade [operation_id]` or bound `取消记录` |
+| Futu assignment/expiry notice via AgentLoop preview tool call | `manual_assignment` / `manual_expiry` | `/confirm trade [operation_id]` or bound `确认记录` | `/cancel trade [operation_id]` or bound `取消记录` |
+| `/symbol add|edit|remove ...` or AgentLoop preview tool call | `symbol_*` | `/confirm symbol [operation_id]` or bound `确认监控` | `/cancel symbol [operation_id]` or bound `取消监控` |
+| `/upgrade [v<version>]` or AgentLoop preview tool call | `upgrade_now` | `/confirm upgrade [operation_id]` or bound `确认升级` | `/cancel upgrade [operation_id]` or bound `取消升级` |
 | `/model use <name>` | `model_use` | `/confirm model [operation_id]` or bound `确认模型` | `/cancel model [operation_id]` or bound `取消模型` |
 
 `立即升级` delegates to the same service upgrade path as `./om update apply --auto --confirm`. The preview does not switch releases. Confirmation only records the confirmation and starts an independent `assistant upgrade-worker`; the worker runs the upgrade, writes the final applied/failed result, and sends the final Feishu receipt after service restarts.

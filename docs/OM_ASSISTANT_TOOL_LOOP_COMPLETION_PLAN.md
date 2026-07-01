@@ -19,7 +19,7 @@ manifest、注册、执行封装和权限硬闸，不是项目自己的 Agent。
 ```text
 user message
   -> assistant context / contract projection
-  -> model emits structured tool call / preview / clarification / final answer event
+  -> model emits structured tool call / clarification / final answer event
   -> host guard checks schema, scope, safety, budget, duplicate
   -> READ_AUTO tool executes through Tool Gateway
   -> tool result becomes event transcript evidence
@@ -383,8 +383,8 @@ V4 主路径的一等停止原因：
    precomputed result。
 3. `planner_repair` error branches 已改为 guard-denial / error observation，
    并由同一个 continuation 机制处理。
-4. preview event 已进入统一 loop terminal：模型选择 preview capability，
-   host 通过 preview normalizer 和 safety 生成 pending preview，然后停止。
+4. preview write 已进入统一 loop terminal：模型选择写工具，host 在执行前通过
+   preview gate 和既有 operation handler 生成 pending preview，然后停止。
 5. trace 和 diagnostics 已更新：主路径不出现 planner repair 成功状态；
    trace 记录 model turns、observations、selected capabilities、stop reason。
 6. 成功路径测试已迁移到 model-turn loop、event transcript、observation、
