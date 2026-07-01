@@ -118,8 +118,8 @@ This names the authority path:
   injection, and preview/confirm boundaries. Its conceptual decisions are
   `allow`, `preview`, `ask`, `deny`, or `defer`.
 - `Act` executes read/local tools or creates a `PendingOperation` for approved
-  preview writes. It does not let LLM-originated plans confirm, cancel, or apply
-  writes.
+  preview writes. It does not let LLM-originated tool calls confirm, cancel, or
+  apply writes.
 - `Observe` renders deterministic facts, records audit evidence, and builds the
   user-facing reply.
 
@@ -128,7 +128,7 @@ Current implementation names map to this loop rather than replacing it:
 | Agent concept | Current implementation handle |
 |---|---|
 | `AgentSession` | `AssistantRequest`, `AgentSessionSnapshot`, inbound audit row, durable `agent_sessions` trace table, conversation context, pending operation store |
-| `Understand` output | `PerceptionResult`, or an internal `tool_plan` produced by `agent_loop` |
+| `Understand` output | `PerceptionResult`, or an internal `tool_loop` event transcript produced by `agent_loop` |
 | `Decide` output | `ReasoningResolution`, model-event validation, tool/operation policy checks |
 | `Act` output | `ActionResult`, `execute_tool(...)`, or operation preview handlers |
 | `Observe` output | `ObservationResponse`, canonical renderer, audit payloads |
@@ -145,14 +145,15 @@ or parallel tool control plane.
 
 LLM authority is deliberately narrow:
 
-- LLM may classify intent, select read evidence paths, plan bounded read tools,
-  request clarification, and synthesize observations.
+- LLM may classify intent, select read evidence paths through bounded model tool
+  calls, request clarification, and synthesize observations.
 - In `agent_loop`, LLM may initiate exactly one approved preview-write
-  capability: `manual_trade_open`, `manual_trade_close`,
-  `manual_assignment`, `manual_expiry`, `manual_trade_update`,
-  `symbol_edit`, `model_use`, or `upgrade_now`.
-- LLM-originated preview-write plans only create `PendingOperation` records
-  through existing deterministic operation handlers.
+  capability through the model tool-call protocol: `manual_trade_open`,
+  `manual_trade_close`, `manual_assignment`, `manual_expiry`,
+  `manual_trade_update`, `symbol_edit`, `model_use`, or `upgrade_now`.
+- LLM-originated preview-write tool calls are intercepted by the host preview
+  gate and only create `PendingOperation` records through existing deterministic
+  operation handlers.
 - LLM must never confirm, cancel, apply, send notifications, write config, write
   ledger/trade state, operate services, or bypass pending-operation gates.
 - Explicit confirm/cancel/apply remains deterministic-only and must be bound to
@@ -187,7 +188,7 @@ plus safer automatic read iteration. It is not more write freedom.
 | Surface | Purpose | Default capability boundary | LLM role |
 |---|---|---|---|
 | `./om-agent` | Local Tool Gateway CLI for structured JSON access to deterministic OM tools | Pure reads plus selected local operator helpers; write modes require `OM_AGENT_ENABLE_WRITE_TOOLS=true` and payload confirmation where applicable | None inside tool execution; external agents may plan calls |
-| `./om assistant handle` | Inbound Assistant CLI namespace for local/remote messages through Feishu, WeChat, or future channels | Inbound catalog only; no arbitrary shell, no direct full `./om-agent` manifest exposure | May recognize allowed intents; read/local tools are directly executable, while approved preview-write capabilities may only create pending previews |
+| `./om assistant handle` | Inbound Assistant CLI namespace for local/remote messages through Feishu, WeChat, or future channels | Inbound catalog only; no arbitrary shell, no direct full `./om-agent` manifest exposure | May recognize allowed intents; read/local tools are directly executable, while approved preview-write tool calls are intercepted to create pending previews only |
 
 Related OM surfaces outside the Inbound Assistant core:
 

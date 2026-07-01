@@ -91,5 +91,5 @@ def test_context_eval_scenarios_mode_runs_real_followup_regression_fixture() -> 
     assert "assistant context eval: 18/18 passed" in text
     assert "mode=scenarios" in text
     assert "family=income_followup" in text
-    assert "terminal=preview_request tool=manual_assignment" in text
+    assert "terminal=preview_tool_call tool=manual_assignment" in text
     assert "validation=ask_clarification" in text

@@ -886,7 +886,7 @@ def _plan_terminal_kind(
     if bool(context_use.get("requires_clarification")) or str(context_use.get("mode") or "") == "ambiguous":
         return "clarification_request"
     if first_tool in _PREVIEW_TOOL_NAMES:
-        return "preview_request"
+        return "preview_tool_call"
     if steps:
         return "read_tool_call"
     required_answer = [str(item) for item in plan.get("required_answer") or ()]

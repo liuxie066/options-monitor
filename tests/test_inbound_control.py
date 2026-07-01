@@ -34,7 +34,7 @@ from src.application.assistant.runtime import handle_assistant_turn
 from src.application.assistant.session_store import collect_assistant_trace
 from src.application.assistant.settings import AssistantSettings, AssistantLlmSettings
 from src.application.assistant.task_contract import TASK_CONTRACT_SCHEMA_VERSION
-from src.application.assistant.model_events import AssistantEvent, ModelToolCallEvent
+from src.application.assistant.model_events import ModelToolCallEvent
 
 
 def _planner_trace(*, reason: str = "accepted") -> dict[str, Any]:
@@ -57,27 +57,14 @@ def _model_turn_result(tool_name: str, arguments: dict[str, Any] | None = None) 
     is_preview = tool_name in {spec.intent_name for spec in planner_preview_specs()}
     args = dict(arguments or {})
     preview_symbol = str(args.get("symbol") or "").strip().upper()
-    event = (
-        AssistantEvent(
-            event_id="preview_request_1",
-            event_type="preview_request",
-            payload={
-                "intent_name": tool_name,
-                "arguments": args,
-                "reason": f"Preview {tool_name} for the current request.",
-            },
-            parent_event_id="user_message_1",
-        )
-        if is_preview
-        else ModelToolCallEvent(
-            event_id="model_tool_call_1",
-            tool_call_id="call_1",
-            tool_name=tool_name,
-            arguments=args,
-            purpose=f"Use {tool_name} for the current request.",
-            provider="openai",
-            parent_event_id="user_message_1",
-        )
+    event = ModelToolCallEvent(
+        event_id="model_tool_call_1",
+        tool_call_id="call_1",
+        tool_name=tool_name,
+        arguments=args,
+        purpose=f"Use {tool_name} for the current request.",
+        provider="openai",
+        parent_event_id="user_message_1",
     )
     task_contract = {
         "schema_version": TASK_CONTRACT_SCHEMA_VERSION,
@@ -2564,6 +2551,7 @@ def test_inbound_llm_symbol_edit_creates_preview_only(monkeypatch: pytest.Monkey
             audit_db=str(audit_db),
         ),
         allowed_senders="feishu:ou_1",
+        execute_tool_fn=lambda _tool_name, _payload: pytest.fail("preview tool should be intercepted before execution"),
         settings=AssistantSettings(
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
@@ -2908,6 +2896,7 @@ markets:
             audit_db=str(audit_db),
         ),
         allowed_senders="feishu:ou_1",
+        execute_tool_fn=lambda _tool_name, _payload: pytest.fail("preview tool should be intercepted before execution"),
         settings=AssistantSettings(
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
