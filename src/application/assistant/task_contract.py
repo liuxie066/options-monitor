@@ -329,7 +329,27 @@ def _infer_domain(question_goal_text: str, full_text: str) -> str:
         return "config"
     if any(token in full_compact for token in ("策略", "建议", "太保守", "适合", "sellput", "coveredcall", "yield")):
         return "strategy"
-    if any(token in full_compact for token in ("持仓", "指派正股", "被指派", "assignedstock", "平仓", "浮盈亏")):
+    if any(
+        token in full_compact
+        for token in (
+            "持仓",
+            "指派正股",
+            "被指派",
+            "assignedstock",
+            "平仓",
+            "浮盈亏",
+            "成交",
+            "交易",
+            "账本",
+            "写入",
+            "未写入",
+            "未记录",
+            "deal_id",
+            "option_positions",
+            "trade_events",
+            "ledger",
+        )
+    ):
         return "position"
     if any(token in full_compact for token in ("收益", "收入", "现金流", "权利金", "已实现", "pnl", "income", "return", "cashflow")):
         return "income"

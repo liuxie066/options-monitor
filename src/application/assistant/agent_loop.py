@@ -1277,10 +1277,10 @@ def run_assistant_tool_event_loop(
                 task_contract=task_contract,
                 tool_results=tool_results,
             )
-            final_answer = first.answer_text if verification.passed or not verification.fallback_text else verification.fallback_text
+            final_answer = first.answer_text if verification.passed else (verification.fallback_text or None)
             return _assistant_tool_loop_outcome(
-                status="done",
-                stop_reason="model_final_answer",
+                status="done" if final_answer else "stopped",
+                stop_reason="model_final_answer" if final_answer else "answer_verification_failed",
                 question=question,
                 task_contract=task_contract,
                 transcript=transcript,
@@ -1595,6 +1595,8 @@ def _assistant_tool_loop_answer_route(
 ) -> str:
     if answer_verification is not None and not answer_verification.passed and answer_verification.fallback_text:
         return "canonical_renderer"
+    if answer_verification is not None and not answer_verification.passed:
+        return "answer_verification_failed"
     if final_answer_event is not None:
         return str(final_answer_event.answer_route or "llm_from_evidence")
     if status == "preview_requested":
@@ -1763,7 +1765,9 @@ def _build_tool_loop_response_from_outcome(
     task_contract: dict[str, Any],
 ) -> dict[str, Any]:
     response_text = _assistant_tool_loop_response_text(outcome)
-    ok = outcome.status in {"done", "stopped"} and any(result.event.ok for result in outcome.tool_results)
+    ok = outcome.status == "done" and (bool(outcome.final_answer) or any(result.event.ok for result in outcome.tool_results))
+    if outcome.status == "stopped" and outcome.stop_reason != "answer_verification_failed":
+        ok = any(result.event.ok for result in outcome.tool_results)
     final_response = {
         "status": "synthesized" if outcome.final_answer else "rendered",
         "reason": outcome.stop_reason or outcome.status,
@@ -1986,6 +1990,8 @@ def _assistant_tool_loop_task_contract(
 def _assistant_tool_loop_response_text(outcome: AssistantToolLoopOutcome) -> str:
     if outcome.final_answer:
         return outcome.final_answer
+    if outcome.stop_reason == "answer_verification_failed":
+        return "需要先读取相关 OM 证据后才能回答；本次没有执行工具。"
     fallback = canonical_fallback_from_tool_results(outcome.tool_results)
     if fallback:
         return fallback
@@ -3198,8 +3204,41 @@ def _event_native_planning_from_model_events(
             details={"clarification_request": first.public_payload()},
         )
     if isinstance(first, ModelFinalAnswerEvent):
-        return None, _invalid_model_event_error("模型直接回答但没有调用只读工具，未执行工具。")
+        return _event_native_planning_from_model_final_answer(
+            text=text,
+            event=first,
+            conversation_context=conversation_context,
+            provider=provider,
+        ), None
     return None, _invalid_model_event_error("模型没有生成可执行工具调用，未执行工具。")
+
+
+def _event_native_planning_from_model_final_answer(
+    *,
+    text: str,
+    event: ModelFinalAnswerEvent,
+    conversation_context: dict[str, Any] | None,
+    provider: str,
+) -> EventNativePlanningResult:
+    today = _planner_today_from_context(conversation_context)
+    plan_payload = {
+        "goal": text,
+        "steps": [],
+        "task_contract": {
+            "goal": text,
+            "requested_effect": "read",
+        },
+    }
+    host_contract = build_task_contract(question=text, plan=plan_payload, request_context=None, today=today)
+    task_contract = _planner_task_contract_from_host_contract(host_contract.public_payload())
+    return EventNativePlanningResult(
+        events=(event,),
+        task_contract=task_contract,
+        required_capabilities=(),
+        context_use=_default_context_use(),
+        provider=provider,
+        goal=str(text or "").strip(),
+    )
 
 
 def _event_native_planning_from_model_tool_calls(

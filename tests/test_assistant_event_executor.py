@@ -11,7 +11,12 @@ from src.application.assistant.agent_loop import (
     run_assistant_tool_event_loop,
 )
 from src.application.assistant.contracts import AssistantRequest
-from src.application.assistant.model_events import AssistantEvent, ModelToolCallEvent, model_tool_call_from_provider_block
+from src.application.assistant.model_events import (
+    AssistantEvent,
+    ModelFinalAnswerEvent,
+    ModelToolCallEvent,
+    model_tool_call_from_provider_block,
+)
 from src.application.assistant.settings import AssistantSettings
 
 
@@ -349,6 +354,65 @@ def test_run_assistant_tool_event_loop_continues_to_final_answer() -> None:
     assert trace["answer_route"] == "llm_from_tool_observation"
     assert trace["loop_stop_reason"] == "model_final_answer"
     assert trace["scope_source"] == "task_contract"
+
+
+def test_run_assistant_tool_event_loop_rejects_business_final_answer_without_tool_evidence() -> None:
+    event = ModelFinalAnswerEvent(
+        event_id="model_final_answer_1",
+        answer_text="这是因为成交记录存在歧义，所以未写入。",
+        answer_route="llm_direct",
+    )
+
+    outcome = run_assistant_tool_event_loop(
+        question="FUTU 成交为什么未写入？",
+        request=AssistantRequest(text="FUTU 成交为什么未写入？", sender_id="u1", config_key="us"),
+        task_contract={
+            "requested_effect": "read",
+            "domain": "position",
+            "task_mode": "diagnose",
+            "scope": {"requested_accounts": ["lx"], "requested_symbols": ["FUTU"]},
+            "required_evidence": ["observed_status", "diagnostic_evidence"],
+        },
+        initial_events=(event,),
+        execute_tool_fn=lambda _tool_name, _payload: build_response(tool_name="unused", ok=True, data={}),
+    )
+
+    assert outcome.status == "stopped"
+    assert outcome.stop_reason == "answer_verification_failed"
+    assert outcome.final_answer is None
+    assert _assistant_tool_loop_response_text(outcome) == "需要先读取相关 OM 证据后才能回答；本次没有执行工具。"
+
+    trace = outcome.public_payload()["trace"]
+    assert trace["answer_route"] == "answer_verification_failed"
+    assert trace["answer_verification"]["status"] == "failed"
+    assert trace["answer_verification"]["trace"]["violation_type"] == "missing_required_tool_evidence"
+
+
+def test_run_assistant_tool_event_loop_allows_general_final_answer_without_tool_evidence() -> None:
+    event = ModelFinalAnswerEvent(
+        event_id="model_final_answer_1",
+        answer_text="你好，我可以帮你查询 OM 状态或解释最近的记录。",
+        answer_route="llm_direct",
+    )
+
+    outcome = run_assistant_tool_event_loop(
+        question="你好",
+        request=AssistantRequest(text="你好", sender_id="u1", config_key="us"),
+        task_contract={
+            "requested_effect": "read",
+            "domain": "general",
+            "task_mode": "summarize",
+            "scope": {},
+            "required_evidence": [],
+        },
+        initial_events=(event,),
+        execute_tool_fn=lambda _tool_name, _payload: build_response(tool_name="unused", ok=True, data={}),
+    )
+
+    assert outcome.status == "done"
+    assert outcome.stop_reason == "model_final_answer"
+    assert outcome.final_answer == "你好，我可以帮你查询 OM 状态或解释最近的记录。"
+    assert outcome.public_payload()["trace"]["answer_verification"]["status"] == "passed"
 
 
 def test_run_assistant_tool_event_loop_skips_internal_catalog_fallback_on_budget_exhaustion() -> None:

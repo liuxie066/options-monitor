@@ -217,6 +217,12 @@ message
   -> final answer verification and assistant_trace
 ```
 
+`model_final_answer` is a first-class model event. It is not a planner error
+by itself. The host still verifies it against the `TaskContract` and observed
+tool evidence before it can become the user-facing answer; business-domain
+answers that require OM evidence must stop as `answer_verification_failed`
+when no tool result has been observed.
+
 The intelligence boundary is:
 
 - the model owns intent understanding, capability selection, result

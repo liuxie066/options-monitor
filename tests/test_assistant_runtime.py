@@ -39,7 +39,12 @@ from src.application.assistant.agent_loop import (
     create_model_turn_events,
     run_read_only_agent_loop,
 )
-from src.application.assistant.model_events import AssistantEvent, ModelToolCallEvent, provider_tool_schema_from_manifest
+from src.application.assistant.model_events import (
+    AssistantEvent,
+    ModelFinalAnswerEvent,
+    ModelToolCallEvent,
+    provider_tool_schema_from_manifest,
+)
 from src.application.assistant.action_policy import ACTION_POLICY_SCHEMA_VERSION, decide_tool_action_policy
 from src.application.assistant.action_safety import ACTION_SAFETY_SCHEMA_VERSION, assess_action_safety
 from src.application.assistant.capability_catalog import (
@@ -231,7 +236,7 @@ def _with_required_capabilities(result: ModelTurnResult, *required_capabilities:
 
 
 def _event_model_turn_result(
-    *events: ModelToolCallEvent | AssistantEvent,
+    *events: ModelToolCallEvent | ModelFinalAnswerEvent | AssistantEvent,
     goal: str,
     task_contract: dict[str, Any] | None = None,
     required_capabilities: tuple[str, ...] = (),
@@ -9822,6 +9827,43 @@ def test_create_model_turn_events_uses_provider_tool_call_not_output_text_json_p
     assert result.trace["event_model"]["events"][0]["tool_name"] == "monthly_income_report"
 
 
+def test_create_model_turn_events_accepts_provider_final_answer_event() -> None:
+    calls: list[dict[str, Any]] = []
+
+    def _create_tool_call_response(**kwargs: Any) -> dict[str, Any]:
+        calls.append(dict(kwargs))
+        return {
+            "output": [
+                {
+                    "type": "message",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "这是因为成交记录存在歧义，所以未写入。",
+                        }
+                    ],
+                }
+            ]
+        }
+
+    result = create_model_turn_events(
+        "FUTU 成交为什么未写入？",
+        AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        conversation_context={"temporal_context": {"current_date": "2026-07-02", "timezone": "Asia/Shanghai"}},
+        create_tool_call_response_fn=_create_tool_call_response,
+        environ={"OM_LLM_API_KEY": "sk-test"},
+    )
+
+    assert calls
+    assert result.error is None
+    assert result.event_plan is not None
+    assert result.trace["reason"] == "accepted"
+    assert result.trace["event_model"]["events"][0]["event_type"] == "model_final_answer"
+    assert result.trace["event_plan"]["task_contract"]["domain"] == "position"
+
+
 def test_create_model_turn_events_context_composes_symbol_config_edit_followup() -> None:
     projection = build_context_projection(
         current_user_message="改为90",
@@ -11053,6 +11095,54 @@ def test_read_only_agent_loop_uses_observation_continuation_for_unsupported_argu
     event_loop = result.tool_loop_result["data"]["event_loop"]
     assert event_loop["events"][1]["error_code"] == "PRE_TOOL_CHECK_FAILED"
     assert event_loop["events"][1]["decision"] == "pre_tool_check_failed"
+
+
+def test_read_only_agent_loop_stops_business_final_answer_without_tool_evidence() -> None:
+    text = "FUTU 成交为什么未写入？"
+    tool_calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _plan(
+        incoming: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> ModelTurnResult:
+        assert incoming == text
+        return _event_model_turn_result(
+            ModelFinalAnswerEvent(
+                event_id="model_final_answer_1",
+                answer_text="这是因为成交记录存在歧义，所以未写入。",
+                answer_route="llm_direct",
+                parent_event_id="user_message_1",
+            ),
+            goal=text,
+            task_contract=_test_task_contract(
+                goal=text,
+                domain="position",
+                task_mode="diagnose",
+                scope={"requested_symbols": ["FUTU"]},
+                required_evidence=("observed_status", "diagnostic_evidence"),
+            ),
+        )
+
+    result = run_read_only_agent_loop(
+        text,
+        settings=AssistantSettings(),
+        conversation_context=None,
+        model_turn_fn=_plan,
+        request=AssistantRequest(text=text, sender_id="local", config_key="us"),
+        execute_tool_fn=lambda tool_name, payload: tool_calls.append((tool_name, payload))
+        or build_response(tool_name=tool_name, ok=True, data={}),
+    )
+
+    assert tool_calls == []
+    assert result.tool_loop_result is not None
+    assert result.tool_loop_result["ok"] is False
+    assert result.tool_loop_result["error"]["code"] == "ANSWER_VERIFICATION_FAILED"
+    assert result.tool_loop_result["data"]["response_text"] == "需要先读取相关 OM 证据后才能回答；本次没有执行工具。"
+    assert result.trace["agent_loop"]["loop_stop_reason"] == "answer_verification_failed"
+    event_loop = result.tool_loop_result["data"]["event_loop"]
+    assert event_loop["trace"]["answer_route"] == "answer_verification_failed"
+    assert event_loop["trace"]["answer_verification"]["trace"]["violation_type"] == "missing_required_tool_evidence"
 
 
 def test_read_only_agent_loop_executes_same_turn_multiple_tool_calls_before_continuation(

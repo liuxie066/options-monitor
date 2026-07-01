@@ -137,6 +137,18 @@ def verify_model_final_answer(
         task_contract=task_contract,
         coverage=coverage,
     )
+    if _missing_required_tool_evidence(task_contract=task_contract, observations=model_evidence.observations):
+        guard = {
+            **guard,
+            "violations": [
+                *[dict(item) for item in guard.get("violations") or [] if isinstance(item, dict)],
+                {
+                    "type": "missing_required_tool_evidence",
+                    "claim": "model_final_answer_without_tool_result",
+                    "evidence": "TaskContract requires OM evidence, but no tool_result was observed",
+                },
+            ],
+        }
     status = "failed" if guard.get("violations") else "passed"
     fallback_text = canonical_fallback_from_tool_results(tool_results)
     trace = answer_guard_trace_payload(status, guard)
@@ -149,6 +161,26 @@ def verify_model_final_answer(
         trace=trace,
         fallback_text=fallback_text,
     )
+
+
+def _missing_required_tool_evidence(
+    *,
+    task_contract: dict[str, Any] | None,
+    observations: tuple[dict[str, Any], ...],
+) -> bool:
+    if observations:
+        return False
+    contract = task_contract if isinstance(task_contract, dict) else {}
+    if not contract:
+        return False
+    requested_effect = str(contract.get("requested_effect") or "read").strip()
+    if requested_effect != "read":
+        return True
+    domain = str(contract.get("domain") or "general").strip()
+    if domain != "general":
+        return True
+    required = {str(item).strip() for item in contract.get("required_evidence") or [] if str(item).strip()}
+    return bool(required - {"summary", "source_policy"})
 
 
 def canonical_fallback_from_tool_results(
