@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 1.2.355 - 2026-07-03
+
+### Changed
+- Narrowed Assistant model planning manifests to the preview capabilities authorized by the current user message.
+- Rendered Assistant analysis-query results as concise summaries, including assigned-stock lifecycle PnL and option-premium attribution.
+
+### Fixed
+- Treated self-contained symbol-setting edits as current-message scope even when prior context contains conflicting symbols.
+- Repaired single-authority preview requests when the model returns a read tool or final answer instead of the controlled preview tool.
+- Retried only retryable incomplete/truncated Assistant final answers before storing the audited response.
+
 ## 1.2.354 - 2026-07-03
 
 ### Fixed
