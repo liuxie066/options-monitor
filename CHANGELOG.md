@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.352 - 2026-07-02
+
+### Fixed
+- Converted Assistant preview-gate upgrade requests into pending upgrade permission requests based on the verified tool-effect boundary, even when the upstream task contract is still read-only.
+
 ## 1.2.351 - 2026-07-02
 
 ### Changed

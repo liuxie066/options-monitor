@@ -180,9 +180,6 @@ def _tool_loop_preview_action_result(
     data = tool_result.get("data") if isinstance(tool_result, dict) else {}
     if not isinstance(data, dict):
         return None
-    task_contract = data.get("task_contract") if isinstance(data.get("task_contract"), dict) else {}
-    if str(task_contract.get("requested_effect") or "").strip() != "preview_write":
-        return None
     event_loop = data.get("event_loop") if isinstance(data.get("event_loop"), dict) else {}
     if str(event_loop.get("status") or "").strip() != "preview_requested":
         return None

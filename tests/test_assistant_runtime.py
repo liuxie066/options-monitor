@@ -3555,6 +3555,98 @@ def test_assistant_runtime_immediate_update_reaches_preview_gate_even_when_contr
     assert step["action_policy"]["apply_allowed"] is False
 
 
+def test_assistant_runtime_immediate_update_creates_upgrade_permission_when_contract_is_read(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("OM_INBOUND_OPERATIONS_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_UPGRADE_WRITE_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_ADMIN_OPEN_IDS", "local:local")
+    monkeypatch.setenv("OM_INBOUND_OPERATION_HMAC_KEY", "test-operation-hmac-key")
+
+    text = "立即更新"
+    preview_calls: list[dict[str, Any]] = []
+
+    def _preview_upgrade(args: dict[str, Any]) -> dict[str, Any]:
+        preview_calls.append(dict(args))
+        assert args["target_version"] == "1.2.352"
+        return {
+            "schema_version": 1,
+            "operation": "upgrade",
+            "ok": True,
+            "status": "planned",
+            "current_version": "1.2.351",
+            "target_version": "1.2.352",
+            "release_tag": "v1.2.352",
+            "repo_root": "/tmp/options-monitor/current",
+            "runtime_root": "/tmp/options-monitor/runtime",
+            "changed": False,
+            "planned_operations": ["materialize v1.2.352", "switch current symlink"],
+            "warnings": [],
+        }
+
+    monkeypatch.setattr("src.application.assistant.upgrade_operations._preview_upgrade", _preview_upgrade)
+
+    def _plan(
+        incoming: str,
+        _settings: AssistantSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> ModelTurnResult:
+        assert incoming == text
+        assert conversation_context is not None
+        return _model_turn_result(
+            "upgrade_now",
+            {"target_version": "1.2.352"},
+            goal=text,
+            purpose="Create a pending upgrade preview.",
+            task_contract=_test_task_contract(
+                goal=text,
+                domain="general",
+                task_mode="summarize",
+                requested_effect="read",
+                intent_families=("general_analysis",),
+            ),
+        )
+
+    out = handle_assistant_response(
+        AssistantRequest(
+            text=text,
+            sender_id="local",
+            channel="local",
+            message_id="msg_immediate_update_contract_read_upgrade_preview",
+            conversation_id="local:local",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=lambda _tool_name, _payload: pytest.fail("upgrade preview must be handled by the preview gate"),
+        allowed_senders="local:local",
+        settings=AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        model_turn_fn=_plan,
+        now_fn=lambda: date(2026, 7, 2),
+    )
+
+    assert preview_calls
+    assert out["ok"] is True, out
+    assert out["tool_name"] == "inbound.upgrade"
+    assert out["data"]["operation_type"] == "upgrade_now"
+    assert out["data"]["perception"]["source"] == "agent_loop_events"
+    assert out["data"]["perception"]["intent_name"] == "upgrade_now"
+    assert out["data"]["payload"]["arguments"]["target_version"] == "1.2.352"
+    assert "升级预览：立即升级" in out["data"]["response_text"]
+    assert "未执行升级" in out["data"]["response_text"]
+    permission_request = out["data"]["permission_request"]
+    assert permission_request["operation_type"] == "upgrade_now"
+    assert permission_request["risk_class"] == "preview_admin"
+    assert permission_request["apply_allowed"] is False
+    assert permission_request["confirm_hint"].startswith("/confirm upgrade ")
+    agent_loop = out["meta"]["assistant"]["llm"]["agent_loop"]
+    assert agent_loop["loop_stop_reason"] == "preview_gate"
+    assert agent_loop["steps"][0]["tool_name"] == "upgrade_now"
+    assert agent_loop["steps"][0]["action_safety"]["requested_effect"] == "preview"
+
+
 def test_assistant_runtime_update_status_question_cannot_call_upgrade_preview(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
 
