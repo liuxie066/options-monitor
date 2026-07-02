@@ -356,6 +356,166 @@ def test_run_assistant_tool_event_loop_continues_to_final_answer() -> None:
     assert trace["scope_source"] == "task_contract"
 
 
+def test_run_assistant_tool_event_loop_retries_empty_continuation_with_final_answer_only() -> None:
+    continuation_payloads: list[dict[str, Any]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "source_label": "OM read-only analysis workspace",
+                "query": {"sql": payload["sql"], "limit": payload.get("limit")},
+                "columns": ["month", "account", "net_income_cny"],
+                "rows": [{"month": "2026-06", "account": "lx", "net_income_cny": 123.45}],
+                "row_count": 1,
+                "truncated": False,
+                "views_used": ["account_monthly_performance"],
+                "fallback_text": (
+                    "分析查询结果：1 行\n"
+                    "| month | account | net_income_cny |\n"
+                    "| --- | --- | --- |\n"
+                    "| 2026-06 | lx | 123.45 |\n"
+                    "数据来源：OM read-only analysis workspace"
+                ),
+            },
+        )
+
+    def _continue(payload: dict[str, Any]) -> dict[str, Any]:
+        continuation_payloads.append(payload)
+        if len(continuation_payloads) == 1:
+            return {"output": []}
+        assert "tools" not in payload
+        assert "tool_choice" not in payload
+        assert "Do not call any more tools" in payload["instructions"]
+        return {
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "lx 2026-06 净收益为 123.45。"}],
+                }
+            ]
+        }
+
+    event = model_tool_call_from_provider_block(
+        {
+            "type": "function_call",
+            "call_id": "call_analysis_1",
+            "name": "analysis_query",
+            "arguments": (
+                '{"sql":"select month, account, net_income_cny from account_monthly_performance",'
+                '"limit":20}'
+            ),
+        },
+        provider="openai",
+        event_id="model_tool_call_1",
+    )
+
+    outcome = run_assistant_tool_event_loop(
+        question="查询 lx 六月收益",
+        request=AssistantRequest(text="查询 lx 六月收益", sender_id="u1", config_key="us"),
+        task_contract={"requested_effect": "read", "scope": {"requested_accounts": ["lx"]}},
+        initial_events=(event,),
+        execute_tool_fn=_execute,
+        provider="openai",
+        create_continuation_response_fn=_continue,
+    )
+
+    assert len(continuation_payloads) == 2
+    assert outcome.status == "done"
+    assert outcome.stop_reason == "model_final_answer"
+    assert outcome.final_answer == "lx 2026-06 净收益为 123.45。"
+    trace = outcome.public_payload()["trace"]
+    assert trace["continuation_count"] == 2
+    assert trace["loop_stop_reason"] == "model_final_answer"
+
+
+def test_run_assistant_tool_event_loop_budget_exhaustion_retries_final_answer_when_evidence_available() -> None:
+    continuation_payloads: list[dict[str, Any]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "source_label": "OM read-only analysis workspace",
+                "query": {"sql": payload["sql"], "limit": payload.get("limit")},
+                "columns": ["month", "account", "net_income_cny"],
+                "rows": [{"month": "2026-06", "account": "lx", "net_income_cny": 123.45}],
+                "row_count": 1,
+                "truncated": False,
+                "views_used": ["account_monthly_performance"],
+                "fallback_text": (
+                    "分析查询结果：1 行\n"
+                    "| month | account | net_income_cny |\n"
+                    "| --- | --- | --- |\n"
+                    "| 2026-06 | lx | 123.45 |\n"
+                    "数据来源：OM read-only analysis workspace"
+                ),
+            },
+        )
+
+    def _continue(payload: dict[str, Any]) -> dict[str, Any]:
+        continuation_payloads.append(payload)
+        if len(continuation_payloads) == 1:
+            return {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_analysis_extra_1",
+                        "name": "analysis_query",
+                        "arguments": (
+                            '{"sql":"select month, account, symbol from symbol_income_attribution",'
+                            '"limit":20}'
+                        ),
+                    }
+                ]
+            }
+        assert "tools" not in payload
+        assert "Do not call any more tools" in payload["instructions"]
+        return {
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "已基于已有查询结果总结：lx 6月净收益 123.45。"}],
+                }
+            ]
+        }
+
+    event = model_tool_call_from_provider_block(
+        {
+            "type": "function_call",
+            "call_id": "call_analysis_1",
+            "name": "analysis_query",
+            "arguments": (
+                '{"sql":"select month, account, net_income_cny from account_monthly_performance",'
+                '"limit":20}'
+            ),
+        },
+        provider="openai",
+        event_id="model_tool_call_1",
+    )
+
+    outcome = run_assistant_tool_event_loop(
+        question="查询 lx 六月收益",
+        request=AssistantRequest(text="查询 lx 六月收益", sender_id="u1", config_key="us"),
+        task_contract={"requested_effect": "read", "scope": {"requested_accounts": ["lx"]}},
+        initial_events=(event,),
+        execute_tool_fn=_execute,
+        provider="openai",
+        create_continuation_response_fn=_continue,
+        max_tool_calls=1,
+    )
+
+    assert len(continuation_payloads) == 2
+    assert outcome.status == "done"
+    assert outcome.stop_reason == "model_final_answer"
+    assert outcome.final_answer == "已基于已有查询结果总结：lx 6月净收益 123.45。"
+    trace = outcome.public_payload()["trace"]
+    assert trace["continuation_count"] == 2
+    assert trace["loop_stop_reason"] == "model_final_answer"
+
+
 def test_run_assistant_tool_event_loop_rejects_business_final_answer_without_tool_evidence() -> None:
     event = ModelFinalAnswerEvent(
         event_id="model_final_answer_1",

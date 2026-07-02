@@ -5993,6 +5993,132 @@ def test_assistant_runtime_agent_loop_analyzes_assigned_stock_when_requested(tmp
     assert tool_plan_data["final_response"]["reason"] == "awaiting_model_continuation"
 
 
+def test_assistant_runtime_retries_empty_continuation_for_assigned_stock_summary(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("OM_LLM_API_KEY", "sk-test")
+    provider_calls: list[dict[str, Any]] = []
+    continuation_calls: list[dict[str, Any]] = []
+    tool_calls: list[tuple[str, dict[str, Any]]] = []
+    final_text = (
+        "lx 当前有 1 条指派正股：NVDA 剩余 100 股，成本 USD 100/股，spot USD 98，quote=fresh；"
+        "正股浮盈亏 USD -200，生命周期PnL USD 50。"
+        "口径：正股成本按真实交割价，生命周期PnL 才含权利金归因。"
+        "数据源：OM 本地 SQLite assigned_stock_events + trade_events。"
+    )
+
+    def _create_tool_call_response(**kwargs: Any) -> dict[str, Any]:
+        provider_calls.append(dict(kwargs))
+        return {
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_assigned_stock_1",
+                    "name": "option_positions_read",
+                    "arguments": (
+                        '{"action":"assigned-stock","account":"lx","status":"open",'
+                        '"refresh_quotes":true}'
+                    ),
+                }
+            ]
+        }
+
+    def _provider_response_fn(provider: str):
+        assert provider == "openai"
+        return _create_tool_call_response
+
+    def _create_continuation_response(**kwargs: Any) -> dict[str, Any]:
+        continuation_calls.append(dict(kwargs))
+        payload = kwargs["payload"]
+        if len(continuation_calls) == 1:
+            return {"output": []}
+        assert "tools" not in payload
+        assert "tool_choice" not in payload
+        assert "Do not call any more tools" in payload["instructions"]
+        return {
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": final_text}],
+                }
+            ]
+        }
+
+    def _provider_payload_response_fn(provider: str):
+        assert provider == "openai"
+        return _create_continuation_response
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        tool_calls.append((tool_name, payload))
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "action": "assigned-stock",
+                "filters": {
+                    "account": "lx",
+                    "status": "open",
+                    "refresh_quotes": True,
+                },
+                "rows": [
+                    {
+                        "stock_lot_id": "assigned-stock-assign_1",
+                        "account": "lx",
+                        "symbol": "NVDA",
+                        "currency": "USD",
+                        "status": "open",
+                        "shares_remaining": 100,
+                        "stock_cost_per_share": 100,
+                        "remaining_stock_cost_basis": 10000,
+                        "spot": 98,
+                        "quote_status": "fresh",
+                        "assigned_stock_unrealized_pnl": -200,
+                        "assigned_stock_realized_pnl": 0,
+                        "assignment_lifecycle_pnl": 50,
+                    }
+                ],
+                "row_count": 1,
+                "quote_refresh": {"status": "ok", "quote_source": "opend_realtime"},
+            },
+        )
+
+    monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_response_fn", _provider_response_fn)
+    monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_payload_response_fn", _provider_payload_response_fn)
+
+    out = handle_assistant_response(
+        AssistantRequest(
+            text="被指派股票的收益",
+            sender_id="local",
+            message_id="msg_agent_loop_assigned_stock_empty_continuation",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        now_fn=lambda: date(2026, 7, 2),
+    )
+
+    assert out["ok"] is True
+    assert provider_calls
+    assert len(continuation_calls) == 2
+    assert tool_calls == [
+        (
+            "option_positions_read",
+            {"action": "assigned-stock", "account": "lx", "status": "open", "refresh_quotes": True, "config_key": "us"},
+        )
+    ]
+    assert out["data"]["response_text"] == final_text
+    assert not out["data"]["response_text"].startswith("lx · open · 指派正股")
+    tool_result = out["data"]["tool_result"]
+    assert tool_result["data"]["final_response"]["status"] == "synthesized"
+    event_loop = tool_result["data"]["event_loop"]
+    assert event_loop["trace"]["continuation_count"] == 2
+    assert event_loop["trace"]["loop_stop_reason"] == "model_final_answer"
+
+
 def test_assistant_runtime_agent_loop_assigned_stock_falls_back_from_invented_amount(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
 
