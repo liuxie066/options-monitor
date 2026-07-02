@@ -3947,7 +3947,7 @@ def _current_message_slots_for_model_plan(
                 _add_context_slot(slots, slot_key, item)
     for key, values in plan_slots.items():
         for value in values:
-            if _context_slot_value_in_question(question, value):
+            if _context_slot_value_in_question(question, value, slot_key=key):
                 _add_context_slot(slots, key, value)
     return slots
 
@@ -4090,14 +4090,57 @@ def _normalized_context_slot_value(value: Any) -> str:
     return str(value).strip().lower()
 
 
-def _context_slot_value_in_question(question: str, value: Any) -> bool:
+def _context_slot_value_in_question(question: str, value: Any, *, slot_key: str | None = None) -> bool:
     text = str(question or "")
     value_text = str(value or "").strip()
     if not value_text:
         return False
     if re.fullmatch(r"[A-Za-z0-9_.-]+", value_text):
-        return re.search(rf"(?<![A-Za-z0-9_.-]){re.escape(value_text)}(?![A-Za-z0-9_.-])", text, re.IGNORECASE) is not None
+        return (
+            re.search(rf"(?<![A-Za-z0-9_.-]){re.escape(value_text)}(?![A-Za-z0-9_.-])", text, re.IGNORECASE)
+            is not None
+            or (
+                slot_key in {"strategy", "setting_path", "setting_field"}
+                and _setting_slot_value_in_question(text, value_text)
+            )
+        )
     return value_text in text
+
+
+_SETTING_SLOT_ALIASES = {
+    "sellput": ("sellput", "卖put"),
+    "sellcall": ("sellcall", "卖call"),
+    "coveredcall": ("coveredcall", "备兑"),
+    "maxstrike": ("maxstrike", "最大行权价", "最高行权价", "行权价上限"),
+    "minstrike": ("minstrike", "最小行权价", "最低行权价", "行权价下限"),
+    "enabled": ("enabled", "启用", "开启", "打开", "禁用", "关闭"),
+}
+_SETTING_PATH_TOKENS = {
+    "sellputmaxstrike": ("sellput", "maxstrike"),
+    "sellputenabled": ("sellput", "enabled"),
+    "sellcallminstrike": ("sellcall", "minstrike"),
+    "sellcallenabled": ("sellcall", "enabled"),
+    "coveredcallminstrike": ("coveredcall", "minstrike"),
+    "coveredcallenabled": ("coveredcall", "enabled"),
+    "sellput": ("sellput",),
+    "sellcall": ("sellcall",),
+    "coveredcall": ("coveredcall",),
+    "maxstrike": ("maxstrike",),
+    "minstrike": ("minstrike",),
+    "enabled": ("enabled",),
+}
+
+
+def _setting_slot_value_in_question(question: str, value_text: str) -> bool:
+    tokens = _SETTING_PATH_TOKENS.get(_compact_setting_text(value_text))
+    if not tokens:
+        return False
+    compact_question = _compact_setting_text(question)
+    return all(any(alias in compact_question for alias in _SETTING_SLOT_ALIASES[token]) for token in tokens)
+
+
+def _compact_setting_text(value: Any) -> str:
+    return re.sub(r"[\s_.-]+", "", str(value or "").strip().lower())
 
 
 def _planner_task_contract_from_host_contract(contract: dict[str, Any]) -> dict[str, Any]:

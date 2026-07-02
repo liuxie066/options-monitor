@@ -1060,6 +1060,31 @@ def test_task_contract_treats_explicit_monitor_run_as_preview_admin() -> None:
     assert preview_request_kind_from_text(read_text) is None
 
 
+def test_task_contract_routes_natural_symbol_setting_edit_as_preview() -> None:
+    text = "把3690 sell put 的max strike 改为65"
+    contract = build_task_contract(
+        question=text,
+        plan={},
+        request_context={"config_key": "hk"},
+        today=date(2026, 7, 2),
+    )
+
+    assert contract.requested_effect == "preview_write"
+    assert preview_effect_allowed_from_text(text) is True
+    assert preview_request_kind_from_text(text) == "symbol_edit"
+
+    read_text = "3690 sell put 的max strike 是多少"
+    read_contract = build_task_contract(
+        question=read_text,
+        plan={},
+        request_context={"config_key": "hk"},
+        today=date(2026, 7, 2),
+    )
+    assert read_contract.requested_effect == "read"
+    assert preview_effect_allowed_from_text(read_text) is False
+    assert preview_request_kind_from_text(read_text) is None
+
+
 def test_task_contract_treats_ambiguous_update_as_planner_upgrade_authority() -> None:
     authority = preview_authority_from_text("立即更新")
 
@@ -10675,6 +10700,94 @@ def test_create_model_turn_events_tool_call_path_current_required_scope_override
     steps = _event_plan_steps(result)
     assert steps[0]["tool_name"] == "candidate_filter_explain"
     assert steps[0]["arguments"] == {"symbol": "0700.HK", "function": "sell_put"}
+
+
+def test_create_model_turn_events_self_contained_symbol_edit_ignores_ambiguous_history() -> None:
+    def _create_tool_call_response(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_symbol_edit_1",
+                    "name": "symbol_edit",
+                    "arguments": '{"symbol":"3690.HK","set":{"sell_put.max_strike":65}}',
+                }
+            ]
+        }
+
+    result = create_model_turn_events(
+        "把3690 sell put 的max strike 改为65",
+        AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        conversation_context={
+            "temporal_context": {"current_date": "2026-07-02", "timezone": "Asia/Shanghai"},
+            "context_projection": {
+                "schema_version": "om-context-projection-v1",
+                "current_user_message": {"text": "把3690 sell put 的max strike 改为65"},
+                "recent_turns": [
+                    {
+                        "turn_id": "turn_0700_config",
+                        "safe_slots": {"symbol": ["0700.HK"], "strategy": ["sell_put"], "setting_field": ["max_strike"]},
+                        "evidence_refs": ["ev_0700_config"],
+                    },
+                    {
+                        "turn_id": "turn_futu_config",
+                        "safe_slots": {"symbol": ["FUTU"], "strategy": ["sell_put"], "setting_field": ["max_strike"]},
+                        "evidence_refs": ["ev_futu_config"],
+                    },
+                ],
+                "recent_successful_tools": [
+                    {
+                        "tool_name": "symbol_config_read",
+                        "safe_slots": {"symbol": ["0700.HK"], "strategy": ["sell_put"], "setting_field": ["max_strike"]},
+                        "evidence_refs": ["ev_0700_config"],
+                    },
+                    {
+                        "tool_name": "symbol_config_read",
+                        "safe_slots": {"symbol": ["FUTU"], "strategy": ["sell_put"], "setting_field": ["max_strike"]},
+                        "evidence_refs": ["ev_futu_config"],
+                    },
+                ],
+                "available_evidence_refs": [
+                    {
+                        "ref_id": "ev_0700_config",
+                        "turn_id": "turn_0700_config",
+                        "source_tool": "symbol_config_read",
+                        "safe_slots": {"symbol": ["0700.HK"], "strategy": ["sell_put"], "setting_field": ["max_strike"]},
+                    },
+                    {
+                        "ref_id": "ev_futu_config",
+                        "turn_id": "turn_futu_config",
+                        "source_tool": "symbol_config_read",
+                        "safe_slots": {"symbol": ["FUTU"], "strategy": ["sell_put"], "setting_field": ["max_strike"]},
+                    },
+                ],
+                "open_evidence_gaps": [],
+                "pending_operations": [],
+                "budget": {"truncated": False},
+            },
+        },
+        create_tool_call_response_fn=_create_tool_call_response,
+        environ={"OM_LLM_API_KEY": "sk-test"},
+    )
+
+    assert result.error is None
+    assert result.event_plan is not None
+    assert result.trace["planner_context_use"]["mode"] == "none"
+    assert result.trace["planner_context_use"]["inherited_slots"] == {}
+    assert result.trace["planner_context_use"]["current_message_slots"] == {
+        "symbol": ["3690.HK"],
+        "strategy": ["sell_put"],
+        "setting_path": ["sell_put.max_strike"],
+        "setting_field": ["max_strike"],
+        "setting_new_value": [65],
+    }
+    assert result.trace["context_validation"]["status"] == "passed"
+    assert result.trace["context_validation"]["code"] == "ok"
+    steps = _event_plan_steps(result)
+    assert steps[0]["tool_name"] == "symbol_edit"
+    assert steps[0]["arguments"] == {"symbol": "3690.HK", "set": {"sell_put.max_strike": 65}}
 
 
 def test_create_model_turn_events_current_required_scope_still_validates_inherited_run_id() -> None:
