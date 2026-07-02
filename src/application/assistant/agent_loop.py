@@ -54,6 +54,7 @@ from src.application.assistant.model_events import (
     ModelToolCallEvent,
     ToolGuardDecisionEvent,
     ToolResultAdapterOutput,
+    ToolResultEvent,
     adapt_tool_result,
     chat_completions_tools_payload,
     event_transcript_payload,
@@ -1248,6 +1249,7 @@ def run_assistant_tool_event_loop(
     pending_events: tuple[ModelToolCallEvent | ModelFinalAnswerEvent | AssistantEvent, ...] = tuple(initial_events)
     tool_call_count = 0
     continuation_count = 0
+    final_answer_retry_attempted = False
     current_continuation_base_payload = dict(continuation_base_payload or {}) if continuation_base_payload is not None else None
 
     while True:
@@ -1411,6 +1413,7 @@ def run_assistant_tool_event_loop(
             try:
                 continuation_base_payload_for_turn = current_continuation_base_payload
                 if final_answer_only_continuation:
+                    final_answer_retry_attempted = True
                     continuation_base_payload_for_turn = _final_answer_only_continuation_base_payload(
                         provider=provider,
                         base_payload=current_continuation_base_payload,
@@ -1454,13 +1457,51 @@ def run_assistant_tool_event_loop(
                         "continuation_count": continuation_count,
                         "continuation_error": build_error_payload(err),
                     },
-                )
+                    )
             continuation_count += 1
             current_continuation_base_payload = dict(continuation.request_payload)
             pending_events = tuple(continuation.events)
+            successful_results = _successful_execution_results(turn_executions)
+            if successful_results and not pending_events and not final_answer_retry_attempted and _final_answer_retry_allowed(
+                task_contract=task_contract,
+                tool_results=tool_results,
+            ):
+                final_answer_retry_attempted = True
+                retry_continuation = continue_model_after_tool_results(
+                    provider=provider,
+                    create_response_fn=create_continuation_response_fn,
+                    results=successful_results,
+                    base_payload=_final_answer_only_continuation_base_payload(
+                        provider=provider,
+                        base_payload=current_continuation_base_payload,
+                    ),
+                    parent_event_id=turn_executions[-1].result_adapter.event.event_id,
+                )
+                continuation_count += 1
+                current_continuation_base_payload = dict(retry_continuation.request_payload)
+                pending_events = tuple(retry_continuation.events)
             if tool_call_count >= int(max_tool_calls) and any(
                 isinstance(event, ModelToolCallEvent) for event in pending_events
             ):
+                if successful_results and not final_answer_retry_attempted and _final_answer_retry_allowed(
+                    task_contract=task_contract,
+                    tool_results=tool_results,
+                ):
+                    final_answer_retry_attempted = True
+                    retry_continuation = continue_model_after_tool_results(
+                        provider=provider,
+                        create_response_fn=create_continuation_response_fn,
+                        results=successful_results,
+                        base_payload=_final_answer_only_continuation_base_payload(
+                            provider=provider,
+                            base_payload=current_continuation_base_payload,
+                        ),
+                        parent_event_id=turn_executions[-1].result_adapter.event.event_id,
+                    )
+                    continuation_count += 1
+                    current_continuation_base_payload = dict(retry_continuation.request_payload)
+                    pending_events = tuple(retry_continuation.events)
+                    continue
                 return _assistant_tool_loop_outcome(
                     status="stopped",
                     stop_reason="tool_budget_exhausted",
@@ -1691,6 +1732,27 @@ def _assistant_tool_loop_recoverable_error_signature(execution: GuardedModelTool
         "result_error_code": str(execution.result_adapter.event.error_code or ""),
     }
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+def _final_answer_retry_allowed(
+    *,
+    task_contract: dict[str, Any],
+    tool_results: list[ToolResultAdapterOutput],
+) -> bool:
+    requested_effect = str(task_contract.get("requested_effect") or "read").strip()
+    if requested_effect not in {"", "read", "none"}:
+        return False
+    return bool(canonical_fallback_from_tool_results(tool_results))
+
+
+def _successful_execution_results(
+    executions: list[GuardedModelToolCallExecution],
+) -> tuple[tuple[ModelToolCallEvent, ToolResultEvent], ...]:
+    return tuple(
+        (execution.model_event, execution.result_adapter.event)
+        for execution in executions
+        if execution.ok
+    )
 
 
 def execute_tool_loop_payload(
