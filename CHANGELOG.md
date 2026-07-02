@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.350 - 2026-07-02
+
+### Fixed
+- Recognized natural-language monitored-symbol setting edits such as `把3690 sell put 的max strike 改为65` as Assistant symbol-edit previews while keeping current-value questions read-only.
+- Treated self-contained symbol-setting edits as current-message scope so ambiguous prior context no longer blocks the preview plan.
+
 ## 1.2.349 - 2026-07-02
 
 ### Changed
