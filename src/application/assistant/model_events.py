@@ -220,6 +220,7 @@ class ModelFinalAnswerEvent:
     answer_text: str
     answer_route: str = "llm_from_evidence"
     parent_event_id: str | None = None
+    provider_metadata: dict[str, Any] | None = None
     schema_version: str = MODEL_EVENT_SCHEMA_VERSION
 
     @property
@@ -236,6 +237,8 @@ class ModelFinalAnswerEvent:
         }
         if self.parent_event_id:
             payload["parent_event_id"] = self.parent_event_id
+        if isinstance(self.provider_metadata, dict) and self.provider_metadata:
+            payload["provider_metadata"] = _copy_mapping(self.provider_metadata)
         return payload
 
 
@@ -351,6 +354,7 @@ def model_final_answer_from_provider_response(
         parent_event_id=parent_event_id,
         answer_text=text,
         answer_route=answer_route,
+        provider_metadata=_provider_final_answer_metadata(response),
     )
 
 
@@ -836,6 +840,38 @@ def _provider_metadata_from_tool_call_block(block: dict[str, Any]) -> dict[str, 
         if key in {"reasoning_content"} and isinstance(value, str) and value
     }
     return out or None
+
+
+def _provider_final_answer_metadata(response: dict[str, Any]) -> dict[str, Any] | None:
+    metadata: dict[str, Any] = {}
+    status = str(response.get("status") or "").strip()
+    if status:
+        metadata["status"] = status
+    incomplete = response.get("incomplete_details")
+    if isinstance(incomplete, dict):
+        reason = str(incomplete.get("reason") or "").strip()
+        if reason:
+            metadata["incomplete_reason"] = reason
+    choices = response.get("choices")
+    if isinstance(choices, list):
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            finish_reason = str(choice.get("finish_reason") or "").strip()
+            if finish_reason:
+                metadata["finish_reason"] = finish_reason
+                break
+    usage = response.get("usage")
+    if isinstance(usage, dict):
+        safe_usage = {
+            key: int(value)
+            for key, value in usage.items()
+            if key in {"input_tokens", "output_tokens", "prompt_tokens", "completion_tokens", "total_tokens"}
+            and isinstance(value, int)
+        }
+        if safe_usage:
+            metadata["usage"] = safe_usage
+    return metadata or None
 
 
 def _provider_text_from_response(response: dict[str, Any]) -> str:
