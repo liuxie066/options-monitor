@@ -1729,6 +1729,9 @@ def _assistant_tool_loop_answer_route(
     answer_verification: ModelAnswerVerification | None,
 ) -> str:
     if answer_verification is not None and not answer_verification.passed and answer_verification.fallback_text:
+        trace = answer_verification.trace if isinstance(answer_verification.trace, dict) else {}
+        if str(trace.get("fallback") or "").strip() == "user_fallback":
+            return "user_fallback"
         return "canonical_renderer"
     if answer_verification is not None and not answer_verification.passed:
         return "answer_verification_failed"
