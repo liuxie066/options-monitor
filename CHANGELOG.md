@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.2.353 - 2026-07-02
+
+### Changed
+- Rendered Assistant `analysis_query` fallback replies as user-facing summaries instead of raw read-only query tables.
+
+### Fixed
+- Preserved analysis warnings, coverage notes, and key numeric evidence in Assistant fallback answers without leaking SQL/tool receipt text.
+
 ## 1.2.352 - 2026-07-02
 
 ### Fixed

@@ -7091,8 +7091,14 @@ def test_assistant_runtime_agent_loop_analysis_query_uses_task_shaped_fallback(t
             },
         ),
     ]
-    assert "分析查询结果：1 行" in out["data"]["response_text"]
-    assert "| 2026-05 | 35842 | 23973 | lx | 11869 |" in out["data"]["response_text"]
+    assert "分析查询结果" not in out["data"]["response_text"]
+    assert "| 2026-05 | 35842 | 23973 | lx | 11869 |" not in out["data"]["response_text"]
+    assert "当前对比里 lx 更高" in out["data"]["response_text"]
+    assert "关键差异：lx 更高" in out["data"]["response_text"]
+    assert "2026-05" in out["data"]["response_text"]
+    assert "35,842" in out["data"]["response_text"]
+    assert "23,973" in out["data"]["response_text"]
+    assert "11,869" in out["data"]["response_text"]
     assert "收益统计完成（OM 本地账本）" not in out["data"]["response_text"]
     assert out["data"]["action"]["result"]["data"]["final_response"] == {
         "status": "rendered",
@@ -7269,7 +7275,12 @@ def test_agent_loop_event_loop_waits_for_model_continuation_for_breakdown_gap(tm
         "evidence_updated",
     ]
     assert tool_loop_data["event_loop"]["trace"]["capability_selection"]["selected"][0]["tool_name"] == "analysis_query"
-    assert "分析查询结果：2 行" in out["data"]["response_text"]
+    assert "分析查询结果" not in out["data"]["response_text"]
+    assert "分析完成：共 2 行" in out["data"]["response_text"]
+    assert "lx" in out["data"]["response_text"]
+    assert "2,414" in out["data"]["response_text"]
+    assert "sy" in out["data"]["response_text"]
+    assert "11,138" in out["data"]["response_text"]
 
 
 def test_agent_loop_event_loop_waits_for_model_continuation_for_missing_account_coverage(tmp_path: Path) -> None:
@@ -7360,7 +7371,10 @@ def test_agent_loop_event_loop_waits_for_model_continuation_for_missing_account_
     assert not followup_contexts
     tool_loop_data = _assert_event_loop_rendered(out)
     assert tool_loop_data["event_loop"]["trace"]["capability_selection"]["selected"][0]["tool_name"] == "analysis_query"
-    assert "分析查询结果：1 行" in out["data"]["response_text"]
+    assert "分析查询结果" not in out["data"]["response_text"]
+    assert "分析完成：共 1 行" in out["data"]["response_text"]
+    assert "lx" in out["data"]["response_text"]
+    assert "2,414" in out["data"]["response_text"]
 
 
 def test_agent_loop_followup_gap_requires_manifest_pure_read_tool() -> None:
@@ -7520,7 +7534,9 @@ def test_agent_loop_event_loop_does_not_run_legacy_duplicate_followup_query(tmp_
     assert len(calls) == 1
     tool_loop_data = _assert_event_loop_rendered(out)
     assert tool_loop_data["event_loop"]["trace"]["tool_call_count"] == 1
-    assert "分析查询结果：1 行" in out["data"]["response_text"]
+    assert "分析查询结果" not in out["data"]["response_text"]
+    assert "分析完成：共 1 行" in out["data"]["response_text"]
+    assert "2,414" in out["data"]["response_text"]
 
 
 def test_tool_loop_duplicate_signature_ignores_system_injected_fields() -> None:
@@ -7758,7 +7774,7 @@ def test_agent_loop_event_loop_low_risk_empty_read_stays_rendered_without_global
     )
 
     assert out["ok"] is True
-    assert out["data"]["response_text"].startswith("分析查询结果：0 行")
+    assert out["data"]["response_text"].startswith("没有查到匹配记录。")
     tool_loop_data = _assert_event_loop_rendered(out)
     assert "clarification_request" not in tool_loop_data["final_response"]
     assert tool_loop_data["event_loop"]["trace"]["answer_route"] == "loop_stopped"
@@ -7999,7 +8015,8 @@ def test_assistant_runtime_agent_loop_answer_guard_falls_back_on_analysis_policy
 
     assert out["ok"] is True
     text = out["data"]["response_text"]
-    assert "分析查询结果：1 行" in text
+    assert "分析查询结果" not in text
+    assert "分析完成：共 1 行" in text
     assert "提示：收益率聚合需复核，avg(net_return_rate) 不能直接代表组合收益率。" in text
     assert "提示：数据新鲜度存在缺失/过期：FUTU missing。" in text
     assert "覆盖范围：账户 lx；月份 2026-06；视图 account_monthly_performance。" in text
@@ -8246,7 +8263,7 @@ def test_assistant_runtime_agent_loop_answer_guard_rewrites_internal_ux_leak(tmp
     assert out["ok"] is True
     text = out["data"]["response_text"]
     assert "2026-05" in text
-    assert "11869" in text
+    assert "11,869" in text
     assert "select month" not in text
     assert "stock_lot_id" not in text
     assert "事实\n" not in text
@@ -8331,8 +8348,8 @@ def test_assistant_runtime_agent_loop_answer_guard_accepts_derived_difference_re
 
     assert out["ok"] is True
     text = out["data"]["response_text"]
-    assert "35842.41" in text
-    assert "21453.29" in text
+    assert "35,842.41" in text
+    assert "21,453.29" in text
     assert "CNY 20,000" not in text
     _assert_event_loop_rendered(out)
 
@@ -8415,8 +8432,8 @@ def test_assistant_runtime_agent_loop_answer_guard_rewrites_wrong_derived_rate(t
 
     assert out["ok"] is True
     text = out["data"]["response_text"]
-    assert "9000" in text
-    assert "300000" in text
+    assert "9,000" in text
+    assert "300,000" in text
     assert "5.00%" not in text
     _assert_event_loop_rendered(out)
 
@@ -8502,7 +8519,7 @@ def test_assistant_runtime_agent_loop_answer_guard_rewrites_wrong_contribution_s
     assert out["ok"] is True
     text = out["data"]["response_text"]
     assert "400" in text
-    assert "1000" in text
+    assert "1,000" in text
     assert "贡献占比 50%" not in text
     _assert_event_loop_rendered(out)
 

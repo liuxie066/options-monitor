@@ -159,10 +159,14 @@ def verify_model_final_answer(
             ],
         }
     status = "failed" if guard.get("violations") else "passed"
-    fallback_text = canonical_fallback_from_tool_results(tool_results)
+    fallback_text = user_fallback_from_tool_results(tool_results)
     trace = answer_guard_trace_payload(status, guard)
     if fallback_text:
-        trace["fallback"] = "canonical_renderer"
+        trace["fallback"] = (
+            "canonical_renderer"
+            if fallback_text == canonical_fallback_from_tool_results(tool_results)
+            else "user_fallback"
+        )
     return ModelAnswerVerification(
         answer_event=answer_event,
         status=status,
@@ -282,6 +286,163 @@ def canonical_fallback_from_tool_results(
     return ""
 
 
+def user_fallback_from_tool_results(
+    tool_results: list[ToolResultAdapterOutput] | tuple[ToolResultAdapterOutput, ...],
+) -> str:
+    for adapter in reversed(tuple(tool_results)):
+        raw_result = adapter.raw_result if isinstance(adapter.raw_result, dict) else {}
+        if not bool(raw_result.get("ok")):
+            continue
+        event = adapter.event
+        data = raw_result.get("data") if isinstance(raw_result.get("data"), dict) else {}
+        if event.tool_name == "analysis_query":
+            rendered = _analysis_query_user_fallback(data)
+            if rendered:
+                return rendered
+        rendered = canonical_fallback_from_tool_results((adapter,))
+        if rendered:
+            return rendered
+    return ""
+
+
+def _analysis_query_user_fallback(data: dict[str, Any]) -> str:
+    rows = [item for item in data.get("rows") or [] if isinstance(item, dict)]
+    columns = [str(item) for item in data.get("columns") or [] if str(item).strip()]
+    try:
+        row_count = int(data.get("row_count") if data.get("row_count") is not None else len(rows))
+    except Exception:
+        row_count = len(rows)
+    source = str(data.get("source_label") or "OM read-only analysis workspace").strip()
+    warning_lines = _analysis_query_warning_lines(data)
+    if row_count <= 0 or not rows:
+        lines = ["没有查到匹配记录。", *warning_lines, f"数据来源：{source}"]
+        return "\n".join(line for line in lines if line).strip()
+
+    lines = [_analysis_query_summary_line(rows=rows, columns=columns, row_count=row_count)]
+    comparison = _analysis_query_comparison_line(rows=rows)
+    if comparison:
+        lines.append(comparison)
+    else:
+        lines.extend(_analysis_query_row_lines(rows=rows, columns=columns))
+    if bool(data.get("truncated")):
+        lines.append("结果已截断，仅展示可用预览中的关键行。")
+    lines.extend(warning_lines)
+    lines.append(f"数据来源：{source}")
+    return "\n".join(line for line in lines if line).strip()
+
+
+def _analysis_query_warning_lines(data: dict[str, Any]) -> list[str]:
+    rendered = render_canonical_tool_result(
+        renderer_key="analysis_result",
+        data=data,
+        tool_result=build_response(tool_name="analysis_query", ok=True, data=data),
+    )
+    return [
+        line
+        for line in rendered.splitlines()
+        if line.startswith("提示：") or line.startswith("覆盖范围：")
+    ]
+
+
+def _analysis_query_summary_line(*, rows: list[dict[str, Any]], columns: list[str], row_count: int) -> str:
+    status_values = _unique_values(rows, "status")
+    if status_values:
+        return f"分析完成：共 {row_count} 行，状态包括 {', '.join(status_values[:4])}。"
+    if "higher_account" in columns:
+        higher = _first_value(rows, "higher_account")
+        if higher:
+            return f"分析完成：共 {row_count} 行，当前对比里 {higher} 更高。"
+    return f"分析完成：共 {row_count} 行。"
+
+
+def _analysis_query_comparison_line(*, rows: list[dict[str, Any]]) -> str:
+    row = rows[0] if rows else {}
+    higher = _first_value(rows, "higher_account")
+    diff_key = _first_existing_key(row, ("income_diff_cny", "diff_cny", "difference_cny", "pnl_diff", "amount_diff"))
+    if not higher or not diff_key:
+        return ""
+    month = _format_value(row.get("month"))
+    left_key = _first_existing_key(row, ("lx_income_cny", "lx_net_income_cny", "lx_amount"))
+    right_key = _first_existing_key(row, ("sy_income_cny", "sy_net_income_cny", "sy_amount"))
+    parts = []
+    if month != "-":
+        parts.append(month)
+    if left_key and right_key:
+        parts.append(f"lx={_format_value(row.get(left_key))}")
+        parts.append(f"sy={_format_value(row.get(right_key))}")
+    parts.append(f"差额={_format_value(row.get(diff_key))}")
+    return f"关键差异：{higher} 更高（{'，'.join(parts)}）。"
+
+
+def _analysis_query_row_lines(*, rows: list[dict[str, Any]], columns: list[str]) -> list[str]:
+    display_columns = _analysis_query_display_columns(rows=rows, columns=columns)
+    lines: list[str] = []
+    for index, row in enumerate(rows[:5], start=1):
+        facts = [f"{column}={_format_value(row.get(column))}" for column in display_columns if row.get(column) is not None]
+        if facts:
+            lines.append(f"{index}. " + "，".join(facts))
+    if len(rows) > 5:
+        lines.append(f"其余 {len(rows) - 5} 行未展开。")
+    return lines
+
+
+def _analysis_query_display_columns(*, rows: list[dict[str, Any]], columns: list[str]) -> list[str]:
+    if not columns and rows:
+        columns = [str(key) for key in rows[0]]
+    priority = [
+        "month",
+        "account",
+        "symbol",
+        "currency",
+        "status",
+        "shares_remaining",
+        "shares_sold",
+        "stock_cost_per_share",
+        "assigned_stock_realized_pnl",
+        "option_premium_attribution",
+        "assignment_lifecycle_pnl",
+        "assigned_stock_unrealized_pnl",
+        "spot",
+        "net_income_cny",
+        "net_return_rate",
+    ]
+    ordered = [column for column in priority if column in columns]
+    ordered.extend(column for column in columns if column not in ordered)
+    return ordered[:10]
+
+
+def _first_existing_key(row: dict[str, Any], keys: tuple[str, ...]) -> str:
+    return next((key for key in keys if key in row), "")
+
+
+def _first_value(rows: list[dict[str, Any]], key: str) -> str:
+    for row in rows:
+        value = _format_value(row.get(key))
+        if value != "-":
+            return value
+    return ""
+
+
+def _unique_values(rows: list[dict[str, Any]], key: str) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        value = _format_value(row.get(key))
+        if value == "-" or value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
+def _format_value(value: Any) -> str:
+    if value is None:
+        return "-"
+    if isinstance(value, float):
+        return f"{value:,.6f}".rstrip("0").rstrip(".")
+    return str(value).strip() or "-"
+
+
 def _output_contract_allows_final_answer(output_contract: dict[str, Any]) -> bool:
     answer_surface = str(output_contract.get("answer_surface") or "").strip().lower()
     if not answer_surface:
@@ -375,5 +536,6 @@ __all__ = [
     "build_model_evidence_bundle",
     "canonical_fallback_from_tool_results",
     "event_observation_from_tool_result",
+    "user_fallback_from_tool_results",
     "verify_model_final_answer",
 ]
