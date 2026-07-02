@@ -67,6 +67,7 @@ from src.application.assistant.model_evidence import (
     ModelEvidenceBundle,
     build_model_evidence_bundle,
     canonical_fallback_from_tool_results,
+    user_fallback_from_tool_results,
     verify_model_final_answer,
 )
 from src.application.assistant.renderer import render_canonical_tool_result, render_inbound_text
@@ -2231,7 +2232,7 @@ def _assistant_tool_loop_response_text(outcome: AssistantToolLoopOutcome) -> str
         return outcome.final_answer
     if outcome.stop_reason == "answer_verification_failed":
         return "需要先读取相关 OM 证据后才能回答；本次没有执行工具。"
-    fallback = canonical_fallback_from_tool_results(outcome.tool_results)
+    fallback = user_fallback_from_tool_results(outcome.tool_results)
     if fallback:
         return fallback
     if outcome.status == "needs_clarification" and outcome.clarification_request:

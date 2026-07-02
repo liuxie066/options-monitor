@@ -10,6 +10,7 @@ from src.application.assistant.model_evidence import (
     build_model_evidence_bundle,
     canonical_fallback_from_tool_results,
     event_observation_from_tool_result,
+    user_fallback_from_tool_results,
     verify_model_final_answer,
 )
 
@@ -296,3 +297,97 @@ def test_canonical_fallback_skips_internal_catalog_renderer() -> None:
     fallback = canonical_fallback_from_tool_results([adapter])
 
     assert fallback == ""
+
+
+def test_user_fallback_summarizes_analysis_query_without_raw_receipt() -> None:
+    adapter = _analysis_adapter()
+
+    fallback = user_fallback_from_tool_results([adapter])
+
+    assert fallback
+    assert "分析查询结果" not in fallback
+    assert "| month | account | net_income_cny |" not in fallback
+    assert "分析完成：共 2 行" in fallback
+    assert "2026-06" in fallback
+    assert "lx" in fallback
+    assert "2,414" in fallback
+    assert "sy" in fallback
+    assert "11,138" in fallback
+    assert "数据来源：OM read-only analysis workspace" in fallback
+
+
+def test_user_fallback_summarizes_assigned_stock_analysis_query() -> None:
+    guard = ToolGuardDecisionEvent(
+        event_id="guard_assigned_analysis_1",
+        tool_call_id="call_assigned_analysis_1",
+        tool_name="analysis_query",
+        allowed=True,
+        decision="allow",
+        reason="read_auto_in_scope",
+        risk_class="READ_AUTO",
+        scope_source="host_task_contract",
+        normalized_payload={
+            "config_key": "hk",
+            "sql": "select * from assigned_stock_lifecycle",
+            "limit": 20,
+        },
+    )
+    data = {
+        "schema_version": "analysis.query.output.v2",
+        "source_label": "OM read-only analysis workspace",
+        "columns": [
+            "account",
+            "symbol",
+            "currency",
+            "status",
+            "shares_remaining",
+            "shares_sold",
+            "stock_cost_per_share",
+            "spot",
+            "assigned_stock_realized_pnl",
+            "option_premium_attribution",
+            "assignment_lifecycle_pnl",
+        ],
+        "rows": [
+            {
+                "account": "lx",
+                "symbol": "0700.HK",
+                "currency": "HKD",
+                "status": "closed",
+                "shares_remaining": 0,
+                "shares_sold": 200,
+                "stock_cost_per_share": 480.0,
+                "spot": None,
+                "assigned_stock_realized_pnl": -1480.0,
+                "option_premium_attribution": 786.0,
+                "assignment_lifecycle_pnl": -694.0,
+            }
+        ],
+        "row_count": 1,
+        "truncated": False,
+        "fallback_text": (
+            "分析查询结果：1 行\n"
+            "| account | symbol | currency | status | shares_remaining | shares_sold | "
+            "stock_cost_per_share | spot | assigned_stock_realized_pnl | "
+            "option_premium_attribution | assignment_lifecycle_pnl |"
+        ),
+    }
+    adapter = adapt_tool_result(
+        event_id="result_assigned_analysis_1",
+        parent_event_id=guard.event_id,
+        tool_call_id="call_assigned_analysis_1",
+        tool_name="analysis_query",
+        normalized_payload=guard.normalized_payload,
+        guard_decision=guard,
+        raw_result=build_response(tool_name="analysis_query", ok=True, data=data),
+    )
+
+    fallback = user_fallback_from_tool_results([adapter])
+
+    assert "分析查询结果" not in fallback
+    assert "| account | symbol |" not in fallback
+    assert "状态包括 closed" in fallback
+    assert "0700.HK" in fallback
+    assert "assigned_stock_realized_pnl=-1,480" in fallback
+    assert "option_premium_attribution=786" in fallback
+    assert "assignment_lifecycle_pnl=-694" in fallback
