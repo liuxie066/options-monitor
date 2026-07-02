@@ -94,6 +94,24 @@ _NON_SYMBOL_TOKENS = {
     "WHERE",
     "WHY",
 }
+_SYMBOL_SETTING_TOKENS = (
+    "coveredcall",
+    "sellcall",
+    "sellput",
+    "minstrike",
+    "maxstrike",
+    "min_strike",
+    "max_strike",
+    "卖call",
+    "卖put",
+    "备兑",
+    "最小行权价",
+    "最低行权价",
+    "最大行权价",
+    "最高行权价",
+    "行权价下限",
+    "行权价上限",
+)
 
 
 @dataclass(frozen=True)
@@ -434,10 +452,7 @@ def _preview_effect_allowed_from_compact(compact: str) -> bool:
         return True
     if _looks_like_scalar_setting_delta(compact):
         return True
-    if (
-        ("设置" in compact or "修改监控" in compact or "配置标的" in compact)
-        and any(token in compact for token in ("coveredcall", "sellcall", "sellput", "minstrike", "maxstrike", "min_strike", "max_strike"))
-    ):
+    if _looks_like_symbol_setting_edit(compact):
         return True
     if _looks_like_fill_notice_preview(compact):
         return True
@@ -539,6 +554,14 @@ def _looks_like_scalar_setting_delta(compact: str) -> bool:
     return re.search(r"(改为|改成|设为|设置成|调到|改到|降到|升到)(true|false|on|off|[0-9]+(?:\.[0-9]+)?)", compact) is not None
 
 
+def _looks_like_symbol_setting_edit(compact: str) -> bool:
+    if not any(token in compact for token in _SYMBOL_SETTING_TOKENS):
+        return False
+    if _looks_like_scalar_setting_delta(compact):
+        return True
+    return "设置" in compact or "修改监控" in compact or "配置标的" in compact
+
+
 def _looks_like_strong_preview_read_query(compact: str) -> bool:
     return any(
         token in compact
@@ -614,10 +637,7 @@ def preview_request_kind_from_text(text: str) -> str | None:
         return "model_use"
     if _looks_like_monitor_run_preview(compact):
         return "monitor_run_now"
-    if (
-        ("设置" in compact or "修改监控" in compact or "配置标的" in compact)
-        and any(token in compact for token in ("coveredcall", "sellcall", "sellput", "minstrike", "maxstrike", "min_strike", "max_strike"))
-    ):
+    if _looks_like_symbol_setting_edit(compact):
         return "symbol_edit"
     return None
 
