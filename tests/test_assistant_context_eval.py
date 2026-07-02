@@ -63,7 +63,7 @@ def test_context_eval_scenarios_mode_runs_real_followup_regression_fixture() -> 
 
     assert summary["mode"] == "scenarios"
     assert summary["ok"] is True
-    assert summary["total"] == 20
+    assert summary["total"] == 21
     assert summary["failed"] == 0
     assert summary["empty"] is False
     assert families == {
@@ -85,12 +85,13 @@ def test_context_eval_scenarios_mode_runs_real_followup_regression_fixture() -> 
         "notice_explanation",
         "position_followup",
         "runtime_followup",
+        "symbol_edit_current_message",
         "upgrade_preview",
         "upgrade_status",
     }
 
     text = format_context_eval_text(report)
-    assert "assistant context eval: 20/20 passed" in text
+    assert "assistant context eval: 21/21 passed" in text
     assert "mode=scenarios" in text
     assert "family=income_followup" in text
     assert "terminal=preview_tool_call tool=manual_assignment" in text

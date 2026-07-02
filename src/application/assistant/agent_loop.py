@@ -73,7 +73,12 @@ from src.application.assistant.model_evidence import (
 from src.application.assistant.renderer import render_canonical_tool_result, render_inbound_text
 from src.application.assistant.session import build_agent_session_snapshot
 from src.application.assistant.settings import AssistantLlmSettings, AssistantSettings
-from src.application.assistant.task_contract import TASK_CONTRACT_SCHEMA_VERSION, build_task_contract, preview_authority_from_text
+from src.application.assistant.task_contract import (
+    TASK_CONTRACT_SCHEMA_VERSION,
+    build_task_contract,
+    preview_authority_from_text,
+    preview_request_kind_from_text,
+)
 from src.application.assistant.tool_bindings import (
     planner_binding_for_tool,
     planner_config_scoped_tool_names,
@@ -446,9 +451,31 @@ class EventNativePlanningResult:
         payload = self.plan_like_payload()
         payload["provider"] = self.provider
         payload["events"] = event_transcript_payload(self.events)
+        host_repair = _event_plan_host_repair_payload(self.events)
+        if host_repair:
+            payload["host_repair"] = host_repair
         if isinstance(self.context_validation, dict) and self.context_validation:
             payload["context_validation"] = dict(self.context_validation)
         return payload
+
+
+def _event_plan_host_repair_payload(events: tuple[ModelToolCallEvent | ModelFinalAnswerEvent | AssistantEvent, ...]) -> dict[str, Any] | None:
+    for event in events:
+        if not isinstance(event, ModelToolCallEvent) or event.provider != "host":
+            continue
+        metadata = event.provider_metadata if isinstance(event.provider_metadata, dict) else {}
+        reason = str(metadata.get("host_repair_reason") or "").strip()
+        if not reason:
+            continue
+        payload = {
+            "reason": reason,
+            "tool_name": event.tool_name,
+            "event_id": event.event_id,
+        }
+        if event.parent_event_id:
+            payload["parent_event_id"] = event.parent_event_id
+        return payload
+    return None
 
 
 @dataclass(frozen=True)
@@ -1327,6 +1354,26 @@ def run_assistant_tool_event_loop(
                 task_contract=task_contract,
                 tool_results=tool_results,
             )
+            if (
+                not verification.passed
+                and verification.fallback_text
+                and create_continuation_response_fn is not None
+                and not final_answer_retry_attempted
+                and _final_answer_retry_allowed(task_contract=task_contract, tool_results=tool_results)
+                and _final_answer_retryable_verification(verification)
+            ):
+                retry_results = _successful_tool_result_pairs_from_transcript(
+                    transcript=transcript,
+                    tool_results=tool_results,
+                )
+                if retry_results:
+                    retry_error = _try_final_answer_retry(
+                        reason=_final_answer_retry_reason_from_verification(verification),
+                        results=retry_results,
+                        parent_event_id=first.event_id,
+                    )
+                    if retry_error is None:
+                        continue
             final_answer = first.answer_text if verification.passed else (verification.fallback_text or None)
             return _assistant_tool_loop_outcome(
                 status="done" if final_answer else "stopped",
@@ -1898,6 +1945,56 @@ def _final_answer_retry_allowed(
     if requested_effect not in {"", "read", "none"}:
         return False
     return bool(canonical_fallback_from_tool_results(tool_results))
+
+
+def _successful_tool_result_pairs_from_transcript(
+    *,
+    transcript: list[Any],
+    tool_results: list[ToolResultAdapterOutput],
+) -> tuple[tuple[ModelToolCallEvent, ToolResultEvent], ...]:
+    calls_by_id = {
+        str(event.tool_call_id): event
+        for event in transcript
+        if isinstance(event, ModelToolCallEvent) and str(event.tool_call_id or "").strip()
+    }
+    pairs: list[tuple[ModelToolCallEvent, ToolResultEvent]] = []
+    for adapter in tool_results:
+        result_event = adapter.event
+        if not result_event.ok:
+            continue
+        model_event = calls_by_id.get(str(result_event.tool_call_id))
+        if model_event is not None:
+            pairs.append((model_event, result_event))
+    return tuple(pairs)
+
+
+def _final_answer_retry_reason_from_verification(verification: ModelAnswerVerification) -> str:
+    trace = verification.trace if isinstance(verification.trace, dict) else {}
+    violation_types = trace.get("violation_types")
+    if isinstance(violation_types, list) and violation_types:
+        return f"answer_guard_{violation_types[0]}"
+    violation_type = str(trace.get("violation_type") or "").strip()
+    if violation_type:
+        return f"answer_guard_{violation_type}"
+    return "answer_guard_failed"
+
+
+def _final_answer_retryable_verification(verification: ModelAnswerVerification) -> bool:
+    trace = verification.trace if isinstance(verification.trace, dict) else {}
+    violation_types = trace.get("violation_types")
+    if isinstance(violation_types, list):
+        return any(str(item) in _FINAL_ANSWER_RETRYABLE_VIOLATIONS for item in violation_types)
+    violation_type = str(trace.get("violation_type") or "").strip()
+    return violation_type in _FINAL_ANSWER_RETRYABLE_VIOLATIONS
+
+
+_FINAL_ANSWER_RETRYABLE_VIOLATIONS = frozenset(
+    {
+        "unsupported_raw_tool_receipt",
+        "incomplete_final_answer",
+        "provider_output_truncated",
+    }
+)
 
 
 def _successful_execution_results(
@@ -3413,6 +3510,21 @@ def _event_native_planning_from_model_events(
     first = events[0] if events else None
     if isinstance(first, ModelToolCallEvent):
         tool_calls = tuple(event for event in events if isinstance(event, ModelToolCallEvent))
+        single_preview_intent = _single_allowed_preview_intent_for_question(text)
+        if single_preview_intent and all(_plan_step_kind(event.tool_name) == "read" for event in tool_calls):
+            return _event_native_planning_from_model_tool_calls(
+                text=text,
+                events=(
+                    _host_repaired_preview_tool_call_event(
+                        tool_name=single_preview_intent,
+                        reason="model_read_tool_for_single_preview_authority",
+                        parent_event_id=first.event_id,
+                    ),
+                ),
+                conversation_context=conversation_context,
+                planner_manifest=planner_manifest,
+                provider=provider,
+            )
         if len(tool_calls) > MAX_TOOL_PLAN_STEPS:
             return None, AgentToolError(
                 code="PLAN_TOO_MANY_STEPS",
@@ -3433,6 +3545,21 @@ def _event_native_planning_from_model_events(
             details={"clarification_request": first.public_payload()},
         )
     if isinstance(first, ModelFinalAnswerEvent):
+        single_preview_intent = _single_allowed_preview_intent_for_question(text)
+        if single_preview_intent:
+            return _event_native_planning_from_model_tool_calls(
+                text=text,
+                events=(
+                    _host_repaired_preview_tool_call_event(
+                        tool_name=single_preview_intent,
+                        reason="model_final_answer_for_single_preview_authority",
+                        parent_event_id=first.event_id,
+                    ),
+                ),
+                conversation_context=conversation_context,
+                planner_manifest=planner_manifest,
+                provider=provider,
+            )
         return _event_native_planning_from_model_final_answer(
             text=text,
             event=first,
@@ -4451,6 +4578,49 @@ def _allowed_preview_intents_from_authority(authority: dict[str, Any]) -> set[st
     return {str(item) for item in authority.get("allowed_preview_intents") or () if str(item).strip()}
 
 
+def _single_allowed_preview_intent_for_question(question: str | None) -> str | None:
+    authority = _planner_preview_authority(question or "")
+    if not bool(authority.get("allowed", False)):
+        return None
+    allowed_preview_intents = sorted(_allowed_preview_intents_from_authority(authority))
+    if len(allowed_preview_intents) != 1:
+        return None
+    intent = allowed_preview_intents[0]
+    if intent not in AGENT_LOOP_PREVIEW_CAPABILITIES:
+        return None
+    if not _preview_intent_allows_host_repair_without_model_args(intent):
+        return None
+    return intent
+
+
+def _preview_intent_allows_host_repair_without_model_args(intent: str) -> bool:
+    return intent in {
+        "upgrade_now",
+        "manual_trade_open",
+        "manual_trade_close",
+        "manual_assignment",
+        "manual_expiry",
+    }
+
+
+def _host_repaired_preview_tool_call_event(
+    *,
+    tool_name: str,
+    reason: str,
+    parent_event_id: str | None = None,
+) -> ModelToolCallEvent:
+    return ModelToolCallEvent(
+        event_id=f"host_repair_{tool_name}",
+        tool_call_id=f"host_repair_{tool_name}",
+        tool_name=tool_name,
+        arguments={},
+        purpose=f"host repair: {reason}",
+        provider="host",
+        parent_event_id=parent_event_id,
+        provider_metadata={"host_repair_reason": reason},
+    )
+
+
 def _question_requests_symbol_config_read(question: str) -> bool:
     if _question_requests_preview_operation(question):
         return False
@@ -5318,6 +5488,10 @@ def _planner_input_payload(text: str, *, conversation_context: dict[str, Any] | 
 
 def _planner_preview_authority(text: str) -> dict[str, Any]:
     authority = preview_authority_from_text(text)
+    kind = preview_request_kind_from_text(text)
+    allowed_preview_intents = _preview_intents_for_request_kind(kind)
+    if bool(authority.get("allowed", False)) and allowed_preview_intents and not authority.get("allowed_preview_intents"):
+        authority = {**authority, "allowed_preview_intents": allowed_preview_intents}
     return {
         **authority,
         "schema_version": "om-planner-preview-authority-v1",
@@ -5328,6 +5502,17 @@ def _planner_preview_authority(text: str) -> dict[str, Any]:
             "host injects raw_text and never lets the model confirm, apply, notify, or mutate state directly."
         ),
     }
+
+
+def _preview_intents_for_request_kind(kind: str | None) -> list[str]:
+    value = str(kind or "").strip()
+    if value == "manual_trade":
+        intents = ("manual_trade_open", "manual_trade_close")
+    elif value in AGENT_LOOP_PREVIEW_CAPABILITIES:
+        intents = (value,)
+    else:
+        intents = ()
+    return [intent for intent in intents if intent in AGENT_LOOP_PREVIEW_CAPABILITIES]
 
 
 def _planner_input_text(text: str, *, conversation_context: dict[str, Any] | None) -> str:

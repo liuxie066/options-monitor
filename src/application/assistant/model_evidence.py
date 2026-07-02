@@ -318,6 +318,10 @@ def _analysis_query_user_fallback(data: dict[str, Any]) -> str:
         lines = ["没有查到匹配记录。", *warning_lines, f"数据来源：{source}"]
         return "\n".join(line for line in lines if line).strip()
 
+    assigned_stock = _assigned_stock_lifecycle_fallback(data=data, rows=rows, columns=columns)
+    if assigned_stock:
+        return assigned_stock
+
     lines = [_analysis_query_summary_line(rows=rows, columns=columns, row_count=row_count)]
     comparison = _analysis_query_comparison_line(rows=rows)
     if comparison:
@@ -329,6 +333,43 @@ def _analysis_query_user_fallback(data: dict[str, Any]) -> str:
     lines.extend(warning_lines)
     lines.append(f"数据来源：{source}")
     return "\n".join(line for line in lines if line).strip()
+
+
+def _assigned_stock_lifecycle_fallback(*, data: dict[str, Any], rows: list[dict[str, Any]], columns: list[str]) -> str:
+    field_set = set(columns)
+    assigned_stock_fields = {
+        "shares_remaining",
+        "shares_sold",
+        "stock_cost_per_share",
+        "assigned_stock_unrealized_pnl",
+        "assigned_stock_realized_pnl",
+        "option_premium_attribution",
+        "assignment_lifecycle_pnl",
+    }
+    if len(field_set & assigned_stock_fields) < 3:
+        return ""
+    rendered = render_canonical_tool_result(
+        renderer_key="assigned_stock_lifecycle",
+        data={
+            "rows": rows,
+            "filters": _assigned_stock_filters_from_rows(rows),
+            "warnings": data.get("warnings") if isinstance(data.get("warnings"), list) else [],
+            "source_label": str(data.get("source_label") or "").strip(),
+        },
+        tool_result=build_response(tool_name="analysis_query", ok=True, data=data),
+    )
+    return rendered.strip()
+
+
+def _assigned_stock_filters_from_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for field in ("account", "status", "symbol"):
+        values = _unique_values(rows, field)
+        if len(values) == 1:
+            out[field] = values[0]
+        elif field in {"account", "status"}:
+            out[field] = "all"
+    return out
 
 
 def _analysis_query_warning_lines(data: dict[str, Any]) -> list[str]:

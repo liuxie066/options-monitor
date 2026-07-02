@@ -633,7 +633,7 @@ def render_symbol_response(
     summary = preview.get("summary") if isinstance(preview, dict) and isinstance(preview.get("summary"), dict) else {}
     cal = summary.get("calibration") if isinstance(summary.get("calibration"), dict) else {}
     action = str(summary.get("action") or str(payload.get("operation_type") or "").removeprefix("symbol_"))
-    action_label = {"add": "新增", "edit": "修改", "remove": "删除"}.get(action, action)
+    action_label = {"add": "新增", "edit": "修改", "set": "修改", "remove": "删除"}.get(action, action)
     title = "监控标的变更预览" if status == "previewed" else "监控标的变更已写入配置"
     lines = [
         f"{title}：{action_label}",

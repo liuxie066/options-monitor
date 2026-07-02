@@ -419,8 +419,10 @@ def test_user_fallback_summarizes_assigned_stock_analysis_query() -> None:
 
     assert "分析查询结果" not in fallback
     assert "| account | symbol |" not in fallback
-    assert "状态包括 closed" in fallback
+    assert "lx · closed · 指派正股 · 0700.HK：1 条" in fallback
     assert "0700.HK" in fallback
-    assert "assigned_stock_realized_pnl=-1,480" in fallback
-    assert "option_premium_attribution=786" in fallback
-    assert "assignment_lifecycle_pnl=-694" in fallback
+    assert "正股已实现 HKD -1,480" in fallback
+    assert "权利金归因 HKD 786" in fallback
+    assert "生命周期PnL HKD -694" in fallback
+    assert "口径：正股成本按真实交割价记录，不扣除 Sell Put 权利金" in fallback
+    assert fallback.endswith("数据源：OM read-only analysis workspace")

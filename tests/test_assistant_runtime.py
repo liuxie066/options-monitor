@@ -2292,10 +2292,13 @@ def test_agent_loop_preview_request_uses_model_driven_manifest() -> None:
 
     assert payload["manifest_budget"]["mode"] != "preview_only"
     assert payload["manifest_budget"]["preview_authority_allowed"] is True
+    assert payload["manifest_budget"]["allowed_preview_intents"] == ["manual_assignment"]
     assert payload["preview_authority"]["allowed"] is True
+    assert payload["preview_authority"]["allowed_preview_intents"] == ["manual_assignment"]
     assert "manual_assignment" in tool_names
-    assert "manual_expiry" in tool_names
+    assert "manual_expiry" not in tool_names
     assert "analysis_query" in tool_names
+    assert (tool_names & AGENT_LOOP_PREVIEW_CAPABILITIES) == {"manual_assignment"}
     assert "raw_text" not in assignment["input_schema"]
     assert {
         "account",
@@ -2322,10 +2325,39 @@ def test_agent_loop_expiry_request_uses_model_driven_manifest() -> None:
 
     assert payload["manifest_budget"]["mode"] != "preview_only"
     assert payload["manifest_budget"]["preview_authority_allowed"] is True
+    assert payload["manifest_budget"]["allowed_preview_intents"] == ["manual_expiry"]
     assert payload["preview_authority"]["allowed"] is True
+    assert payload["preview_authority"]["allowed_preview_intents"] == ["manual_expiry"]
     assert "manual_expiry" in tool_names
-    assert "manual_assignment" in tool_names
+    assert "manual_assignment" not in tool_names
     assert "analysis_query" in tool_names
+    assert (tool_names & AGENT_LOOP_PREVIEW_CAPABILITIES) == {"manual_expiry"}
+
+
+def test_agent_loop_symbol_edit_request_exposes_only_symbol_preview() -> None:
+    payload = json.loads(_planner_input_text("把3690 sell put 的max strike 改为65", conversation_context=None))
+    tool_names = {tool["name"] for tool in payload["tools"]}
+
+    assert payload["manifest_budget"]["preview_authority_allowed"] is True
+    assert payload["manifest_budget"]["allowed_preview_intents"] == ["symbol_edit"]
+    assert payload["preview_authority"]["allowed"] is True
+    assert payload["preview_authority"]["allowed_preview_intents"] == ["symbol_edit"]
+    assert "symbol_edit" in tool_names
+    assert "symbol_config_read" in tool_names
+    assert (tool_names & AGENT_LOOP_PREVIEW_CAPABILITIES) == {"symbol_edit"}
+
+
+def test_agent_loop_fill_notice_request_exposes_only_manual_trade_preview_group() -> None:
+    text = "成交提醒: 【成交提醒】成功卖出2张$腾讯 260605 440.00 沽$，成交价格：0.86，此笔订单委托已全部成交"
+    payload = json.loads(_planner_input_text(text, conversation_context=None))
+    tool_names = {tool["name"] for tool in payload["tools"]}
+
+    assert payload["manifest_budget"]["preview_authority_allowed"] is True
+    assert payload["manifest_budget"]["allowed_preview_intents"] == ["manual_trade_open", "manual_trade_close"]
+    assert payload["preview_authority"]["allowed"] is True
+    assert payload["preview_authority"]["allowed_preview_intents"] == ["manual_trade_open", "manual_trade_close"]
+    assert "analysis_query" in tool_names
+    assert (tool_names & AGENT_LOOP_PREVIEW_CAPABILITIES) == {"manual_trade_open", "manual_trade_close"}
 
 
 def test_agent_loop_assignment_status_question_keeps_read_manifest() -> None:
@@ -2742,6 +2774,11 @@ def test_assistant_runtime_renders_analysis_result_compact_warnings() -> None:
     text = render_canonical_tool_result(
         renderer_key="analysis_result",
         data={
+            "source_label": "OM read-only analysis workspace",
+            "columns": ["month", "account", "avg_rate"],
+            "rows": [{"month": "2026-06", "account": "lx", "avg_rate": 0.0123}],
+            "row_count": 1,
+            "truncated": False,
             "fallback_text": (
                 "分析查询结果：1 行\n"
                 "| month | account | avg_rate |\n"
@@ -2781,12 +2818,85 @@ def test_assistant_runtime_renders_analysis_result_compact_warnings() -> None:
         ),
     )
 
-    assert "| 2026-06 | lx | 0.0123 |" in text
+    assert "分析查询结果" not in text
+    assert "| 2026-06 | lx | 0.0123 |" not in text
+    assert "分析完成：共 1 行。" in text
+    assert "1. month=2026-06，account=lx，avg_rate=0.0123" in text
     assert "提示：收益率聚合需复核，avg(net_return_rate) 不能直接代表组合收益率。" in text
     assert "提示：数据新鲜度存在缺失/过期：FUTU missing。" in text
     assert "提示：平仓建议快照缺失：没有找到最近的平仓建议报告。" in text
     assert "覆盖范围：账户 lx；月份 2026-06；视图 account_monthly_performance。" in text
     assert text.endswith("数据来源：OM read-only analysis workspace")
+
+
+def test_assistant_runtime_renders_empty_structured_analysis_without_raw_receipt() -> None:
+    text = render_canonical_tool_result(
+        renderer_key="analysis_result",
+        data={
+            "schema_version": "analysis.query.output.v2",
+            "source_label": "OM read-only analysis workspace",
+            "columns": ["account", "symbol", "net_income_cny"],
+            "rows": [],
+            "row_count": 0,
+            "fallback_text": "分析查询结果：0 行\n| account | symbol | net_income_cny |",
+        },
+        tool_result=build_response(tool_name="analysis_query", ok=True, data={}),
+    )
+
+    assert text == "分析完成：共 0 行。\n数据来源：OM read-only analysis workspace"
+
+
+def test_assistant_runtime_renders_assigned_stock_analysis_result_readably() -> None:
+    text = render_canonical_tool_result(
+        renderer_key="analysis_result",
+        data={
+            "schema_version": "analysis.query.output.v2",
+            "source_label": "OM read-only analysis workspace",
+            "columns": [
+                "account",
+                "symbol",
+                "currency",
+                "status",
+                "shares_remaining",
+                "shares_sold",
+                "stock_cost_per_share",
+                "spot",
+                "assigned_stock_realized_pnl",
+                "option_premium_attribution",
+                "assignment_lifecycle_pnl",
+            ],
+            "rows": [
+                {
+                    "account": "lx",
+                    "symbol": "0700.HK",
+                    "currency": "HKD",
+                    "status": "closed",
+                    "shares_remaining": 0,
+                    "shares_sold": 200,
+                    "stock_cost_per_share": 480,
+                    "spot": None,
+                    "assigned_stock_realized_pnl": -1480,
+                    "option_premium_attribution": 786,
+                    "assignment_lifecycle_pnl": -694,
+                }
+            ],
+            "fallback_text": (
+                "分析查询结果：1 行\n"
+                "| account | symbol | currency | status | shares_remaining | shares_sold | "
+                "stock_cost_per_share | spot | assigned_stock_realized_pnl | "
+                "option_premium_attribution | assignment_lifecycle_pnl |"
+            ),
+        },
+        tool_result=build_response(tool_name="analysis_query", ok=True, data={}),
+    )
+
+    assert "分析查询结果" not in text
+    assert "| account | symbol |" not in text
+    assert "lx · closed · 指派正股 · 0700.HK：1 条" in text
+    assert "正股已实现 HKD -1,480" in text
+    assert "权利金归因 HKD 786" in text
+    assert "生命周期PnL HKD -694" in text
+    assert text.endswith("数据源：OM read-only analysis workspace")
 
 
 def test_assistant_runtime_renders_analysis_result_diagnostic_warnings() -> None:
@@ -3641,7 +3751,8 @@ def test_assistant_runtime_immediate_update_creates_upgrade_permission_when_cont
     assert permission_request["risk_class"] == "preview_admin"
     assert permission_request["apply_allowed"] is False
     assert permission_request["confirm_hint"].startswith("/confirm upgrade ")
-    agent_loop = out["meta"]["assistant"]["llm"]["agent_loop"]
+    llm_trace = out["meta"]["assistant"]["llm"]
+    agent_loop = llm_trace["agent_loop"]
     assert agent_loop["loop_stop_reason"] == "preview_gate"
     assert agent_loop["steps"][0]["tool_name"] == "upgrade_now"
     assert agent_loop["steps"][0]["action_safety"]["requested_effect"] == "preview"
@@ -6423,12 +6534,18 @@ def test_assistant_runtime_retries_empty_continuation_for_income_summary(
     assert event_loop["trace"]["final_answer_retry_reason"] == "empty_continuation"
 
 
-def test_assistant_runtime_replaces_raw_analysis_final_answer_with_user_fallback(
+def test_assistant_runtime_repairs_raw_analysis_final_answer_with_model_retry(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("OM_LLM_API_KEY", "sk-test")
     continuation_calls: list[dict[str, Any]] = []
+    final_text = (
+        "2026-06 lx 的净收益是 123.45。\n\n"
+        "关键依据：\n"
+        "- account=lx。\n"
+        "数据来源：OM read-only analysis workspace"
+    )
 
     def _create_tool_call_response(**_kwargs: Any) -> dict[str, Any]:
         return {
@@ -6451,6 +6568,19 @@ def test_assistant_runtime_replaces_raw_analysis_final_answer_with_user_fallback
 
     def _create_continuation_response(**kwargs: Any) -> dict[str, Any]:
         continuation_calls.append(dict(kwargs))
+        if len(continuation_calls) == 2:
+            payload = kwargs["payload"]
+            assert "tools" not in payload
+            assert "tool_choice" not in payload
+            assert "Do not call any more tools" in payload["instructions"]
+            return {
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": final_text}],
+                    }
+                ]
+            }
         return {
             "output": [
                 {
@@ -6510,17 +6640,18 @@ def test_assistant_runtime_replaces_raw_analysis_final_answer_with_user_fallback
     )
 
     assert out["ok"] is True
-    assert len(continuation_calls) == 1
+    assert len(continuation_calls) == 2
     text = out["data"]["response_text"]
+    assert text == final_text
     assert "分析查询结果" not in text
-    assert "分析完成：共 1 行" in text
     assert "2026-06" in text
     assert "123.45" in text
     event_loop = out["data"]["tool_result"]["data"]["event_loop"]
     trace = event_loop["trace"]
-    assert trace["answer_route"] == "user_fallback"
-    assert trace["answer_verification"]["status"] == "failed"
-    assert "unsupported_raw_tool_receipt" in trace["answer_verification"]["trace"]["violation_types"]
+    assert trace["answer_route"] == "llm_from_tool_observation"
+    assert trace["answer_verification"]["status"] == "passed"
+    assert trace["final_answer_retry_attempted"] is True
+    assert trace["final_answer_retry_reason"] == "answer_guard_unsupported_raw_tool_receipt"
 
 
 def test_assistant_runtime_retries_empty_continuation_for_assigned_stock_summary(
@@ -9591,6 +9722,91 @@ def test_assistant_runtime_provider_symbol_monitor_run_preview_is_no_send(
     assert llm_trace["agent_loop"]["preview_receipt"]["operation_type"] == "monitor_run_now"
 
 
+def test_assistant_runtime_provider_symbol_edit_creates_preview_without_context_clarification(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("OM_LLM_API_KEY", "sk-test")
+    monkeypatch.setenv("OM_INBOUND_OPERATIONS_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_SYMBOL_WRITE_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_ADMIN_OPEN_IDS", "local:local")
+    monkeypatch.setenv("OM_INBOUND_OPERATION_HMAC_KEY", "test-operation-hmac-key")
+
+    provider_calls: list[dict[str, Any]] = []
+
+    def _create_tool_call_response(**kwargs: Any) -> dict[str, Any]:
+        provider_calls.append(dict(kwargs))
+        tool_names = {
+            (tool.get("function") if isinstance(tool.get("function"), dict) else tool).get("name")
+            for tool in kwargs["tools"]
+        }
+        assert "symbol_edit" in tool_names
+        return {
+            "output": [
+                _provider_function_call(
+                    "symbol_edit",
+                    {"symbol": "3690.HK", "set": {"sell_put.max_strike": 65}},
+                )
+            ]
+        }
+
+    def _provider_response_fn(provider: str):
+        assert provider == "openai"
+        return _create_tool_call_response
+
+    monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_response_fn", _provider_response_fn)
+
+    hk_cfg_path, _sqlite_path = _write_agent_loop_trade_runtime_config(tmp_path)
+    hk_cfg = json.loads(hk_cfg_path.read_text(encoding="utf-8"))
+    hk_cfg["symbols"][0]["symbol"] = "3690.HK"
+    hk_cfg["symbols"][0]["sell_put"]["max_strike"] = 70
+    hk_cfg_path.write_text(json.dumps(hk_cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    out = handle_assistant_response(
+        AssistantRequest(
+            text="把3690 sell put 的max strike 改为65",
+            sender_id="local",
+            channel="local",
+            message_id="msg_provider_preview_symbol_edit_3690",
+            conversation_id="local:local",
+            config_key="hk",
+            config_path=str(hk_cfg_path),
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=lambda _tool_name, _payload: pytest.fail("symbol edit preview must not execute through read tool fn"),
+        allowed_senders="local:local",
+        settings=AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        now_fn=lambda: date(2026, 7, 2),
+    )
+
+    assert provider_calls
+    assert out["ok"] is True, out
+    assert out["tool_name"] == "inbound.symbols"
+    assert out["data"]["operation_type"] == "symbol_edit"
+    assert out["data"]["perception"]["source"] == "agent_loop_events"
+    assert out["data"]["perception"]["intent_name"] == "symbol_edit"
+    assert out["data"]["payload"]["arguments"] == {"symbol": "3690.HK", "set": {"sell_put.max_strike": 65}}
+    assert "上一轮上下文不明确" not in out["data"]["response_text"]
+    assert out["data"]["response_text"].startswith("监控标的变更预览：修改")
+    assert "未写入配置" in out["data"]["response_text"]
+    permission_request = out["data"]["permission_request"]
+    assert permission_request["operation_type"] == "symbol_edit"
+    assert permission_request["risk_class"] == "preview_write"
+    assert permission_request["apply_allowed"] is False
+
+    llm_trace = out["meta"]["assistant"]["llm"]
+    assert llm_trace["planner_context_use"]["mode"] == "none"
+    assert llm_trace["context_validation"]["status"] == "passed"
+    assert llm_trace["agent_loop"]["loop_stop_reason"] == "preview_gate"
+    step = llm_trace["agent_loop"]["steps"][0]
+    assert step["tool_name"] == "symbol_edit"
+    assert step["action_safety"]["status"] == "allow_preview"
+    assert step["precheck"]["status"] == "pass"
+    assert llm_trace["agent_loop"]["preview_receipt"]["operation_type"] == "symbol_edit"
+
+
 def test_assistant_runtime_repairs_provider_malformed_assignment_arguments_via_tool_observation(
     monkeypatch: Any,
     tmp_path: Path,
@@ -9610,7 +9826,8 @@ def test_assistant_runtime_repairs_provider_malformed_assignment_arguments_via_t
         assignment_tool = next(tool for tool in kwargs["tools"] if tool["function"]["name"] == "manual_assignment")
         assignment_properties = assignment_tool["function"]["parameters"]["properties"]
         assert "manual_assignment" in tool_names
-        assert "manual_expiry" in tool_names
+        assert "manual_expiry" not in tool_names
+        assert (tool_names & AGENT_LOOP_PREVIEW_CAPABILITIES) == {"manual_assignment"}
         assert "analysis_query" in tool_names
         assert {
             "account",
@@ -10541,6 +10758,53 @@ def test_create_model_turn_events_accepts_provider_final_answer_event() -> None:
     assert result.trace["event_plan"]["task_contract"]["domain"] == "position"
 
 
+def test_create_model_turn_events_repairs_assignment_notice_final_answer_to_preview() -> None:
+    text = (
+        "sy 衍生品提醒: 期权提前被指派通知: 您的保证金综合账户(2905) - "
+        "证券所持有的-1张PDD 260626 78.00P期权已提前被指派，详情请查看资金明细及持仓情况。【富途证券(香港)】"
+    )
+
+    def _create_tool_call_response(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "output": [
+                {
+                    "type": "message",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "这是一条指派通知，需要进入预览流程。",
+                        }
+                    ],
+                }
+            ]
+        }
+
+    result = create_model_turn_events(
+        text,
+        AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        conversation_context={"temporal_context": {"current_date": "2026-06-26", "timezone": "Asia/Shanghai"}},
+        create_tool_call_response_fn=_create_tool_call_response,
+        environ={"OM_LLM_API_KEY": "sk-test"},
+    )
+
+    assert result.error is None
+    steps = _event_plan_steps(result)
+    assert steps == [
+        {
+            "id": "host_repair_manual_assignment",
+            "tool_name": "manual_assignment",
+            "arguments": {},
+            "purpose": "host repair: model_final_answer_for_single_preview_authority",
+        }
+    ]
+    host_repair = result.trace["event_plan"]["host_repair"]
+    assert host_repair["reason"] == "model_final_answer_for_single_preview_authority"
+    assert host_repair["tool_name"] == "manual_assignment"
+    assert host_repair["parent_event_id"] == result.trace["event_model"]["events"][0]["event_id"]
+
+
 def test_create_model_turn_events_preserves_final_answer_finish_reason() -> None:
     def _create_tool_call_response(**_kwargs: Any) -> dict[str, Any]:
         return {
@@ -10617,6 +10881,7 @@ def test_assistant_runtime_rejects_dangling_final_answer(
     tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("OM_LLM_API_KEY", "sk-test")
+    audit_db = tmp_path / "inbound.sqlite3"
 
     def _create_tool_call_response(**_kwargs: Any) -> dict[str, Any]:
         return {"choices": [{"finish_reason": "stop", "message": {"content": "当前可用的 preview capability 只有"}}]}
@@ -10633,7 +10898,7 @@ def test_assistant_runtime_rejects_dangling_final_answer(
             sender_id="local",
             message_id="msg_dangling_final_answer",
             config_key="us",
-            audit_db=str(tmp_path / "inbound.sqlite3"),
+            audit_db=str(audit_db),
         ),
         execute_tool_fn=lambda tool_name, payload: build_response(tool_name=tool_name, ok=True, data={}),
         settings=AssistantSettings(
@@ -10647,13 +10912,43 @@ def test_assistant_runtime_rejects_dangling_final_answer(
     assert "当前可用的 preview capability 只有" not in out["data"]["response_text"]
     event_loop = out["data"]["tool_result"]["data"]["event_loop"]
     assert event_loop["trace"]["answer_verification"]["trace"]["violation_type"] == "incomplete_final_answer"
+    recent = InboundAuditStore(audit_db).list_recent(limit=1)
+    audited = json.loads(str(recent[0]["response_json"]))
+    assert "当前可用的 preview capability 只有" not in audited["data"]["response_text"]
+    assert audited["data"]["tool_result"]["data"]["event_loop"]["trace"]["answer_verification"]["trace"]["violation_type"] == "incomplete_final_answer"
 
 
-def test_assistant_runtime_rejects_preview_request_final_answer_without_tool_call(
+def test_assistant_runtime_repairs_preview_request_final_answer_to_upgrade_permission(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("OM_LLM_API_KEY", "sk-test")
+    monkeypatch.setenv("OM_INBOUND_OPERATIONS_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_UPGRADE_WRITE_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_ADMIN_OPEN_IDS", "local:local")
+    monkeypatch.setenv("OM_INBOUND_OPERATION_HMAC_KEY", "test-operation-hmac-key")
+
+    preview_calls: list[dict[str, Any]] = []
+
+    def _preview_upgrade(args: dict[str, Any]) -> dict[str, Any]:
+        preview_calls.append(dict(args))
+        assert args.get("target_version") is None
+        return {
+            "schema_version": 1,
+            "operation": "upgrade",
+            "ok": True,
+            "status": "planned",
+            "current_version": "1.2.351",
+            "target_version": "1.2.352",
+            "release_tag": "v1.2.352",
+            "repo_root": "/tmp/options-monitor/current",
+            "runtime_root": "/tmp/options-monitor/runtime",
+            "changed": False,
+            "planned_operations": ["materialize v1.2.352", "switch current symlink"],
+            "warnings": [],
+        }
+
+    monkeypatch.setattr("src.application.assistant.upgrade_operations._preview_upgrade", _preview_upgrade)
 
     def _create_tool_call_response(**_kwargs: Any) -> dict[str, Any]:
         return {
@@ -10676,29 +10971,128 @@ def test_assistant_runtime_rejects_preview_request_final_answer_without_tool_cal
 
     monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_response_fn", _provider_response_fn)
 
+    audit_db = tmp_path / "inbound.sqlite3"
     out = handle_assistant_response(
         AssistantRequest(
             text="立即更新",
             sender_id="local",
+            channel="local",
             message_id="msg_upgrade_final_answer_without_tool",
+            conversation_id="local:local",
             config_key="us",
-            audit_db=str(tmp_path / "inbound.sqlite3"),
+            audit_db=str(audit_db),
         ),
-        execute_tool_fn=lambda tool_name, payload: build_response(tool_name=tool_name, ok=True, data={}),
+        execute_tool_fn=lambda _tool_name, _payload: pytest.fail("upgrade preview must be handled by the preview gate"),
+        allowed_senders="local:local",
         settings=AssistantSettings(
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
         now_fn=lambda: date(2026, 7, 2),
     )
 
-    assert out["ok"] is False
-    assert out["error"]["code"] == "ANSWER_VERIFICATION_FAILED"
+    assert preview_calls
+    assert out["ok"] is True, out
+    assert out["tool_name"] == "inbound.upgrade"
+    assert out["data"]["operation_type"] == "upgrade_now"
+    assert out["data"]["perception"]["source"] == "agent_loop_events"
+    assert out["data"]["perception"]["intent_name"] == "upgrade_now"
+    assert out["data"]["payload"]["arguments"]["target_version"] == "1.2.352"
     assert "当前可用的 preview capability 只有" not in out["data"]["response_text"]
-    tool_loop_data = out["data"]["tool_result"]["data"]
-    assert tool_loop_data["task_contract"]["requested_effect"] == "preview_write"
-    event_loop = tool_loop_data["event_loop"]
-    assert event_loop["trace"]["answer_route"] == "answer_verification_failed"
-    assert event_loop["trace"]["answer_verification"]["trace"]["violation_type"] == "missing_required_tool_evidence"
+    assert "升级预览：立即升级" in out["data"]["response_text"]
+    assert "未执行升级" in out["data"]["response_text"]
+    permission_request = out["data"]["permission_request"]
+    assert permission_request["operation_type"] == "upgrade_now"
+    assert permission_request["apply_allowed"] is False
+    llm_trace = out["meta"]["assistant"]["llm"]
+    agent_loop = llm_trace["agent_loop"]
+    assert agent_loop["loop_stop_reason"] == "preview_gate"
+    assert agent_loop["steps"][0]["tool_name"] == "upgrade_now"
+    assert agent_loop["steps"][0]["action_safety"]["requested_effect"] == "preview"
+    assert agent_loop["steps"][0]["purpose"] == "host repair: model_final_answer_for_single_preview_authority"
+    host_repair = llm_trace["event_plan"]["host_repair"]
+    assert host_repair["reason"] == "model_final_answer_for_single_preview_authority"
+    assert host_repair["tool_name"] == "upgrade_now"
+    assert host_repair["parent_event_id"] == llm_trace["event_model"]["events"][0]["event_id"]
+    recent = InboundAuditStore(audit_db).list_recent(limit=1)
+    audited = json.loads(str(recent[0]["response_json"]))
+    assert "升级预览：立即升级" in audited["data"]["response_text"]
+    assert "当前可用的 preview capability 只有" not in audited["data"]["response_text"]
+    assert audited["meta"]["assistant"]["llm"]["event_plan"]["host_repair"] == host_repair
+
+
+def test_assistant_runtime_repairs_immediate_update_read_tool_to_upgrade_permission(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("OM_LLM_API_KEY", "sk-test")
+    monkeypatch.setenv("OM_INBOUND_OPERATIONS_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_UPGRADE_WRITE_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_ADMIN_OPEN_IDS", "local:local")
+    monkeypatch.setenv("OM_INBOUND_OPERATION_HMAC_KEY", "test-operation-hmac-key")
+
+    preview_calls: list[dict[str, Any]] = []
+
+    def _preview_upgrade(args: dict[str, Any]) -> dict[str, Any]:
+        preview_calls.append(dict(args))
+        assert args.get("target_version") is None
+        return {
+            "schema_version": 1,
+            "operation": "upgrade",
+            "ok": True,
+            "status": "planned",
+            "current_version": "1.2.351",
+            "target_version": "1.2.352",
+            "release_tag": "v1.2.352",
+            "repo_root": "/tmp/options-monitor/current",
+            "runtime_root": "/tmp/options-monitor/runtime",
+            "changed": False,
+            "planned_operations": ["materialize v1.2.352", "switch current symlink"],
+            "warnings": [],
+        }
+
+    monkeypatch.setattr("src.application.assistant.upgrade_operations._preview_upgrade", _preview_upgrade)
+
+    def _create_tool_call_response(**_kwargs: Any) -> dict[str, Any]:
+        return {"output": [_provider_function_call("runtime_status", {})]}
+
+    def _provider_response_fn(provider: str):
+        assert provider == "openai"
+        return _create_tool_call_response
+
+    monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_response_fn", _provider_response_fn)
+
+    out = handle_assistant_response(
+        AssistantRequest(
+            text="立即更新",
+            sender_id="local",
+            channel="local",
+            message_id="msg_upgrade_read_tool_repaired_to_preview",
+            conversation_id="local:local",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=lambda _tool_name, _payload: pytest.fail("read tool should be repaired before execution"),
+        allowed_senders="local:local",
+        settings=AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        now_fn=lambda: date(2026, 7, 2),
+    )
+
+    assert preview_calls
+    assert out["ok"] is True, out
+    assert out["tool_name"] == "inbound.upgrade"
+    assert out["data"]["operation_type"] == "upgrade_now"
+    assert out["data"]["payload"]["arguments"]["target_version"] == "1.2.352"
+    llm_trace = out["meta"]["assistant"]["llm"]
+    agent_loop = llm_trace["agent_loop"]
+    assert agent_loop["loop_stop_reason"] == "preview_gate"
+    assert agent_loop["steps"][0]["tool_name"] == "upgrade_now"
+    assert agent_loop["steps"][0]["purpose"] == "host repair: model_read_tool_for_single_preview_authority"
+    host_repair = llm_trace["event_plan"]["host_repair"]
+    assert host_repair["reason"] == "model_read_tool_for_single_preview_authority"
+    assert host_repair["tool_name"] == "upgrade_now"
+    assert host_repair["parent_event_id"] == llm_trace["event_model"]["events"][0]["event_id"]
 
 
 def test_create_model_turn_events_context_composes_symbol_config_edit_followup() -> None:
@@ -11049,6 +11443,42 @@ def test_create_model_turn_events_preserves_multiple_provider_tool_calls() -> No
     assert [step["tool_name"] for step in steps] == ["monthly_income_report", "analysis_query"]
     assert steps[0]["arguments"] == {"month": "2026-06", "include_rows": True}
     assert steps[1]["arguments"] == {"sql": "select month, account from account_monthly_performance limit 5"}
+
+
+def test_create_model_turn_events_rejects_mixed_read_and_preview_tool_calls() -> None:
+    def _create_tool_call_response(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_runtime_1",
+                    "name": "runtime_status",
+                    "arguments": "{}",
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_upgrade_1",
+                    "name": "upgrade_now",
+                    "arguments": "{}",
+                },
+            ]
+        }
+
+    result = create_model_turn_events(
+        "立即升级",
+        AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        conversation_context={"temporal_context": {"current_date": "2026-07-02", "timezone": "Asia/Shanghai"}},
+        create_tool_call_response_fn=_create_tool_call_response,
+        environ={"OM_LLM_API_KEY": "sk-test"},
+    )
+
+    assert result.event_plan is None
+    assert result.error is not None
+    assert result.error.code == "PLAN_UNSUPPORTED_COMPOSITION"
+    assert result.error.details == {"read_steps": 1, "preview_steps": 1}
+    assert result.trace["event_model"]["event_count"] == 2
 
 
 def test_read_only_agent_loop_respects_event_plan_context_error_without_tool_execution() -> None:

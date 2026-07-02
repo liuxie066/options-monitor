@@ -258,26 +258,181 @@ def _first_candidate_event(item: dict[str, Any]) -> str:
 
 def _render_analysis_result(data: dict[str, Any], tool_result: dict[str, Any]) -> str:
     warning_lines = _analysis_result_warning_lines(data, tool_result)
+    columns = [str(item) for item in data.get("columns") or [] if str(item).strip()]
+    rows = [item for item in data.get("rows") or [] if isinstance(item, dict)]
+    assigned_stock = _analysis_result_assigned_stock_lifecycle(data=data, rows=rows, columns=columns)
+    if assigned_stock:
+        return _append_analysis_result_warning_lines(assigned_stock, warning_lines)
+    if rows or columns:
+        return _append_analysis_result_warning_lines(
+            _render_analysis_result_rows(data=data, rows=rows, columns=columns),
+            warning_lines,
+        )
     fallback = str(data.get("fallback_text") or "").strip()
     if fallback:
         return _append_analysis_result_warning_lines(fallback, warning_lines)
-    columns = [str(item) for item in data.get("columns") or [] if str(item).strip()]
-    rows = [item for item in data.get("rows") or [] if isinstance(item, dict)]
-    if not columns:
-        return _append_analysis_result_warning_lines(
-            "分析查询完成：0 行。\n数据来源：OM read-only analysis workspace",
-            warning_lines,
-        )
-    lines = [f"分析查询结果：{len(rows)} 行"]
-    lines.append("| " + " | ".join(columns) + " |")
-    lines.append("| " + " | ".join("---" for _ in columns) + " |")
-    for row in rows[:12]:
-        lines.append("| " + " | ".join(_analysis_cell(row.get(column)) for column in columns) + " |")
-    if len(rows) > 12:
-        lines.append(f"其余 {len(rows) - 12} 行已省略。")
-    lines.extend(warning_lines)
-    lines.append("数据来源：OM read-only analysis workspace")
-    return "\n".join(lines)
+    return _append_analysis_result_warning_lines(
+        "分析查询完成：0 行。\n数据来源：OM read-only analysis workspace",
+        warning_lines,
+    )
+
+
+def _render_analysis_result_rows(*, data: dict[str, Any], rows: list[dict[str, Any]], columns: list[str]) -> str:
+    source = str(data.get("source_label") or "OM read-only analysis workspace").strip()
+    try:
+        row_count = int(data.get("row_count") if data.get("row_count") is not None else len(rows))
+    except Exception:
+        row_count = len(rows)
+    lines = [_analysis_result_summary_line(rows=rows, columns=columns, row_count=row_count)]
+    comparison = _analysis_result_comparison_line(rows=rows)
+    if comparison:
+        lines.append(comparison)
+    else:
+        lines.extend(_analysis_result_row_lines(rows=rows, columns=columns))
+    if bool(data.get("truncated")):
+        lines.append("结果已截断，仅展示可用预览中的关键行。")
+    lines.append(f"数据来源：{source}")
+    return "\n".join(line for line in lines if line).strip()
+
+
+def _analysis_result_summary_line(*, rows: list[dict[str, Any]], columns: list[str], row_count: int) -> str:
+    status_values = _analysis_unique_values(rows, "status")
+    if status_values:
+        return f"分析完成：共 {row_count} 行，状态包括 {', '.join(status_values[:4])}。"
+    higher = _analysis_first_value(rows, "higher_account")
+    if higher:
+        return f"分析完成：共 {row_count} 行，当前对比里 {higher} 更高。"
+    return f"分析完成：共 {row_count} 行。"
+
+
+def _analysis_result_comparison_line(*, rows: list[dict[str, Any]]) -> str:
+    row = rows[0] if rows else {}
+    higher = _analysis_first_value(rows, "higher_account")
+    diff_key = _analysis_first_existing_key(row, ("income_diff_cny", "diff_cny", "difference_cny", "pnl_diff", "amount_diff"))
+    if not higher or not diff_key:
+        return ""
+    parts: list[str] = []
+    month = _analysis_value(row.get("month"))
+    if month != "-":
+        parts.append(month)
+    left_key = _analysis_first_existing_key(row, ("lx_income_cny", "lx_net_income_cny", "lx_amount"))
+    right_key = _analysis_first_existing_key(row, ("sy_income_cny", "sy_net_income_cny", "sy_amount"))
+    if left_key and right_key:
+        parts.append(f"lx={_analysis_value(row.get(left_key))}")
+        parts.append(f"sy={_analysis_value(row.get(right_key))}")
+    parts.append(f"差额={_analysis_value(row.get(diff_key))}")
+    return f"关键差异：{higher} 更高（{'，'.join(parts)}）。"
+
+
+def _analysis_result_row_lines(*, rows: list[dict[str, Any]], columns: list[str]) -> list[str]:
+    display_columns = _analysis_result_display_columns(rows=rows, columns=columns)
+    lines: list[str] = []
+    for index, row in enumerate(rows[:5], start=1):
+        facts = [f"{column}={_analysis_value(row.get(column))}" for column in display_columns if row.get(column) is not None]
+        if facts:
+            lines.append(f"{index}. " + "，".join(facts))
+    if len(rows) > 5:
+        lines.append(f"其余 {len(rows) - 5} 行未展开。")
+    return lines
+
+
+def _analysis_result_display_columns(*, rows: list[dict[str, Any]], columns: list[str]) -> list[str]:
+    if not columns and rows:
+        columns = [str(key) for key in rows[0]]
+    priority = [
+        "month",
+        "account",
+        "symbol",
+        "currency",
+        "status",
+        "component",
+        "summary",
+        "net_income_cny",
+        "net_return_rate",
+        "amount",
+        "amount_gross",
+        "avg_rate",
+    ]
+    ordered = [column for column in priority if column in columns]
+    ordered.extend(column for column in columns if column not in ordered)
+    return ordered[:10]
+
+
+def _analysis_first_existing_key(row: dict[str, Any], keys: tuple[str, ...]) -> str:
+    return next((key for key in keys if key in row), "")
+
+
+def _analysis_first_value(rows: list[dict[str, Any]], key: str) -> str:
+    for row in rows:
+        value = _analysis_value(row.get(key))
+        if value != "-":
+            return value
+    return ""
+
+
+def _analysis_unique_values(rows: list[dict[str, Any]], key: str) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        value = _analysis_value(row.get(key))
+        if value == "-" or value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
+def _analysis_value(value: Any) -> str:
+    if value is None:
+        return "-"
+    if isinstance(value, float):
+        return f"{value:,.6f}".rstrip("0").rstrip(".")
+    return str(value).strip() or "-"
+
+
+def _analysis_result_assigned_stock_lifecycle(
+    *,
+    data: dict[str, Any],
+    rows: list[dict[str, Any]],
+    columns: list[str],
+) -> str:
+    field_set = set(columns)
+    assigned_stock_fields = {
+        "shares_remaining",
+        "shares_sold",
+        "stock_cost_per_share",
+        "assigned_stock_unrealized_pnl",
+        "assigned_stock_realized_pnl",
+        "option_premium_attribution",
+        "assignment_lifecycle_pnl",
+    }
+    if len(field_set & assigned_stock_fields) < 3 or not rows:
+        return ""
+    return _render_assigned_stock_lifecycle(
+        {
+            "rows": rows,
+            "filters": _analysis_result_assigned_stock_filters(rows),
+            "source_label": str(data.get("source_label") or "").strip(),
+        }
+    )
+
+
+def _analysis_result_assigned_stock_filters(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for field in ("account", "status", "symbol"):
+        values: list[str] = []
+        seen: set[str] = set()
+        for row in rows:
+            value = _value(row.get(field))
+            if value == "-" or value in seen:
+                continue
+            seen.add(value)
+            values.append(value)
+        if len(values) == 1:
+            out[field] = values[0]
+        elif field in {"account", "status"}:
+            out[field] = "all"
+    return out
 
 
 def _float_or_none(value: Any) -> float | None:
@@ -364,7 +519,7 @@ def _append_analysis_result_warning_lines(text: str, warning_lines: list[str]) -
     if not warning_lines:
         return text
     lines = text.rstrip().splitlines()
-    if lines and lines[-1].startswith("数据来源："):
+    if lines and (lines[-1].startswith("数据来源：") or lines[-1].startswith("数据源：")):
         return "\n".join([*lines[:-1], *warning_lines, lines[-1]])
     return "\n".join([*lines, *warning_lines])
 
@@ -1021,6 +1176,7 @@ def _render_positions(data: dict[str, Any]) -> str:
 def _render_assigned_stock_lifecycle(data: dict[str, Any]) -> str:
     rows = _list(data.get("rows") or data.get("assigned_stock_lots"))
     filters = _dict(data.get("filters"))
+    source_label = str(data.get("source_label") or "OM 本地 SQLite assigned_stock_events + trade_events").strip()
     account = _value(filters.get("account") or "all")
     status = _value(filters.get("status") or "open")
     symbol = _value(filters.get("symbol"))
@@ -1034,7 +1190,7 @@ def _render_assigned_stock_lifecycle(data: dict[str, Any]) -> str:
         refresh_status = str(quote_refresh.get("status") or "").strip()
         if refresh_status:
             lines.append(f"报价刷新：{refresh_status}")
-        lines.append("数据源：OM 本地 SQLite assigned_stock_events + trade_events")
+        lines.append(f"数据源：{source_label}")
         return "\n".join(lines)
 
     lines = [f"{scope}：{len(rows)} 条"]
@@ -1068,7 +1224,7 @@ def _render_assigned_stock_lifecycle(data: dict[str, Any]) -> str:
     if warnings:
         lines.append("提示：" + "；".join(warnings[:3]))
     lines.append("口径：正股成本按真实交割价记录，不扣除 Sell Put 权利金；生命周期PnL 才包含权利金归因。")
-    lines.append("数据源：OM 本地 SQLite assigned_stock_events + trade_events")
+    lines.append(f"数据源：{source_label}")
     return "\n".join(lines)
 
 
@@ -1132,6 +1288,7 @@ def _assigned_stock_detail_line(idx: int, row_raw: Any, *, show_account: bool) -
     spot = _money(row.get("spot"), currency)
     unrealized = _money(row.get("assigned_stock_unrealized_pnl"), currency)
     realized = _money(row.get("assigned_stock_realized_pnl"), currency)
+    premium = _money(row.get("option_premium_attribution"), currency)
     lifecycle = _money(row.get("assignment_lifecycle_pnl"), currency)
 
     holding = f"剩余 {shares_remaining} 股"
@@ -1151,6 +1308,8 @@ def _assigned_stock_detail_line(idx: int, row_raw: Any, *, show_account: bool) -
     parts.append(f"正股浮盈亏 {unrealized}")
     if not _is_zero_number(row.get("assigned_stock_realized_pnl")):
         parts.append(f"正股已实现 {realized}")
+    if not _is_zero_number(row.get("option_premium_attribution")):
+        parts.append(f"权利金归因 {premium}")
     parts.append(f"生命周期PnL {lifecycle}")
     return " · ".join(parts)
 
@@ -1173,6 +1332,7 @@ def _assigned_stock_summary_lines(rows: list[Any]) -> list[str]:
         "remaining_market_value": "市值",
         "assigned_stock_unrealized_pnl": "正股浮盈亏",
         "assigned_stock_realized_pnl": "正股已实现",
+        "option_premium_attribution": "权利金归因",
         "assignment_lifecycle_pnl": "生命周期PnL",
     }
     for row_raw in rows:
