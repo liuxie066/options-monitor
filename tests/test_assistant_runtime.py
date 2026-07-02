@@ -6423,6 +6423,106 @@ def test_assistant_runtime_retries_empty_continuation_for_income_summary(
     assert event_loop["trace"]["final_answer_retry_reason"] == "empty_continuation"
 
 
+def test_assistant_runtime_replaces_raw_analysis_final_answer_with_user_fallback(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("OM_LLM_API_KEY", "sk-test")
+    continuation_calls: list[dict[str, Any]] = []
+
+    def _create_tool_call_response(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_analysis_1",
+                    "name": "analysis_query",
+                    "arguments": (
+                        '{"sql":"select month, account, net_income_cny from account_monthly_performance",'
+                        '"limit":20}'
+                    ),
+                }
+            ]
+        }
+
+    def _provider_response_fn(provider: str):
+        assert provider == "openai"
+        return _create_tool_call_response
+
+    def _create_continuation_response(**kwargs: Any) -> dict[str, Any]:
+        continuation_calls.append(dict(kwargs))
+        return {
+            "output": [
+                {
+                    "type": "message",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": (
+                                "分析查询结果：1 行\n"
+                                "| month | account | net_income_cny |\n"
+                                "| --- | --- | --- |\n"
+                                "| 2026-06 | lx | 123.45 |\n"
+                                "数据来源：OM read-only analysis workspace"
+                            ),
+                        }
+                    ],
+                }
+            ]
+        }
+
+    def _provider_payload_response_fn(provider: str):
+        assert provider == "openai"
+        return _create_continuation_response
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        assert tool_name == "analysis_query"
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "source_label": "OM read-only analysis workspace",
+                "query": {"sql": payload["sql"], "limit": payload.get("limit")},
+                "columns": ["month", "account", "net_income_cny"],
+                "rows": [{"month": "2026-06", "account": "lx", "net_income_cny": 123.45}],
+                "row_count": 1,
+                "truncated": False,
+                "views_used": ["account_monthly_performance"],
+            },
+        )
+
+    monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_response_fn", _provider_response_fn)
+    monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_payload_response_fn", _provider_payload_response_fn)
+
+    out = handle_assistant_response(
+        AssistantRequest(
+            text="6月收益分析",
+            sender_id="local",
+            message_id="msg_agent_loop_raw_analysis_receipt",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        now_fn=lambda: date(2026, 7, 3),
+    )
+
+    assert out["ok"] is True
+    assert len(continuation_calls) == 1
+    text = out["data"]["response_text"]
+    assert "分析查询结果" not in text
+    assert "分析完成：共 1 行" in text
+    assert "2026-06" in text
+    assert "123.45" in text
+    event_loop = out["data"]["tool_result"]["data"]["event_loop"]
+    trace = event_loop["trace"]
+    assert trace["answer_route"] == "user_fallback"
+    assert trace["answer_verification"]["status"] == "failed"
+    assert "unsupported_raw_tool_receipt" in trace["answer_verification"]["trace"]["violation_types"]
+
+
 def test_assistant_runtime_retries_empty_continuation_for_assigned_stock_summary(
     monkeypatch: Any,
     tmp_path: Path,

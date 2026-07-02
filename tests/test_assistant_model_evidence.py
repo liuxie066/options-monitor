@@ -244,6 +244,39 @@ def test_event_final_answer_verifier_rejects_claim_that_observed_analysis_rows_a
     assert "2,414" in verification.fallback_text
 
 
+def test_event_final_answer_verifier_rejects_raw_analysis_receipt() -> None:
+    adapter = _analysis_adapter()
+    model_evidence = build_model_evidence_bundle(
+        question="6月收益总结",
+        task_contract={"goal": "总结 2026-06 收益", "scope": {"months": ["2026-06"]}},
+        tool_results=[adapter],
+    )
+    raw_receipt = ModelFinalAnswerEvent(
+        event_id="answer_raw_analysis_receipt",
+        parent_event_id=model_evidence.evidence_event.event_id,
+        answer_text=(
+            "分析查询结果：2 行\n"
+            "| month | account | net_income_cny |\n"
+            "| --- | --- | --- |\n"
+            "| 2026-06 | lx | 2,414 |\n"
+            "| 2026-06 | sy | 11,138 |\n"
+            "数据来源：OM read-only analysis workspace"
+        ),
+    )
+
+    verification = verify_model_final_answer(
+        answer_event=raw_receipt,
+        model_evidence=model_evidence,
+        tool_results=[adapter],
+    )
+
+    assert verification.passed is False
+    assert any(item["type"] == "unsupported_raw_tool_receipt" for item in verification.guard["violations"])
+    assert "分析查询结果" not in verification.fallback_text
+    assert "分析完成：共 2 行" in verification.fallback_text
+    assert "2,414" in verification.fallback_text
+
+
 def test_event_observation_uses_normalized_payload_for_payload_dependent_contract() -> None:
     adapter = _income_adapter()
 

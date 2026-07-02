@@ -69,7 +69,7 @@ def _turn_render_route(*, response: dict[str, Any], route: str, data: dict[str, 
     if status in {"needs_user_input", "clarify", "clarification"}:
         return "clarification"
     answer_route = str(agent_loop.get("answer_route") or "").strip()
-    if answer_route == "canonical_renderer":
+    if answer_route in {"canonical_renderer", "user_fallback"}:
         return "canonical_renderer"
     if answer_route in {"llm_from_evidence", "model_final_answer"}:
         return "llm_verified"
