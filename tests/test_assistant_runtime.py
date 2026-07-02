@@ -5993,6 +5993,118 @@ def test_assistant_runtime_agent_loop_analyzes_assigned_stock_when_requested(tmp
     assert tool_plan_data["final_response"]["reason"] == "awaiting_model_continuation"
 
 
+def test_assistant_runtime_retries_empty_continuation_for_income_summary(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("OM_LLM_API_KEY", "sk-test")
+    provider_calls: list[dict[str, Any]] = []
+    continuation_calls: list[dict[str, Any]] = []
+    tool_calls: list[tuple[str, dict[str, Any]]] = []
+    final_text = "6月收益总结：lx 净收益 CNY 123.45，主要来自当前查询到的月度汇总结果；数据源是 OM 只读收益数据。"
+
+    def _create_tool_call_response(**kwargs: Any) -> dict[str, Any]:
+        provider_calls.append(dict(kwargs))
+        return {
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_analysis_1",
+                    "name": "analysis_query",
+                    "arguments": (
+                        '{"sql":"select month, account, net_income_cny from account_monthly_performance",'
+                        '"limit":20}'
+                    ),
+                }
+            ]
+        }
+
+    def _provider_response_fn(provider: str):
+        assert provider == "openai"
+        return _create_tool_call_response
+
+    def _create_continuation_response(**kwargs: Any) -> dict[str, Any]:
+        continuation_calls.append(dict(kwargs))
+        payload = kwargs["payload"]
+        if len(continuation_calls) == 1:
+            return {"output": []}
+        assert "tools" not in payload
+        assert "tool_choice" not in payload
+        assert "Do not call any more tools" in payload["instructions"]
+        assert "only allowed evidence" in payload["instructions"]
+        return {
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": final_text}],
+                }
+            ]
+        }
+
+    def _provider_payload_response_fn(provider: str):
+        assert provider == "openai"
+        return _create_continuation_response
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        tool_calls.append((tool_name, payload))
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "source_label": "OM read-only analysis workspace",
+                "query": {"sql": payload["sql"], "limit": payload.get("limit")},
+                "columns": ["month", "account", "net_income_cny"],
+                "rows": [{"month": "2026-06", "account": "lx", "net_income_cny": 123.45}],
+                "row_count": 1,
+                "truncated": False,
+                "views_used": ["account_monthly_performance"],
+            },
+        )
+
+    monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_response_fn", _provider_response_fn)
+    monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_payload_response_fn", _provider_payload_response_fn)
+
+    out = handle_assistant_response(
+        AssistantRequest(
+            text="6月收益分析",
+            sender_id="local",
+            message_id="msg_agent_loop_income_empty_continuation",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        now_fn=lambda: date(2026, 7, 2),
+    )
+
+    assert out["ok"] is True
+    assert provider_calls
+    assert len(continuation_calls) == 2
+    assert tool_calls == [
+        (
+            "analysis_query",
+            {
+                "sql": "select month, account, net_income_cny from account_monthly_performance",
+                "limit": 20,
+                "config_key": "us",
+            },
+        )
+    ]
+    assert out["data"]["response_text"] == final_text
+    assert not out["data"]["response_text"].startswith("分析查询结果")
+    tool_result = out["data"]["tool_result"]
+    assert tool_result["data"]["final_response"]["status"] == "synthesized"
+    assert tool_result["data"]["final_response"]["final_answer_retry_attempted"] is True
+    assert tool_result["data"]["final_response"]["final_answer_retry_reason"] == "empty_continuation"
+    event_loop = tool_result["data"]["event_loop"]
+    assert event_loop["trace"]["continuation_count"] == 2
+    assert event_loop["trace"]["loop_stop_reason"] == "model_final_answer"
+    assert event_loop["trace"]["final_answer_retry_attempted"] is True
+    assert event_loop["trace"]["final_answer_retry_reason"] == "empty_continuation"
+
+
 def test_assistant_runtime_retries_empty_continuation_for_assigned_stock_summary(
     monkeypatch: Any,
     tmp_path: Path,
@@ -6114,9 +6226,13 @@ def test_assistant_runtime_retries_empty_continuation_for_assigned_stock_summary
     assert not out["data"]["response_text"].startswith("lx · open · 指派正股")
     tool_result = out["data"]["tool_result"]
     assert tool_result["data"]["final_response"]["status"] == "synthesized"
+    assert tool_result["data"]["final_response"]["final_answer_retry_attempted"] is True
+    assert tool_result["data"]["final_response"]["final_answer_retry_reason"] == "empty_continuation"
     event_loop = tool_result["data"]["event_loop"]
     assert event_loop["trace"]["continuation_count"] == 2
     assert event_loop["trace"]["loop_stop_reason"] == "model_final_answer"
+    assert event_loop["trace"]["final_answer_retry_attempted"] is True
+    assert event_loop["trace"]["final_answer_retry_reason"] == "empty_continuation"
 
 
 def test_assistant_runtime_agent_loop_assigned_stock_falls_back_from_invented_amount(tmp_path: Path) -> None:

@@ -44,6 +44,7 @@ def _income_tool_result(model_event: ModelToolCallEvent | None = None) -> ToolRe
         tool_call_id=event.tool_call_id,
         tool_name=event.tool_name,
         normalized_payload={**event.arguments, "config_key": "us"},
+        output_contract={"canonical_renderer": "monthly_income", "source_label": "OM 本地账本"},
         raw_result=build_response(
             tool_name=event.tool_name,
             ok=True,
@@ -76,6 +77,7 @@ def _analysis_tool_result(model_event: ModelToolCallEvent | None = None) -> Tool
         tool_call_id=event.tool_call_id,
         tool_name=event.tool_name,
         normalized_payload={**event.arguments, "config_key": "us"},
+        output_contract={"canonical_renderer": "analysis_result", "source_label": "OM read-only analysis workspace"},
         raw_result=build_response(
             tool_name=event.tool_name,
             ok=True,
@@ -116,6 +118,8 @@ def test_openai_responses_continuation_input_binds_original_tool_call_id() -> No
     assert output["is_error"] is False
     assert output["content"]["tool_name"] == "monthly_income_report"
     assert output["content"]["data_summary"]["row_count"] == 1
+    assert output["content"]["output_contract"]["canonical_renderer"] == "monthly_income"
+    assert output["content"]["continuation_advice"]["may_request_more_read_tools"] is True
 
 
 def test_continuation_observation_includes_analysis_query_rows_preview() -> None:
@@ -130,6 +134,10 @@ def test_continuation_observation_includes_analysis_query_rows_preview() -> None
     assert preview["rows"][0] == {"month": "2026-06", "account": "lx", "net_income_cny": 2414.0}
     assert preview["rows"][1]["net_income_cny"] == 11138.0
     assert "sql" not in json.dumps(preview, ensure_ascii=False).lower()
+    assert output["content"]["data_quality"]["row_count"] == 2
+    assert output["content"]["data_quality"]["preview_completeness"]["rows_complete"] is True
+    assert output["content"]["query_scope"]["views_used"] == ["account_monthly_performance"]
+    assert output["content"]["output_contract"]["canonical_renderer"] == "analysis_result"
 
 
 def test_continuation_analysis_preview_keeps_moderate_result_rows_complete() -> None:

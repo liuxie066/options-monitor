@@ -361,6 +361,7 @@ def test_tool_result_adapter_splits_raw_result_from_model_observation() -> None:
         tool_name="monthly_income_report",
         normalized_payload={"month": "2026-06", "include_rows": True},
         guard_decision=guard,
+        output_contract={"canonical_renderer": "monthly_income", "source_label": "OM 本地账本"},
         raw_result={
             "schema_version": "1.0",
             "tool_name": "monthly_income_report",
@@ -387,6 +388,10 @@ def test_tool_result_adapter_splits_raw_result_from_model_observation() -> None:
     assert event_payload["ok"] is True
     assert observation["schema_version"] == "om-assistant-model-observation-v1"
     assert observation["data_summary"]["row_count"] == 2
+    assert observation["data_quality"]["row_count"] == 2
+    assert observation["data_quality"]["missing_data_count"] == 0
+    assert observation["continuation_advice"]["may_request_more_read_tools"] is True
+    assert observation["output_contract"]["canonical_renderer"] == "monthly_income"
     assert "internal_sql" not in observation["data_summary"]["keys"]
     assert "artifact_path" not in observation["data_summary"]["keys"]
     assert "select * from internal_table" not in str(observation)
@@ -425,6 +430,8 @@ def test_tool_result_adapter_previews_symbol_config_values_for_model() -> None:
     observation = adapted.event.provider_tool_result_payload()["content"]
 
     assert observation["data_summary"]["keys"] == ["canonical_symbol", "found", "strategies", "symbol"]
+    assert observation["output_contract"]["canonical_renderer"] == "symbol_config"
+    assert observation["query_scope"]["payload"]["symbol"] == "中国海洋石油"
     assert observation["data_preview"]["canonical_symbol"] == "0883.HK"
     assert observation["data_preview"]["strategies"]["sell_put"]["max_strike"] == 20
     assert "_explicit_fields" not in observation["data_preview"]["strategies"]["combo_yield"]

@@ -1250,7 +1250,47 @@ def run_assistant_tool_event_loop(
     tool_call_count = 0
     continuation_count = 0
     final_answer_retry_attempted = False
+    final_answer_retry_reason = ""
     current_continuation_base_payload = dict(continuation_base_payload or {}) if continuation_base_payload is not None else None
+
+    def _try_final_answer_retry(
+        *,
+        reason: str,
+        results: tuple[tuple[ModelToolCallEvent, ToolResultEvent], ...],
+        parent_event_id: str,
+    ) -> AgentToolError | None:
+        nonlocal pending_events
+        nonlocal continuation_count
+        nonlocal current_continuation_base_payload
+        nonlocal final_answer_retry_attempted
+        nonlocal final_answer_retry_reason
+
+        final_answer_retry_attempted = True
+        final_answer_retry_reason = reason
+        try:
+            retry_continuation = continue_model_after_tool_results(
+                provider=provider,
+                create_response_fn=create_continuation_response_fn,
+                results=results,
+                base_payload=_final_answer_only_continuation_base_payload(
+                    provider=provider,
+                    base_payload=current_continuation_base_payload,
+                ),
+                parent_event_id=parent_event_id,
+            )
+        except (OpenAIResponsesError, OpenAIChatCompletionsError) as err:
+            return AgentToolError(
+                code="LLM_PROVIDER_ERROR",
+                message="LLM continuation provider failed.",
+                details={"provider": provider, "http_status": err.http_status},
+            )
+        except AgentToolError as err:
+            return err
+
+        continuation_count += 1
+        current_continuation_base_payload = dict(retry_continuation.request_payload)
+        pending_events = tuple(retry_continuation.events)
+        return None
 
     while True:
         if not pending_events:
@@ -1261,7 +1301,14 @@ def run_assistant_tool_event_loop(
                 task_contract=task_contract,
                 transcript=transcript,
                 tool_results=tool_results,
-                trace_extra={"planner_plan_used": False, "continuation_count": continuation_count},
+                trace_extra={
+                    "planner_plan_used": False,
+                    "continuation_count": continuation_count,
+                    **_final_answer_retry_trace(
+                        attempted=final_answer_retry_attempted,
+                        reason=final_answer_retry_reason,
+                    ),
+                },
             )
 
         first = pending_events[0]
@@ -1295,6 +1342,10 @@ def run_assistant_tool_event_loop(
                     "planner_plan_used": False,
                     "continuation_count": continuation_count,
                     "answer_verification": verification.public_payload(),
+                    **_final_answer_retry_trace(
+                        attempted=final_answer_retry_attempted,
+                        reason=final_answer_retry_reason,
+                    ),
                 },
             )
 
@@ -1321,7 +1372,14 @@ def run_assistant_tool_event_loop(
                 task_contract=task_contract,
                 transcript=transcript,
                 tool_results=tool_results,
-                trace_extra={"planner_plan_used": False, "continuation_count": continuation_count},
+                trace_extra={
+                    "planner_plan_used": False,
+                    "continuation_count": continuation_count,
+                    **_final_answer_retry_trace(
+                        attempted=final_answer_retry_attempted,
+                        reason=final_answer_retry_reason,
+                    ),
+                },
             )
 
         turn_executions: list[GuardedModelToolCallExecution] = []
@@ -1414,6 +1472,7 @@ def run_assistant_tool_event_loop(
                 continuation_base_payload_for_turn = current_continuation_base_payload
                 if final_answer_only_continuation:
                     final_answer_retry_attempted = True
+                    final_answer_retry_reason = final_answer_retry_reason or "duplicate_call"
                     continuation_base_payload_for_turn = _final_answer_only_continuation_base_payload(
                         provider=provider,
                         base_payload=current_continuation_base_payload,
@@ -1442,6 +1501,10 @@ def run_assistant_tool_event_loop(
                         "planner_plan_used": False,
                         "continuation_count": continuation_count,
                         "continuation_error": build_error_payload(continuation_error),
+                        **_final_answer_retry_trace(
+                            attempted=final_answer_retry_attempted,
+                            reason=final_answer_retry_reason,
+                        ),
                     },
                 )
             except AgentToolError as err:
@@ -1456,8 +1519,12 @@ def run_assistant_tool_event_loop(
                         "planner_plan_used": False,
                         "continuation_count": continuation_count,
                         "continuation_error": build_error_payload(err),
+                        **_final_answer_retry_trace(
+                            attempted=final_answer_retry_attempted,
+                            reason=final_answer_retry_reason,
+                        ),
                     },
-                    )
+                )
             continuation_count += 1
             current_continuation_base_payload = dict(continuation.request_payload)
             pending_events = tuple(continuation.events)
@@ -1466,20 +1533,29 @@ def run_assistant_tool_event_loop(
                 task_contract=task_contract,
                 tool_results=tool_results,
             ):
-                final_answer_retry_attempted = True
-                retry_continuation = continue_model_after_tool_results(
-                    provider=provider,
-                    create_response_fn=create_continuation_response_fn,
+                retry_error = _try_final_answer_retry(
+                    reason="empty_continuation",
                     results=successful_results,
-                    base_payload=_final_answer_only_continuation_base_payload(
-                        provider=provider,
-                        base_payload=current_continuation_base_payload,
-                    ),
                     parent_event_id=turn_executions[-1].result_adapter.event.event_id,
                 )
-                continuation_count += 1
-                current_continuation_base_payload = dict(retry_continuation.request_payload)
-                pending_events = tuple(retry_continuation.events)
+                if retry_error is not None:
+                    return _assistant_tool_loop_outcome(
+                        status="stopped",
+                        stop_reason=_continuation_error_stop_reason(retry_error),
+                        question=question,
+                        task_contract=task_contract,
+                        transcript=transcript,
+                        tool_results=tool_results,
+                        trace_extra={
+                            "planner_plan_used": False,
+                            "continuation_count": continuation_count,
+                            "continuation_error": build_error_payload(retry_error),
+                            **_final_answer_retry_trace(
+                                attempted=final_answer_retry_attempted,
+                                reason=final_answer_retry_reason,
+                            ),
+                        },
+                    )
             if tool_call_count >= int(max_tool_calls) and any(
                 isinstance(event, ModelToolCallEvent) for event in pending_events
             ):
@@ -1487,20 +1563,29 @@ def run_assistant_tool_event_loop(
                     task_contract=task_contract,
                     tool_results=tool_results,
                 ):
-                    final_answer_retry_attempted = True
-                    retry_continuation = continue_model_after_tool_results(
-                        provider=provider,
-                        create_response_fn=create_continuation_response_fn,
+                    retry_error = _try_final_answer_retry(
+                        reason="tool_budget_exhausted",
                         results=successful_results,
-                        base_payload=_final_answer_only_continuation_base_payload(
-                            provider=provider,
-                            base_payload=current_continuation_base_payload,
-                        ),
                         parent_event_id=turn_executions[-1].result_adapter.event.event_id,
                     )
-                    continuation_count += 1
-                    current_continuation_base_payload = dict(retry_continuation.request_payload)
-                    pending_events = tuple(retry_continuation.events)
+                    if retry_error is not None:
+                        return _assistant_tool_loop_outcome(
+                            status="stopped",
+                            stop_reason=_continuation_error_stop_reason(retry_error),
+                            question=question,
+                            task_contract=task_contract,
+                            transcript=transcript,
+                            tool_results=tool_results,
+                            trace_extra={
+                                "planner_plan_used": False,
+                                "continuation_count": continuation_count,
+                                "continuation_error": build_error_payload(retry_error),
+                                **_final_answer_retry_trace(
+                                    attempted=final_answer_retry_attempted,
+                                    reason=final_answer_retry_reason,
+                                ),
+                            },
+                        )
                     continue
                 return _assistant_tool_loop_outcome(
                     status="stopped",
@@ -1560,6 +1645,7 @@ def _assistant_tool_loop_outcome(
         final_answer_event=final_answer_event,
     )
     trace_extra_payload = dict(trace_extra or {})
+    evidence_summary = _assistant_tool_loop_trace_evidence_summary(resolved_evidence)
     trace = {
         "schema_version": "om-assistant-tool-loop-trace-v1",
         "status": status,
@@ -1579,9 +1665,16 @@ def _assistant_tool_loop_outcome(
             continuation_count=int(trace_extra_payload.get("continuation_count") or 0),
         ),
         "capability_selection": _assistant_tool_loop_capability_selection(events),
+        "read_agent_mode": _assistant_tool_loop_read_agent_mode(task_contract),
+        "evidence_summary": evidence_summary,
         "planner_plan_used": False,
     }
     trace.update(trace_extra_payload)
+    trace["stop_category"] = _assistant_tool_loop_stop_category(
+        status=status,
+        stop_reason=stop_reason,
+        trace=trace,
+    )
     return AssistantToolLoopOutcome(
         status=status,
         stop_reason=stop_reason,
@@ -1681,6 +1774,64 @@ def _assistant_tool_loop_capability_selection(events: tuple[Any, ...]) -> dict[s
     }
 
 
+def _assistant_tool_loop_read_agent_mode(task_contract: dict[str, Any]) -> str:
+    requested_effect = str(task_contract.get("requested_effect") or "read").strip()
+    if requested_effect in {"", "read", "none"}:
+        return "model_driven_read_loop"
+    if requested_effect in {"preview", "preview_write"}:
+        return "preview_boundary"
+    return "write_boundary"
+
+
+def _assistant_tool_loop_trace_evidence_summary(evidence: ModelEvidenceBundle | None) -> dict[str, Any]:
+    if evidence is None:
+        return {
+            "fact_count": 0,
+            "dataset_count": 0,
+            "diagnostic_count": 0,
+            "missing_data_count": 0,
+            "conflict_count": 0,
+        }
+    payload = evidence.evidence_bundle.trace_payload()
+    return {
+        key: payload.get(key)
+        for key in (
+            "fact_count",
+            "dataset_count",
+            "diagnostic_count",
+            "missing_data_count",
+            "conflict_count",
+            "sources",
+            "tools",
+            "diagnostic_domains",
+        )
+        if payload.get(key) not in (None, "", [], {})
+    }
+
+
+def _assistant_tool_loop_stop_category(*, status: str, stop_reason: str, trace: dict[str, Any]) -> str:
+    if stop_reason == "model_final_answer":
+        return "model_final_answer"
+    if status == "needs_clarification" or stop_reason == "clarification_request":
+        return "clarification_request"
+    if status == "preview_requested" or stop_reason == "preview_gate":
+        return "preview_gate"
+    if stop_reason == "answer_verification_failed":
+        return "answer_verification_failed"
+    if stop_reason == "tool_budget_exhausted":
+        evidence_summary = trace.get("evidence_summary") if isinstance(trace.get("evidence_summary"), dict) else {}
+        return "tool_budget_exhausted_with_evidence" if evidence_summary.get("dataset_count") else "tool_budget_exhausted"
+    if trace.get("guard_denial_recoverable") is False:
+        return "unrecoverable_guard_denial"
+    if trace.get("guard_denial_recoverable") is True:
+        return "recoverable_guard_denial"
+    if stop_reason in {"continuation_provider_error", "repeated_recoverable_error", "invalid_model_event"}:
+        return stop_reason
+    if status == "stopped":
+        return "loop_stopped"
+    return status or stop_reason or "unknown"
+
+
 def _assistant_tool_loop_evidence(
     *,
     question: str,
@@ -1753,6 +1904,21 @@ def _successful_execution_results(
         for execution in executions
         if execution.ok
     )
+
+
+def _final_answer_retry_trace(*, attempted: bool, reason: str) -> dict[str, Any]:
+    if not attempted:
+        return {}
+    trace: dict[str, Any] = {"final_answer_retry_attempted": True}
+    if reason:
+        trace["final_answer_retry_reason"] = reason
+    return trace
+
+
+def _continuation_error_stop_reason(error: AgentToolError) -> str:
+    if str(error.code or "") == "LLM_PROVIDER_ERROR":
+        return "continuation_provider_error"
+    return str(error.code or "invalid_model_event").lower()
 
 
 def execute_tool_loop_payload(
@@ -1836,6 +2002,11 @@ def _build_tool_loop_response_from_outcome(
         "canonical_renderer_required": not bool(outcome.final_answer),
         "llm_may_summarize": bool(outcome.final_answer),
     }
+    if outcome.trace.get("final_answer_retry_attempted"):
+        final_response["final_answer_retry_attempted"] = True
+    retry_reason = str(outcome.trace.get("final_answer_retry_reason") or "").strip()
+    if retry_reason:
+        final_response["final_answer_retry_reason"] = retry_reason
     observations = (
         [dict(item) for item in outcome.evidence.observations]
         if outcome.evidence is not None
@@ -1932,8 +2103,9 @@ def _final_answer_only_continuation_base_payload(*, provider: str, base_payload:
     payload.pop("tools", None)
     payload.pop("tool_choice", None)
     instruction = (
-        "A requested tool call duplicated evidence that is already available. Do not call any more tools. "
-        "Produce one natural user-facing final answer using only the existing tool observations."
+        "The existing tool observations are the only allowed evidence for this answer. Do not call any more tools. "
+        "Produce one natural user-facing final answer using only those observations. "
+        "If useful data is missing, say that explicitly instead of inventing it."
     )
     if provider_api_kind(provider) == "chat_completions":
         messages = payload.get("messages")

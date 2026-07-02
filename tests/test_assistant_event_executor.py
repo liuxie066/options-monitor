@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from src.application.agent_tool_contracts import build_response
@@ -289,6 +290,9 @@ def test_run_assistant_tool_event_loop_returns_event_outcome_without_planner_pla
     trace = outcome.public_payload()["trace"]
     assert trace["planner_plan_used"] is False
     assert trace["loop_stop_reason"] == "awaiting_model_continuation"
+    assert trace["stop_category"] == "loop_stopped"
+    assert trace["read_agent_mode"] == "model_driven_read_loop"
+    assert trace["evidence_summary"]["dataset_count"] == 1
     assert trace["tool_call_count"] == 1
     assert trace["repair_attempted"] is False
     assert trace["capability_selection"]["selected"][0]["tool_name"] == "monthly_income_report"
@@ -353,7 +357,242 @@ def test_run_assistant_tool_event_loop_continues_to_final_answer() -> None:
     assert trace["answer_verification"]["status"] == "passed"
     assert trace["answer_route"] == "llm_from_tool_observation"
     assert trace["loop_stop_reason"] == "model_final_answer"
+    assert trace["stop_category"] == "model_final_answer"
     assert trace["scope_source"] == "task_contract"
+
+
+def test_run_assistant_tool_event_loop_multihop_income_report_to_analysis_query() -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+    continuation_payloads: list[dict[str, Any]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        if tool_name == "monthly_income_report":
+            return build_response(
+                tool_name=tool_name,
+                ok=True,
+                data={
+                    "summary": [{"month": "2026-06", "account": "lx", "currency": "USD", "net_cashflow_gross": 520}],
+                    "return_summary": [{"month": "2026-06", "account": "lx", "net_income_cny": 3720, "net_return_rate": 0.012}],
+                    "row_count": 1,
+                    "filters": {"month": "2026-06", "account": "lx"},
+                },
+            )
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "schema_version": "analysis.query.output.v2",
+                "source_label": "OM read-only analysis workspace",
+                "columns": ["month", "account", "component", "amount_cny"],
+                "rows": [
+                    {"month": "2026-06", "account": "lx", "component": "premium_income", "amount_cny": 3720}
+                ],
+                "row_count": 1,
+                "truncated": False,
+                "views_used": ["account_monthly_income_components"],
+            },
+        )
+
+    def _continue(payload: dict[str, Any]) -> dict[str, Any]:
+        continuation_payloads.append(payload)
+        if len(continuation_payloads) == 1:
+            tool_outputs = [
+                json.loads(item["output"])
+                for item in payload["input"]
+                if item.get("type") == "function_call_output"
+            ]
+            observation = tool_outputs[-1]["content"]
+            assert observation["output_contract"]["canonical_renderer"] == "monthly_income"
+            assert observation["data_quality"]["row_count"] == 1
+            assert observation["query_scope"]["payload"]["month"] == "2026-06"
+            assert observation["continuation_advice"]["may_request_more_read_tools"] is True
+            return {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_income_components_1",
+                        "name": "analysis_query",
+                        "arguments": (
+                            '{"sql":"select month, account, component, amount_cny '
+                            "from account_monthly_income_components where month = '2026-06' and account = 'lx'\","
+                            '"limit":20}'
+                        ),
+                    }
+                ]
+            }
+        return {
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "lx 2026-06 收益主要来自期权权利金，CNY 3,720。"}],
+                }
+            ]
+        }
+
+    event = model_tool_call_from_provider_block(
+        {
+            "type": "function_call",
+            "call_id": "call_income_1",
+            "name": "monthly_income_report",
+            "arguments": '{"account":"lx","month":"2026-06","include_rows":true}',
+        },
+        provider="openai",
+        event_id="model_tool_call_1",
+    )
+
+    outcome = run_assistant_tool_event_loop(
+        question="lx 6月收益主要来自哪里？",
+        request=AssistantRequest(text="lx 6月收益主要来自哪里？", sender_id="u1", config_key="us"),
+        task_contract={"requested_effect": "read", "scope": {"requested_accounts": ["lx"], "requested_months": ["2026-06"]}},
+        initial_events=(event,),
+        execute_tool_fn=_execute,
+        provider="openai",
+        create_continuation_response_fn=_continue,
+    )
+
+    assert outcome.status == "done"
+    assert outcome.stop_reason == "model_final_answer"
+    assert outcome.final_answer == "lx 2026-06 收益主要来自期权权利金，CNY 3,720。"
+    assert [name for name, _payload in calls] == ["monthly_income_report", "analysis_query"]
+    trace = outcome.public_payload()["trace"]
+    assert trace["continuation_count"] == 2
+    assert trace["tool_call_count"] == 2
+    assert trace["stop_category"] == "model_final_answer"
+    assert [item["tool_name"] for item in trace["capability_selection"]["selected"]] == [
+        "monthly_income_report",
+        "analysis_query",
+    ]
+
+
+def test_run_assistant_tool_event_loop_multihop_assigned_stock_to_lifecycle_analysis() -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        if tool_name == "option_positions_read":
+            return build_response(
+                tool_name=tool_name,
+                ok=True,
+                data={
+                    "action": "assigned-stock",
+                    "filters": {"account": "lx", "status": "open", "refresh_quotes": True},
+                    "rows": [
+                        {
+                            "account": "lx",
+                            "symbol": "FUTU",
+                            "currency": "USD",
+                            "status": "open",
+                            "shares_remaining": 100,
+                            "stock_cost_per_share": 117.45,
+                            "spot": None,
+                            "quote_status": "missing_quote",
+                            "assigned_stock_unrealized_pnl": None,
+                            "assigned_stock_realized_pnl": 0,
+                            "option_premium_attribution": 520,
+                            "assignment_lifecycle_pnl": None,
+                        }
+                    ],
+                    "row_count": 1,
+                    "quote_refresh": {"status": "missing_quote", "missing_symbols": ["FUTU"]},
+                    "missing_data": [{"kind": "missing_quote", "symbol": "FUTU", "impact": "current unrealized PnL unavailable"}],
+                },
+            )
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "schema_version": "analysis.query.output.v2",
+                "source_label": "OM read-only analysis workspace",
+                "columns": [
+                    "account",
+                    "symbol",
+                    "shares_remaining",
+                    "option_premium_attribution",
+                    "quote_status",
+                ],
+                "rows": [
+                    {
+                        "account": "lx",
+                        "symbol": "FUTU",
+                        "shares_remaining": 100,
+                        "option_premium_attribution": 520,
+                        "quote_status": "missing_quote",
+                    }
+                ],
+                "row_count": 1,
+                "truncated": False,
+                "views_used": ["assigned_stock_position_pnl"],
+                "missing_data": [{"kind": "missing_quote", "symbol": "FUTU", "impact": "current unrealized PnL unavailable"}],
+            },
+        )
+
+    def _continue(payload: dict[str, Any]) -> dict[str, Any]:
+        if len(calls) == 1:
+            output = json.loads(
+                next(item["output"] for item in payload["input"] if item.get("type") == "function_call_output")
+            )
+            observation = output["content"]
+            assert observation["output_contract"]["canonical_renderer"] == "assigned_stock_lifecycle"
+            assert observation["data_quality"]["missing_data_count"] == 1
+            assert observation["continuation_advice"]["must_disclose_missing_data"] is True
+            return {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_assigned_stock_pnl_1",
+                        "name": "analysis_query",
+                        "arguments": (
+                            '{"sql":"select account, symbol, shares_remaining, option_premium_attribution, quote_status '
+                            "from assigned_stock_position_pnl where account = 'lx' and symbol = 'FUTU'\","
+                            '"limit":20}'
+                        ),
+                    }
+                ]
+            }
+        return {
+            "output": [
+                {
+                    "type": "message",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "FUTU 指派正股仍持有 100 股，已归因期权权利金 USD 520；当前报价缺失，所以不能计算实时正股浮盈亏。",
+                        }
+                    ],
+                }
+            ]
+        }
+
+    event = model_tool_call_from_provider_block(
+        {
+            "type": "function_call",
+            "call_id": "call_assigned_stock_1",
+            "name": "option_positions_read",
+            "arguments": '{"action":"assigned-stock","account":"lx","status":"open","refresh_quotes":true}',
+        },
+        provider="openai",
+        event_id="model_tool_call_1",
+    )
+
+    outcome = run_assistant_tool_event_loop(
+        question="分析 lx FUTU 指派正股收益",
+        request=AssistantRequest(text="分析 lx FUTU 指派正股收益", sender_id="u1", config_key="us"),
+        task_contract={"requested_effect": "read", "scope": {"requested_accounts": ["lx"], "requested_symbols": ["FUTU"]}},
+        initial_events=(event,),
+        execute_tool_fn=_execute,
+        provider="openai",
+        create_continuation_response_fn=_continue,
+    )
+
+    assert outcome.status == "done"
+    assert outcome.stop_reason == "model_final_answer"
+    assert [name for name, _payload in calls] == ["option_positions_read", "analysis_query"]
+    assert "报价缺失" in str(outcome.final_answer)
+    trace = outcome.public_payload()["trace"]
+    assert trace["tool_call_count"] == 2
+    assert trace["evidence_summary"]["missing_data_count"] >= 1
+    assert trace["stop_category"] == "model_final_answer"
 
 
 def test_run_assistant_tool_event_loop_retries_empty_continuation_with_final_answer_only() -> None:
@@ -428,6 +667,8 @@ def test_run_assistant_tool_event_loop_retries_empty_continuation_with_final_ans
     trace = outcome.public_payload()["trace"]
     assert trace["continuation_count"] == 2
     assert trace["loop_stop_reason"] == "model_final_answer"
+    assert trace["final_answer_retry_attempted"] is True
+    assert trace["final_answer_retry_reason"] == "empty_continuation"
 
 
 def test_run_assistant_tool_event_loop_budget_exhaustion_retries_final_answer_when_evidence_available() -> None:
@@ -514,6 +755,62 @@ def test_run_assistant_tool_event_loop_budget_exhaustion_retries_final_answer_wh
     trace = outcome.public_payload()["trace"]
     assert trace["continuation_count"] == 2
     assert trace["loop_stop_reason"] == "model_final_answer"
+    assert trace["final_answer_retry_attempted"] is True
+    assert trace["final_answer_retry_reason"] == "tool_budget_exhausted"
+
+
+def test_run_assistant_tool_event_loop_does_not_retry_final_answer_for_write_effect() -> None:
+    continuation_payloads: list[dict[str, Any]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "source_label": "OM read-only analysis workspace",
+                "query": {"sql": payload["sql"], "limit": payload.get("limit")},
+                "columns": ["month", "account", "net_income_cny"],
+                "rows": [{"month": "2026-06", "account": "lx", "net_income_cny": 123.45}],
+                "row_count": 1,
+                "truncated": False,
+                "views_used": ["account_monthly_performance"],
+            },
+        )
+
+    def _continue(payload: dict[str, Any]) -> dict[str, Any]:
+        continuation_payloads.append(payload)
+        return {"output": []}
+
+    event = model_tool_call_from_provider_block(
+        {
+            "type": "function_call",
+            "call_id": "call_analysis_1",
+            "name": "analysis_query",
+            "arguments": (
+                '{"sql":"select month, account, net_income_cny from account_monthly_performance",'
+                '"limit":20}'
+            ),
+        },
+        provider="openai",
+        event_id="model_tool_call_1",
+    )
+
+    outcome = run_assistant_tool_event_loop(
+        question="准备写入前先看一下 lx 六月收益",
+        request=AssistantRequest(text="看一下 lx 六月收益", sender_id="u1", config_key="us"),
+        task_contract={"requested_effect": "write", "scope": {"requested_accounts": ["lx"]}},
+        initial_events=(event,),
+        execute_tool_fn=_execute,
+        provider="openai",
+        create_continuation_response_fn=_continue,
+    )
+
+    assert len(continuation_payloads) == 1
+    assert outcome.status == "unsupported"
+    assert outcome.stop_reason == "invalid_model_event"
+    trace = outcome.public_payload()["trace"]
+    assert trace["continuation_count"] == 1
+    assert "final_answer_retry_attempted" not in trace
 
 
 def test_run_assistant_tool_event_loop_rejects_business_final_answer_without_tool_evidence() -> None:
@@ -810,6 +1107,8 @@ def test_run_assistant_tool_event_loop_turns_duplicate_query_into_final_answer()
     assert trace["continuation_count"] == 2
     assert trace["repair_attempted"] is True
     assert trace["answer_route"] == "llm_from_tool_observation"
+    assert trace["final_answer_retry_attempted"] is True
+    assert trace["final_answer_retry_reason"] == "duplicate_call"
 
 
 def test_synthesis_observation_keeps_moderate_analysis_rows_complete() -> None:
