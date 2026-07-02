@@ -25,6 +25,7 @@ def reconcile_trade_intake_state(
     requested = _normalize_deal_ids(deal_ids)
     audit_by_deal = _audit_events_by_deal(audit_file)
     ledger_by_deal = _ledger_events_by_deal(repo)
+    assigned_stock_by_deal = _assigned_stock_events_by_deal(repo)
     lifecycle_by_deal = _completed_lifecycle_cases_by_deal(repo)
     candidates = _pending_deal_ids(state, requested=requested)
 
@@ -65,6 +66,28 @@ def reconcile_trade_intake_state(
                     "reason": "ledger_event_already_recorded",
                     "ledger_event_id": payload["diagnostics"]["reconciled_ledger_event_id"],
                     "ledger_event_type": payload["diagnostics"]["reconciled_ledger_event_type"],
+                    "write_state": True,
+                }
+            )
+            new_state = upsert_deal_state(new_state, bucket="processed_deal_ids", deal_id=deal_id, payload=payload)
+            continue
+
+        assigned_stock_events = assigned_stock_by_deal.get(deal_id) or []
+        if assigned_stock_events:
+            payload = _processed_payload_from_assigned_stock_event(
+                deal_id=deal_id,
+                from_bucket=bucket,
+                state_item=item,
+                assigned_stock_event=assigned_stock_events[-1],
+            )
+            actions.append(
+                {
+                    "deal_id": deal_id,
+                    "from_bucket": bucket,
+                    "to_bucket": "processed_deal_ids",
+                    "action": "mark_processed",
+                    "reason": "assigned_stock_sale_event_recorded",
+                    "assigned_stock_event_id": payload["diagnostics"]["reconciled_assigned_stock_event_id"],
                     "write_state": True,
                 }
             )
@@ -209,6 +232,29 @@ def _deal_ids_from_ledger_event(event: dict[str, Any]) -> list[str]:
     return out
 
 
+def _assigned_stock_events_by_deal(repo: Any) -> dict[str, list[dict[str, Any]]]:
+    list_events = getattr(repo, "list_assigned_stock_events", None)
+    if not callable(list_events):
+        return {}
+    out: dict[str, list[dict[str, Any]]] = {}
+    for event in list_events():
+        if not isinstance(event, dict):
+            continue
+        for deal_id in _deal_ids_from_assigned_stock_event(event):
+            out.setdefault(deal_id, []).append(event)
+    return out
+
+
+def _deal_ids_from_assigned_stock_event(event: dict[str, Any]) -> list[str]:
+    values = [event.get("source_deal_id"), event.get("deal_id"), event.get("futu_deal_id")]
+    out = _normalize_deal_ids([str(item) for item in values if item not in (None, "")])
+    event_id = str(event.get("stock_event_id") or event.get("event_id") or "").strip()
+    for token in event_id.replace(":", "-").split("-"):
+        if token.isdigit() and len(token) >= 12 and token not in out:
+            out.append(token)
+    return out
+
+
 def _completed_lifecycle_cases_by_deal(repo: Any) -> dict[str, list[dict[str, Any]]]:
     list_cases = getattr(repo, "list_trade_lifecycle_cases", None)
     list_evidence = getattr(repo, "list_trade_lifecycle_evidence", None)
@@ -329,6 +375,33 @@ def _processed_payload_from_ledger(
             "reconciled_ledger_event_id": ledger_event.get("event_id"),
             "reconciled_ledger_event_type": event_type,
             "reconciled_source_deal_id": deal_id,
+            "previous_status": state_item.get("status"),
+            "previous_reason": state_item.get("reason"),
+        },
+    }
+
+
+def _processed_payload_from_assigned_stock_event(
+    *,
+    deal_id: str,
+    from_bucket: str,
+    state_item: dict[str, Any],
+    assigned_stock_event: dict[str, Any],
+) -> dict[str, Any]:
+    event_id = str(assigned_stock_event.get("stock_event_id") or assigned_stock_event.get("event_id") or "").strip()
+    stock_lot_id = str(assigned_stock_event.get("target_stock_lot_id") or assigned_stock_event.get("stock_lot_id") or "").strip()
+    action = str(state_item.get("action") or "").strip() or "assigned_stock_sale"
+    return {
+        "status": "reconciled",
+        "action": action,
+        "account": state_item.get("account") or assigned_stock_event.get("account"),
+        "applied_record_ids": [stock_lot_id] if stock_lot_id else [],
+        "reason": "assigned_stock_sale_event_recorded",
+        "diagnostics": {
+            "reconciled_from_bucket": from_bucket,
+            "reconciled_assigned_stock_event_id": event_id,
+            "reconciled_source_deal_id": deal_id,
+            "reconciled_target_stock_lot_id": stock_lot_id or None,
             "previous_status": state_item.get("status"),
             "previous_reason": state_item.get("reason"),
         },
