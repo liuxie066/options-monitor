@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.349 - 2026-07-02
+
+### Changed
+- Strengthened the Assistant read-tool event loop so model turns observe tool evidence, perform bounded read-only follow-ups, and expose clearer stop/evidence trace fields.
+- Expanded model-facing tool observations with data quality, query scope, output-contract, and continuation guidance for higher-quality synthesized answers.
+
+### Fixed
+- Retried final-answer-only synthesis when the Assistant model returns an empty continuation, repeats an already-observed read call, or exhausts the read-tool budget with usable evidence.
+- Reconciled assigned-stock sale state after lifecycle sale intake so released assigned lots stay consistent.
+
 ## 1.2.348 - 2026-07-02
 
 ### Added

@@ -504,20 +504,40 @@ def adapt_tool_result(
     conflicts = tuple(_dict_items(data.get("conflicts")))
     error_code = str(error.get("code") or "") or None
 
+    contract = output_contract if isinstance(output_contract, dict) else {}
+    data_preview = _provider_data_preview(
+        tool_name=tool_name,
+        data=data,
+        output_contract=contract,
+    )
+    data_summary = _data_summary(data, output_contract=contract, data_preview=data_preview)
+    data_quality = _data_quality_summary(
+        data=data,
+        data_preview=data_preview,
+        missing_data=missing_data,
+        conflicts=conflicts,
+    )
     observation = {
         "schema_version": MODEL_OBSERVATION_SCHEMA_VERSION,
         "tool_name": tool_name,
         "ok": ok,
         "status": "ok" if ok else "error",
-        "data_summary": _data_summary(data),
+        "data_summary": data_summary,
+        "data_quality": data_quality,
         "missing_data": [_copy_mapping(item) for item in missing_data],
         "conflicts": [_copy_mapping(item) for item in conflicts],
+        "continuation_advice": _continuation_advice(
+            ok=ok,
+            missing_data=missing_data,
+            conflicts=conflicts,
+        ),
     }
-    data_preview = _provider_data_preview(
-        tool_name=tool_name,
-        data=data,
-        output_contract=output_contract if isinstance(output_contract, dict) else {},
-    )
+    query_scope = _query_scope_summary(data=data, normalized_payload=normalized_payload or {})
+    if query_scope:
+        observation["query_scope"] = query_scope
+    contract_summary = _output_contract_summary(contract)
+    if contract_summary:
+        observation["output_contract"] = contract_summary
     if data_preview:
         observation["data_preview"] = data_preview
     if error:
@@ -548,7 +568,8 @@ def adapt_tool_result(
         "guard_decision": guard_decision.public_payload() if guard_decision else {},
         "result_size": _rough_size(raw_result),
         "error_code": error_code,
-        "observation_summary": _data_summary(data),
+        "observation_summary": data_summary,
+        "data_quality": data_quality,
     }
 
     event = ToolResultEvent(
@@ -976,19 +997,158 @@ def _dict_items(value: Any) -> list[dict[str, Any]]:
     return [_copy_mapping(item) for item in value if isinstance(item, dict)]
 
 
-def _data_summary(data: dict[str, Any]) -> dict[str, Any]:
+def _data_summary(
+    data: dict[str, Any],
+    *,
+    output_contract: dict[str, Any] | None = None,
+    data_preview: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     rows = data.get("rows")
+    contract = output_contract if isinstance(output_contract, dict) else {}
     summary = {
         "keys": _public_data_keys(data),
         "row_count": len(rows) if isinstance(rows, list) else _optional_int(data.get("row_count")),
+        "source_label": data.get("source_label") or contract.get("source_label"),
     }
-    output_contract = data.get("output_contract")
-    if isinstance(output_contract, dict):
-        summary["output_contract"] = {
-            "canonical_renderer": str(output_contract.get("canonical_renderer") or ""),
-            "source_label": str(output_contract.get("source_label") or ""),
-        }
+    row_counts = _row_count_summary(data)
+    if row_counts:
+        summary["row_counts"] = row_counts
+    completeness = _preview_completeness_summary(data_preview or {})
+    if completeness:
+        summary["preview_completeness"] = completeness
+    contract_summary = _output_contract_summary(contract or data.get("output_contract"))
+    if contract_summary:
+        summary["output_contract"] = contract_summary
     return {key: value for key, value in summary.items() if value not in (None, "", [])}
+
+
+def _row_count_summary(data: dict[str, Any]) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for key, value in data.items():
+        key_text = str(key)
+        if key_text != "row_count" and not key_text.endswith("_row_count"):
+            continue
+        count = _optional_int(value)
+        if count is not None:
+            out[key_text] = count
+    return out
+
+
+def _preview_completeness_summary(data_preview: dict[str, Any]) -> dict[str, bool]:
+    out: dict[str, bool] = {}
+    for key, value in data_preview.items():
+        key_text = str(key)
+        if key_text == "rows_complete" or key_text.endswith("_complete"):
+            out[key_text] = bool(value)
+    return out
+
+
+def _data_quality_summary(
+    *,
+    data: dict[str, Any],
+    data_preview: dict[str, Any],
+    missing_data: tuple[dict[str, Any], ...],
+    conflicts: tuple[dict[str, Any], ...],
+) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "missing_data_count": len(missing_data),
+        "conflict_count": len(conflicts),
+    }
+    row_count = _optional_int(data.get("row_count"))
+    if row_count is not None:
+        out["row_count"] = row_count
+    rows = data_preview.get("rows")
+    if isinstance(rows, list):
+        out["preview_row_count"] = len(rows)
+    completeness = _preview_completeness_summary(data_preview)
+    if completeness:
+        out["preview_completeness"] = completeness
+    if "truncated" in data:
+        out["truncated"] = bool(data.get("truncated"))
+    quote_refresh = data.get("quote_refresh")
+    if isinstance(quote_refresh, dict):
+        out["quote_refresh_status"] = str(quote_refresh.get("status") or "")
+        if quote_refresh.get("quote_source"):
+            out["quote_source"] = str(quote_refresh.get("quote_source") or "")
+    return {key: value for key, value in out.items() if value not in (None, "", [], {})}
+
+
+def _query_scope_summary(*, data: dict[str, Any], normalized_payload: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    coverage = data.get("evidence")
+    coverage = coverage.get("coverage") if isinstance(coverage, dict) else None
+    if isinstance(coverage, dict):
+        scoped = {
+            key: _preview_value(coverage.get(key))
+            for key in ("views", "months", "accounts", "symbols")
+            if coverage.get(key) not in (None, "", [], {})
+        }
+        if scoped:
+            out["coverage"] = scoped
+    filters = data.get("filters")
+    if isinstance(filters, dict):
+        out["filters"] = _preview_mapping(filters)
+    views_used = data.get("views_used")
+    if isinstance(views_used, list):
+        out["views_used"] = _preview_columns(views_used, limit=20)
+    payload_scope = {
+        key: _preview_value(normalized_payload.get(key))
+        for key in (
+            "account",
+            "accounts",
+            "symbol",
+            "symbols",
+            "month",
+            "months",
+            "status",
+            "action",
+            "limit",
+        )
+        if normalized_payload.get(key) not in (None, "", [], {})
+    }
+    query = normalized_payload.get("query")
+    if isinstance(query, dict):
+        payload_scope["query"] = _preview_mapping(query)
+    if payload_scope:
+        out["payload"] = payload_scope
+    return _compact_preview(out)
+
+
+def _output_contract_summary(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    out = {
+        key: value.get(key)
+        for key in (
+            "canonical_renderer",
+            "source_label",
+            "answer_surface",
+            "result_shape",
+            "primary_rows",
+            "row_count_field",
+            "guard_profile",
+        )
+        if value.get(key) not in (None, "", [], {})
+    }
+    if isinstance(value.get("fact_fields"), list):
+        out["fact_field_count"] = len(value["fact_fields"])
+    if isinstance(value.get("model_preview_fields"), list):
+        out["model_preview_field_count"] = len(value["model_preview_fields"])
+    return out
+
+
+def _continuation_advice(
+    *,
+    ok: bool,
+    missing_data: tuple[dict[str, Any], ...],
+    conflicts: tuple[dict[str, Any], ...],
+) -> dict[str, Any]:
+    return {
+        "may_request_more_read_tools": bool(ok),
+        "answer_from_observation_if_sufficient": bool(ok),
+        "must_disclose_missing_data": bool(missing_data),
+        "must_disclose_conflicts": bool(conflicts),
+    }
 
 
 def _provider_data_preview(*, tool_name: str, data: dict[str, Any], output_contract: dict[str, Any]) -> dict[str, Any]:
