@@ -899,10 +899,12 @@ _PREVIEW_TOOL_NAMES = frozenset(
     {
         "manual_trade_open",
         "manual_trade_close",
+        "manual_trade_update",
         "manual_assignment",
         "manual_expiry",
         "symbol_edit",
         "model_use",
+        "monitor_run_now",
         "upgrade_now",
     }
 )
