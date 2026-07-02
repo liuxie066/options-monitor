@@ -737,6 +737,45 @@ def test_action_safety_denies_preview_for_read_only_request() -> None:
     assert safety["route"] == "deny"
 
 
+def test_action_safety_allows_current_preview_authority_when_contract_is_read() -> None:
+    request = AssistantRequest(text="立即更新", sender_id="local", config_key="us")
+    call = ToolCall(tool_name="upgrade_now", payload={"target_version": "1.2.350"})
+    policy = decide_tool_action_policy(call=call, request=request, task_contract={"requested_effect": "read"})
+
+    safety = assess_action_safety(
+        question=request.text,
+        task_contract={"requested_effect": "read"},
+        tool_name="upgrade_now",
+        payload=call.payload,
+        action_policy=policy.public_payload(),
+    ).public_payload()
+
+    assert safety["status"] == "allow_preview"
+    assert safety["code"] == "ok"
+    assert safety["requested_effect"] == "preview"
+    assert safety["proposed_effect"] == "preview_admin"
+    assert safety["route"] == "preview"
+
+
+def test_action_safety_allows_read_tool_for_preview_request() -> None:
+    request = AssistantRequest(text="立即升级前先看当前状态", sender_id="local", config_key="us")
+    call = ToolCall(tool_name="runtime_status", payload={"config_key": "us"})
+    policy = decide_tool_action_policy(call=call, request=request, task_contract={"requested_effect": "preview_write"})
+
+    safety = assess_action_safety(
+        question=request.text,
+        task_contract={"requested_effect": "preview_write"},
+        tool_name="runtime_status",
+        payload=call.payload,
+        action_policy=policy.public_payload(),
+    ).public_payload()
+
+    assert safety["status"] == "allow"
+    assert safety["code"] == "ok"
+    assert safety["requested_effect"] == "preview"
+    assert safety["proposed_effect"] == "read"
+
+
 def test_action_safety_allows_matching_preview_without_apply_authority() -> None:
     request = AssistantRequest(text="记录开仓 sy 成交提醒", sender_id="local", config_key="hk")
     call = ToolCall(tool_name="manual_trade_open", payload={"account": "sy", "raw_text": request.text})
@@ -1087,10 +1126,17 @@ def test_task_contract_routes_natural_symbol_setting_edit_as_preview() -> None:
 
 def test_task_contract_treats_ambiguous_update_as_planner_upgrade_authority() -> None:
     authority = preview_authority_from_text("立即更新")
+    contract = build_task_contract(
+        question="立即更新",
+        plan={"goal": "立即更新", "steps": []},
+        request_context={"config_key": "us"},
+        today=date(2026, 7, 2),
+    )
 
     assert authority["allowed"] is True
     assert authority["mode"] == "ambiguous"
     assert authority["allowed_preview_intents"] == ["upgrade_now"]
+    assert contract.requested_effect == "preview_write"
     assert preview_effect_allowed_from_text("立即更新") is True
     assert preview_request_kind_from_text("立即更新") is None
     assert preview_request_kind_from_text("立即升级") == "upgrade_now"
@@ -3404,6 +3450,161 @@ def test_assistant_runtime_agent_loop_routes_read_text_without_deterministic_ali
         "status": "skipped",
         "reason": "not_permission_response",
     }
+
+
+def test_assistant_runtime_allows_read_tool_before_preview_boundary(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(tool_name=tool_name, ok=True, data={"summary": {"status": "ok"}})
+
+    def _plan(
+        text: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> ModelTurnResult:
+        assert text == "立即升级前先看当前状态"
+        return _model_turn_result(
+            "runtime_status",
+            goal=text,
+            task_contract=_test_task_contract(
+                goal=text,
+                domain="operation",
+                task_mode="preview_write",
+                requested_effect="preview_write",
+                intent_families=("upgrade_status",),
+            ),
+        )
+
+    out = handle_assistant_response(
+        AssistantRequest(
+            text="立即升级前先看当前状态",
+            sender_id="local",
+            message_id="msg_read_before_preview",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        model_turn_fn=_plan,
+    )
+
+    assert out["ok"] is True
+    assert calls == [("runtime_status", {"config_key": "us"})]
+    event_loop = out["data"]["tool_result"]["data"]["event_loop"]
+    assert event_loop["trace"]["capability_selection"]["selected"][0]["effect"] == "read"
+    assert event_loop["events"][1]["decision"] == "allow"
+
+
+def test_assistant_runtime_immediate_update_reaches_preview_gate_even_when_contract_is_read() -> None:
+    text = "立即更新"
+    settings = AssistantSettings(
+        llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+    )
+
+    def _plan(
+        incoming: str,
+        _settings: AssistantSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> ModelTurnResult:
+        assert incoming == text
+        assert conversation_context is not None
+        return _model_turn_result(
+            "upgrade_now",
+            {"target_version": "1.2.351"},
+            goal=text,
+            purpose="Create a pending upgrade preview.",
+            task_contract=_test_task_contract(
+                goal=text,
+                domain="general",
+                task_mode="summarize",
+                requested_effect="read",
+                required_evidence=("current_state",),
+                answer_shape=("conclusion",),
+                intent_families=("general_analysis",),
+            ),
+        )
+
+    result = run_read_only_agent_loop(
+        text,
+        settings=settings,
+        conversation_context={},
+        model_turn_fn=_plan,
+        request=AssistantRequest(text=text, sender_id="local", config_key="us"),
+        execute_tool_fn=lambda _tool_name, _payload: pytest.fail("upgrade preview must stop at the preview gate"),
+        now_fn=lambda: date(2026, 7, 2),
+    )
+
+    assert result.planning.error is None
+    assert result.planning.perception is not None
+    assert result.planning.perception.intent_name == "tool_loop"
+    assert result.trace["agent_loop"]["loop_stop_reason"] == "preview_gate"
+    assert result.tool_loop_result is not None
+    event_loop = result.tool_loop_result["data"]["event_loop"]
+    assert event_loop["status"] == "preview_requested"
+    assert event_loop["preview_gate"]["intent_name"] == "upgrade_now"
+    assert event_loop["preview_gate"]["arguments"] == {"target_version": "1.2.351"}
+    step = result.trace["agent_loop"]["steps"][0]
+    assert step["tool_name"] == "upgrade_now"
+    assert step["action_safety"]["status"] == "allow_preview"
+    assert step["action_safety"]["requested_effect"] == "preview"
+    assert step["action_policy"]["requires_confirmation"] is True
+    assert step["action_policy"]["apply_allowed"] is False
+
+
+def test_assistant_runtime_update_status_question_cannot_call_upgrade_preview(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(tool_name=tool_name, ok=True, data={})
+
+    def _plan(
+        incoming: str,
+        _settings: AssistantSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> ModelTurnResult:
+        assert incoming == "立即更新了吗"
+        return _model_turn_result(
+            "upgrade_now",
+            {"target_version": "1.2.351"},
+            goal="错误地把更新状态查询规划成升级预览",
+            purpose="Should be rejected because the user asked a status question.",
+            task_contract=_test_task_contract(
+                goal="查询升级状态",
+                domain="runtime",
+                task_mode="diagnose",
+                requested_effect="read",
+                intent_families=("upgrade_status",),
+            ),
+        )
+
+    out = handle_assistant_response(
+        AssistantRequest(
+            text="立即更新了吗",
+            sender_id="local",
+            channel="local",
+            message_id="msg_agent_loop_update_status_rejects_upgrade_preview",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        model_turn_fn=_plan,
+    )
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "PLAN_RISK_MISMATCH"
+    assert calls == []
+    agent_loop = out["meta"]["assistant"]["llm"]["agent_loop"]
+    assert agent_loop["steps_used"] == 1
+    assert agent_loop["steps"][0]["tool_name"] == "upgrade_now"
+    assert any(event.get("decision") == "risk_mismatch" for event in agent_loop["tool_events"])
 
 
 def test_assistant_runtime_agent_loop_routes_provider_events_without_tool_plan_bridge(tmp_path: Path) -> None:
@@ -10129,6 +10330,166 @@ def test_create_model_turn_events_accepts_provider_final_answer_event() -> None:
     assert result.trace["reason"] == "accepted"
     assert result.trace["event_model"]["events"][0]["event_type"] == "model_final_answer"
     assert result.trace["event_plan"]["task_contract"]["domain"] == "position"
+
+
+def test_create_model_turn_events_preserves_final_answer_finish_reason() -> None:
+    def _create_tool_call_response(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "choices": [
+                {
+                    "finish_reason": "length",
+                    "message": {"content": "这是一个被截断的回答"},
+                }
+            ],
+            "usage": {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20},
+        }
+
+    result = create_model_turn_events(
+        "你好",
+        AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        conversation_context={"temporal_context": {"current_date": "2026-07-02", "timezone": "Asia/Shanghai"}},
+        create_tool_call_response_fn=_create_tool_call_response,
+        environ={"OM_LLM_API_KEY": "sk-test"},
+    )
+
+    event = result.trace["event_model"]["events"][0]
+    assert event["event_type"] == "model_final_answer"
+    assert event["provider_metadata"]["finish_reason"] == "length"
+    assert event["provider_metadata"]["usage"]["completion_tokens"] == 8
+
+
+def test_assistant_runtime_rejects_length_truncated_final_answer(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("OM_LLM_API_KEY", "sk-test")
+
+    def _create_tool_call_response(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "choices": [
+                {
+                    "finish_reason": "length",
+                    "message": {"content": "你好，我可以帮你查看"},
+                }
+            ]
+        }
+
+    def _provider_response_fn(provider: str):
+        assert provider == "openai"
+        return _create_tool_call_response
+
+    monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_response_fn", _provider_response_fn)
+
+    out = handle_assistant_response(
+        AssistantRequest(
+            text="你好",
+            sender_id="local",
+            message_id="msg_length_truncated_final_answer",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=lambda tool_name, payload: build_response(tool_name=tool_name, ok=True, data={}),
+        settings=AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        now_fn=lambda: date(2026, 7, 2),
+    )
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "ANSWER_VERIFICATION_FAILED"
+    event_loop = out["data"]["tool_result"]["data"]["event_loop"]
+    assert event_loop["trace"]["answer_verification"]["trace"]["violation_type"] == "provider_output_truncated"
+
+
+def test_assistant_runtime_rejects_dangling_final_answer(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("OM_LLM_API_KEY", "sk-test")
+
+    def _create_tool_call_response(**_kwargs: Any) -> dict[str, Any]:
+        return {"choices": [{"finish_reason": "stop", "message": {"content": "当前可用的 preview capability 只有"}}]}
+
+    def _provider_response_fn(provider: str):
+        assert provider == "openai"
+        return _create_tool_call_response
+
+    monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_response_fn", _provider_response_fn)
+
+    out = handle_assistant_response(
+        AssistantRequest(
+            text="你好",
+            sender_id="local",
+            message_id="msg_dangling_final_answer",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=lambda tool_name, payload: build_response(tool_name=tool_name, ok=True, data={}),
+        settings=AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        now_fn=lambda: date(2026, 7, 2),
+    )
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "ANSWER_VERIFICATION_FAILED"
+    assert "当前可用的 preview capability 只有" not in out["data"]["response_text"]
+    event_loop = out["data"]["tool_result"]["data"]["event_loop"]
+    assert event_loop["trace"]["answer_verification"]["trace"]["violation_type"] == "incomplete_final_answer"
+
+
+def test_assistant_runtime_rejects_preview_request_final_answer_without_tool_call(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("OM_LLM_API_KEY", "sk-test")
+
+    def _create_tool_call_response(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "output": [
+                {
+                    "type": "message",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "“立即更新”是一个写入/管理类请求，我这边不能直接修改运行时配置或确认生效。\n\n当前可用的 preview capability 只有",
+                        }
+                    ],
+                }
+            ]
+        }
+
+    def _provider_response_fn(provider: str):
+        assert provider == "openai"
+        return _create_tool_call_response
+
+    monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_response_fn", _provider_response_fn)
+
+    out = handle_assistant_response(
+        AssistantRequest(
+            text="立即更新",
+            sender_id="local",
+            message_id="msg_upgrade_final_answer_without_tool",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=lambda tool_name, payload: build_response(tool_name=tool_name, ok=True, data={}),
+        settings=AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        now_fn=lambda: date(2026, 7, 2),
+    )
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "ANSWER_VERIFICATION_FAILED"
+    assert "当前可用的 preview capability 只有" not in out["data"]["response_text"]
+    tool_loop_data = out["data"]["tool_result"]["data"]
+    assert tool_loop_data["task_contract"]["requested_effect"] == "preview_write"
+    event_loop = tool_loop_data["event_loop"]
+    assert event_loop["trace"]["answer_route"] == "answer_verification_failed"
+    assert event_loop["trace"]["answer_verification"]["trace"]["violation_type"] == "missing_required_tool_evidence"
 
 
 def test_create_model_turn_events_context_composes_symbol_config_edit_followup() -> None:

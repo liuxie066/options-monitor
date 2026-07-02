@@ -149,6 +149,15 @@ def verify_model_final_answer(
                 },
             ],
         }
+    integrity_violations = _completion_integrity_violations(answer_event)
+    if integrity_violations:
+        guard = {
+            **guard,
+            "violations": [
+                *[dict(item) for item in guard.get("violations") or [] if isinstance(item, dict)],
+                *integrity_violations,
+            ],
+        }
     status = "failed" if guard.get("violations") else "passed"
     fallback_text = canonical_fallback_from_tool_results(tool_results)
     trace = answer_guard_trace_payload(status, guard)
@@ -181,6 +190,70 @@ def _missing_required_tool_evidence(
         return True
     required = {str(item).strip() for item in contract.get("required_evidence") or [] if str(item).strip()}
     return bool(required - {"summary", "source_policy"})
+
+
+def _completion_integrity_violations(answer_event: ModelFinalAnswerEvent) -> list[dict[str, Any]]:
+    violations: list[dict[str, Any]] = []
+    metadata = answer_event.provider_metadata if isinstance(answer_event.provider_metadata, dict) else {}
+    finish_reason = str(metadata.get("finish_reason") or "").strip().lower()
+    status = str(metadata.get("status") or "").strip().lower()
+    incomplete_reason = str(metadata.get("incomplete_reason") or "").strip().lower()
+    if finish_reason in {"length", "max_tokens"} or status == "incomplete" or incomplete_reason in {
+        "max_output_tokens",
+        "max_tokens",
+    }:
+        violations.append(
+            {
+                "type": "provider_output_truncated",
+                "claim": finish_reason or incomplete_reason or status,
+                "evidence": "provider indicated the final answer may be incomplete",
+            }
+        )
+    if _looks_like_incomplete_final_answer(answer_event.answer_text):
+        violations.append(
+            {
+                "type": "incomplete_final_answer",
+                "claim": _tail(answer_event.answer_text),
+                "evidence": "final answer ends with a dangling phrase or list marker",
+            }
+        )
+    return violations
+
+
+def _looks_like_incomplete_final_answer(text: str) -> bool:
+    value = str(text or "").strip()
+    if not value:
+        return False
+    compact = "".join(value.split()).lower()
+    if not compact:
+        return False
+    if value[-1] in {"，", "、", "：", ":", "-", "；", ";"}:
+        return True
+    dangling_suffixes = (
+        "只有",
+        "包括",
+        "如下",
+        "如下:",
+        "如下：",
+        "分别为",
+        "为:",
+        "为：",
+        "和",
+        "或",
+        "以及",
+        "但",
+        "但是",
+        "因为",
+        "所以",
+        "如果",
+        "当前可用的previewcapability只有",
+    )
+    return any(compact.endswith(suffix) for suffix in dangling_suffixes)
+
+
+def _tail(text: str, *, limit: int = 80) -> str:
+    value = str(text or "").strip()
+    return value[-limit:]
 
 
 def canonical_fallback_from_tool_results(

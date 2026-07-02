@@ -221,7 +221,7 @@ def build_task_contract(
     requested_effect = _normalized_contract_value(
         planner_contract.get("requested_effect") if isinstance(planner_contract, dict) else None,
         allowed={"read", "preview_write", "prohibited"},
-        default=_infer_requested_effect(text),
+        default=_infer_requested_effect(user_text),
     )
     required_evidence = _merge_contract_list(
         _default_required_evidence(domain=domain, task_mode=task_mode, intent_families=intent_families),

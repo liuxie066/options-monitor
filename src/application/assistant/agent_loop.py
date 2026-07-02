@@ -2185,6 +2185,11 @@ def _assistant_tool_loop_event_from_payload(payload: dict[str, Any]) -> ModelToo
             answer_text=str(payload.get("answer_text") or ""),
             answer_route=str(payload.get("answer_route") or "llm_from_evidence"),
             parent_event_id=str(payload.get("parent_event_id") or "") or None,
+            provider_metadata=(
+                dict(payload.get("provider_metadata"))
+                if isinstance(payload.get("provider_metadata"), dict)
+                else None
+            ),
             schema_version=str(payload.get("schema_version") or MODEL_EVENT_SCHEMA_VERSION),
         )
     if event_type in {"clarification_request", "loop_stopped", "context_projected", "user_message"}:
@@ -2887,20 +2892,6 @@ def _read_tool_loop_guard(
             "scope_source": _scope_source_for_guard(task_contract),
             "error_code": "PERMISSION_DENIED",
         }
-    requested_effect = str(task_contract.get("requested_effect") or "read").strip()
-    if requested_effect != "read":
-        return {
-            "schema_version": TOOL_CHECK_SCHEMA_VERSION,
-            "allowed": False,
-            "decision": "write_boundary",
-            "reason": "task contract requested effect is not read",
-            "tool_name": tool_name,
-            "risk_class": "READ_AUTO",
-            "duplicate_signature": signature,
-            "scope_source": _scope_source_for_guard(task_contract),
-            "requested_effect": requested_effect,
-            "error_code": "PERMISSION_DENIED",
-        }
     if signature and signature in attempted_signatures:
         return {
             "schema_version": TOOL_CHECK_SCHEMA_VERSION,
@@ -3458,10 +3449,6 @@ def _event_native_planning_from_model_final_answer(
     plan_payload = {
         "goal": text,
         "steps": [],
-        "task_contract": {
-            "goal": text,
-            "requested_effect": "read",
-        },
     }
     host_contract = build_task_contract(question=text, plan=plan_payload, request_context=None, today=today)
     task_contract = _planner_task_contract_from_host_contract(host_contract.public_payload())

@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 706 (`src`: 410, `domain`: 52, `scripts`: 7, `tests`: 237)
-- Internal import edges: 3769 total, 1772 production/script edges excluding tests
+- Internal import edges: 3770 total, 1773 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.351 - 2026-07-02
+
+### Changed
+- Let explicit immediate update requests reach the Assistant `upgrade_now` preview gate even when an upstream task contract is overly conservative.
+- Allowed read-only tools inside preview-intent conversations so the model can inspect status before reaching a controlled preview boundary.
+
+### Fixed
+- Rejected provider-truncated or dangling Assistant final answers instead of storing incomplete half-sentence replies.
+- Kept update-status questions such as `立即更新了吗` on the read path so they cannot accidentally trigger an upgrade preview.
+
 ## 1.2.350 - 2026-07-02
 
 ### Fixed
