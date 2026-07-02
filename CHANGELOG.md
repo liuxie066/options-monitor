@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.354 - 2026-07-03
+
+### Fixed
+- Rejected Assistant model final answers that leak raw `analysis_query` table receipts and replaced them with grounded user-facing fallbacks.
+- Marked answer-verification fallbacks that use Assistant user summaries as `user_fallback` in the agent-loop trace instead of `canonical_renderer`.
+
 ## 1.2.353 - 2026-07-02
 
 ### Changed

@@ -171,6 +171,7 @@ _UX_TOOL_NAME_RE = re.compile(r"(?i)\b(?:analysis_query|analysis_catalog)\b")
 _UX_SQL_RE = re.compile(r"(?is)(?:\bsql\b|\bselect\b.{0,240}\bfrom\b|\bwith\b.{0,240}\bselect\b)")
 _UX_INTERNAL_ID_RE = re.compile(r"(?i)\b(?:stock_lot_id|record_id|event_id|source_deal_id|position_key|trace_id|artifact_path)\b")
 _UX_INTERNAL_PATH_RE = re.compile(r"(?i)(?:/Volumes/|/Users/|output_runs/|output_shared/|candidate_filter_trace\.jsonl|\.(?:sqlite3|jsonl)\b)")
+_UX_RAW_TOOL_RECEIPT_RE = re.compile(r"(?m)^\s*分析查询结果[:：]\s*\d+\s*行")
 
 
 def _normal_answer_ux_violations(response_text: str) -> list[dict[str, Any]]:
@@ -181,6 +182,7 @@ def _normal_answer_ux_violations(response_text: str) -> list[dict[str, Any]]:
         ("unsupported_internal_sql_leak", "SQL detail leaked", _UX_SQL_RE),
         ("unsupported_internal_id_leak", "internal identifier leaked", _UX_INTERNAL_ID_RE),
         ("unsupported_internal_path_leak", "internal artifact path leaked", _UX_INTERNAL_PATH_RE),
+        ("unsupported_raw_tool_receipt", "raw tool receipt leaked", _UX_RAW_TOOL_RECEIPT_RE),
         ("unsupported_forced_fact_analysis_split", "forced fact/analysis section split leaked", _UX_FORCED_SECTION_RE),
     )
     violations: list[dict[str, Any]] = []
