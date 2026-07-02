@@ -14,13 +14,18 @@ class FakeRepo:
         *,
         lifecycle_cases: list[dict] | None = None,
         lifecycle_evidence: list[dict] | None = None,
+        assigned_stock_events: list[dict] | None = None,
     ) -> None:
         self.events = events
         self.lifecycle_cases = list(lifecycle_cases or [])
         self.lifecycle_evidence = list(lifecycle_evidence or [])
+        self.assigned_stock_events = list(assigned_stock_events or [])
 
     def list_trade_events(self) -> list[dict]:
         return list(self.events)
+
+    def list_assigned_stock_events(self) -> list[dict]:
+        return list(self.assigned_stock_events)
 
     def list_trade_lifecycle_cases(self) -> list[dict]:
         return list(self.lifecycle_cases)
@@ -172,6 +177,53 @@ def test_reconcile_trade_intake_state_uses_lifecycle_stock_settlement_source_eve
     processed = state["processed_deal_ids"]["8433576313500456302"]
     assert processed["reason"] == "ledger_event_already_recorded"
     assert processed["applied_record_ids"] == ["lot-futu-1"]
+
+
+def test_reconcile_trade_intake_state_marks_assigned_stock_sale_event_processed(tmp_path: Path) -> None:
+    state_path = tmp_path / "auto_trade_intake_state.json"
+    write_trade_intake_state(
+        state_path,
+        {
+            "processed_deal_ids": {},
+            "failed_deal_ids": {},
+            "unresolved_deal_ids": {
+                "6315806741161105994": {
+                    "status": "unresolved",
+                    "action": "assigned_stock_sale",
+                    "account": "lx",
+                    "reason": "ambiguous_assigned_stock_sale",
+                    "retryable": False,
+                }
+            },
+        },
+    )
+    repo = FakeRepo(
+        [],
+        assigned_stock_events=[
+            {
+                "stock_event_id": "assigned-stock-sale-6315806741161105994",
+                "source_deal_id": "6315806741161105994",
+                "target_stock_lot_id": "assigned-stock-lot-a",
+                "account": "lx",
+                "symbol": "FUTU",
+            }
+        ],
+    )
+
+    out = reconcile_trade_intake_state(state_path=state_path, repo=repo, apply_changes=True)
+
+    assert out["planned_count"] == 1
+    assert out["applied_count"] == 1
+    assert out["actions"][0]["reason"] == "assigned_stock_sale_event_recorded"
+    state = load_trade_intake_state(state_path)
+    assert "6315806741161105994" not in state["unresolved_deal_ids"]
+    processed = state["processed_deal_ids"]["6315806741161105994"]
+    assert processed["status"] == "reconciled"
+    assert processed["action"] == "assigned_stock_sale"
+    assert processed["reason"] == "assigned_stock_sale_event_recorded"
+    assert processed["applied_record_ids"] == ["assigned-stock-lot-a"]
+    assert processed["diagnostics"]["reconciled_assigned_stock_event_id"] == "assigned-stock-sale-6315806741161105994"
+    assert processed["diagnostics"]["previous_reason"] == "ambiguous_assigned_stock_sale"
 
 
 def test_reconcile_trade_intake_state_marks_ignored_non_option_unresolved_deal_processed(tmp_path: Path) -> None:
