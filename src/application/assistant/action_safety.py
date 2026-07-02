@@ -5,6 +5,7 @@ import re
 from typing import Any
 
 from src.application.assistant.capability_catalog import ACCOUNT_VALUES, spec_by_intent
+from src.application.assistant.task_contract import preview_authority_from_text
 from src.application.symbol_calibration import calibrate_symbol
 
 
@@ -233,21 +234,6 @@ def assess_action_safety(
             source=source_text,
         )
 
-    if requested_effect in {"preview", "confirm"} and proposed_family == "read":
-        return _decision(
-            status="ask",
-            code="effect_mismatch",
-            user_intent=user_intent,
-            requested_effect=requested_effect,
-            tool_name=tool_name,
-            proposed_effect=proposed_effect,
-            scope_delta=scope_delta,
-            injection_evidence=injection_evidence,
-            route="ask",
-            reason="User request appears to require an operation preview, but the proposed tool is read-only.",
-            source=source_text,
-        )
-
     scope_code = _scope_decision_code(
         tool_name=tool_name,
         proposed_family=proposed_family,
@@ -347,11 +333,14 @@ def _user_intent(*, contract: dict[str, Any], requested_effect: str) -> str:
 
 def _requested_effect(*, text: str, contract: dict[str, Any]) -> str:
     explicit = str(contract.get("requested_effect") or "").strip().lower()
-    if explicit in {"read", "preview", "confirm"}:
-        return explicit
     if explicit == "preview_write":
         return "preview"
     compact = re.sub(r"\s+", "", str(text or "").lower())
+    text_preview_allowed = bool(preview_authority_from_text(text).get("allowed", False))
+    if explicit == "read":
+        return "preview" if text_preview_allowed else "read"
+    if explicit in {"preview", "confirm"}:
+        return explicit
     if not compact:
         return "read"
     if any(token in compact for token in ("为什么", "原因", "回执", "状态", "查询", "查看", "对比", "比较", "收益", "持仓", "盈亏")):
