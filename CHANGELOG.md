@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.357 - 2026-07-03
+
+### Fixed
+- Made lifecycle trade-intake evidence retries idempotent when broker evidence is unchanged but normalization diagnostics differ.
+- Mapped Futu's `MET` option root to `3690.HK` so Meituan option trades reuse the canonical HK multiplier cache and lifecycle matching.
+
 ## 1.2.356 - 2026-07-03
 
 ### Fixed
