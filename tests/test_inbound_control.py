@@ -1959,6 +1959,76 @@ def test_inbound_upgrade_returns_no_upgrade_without_pending_operation(monkeypatc
     assert pending["data"]["response_text"] == "当前对话没有待确认操作。"
 
 
+def test_inbound_upgrade_rejects_older_target_without_pending_operation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from src.application.assistant import upgrade_operations
+
+    _enable_inbound_upgrade_write(monkeypatch)
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    audit_db = tmp_path / "inbound.sqlite3"
+
+    def _fake_service_upgrade_check(**kwargs):  # type: ignore[no-untyped-def]
+        return {
+            "ok": True,
+            "status": "upgrade_available",
+            "repo_root": str(kwargs["repo_root"]),
+            "repo_root_resolved": str(kwargs["repo_root"]),
+            "repo_root_resolution": {"status": "input"},
+            "runtime_root": str(kwargs["runtime_root"]),
+            "current_version": "1.2.355",
+            "latest_version": "1.2.355",
+            "release_tag": "v1.2.355",
+            "upgrade_available": False,
+            "message": "没有可升级版本。当前已是最新版本 1.2.355",
+            "version_check": {"ok": True, "update_available": False},
+        }
+
+    monkeypatch.setattr(upgrade_operations, "service_upgrade_check", _fake_service_upgrade_check)
+    monkeypatch.setattr(
+        upgrade_operations,
+        "service_upgrade",
+        lambda **kwargs: pytest.fail(f"unexpected upgrade apply: {kwargs}"),
+    )
+    monkeypatch.setattr(
+        upgrade_operations,
+        "UPGRADE_WORKER_LAUNCHER",
+        lambda operation_id, audit_db: pytest.fail(f"unexpected upgrade worker: {operation_id}"),
+    )
+
+    preview = handle_assistant_request(
+        AssistantRequest(
+            text="/upgrade v1.2.352",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_upgrade_older_target",
+            conversation_id="feishu:chat_a:ou_1",
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert preview["ok"] is True
+    assert preview["tool_name"] == "inbound.upgrade"
+    assert preview["data"]["status"] == "target_older_than_current"
+    assert "确认执行" not in preview["data"]["response_text"]
+    assert "operation_id" not in preview["data"]
+
+    pending = handle_assistant_request(
+        AssistantRequest(
+            text="/pending",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_upgrade_older_target_pending",
+            conversation_id="feishu:chat_a:ou_1",
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert pending["ok"] is True
+    assert pending["data"]["pending_count"] == 0
+    assert pending["data"]["response_text"] == "当前对话没有待确认操作。"
+
+
 def test_inbound_upgrade_reconfirm_hides_internal_status(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from src.application.assistant import upgrade_operations
 

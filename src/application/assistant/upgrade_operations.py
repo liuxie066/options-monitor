@@ -67,17 +67,18 @@ def _preview_and_save(
 ) -> dict[str, Any]:
     _attach_receipt_target(payload, request)
     preview = _preview_operation(payload)
-    if _preview_has_no_upgrade(preview):
+    if not _preview_can_confirm(preview):
+        status = _preview_status(preview)
         return build_response(
             tool_name="inbound.upgrade",
             ok=True,
             data={
                 "operation_type": payload["operation_type"],
-                "status": "no_upgrade_available",
+                "status": status,
                 "payload": payload,
                 "preview": preview,
                 "response_text": render_upgrade_response(
-                    status="no_upgrade_available",
+                    status=status,
                     operation_id=command_id,
                     payload=payload,
                     preview=preview,
@@ -270,17 +271,19 @@ def _preview_operation(payload: dict[str, Any]) -> dict[str, Any]:
     return {"summary": _upgrade_summary(out), "upgrade": out}
 
 
-def _preview_has_no_upgrade(preview: dict[str, Any]) -> bool:
+def _preview_status(preview: dict[str, Any]) -> str:
     upgrade = preview.get("upgrade") if isinstance(preview, dict) else {}
     if not isinstance(upgrade, dict):
+        return "unknown"
+    return str(upgrade.get("status") or "unknown").strip().lower() or "unknown"
+
+
+def _preview_can_confirm(preview: dict[str, Any]) -> bool:
+    upgrade = preview.get("upgrade") if isinstance(preview, dict) else {}
+    if not isinstance(upgrade, dict) or not bool(upgrade.get("ok")):
         return False
-    status = str(upgrade.get("status") or "").strip().lower()
-    if status == "no_upgrade_available":
-        return True
-    version_check = upgrade.get("version_check")
-    if status == "already_current" and isinstance(version_check, dict):
-        return not bool(version_check.get("update_available"))
-    return False
+    planned = upgrade.get("planned_operations")
+    return isinstance(planned, list) and bool(planned)
 
 
 def _apply_operation(payload: dict[str, Any]) -> dict[str, Any]:
@@ -800,6 +803,15 @@ def render_upgrade_response(
                 f"当前版本：{current}",
                 f"远端最新版本：{target}",
                 "未执行升级。",
+            ]
+        )
+    if status in {"already_current", "blocked_major_upgrade", "no_target_version", "target_older_than_current", "upgrade_check_failed"}:
+        return "\n".join(
+            [
+                "未执行升级。",
+                f"当前版本：{current}",
+                f"目标版本：{target}",
+                f"状态：{upgrade_status}",
             ]
         )
     if status == "previewed":
