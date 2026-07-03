@@ -79,6 +79,19 @@ def _position_lot_contract_scalars(fields: dict[str, Any]) -> tuple[int | None, 
     return expiration_ms, strike, multiplier
 
 
+def _same_lifecycle_evidence_source(existing_raw_json: Any, payload: dict[str, Any]) -> bool:
+    try:
+        existing = json.loads(str(existing_raw_json or "{}"))
+    except Exception:
+        return False
+    if not isinstance(existing, dict):
+        return False
+    for key in ("source_type", "source_event_id", "evidence_type"):
+        if str(existing.get(key) or "").strip() != str(payload.get(key) or "").strip():
+            return False
+    return True
+
+
 def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:
     cols = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
     if column not in cols:
@@ -595,9 +608,25 @@ class SQLiteOptionPositionsRepository:
                 (evidence_id,),
             ).fetchone()
             if existing is not None:
-                if str(existing["raw_json"] or "") != raw_json:
+                if not _same_lifecycle_evidence_source(existing["raw_json"], payload):
                     raise ValueError(f"trade lifecycle evidence conflict for evidence_id={evidence_id}")
-                return False
+                if str(existing["raw_json"] or "") == raw_json:
+                    return False
+                active_conn.execute(
+                    """
+                    UPDATE trade_lifecycle_evidence
+                    SET case_id = ?, account = ?, symbol = ?, raw_json = ?
+                    WHERE evidence_id = ?
+                    """,
+                    (
+                        (str(payload.get("case_id") or "").strip() or None),
+                        (str(payload.get("account") or "").strip().lower() or None),
+                        (str(payload.get("symbol") or "").strip().upper() or None),
+                        raw_json,
+                        evidence_id,
+                    ),
+                )
+                return True
             active_conn.execute(
                 """
                 INSERT INTO trade_lifecycle_evidence (

@@ -576,6 +576,73 @@ def test_resolve_trade_close_retry_failed_routes_early_zero_price_assignment_to_
     assert repo.get_record_fields(lot_id)["contracts_open"] == 1
 
 
+def test_resolve_trade_lifecycle_retry_duplicate_evidence_keeps_waiting(tmp_path) -> None:
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    deal_kwargs = {
+        "deal_id": "deal-lifecycle-retry-1",
+        "order_id": "order-lifecycle-retry-1",
+        "symbol": "FUTU",
+        "contracts": 1,
+        "price": 0.0,
+        "strike": 120.0,
+        "expiration_ymd": "2026-06-05",
+        "currency": "USD",
+        "trade_time_ms": 1780506955360,
+        "raw_payload": {"deal_id": "deal-lifecycle-retry-1", "code": "US.FUTU260605P120000"},
+    }
+
+    first = resolve_trade_deal(
+        _deal(
+            **deal_kwargs,
+            normalization_diagnostics={
+                "multiplier_resolution": {
+                    "attempted_sources": [
+                        {"source": "payload", "status": "missing"},
+                        {"source": "cache", "status": "miss"},
+                        {"source": "opend", "status": "resolved", "value": 100},
+                    ]
+                }
+            },
+        ),
+        repo=repo,
+        state={},
+        apply_changes=True,
+    )
+    assert first.status == "unresolved"
+
+    retry = resolve_trade_deal(
+        _deal(
+            **deal_kwargs,
+            normalization_diagnostics={
+                "multiplier_resolution": {
+                    "attempted_sources": [
+                        {"source": "payload", "status": "missing"},
+                        {"source": "cache", "status": "resolved", "value": 100},
+                    ]
+                }
+            },
+        ),
+        repo=repo,
+        state={
+            "unresolved_deal_ids": {
+                "deal-lifecycle-retry-1": {"status": "unresolved", "retryable": True}
+            }
+        },
+        apply_changes=True,
+    )
+
+    assert retry.status == "unresolved"
+    assert retry.reason == "waiting_settlement_evidence"
+    cases = repo.list_trade_lifecycle_cases()
+    assert cases[0]["status"] == "waiting_settlement_evidence"
+    evidence = repo.list_trade_lifecycle_evidence(case_id=cases[0]["case_id"])
+    assert len(evidence) == 1
+    assert evidence[0]["raw"]["normalization_diagnostics"]["multiplier_resolution"]["attempted_sources"] == [
+        {"source": "payload", "status": "missing"},
+        {"source": "cache", "status": "resolved", "value": 100},
+    ]
+
+
 def test_resolve_trade_lifecycle_option_first_records_early_assignment_before_expiration(tmp_path) -> None:
     from domain.domain.option_position_lots import OpenPositionCommand
 

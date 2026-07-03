@@ -216,6 +216,34 @@ def test_normalize_trade_deal_falls_back_to_option_code_root_alias_for_symbol() 
     assert deal.position_effect == "open"
 
 
+def test_normalize_trade_deal_maps_met_option_root_to_hk_symbol_multiplier_cache(tmp_path) -> None:
+    cache_dir = tmp_path / "output_shared" / "state"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "multiplier_cache.json").write_text(
+        '{"3690.HK":{"multiplier":500,"source":"test"}}',
+        encoding="utf-8",
+    )
+
+    deal = normalize_trade_deal(
+        {
+            "deal_id": "deal-met",
+            "futu_account_id": "REAL_HK_1",
+            "code": "HK.MET260703P60000",
+            "trd_side": "BUY_BACK",
+            "qty": 1,
+            "price": 0.0,
+            "create_time": "2026-07-03 19:36:21",
+        },
+        futu_account_mapping={"REAL_HK_1": "lx"},
+        runtime_root=tmp_path,
+        allow_opend_refresh=False,
+    )
+
+    assert deal.symbol == "3690.HK"
+    assert deal.multiplier == 500
+    assert deal.multiplier_source == "test"
+
+
 def test_normalize_trade_deal_canonicalizes_us_prefixed_underlying_symbol() -> None:
     deal = normalize_trade_deal(
         {
