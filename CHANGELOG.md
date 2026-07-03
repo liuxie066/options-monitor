@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.356 - 2026-07-03
+
+### Fixed
+- Stopped Assistant upgrade previews from creating confirmable pending operations when the requested target version is older than the running release.
+
 ## 1.2.355 - 2026-07-03
 
 ### Changed
