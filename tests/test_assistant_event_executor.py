@@ -19,6 +19,7 @@ from src.application.assistant.model_events import (
     model_tool_call_from_provider_block,
 )
 from src.application.assistant.settings import AssistantSettings
+from src.infrastructure.openai_responses import OpenAIResponsesError
 
 
 def test_execute_model_tool_call_event_runs_read_tool_through_guard() -> None:
@@ -359,6 +360,52 @@ def test_run_assistant_tool_event_loop_continues_to_final_answer() -> None:
     assert trace["loop_stop_reason"] == "model_final_answer"
     assert trace["stop_category"] == "model_final_answer"
     assert trace["scope_source"] == "task_contract"
+
+
+def test_run_assistant_tool_event_loop_records_continuation_provider_error_details() -> None:
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={"return_summary": [{"month": "2026-06", "account": "lx", "net_income_cny": 123.45}]},
+        )
+
+    def _continue(_payload: dict[str, Any]) -> dict[str, Any]:
+        raise OpenAIResponsesError(
+            "provider timeout after tool result",
+            response={"error": {"type": "timeout", "message": "payload too large"}},
+        )
+
+    event = model_tool_call_from_provider_block(
+        {
+            "type": "function_call",
+            "call_id": "call_income_1",
+            "name": "monthly_income_report",
+            "arguments": '{"account":"lx","month":"2026-06","include_rows":true}',
+        },
+        provider="openai",
+        event_id="model_tool_call_1",
+    )
+
+    outcome = run_assistant_tool_event_loop(
+        question="lx 6月收益分析",
+        request=AssistantRequest(text="lx 6月收益分析", sender_id="u1", config_key="us"),
+        task_contract={"requested_effect": "read", "scope": {"requested_accounts": ["lx"]}},
+        initial_events=(event,),
+        execute_tool_fn=_execute,
+        provider="openai",
+        create_continuation_response_fn=_continue,
+    )
+
+    error = outcome.public_payload()["trace"]["continuation_error"]
+    details = error["details"]
+    assert outcome.stop_reason == "continuation_provider_error"
+    assert details["provider"] == "openai"
+    assert details["error_type"] == "OpenAIResponsesError"
+    assert details["message"] == "provider timeout after tool result"
+    assert details["phase"] == "tool_result_continuation"
+    assert details["provider_payload_bytes"] > 0
+    assert details["response_error_type"] == "timeout"
 
 
 def test_run_assistant_tool_event_loop_multihop_income_report_to_analysis_query() -> None:
@@ -1011,6 +1058,65 @@ def test_run_assistant_tool_event_loop_recovers_from_scope_denial_once() -> None
     assert trace["continuation_count"] == 2
     assert trace["repair_attempted"] is True
     assert trace["capability_selection"]["selected_count"] == 2
+
+
+def test_run_assistant_tool_event_loop_repairs_unknown_tool_once() -> None:
+    continuation_payloads: list[dict[str, Any]] = []
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(tool_name=tool_name, ok=True, data={"summary": {"ok": True}})
+
+    def _continue(payload: dict[str, Any]) -> dict[str, Any]:
+        continuation_payloads.append(payload)
+        output = json.loads(payload["input"][-1]["output"])
+        if len(continuation_payloads) == 1:
+            assert output["is_error"] is True
+            assert output["content"]["error"]["code"] == "UNKNOWN_TOOL"
+            assert output["content"]["guard_decision"]["decision"] == "unknown_tool"
+            return {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_runtime_status_repaired",
+                        "name": "runtime_status",
+                        "arguments": "{}",
+                    }
+                ]
+            }
+        return {
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "运行状态已根据工具结果完成。"}],
+                }
+            ]
+        }
+
+    bad_event = ModelToolCallEvent(
+        event_id="model_tool_call_bad",
+        tool_call_id="call_bad_tool",
+        tool_name="made_up_tool",
+        arguments={},
+        provider="openai",
+    )
+
+    outcome = run_assistant_tool_event_loop(
+        question="看一下状态",
+        request=AssistantRequest(text="看一下状态", sender_id="u1", config_key="us"),
+        task_contract={"requested_effect": "read", "domain": "runtime", "scope": {}},
+        initial_events=(bad_event,),
+        execute_tool_fn=_execute,
+        provider="openai",
+        create_continuation_response_fn=_continue,
+    )
+
+    assert calls == [("runtime_status", {"config_key": "us"})]
+    assert outcome.status == "done"
+    assert outcome.stop_reason == "model_final_answer"
+    assert outcome.trace["repair_attempted"] is True
+    assert outcome.trace["capability_selection"]["selected_count"] == 2
 
 
 def test_run_assistant_tool_event_loop_turns_duplicate_query_into_final_answer() -> None:

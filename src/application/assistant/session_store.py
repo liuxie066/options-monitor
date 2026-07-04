@@ -634,6 +634,7 @@ def _trace_from_row(row: dict[str, Any], *, include_snapshot: bool) -> dict[str,
     answer_trace = snapshot.get("answer_trace") if isinstance(snapshot.get("answer_trace"), dict) else {}
     final_response = answer_trace.get("final_response") if isinstance(answer_trace.get("final_response"), dict) else {}
     synthesis = answer_trace.get("synthesis") if isinstance(answer_trace.get("synthesis"), dict) else {}
+    event_loop_trace = synthesis.get("event_loop") if isinstance(synthesis.get("event_loop"), dict) else {}
     permission_state = snapshot.get("permission_state") if isinstance(snapshot.get("permission_state"), dict) else {}
     trace: dict[str, Any] = {
         "schema_version": "om-assistant-trace-entry-v1",
@@ -679,6 +680,8 @@ def _trace_from_row(row: dict[str, Any], *, include_snapshot: bool) -> dict[str,
             "answer_route": answer_trace.get("answer_route"),
             "scope_source": answer_trace.get("scope_source"),
             "clarification_reason": answer_trace.get("clarification_reason"),
+            "loop_stop_reason": answer_trace.get("loop_stop_reason") or event_loop_trace.get("loop_stop_reason"),
+            "continuation_count": _safe_int(event_loop_trace.get("continuation_count")),
             "answer_guard": synthesis.get("answer_guard") if isinstance(synthesis.get("answer_guard"), dict) else None,
             "clarification_request": _compact_clarification_request(final_response.get("clarification_request")),
             "hook_results": _compact_hook_results(final_response.get("hook_results") or synthesis.get("hook_results")),
@@ -687,6 +690,7 @@ def _trace_from_row(row: dict[str, Any], *, include_snapshot: bool) -> dict[str,
         "context": _compact_context_trace(synthesis.get("context")),
         "permission_state": permission_state,
     }
+    trace["compact_trace"] = _compact_diagnostic_trace(trace)
     if include_snapshot:
         trace["snapshot"] = snapshot
     return trace
@@ -703,6 +707,56 @@ def _compact_context_trace(value: Any) -> dict[str, Any]:
     if projection:
         out["context_projection"] = projection
     return out
+
+
+def _compact_diagnostic_trace(trace: dict[str, Any]) -> dict[str, Any]:
+    capability = trace.get("capability_selection") if isinstance(trace.get("capability_selection"), dict) else {}
+    progress = trace.get("progress") if isinstance(trace.get("progress"), dict) else {}
+    answer = trace.get("answer") if isinstance(trace.get("answer"), dict) else {}
+    plan = trace.get("plan") if isinstance(trace.get("plan"), dict) else {}
+    selected = [item for item in capability.get("selected") or [] if isinstance(item, dict)]
+    selected_tools = _string_list(capability.get("selected_tools"))
+    return {
+        "schema_version": "om-assistant-compact-trace-v1",
+        "selected_capability": (selected[0].get("tool_name") if selected else None) or (selected_tools[0] if selected_tools else None),
+        "model_turns": {
+            "plan_revision_count": _safe_int(plan.get("revision_count")),
+            "tool_call_count": _safe_int(progress.get("tool_call_count") or len(trace.get("tools") or [])),
+            "continuation_count": _safe_int(answer.get("continuation_count")),
+        },
+        "tool_observations": [_compact_tool_observation(item) for item in trace.get("tools") or [] if isinstance(item, dict)],
+        "evidence_gaps": _compact_evidence_gaps(progress.get("blocked_by")),
+        "stop_reason": answer.get("loop_stop_reason") or answer.get("response_reason"),
+        "answer_route": answer.get("answer_route"),
+    }
+
+
+def _compact_tool_observation(value: dict[str, Any]) -> dict[str, Any]:
+    precheck = value.get("precheck") if isinstance(value.get("precheck"), dict) else {}
+    evidence = value.get("evidence_summary") if isinstance(value.get("evidence_summary"), dict) else {}
+    return {
+        "tool_name": value.get("tool_name"),
+        "ok": bool(value.get("ok", False)),
+        "error_code": value.get("error_code"),
+        "guard_decision": precheck.get("decision"),
+        "risk_class": precheck.get("risk_class"),
+        "row_count": evidence.get("row_count"),
+    }
+
+
+def _compact_evidence_gaps(value: Any) -> list[dict[str, Any]]:
+    gaps: list[dict[str, Any]] = []
+    for item in value or []:
+        if not isinstance(item, dict) or item.get("kind") != "evidence_gap":
+            continue
+        gaps.append(
+            {
+                "gap_type": item.get("gap_kind") or "evidence_gap",
+                "suggested_tool": item.get("suggested_tool") or item.get("recoverable_by"),
+                "recoverable_by": item.get("recoverable_by"),
+            }
+        )
+    return gaps
 
 
 def _compact_context_projection(value: Any) -> dict[str, Any]:

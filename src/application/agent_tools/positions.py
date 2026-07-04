@@ -194,6 +194,7 @@ def _option_positions_output_contract(payload: dict[str, Any]) -> dict[str, Any]
 
 _MONTHLY_INCOME_PLANNER_NOTES: tuple[str, ...] = (
     "Set include_rows=true for income analysis/review/performance, cashflow details, composition, source, 分析, 复盘, 表现, 明细, 组成, 构成, 来源, or 由什么组成.",
+    "Use for monthly income source/breakdown/composition questions; not for current assigned-stock holding PnL, which belongs to option_positions_read action=assigned-stock.",
     "When include_rows=true, canonical factual rows are rendered by the system; synthesis should only add analysis.",
     "Data comes from OM local ledger, not broker realtime cash statements.",
     "If month is omitted, the tool reads all months currently available in the OM local ledger.",
@@ -228,6 +229,7 @@ _MONTHLY_INCOME_PLANNER_SEMANTICS: dict[str, Any] = {
 _OPTION_POSITIONS_PLANNER_NOTES: tuple[str, ...] = (
     "Use for current option position list/detail requests, including 持仓明细, 持仓明晰, 持仓详情, 当前仓位, or current positions.",
     "For assigned stock / 被指派正股 / 指派正股 holding PnL, use action=assigned-stock with status=open by default and refresh_quotes=true when the user asks current 盈亏, spot, 浮盈亏, or 持仓盈亏; use synthesis so the Agent composer can answer from tool evidence.",
+    "Use assigned-stock action for current assigned-stock holding PnL; not for monthly income source breakdown, realized income composition, or account performance summaries.",
     "For ordinary position list/detail requests, required_capabilities should be [] because option_positions_read itself provides option_positions/read_only.",
     "Use action=list for current lots; use action=history or action=inspect only when the user explicitly asks for event history, projection, repair, or ledger diagnostics.",
     "For action=list or action=assigned-stock, tool rows are evidence; deterministic renderers are fallback/provenance, not the default user-visible mode.",
