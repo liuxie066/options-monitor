@@ -13,7 +13,7 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 ## Summary
 
 - Python files scanned: 706 (`src`: 410, `domain`: 52, `scripts`: 7, `tests`: 237)
-- Internal import edges: 3772 total, 1773 production/script edges excluding tests
+- Internal import edges: 3777 total, 1774 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -44,11 +44,11 @@ flowchart LR
   scripts -->|1| infrastructure
   scripts -->|2| storage
   storage -->|1| domain
-  tests -->|1387| application
+  tests -->|1389| application
   tests -->|292| domain
   tests -->|2| domain_services
-  tests -->|96| infrastructure
-  tests -->|178| interfaces
+  tests -->|97| infrastructure
+  tests -->|179| interfaces
   tests -->|8| scripts
   tests -->|18| storage
 ```
@@ -75,10 +75,10 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 1387 |
+| tests | application | 1389 |
 | tests | domain | 292 |
-| tests | interfaces | 178 |
-| tests | infrastructure | 96 |
+| tests | interfaces | 179 |
+| tests | infrastructure | 97 |
 | tests | storage | 18 |
 | tests | scripts | 8 |
 | tests | domain_services | 2 |
@@ -175,7 +175,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 
 | module | incoming imports |
 |---|---|
-| src.application.agent_tool_contracts | 89 |
+| src.application.agent_tool_contracts | 90 |
 | src.infrastructure.io_utils | 43 |
 | domain.domain.ledger.position_fields | 42 |
 | domain.domain.symbol_identity | 39 |

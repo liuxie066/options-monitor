@@ -268,7 +268,44 @@ def test_assistant_llm_check_command_forwards_diagnostic_args(monkeypatch, capsy
         "include_local_env_file": False,
         "live": True,
         "live_text": "状态",
+        "live_texts": None,
+        "live_expected_tools": None,
+        "live_expected_event_types": None,
+        "live_expected_arguments": None,
     }]
+
+    calls.clear()
+    rc = cli.main([
+        "assistant",
+        "llm-check",
+        "--live",
+        "--text",
+        "状态",
+        "--text",
+        "sy 6月收益来源拆一下",
+        "--expect-tool",
+        "runtime_status",
+        "--expect-tool",
+        "monthly_income_report",
+        "--expect-event-type",
+        "model_tool_call",
+        "--expect-event-type",
+        "model_tool_call",
+        "--expect-arguments",
+        '{"config_key":"us"}',
+        "--expect-arguments",
+        '{"account":"sy","month":"2026-06"}',
+    ])
+
+    assert rc == 0
+    assert calls[-1]["live_text"] == "状态"
+    assert calls[-1]["live_texts"] == ["状态", "sy 6月收益来源拆一下"]
+    assert calls[-1]["live_expected_tools"] == ["runtime_status", "monthly_income_report"]
+    assert calls[-1]["live_expected_event_types"] == ["model_tool_call", "model_tool_call"]
+    assert calls[-1]["live_expected_arguments"] == [
+        '{"config_key":"us"}',
+        '{"account":"sy","month":"2026-06"}',
+    ]
 
 
 def test_assistant_model_catalog_command_renders_provider_catalog(capsys) -> None:
@@ -326,6 +363,79 @@ assistant:
     assert "credential_configured=False" in text
     assert "OM_LLM_API_KEY" not in text
     assert "api_key_env" not in text
+
+
+def test_assistant_model_check_forwards_multiple_probe_texts(tmp_path: Path, monkeypatch, capsys) -> None:
+    import src.interfaces.cli.main as cli
+
+    calls: list[dict] = []
+
+    def _check_llm_planner(**kwargs):
+        calls.append(kwargs)
+        return {"summary": {"ok": True, "status": "ready"}, "checks": [], "config": {}}
+
+    monkeypatch.setattr(cli, "check_llm_planner", _check_llm_planner)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """\
+accounts:
+  lx:
+    type: external_holdings
+markets:
+  us:
+    accounts: [lx]
+    symbols: [NVDA]
+assistant:
+  enabled: true
+  planner:
+    enabled: true
+  active_model: openai-default
+  models:
+    openai-default:
+      provider: openai
+      model: gpt-5.2
+      api_key_env: OM_LLM_API_KEY
+""",
+        encoding="utf-8",
+    )
+
+    rc = cli.main([
+        "assistant",
+        "model",
+        "check",
+        "openai-default",
+        "--config-yaml",
+        str(config_path),
+        "--live",
+        "--text",
+        "状态",
+        "--text",
+        "sy 6月收益来源拆一下",
+        "--expect-tool",
+        "runtime_status",
+        "--expect-tool",
+        "monthly_income_report",
+        "--expect-event-type",
+        "model_tool_call",
+        "--expect-event-type",
+        "model_tool_call",
+        "--expect-arguments",
+        '{"config_key":"us"}',
+        "--expect-arguments",
+        '{"account":"sy","month":"2026-06"}',
+    ])
+    payload = _read_json_output(capsys)
+
+    assert rc == 0
+    assert payload["tool_name"] == "assistant.model.check"
+    assert calls[-1]["live_text"] == "状态"
+    assert calls[-1]["live_texts"] == ["状态", "sy 6月收益来源拆一下"]
+    assert calls[-1]["live_expected_tools"] == ["runtime_status", "monthly_income_report"]
+    assert calls[-1]["live_expected_event_types"] == ["model_tool_call", "model_tool_call"]
+    assert calls[-1]["live_expected_arguments"] == [
+        '{"config_key":"us"}',
+        '{"account":"sy","month":"2026-06"}',
+    ]
 
 
 def test_assistant_model_add_dry_run_does_not_write_config(tmp_path: Path, capsys) -> None:
@@ -675,7 +785,7 @@ def test_assistant_eval_context_command_renders_report(capsys) -> None:
     assert payload["tool_name"] == "assistant.eval_context"
     assert payload["ok"] is True
     assert payload["data"]["summary"]["mode"] == "scenarios"
-    assert payload["data"]["summary"]["total"] == 20
+    assert payload["data"]["summary"]["total"] == 23
     result = payload["data"]["results"][0]
     assert result["mode"] == "scenarios"
     assert result["actual"]["validation"]["context_validation"]["schema_version"] == "om-context-validation-v1"

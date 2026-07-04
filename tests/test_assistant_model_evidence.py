@@ -15,7 +15,7 @@ from src.application.assistant.model_evidence import (
 )
 
 
-def _income_adapter(*, missing_data: list[dict] | None = None):
+def _income_adapter(*, missing_data: list[dict] | None = None, coverage: dict | None = None):
     guard = ToolGuardDecisionEvent(
         event_id="guard_income_1",
         tool_call_id="call_income_1",
@@ -53,6 +53,8 @@ def _income_adapter(*, missing_data: list[dict] | None = None):
     }
     if missing_data is not None:
         data["missing_data"] = missing_data
+    if coverage is not None:
+        data["coverage"] = coverage
     return adapt_tool_result(
         event_id="result_income_1",
         parent_event_id=guard.event_id,
@@ -200,7 +202,8 @@ def test_event_final_answer_verifier_passes_supported_claims_and_fails_unsupport
     assert bad.status == "failed"
     assert bad.fallback_text
     assert any(item["type"] == "unsupported_contract_currency_amount" for item in bad.guard["violations"])
-    assert bad.trace["fallback"] == "canonical_renderer"
+    assert bad.trace["fallback"] == "user_fallback"
+    assert "结论：" in bad.fallback_text
 
 
 def test_event_evidence_carries_missing_data_records_from_tool_result_event() -> None:
@@ -284,6 +287,30 @@ def test_event_observation_uses_normalized_payload_for_payload_dependent_contrac
 
     assert observation["payload"]["include_rows"] is False
     assert observation["output_contract"]["schema_version"] == "monthly_income_report.output.v1"
+
+
+def test_model_evidence_observation_exposes_recoverable_gap_guidance() -> None:
+    adapter = _income_adapter(
+        coverage={
+            "status": "recoverable_gap",
+            "gaps": [
+                {
+                    "kind": "analysis_breakdown_needed",
+                    "recoverable_by": "analysis_query",
+                    "suggested_tool": "analysis_query",
+                    "suggested_views": ["account_monthly_income_components"],
+                }
+            ],
+        }
+    )
+
+    observation = event_observation_from_tool_result(adapter, index=1)
+
+    gap = observation["evidence_gaps"][0]
+    assert gap["gap_type"] == "analysis_breakdown_needed"
+    assert gap["recoverable"] is True
+    assert gap["suggested_tool"] == "analysis_query"
+    assert gap["allowed_next_actions"] == ["call_suggested_read_tool", "answer_with_missing_data"]
 
 
 def test_symbol_config_evidence_uses_registered_contract_for_fallback() -> None:

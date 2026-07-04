@@ -59,13 +59,26 @@ def test_context_eval_validation_mode_runs_validation_fixture() -> None:
 def test_context_eval_scenarios_mode_runs_real_followup_regression_fixture() -> None:
     report = run_context_eval_suite(fixture_path=SCENARIOS_FIXTURE, mode="scenarios")
     summary = report["summary"]
+    results = {item["id"]: item for item in report["results"]}
     families = {item["family"] for item in report["results"]}
 
     assert summary["mode"] == "scenarios"
     assert summary["ok"] is True
-    assert summary["total"] == 21
+    assert summary["total"] == 23
     assert summary["failed"] == 0
     assert summary["empty"] is False
+    runtime_budget = results["scenario_runtime_followup_carries_diagnostic_run_ref"]["actual"]["planner_context"][
+        "manifest_budget"
+    ]
+    runtime_checks = {
+        check["name"] for check in results["scenario_runtime_followup_carries_diagnostic_run_ref"]["checks"]
+    }
+    assert "read_tool_scope:runtime" in runtime_budget["read_tool_selection_sources"]
+    assert "runtime_status" in runtime_budget["read_tools_included"]
+    assert "monthly_income_report" in runtime_budget["read_tools_omitted"]
+    assert "budget.read_tool_selection_sources.read_tool_scope:runtime" in runtime_checks
+    assert "budget.read_tools_included.runtime_status" in runtime_checks
+    assert "budget.read_tools_omitted.monthly_income_report" in runtime_checks
     assert families == {
         "assigned_stock_read",
         "assignment_preview",
@@ -79,7 +92,9 @@ def test_context_eval_scenarios_mode_runs_real_followup_regression_fixture() -> 
         "income_followup",
         "income_metric_followup",
         "income_standalone",
+        "manual_trade_preview",
         "metric_followup",
+        "missing_data_read",
         "multi_topic_ambiguity",
         "no_context",
         "notice_explanation",
@@ -91,8 +106,12 @@ def test_context_eval_scenarios_mode_runs_real_followup_regression_fixture() -> 
     }
 
     text = format_context_eval_text(report)
-    assert "assistant context eval: 21/21 passed" in text
+    assert "assistant context eval: 23/23 passed" in text
     assert "mode=scenarios" in text
     assert "family=income_followup" in text
+    assert "read_scope=read_tool_scope:runtime" in text
+    assert "read_scope=read_tool_scope:preview_manual_trade" in text
     assert "terminal=preview_tool_call tool=manual_assignment" in text
+    assert "scenario_low_risk_missing_data_no_clarification" in text
+    assert "terminal=read_tool_call" in text
     assert "validation=ask_clarification" in text

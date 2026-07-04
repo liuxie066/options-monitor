@@ -119,6 +119,9 @@ def event_observation_from_tool_result(adapter: ToolResultAdapterOutput, *, inde
     }
     if output_contract:
         observation["output_contract"] = output_contract
+    evidence_gaps = _normalized_evidence_gaps(data)
+    if evidence_gaps:
+        observation["evidence_gaps"] = evidence_gaps
     return observation
 
 
@@ -194,6 +197,41 @@ def _missing_required_tool_evidence(
         return True
     required = {str(item).strip() for item in contract.get("required_evidence") or [] if str(item).strip()}
     return bool(required - {"summary", "source_policy"})
+
+
+def _normalized_evidence_gaps(data: dict[str, Any]) -> list[dict[str, Any]]:
+    coverage = data.get("coverage") if isinstance(data.get("coverage"), dict) else {}
+    raw_gaps = coverage.get("gaps") if isinstance(coverage.get("gaps"), list) else []
+    gaps: list[dict[str, Any]] = []
+    for item in raw_gaps:
+        if not isinstance(item, dict):
+            continue
+        suggested_tool = _first_nonempty(item.get("suggested_tool"), item.get("recoverable_by"))
+        recoverable = bool(suggested_tool)
+        gap: dict[str, Any] = {
+            "gap_type": _first_nonempty(item.get("kind"), item.get("gap_type"), "evidence_gap"),
+            "required_fact": _first_nonempty(item.get("required_fact"), item.get("reason"), ""),
+            "current_evidence_refs": item.get("current_evidence_refs")
+            if isinstance(item.get("current_evidence_refs"), list)
+            else [],
+            "recoverable": recoverable,
+            "allowed_next_actions": ["answer_with_missing_data"],
+        }
+        if suggested_tool:
+            gap["suggested_tool"] = suggested_tool
+            gap["allowed_next_actions"] = ["call_suggested_read_tool", "answer_with_missing_data"]
+        if isinstance(item.get("suggested_views"), list):
+            gap["suggested_views"] = item["suggested_views"]
+        gaps.append(gap)
+    return gaps
+
+
+def _first_nonempty(*values: Any) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
 
 
 def _completion_integrity_violations(answer_event: ModelFinalAnswerEvent) -> list[dict[str, Any]]:
@@ -295,6 +333,10 @@ def user_fallback_from_tool_results(
             continue
         event = adapter.event
         data = raw_result.get("data") if isinstance(raw_result.get("data"), dict) else {}
+        if event.tool_name == "monthly_income_report":
+            rendered = _monthly_income_user_fallback(data)
+            if rendered:
+                return rendered
         if event.tool_name == "analysis_query":
             rendered = _analysis_query_user_fallback(data)
             if rendered:
@@ -303,6 +345,165 @@ def user_fallback_from_tool_results(
         if rendered:
             return rendered
     return ""
+
+
+def _monthly_income_user_fallback(data: dict[str, Any]) -> str:
+    combined_rows = _dict_rows(data.get("combined_return_summary"))
+    return_rows = _dict_rows(data.get("return_summary"))
+    rows = combined_rows or (return_rows if len(return_rows) == 1 else [])
+    if not rows:
+        return ""
+    row = rows[0]
+    scope = _monthly_income_scope(row)
+    net = _money_cny(row.get("net_income_cny"), row.get("net_income_by_ccy"))
+    realized = _money_cny(row.get("realized_pnl_cny"), row.get("realized_pnl_by_ccy"))
+    premium = _money_cny(row.get("premium_income_cny"), row.get("premium_income_by_ccy"))
+    parts = [f"结论：{scope} 净现金流 {net}"]
+    net_rate = _format_rate(row.get("net_return_rate"))
+    if net_rate != "-":
+        parts.append(f"现金流率 {net_rate}")
+    lines = ["，".join(parts) + "。"]
+    metric_parts = []
+    if row.get("realized_pnl_cny") is not None:
+        metric_parts.append(f"已实现PnL {realized}")
+    if row.get("premium_income_cny") is not None:
+        metric_parts.append(f"权利金 {premium}")
+    if metric_parts:
+        lines.append("；".join(metric_parts) + "。")
+    annualized = _monthly_income_annualized_line(row)
+    if annualized:
+        lines.append(annualized)
+    driver_line = _monthly_income_driver_line(data)
+    if driver_line:
+        lines.append(driver_line)
+    lines.append("数据来源：OM 本地账本。口径：现金流率=净现金流/当前现金担保；合并口径按现金担保加权汇总。")
+    return "\n".join(line for line in lines if line).strip()
+
+
+def _monthly_income_scope(row: dict[str, Any]) -> str:
+    month = _format_value(row.get("month"))
+    account = _format_value(row.get("account"))
+    if account == "-" or account.lower() in {"all", "全部账户"}:
+        account = "全部账户"
+    if month == "-":
+        return account
+    return f"{account} {month}"
+
+
+def _monthly_income_annualized_line(row: dict[str, Any]) -> str:
+    annualized = _format_rate(row.get("annualized_net_return_rate"))
+    if annualized == "-":
+        return ""
+    days = row.get("annualized_basis_days")
+    if days is None:
+        return f"年化：{annualized}（按净现金流）。"
+    return f"年化：{annualized}（按净现金流，{_format_number(days)} 天）。"
+
+
+def _monthly_income_driver_line(data: dict[str, Any]) -> str:
+    candidates: list[tuple[float, str]] = []
+    for row in _dict_rows(data.get("realized_rows")):
+        label = _monthly_income_row_label(row, amount_key="realized_gross", fallback_key="realized_pnl_gross")
+        if label:
+            candidates.append(label)
+    for row in _dict_rows(data.get("cashflow_rows")):
+        label = _monthly_income_row_label(row, amount_key="net_cashflow_gross")
+        if label:
+            candidates.append(label)
+    if not candidates:
+        return ""
+    top = [text for _amount, text in sorted(candidates, key=lambda item: item[0], reverse=True)[:3]]
+    return "主要驱动：" + "；".join(top) + "。"
+
+
+def _monthly_income_row_label(row: dict[str, Any], *, amount_key: str, fallback_key: str = "") -> tuple[float, str] | None:
+    amount = row.get(amount_key)
+    if amount is None and fallback_key:
+        amount = row.get(fallback_key)
+    try:
+        magnitude = abs(float(amount))
+    except Exception:
+        return None
+    symbol = _format_value(row.get("symbol"))
+    if symbol == "-":
+        return None
+    currency = _format_value(row.get("currency"))
+    amount_text = f"{currency} {_format_number(amount)}" if currency != "-" else _format_number(amount)
+    contract = _monthly_income_contract_label(row)
+    action = _monthly_income_action_label(row)
+    contracts = _monthly_income_contracts_text(row.get("contracts_closed", row.get("contracts")))
+    parts = [contract]
+    if action:
+        parts.append(action)
+    if contracts:
+        parts.append(contracts)
+    return magnitude, f"{' '.join(parts)} | {amount_text}"
+
+
+def _monthly_income_contract_label(row: dict[str, Any]) -> str:
+    symbol = _format_value(row.get("symbol"))
+    option_type = _format_value(row.get("option_type")).lower()
+    strike = row.get("strike")
+    expiration = _format_value(row.get("expiration_ymd") or row.get("expiration") or row.get("exp"))
+    if option_type in {"put", "call"} and strike is not None:
+        side = "Put" if option_type == "put" else "Call"
+        suffix = "P" if option_type == "put" else "C"
+        label = f"{symbol} {side} {_format_number(strike)}{suffix}"
+    else:
+        label = symbol
+    if expiration != "-":
+        label += f" @ {expiration}"
+    return label
+
+
+def _monthly_income_action_label(row: dict[str, Any]) -> str:
+    close_type = str(row.get("close_type") or "").strip()
+    trade_action = str(row.get("trade_action") or "").strip()
+    labels = {
+        "expire_auto_close": "到期作废",
+        "assignment_close": "指派平仓",
+        "buy_close": "买回平仓",
+        "sell_open": "卖出开仓",
+        "buy_open": "买入开仓",
+    }
+    return labels.get(close_type) or labels.get(trade_action) or ""
+
+
+def _monthly_income_contracts_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return f"{_format_number(value)}张"
+
+
+def _dict_rows(value: Any) -> list[dict[str, Any]]:
+    return [item for item in value or [] if isinstance(item, dict)]
+
+
+def _money_cny(value: Any, by_ccy: Any) -> str:
+    text = f"CNY {_format_number(value)}"
+    if isinstance(by_ccy, dict):
+        parts = [
+            f"{str(currency)} {_format_number(amount)}"
+            for currency, amount in by_ccy.items()
+            if amount is not None
+        ]
+        if parts:
+            text += "（" + " + ".join(parts) + "）"
+    return text
+
+
+def _format_number(value: Any) -> str:
+    try:
+        return f"{float(value):,.2f}".rstrip("0").rstrip(".")
+    except Exception:
+        return _format_value(value)
+
+
+def _format_rate(value: Any) -> str:
+    try:
+        return f"{float(value) * 100:.2f}%"
+    except Exception:
+        return "-"
 
 
 def _analysis_query_user_fallback(data: dict[str, Any]) -> str:

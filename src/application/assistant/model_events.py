@@ -1227,20 +1227,20 @@ def _provider_data_preview(*, tool_name: str, data: dict[str, Any], output_contr
             row_count=None,
             default_limit=4,
         )
-        cashflow_rows, cashflow_complete, cashflow_limit = _preview_rows_with_metadata(
+        cashflow_rows, cashflow_complete, cashflow_limit = _monthly_income_preview_rows_with_metadata(
             data.get("cashflow_rows"),
             row_count=_optional_int(data.get("cashflow_row_count")),
-            default_limit=12,
+            default_limit=5,
         )
-        realized_rows, realized_complete, realized_limit = _preview_rows_with_metadata(
+        realized_rows, realized_complete, realized_limit = _monthly_income_preview_rows_with_metadata(
             data.get("realized_rows"),
             row_count=_optional_int(data.get("realized_row_count")),
-            default_limit=12,
+            default_limit=5,
         )
-        premium_rows, premium_complete, premium_limit = _preview_rows_with_metadata(
+        premium_rows, premium_complete, premium_limit = _monthly_income_preview_rows_with_metadata(
             data.get("premium_rows"),
             row_count=_optional_int(data.get("premium_row_count")),
-            default_limit=12,
+            default_limit=5,
         )
         return _compact_preview(
             {
@@ -1302,6 +1302,39 @@ def _preview_rows_with_metadata(
         _preview_rows_complete(preview_rows=rows, row_count=row_count, truncated=truncated),
         limit,
     )
+
+
+def _monthly_income_preview_rows_with_metadata(
+    value: Any,
+    *,
+    row_count: int | None,
+    default_limit: int,
+) -> tuple[list[dict[str, Any]], bool | None, int | None]:
+    if not isinstance(value, list) and row_count is None:
+        return [], None, None
+    rows = [item for item in value or [] if isinstance(item, dict)]
+    rows = sorted(rows, key=_monthly_income_row_magnitude, reverse=True)
+    preview_rows = [_preview_mapping(item) for item in rows[:default_limit]]
+    count = row_count if row_count is not None else len(rows)
+    return preview_rows, _preview_rows_complete(preview_rows=preview_rows, row_count=count, truncated=False), default_limit
+
+
+def _monthly_income_row_magnitude(row: dict[str, Any]) -> float:
+    for key in (
+        "net_cashflow_gross",
+        "realized_gross",
+        "realized_pnl_gross",
+        "premium_gross",
+        "premium_income_gross",
+        "premium_received_gross",
+        "realized_long_pnl_gross",
+        "amount",
+    ):
+        try:
+            return abs(float(row[key]))
+        except Exception:
+            continue
+    return 0.0
 
 
 def _preview_rows_complete(*, preview_rows: list[dict[str, Any]], row_count: int | None, truncated: bool) -> bool:

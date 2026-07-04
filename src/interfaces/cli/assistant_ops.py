@@ -168,7 +168,10 @@ def add_assistant_commands(parser: argparse.ArgumentParser) -> None:
     assistant_llm_check.add_argument("--env-file", default=None)
     assistant_llm_check.add_argument("--no-local-env-file", action="store_true")
     assistant_llm_check.add_argument("--live", action="store_true", help="run one read-only planner probe")
-    assistant_llm_check.add_argument("--text", default=None, help="probe text used with --live")
+    assistant_llm_check.add_argument("--text", action="append", default=None, help="probe text used with --live; repeat for multiple probes")
+    assistant_llm_check.add_argument("--expect-tool", action="append", default=None, help="expected selected tool for each live probe")
+    assistant_llm_check.add_argument("--expect-event-type", action="append", default=None, help="expected first model event type for each live probe")
+    assistant_llm_check.add_argument("--expect-arguments", action="append", default=None, help="expected JSON argument subset for each live probe")
     assistant_model = assistant_sub.add_parser("model", help="manage optional assistant LLM model profiles")
     assistant_model_sub = assistant_model.add_subparsers(dest="assistant_model_command", required=True)
     assistant_model_catalog = assistant_model_sub.add_parser("catalog", help="list built-in supported LLM providers")
@@ -206,7 +209,10 @@ def add_assistant_commands(parser: argparse.ArgumentParser) -> None:
     assistant_model_check.add_argument("--env-file", default=None)
     assistant_model_check.add_argument("--no-local-env-file", action="store_true")
     assistant_model_check.add_argument("--live", action="store_true")
-    assistant_model_check.add_argument("--text", default=None, help="probe text used with --live")
+    assistant_model_check.add_argument("--text", action="append", default=None, help="probe text used with --live; repeat for multiple probes")
+    assistant_model_check.add_argument("--expect-tool", action="append", default=None, help="expected selected tool for each live probe")
+    assistant_model_check.add_argument("--expect-event-type", action="append", default=None, help="expected first model event type for each live probe")
+    assistant_model_check.add_argument("--expect-arguments", action="append", default=None, help="expected JSON argument subset for each live probe")
     assistant_model_check.add_argument("--format", choices=("json", "text"), default="json")
     assistant_pending = assistant_sub.add_parser("pending", help="inspect pending assistant operations")
     assistant_pending_sub = assistant_pending.add_subparsers(dest="assistant_pending_command", required=True)
@@ -356,13 +362,18 @@ def _check_assistant_model_profile(
     with tempfile.TemporaryDirectory(prefix="om-assistant-model-check-") as tmp_dir:
         assistant_config_path = Path(tmp_dir) / "config.assistant.json"
         assistant_config_path.write_text(json.dumps(runtime_cfg, ensure_ascii=False), encoding="utf-8")
+        probe_texts = [str(item) for item in (args.text or []) if str(item).strip()]
         data = check_llm_planner_fn(
             repo_root=repo_base_fn(),
             config_path=assistant_config_path,
             env_file=args.env_file,
             include_local_env_file=not bool(args.no_local_env_file),
             live=bool(args.live),
-            live_text=args.text or "状态",
+            live_text=probe_texts[0] if probe_texts else "状态",
+            live_texts=probe_texts if len(probe_texts) > 1 else None,
+            live_expected_tools=args.expect_tool,
+            live_expected_event_types=args.expect_event_type,
+            live_expected_arguments=args.expect_arguments,
         )
     data["profile"] = profile.public_payload(active=profile.name == str(assistant.get("active_model") or "").strip())
     data["config_yaml_path"] = str(config_yaml_path)
@@ -380,13 +391,18 @@ def handle_assistant_command(
     handle_assistant_turn_fn: Callable[..., AssistantTurnResult] = handle_assistant_turn,
 ) -> int:
     if args.assistant_command == "llm-check":
+        probe_texts = [str(item) for item in (args.text or []) if str(item).strip()]
         data = check_llm_planner_fn(
             repo_root=repo_base_fn(),
             config_path=args.assistant_config,
             env_file=args.env_file,
             include_local_env_file=not bool(args.no_local_env_file),
             live=bool(args.live),
-            live_text=args.text or "状态",
+            live_text=probe_texts[0] if probe_texts else "状态",
+            live_texts=probe_texts if len(probe_texts) > 1 else None,
+            live_expected_tools=args.expect_tool,
+            live_expected_event_types=args.expect_event_type,
+            live_expected_arguments=args.expect_arguments,
         )
         return _print(build_response(
             tool_name="assistant.llm_check",

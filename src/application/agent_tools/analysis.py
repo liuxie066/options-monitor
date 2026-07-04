@@ -4009,6 +4009,7 @@ _ANALYSIS_CATALOG_PLANNER_SEMANTICS: dict[str, Any] = {
 
 _ANALYSIS_QUERY_PLANNER_NOTES: tuple[str, ...] = (
     "Use for open-ended analysis: 对比, 有什么不同, 排名, 趋势, 组成, 来源, 按账户/月份/标的汇总, 差额, 收益率差.",
+    "Use for cross-domain analytical comparisons or grouped queries when a narrow renderer cannot answer; use monthly_income_report first for ordinary monthly income source/breakdown questions.",
     "Generate one SELECT or WITH query over analysis_catalog views; never include writes, PRAGMA, ATTACH, paths, config, or system arguments.",
     "Use only the columns listed in semantics.analysis_views. Do not invent columns such as net_cashflow, total_return, return_rate, or open_basis_pnl unless they are listed.",
     "For account income/performance comparison, prefer account_monthly_performance columns month, account, net_income_cny, net_return_rate, realized_pnl_cny, premium_income_cny, and cash_secured_cny.",
