@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.358 - 2026-07-04
+
+### Added
+- Added stricter Assistant live planner diagnostics for repeated read-only probes, expected tools, event types, and argument subsets.
+- Added regression coverage for Assistant routing, evidence-gap continuation, unknown-tool repair, and compact trace diagnostics.
+
+### Changed
+- Clarified Assistant planner guidance for monthly income, assigned-stock positions, analysis queries, and write-preview boundaries.
+- Exposed compact Assistant diagnostics without raw provider payloads or secret-looking fields.
+
 ## 1.2.357 - 2026-07-03
 
 ### Fixed

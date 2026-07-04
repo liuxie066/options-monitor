@@ -182,7 +182,7 @@ def test_continuation_analysis_preview_keeps_moderate_result_rows_complete() -> 
     assert "fallback_text" not in preview
 
 
-def test_continuation_monthly_income_preview_keeps_moderate_detail_rows_complete() -> None:
+def test_continuation_monthly_income_preview_compacts_moderate_detail_rows_for_provider() -> None:
     call = _income_tool_call()
     rows = [
         {
@@ -219,9 +219,11 @@ def test_continuation_monthly_income_preview_keeps_moderate_detail_rows_complete
 
     output = json.loads(continuation[1]["output"])
     preview = output["content"]["data_preview"]
-    assert len(preview["cashflow_rows"]) == 31
-    assert preview["cashflow_rows_complete"] is True
-    assert preview["cashflow_rows_preview_limit"] == 31
+    assert len(preview["cashflow_rows"]) == 5
+    assert preview["cashflow_rows"][0]["symbol"] == "SYM30"
+    assert preview["cashflow_row_count"] == 31
+    assert preview["cashflow_rows_complete"] is False
+    assert preview["cashflow_rows_preview_limit"] == 5
 
 
 def test_chat_completions_continuation_messages_bind_tool_call_id() -> None:

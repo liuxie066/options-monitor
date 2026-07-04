@@ -1296,21 +1296,28 @@ def run_assistant_tool_event_loop(
         final_answer_retry_attempted = True
         final_answer_retry_reason = reason
         try:
+            retry_base_payload = _final_answer_only_continuation_base_payload(
+                provider=provider,
+                base_payload=current_continuation_base_payload,
+            )
             retry_continuation = continue_model_after_tool_results(
                 provider=provider,
                 create_response_fn=create_continuation_response_fn,
                 results=results,
-                base_payload=_final_answer_only_continuation_base_payload(
-                    provider=provider,
-                    base_payload=current_continuation_base_payload,
-                ),
+                base_payload=retry_base_payload,
                 parent_event_id=parent_event_id,
             )
         except (OpenAIResponsesError, OpenAIChatCompletionsError) as err:
             return AgentToolError(
                 code="LLM_PROVIDER_ERROR",
                 message="LLM continuation provider failed.",
-                details={"provider": provider, "http_status": err.http_status},
+                details=_continuation_provider_error_details(
+                    err,
+                    provider=provider,
+                    phase="final_answer_retry_continuation",
+                    base_payload=retry_base_payload,
+                    results=results,
+                ),
             )
         except AgentToolError as err:
             return err
@@ -1536,7 +1543,15 @@ def run_assistant_tool_event_loop(
                 continuation_error = AgentToolError(
                     code="LLM_PROVIDER_ERROR",
                     message="LLM continuation provider failed.",
-                    details={"provider": provider, "http_status": err.http_status},
+                    details=_continuation_provider_error_details(
+                        err,
+                        provider=provider,
+                        phase="tool_result_continuation",
+                        base_payload=continuation_base_payload_for_turn,
+                        results=tuple(
+                            (execution.model_event, execution.result_adapter.event) for execution in turn_executions
+                        ),
+                    ),
                 )
                 return _assistant_tool_loop_outcome(
                     status="stopped",
@@ -2216,6 +2231,44 @@ def _final_answer_only_continuation_base_payload(*, provider: str, base_payload:
     existing_instructions = str(payload.get("instructions") or "").strip()
     payload["instructions"] = f"{existing_instructions}\n\n{instruction}".strip()
     return payload
+
+
+def _continuation_provider_error_details(
+    err: OpenAIResponsesError | OpenAIChatCompletionsError,
+    *,
+    provider: str,
+    phase: str,
+    base_payload: dict[str, Any] | None,
+    results: tuple[tuple[ModelToolCallEvent, ToolResultEvent], ...],
+) -> dict[str, Any]:
+    details: dict[str, Any] = {
+        "provider": provider,
+        "http_status": err.http_status,
+        "error_type": type(err).__name__,
+        "message": str(err),
+        "phase": phase,
+        "provider_payload_bytes": _continuation_payload_size(base_payload=base_payload, results=results),
+    }
+    response = err.response if isinstance(err.response, dict) else {}
+    response_error = response.get("error") if isinstance(response.get("error"), dict) else {}
+    if response_error:
+        if response_error.get("type") is not None:
+            details["response_error_type"] = str(response_error.get("type"))
+        if response_error.get("message") is not None:
+            details["response_error_message"] = str(response_error.get("message"))
+    return details
+
+
+def _continuation_payload_size(
+    *,
+    base_payload: dict[str, Any] | None,
+    results: tuple[tuple[ModelToolCallEvent, ToolResultEvent], ...],
+) -> int:
+    payload = {
+        "base_payload": dict(base_payload or {}),
+        "tool_results": [result.provider_tool_result_payload() for _event, result in results],
+    }
+    return len(json.dumps(payload, ensure_ascii=False, sort_keys=True))
 
 
 def _assistant_tool_loop_continuation_base_payload(
@@ -3277,13 +3330,7 @@ def _model_turn_result_from_frame_delta(
     if value is _NO_FRAME_DELTA_VALUE:
         return None
     projection = _planner_payload_context_projection(planner_payload)
-    frames = [
-        frame
-        for frame in projection.get("active_frames") or []
-        if isinstance(frame, dict)
-        and frame.get("type") == "symbol_setting"
-        and "set_value" in {str(item) for item in frame.get("allowed_deltas") or []}
-    ]
+    frames = _symbol_setting_delta_frames(projection)
     if not frames:
         return None
     planner_input = _planner_input_trace(planner_payload, json.dumps(planner_payload, ensure_ascii=False, sort_keys=True))
@@ -3385,6 +3432,16 @@ def _model_turn_result_from_frame_delta(
         trace["error_code"] = context_error.code
         return ModelTurnResult(trace=trace, error=context_error, event_plan=event_plan)
     return ModelTurnResult(trace={**trace, "reason": "accepted"}, event_plan=event_plan)
+
+
+def _symbol_setting_delta_frames(projection: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        frame
+        for frame in projection.get("active_frames") or []
+        if isinstance(frame, dict)
+        and frame.get("type") == "symbol_setting"
+        and "set_value" in {str(item) for item in frame.get("allowed_deltas") or []}
+    ]
 
 
 _NO_FRAME_DELTA_VALUE = object()
@@ -4646,10 +4703,143 @@ def _question_requests_cash_headroom(question: str) -> bool:
     return any(token in compact for token in ("现金加货基", "现金类", "担保金", "现金担保", "资金", "cash", "超过", "余量", "缺口"))
 
 
-def _planner_omitted_read_tools_for_question(question: str) -> frozenset[str]:
+def _question_requests_candidate_filter_read(question: str) -> bool:
+    compact = re.sub(r"\s+", "", str(question or "").lower())
+    if not any(token in compact for token in ("候选", "过滤", "筛选", "推荐", "candidate", "filter", "filtered")):
+        return False
+    return any(token in compact for token in ("为什么", "为何", "解释", "原因", "没", "没有", "未", "不在", "missing", "why", "rejected"))
+
+
+def _question_requests_operation_status_read(question: str) -> bool:
+    compact = re.sub(r"\s+", "", str(question or "").lower())
+    if not any(token in compact for token in ("更新", "升级", "update", "upgrade")):
+        return False
+    return any(token in compact for token in ("了吗", "了没", "是否", "状态", "进度", "回执", "成功", "完成", "status"))
+
+
+def _planner_omitted_read_tools_for_question(
+    question: str,
+    *,
+    analysis_view_selection: dict[str, Any] | None = None,
+    preview_authority: dict[str, Any] | None = None,
+) -> frozenset[str]:
     if _question_requests_cash_headroom(question):
         return frozenset()
+    preview_read_scope = _planner_preview_read_tool_scope(preview_authority)
+    if preview_read_scope is not None:
+        _scope, allowed = preview_read_scope
+        return frozenset(AGENT_LOOP_READ_TOOLS - allowed)
+    matched_groups = {
+        str(item)
+        for item in (analysis_view_selection or {}).get("matched_view_groups") or ()
+        if str(item).strip()
+    }
+    if _question_requests_candidate_filter_read(question):
+        allowed = {"analysis_catalog", "analysis_query", "candidate_filter_explain", "symbol_resolve"}
+        return frozenset(AGENT_LOOP_READ_TOOLS - allowed)
+    if _question_requests_operation_status_read(question):
+        allowed = {"analysis_catalog", "analysis_query", "operation_timeline"}
+        return frozenset(AGENT_LOOP_READ_TOOLS - allowed)
+    if _question_requests_symbol_config_read(question):
+        allowed = {"symbol_config_read", "symbol_resolve"}
+        return frozenset(AGENT_LOOP_READ_TOOLS - allowed)
+    if "config" in matched_groups:
+        allowed = {"analysis_catalog", "analysis_query", "symbol_config_read", "symbol_resolve"}
+        return frozenset(AGENT_LOOP_READ_TOOLS - allowed)
+    if "assigned_stock" in matched_groups:
+        allowed = {"analysis_catalog", "analysis_query", "monthly_income_report", "option_positions_read", "symbol_resolve"}
+        return frozenset(AGENT_LOOP_READ_TOOLS - allowed)
+    if "position" in matched_groups:
+        allowed = {"analysis_catalog", "analysis_query", "close_advice_read", "option_positions_read", "symbol_resolve"}
+        return frozenset(AGENT_LOOP_READ_TOOLS - allowed)
+    if "runtime" in matched_groups:
+        allowed = {
+            "analysis_catalog",
+            "analysis_query",
+            "config_validate",
+            "healthcheck",
+            "notification_perception_read",
+            "operation_timeline",
+            "runtime_logs",
+            "runtime_runs",
+            "runtime_status",
+        }
+        return frozenset(AGENT_LOOP_READ_TOOLS - allowed)
+    if "income" in matched_groups:
+        allowed = {"analysis_catalog", "analysis_query", "monthly_income_report", "symbol_resolve"}
+        return frozenset(AGENT_LOOP_READ_TOOLS - allowed)
+    if "candidate_strategy" in matched_groups:
+        allowed = {"analysis_catalog", "analysis_query", "candidate_filter_explain", "close_advice_read", "symbol_resolve"}
+        return frozenset(AGENT_LOOP_READ_TOOLS - allowed)
     return frozenset({"query_cash_headroom"})
+
+
+def _planner_read_tool_selection_sources(
+    question: str,
+    *,
+    analysis_view_selection: dict[str, Any] | None = None,
+    omitted_read_tools: frozenset[str] | None = None,
+    preview_authority: dict[str, Any] | None = None,
+) -> list[str]:
+    if not omitted_read_tools:
+        return ["read_tool_scope:all"]
+    preview_read_scope = _planner_preview_read_tool_scope(preview_authority)
+    if preview_read_scope is not None:
+        scope, _allowed = preview_read_scope
+        return [scope]
+    matched_groups = {
+        str(item)
+        for item in (analysis_view_selection or {}).get("matched_view_groups") or ()
+        if str(item).strip()
+    }
+    if _question_requests_candidate_filter_read(question):
+        return ["read_tool_scope:candidate_filter"]
+    if _question_requests_operation_status_read(question):
+        return ["read_tool_scope:operation_status"]
+    if _question_requests_symbol_config_read(question):
+        return ["read_tool_scope:symbol_config"]
+    if "config" in matched_groups:
+        return ["read_tool_scope:symbol_config"]
+    if "assigned_stock" in matched_groups:
+        return ["read_tool_scope:assigned_stock"]
+    if "position" in matched_groups:
+        return ["read_tool_scope:position"]
+    if "runtime" in matched_groups:
+        return ["read_tool_scope:runtime"]
+    if "income" in matched_groups:
+        return ["read_tool_scope:income"]
+    if "candidate_strategy" in matched_groups:
+        return ["read_tool_scope:candidate_strategy"]
+    return ["read_tool_scope:default_without_cash_headroom"]
+
+
+def _planner_preview_read_tool_scope(preview_authority: dict[str, Any] | None) -> tuple[str, set[str]] | None:
+    if not isinstance(preview_authority, dict) or not bool(preview_authority.get("allowed", False)):
+        return None
+    intents = [str(item) for item in preview_authority.get("allowed_preview_intents") or () if str(item).strip()]
+    if intents == ["upgrade_now"]:
+        return ("read_tool_scope:preview_upgrade", {"analysis_catalog", "analysis_query", "operation_timeline"})
+    if intents == ["symbol_edit"]:
+        return (
+            "read_tool_scope:preview_symbol_edit",
+            {"analysis_catalog", "analysis_query", "symbol_config_read", "symbol_resolve"},
+        )
+    if intents == ["manual_assignment"]:
+        return (
+            "read_tool_scope:preview_assignment",
+            {"analysis_catalog", "analysis_query", "option_positions_read", "symbol_resolve"},
+        )
+    if intents == ["manual_expiry"]:
+        return (
+            "read_tool_scope:preview_expiry",
+            {"analysis_catalog", "analysis_query", "option_positions_read", "symbol_resolve"},
+        )
+    if set(intents) == {"manual_trade_open", "manual_trade_close"}:
+        return (
+            "read_tool_scope:preview_manual_trade",
+            {"analysis_catalog", "analysis_query", "option_positions_read", "symbol_resolve"},
+        )
+    return None
 
 
 def _preview_precheck_clarification_error(precheck: dict[str, Any] | None) -> AgentToolError | None:
@@ -5450,11 +5640,32 @@ def _trim_planner_projection_payload(payload: dict[str, Any]) -> None:
 def _planner_input_payload(text: str, *, conversation_context: dict[str, Any] | None) -> dict[str, Any]:
     selection = _planner_analysis_view_selection(text, conversation_context=conversation_context)
     preview_authority = _planner_preview_authority(text)
+    projection_payload: dict[str, Any] | None = None
+    if isinstance(conversation_context, dict):
+        projection = _planner_context_projection(text, conversation_context=conversation_context)
+        projection_payload = _planner_projection_payload(projection, current_user_message=text)
+        if (
+            bool(preview_authority.get("allowed", False))
+            and not preview_authority.get("allowed_preview_intents")
+            and len(_symbol_setting_delta_frames(projection_payload)) == 1
+        ):
+            preview_authority = {**preview_authority, "allowed_preview_intents": ["symbol_edit"]}
+    omitted_read_tools = _planner_omitted_read_tools_for_question(
+        text,
+        analysis_view_selection=selection,
+        preview_authority=preview_authority,
+    )
+    read_tool_selection_sources = _planner_read_tool_selection_sources(
+        text,
+        analysis_view_selection=selection,
+        omitted_read_tools=omitted_read_tools,
+        preview_authority=preview_authority,
+    )
     tools = _planner_tool_manifest(
         analysis_view_names=selection["selected_analysis_views"],
         include_read_tools=True,
-        include_preview_capabilities=True,
-        omit_read_tools=_planner_omitted_read_tools_for_question(text),
+        include_preview_capabilities=bool(preview_authority.get("allowed", False) and preview_authority.get("allowed_preview_intents")),
+        omit_read_tools=omitted_read_tools,
         allowed_preview_intents=preview_authority.get("allowed_preview_intents"),
     )
     payload: dict[str, Any] = {
@@ -5466,11 +5677,10 @@ def _planner_input_payload(text: str, *, conversation_context: dict[str, Any] | 
             tools=tools,
             analysis_view_selection=selection,
             preview_authority=preview_authority,
+            read_tool_selection_sources=read_tool_selection_sources,
         ),
     }
-    if isinstance(conversation_context, dict):
-        projection = _planner_context_projection(text, conversation_context=conversation_context)
-        projection_payload = _planner_projection_payload(projection, current_user_message=text)
+    if projection_payload is not None:
         context_payload = {
             "current_user_message": {"text": str(text or "")},
             "context_projection": projection_payload,
@@ -5559,6 +5769,7 @@ def _planner_manifest_budget(
     tools: list[dict[str, Any]],
     analysis_view_selection: dict[str, Any],
     preview_authority: dict[str, Any] | None = None,
+    read_tool_selection_sources: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     selected = [
         str(item)
@@ -5566,11 +5777,22 @@ def _planner_manifest_budget(
         if str(item).strip()
     ]
     preview = preview_authority if isinstance(preview_authority, dict) else {}
+    read_tools_included = sorted(
+        {
+            str(tool.get("name") or "")
+            for tool in tools
+            if str(tool.get("name") or "") in AGENT_LOOP_READ_TOOLS
+        }
+    )
     return {
         "schema_version": "om-planner-manifest-budget-v1",
         "mode": analysis_view_selection.get("mode"),
         "manifest_chars": len(json.dumps(tools, ensure_ascii=False, sort_keys=True)),
         "tool_count": len(tools),
+        "read_tool_count": len(read_tools_included),
+        "read_tools_included": read_tools_included,
+        "read_tools_omitted": sorted(AGENT_LOOP_READ_TOOLS - set(read_tools_included)),
+        "read_tool_selection_sources": list(read_tool_selection_sources or []),
         "analysis_views_total": len(ANALYSIS_VIEW_SPECS),
         "analysis_views_included": len(selected),
         "analysis_views_omitted": max(0, len(ANALYSIS_VIEW_SPECS) - len(selected)),
@@ -6052,6 +6274,7 @@ def _planner_preview_notes(intent_name: str) -> list[str]:
     if intent_name == "manual_assignment":
         return [
             "Use for Futu 期权被指派通知 or 已被指派 lifecycle notices.",
+            "not for explaining assignment notices; not for assigned-stock PnL questions or status questions; those are read-only analysis/position requests.",
             "Extract visible lifecycle fields such as symbol, option_type, position_side, contracts_to_close, strike, expiration_ymd, stock_side, stock_qty, and stock_price; omit uncertain fields.",
             "Do not provide raw_text; the host injects the original user message and validates your structured fields against open lots before creating a preview.",
             "Creates only a pending preview; it never writes the ledger until a deterministic confirm command is received.",
@@ -6059,6 +6282,7 @@ def _planner_preview_notes(intent_name: str) -> list[str]:
     if intent_name == "manual_expiry":
         return [
             "Use for Futu 期权到期失效通知 or 已到期失效 lifecycle notices.",
+            "not for explaining expiry notices or status questions; those are read-only analysis/position requests.",
             "Extract visible lifecycle fields such as symbol, option_type, position_side, contracts_to_close, strike, and expiration_ymd; omit uncertain fields.",
             "Do not provide raw_text; the host injects the original user message and validates your structured fields against open lots before creating a preview.",
             "Creates only a pending preview; it never writes the ledger until a deterministic confirm command is received.",

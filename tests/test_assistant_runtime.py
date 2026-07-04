@@ -1860,6 +1860,139 @@ def test_agent_loop_planner_input_includes_cash_headroom_only_for_cash_questions
     assert "query_cash_headroom" not in {tool["name"] for tool in income_payload["tools"]}
 
 
+def test_agent_loop_planner_input_scopes_read_tools_for_income_questions() -> None:
+    payload = json.loads(_planner_input_text("6月收益分析", conversation_context=None))
+    tool_names = {tool["name"] for tool in payload["tools"]}
+    budget = payload["manifest_budget"]
+
+    assert {"analysis_catalog", "analysis_query", "monthly_income_report"} <= tool_names
+    assert tool_names.isdisjoint(
+        {
+            "candidate_filter_explain",
+            "close_advice_read",
+            "config_validate",
+            "healthcheck",
+            "operation_timeline",
+            "option_positions_read",
+            "runtime_logs",
+            "runtime_runs",
+            "runtime_status",
+            "symbol_config_read",
+        }
+    )
+    assert {"analysis_catalog", "analysis_query", "monthly_income_report"} <= set(budget["read_tools_included"])
+    assert "runtime_status" in budget["read_tools_omitted"]
+    assert "read_tool_scope:income" in budget["read_tool_selection_sources"]
+
+
+def test_agent_loop_manifest_selection_notes_distinguish_income_analysis_and_positions() -> None:
+    payload = json.loads(_planner_input_text("sy 6月收益来源拆一下", conversation_context=None))
+    scoped_tools = {tool["name"]: tool for tool in payload["tools"]}
+    full_tools = {tool["name"]: tool for tool in _planner_tool_manifest()}
+
+    monthly_notes = " ".join(scoped_tools["monthly_income_report"]["planner_notes"])
+    analysis_notes = " ".join(scoped_tools["analysis_query"]["planner_notes"])
+    position_notes = " ".join(full_tools["option_positions_read"]["planner_notes"])
+
+    assert "monthly income source" in monthly_notes
+    assert "not for current assigned-stock holding PnL" in monthly_notes
+    assert "cross-domain analytical" in analysis_notes
+    assert "not for monthly income source breakdown" in position_notes
+
+
+def test_agent_loop_preview_notes_do_not_use_notice_explanation_for_preview() -> None:
+    assignment_manifest = _planner_tool_manifest(
+        include_read_tools=False,
+        include_preview_capabilities=True,
+        allowed_preview_intents=["manual_assignment"],
+    )
+    notes = " ".join(next(tool for tool in assignment_manifest if tool["name"] == "manual_assignment")["planner_notes"])
+
+    assert "not for explaining assignment notices" in notes
+    assert "not for assigned-stock PnL questions" in notes
+    assert "pending preview" in notes
+
+
+def test_agent_loop_planner_input_scopes_read_tools_for_candidate_questions() -> None:
+    payload = json.loads(_planner_input_text("为什么 NVDA 没出现在候选里？", conversation_context=None))
+    tool_names = {tool["name"] for tool in payload["tools"]}
+
+    assert {"candidate_filter_explain", "symbol_resolve"} <= tool_names
+    assert tool_names.isdisjoint(
+        {
+            "close_advice_read",
+            "config_validate",
+            "healthcheck",
+            "monthly_income_report",
+            "operation_timeline",
+            "option_positions_read",
+            "runtime_logs",
+            "runtime_runs",
+            "runtime_status",
+            "symbol_config_read",
+        }
+    )
+
+
+def test_agent_loop_planner_input_scopes_read_tools_for_runtime_questions() -> None:
+    payload = json.loads(_planner_input_text("最近一次运行为什么没推送？", conversation_context=None))
+    tool_names = {tool["name"] for tool in payload["tools"]}
+    budget = payload["manifest_budget"]
+
+    assert {"analysis_catalog", "analysis_query", "notification_perception_read", "runtime_status"} <= tool_names
+    assert tool_names.isdisjoint(
+        {
+            "candidate_filter_explain",
+            "close_advice_read",
+            "monthly_income_report",
+            "option_positions_read",
+            "symbol_config_read",
+        }
+    )
+    assert "read_tool_scope:runtime" in budget["read_tool_selection_sources"]
+
+
+def test_agent_loop_planner_input_scopes_read_tools_for_position_questions() -> None:
+    payload = json.loads(_planner_input_text("当前持仓敞口怎么样？", conversation_context=None))
+    tool_names = {tool["name"] for tool in payload["tools"]}
+    budget = payload["manifest_budget"]
+
+    assert {"analysis_catalog", "analysis_query", "option_positions_read"} <= tool_names
+    assert tool_names.isdisjoint(
+        {
+            "candidate_filter_explain",
+            "config_validate",
+            "healthcheck",
+            "monthly_income_report",
+            "notification_perception_read",
+            "operation_timeline",
+            "runtime_logs",
+            "runtime_runs",
+            "runtime_status",
+            "symbol_config_read",
+        }
+    )
+    assert "read_tool_scope:position" in budget["read_tool_selection_sources"]
+
+
+def test_agent_loop_planner_input_scopes_read_tools_for_symbol_config_questions() -> None:
+    payload = json.loads(_planner_input_text("现在中国海洋石油的 sell put max strike是多少？", conversation_context=None))
+    tool_names = {tool["name"] for tool in payload["tools"]}
+    budget = payload["manifest_budget"]
+
+    assert {"symbol_config_read", "symbol_resolve"} <= tool_names
+    assert tool_names.isdisjoint(
+        {
+            "analysis_query",
+            "candidate_filter_explain",
+            "monthly_income_report",
+            "option_positions_read",
+            "runtime_status",
+        }
+    )
+    assert "read_tool_scope:symbol_config" in budget["read_tool_selection_sources"]
+
+
 def test_agent_loop_symbol_edit_provider_schema_requires_flat_setting_paths() -> None:
     symbol_edit = next(tool for tool in _planner_tool_manifest() if tool["name"] == "symbol_edit")
     provider_schema = provider_tool_schema_from_manifest(symbol_edit)
@@ -2289,15 +2422,29 @@ def test_agent_loop_preview_request_uses_model_driven_manifest() -> None:
     payload = json.loads(_planner_input_text(text, conversation_context=None))
     tool_names = {tool["name"] for tool in payload["tools"]}
     assignment = next(tool for tool in payload["tools"] if tool["name"] == "manual_assignment")
+    budget = payload["manifest_budget"]
 
-    assert payload["manifest_budget"]["mode"] != "preview_only"
-    assert payload["manifest_budget"]["preview_authority_allowed"] is True
-    assert payload["manifest_budget"]["allowed_preview_intents"] == ["manual_assignment"]
+    assert budget["mode"] != "preview_only"
+    assert budget["preview_authority_allowed"] is True
+    assert budget["allowed_preview_intents"] == ["manual_assignment"]
+    assert budget["read_tool_selection_sources"] == ["read_tool_scope:preview_assignment"]
+    assert {"analysis_catalog", "analysis_query", "option_positions_read", "symbol_resolve"} <= set(
+        budget["read_tools_included"]
+    )
+    assert {"monthly_income_report", "candidate_filter_explain", "runtime_status", "symbol_config_read"} <= set(
+        budget["read_tools_omitted"]
+    )
     assert payload["preview_authority"]["allowed"] is True
     assert payload["preview_authority"]["allowed_preview_intents"] == ["manual_assignment"]
     assert "manual_assignment" in tool_names
     assert "manual_expiry" not in tool_names
     assert "analysis_query" in tool_names
+    assert "option_positions_read" in tool_names
+    assert "symbol_resolve" in tool_names
+    assert "monthly_income_report" not in tool_names
+    assert "candidate_filter_explain" not in tool_names
+    assert "runtime_status" not in tool_names
+    assert "symbol_config_read" not in tool_names
     assert (tool_names & AGENT_LOOP_PREVIEW_CAPABILITIES) == {"manual_assignment"}
     assert "raw_text" not in assignment["input_schema"]
     assert {
@@ -2322,28 +2469,51 @@ def test_agent_loop_expiry_request_uses_model_driven_manifest() -> None:
 
     payload = json.loads(_planner_input_text(text, conversation_context=None))
     tool_names = {tool["name"] for tool in payload["tools"]}
+    budget = payload["manifest_budget"]
 
-    assert payload["manifest_budget"]["mode"] != "preview_only"
-    assert payload["manifest_budget"]["preview_authority_allowed"] is True
-    assert payload["manifest_budget"]["allowed_preview_intents"] == ["manual_expiry"]
+    assert budget["mode"] != "preview_only"
+    assert budget["preview_authority_allowed"] is True
+    assert budget["allowed_preview_intents"] == ["manual_expiry"]
+    assert budget["read_tool_selection_sources"] == ["read_tool_scope:preview_expiry"]
+    assert {"analysis_catalog", "analysis_query", "option_positions_read", "symbol_resolve"} <= set(
+        budget["read_tools_included"]
+    )
+    assert {"close_advice_read", "monthly_income_report", "candidate_filter_explain", "runtime_status"} <= set(
+        budget["read_tools_omitted"]
+    )
     assert payload["preview_authority"]["allowed"] is True
     assert payload["preview_authority"]["allowed_preview_intents"] == ["manual_expiry"]
     assert "manual_expiry" in tool_names
     assert "manual_assignment" not in tool_names
     assert "analysis_query" in tool_names
+    assert "option_positions_read" in tool_names
+    assert "symbol_resolve" in tool_names
+    assert "close_advice_read" not in tool_names
+    assert "monthly_income_report" not in tool_names
+    assert "candidate_filter_explain" not in tool_names
+    assert "runtime_status" not in tool_names
     assert (tool_names & AGENT_LOOP_PREVIEW_CAPABILITIES) == {"manual_expiry"}
 
 
 def test_agent_loop_symbol_edit_request_exposes_only_symbol_preview() -> None:
     payload = json.loads(_planner_input_text("把3690 sell put 的max strike 改为65", conversation_context=None))
     tool_names = {tool["name"] for tool in payload["tools"]}
+    budget = payload["manifest_budget"]
 
-    assert payload["manifest_budget"]["preview_authority_allowed"] is True
-    assert payload["manifest_budget"]["allowed_preview_intents"] == ["symbol_edit"]
+    assert budget["preview_authority_allowed"] is True
+    assert budget["allowed_preview_intents"] == ["symbol_edit"]
+    assert budget["read_tool_selection_sources"] == ["read_tool_scope:preview_symbol_edit"]
+    assert {"analysis_catalog", "analysis_query", "symbol_config_read", "symbol_resolve"} <= set(
+        budget["read_tools_included"]
+    )
+    assert {"monthly_income_report", "candidate_filter_explain", "runtime_status"} <= set(budget["read_tools_omitted"])
     assert payload["preview_authority"]["allowed"] is True
     assert payload["preview_authority"]["allowed_preview_intents"] == ["symbol_edit"]
     assert "symbol_edit" in tool_names
     assert "symbol_config_read" in tool_names
+    assert "monthly_income_report" not in tool_names
+    assert "candidate_filter_explain" not in tool_names
+    assert "runtime_status" not in tool_names
     assert (tool_names & AGENT_LOOP_PREVIEW_CAPABILITIES) == {"symbol_edit"}
 
 
@@ -2351,13 +2521,36 @@ def test_agent_loop_fill_notice_request_exposes_only_manual_trade_preview_group(
     text = "成交提醒: 【成交提醒】成功卖出2张$腾讯 260605 440.00 沽$，成交价格：0.86，此笔订单委托已全部成交"
     payload = json.loads(_planner_input_text(text, conversation_context=None))
     tool_names = {tool["name"] for tool in payload["tools"]}
+    budget = payload["manifest_budget"]
 
-    assert payload["manifest_budget"]["preview_authority_allowed"] is True
-    assert payload["manifest_budget"]["allowed_preview_intents"] == ["manual_trade_open", "manual_trade_close"]
+    assert budget["preview_authority_allowed"] is True
+    assert budget["allowed_preview_intents"] == ["manual_trade_open", "manual_trade_close"]
+    assert budget["read_tool_selection_sources"] == ["read_tool_scope:preview_manual_trade"]
+    assert {"analysis_catalog", "analysis_query", "option_positions_read", "symbol_resolve"} <= set(
+        budget["read_tools_included"]
+    )
+    assert {"monthly_income_report", "candidate_filter_explain", "runtime_status", "symbol_config_read"} <= set(
+        budget["read_tools_omitted"]
+    )
     assert payload["preview_authority"]["allowed"] is True
     assert payload["preview_authority"]["allowed_preview_intents"] == ["manual_trade_open", "manual_trade_close"]
     assert "analysis_query" in tool_names
+    assert "option_positions_read" in tool_names
+    assert "symbol_resolve" in tool_names
+    assert "monthly_income_report" not in tool_names
+    assert "candidate_filter_explain" not in tool_names
+    assert "runtime_status" not in tool_names
+    assert "symbol_config_read" not in tool_names
     assert (tool_names & AGENT_LOOP_PREVIEW_CAPABILITIES) == {"manual_trade_open", "manual_trade_close"}
+
+
+def test_agent_loop_unclear_preview_authority_does_not_expose_all_preview_tools() -> None:
+    payload = json.loads(_planner_input_text("记录成交", conversation_context=None))
+    tool_names = {tool["name"] for tool in payload["tools"]}
+
+    assert payload["preview_authority"]["allowed"] is True
+    assert payload["preview_authority"]["allowed_preview_intents"] == []
+    assert tool_names.isdisjoint(AGENT_LOOP_PREVIEW_CAPABILITIES)
 
 
 def test_agent_loop_assignment_status_question_keeps_read_manifest() -> None:
@@ -2368,7 +2561,7 @@ def test_agent_loop_assignment_status_question_keeps_read_manifest() -> None:
     assert payload["manifest_budget"]["preview_authority_allowed"] is False
     assert payload["preview_authority"]["allowed"] is False
     assert "option_positions_read" in tool_names
-    assert "manual_assignment" in tool_names
+    assert tool_names.isdisjoint(AGENT_LOOP_PREVIEW_CAPABILITIES)
 
 
 def test_agent_loop_bare_assignment_analysis_keeps_read_manifest() -> None:
@@ -2379,7 +2572,7 @@ def test_agent_loop_bare_assignment_analysis_keeps_read_manifest() -> None:
     assert payload["manifest_budget"]["preview_authority_allowed"] is False
     assert payload["preview_authority"]["allowed"] is False
     assert "option_positions_read" in tool_names
-    assert "manual_assignment" in tool_names
+    assert tool_names.isdisjoint(AGENT_LOOP_PREVIEW_CAPABILITIES)
 
 
 def test_agent_loop_notification_explanation_keeps_read_preview_authority() -> None:
@@ -2395,20 +2588,31 @@ def test_agent_loop_notification_explanation_keeps_read_preview_authority() -> N
         assert payload["manifest_budget"]["preview_authority_allowed"] is False
         assert payload["preview_authority"]["allowed"] is False
         assert "analysis_query" in tool_names
-        assert "manual_assignment" in tool_names
+        assert tool_names.isdisjoint(AGENT_LOOP_PREVIEW_CAPABILITIES)
 
 
 def test_agent_loop_ambiguous_update_manifest_exposes_only_upgrade_preview() -> None:
     payload = json.loads(_planner_input_text("立即更新", conversation_context=None))
     tool_names = {tool["name"] for tool in payload["tools"]}
+    budget = payload["manifest_budget"]
 
-    assert payload["manifest_budget"]["preview_authority_allowed"] is True
-    assert payload["manifest_budget"]["preview_authority_mode"] == "ambiguous"
-    assert payload["manifest_budget"]["allowed_preview_intents"] == ["upgrade_now"]
+    assert budget["preview_authority_allowed"] is True
+    assert budget["preview_authority_mode"] == "ambiguous"
+    assert budget["allowed_preview_intents"] == ["upgrade_now"]
+    assert budget["read_tool_selection_sources"] == ["read_tool_scope:preview_upgrade"]
+    assert {"analysis_catalog", "analysis_query", "operation_timeline"} <= set(budget["read_tools_included"])
+    assert {"monthly_income_report", "candidate_filter_explain", "runtime_status", "symbol_config_read"} <= set(
+        budget["read_tools_omitted"]
+    )
     assert payload["preview_authority"]["allowed"] is True
     assert payload["preview_authority"]["mode"] == "ambiguous"
     assert payload["preview_authority"]["allowed_preview_intents"] == ["upgrade_now"]
     assert "analysis_query" in tool_names
+    assert "operation_timeline" in tool_names
+    assert "monthly_income_report" not in tool_names
+    assert "candidate_filter_explain" not in tool_names
+    assert "runtime_status" not in tool_names
+    assert "symbol_config_read" not in tool_names
     assert (tool_names & AGENT_LOOP_PREVIEW_CAPABILITIES) == {"upgrade_now"}
 
 
@@ -5564,10 +5768,11 @@ def test_assistant_runtime_agent_loop_executes_planned_cashflow_detail(tmp_path:
         )
     ]
     text = out["data"]["response_text"]
-    assert text.startswith("收益统计完成（OM 本地账本）：")
-    assert "lx 2026-06 收益摘要" in text
-    assert "- 现金流 0700.HK 卖出开仓 1张 | 净现金流 HKD 1200 | lx" in text
-    assert "口径：现金流率=净现金流/当前现金担保，不是账户总资产收益率。" in text
+    assert "收益统计完成" not in text
+    assert "结论：lx 2026-06" in text
+    assert "净现金流 CNY 1,104" in text
+    assert "0700.HK 卖出开仓 1张" in text
+    assert "数据来源：OM 本地账本" in text
     assert "\n\n分析\n" not in text
     agent_loop = out["meta"]["assistant"]["llm"]["agent_loop"]
     assert agent_loop["runtime"] == "model_turn_loop"
@@ -5651,9 +5856,10 @@ def test_assistant_runtime_agent_loop_satisfies_single_account_return_capability
 
     assert out["ok"] is True
     assert calls == [("monthly_income_report", {"account": "lx", "config_key": "us", "month": "2026-06"})]
-    assert out["data"]["response_text"].startswith("收益统计完成（OM 本地账本）：")
-    assert "lx 2026-06 收益摘要" in out["data"]["response_text"]
-    assert "净现金流：CNY 9,000" in out["data"]["response_text"]
+    assert "收益统计完成" not in out["data"]["response_text"]
+    assert "结论：lx 2026-06" in out["data"]["response_text"]
+    assert "净现金流 CNY 9,000" in out["data"]["response_text"]
+    assert "权利金 CNY 10,000" in out["data"]["response_text"]
     agent_loop = out["meta"]["assistant"]["llm"]["agent_loop"]
     assert agent_loop["final_response"] == {
         "status": "rendered",
@@ -7145,6 +7351,26 @@ def test_assistant_runtime_agent_loop_uses_canonical_fallback_when_synthesis_una
                 "premium_row_count": 1,
                 "cashflow_row_count": 2,
                 "realized_row_count": 1,
+                "cashflow_rows": [
+                    {
+                        "account": "lx",
+                        "symbol": "9992.HK",
+                        "option_type": "put",
+                        "strike": 145,
+                        "currency": "HKD",
+                        "net_cashflow_gross": -128.0,
+                    }
+                ],
+                "realized_rows": [
+                    {
+                        "account": "lx",
+                        "symbol": "9992.HK",
+                        "option_type": "put",
+                        "strike": 145,
+                        "currency": "HKD",
+                        "realized_gross": 1132.0,
+                    }
+                ],
             },
         )
 
@@ -7181,8 +7407,12 @@ def test_assistant_runtime_agent_loop_uses_canonical_fallback_when_synthesis_una
     assert out["ok"] is True
     assert calls == [("monthly_income_report", {"account": "lx", "config_key": "us", "month": "2026-06"})]
     assert "LLM 生成不可用" not in out["data"]["response_text"]
-    assert "lx 2026-06 收益摘要" in out["data"]["response_text"]
-    assert "净现金流" in out["data"]["response_text"]
+    assert "收益统计完成" not in out["data"]["response_text"]
+    assert "结论：lx 2026-06" in out["data"]["response_text"]
+    assert "净现金流 CNY -44.22" in out["data"]["response_text"]
+    assert "已实现PnL CNY 981.51" in out["data"]["response_text"]
+    assert "9992.HK" in out["data"]["response_text"]
+    assert "数据来源：OM 本地账本" in out["data"]["response_text"]
     agent_loop = out["meta"]["assistant"]["llm"]["agent_loop"]
     assert agent_loop["final_response"] == {
         "status": "rendered",
@@ -12157,7 +12387,7 @@ def test_assistant_runtime_default_agent_loop_uses_provider_tool_call(monkeypatc
     assert events[-1]["parent_event_id"] == events[-2]["event_id"]
     assert events[-1]["answer_text"] == "已根据工具结果完成 6月收益分析。"
     trace = event_loop["trace"]
-    assert trace["answer_route"] == "canonical_renderer"
+    assert trace["answer_route"] == "user_fallback"
     assert trace["loop_stop_reason"] == "model_final_answer"
     assert trace["tool_call_count"] == 1
     assert trace["repair_attempted"] is False

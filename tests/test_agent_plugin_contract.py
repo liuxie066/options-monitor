@@ -218,6 +218,12 @@ def test_agent_tool_output_contracts_advertise_canonical_renderers() -> None:
     assert tools["assistant_trace"]["output_contract"]["canonical_renderer"] == "assistant_trace"
     assistant_trace_fields = tools["assistant_trace"]["output_contract"]["fact_fields"]
     assert "traces[].capability_selection.selected_tools[]" in assistant_trace_fields
+    assert "traces[].compact_trace.selected_capability" in assistant_trace_fields
+    assert "traces[].compact_trace.model_turns.tool_call_count" in assistant_trace_fields
+    assert "traces[].compact_trace.tool_observations[].tool_name" in assistant_trace_fields
+    assert "traces[].compact_trace.evidence_gaps[].suggested_tool" in assistant_trace_fields
+    assert "traces[].compact_trace.stop_reason" in assistant_trace_fields
+    assert "traces[].compact_trace.answer_route" in assistant_trace_fields
     assert "traces[].progress.next_action" in assistant_trace_fields
     assert "traces[].progress.blocked_by[].tool_name" in assistant_trace_fields
     assert "traces[].answer.clarification_request.questions[].slot" in assistant_trace_fields

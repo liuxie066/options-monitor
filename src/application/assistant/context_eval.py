@@ -310,6 +310,7 @@ def format_context_eval_text(report: dict[str, Any]) -> str:
                         f"validation={validation_trace.get('status') or '-'}",
                         f"code={validation_trace.get('code') or '-'}",
                         f"sources={_compact_list(planner_budget.get('selection_sources'))}",
+                        f"read_scope={_compact_list(planner_budget.get('read_tool_selection_sources'))}",
                         f"refs={projection_trace.get('evidence_ref_count', 0)}",
                         f"gaps={projection_trace.get('open_gap_count', 0)}",
                         f"terminal={decision.get('terminal') or '-'}",
@@ -438,6 +439,27 @@ def _evaluate_context_checks(
     _add_check(checks, "budget.manifest_is_scoped", True, int(budget.get("manifest_chars") or 0) < full_manifest_chars)
     if case.get("expect_selection_sources") is not None:
         _add_check(checks, "budget.selection_sources", case["expect_selection_sources"], budget.get("selection_sources"))
+    for source in case.get("expect_read_tool_selection_sources") or ():
+        _add_check(
+            checks,
+            f"budget.read_tool_selection_sources.{source}",
+            True,
+            str(source) in set(str(item) for item in budget.get("read_tool_selection_sources") or ()),
+        )
+    for tool_name in case.get("expect_read_tools_included") or ():
+        _add_check(
+            checks,
+            f"budget.read_tools_included.{tool_name}",
+            True,
+            str(tool_name) in set(str(item) for item in budget.get("read_tools_included") or ()),
+        )
+    for tool_name in case.get("expect_read_tools_omitted") or ():
+        _add_check(
+            checks,
+            f"budget.read_tools_omitted.{tool_name}",
+            True,
+            str(tool_name) in set(str(item) for item in budget.get("read_tools_omitted") or ()),
+        )
     for group_name in case.get("expect_matched_view_groups") or ():
         _add_check(
             checks,
@@ -611,6 +633,9 @@ def _evaluate_scenario_checks(
             "expect_max_manifest_chars": planner_expect.get("max_manifest_chars"),
             "expect_max_analysis_views_included": planner_expect.get("max_analysis_views_included"),
             "expect_preview_authority_allowed": planner_expect.get("preview_authority_allowed"),
+            "expect_read_tool_selection_sources": planner_expect.get("read_tool_selection_sources"),
+            "expect_read_tools_included": planner_expect.get("read_tools_included"),
+            "expect_read_tools_omitted": planner_expect.get("read_tools_omitted"),
         }
         checks.extend(
             _evaluate_context_checks(
@@ -826,6 +851,9 @@ def _context_eval_actual_payload(
             "analysis_views_omitted": budget.get("analysis_views_omitted"),
             "matched_view_groups": list(budget.get("matched_view_groups") or []),
             "selection_sources": list(budget.get("selection_sources") or []),
+            "read_tool_selection_sources": list(budget.get("read_tool_selection_sources") or []),
+            "read_tools_included": list(budget.get("read_tools_included") or []),
+            "read_tools_omitted": list(budget.get("read_tools_omitted") or []),
         },
         "analysis_views": analysis_views,
         "context": _context_decision_summary(context),
