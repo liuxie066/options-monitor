@@ -20,6 +20,8 @@ into one overloaded "agent" concept.
   [OM_ASSISTANT_CONTEXT_IMPLEMENTATION_PLAN.md](OM_ASSISTANT_CONTEXT_IMPLEMENTATION_PLAN.md).
 - Current assistant memory design:
   [OM_ASSISTANT_MEMORY_DESIGN.md](OM_ASSISTANT_MEMORY_DESIGN.md).
+- Current agent task runtime design note:
+  [superpowers/specs/2026-07-05-agent-task-system-design.md](superpowers/specs/2026-07-05-agent-task-system-design.md).
 
 Historical design notes such as `OM_AGENT_COMPLETION_DESIGN.md`,
 `OM_AGENT_INTELLIGENCE_UPGRADE_PLAN.md`,
@@ -145,7 +147,8 @@ assistant loop:
 ```text
 message
   -> perception/router
-  -> AgentLoop plan
+  -> AgentTask / TaskProfile / EvidencePlan
+  -> AgentLoop model-event plan
   -> tool_execution
   -> evidence_bundle
   -> coverage/progress
@@ -158,8 +161,20 @@ This loop is owned by `./om assistant`. `assistant_trace` is read through the
 local `./om-agent` Tool Gateway as a diagnostic tool, but that does not make
 `./om-agent` the assistant or a planner.
 
+For free-form read-only analysis, the host first derives an `AgentTask` and
+matched `TaskProfile` set before exposing the model-visible tool manifest.
+The resulting `EvidencePlan` narrows analysis views and records
+`agent_task.evidence_plan` as a planner selection source. Tool success or raw
+renderer output is not task completion when the task profile requires
+synthesis; coverage and answer-shape checks decide whether the assistant can
+answer, should continue, or must disclose missing evidence.
+
 Current session snapshots expose these derived fields:
 
+- `agent_task`: normalized task name, domain, mode, scope, profiles, required
+  evidence, required answer keys, and synthesis requirement.
+- `evidence_plan`: host-selected executable read calls and required analysis
+  views derived from matched task profiles.
 - `capability_selection`: selected, required, satisfied, and rejected
   capabilities/tools derived from the bounded plan and tool transcript.
 - `progress`: task state, coverage status, next action, blocker list, pending
@@ -423,7 +438,8 @@ slash command.
 
 It may:
 
-- derive and use a host-owned task contract,
+- derive and use a host-owned `AgentTask`, task profiles, evidence plan, and
+  task contract,
 - run a bounded sequence of automatic read tool calls selected by the model,
 - request a preview event when policy allows, leaving pending-operation creation
   to deterministic handlers,
@@ -445,7 +461,8 @@ It must not:
 
 The current optimization target is `./om assistant` capability quality:
 
-- better intent recognition,
+- better free-form task recognition,
+- better evidence planning for task-shaped questions,
 - better capability selection,
 - better host-derived task contract and coverage verification,
 - better model-driven read tool iteration,
@@ -460,11 +477,12 @@ execution receipts, but it should stay a Tool Gateway rather than becoming the
 project's autonomous Agent.
 
 The next assistant optimization should focus on capability selection
-explainability, not another context state machine. In practice that means:
+and task-completion explainability, not another context state machine. In
+practice that means:
 
 - keeping model-visible capability manifests narrow and auditable,
-- deriving selection reasons from message text, `ContextProjection`,
-  open evidence gaps, and `task_contract.required_evidence`,
+- deriving selection reasons from message text, `AgentTask`, `EvidencePlan`,
+  `ContextProjection`, open evidence gaps, and `task_contract.required_evidence`,
 - adding regression fixtures for selected tools/views and selection sources,
 - keeping execution authority inside the existing
   `AgentLoop -> tool_execution -> agent_tool_registry` path.

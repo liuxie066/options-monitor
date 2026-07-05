@@ -1053,7 +1053,6 @@ def _analysis_catalog_tool(
         "field_types": _catalog_field_types(specs),
         "aggregation_policies": _catalog_aggregation_policies(specs),
         "join_policies": _catalog_join_policies(specs),
-        "investigation_recipes": _catalog_investigation_recipes(specs),
         "sql_rules": {
             "allowed_statements": ["SELECT", "WITH"],
             "single_statement_only": True,
@@ -1108,81 +1107,18 @@ def _catalog_join_policies(specs: dict[str, dict[str, Any]]) -> dict[str, dict[s
     }
 
 
-def _catalog_investigation_recipes(specs: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
-    visible_views = set(specs)
-    recipes = [
-        {
-            "name": "income_analysis_breakdown",
-            "domains": ["income"],
-            "task_modes": ["analyze", "compare"],
-            "evidence_needs": ["summary", "driver_or_breakdown", "same_scope_comparable_data"],
-            "primary_views": [
-                "account_monthly_performance",
-                "account_monthly_income_components",
-                "symbol_income_attribution",
-            ],
-            "followup_tool": "analysis_query",
-            "answer_shape": ["conclusion", "drivers", "source_policy"],
-        },
-        {
-            "name": "position_or_quote_diagnosis",
-            "domains": ["position", "runtime"],
-            "task_modes": ["diagnose", "explain"],
-            "evidence_needs": ["current_state", "diagnostic_evidence", "quote_freshness"],
-            "primary_views": ["assigned_stock_position_pnl", "quote_freshness", "runtime_tick_status"],
-            "followup_tool": "analysis_query",
-            "answer_shape": ["observation", "cause_chain", "evidence_boundary"],
-        },
-        {
-            "name": "operation_status_readback",
-            "domains": ["operation"],
-            "task_modes": ["diagnose", "explain"],
-            "evidence_needs": ["observed_status", "operation_readback", "receipt_status"],
-            "primary_views": ["upgrade_operation_status"],
-            "source_tools": ["operation_timeline", "assistant_trace"],
-            "followup_tool": "operation_timeline",
-            "answer_shape": ["observation", "cause_chain", "evidence_boundary", "next_step"],
-        },
-        {
-            "name": "strategy_replay_review",
-            "domains": ["strategy", "candidate"],
-            "task_modes": ["analyze", "recommend"],
-            "evidence_needs": ["current_state", "constraints", "risk_premise", "dry_run_or_replay"],
-            "primary_views": [
-                "candidate_filter_diagnostics",
-                "close_advice_snapshot",
-                "strategy_config_by_symbol_account",
-                "strategy_replay_read_surface",
-            ],
-            "source_tools": ["analysis_query"],
-            "followup_tool": "analysis_query",
-            "answer_shape": ["judgement", "options", "risk", "premise"],
-        },
-        {
-            "name": "action_lifecycle_audit",
-            "domains": ["operation"],
-            "task_modes": ["preview_write", "diagnose"],
-            "evidence_needs": ["permission_request", "preview_receipt", "operation_readback", "audit"],
-            "primary_views": ["upgrade_operation_status"],
-            "source_tools": ["operation_timeline", "assistant_trace"],
-            "followup_tool": "operation_timeline",
-            "answer_shape": ["preview_summary", "risk", "confirmation_handle", "verification_status"],
-        },
-    ]
-    return [
-        recipe
-        for recipe in recipes
-        if not visible_views or visible_views.intersection(str(view) for view in recipe.get("primary_views") or [])
-    ]
-
-
 def _analysis_query_tool(
     ctx: AgentToolContext,
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    sql = _validated_sql(payload.get("sql") or payload.get("query"))
     limit = _bounded_limit(payload.get("limit"))
     warnings: list[str] = []
+    if not payload.get("sql") and not payload.get("query") and (payload.get("views") or payload.get("view")):
+        requested_views = _requested_analysis_views_from_payload(payload)
+        views = _materialize_views(ctx, payload, warnings=warnings, requested_views=requested_views)
+        return _analysis_views_mode_result(payload=payload, views=views, warnings=warnings, limit=limit)
+
+    sql = _validated_sql(payload.get("sql") or payload.get("query"))
     requested_views = set(_referenced_analysis_views(sql))
     views = _materialize_views(ctx, payload, warnings=warnings, requested_views=requested_views)
     rows, columns, views_used = _execute_select(sql, views, limit=limit)
@@ -1220,6 +1156,129 @@ def _analysis_query_tool(
         "views_used": views_used,
         "view_count": len(views),
     }
+
+
+def _analysis_views_mode_result(
+    *,
+    payload: dict[str, Any],
+    views: dict[str, list[dict[str, Any]]],
+    warnings: list[str],
+    limit: int,
+) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    view_names = sorted(views)
+    view_datasets: dict[str, dict[str, Any]] = {}
+    preview_rows: list[dict[str, Any]] = []
+    all_rows: list[dict[str, Any]] = []
+    truncated = False
+    for view_name in view_names:
+        rows = _filter_views_mode_rows(views.get(view_name) or [], payload=payload)
+        all_rows.extend(rows)
+        row_count = len(rows)
+        display_rows = rows[:limit]
+        truncated = truncated or row_count > len(display_rows)
+        view_datasets[view_name] = {
+            "columns": _columns_for_rows(rows, VIEW_SPECS.get(view_name, {}).get("fields") or ()),
+            "rows": display_rows,
+            "row_count": row_count,
+            "truncated": row_count > len(display_rows),
+        }
+        for row in display_rows:
+            if len(preview_rows) >= limit:
+                truncated = True
+                continue
+            preview_rows.append({"view": view_name, **row})
+    columns = _columns_for_rows(preview_rows, ("view",))
+    coverage = _query_coverage(all_rows)
+    diagnostics = _query_diagnostics(rows=all_rows, views_used=view_names, warnings=warnings)
+    evidence = {
+        "cells": _cell_refs(preview_rows),
+        "coverage": {"views": view_names, **coverage},
+        "freshness": _query_freshness(view_names),
+        "aggregation_policy": [],
+        "diagnostics": diagnostics,
+    }
+    data = {
+        "schema_version": "analysis.query.output.v2",
+        "source_label": "OM read-only analysis workspace",
+        "query": {"mode": "views", "views": view_names, "limit": limit},
+        "preflight": {"ok": True, "warnings": []},
+        "columns": columns,
+        "rows": preview_rows,
+        "row_count": len(all_rows),
+        "truncated": truncated,
+        "views_used": view_names,
+        "view_datasets": view_datasets,
+        "available_views": sorted(VIEW_SPECS),
+        "query_explain": {
+            "views_used": view_names,
+            "grain": [],
+            "aggregations": [],
+            "warnings": [],
+            "coverage": coverage,
+            "diagnostics": diagnostics,
+        },
+        "evidence": evidence,
+        "cell_refs": _cell_refs(preview_rows),
+        "fallback_text": _render_fallback_table(rows=preview_rows, columns=columns, row_count=len(all_rows), truncated=truncated),
+    }
+    return data, warnings, {
+        "source": "in_memory_sqlite",
+        "requested_views": view_names,
+        "materialized_views": view_names,
+        "views_used": view_names,
+        "view_count": len(view_names),
+        "query_mode": "views",
+    }
+
+
+def _requested_analysis_views_from_payload(payload: dict[str, Any]) -> set[str]:
+    raw: list[Any] = []
+    views = payload.get("views")
+    if isinstance(views, str):
+        raw.extend(item.strip() for item in views.split(","))
+    elif isinstance(views, (list, tuple, set)):
+        raw.extend(views)
+    elif views not in (None, ""):
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message="analysis view filter must be a string or list of strings",
+            details={"allowed_views": sorted(VIEW_SPECS)},
+        )
+    view = payload.get("view")
+    if isinstance(view, str) and view.strip():
+        raw.append(view.strip())
+    return _requested_views(raw)
+
+
+def _filter_views_mode_rows(rows: list[dict[str, Any]], *, payload: dict[str, Any]) -> list[dict[str, Any]]:
+    months = _payload_filter_values(payload, "month", "months")
+    accounts = _payload_filter_values(payload, "account", "accounts")
+    symbols = _payload_filter_values(payload, "symbol", "symbols")
+    if not months and not accounts and not symbols:
+        return rows
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        if months and str(row.get("month") or "").strip() not in months:
+            continue
+        if accounts and str(row.get("account") or "").strip() not in accounts:
+            continue
+        if symbols and str(row.get("symbol") or "").strip() not in symbols:
+            continue
+        out.append(row)
+    return out
+
+
+def _payload_filter_values(payload: dict[str, Any], single_key: str, multi_key: str) -> set[str]:
+    values: list[Any] = []
+    single = payload.get(single_key)
+    if single not in (None, "", []):
+        values.append(single)
+    multi = payload.get(multi_key)
+    if isinstance(multi, str):
+        values.extend(item.strip() for item in multi.split(","))
+    elif isinstance(multi, (list, tuple, set)):
+        values.extend(multi)
+    return {str(item or "").strip() for item in values if str(item or "").strip()}
 
 
 def _requested_views(value: Any) -> set[str]:
@@ -3992,14 +4051,14 @@ def _format_cell(value: Any) -> str:
 
 _ANALYSIS_CATALOG_PLANNER_NOTES: tuple[str, ...] = (
     "Use when the user asks what data/fields can be analyzed, or before analysis_query if view names are unknown.",
-    "Use investigation_recipes to map task_contract domains, task modes, and evidence gaps to the safest generic views/tools.",
+    "Task recipes are owned by the assistant TaskProfile registry; this catalog only exposes views, fields, and SQL rules.",
     "This is a pure-read catalog; it does not answer the business question by itself.",
 )
 
 _ANALYSIS_CATALOG_PLANNER_SEMANTICS: dict[str, Any] = {
     "data_source": "OM Tool OS catalog",
     "answer_capabilities": {
-        "analysis_catalog": "lists whitelisted read-only views, SQL rules, and investigation recipes",
+        "analysis_catalog": "lists whitelisted read-only views and SQL rules",
         "read_only": "catalog only; no ledger mutation",
     },
     "scope_semantics": {
@@ -4157,8 +4216,6 @@ ANALYSIS_CATALOG_TOOL = build_agent_tool(
         "fact_fields": [
             "view_count",
             "view_names[]",
-            "investigation_recipes[].name",
-            "investigation_recipes[].primary_views[]",
             "sql_rules.allowed_statements[]",
             "sql_rules.writes_allowed",
         ],
@@ -4179,9 +4236,31 @@ ANALYSIS_QUERY_TOOL = build_agent_tool(
         "data_config": "optional explicit data config path",
         "sql": "required SELECT or WITH query over analysis_catalog views",
         "query": "alias for sql",
+        "view": "optional single materialized analysis view when sql/query is omitted",
+        "views": {
+            "type": ["string", "array"],
+            "items": {"type": "string"},
+            "description": "optional materialized analysis views when sql/query is omitted",
+        },
         "limit": f"optional int, max {MAX_QUERY_LIMIT}",
         "account": "optional materialization account filter",
+        "accounts": {
+            "type": ["string", "array"],
+            "items": {"type": "string"},
+            "description": "optional materialization account filters",
+        },
         "month": "optional materialization month filter",
+        "months": {
+            "type": ["string", "array"],
+            "items": {"type": "string"},
+            "description": "optional materialization month filters",
+        },
+        "symbol": "optional materialization symbol filter",
+        "symbols": {
+            "type": ["string", "array"],
+            "items": {"type": "string"},
+            "description": "optional materialization symbol filters",
+        },
     },
     handler=_analysis_query_tool,
     pure_read=True,
