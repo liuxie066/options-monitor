@@ -5,6 +5,7 @@ from typing import Any
 
 from src.application.agent_tool_contracts import build_response
 from src.application.assistant.agent_loop import (
+    _assistant_tool_loop_outcome,
     _assistant_tool_loop_response_text,
     build_synthesis_observation,
     execute_model_tool_call_event,
@@ -16,6 +17,7 @@ from src.application.assistant.model_events import (
     AssistantEvent,
     ModelFinalAnswerEvent,
     ModelToolCallEvent,
+    adapt_tool_result,
     model_tool_call_from_provider_block,
 )
 from src.application.assistant.settings import AssistantSettings
@@ -890,6 +892,174 @@ def test_run_assistant_tool_event_loop_rejects_business_final_answer_without_too
     assert trace["answer_route"] == "answer_verification_failed"
     assert trace["answer_verification"]["status"] == "failed"
     assert trace["answer_verification"]["trace"]["violation_type"] == "missing_required_tool_evidence"
+
+
+def test_tool_loop_outcome_trace_includes_agent_task() -> None:
+    outcome = _assistant_tool_loop_outcome(
+        status="unsupported",
+        stop_reason="invalid_model_event",
+        question="分析6月的期权操作有没有不合理，需要优化的地方",
+        task_contract={
+            "agent_task": {
+                "schema_version": "om-agent-task-v1",
+                "name": "option_operation_review",
+                "domain": "strategy",
+                "task_mode": "analyze",
+                "requested_effect": "read",
+                "scope": {"requested_months": ["2026-06"]},
+                "profile_names": ["option_operation_review"],
+                "required_evidence": ["trade_or_cashflow_rows"],
+                "required_answer": ["overall_judgement"],
+                "answer_shape": ["judgement"],
+                "requires_synthesis": True,
+            }
+        },
+        transcript=[],
+        tool_results=[],
+    )
+
+    assert outcome.public_payload()["trace"]["agent_task"]["name"] == "option_operation_review"
+
+
+def test_task_shaped_tool_loop_rejects_raw_analysis_fallback() -> None:
+    adapter = adapt_tool_result(
+        event_id="tool_result_1",
+        tool_call_id="call_analysis_query_1",
+        tool_name="analysis_query",
+        raw_result=build_response(
+            tool_name="analysis_query",
+            ok=True,
+            data={
+                "source_label": "OM read-only analysis workspace",
+                "columns": ["month", "account", "symbol", "premium"],
+                "rows": [{"month": "2026-06", "account": "lx", "symbol": "0700.HK", "premium": 1467}],
+                "row_count": 1,
+                "views_used": ["monthly_income_cashflow_rows"],
+                "evidence": {"coverage": {"views": ["monthly_income_cashflow_rows"], "months": ["2026-06"]}},
+            },
+        ),
+        normalized_payload={"limit": 20},
+    )
+    outcome = _assistant_tool_loop_outcome(
+        status="stopped",
+        stop_reason="tool_budget_exhausted",
+        question="分析6月的期权操作有没有不合理，需要优化的地方",
+        task_contract={
+            "agent_task": {
+                "schema_version": "om-agent-task-v1",
+                "name": "option_operation_review",
+                "task_mode": "analyze",
+                "profile_names": ["option_operation_review"],
+                "required_views": ["monthly_income_cashflow_rows", "trade_events", "open_option_exposure"],
+                "requires_synthesis": True,
+            }
+        },
+        transcript=[],
+        tool_results=[adapter],
+    )
+
+    text = _assistant_tool_loop_response_text(outcome)
+
+    assert "分析完成：共" not in text
+    assert "缺少证据视图" in text
+    assert "trade_events" in text
+    assert outcome.trace["task_completion"]["status"] == "need_more_evidence"
+    assert "open_option_exposure" in outcome.trace["task_completion"]["missing_views"]
+
+
+def test_task_shaped_tool_loop_reports_no_successful_evidence() -> None:
+    adapter = adapt_tool_result(
+        event_id="tool_result_1",
+        tool_call_id="call_analysis_query_1",
+        tool_name="analysis_query",
+        raw_result=build_response(
+            tool_name="analysis_query",
+            ok=False,
+            error={"code": "PROVIDER_PROTOCOL_ERROR", "message": "malformed provider arguments"},
+        ),
+        normalized_payload={},
+    )
+    outcome = _assistant_tool_loop_outcome(
+        status="stopped",
+        stop_reason="repeated_recoverable_error",
+        question="分析6月的期权操作有没有不合理，需要优化的地方",
+        task_contract={
+            "agent_task": {
+                "schema_version": "om-agent-task-v1",
+                "name": "option_operation_review",
+                "task_mode": "analyze",
+                "profile_names": ["option_operation_review"],
+                "requires_synthesis": True,
+            }
+        },
+        transcript=[],
+        tool_results=[adapter],
+    )
+
+    text = _assistant_tool_loop_response_text(outcome)
+
+    assert text != "已完成工具调用，但当前结果没有可渲染的文本。"
+    assert "没有成功读取" in text
+    assert "所需证据" in text
+
+
+def test_task_shaped_tool_loop_rejects_final_answer_after_failed_evidence() -> None:
+    event = ModelToolCallEvent(
+        event_id="model_tool_call_1",
+        tool_call_id="call_analysis_1",
+        tool_name="analysis_query",
+        arguments={"views": ["trade_events"], "month": "2026-06", "account": "sy"},
+        purpose="read option operation evidence",
+        provider="host",
+    )
+
+    def _execute(tool_name: str, _payload: dict[str, Any]) -> dict[str, Any]:
+        raise AssertionError(f"{tool_name} should be blocked by scope guard before execution")
+
+    def _continue(_payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "output": [
+                {
+                    "type": "message",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "结论：6月期权操作整体正常。问题模式：没有明显问题。优化建议：继续执行。证据边界：基于 OM 证据。",
+                        }
+                    ],
+                }
+            ]
+        }
+
+    outcome = run_assistant_tool_event_loop(
+        question="分析6月的期权操作有没有不合理，需要优化的地方",
+        request=AssistantRequest(text="分析6月的期权操作有没有不合理，需要优化的地方", sender_id="u1", config_key="us"),
+        task_contract={
+            "requested_effect": "read",
+            "domain": "strategy",
+            "task_mode": "analyze",
+            "agent_task": {
+                "schema_version": "om-agent-task-v1",
+                "name": "option_operation_review",
+                "task_mode": "analyze",
+                "profile_names": ["option_operation_review"],
+                "requires_synthesis": True,
+            },
+            "required_evidence": ["trade_or_cashflow_rows"],
+            "required_answer": ["overall_judgement", "operation_patterns", "optimization_options", "source_and_policy"],
+            "scope": {"requested_accounts": ["lx"], "requested_months": ["2026-06"]},
+        },
+        initial_events=(event,),
+        execute_tool_fn=_execute,
+        provider="openai",
+        create_continuation_response_fn=_continue,
+    )
+
+    assert outcome.status == "stopped"
+    assert outcome.stop_reason == "answer_verification_failed"
+    assert outcome.final_answer is None
+    trace = outcome.public_payload()["trace"]
+    assert trace["answer_verification"]["trace"]["violation_type"] == "missing_successful_tool_evidence"
 
 
 def test_run_assistant_tool_event_loop_allows_general_final_answer_without_tool_evidence() -> None:

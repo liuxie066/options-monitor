@@ -794,7 +794,6 @@ def _compact_plan_revisions(value: Any) -> list[dict[str, Any]]:
                 "revision": item.get("revision"),
                 "reason": item.get("reason"),
                 "goal": plan.get("goal"),
-                "selected_recipe": _compact_selected_recipe(plan.get("selected_recipe")),
                 "steps": [
                     {
                         "tool_name": step.get("tool_name"),
@@ -807,23 +806,6 @@ def _compact_plan_revisions(value: Any) -> list[dict[str, Any]]:
             }
         )
     return out
-
-
-def _compact_selected_recipe(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        return {}
-    allowed = {
-        "name",
-        "match_source",
-        "evidence_needs",
-        "primary_views",
-        "source_tools",
-        "external_evidence",
-        "followup_tool",
-        "answer_shape",
-        "reason",
-    }
-    return {key: value.get(key) for key in sorted(allowed) if key in value}
 
 
 def _compact_capability_selection(value: Any) -> dict[str, Any]:
