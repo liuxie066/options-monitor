@@ -250,6 +250,7 @@ def test_assistant_context_eval_report_covers_planner_context_decisions() -> Non
     candidate = results["planner_context_candidate_metric_followup_uses_projection_refs"]
     candidate_actual = candidate["actual"]
     assert candidate_actual["manifest_budget"]["selection_sources"] == [
+        "agent_task.evidence_plan",
         "message",
         "context_projection.recent_evidence",
     ]
@@ -258,7 +259,7 @@ def test_assistant_context_eval_report_covers_planner_context_decisions() -> Non
 
     override = results["planner_context_account_metric_message_wins_over_projection_refs"]
     override_actual = override["actual"]
-    assert override_actual["manifest_budget"]["selection_sources"] == ["message"]
+    assert override_actual["manifest_budget"]["selection_sources"] == ["agent_task.evidence_plan", "message"]
     assert override_actual["context"]["context_projection"]["recent_successful_tool_count"] == 1
     assert override_actual["context"]["context_projection"]["evidence_ref_count"] == 1
 

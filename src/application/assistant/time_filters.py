@@ -50,6 +50,35 @@ def extract_month_filter(text: str, *, today: date) -> str | None:
     return None
 
 
+def extract_month_filters(text: str, *, today: date) -> list[str]:
+    raw = str(text or "")
+    compact = re.sub(r"\s+", "", raw)
+    found: list[tuple[int, str]] = []
+    for match in _MONTH_RE.finditer(raw):
+        found.append((match.start(), f"{match.group(1)}-{match.group(2)}"))
+    occupied = [(match.start(), match.end()) for match in _YEAR_MONTH_CN_RE.finditer(compact)]
+    for match in _YEAR_MONTH_CN_RE.finditer(compact):
+        month = _month_number(match.group(2))
+        if month:
+            found.append((match.start(), f"{int(match.group(1)):04d}-{month:02d}"))
+    for match in _MONTH_CN_RE.finditer(compact):
+        if any(start <= match.start() < end for start, end in occupied):
+            continue
+        month = _month_number(match.group(1))
+        if month:
+            found.append((match.start(), f"{today.year:04d}-{month:02d}"))
+    if not found:
+        month = extract_month_filter(raw, today=today)
+        return [month] if month else []
+    out: list[str] = []
+    seen: set[str] = set()
+    for _position, month in sorted(found, key=lambda item: item[0]):
+        if month not in seen:
+            seen.add(month)
+            out.append(month)
+    return out
+
+
 def _month_number(raw: str) -> int | None:
     if raw.isdigit():
         value = int(raw)

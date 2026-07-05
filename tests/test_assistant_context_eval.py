@@ -64,7 +64,7 @@ def test_context_eval_scenarios_mode_runs_real_followup_regression_fixture() -> 
 
     assert summary["mode"] == "scenarios"
     assert summary["ok"] is True
-    assert summary["total"] == 23
+    assert summary["total"] == 24
     assert summary["failed"] == 0
     assert summary["empty"] is False
     runtime_budget = results["scenario_runtime_followup_carries_diagnostic_run_ref"]["actual"]["planner_context"][
@@ -98,6 +98,7 @@ def test_context_eval_scenarios_mode_runs_real_followup_regression_fixture() -> 
         "multi_topic_ambiguity",
         "no_context",
         "notice_explanation",
+        "option_operation_review",
         "position_followup",
         "runtime_followup",
         "symbol_edit_current_message",
@@ -106,7 +107,7 @@ def test_context_eval_scenarios_mode_runs_real_followup_regression_fixture() -> 
     }
 
     text = format_context_eval_text(report)
-    assert "assistant context eval: 23/23 passed" in text
+    assert "assistant context eval: 24/24 passed" in text
     assert "mode=scenarios" in text
     assert "family=income_followup" in text
     assert "read_scope=read_tool_scope:runtime" in text

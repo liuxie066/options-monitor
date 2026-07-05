@@ -31,6 +31,7 @@ from src.application.assistant.context_projection import SAFE_SLOT_KEYS, build_c
 from src.application.assistant.context_validation import context_validation_trace, validate_context_use
 from src.application.assistant.coverage_verifier import CoverageResult, verify_coverage
 from src.application.assistant.evidence import build_evidence_bundle
+from src.application.assistant.evidence_planner import plan_task_evidence
 from src.application.assistant.llm_common import (
     CreateStructuredResponseFn,
     CreateToolCallPayloadResponseFn,
@@ -79,6 +80,8 @@ from src.application.assistant.task_contract import (
     preview_authority_from_text,
     preview_request_kind_from_text,
 )
+from src.application.assistant.task_completion import check_task_completion
+from src.application.assistant.task_runtime import AgentTask, derive_agent_task
 from src.application.assistant.tool_bindings import (
     planner_binding_for_tool,
     planner_config_scoped_tool_names,
@@ -92,7 +95,7 @@ from src.application.assistant.verifier_hooks import (
     hook_results_from_coverage,
     hook_results_from_tool_check,
 )
-from src.application.assistant.time_filters import extract_month_filter
+from src.application.assistant.time_filters import extract_month_filters
 from src.application.assistant.tool_policy import DEFAULT_TOOL_POLICY
 from src.application.assistant.user_profile import user_profile_trace
 from src.application.tool_input_schema import build_tool_input_json_schema, validate_tool_input_payload
@@ -1732,6 +1735,8 @@ def _assistant_tool_loop_outcome(
         "evidence_summary": evidence_summary,
         "planner_plan_used": False,
     }
+    if isinstance(task_contract.get("agent_task"), dict) and task_contract["agent_task"]:
+        trace["agent_task"] = dict(task_contract["agent_task"])
     trace.update(trace_extra_payload)
     trace["stop_category"] = _assistant_tool_loop_stop_category(
         status=status,
@@ -2220,6 +2225,7 @@ def _final_answer_only_continuation_base_payload(*, provider: str, base_payload:
     payload.pop("tool_choice", None)
     instruction = (
         "The existing tool observations are the only allowed evidence for this answer. Do not call any more tools. "
+        "When the planner input includes agent_task.required_answer or agent_task.answer_shape, cover those items explicitly. "
         "Produce one natural user-facing final answer using only those observations. "
         "If useful data is missing, say that explicitly instead of inventing it."
     )
@@ -2385,6 +2391,12 @@ def _assistant_tool_loop_response_text(outcome: AssistantToolLoopOutcome) -> str
         return outcome.final_answer
     if outcome.stop_reason == "answer_verification_failed":
         return "需要先读取相关 OM 证据后才能回答；本次没有执行工具。"
+    task_completion_text = _assistant_task_completion_text(
+        trace=outcome.trace,
+        tool_results=outcome.tool_results,
+    )
+    if task_completion_text:
+        return task_completion_text
     fallback = user_fallback_from_tool_results(outcome.tool_results)
     if fallback:
         return fallback
@@ -2397,6 +2409,90 @@ def _assistant_tool_loop_response_text(outcome: AssistantToolLoopOutcome) -> str
     if outcome.tool_results:
         return "已完成工具调用，但当前结果没有可渲染的文本。"
     return "模型没有生成可执行工具调用，未执行工具。"
+
+
+def _assistant_task_completion_text(
+    *,
+    trace: dict[str, Any] | None,
+    tool_results: tuple[ToolResultAdapterOutput, ...],
+) -> str:
+    if not tool_results:
+        return ""
+    payload = trace if isinstance(trace, dict) else {}
+    agent_task = payload.get("agent_task") if isinstance(payload.get("agent_task"), dict) else {}
+    if not _agent_task_requires_synthesis(agent_task):
+        return ""
+    task = _assistant_agent_task_from_trace(agent_task)
+    if task is None:
+        return ""
+    completion = check_task_completion(
+        task=task,
+        covered_views=_assistant_tool_result_covered_views(tool_results),
+        successful_tool_count=_assistant_successful_tool_result_count(tool_results),
+    )
+    payload["task_completion"] = completion.public_payload()
+    if completion.reason == "no_successful_evidence":
+        return "OM 没有成功读取形成结论所需证据；本次工具调用没有产生可用的只读结果。"
+    if completion.missing_views:
+        return f"已读取到部分 OM 证据，但还不能形成结论；缺少证据视图：{', '.join(completion.missing_views[:6])}。"
+    return "已读取到所需 OM 证据，但本轮没有生成可用结论；需要继续综合分析。"
+
+
+def _assistant_agent_task_from_trace(agent_task: dict[str, Any]) -> AgentTask | None:
+    if not isinstance(agent_task, dict) or not agent_task:
+        return None
+    scope = agent_task.get("scope") if isinstance(agent_task.get("scope"), dict) else {}
+    return AgentTask(
+        name=str(agent_task.get("name") or ""),
+        goal=str(agent_task.get("goal") or ""),
+        domain=str(agent_task.get("domain") or "general"),
+        task_mode=str(agent_task.get("task_mode") or "summarize"),
+        requested_effect=str(agent_task.get("requested_effect") or "read"),
+        scope=dict(scope),
+        profile_names=_assistant_trace_string_tuple(agent_task.get("profile_names")),
+        required_evidence=_assistant_trace_string_tuple(agent_task.get("required_evidence")),
+        required_views=_assistant_trace_string_tuple(agent_task.get("required_views")),
+        required_answer=_assistant_trace_string_tuple(agent_task.get("required_answer")),
+        answer_shape=_assistant_trace_string_tuple(agent_task.get("answer_shape")),
+    )
+
+
+def _agent_task_requires_synthesis(agent_task: dict[str, Any]) -> bool:
+    if bool(agent_task.get("requires_synthesis")):
+        return True
+    profiles = {str(item).strip() for item in agent_task.get("profile_names") or [] if str(item).strip()}
+    task_mode = str(agent_task.get("task_mode") or "").strip()
+    return bool(profiles and task_mode in {"analyze", "compare", "diagnose", "recommend"})
+
+
+def _assistant_trace_string_tuple(value: Any) -> tuple[str, ...]:
+    return tuple(str(item).strip() for item in value or [] if str(item).strip())
+
+
+def _assistant_tool_result_covered_views(tool_results: tuple[ToolResultAdapterOutput, ...]) -> set[str]:
+    views: set[str] = set()
+    for adapter in tool_results:
+        raw_result = adapter.raw_result if isinstance(adapter.raw_result, dict) else {}
+        if not adapter.event.ok or not bool(raw_result.get("ok")):
+            continue
+        data = raw_result.get("data") if isinstance(raw_result.get("data"), dict) else {}
+        views.update(_assistant_trace_string_tuple(data.get("views_used")))
+        evidence = data.get("evidence") if isinstance(data.get("evidence"), dict) else {}
+        coverage = evidence.get("coverage") if isinstance(evidence.get("coverage"), dict) else {}
+        views.update(_assistant_trace_string_tuple(coverage.get("views")))
+        view_datasets = data.get("view_datasets")
+        if isinstance(view_datasets, dict):
+            views.update(str(name).strip() for name in view_datasets if str(name).strip())
+    return views
+
+
+def _assistant_successful_tool_result_count(tool_results: tuple[ToolResultAdapterOutput, ...]) -> int:
+    count = 0
+    for adapter in tool_results:
+        raw_result = adapter.raw_result if isinstance(adapter.raw_result, dict) else {}
+        if adapter.event.ok and bool(raw_result.get("ok")):
+            count += 1
+    return count
 
 
 def _assistant_tool_loop_tool_events(outcome: AssistantToolLoopOutcome) -> list[dict[str, Any]]:
@@ -2469,6 +2565,18 @@ def run_read_only_agent_loop(
     steps = max(1, min(int(max_steps), MAX_TOOL_PLAN_STEPS))
     today = _planner_today(now_fn)
     loop_context = _with_temporal_context(conversation_context, today=today)
+    if model_turn_fn is None and request is not None and execute_tool_fn is not None:
+        host_result = _host_owned_evidence_plan_loop_result(
+            text=text,
+            request=request,
+            execute_tool_fn=execute_tool_fn,
+            settings=settings,
+            conversation_context=loop_context,
+            today=today,
+            max_steps=steps,
+        )
+        if host_result is not None:
+            return host_result
     model_turn_entry_fn = model_turn_fn or create_model_turn_events
     model_turn_result = model_turn_entry_fn(text, settings, loop_context)
     model_turn_result = _normalize_model_turn_result(model_turn_result, question=text, today=today)
@@ -2516,6 +2624,210 @@ def run_read_only_agent_loop(
         model_turn_result=model_turn_result,
         max_steps=steps,
     )
+
+
+def _host_owned_evidence_plan_loop_result(
+    *,
+    text: str,
+    request: AssistantRequest,
+    execute_tool_fn: Callable[[str, dict[str, Any]], dict[str, Any]],
+    settings: AssistantSettings,
+    conversation_context: dict[str, Any] | None,
+    today: date,
+    max_steps: int,
+) -> AgentLoopResult | None:
+    agent_task = derive_agent_task(
+        question=text,
+        request_context=request.public_payload(),
+        today=today,
+        conversation_context=conversation_context,
+    )
+    if not _host_owned_evidence_task(agent_task):
+        return None
+    evidence_plan = plan_task_evidence(agent_task)
+    events = _host_evidence_plan_events(evidence_plan)
+    if not events:
+        return None
+    provider = normalize_llm_provider(str(settings.llm.provider or "openai"))
+    continuation_response_fn = _assistant_tool_loop_continuation_response_fn(
+        provider=provider,
+        llm_settings=settings.llm,
+    )
+    if continuation_response_fn is None:
+        error = _host_evidence_synthesis_unavailable_error(settings.llm, provider=provider)
+        agent_loop_trace = _direct_model_turn_rejection_trace(error=error, max_steps=max_steps)
+        agent_loop_trace["runtime"] = "host_evidence_loop"
+        agent_loop_trace["host_evidence_plan_used"] = True
+        trace = {
+            "enabled": True,
+            "attempted": True,
+            "reason": "host_evidence_plan_synthesis_unavailable",
+            "provider": provider,
+            "event_model": {
+                "schema_version": "om-assistant-event-planner-v1",
+                "provider": "host",
+                "api_kind": "host",
+                "event_count": len(events),
+                "events": event_transcript_payload(events),
+                "legacy_json_plan_used": False,
+                "host_evidence_plan_used": True,
+            },
+            "agent_task": agent_task.public_payload(),
+            "evidence_plan": evidence_plan.public_payload(),
+            "agent_loop": agent_loop_trace,
+        }
+        return AgentLoopResult(
+            planning=AgentLoopPlanningOutcome(perception=None, trace=dict(trace), error=error),
+            trace=trace,
+            steps=(),
+        )
+    plan_payload = {
+        "goal": text,
+        "steps": [],
+        "task_contract": agent_task.task_contract_patch(),
+    }
+    host_contract = build_task_contract(question=text, plan=plan_payload, request_context=request.public_payload(), today=today)
+    task_contract = _planner_task_contract_from_host_contract(host_contract.public_payload())
+    base_payload = _assistant_tool_loop_continuation_base_payload(
+        provider=provider,
+        question=text,
+        conversation_context=conversation_context,
+        llm_settings=settings.llm,
+    )
+    continuation_base_payload = _final_answer_only_continuation_base_payload(provider=provider, base_payload=base_payload)
+    outcome = run_assistant_tool_event_loop(
+        question=text,
+        request=request,
+        task_contract=task_contract,
+        initial_events=events,
+        execute_tool_fn=execute_tool_fn,
+        context_validation=None,
+        provider=provider,
+        create_continuation_response_fn=continuation_response_fn,
+        continuation_base_payload=continuation_base_payload,
+    )
+    tool_loop_result = _build_tool_loop_response_from_outcome(
+        outcome=outcome,
+        question=text,
+        command_id=None,
+        task_contract=task_contract,
+    )
+    steps = _agent_loop_steps_from_model_events(
+        events=outcome.events,
+        question=text,
+        task_contract=task_contract,
+        provider=provider,
+        context_validation=None,
+    )
+    event_plan = EventNativePlanningResult(
+        events=events,
+        task_contract=task_contract,
+        required_capabilities=_required_capabilities_for_model_tool_calls(events),
+        context_use=_default_context_use(),
+        context_validation=None,
+        provider=provider,
+        goal=str(text or "").strip(),
+    )
+    final_response = (
+        dict(tool_loop_result.get("data", {}).get("final_response") or {})
+        if isinstance(tool_loop_result.get("data"), dict)
+        else {}
+    )
+    agent_loop_trace = _direct_model_turn_agent_loop_trace(
+        outcome=outcome,
+        max_steps=max_steps,
+        steps=steps,
+        final_response=final_response,
+    )
+    agent_loop_trace["runtime"] = "host_evidence_loop"
+    trace = {
+        "enabled": True,
+        "attempted": True,
+        "reason": "host_evidence_plan",
+        "provider": provider,
+        "event_model": {
+            "schema_version": "om-assistant-event-planner-v1",
+            "provider": "host",
+            "api_kind": "host",
+            "event_count": len(events),
+            "events": event_transcript_payload(events),
+            "legacy_json_plan_used": False,
+            "host_evidence_plan_used": True,
+        },
+        "event_plan": event_plan.public_payload(),
+        "agent_loop": agent_loop_trace,
+    }
+    planning = AgentLoopPlanningOutcome(
+        perception=PerceptionResult(
+            intent_name="tool_loop",
+            arguments={
+                "events": event_transcript_payload(events),
+                "task_contract": task_contract,
+                "provider": provider,
+            },
+            source="agent_loop_events",
+            confidence=1.0,
+        ),
+        trace=dict(trace),
+    )
+    return AgentLoopResult(
+        planning=planning,
+        trace=trace,
+        steps=steps,
+        tool_loop_result=tool_loop_result,
+    )
+
+
+def _host_owned_evidence_task(agent_task: Any) -> bool:
+    if str(getattr(agent_task, "requested_effect", "") or "") != "read":
+        return False
+    if not bool(getattr(agent_task, "profile_names", ())):
+        return False
+    return bool(getattr(agent_task, "requires_synthesis", False))
+
+
+def _host_evidence_synthesis_unavailable_error(llm_settings: AssistantLlmSettings, *, provider: str) -> AgentToolError:
+    missing = missing_llm_config(llm_settings)
+    details: dict[str, Any] = {"phase": "host_evidence_synthesis", "provider": provider}
+    if not bool(llm_settings.enabled):
+        reason = "disabled"
+    elif missing:
+        reason = "missing_config"
+        details["missing"] = missing
+    elif not is_supported_llm_provider(provider):
+        reason = "unsupported_provider"
+    elif not llm_api_key_value(llm_settings, environ=None):
+        reason = "missing_api_key"
+        details["api_key_env"] = llm_settings.api_key_env
+    else:
+        reason = "unavailable"
+    details["reason"] = reason
+    return AgentToolError(
+        code="LLM_UNAVAILABLE",
+        message="已识别为 OM 分析任务，但当前没有可用 LLM 合成结论。",
+        hint="配置 assistant.llm 并设置 API key 后重试；本轮不会降级为明细表格。",
+        details=details,
+    )
+
+
+def _host_evidence_plan_events(evidence_plan: Any) -> tuple[ModelToolCallEvent, ...]:
+    events: list[ModelToolCallEvent] = []
+    for index, call in enumerate(getattr(evidence_plan, "calls", ()) or (), start=1):
+        tool_name = str(getattr(call, "tool_name", "") or "").strip()
+        if not tool_name:
+            continue
+        events.append(
+            ModelToolCallEvent(
+                event_id=f"host_evidence_{index}",
+                tool_call_id=f"host_evidence_{index}",
+                tool_name=tool_name,
+                arguments=dict(getattr(call, "arguments", {}) or {}),
+                purpose=str(getattr(call, "purpose", "") or "read task evidence"),
+                provider="host",
+                provider_metadata={"host_plan": "agent_task_evidence_plan"},
+            )
+        )
+    return tuple(events)
 
 
 def _direct_model_turn_loop_result(
@@ -3634,9 +3946,16 @@ def _event_native_planning_from_model_final_answer(
     provider: str,
 ) -> EventNativePlanningResult:
     today = _planner_today_from_context(conversation_context)
+    agent_task = derive_agent_task(
+        question=text,
+        request_context=None,
+        today=today,
+        conversation_context=conversation_context,
+    )
     plan_payload = {
         "goal": text,
         "steps": [],
+        "task_contract": agent_task.task_contract_patch(),
     }
     host_contract = build_task_contract(question=text, plan=plan_payload, request_context=None, today=today)
     task_contract = _planner_task_contract_from_host_contract(host_contract.public_payload())
@@ -3659,6 +3978,12 @@ def _event_native_planning_from_model_tool_calls(
     provider: str,
 ) -> tuple[EventNativePlanningResult | None, AgentToolError | None]:
     today = _planner_today_from_context(conversation_context)
+    agent_task = derive_agent_task(
+        question=text,
+        request_context=None,
+        today=today,
+        conversation_context=conversation_context,
+    )
     normalized_events = _normalize_model_tool_call_events(events, question=text, today=today)
     validation_error = _validate_model_tool_call_events(normalized_events, question=text)
     if validation_error is not None and not _allow_model_turn_guard_observation(
@@ -3672,7 +3997,7 @@ def _event_native_planning_from_model_tool_calls(
         goal=text,
         events=normalized_events,
         required_capabilities=_required_capabilities_for_model_tool_calls(normalized_events),
-        task_contract=None,
+        task_contract=agent_task.task_contract_patch(),
         context_use=_default_context_use(),
     )
     host_contract = build_task_contract(
@@ -3795,7 +4120,7 @@ def _normalize_model_tool_call_events(
     question: str,
     today: date,
 ) -> tuple[ModelToolCallEvent, ...]:
-    months = _extract_month_filters(question, today=today)
+    months = extract_month_filters(question, today=today)
     month = months[0] if len(months) == 1 else None
     detail_requested = _question_requests_income_detail(question)
     all_history_requested = _question_requests_all_income_history(question)
@@ -3808,7 +4133,7 @@ def _normalize_model_tool_call_events(
         changed = False
         if event.tool_name == "monthly_income_report":
             monthly_step_index += 1
-            purpose_months = _extract_month_filters(event.purpose, today=today)
+            purpose_months = extract_month_filters(event.purpose, today=today)
             if all_accounts_requested and "account" in arguments:
                 arguments.pop("account", None)
                 changed = True
@@ -4200,6 +4525,8 @@ def _question_is_contextual_followup(question: str) -> bool:
         "前面",
         "接着",
         "补证据",
+        "结论",
+        "总结",
         "怎么算",
         "为什么",
         "原因",
@@ -4212,7 +4539,7 @@ def _question_is_contextual_followup(question: str) -> bool:
         "降到",
         "升到",
     )
-    return any(token in compact for token in tokens) or compact in {"继续", "继续分析", "继续解释"}
+    return any(token in compact for token in tokens) or compact in {"继续", "继续分析", "继续解释", "总结一下"}
 
 
 def _context_slot_mapping(value: Any) -> dict[str, list[Any]]:
@@ -4323,6 +4650,7 @@ def _planner_task_contract_from_host_contract(contract: dict[str, Any]) -> dict[
         key: contract[key]
         for key in (
             "schema_version",
+            "agent_task",
             "goal",
             "domain",
             "task_mode",
@@ -4334,6 +4662,7 @@ def _planner_task_contract_from_host_contract(contract: dict[str, Any]) -> dict[
             "required_evidence",
             "answer_shape",
             "constraints",
+            "task_profiles",
         )
         if key in contract
     }
@@ -4985,6 +5314,7 @@ def _safe_tool_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _safe_task_contract_payload(payload: dict[str, Any]) -> dict[str, Any]:
     allowed = {
+        "agent_task",
         "schema_version",
         "goal",
         "domain",
@@ -4998,23 +5328,7 @@ def _safe_task_contract_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "answer_shape",
         "constraints",
         "ambiguities",
-    }
-    return {key: payload[key] for key in sorted(allowed) if key in payload}
-
-
-def _safe_selected_recipe_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    allowed = {
-        "name",
-        "domains",
-        "task_modes",
-        "evidence_needs",
-        "primary_views",
-        "source_tools",
-        "external_evidence",
-        "followup_tool",
-        "answer_shape",
-        "match_source",
-        "reason",
+        "task_profiles",
     }
     return {key: payload[key] for key in sorted(allowed) if key in payload}
 
@@ -5091,62 +5405,6 @@ def _question_requests_all_income_history(question: str) -> bool:
 def _question_requests_all_accounts(question: str) -> bool:
     compact = re.sub(r"\s+", "", str(question or ""))
     return any(token in compact for token in ("所有账户", "全部账户", "各账户", "全账户"))
-
-
-_MONTH_FILTER_RE = re.compile(r"(?<!\d)(20\d{2})[-/.](0[1-9]|1[0-2])(?!\d)")
-_YEAR_MONTH_CN_FILTER_RE = re.compile(r"(?<!\d)(20\d{2})年(1[0-2]|0?[1-9]|十[一二]?|[一二三四五六七八九])月")
-_MONTH_CN_FILTER_RE = re.compile(r"(?<!\d)(1[0-2]|0?[1-9]|十[一二]?|[一二三四五六七八九])月")
-_CN_MONTH_NUMBERS = {
-    "一": 1,
-    "二": 2,
-    "三": 3,
-    "四": 4,
-    "五": 5,
-    "六": 6,
-    "七": 7,
-    "八": 8,
-    "九": 9,
-    "十": 10,
-    "十一": 11,
-    "十二": 12,
-}
-
-
-def _extract_month_filters(text: str, *, today: date) -> list[str]:
-    raw = str(text or "")
-    compact = re.sub(r"\s+", "", raw)
-    found: list[tuple[int, str]] = []
-    for match in _MONTH_FILTER_RE.finditer(raw):
-        found.append((match.start(), f"{match.group(1)}-{match.group(2)}"))
-    occupied = [(match.start(), match.end()) for match in _YEAR_MONTH_CN_FILTER_RE.finditer(compact)]
-    for match in _YEAR_MONTH_CN_FILTER_RE.finditer(compact):
-        month = _month_filter_number(match.group(2))
-        if month:
-            found.append((match.start(), f"{int(match.group(1)):04d}-{month:02d}"))
-    for match in _MONTH_CN_FILTER_RE.finditer(compact):
-        if any(start <= match.start() < end for start, end in occupied):
-            continue
-        month = _month_filter_number(match.group(1))
-        if month:
-            found.append((match.start(), f"{today.year:04d}-{month:02d}"))
-    if not found:
-        month = extract_month_filter(raw, today=today)
-        return [month] if month else []
-    out: list[str] = []
-    seen: set[str] = set()
-    for _position, month in sorted(found, key=lambda item: item[0]):
-        if month not in seen:
-            out.append(month)
-            seen.add(month)
-    return out
-
-
-def _month_filter_number(raw: str) -> int | None:
-    if raw.isdigit():
-        value = int(raw)
-    else:
-        value = _CN_MONTH_NUMBERS.get(raw)
-    return value if value is not None and 1 <= value <= 12 else None
 
 
 def build_synthesis_observation(*, index: int, tool_name: str, payload: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
@@ -5638,7 +5896,18 @@ def _trim_planner_projection_payload(payload: dict[str, Any]) -> None:
 
 
 def _planner_input_payload(text: str, *, conversation_context: dict[str, Any] | None) -> dict[str, Any]:
-    selection = _planner_analysis_view_selection(text, conversation_context=conversation_context)
+    agent_task = derive_agent_task(
+        question=text,
+        request_context=None,
+        today=_planner_today_from_context(conversation_context),
+        conversation_context=conversation_context,
+    )
+    evidence_plan = plan_task_evidence(agent_task)
+    selection = _planner_analysis_view_selection(
+        text,
+        conversation_context=conversation_context,
+        evidence_plan=evidence_plan.public_payload(),
+    )
     preview_authority = _planner_preview_authority(text)
     projection_payload: dict[str, Any] | None = None
     if isinstance(conversation_context, dict):
@@ -5671,6 +5940,8 @@ def _planner_input_payload(text: str, *, conversation_context: dict[str, Any] | 
     payload: dict[str, Any] = {
         "message": str(text or ""),
         "current_user_message": {"text": str(text or "")},
+        "agent_task": agent_task.public_payload(),
+        "evidence_plan": evidence_plan.public_payload(),
         "tools": tools,
         "preview_authority": preview_authority,
         "manifest_budget": _planner_manifest_budget(
@@ -5835,7 +6106,6 @@ Return only JSON that matches the requested schema.
 Rules:
 - Produce 1 to 3 read-only tool calls, or exactly 1 preview-write capability call.
 - Always fill task_contract. The task_contract is your structured understanding of the user goal; the steps are your executable plan. If unsure, use domain=general, requested_effect=read, conservative answer/evidence requirements, empty scope, and record uncertainty in ambiguities instead of omitting task_contract.
-- Also fill selected_recipe.name when one investigation recipe matches the task_contract and planned evidence path. Use income_analysis_breakdown for income analysis/breakdown, position_or_quote_diagnosis for position/runtime diagnosis, operation_status_readback for operation status/readback questions, strategy_replay_review for strategy/candidate replay or recommendation, and action_lifecycle_audit for preview-write lifecycle/audit questions.
 - task_contract.domain is one of income, position, candidate, config, operation, runtime, strategy, general. task_contract.task_mode is one of summarize, analyze, compare, diagnose, explain, recommend, preview_write.
 - Use task_mode=analyze for analysis/复盘/表现/来源/结构 questions, compare for same-scope comparisons, diagnose for why/missing/failure/abnormal status questions, explain for rules or accounting policies, recommend for advisory options, and preview_write only for approved preview operations.
 - task_contract.required_evidence should name evidence categories needed to complete the answer, not tool names. Examples: summary, driver_or_breakdown, same_scope_comparable_data, observed_status, diagnostic_evidence, rule_or_config_source, current_state, constraints, risk_premise, source_policy.
@@ -5880,10 +6150,20 @@ def _planner_analysis_view_selection(
     text: str,
     *,
     conversation_context: dict[str, Any] | None,
+    evidence_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     selected: list[str] = []
     matched_groups: list[str] = []
     selection_sources: list[str] = []
+    plan_views = [
+        str(item)
+        for item in (evidence_plan or {}).get("required_views", [])
+        if str(item).strip()
+    ]
+    if plan_views:
+        selected.extend(plan_views)
+        matched_groups.append(str((evidence_plan or {}).get("task_name") or "task_profile"))
+        selection_sources.append("agent_task.evidence_plan")
     message_groups, message_views = _planner_matched_analysis_groups(_planner_selection_haystack([text]))
     if message_views:
         matched_groups.extend(message_groups)
@@ -5979,6 +6259,8 @@ def _planner_should_blend_context_for_term_followup(
         "前面",
         "为什么",
         "为何",
+        "结论",
+        "总结",
         "why",
         "how",
         "calculate",

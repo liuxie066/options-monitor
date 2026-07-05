@@ -158,34 +158,15 @@ def test_analysis_catalog_exposes_p2_semantic_views() -> None:
     assert "dry_run_patch_allowed" in data["views"]["strategy_replay_read_surface"]["fields"]
 
 
-def test_analysis_catalog_exposes_investigation_recipes() -> None:
+def test_analysis_catalog_does_not_expose_task_recipes() -> None:
     data, _warnings, _meta = ANALYSIS_CATALOG_TOOL.call(
         _CatalogContext(),
         {"views": ["account_monthly_performance", "symbol_income_attribution", "upgrade_operation_status"]},
     )
 
-    recipes = {item["name"]: item for item in data["investigation_recipes"]}
-    assert "income_analysis_breakdown" in recipes
-    assert recipes["income_analysis_breakdown"]["followup_tool"] == "analysis_query"
-    assert "driver_or_breakdown" in recipes["income_analysis_breakdown"]["evidence_needs"]
-    assert "symbol_income_attribution" in recipes["income_analysis_breakdown"]["primary_views"]
-
-    assert "operation_status_readback" in recipes
-    assert recipes["operation_status_readback"]["followup_tool"] == "operation_timeline"
-    assert "operation_readback" in recipes["operation_status_readback"]["evidence_needs"]
-
-
-def test_analysis_catalog_strategy_replay_recipe_uses_read_surface() -> None:
-    data, _warnings, _meta = ANALYSIS_CATALOG_TOOL.call(
-        _CatalogContext(),
-        {"views": ["strategy_replay_read_surface", "candidate_filter_diagnostics"]},
-    )
-
-    recipes = {item["name"]: item for item in data["investigation_recipes"]}
-    assert "strategy_replay_review" in recipes
-    assert recipes["strategy_replay_review"]["followup_tool"] == "analysis_query"
-    assert "dry_run_or_replay" in recipes["strategy_replay_review"]["evidence_needs"]
-    assert "strategy_replay_read_surface" in recipes["strategy_replay_review"]["primary_views"]
+    assert "investigation_recipes" not in data
+    assert "account_monthly_performance" in data["views"]
+    assert "sql_rules" in data
 
 
 def test_analysis_query_authorizer_rejects_non_whitelisted_tables() -> None:
@@ -256,6 +237,41 @@ def test_analysis_query_materializes_only_referenced_monthly_views(monkeypatch: 
     assert data["rows"] == [{"month": "2026-05", "account": "lx", "net_income_cny": 1.0}]
     assert meta["requested_views"] == ["account_monthly_performance"]
     assert meta["materialized_views"] == ["account_monthly_performance"]
+
+
+def test_analysis_query_views_mode_materializes_requested_views_without_sql(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def fake_monthly_tool(*_args, **_kwargs):
+        calls.append("monthly")
+        return {"return_summary": [{"month": "2026-06", "account": "lx", "net_income_cny": 1.0}]}, [], {}
+
+    def fake_positions_tool(*_args, **_kwargs):
+        calls.append("positions")
+        return {"rows": [{"account": "lx", "symbol": "NVDA", "contracts": 1}]}, [], {}
+
+    monkeypatch.setattr(analysis_module, "monthly_income_report_tool", fake_monthly_tool)
+    monkeypatch.setattr(analysis_module, "option_positions_read_tool", fake_positions_tool)
+
+    data, warnings, meta = ANALYSIS_QUERY_TOOL.call(
+        _AnalysisQueryContext(),
+        {
+            "views": ["account_monthly_performance", "open_option_exposure"],
+            "month": "2026-06",
+            "limit": 10,
+        },
+    )
+
+    assert warnings == []
+    assert calls == ["monthly", "positions"]
+    assert data["query"]["mode"] == "views"
+    assert data["views_used"] == ["account_monthly_performance", "open_option_exposure"]
+    assert data["view_datasets"]["account_monthly_performance"]["rows"] == [
+        {"month": "2026-06", "account": "lx", "net_income_cny": 1.0}
+    ]
+    assert data["evidence"]["coverage"]["views"] == ["account_monthly_performance", "open_option_exposure"]
+    assert meta["requested_views"] == ["account_monthly_performance", "open_option_exposure"]
+    assert meta["materialized_views"] == ["account_monthly_performance", "open_option_exposure"]
 
 
 def test_analysis_query_materializes_only_referenced_position_views(monkeypatch: pytest.MonkeyPatch) -> None:

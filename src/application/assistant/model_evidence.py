@@ -152,6 +152,18 @@ def verify_model_final_answer(
                 },
             ],
         }
+    if _missing_successful_tool_evidence(task_contract=task_contract, tool_results=tool_results):
+        guard = {
+            **guard,
+            "violations": [
+                *[dict(item) for item in guard.get("violations") or [] if isinstance(item, dict)],
+                {
+                    "type": "missing_successful_tool_evidence",
+                    "claim": "model_final_answer_without_successful_tool_result",
+                    "evidence": "Task-shaped synthesis requires at least one successful read-only tool result",
+                },
+            ],
+        }
     integrity_violations = _completion_integrity_violations(answer_event)
     if integrity_violations:
         guard = {
@@ -197,6 +209,41 @@ def _missing_required_tool_evidence(
         return True
     required = {str(item).strip() for item in contract.get("required_evidence") or [] if str(item).strip()}
     return bool(required - {"summary", "source_policy"})
+
+
+def _missing_successful_tool_evidence(
+    *,
+    task_contract: dict[str, Any] | None,
+    tool_results: list[ToolResultAdapterOutput] | tuple[ToolResultAdapterOutput, ...],
+) -> bool:
+    if not tool_results:
+        return False
+    contract = task_contract if isinstance(task_contract, dict) else {}
+    if not _requires_successful_tool_evidence(contract):
+        return False
+    return not any(_successful_tool_result(adapter) for adapter in tool_results)
+
+
+def _requires_successful_tool_evidence(contract: dict[str, Any]) -> bool:
+    if str(contract.get("requested_effect") or "read").strip() != "read":
+        return False
+    agent_task = contract.get("agent_task") if isinstance(contract.get("agent_task"), dict) else {}
+    if bool(agent_task.get("requires_synthesis")):
+        return True
+    profiles = {str(item).strip() for item in agent_task.get("profile_names") or [] if str(item).strip()}
+    task_mode = str(agent_task.get("task_mode") or contract.get("task_mode") or "").strip()
+    if profiles and task_mode in {"analyze", "compare", "diagnose", "recommend"}:
+        return True
+    domain = str(contract.get("domain") or "general").strip()
+    required = {str(item).strip() for item in contract.get("required_evidence") or [] if str(item).strip()}
+    return bool(domain != "general" and required - {"summary", "source_policy"})
+
+
+def _successful_tool_result(adapter: ToolResultAdapterOutput) -> bool:
+    if not adapter.event.ok:
+        return False
+    raw_result = adapter.raw_result if isinstance(adapter.raw_result, dict) else {}
+    return bool(raw_result.get("ok", True))
 
 
 def _normalized_evidence_gaps(data: dict[str, Any]) -> list[dict[str, Any]]:

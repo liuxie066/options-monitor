@@ -6,7 +6,7 @@ import re
 from typing import Any
 
 from src.application.assistant.capability_catalog import ACCOUNT_VALUES
-from src.application.assistant.time_filters import extract_month_filter
+from src.application.assistant.time_filters import extract_month_filters
 from src.application.symbol_calibration import calibrate_symbol
 
 
@@ -128,7 +128,8 @@ class TaskContract:
     requested_effect: str = "read"
     required_evidence: tuple[str, ...] = ()
     answer_shape: tuple[str, ...] = ()
-    selected_recipe: dict[str, Any] | None = None
+    agent_task: dict[str, Any] | None = None
+    task_profiles: tuple[str, ...] = ()
     planner_declared: bool = False
     schema_version: str = TASK_CONTRACT_SCHEMA_VERSION
 
@@ -149,8 +150,10 @@ class TaskContract:
             "answer_shape": list(self.answer_shape),
             "planner_declared": bool(self.planner_declared),
         }
-        if isinstance(self.selected_recipe, dict) and self.selected_recipe:
-            payload["selected_recipe"] = _safe_selected_recipe(self.selected_recipe)
+        if isinstance(self.agent_task, dict) and self.agent_task:
+            payload["agent_task"] = dict(self.agent_task)
+        if self.task_profiles:
+            payload["task_profiles"] = list(self.task_profiles)
         return payload
 
 
@@ -231,6 +234,12 @@ def build_task_contract(
         _default_answer_shape(task_mode=task_mode, required_answer=required),
         planner_contract.get("answer_shape") if isinstance(planner_contract, dict) else None,
     )
+    agent_task = planner_contract.get("agent_task") if isinstance(planner_contract.get("agent_task"), dict) else None
+    task_profiles = tuple(
+        str(item).strip()
+        for item in planner_contract.get("task_profiles") or []
+        if str(item).strip()
+    )
     return TaskContract(
         question=str(question or "").strip(),
         goal=goal,
@@ -244,28 +253,10 @@ def build_task_contract(
         requested_effect=requested_effect,
         required_evidence=tuple(required_evidence),
         answer_shape=tuple(answer_shape),
-        selected_recipe=_safe_selected_recipe(plan.get("selected_recipe")) if isinstance(plan.get("selected_recipe"), dict) else None,
+        agent_task=dict(agent_task) if isinstance(agent_task, dict) else None,
+        task_profiles=task_profiles,
         planner_declared=bool(planner_contract),
     )
-
-
-def _safe_selected_recipe(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        return {}
-    allowed = {
-        "name",
-        "domains",
-        "task_modes",
-        "evidence_needs",
-        "primary_views",
-        "source_tools",
-        "external_evidence",
-        "followup_tool",
-        "answer_shape",
-        "match_source",
-        "reason",
-    }
-    return {str(key): value[key] for key in value if str(key) in allowed}
 
 
 def _intent_families(question_goal_text: str, full_text: str) -> list[str]:
@@ -1078,13 +1069,7 @@ def _calibrated_symbol(text: str) -> str:
 
 
 def _extract_months(text: str, *, today: date) -> list[str]:
-    months: list[str] = []
-    explicit = re.findall(r"(?<!\d)(20\d{2})[-/.](0[1-9]|1[0-2])(?!\d)", str(text or ""))
-    months.extend(f"{year}-{month}" for year, month in explicit)
-    normalized = extract_month_filter(text, today=today)
-    if normalized:
-        months.append(normalized)
-    return _unique(months)
+    return extract_month_filters(text, today=today)
 
 
 def _extract_config_keys(values: list[str], *, request_context: dict[str, Any] | None) -> list[str]:

@@ -26,12 +26,15 @@ from src.application.assistant.agent_loop import (
     ToolExecutor,
     _clarification_reason_code,
     _evidence_gap_allows_followup,
+    _event_native_planning_from_model_events,
     _clarification_request_payload,
     _followup_clarification_should_ask,
     _followup_decision_contract,
     _followup_tool_allowlist_rejection,
     _planner_input_text,
+    _planner_input_payload,
     _planner_tool_manifest,
+    _question_is_contextual_followup,
     _synthesis_input_text,
     _tool_loop_duplicate_signature,
     _validate_model_tool_call_events,
@@ -233,6 +236,219 @@ def _with_required_capabilities(result: ModelTurnResult, *required_capabilities:
             schema_version=result.event_plan.schema_version,
         ),
     )
+
+
+def test_planner_input_payload_includes_agent_task_evidence_plan_for_option_review() -> None:
+    payload = _planner_input_payload(
+        "分析6月的期权操作有没有不合理，需要优化的地方",
+        conversation_context={"temporal_context": {"today": "2026-07-05"}},
+    )
+
+    agent_task = payload["agent_task"]
+    evidence_plan = payload["evidence_plan"]
+
+    assert agent_task["name"] == "option_operation_review"
+    assert agent_task["scope"]["requested_months"] == ["2026-06"]
+    assert "option_operation_review" in agent_task["profile_names"]
+    assert evidence_plan["task_name"] == "option_operation_review"
+    assert "trade_events" in evidence_plan["required_views"]
+    assert evidence_plan["calls"][0]["tool_name"] == "analysis_query"
+    assert "open_option_exposure" in payload["manifest_budget"]["selected_analysis_views"]
+    assert "agent_task.evidence_plan" in payload["manifest_budget"]["selection_sources"]
+
+
+def test_known_option_review_runs_host_evidence_plan_before_model_planner(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("OM_LLM_API_KEY", "sk-test")
+    planner_calls: list[dict[str, Any]] = []
+    continuation_calls: list[dict[str, Any]] = []
+    tool_calls: list[tuple[str, dict[str, Any]]] = []
+    final_text = (
+        "结论：6月期权操作整体偏弱。"
+        "问题模式：指派和现金占用集中。"
+        "优化建议：下月控制单一标的敞口，并优先选择权利金覆盖更充分的合约。"
+        "证据边界：仅基于 OM read-only analysis workspace 已读取的交易、敞口、收益和策略证据。"
+    )
+
+    def _create_tool_call_response(**kwargs: Any) -> dict[str, Any]:
+        planner_calls.append(dict(kwargs))
+        raise AssertionError("known profile should not call the initial model planner")
+
+    def _provider_response_fn(provider: str):
+        assert provider == "openai"
+        return _create_tool_call_response
+
+    def _create_continuation_response(**kwargs: Any) -> dict[str, Any]:
+        continuation_calls.append(dict(kwargs))
+        payload = kwargs["payload"]
+        assert "tools" not in payload
+        assert "tool_choice" not in payload
+        assert "Do not call any more tools" in payload["instructions"]
+        assert "required_answer" in payload["instructions"]
+        assert "answer_shape" in payload["instructions"]
+        return {
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": final_text}],
+                }
+            ]
+        }
+
+    def _provider_payload_response_fn(provider: str):
+        assert provider == "openai"
+        return _create_continuation_response
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        tool_calls.append((tool_name, payload))
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "schema_version": "analysis.query.output.v2",
+                "source_label": "OM read-only analysis workspace",
+                "query": {"mode": "views", "views": payload["views"], "limit": payload.get("limit")},
+                "columns": ["view", "month", "account", "symbol"],
+                "rows": [
+                    {"view": "trade_events", "month": "2026-06", "account": "lx", "symbol": "0700.HK"},
+                    {"view": "open_option_exposure", "month": "2026-06", "account": "lx", "symbol": "0700.HK"},
+                ],
+                "row_count": 2,
+                "truncated": False,
+                "views_used": list(payload["views"]),
+                "evidence": {
+                    "coverage": {
+                        "views": list(payload["views"]),
+                        "months": ["2026-06"],
+                        "accounts": ["lx"],
+                        "symbols": ["0700.HK"],
+                    }
+                },
+            },
+        )
+
+    monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_response_fn", _provider_response_fn)
+    monkeypatch.setattr("src.application.assistant.agent_loop.provider_create_tool_call_payload_response_fn", _provider_payload_response_fn)
+
+    out = handle_assistant_response(
+        AssistantRequest(
+            text="分析6月的期权操作有没有不合理，需要优化的地方",
+            sender_id="local",
+            message_id="msg_host_option_review",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        now_fn=lambda: date(2026, 7, 5),
+    )
+
+    assert out["ok"] is True
+    assert planner_calls == []
+    assert len(continuation_calls) == 1
+    assert tool_calls == [
+        (
+            "analysis_query",
+            {
+                "views": [
+                    "account_monthly_performance",
+                    "account_monthly_income_components",
+                    "monthly_income_cashflow_rows",
+                    "trade_events",
+                    "open_option_exposure",
+                    "strategy_config_by_symbol_account",
+                    "strategy_replay_read_surface",
+                ],
+                "month": "2026-06",
+                "months": [],
+                "limit": 200,
+                "config_key": "us",
+            },
+        )
+    ]
+    assert out["data"]["response_text"] == final_text
+    trace = out["data"]["tool_result"]["data"]["event_loop"]["trace"]
+    assert trace["agent_task"]["profile_names"] == ["option_operation_review"]
+    assert trace["planner_plan_used"] is False
+    assert trace["loop_stop_reason"] == "model_final_answer"
+
+
+def test_known_option_review_does_not_fall_back_to_model_planner_when_synthesis_llm_unavailable(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("OM_LLM_API_KEY", raising=False)
+    tool_calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        tool_calls.append((tool_name, payload))
+        return build_response(tool_name=tool_name, ok=True, data={"ok": True})
+
+    out = handle_assistant_response(
+        AssistantRequest(
+            text="分析6月的期权操作有没有不合理，需要优化的地方",
+            sender_id="local",
+            message_id="msg_host_option_review_no_synth_llm",
+            config_key="us",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AssistantSettings(
+            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        now_fn=lambda: date(2026, 7, 5),
+    )
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "LLM_UNAVAILABLE"
+    assert tool_calls == []
+    llm_trace = out["meta"]["assistant"]["llm"]
+    assert llm_trace["reason"] == "host_evidence_plan_synthesis_unavailable"
+    assert llm_trace["event_model"]["host_evidence_plan_used"] is True
+    assert llm_trace["agent_task"]["profile_names"] == ["option_operation_review"]
+    assert llm_trace["agent_loop"]["runtime"] == "host_evidence_loop"
+
+
+def test_conclusion_terms_are_contextual_followups() -> None:
+    assert _question_is_contextual_followup("结论呢")
+    assert _question_is_contextual_followup("总结一下")
+
+
+def test_event_native_plan_keeps_host_agent_task_contract() -> None:
+    planner_payload = _planner_input_payload(
+        "分析6月的期权操作有没有不合理，需要优化的地方",
+        conversation_context={"temporal_context": {"today": "2026-07-05"}},
+    )
+    event = ModelToolCallEvent(
+        event_id="model_tool_call_1",
+        tool_call_id="call_analysis_query",
+        tool_name="analysis_query",
+        arguments={
+            "sql": "select month, account, symbol, currency from trade_events where month = '2026-06' limit 20",
+            "limit": 20,
+        },
+        purpose="read option operation evidence",
+        provider="openai",
+        parent_event_id="user_message_1",
+    )
+
+    event_plan, error = _event_native_planning_from_model_events(
+        text="分析6月的期权操作有没有不合理，需要优化的地方",
+        events=(event,),
+        conversation_context={"temporal_context": {"today": "2026-07-05"}},
+        planner_manifest=planner_payload["tools"],
+        provider="openai",
+    )
+
+    assert error is None
+    assert event_plan is not None
+    agent_task = event_plan.task_contract["agent_task"]
+    assert agent_task["name"] == "option_operation_review"
+    assert agent_task["scope"]["requested_months"] == ["2026-06"]
 
 
 def _event_model_turn_result(
@@ -2291,7 +2507,11 @@ def test_agent_loop_planner_input_exposes_candidate_followup_through_context_pro
     assert "followup_resolution" not in payload["context"]
     assert "metric_glossary" not in payload["context"]
     assert "candidate_filter_diagnostics" in views
-    assert payload["manifest_budget"]["selection_sources"] == ["message", "context_projection.recent_evidence"]
+    assert payload["manifest_budget"]["selection_sources"] == [
+        "agent_task.evidence_plan",
+        "message",
+        "context_projection.recent_evidence",
+    ]
 
 
 def test_agent_loop_planner_input_keeps_explicit_account_message_ahead_of_projection_context() -> None:
@@ -2310,7 +2530,7 @@ def test_agent_loop_planner_input_keeps_explicit_account_message_ahead_of_projec
     assert payload["context"]["context_projection"]["available_evidence_refs"][0]["source_tool"] == "candidate_filter_explain"
     assert "account_monthly_performance" in views
     assert "candidate_filter_diagnostics" not in views
-    assert payload["manifest_budget"]["selection_sources"] == ["message"]
+    assert payload["manifest_budget"]["selection_sources"] == ["agent_task.evidence_plan", "message"]
 
     model_turn_result = _model_turn_result(
         "monthly_income_report",
@@ -2375,7 +2595,7 @@ def test_agent_loop_planner_input_keeps_explicit_message_ahead_of_context() -> N
     assert "candidate_filter_diagnostics" in views
     assert "symbol_income_attribution" not in views
     assert "candidate_strategy" in budget["matched_view_groups"]
-    assert budget["selection_sources"] == ["message"]
+    assert budget["selection_sources"] == ["agent_task.evidence_plan", "message"]
 
 
 def test_agent_loop_planner_manifest_hides_system_scoped_arguments() -> None:
@@ -5216,7 +5436,11 @@ def test_assistant_runtime_two_turn_candidate_net_income_followup_uses_projectio
     assert "metric_glossary" not in planner_context
     assert "followup_resolution" not in planner_context
     assert "candidate_filter_diagnostics" in analysis_query["semantics"]["analysis_views"]
-    assert planner_payload["manifest_budget"]["selection_sources"] == ["message", "context_projection.recent_evidence"]
+    assert planner_payload["manifest_budget"]["selection_sources"] == [
+        "agent_task.evidence_plan",
+        "message",
+        "context_projection.recent_evidence",
+    ]
 
     trace = collect_assistant_trace(audit_db=str(audit_db), command_id=second["data"]["command_id"])
     trace_context = trace["traces"][0]["context"]
@@ -5332,7 +5556,7 @@ def test_assistant_runtime_two_turn_account_net_income_override_suppresses_candi
     assert planner_context["context_projection"]["recent_turns"]
     assert "account_monthly_income_components" in analysis_query["semantics"]["analysis_views"]
     assert "candidate_filter_diagnostics" not in analysis_query["semantics"]["analysis_views"]
-    assert planner_payload["manifest_budget"]["selection_sources"] == ["message"]
+    assert planner_payload["manifest_budget"]["selection_sources"] == ["agent_task.evidence_plan", "message"]
 
     trace = collect_assistant_trace(audit_db=str(audit_db), command_id=second["data"]["command_id"])
     trace_context = trace["traces"][0]["context"]
@@ -6711,6 +6935,7 @@ def test_assistant_runtime_retries_empty_continuation_for_income_summary(
         settings=AssistantSettings(
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
+        model_turn_fn=create_model_turn_events,
         now_fn=lambda: date(2026, 7, 2),
     )
 
@@ -6842,6 +7067,7 @@ def test_assistant_runtime_repairs_raw_analysis_final_answer_with_model_retry(
         settings=AssistantSettings(
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
+        model_turn_fn=create_model_turn_events,
         now_fn=lambda: date(2026, 7, 3),
     )
 
@@ -12355,6 +12581,7 @@ def test_assistant_runtime_default_agent_loop_uses_provider_tool_call(monkeypatc
         settings=AssistantSettings(
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
+        model_turn_fn=create_model_turn_events,
         now_fn=lambda: date(2026, 6, 19),
     )
 
@@ -12476,6 +12703,7 @@ def test_assistant_runtime_tool_loop_continuation_repairs_pre_tool_denial(monkey
         settings=AssistantSettings(
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
+        model_turn_fn=create_model_turn_events,
         now_fn=lambda: date(2026, 6, 19),
     )
 
@@ -13025,6 +13253,7 @@ def test_assistant_runtime_comparative_income_uses_provider_tool_call(monkeypatc
         settings=AssistantSettings(
             llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
         ),
+        model_turn_fn=create_model_turn_events,
         now_fn=lambda: date(2026, 6, 19),
     )
 

@@ -5,6 +5,7 @@ import re
 from typing import Any
 
 from src.application.assistant.evidence import EvidenceBundle
+from src.application.assistant.task_profiles import TaskProfile, profile_by_name
 
 
 _CURRENCY_AMOUNT_RE = re.compile(r"\b(USD|HKD|CNY)\s*([-+]?\d[\d,]*(?:\.\d+)?)", re.IGNORECASE)
@@ -291,6 +292,7 @@ def verify_response_shape(
     families = {str(item) for item in contract.get("intent_families") or [] if str(item).strip()}
     task_mode = str(contract.get("task_mode") or "").strip()
     answer_shape = tuple(str(item) for item in contract.get("answer_shape") or [] if str(item).strip())
+    task_profiles = _contract_task_profiles(contract)
     scope = contract.get("scope") if isinstance(contract.get("scope"), dict) else {}
     coverage_payload = coverage if isinstance(coverage, dict) else {}
     coverage_missing = tuple(str(item) for item in coverage_payload.get("missing") or [] if str(item).strip())
@@ -308,6 +310,11 @@ def verify_response_shape(
                 strict_shape_keys.add("main_drivers")
             if "drivers" in answer_shape:
                 enforced_shape_keys["drivers"] = "main_drivers"
+        for profile in task_profiles:
+            enforced_missing_keys.update(profile.completion_answer_keys)
+            strict_shape_keys.update(profile.completion_answer_keys)
+            if "evidence_boundary" in profile.answer_shape:
+                enforced_shape_keys["evidence_boundary"] = "source_and_policy"
         if "assigned_stock_pnl" in families and any(str(gap.get("kind") or "") == "recoverable_missing_quote" for gap in coverage_gaps):
             enforced_missing_keys.update({"spot_freshness", "unrealized_pnl", "lifecycle_pnl"})
         if "upgrade_status" in families:
@@ -416,6 +423,14 @@ def _shape_key_satisfied(compact: str, *, key: str, families: set[str]) -> bool:
             token in compact
             for token in ("主要", "来自", "来源", "贡献", "驱动", "原因", "组成", "构成", "明细", "top", "driver", "无法判断", "不能判断")
         )
+    if key == "overall_judgement":
+        return any(token in compact for token in ("结论", "判断", "整体", "合理", "不合理", "正常", "不理想", "偏弱", "偏高", "偏低"))
+    if key == "operation_patterns":
+        return any(token in compact for token in ("问题模式", "模式", "问题", "集中", "频繁", "指派", "被动", "接货", "敞口", "现金占用"))
+    if key == "optimization_options":
+        return any(token in compact for token in ("优化", "建议", "下月", "可以", "应", "减少", "控制", "调整", "优先", "上限", "选择"))
+    if key == "source_and_policy":
+        return any(token in compact for token in ("证据", "数据来源", "数据源", "来源", "边界", "仅基于", "未包含", "无法", "不能", "缺少"))
     if key == "shares_remaining":
         return "剩余" in compact and "股" in compact
     if key == "cost_basis":
@@ -447,6 +462,10 @@ def _shape_missing_key_acknowledged(compact: str, *, key: str, gaps: list[dict[s
         "amount_difference": ("差额", "相差", "金额", "收益"),
         "rate_difference": ("收益率", "率", "百分点"),
         "main_drivers": ("来源", "组成", "主要", "原因", "driver"),
+        "overall_judgement": ("结论", "判断", "整体"),
+        "operation_patterns": ("模式", "问题", "交易", "操作"),
+        "optimization_options": ("优化", "建议", "调整"),
+        "source_and_policy": ("证据", "来源", "数据源", "边界", "数据"),
         "shares_remaining": ("剩余", "股数", "持仓"),
         "cost_basis": ("成本", "成本基数", "成本价"),
         "spot_freshness": ("spot", "quote", "行情", "报价"),
@@ -467,6 +486,18 @@ def _shape_missing_key_acknowledged(compact: str, *, key: str, gaps: list[dict[s
             if str(symbol).strip().lower() in compact:
                 return True
     return False
+
+
+def _contract_task_profiles(contract: dict[str, Any]) -> tuple[TaskProfile, ...]:
+    names = {str(item).strip() for item in contract.get("task_profiles") or [] if str(item).strip()}
+    agent_task = contract.get("agent_task") if isinstance(contract.get("agent_task"), dict) else {}
+    names.update(str(item).strip() for item in agent_task.get("profile_names") or [] if str(item).strip())
+    profiles: list[TaskProfile] = []
+    for name in sorted(names):
+        profile = profile_by_name(name)
+        if profile is not None:
+            profiles.append(profile)
+    return tuple(profiles)
 
 
 def _shape_violation(violation_type: str, key: str, evidence: str) -> dict[str, Any]:
