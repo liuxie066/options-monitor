@@ -6,27 +6,26 @@ import pytest
 
 from src.application.assistant.answer_verifier import verify_response_shape
 from src.application.assistant.coverage_verifier import verify_coverage
+from src.application.assistant.copilot import compose_answer, derive_task_frame, plan_evidence
 from src.application.assistant.evidence import build_evidence_bundle
-from src.application.assistant.evidence_planner import plan_task_evidence
 from src.application.assistant.task_completion import check_task_completion
 from src.application.assistant.task_contract import build_task_contract
-from src.application.assistant.task_runtime import derive_agent_task
 
 
 def test_option_operation_review_task_preserves_two_month_scope() -> None:
-    task = derive_agent_task(
+    task = derive_task_frame(
         question="分析5月6月的期权操作有没有不合理，需要优化的地方",
         request_context={},
         today=date(2026, 7, 5),
         conversation_context=None,
     )
 
-    assert task.name == "option_operation_review"
+    assert task.task_name == "option_operation_review"
     assert task.domain == "strategy"
     assert task.task_mode == "analyze"
     assert task.requested_effect == "read"
-    assert task.scope["requested_months"] == ["2026-05", "2026-06"]
-    assert "option_operation_review" in task.profile_names
+    assert task.scope.requested_months == ("2026-05", "2026-06")
+    assert "option_operation_review" in [profile.name for profile in task.profiles]
     assert "overall_judgement" in task.required_answer
     assert "operation_patterns" in task.required_answer
     assert "optimization_options" in task.required_answer
@@ -34,23 +33,42 @@ def test_option_operation_review_task_preserves_two_month_scope() -> None:
 
 
 def test_monthly_income_analysis_profile_is_distinct_from_operation_review() -> None:
-    task = derive_agent_task(
+    task = derive_task_frame(
         question="6月收益主要来自哪里",
         request_context={},
         today=date(2026, 7, 5),
         conversation_context=None,
     )
 
-    assert task.name == "monthly_income_analysis"
+    assert task.task_name == "monthly_income_analysis"
     assert task.domain == "income"
-    assert task.scope["requested_months"] == ["2026-06"]
-    assert task.profile_names == ("monthly_income_analysis",)
+    assert task.scope.requested_months == ("2026-06",)
+    assert tuple(profile.name for profile in task.profiles) == ("monthly_income_analysis",)
     assert "drivers" in task.answer_shape
+
+
+def test_net_cashflow_question_selects_income_profile_and_account_scope() -> None:
+    task = derive_task_frame(
+        question="分析 lx 6月的净现金流明细",
+        request_context={},
+        today=date(2026, 7, 6),
+        conversation_context=None,
+    )
+
+    plan = plan_evidence(task)
+
+    assert task.task_name == "monthly_income_analysis"
+    assert task.scope.requested_months == ("2026-06",)
+    assert task.scope.requested_accounts == ("lx",)
+    assert plan.calls[0].tool_name == "analysis_query"
+    assert plan.calls[0].arguments["account"] == "lx"
+    assert plan.calls[0].arguments["month"] == "2026-06"
+    assert "monthly_income_cashflow_rows" in plan.required_views
 
 
 def test_monthly_income_shape_accepts_data_source_wording() -> None:
     question = "6月收益分析"
-    task = derive_agent_task(
+    task = derive_task_frame(
         question=question,
         request_context={},
         today=date(2026, 7, 5),
@@ -58,7 +76,7 @@ def test_monthly_income_shape_accepts_data_source_wording() -> None:
     )
     contract = build_task_contract(
         question=question,
-        plan={"goal": question, "steps": [], "task_contract": task.task_contract_patch()},
+        plan={"goal": question, "steps": [], "task_contract": task.task_contract_payload()},
         request_context={},
         today=date(2026, 7, 5),
     ).public_payload()
@@ -73,7 +91,7 @@ def test_monthly_income_shape_accepts_data_source_wording() -> None:
 
 
 def test_assigned_stock_income_wording_does_not_select_monthly_income_profile() -> None:
-    task = derive_agent_task(
+    task = derive_task_frame(
         question="被指派股票的收益",
         request_context={},
         today=date(2026, 7, 5),
@@ -81,33 +99,33 @@ def test_assigned_stock_income_wording_does_not_select_monthly_income_profile() 
     )
 
     assert task.domain == "position"
-    assert "monthly_income_analysis" not in task.profile_names
+    assert "monthly_income_analysis" not in [profile.name for profile in task.profiles]
     assert "main_drivers" not in task.required_answer
     assert "shares_remaining" in task.required_answer
 
 
 def test_runtime_health_diagnosis_profile_for_health_check() -> None:
-    task = derive_agent_task(
+    task = derive_task_frame(
         question="系统健康检查",
         request_context={},
         today=date(2026, 7, 5),
         conversation_context=None,
     )
 
-    assert task.name == "runtime_health_diagnosis"
+    assert task.task_name == "runtime_health_diagnosis"
     assert task.requested_effect == "read"
-    assert "runtime_health_diagnosis" in task.profile_names
+    assert "runtime_health_diagnosis" in [profile.name for profile in task.profiles]
 
 
 def test_option_operation_review_evidence_plan_builds_executable_calls() -> None:
-    task = derive_agent_task(
+    task = derive_task_frame(
         question="分析6月的期权操作有没有不合理，需要优化的地方",
         request_context={},
         today=date(2026, 7, 5),
         conversation_context=None,
     )
 
-    plan = plan_task_evidence(task)
+    plan = plan_evidence(task)
 
     assert plan.task_name == "option_operation_review"
     assert [call.tool_name for call in plan.calls] == ["analysis_query"]
@@ -131,13 +149,107 @@ def test_option_operation_review_evidence_plan_builds_executable_calls() -> None
             "strategy_replay_read_surface",
         ],
         "month": "2026-06",
-        "months": [],
         "limit": 200,
     }
 
 
+def test_copilot_explicit_month_overrides_stale_context_month() -> None:
+    task = derive_task_frame(
+        question="分析6月的期权操作有没有不合理，需要优化的地方",
+        request_context={},
+        today=date(2026, 7, 6),
+        conversation_context={
+            "context_projection": {
+                "available_evidence_refs": [{"safe_slots": {"month": ["2026-07"]}}],
+                "recent_turns": [{"safe_slots": {"month": ["2026-07"]}}],
+            }
+        },
+    )
+
+    plan = plan_evidence(task)
+
+    assert task.task_name == "option_operation_review"
+    assert task.scope.requested_months == ("2026-06",)
+    assert task.scope.context_mode == "none"
+    assert plan.calls[0].arguments["month"] == "2026-06"
+    assert "months" not in plan.calls[0].arguments
+
+
+def test_copilot_fill_notice_plans_concrete_manual_trade_open_preview() -> None:
+    task = derive_task_frame(
+        question="sy 成交提醒: 【成交提醒】成功卖出2张$腾讯 260605 440.00 沽$，成交价格：0.86，此笔订单委托已全部成交",
+        request_context={},
+        today=date(2026, 7, 6),
+        conversation_context=None,
+    )
+
+    plan = plan_evidence(task)
+
+    assert len(plan.calls) == 1
+    assert plan.calls[0].tool_name == "manual_trade_open"
+    assert plan.calls[0].arguments == {"account": "sy"}
+
+
+def test_copilot_fill_notice_plans_concrete_manual_trade_close_preview() -> None:
+    task = derive_task_frame(
+        question="sy 成交提醒: 【成交提醒】成功买入1张$腾讯 260629 450.00 沽$，成交价格：1.20，此笔订单委托已全部成交",
+        request_context={},
+        today=date(2026, 7, 6),
+        conversation_context=None,
+    )
+
+    plan = plan_evidence(task)
+
+    assert len(plan.calls) == 1
+    assert plan.calls[0].tool_name == "manual_trade_close"
+    assert plan.calls[0].arguments == {"account": "sy"}
+
+
+def test_copilot_does_not_judge_option_review_when_analysis_views_have_no_rows() -> None:
+    task = derive_task_frame(
+        question="分析6月的期权操作有没有不合理，需要优化的地方",
+        request_context={},
+        today=date(2026, 7, 6),
+        conversation_context=None,
+    )
+
+    answer, trace = compose_answer(
+        task=task,
+        tool_results=(
+            {
+                "ok": True,
+                "data": {
+                    "schema_version": "analysis.query.output.v2",
+                    "source_label": "OM read-only analysis workspace",
+                    "rows": [],
+                    "views_used": ["trade_events", "open_option_exposure"],
+                    "view_datasets": {
+                        "trade_events": {"rows": [], "row_count": 0},
+                        "open_option_exposure": {"rows": [], "row_count": 0},
+                    },
+                    "evidence": {
+                        "diagnostics": [
+                            {
+                                "answer_boundary": "cannot infer absence of problem from empty diagnostic result",
+                            }
+                        ]
+                    },
+                },
+            },
+        ),
+    )
+
+    assert trace["route"] == "copilot_no_matching_analysis_evidence"
+    assert "不能判断期权操作是否不合理" in answer
+    assert "行级记录为 0" in answer
+    assert "空结果不能证明没有问题" in answer
+    assert "cannot infer" not in answer
+    assert "偏保守" not in answer
+    assert "未发现单一异常模式" not in answer
+
+
 def test_option_operation_review_partial_rows_are_not_complete() -> None:
-    task = derive_agent_task(
+    task = derive_task_frame(
         question="分析6月的期权操作有没有不合理，需要优化的地方",
         request_context={},
         today=date(2026, 7, 5),
@@ -157,7 +269,7 @@ def test_option_operation_review_partial_rows_are_not_complete() -> None:
 
 def test_option_operation_review_coverage_requires_detail_views() -> None:
     question = "分析6月的期权操作有没有不合理，需要优化的地方"
-    task = derive_agent_task(
+    task = derive_task_frame(
         question=question,
         request_context={},
         today=date(2026, 7, 5),
@@ -165,7 +277,7 @@ def test_option_operation_review_coverage_requires_detail_views() -> None:
     )
     contract = build_task_contract(
         question=question,
-        plan={"goal": question, "steps": [], "task_contract": task.task_contract_patch()},
+        plan={"goal": question, "steps": [], "task_contract": task.task_contract_payload()},
         request_context={},
         today=date(2026, 7, 5),
     )
@@ -215,7 +327,7 @@ def test_option_operation_review_coverage_requires_detail_views() -> None:
 
 def test_option_operation_review_answer_shape_requires_judgement_patterns_and_options() -> None:
     question = "分析6月的期权操作有没有不合理，需要优化的地方"
-    task = derive_agent_task(
+    task = derive_task_frame(
         question=question,
         request_context={},
         today=date(2026, 7, 5),
@@ -223,7 +335,7 @@ def test_option_operation_review_answer_shape_requires_judgement_patterns_and_op
     )
     contract = build_task_contract(
         question=question,
-        plan={"goal": question, "steps": [], "task_contract": task.task_contract_patch()},
+        plan={"goal": question, "steps": [], "task_contract": task.task_contract_payload()},
         request_context={},
         today=date(2026, 7, 5),
     ).public_payload()
@@ -244,7 +356,7 @@ def test_option_operation_review_answer_shape_requires_judgement_patterns_and_op
 
 
 def test_conclusion_followup_inherits_prior_option_review_task_profile() -> None:
-    task = derive_agent_task(
+    task = derive_task_frame(
         question="结论呢",
         request_context={},
         today=date(2026, 7, 5),
@@ -272,13 +384,13 @@ def test_conclusion_followup_inherits_prior_option_review_task_profile() -> None
         },
     )
 
-    assert task.name == "option_operation_review"
-    assert task.scope["requested_months"] == ["2026-06"]
+    assert task.task_name == "option_operation_review"
+    assert task.scope.requested_months == ("2026-06",)
     assert "operation_patterns" in task.required_answer
 
 
 def test_conclusion_followup_inherits_latest_compatible_option_review_with_multiple_turns() -> None:
-    task = derive_agent_task(
+    task = derive_task_frame(
         question="结论呢",
         request_context={},
         today=date(2026, 7, 5),
@@ -307,9 +419,58 @@ def test_conclusion_followup_inherits_latest_compatible_option_review_with_multi
         },
     )
 
-    assert task.name == "option_operation_review"
-    assert task.scope["requested_months"] == ["2026-06"]
+    assert task.task_name == "option_operation_review"
+    assert task.scope.requested_months == ("2026-06",)
     assert "operation_patterns" in task.required_answer
+
+
+def test_copilot_assigned_stock_followup_carries_account_and_symbol_scope() -> None:
+    task = derive_task_frame(
+        question="继续看这个指派正股浮盈",
+        request_context={},
+        today=date(2026, 7, 5),
+        conversation_context={
+            "context_projection": {
+                "recent_turns": [
+                    {
+                        "turn_id": "turn_assigned_stock",
+                        "safe_slots": {
+                            "account": ["sy"],
+                            "symbol": ["0700.HK"],
+                            "action": ["assigned-stock"],
+                            "status": ["open"],
+                        },
+                    }
+                ],
+                "available_evidence_refs": [
+                    {
+                        "ref_id": "ev_assigned_stock",
+                        "safe_slots": {
+                            "account": ["sy"],
+                            "symbol": ["0700.HK"],
+                            "action": ["assigned-stock"],
+                            "status": ["open"],
+                        },
+                    }
+                ],
+            }
+        },
+    )
+
+    plan = plan_evidence(task)
+
+    assert task.task_name == "assigned_stock_review"
+    assert task.scope.requested_accounts == ("sy",)
+    assert task.scope.requested_symbols == ("0700.HK",)
+    assert task.scope.context_mode == "carry"
+    assert plan.calls[0].tool_name == "option_positions_read"
+    assert plan.calls[0].arguments == {
+        "action": "assigned-stock",
+        "status": "open",
+        "refresh_quotes": True,
+        "account": "sy",
+        "symbol": "0700.HK",
+    }
 
 
 @pytest.mark.parametrize(
@@ -340,15 +501,15 @@ def test_free_form_questions_select_task_profiles_and_evidence_views(
     profile_name: str,
     expected_view: str,
 ) -> None:
-    task = derive_agent_task(
+    task = derive_task_frame(
         question=question,
         request_context={},
         today=date(2026, 7, 5),
         conversation_context=None,
     )
 
-    plan = plan_task_evidence(task)
+    plan = plan_evidence(task)
 
-    assert task.name == profile_name
-    assert task.profile_names[0] == profile_name
+    assert task.task_name == profile_name
+    assert task.profiles[0].name == profile_name
     assert expected_view in plan.required_views

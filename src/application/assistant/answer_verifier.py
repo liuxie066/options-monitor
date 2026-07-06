@@ -490,8 +490,8 @@ def _shape_missing_key_acknowledged(compact: str, *, key: str, gaps: list[dict[s
 
 def _contract_task_profiles(contract: dict[str, Any]) -> tuple[TaskProfile, ...]:
     names = {str(item).strip() for item in contract.get("task_profiles") or [] if str(item).strip()}
-    agent_task = contract.get("agent_task") if isinstance(contract.get("agent_task"), dict) else {}
-    names.update(str(item).strip() for item in agent_task.get("profile_names") or [] if str(item).strip())
+    copilot_task = contract.get("copilot_task") if isinstance(contract.get("copilot_task"), dict) else {}
+    names.update(str(item).strip() for item in copilot_task.get("profile_names") or [] if str(item).strip())
     profiles: list[TaskProfile] = []
     for name in sorted(names):
         profile = profile_by_name(name)

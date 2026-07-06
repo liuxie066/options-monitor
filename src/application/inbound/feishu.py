@@ -20,7 +20,6 @@ def handle_feishu_payload(
     allowed_senders: str | None = None,
     assistant_settings: Any | None = None,
     assistant_config_path: str | None = None,
-    model_turn_fn: Any | None = None,
     generate_reply_fn: Any | None = None,
 ) -> dict[str, Any]:
     event_type = _extract_event_type(payload)
@@ -45,8 +44,6 @@ def handle_feishu_payload(
     kwargs: dict[str, Any] = {"allowed_senders": allowed_senders}
     if execute_tool_fn is not None:
         kwargs["execute_tool_fn"] = execute_tool_fn
-    if model_turn_fn is not None:
-        kwargs["model_turn_fn"] = model_turn_fn
     if generate_reply_fn is not None:
         kwargs["generate_reply_fn"] = generate_reply_fn
     settings = assistant_settings or _assistant_settings(

@@ -5,12 +5,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 from src.application.assistant.agent_loop import (
-    ModelTurnFn,
     AGENT_LOOP_READ_TOOLS,
     INTERNAL_TOOL_LOOP_NAME,
     TOOL_CHECK_SCHEMA_VERSION,
     ToolExecutor,
-    execute_tool_loop_payload,
     skipped_llm_trace,
 )
 from src.application.assistant.perception_trace import (
@@ -19,7 +17,7 @@ from src.application.assistant.perception_trace import (
 )
 from src.application.assistant.perception import GenerateReplyFn, PerceptionEngine
 from src.application.assistant.settings import AssistantSettings
-from src.application.agent_tool_contracts import AgentToolError
+from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response
 from src.application.assistant.capability_catalog import spec_by_intent
 from src.application.assistant.contracts import AssistantRequest, AssistantTurnResult, PerceptionResult
 from src.application.assistant.memory_proposals import (
@@ -53,7 +51,6 @@ def handle_assistant_turn(
     allowed_senders: str | None = None,
     now_fn: Callable[[], date] | None = None,
     settings: AssistantSettings | None = None,
-    model_turn_fn: ModelTurnFn | None = None,
     generate_reply_fn: GenerateReplyFn | None = None,
     memory_suggestion_dir: str | Path | None = None,
 ) -> AssistantTurnResult:
@@ -64,7 +61,6 @@ def handle_assistant_turn(
         allowed_senders=allowed_senders,
         now_fn=now_fn,
         settings=settings,
-        model_turn_fn=model_turn_fn,
         generate_reply_fn=generate_reply_fn,
         memory_suggestion_dir=memory_suggestion_dir,
     )
@@ -79,7 +75,6 @@ def _run_assistant_turn_response(
     allowed_senders: str | None = None,
     now_fn: Callable[[], date] | None = None,
     settings: AssistantSettings | None = None,
-    model_turn_fn: ModelTurnFn | None = None,
     generate_reply_fn: GenerateReplyFn | None = None,
     memory_suggestion_dir: str | Path | None = None,
 ) -> dict[str, Any]:
@@ -110,7 +105,6 @@ def _run_assistant_turn_response(
         request=request,
         audit_store=store,
         settings=runtime_settings,
-        model_turn_fn=model_turn_fn,
         generate_reply_fn=generate_reply_fn,
         execute_tool_fn=execute_tool_fn,
     )
@@ -121,7 +115,6 @@ def _run_assistant_turn_response(
             execute_tool_fn=execute_tool_fn,
             request=request,
             settings=runtime_settings,
-            model_turn_fn=model_turn_fn,
             conversation_context_fn=lambda: perception_engine.last_conversation_context,
             precomputed_tool_loop_result_fn=lambda: perception_engine.last_tool_loop_result,
             tool_events=agent_loop_tool_events,
@@ -184,7 +177,6 @@ def _agent_loop_execute_tool_fn(
     execute_tool_fn: ExecuteToolFn,
     request: AssistantRequest,
     settings: AssistantSettings,
-    model_turn_fn: ModelTurnFn | None,
     conversation_context_fn: Callable[[], dict[str, Any] | None],
     precomputed_tool_loop_result_fn: Callable[[], dict[str, Any] | None],
     tool_events: list[dict[str, Any]],
@@ -197,16 +189,20 @@ def _agent_loop_execute_tool_fn(
         if str(tool_name or "") == INTERNAL_TOOL_LOOP_NAME:
             precomputed = precomputed_tool_loop_result_fn()
             if isinstance(precomputed, dict):
-                payload = {**dict(payload or {}), "_precomputed_tool_loop_result": precomputed}
-            result = execute_tool_loop_payload(
-                question=str((payload or {}).get("question") or request.text),
-                request=request,
-                loop_payload=dict(payload or {}),
-                command_id=str((payload or {}).get("_command_id") or "").strip() or None,
-                settings=settings,
-                conversation_context=conversation_context_fn(),
-                execute_tool_fn=execute_tool_fn,
-            )
+                result = _precomputed_copilot_tool_loop_response(
+                    precomputed,
+                    command_id=str((payload or {}).get("_command_id") or "").strip() or None,
+                )
+            else:
+                err = AgentToolError(
+                    code="COPILOT_RESULT_MISSING",
+                    message="OM Copilot did not provide a precomputed tool-loop result.",
+                )
+                result = build_response(
+                    tool_name=INTERNAL_TOOL_LOOP_NAME,
+                    ok=False,
+                    error=build_error_payload(err),
+                )
             data = result.get("data") if isinstance(result, dict) else {}
             if isinstance(data, dict):
                 tool_events.extend([dict(item) for item in data.get("tool_events") or [] if isinstance(item, dict)])
@@ -234,6 +230,17 @@ def _agent_loop_execute_tool_fn(
         return outcome.result_payload or {}
 
     return _execute
+
+
+def _precomputed_copilot_tool_loop_response(precomputed: dict[str, Any], *, command_id: str | None) -> dict[str, Any]:
+    response = dict(precomputed)
+    data = response.get("data")
+    if isinstance(data, dict):
+        patched_data = dict(data)
+        if command_id:
+            patched_data["command_id"] = command_id
+        response["data"] = patched_data
+    return response
 
 
 def _merge_agent_loop_tool_events(
@@ -794,8 +801,6 @@ def _effective_perception_from_response(
 def _intent_metadata(perception: PerceptionResult | None) -> dict[str, Any]:
     if perception is None:
         return {}
-    if perception.intent_name == "tool_plan":
-        return _tool_plan_metadata(perception)
     if perception.intent_name == "tool_loop":
         return _tool_loop_metadata(perception)
     spec = _COMMAND_SPECS_BY_INTENT.get(perception.intent_name)
@@ -808,22 +813,6 @@ def _intent_metadata(perception: PerceptionResult | None) -> dict[str, Any]:
         "operation_target": spec.operation_target,
         "llm_allowed": bool(spec.llm_allowed),
         "supported": bool(spec.supported),
-    }
-
-
-def _tool_plan_metadata(perception: PerceptionResult) -> dict[str, Any]:
-    arguments = perception.arguments if isinstance(perception.arguments, dict) else {}
-    plan = arguments.get("plan") if isinstance(arguments.get("plan"), dict) else {}
-    steps = plan.get("steps") if isinstance(plan.get("steps"), list) else []
-    tool_names = [str(step.get("tool_name") or "").strip() for step in steps if isinstance(step, dict)]
-    read_only = bool(tool_names) and all(name in AGENT_LOOP_READ_TOOLS for name in tool_names)
-    return {
-        "read_only": read_only if tool_names else None,
-        "risk_level": "read_only" if read_only else "unknown",
-        "operation_action": "tool_plan",
-        "operation_target": "assistant_read_tools",
-        "llm_allowed": read_only,
-        "supported": read_only,
     }
 
 

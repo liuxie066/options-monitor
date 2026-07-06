@@ -4,8 +4,8 @@ import re
 from datetime import date
 
 
-_MONTH_RE = re.compile(r"(?<!\d)(20\d{2})[-/.](0[1-9]|1[0-2])(?!\d)")
-_YEAR_MONTH_CN_RE = re.compile(r"(?<!\d)(20\d{2})年(1[0-2]|0?[1-9]|十[一二]?|[一二三四五六七八九])月")
+_MONTH_RE = re.compile(r"(?<!\d)((?:19|20)\d{2})[-/.](0[1-9]|1[0-2])(?!\d)")
+_YEAR_MONTH_CN_RE = re.compile(r"(?<!\d)((?:19|20)\d{2})年(1[0-2]|0?[1-9]|十[一二]?|[一二三四五六七八九])月")
 _MONTH_CN_RE = re.compile(r"(?<!\d)(1[0-2]|0?[1-9]|十[一二]?|[一二三四五六七八九])月")
 _CN_MONTHS = {
     "一": 1,

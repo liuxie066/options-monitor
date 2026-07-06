@@ -8,17 +8,14 @@ authority. For current naming and dimension boundaries, first read
 Current facts should still be verified through the tool manifest, Inbound
 capability catalog, source, tests, configs, and runtime artifacts.
 
-Detailed tool-loop design lives in
-[OM_ASSISTANT_TOOL_CALLING_V2_SYSTEM_DESIGN.md](OM_ASSISTANT_TOOL_CALLING_V2_SYSTEM_DESIGN.md).
-
 Terminology used here:
 
 - `./om-agent` is the local Tool Gateway CLI for structured JSON tool calls.
   It is not OM's autonomous/project Agent.
 - `./om assistant ...` is the Inbound Assistant CLI namespace for local or
   remote messages.
-- `AgentLoop` is an internal Assistant planner/event loop used by
-  `./om assistant` when planner routing is enabled. It is not a public
+- `AgentLoop` is the internal OM Copilot task/evidence/answer loop used by
+  `./om assistant` when agent-loop routing is enabled. It is not a public
   entrypoint and is not a peer of `./om-agent`.
 
 Historical roadmap documents such as
@@ -46,11 +43,13 @@ Rules:
 - Assistant memory is a hint-only context source for collaboration, OM usage,
   and parameter-tuning preferences. It is not evidence, market data, runtime
   state, config authority, or write authorization.
-- LLM may classify intent, choose evidence paths, plan bounded tool calls, and
-  summarize observations. LLM is not a factual source.
-- For analytical answers, use the Data Analysis-style boundary: LLM plans the
-  analysis and may interpret results, while deterministic tools, controlled
-  analysis artifacts, and renderers own calculations and user-visible facts.
+- OM Copilot may classify intent, choose evidence paths, plan bounded tool
+  calls, and summarize observations. LLM is optional and is not a factual
+  source.
+- For analytical answers, use the Data Analysis-style boundary: Copilot plans
+  the evidence path and may interpret results, while deterministic tools,
+  controlled analysis artifacts, and renderers own calculations and
+  user-visible facts.
   Do not add natural-language parser or regex guards as the primary way to make
   LLM-generated accounting facts safe.
 - Intelligence means knowing what to inspect first, what not to touch, and how
@@ -112,8 +111,8 @@ This names the authority path:
 - `PermissionResponseGate` handles confirm/cancel replies only after binding to
   an existing pending operation in the same sender/channel/conversation scope.
 - `Understand` sends all other non-slash natural language into the AgentLoop
-  structured event path. It only describes intent or produces model tool-call
-  events; it does not execute tools.
+  Copilot path. It frames the task and produces bounded tool/preview events; it
+  does not execute tools.
 - `Decide` owns permission, safety class, capability support, config-scope
   injection, and preview/confirm boundaries. Its conceptual decisions are
   `allow`, `preview`, `ask`, `deny`, or `defer`.
@@ -145,15 +144,19 @@ or parallel tool control plane.
 
 LLM authority is deliberately narrow:
 
-- LLM may classify intent, select read evidence paths through bounded model tool
-  calls, request clarification, and synthesize observations.
-- In `agent_loop`, LLM may initiate exactly one approved preview-write
-  capability through the model tool-call protocol: `manual_trade_open`,
-  `manual_trade_close`, `manual_assignment`, `manual_expiry`,
-  `manual_trade_update`, `symbol_edit`, `model_use`, or `upgrade_now`.
-- LLM-originated preview-write tool calls are intercepted by the host preview
-  gate and only create `PendingOperation` records through existing deterministic
-  operation handlers.
+- Default free-form routing uses Copilot task framing, evidence selection,
+  preview routing, and answer composition.
+- In explicit injected/provider-event diagnostic paths, LLM may classify intent,
+  select read evidence paths through bounded model tool calls, request
+  clarification, and synthesize observations.
+- In those diagnostic paths, Copilot may initiate exactly one approved
+  preview-write capability through a bounded preview event:
+  `manual_trade_open`, `manual_trade_close`, `manual_assignment`,
+  `manual_expiry`, `manual_trade_update`, `symbol_edit`, `model_use`, or
+  `upgrade_now`.
+- LLM-originated preview-write tool calls, when used, are intercepted by the
+  host preview gate and only create `PendingOperation` records through existing
+  deterministic operation handlers.
 - LLM must never confirm, cancel, apply, send notifications, write config, write
   ledger/trade state, operate services, or bypass pending-operation gates.
 - Explicit confirm/cancel/apply remains deterministic-only and must be bound to
@@ -311,16 +314,16 @@ The assistant should not use them as default evidence paths.
   `agent_tool_registry` tool metadata via `is_pure_read()`: `read_only=true`,
   resolved `risk_level=read_only`, no `side_effects`, and no confirmation
   requirement.
-- `src/application/assistant/agent_loop.py` has a narrower Inbound model-visible
-  allowlist than the full pure-read manifest. That is intentional for remote
-  LLM tool-call planning, but it should remain tested against the public
+- `src/application/assistant/agent_loop.py` has a narrower Copilot-visible
+  allowlist than the full pure-read manifest. That is intentional for bounded
+  task evidence planning, but it should remain tested against the public
   capability catalog.
 - `assistant.mode` is retired and unsupported. The active product controls are
   `assistant.enabled` and `assistant.agent_loop.enabled`;
   `assistant.planner.enabled` is a deprecated compatibility alias. The runtime
-  target is one `AgentSession` boundary + `AgentLoop` with structured model
-  tool-call events, deterministic guard/execution, and durable operator trace
-  in `agent_sessions`.
+  target is one `AgentSession` boundary + `AgentLoop`/OM Copilot with
+  host-derived task/evidence events, deterministic guard/execution, and durable
+  operator trace in `agent_sessions`.
 - Write-request detection is owned by registry metadata/policy. `version_update`
   and `manage_symbols` carry explicit write predicates in their
   `AgentTool`; `src/application/tool_execution.py` delegates env/confirm gates

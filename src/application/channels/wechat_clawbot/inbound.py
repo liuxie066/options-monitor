@@ -214,7 +214,6 @@ def handle_wechat_clawbot_message(
     allowed_senders: str | None = None,
     assistant_settings: Any | None = None,
     assistant_config_path: str | None = None,
-    model_turn_fn: Any | None = None,
     generate_reply_fn: Any | None = None,
 ) -> dict[str, Any]:
     text = message_text(payload)
@@ -246,8 +245,6 @@ def handle_wechat_clawbot_message(
     kwargs: dict[str, Any] = {"allowed_senders": allowed_senders}
     if execute_tool_fn is not None:
         kwargs["execute_tool_fn"] = execute_tool_fn
-    if model_turn_fn is not None:
-        kwargs["model_turn_fn"] = model_turn_fn
     if generate_reply_fn is not None:
         kwargs["generate_reply_fn"] = generate_reply_fn
     settings = assistant_settings or _assistant_settings(assistant_config_path=assistant_config_path)
@@ -338,7 +335,6 @@ def poll_wechat_clawbot_once(
     client_factory: ClientFactory = WechatClawbotClient,
     channel_service: ChannelService | None = None,
     execute_tool_fn: ExecuteToolFn | None = None,
-    model_turn_fn: Callable[..., Any] | None = None,
     generate_reply_fn: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     store = _state_store(base=base, label=label, state_dir=state_dir)
@@ -375,8 +371,6 @@ def poll_wechat_clawbot_once(
         }
         if execute_tool_fn is not None:
             inbound_kwargs["execute_tool_fn"] = execute_tool_fn
-        if model_turn_fn is not None:
-            inbound_kwargs["model_turn_fn"] = model_turn_fn
         if generate_reply_fn is not None:
             inbound_kwargs["generate_reply_fn"] = generate_reply_fn
         typing_status = _maybe_start_typing(message=message, client=client, allowed_senders=allowed_senders)

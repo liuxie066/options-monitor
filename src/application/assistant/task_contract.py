@@ -128,7 +128,6 @@ class TaskContract:
     requested_effect: str = "read"
     required_evidence: tuple[str, ...] = ()
     answer_shape: tuple[str, ...] = ()
-    agent_task: dict[str, Any] | None = None
     task_profiles: tuple[str, ...] = ()
     planner_declared: bool = False
     schema_version: str = TASK_CONTRACT_SCHEMA_VERSION
@@ -150,8 +149,6 @@ class TaskContract:
             "answer_shape": list(self.answer_shape),
             "planner_declared": bool(self.planner_declared),
         }
-        if isinstance(self.agent_task, dict) and self.agent_task:
-            payload["agent_task"] = dict(self.agent_task)
         if self.task_profiles:
             payload["task_profiles"] = list(self.task_profiles)
         return payload
@@ -234,7 +231,6 @@ def build_task_contract(
         _default_answer_shape(task_mode=task_mode, required_answer=required),
         planner_contract.get("answer_shape") if isinstance(planner_contract, dict) else None,
     )
-    agent_task = planner_contract.get("agent_task") if isinstance(planner_contract.get("agent_task"), dict) else None
     task_profiles = tuple(
         str(item).strip()
         for item in planner_contract.get("task_profiles") or []
@@ -253,7 +249,6 @@ def build_task_contract(
         requested_effect=requested_effect,
         required_evidence=tuple(required_evidence),
         answer_shape=tuple(answer_shape),
-        agent_task=dict(agent_task) if isinstance(agent_task, dict) else None,
         task_profiles=task_profiles,
         planner_declared=bool(planner_contract),
     )

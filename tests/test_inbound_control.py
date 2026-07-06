@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from src.application.agent_tool_contracts import AgentToolError, build_response
-from src.application.assistant.capability_catalog import command_specs, planner_preview_specs
+from src.application.assistant.capability_catalog import command_specs
 from src.application.assistant.command_parser import parse_assistant_command
 from src.application.assistant.contracts import (
     AssistantRequest,
@@ -19,12 +19,6 @@ from src.application.assistant.contracts import (
     PerceptionResult,
     ToolCall,
 )
-from src.application.assistant.agent_loop import (
-    create_model_turn_events,
-    EventNativePlanningResult,
-    ModelTurnResult,
-    TOOL_PLAN_SCHEMA_VERSION,
-)
 from src.application.inbound.feishu import feishu_payload_to_inbound_request, handle_feishu_payload
 from src.application.assistant.deterministic_commands import parse_deterministic_text
 from src.application.assistant.policy import PURE_READ_TOOLS, check_sender_allowed, enforce_tool_allowed
@@ -32,72 +26,7 @@ from src.application.assistant.renderer import render_inbound_text
 from src.application.assistant.router import handle_assistant_request
 from src.application.assistant.runtime import handle_assistant_turn
 from src.application.assistant.session_store import collect_assistant_trace
-from src.application.assistant.settings import AssistantSettings, AssistantLlmSettings
-from src.application.assistant.task_contract import TASK_CONTRACT_SCHEMA_VERSION
-from src.application.assistant.model_events import ModelToolCallEvent
-
-
-def _planner_trace(*, reason: str = "accepted") -> dict[str, Any]:
-    return {
-        "enabled": True,
-        "attempted": True,
-        "reason": reason,
-        "provider": "openai",
-        "base_url": "",
-        "model": "gpt-5.2",
-        "api_key_env": "OM_LLM_API_KEY",
-        "confidence_min": 0.75,
-        "timeout_seconds": 20,
-        "max_output_tokens": 512,
-        "schema_version": TOOL_PLAN_SCHEMA_VERSION,
-    }
-
-
-def _model_turn_result(tool_name: str, arguments: dict[str, Any] | None = None) -> ModelTurnResult:
-    is_preview = tool_name in {spec.intent_name for spec in planner_preview_specs()}
-    args = dict(arguments or {})
-    preview_symbol = str(args.get("symbol") or "").strip().upper()
-    event = ModelToolCallEvent(
-        event_id="model_tool_call_1",
-        tool_call_id="call_1",
-        tool_name=tool_name,
-        arguments=args,
-        purpose=f"Use {tool_name} for the current request.",
-        provider="openai",
-        parent_event_id="user_message_1",
-    )
-    task_contract = {
-        "schema_version": TASK_CONTRACT_SCHEMA_VERSION,
-        "goal": "test plan",
-        "domain": "operation" if is_preview else "general",
-        "task_mode": "preview_write" if is_preview else "summarize",
-        "requested_effect": "preview_write" if is_preview else "read",
-        "scope": {"requested_symbols": [preview_symbol]} if is_preview and preview_symbol else {},
-        "required_answer": ["preview_summary"] if is_preview else ["summary"],
-        "required_evidence": ["permission_request", "preview_receipt"] if is_preview else ["current_state"],
-        "answer_shape": ["preview_summary", "risk", "confirmation_handle"] if is_preview else ["conclusion"],
-    }
-    return ModelTurnResult(
-        trace=_planner_trace(),
-        event_plan=EventNativePlanningResult(
-            events=(event,),
-            task_contract=task_contract,
-            required_capabilities=("preview_operation",) if is_preview else (),
-            context_use={
-                "schema_version": "om-planner-context-use-v1",
-                "mode": "none",
-                "referenced_turn_ids": [],
-                "referenced_evidence_refs": [],
-                "inherited_slots": {},
-                "current_message_slots": {},
-                "override_slots": {},
-                "requires_clarification": False,
-                "clarification_question": None,
-            },
-            provider="openai",
-            goal="test plan",
-        ),
-    )
+from src.application.assistant.settings import AssistantSettings
 
 
 def _assistant_turn_response(response_text: str = "状态查询完成。") -> AssistantTurnResult:
@@ -485,91 +414,6 @@ def test_inbound_read_tool_requires_config_scope(tmp_path: Path) -> None:
     assert calls == []
 
 
-def test_inbound_exit_analysis_routes_to_close_advice_read(tmp_path: Path) -> None:
-    calls: list[tuple[str, dict]] = []
-
-    def _execute_tool(tool_name: str, payload: dict) -> dict:
-        calls.append((tool_name, payload))
-        return build_response(
-            tool_name=tool_name,
-            ok=True,
-            data={
-                "query": payload["query"],
-                "source": {"run_id": "run-1", "paths": [".../close_advice.csv"]},
-                "row_count": 2,
-                "matched_count": 1,
-                "returned_count": 1,
-                "rows": [
-                    {
-                        "account": "lx",
-                        "symbol": "FUTU",
-                        "option_type": "call",
-                        "side": "long",
-                        "expiration": "2026-08-21",
-                        "strike": 152.45,
-                        "close_action": "hold_call_as_convexity",
-                        "tier_label": "继续持有",
-                        "reason": "long call 仍保留右尾 convexity，可继续持有",
-                        "realized_if_close": 320,
-                        "long_call_cost_basis": 500,
-                        "long_call_current_value": 820,
-                        "long_call_value_ratio": 1.64,
-                        "capture_ratio": 0.42,
-                    }
-                ],
-                "summary": {"tier_counts": {"none": 1}},
-            },
-        )
-
-    def _plan(
-        text: str,
-        _settings: AssistantSettings,
-        conversation_context: dict[str, Any] | None,
-    ) -> ModelTurnResult:
-        assert text == "分析 long call 是不是应该平仓"
-        assert conversation_context is not None
-        return _model_turn_result(
-            "close_advice_read",
-            {"query": {"status": "open", "option_type": "call", "side": "long", "limit": 50}},
-        )
-
-    out = handle_assistant_response(
-        AssistantRequest(
-            text="分析 long call 是不是应该平仓",
-            sender_id="local",
-            channel="local",
-            message_id="msg_exit_analysis",
-            config_key="us",
-            audit_db=str(tmp_path / "inbound.sqlite3"),
-        ),
-        execute_tool_fn=_execute_tool,
-        allowed_senders="local:local",
-        settings=AssistantSettings(
-            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
-        ),
-        model_turn_fn=_plan,
-    )
-
-    assert out["ok"] is True
-    assert calls == [
-        (
-            "close_advice_read",
-            {
-                "config_key": "us",
-                "market_scope": "all",
-                "query": {"status": "open", "option_type": "call", "side": "long", "limit": 50},
-            },
-        )
-    ]
-    assert out["data"]["perception"]["intent_name"] == "tool_loop"
-    assert out["data"]["reasoning"]["tool_call"]["tool_name"] == "assistant.tool_loop"
-    assert "平仓建议分析" in out["data"]["response_text"]
-    assert "继续持有 Call 凸性腿" in out["data"]["response_text"]
-    assert "Call现值 820" in out["data"]["response_text"]
-    assert "Call现值/成本 1.64" in out["data"]["response_text"]
-    assert "数据源：run run-1" in out["data"]["response_text"]
-
-
 def test_command_catalog_read_tool_names_match_inbound_policy() -> None:
     special_inbound_tools = {"inbound.pending", "inbound.symbols", "inbound.model"}
     for spec in command_specs():
@@ -645,84 +489,6 @@ def test_inbound_parser_maps_manual_trade_and_symbol_operations() -> None:
     upgrade_cancel = parse_assistant_command("/cancel upgrade")
     assert upgrade_cancel is not None
     assert upgrade_cancel.intent_name == "upgrade_cancel"
-
-
-def test_inbound_symbol_config_query_executes_read_only_tool_via_llm(tmp_path: Path) -> None:
-    data_cfg_path = tmp_path / "portfolio.runtime.json"
-    data_cfg_path.write_text(json.dumps({"option_positions": {}}, ensure_ascii=False), encoding="utf-8")
-    cfg = _runtime_cfg(str(data_cfg_path), market="hk")
-    cfg["symbols"] = [
-        {
-            "symbol": "9992.HK",
-            "fetch": {"source": "futu", "limit_expirations": 8},
-            "use": ["put_base"],
-            "sell_put": {"enabled": True, "min_dte": 20, "max_dte": 90, "max_strike": 145},
-            "sell_call": {"enabled": False},
-        }
-    ]
-    cfg_path = tmp_path / "config.hk.json"
-    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    def _plan(
-        text: str,
-        _runtime_settings: AssistantSettings,
-        conversation_context: dict[str, Any] | None,
-    ) -> ModelTurnResult:
-        assert text == "现在泡泡玛特 sell put的max strike是多少？"
-        assert conversation_context is not None
-        return _model_turn_result("symbol_config_read", {"symbol": "泡泡玛特", "strategy": "sell_put", "field": "max_strike"})
-
-    out = handle_assistant_response(
-        AssistantRequest(
-            text="现在泡泡玛特 sell put的max strike是多少？",
-            sender_id="local",
-            channel="local",
-            message_id="msg_symbol_config_read",
-            config_path=str(cfg_path),
-            audit_db=str(tmp_path / "inbound.sqlite3"),
-        ),
-        allowed_senders="local:local",
-        settings=AssistantSettings(
-            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
-        ),
-        model_turn_fn=_plan,
-    )
-
-    assert out["ok"] is True
-    assert out["tool_name"] == "assistant.tool_loop"
-    assert out["data"]["perception"]["intent_name"] == "tool_loop"
-    tool_call = out["data"]["reasoning"]["tool_call"]
-    assert tool_call["tool_name"] == "assistant.tool_loop"
-    assert tool_call["payload"]["question"] == "现在泡泡玛特 sell put的max strike是多少？"
-    assert tool_call["payload"]["config_path"] == str(cfg_path)
-    assert tool_call["payload"]["task_contract"] == {
-        "schema_version": TASK_CONTRACT_SCHEMA_VERSION,
-        "goal": "test plan",
-        "domain": "general",
-        "task_mode": "summarize",
-        "requested_effect": "read",
-        "scope": {},
-        "required_answer": ["summary"],
-        "required_evidence": ["current_state"],
-        "answer_shape": ["conclusion"],
-    }
-    assert tool_call["payload"]["events"] == [
-        {
-            "schema_version": "om-assistant-model-event-v1",
-            "event_id": "model_tool_call_1",
-            "event_type": "model_tool_call",
-            "tool_call_id": "call_1",
-            "tool_name": "symbol_config_read",
-            "arguments": {"symbol": "泡泡玛特", "strategy": "sell_put", "field": "max_strike"},
-            "purpose": "Use symbol_config_read for the current request.",
-            "provider": "openai",
-            "parent_event_id": "user_message_1",
-        }
-    ]
-    assert "operation_type" not in out["data"]
-    assert "9992.HK" in out["data"]["response_text"]
-    assert "sell_put.max_strike" in out["data"]["response_text"]
-    assert "145" in out["data"]["response_text"]
 
 
 def test_inbound_request_reports_unwritable_audit_db(tmp_path: Path) -> None:
@@ -2589,80 +2355,6 @@ def test_inbound_symbol_add_edit_remove_preview_and_confirm(monkeypatch: pytest.
     assert nvda["sell_call"]["min_strike"] == 140.0
 
 
-def test_inbound_llm_symbol_edit_creates_preview_only(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    _enable_inbound_symbol_write(monkeypatch)
-    cfg_path = _write_symbols_runtime_config(tmp_path)
-    audit_db = tmp_path / "inbound.sqlite3"
-    before = json.loads(cfg_path.read_text(encoding="utf-8"))
-
-    def _plan(
-        text: str,
-        _runtime_settings: AssistantSettings,
-        conversation_context: dict[str, Any] | None,
-    ) -> ModelTurnResult:
-        assert text == "设置 NVDA covered call min strike 140"
-        assert conversation_context is not None
-        return _model_turn_result(
-            "symbol_edit",
-            {
-                "symbol": "NVDA",
-                "set": {"sell_call.min_strike": 140.0, "sell_call.enabled": True},
-                "ensure_use": ["call_base"],
-            },
-        )
-
-    out = handle_assistant_response(
-        AssistantRequest(
-            text="设置 NVDA covered call min strike 140",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_llm_symbol_edit_preview",
-            config_path=str(cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
-        execute_tool_fn=lambda _tool_name, _payload: pytest.fail("preview tool should be intercepted before execution"),
-        settings=AssistantSettings(
-            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
-        ),
-        model_turn_fn=_plan,
-    )
-
-    assert out["ok"] is True
-    assert out["tool_name"] == "inbound.symbols"
-    assert out["data"]["perception"]["source"] == "agent_loop_events"
-    assert out["data"]["perception"]["intent_name"] == "symbol_edit"
-    assert out["data"]["reasoning"]["status"] == "preview_required"
-    assert out["data"]["reasoning"]["safety_class"] == "write_preview"
-    assert out["data"]["reasoning"]["requires_confirmation"] is True
-    assert out["data"]["status"] == "previewed"
-    assert out["data"]["operation_type"] == "symbol_edit"
-    assert out["data"]["payload"]["arguments"] == {
-        "symbol": "NVDA",
-        "set": {"sell_call.min_strike": 140.0, "sell_call.enabled": True},
-        "ensure_use": ["call_base"],
-    }
-    assert "未写入配置" in out["data"]["response_text"]
-    assert "确认监控" in out["data"]["response_text"]
-    assert json.loads(cfg_path.read_text(encoding="utf-8")) == before
-
-    assistant_meta = out["meta"]["assistant"]
-    assert assistant_meta["route"] == "agent_loop"
-    assert assistant_meta["decision"]["execution_contract"] == {
-        "read_only": False,
-        "risk_level": "preview_write",
-        "operation_action": "preview",
-        "operation_target": "symbol",
-        "llm_allowed": True,
-        "supported": True,
-        "direct_writes_allowed": False,
-        "llm_write_allowed": False,
-        "preview_confirm_required": True,
-        "canonical_renderer_required": True,
-    }
-    assert assistant_meta["perception_trace"]["decision"] == "agent_loop_selected"
-
-
 def test_inbound_symbol_write_uses_symbol_market_over_default_us_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _enable_inbound_symbol_write(monkeypatch)
     data_cfg_path = tmp_path / "portfolio.runtime.json"
@@ -2851,135 +2543,6 @@ markets:
     current_us = json.loads(us_cfg_path.read_text(encoding="utf-8"))
     item = next(row for row in current_us["symbols"] if row["symbol"] == "FUTU")
     assert item["sell_put"]["max_strike"] == 90.0
-
-
-def test_inbound_llm_context_composed_symbol_edit_preview_only(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from src.application.config_yaml import build_yaml_runtime_config_file
-
-    _enable_inbound_symbol_write(monkeypatch)
-    config_yaml = tmp_path / "config.yaml"
-    config_yaml.write_text(
-        """\
-accounts:
-  lx:
-    type: futu
-markets:
-  us:
-    accounts: [lx]
-    symbols: [FUTU]
-    overrides:
-      FUTU:
-        sell_put:
-          enabled: true
-          max_strike: 120
-""",
-        encoding="utf-8",
-    )
-    us_cfg_path = tmp_path / "config.us.json"
-    build_yaml_runtime_config_file(repo_root=Path(__file__).resolve().parents[1], market="us", config_path=config_yaml, output_config_path=us_cfg_path)
-    audit_db = tmp_path / "inbound.sqlite3"
-
-    def _first_plan(
-        _text: str,
-        _settings: AssistantSettings,
-        _conversation_context: dict[str, Any] | None,
-    ) -> ModelTurnResult:
-        return _model_turn_result(
-            "symbol_config_read",
-            {"symbol": "FUTU", "strategy": "sell_put", "field": "max_strike"},
-        )
-
-    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
-        assert tool_name == "symbol_config_read"
-        assert payload["symbol"] == "FUTU"
-        return build_response(
-            tool_name=tool_name,
-            ok=True,
-            data={
-                "schema_version": "symbol_config_read.v1",
-                "symbol": "FUTU",
-                "canonical_symbol": "FUTU",
-                "found": True,
-                "strategy": "sell_put",
-                "field": "max_strike",
-                "path": "sell_put.max_strike",
-                "value": 120.0,
-            },
-        )
-
-    first = handle_assistant_response(
-        AssistantRequest(
-            text="FUTU sell put的max strike设置的是多少？",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_context_config_read",
-            config_path=str(us_cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
-        execute_tool_fn=_execute,
-        settings=AssistantSettings(
-            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
-        ),
-        model_turn_fn=_first_plan,
-    )
-    assert first["ok"] is True
-
-    def _second_plan(
-        text: str,
-        settings: AssistantSettings,
-        conversation_context: dict[str, Any] | None,
-    ) -> ModelTurnResult:
-        assert text == "改为90"
-        assert conversation_context is not None
-        projection = conversation_context["context_projection"]
-        assert projection["available_evidence_refs"][0]["safe_slots"]["setting_path"] == ["sell_put.max_strike"]
-
-        def _create_tool_call_response(**_kwargs: Any) -> dict[str, Any]:
-            return {
-                "output": [
-                    {
-                        "type": "function_call",
-                        "call_id": "call_symbol_edit",
-                        "name": "symbol_edit",
-                        "arguments": '{"symbol":"FUTU","set":{"sell_put.max_strike":90}}',
-                    }
-                ]
-            }
-
-        return create_model_turn_events(
-            text,
-            settings,
-            conversation_context,
-            create_tool_call_response_fn=_create_tool_call_response,
-            environ={"OM_LLM_API_KEY": "sk-test"},
-        )
-
-    before_yaml = config_yaml.read_text(encoding="utf-8")
-    preview = handle_assistant_response(
-        AssistantRequest(
-            text="改为90",
-            sender_id="ou_1",
-            channel="feishu",
-            message_id="msg_context_config_edit_preview",
-            config_path=str(us_cfg_path),
-            audit_db=str(audit_db),
-        ),
-        allowed_senders="feishu:ou_1",
-        execute_tool_fn=lambda _tool_name, _payload: pytest.fail("preview tool should be intercepted before execution"),
-        settings=AssistantSettings(
-            llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
-        ),
-        model_turn_fn=_second_plan,
-    )
-
-    assert preview["ok"] is True
-    assert preview["tool_name"] == "inbound.symbols"
-    assert preview["data"]["status"] == "previewed"
-    assert preview["data"]["payload"]["yaml_symbol_set"]["sell_put_max_strike"] == 90.0
-    assert "未写入配置" in preview["data"]["response_text"]
-    assert "确认监控" in preview["data"]["response_text"]
-    assert config_yaml.read_text(encoding="utf-8") == before_yaml
 
 
 def test_inbound_monitor_run_preview_requires_run_specific_confirmation(
