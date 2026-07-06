@@ -105,6 +105,7 @@ def context_trace(context: dict[str, Any] | None) -> dict[str, Any]:
     pending = context.get("pending_operations")
     trace = {
         "provided": True,
+        "degraded": bool(context.get("degraded")),
         "window_messages": int(context.get("window_messages") or 0),
         "recent_count": len(recent) if isinstance(recent, list) else 0,
         "system_event_count": len(system_events) if isinstance(system_events, list) else 0,
@@ -121,6 +122,12 @@ def context_trace(context: dict[str, Any] | None) -> dict[str, Any]:
     )
     if projection_trace.get("provided"):
         trace["context_projection"] = projection_trace
+    if isinstance(context.get("error"), dict):
+        error = context["error"]
+        trace["error"] = {
+            "stage": str(error.get("stage") or ""),
+            "error_type": str(error.get("error_type") or ""),
+        }
     return trace
 
 
@@ -167,7 +174,7 @@ def _audit_context_item(row: dict[str, Any]) -> dict[str, Any]:
     intent_name = row.get("intent_name")
     tool_payload = _safe_tool_payload(row.get("tool_payload_json"))
     response_text = ""
-    if str(raw_tool_name or "").strip() in {"assistant.tool_plan", "assistant.tool_loop"}:
+    if str(raw_tool_name or "").strip() == "assistant.tool_loop":
         derived = _agent_loop_read_context(row)
         if derived is not None:
             tool_name = derived.get("tool_name") or tool_name

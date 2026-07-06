@@ -10,15 +10,8 @@ from typing import Any
 import pytest
 
 from src.application.agent_tool_contracts import AgentToolError, build_response
-from src.application.assistant import AssistantRequest, AssistantSettings, AssistantLlmSettings, handle_assistant_turn
-from src.application.assistant.agent_loop import (
-    EventNativePlanningResult,
-    ModelTurnResult,
-    PLANNER_CONTEXT_USE_SCHEMA_VERSION,
-    TOOL_CHECK_SCHEMA_VERSION,
-    TOOL_PLAN_SCHEMA_VERSION,
-)
-from src.application.assistant.model_events import ModelToolCallEvent
+from src.application.assistant import AssistantRequest, AssistantSettings, handle_assistant_turn
+from src.application.assistant.agent_loop import TOOL_CHECK_SCHEMA_VERSION
 from src.application.assistant.action_policy import ACTION_POLICY_SCHEMA_VERSION
 from src.application.assistant.action_safety import ACTION_SAFETY_SCHEMA_VERSION
 from src.application.assistant.answer_verifier import verify_response_against_evidence, verify_response_shape
@@ -178,7 +171,7 @@ def _plan_payload(
     task_contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
-        "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+        "schema_version": "legacy-tool-plan-v1",
         "goal": goal,
         "task_contract": task_contract or _test_task_contract(goal=goal),
         "steps": [
@@ -194,46 +187,6 @@ def _plan_payload(
 
 def _plan_step_arguments(plan: dict[str, Any], index: int = 0) -> dict[str, Any]:
     return dict(plan["steps"][index]["arguments"])
-
-
-def _event_model_turn_result(
-    *,
-    goal: str,
-    tool_name: str,
-    arguments: dict[str, Any],
-    purpose: str,
-    task_contract: dict[str, Any] | None = None,
-) -> ModelTurnResult:
-    return ModelTurnResult(
-        trace={"attempted": True, "reason": "accepted", "schema_version": TOOL_PLAN_SCHEMA_VERSION},
-        event_plan=EventNativePlanningResult(
-            events=(
-                ModelToolCallEvent(
-                    event_id="model_tool_call_1",
-                    tool_call_id="call_1",
-                    tool_name=tool_name,
-                    arguments=dict(arguments),
-                    purpose=purpose,
-                    provider="openai",
-                    parent_event_id="user_message_1",
-                ),
-            ),
-            task_contract=task_contract or _test_task_contract(goal=goal),
-            context_use={
-                "schema_version": PLANNER_CONTEXT_USE_SCHEMA_VERSION,
-                "mode": "none",
-                "referenced_turn_ids": [],
-                "referenced_evidence_refs": [],
-                "inherited_slots": {},
-                "current_message_slots": {},
-                "override_slots": {},
-                "requires_clarification": False,
-                "clarification_question": None,
-            },
-            provider="openai",
-            goal=goal,
-        ),
-    )
 
 
 def _load_trace_route_cases() -> list[dict[str, Any]]:
@@ -2542,7 +2495,7 @@ def test_task_contract_and_coverage_detect_missing_account_comparison_scope() ->
 
 def test_planner_task_contract_payload_ignores_legacy_selected_recipe() -> None:
     plan = {
-        "schema_version": TOOL_PLAN_SCHEMA_VERSION,
+        "schema_version": "legacy-tool-plan-v1",
         "goal": "分析 2026-06 收益来源",
         "task_contract": {
             "schema_version": TASK_CONTRACT_SCHEMA_VERSION,
@@ -3568,33 +3521,16 @@ def test_message_less_local_agent_sessions_do_not_overwrite_each_other(tmp_path:
             },
         )
 
-    def _plan(
-        _text: str,
-        _settings: AssistantSettings,
-        _conversation_context: dict[str, Any] | None,
-    ) -> ModelTurnResult:
-        return _event_model_turn_result(
-            goal="查看 lx 指派正股持仓盈亏",
-            tool_name="option_positions_read",
-            arguments={"action": "assigned-stock", "account": "lx", "status": "open", "refresh_quotes": True},
-            purpose="读取指派正股持仓盈亏",
-            task_contract=_assigned_stock_pnl_task_contract(),
-        )
-
-    settings = AssistantSettings(
-        llm=AssistantLlmSettings(enabled=True, provider="openai", model="gpt-5.2"),
-    )
+    settings = AssistantSettings()
     first = handle_assistant_response(
         AssistantRequest(text="查看 lx 指派正股持仓盈亏", sender_id="local", config_key="us", audit_db=str(audit_db)),
         execute_tool_fn=_execute,
         settings=settings,
-        model_turn_fn=_plan,
     )
     second = handle_assistant_response(
         AssistantRequest(text="查看 lx 指派正股持仓盈亏", sender_id="local", config_key="us", audit_db=str(audit_db)),
         execute_tool_fn=_execute,
         settings=settings,
-        model_turn_fn=_plan,
     )
 
     assert first["data"]["command_id"] != second["data"]["command_id"]

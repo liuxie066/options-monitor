@@ -140,8 +140,10 @@ the active product path is controlled by `assistant.enabled` and
 `assistant.agent_loop.enabled`. `assistant.planner.enabled` is a deprecated
 compatibility alias only.
 
-LLM providers are optional. In `agent_loop`, they may plan bounded read tools
-plus exactly one approved preview-write capability. Deterministic OM tools own
+LLM providers are optional. In the default `agent_loop`, OM Copilot derives the
+task frame, evidence plan, preview route, and answer from deterministic OM
+tools. Provider model-turn planning remains an explicit injected/diagnostic
+compatibility path, not the default free-form route. Deterministic OM tools own
 facts, and write actions remain behind preview/confirm gates.
 
 Model selection is a control-plane concern. `config.yaml` may define multiple
@@ -154,10 +156,11 @@ Inbound uses one internal Agent-loop contract. Slash commands enter through the
 ProtocolGate command parser and never call LLM. Bound confirm/cancel phrases
 such as `确认升级` enter PermissionResponseGate only when they match an
 existing pending operation in the same sender/channel/conversation scope.
-All other non-slash natural language enters AgentLoop. Deterministic code is
-limited to protocol parsing, permission binding, tool execution, validators,
-renderers, and operation apply boundaries; it must not recover natural-language
-business intent through keyword fallback. Objective slot repair is handled by
+All other non-slash natural language enters AgentLoop / OM Copilot.
+Deterministic code is limited to protocol parsing, permission binding, task
+profiles, evidence planning, tool execution, validators, renderers, and
+operation apply boundaries; it must not recover natural-language business
+intent through unrelated command fallback. Objective slot repair is handled by
 small focused helpers such as month filters or position-query filters, not by a
 generic natural-language parser.
 AgentLoop may plan read tools or exactly one preview capability from
@@ -169,19 +172,19 @@ authority.
 
 ```text
 Perceive   -> AssistantRequest / channel context
-Understand -> PerceptionResult or internal tool_plan
+Understand -> PerceptionResult or internal Copilot event plan
 Decide     -> ReasoningResolution / permission decision
 Act        -> ActionResult / ToolResult / PendingOperation
 Observe    -> ObservationResponse / audited reply
 ```
 
 ProtocolGate, PermissionResponseGate, and AgentLoop must only emit
-`PerceptionResult` or bounded model tool-call events. Tool-name selection,
-config-scoped payload construction, capability support, safety class
+`PerceptionResult` or bounded Copilot task/evidence events. Tool-name
+selection, config-scoped payload construction, capability support, safety class
 validation, and confirmation requirements are owned by
-`src.application.assistant.reasoning` and AgentLoop validation. Execution is
-owned by `src.application.assistant.action`, and response shaping is owned by
-`src.application.assistant.observation`.
+`src.application.assistant.reasoning`, Copilot task profiles, and AgentLoop
+validation. Execution is owned by `src.application.assistant.action`, and
+response shaping is owned by `src.application.assistant.observation`.
 
 ## Runtime Tick Flow
 

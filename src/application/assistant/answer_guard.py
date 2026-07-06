@@ -165,7 +165,7 @@ def answer_guard_trace_payload(status: str, guard: dict[str, Any]) -> dict[str, 
 
 _UX_FORCED_SECTION_RE = re.compile(r"(?im)^\s*(?:事实|分析)\s*[:：]?\s*$")
 _UX_INTERNAL_MODE_RE = re.compile(
-    r"(?i)\b(?:canonical|synthesis|fact\s*mode|analysis\s*mode|tool_plan|output_contract|evidencebundle|assistant\.answer_evidence)\b"
+    r"(?i)\b(?:canonical|synthesis|fact\s*mode|analysis\s*mode|output_contract|evidencebundle|assistant\.answer_evidence)\b"
 )
 _UX_TOOL_NAME_RE = re.compile(r"(?i)\b(?:analysis_query|analysis_catalog)\b")
 _UX_SQL_RE = re.compile(r"(?is)(?:\bsql\b|\bselect\b.{0,240}\bfrom\b|\bwith\b.{0,240}\bselect\b)")

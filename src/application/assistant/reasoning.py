@@ -41,8 +41,6 @@ def resolve_reasoning(perception: PerceptionResult, *, request: AssistantRequest
             action_kind="local_response",
             reason="local_help",
         )
-    if perception.intent_name == "tool_plan":
-        return _unsupported(perception, reason="tool_plan_deprecated", display_name="assistant.tool_plan")
     if perception.intent_name == "tool_loop":
         return _internal_tool_loop_resolution(perception, request=request)
 

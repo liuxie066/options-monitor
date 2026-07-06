@@ -4,21 +4,21 @@ import json
 from pathlib import Path
 from typing import Any
 
-from src.application.assistant.agent_loop import _planner_input_text, _planner_tool_manifest
+from src.application.assistant.agent_loop import _copilot_input_text, _copilot_tool_manifest
 from src.application.assistant.context_projection import build_context_projection, context_projection_trace
 from src.application.assistant.context_validation import validate_context_use
 
 
 CONTEXT_EVAL_SCHEMA_VERSION = "om-assistant-context-eval-v1"
-CONTEXT_EVAL_MODES = ("planner_context", "projection", "validation", "scenarios")
+CONTEXT_EVAL_MODES = ("copilot_context", "projection", "validation", "scenarios")
 _MODE_FIXTURE_VALUES = {
-    "planner_context": {"planner_context"},
+    "copilot_context": {"copilot_context"},
     "projection": {"projection", "context_projection"},
     "validation": {"validation", "context_validation"},
     "scenarios": {"scenario", "scenarios", "context_scenario"},
 }
 _MODE_ALIASES = {
-    "legacy": "planner_context",
+    "legacy": "copilot_context",
     "context_projection": "projection",
     "context_validation": "validation",
     "scenario": "scenarios",
@@ -30,7 +30,7 @@ def run_context_eval_suite(
     *,
     fixture_path: str | Path,
     case_ids: list[str] | tuple[str, ...] | None = None,
-    mode: str = "planner_context",
+    mode: str = "copilot_context",
 ) -> dict[str, Any]:
     eval_mode = normalize_context_eval_mode(mode)
     selected_ids = {str(item) for item in case_ids or () if str(item).strip()}
@@ -42,7 +42,7 @@ def run_context_eval_suite(
     ]
     observed_ids = {str(case.get("id") or "") for case in cases}
     missing_ids = sorted(selected_ids - observed_ids)
-    full_manifest_chars = len(json.dumps(_planner_tool_manifest(), ensure_ascii=False, sort_keys=True))
+    full_manifest_chars = len(json.dumps(_copilot_tool_manifest(), ensure_ascii=False, sort_keys=True))
     results = [
         _evaluate_case_for_mode(case, mode=eval_mode, full_manifest_chars=full_manifest_chars)
         for case in cases
@@ -50,7 +50,7 @@ def run_context_eval_suite(
     failed = [result for result in results if not result.get("ok")]
     skipped = [result for result in results if str(result.get("status") or "") == "skip"]
     passed = [result for result in results if result.get("ok") and str(result.get("status") or "") == "pass"]
-    requires_cases = bool(selected_ids) or eval_mode in {"planner_context", "projection", "validation", "scenarios"}
+    requires_cases = bool(selected_ids) or eval_mode in {"copilot_context", "projection", "validation", "scenarios"}
     summary = {
         "schema_version": CONTEXT_EVAL_SCHEMA_VERSION,
         "mode": eval_mode,
@@ -71,7 +71,7 @@ def run_context_eval_suite(
 
 
 def normalize_context_eval_mode(mode: str | None) -> str:
-    text = str(mode or "planner_context").strip()
+    text = str(mode or "copilot_context").strip()
     normalized = _MODE_ALIASES.get(text, text)
     if normalized not in CONTEXT_EVAL_MODES:
         raise ValueError(f"unsupported context eval mode: {mode!r}")
@@ -80,7 +80,7 @@ def normalize_context_eval_mode(mode: str | None) -> str:
 
 def evaluate_context_case(case: dict[str, Any], *, full_manifest_chars: int | None = None) -> dict[str, Any]:
     payload = json.loads(
-        _planner_input_text(
+        _copilot_input_text(
             str(case.get("question") or ""),
             conversation_context=_case_conversation_context(case),
         )
@@ -88,7 +88,7 @@ def evaluate_context_case(case: dict[str, Any], *, full_manifest_chars: int | No
     budget = payload.get("manifest_budget") if isinstance(payload.get("manifest_budget"), dict) else {}
     context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
     analysis_views = _analysis_views_from_payload(payload)
-    full_chars = int(full_manifest_chars or len(json.dumps(_planner_tool_manifest(), ensure_ascii=False, sort_keys=True)))
+    full_chars = int(full_manifest_chars or len(json.dumps(_copilot_tool_manifest(), ensure_ascii=False, sort_keys=True)))
     checks = _evaluate_context_checks(
         case=case,
         budget=budget,
@@ -100,7 +100,7 @@ def evaluate_context_case(case: dict[str, Any], *, full_manifest_chars: int | No
     return {
         "schema_version": CONTEXT_EVAL_SCHEMA_VERSION,
         "id": str(case.get("id") or ""),
-        "mode": "planner_context",
+        "mode": "copilot_context",
         "question": str(case.get("question") or ""),
         "ok": not failures,
         "status": "pass" if not failures else "fail",
@@ -148,7 +148,7 @@ def evaluate_validation_case(case: dict[str, Any]) -> dict[str, Any]:
         current_user_message=str(case.get("current_user_message") or case.get("question") or ""),
         context_projection=projection,
         plan_payload=_case_plan_payload(case),
-        planner_manifest=_case_planner_manifest(case),
+        tool_manifest=_case_tool_manifest(case),
     )
     actual = _validation_eval_actual_payload(validation)
     checks = _evaluate_validation_checks(case=case, validation=validation, actual=actual)
@@ -176,22 +176,23 @@ def evaluate_scenario_case(case: dict[str, Any], *, full_manifest_chars: int | N
             conversation_context=conversation_context,
             recent_sessions=_case_recent_sessions(case),
         )
-    planner_context = dict(conversation_context)
-    planner_context["context_projection"] = projection
-    planner_payload = json.loads(_planner_input_text(question, conversation_context=planner_context))
-    budget = planner_payload.get("manifest_budget") if isinstance(planner_payload.get("manifest_budget"), dict) else {}
-    context = planner_payload.get("context") if isinstance(planner_payload.get("context"), dict) else {}
-    analysis_views = _analysis_views_from_payload(planner_payload)
+    copilot_context = dict(conversation_context)
+    copilot_context["context_projection"] = projection
+    copilot_payload = json.loads(_copilot_input_text(question, conversation_context=copilot_context))
+    budget = copilot_payload.get("manifest_budget") if isinstance(copilot_payload.get("manifest_budget"), dict) else {}
+    context = copilot_payload.get("context") if isinstance(copilot_payload.get("context"), dict) else {}
+    analysis_views = _analysis_views_from_payload(copilot_payload)
     validation = validate_context_use(
         current_user_message=question,
         context_projection=projection,
         plan_payload=_case_plan_payload(case),
-        planner_manifest=_case_planner_manifest(case),
+        tool_manifest=_case_tool_manifest(case),
     )
-    full_chars = int(full_manifest_chars or len(json.dumps(_planner_tool_manifest(), ensure_ascii=False, sort_keys=True)))
+    full_chars = int(full_manifest_chars or len(json.dumps(_copilot_tool_manifest(), ensure_ascii=False, sort_keys=True)))
     actual = _scenario_eval_actual_payload(
         case=case,
         projection=projection,
+        copilot_payload=copilot_payload,
         budget=budget,
         context=context,
         analysis_views=analysis_views,
@@ -200,6 +201,7 @@ def evaluate_scenario_case(case: dict[str, Any], *, full_manifest_chars: int | N
     checks = _evaluate_scenario_checks(
         case=case,
         projection=projection,
+        copilot_payload=copilot_payload,
         budget=budget,
         context=context,
         analysis_views=analysis_views,
@@ -275,7 +277,7 @@ def format_context_eval_text(report: dict[str, Any]) -> str:
                     ]
                 )
             )
-        elif result.get("mode") == "planner_context":
+        elif result.get("mode") == "copilot_context":
             projection = context.get("context_projection") if isinstance(context.get("context_projection"), dict) else {}
             lines.append(
                 " ".join(
@@ -290,11 +292,11 @@ def format_context_eval_text(report: dict[str, Any]) -> str:
                 )
             )
         elif result.get("mode") == "scenarios":
-            planner = actual.get("planner_context") if isinstance(actual.get("planner_context"), dict) else {}
+            copilot = actual.get("copilot_context") if isinstance(actual.get("copilot_context"), dict) else {}
             projection = actual.get("projection") if isinstance(actual.get("projection"), dict) else {}
             validation = actual.get("validation") if isinstance(actual.get("validation"), dict) else {}
             decision = actual.get("decision") if isinstance(actual.get("decision"), dict) else {}
-            planner_budget = planner.get("manifest_budget") if isinstance(planner.get("manifest_budget"), dict) else {}
+            copilot_budget = copilot.get("manifest_budget") if isinstance(copilot.get("manifest_budget"), dict) else {}
             projection_trace = (
                 projection.get("context_projection") if isinstance(projection.get("context_projection"), dict) else {}
             )
@@ -309,8 +311,8 @@ def format_context_eval_text(report: dict[str, Any]) -> str:
                         f"family={result.get('family') or '-'}",
                         f"validation={validation_trace.get('status') or '-'}",
                         f"code={validation_trace.get('code') or '-'}",
-                        f"sources={_compact_list(planner_budget.get('selection_sources'))}",
-                        f"read_scope={_compact_list(planner_budget.get('read_tool_selection_sources'))}",
+                        f"sources={_compact_list(copilot_budget.get('selection_sources'))}",
+                        f"read_scope={_compact_list(copilot_budget.get('read_tool_selection_sources'))}",
                         f"refs={projection_trace.get('evidence_ref_count', 0)}",
                         f"gaps={projection_trace.get('open_gap_count', 0)}",
                         f"terminal={decision.get('terminal') or '-'}",
@@ -343,7 +345,7 @@ def _evaluate_case_for_mode(
     mode: str,
     full_manifest_chars: int,
 ) -> dict[str, Any]:
-    if mode == "planner_context":
+    if mode == "copilot_context":
         return evaluate_context_case(case, full_manifest_chars=full_manifest_chars)
     if mode == "projection":
         return evaluate_projection_case(case)
@@ -411,11 +413,11 @@ def _case_plan_payload(case: dict[str, Any]) -> dict[str, Any]:
     return dict(raw_plan) if isinstance(raw_plan, dict) else {}
 
 
-def _case_planner_manifest(case: dict[str, Any]) -> list[dict[str, Any]]:
-    raw_manifest = case.get("planner_manifest")
+def _case_tool_manifest(case: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_manifest = case.get("tool_manifest")
     if isinstance(raw_manifest, list):
         return [dict(item) for item in raw_manifest if isinstance(item, dict)]
-    return _planner_tool_manifest()
+    return _copilot_tool_manifest()
 
 
 def _analysis_views_from_payload(payload: dict[str, Any]) -> list[str]:
@@ -603,6 +605,7 @@ def _evaluate_scenario_checks(
     *,
     case: dict[str, Any],
     projection: dict[str, Any],
+    copilot_payload: dict[str, Any],
     budget: dict[str, Any],
     context: dict[str, Any],
     analysis_views: list[str],
@@ -623,23 +626,23 @@ def _evaluate_scenario_checks(
             )
         )
 
-    planner_expect = expect.get("planner") if isinstance(expect.get("planner"), dict) else {}
-    if planner_expect:
-        planner_case = {
-            "expect_selection_sources": planner_expect.get("selection_sources"),
-            "expect_matched_view_groups": planner_expect.get("matched_view_groups"),
-            "expect_analysis_views": planner_expect.get("analysis_views"),
-            "expect_analysis_views_absent": planner_expect.get("analysis_views_absent"),
-            "expect_max_manifest_chars": planner_expect.get("max_manifest_chars"),
-            "expect_max_analysis_views_included": planner_expect.get("max_analysis_views_included"),
-            "expect_preview_authority_allowed": planner_expect.get("preview_authority_allowed"),
-            "expect_read_tool_selection_sources": planner_expect.get("read_tool_selection_sources"),
-            "expect_read_tools_included": planner_expect.get("read_tools_included"),
-            "expect_read_tools_omitted": planner_expect.get("read_tools_omitted"),
+    copilot_expect = expect.get("copilot") if isinstance(expect.get("copilot"), dict) else {}
+    if copilot_expect:
+        copilot_case = {
+            "expect_selection_sources": copilot_expect.get("selection_sources"),
+            "expect_matched_view_groups": copilot_expect.get("matched_view_groups"),
+            "expect_analysis_views": copilot_expect.get("analysis_views"),
+            "expect_analysis_views_absent": copilot_expect.get("analysis_views_absent"),
+            "expect_max_manifest_chars": copilot_expect.get("max_manifest_chars"),
+            "expect_max_analysis_views_included": copilot_expect.get("max_analysis_views_included"),
+            "expect_preview_authority_allowed": copilot_expect.get("preview_authority_allowed"),
+            "expect_read_tool_selection_sources": copilot_expect.get("read_tool_selection_sources"),
+            "expect_read_tools_included": copilot_expect.get("read_tools_included"),
+            "expect_read_tools_omitted": copilot_expect.get("read_tools_omitted"),
         }
         checks.extend(
             _evaluate_context_checks(
-                case=planner_case,
+                case=copilot_case,
                 budget=budget,
                 context=context,
                 analysis_views=analysis_views,
@@ -662,7 +665,7 @@ def _evaluate_scenario_checks(
         checks.extend(
             _evaluate_decision_checks(
                 expect=decision_expect,
-                actual=_plan_decision_actual_payload(_case_plan_payload(case)),
+                actual=_copilot_decision_actual_payload(copilot_payload, validation=validation),
             )
         )
 
@@ -864,6 +867,7 @@ def _scenario_eval_actual_payload(
     *,
     case: dict[str, Any],
     projection: dict[str, Any],
+    copilot_payload: dict[str, Any],
     budget: dict[str, Any],
     context: dict[str, Any],
     analysis_views: list[str],
@@ -872,14 +876,54 @@ def _scenario_eval_actual_payload(
     return {
         "family": str(case.get("family") or ""),
         "projection": _projection_eval_actual_payload(projection),
-        "planner_context": _context_eval_actual_payload(
+        "copilot_context": _context_eval_actual_payload(
             budget=budget,
             context=context,
             analysis_views=analysis_views,
         ),
         "validation": _validation_eval_actual_payload(validation),
-        "decision": _plan_decision_actual_payload(_case_plan_payload(case)),
+        "decision": _copilot_decision_actual_payload(copilot_payload, validation=validation),
     }
+
+
+def _copilot_decision_actual_payload(copilot_payload: dict[str, Any], *, validation: dict[str, Any]) -> dict[str, Any]:
+    payload = copilot_payload if isinstance(copilot_payload, dict) else {}
+    task = payload.get("copilot_task") if isinstance(payload.get("copilot_task"), dict) else {}
+    evidence_plan = payload.get("evidence_plan") if isinstance(payload.get("evidence_plan"), dict) else {}
+    calls = [dict(item) for item in evidence_plan.get("calls") or [] if isinstance(item, dict)]
+    first = calls[0] if calls else {}
+    first_tool = str(first.get("tool_name") or "")
+    first_arguments = dict(first.get("arguments") or {}) if isinstance(first.get("arguments"), dict) else {}
+    validation_status = str(validation.get("status") or "")
+    requires_clarification = validation_status in {"ask_clarification", "blocked"} or bool(
+        validation.get("requires_clarification")
+    )
+    return {
+        "terminal": _copilot_terminal_kind(
+            calls=calls,
+            first_tool=first_tool,
+            requires_clarification=requires_clarification,
+        ),
+        "tool_call_count": len(calls),
+        "tool_sequence": [str(call.get("tool_name") or "") for call in calls],
+        "first_tool": first_tool,
+        "first_tool_family": _tool_family(first_tool),
+        "first_arguments": first_arguments,
+        "first_argument_keys": sorted(str(key) for key in first_arguments),
+        "requested_effect": str(task.get("requested_effect") or ""),
+        "context_use_mode": str((task.get("scope") if isinstance(task.get("scope"), dict) else {}).get("context_mode") or "none"),
+        "requires_clarification": requires_clarification,
+    }
+
+
+def _copilot_terminal_kind(*, calls: list[dict[str, Any]], first_tool: str, requires_clarification: bool) -> str:
+    if requires_clarification:
+        return "clarification_request"
+    if first_tool in _PREVIEW_TOOL_NAMES:
+        return "preview_tool_call"
+    if calls:
+        return "read_tool_call"
+    return "no_tool"
 
 
 def _plan_decision_actual_payload(plan_payload: dict[str, Any]) -> dict[str, Any]:

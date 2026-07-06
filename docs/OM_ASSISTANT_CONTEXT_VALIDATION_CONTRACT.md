@@ -1,35 +1,34 @@
 # OM Assistant Context Validation Contract
 
-> Deterministic validation for planner use of multi-turn context.
+> Deterministic validation for Copilot use of multi-turn context.
 
 ## Status
 
-This contract defines the validation layer between planner output and tool
+This contract defines the validation layer between Copilot evidence plans and tool
 execution. It does not replace policy, coverage verification, answer guards, or
 tool output contracts.
 
 ## Purpose
 
-The planner may decide that the current message refers to prior context. Because
-the planner can trigger deterministic tools, OM needs a structural guard before
+Copilot may decide that the current message refers to prior context. Because
+Copilot can trigger deterministic tools, OM needs a structural guard before
 execution.
 
 The validator checks whether the plan's declared context use is legal. It does
-not interpret business language itself. In the provider structured tool-call
-path, tool-call `arguments` are the model turn's explicit execution intent;
-the validator must not reclassify normalized explicit arguments as inherited
-context merely because their serialized value does not appear verbatim in the
-current user message.
+not interpret business language itself. In the current Copilot path, evidence
+call `arguments` are the current turn's explicit execution intent; the validator
+must not reclassify normalized explicit arguments as inherited context merely
+because their serialized value does not appear verbatim in the current user
+message.
 
 ## ContextUse Declaration
 
-Planner output, or the event-native host adapter for provider structured
-tool-call paths, should include a `context_use` object:
+Copilot task/evidence planning should include a `context_use` object:
 
 ```json
 {
   "context_use": {
-    "schema_version": "om-planner-context-use-v1",
+    "schema_version": "om-copilot-context-use-v1",
     "mode": "none",
     "referenced_turn_ids": [],
     "referenced_evidence_refs": [],
@@ -51,16 +50,16 @@ Allowed `mode` values:
 | `carry` | current message intentionally carries prior context |
 | `refine` | current message narrows or asks details inside prior context |
 | `override` | current message explicitly replaces prior scope |
-| `ambiguous` | planner cannot safely choose one context |
+| `ambiguous` | Copilot cannot safely choose one context |
 
 These declarations are not resolver outputs. The validator only checks whether
 the declaration is consistent with the projection and plan.
 
-In provider structured tool-call mode, `context_use` may be host-derived because
-the provider gives the host tool-call arguments rather than a full JSON plan.
-That derivation is only for tracing and validating actual inherited context. It
-must not turn current-turn normalized arguments into inherited slots simply
-because host text extraction did not produce the same serialized value.
+`context_use` may be host-derived when the current turn is a deterministic
+preview or command adapter rather than a full Copilot evidence plan. That
+derivation is only for tracing and validating actual inherited context. It must
+not turn current-turn normalized arguments into inherited slots simply because
+host text extraction did not produce the same serialized value.
 
 `safe_slots` in `ContextProjection` are projection and audit metadata. They are
 not a second natural-language parser. `context_use.inherited_slots` should be
@@ -72,14 +71,14 @@ prior context.
 ```text
 current_user_message
 ContextProjection
-ModelEvent / EventNativePlanningResult
+CopilotEvidencePlan / deterministic preview adapter
 TaskContract
 ContextUse
-planner-visible tool manifest
+Copilot-visible tool manifest
 ```
 
 The validator must not read hidden runtime state to rescue an invalid context
-declaration. If the projection omitted a turn due to budget, the planner must
+declaration. If the projection omitted a turn due to budget, Copilot must
 not rely on it.
 
 ## Core Checks

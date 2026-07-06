@@ -73,6 +73,8 @@ def _turn_render_route(*, response: dict[str, Any], route: str, data: dict[str, 
         return "canonical_renderer"
     if answer_route in {"llm_from_evidence", "model_final_answer"}:
         return "llm_verified"
+    if answer_route == "copilot_answer":
+        return "copilot_answer"
     if answer_route == "preview_lifecycle":
         return "preview_request"
     if answer_route == "clarification_request":

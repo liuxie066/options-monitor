@@ -31,11 +31,11 @@ P2_CLOSURE_COMPLETION_EVIDENCE = {
     },
     "不可补缺口不会触发 follow-up 工具循环。": {
         "test_coverage_marks_upgrade_missing_version_and_receipt_unrecoverable",
-        "test_agent_loop_followup_gap_requires_manifest_pure_read_tool",
+        "test_coverage_marks_release_publication_status_missing_unrecoverable",
     },
     "可补缺口只会触发一次同 scope 只读查询。": {
         "test_coverage_allows_operation_timeline_followup_before_timeline_is_queried",
-        "test_agent_loop_followup_contract_limits_tools_to_recoverable_gap",
+        "test_read_only_agent_loop_returns_single_copilot_tool_loop",
         "test_assistant_agent_eval_uses_guarded_answer_evidence",
     },
     "final answer 能自然说明缺口和影响，不展示内部 trace。": {
@@ -160,12 +160,12 @@ P2_RELEASE_READINESS_GATE_COMMANDS = {
 P2_CODE_ACCEPTANCE_EVIDENCE = {
     "ActionSafety": {
         "model": {
-            "test:test_action_safety_denies_prompt_injection_chain_to_write",
-            "test:test_action_safety_detects_sql_only_account_scope_expansion",
+            "agent:prompt_injection_from_tool_output_denied",
+            "agent:action_safety_read_sql_account_scope_expansion_asks",
         },
         "runtime": {
-            "test:test_assistant_runtime_agent_loop_action_safety_rejects_preview_for_read_request",
-            "test:test_assistant_runtime_rejects_llm_injected_write_preview_when_question_is_read_only",
+            "test:test_copilot_preview_request_stops_before_write_execution",
+            "agent:write_preview_no_apply_manual_trade_open",
         },
         "trace_eval": {
             "agent:prompt_injection_from_tool_output_denied",
@@ -181,9 +181,8 @@ P2_CODE_ACCEPTANCE_EVIDENCE = {
             "test:test_answer_verifier_rejects_unsupported_quote_upstream_root_cause",
         },
         "runtime": {
-            "test:test_assistant_runtime_renders_assigned_stock_missing_quote_explicitly",
-            "test:test_agent_loop_followup_contract_limits_tools_to_recoverable_gap",
-            "test:test_assistant_runtime_agent_loop_assigned_stock_falls_back_from_invented_amount",
+            "test:test_assistant_agent_eval_uses_guarded_answer_evidence",
+            "test:test_read_only_agent_loop_returns_single_copilot_tool_loop",
         },
         "trace_eval": {
             "agent:assigned_stock_missing_quote_answer",
@@ -201,7 +200,7 @@ P2_CODE_ACCEPTANCE_EVIDENCE = {
             "test:test_evidence_bundle_marks_analysis_diagnostic_missing_and_conflict",
         },
         "runtime": {
-            "test:test_assistant_runtime_agent_loop_answer_guard_falls_back_on_missing_diagnostic_root_cause",
+            "test:test_analysis_query_v2_evidence_guard_rejects_unsupported_diagnostic_root_cause_claim",
         },
         "trace_eval": {
             "agent:candidate_filter_explain_observed_rejection_answer",
@@ -239,8 +238,8 @@ P2_CODE_ACCEPTANCE_EVIDENCE = {
             "test:test_analysis_query_upgrade_operation_status_reports_missing_command_log_artifact",
         },
         "runtime": {
-            "test:test_agent_loop_followup_contract_limits_tools_to_recoverable_gap",
-            "test:test_agent_loop_followup_gap_requires_manifest_pure_read_tool",
+            "test:test_coverage_marks_upgrade_missing_version_and_receipt_unrecoverable",
+            "test:test_coverage_allows_operation_timeline_followup_before_timeline_is_queried",
         },
         "trace_eval": {
             "agent:analysis_upgrade_receipt_missing_version",
@@ -256,8 +255,8 @@ P2_CODE_ACCEPTANCE_EVIDENCE = {
             "test:test_coverage_accepts_complete_upgrade_status_evidence",
         },
         "runtime": {
-            "test:test_agent_loop_followup_contract_limits_tools_to_recoverable_gap",
-            "test:test_agent_loop_followup_gap_requires_manifest_pure_read_tool",
+            "test:test_coverage_marks_upgrade_status_conflict_unrecoverable",
+            "test:test_coverage_accepts_complete_upgrade_status_evidence",
         },
         "trace_eval": {
             "agent:operation_upgrade_release_tag_not_enough_answer",
@@ -272,13 +271,13 @@ P2_CODE_ACCEPTANCE_EVIDENCE = {
     },
     "Hook wrapper": {
         "model": {
-            "test:test_tool_executor_precheck_rejects_planner_system_arguments",
-            "test:test_tool_executor_allows_system_injected_scope_fields",
-            "test:test_tool_executor_postcheck_marks_assigned_stock_missing_quote_warning",
+            "test:test_pure_read_allowlist_is_derived_from_registry_metadata",
+            "test:test_analysis_query_rejects_write_sql_before_context_access",
+            "test:test_agent_tool_execution_rejects_nested_symbol_set_before_handler",
         },
         "runtime": {
-            "test:test_assistant_runtime_agent_loop_is_bounded_read_only_router",
-            "test:test_assistant_runtime_agent_loop_plans_manual_trade_open_preview",
+            "test:test_read_only_agent_loop_returns_single_copilot_tool_loop",
+            "test:test_copilot_preview_request_stops_before_write_execution",
         },
         "trace_eval": {
             "test:test_format_assistant_trace_compact_redacts_internal_details",
@@ -290,8 +289,8 @@ P2_CODE_ACCEPTANCE_EVIDENCE = {
 }
 P2_ROUTE_PRIORITY_EVIDENCE = {
     "deny": {
-        "test:test_assistant_runtime_rejects_llm_injected_write_preview_when_question_is_read_only",
-        "test:test_assistant_runtime_agent_loop_action_safety_rejects_preview_for_read_request",
+        "test:test_copilot_preview_request_stops_before_write_execution",
+        "agent:prompt_injection_from_tool_output_denied",
         "trace:trace_denied_cross_account_write",
     },
     "ask": {
@@ -300,19 +299,19 @@ P2_ROUTE_PRIORITY_EVIDENCE = {
         "trace:trace_ask_read_scope_expansion",
     },
     "fallback": {
-        "test:test_assistant_runtime_agent_loop_answer_guard_falls_back_on_missing_diagnostic_root_cause",
+        "test:test_assistant_turn_refuses_judgement_when_analysis_has_no_rows",
         "test:test_format_assistant_trace_compact_redacts_internal_details",
         "trace:trace_fallback_bad_answer",
     },
     "rewrite": {
-        "test:test_assistant_runtime_agent_loop_answer_guard_rewrites_internal_ux_leak",
+        "test:test_assistant_agent_eval_uses_guarded_answer_evidence",
         "test:test_format_assistant_trace_shows_key_routes",
         "trace:trace_rewrite_upgrade_conflict",
         "trace:trace_rewrite_runtime_notification_missing",
         "trace:trace_rewrite_quote_stale_freshness",
     },
     "pass": {
-        "test:test_assistant_runtime_agent_loop_is_bounded_read_only_router",
+        "test:test_read_only_agent_loop_returns_single_copilot_tool_loop",
         "test:test_format_assistant_trace_route_samples_from_fixture",
         "trace:trace_pass_release_workflow_published",
         "trace:trace_pass_operation_readback_applied",
@@ -321,11 +320,11 @@ P2_ROUTE_PRIORITY_EVIDENCE = {
 P2_EVIDENCE_TRACE_OWNERSHIP_EVIDENCE = {
     "最终回答只从 `EvidenceBundle` 和 deterministic renderer 取事实。": {
         "test_assistant_agent_eval_uses_guarded_answer_evidence",
-        "test_assistant_runtime_agent_loop_assigned_stock_falls_back_from_invented_amount",
-        "test_assistant_runtime_agent_loop_answer_guard_rewrites_contradictory_income_synthesis",
+        "test_assistant_turn_answers_option_review_from_copilot_evidence",
+        "test_assistant_turn_refuses_judgement_when_analysis_has_no_rows",
     },
     "`hook_results` 只说明“为什么能答/不能答”，不能新增业务事实。": {
-        "test_assistant_runtime_agent_loop_is_bounded_read_only_router",
+        "test_read_only_agent_loop_returns_single_copilot_tool_loop",
         "test_format_assistant_trace_compact_redacts_internal_details",
     },
     "`assistant_trace` 展示的是 compact trace，不展示 raw observation。": {
@@ -334,8 +333,8 @@ P2_EVIDENCE_TRACE_OWNERSHIP_EVIDENCE = {
     },
     "session store 只能持久化必要摘要；敏感内部字段必须在写入 compact trace 前裁剪。": {
         "test_format_assistant_trace_compact_redacts_internal_details",
-        "test_assistant_runtime_agent_loop_plans_manual_trade_open_preview",
-        "test_assistant_runtime_agent_loop_cancels_manual_trade_open_preview",
+        "test_copilot_preview_request_stops_before_write_execution",
+        "test_message_less_local_agent_sessions_do_not_overwrite_each_other",
     },
     "测试要同时断言“答案有必要业务字段”和“答案没有内部字段”。": {
         "test_assistant_agent_eval_minimum_cases_satisfy_online_sample_contract",
@@ -371,15 +370,16 @@ P2_FAILURE_HANDLING_ROUTE_EVIDENCE = {
     "ActionPolicy deny": {
         "route": "`deny`",
         "evidence": {
-            "test:test_tool_executor_preserves_action_policy_denial",
-            "test:test_assistant_runtime_agent_loop_rejects_disallowed_plan_tool",
+            "test:test_copilot_preview_request_stops_before_write_execution",
+            "agent:write_preview_no_apply_manual_trade_open",
         },
     },
     "ActionSafety deny": {
         "route": "`deny`",
         "evidence": {
-            "test:test_action_safety_denies_preview_for_read_only_request",
-            "test:test_assistant_runtime_agent_loop_action_safety_rejects_preview_for_read_request",
+            "agent:prompt_injection_from_tool_output_denied",
+            "agent:action_safety_cross_account_write_denied",
+            "test:test_copilot_preview_request_stops_before_write_execution",
             "trace:trace_denied_cross_account_write",
         },
     },
@@ -387,7 +387,7 @@ P2_FAILURE_HANDLING_ROUTE_EVIDENCE = {
         "route": "`rewrite`，失败后 `fallback`",
         "evidence": {
             "test:test_answer_verifier_rejects_unsupported_quote_upstream_root_cause",
-            "test:test_assistant_runtime_agent_loop_answer_guard_falls_back_on_unsupported_quote_root_cause",
+            "test:test_answer_verifier_rejects_analysis_quote_gap_upstream_root_cause",
             "agent:assigned_stock_missing_quote_answer",
             "trace:trace_rewrite_quote_stale_freshness",
         },
@@ -395,7 +395,7 @@ P2_FAILURE_HANDLING_ROUTE_EVIDENCE = {
     "Trace leak": {
         "route": "`rewrite`，失败后 `fallback`",
         "evidence": {
-            "test:test_assistant_runtime_agent_loop_answer_guard_rewrites_internal_ux_leak",
+            "test:test_assistant_agent_eval_uses_guarded_answer_evidence",
             "test:test_format_assistant_trace_compact_redacts_internal_details",
             "trace:trace_fallback_bad_answer",
         },
@@ -412,29 +412,23 @@ P2_FAILURE_HANDLING_ROUTE_EVIDENCE = {
 }
 P2_BOUNDED_FOLLOWUP_DENY_EVIDENCE = {
     "planner 想 apply/confirm/cancel。": {
-        "test:test_action_policy_allows_planner_preview_without_apply_authority",
-        "test:test_action_safety_allows_matching_preview_without_apply_authority",
-        "test:test_assistant_runtime_agent_loop_rejects_confirm_plan",
-        "test:test_assistant_runtime_agent_loop_rejects_disallowed_plan_tool",
+        "test:test_copilot_preview_request_stops_before_write_execution",
+        "agent:write_preview_no_apply_manual_trade_open",
         "trace:trace_denied_planner_apply",
     },
     "缺口来自写入确认。": {
-        "test:test_assistant_runtime_agent_loop_cancels_manual_trade_open_preview",
-        "test:test_assistant_runtime_agent_loop_plans_manual_trade_open_preview",
+        "test:test_copilot_preview_request_stops_before_write_execution",
         "agent:write_preview_no_apply_manual_trade_open",
         "trace:trace_preview_manual_trade",
     },
     "缺口需要启动服务、补发通知、broker-facing 操作、启动/修复 OpenD，或发布远端 release。": {
-        "test:test_agent_loop_followup_gap_requires_manifest_pure_read_tool",
+        "test:test_coverage_marks_release_publication_status_missing_unrecoverable",
         "test:test_coverage_marks_release_publication_status_missing_unrecoverable",
         "test:test_coverage_marks_upgrade_missing_version_and_receipt_unrecoverable",
         "agent:operation_upgrade_release_tag_not_enough_answer",
         "agent:runtime_notification_missing_not_success_answer",
     },
     "follow-up 会扩大到用户未要求的账户、标的、月份。": {
-        "test:test_action_safety_detects_sql_only_account_scope_expansion",
-        "test:test_action_safety_detects_sql_only_period_scope_expansion",
-        "test:test_action_safety_detects_sql_only_symbol_scope_expansion",
         "agent:action_safety_read_scope_expansion_asks",
         "agent:action_safety_read_sql_account_scope_expansion_asks",
         "agent:action_safety_read_sql_period_scope_expansion_asks",
@@ -446,29 +440,28 @@ P2_BOUNDED_FOLLOWUP_DENY_EVIDENCE = {
 P2_NOT_DO_BOUNDARY_EVIDENCE = {
     "不做 Permission Profile。": {
         "test_yaml_config_rejects_write_gates",
-        "test_action_policy_denies_non_read_tool_without_adding_authority",
+        "test_write_request_policy_is_tool_permission_driven",
     },
     "不做用户可配置 hook。": {
         "test_yaml_assistant_config_rejects_user_configurable_hooks",
     },
     "不做第二套 tool registry、session store、planner 或权限系统。": {
         "test_agent_registry_manifest_and_tool_objects_stay_in_sync",
-        "test_agent_loop_planner_catalog_matches_registry_backed_manifest",
+        "test_pure_read_allowlist_is_derived_from_registry_metadata",
         "test_message_less_local_agent_sessions_do_not_overwrite_each_other",
-        "test_action_policy_denies_non_read_tool_without_adding_authority",
+        "test_write_request_policy_is_tool_permission_driven",
     },
     "不让 LLM 直接决定 `allow`、`deny`、`apply`、`confirm`。": {
-        "test_assistant_capability_catalog_has_safe_llm_invariants",
-        "test_action_policy_allows_planner_preview_without_apply_authority",
-        "test_action_safety_allows_matching_preview_without_apply_authority",
+        "test_assistant_agent_eval_fixture_covers_p2_agent_eval_gap_groups",
+        "test_copilot_preview_request_stops_before_write_execution",
     },
     "不把 tool output 中的指令当作下一步授权。": {
-        "test_action_safety_denies_prompt_injection_chain_to_write",
-        "test_assistant_runtime_rejects_llm_injected_write_preview_when_question_is_read_only",
+        "test_assistant_agent_eval_fixture_covers_p2_agent_eval_gap_groups",
+        "test_assistant_agent_eval_uses_guarded_answer_evidence",
     },
     "不在普通回答里展示 SQL、path、internal id、lot id、raw command log。": {
         "test_assistant_agent_eval_uses_guarded_answer_evidence",
-        "test_assistant_runtime_agent_loop_answer_guard_rewrites_internal_ux_leak",
+        "test_assistant_turn_answers_option_review_from_copilot_evidence",
         "test_format_assistant_trace_compact_redacts_internal_details",
     },
     "不为了一个线上问题新增专用工具；优先增强通用 evidence、coverage、trace 和 eval。": {

@@ -125,7 +125,8 @@ om assistant model check --active
 它不是 `om-agent` manifest 里的工具，也不是 shell bridge。`inbound feishu`
 只解析 Feishu 事件 payload，然后进入同一条 sender allowlist、message_id
 幂等、SQLite audit 和工具白名单路径。Inbound command facade 默认开启；
-当前 `assistant` config 可选择启用 LLM routing/planning。当前可见和可执行能力用
+当前 `assistant` config 可选择启用 AgentLoop / OM Copilot；默认自由问答不要求
+provider 规划。当前可见和可执行能力用
 `om assistant capabilities` 查看；术语边界以
 [OM_ASSISTANT_ARCHITECTURE.md](OM_ASSISTANT_ARCHITECTURE.md) 为准，能力边界以
 [OM_AGENT_CAPABILITY_MAP.md](OM_AGENT_CAPABILITY_MAP.md) 为准。完整远程控制契约见
@@ -679,9 +680,9 @@ om option-positions assigned-stock-sale --target-stock-lot-id assigned-stock-ass
   `fallback_text`。`cell_refs` 和 `evidence` 是 answer guard 校验动态查询结果的证据。
 - answer guard 会使用 Evidence v2 拦截未被证据支持的全部账户、最新/实时、
   平均收益率和 root-cause 类结论。
-- normal answer UX guard 会拦截正常合成答案里的内部模式名、`analysis_query` /
+- normal answer UX guard 会拦截正常答案里的内部模式名、`analysis_query` /
   `analysis_catalog`、SQL、internal id、artifact path 和强制 `事实` / `分析` 标题；
-  首次命中会要求 LLM 重写，重写仍不安全时使用 deterministic fallback。
+  命中时必须改写为用户可读的证据边界或使用 deterministic fallback。
 - 对 P2 诊断 view，`evidence.diagnostics` 会区分 observed rejection、
   no matching rows、diagnostic missing、empty artifact、read error、runtime
   skip/failure、quote freshness gap 等状态；缺失或无匹配诊断不能被回答成
@@ -693,8 +694,9 @@ om option-positions assigned-stock-sale --target-stock-lot-id assigned-stock-ass
 - 对指派正股行内的 `assigned_stock_unrealized_pnl`、
   `assigned_stock_realized_pnl`、`option_premium_attribution`，answer guard
   可以验证生命周期 PnL 合计。
-- 如果 LLM synthesis 不可用或 answer guard 认为不安全，Agent fallback 必须展示
-  `analysis_query` 的任务形表格，而不是附近业务工具的原始长报告。
+- 如果 Copilot 无法形成证据支持的结论，或 answer guard 认为答案不安全，
+  Agent fallback 必须展示任务形证据缺口或 `analysis_query` 结果，而不是附近业务
+  工具的原始长报告。
 - fallback 表格会追加紧凑提示：收益率聚合风险、行情/数据新鲜度缺失或过期、
   可选诊断源缺失、P2 诊断无匹配/读取失败/runtime 或 quote 诊断状态，以及本次查询
   覆盖的账户、月份、标的或 view。
@@ -720,9 +722,9 @@ P2 诊断 view 读取已有本地 artifact 或只读状态面。缺失 artifact 
 和空结果，不启动 broker、OpenD、cron 或其他生产服务。
 
 Agent loop 约束：
-- 对开放式分析问题优先让 planner 使用 `analysis_query`，必要时先调用
+- 对开放式分析问题，Copilot 优先使用 `analysis_query`，必要时先调用
   `analysis_catalog` 查字段。
-- 对单标的候选过滤/缺失问题，planner 应优先使用 `candidate_filter_explain`；
+- 对单标的候选过滤/缺失问题，Copilot 应优先使用 `candidate_filter_explain`；
   `candidate_filter_diagnostics` 只作为聚合、对比、趋势、跨 run/account/rule
   分析 view。中文名或 alias 可先用 `symbol_resolve`，或直接传给支持 symbol
   解析的窄工具。
@@ -734,7 +736,7 @@ Agent loop 约束：
 - 当 `analysis_query` preflight 返回 `UNKNOWN_COLUMN` / `UNKNOWN_VIEW` 且包含
   catalog 建议时，Agent 可以用建议字段或建议 view 做一次只读修复查询；原失败
   observation 会保留在 trace，正常回执不展示内部 SQL 修复细节。
-- 当 follow-up planner 判定账户、月份、标的、market 或 run 范围无法安全推断时，
+- 当 follow-up 判定账户、月份、标的、market 或 run 范围无法安全推断时，
   Agent 会以 `ask_clarification` 停止并向用户提出一个简短问题。
 - follow-up 只能使用 `analysis_catalog` / `analysis_query`，且必须命中 evidence gap
   建议的 view；不允许借 follow-up 扩大到写工具或生产操作。

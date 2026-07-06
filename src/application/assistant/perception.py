@@ -4,7 +4,7 @@ from datetime import date
 from typing import Any, Callable
 
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.assistant.agent_loop import ModelTurnFn, AgentLoopPlanningOutcome, run_read_only_agent_loop, skipped_llm_trace
+from src.application.assistant.agent_loop import AgentLoopPlanningOutcome, run_read_only_agent_loop, skipped_llm_trace
 from src.application.assistant.audit import InboundAuditStore
 from src.application.assistant.capability_catalog import is_llm_planner_preview_spec, spec_by_intent
 from src.application.assistant.command_parser import parse_assistant_command
@@ -90,14 +90,12 @@ class PerceptionEngine:
         request: AssistantRequest,
         audit_store: InboundAuditStore,
         settings: AssistantSettings,
-        model_turn_fn: ModelTurnFn | None = None,
         generate_reply_fn: GenerateReplyFn | None = None,
         execute_tool_fn: ExecuteToolFn | None = None,
     ) -> None:
         self._request = request
         self._audit_store = audit_store
         self._settings = settings
-        self._model_turn_fn = model_turn_fn
         self._generate_reply_fn = generate_reply_fn
         self._execute_tool_fn = execute_tool_fn
         self.route = self._initial_route(request.text)
@@ -202,25 +200,24 @@ class PerceptionEngine:
     def _agent_loop_available(self) -> bool:
         return bool(
             self._settings.agent_loop_enabled
-            or self._model_turn_fn is not None
             or self._generate_reply_fn is not None
         )
 
     def _perceive_agent_loop(self, text: str, parser_now_fn: Callable[[], date] | None) -> PerceptionResult:
         conversation_context = self._conversation_context()
-        llm_result = self._plan_with_llm(text, conversation_context=conversation_context, now_fn=parser_now_fn)
+        copilot_result = self._plan_with_copilot(text, conversation_context=conversation_context, now_fn=parser_now_fn)
         if "context" not in self.llm_trace:
             self.llm_trace["context"] = context_trace(conversation_context)
-        if llm_result.perception is not None:
+        if copilot_result.perception is not None:
             return self._handle_agent_loop_perception(
-                llm_result.perception,
+                copilot_result.perception,
                 text=text,
                 now_fn=parser_now_fn,
             )
-        if llm_result.error is not None:
-            details = llm_result.error.details if isinstance(llm_result.error.details, dict) else {}
+        if copilot_result.error is not None:
+            details = copilot_result.error.details if isinstance(copilot_result.error.details, dict) else {}
             if (
-                llm_result.error.code == "NEEDS_CLARIFICATION"
+                copilot_result.error.code == "NEEDS_CLARIFICATION"
                 and details.get("missing_capability") == "read_tool_or_required_slots"
             ):
                 self.trace = build_perception_trace(
@@ -228,13 +225,13 @@ class PerceptionEngine:
                     selected_source=None,
                     selected_perception=None,
                     candidates=[
-                        error_candidate("agent_loop", llm_result.error, reason=str(self.llm_trace.get("reason") or "no_intent")),
+                        error_candidate("agent_loop", copilot_result.error, reason=str(self.llm_trace.get("reason") or "no_intent")),
                         skipped_candidate("command", "not_command"),
                         skipped_candidate("permission_response", "not_permission_response"),
                     ],
                 )
-                raise llm_result.error
-            return self._handle_agent_loop_error(text, llm_result.error, conversation_context)
+                raise copilot_result.error
+            return self._handle_agent_loop_error(text, copilot_result.error, conversation_context)
         err = AgentToolError(code="NEEDS_CLARIFICATION", message="AgentLoop 没有识别出可执行请求。")
         self.trace = build_perception_trace(
             decision="needs_clarification",
@@ -251,7 +248,6 @@ class PerceptionEngine:
     def _conversation_context(self) -> dict[str, Any] | None:
         if (
             not self._agent_loop_available()
-            and self._model_turn_fn is None
             and self._generate_reply_fn is None
         ):
             return None
@@ -290,27 +286,26 @@ class PerceptionEngine:
             }
         return self.last_conversation_context
 
-    def _plan_with_llm(
+    def _plan_with_copilot(
         self,
         text: str,
         *,
         conversation_context: dict[str, Any] | None,
         now_fn: Callable[[], date] | None,
     ) -> AgentLoopPlanningOutcome:
-        if not self._agent_loop_available() and self._model_turn_fn is None:
-            llm_result = AgentLoopPlanningOutcome(
+        if not self._agent_loop_available():
+            copilot_result = AgentLoopPlanningOutcome(
                 perception=None,
                 trace=skipped_llm_trace(self._settings.llm, reason="agent_loop_disabled"),
             )
-            self.llm_trace = dict(llm_result.trace)
-            return llm_result
+            self.llm_trace = dict(copilot_result.trace)
+            return copilot_result
         conversation_context = _with_perception_temporal_context(conversation_context, now_fn=now_fn)
         self.last_conversation_context = conversation_context
         loop_result = run_read_only_agent_loop(
             text,
             settings=self._settings,
             conversation_context=conversation_context,
-            model_turn_fn=self._model_turn_fn,
             request=self._request,
             execute_tool_fn=self._execute_tool_fn,
             now_fn=now_fn,
@@ -332,9 +327,9 @@ class PerceptionEngine:
             text=text,
             today=now_fn() if now_fn is not None else date.today(),
         )
-        llm_candidate = accepted_candidate(self.route, perception)
+        agent_loop_candidate = accepted_candidate(self.route, perception)
         candidates = [
-            llm_candidate,
+            agent_loop_candidate,
             skipped_candidate("command", "not_command"),
             skipped_candidate("permission_response", "not_permission_response"),
         ]

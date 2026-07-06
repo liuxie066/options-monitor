@@ -227,11 +227,11 @@ def _missing_successful_tool_evidence(
 def _requires_successful_tool_evidence(contract: dict[str, Any]) -> bool:
     if str(contract.get("requested_effect") or "read").strip() != "read":
         return False
-    agent_task = contract.get("agent_task") if isinstance(contract.get("agent_task"), dict) else {}
-    if bool(agent_task.get("requires_synthesis")):
+    task = contract.get("copilot_task") if isinstance(contract.get("copilot_task"), dict) else {}
+    if bool(task.get("requires_synthesis")):
         return True
-    profiles = {str(item).strip() for item in agent_task.get("profile_names") or [] if str(item).strip()}
-    task_mode = str(agent_task.get("task_mode") or contract.get("task_mode") or "").strip()
+    profiles = {str(item).strip() for item in task.get("profile_names") or [] if str(item).strip()}
+    task_mode = str(task.get("task_mode") or contract.get("task_mode") or "").strip()
     if profiles and task_mode in {"analyze", "compare", "diagnose", "recommend"}:
         return True
     domain = str(contract.get("domain") or "general").strip()

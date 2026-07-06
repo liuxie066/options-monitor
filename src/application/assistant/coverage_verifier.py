@@ -268,8 +268,6 @@ def _task_profile_evidence_gaps(*, task_contract: TaskContract, datasets: list[d
 
 def _task_profile_names(task_contract: TaskContract) -> tuple[str, ...]:
     names = {str(item).strip() for item in task_contract.task_profiles if str(item).strip()}
-    agent_task = task_contract.agent_task if isinstance(task_contract.agent_task, dict) else {}
-    names.update(str(item).strip() for item in agent_task.get("profile_names") or [] if str(item).strip())
     return tuple(sorted(names))
 
 

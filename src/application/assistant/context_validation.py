@@ -6,7 +6,7 @@ from src.application.assistant.context_projection import SAFE_SLOT_KEYS
 
 
 CONTEXT_VALIDATION_SCHEMA_VERSION = "om-context-validation-v1"
-PLANNER_CONTEXT_USE_SCHEMA_VERSION = "om-planner-context-use-v1"
+COPILOT_CONTEXT_USE_SCHEMA_VERSION = "om-copilot-context-use-v1"
 CONTEXT_USE_MODES = ("none", "carry", "refine", "override", "frame_delta", "ambiguous")
 CONTEXT_USING_MODES = {"carry", "refine", "override", "frame_delta"}
 CONTEXT_VALIDATION_STATUSES = ("passed", "blocked", "ask_clarification")
@@ -56,9 +56,9 @@ def validate_context_use(
     current_user_message: str | None = None,
     context_projection: dict[str, Any] | None,
     plan_payload: dict[str, Any] | None,
-    planner_manifest: list[dict[str, Any]] | None,
+    tool_manifest: list[dict[str, Any]] | None,
 ) -> dict[str, Any]:
-    """Validate a planner context-use declaration against visible context only.
+    """Validate a Copilot context-use declaration against visible context only.
 
     This function is deterministic and structural. It does not inspect business
     wording in the current message, infer missing facts, or choose tools.
@@ -67,7 +67,7 @@ def validate_context_use(
     projection = context_projection if isinstance(context_projection, dict) else {}
     plan = plan_payload if isinstance(plan_payload, dict) else {}
     context_use = _normalized_context_use(plan.get("context_use"))
-    manifest = _manifest_by_tool(planner_manifest)
+    manifest = _manifest_by_tool(tool_manifest)
     steps = [dict(item) for item in plan.get("steps") or [] if isinstance(item, dict)]
     referenced_turn_ids = _string_list(context_use.get("referenced_turn_ids"))
     referenced_evidence_refs = _string_list(context_use.get("referenced_evidence_refs"))
@@ -104,7 +104,7 @@ def validate_context_use(
             code="CONTEXT_AMBIGUOUS",
             context_use=context_use,
             warnings=warnings,
-            violation={"reason": "planner_declared_ambiguity"},
+            violation={"reason": "copilot_declared_ambiguity"},
         )
 
     frame_violation = _frame_reference_violation(
@@ -231,7 +231,7 @@ def _normalized_context_use(value: Any) -> dict[str, Any]:
     if mode not in CONTEXT_USE_MODES:
         mode = "none"
     return {
-        "schema_version": str(raw.get("schema_version") or PLANNER_CONTEXT_USE_SCHEMA_VERSION),
+        "schema_version": str(raw.get("schema_version") or COPILOT_CONTEXT_USE_SCHEMA_VERSION),
         "mode": mode,
         "referenced_turn_ids": _string_list(raw.get("referenced_turn_ids")),
         "referenced_evidence_refs": _string_list(raw.get("referenced_evidence_refs")),
@@ -257,9 +257,9 @@ def _frame_delta(value: Any) -> dict[str, Any]:
     return out
 
 
-def _manifest_by_tool(planner_manifest: list[dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
+def _manifest_by_tool(tool_manifest: list[dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
-    for item in planner_manifest or []:
+    for item in tool_manifest or []:
         if not isinstance(item, dict):
             continue
         name = str(item.get("name") or "").strip()
@@ -278,7 +278,7 @@ def _tool_compatibility_violation(
     planned_tools.discard("")
     for tool_name in sorted(planned_tools):
         if tool_name not in manifest:
-            return {"reason": "tool_not_in_planner_manifest", "tool_name": tool_name}
+            return {"reason": "tool_not_in_copilot_manifest", "tool_name": tool_name}
     for step in steps:
         tool_name = str(step.get("tool_name") or "").strip()
         arguments = step.get("arguments") if isinstance(step.get("arguments"), dict) else {}
@@ -289,7 +289,7 @@ def _tool_compatibility_violation(
         extra = sorted(str(key) for key in arguments if allowed and str(key) not in allowed)
         if extra:
             return {
-                "reason": "argument_not_in_planner_manifest",
+                "reason": "argument_not_in_copilot_manifest",
                 "tool_name": tool_name,
                 "extra_arguments": extra,
                 "allowed_arguments": sorted(allowed),
@@ -300,7 +300,7 @@ def _tool_compatibility_violation(
         compatible_slot_keys.update(_allowed_arguments(manifest.get(str(step.get("tool_name") or "").strip())))
     incompatible = sorted(key for key in declared_slot_keys if key not in compatible_slot_keys)
     if incompatible:
-        return {"reason": "inherited_slot_not_allowed_for_planner", "slots": incompatible}
+        return {"reason": "inherited_slot_not_allowed_for_copilot", "slots": incompatible}
     return None
 
 

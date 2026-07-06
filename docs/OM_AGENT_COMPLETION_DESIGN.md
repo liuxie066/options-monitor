@@ -5,13 +5,14 @@
 > naming and boundaries live in
 > [OM_ASSISTANT_ARCHITECTURE.md](OM_ASSISTANT_ARCHITECTURE.md): `./om-agent`
 > is the Tool Gateway, `./om assistant` is the Inbound Assistant, and
-> `AgentLoop` is an internal assistant planner loop.
+> `AgentLoop` is an internal OM Copilot task/evidence/answer loop.
 >
 > Current reading note: keep the high-level goal of bounded multi-tool answers,
 > but read older verifier/replan language as guardrail design. Current Tool
-> Calling v2 direction lets the model drive read-tool continuation while code
-> enforces scope, risk, budget, duplicate prevention, evidence, and trace. Do
-> not preserve old planner or answer paths as alternate contracts.
+> Calling direction is the host-owned Copilot task/evidence loop: Copilot
+> chooses what to inspect from task profiles while code enforces scope, risk,
+> budget, duplicate prevention, evidence, and trace. Do not preserve old planner
+> or answer paths as alternate contracts.
 
 This historical document recorded a path from the older OM Ops Copilot framing
 to a complete bounded assistant loop. It is not a new public surface. The
@@ -251,8 +252,8 @@ succeeds, fallback must preserve that task shape:
 ```text
 user: 对比 lx 和 sy 的账户收益，有什么不同？
 -> analysis_query returns rows grouped by month/account with diff columns
--> LLM synthesis succeeds: concise comparison + source
--> LLM synthesis fails or guard rejects it: render the query result table +
+-> legacy model synthesis succeeds: concise comparison + source
+-> legacy model synthesis fails or guard rejects it: render the query result table +
    conservative one-line conclusion + source
 ```
 
@@ -536,7 +537,7 @@ Rules:
 - Keep currency/account/symbol separation visible when it affects the answer.
 - Mention missing quote, stale data, unsupported period, or scope mismatch only
   when it changes the conclusion.
-- Use deterministic renderer fallback if LLM synthesis fails verification.
+- Use deterministic renderer fallback if legacy model synthesis fails verification.
 - Keep source and accounting policy lines short and stable.
 
 ## Mainline 3: Contract Verifier And Evaluation

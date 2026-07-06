@@ -7,7 +7,7 @@ It is not a shell bridge. Gateways should pass one message into OM and let OM pa
 The current CLI namespace is `./om assistant ...`, and the current implementation
 path is `src/application/assistant/...`; the product/module name is Inbound.
 It is also not the same dimension as `./om-agent`: `./om-agent` is the local
-Tool Gateway CLI, while `AgentLoop` is an internal assistant planner loop. See
+Tool Gateway CLI, while `AgentLoop` is an internal assistant Copilot loop. See
 [OM_ASSISTANT_ARCHITECTURE.md](OM_ASSISTANT_ARCHITECTURE.md) for the current
 terminology.
 
@@ -156,15 +156,16 @@ assistant:
   context_window_messages: 8
 ```
 
-This keeps OM Copilot enabled while disabling model planning. Unknown slash
-commands return clarification; non-slash messages require AgentLoop and return
-clarification/error when `assistant.agent_loop.enabled=false`. Supported active
-states are `assistant.enabled=true|false` and
-`assistant.agent_loop.enabled=true|false`.
+`assistant.agent_loop.enabled=true` enables OM Copilot for non-slash natural
+language. Unknown slash commands return clarification; non-slash messages
+require AgentLoop and return clarification/error when
+`assistant.agent_loop.enabled=false`. Supported active states are
+`assistant.enabled=true|false` and `assistant.agent_loop.enabled=true|false`.
 
 By default, `default_market_scope` is intentionally unset. Feishu WS should receive an explicit `--config-key us|hk` or `--config-path` when it is bound to one market. Only set `assistant.default_market_scope: us|hk|all` when that default is an explicit product decision for Inbound.
 
-LLM planning is disabled by default:
+Provider planning is not required for the default Copilot path. Legacy
+`planner.enabled=false` is still accepted as a deprecated compatibility alias:
 
 ```yaml
 assistant:
@@ -314,17 +315,20 @@ The same model surface is available in chat through one slash command namespace:
 
 `/model` and `/model list` are read-only. `/model use <name>` only creates a preview; it writes `config.yaml` and rebuilds `config.assistant.json` after `确认模型` or `/confirm model <operation_id>`.
 
-When LLM planning runs, OM builds a bounded same-conversation context window for
-planning. Sender and conversation identifiers are used locally to select the
-window, but are not sent to the provider. The provider receives compact hint-only
-fields such as `last_successful_read`, `recent_read_hints`, temporal context,
-and profile semantics; it does not receive the full inbound audit rows.
+When OM Copilot runs, OM builds a bounded same-conversation context window for
+task framing and evidence planning. Sender and conversation identifiers are
+used locally to select the window, but are not treated as authoritative trading
+facts. OM Copilot receives compact hint-only fields such as
+`last_successful_read`, `recent_read_hints`, temporal context, and profile
+semantics; full inbound audit rows are not part of the free-form answer
+contract.
 `assistant.context_window_messages` controls the recent-message window and is
-capped at 20; this context is only used for bounded tool planning, not execution.
+capped at 20; this context is only used for bounded Copilot planning, not
+execution authority.
 
-If repo-local `user.md` exists, OM Copilot also includes it as `context.user_profile`. This file is a manually maintained, hint-only user profile for stable collaboration preferences such as language, operator role, response style, and safety preferences. The current user message still wins over profile hints, and the profile must not be treated as market, ledger, broker, or config fact. `user.md` is ignored by git and should not contain secrets, credentials, webhook URLs, private keys, or account identifiers; obvious secret-like lines are redacted before provider calls.
+If repo-local `user.md` exists, OM Copilot also includes it as `context.user_profile`. This file is a manually maintained, hint-only user profile for stable collaboration preferences such as language, operator role, response style, and safety preferences. The current user message still wins over profile hints, and the profile must not be treated as market, ledger, broker, or config fact. `user.md` is ignored by git and should not contain secrets, credentials, webhook URLs, private keys, or account identifiers; obvious secret-like lines are redacted before use.
 
-Check the planner control plane before enabling it in Feishu:
+Check the Copilot control plane before enabling it in Feishu:
 
 ```bash
 ./om assistant commands --format text
@@ -333,26 +337,33 @@ Check the planner control plane before enabling it in Feishu:
 ./om assistant llm-check --live
 ```
 
+`assistant llm-check --live` no longer probes provider tool-call planning; it
+reports that the live probe path has been removed. Free-form routing quality is
+verified through deterministic Copilot scenario evals:
+
+```bash
+./om assistant eval-context --mode scenarios
+```
+
 `assistant commands` renders the slash-command help surface. `assistant
 capabilities` renders the full assistant capability catalog used by the
-AgentLoop tool-call manifest: read-only capabilities are executable, approved
+AgentLoop/Copilot tool manifest: read-only capabilities are executable, approved
 preview-write capabilities are intercepted before execution to create pending
 previews, and confirm/cancel/apply capabilities are intentionally absent from
-the tool-call manifest. The default
-LLM check validates `config.assistant.json`, the effective env file, redacted
-API-key presence, the resolved provider endpoint URL, and the current capability
-routing surface. `--live` sends one read-only structured planning probe to the
-configured provider.
+the tool-call manifest. The default LLM check validates `config.assistant.json`,
+the effective env file, redacted API-key presence, the resolved provider
+endpoint URL, and the current capability routing surface. `--live` reports that
+provider tool-call probing has been retired for the default Copilot path; use
+scenario evals to verify free-form routing.
 
-The planner keeps the full tool list visible, but scopes the heavy
-`analysis_query.semantics.analysis_views` section to the user's current task.
+Copilot keeps the full Tool Gateway out of the prompt-facing surface and scopes
+the heavy `analysis_query.semantics.analysis_views` section to the current task.
 This follows the Claude Code-style context-budget lesson without adding another
-Agent layer: give the planner enough local capability semantics for the current
-question, let short follow-ups use recent read-tool context as hint only,
-keep `analysis_catalog` as the fallback when a view/field is missing, and
-record `planner_input.manifest_budget` in trace so capability-selection context
-remains auditable. Explicit current-message matches still win over conversation
-context.
+Agent layer: give Copilot enough local capability semantics for the current
+question, let short follow-ups use recent read-tool context as hint only, keep
+`analysis_catalog` as the fallback when a view/field is missing, and record
+`manifest_budget` in trace so capability selection remains auditable. Explicit
+current-message matches still win over conversation context.
 
 ## Sender Allowlist
 
@@ -612,33 +623,31 @@ The intended recovery contract is allowed-inbound binding refresh:
 - A refresh does not resend historical notifications. It only makes subsequent
   proactive notifications use the latest observed inbound context.
 
-## LLM Translator
+## OM Copilot
 
-LLM planning is opt-in and inactive unless `assistant.enabled` and
+OM Copilot is active when `assistant.enabled` and
 `assistant.agent_loop.enabled` are both true. In that state, non-slash natural
-language is routed through AgentLoop. Deterministic code is the authority for
-slash protocol commands, bound permission responses, tool execution, verifier
-fallbacks, and confirm/cancel/apply operation boundaries. It is not a
+language is routed through AgentLoop. Deterministic code remains the authority
+for slash protocol commands, bound permission responses, tool execution,
+verifier fallbacks, and confirm/cancel/apply operation boundaries. It is not a
 natural-language fallback router. Slash commands are resolved by the Inbound
-command catalog before LLM and do not call AgentLoop.
+command catalog before Copilot and do not call AgentLoop.
 
-The current provider adapters use OpenAI Responses API for `openai` and Chat
-Completions JSON output for `deepseek`. They produce an `om-tool-plan-v2`
-capability plan for the AgentLoop. The plan describes the goal, required
-capabilities, and tool calls; AgentLoop decides the final answer path from the
-task, tool contracts, and gathered evidence. AgentLoop read calls still go
-through the read whitelist before execution. AgentLoop preview-write tool calls
-are intercepted by the host preview gate and converted back into the same
-operation preview path as explicit commands, so sender allowlist, operation
-gates, preview storage, audit, idempotency, and later explicit confirmation
-still apply. Low-confidence or incomplete requests must return clarification.
+The current free-form path is host-owned: Copilot derives a
+`CopilotTaskFrame`, selects task profiles, builds a `CopilotEvidencePlan`, and
+emits bounded read or preview events. AgentLoop read calls still go through the
+read whitelist before execution. Preview-write events are intercepted by the
+host preview gate and converted back into the same operation preview path as
+explicit commands, so sender allowlist, operation gates, preview storage, audit,
+idempotency, and later explicit confirmation still apply. Low-confidence or
+incomplete requests must return clarification or an explicit evidence gap.
 
-`agent_loop` is the current bounded Planner lane inside the Agent loop. It may
-select read tools or one preview-write tool call, but deterministic execution,
+`agent_loop` is the current bounded Copilot lane inside the Agent loop. It may
+select read tools or one preview-write event, but deterministic execution,
 factual rendering, preview storage, confirm/apply, and audit ownership remain
 outside model authority. If a write-like request such as a Futu fill alert is
-planned as a read query, OM rejects the call instead of silently returning nearby
-holdings or income data.
+classified as a read query, OM rejects the call instead of silently returning
+nearby holdings or income data.
 
 ### Agent Analytical Answers
 
@@ -648,17 +657,21 @@ For analytical questions such as `6月收益的组成`, `分析 lx 6月净现金
 
 ```text
 user question
--> LLM plans the task and required OM tools
+-> Copilot derives the task frame and required OM evidence
 -> read-only OM tools fetch ledger/runtime/config/strategy evidence
 -> optional analysis workspace query builds a task-shaped result table
 -> AgentLoop builds an internal evidence bundle from tool observations
--> LLM composes normal analytical answers from that evidence
+-> Copilot composes analytical answers or declares the evidence gap
 -> answer guard checks the response against tool facts and query cells
 -> deterministic provenance is appended
 -> deterministic renderer remains an evidence formatter and fallback when composition is unavailable or unsafe
 ```
 
-The design goal is to preserve LLM intelligence without making the LLM a factual source. The LLM may choose what to inspect, which dimensions to compare, and what explanation angle is useful. It must not be the component that invents accounting facts such as amount, currency, contract count, account, symbol, expiration, close type, or date.
+The design goal is to preserve Copilot intelligence without making a model or
+heuristic a factual source. Copilot may choose what to inspect, which
+dimensions to compare, and what explanation angle is useful. It must not invent
+accounting facts such as amount, currency, contract count, account, symbol,
+expiration, close type, or date.
 
 Canonical factual rendering is declared by the tool definition through `output_contract.canonical_renderer`. `agent_loop` uses this contract to build fallback evidence and deterministic provenance; it is not a user-visible `canonical` mode. When a tool has payload-dependent factual output, use an `output_contract_resolver` so the concrete contract travels with the observation.
 
@@ -681,7 +694,8 @@ workspace:
   shared-report fallbacks.
 - Future diagnostic views should extend the same catalog/query surface when the
   task shape is analytical. Add or expose a narrow read API only when the user
-  intent is task-shaped and the API removes ambiguity for LLM planning.
+  intent is task-shaped and the API removes ambiguity for Copilot evidence
+  planning.
 
 For income, cashflow, positions, and assigned-stock analysis, the evidence bundle is the authority. It should contain the evidence needed for the final answer, for example:
 

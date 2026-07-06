@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from src.application.assistant.agent_loop import _planner_tool_manifest
+from src.application.assistant.agent_loop import _copilot_tool_manifest
 from src.application.assistant.context_validation import (
     CONTEXT_VALIDATION_SCHEMA_VERSION,
     validate_context_use,
@@ -30,7 +30,7 @@ def test_context_validation_fixture_cases_match_expected_status() -> None:
             current_user_message=str(case.get("current_user_message") or ""),
             context_projection=dict(case["context_projection"]),
             plan_payload=dict(case["plan_payload"]),
-            planner_manifest=_planner_tool_manifest(),
+            tool_manifest=_copilot_tool_manifest(),
         )
         expect = case["expect"]
         assert validation["schema_version"] == CONTEXT_VALIDATION_SCHEMA_VERSION, case["id"]
@@ -72,7 +72,7 @@ def test_context_validation_passes_without_projection_as_shadow_warning() -> Non
                 }
             ],
         },
-        planner_manifest=_planner_tool_manifest(),
+        tool_manifest=_copilot_tool_manifest(),
     )
 
     assert validation["status"] == "passed"
@@ -111,7 +111,7 @@ def test_context_validation_accepts_symbol_config_followup_setting_edit() -> Non
                 }
             ],
         },
-        planner_manifest=_planner_tool_manifest(),
+        tool_manifest=_copilot_tool_manifest(),
     )
 
     assert validation["status"] == "passed"
@@ -151,7 +151,7 @@ def test_context_validation_accepts_frame_delta_using_frame_reference_only() -> 
                 }
             ],
         },
-        planner_manifest=_planner_tool_manifest(),
+        tool_manifest=_copilot_tool_manifest(),
     )
 
     assert validation["status"] == "passed"
@@ -190,7 +190,7 @@ def test_context_validation_blocks_followup_setting_path_drift() -> None:
                 }
             ],
         },
-        planner_manifest=_planner_tool_manifest(),
+        tool_manifest=_copilot_tool_manifest(),
     )
 
     assert validation["status"] == "blocked"
@@ -244,7 +244,7 @@ def test_context_validation_accepts_notification_system_event_reference_for_read
                 }
             ],
         },
-        planner_manifest=_planner_tool_manifest(),
+        tool_manifest=_copilot_tool_manifest(),
     )
 
     assert validation["status"] == "passed"

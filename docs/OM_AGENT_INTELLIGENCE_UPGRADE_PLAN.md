@@ -5,12 +5,11 @@
 > naming and boundaries live in
 > [OM_ASSISTANT_ARCHITECTURE.md](OM_ASSISTANT_ARCHITECTURE.md): `./om-agent`
 > is the Tool Gateway, `./om assistant` is the Inbound Assistant, and
-> `AgentLoop` is an internal assistant planner loop.
+> `AgentLoop` is an internal OM Copilot task/evidence/answer loop.
 >
-> Current reading note: the current tool-calling event-model direction is
-> model-driven read iteration with deterministic guardrails, but the current
-> implementation target is the event model in
-> [OM_ASSISTANT_TOOL_CALLING_V2_SYSTEM_DESIGN.md](OM_ASSISTANT_TOOL_CALLING_V2_SYSTEM_DESIGN.md).
+> Current reading note: the current implementation target is the host-owned OM
+> Copilot task/evidence/answer loop documented in
+> [OM_ASSISTANT_ARCHITECTURE.md](OM_ASSISTANT_ARCHITECTURE.md).
 > Read older `Planner must output TaskContract/ToolPlan`, `CoverageVerifier`,
 > and `AnswerVerifier` language below as historical rollout context. It is not
 > a preserved path for ordinary text JSON planning, not the primary loop
@@ -30,7 +29,8 @@ OM Agent = 嵌入 OM 运行世界的运营与策略 Agent
 ```
 
 当前术语应改读为：`./om assistant` 承载 Inbound Assistant 能力，
-`AgentLoop` 是其内部 planner loop，`./om-agent` 只是 Tool Gateway。
+`AgentLoop` 是其内部 OM Copilot task/evidence/answer loop，`./om-agent`
+只是 Tool Gateway。
 
 核心升级方向：
 
@@ -40,9 +40,9 @@ Planner 统一负责理解和计划，但必须输出可验证的 TaskContract�
 保证安全和质量。
 ```
 
-当前读法：这段描述的是历史方案。最新方向是模型通过 provider structured
-tool call 产生 `ModelEvent`，host 派生 `TaskContract` 作为权限和 scope
-护栏；不再要求模型在普通文本中输出完整 JSON plan。
+当前读法：这段描述的是历史方案。最新方向是 host-owned OM Copilot 派生
+`CopilotTaskFrame`、`TaskProfile` 和 `CopilotEvidencePlan`，再通过受控执行
+和证据边界生成答案；不再要求模型在普通文本中输出完整 JSON plan。
 
 ## 设计原则
 

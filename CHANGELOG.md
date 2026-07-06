@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 1.2.360 - 2026-07-07
+
+### Added
+- Added the host-owned OM Copilot task/evidence/answer loop for free-form Assistant analysis questions.
+
+### Changed
+- Routed read-only Assistant Q&A through Copilot task profiles, scoped evidence planning, guarded tool execution, and deterministic answer composition.
+- Made option-operation reviews answer with a conclusion, problem patterns, optimization guidance, and evidence boundaries instead of raw detail rows.
+- Marked Copilot answers as `copilot_answer` in turn metadata and kept external LLM trace separate from host-owned Copilot execution.
+
+### Removed
+- Removed the legacy provider-planned Assistant tool loop, model continuation path, task runtime shim, and obsolete tool-calling design docs.
+
+### Fixed
+- Refused qualitative option-operation judgements when OM analysis evidence returns no matching rows, instead of treating empty evidence as proof of no problem.
+
 ## 1.2.359 - 2026-07-06
 
 ### Fixed

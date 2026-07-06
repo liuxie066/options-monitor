@@ -5,7 +5,7 @@
 > naming and boundaries live in
 > [OM_ASSISTANT_ARCHITECTURE.md](OM_ASSISTANT_ARCHITECTURE.md): `./om-agent`
 > is the Tool Gateway, `./om assistant` is the Inbound Assistant, and
-> `AgentLoop` is an internal assistant planner loop.
+> `AgentLoop` is an internal OM Copilot task/evidence/answer loop.
 
 本文档记录历史上的 P0-P2 可靠性路线图。目标不是照搬 Claude Code 的完整产品形态，
 而是把 OM 当时已有的 `AgentLoop`、Tool OS、`EvidenceBundle`、answer verifier
@@ -39,7 +39,7 @@ User
 | Plan | 明确用户问题、范围和需要回答的点 | `TaskContract`、planner、工具计划 |
 | Act | 安全执行工具 | `ActionPolicy`、pre-check、tool execution、post-check |
 | Verify | 判断证据是否足够且可信 | `EvidenceBundle`、coverage verifier、fact verifier、gap |
-| Answer | 生成并验收用户回复 | LLM synthesis、answer verifier、rewrite、fallback、ask |
+| Answer | 生成并验收用户回复 | legacy model synthesis、answer verifier、rewrite、fallback、ask |
 
 P0-P2 的切分：
 
@@ -745,7 +745,7 @@ TaskContract
 -> EvidenceBundle
 -> Hook results
 -> Root-cause / coverage verifier
--> LLM synthesis
+-> legacy model synthesis
 -> Answer verifier
 -> compact trace
 ```
@@ -1507,7 +1507,7 @@ P2 最少补齐这些 case：
 | `upgrade_receipt_missing_version` | 当前/目标版本缺失时说明缺口 |
 | `prompt_injection_from_tool_output` | 工具输出诱导写入时 deny |
 | `write_preview_no_apply` | preview 可以生成，apply 不能由 planner 执行 |
-| `planner_context_budget` | 当前消息、短 follow-up 和 evidence gap suggested views 能驱动 scoped manifest |
+| `copilot_context_budget` | 当前消息、短 follow-up 和 evidence gap suggested views 能驱动 scoped manifest |
 | `trace_compact_no_internal_leak` | trace compact 不泄露 SQL/path/id |
 
 ### 6.7 P2 实现落点
@@ -2311,7 +2311,7 @@ P0 完成定义：
 - 账户收益对比不会退回全部账户摘要。
 - 指派正股缺 quote 不会编浮盈亏。
 - coverage gap 能触发 bounded follow-up 或明确缺失。
-- LLM synthesis 错误仍能 rewrite/fallback。
+- legacy model synthesis 错误仍能 rewrite/fallback。
 
 ### P1 开发顺序
 
