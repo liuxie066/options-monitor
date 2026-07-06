@@ -7,11 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from src.application.agent_tool_contracts import build_response
-from src.application.assistant import AssistantSettings
 from src.application.assistant.audit import InboundAuditStore
-from src.application.assistant.agent_loop import EventNativePlanningResult, ModelTurnResult
-from src.application.assistant.model_events import ModelToolCallEvent
-from src.application.assistant.task_contract import TASK_CONTRACT_SCHEMA_VERSION
 from src.application.inbound.feishu_ws import (
     FeishuWsSettings,
     build_feishu_ws_settings,
@@ -35,69 +31,6 @@ def _message_payload(*, sender: str = "ou_1", text: str = "/income sy 2026-05") 
             },
         },
     }
-
-
-def _test_task_contract(
-    *,
-    goal: str,
-    domain: str,
-    task_mode: str,
-    scope: dict[str, Any] | None = None,
-    required_answer: tuple[str, ...] = ("summary",),
-    required_evidence: tuple[str, ...] = ("source_policy",),
-    answer_shape: tuple[str, ...] = ("conclusion", "source_policy"),
-) -> dict[str, Any]:
-    return {
-        "schema_version": TASK_CONTRACT_SCHEMA_VERSION,
-        "goal": goal,
-        "domain": domain,
-        "task_mode": task_mode,
-        "requested_effect": "read",
-        "scope": dict(scope or {}),
-        "required_answer": list(required_answer),
-        "required_evidence": list(required_evidence),
-        "answer_shape": list(answer_shape),
-    }
-
-
-def _event_model_turn_result(
-    *,
-    goal: str,
-    tool_name: str,
-    arguments: dict[str, Any] | None,
-    task_contract: dict[str, Any],
-    purpose: str,
-) -> ModelTurnResult:
-    return ModelTurnResult(
-        trace={"enabled": True, "attempted": True, "reason": "accepted"},
-        event_plan=EventNativePlanningResult(
-            events=(
-                ModelToolCallEvent(
-                    event_id="model_tool_call_1",
-                    tool_call_id="call_1",
-                    tool_name=tool_name,
-                    arguments=dict(arguments or {}),
-                    purpose=purpose,
-                    provider="openai",
-                    parent_event_id="user_message_1",
-                ),
-            ),
-            task_contract=task_contract,
-            context_use={
-                "schema_version": "om-planner-context-use-v1",
-                "mode": "none",
-                "referenced_turn_ids": [],
-                "referenced_evidence_refs": [],
-                "inherited_slots": {},
-                "current_message_slots": {},
-                "override_slots": {},
-                "requires_clarification": False,
-                "clarification_question": None,
-            },
-            provider="openai",
-            goal=goal,
-        ),
-    )
 
 
 def test_feishu_ws_delegates_to_inbound_and_replies(tmp_path: Path) -> None:
@@ -239,7 +172,7 @@ def test_feishu_ws_can_route_through_assistant(tmp_path: Path) -> None:
     assert inbound_result["meta"]["assistant"]["llm"]["enabled"] is False
 
 
-def test_feishu_ws_agent_loop_routes_cashflow_detail_plan(tmp_path: Path) -> None:
+def test_feishu_ws_copilot_routes_cashflow_detail_question(tmp_path: Path) -> None:
     replies: list[dict[str, Any]] = []
     calls: list[tuple[str, dict[str, Any]]] = []
     assistant_config_path = tmp_path / "config.assistant.json"
@@ -248,7 +181,6 @@ def test_feishu_ws_agent_loop_routes_cashflow_detail_plan(tmp_path: Path) -> Non
             {
                 "assistant": {
                     "enabled": True,
-                    "planner": {"enabled": True},
                     "llm": {"provider": "openai", "model": "gpt-5.2", "api_key_env": "OM_LLM_API_KEY"},
                 }
             }
@@ -258,43 +190,31 @@ def test_feishu_ws_agent_loop_routes_cashflow_detail_plan(tmp_path: Path) -> Non
 
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         calls.append((tool_name, payload))
+        assert tool_name == "analysis_query"
         return build_response(
             tool_name=tool_name,
             ok=True,
             data={
-                "summary": [{"month": "2026-06", "account": "lx", "currency": "HKD", "net_cashflow_gross": 1200}],
-                "return_summary": [{"month": "2026-06", "account": "lx", "cash_secured_cny": 10000, "net_income_cny": 1104}],
-                "cashflow_rows": [{"symbol": "0700.HK", "trade_action": "sell_open", "currency": "HKD", "net_cashflow_gross": 1200}],
-                "row_count": 1,
-                "premium_row_count": 1,
+                "schema_version": "analysis.query.output.v2",
+                "source_label": "OM read-only analysis workspace",
+                "views_used": list(payload.get("views") or []),
+                "view_datasets": {
+                    "account_monthly_income_components": {
+                        "rows": [{"account": "lx", "component": "premium", "amount_cny": 1200}]
+                    },
+                    "symbol_income_attribution": {
+                        "rows": [{"symbol": "0700.HK", "amount_cny": 1200}]
+                    },
+                    "monthly_income_cashflow_rows": {
+                        "rows": [{"symbol": "0700.HK", "trade_action": "sell_open", "net_cashflow_gross": 1200}]
+                    },
+                },
             },
         )
 
     def _reply(**kwargs: Any) -> dict[str, Any]:
         replies.append(dict(kwargs))
         return {"code": 0, "data": {"message_id": "reply_1"}}
-
-    def _plan(
-        text: str,
-        _settings: AssistantSettings,
-        _conversation_context: dict[str, Any] | None,
-    ) -> ModelTurnResult:
-        assert text == "分析 lx 6月的净现金流明细"
-        return _event_model_turn_result(
-            goal="分析 lx 2026-06 的净现金流明细",
-            tool_name="monthly_income_report",
-            arguments={"account": "lx", "month": "2026-06", "include_rows": True},
-            task_contract=_test_task_contract(
-                goal="分析 lx 2026-06 的净现金流明细",
-                domain="income",
-                task_mode="analyze",
-                scope={"accounts": ["lx"], "months": ["2026-06"], "config_keys": ["us"]},
-                required_answer=("summary", "main_drivers", "source_and_policy"),
-                required_evidence=("summary", "driver_or_breakdown", "source_policy"),
-                answer_shape=("conclusion", "drivers", "source_policy"),
-            ),
-            purpose="cashflow detail",
-        )
 
     out = handle_feishu_ws_event(
         _message_payload(text="分析 lx 6月的净现金流明细"),
@@ -308,25 +228,37 @@ def test_feishu_ws_agent_loop_routes_cashflow_detail_plan(tmp_path: Path) -> Non
         ),
         reply_fn=_reply,
         execute_tool_fn=_execute,
-        model_turn_fn=_plan,
     )
 
     inbound_result = out["data"]["inbound"]["data"]["inbound_result"]
     assert out["ok"] is True
     assert calls == [
         (
-            "monthly_income_report",
-            {"account": "lx", "config_key": "us", "include_rows": True, "month": "2026-06"},
+            "analysis_query",
+            {
+                "views": [
+                    "account_monthly_performance",
+                    "account_monthly_income_components",
+                    "symbol_income_attribution",
+                    "monthly_income_cashflow_rows",
+                    "monthly_income_realized_rows",
+                    "monthly_income_premium_rows",
+                ],
+                "limit": 200,
+                "month": "2026-06",
+                "account": "lx",
+                "config_key": "us",
+            },
         )
     ]
     assert "0700.HK" in replies[0]["text"]
-    assert "HKD 1200" in replies[0]["text"]
-    assert "OM 本地账本" in replies[0]["text"]
+    assert "主要标的是 0700.HK" in replies[0]["text"]
+    assert "OM read-only analysis workspace" in replies[0]["text"]
     assert "\n\n分析\n" not in replies[0]["text"]
     assert inbound_result["meta"]["assistant"]["route"] == "agent_loop"
     final_response = inbound_result["meta"]["assistant"]["llm"]["agent_loop"]["final_response"]
-    assert final_response["status"] == "rendered"
-    assert final_response["canonical_renderer_required"] is True
+    assert final_response["status"] == "synthesized"
+    assert final_response["reason"] == "copilot_completed"
 
 
 def test_feishu_ws_agent_loop_degrades_when_conversation_context_fails(
@@ -334,7 +266,6 @@ def test_feishu_ws_agent_loop_degrades_when_conversation_context_fails(
     tmp_path: Path,
 ) -> None:
     replies: list[dict[str, Any]] = []
-    contexts: list[dict[str, Any] | None] = []
     assistant_config_path = tmp_path / "config.assistant.json"
     assistant_config_path.write_text(
         json.dumps(
@@ -353,35 +284,22 @@ def test_feishu_ws_agent_loop_degrades_when_conversation_context_fails(
     monkeypatch.setattr(InboundAuditStore, "list_recent", _broken_list_recent)
 
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
-        return build_response(tool_name=tool_name, ok=True, data={"status": "ok"})
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "schema_version": "analysis.query.output.v2",
+                "views_used": list(payload.get("views") or []),
+                "view_datasets": {"runtime_tick_status": {"rows": [{"status": "ok"}]}},
+            },
+        )
 
     def _reply(**kwargs: Any) -> dict[str, Any]:
         replies.append(dict(kwargs))
         return {"code": 0, "data": {"message_id": "reply_1"}}
 
-    def _plan(
-        _text: str,
-        _settings: AssistantSettings,
-        conversation_context: dict[str, Any] | None,
-    ) -> ModelTurnResult:
-        contexts.append(conversation_context)
-        return _event_model_turn_result(
-            goal="runtime status",
-            tool_name="runtime_status",
-            arguments={},
-            task_contract=_test_task_contract(
-                goal="runtime status",
-                domain="runtime",
-                task_mode="summarize",
-                scope={"config_keys": ["us"]},
-                required_evidence=("summary", "source_policy"),
-                answer_shape=("direct_answer", "source_policy"),
-            ),
-            purpose="status",
-        )
-
     out = handle_feishu_ws_event(
-        _message_payload(text="状态"),
+        _message_payload(text="系统健康检查"),
         settings=FeishuWsSettings(
             config_key="us",
             assistant_config_path=str(assistant_config_path),
@@ -392,16 +310,14 @@ def test_feishu_ws_agent_loop_degrades_when_conversation_context_fails(
         ),
         reply_fn=_reply,
         execute_tool_fn=_execute,
-        model_turn_fn=_plan,
     )
 
     inbound_result = out["data"]["inbound"]["data"]["inbound_result"]
     assert out["ok"] is True
     assert replies
-    assert contexts[0] is not None
-    assert contexts[0]["degraded"] is True
-    assert contexts[0]["recent_messages"] == []
     assert inbound_result["meta"]["assistant"]["route"] == "agent_loop"
+    assert inbound_result["meta"]["assistant"]["context"]["degraded"] is True
+    assert inbound_result["meta"]["assistant"]["context"]["window_messages"] == 0
 
 
 def test_feishu_ws_reaction_failure_does_not_fail_inbound_or_reply(tmp_path: Path) -> None:

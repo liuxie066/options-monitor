@@ -67,7 +67,7 @@ def test_context_eval_scenarios_mode_runs_real_followup_regression_fixture() -> 
     assert summary["total"] == 24
     assert summary["failed"] == 0
     assert summary["empty"] is False
-    runtime_budget = results["scenario_runtime_followup_carries_diagnostic_run_ref"]["actual"]["planner_context"][
+    runtime_budget = results["scenario_runtime_followup_carries_diagnostic_run_ref"]["actual"]["copilot_context"][
         "manifest_budget"
     ]
     runtime_checks = {

@@ -84,12 +84,12 @@ expanded for new capability work.
 ## Post-Cutover Context Authority Convergence
 
 After Slice 8, the remaining risk was not a missing business case. It was an
-authority mismatch between provider structured tool-call arguments and
-host-side slot-source validation:
+authority mismatch between normalized Copilot/preview arguments and host-side
+slot-source validation:
 
 ```text
 current message says "0700 Tencent sell put"
-model normalizes tool args to {"symbol": "0700.HK", "function": "sell_put"}
+Copilot/preview adapter normalizes tool args to {"symbol": "0700.HK", "function": "sell_put"}
 history also contains safe_slots.function = "sell_put"
 host incorrectly treats "function" as inherited context
 ```
@@ -234,7 +234,7 @@ Implementation notes:
 
 ```json
 {
-  "schema_version": "om-planner-context-use-v1",
+  "schema_version": "om-copilot-context-use-v1",
   "mode": "none",
   "referenced_turn_ids": [],
   "referenced_evidence_refs": [],
@@ -253,7 +253,7 @@ Implementation notes:
   - ambiguous context means clarification.
 - Remove named case examples from the prompt only after shadow trace proves
   `context_use` is being populated reliably.
-- Trace `planner_context_use` but do not block execution yet.
+- Trace `copilot_context_use` but do not block execution yet.
 
 Tests:
 
@@ -371,12 +371,12 @@ Primary files:
 
 Implementation notes:
 
-- Change `_planner_input_payload` to include:
+- Change the Copilot input payload to include:
   - `current_user_message`
   - `context_projection`
   - planner-visible policy
   - recent turn and evidence refs
-- Do not include legacy `followup_resolution` as planner authority.
+- Do not include legacy `followup_resolution` as Copilot authority.
 - Keep legacy fields under a clearly named historical trace only if tests
   still need comparison.
 - Replace active-frame analysis view selection with projection-informed

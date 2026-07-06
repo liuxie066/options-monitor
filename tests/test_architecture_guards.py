@@ -157,7 +157,7 @@ def test_assistant_config_rejects_business_runtime_shape() -> None:
     assert "use config.assistant.json, not config.<market>.json" in str(exc.value)
 
 
-def test_agent_loop_planner_surface_keeps_read_only_and_preview_limited() -> None:
+def test_agent_loop_copilot_surface_keeps_read_only_and_preview_limited() -> None:
     from src.application.agent_tool_registry import get_tool_definition
     from src.application.assistant.agent_loop import AGENT_LOOP_PREVIEW_CAPABILITIES, AGENT_LOOP_READ_TOOLS
     from src.application.assistant.capability_catalog import planner_preview_specs, planner_read_specs
@@ -185,11 +185,11 @@ def test_agent_loop_planner_surface_keeps_read_only_and_preview_limited() -> Non
         assert definition.requires_confirm is False
 
 
-def test_planner_tool_metadata_lives_on_agent_tool_definitions() -> None:
+def test_copilot_tool_metadata_lives_on_agent_tool_definitions() -> None:
     from dataclasses import fields
 
     from src.application.agent_tool_registry import get_tool_definition
-    from src.application.assistant.agent_loop import _planner_tool_manifest
+    from src.application.assistant.agent_loop import _copilot_tool_manifest
     from src.application.assistant.tool_bindings import AssistantToolBinding
 
     binding_fields = {field.name for field in fields(AssistantToolBinding)}
@@ -198,8 +198,9 @@ def test_planner_tool_metadata_lives_on_agent_tool_definitions() -> None:
     assert "output_contract" not in binding_fields
     assert "planner_notes" not in binding_fields
     assert "planner_semantics" not in binding_fields
+    assert "copilot_notes" not in binding_fields
 
-    manifest_by_name = {str(item["name"]): item for item in _planner_tool_manifest()}
+    manifest_by_name = {str(item["name"]): item for item in _copilot_tool_manifest()}
     for tool_name in (
         "monthly_income_report",
         "analysis_catalog",
@@ -214,7 +215,7 @@ def test_planner_tool_metadata_lives_on_agent_tool_definitions() -> None:
         assert definition is not None, tool_name
         assert definition.planner_notes, tool_name
         assert definition.resolve_planner_semantics({"analysis_view_names": None}), tool_name
-        assert manifest_by_name[tool_name]["planner_notes"] == list(definition.planner_notes)
+        assert manifest_by_name[tool_name]["copilot_notes"] == list(definition.planner_notes)
         assert manifest_by_name[tool_name]["semantics"] == definition.resolve_planner_semantics(
             {"analysis_view_names": None}
         )
@@ -503,6 +504,51 @@ def test_legacy_assistant_frame_and_tool_plan_are_removed() -> None:
     assert "ASSISTANT_MODES" not in settings_text
     assert "mode: str" not in settings_text
     assert '"mode": self.mode' not in settings_text
+
+
+def test_legacy_provider_planner_runtime_is_removed() -> None:
+    removed_files = (
+        "evidence_planner.py",
+        "model_continuation.py",
+        "task_runtime.py",
+    )
+    for filename in removed_files:
+        assert not (ROOT / "src" / "application" / "assistant" / filename).exists()
+
+    removed_tests = (
+        "test_assistant_event_executor.py",
+        "test_assistant_model_continuation.py",
+    )
+    for filename in removed_tests:
+        assert not (ROOT / "tests" / filename).exists()
+
+    forbidden_source_tokens = (
+        "assistant.evidence_planner",
+        "assistant.model_continuation",
+        "assistant.task_runtime",
+        "PlannerPlan",
+        "execute_tool_plan(",
+    )
+    offenders: dict[str, list[str]] = {}
+    for path in sorted((ROOT / "src" / "application" / "assistant").glob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        hits = [token for token in forbidden_source_tokens if token in text]
+        if hits:
+            offenders[str(path.relative_to(ROOT))] = hits
+    assert offenders == {}
+
+    provider_files = (
+        ROOT / "src" / "infrastructure" / "openai_chat_completions.py",
+        ROOT / "src" / "infrastructure" / "openai_responses.py",
+    )
+    provider_forbidden = ("tool_calls", '"tools"', "'tools'", "function_call")
+    provider_offenders: dict[str, list[str]] = {}
+    for path in provider_files:
+        text = path.read_text(encoding="utf-8")
+        hits = [token for token in provider_forbidden if token in text]
+        if hits:
+            provider_offenders[str(path.relative_to(ROOT))] = hits
+    assert provider_offenders == {}
 
 
 def test_runtime_router_and_arbitrator_do_not_know_model_profiles() -> None:

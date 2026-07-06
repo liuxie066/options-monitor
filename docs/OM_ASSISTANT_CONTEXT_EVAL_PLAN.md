@@ -158,8 +158,8 @@ Agent session trace should expose:
     "schema_version": "om-context-projection-v1",
     "budget": {}
   },
-  "planner_context_use": {
-    "schema_version": "om-planner-context-use-v1",
+  "copilot_context_use": {
+    "schema_version": "om-copilot-context-use-v1",
     "mode": "refine"
   },
   "context_validation": {

@@ -238,11 +238,11 @@ def test_assistant_llm_check_command_forwards_diagnostic_args(monkeypatch, capsy
 
     calls: list[dict] = []
 
-    def _check_llm_planner(**kwargs):
+    def _check_assistant_llm(**kwargs):
         calls.append(kwargs)
         return {"summary": {"ok": True, "status": "ready"}, "checks": []}
 
-    monkeypatch.setattr(cli, "check_llm_planner", _check_llm_planner)
+    monkeypatch.setattr(cli, "check_assistant_llm", _check_assistant_llm)
 
     rc = cli.main([
         "assistant",
@@ -253,8 +253,6 @@ def test_assistant_llm_check_command_forwards_diagnostic_args(monkeypatch, capsy
         "options-monitor.env",
         "--no-local-env-file",
         "--live",
-        "--text",
-        "状态",
     ])
     payload = _read_json_output(capsys)
 
@@ -267,45 +265,7 @@ def test_assistant_llm_check_command_forwards_diagnostic_args(monkeypatch, capsy
         "env_file": "options-monitor.env",
         "include_local_env_file": False,
         "live": True,
-        "live_text": "状态",
-        "live_texts": None,
-        "live_expected_tools": None,
-        "live_expected_event_types": None,
-        "live_expected_arguments": None,
     }]
-
-    calls.clear()
-    rc = cli.main([
-        "assistant",
-        "llm-check",
-        "--live",
-        "--text",
-        "状态",
-        "--text",
-        "sy 6月收益来源拆一下",
-        "--expect-tool",
-        "runtime_status",
-        "--expect-tool",
-        "monthly_income_report",
-        "--expect-event-type",
-        "model_tool_call",
-        "--expect-event-type",
-        "model_tool_call",
-        "--expect-arguments",
-        '{"config_key":"us"}',
-        "--expect-arguments",
-        '{"account":"sy","month":"2026-06"}',
-    ])
-
-    assert rc == 0
-    assert calls[-1]["live_text"] == "状态"
-    assert calls[-1]["live_texts"] == ["状态", "sy 6月收益来源拆一下"]
-    assert calls[-1]["live_expected_tools"] == ["runtime_status", "monthly_income_report"]
-    assert calls[-1]["live_expected_event_types"] == ["model_tool_call", "model_tool_call"]
-    assert calls[-1]["live_expected_arguments"] == [
-        '{"config_key":"us"}',
-        '{"account":"sy","month":"2026-06"}',
-    ]
 
 
 def test_assistant_model_catalog_command_renders_provider_catalog(capsys) -> None:
@@ -365,16 +325,16 @@ assistant:
     assert "api_key_env" not in text
 
 
-def test_assistant_model_check_forwards_multiple_probe_texts(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_assistant_model_check_forwards_live_flag(tmp_path: Path, monkeypatch, capsys) -> None:
     import src.interfaces.cli.main as cli
 
     calls: list[dict] = []
 
-    def _check_llm_planner(**kwargs):
+    def _check_assistant_llm(**kwargs):
         calls.append(kwargs)
         return {"summary": {"ok": True, "status": "ready"}, "checks": [], "config": {}}
 
-    monkeypatch.setattr(cli, "check_llm_planner", _check_llm_planner)
+    monkeypatch.setattr(cli, "check_assistant_llm", _check_assistant_llm)
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         """\
@@ -407,35 +367,12 @@ assistant:
         "--config-yaml",
         str(config_path),
         "--live",
-        "--text",
-        "状态",
-        "--text",
-        "sy 6月收益来源拆一下",
-        "--expect-tool",
-        "runtime_status",
-        "--expect-tool",
-        "monthly_income_report",
-        "--expect-event-type",
-        "model_tool_call",
-        "--expect-event-type",
-        "model_tool_call",
-        "--expect-arguments",
-        '{"config_key":"us"}',
-        "--expect-arguments",
-        '{"account":"sy","month":"2026-06"}',
     ])
     payload = _read_json_output(capsys)
 
     assert rc == 0
     assert payload["tool_name"] == "assistant.model.check"
-    assert calls[-1]["live_text"] == "状态"
-    assert calls[-1]["live_texts"] == ["状态", "sy 6月收益来源拆一下"]
-    assert calls[-1]["live_expected_tools"] == ["runtime_status", "monthly_income_report"]
-    assert calls[-1]["live_expected_event_types"] == ["model_tool_call", "model_tool_call"]
-    assert calls[-1]["live_expected_arguments"] == [
-        '{"config_key":"us"}',
-        '{"account":"sy","month":"2026-06"}',
-    ]
+    assert calls[-1]["live"] is True
 
 
 def test_assistant_model_add_dry_run_does_not_write_config(tmp_path: Path, capsys) -> None:
@@ -732,14 +669,14 @@ def test_assistant_memory_suggest_command_creates_proposal_only(tmp_path: Path, 
 def test_assistant_eval_context_command_renders_report(capsys) -> None:
     import src.interfaces.cli.main as cli
 
-    case_id = "planner_context_candidate_metric_followup_uses_projection_refs"
+    case_id = "copilot_context_candidate_metric_followup_uses_projection_refs"
     rc = cli.main(["assistant", "eval-context", "--case-id", case_id])
     text = capsys.readouterr().out
 
     assert rc == 0
     assert "assistant context eval: 1/1 passed" in text
     assert case_id in text
-    assert "sources=message,context_projection.recent_evidence" in text
+    assert "sources=copilot.evidence_plan,message,context_projection.recent_evidence" in text
     assert "projection=om-context-projection-v1" in text
     assert "refs=1" in text
 
@@ -785,7 +722,7 @@ def test_assistant_eval_context_command_renders_report(capsys) -> None:
     assert payload["tool_name"] == "assistant.eval_context"
     assert payload["ok"] is True
     assert payload["data"]["summary"]["mode"] == "scenarios"
-    assert payload["data"]["summary"]["total"] == 23
+    assert payload["data"]["summary"]["total"] == 24
     result = payload["data"]["results"][0]
     assert result["mode"] == "scenarios"
     assert result["actual"]["validation"]["context_validation"]["schema_version"] == "om-context-validation-v1"

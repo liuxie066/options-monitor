@@ -5,7 +5,7 @@
 > Current naming and boundaries live in
 > [OM_ASSISTANT_ARCHITECTURE.md](OM_ASSISTANT_ARCHITECTURE.md): `./om-agent`
 > is the Tool Gateway, `./om assistant` is the Inbound Assistant, and
-> `AgentLoop` is an internal assistant planner loop.
+> `AgentLoop` is an internal OM Copilot task/evidence/answer loop.
 
 本文档记录历史上的 SQLite Tool OS 扩展方案。目标不是再加一个
 `account_income_compare` 这样的窄工具，而是把现有 `analysis_catalog` /
@@ -96,7 +96,7 @@
 - `analysis_query` 是内存 SQLite SELECT-only 查询层。
 - 输出保留兼容字段：`columns`、`rows`、`row_count`、`truncated`、
   `views_used`、`cell_refs`、`fallback_text`。
-- AgentLoop 已经有受控 tool policy、LLM synthesis、answer guard 和 deterministic fallback。
+- AgentLoop 已经有受控 tool policy、Copilot answer composition、answer guard 和 deterministic fallback。
 - 写操作仍走 existing preview / confirm / apply 路径。
 
 当前工作区已有的扩展方向：

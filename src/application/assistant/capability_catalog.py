@@ -522,6 +522,10 @@ def is_llm_planner_preview_spec(spec: AssistantCommandSpec) -> bool:
     return bool(_planner_allowed(spec) and _kind(spec) == "preview")
 
 
+def is_llm_copilot_preview_spec(spec: AssistantCommandSpec) -> bool:
+    return is_llm_planner_preview_spec(spec)
+
+
 def planner_allowed_specs() -> tuple[AssistantCommandSpec, ...]:
     return tuple(spec for spec in COMMAND_SPECS if _planner_allowed(spec))
 

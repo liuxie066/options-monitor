@@ -3,8 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from src.application.assistant.task_runtime import AgentTask
-
 
 TASK_COMPLETION_SCHEMA_VERSION = "om-agent-task-completion-v1"
 
@@ -31,16 +29,25 @@ class TaskCompletion:
 
 def check_task_completion(
     *,
-    task: AgentTask,
+    task: Any,
     covered_views: set[str],
     successful_tool_count: int,
 ) -> TaskCompletion:
     if successful_tool_count <= 0:
         return TaskCompletion(status="need_more_evidence", next_action="followup_tool", reason="no_successful_evidence")
-    missing = tuple(sorted(set(task.required_views) - {str(item).strip() for item in covered_views if str(item).strip()}))
+    required_views = _task_required_views(task)
+    missing = tuple(sorted(set(required_views) - {str(item).strip() for item in covered_views if str(item).strip()}))
     if missing:
         return TaskCompletion(status="need_more_evidence", missing_views=missing, next_action="followup_tool")
     return TaskCompletion(status="ready_to_synthesize")
+
+
+def _task_required_views(task: Any) -> tuple[str, ...]:
+    if isinstance(task, dict):
+        value = task.get("required_views")
+    else:
+        value = getattr(task, "required_views", ())
+    return tuple(str(item).strip() for item in value or [] if str(item).strip())
 
 
 __all__ = ["TASK_COMPLETION_SCHEMA_VERSION", "TaskCompletion", "check_task_completion"]
