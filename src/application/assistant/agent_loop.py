@@ -2114,14 +2114,20 @@ def _build_tool_loop_response_from_outcome(
     task_contract: dict[str, Any],
 ) -> dict[str, Any]:
     response_text = _assistant_tool_loop_response_text(outcome)
-    ok = outcome.status == "done" and (bool(outcome.final_answer) or any(result.event.ok for result in outcome.tool_results))
+    requires_model_answer = _task_contract_requires_synthesis(task_contract)
+    ok = outcome.status == "done" and (
+        bool(outcome.final_answer) or (not requires_model_answer and any(result.event.ok for result in outcome.tool_results))
+    )
     if outcome.status == "stopped" and outcome.stop_reason != "answer_verification_failed":
-        ok = any(result.event.ok for result in outcome.tool_results)
+        ok = bool(not requires_model_answer and any(result.event.ok for result in outcome.tool_results))
+    final_response_status = "synthesized" if outcome.final_answer else "rendered"
+    if not outcome.final_answer and requires_model_answer:
+        final_response_status = "needs_model_continuation"
     final_response = {
-        "status": "synthesized" if outcome.final_answer else "rendered",
+        "status": final_response_status,
         "reason": outcome.stop_reason or outcome.status,
-        "canonical_renderer_required": not bool(outcome.final_answer),
-        "llm_may_summarize": bool(outcome.final_answer),
+        "canonical_renderer_required": bool(not outcome.final_answer and not requires_model_answer),
+        "llm_may_summarize": bool(outcome.final_answer or requires_model_answer),
     }
     if outcome.trace.get("final_answer_retry_attempted"):
         final_response["final_answer_retry_attempted"] = True
@@ -2465,6 +2471,12 @@ def _agent_task_requires_synthesis(agent_task: dict[str, Any]) -> bool:
     return bool(profiles and task_mode in {"analyze", "compare", "diagnose", "recommend"})
 
 
+def _task_contract_requires_synthesis(task_contract: dict[str, Any] | None) -> bool:
+    contract = task_contract if isinstance(task_contract, dict) else {}
+    agent_task = contract.get("agent_task") if isinstance(contract.get("agent_task"), dict) else {}
+    return _agent_task_requires_synthesis(agent_task)
+
+
 def _assistant_trace_string_tuple(value: Any) -> tuple[str, ...]:
     return tuple(str(item).strip() for item in value or [] if str(item).strip())
 
@@ -2653,34 +2665,6 @@ def _host_owned_evidence_plan_loop_result(
         provider=provider,
         llm_settings=settings.llm,
     )
-    if continuation_response_fn is None:
-        error = _host_evidence_synthesis_unavailable_error(settings.llm, provider=provider)
-        agent_loop_trace = _direct_model_turn_rejection_trace(error=error, max_steps=max_steps)
-        agent_loop_trace["runtime"] = "host_evidence_loop"
-        agent_loop_trace["host_evidence_plan_used"] = True
-        trace = {
-            "enabled": True,
-            "attempted": True,
-            "reason": "host_evidence_plan_synthesis_unavailable",
-            "provider": provider,
-            "event_model": {
-                "schema_version": "om-assistant-event-planner-v1",
-                "provider": "host",
-                "api_kind": "host",
-                "event_count": len(events),
-                "events": event_transcript_payload(events),
-                "legacy_json_plan_used": False,
-                "host_evidence_plan_used": True,
-            },
-            "agent_task": agent_task.public_payload(),
-            "evidence_plan": evidence_plan.public_payload(),
-            "agent_loop": agent_loop_trace,
-        }
-        return AgentLoopResult(
-            planning=AgentLoopPlanningOutcome(perception=None, trace=dict(trace), error=error),
-            trace=trace,
-            steps=(),
-        )
     plan_payload = {
         "goal": text,
         "steps": [],
@@ -2688,13 +2672,21 @@ def _host_owned_evidence_plan_loop_result(
     }
     host_contract = build_task_contract(question=text, plan=plan_payload, request_context=request.public_payload(), today=today)
     task_contract = _planner_task_contract_from_host_contract(host_contract.public_payload())
-    base_payload = _assistant_tool_loop_continuation_base_payload(
-        provider=provider,
-        question=text,
-        conversation_context=conversation_context,
-        llm_settings=settings.llm,
+    base_payload = (
+        _assistant_tool_loop_continuation_base_payload(
+            provider=provider,
+            question=text,
+            conversation_context=conversation_context,
+            llm_settings=settings.llm,
+        )
+        if continuation_response_fn is not None
+        else None
     )
-    continuation_base_payload = _final_answer_only_continuation_base_payload(provider=provider, base_payload=base_payload)
+    continuation_base_payload = (
+        _final_answer_only_continuation_base_payload(provider=provider, base_payload=base_payload)
+        if continuation_response_fn is not None
+        else None
+    )
     outcome = run_assistant_tool_event_loop(
         question=text,
         request=request,
@@ -2784,30 +2776,6 @@ def _host_owned_evidence_task(agent_task: Any) -> bool:
     if not bool(getattr(agent_task, "profile_names", ())):
         return False
     return bool(getattr(agent_task, "requires_synthesis", False))
-
-
-def _host_evidence_synthesis_unavailable_error(llm_settings: AssistantLlmSettings, *, provider: str) -> AgentToolError:
-    missing = missing_llm_config(llm_settings)
-    details: dict[str, Any] = {"phase": "host_evidence_synthesis", "provider": provider}
-    if not bool(llm_settings.enabled):
-        reason = "disabled"
-    elif missing:
-        reason = "missing_config"
-        details["missing"] = missing
-    elif not is_supported_llm_provider(provider):
-        reason = "unsupported_provider"
-    elif not llm_api_key_value(llm_settings, environ=None):
-        reason = "missing_api_key"
-        details["api_key_env"] = llm_settings.api_key_env
-    else:
-        reason = "unavailable"
-    details["reason"] = reason
-    return AgentToolError(
-        code="LLM_UNAVAILABLE",
-        message="已识别为 OM 分析任务，但当前没有可用 LLM 合成结论。",
-        hint="配置 assistant.llm 并设置 API key 后重试；本轮不会降级为明细表格。",
-        details=details,
-    )
 
 
 def _host_evidence_plan_events(evidence_plan: Any) -> tuple[ModelToolCallEvent, ...]:

@@ -377,7 +377,7 @@ def test_known_option_review_runs_host_evidence_plan_before_model_planner(
     assert trace["loop_stop_reason"] == "model_final_answer"
 
 
-def test_known_option_review_does_not_fall_back_to_model_planner_when_synthesis_llm_unavailable(
+def test_known_option_review_executes_evidence_but_blocks_renderer_without_model_continuation(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
@@ -386,13 +386,38 @@ def test_known_option_review_does_not_fall_back_to_model_planner_when_synthesis_
 
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         tool_calls.append((tool_name, payload))
-        return build_response(tool_name=tool_name, ok=True, data={"ok": True})
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "schema_version": "analysis.query.output.v2",
+                "source_label": "OM read-only analysis workspace",
+                "query": {"mode": "views", "views": payload["views"], "limit": payload.get("limit")},
+                "columns": ["view", "month", "account", "symbol"],
+                "rows": [
+                    {"view": "trade_events", "month": "2026-06", "account": "lx", "symbol": "0700.HK"},
+                    {"view": "open_option_exposure", "month": "2026-06", "account": "lx", "symbol": "0700.HK"},
+                ],
+                "row_count": 2,
+                "truncated": False,
+                "views_used": list(payload["views"]),
+                "fallback_text": "分析完成：共 2 行。\n1. account=lx，symbol=0700.HK",
+                "evidence": {
+                    "coverage": {
+                        "views": list(payload["views"]),
+                        "months": ["2026-06"],
+                        "accounts": ["lx"],
+                        "symbols": ["0700.HK"],
+                    }
+                },
+            },
+        )
 
     out = handle_assistant_response(
         AssistantRequest(
             text="分析6月的期权操作有没有不合理，需要优化的地方",
             sender_id="local",
-            message_id="msg_host_option_review_no_synth_llm",
+            message_id="msg_host_option_review_no_model_continuation",
             config_key="us",
             audit_db=str(tmp_path / "inbound.sqlite3"),
         ),
@@ -404,13 +429,40 @@ def test_known_option_review_does_not_fall_back_to_model_planner_when_synthesis_
     )
 
     assert out["ok"] is False
-    assert out["error"]["code"] == "LLM_UNAVAILABLE"
-    assert tool_calls == []
+    assert out["error"]["code"] == "AWAITING_MODEL_CONTINUATION"
+    assert tool_calls == [
+        (
+            "analysis_query",
+            {
+                "views": [
+                    "account_monthly_performance",
+                    "account_monthly_income_components",
+                    "monthly_income_cashflow_rows",
+                    "trade_events",
+                    "open_option_exposure",
+                    "strategy_config_by_symbol_account",
+                    "strategy_replay_read_surface",
+                ],
+                "month": "2026-06",
+                "months": [],
+                "limit": 200,
+                "config_key": "us",
+            },
+        )
+    ]
+    assert "分析完成：共 2 行" not in out["data"]["response_text"]
+    assert "已读取到所需 OM 证据，但本轮没有生成可用结论" in out["data"]["response_text"]
     llm_trace = out["meta"]["assistant"]["llm"]
-    assert llm_trace["reason"] == "host_evidence_plan_synthesis_unavailable"
+    assert llm_trace["reason"] == "host_evidence_plan"
     assert llm_trace["event_model"]["host_evidence_plan_used"] is True
-    assert llm_trace["agent_task"]["profile_names"] == ["option_operation_review"]
     assert llm_trace["agent_loop"]["runtime"] == "host_evidence_loop"
+    assert llm_trace["agent_loop"]["loop_stop_reason"] == "awaiting_model_continuation"
+    assert llm_trace["agent_loop"]["final_response"] == {
+        "status": "needs_model_continuation",
+        "reason": "awaiting_model_continuation",
+        "canonical_renderer_required": False,
+        "llm_may_summarize": True,
+    }
 
 
 def test_conclusion_terms_are_contextual_followups() -> None:
