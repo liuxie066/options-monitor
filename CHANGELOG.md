@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.359 - 2026-07-06
+
+### Fixed
+- Aligned task-shaped Assistant analysis with the model-continuation loop so host-collected OM evidence cannot be returned as a raw renderer answer when a qualitative conclusion is required.
+- Kept option-operation review evidence collection active while blocking `analysis_query` table fallback text when model continuation is unavailable.
+
 ## 1.2.358 - 2026-07-04
 
 ### Added
