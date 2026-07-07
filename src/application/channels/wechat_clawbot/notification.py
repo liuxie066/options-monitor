@@ -79,6 +79,10 @@ def _client_id_from_idempotency_key(idempotency_key: str | None) -> str | None:
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]
 
 
+def _context_token_rejected(response: dict[str, Any]) -> bool:
+    return _response_code(response) == -2
+
+
 def send_wechat_clawbot_message(
     *,
     base: Path,
@@ -98,13 +102,25 @@ def send_wechat_clawbot_message(
     state = load_wechat_clawbot_state(base=base, label=binding.label, notifications=notifications)
     timeout_sec = int((notifications or {}).get("send_timeout_sec") or 60)
     client = client_factory(bot_token=state.bot_token, base_url=state.base_url, timeout=timeout_sec)
+    client_id = _client_id_from_idempotency_key(idempotency_key)
     response_json = client.send_text_message(
         to_user_id=binding.to_user_id,
         group_id=binding.group_id,
         context_token=binding.context_token,
         text=text,
-        client_id=_client_id_from_idempotency_key(idempotency_key),
+        client_id=client_id,
     )
+    initial_response_json = response_json
+    fallback_response_json: dict[str, Any] | None = None
+    if binding.context_token and _context_token_rejected(response_json):
+        fallback_response_json = client.send_text_message(
+            to_user_id=binding.to_user_id,
+            group_id=binding.group_id,
+            context_token="",
+            text=text,
+            client_id=client_id,
+        )
+        response_json = fallback_response_json
     ok = _response_success(response_json)
     message_id = _extract_message_id(response_json)
     local_receipt_id = _local_receipt_id(idempotency_key=idempotency_key, target=binding.target, message=text)
@@ -116,6 +132,12 @@ def send_wechat_clawbot_message(
         "response_tail": json.dumps(response_json, ensure_ascii=False)[-500:],
         "message_id": message_id,
         "provider_response_code": _response_code(response_json),
+        "context_token_fallback_attempted": fallback_response_json is not None,
+        "context_token_fallback_response_code": (
+            None if fallback_response_json is None else _response_code(fallback_response_json)
+        ),
+        "initial_response_json": (None if fallback_response_json is None else initial_response_json),
+        "fallback_response_json": fallback_response_json,
         "local_receipt_id": local_receipt_id,
         "idempotency_key": idempotency_key,
         "binding_label": binding.label,
@@ -169,6 +191,8 @@ def normalize_wechat_clawbot_send_output(*, send_result: dict[str, Any]) -> dict
             "local_receipt_id": local_receipt_id,
             "binding_label": result.get("binding_label"),
             "binding_name": result.get("binding_name"),
+            "context_token_fallback_attempted": bool(result.get("context_token_fallback_attempted")),
+            "context_token_fallback_response_code": result.get("context_token_fallback_response_code"),
         },
     )
 

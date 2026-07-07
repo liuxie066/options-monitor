@@ -283,6 +283,60 @@ def test_send_wechat_clawbot_message_uses_bound_context(tmp_path: Path) -> None:
     assert out["local_receipt_id"] == "om-run-1:ops"
 
 
+def test_send_wechat_clawbot_message_retries_ret_minus_2_without_context_token(tmp_path: Path) -> None:
+    from src.application.channels.wechat_clawbot.notification import (
+        normalize_wechat_clawbot_send_output,
+        send_wechat_clawbot_message,
+    )
+
+    calls: list[dict[str, object]] = []
+
+    class FakeClient:
+        def __init__(self, *, bot_token: str, base_url: str, timeout: int) -> None:
+            del bot_token, base_url, timeout
+
+        def send_text_message(self, **kwargs):  # type: ignore[no-untyped-def]
+            calls.append(dict(kwargs))
+            if len(calls) == 1:
+                return {"ret": -2, "errcode": 0}
+            return {"ret": 0, "data": {"message_id": "msg_2"}}
+
+    state_dir = tmp_path / "wechat"
+    state_dir.mkdir()
+    (state_dir / "state.json").write_text(
+        json.dumps({"bot_token": "bot_1", "base_url": "https://example.invalid"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (state_dir / "bindings.json").write_text(
+        json.dumps({"bindings": {"ops": {"to_user_id": "wx_user_1", "context_token": "ctx_1"}}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    send_result = send_wechat_clawbot_message(
+        base=tmp_path,
+        channel="wechat_clawbot",
+        target="ops",
+        message="hello",
+        notifications={"wechat_clawbot_state_dir": str(state_dir)},
+        idempotency_key="om-idem-1",
+        client_factory=FakeClient,
+    )
+    normalized = normalize_wechat_clawbot_send_output(send_result=send_result)
+
+    assert [call["context_token"] for call in calls] == ["ctx_1", ""]
+    assert calls[0]["client_id"] == calls[1]["client_id"]
+    assert send_result["ok"] is True
+    assert send_result["message_id"] == "msg_2"
+    assert send_result["provider_response_code"] == 0
+    assert send_result["context_token_fallback_attempted"] is True
+    assert send_result["context_token_fallback_response_code"] == 0
+    assert send_result["initial_response_json"] == {"ret": -2, "errcode": 0}
+    assert send_result["fallback_response_json"] == {"ret": 0, "data": {"message_id": "msg_2"}}
+    assert normalized["delivery_confirmed"] is True
+    assert normalized["context_token_fallback_attempted"] is True
+    assert normalized["context_token_fallback_response_code"] == 0
+
+
 def test_wechat_clawbot_client_wraps_sendmessage_payload_in_msg() -> None:
     from src.application.channels.wechat_clawbot.ilink_client import WechatClawbotClient
 
