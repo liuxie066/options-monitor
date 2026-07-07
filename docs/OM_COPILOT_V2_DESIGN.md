@@ -358,10 +358,7 @@ Add a local-only command that does not affect inbound channels:
 ./om assistant copilot-run --text "分析6月的期权操作有没有不合理，需要优化的地方" --config-key us --dry-run
 ```
 
-Status: implemented as a local prototype. The runtime can use an injected fake
-model in tests or the configured assistant LLM locally. If the model is
-unavailable, it returns a structured failure instead of a raw traceback or a
-generic chat fallback.
+Status: design target only. No runtime command is currently implemented.
 
 Required modules:
 
@@ -385,8 +382,8 @@ Phase 1 only supports read-only tools:
 
 Acceptance:
 
-- with a capable configured model, target June options question returns
-  conclusion plus evidence-backed findings and recommendations;
+- target June options question returns conclusion plus evidence-backed
+  findings and recommendations;
 - no write tools are visible;
 - failed model synthesis returns explicit evidence limitation, not raw rows;
 - trace records task frame, plan, observations, and verification result.

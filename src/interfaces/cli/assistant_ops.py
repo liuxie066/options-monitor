@@ -41,7 +41,6 @@ from src.application.assistant.operation_diagnostics import collect_pending_oper
 from src.application.assistant.runtime import handle_assistant_turn
 from src.application.assistant.settings import AssistantSettings
 from src.application.assistant.upgrade_operations import run_confirmed_upgrade_operation
-from src.application.assistant_copilot.runtime import CopilotRuntimeLimits, run_copilot_task
 from src.application.config_yaml import default_yaml_config_path, load_yaml_config_file
 
 
@@ -101,20 +100,6 @@ def add_assistant_commands(parser: argparse.ArgumentParser) -> None:
         help="list supported assistant capabilities and LLM routing surface",
     )
     assistant_capabilities.add_argument("--format", choices=("json", "text"), default="json")
-    assistant_copilot_run = assistant_sub.add_parser(
-        "copilot-run",
-        help="run one local-only Copilot v2 read-only task prototype",
-    )
-    assistant_copilot_run.add_argument("--text", required=True)
-    assistant_copilot_run.add_argument("--config-key", required=True, choices=("us", "hk"))
-    assistant_copilot_run.add_argument("--config-path", default=None)
-    assistant_copilot_run.add_argument("--assistant-config", default=None)
-    assistant_copilot_run.add_argument("--max-tool-calls", type=int, default=6)
-    assistant_copilot_run.add_argument("--max-model-turns", type=int, default=4)
-    assistant_copilot_run.add_argument("--dry-run", action="store_true")
-    assistant_copilot_run.add_argument("--env-file", default=None)
-    assistant_copilot_run.add_argument("--no-local-env-file", action="store_true")
-    assistant_copilot_run.add_argument("--format", choices=("json", "text"), default="json")
     assistant_memory = assistant_sub.add_parser("memory", help="manage assistant memory proposals")
     assistant_memory_sub = assistant_memory.add_subparsers(dest="assistant_memory_command", required=True)
     assistant_memory_propose = assistant_memory_sub.add_parser("propose", help="create one assistant memory proposal")
@@ -571,36 +556,6 @@ def handle_assistant_command(
             return 0
         tool_name = "assistant.capabilities" if args.assistant_command == "capabilities" else "assistant.commands"
         return _print(build_response(tool_name=tool_name, ok=True, data=data))
-
-    if args.assistant_command == "copilot-run":
-        assistant_settings = _assistant_settings_for_cli(
-            config_key=args.config_key,
-            config_path=args.config_path,
-            assistant_config_path=args.assistant_config,
-            force_enabled=True,
-        )
-        data = run_copilot_task(
-            text=args.text,
-            config_key=args.config_key,
-            config_path=args.config_path,
-            assistant_settings=assistant_settings,
-            limits=CopilotRuntimeLimits(
-                max_tool_calls=int(args.max_tool_calls),
-                max_model_turns=int(args.max_model_turns),
-            ),
-            dry_run=bool(args.dry_run),
-        )
-        out = build_response(
-            tool_name="assistant.copilot_run",
-            ok=bool(data.get("ok", False)),
-            data=data,
-            error=data.get("error") if not data.get("ok", False) else None,
-        )
-        if args.format == "text":
-            text = str(data.get("response_text") or "").strip() or _dumps(out)
-            sys.stdout.write(text + "\n")
-            return 0 if out.get("ok", True) else 2
-        return _print(out)
 
     if args.assistant_command == "handle":
         assistant_settings = _assistant_settings_for_cli(
