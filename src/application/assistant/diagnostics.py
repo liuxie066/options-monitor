@@ -99,7 +99,7 @@ def _append_assistant_config_check(checks: list[dict[str, Any]], *, cfg: dict[st
         checks.append({
             "name": "assistant_config",
             "status": "warn",
-            "message": "config.assistant.json not found; using default AgentLoop settings",
+            "message": "config.assistant.json not found; using default assistant settings",
         })
         return True
     checks.append({
@@ -242,11 +242,11 @@ def _live_probe_check(
     return {
         "name": "live_probe",
         "status": "skipped",
-        "message": "live provider probe removed; OM Copilot uses deterministic task routing and scenario eval",
+        "message": "live provider probe removed; free-form assistant execution is rebuilding",
         "value": {
             "live_requested": bool(live),
             "probe_count": 0,
-            "copilot_runtime": True,
+            "freeform_runtime": False,
         },
     }
 

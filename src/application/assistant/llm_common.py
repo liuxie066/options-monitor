@@ -26,7 +26,7 @@ def unsupported_llm_provider_error(settings: AssistantLlmSettings, *, component:
     return AgentToolError(
         code="LLM_UNAVAILABLE",
         message=f"unsupported LLM {component} provider: {settings.provider}",
-        hint=f"Set assistant.llm.provider to one of: {providers}, or disable assistant.agent_loop.enabled.",
+        hint=f"Set assistant.llm.provider to one of: {providers}, or disable assistant planner config.",
         details={"provider": settings.provider, "supported_providers": list(supported_llm_providers())},
     )
 

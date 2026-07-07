@@ -31,8 +31,8 @@ Entrypoint rule:
   read-first diagnostics.
 - Use `./om assistant handle` for local or remote messages. This is the
   Inbound Assistant surface.
-- Never invoke `AgentLoop` directly. It is an internal planner/evidence loop
-  that `./om assistant` may use after policy and capability filtering.
+- Free-form natural-language execution is currently disabled. Non-slash,
+  non-permission messages return `NATURAL_LANGUAGE_REBUILDING`.
 
 For the canonical terminology and dimension boundary, see
 [OM_ASSISTANT_ARCHITECTURE.md](OM_ASSISTANT_ARCHITECTURE.md). For capability

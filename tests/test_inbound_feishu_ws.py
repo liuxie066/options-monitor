@@ -172,7 +172,7 @@ def test_feishu_ws_can_route_through_assistant(tmp_path: Path) -> None:
     assert inbound_result["meta"]["assistant"]["llm"]["enabled"] is False
 
 
-def test_feishu_ws_copilot_routes_cashflow_detail_question(tmp_path: Path) -> None:
+def test_feishu_ws_rejects_free_form_cashflow_question_without_tool_calls(tmp_path: Path) -> None:
     replies: list[dict[str, Any]] = []
     calls: list[tuple[str, dict[str, Any]]] = []
     assistant_config_path = tmp_path / "config.assistant.json"
@@ -190,27 +190,7 @@ def test_feishu_ws_copilot_routes_cashflow_detail_question(tmp_path: Path) -> No
 
     def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         calls.append((tool_name, payload))
-        assert tool_name == "analysis_query"
-        return build_response(
-            tool_name=tool_name,
-            ok=True,
-            data={
-                "schema_version": "analysis.query.output.v2",
-                "source_label": "OM read-only analysis workspace",
-                "views_used": list(payload.get("views") or []),
-                "view_datasets": {
-                    "account_monthly_income_components": {
-                        "rows": [{"account": "lx", "component": "premium", "amount_cny": 1200}]
-                    },
-                    "symbol_income_attribution": {
-                        "rows": [{"symbol": "0700.HK", "amount_cny": 1200}]
-                    },
-                    "monthly_income_cashflow_rows": {
-                        "rows": [{"symbol": "0700.HK", "trade_action": "sell_open", "net_cashflow_gross": 1200}]
-                    },
-                },
-            },
-        )
+        return build_response(tool_name=tool_name, ok=True, data={"unexpected": True})
 
     def _reply(**kwargs: Any) -> dict[str, Any]:
         replies.append(dict(kwargs))
@@ -231,37 +211,16 @@ def test_feishu_ws_copilot_routes_cashflow_detail_question(tmp_path: Path) -> No
     )
 
     inbound_result = out["data"]["inbound"]["data"]["inbound_result"]
-    assert out["ok"] is True
-    assert calls == [
-        (
-            "analysis_query",
-            {
-                "views": [
-                    "account_monthly_performance",
-                    "account_monthly_income_components",
-                    "symbol_income_attribution",
-                    "monthly_income_cashflow_rows",
-                    "monthly_income_realized_rows",
-                    "monthly_income_premium_rows",
-                ],
-                "limit": 200,
-                "month": "2026-06",
-                "account": "lx",
-                "config_key": "us",
-            },
-        )
-    ]
-    assert "0700.HK" in replies[0]["text"]
-    assert "主要标的是 0700.HK" in replies[0]["text"]
-    assert "OM read-only analysis workspace" in replies[0]["text"]
-    assert "\n\n分析\n" not in replies[0]["text"]
-    assert inbound_result["meta"]["assistant"]["route"] == "agent_loop"
-    final_response = inbound_result["meta"]["assistant"]["llm"]["agent_loop"]["final_response"]
-    assert final_response["status"] == "synthesized"
-    assert final_response["reason"] == "copilot_completed"
+    assert out["ok"] is False
+    assert calls == []
+    assert replies
+    assert "自由问答正在重建中" in replies[0]["text"]
+    assert inbound_result["error"]["code"] == "NATURAL_LANGUAGE_REBUILDING"
+    assert inbound_result["meta"]["assistant"]["route"] == "natural_language_rebuilding"
+    assert inbound_result["meta"]["assistant"]["llm"]["reason"] == "natural_language_rebuilding"
 
 
-def test_feishu_ws_agent_loop_degrades_when_conversation_context_fails(
+def test_feishu_ws_free_form_rebuild_error_does_not_read_conversation_context(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
@@ -313,11 +272,12 @@ def test_feishu_ws_agent_loop_degrades_when_conversation_context_fails(
     )
 
     inbound_result = out["data"]["inbound"]["data"]["inbound_result"]
-    assert out["ok"] is True
+    assert out["ok"] is False
     assert replies
-    assert inbound_result["meta"]["assistant"]["route"] == "agent_loop"
-    assert inbound_result["meta"]["assistant"]["context"]["degraded"] is True
-    assert inbound_result["meta"]["assistant"]["context"]["window_messages"] == 0
+    assert "自由问答正在重建中" in replies[0]["text"]
+    assert inbound_result["error"]["code"] == "NATURAL_LANGUAGE_REBUILDING"
+    assert inbound_result["meta"]["assistant"]["route"] == "natural_language_rebuilding"
+    assert inbound_result["meta"]["assistant"]["context"] == {"provided": False}
 
 
 def test_feishu_ws_reaction_failure_does_not_fail_inbound_or_reply(tmp_path: Path) -> None:
@@ -518,7 +478,7 @@ def test_feishu_ws_settings_reads_behavior_from_assistant_config(tmp_path: Path)
     assert settings.ack_reaction == "SMILE"
     assert settings.queue_size == 5
     assert settings.assistant_enabled is True
-    assert settings.assistant_planner_enabled is True
+    assert settings.assistant_planner_enabled is False
     assert settings.assistant_context_window_messages == 9
     assert settings.assistant_llm.enabled is True
     assert settings.assistant_llm.provider == "openai"
@@ -543,7 +503,7 @@ def test_feishu_ws_settings_enables_command_runtime_by_default(tmp_path: Path) -
     )
 
     assert settings.assistant_enabled is True
-    assert settings.assistant_planner_enabled is True
+    assert settings.assistant_planner_enabled is False
     assert settings.assistant_llm.enabled is False
 
 

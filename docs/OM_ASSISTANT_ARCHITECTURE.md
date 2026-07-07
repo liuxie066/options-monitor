@@ -1,469 +1,104 @@
 # OM Assistant Architecture
 
-This is the current terminology and architecture authority for OM's assistant
-surfaces. It exists to prevent three different dimensions from being collapsed
-into one overloaded "agent" concept.
+This document is the current authority for the local Tool Gateway and inbound
+assistant boundary.
 
-## Status
+## Current State
 
-- Current architecture authority: this document.
-- Current capability matrix: [OM_AGENT_CAPABILITY_MAP.md](OM_AGENT_CAPABILITY_MAP.md).
-- Local tool invocation contract: [AGENT_INTEGRATION.md](AGENT_INTEGRATION.md).
-- Remote/message safety contract: [INBOUND_CONTROL.md](INBOUND_CONTROL.md).
-- Current conversation-context design:
-  [OM_ASSISTANT_CONVERSATION_CONTEXT_DESIGN.md](OM_ASSISTANT_CONVERSATION_CONTEXT_DESIGN.md).
-- Current conversation-context implementation plan:
-  [OM_ASSISTANT_CONTEXT_IMPLEMENTATION_PLAN.md](OM_ASSISTANT_CONTEXT_IMPLEMENTATION_PLAN.md).
-- Current assistant memory design:
-  [OM_ASSISTANT_MEMORY_DESIGN.md](OM_ASSISTANT_MEMORY_DESIGN.md).
-- Current Copilot runtime implementation:
-  `src/application/assistant/copilot.py`.
+OM now keeps two separate surfaces:
 
-Historical design notes such as `OM_AGENT_COMPLETION_DESIGN.md`,
-`OM_AGENT_INTELLIGENCE_UPGRADE_PLAN.md`,
-`AGENT_RELIABILITY_P0_P2_DESIGN.md`, and
-`SQLITE_TOOL_OS_EXPANSION_DESIGN.md` are not current architecture authorities.
-They may contain useful rationale, but current source, tests, manifest output,
-and this document win when terminology conflicts.
-
-## Terminology
-
-| Name | What it is | What it is not |
+| Surface | Entry | Purpose |
 |---|---|---|
-| `./om` | Human/operator CLI for product workflows | Not a remote message agent |
-| `./om-agent` | Tool Gateway CLI for structured JSON tool calls | Not OM's autonomous/project Agent |
-| `./om assistant` | Inbound Assistant CLI namespace for local or remote messages | Not the full `./om-agent` manifest |
-| `AgentLoop` | Internal OM Copilot task/evidence/answer loop used by `./om assistant` when enabled | Not a public entry point |
+| Tool Gateway | `./om-agent` | Structured JSON tools for read diagnostics and gated write operations |
+| Inbound Assistant | `./om assistant handle` | Channel-facing command handler for slash commands, permission replies, audit, and receipts |
 
-Naming rules:
+Free-form natural-language execution is intentionally disabled while the next
+task system is rebuilt. Non-slash, non-permission text returns
+`NATURAL_LANGUAGE_REBUILDING` and does not call tools or fall back to a generic
+LLM reply.
 
-- Do not call `./om-agent` "OM Agent" in current docs. Prefer "Tool Gateway"
-  or "Agent Tool Gateway".
-- Use "Inbound Assistant" for the `./om assistant ...` message entrypoint.
-- Use "OM Copilot", "Assistant Event Loop", or `AgentLoop` for the internal
-  bounded task, tool-event, evidence, safety, and answer loop.
-- When discussing future intelligence work, say it optimizes `./om assistant`
-  capabilities, with `./om-agent` and tool metadata as support surfaces.
-
-## Architecture Dimensions
-
-The main confusion risk is treating entrypoints, shared tooling, and internal
-assistant orchestration as one hierarchy. They are separate dimensions.
+## Supported Flow
 
 ```text
-Entry surfaces
-  ./om            human/operator CLI
-  ./om-agent      Tool Gateway CLI for structured JSON tool calls
-  ./om assistant  Inbound Assistant message CLI
-
-Shared tool substrate
-  src/application/agent_tools/*
-  src/application/agent_tool_registry.py
-  src/application/tool_execution.py
-  src/application/agent_tools/permissions.py
-  output_contract / evidence_contract metadata
-
-Assistant internals
-  runtime / router / perception / reasoning / action
-  AgentLoop / OM Copilot
-  evidence / coverage / answer verification
-  operation_lifecycle / audit / session trace
+channel message
+-> sender allowlist
+-> command / permission parser
+-> reasoning over a known command contract
+-> permission gate and tool execution
+-> observation
+-> renderer
+-> audit/session/operation persistence
 ```
 
-The actual call relationships are:
+The assistant currently supports:
 
-```text
-./om-agent
-  -> tool_execution
-  -> agent_tool_registry
-  -> tool handler
+- slash commands such as `/help`, `/status`, `/income`, `/positions`, `/cash`,
+  `/model`, `/trace`, `/upgrade`, `/confirm`, and `/cancel`;
+- deterministic read tools routed through `agent_tool_registry`;
+- write previews that require explicit confirmation before applying changes;
+- permission responses for pending operations;
+- model/profile diagnostics as configuration surfaces.
 
-./om assistant
-  -> assistant runtime/router
-  -> perception/reasoning/action
-  -> optional AgentLoop
-  -> tool_execution
-  -> agent_tool_registry
-  -> tool handler
-```
+The assistant currently does not support:
 
-`AgentLoop` therefore sits inside the `./om assistant` path. It is not a peer
-of `./om-agent` or `./om assistant`.
+- free-form analysis questions;
+- automatic tool planning from arbitrary natural language;
+- model-authored answer synthesis over tool observations;
+- fallback from failed free-form handling to the generic planner or ordinary LLM
+  chat.
 
-## Response And Perception Modes
+## Tool Authority
 
-`./om assistant` now has two input modes that share conversation context but do
-not share authority:
+`agent_tool_registry` is the canonical tool registry. Assistant code must not
+create a parallel tool registry or hidden execution path.
 
-```text
-response mode:
-  user message
-  -> AssistantRequest
-  -> perception/reasoning/action
-  -> optional AgentLoop
-  -> user-visible response
+Read and write boundaries stay in the existing tool metadata:
 
-perception mode:
-  tick notification event
-  -> assistant_perception audit event
-  -> compressed system-event context card
-  -> available evidence for later user follow-up
-```
+- read tools may execute directly when a slash command maps to them;
+- write-capable tools must produce a preview unless an explicit confirmed path
+  is used;
+- write gates remain in `agent_tools/permissions.py` and operation-specific
+  preview/confirm modules.
 
-Perception mode is not a hidden user request. Tick notification code must not
-call `handle_assistant_turn`, must not ask the model to generate a message,
-and must not make send/skip decisions through Assistant. The authoritative
-notification path remains `tick_notification_flow -> scheduled_notification ->
-delivery adapter`.
+## Model Config Boundary
 
-Only compressed, safe context cards enter Assistant context. They may contain
-run id, account/symbol summaries, delivery action/reason, counts, and message
-hashes. They must not contain raw notification text, webhook URLs, tokens, or
-credentials. These cards can anchor follow-ups such as "刚才那条为什么没发",
-but they do not grant write permission, confirmation authority, broker access,
-or notification-send authority.
+`assistant.llm`, `assistant.models`, and `assistant.active_model` may remain in
+config so operators can inspect and manage future model profiles. These settings
+do not enable free-form execution in the current runtime.
 
-For WeChat ClawBot, conversation scope is window-level:
+For compatibility, existing `assistant.agent_loop.enabled` config is still
+accepted as a no-op compatibility field. Runtime metadata marks free-form
+execution as disabled.
 
-```text
-channel = wechat
-conversation_id = wechat:<chat_key-or-group_id>
-sender_id = <human identity for allowlist/permission only>
-```
+## Removed Runtime
 
-This lets multiple messages in the same ClawBot window share context while
-preserving sender identity for permission checks.
+The previous free-form stack has been removed from the active code path and from
+source modules:
 
-## Current Assistant Intelligence Loop
+- `agent_loop.py`
+- `copilot.py`
+- `task_profiles.py`
+- `model_events.py`
+- `model_evidence.py`
+- `answer_guard.py`
+- `coverage_verifier.py`
+- `task_completion.py`
+- `llm_reply.py`
+- `context_eval.py`
+- `conversation_context.py`
+- `context_projection.py`
+- `context_validation.py`
 
-The current assistant intelligence upgrade connects trace, capability
-selection, evidence collection, progress, and clarification into one audited
-assistant loop:
+Do not reintroduce these modules or rebuild them under a new name. The next
+generation task system should be designed as a first-class execution model, with
+explicit evidence acquisition, bounded actions, and evals that measure answer
+quality without hardcoded business templates.
 
-```text
-message
-  -> perception/router
-  -> CopilotTaskFrame / TaskProfile / CopilotEvidencePlan
-  -> tool_execution
-  -> evidence/result adapter
-  -> follow-up or clarification
-  -> Copilot answer / preview receipt
-  -> assistant_trace
-```
+## Release Gate
 
-This loop is owned by `./om assistant`. `assistant_trace` is read through the
-local `./om-agent` Tool Gateway as a diagnostic tool, but that does not make
-`./om-agent` the assistant or a planner.
-
-For default free-form OM Q&A, the host derives a `CopilotTaskFrame` and matched
-`TaskProfile` set, then creates an executable `CopilotEvidencePlan` directly. The
-provider planner is not on this default path. Tool success or raw renderer
-output is not task completion for analytical questions; Copilot must turn the
-evidence into a user-facing judgement, recommendation, preview receipt, or an
-explicit evidence-gap/clarification response.
-
-Current Copilot traces expose these derived fields:
-
-- `copilot_task`: normalized task name, domain, mode, scope, profiles,
-  required evidence/views, and expected answer shape.
-- `evidence_plan`: host-selected executable read or preview calls and required
-  analysis views derived from matched task profiles.
-- `capability_selection`: selected, required, satisfied, and rejected
-  capabilities/tools derived from the bounded plan and tool transcript.
-- `progress`: task state, coverage status, next action, blocker list, pending
-  operation ids, and tool/step counts derived from execution and coverage.
-- `answer.clarification_request`: structured clarification status and
-  questions derived from the assistant response when scope or evidence is not
-  safe to infer.
-
-These fields are trace/session state. They are not a new task database, not a
-second pending-operation store, not another tool registry, and not a separate
-project Agent. The durable store remains the inbound audit SQLite
-`agent_sessions` trace table, and the authority path remains
-`./om assistant -> AgentLoop -> tool_execution -> agent_tool_registry`.
-
-Implementation note: the current natural-language path is OM Copilot, not
-provider tool-call planning. Provider structured tool-call parsing and the old
-`PlannerPlan -> execute_tool_plan(plan_payload)` bridge have been removed from
-the assistant package. Current assistant code should treat `PlannerPlan` as
-historical terminology only; it must not be reintroduced as the runtime
-contract.
-
-## Tool Calling Event Model Direction
-
-The useful Claude Code lesson is the separation of task understanding, tool
-execution, observation, and final answer, not a dependency on provider-side
-planning. OM's default implementation applies that shape with a host-owned
-Copilot task/evidence loop and financial-operation guardrails.
-
-The current implementation boundary is stricter than provider tool calling:
-ordinary OM free-form Q&A uses a host-owned Copilot task/evidence loop, not a
-provider planner result and not a `PlannerPlan` bridge. New intelligence work
-should improve task profiles, evidence planning, coverage, context projection,
-and answer composition inside the Copilot loop.
-
-Default free-form path:
-
-```text
-message
-  -> context projection
-  -> CopilotTaskFrame / TaskProfile
-  -> CopilotEvidencePlan
-  -> guarded tool or preview execution
-  -> coverage / missing-data boundary
-  -> Copilot answer or clarification
-  -> assistant_trace
-```
-
-The intelligence boundary is:
-
-- Copilot owns task framing, capability/evidence selection for covered OM
-  tasks, result interpretation, and composing the user-facing answer;
-- code owns schema validation, scope injection, risk class, duplicate-call
-  prevention, evidence extraction, missing-data declarations, answer guardrails,
-  and trace/audit;
-- provider model configuration may still support ordinary JSON reply helpers,
-  but provider tool-call planning is not an execution dependency.
-
-Preview/write routes exit the read loop and go through existing deterministic
-preview/confirm lifecycle. Copilot may create only a pending preview receipt;
-confirm/cancel/apply still belong to deterministic commands and user approval.
-
-Coverage and answer-shape checks are guardrails, not a separate intelligence
-engine. If required evidence is absent, Copilot must answer with explicit
-missing data or ask a clarification; it must not dump raw rows as the final
-answer and must not fabricate a judgement from empty evidence.
-
-## Conversation Context State
-
-The current conversation-context path uses a bounded Copilot-facing projection
-of prior turns, then validates derived context use before execution. This
-follows the useful Claude Code boundary: code owns conversation state,
-projection, budget, and compaction-like boundaries, while Copilot performs
-natural-language semantic continuity over the visible conversation view.
-
-OM adds deterministic validation because model-selected tool paths can trigger
-financial and runtime read tools. The context layer should therefore be:
-
-```text
-transcript
-  -> ContextProjection
-  -> Copilot task/evidence judgement
-  -> ContextValidator for inherited context
-  -> policy/tool execution
-```
-
-Copilot-selected tool arguments are the current turn's execution intent. The
-host must validate them for schema, scope, risk, duplicate calls, hidden
-arguments, and tool policy, but it must not use literal safe-slot matching to
-prove that every normalized argument appeared verbatim in the current user
-message. That would make host-side slot extraction a second NLU authority and
-can falsely convert explicit current requests into inherited context.
-
-Authority is split this way:
-
-| Surface | Authority | Not Authority |
-|---|---|---|
-| current user message | explicit current scope and overrides | hidden defaults or historical carry |
-| Copilot evidence-call arguments | current turn execution intent | proof that an argument came from history |
-| `ContextProjection.safe_slots` | bounded model-visible history and audit metadata | a second natural-language parser |
-| `ContextProjection.relevant_memories` | hint-only collaboration, OM usage, and parameter-tuning preferences | market data, ledger state, runtime config, evidence, or write authorization |
-| `context_use.inherited_slots` | values intentionally carried from referenced visible context | normalized synonyms in the current message |
-| host guards | schema, scope, risk, budget, duplicates, hidden args, policy | business-language interpretation by keyword |
-
-`ContextProjection.safe_slots` remains model-visible context and trace/audit
-metadata. `context_use.inherited_slots` is only for values actually carried
-from a referenced prior turn or evidence ref. When a tool call's required
-current scope is supplied by the current message, optional normalized
-arguments such as strategy/function filters should not force a prior-context
-source match just because their internal enum form differs from the user's
-wording.
-
-The context layer should not grow as a collection of business-specific
-follow-up branches.
-Detailed contracts and rollout plan live in:
-
-- [OM_ASSISTANT_MEMORY_DESIGN.md](OM_ASSISTANT_MEMORY_DESIGN.md)
-- [OM_ASSISTANT_CONTEXT_PROJECTION_CONTRACT.md](OM_ASSISTANT_CONTEXT_PROJECTION_CONTRACT.md)
-- [OM_ASSISTANT_CONTEXT_VALIDATION_CONTRACT.md](OM_ASSISTANT_CONTEXT_VALIDATION_CONTRACT.md)
-- [OM_ASSISTANT_CONTEXT_EVAL_PLAN.md](OM_ASSISTANT_CONTEXT_EVAL_PLAN.md)
-- [OM_ASSISTANT_CONTEXT_IMPLEMENTATION_PLAN.md](OM_ASSISTANT_CONTEXT_IMPLEMENTATION_PLAN.md)
-
-The context eval harness is layered by explicit mode:
+Assistant changes should run the current minimal gate:
 
 ```bash
-./om assistant eval-context --mode copilot_context
-./om assistant eval-context --mode projection
-./om assistant eval-context --mode validation
-./om assistant eval-context --mode scenarios
+python3 -m pytest tests/test_assistant_runtime.py tests/test_inbound_control.py tests/test_assistant_permission_request.py tests/test_cli_operator_commands.py tests/test_assistant_diagnostics.py tests/test_architecture_guards.py
+python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py tests/test_candidate_filter_trace.py tests/test_analysis_tools.py
 ```
-
-`copilot_context` is a historical eval lane, not an alternate contract.
-Current context work should use `projection`, `validation`, and `scenarios` as
-the authoritative regression lanes. New fixtures should move to those modes
-instead of preserving old planner payload shape as a parallel contract.
-
-## Claude Code Reference Boundary
-
-The useful Claude Code reference is its module separation, not the exact
-implementation or product scope. In the local source, Claude Code is split
-roughly this way:
-
-| Claude Code area | Local source examples | OM analogue | Borrowing decision |
-|---|---|---|---|
-| Entrypoints and UI | `main.tsx`, `cli/`, `commands/`, `components/`, `screens/` | `./om`, `./om assistant`, CLI adapters | Keep entrypoints thin; do not place planning or tool policy in CLI parsing. |
-| Model loop and context | `query.ts`, `QueryEngine.ts`, `services/api/`, `services/compact/`, `services/contextCollapse/` | `AgentLoop`, `ContextProjection`, `ContextValidator` | Keep code responsible for projection, budget, and context boundaries; do not copy full compaction machinery unless context pressure proves it is needed. |
-| Tool protocol | `Tool.ts` | `agent_tools` metadata, output/evidence contracts, tool registry metadata | Strengthen deterministic metadata and result contracts instead of letting model prose define tool semantics. |
-| Tool pool and visibility | `tools.ts`, `ToolSearchTool` | `capability_catalog`, model-visible manifest, `AgentLoop` tool selection | Make the model-visible capability view narrow, auditable, and explainable. Do not expose the full Tool Gateway manifest to Inbound Assistant. |
-| Execution orchestration | `services/tools/toolExecution.ts`, `toolOrchestration.ts`, `StreamingToolExecutor.ts` | `tool_execution`, tool-loop guard, evidence bundle, answer verification | Preserve a validate -> policy -> execute -> observe pipeline where Copilot's host-owned task/evidence plan decides what to inspect and code enforces scope, risk, budget, and duplicate guards. |
-| Permissions and hooks | `utils/permissions/`, permission hooks | `agent_tools/permissions.py`, `action_safety`, `operation_lifecycle` | Keep write authority centralized and reason-coded. A model preview request may enter operation lifecycle, but must not apply writes. |
-| Tool implementations | `tools/*` | `src/application/agent_tools/*`, domain services | Keep tools deterministic, scoped, and evidence-oriented. Business rules remain in owning domain/application modules. |
-| Extension surfaces | `services/mcp/`, `services/plugins/`, `skills/` | Local Tool Gateway integration only, not Inbound core | Do not add remote extension/plugin authority to OM Assistant without a separate safety design. |
-
-This mapping reinforces the existing OM boundary:
-
-```text
-./om assistant
-  -> AgentLoop / policy / trace
-  -> model-visible capability view
-  -> tool_execution
-  -> agent_tool_registry
-  -> deterministic tool
-```
-
-The next Claude Code-inspired improvement should therefore be better Copilot
-task profiling, coverage explanation, and capability selection hygiene inside
-the existing host-owned loop. It should not add a new public agent surface,
-second tool registry, global conversation state machine, or broader write/admin
-execution authority.
-
-## `./om-agent` Boundary
-
-`./om-agent` is a stable local machine interface for external agents, scripts,
-Codex, or operators that need structured OM tool calls.
-
-It owns:
-
-- `spec`: current tool manifest.
-- `run`: execute one named tool with JSON input.
-- JSON response envelope.
-- write-tool env and confirmation gate.
-
-It should not own:
-
-- multi-step autonomous planning,
-- message conversation context,
-- LLM routing,
-- preview/confirm operation lifecycle,
-- arbitrary shell bridges,
-- broker/service/notification authority beyond the called tool's explicit
-  contract.
-
-Changes to `./om-agent` should usually support one of these needs:
-
-- expose or correct tool metadata,
-- improve output/evidence contracts,
-- add a deterministic tool handler,
-- normalize execution receipts,
-- keep write gates strict.
-
-## `./om assistant` Boundary
-
-`./om assistant` is the current Inbound Assistant surface. It accepts a user
-message, normalizes it, applies policy, and returns an audited response.
-
-It owns:
-
-- explicit slash command handling through ProtocolGate,
-- bound confirm/cancel handling through PermissionResponseGate,
-- natural-language capability recognition through OM Copilot / AgentLoop,
-- capability catalog filtering,
-- bounded Copilot task/evidence planning,
-- sender allowlist and idempotency,
-- pending preview creation,
-- confirm/cancel routing for existing pending operations,
-- audit and durable assistant trace.
-
-It must not route ordinary non-slash natural language through keyword-based
-business-tool fallback. If AgentLoop is disabled or unavailable, non-slash
-requests should return clarification/error instead of selecting a nearby
-deterministic business command.
-
-It must not expose the full `./om-agent` manifest to remote messages. The
-assistant capability catalog is intentionally narrower than the local Tool
-Gateway manifest.
-
-## AgentLoop Boundary
-
-`AgentLoop` is an internal bounded Copilot loop. It helps `./om assistant`
-answer questions that require task framing, evidence selection, preview
-routing, and answer composition instead of matching one slash command.
-
-It may:
-
-- derive and use a host-owned `CopilotTaskFrame`, task profiles, evidence plan,
-  and task contract,
-- run a bounded sequence of automatic read tool calls selected by Copilot,
-- request a preview event when policy allows, leaving pending-operation creation
-  to deterministic handlers,
-- collect evidence,
-- use coverage and answer verification as post-check guardrails,
-- synthesize an answer from deterministic evidence,
-- record trace/session data.
-
-It must not:
-
-- confirm, cancel, or apply writes,
-- run arbitrary shell or Python,
-- mutate config/ledger/broker-facing state directly,
-- send notifications,
-- bypass `tool_execution`, tool policy, operation lifecycle, or audit.
-
-## Optimization Target
-
-The current optimization target is `./om assistant` capability quality:
-
-- better free-form task recognition,
-- better evidence planning for task-shaped questions,
-- better capability selection,
-- better host-derived task contract and coverage verification,
-- better Copilot-owned read tool selection and evidence coverage,
-- better evidence extraction,
-- better answer quality,
-- clearer preview/confirm receipts,
-- more useful `assistant_trace`.
-
-`./om-agent` remains a support surface. It can be improved when assistant work
-needs better tool contracts, pure-read classification, output evidence, or
-execution receipts, but it should stay a Tool Gateway rather than becoming the
-project's autonomous Agent.
-
-The next assistant optimization should focus on capability selection
-and task-completion explainability, not another context state machine. In
-practice that means:
-
-- keeping model-visible capability manifests narrow and auditable,
-- deriving selection reasons from message text, `CopilotTaskFrame`,
-  `CopilotEvidencePlan`, `ContextProjection`, open evidence gaps, and
-  `task_contract.required_evidence`,
-- adding regression fixtures for selected tools/views and selection sources,
-- keeping execution authority inside the existing
-  `AgentLoop -> tool_execution -> agent_tool_registry` path.
-
-## Verification Sources
-
-When docs disagree, verify current behavior from:
-
-```bash
-./om-agent spec
-./om assistant capabilities --format json
-```
-
-Then check the source owners:
-
-- `src/interfaces/agent/cli.py`
-- `src/application/tool_execution.py`
-- `src/application/agent_tool_registry.py`
-- `src/application/assistant/capability_catalog.py`
-- `src/application/assistant/agent_loop.py`
-- `src/application/assistant/operation_lifecycle.py`
