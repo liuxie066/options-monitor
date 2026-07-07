@@ -15,6 +15,7 @@
 - [../AGENTS.md](../AGENTS.md)：本地 agent 首屏说明书、安全红线、入口层级、模块归属（静态前缀，Prompt Cache 友好）
 - [../CLAUDE.md](../CLAUDE.md)：Claude 特有补充指令
 - [OM_ASSISTANT_ARCHITECTURE.md](OM_ASSISTANT_ARCHITECTURE.md)：当前权威术语和架构边界；说明 `./om-agent` 与 `./om assistant` 的职责
+- [OM_COPILOT_V2_DESIGN.md](OM_COPILOT_V2_DESIGN.md)：下一代自由问答 Copilot v2 任务系统设计；当前仅为设计目标，尚未启用
 - [AGENT_INTEGRATION.md](AGENT_INTEGRATION.md)：`./om-agent` Tool Gateway JSON 集成合同
 - [AGENT_GETTING_STARTED.md](AGENT_GETTING_STARTED.md)：本地 Tool Gateway 工具快速开始
 - [AGENT_WIKI.md](AGENT_WIKI.md)：本地 agent 任务手册（工具选择、Research / Shadow Replay 侧线、排障 playbook、模块地图、验证矩阵）
