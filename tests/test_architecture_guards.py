@@ -157,39 +157,56 @@ def test_assistant_config_rejects_business_runtime_shape() -> None:
     assert "use config.assistant.json, not config.<market>.json" in str(exc.value)
 
 
-def test_agent_loop_copilot_surface_keeps_read_only_and_preview_limited() -> None:
-    from src.application.agent_tool_registry import get_tool_definition
-    from src.application.assistant.agent_loop import AGENT_LOOP_PREVIEW_CAPABILITIES, AGENT_LOOP_READ_TOOLS
-    from src.application.assistant.capability_catalog import planner_preview_specs, planner_read_specs
-    from src.application.tool_allowlist import PURE_READ_TOOLS
+def test_old_agent_loop_copilot_modules_are_removed() -> None:
+    removed = (
+        "agent_loop.py",
+        "action_policy.py",
+        "action_safety.py",
+        "copilot.py",
+        "task_profiles.py",
+        "model_events.py",
+        "model_evidence.py",
+        "coverage_verifier.py",
+        "task_completion.py",
+        "llm_reply.py",
+        "context_eval.py",
+        "conversation_context.py",
+        "context_projection.py",
+        "context_validation.py",
+    )
 
-    read_tool_names = {str(spec.tool_name) for spec in planner_read_specs() if spec.tool_name}
-    preview_names = {spec.intent_name for spec in planner_preview_specs()}
-
-    assert AGENT_LOOP_READ_TOOLS == read_tool_names - {"inbound.pending", "inbound.symbols"}
-    assert "close_advice_read" in AGENT_LOOP_READ_TOOLS
-    assert "symbol_config_read" in AGENT_LOOP_READ_TOOLS
-    assert "query_cash_headroom" in AGENT_LOOP_READ_TOOLS
-    assert "symbol_edit" in AGENT_LOOP_PREVIEW_CAPABILITIES
-    assert "manual_trade_open" in AGENT_LOOP_PREVIEW_CAPABILITIES
-    assert "manual_trade_confirm" not in AGENT_LOOP_PREVIEW_CAPABILITIES
-    assert "symbol_confirm" not in AGENT_LOOP_PREVIEW_CAPABILITIES
-    assert AGENT_LOOP_PREVIEW_CAPABILITIES <= preview_names
-
-    for tool_name in AGENT_LOOP_READ_TOOLS:
-        definition = get_tool_definition(tool_name)
-        assert definition is not None, tool_name
-        assert tool_name in PURE_READ_TOOLS
-        assert definition.risk_level == "read_only"
-        assert not definition.side_effects
-        assert definition.requires_confirm is False
+    existing = [name for name in removed if (ROOT / "src" / "application" / "assistant" / name).exists()]
+    assert existing == []
 
 
-def test_copilot_tool_metadata_lives_on_agent_tool_definitions() -> None:
+def test_old_freeform_session_builder_is_removed() -> None:
+    session_source = (ROOT / "src" / "application" / "assistant" / "session.py").read_text(encoding="utf-8")
+
+    assert "def build_agent_session_snapshot(" not in session_source
+    assert "build_agent_session_snapshot" not in session_source
+
+
+def test_old_freeform_eval_fixtures_are_removed() -> None:
+    removed = (
+        "assistant_agent_eval.jsonl",
+        "assistant_nlu_eval.jsonl",
+        "assistant_trace_route_samples.jsonl",
+        "assistant_context_projection.jsonl",
+        "assistant_context_validation.jsonl",
+        "assistant_context_scenarios.jsonl",
+    )
+
+    existing = [name for name in removed if (ROOT / "tests" / "fixtures" / name).exists()]
+    assert existing == []
+    assert not (ROOT / "tests" / "test_assistant_nlu_eval.py").exists()
+    assert not (ROOT / "tests" / "test_assistant_context_projection.py").exists()
+    assert not (ROOT / "tests" / "test_assistant_context_validation.py").exists()
+
+
+def test_planner_tool_metadata_lives_on_agent_tool_definitions() -> None:
     from dataclasses import fields
 
     from src.application.agent_tool_registry import get_tool_definition
-    from src.application.assistant.agent_loop import _copilot_tool_manifest
     from src.application.assistant.tool_bindings import AssistantToolBinding
 
     binding_fields = {field.name for field in fields(AssistantToolBinding)}
@@ -200,7 +217,6 @@ def test_copilot_tool_metadata_lives_on_agent_tool_definitions() -> None:
     assert "planner_semantics" not in binding_fields
     assert "copilot_notes" not in binding_fields
 
-    manifest_by_name = {str(item["name"]): item for item in _copilot_tool_manifest()}
     for tool_name in (
         "monthly_income_report",
         "analysis_catalog",
@@ -215,10 +231,6 @@ def test_copilot_tool_metadata_lives_on_agent_tool_definitions() -> None:
         assert definition is not None, tool_name
         assert definition.planner_notes, tool_name
         assert definition.resolve_planner_semantics({"analysis_view_names": None}), tool_name
-        assert manifest_by_name[tool_name]["copilot_notes"] == list(definition.planner_notes)
-        assert manifest_by_name[tool_name]["semantics"] == definition.resolve_planner_semantics(
-            {"analysis_view_names": None}
-        )
 
 
 def test_read_tool_allowlist_has_neutral_owner() -> None:
@@ -377,11 +389,21 @@ def test_assistant_runtime_delegates_perception() -> None:
     offenders = [token for token in forbidden_runtime_tokens if token in runtime_text]
     assert offenders == []
 
-    perception_tokens = tuple(token for token in forbidden_runtime_tokens if token != "parse_deterministic_text") + (
+    perception_tokens = (
+        "parse_assistant_command",
         "parse_permission_response",
+        "natural_language_rebuilding_error",
     )
     for token in perception_tokens:
         assert token in perception_text
+    removed_tokens = (
+        "run_read_only_agent_loop",
+        "generate_general_reply",
+        "build_conversation_context",
+        "context_trace",
+    )
+    offenders = [token for token in removed_tokens if token in perception_text]
+    assert offenders == []
     assert "translate_inbound_intent" not in perception_text
 
 

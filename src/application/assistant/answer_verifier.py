@@ -5,7 +5,6 @@ import re
 from typing import Any
 
 from src.application.assistant.evidence import EvidenceBundle
-from src.application.assistant.task_profiles import TaskProfile, profile_by_name
 
 
 _CURRENCY_AMOUNT_RE = re.compile(r"\b(USD|HKD|CNY)\s*([-+]?\d[\d,]*(?:\.\d+)?)", re.IGNORECASE)
@@ -292,7 +291,6 @@ def verify_response_shape(
     families = {str(item) for item in contract.get("intent_families") or [] if str(item).strip()}
     task_mode = str(contract.get("task_mode") or "").strip()
     answer_shape = tuple(str(item) for item in contract.get("answer_shape") or [] if str(item).strip())
-    task_profiles = _contract_task_profiles(contract)
     scope = contract.get("scope") if isinstance(contract.get("scope"), dict) else {}
     coverage_payload = coverage if isinstance(coverage, dict) else {}
     coverage_missing = tuple(str(item) for item in coverage_payload.get("missing") or [] if str(item).strip())
@@ -310,11 +308,6 @@ def verify_response_shape(
                 strict_shape_keys.add("main_drivers")
             if "drivers" in answer_shape:
                 enforced_shape_keys["drivers"] = "main_drivers"
-        for profile in task_profiles:
-            enforced_missing_keys.update(profile.completion_answer_keys)
-            strict_shape_keys.update(profile.completion_answer_keys)
-            if "evidence_boundary" in profile.answer_shape:
-                enforced_shape_keys["evidence_boundary"] = "source_and_policy"
         if "assigned_stock_pnl" in families and any(str(gap.get("kind") or "") == "recoverable_missing_quote" for gap in coverage_gaps):
             enforced_missing_keys.update({"spot_freshness", "unrealized_pnl", "lifecycle_pnl"})
         if "upgrade_status" in families:
@@ -486,18 +479,6 @@ def _shape_missing_key_acknowledged(compact: str, *, key: str, gaps: list[dict[s
             if str(symbol).strip().lower() in compact:
                 return True
     return False
-
-
-def _contract_task_profiles(contract: dict[str, Any]) -> tuple[TaskProfile, ...]:
-    names = {str(item).strip() for item in contract.get("task_profiles") or [] if str(item).strip()}
-    copilot_task = contract.get("copilot_task") if isinstance(contract.get("copilot_task"), dict) else {}
-    names.update(str(item).strip() for item in copilot_task.get("profile_names") or [] if str(item).strip())
-    profiles: list[TaskProfile] = []
-    for name in sorted(names):
-        profile = profile_by_name(name)
-        if profile is not None:
-            profiles.append(profile)
-    return tuple(profiles)
 
 
 def _shape_violation(violation_type: str, key: str, evidence: str) -> dict[str, Any]:

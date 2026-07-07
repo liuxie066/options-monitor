@@ -1319,7 +1319,7 @@ def test_inbound_upgrade_cancel_persists_readback_trace(monkeypatch: pytest.Monk
     assert len(calls) == 1
 
     trace = collect_assistant_trace(audit_db=str(audit_db), command_id=operation_id)
-    assert trace["trace_count"] == 1
+    assert trace["trace_count"] == 2
     entry = trace["traces"][0]
     assert entry["identity"]["command_id"] == operation_id
     assert entry["task"]["state"] == "done"
@@ -1334,6 +1334,11 @@ def test_inbound_upgrade_cancel_persists_readback_trace(monkeypatch: pytest.Monk
     assert tool["payload"]["status"] == "cancelled"
     assert tool["postcheck"]["status"] == "pass"
     assert any(item["hook"] == "operation_readback" and item["status"] == "pass" for item in tool["hook_results"])
+    preview_entry = trace["traces"][1]
+    assert preview_entry["identity"]["command_id"] == operation_id
+    assert preview_entry["task"]["state"] == "waiting_for_permission"
+    assert preview_entry["answer"]["response_status"] == "preview"
+    assert preview_entry["permission_state"]["pending_operation_ids"] == [operation_id]
     trace_text = trace["response_text"]
     assert "任务：升级预览：1.2.110 -> 1.2.111 status dry_run" in trace_text
     assert "工具：读取OM 本地操作回执（ok，1 行）" in trace_text

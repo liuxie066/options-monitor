@@ -153,13 +153,11 @@ Use `./om assistant handle` when a remote messaging gateway needs to send user t
 
 This is a controlled Inbound Assistant message entrypoint, not an `./om-agent`
 tool and not a shell bridge. It performs slash-command parsing, deterministic
-operation-alias handling or bounded AgentLoop planning, sender allowlist checks,
-message idempotency, SQLite audit, and then calls an allowlisted tool or
-creates a pending preview through the existing operation path. The current
-`./om assistant ...` CLI namespace and `assistant` config keys remain
-compatibility names. Inbound config may opt into LLM tool planning; planner
-output still returns into the same allowlist, audit, pending-operation, and
-renderer path. LLM-originated plans may read or initiate approved previews only;
+operation-alias handling, sender allowlist checks, message idempotency, SQLite
+audit, and then calls an allowlisted tool or creates a pending preview through
+the existing operation path. The current `./om assistant ...` CLI namespace and
+`assistant` config keys remain compatibility names. Free-form natural-language
+execution is currently disabled and returns `NATURAL_LANGUAGE_REBUILDING`;
 confirm/cancel/apply remains deterministic-only.
 
 Remote channels require:

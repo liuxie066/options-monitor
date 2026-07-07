@@ -104,16 +104,10 @@ current implementation path remains `src/application/assistant/...`:
 Feishu / future channels
 -> src.application.channels.ChannelService
 -> src.application.inbound.feishu(_ws)
--> AgentSession / AgentSessionSnapshot
--> AgentLoop
-   -> Perceive
-   -> Understand
-   -> Plan
-   -> Decide
-   -> Act
-   -> Observe
-   -> Verify / Replan
-   -> Compose / Verify Answer
+-> sender allowlist / idempotency
+-> command parser or pending-operation permission parser
+-> deterministic reasoning/action/rendering
+-> audit / session / operation persistence
 -> channel reply
 ```
 
@@ -122,29 +116,27 @@ Inbound control and outbound notifications are capabilities of the
 same channel model. `src.application.inbound` should stay thin: extract channel
 payloads, enforce channel-specific receive/reply mechanics, and build the
 transport request.
-`AgentSession` is the Agent task boundary, currently represented by
-`AssistantRequest`, `AgentSessionSnapshot`, the audit row, conversation context,
-pending-operation store, and durable operator trace in the inbound SQLite
-`agent_sessions` table. It is not a separate runtime service or a second
+`AssistantRequest`, the audit row, conversation context, pending-operation
+store, and durable operator trace in the inbound SQLite tables form the current
+Inbound Assistant boundary. They are not a separate runtime service or a second
 pending-operation store.
-Protocol command parsing, bound permission responses, natural-language
-AgentLoop routing, sender allowlist checks, SQLite audit, preview/confirm
-operations, and user-facing rendering are owned by
+Protocol command parsing, bound permission responses, sender allowlist checks,
+SQLite audit, preview/confirm operations, and user-facing rendering are owned by
 `src.application.assistant`.
 
 The current implementation path still contains files named `runtime.py`,
 `router.py`, `perception.py`, `reasoning.py`, `action.py`, and
-`observation.py`; those are implementation handles inside one Agent loop, not
-separate product runtime layers. `assistant.mode` is retired and unsupported;
-the active product path is controlled by `assistant.enabled` and
-`assistant.agent_loop.enabled`. `assistant.planner.enabled` is a deprecated
-compatibility alias only.
+`observation.py`; those are implementation handles inside one Inbound Assistant
+control plane, not separate product runtime layers. `assistant.mode` is retired
+and unsupported. `assistant.agent_loop.enabled` is accepted only as a legacy
+no-op compatibility field; it does not enable free-form execution.
 
-LLM providers are optional. In the default `agent_loop`, OM Copilot derives the
-task frame, evidence plan, preview route, and answer from deterministic OM
-tools. Provider model-turn planning remains an explicit injected/diagnostic
-compatibility path, not the default free-form route. Deterministic OM tools own
-facts, and write actions remain behind preview/confirm gates.
+LLM providers are configuration/diagnostic surfaces only in the current
+runtime. Free-form natural-language execution is disabled: non-slash,
+non-permission messages return `NATURAL_LANGUAGE_REBUILDING`, perform no tool
+calls, and do not fall back to a generic planner or ordinary LLM chat.
+Deterministic OM tools own facts, and write actions remain behind
+preview/confirm gates.
 
 Model selection is a control-plane concern. `config.yaml` may define multiple
 `assistant.models` profiles and an `assistant.active_model`, but
@@ -152,39 +144,33 @@ Model selection is a control-plane concern. `config.yaml` may define multiple
 `config.assistant.json`. Runtime, router, perception, reasoning, action, and
 tool execution must not depend on model profiles or choose models per message.
 
-Inbound uses one internal Agent-loop contract. Slash commands enter through the
-ProtocolGate command parser and never call LLM. Bound confirm/cancel phrases
+Inbound uses one explicit command/permission contract. Slash commands enter
+through the ProtocolGate command parser and never call LLM. Bound confirm/cancel phrases
 such as `确认升级` enter PermissionResponseGate only when they match an
 existing pending operation in the same sender/channel/conversation scope.
-All other non-slash natural language enters AgentLoop / OM Copilot.
-Deterministic code is limited to protocol parsing, permission binding, task
-profiles, evidence planning, tool execution, validators, renderers, and
-operation apply boundaries; it must not recover natural-language business
-intent through unrelated command fallback. Objective slot repair is handled by
-small focused helpers such as month filters or position-query filters, not by a
-generic natural-language parser.
-AgentLoop may plan read tools or exactly one preview capability from
-`manual_trade_open`, `manual_trade_close`, `manual_assignment`, `manual_expiry`,
-`manual_trade_update`, `symbol_edit`, `model_use`, or `upgrade_now`. Any preview-write result can only enter an
-existing pending-operation path. Confirm, cancel, apply, notifications, direct
-config writes, ledger/trade writes, and service operations remain outside model
-authority.
+All other non-slash natural language is rejected with
+`NATURAL_LANGUAGE_REBUILDING`. Deterministic code is limited to protocol
+parsing, permission binding, explicit command payload construction, tool
+execution, validators, renderers, and operation apply boundaries; it must not
+recover natural-language business intent through unrelated command fallback.
+Any preview-write result can only enter an existing pending-operation path.
+Confirm, cancel, apply, notifications, direct config writes, ledger/trade
+writes, and service operations remain outside model authority.
 
 ```text
 Perceive   -> AssistantRequest / channel context
-Understand -> PerceptionResult or internal Copilot event plan
+Understand -> PerceptionResult or NATURAL_LANGUAGE_REBUILDING
 Decide     -> ReasoningResolution / permission decision
 Act        -> ActionResult / ToolResult / PendingOperation
 Observe    -> ObservationResponse / audited reply
 ```
 
-ProtocolGate, PermissionResponseGate, and AgentLoop must only emit
-`PerceptionResult` or bounded Copilot task/evidence events. Tool-name
+ProtocolGate and PermissionResponseGate emit `PerceptionResult`. Tool-name
 selection, config-scoped payload construction, capability support, safety class
 validation, and confirmation requirements are owned by
-`src.application.assistant.reasoning`, Copilot task profiles, and AgentLoop
-validation. Execution is owned by `src.application.assistant.action`, and
-response shaping is owned by `src.application.assistant.observation`.
+`src.application.assistant.reasoning`. Execution is owned by
+`src.application.assistant.action`, and response shaping is owned by
+`src.application.assistant.observation`.
 
 ## Runtime Tick Flow
 

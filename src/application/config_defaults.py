@@ -135,11 +135,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "assistant": {
             "enabled": True,
             "context_window_messages": 8,
-            "agent_loop": {
-                "enabled": True,
-            },
             "planner": {
-                "enabled": True,
+                "enabled": False,
             },
             "llm": {
                 "provider": "",

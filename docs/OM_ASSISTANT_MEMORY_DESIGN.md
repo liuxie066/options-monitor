@@ -1,8 +1,7 @@
 # OM Assistant Memory Design
 
-This document defines the first bounded memory surface for `./om assistant`.
-It is a current design note for the implemented read-only memory path, not a
-general agent roadmap.
+This document defines the current bounded memory proposal surface for
+`./om assistant`. It is not a free-form task memory system.
 
 ## Goal
 
@@ -18,13 +17,8 @@ store, or a hidden permission source.
 
 Implemented scope:
 
-- read topic markdown files from `assistant_memory/`,
-- ignore the optional `assistant_memory/MEMORY.md` entrypoint file for now,
-- accept only explicitly allowed memory types,
-- load matching entries as hint-only `assistant_memory`,
-- project sanitized entries into `ContextProjection.relevant_memories`,
-- expose trace counts for audit,
-- keep existing `user.md` profile behavior compatible,
+- keep the markdown memory file format and loader available for explicit
+  operator commands/tests,
 - manage explicit memory proposals under `assistant_memory/proposals/`,
 - suggest memory proposals from explicit remember/preference/correction text,
 - create one proposal sidecar from explicit remember/preference/correction text
@@ -33,6 +27,7 @@ Implemented scope:
 
 Not implemented yet:
 
+- model-visible memory projection,
 - automatic memory writes,
 - automatic background memory extraction,
 - session-memory summarization,
@@ -46,8 +41,7 @@ Use existing assistant naming:
 | Name | Meaning |
 |---|---|
 | `assistant_memory` | read-only long-term memory source |
-| `ContextProjection.relevant_memories` | bounded model-visible memory hints |
-| `assistant_trace` / context trace | audit surface for what memory was loaded |
+| `assistant_trace` | audit surface for explicit proposal commands |
 | `session_memory` | future short-term summarization surface, not implemented |
 | `EvidenceBundle` | tool evidence surface; memory is not evidence |
 
@@ -117,22 +111,13 @@ this config value now" or "this symbol is currently safe".
 
 ```text
 AssistantRequest
-  -> build_conversation_context
-     -> load_user_profile_context(user.md)
-     -> load_assistant_memory_context(assistant_memory/, query=current message)
-  -> build_context_projection
-     -> ContextProjection.relevant_memories
-     -> policy: memory is hint-only, tool evidence wins, memory cannot authorize writes
-  -> planner input
-     -> model can use memory as preference hints only
-  -> tool execution / evidence / answer verification
+  -> command / permission handling
   -> explicit memory suggestion check
      -> optional assistant_memory/proposals/<proposal_id>.json sidecar
      -> response data/meta memory_suggestion audit summary
 ```
 
-The full raw memory source is not passed directly to planner input. Only
-bounded, redacted, projected entries are visible.
+No memory content is passed to a planner or model in the current runtime.
 
 The memory suggestion check runs after the assistant answer is formed. It is
 not part of planning and cannot change tool authorization. It only reacts to
@@ -199,9 +184,8 @@ Sensitive frontmatter fields and body lines containing token, password, cookie,
 authorization, secret, private key, webhook, or API-key markers are redacted
 before projection.
 
-Projection enforces bounded item counts and text limits. If the projection
-exceeds the context budget, `relevant_memories` are removed before recent turns
-or evidence refs, because tool evidence has higher authority than memory.
+Future projection work must define its own bounded context contract before any
+memory content becomes model-visible.
 
 ## Future Work
 

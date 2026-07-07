@@ -522,10 +522,6 @@ def is_llm_planner_preview_spec(spec: AssistantCommandSpec) -> bool:
     return bool(_planner_allowed(spec) and _kind(spec) == "preview")
 
 
-def is_llm_copilot_preview_spec(spec: AssistantCommandSpec) -> bool:
-    return is_llm_planner_preview_spec(spec)
-
-
 def planner_allowed_specs() -> tuple[AssistantCommandSpec, ...]:
     return tuple(spec for spec in COMMAND_SPECS if _planner_allowed(spec))
 
@@ -682,11 +678,11 @@ def _capability_text_line(item: dict[str, Any]) -> str:
 
 def command_help_text() -> str:
     specs = [_spec_payload(spec) for spec in COMMAND_SPECS]
-    read_only = [item for item in specs if item["read_only"] and item["llm_visible"]]
+    read_only = [item for item in specs if item["read_only"] and item.get("commands")]
     preview_writes = [
         item
         for item in specs
-        if not item["read_only"] and item["risk_level"] in {"preview_write", "preview_admin"}
+        if not item["read_only"] and item["risk_level"] in {"preview_write", "preview_admin"} and item.get("commands")
     ]
     confirm_shortcuts = _non_slash_examples(
         item for item in specs if not item["read_only"] and item["intent_name"].endswith("_confirm")
@@ -727,7 +723,7 @@ def _help_menu_line(item: dict[str, Any]) -> str:
 
 
 def _help_examples(item: dict[str, Any]) -> str:
-    examples = _unique(item.get("examples") or ())
+    examples = [example for example in _unique(item.get("examples") or ()) if str(example).strip().startswith("/")]
     commands = [
         command
         for command in _unique(item.get("commands") or ())

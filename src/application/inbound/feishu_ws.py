@@ -62,8 +62,8 @@ class FeishuWsSettings:
     ack_reaction: str = ""
     queue_size: int = DEFAULT_FEISHU_WS_QUEUE_SIZE
     assistant_enabled: bool = True
-    assistant_agent_loop_enabled: bool = True
-    assistant_planner_enabled: bool = True
+    assistant_freeform_runtime_enabled: bool = False
+    assistant_planner_enabled: bool = False
     assistant_context_window_messages: int = DEFAULT_CONTEXT_WINDOW_MESSAGES
     assistant_default_market_scope: str = ""
     assistant_llm: AssistantLlmSettings = field(default_factory=AssistantLlmSettings)
@@ -103,7 +103,7 @@ class FeishuWsSettings:
             "ack_reaction": self.ack_reaction,
             "queue_size": int(self.queue_size),
             "assistant_enabled": bool(self.assistant_enabled),
-            "assistant_agent_loop_enabled": bool(self.assistant_agent_loop_enabled),
+            "assistant_freeform_runtime_enabled": bool(self.assistant_freeform_runtime_enabled),
             "assistant_planner_enabled": bool(self.assistant_planner_enabled),
             "assistant_context_window_messages": int(self.assistant_context_window_messages),
             "assistant_default_market_scope": self.assistant_default_market_scope,
@@ -159,7 +159,7 @@ def build_feishu_ws_settings(
             default=DEFAULT_FEISHU_WS_QUEUE_SIZE,
         ),
         assistant_enabled=bool(assistant_settings.enabled),
-        assistant_agent_loop_enabled=bool(assistant_settings.agent_loop_enabled),
+        assistant_freeform_runtime_enabled=bool(assistant_settings.freeform_runtime_enabled),
         assistant_planner_enabled=bool(assistant_settings.planner_enabled),
         assistant_context_window_messages=assistant_settings.context_window_messages,
         assistant_default_market_scope=assistant_settings.default_market_scope,
@@ -204,13 +204,10 @@ def handle_feishu_ws_event(
     reaction_fn: ReactionFn = add_message_reaction,
     channel_service: ChannelService | None = None,
     execute_tool_fn: ExecuteToolFn | None = None,
-    generate_reply_fn: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     inbound_kwargs: dict[str, Any] = {"allowed_senders": settings.allowed_senders}
     if execute_tool_fn is not None:
         inbound_kwargs["execute_tool_fn"] = execute_tool_fn
-    if generate_reply_fn is not None:
-        inbound_kwargs["generate_reply_fn"] = generate_reply_fn
     service = channel_service or build_feishu_inbound_channel_service()
     inbound = service.handle_inbound(
         FEISHU_APP_NOTIFICATION_PROVIDER,
@@ -243,7 +240,6 @@ def serve_feishu_ws(
     reply_fn: ReplyFn = reply_text_message,
     reaction_fn: ReactionFn = add_message_reaction,
     execute_tool_fn: ExecuteToolFn | None = None,
-    generate_reply_fn: Callable[..., Any] | None = None,
     start_client_fn: StartClientFn = start_feishu_ws_client,
     lock_path: str | os.PathLike[str] | None = None,
 ) -> None:
@@ -254,7 +250,6 @@ def serve_feishu_ws(
             reply_fn=reply_fn,
             reaction_fn=reaction_fn,
             execute_tool_fn=execute_tool_fn,
-            generate_reply_fn=generate_reply_fn,
         )
         worker.start()
         try:
@@ -275,13 +270,11 @@ class _FeishuWsWorker:
         reply_fn: ReplyFn,
         reaction_fn: ReactionFn,
         execute_tool_fn: ExecuteToolFn | None,
-        generate_reply_fn: Callable[..., Any] | None = None,
     ) -> None:
         self._settings = settings
         self._reply_fn = reply_fn
         self._reaction_fn = reaction_fn
         self._execute_tool_fn = execute_tool_fn
-        self._generate_reply_fn = generate_reply_fn
         self._queue: queue.Queue[dict[str, Any] | None] = queue.Queue(maxsize=max(1, int(settings.queue_size)))
         self._thread = threading.Thread(target=self._run, name="om-feishu-ws-worker", daemon=True)
 
@@ -310,7 +303,6 @@ class _FeishuWsWorker:
                     reply_fn=self._reply_fn,
                     reaction_fn=self._reaction_fn,
                     execute_tool_fn=self._execute_tool_fn,
-                    generate_reply_fn=self._generate_reply_fn,
                 )
             except Exception:
                 LOG.exception("failed to process Feishu WebSocket event")
