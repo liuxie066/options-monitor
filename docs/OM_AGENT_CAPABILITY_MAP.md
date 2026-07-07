@@ -10,7 +10,6 @@ terminology and runtime ownership are defined in
 |---|---|---|
 | Tool Gateway | `./om-agent` | `src/application/agent_tool_registry.py` |
 | Inbound Assistant | `./om assistant handle` | `src/application/assistant/capability_catalog.py` and explicit command parsing |
-| Copilot v2 Prototype | `./om assistant copilot-run` | `src/application/assistant_copilot/` local-only task runtime |
 
 `./om-agent` is for structured JSON tools. `./om assistant` is for channel
 messages and deterministic command handling.
@@ -35,11 +34,6 @@ Inbound Assistant currently rejects:
 - fallback to generic LLM chat.
 
 Rejected free text returns `NATURAL_LANGUAGE_REBUILDING`.
-
-The local `copilot-run` prototype is separate from inbound handling. It is
-allowed to test task framing, read-only evidence planning, evidence ledgers, and
-answer verification against a configured local model or test fake, but it is not
-enabled for channel messages.
 
 ## Read Boundary
 

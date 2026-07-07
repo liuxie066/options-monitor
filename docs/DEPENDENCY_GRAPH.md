@@ -12,8 +12,8 @@ Limitations: this captures Python import edges only. It does not see dynamic imp
 
 ## Summary
 
-- Python files scanned: 692 (`src`: 405, `domain`: 52, `scripts`: 7, `tests`: 228)
-- Internal import edges: 3621 total, 1709 production/script edges excluding tests
+- Python files scanned: 684 (`src`: 398, `domain`: 52, `scripts`: 7, `tests`: 227)
+- Internal import edges: 3597 total, 1690 production/script edges excluding tests
 - Parse errors: 0
 - Boundary guard status: **PASS**
 - Production module cycles: 0
@@ -33,22 +33,22 @@ flowchart LR
   storage["domain.storage"]
   application -->|227| domain
   application -->|2| domain_services
-  application -->|107| infrastructure
+  application -->|105| infrastructure
   application -->|34| storage
   domain_services -->|5| domain
   domain_services -->|2| storage
   infrastructure -->|1| domain
-  interfaces -->|112| application
+  interfaces -->|111| application
   interfaces -->|2| domain
   scripts -->|2| application
   scripts -->|1| infrastructure
   scripts -->|2| storage
   storage -->|1| domain
-  tests -->|1302| application
+  tests -->|1299| application
   tests -->|291| domain
   tests -->|2| domain_services
   tests -->|93| infrastructure
-  tests -->|180| interfaces
+  tests -->|178| interfaces
   tests -->|8| scripts
   tests -->|18| storage
 ```
@@ -58,8 +58,8 @@ flowchart LR
 | from | to | imports |
 |---|---|---|
 | application | domain | 227 |
-| interfaces | application | 112 |
-| application | infrastructure | 107 |
+| interfaces | application | 111 |
+| application | infrastructure | 105 |
 | application | storage | 34 |
 | domain_services | domain | 5 |
 | application | domain_services | 2 |
@@ -75,9 +75,9 @@ flowchart LR
 
 | from | to | imports |
 |---|---|---|
-| tests | application | 1302 |
+| tests | application | 1299 |
 | tests | domain | 291 |
-| tests | interfaces | 180 |
+| tests | interfaces | 178 |
 | tests | infrastructure | 93 |
 | tests | storage | 18 |
 | tests | scripts | 8 |
@@ -90,8 +90,8 @@ The full compressed Mermaid graph is in [`docs/dependency_graph.mmd`](dependency
 | from | to | imports |
 |---|---|---|
 | src.application | domain.domain | 119 |
-| src.interfaces | src.application | 92 |
-| src.application | src.infrastructure | 77 |
+| src.interfaces | src.application | 91 |
+| src.application | src.infrastructure | 75 |
 | src.application.ledger | domain.domain.ledger | 29 |
 | src.application | domain.storage | 25 |
 | src.application.positions | src.application | 18 |
@@ -175,7 +175,7 @@ Package-level cycles are expected to be noisier because many flat `src.applicati
 
 | module | incoming imports |
 |---|---|
-| src.application.agent_tool_contracts | 87 |
+| src.application.agent_tool_contracts | 84 |
 | src.infrastructure.io_utils | 43 |
 | domain.domain.ledger.position_fields | 42 |
 | domain.domain.symbol_identity | 38 |
