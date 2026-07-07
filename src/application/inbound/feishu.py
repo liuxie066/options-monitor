@@ -20,7 +20,6 @@ def handle_feishu_payload(
     allowed_senders: str | None = None,
     assistant_settings: Any | None = None,
     assistant_config_path: str | None = None,
-    generate_reply_fn: Any | None = None,
 ) -> dict[str, Any]:
     event_type = _extract_event_type(payload)
     if event_type and event_type != "im.message.receive_v1":
@@ -44,8 +43,6 @@ def handle_feishu_payload(
     kwargs: dict[str, Any] = {"allowed_senders": allowed_senders}
     if execute_tool_fn is not None:
         kwargs["execute_tool_fn"] = execute_tool_fn
-    if generate_reply_fn is not None:
-        kwargs["generate_reply_fn"] = generate_reply_fn
     settings = assistant_settings or _assistant_settings(
         config_key=config_key,
         config_path=config_path,

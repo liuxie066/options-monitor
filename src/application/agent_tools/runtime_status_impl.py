@@ -2332,10 +2332,14 @@ def runtime_status_tool(
     assistant_audit_summary = assistant_runtime.get("audit") if isinstance(assistant_runtime.get("audit"), dict) else {}
     assistant_latest = assistant_audit_summary.get("latest") if isinstance(assistant_audit_summary.get("latest"), dict) else {}
     data["summary"]["assistant_enabled"] = bool(assistant_config_summary.get("enabled"))
-    assistant_agent_loop = assistant_config_summary.get("agent_loop") if isinstance(assistant_config_summary.get("agent_loop"), dict) else {}
-    assistant_planner = assistant_config_summary.get("planner") if isinstance(assistant_config_summary.get("planner"), dict) else {}
-    data["summary"]["assistant_agent_loop_enabled"] = bool(assistant_agent_loop.get("enabled", assistant_planner.get("enabled")))
-    data["summary"]["assistant_planner_enabled"] = bool(assistant_planner.get("enabled"))
+    assistant_freeform = (
+        assistant_config_summary.get("freeform_runtime")
+        if isinstance(assistant_config_summary.get("freeform_runtime"), dict)
+        else {}
+    )
+    data["summary"]["assistant_agent_loop_enabled"] = False
+    data["summary"]["assistant_freeform_runtime_enabled"] = bool(assistant_freeform.get("execution_enabled"))
+    data["summary"]["assistant_planner_enabled"] = False
     data["summary"]["assistant_llm_enabled"] = bool(assistant_llm_summary.get("enabled"))
     data["summary"]["assistant_llm_provider"] = assistant_llm_summary.get("provider")
     data["summary"]["assistant_latest_route"] = assistant_latest.get("route")

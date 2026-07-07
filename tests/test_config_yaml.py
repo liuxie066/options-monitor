@@ -460,7 +460,7 @@ inbound:
     cfg, _meta = resolve_yaml_assistant_config(repo_root=REPO_ROOT, config_path=config_path)
 
     assert cfg["assistant"]["enabled"] is True
-    assert cfg["assistant"]["planner"]["enabled"] is True
+    assert cfg["assistant"]["planner"]["enabled"] is False
     assert cfg["assistant"]["llm"]["api_key_env"] == "OM_LLM_API_KEY"
     assert cfg["inbound"]["feishu_ws"]["reply_enabled"] is True
     assert cfg["inbound"]["feishu_ws"]["queue_size"] == 100

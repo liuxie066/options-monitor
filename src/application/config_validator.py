@@ -299,12 +299,12 @@ def _validate_assistant_config(cfg: dict) -> None:
     if not isinstance(llm, dict):
         die('assistant.llm must be an object')
     if 'enabled' in llm:
-        die('assistant.llm.enabled is retired; use assistant.agent_loop.enabled')
+        die('assistant.llm.enabled is retired; use assistant.planner.enabled')
     _validate_llm_config(
         llm,
         path='assistant.llm',
         enabled=False,
-        required_reason='assistant AgentLoop uses LLM',
+        required_reason='assistant planner uses LLM',
     )
 
     if 'agent' in cfg:

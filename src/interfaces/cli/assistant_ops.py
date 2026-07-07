@@ -15,7 +15,6 @@ from src.application.assistant import (
     command_catalog_payload,
 )
 from src.application.assistant.config_loader import load_assistant_config
-from src.application.assistant.context_eval import CONTEXT_EVAL_MODES, format_context_eval_text, run_context_eval_suite
 from src.application.assistant.contracts import AssistantRequest, AssistantTurnResult
 from src.application.assistant.diagnostics import check_assistant_llm
 from src.application.assistant.llm_model_profiles import (
@@ -52,16 +51,6 @@ def _dumps(payload: dict[str, Any]) -> str:
 def _print(payload: dict[str, Any]) -> int:
     sys.stdout.write(_dumps(payload))
     return 0 if payload.get("ok", True) else 2
-
-
-def _default_context_eval_fixture(base: Path, *, mode: str) -> Path:
-    if mode == "projection":
-        return base / "tests" / "fixtures" / "assistant_context_projection.jsonl"
-    if mode == "validation":
-        return base / "tests" / "fixtures" / "assistant_context_validation.jsonl"
-    if mode == "scenarios":
-        return base / "tests" / "fixtures" / "assistant_context_scenarios.jsonl"
-    return base / "tests" / "fixtures" / "assistant_agent_eval.jsonl"
 
 
 def _assistant_settings_for_cli(
@@ -111,14 +100,6 @@ def add_assistant_commands(parser: argparse.ArgumentParser) -> None:
         help="list supported assistant capabilities and LLM routing surface",
     )
     assistant_capabilities.add_argument("--format", choices=("json", "text"), default="json")
-    assistant_context_eval = assistant_sub.add_parser(
-        "eval-context",
-        help="run assistant context eval fixtures and print context decision report",
-    )
-    assistant_context_eval.add_argument("--fixture", default=None)
-    assistant_context_eval.add_argument("--case-id", action="append", default=None)
-    assistant_context_eval.add_argument("--mode", choices=CONTEXT_EVAL_MODES, default="copilot_context")
-    assistant_context_eval.add_argument("--format", choices=("json", "text"), default="text")
     assistant_memory = assistant_sub.add_parser("memory", help="manage assistant memory proposals")
     assistant_memory_sub = assistant_memory.add_subparsers(dest="assistant_memory_command", required=True)
     assistant_memory_propose = assistant_memory_sub.add_parser("propose", help="create one assistant memory proposal")
@@ -575,23 +556,6 @@ def handle_assistant_command(
             return 0
         tool_name = "assistant.capabilities" if args.assistant_command == "capabilities" else "assistant.commands"
         return _print(build_response(tool_name=tool_name, ok=True, data=data))
-
-    if args.assistant_command == "eval-context":
-        fixture_path = (
-            Path(args.fixture).expanduser().resolve()
-            if args.fixture
-            else _default_context_eval_fixture(repo_base_fn(), mode=args.mode)
-        )
-        data = run_context_eval_suite(fixture_path=fixture_path, case_ids=args.case_id, mode=args.mode)
-        out = build_response(
-            tool_name="assistant.eval_context",
-            ok=bool(data.get("summary", {}).get("ok")),
-            data=data,
-        )
-        if args.format == "text":
-            sys.stdout.write(format_context_eval_text(data).strip() + "\n")
-            return 0 if out.get("ok", True) else 2
-        return _print(out)
 
     if args.assistant_command == "handle":
         assistant_settings = _assistant_settings_for_cli(

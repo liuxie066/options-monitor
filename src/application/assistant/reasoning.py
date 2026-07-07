@@ -14,7 +14,6 @@ from src.application.assistant.contracts import (
     ToolCall,
 )
 from src.application.assistant.position_query import PositionQuery
-from src.application.assistant.tool_policy import INTERNAL_TOOL_LOOP_NAME
 from src.application.assistant.tool_bindings import binding_for_intent, config_required_intent_names
 
 
@@ -41,9 +40,6 @@ def resolve_reasoning(perception: PerceptionResult, *, request: AssistantRequest
             action_kind="local_response",
             reason="local_help",
         )
-    if perception.intent_name == "tool_loop":
-        return _internal_tool_loop_resolution(perception, request=request)
-
     spec = _COMMAND_SPECS_BY_INTENT.get(perception.intent_name)
     if spec is None:
         return _unsupported(perception, reason="unknown_capability")
@@ -70,38 +66,6 @@ def resolve_reasoning(perception: PerceptionResult, *, request: AssistantRequest
         read_only=bool(spec.read_only),
         requires_confirmation=requires_confirmation,
         reason=_resolution_reason(risk_level, read_only=spec.read_only),
-    )
-
-
-def _internal_tool_loop_resolution(perception: PerceptionResult, *, request: AssistantRequest) -> ReasoningResolution:
-    if perception.source != "agent_loop_events":
-        raise AgentToolError(
-            code="PERMISSION_DENIED",
-            message="tool_loop is only allowed from agent_loop event planning",
-            details={"source": perception.source},
-        )
-    events = perception.arguments.get("events")
-    if not isinstance(events, list) or not events:
-        raise AgentToolError(code="INPUT_ERROR", message="tool_loop intent requires structured model events")
-    payload = {
-        **_base_payload(request),
-        "question": request.text,
-        "events": [dict(item) for item in events if isinstance(item, dict)],
-        "task_contract": dict(perception.arguments.get("task_contract") or {})
-        if isinstance(perception.arguments.get("task_contract"), dict)
-        else {},
-        "provider": str(perception.arguments.get("provider") or "").strip(),
-    }
-    return ReasoningResolution(
-        status="supported",
-        intent_name=perception.intent_name,
-        arguments=dict(perception.arguments),
-        safety_class="read",
-        action_kind="tool",
-        tool_call=ToolCall(tool_name=INTERNAL_TOOL_LOOP_NAME, payload=payload),
-        read_only=True,
-        requires_confirmation=False,
-        reason="internal_agent_loop_events",
     )
 
 

@@ -1961,7 +1961,7 @@ def test_runtime_status_reports_assistant_llm_and_latest_agent_route(monkeypatch
     data, _warnings, _meta = _call_runtime_status_for_upgrade(tmp_path, fixture["cfg_path"], fixture["cfg"])
 
     assert data["assistant_runtime"]["config"]["enabled"] is True
-    assert data["assistant_runtime"]["config"]["planner"]["enabled"] is True
+    assert data["assistant_runtime"]["config"]["planner"]["enabled"] is False
     assert data["assistant_runtime"]["llm"]["enabled"] is True
     assert data["assistant_runtime"]["llm"]["provider"] == "deepseek"
     assert data["assistant_runtime"]["llm"]["endpoint_url"] == "https://api.deepseek.com/chat/completions"

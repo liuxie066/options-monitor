@@ -81,7 +81,7 @@ def resolve_authoring_assistant_config(assistant_cfg: dict[str, Any]) -> tuple[d
     assistant = deepcopy(assistant_cfg if isinstance(assistant_cfg, dict) else {})
     models_raw = assistant.pop("models", None)
     active_model_raw = assistant.pop("active_model", None)
-    agent_loop_enabled = _assistant_agent_loop_enabled(assistant)
+    planner_enabled = _assistant_planner_config_enabled(assistant)
 
     if models_raw is None and active_model_raw is None:
         return assistant, {
@@ -95,17 +95,17 @@ def resolve_authoring_assistant_config(assistant_cfg: dict[str, Any]) -> tuple[d
     active_model = str(active_model_raw or "").strip()
     warnings: list[str] = []
     if not active_model:
-        if agent_loop_enabled:
+        if planner_enabled:
             raise AgentToolError(
                 code="CONFIG_ERROR",
-                message="assistant.active_model is required when assistant.models is configured and assistant AgentLoop is enabled",
+                message="assistant.active_model is required when assistant.models is configured and assistant planner config is enabled",
             )
         return assistant, {
             "model_profiles_enabled": True,
             "active_model": None,
             "resolved_profile": None,
             "profile_count": len(profiles),
-            "warnings": ["assistant.models configured without active_model; assistant AgentLoop is disabled so assistant.llm is unchanged"],
+            "warnings": ["assistant.models configured without active_model; assistant planner config is disabled so assistant.llm is unchanged"],
         }
 
     active_model = normalize_model_profile_name(active_model, path="assistant.active_model")
@@ -128,7 +128,7 @@ def resolve_authoring_assistant_config(assistant_cfg: dict[str, Any]) -> tuple[d
     }
 
 
-def _assistant_agent_loop_enabled(assistant: dict[str, Any]) -> bool:
+def _assistant_planner_config_enabled(assistant: dict[str, Any]) -> bool:
     if isinstance(assistant.get("enabled"), bool) and assistant.get("enabled") is False:
         return False
     legacy_mode = str(assistant.get("mode") or "").strip().lower()

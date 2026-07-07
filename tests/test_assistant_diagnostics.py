@@ -283,8 +283,8 @@ def test_llm_check_live_probe_skips_removed_provider_planner(tmp_path: Path) -> 
     checks = {item["name"]: item for item in out["checks"]}
     live_probe = checks["live_probe"]
     assert live_probe["status"] == "skipped"
-    assert live_probe["message"] == "live provider probe removed; OM Copilot uses deterministic task routing and scenario eval"
-    assert live_probe["value"] == {"live_requested": True, "probe_count": 0, "copilot_runtime": True}
+    assert live_probe["message"] == "live provider probe removed; free-form assistant execution is rebuilding"
+    assert live_probe["value"] == {"live_requested": True, "probe_count": 0, "freeform_runtime": False}
 
 
 def test_assistant_trace_exposes_compact_diagnostics_without_raw_provider_payload(tmp_path: Path) -> None:

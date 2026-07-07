@@ -666,69 +666,6 @@ def test_assistant_memory_suggest_command_creates_proposal_only(tmp_path: Path, 
     assert "runtime_or_market_fact" in text
 
 
-def test_assistant_eval_context_command_renders_report(capsys) -> None:
-    import src.interfaces.cli.main as cli
-
-    case_id = "copilot_context_candidate_metric_followup_uses_projection_refs"
-    rc = cli.main(["assistant", "eval-context", "--case-id", case_id])
-    text = capsys.readouterr().out
-
-    assert rc == 0
-    assert "assistant context eval: 1/1 passed" in text
-    assert case_id in text
-    assert "sources=copilot.evidence_plan,message,context_projection.recent_evidence" in text
-    assert "projection=om-context-projection-v1" in text
-    assert "refs=1" in text
-
-    rc = cli.main(["assistant", "eval-context", "--case-id", case_id, "--format", "json"])
-    payload = _read_json_output(capsys)
-
-    assert rc == 0
-    assert payload["tool_name"] == "assistant.eval_context"
-    assert payload["ok"] is True
-    assert payload["data"]["summary"]["total"] == 1
-    context = payload["data"]["results"][0]["actual"]["context"]
-    assert context["context_projection"]["schema_version"] == "om-context-projection-v1"
-    assert context["context_projection"]["recent_turn_count"] == 1
-    assert context["context_projection"]["evidence_ref_count"] == 1
-    assert set(context) == {"context_projection", "context_policy"}
-
-    rc = cli.main(["assistant", "eval-context", "--mode", "projection", "--format", "json"])
-    payload = _read_json_output(capsys)
-
-    assert rc == 0
-    assert payload["tool_name"] == "assistant.eval_context"
-    assert payload["ok"] is True
-    assert payload["data"]["summary"]["mode"] == "projection"
-    assert payload["data"]["summary"]["total"] == 1
-    assert payload["data"]["results"][0]["mode"] == "projection"
-    assert payload["data"]["results"][0]["actual"]["context_projection"]["evidence_ref_count"] == 2
-
-    rc = cli.main(["assistant", "eval-context", "--mode", "validation", "--format", "json"])
-    payload = _read_json_output(capsys)
-
-    assert rc == 0
-    assert payload["tool_name"] == "assistant.eval_context"
-    assert payload["ok"] is True
-    assert payload["data"]["summary"]["mode"] == "validation"
-    assert payload["data"]["summary"]["total"] == 10
-    assert payload["data"]["results"][0]["mode"] == "validation"
-    assert payload["data"]["results"][0]["actual"]["context_validation"]["schema_version"] == "om-context-validation-v1"
-
-    rc = cli.main(["assistant", "eval-context", "--mode", "scenarios", "--format", "json"])
-    payload = _read_json_output(capsys)
-
-    assert rc == 0
-    assert payload["tool_name"] == "assistant.eval_context"
-    assert payload["ok"] is True
-    assert payload["data"]["summary"]["mode"] == "scenarios"
-    assert payload["data"]["summary"]["total"] == 24
-    result = payload["data"]["results"][0]
-    assert result["mode"] == "scenarios"
-    assert result["actual"]["validation"]["context_validation"]["schema_version"] == "om-context-validation-v1"
-    assert result["actual"]["validation"]["context_validation"]["status"] in {"passed", "ask_clarification"}
-
-
 def test_assistant_capabilities_command_renders_capability_catalog(capsys) -> None:
     import src.interfaces.cli.main as cli
 
