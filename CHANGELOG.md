@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.361 - 2026-07-07
+
+### Fixed
+- Retried WeChat ClawBot `ret=-2` proactive sends once without the stale `context_token`, while preserving unconfirmed delivery handling and fallback diagnostics.
+
 ## 1.2.360 - 2026-07-07
 
 ### Added
