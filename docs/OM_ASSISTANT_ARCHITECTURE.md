@@ -11,6 +11,7 @@ OM now keeps two separate surfaces:
 |---|---|---|
 | Tool Gateway | `./om-agent` | Structured JSON tools for read diagnostics and gated write operations |
 | Inbound Assistant | `./om assistant handle` | Channel-facing command handler for slash commands, permission replies, audit, and receipts |
+| Copilot v2 Prototype | `./om assistant copilot-run` | Local-only read-first task runtime prototype; not wired to inbound channels |
 
 Free-form natural-language execution is intentionally disabled while the next
 task system is rebuilt. Non-slash, non-permission text returns
@@ -41,11 +42,16 @@ The assistant currently supports:
 
 The assistant currently does not support:
 
-- free-form analysis questions;
+- inbound free-form analysis questions;
 - automatic tool planning from arbitrary natural language;
 - model-authored answer synthesis over tool observations;
 - fallback from failed free-form handling to the generic planner or ordinary LLM
   chat.
+
+`copilot-run` is a local prototype for rebuilding that capability with an
+explicit task frame, read-only evidence plan, evidence ledger, answer
+verification, and trace. It may call the configured assistant LLM locally, but
+it does not change `./om assistant handle` behavior.
 
 ## Tool Authority
 
