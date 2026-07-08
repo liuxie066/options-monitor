@@ -172,6 +172,70 @@ def _trade_intake_summary(state_json: dict[str, Any], status_json: dict[str, Any
     }
 
 
+def _aggregate_trade_intake_summaries(summaries: list[dict[str, Any]]) -> dict[str, Any]:
+    if not summaries:
+        return {"listener_status": None}
+
+    count_keys = (
+        "processed_count",
+        "failed_count",
+        "unresolved_count",
+        "receipt_count",
+        "receipt_confirmed_count",
+        "receipt_failed_count",
+        "last_backfill_deal_count",
+        "last_backfill_applied_count",
+        "last_backfill_skipped_duplicate_count",
+        "last_backfill_failed_count",
+        "last_backfill_unresolved_count",
+        "missed_push_backfill_count",
+    )
+    passthrough_keys = (
+        "listener_stage",
+        "last_heartbeat_utc",
+        "last_push_received_utc",
+        "last_push_deal_id",
+        "last_backfill_check_utc",
+        "last_backfill_window_start_utc",
+        "last_backfill_window_end_utc",
+        "last_backfill_error",
+        "last_deal_result",
+        "last_backfill_result",
+        "last_receipt_result",
+    )
+    statuses = [str(item.get("listener_status") or "").strip() for item in summaries if item.get("listener_status")]
+    if not statuses:
+        listener_status = None
+    elif len(set(statuses)) == 1:
+        listener_status = statuses[0]
+    elif all(status == "listening" for status in statuses):
+        listener_status = "listening"
+    else:
+        listener_status = "partial"
+
+    out: dict[str, Any] = {
+        "listener_status": listener_status,
+        "source_count": len(summaries),
+    }
+    for key in count_keys:
+        out[key] = sum(int(item.get(key) or 0) for item in summaries)
+    for key in passthrough_keys:
+        values = [item.get(key) for item in summaries if item.get(key) not in (None, "")]
+        if values:
+            out[key] = values[-1]
+    return out
+
+
+def _trade_intake_source_path(value: Any, *, base: Path, state_dir: Path) -> Path:
+    path = Path(str(value or ""))
+    if path.is_absolute():
+        return path
+    parts = path.parts
+    if len(parts) >= 2 and parts[0] == "output_shared" and parts[1] == "state":
+        return (state_dir / Path(*parts[2:])).resolve()
+    return (base / path).resolve()
+
+
 def _auto_close_receipt_summary(maintenance_json: dict[str, Any] | Any) -> dict[str, Any] | None:
     if not isinstance(maintenance_json, dict):
         return None
@@ -1880,6 +1944,10 @@ def runtime_status_tool(
         intake_cfg = resolve_trade_intake_config(cfg)
         intake_section_raw = cfg.get("trade_intake")
         intake_section: dict[str, Any] = intake_section_raw if isinstance(intake_section_raw, dict) else {}
+        explicit_intake_paths = any(
+            payload.get(key)
+            for key in ("trade_intake_status_path", "trade_intake_state_path", "trade_intake_audit_path")
+        )
         default_intake_status_path = (
             _path_from_config(intake_cfg["status_path"], base=base)
             if "status_path" in intake_section
@@ -1895,24 +1963,86 @@ def runtime_status_tool(
             if "audit_path" in intake_section
             else state_dir / "auto_trade_intake_audit.jsonl"
         )
-        trade_intake_status = _json_file_info(
-            _path_from_config(payload.get("trade_intake_status_path"), base=base) if payload.get("trade_intake_status_path") else default_intake_status_path,
-            base=base,
-            read_json_object_or_empty=read_json_object_or_empty,
-        )
-        trade_intake_state = _json_file_info(
-            _path_from_config(payload.get("trade_intake_state_path"), base=base) if payload.get("trade_intake_state_path") else default_intake_state_path,
-            base=base,
-            read_json_object_or_empty=read_json_object_or_empty,
-        )
-        trade_intake_audit = _file_info(
-            _path_from_config(payload.get("trade_intake_audit_path"), base=base) if payload.get("trade_intake_audit_path") else default_intake_audit_path,
-            base=base,
-        )
-        trade_intake_state_json = trade_intake_state.get("json")
-        trade_intake_status_json = trade_intake_status.get("json")
-        trade_intake_state_payload: dict[str, Any] = trade_intake_state_json if isinstance(trade_intake_state_json, dict) else {}
-        trade_intake_status_payload: dict[str, Any] = trade_intake_status_json if isinstance(trade_intake_status_json, dict) else {}
+        source_infos: list[dict[str, Any]] = []
+        sources_raw = intake_cfg.get("sources")
+        sources = sources_raw if isinstance(sources_raw, list) else []
+        if sources and not explicit_intake_paths:
+            for source in sources:
+                if not isinstance(source, dict):
+                    continue
+                status_info = _json_file_info(
+                    _trade_intake_source_path(source.get("status_path"), base=base, state_dir=state_dir),
+                    base=base,
+                    read_json_object_or_empty=read_json_object_or_empty,
+                )
+                state_info = _json_file_info(
+                    _trade_intake_source_path(source.get("state_path"), base=base, state_dir=state_dir),
+                    base=base,
+                    read_json_object_or_empty=read_json_object_or_empty,
+                )
+                audit_info = _file_info(
+                    _trade_intake_source_path(source.get("audit_path"), base=base, state_dir=state_dir),
+                    base=base,
+                )
+                state_json = state_info.get("json")
+                status_json = status_info.get("json")
+                state_payload: dict[str, Any] = state_json if isinstance(state_json, dict) else {}
+                status_payload: dict[str, Any] = status_json if isinstance(status_json, dict) else {}
+                source_infos.append(
+                    {
+                        "id": source.get("id"),
+                        "account": source.get("account"),
+                        "enabled": bool(source.get("enabled")),
+                        "mode": source.get("mode"),
+                        "host": source.get("host"),
+                        "port": source.get("port"),
+                        "status": status_info,
+                        "state": state_info,
+                        "audit": audit_info,
+                        "summary": _trade_intake_summary(state_payload, status_payload),
+                    }
+                )
+
+        if source_infos:
+            if len(source_infos) == 1:
+                trade_intake_status = dict(source_infos[0]["status"])
+                trade_intake_state = dict(source_infos[0]["state"])
+                trade_intake_audit = dict(source_infos[0]["audit"])
+                trade_intake_summary = dict(source_infos[0]["summary"])
+            else:
+                trade_intake_status = {
+                    "exists": any(bool(item["status"].get("exists")) for item in source_infos),
+                    "source_count": len(source_infos),
+                }
+                trade_intake_state = {
+                    "exists": any(bool(item["state"].get("exists")) for item in source_infos),
+                    "source_count": len(source_infos),
+                }
+                trade_intake_audit = {
+                    "exists": any(bool(item["audit"].get("exists")) for item in source_infos),
+                    "source_count": len(source_infos),
+                }
+                trade_intake_summary = _aggregate_trade_intake_summaries([dict(item["summary"]) for item in source_infos])
+        else:
+            trade_intake_status = _json_file_info(
+                _path_from_config(payload.get("trade_intake_status_path"), base=base) if payload.get("trade_intake_status_path") else default_intake_status_path,
+                base=base,
+                read_json_object_or_empty=read_json_object_or_empty,
+            )
+            trade_intake_state = _json_file_info(
+                _path_from_config(payload.get("trade_intake_state_path"), base=base) if payload.get("trade_intake_state_path") else default_intake_state_path,
+                base=base,
+                read_json_object_or_empty=read_json_object_or_empty,
+            )
+            trade_intake_audit = _file_info(
+                _path_from_config(payload.get("trade_intake_audit_path"), base=base) if payload.get("trade_intake_audit_path") else default_intake_audit_path,
+                base=base,
+            )
+            trade_intake_state_json = trade_intake_state.get("json")
+            trade_intake_status_json = trade_intake_status.get("json")
+            trade_intake_state_payload: dict[str, Any] = trade_intake_state_json if isinstance(trade_intake_state_json, dict) else {}
+            trade_intake_status_payload: dict[str, Any] = trade_intake_status_json if isinstance(trade_intake_status_json, dict) else {}
+            trade_intake_summary = _trade_intake_summary(trade_intake_state_payload, trade_intake_status_payload)
         trade_intake = {
             "enabled": bool(intake_cfg["enabled"]),
             "mode": intake_cfg["mode"],
@@ -1920,7 +2050,8 @@ def runtime_status_tool(
             "status": trade_intake_status,
             "state": trade_intake_state,
             "audit": trade_intake_audit,
-            "summary": _trade_intake_summary(trade_intake_state_payload, trade_intake_status_payload),
+            "summary": trade_intake_summary,
+            **({"sources": source_infos} if source_infos else {}),
         }
     except ValueError as exc:
         trade_intake = {

@@ -10,7 +10,7 @@ from src.application.symbol_mutations import default_use_for_enabled_sides, edit
 def _base_cfg(symbol: dict) -> dict:
     return {
         "accounts": ["lx"],
-        "account_settings": {"lx": {"type": "futu"}},
+        "account_settings": {"lx": {"type": "futu", "futu": {"account_id": "REAL_12345678"}}},
         "templates": {
             "put_base": {"sell_put": {"strategy": "insurance_underwriting"}},
             "call_base": {"sell_call": {"strategy": "insurance_underwriting"}},

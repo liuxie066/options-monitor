@@ -768,7 +768,7 @@ def test_validate_config_accepts_external_holdings_account_settings() -> None:
     cfg = {
         'accounts': ['user1', 'ext1'],
         'account_settings': {
-            'user1': {'type': 'futu'},
+            'user1': {'type': 'futu', 'futu': {'account_id': 'REAL_1'}},
             'ext1': {'type': 'external_holdings', 'holdings_account': 'Feishu EXT'},
         },
         'portfolio': {

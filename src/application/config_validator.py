@@ -841,6 +841,7 @@ def validate_config(cfg: dict):
         die('account_settings must be an object')
     if isinstance(account_settings, dict):
         known_accounts = set(accounts_from_config(cfg))
+        futu_account_settings = []
         for raw_key, raw_value in account_settings.items():
             account = str(raw_key or '').strip().lower()
             if not account:
@@ -852,9 +853,34 @@ def validate_config(cfg: dict):
             acct_type = str(raw_value.get('type') or '').strip().lower()
             if acct_type not in ACCOUNT_TYPES:
                 die(f'account_settings.{account}.type must be one of: {", ".join(ACCOUNT_TYPES)}')
+            if 'trade_intake_enabled' in raw_value and not isinstance(raw_value.get('trade_intake_enabled'), bool):
+                die(f'account_settings.{account}.trade_intake_enabled must be a boolean')
             holdings_account = raw_value.get('holdings_account')
             if holdings_account is not None and not str(holdings_account).strip():
                 die(f'account_settings.{account}.holdings_account must be a non-empty string when set')
+            if acct_type == 'futu':
+                futu_cfg = raw_value.get('futu')
+                if not isinstance(futu_cfg, dict):
+                    die(f'account_settings.{account}.futu must be an object')
+                if not str(futu_cfg.get('account_id') or '').strip():
+                    die(f'account_settings.{account}.futu.account_id must be a non-empty string')
+                for key in ('port', 'telnet_port'):
+                    if key not in futu_cfg or futu_cfg.get(key) in (None, ''):
+                        continue
+                    value = futu_cfg.get(key)
+                    if isinstance(value, bool):
+                        die(f'account_settings.{account}.futu.{key} must be an integer')
+                    try:
+                        int(value)
+                    except Exception:
+                        die(f'account_settings.{account}.futu.{key} must be an integer')
+                futu_account_settings.append((account, futu_cfg))
+        if len(futu_account_settings) > 1:
+            for account, futu_cfg in futu_account_settings:
+                if not str(futu_cfg.get('host') or '').strip():
+                    die(f'account_settings.{account}.futu.host must be set when multiple futu accounts are configured')
+                if futu_cfg.get('port') in (None, ''):
+                    die(f'account_settings.{account}.futu.port must be set when multiple futu accounts are configured')
         account_settings_from_config(cfg)
 
     trade_intake = cfg.get('trade_intake') or {}

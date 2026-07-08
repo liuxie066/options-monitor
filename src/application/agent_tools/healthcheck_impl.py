@@ -435,36 +435,34 @@ def run_healthcheck_tool(
     primary_errors: list[str] = []
     primary_preview: dict[str, dict[str, Any]] = {}
     account_views = {item.account: item for item in list_account_config_views(cfg)}
-    account_settings = _dict(cfg.get("account_settings"))
     for account in accounts:
         account_view = account_views[account]
+        runtime_plan = account_view.runtime_plan
         source_plan = account_view.portfolio_source_plan
         account_type = account_view.account_type
         mapped_ids = account_view.futu_acc_ids
+        trade_intake_enabled = bool(getattr(runtime_plan, "trade_intake_enabled", account_type == "futu"))
+        portfolio_source = str(getattr(runtime_plan, "portfolio_source", source_plan.primary_source) or source_plan.primary_source)
+        trade_source = str(getattr(runtime_plan, "trade_source", "api" if account_type == "futu" else "manual") or "")
         primary_preview[account] = {
             "type": account_type,
-            "source": source_plan.primary_source,
+            "source": portfolio_source,
+            "trade_source": trade_source,
+            "trade_intake_enabled": trade_intake_enabled,
             "ready": False,
         }
         mapping_preview[account] = {
             "type": account_type,
+            "portfolio_source": portfolio_source,
+            "trade_source": trade_source,
+            "trade_intake_enabled": trade_intake_enabled,
             "futu_account_ids": [mask_account_id(x) for x in mapped_ids],
         }
         if account_type == "futu":
             if not mapped_ids:
-                mapping_errors.append(f"{account}: missing trade_intake.account_mapping.futu entry")
-                primary_errors.append(f"{account}: missing trade_intake.account_mapping.futu entry")
+                mapping_errors.append(f"{account}: missing account_settings.{account}.futu.account_id")
+                primary_errors.append(f"{account}: missing account_settings.{account}.futu.account_id")
                 continue
-            account_setting = _dict(account_settings.get(account))
-            futu_setting = _dict(account_setting.get("futu"))
-            configured_acc_id = str(futu_setting.get("account_id") or "").strip()
-            if configured_acc_id and configured_acc_id not in {str(x).strip() for x in mapped_ids}:
-                mapping_errors.append(
-                    f"{account}: account_settings.{account}.futu.account_id={configured_acc_id} missing from trade_intake.account_mapping.futu"
-                )
-                primary_errors.append(
-                    f"{account}: account_settings.{account}.futu.account_id={configured_acc_id} missing from trade_intake.account_mapping.futu"
-                )
             for acc_id in mapped_ids:
                 if str(acc_id).startswith("REAL_"):
                     mapping_errors.append(f"{account}: placeholder futu acc_id {acc_id}")
@@ -473,6 +471,11 @@ def run_healthcheck_tool(
                     mapping_errors.append(f"{account}: futu acc_id must be digits only")
                     primary_errors.append(f"{account}: futu acc_id must be digits only")
             primary_preview[account]["futu_account_ids"] = [mask_account_id(x) for x in mapped_ids]
+            host = str(getattr(runtime_plan, "futu_host", "") or "").strip()
+            port = getattr(runtime_plan, "futu_port", None)
+            if host and port:
+                mapping_preview[account]["opend"] = {"host": host, "port": int(port)}
+                primary_preview[account]["opend"] = {"host": host, "port": int(port)}
             primary_preview[account]["ready"] = not any(msg.startswith(f"{account}:") for msg in primary_errors)
             continue
 
@@ -501,12 +504,12 @@ def run_healthcheck_tool(
         {
             "name": "account_mapping",
             "status": ("error" if mapping_errors else "ok"),
-            "message": ("; ".join(mapping_errors) if mapping_errors else f"resolved account setup for {len(accounts)} account(s)"),
+            "message": ("; ".join(mapping_errors) if mapping_errors else f"resolved account runtime setup for {len(accounts)} account(s)"),
             "value": mapping_preview,
         }
     )
     if mapping_errors:
-        warnings.append("Use `./om-agent add-account --account-type futu|external_holdings` and complete the matching mapping/config fields.")
+        warnings.append("Use `./om-agent add-account --account-type futu|external_holdings` and complete the matching account settings.")
     elif any(str(value) == "user1" for value in accounts):
         warnings.append("You are still using the starter account label 'user1'; rename it before long-term use if this is not intentional.")
 
@@ -514,20 +517,27 @@ def run_healthcheck_tool(
     opend_endpoints: dict[str, dict[str, Any]] = {}
     for account in accounts:
         acc_view = account_views[account]
-        if acc_view.portfolio_source_plan.primary_source == "futu":
-            acc_settings = infer_futu_portfolio_settings(cfg, account=account)
-            host = str(acc_settings.get("host") or "").strip()
+        runtime_plan = acc_view.runtime_plan
+        if acc_view.account_type == "futu":
+            host = str(getattr(runtime_plan, "futu_host", "") or "").strip()
+            port = getattr(runtime_plan, "futu_port", None)
+            telnet_port = getattr(runtime_plan, "futu_telnet_port", None)
+            if not host or not port:
+                acc_settings = infer_futu_portfolio_settings(cfg, account=account)
+                host = str(acc_settings.get("host") or "").strip()
+                port = acc_settings.get("port")
             try:
-                port = int(acc_settings.get("port") or 0)
+                port_value = int(port or 0)
             except Exception:
-                port = 0
-            if host and port > 0:
-                key = f"{host}:{port}"
+                port_value = 0
+            if host and port_value > 0:
+                key = f"{host}:{port_value}"
                 if key not in opend_endpoints:
-                    opend_endpoints[key] = {"host": host, "port": port, "accounts": []}
+                    opend_endpoints[key] = {"host": host, "port": port_value, "telnet_port": telnet_port, "accounts": []}
                 opend_endpoints[key]["accounts"].append(account)
 
     readiness_results: dict[str, dict[str, Any]] = {}
+    opend_ready_by_account: dict[str, bool] = {}
     for key, ep in opend_endpoints.items():
         ep_host = ep["host"]
         ep_port = ep["port"]
@@ -537,7 +547,7 @@ def run_healthcheck_tool(
             symbols=healthcheck_symbols_for_futu(cfg),
             timeout_sec=int(payload.get("timeout_sec") or 20),
             telnet_host=str(payload.get("opend_telnet_host") or "127.0.0.1"),
-            telnet_port=int(payload.get("opend_telnet_port") or 22222),
+            telnet_port=int(payload.get("opend_telnet_port") or ep.get("telnet_port") or 22222),
         )
         readiness_results[key] = readiness
 
@@ -558,6 +568,8 @@ def run_healthcheck_tool(
             readiness = readiness_results[key]
             readiness_ok = bool(readiness.get("ok"))
             ep_accounts = ep["accounts"]
+            for account in ep_accounts:
+                opend_ready_by_account[account] = readiness_ok
 
             if readiness_ok:
                 readiness_message = f"OpenD readiness passed for {', '.join(ep_accounts)}"
@@ -609,6 +621,9 @@ def run_healthcheck_tool(
             telnet_port=int(payload.get("opend_telnet_port") or 22222),
         )
         readiness_ok = bool(readiness.get("ok"))
+        for account in accounts:
+            if account_views[account].account_type == "futu":
+                opend_ready_by_account[account] = readiness_ok
         checks.append(
             {
                 "name": "opend_readiness_global",
@@ -635,21 +650,22 @@ def run_healthcheck_tool(
         )
         warnings.append("Set account_settings.<account>.futu.host/port or symbols[].fetch.source=futu for the public install flow.")
 
-    opend_ready = bool(
-        any(str(item.get("name") or "").startswith("opend_readiness") and item.get("status") == "ok" for item in checks)
-    )
     account_paths: dict[str, dict[str, Any]] = {}
     for account in accounts:
         primary = dict(primary_preview.get(account) or {})
         primary_source = str(primary.get("source") or "").strip()
-        primary_ok = bool(primary.get("ready")) and opend_ready if primary_source == "futu" else bool(primary.get("ready"))
+        account_type = str(primary.get("type") or "").strip()
+        primary_ok = bool(primary.get("ready")) and bool(opend_ready_by_account.get(account)) if account_type == "futu" else bool(primary.get("ready"))
 
         account_paths[account] = {
-            "type": str(primary.get("type") or ""),
+            "type": account_type,
             "primary": {
                 "source": (primary_source or None),
                 "ok": bool(primary_ok),
+                **({"trade_source": primary.get("trade_source")} if primary.get("trade_source") is not None else {}),
+                **({"trade_intake_enabled": primary.get("trade_intake_enabled")} if primary.get("trade_intake_enabled") is not None else {}),
                 **({"futu_account_ids": primary.get("futu_account_ids")} if primary.get("futu_account_ids") is not None else {}),
+                **({"opend": primary.get("opend")} if primary.get("opend") is not None else {}),
                 **({"holdings_account": primary.get("holdings_account")} if primary.get("holdings_account") is not None else {}),
             },
         }

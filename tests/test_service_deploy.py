@@ -142,6 +142,190 @@ def test_render_systemd_bundle_can_include_opend_service(tmp_path: Path) -> None
     assert "systemctl enable --now options-monitor-opend.service" in bundle["commands"]["enable"]
 
 
+def test_render_systemd_bundle_uses_account_opend_services_from_config(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    opend_lx = tmp_path / "futu-opend-lx" / "current"
+    opend_sy = tmp_path / "futu-opend-sy" / "current"
+    config_path = tmp_path / "config.us.json"
+    repo.mkdir()
+    opend_lx.mkdir(parents=True)
+    opend_sy.mkdir(parents=True)
+    config_path.write_text(
+        json.dumps(
+            {
+                "accounts": ["lx", "sy"],
+                "account_settings": {
+                    "lx": {
+                        "type": "futu",
+                        "futu": {
+                            "account_id": "281756479859383816",
+                            "host": "127.0.0.1",
+                            "port": 11111,
+                            "opend_root": str(opend_lx),
+                        },
+                    },
+                    "sy": {
+                        "type": "futu",
+                        "futu": {
+                            "account_id": "281756479859383817",
+                            "host": "127.0.0.1",
+                            "port": 11112,
+                            "opend_root": str(opend_sy),
+                        },
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        accounts=["lx", "sy"],
+        markets=["us"],
+        config_paths={"us": config_path},
+        include_opend=True,
+    )
+
+    files = {item["relative_path"]: item for item in bundle["files"]}
+    lx_service = files["systemd/options-monitor-opend-lx.service"]["content"]
+    sy_service = files["systemd/options-monitor-opend-sy.service"]["content"]
+    intake = files["systemd/options-monitor-trade-intake.service"]["content"]
+    profile = json.loads(files["service.profile.json"]["content"])
+
+    assert "WorkingDirectory=" + str(opend_lx) in lx_service
+    assert "ExecStart=" + str(opend_lx / "FutuOpenD") in lx_service
+    assert "WorkingDirectory=" + str(opend_sy) in sy_service
+    assert "ExecStart=" + str(opend_sy / "FutuOpenD") in sy_service
+    assert "After=network-online.target options-monitor-opend-lx.service options-monitor-opend-sy.service" in intake
+    assert "Wants=network-online.target options-monitor-opend-lx.service options-monitor-opend-sy.service" in intake
+    assert {"name": "options-monitor-opend-lx.service"} in profile["services"]
+    assert {"name": "options-monitor-opend-sy.service"} in profile["services"]
+    assert profile["opend"]["services"] == [
+        {
+            "account": "lx",
+            "root": str(opend_lx),
+            "executable": str(opend_lx / "FutuOpenD"),
+            "service_name": "options-monitor-opend-lx.service",
+        },
+        {
+            "account": "sy",
+            "root": str(opend_sy),
+            "executable": str(opend_sy / "FutuOpenD"),
+            "service_name": "options-monitor-opend-sy.service",
+        },
+    ]
+    assert "root" not in profile["opend"]
+    assert profile["restart"]["services"] == [
+        "options-monitor-opend-lx.service",
+        "options-monitor-opend-sy.service",
+        "options-monitor-trade-intake.service",
+    ]
+    assert "systemctl enable --now options-monitor-opend-lx.service" in bundle["commands"]["enable"]
+    assert "systemctl enable --now options-monitor-opend-sy.service" in bundle["commands"]["enable"]
+
+
+def test_render_systemd_bundle_uses_account_opend_services_from_yaml_config(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    opend_lx = tmp_path / "futu-opend-lx" / "current"
+    opend_sy = tmp_path / "futu-opend-sy" / "current"
+    config_yaml = tmp_path / "config.yaml"
+    repo.mkdir()
+    runtime.mkdir()
+    opend_lx.mkdir(parents=True)
+    opend_sy.mkdir(parents=True)
+    config_yaml.write_text(
+        f"""\
+accounts:
+  lx:
+    type: futu
+    futu:
+      account_id: "REAL_12345678"
+      host: 127.0.0.1
+      port: 11111
+      opend_root: {opend_lx}
+  sy:
+    type: futu
+    futu:
+      account_id: "REAL_87654321"
+      host: 127.0.0.1
+      port: 11112
+      opend_root: {opend_sy}
+markets:
+  us:
+    accounts: [lx, sy]
+    symbols: [NVDA]
+    overrides:
+      NVDA:
+        sell_put:
+          max_strike: 150
+""",
+        encoding="utf-8",
+    )
+
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        accounts=["lx", "sy"],
+        markets=["us"],
+        config_yaml=config_yaml,
+        include_opend=True,
+    )
+
+    files = {item["relative_path"]: item for item in bundle["files"]}
+    assert "systemd/options-monitor-opend-lx.service" in files
+    assert "systemd/options-monitor-opend-sy.service" in files
+    assert "systemd/options-monitor-opend.service" not in files
+    intake = files["systemd/options-monitor-trade-intake.service"]["content"]
+    assert "After=network-online.target options-monitor-opend-lx.service options-monitor-opend-sy.service" in intake
+    profile = json.loads(files["service.profile.json"]["content"])
+    assert profile["opend"]["services"] == [
+        {
+            "account": "lx",
+            "root": str(opend_lx),
+            "executable": str(opend_lx / "FutuOpenD"),
+            "service_name": "options-monitor-opend-lx.service",
+        },
+        {
+            "account": "sy",
+            "root": str(opend_sy),
+            "executable": str(opend_sy / "FutuOpenD"),
+            "service_name": "options-monitor-opend-sy.service",
+        },
+    ]
+
+
+def test_render_systemd_bundle_rejects_invalid_opend_config_json(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    config_path = tmp_path / "config.us.json"
+    repo.mkdir()
+    runtime.mkdir()
+    config_path.write_text("{invalid json", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="failed to parse service config JSON"):
+        render_service_bundle(
+            target="systemd",
+            repo_root=repo,
+            runtime_root=runtime,
+            accounts=["lx", "sy"],
+            markets=["us"],
+            config_paths={"us": config_path},
+            include_opend=True,
+        )
+
+
 def _write_systemd_units_from_bundle(bundle: dict, systemd_root: Path, *, skip: set[str] | None = None) -> None:
     skip = skip or set()
     systemd_root.mkdir(parents=True, exist_ok=True)

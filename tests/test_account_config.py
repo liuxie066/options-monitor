@@ -137,6 +137,65 @@ def test_build_account_portfolio_source_plan_for_external_holdings_account() -> 
     assert out.holdings_account == "Feishu EXT"
 
 
+def test_build_account_config_view_exposes_futu_runtime_plan() -> None:
+    from src.application.account_config import build_account_config_view
+
+    cfg = {
+        "accounts": ["lx"],
+        "account_settings": {
+            "lx": {
+                "type": "futu",
+                "trade_intake_enabled": False,
+                "futu": {
+                    "account_id": "281756479859383816",
+                    "host": "127.0.0.1",
+                    "port": "11111",
+                    "telnet_port": "22222",
+                    "opend_root": "/home/liuxie/apps/futu-opend-lx/current",
+                    "trd_env": "REAL",
+                },
+            }
+        },
+        "trade_intake": {
+            "account_mapping": {
+                "futu": {
+                    "legacy-id": "lx",
+                }
+            }
+        },
+    }
+
+    out = build_account_config_view(cfg, account="lx")
+
+    assert out.futu_acc_ids == ["281756479859383816"]
+    assert out.runtime_plan.portfolio_source == "futu"
+    assert out.runtime_plan.trade_source == "api"
+    assert out.runtime_plan.trade_intake_enabled is False
+    assert out.runtime_plan.futu_account_id == "281756479859383816"
+    assert out.runtime_plan.futu_host == "127.0.0.1"
+    assert out.runtime_plan.futu_port == 11111
+    assert out.runtime_plan.futu_telnet_port == 22222
+    assert out.runtime_plan.futu_opend_root == "/home/liuxie/apps/futu-opend-lx/current"
+    assert out.runtime_plan.futu_trd_env == "REAL"
+
+
+def test_resolve_futu_account_ids_falls_back_to_legacy_trade_mapping() -> None:
+    from src.application.account_config import resolve_futu_account_ids
+
+    cfg = {
+        "accounts": ["lx"],
+        "trade_intake": {
+            "account_mapping": {
+                "futu": {
+                    "legacy-id": "lx",
+                }
+            }
+        },
+    }
+
+    assert resolve_futu_account_ids(cfg, account="lx") == ["legacy-id"]
+
+
 def test_parse_option_message_accepts_configured_account_labels() -> None:
     from src.application.parse_option_message import parse_account
 

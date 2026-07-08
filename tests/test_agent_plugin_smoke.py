@@ -69,6 +69,11 @@ def _public_cfg_with_futu(data_config_ref: str, *, market: str = "us") -> dict[s
     cfg["account_settings"] = {
         "user1": {
             "type": "futu",
+            "futu": {
+                "account_id": "281756479859383816",
+                "host": "127.0.0.1",
+                "port": 11111,
+            },
         }
     }
     cfg["portfolio"]["account"] = "user1"
@@ -388,7 +393,7 @@ def test_healthcheck_rejects_placeholder_futu_mapping(monkeypatch, tmp_path: Pat
         encoding="utf-8",
     )
     cfg = _public_cfg_with_futu("portfolio.runtime.json")
-    cfg["trade_intake"]["account_mapping"]["futu"] = {"REAL_12345678": "user1"}
+    cfg["account_settings"]["user1"]["futu"]["account_id"] = "REAL_12345678"
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
     _patch_healthcheck_context(monkeypatch)
@@ -432,7 +437,7 @@ def test_healthcheck_accepts_futu_auto_source_without_fallback_checks(monkeypatc
     assert not any("holdings fallback configured" in item for item in out["warnings"])
 
 
-def test_healthcheck_rejects_account_settings_acc_id_missing_from_trade_intake_mapping(monkeypatch, tmp_path: Path) -> None:
+def test_healthcheck_accepts_account_settings_futu_account_id_without_trade_mapping(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
     cfg_path = tmp_path / "config.us.json"
@@ -451,10 +456,13 @@ def test_healthcheck_rejects_account_settings_acc_id_missing_from_trade_intake_m
     out = run_tool("healthcheck", {"config_path": str(cfg_path)})
 
     assert out["ok"] is True
-    assert out["data"]["summary"]["ok"] is False
+    assert out["data"]["summary"]["ok"] is True
     primary = next(item for item in out["data"]["checks"] if item["name"] == "account_primary_paths")
-    assert primary["status"] == "error"
-    assert "missing from trade_intake.account_mapping.futu" in primary["message"]
+    mapping = next(item for item in out["data"]["checks"] if item["name"] == "account_mapping")
+    assert primary["status"] == "ok"
+    assert mapping["status"] == "ok"
+    assert primary["value"]["user1"]["futu_account_ids"] == ["...9999"]
+    assert mapping["value"]["user1"]["trade_source"] == "api"
 
 
 def test_healthcheck_accepts_external_holdings_account_without_futu_mapping(monkeypatch, tmp_path: Path) -> None:
@@ -491,7 +499,7 @@ def test_healthcheck_accepts_external_holdings_account_without_futu_mapping(monk
     out = run_tool("healthcheck", {"config_path": str(cfg_path)})
 
     assert out["ok"] is True
-    assert out["data"]["account_paths"]["ext1"]["primary"]["source"] == "external_holdings"
+    assert out["data"]["account_paths"]["ext1"]["primary"]["source"] == "holdings"
     assert out["data"]["account_paths"]["ext1"]["primary"]["ok"] is True
     assert "fallback" not in out["data"]["account_paths"]["ext1"]
     primary = next(item for item in out["data"]["checks"] if item["name"] == "account_primary_paths")
@@ -1640,6 +1648,125 @@ def test_runtime_status_summarizes_runtime_files(tmp_path: Path) -> None:
     assert "option_positions_feishu_sync" not in out["data"]
     assert "option_positions_feishu_sync_status" not in out["data"]["summary"]
     assert "option_positions_feishu_sync_receipt_status" not in out["data"]["summary"]
+
+
+def test_runtime_status_reads_account_trade_intake_sources(tmp_path: Path) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    cfg_path = tmp_path / "config.us.json"
+    cfg = _minimal_cfg()
+    cfg["accounts"] = ["lx", "sy"]
+    cfg["portfolio"]["data_config"] = "portfolio.runtime.json"
+    cfg["account_settings"] = {
+        "lx": {
+            "type": "futu",
+            "futu": {
+                "account_id": "281756479859383816",
+                "host": "127.0.0.1",
+                "port": 11111,
+            },
+        },
+        "sy": {
+            "type": "futu",
+            "futu": {
+                "account_id": "281756479859383817",
+                "host": "127.0.0.1",
+                "port": 11112,
+            },
+        },
+    }
+    cfg["trade_intake"] = {"enabled": True, "mode": "apply"}
+    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    (tmp_path / "portfolio.runtime.json").write_text(
+        json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    state_dir = tmp_path / "output_shared" / "state"
+    report_dir = tmp_path / "output_shared" / "reports"
+    accounts_root = tmp_path / "output_accounts"
+    runs_root = tmp_path / "output_runs"
+    for account in ("lx", "sy"):
+        (state_dir / "trade_intake" / account).mkdir(parents=True, exist_ok=True)
+    report_dir.mkdir(parents=True)
+    accounts_root.mkdir(parents=True)
+    runs_root.mkdir(parents=True)
+
+    (state_dir / "trade_intake" / "lx" / "status.json").write_text(
+        json.dumps(
+            {
+                "status": "listening",
+                "last_push_received_utc": "2026-01-01T00:01:00+00:00",
+                "last_push_deal_id": "lx-deal-1",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (state_dir / "trade_intake" / "lx" / "state.json").write_text(
+        json.dumps(
+            {
+                "processed_deal_ids": {
+                    "lx-deal-1": {
+                        "receipt": {"status": "sent", "delivery_confirmed": True},
+                    }
+                },
+                "failed_deal_ids": {},
+                "unresolved_deal_ids": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (state_dir / "trade_intake" / "lx" / "audit.jsonl").write_text('{"phase":"lx"}\n', encoding="utf-8")
+    (state_dir / "trade_intake" / "sy" / "status.json").write_text(
+        json.dumps(
+            {
+                "status": "listening",
+                "last_push_received_utc": "2026-01-01T00:02:00+00:00",
+                "last_push_deal_id": "sy-deal-1",
+                "last_backfill_applied_count": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (state_dir / "trade_intake" / "sy" / "state.json").write_text(
+        json.dumps(
+            {
+                "processed_deal_ids": {},
+                "failed_deal_ids": {"sy-deal-1": {}},
+                "unresolved_deal_ids": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (state_dir / "trade_intake" / "sy" / "audit.jsonl").write_text('{"phase":"sy"}\n', encoding="utf-8")
+
+    out = run_tool(
+        "runtime_status",
+        {
+            "config_path": str(cfg_path),
+            "state_dir": str(state_dir),
+            "report_dir": str(report_dir),
+            "shared_state_dir": str(state_dir),
+            "accounts_root": str(accounts_root),
+            "runs_root": str(runs_root),
+        },
+    )
+
+    assert out["ok"] is True
+    trade = out["data"]["trade_intake"]
+    assert trade["status"]["source_count"] == 2
+    assert trade["state"]["source_count"] == 2
+    assert trade["audit"]["source_count"] == 2
+    assert [item["account"] for item in trade["sources"]] == ["lx", "sy"]
+    assert trade["sources"][0]["summary"]["last_push_deal_id"] == "lx-deal-1"
+    assert trade["sources"][1]["summary"]["last_push_deal_id"] == "sy-deal-1"
+    assert trade["summary"]["listener_status"] == "listening"
+    assert trade["summary"]["source_count"] == 2
+    assert trade["summary"]["processed_count"] == 1
+    assert trade["summary"]["failed_count"] == 1
+    assert trade["summary"]["receipt_confirmed_count"] == 1
+    assert trade["summary"]["last_push_deal_id"] == "sy-deal-1"
+    assert trade["summary"]["last_backfill_applied_count"] == 1
 
 
 def test_runtime_status_reports_config_authority(tmp_path: Path) -> None:
