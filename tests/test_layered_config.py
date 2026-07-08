@@ -125,6 +125,31 @@ def test_layered_config_derives_external_holdings_defaults(tmp_path: Path) -> No
     validate_config(json.loads(json.dumps(cfg)))
 
 
+def test_layered_config_skips_trade_mapping_for_disabled_futu_intake(tmp_path: Path) -> None:
+    user_path = _write_json(
+        tmp_path / "user.us.json",
+        {
+            "account_settings": {
+                "lx": {
+                    "type": "futu",
+                    "futu": {"account_id": "REAL_12345678", "host": "127.0.0.1", "port": 11111},
+                },
+                "sy": {
+                    "type": "futu",
+                    "trade_intake_enabled": False,
+                    "futu": {"account_id": "REAL_87654321", "host": "127.0.0.1", "port": 11112},
+                },
+            },
+            "symbols": [{"symbol": "NVDA", "sell_put": {"max_strike": 160}}],
+        },
+    )
+
+    cfg, _meta = build_layered_runtime_config(repo_root=REPO_ROOT, market="us", user_config_path=user_path)
+
+    assert cfg["portfolio"]["source_by_account"] == {"lx": "futu", "sy": "futu"}
+    assert cfg["trade_intake"]["account_mapping"]["futu"] == {"REAL_12345678": "lx"}
+
+
 def test_layered_config_auto_loads_common_user_config_for_default_user_path(tmp_path: Path) -> None:
     config_dir = tmp_path / "configs"
     config_dir.mkdir()

@@ -11,7 +11,7 @@ from domain.domain.symbol_identity import (
     looks_like_option_contract_label,
     symbol_currency,
 )
-from src.application.account_config import resolve_trade_intake_futu_account_ids as _resolve_trade_intake_futu_account_ids
+from src.application.account_config import resolve_futu_account_ids
 
 
 _DEFAULT_TRD_ENV = "REAL"
@@ -288,7 +288,7 @@ def should_try_futu_portfolio(cfg: Mapping[str, Any] | Any, *, account: str | No
     settings = infer_futu_portfolio_settings(cfg, account=account)
     if not settings.get("host") or not settings.get("port"):
         return False
-    return bool(_resolve_trade_intake_futu_account_ids(cfg, account=account))
+    return bool(resolve_futu_account_ids(cfg, account=account))
 
 
 def _filter_rows_for_account_ids(
@@ -469,9 +469,9 @@ def fetch_futu_portfolio_context(
         raise ValueError("futu portfolio settings missing host/port")
     trd_env = _resolve_trd_env(settings.get("trd_env"))
 
-    account_ids = set(_resolve_trade_intake_futu_account_ids(cfg, account=account))
+    account_ids = set(resolve_futu_account_ids(cfg, account=account))
     if not account_ids:
-        raise ValueError(f"no futu account mapping for account={account}")
+        raise ValueError(f"no futu account_id for account={account}")
 
     gateway = build_ready_futu_gateway(
         host=str(host),

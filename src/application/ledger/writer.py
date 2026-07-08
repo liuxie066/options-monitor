@@ -12,6 +12,7 @@ from domain.domain.trade_contract_identity import (
     normalize_trade_side,
 )
 from src.application.ledger.lot_resolver import LotCloseResolutionError, LotCloseSelector, resolve_fifo_close_targets
+from src.application.ledger.external_event_key import broker_external_event_key
 from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
 from src.application.ledger.repository import with_sqlite_repo_transaction
 from src.application.ledger.results import LedgerWriteResult, ProjectionRefreshResult
@@ -209,9 +210,19 @@ def _trade_event_from_normalized_deal(deal: Any) -> TradeEvent:
     trade_side = normalize_trade_side(getattr(deal, "side", None)) or ""
     position_effect = normalize_position_effect(getattr(deal, "position_effect", None)) or ""
     raw_payload = dict(getattr(deal, "raw_payload", {}) or {})
+    source_deal_id = str(getattr(deal, "deal_id", "") or "").strip()
+    event_id = broker_external_event_key(deal)
     event_type = _event_type_from_position_effect(position_effect, raw_payload=raw_payload)
     position_side = _position_side_from_trade(effect=position_effect, trade_side=trade_side)
     raw_payload.setdefault("source_type", "broker_trade_event")
+    raw_payload.setdefault("source", "api")
+    if source_deal_id:
+        raw_payload.setdefault("source_deal_id", source_deal_id)
+    futu_account_id = str(getattr(deal, "futu_account_id", "") or "").strip()
+    if futu_account_id:
+        raw_payload.setdefault("futu_account_id", futu_account_id)
+    if event_id:
+        raw_payload.setdefault("external_event_key", event_id)
     raw_payload.setdefault("side", trade_side)
     order_id = str(getattr(deal, "order_id", "") or "").strip()
     if order_id:
@@ -230,7 +241,7 @@ def _trade_event_from_normalized_deal(deal: Any) -> TradeEvent:
         expiration_ymd=normalize_contract_expiration(getattr(deal, "expiration_ymd", None)),
     )
     return TradeEvent(
-        event_id=str(getattr(deal, "deal_id", "") or "").strip(),
+        event_id=event_id,
         event_type=event_type,
         event_time_ms=event_time_ms,
         contract_key=contract_key,

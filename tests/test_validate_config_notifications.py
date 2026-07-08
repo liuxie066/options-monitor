@@ -4,7 +4,12 @@ from __future__ import annotations
 def _base_cfg() -> dict[str, object]:
     return {
         "accounts": ["user1"],
-        "account_settings": {"user1": {"type": "futu"}},
+        "account_settings": {
+            "user1": {
+                "type": "futu",
+                "futu": {"account_id": "REAL_12345678"},
+            }
+        },
         "portfolio": {
             "broker": "富途",
             "account": "user1",
@@ -404,6 +409,49 @@ def test_validate_config_rejects_non_boolean_trade_intake_enabled() -> None:
         raise AssertionError("expected SystemExit")
     except SystemExit as exc:
         assert "trade_intake.enabled must be a boolean" in str(exc)
+
+
+def test_validate_config_rejects_non_boolean_account_trade_intake_enabled() -> None:
+    import src.application.config_validator as mod
+
+    cfg = _base_cfg()
+    cfg["account_settings"]["user1"]["trade_intake_enabled"] = "false"
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "account_settings.user1.trade_intake_enabled must be a boolean" in str(exc)
+
+
+def test_validate_config_rejects_futu_account_without_account_id() -> None:
+    import src.application.config_validator as mod
+
+    cfg = _base_cfg()
+    cfg["account_settings"]["user1"]["futu"] = {}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "account_settings.user1.futu.account_id must be a non-empty string" in str(exc)
+
+
+def test_validate_config_requires_host_port_for_multiple_futu_accounts() -> None:
+    import src.application.config_validator as mod
+
+    cfg = _base_cfg()
+    cfg["accounts"] = ["user1", "sy"]
+    cfg["account_settings"]["sy"] = {
+        "type": "futu",
+        "futu": {"account_id": "REAL_87654321", "host": "127.0.0.1", "port": 11112},
+    }
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "account_settings.user1.futu.host must be set when multiple futu accounts are configured" in str(exc)
 
 
 def test_validate_config_accepts_option_positions_auto_close_enabled_boolean() -> None:

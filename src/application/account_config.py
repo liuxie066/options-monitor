@@ -29,6 +29,23 @@ class AccountConfigView:
     futu_acc_ids: list[str]
     holdings_account: str | None
     portfolio_source_plan: AccountPortfolioSourcePlan
+    runtime_plan: AccountRuntimePlan
+
+
+@dataclass(frozen=True)
+class AccountRuntimePlan:
+    account: str
+    account_type: str
+    portfolio_source: str
+    trade_source: str
+    trade_intake_enabled: bool
+    holdings_account: str | None
+    futu_account_id: str | None = None
+    futu_host: str | None = None
+    futu_port: int | None = None
+    futu_telnet_port: int | None = None
+    futu_opend_root: str | None = None
+    futu_trd_env: str | None = None
 
 
 def normalize_accounts(raw: Any, *, fallback: tuple[str, ...] = DEFAULT_ACCOUNTS) -> list[str]:
@@ -56,6 +73,15 @@ def normalize_accounts(raw: Any, *, fallback: tuple[str, ...] = DEFAULT_ACCOUNTS
 def accounts_from_config(config: dict[str, Any] | None, *, fallback: tuple[str, ...] = DEFAULT_ACCOUNTS) -> list[str]:
     cfg = config if isinstance(config, dict) else {}
     return normalize_accounts(cfg.get("accounts"), fallback=fallback)
+
+
+def _int_or_none(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
 
 
 def account_settings_from_config(config: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
@@ -91,15 +117,23 @@ def account_settings_from_config(config: dict[str, Any] | None) -> dict[str, dic
             host = str(futu_cfg.get("host") or "").strip()
             if host:
                 futu_out["host"] = host
-            port = futu_cfg.get("port")
-            if port not in (None, ""):
+            for key in ("port", "telnet_port"):
+                port = futu_cfg.get(key)
+                if port in (None, ""):
+                    continue
                 try:
-                    futu_out["port"] = int(port)
+                    futu_out[key] = int(port)
                 except Exception:
                     pass
             account_id = str(futu_cfg.get("account_id") or "").strip()
             if account_id:
                 futu_out["account_id"] = account_id
+            opend_root = str(futu_cfg.get("opend_root") or "").strip()
+            if opend_root:
+                futu_out["opend_root"] = opend_root
+            trd_env = str(futu_cfg.get("trd_env") or "").strip()
+            if trd_env:
+                futu_out["trd_env"] = trd_env
             if futu_out:
                 normalized["futu"] = futu_out
         bitable_cfg = item.get("bitable")
@@ -158,6 +192,81 @@ def resolve_configured_holdings_account(config: dict[str, Any] | None, *, accoun
         if value:
             return value
     return None
+
+
+def resolve_account_futu_settings(config: Mapping[str, Any] | Any, *, account: str | None) -> dict[str, Any]:
+    account_key = str(account or "").strip().lower()
+    if not account_key:
+        return {}
+    settings = account_settings_from_config(dict(config) if isinstance(config, Mapping) else {})
+    item = settings.get(account_key) if isinstance(settings, dict) else None
+    futu_cfg = item.get("futu") if isinstance(item, dict) else None
+    if isinstance(futu_cfg, dict):
+        return dict(futu_cfg)
+
+    if not isinstance(config, Mapping):
+        return {}
+    raw_settings = config.get("account_settings")
+    if not isinstance(raw_settings, Mapping):
+        return {}
+    raw_item = raw_settings.get(account_key)
+    if not isinstance(raw_item, Mapping):
+        return {}
+    raw_futu = raw_item.get("futu")
+    return dict(raw_futu) if isinstance(raw_futu, Mapping) else {}
+
+
+def resolve_futu_account_ids(config: Mapping[str, Any] | Any, *, account: str | None) -> list[str]:
+    futu_cfg = resolve_account_futu_settings(config, account=account)
+    account_id = str(futu_cfg.get("account_id") or "").strip()
+    if account_id:
+        return [account_id]
+    return _resolve_trade_intake_mapping_futu_account_ids(config, account=account)
+
+
+def resolve_account_trade_intake_enabled(config: Mapping[str, Any] | Any, *, account: str | None) -> bool:
+    account_key = str(account or "").strip().lower()
+    if not account_key:
+        return False
+    if resolve_account_type(dict(config) if isinstance(config, Mapping) else {}, account=account_key) != ACCOUNT_TYPE_FUTU:
+        return False
+
+    settings = account_settings_from_config(dict(config) if isinstance(config, Mapping) else {})
+    item = settings.get(account_key) if isinstance(settings, dict) else None
+    if isinstance(item, dict) and "trade_intake_enabled" in item:
+        return bool(item.get("trade_intake_enabled"))
+
+    if isinstance(config, Mapping):
+        raw_settings = config.get("account_settings")
+        raw_item = raw_settings.get(account_key) if isinstance(raw_settings, Mapping) else None
+        if isinstance(raw_item, Mapping) and isinstance(raw_item.get("trade_intake_enabled"), bool):
+            return bool(raw_item.get("trade_intake_enabled"))
+    return True
+
+
+def build_account_runtime_plan(config: dict[str, Any] | None, *, account: str) -> AccountRuntimePlan:
+    account_key = str(account or "").strip().lower()
+    cfg = config if isinstance(config, dict) else {}
+    source_plan = build_account_portfolio_source_plan(cfg, account=account_key)
+    futu_cfg = resolve_account_futu_settings(cfg, account=account_key)
+    account_type = source_plan.account_type
+    trade_source = "api" if account_type == ACCOUNT_TYPE_FUTU else "manual"
+    portfolio_source = "holdings" if source_plan.primary_source == ACCOUNT_TYPE_EXTERNAL_HOLDINGS else source_plan.primary_source
+
+    return AccountRuntimePlan(
+        account=account_key,
+        account_type=account_type,
+        portfolio_source=portfolio_source,
+        trade_source=trade_source,
+        trade_intake_enabled=resolve_account_trade_intake_enabled(cfg, account=account_key),
+        holdings_account=source_plan.holdings_account,
+        futu_account_id=str(futu_cfg.get("account_id") or "").strip() or None,
+        futu_host=str(futu_cfg.get("host") or "").strip() or None,
+        futu_port=_int_or_none(futu_cfg.get("port")),
+        futu_telnet_port=_int_or_none(futu_cfg.get("telnet_port")),
+        futu_opend_root=str(futu_cfg.get("opend_root") or "").strip() or None,
+        futu_trd_env=str(futu_cfg.get("trd_env") or "").strip() or None,
+    )
 
 
 def resolve_portfolio_source(config: dict[str, Any] | None, *, account: str | None) -> str:
@@ -247,7 +356,7 @@ def _normalize_account_ids(raw: Mapping[str, Any] | Any, *, account: str | None)
     return out
 
 
-def resolve_trade_intake_futu_account_ids(config: Mapping[str, Any] | Any, *, account: str | None) -> list[str]:
+def _resolve_trade_intake_mapping_futu_account_ids(config: Mapping[str, Any] | Any, *, account: str | None) -> list[str]:
     if not isinstance(config, Mapping):
         return []
     trade_intake = config.get("trade_intake")
@@ -260,17 +369,23 @@ def resolve_trade_intake_futu_account_ids(config: Mapping[str, Any] | Any, *, ac
     return _normalize_account_ids(futu_mapping, account=account)
 
 
+def resolve_trade_intake_futu_account_ids(config: Mapping[str, Any] | Any, *, account: str | None) -> list[str]:
+    return resolve_futu_account_ids(config, account=account)
+
+
 def build_account_config_view(config: dict[str, Any] | None, *, account: str) -> AccountConfigView:
     account_key = str(account or "").strip().lower()
     cfg = config if isinstance(config, dict) else {}
     source_plan = build_account_portfolio_source_plan(cfg, account=account_key)
-    futu_acc_ids = resolve_trade_intake_futu_account_ids(cfg, account=account_key)
+    futu_acc_ids = resolve_futu_account_ids(cfg, account=account_key)
+    runtime_plan = build_account_runtime_plan(cfg, account=account_key)
     return AccountConfigView(
         account=account_key,
         account_type=source_plan.account_type,
         futu_acc_ids=futu_acc_ids,
         holdings_account=source_plan.holdings_account,
         portfolio_source_plan=source_plan,
+        runtime_plan=runtime_plan,
     )
 
 

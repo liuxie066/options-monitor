@@ -162,6 +162,7 @@ def test_yaml_config_keeps_explicit_sell_put_underwriting_thresholds(tmp_path: P
 accounts:
   lx:
     type: futu
+    futu_account_id: "REAL_12345678"
 templates:
   put_base:
     sell_put:
@@ -203,6 +204,7 @@ def test_yaml_config_accepts_legacy_sell_call_authoring_key(tmp_path: Path) -> N
 accounts:
   lx:
     type: futu
+    futu_account_id: "REAL_12345678"
 markets:
   us:
     accounts: [lx]
@@ -231,6 +233,7 @@ def test_yaml_config_rejects_covered_call_and_sell_call_conflict(tmp_path: Path)
 accounts:
   lx:
     type: futu
+    futu_account_id: "REAL_12345678"
 markets:
   us:
     accounts: [lx]
@@ -271,6 +274,7 @@ def test_yaml_config_maps_covered_call_passthrough_authoring_keys(tmp_path: Path
 accounts:
   lx:
     type: futu
+    futu_account_id: "REAL_12345678"
 templates:
   call_base:
     covered_call:
@@ -387,6 +391,7 @@ def test_yaml_symbol_set_preserves_existing_legacy_sell_call_key(tmp_path: Path)
 accounts:
   lx:
     type: futu
+    futu_account_id: "REAL_12345678"
 markets:
   us:
     accounts: [lx]
@@ -742,6 +747,7 @@ def test_yaml_config_requires_explicit_market(tmp_path: Path) -> None:
 accounts:
   lx:
     type: futu
+    futu_account_id: "REAL_12345678"
 markets:
   us:
     accounts: [lx]
@@ -770,6 +776,7 @@ def test_yaml_config_rejects_global_combo_yield_switch(tmp_path: Path) -> None:
 accounts:
   lx:
     type: futu
+    futu_account_id: "REAL_12345678"
 features:
   combo_yield: true
 markets:
@@ -790,6 +797,7 @@ def test_yaml_config_rejects_write_gates(tmp_path: Path) -> None:
 accounts:
   lx:
     type: futu
+    futu_account_id: "REAL_12345678"
 writes:
   feishu: true
 markets:
@@ -810,6 +818,7 @@ def test_yaml_config_rejects_trade_intake_write_policy(tmp_path: Path) -> None:
 accounts:
   lx:
     type: futu
+    futu_account_id: "REAL_12345678"
 trade_intake:
   mode: apply
 markets:
@@ -830,6 +839,7 @@ def test_yaml_config_rejects_override_for_symbol_not_in_market(tmp_path: Path) -
 accounts:
   lx:
     type: futu
+    futu_account_id: "REAL_12345678"
 markets:
   us:
     accounts: [lx]

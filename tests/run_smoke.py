@@ -463,6 +463,10 @@ def test_agent_launcher_add_futu_account_with_holdings_fallback() -> None:
                 "futu",
                 "--futu-acc-id",
                 "381756479859383816",
+                "--futu-host",
+                "127.0.0.1",
+                "--futu-port",
+                "11112",
                 "--holdings-account",
                 "sy",
                 "--confirm",
@@ -478,6 +482,9 @@ def test_agent_launcher_add_futu_account_with_holdings_fallback() -> None:
         assert payload["ok"] is True
         assert payload["data"]["holdings_account"] == "sy"
         assert current["account_settings"]["sy"]["type"] == "futu"
+        assert current["account_settings"]["sy"]["futu"]["account_id"] == "381756479859383816"
+        assert current["account_settings"]["sy"]["futu"]["host"] == "127.0.0.1"
+        assert current["account_settings"]["sy"]["futu"]["port"] == 11112
         assert current["account_settings"]["sy"]["holdings_account"] == "sy"
         assert current["portfolio"]["source_by_account"]["sy"] == "futu"
 
@@ -511,6 +518,8 @@ def test_agent_launcher_edit_account_updates_type_and_mappings() -> None:
                 "--account-label", "ext1",
                 "--account-type", "futu",
                 "--futu-acc-id", "381756479859383816",
+                "--futu-host", "127.0.0.1",
+                "--futu-port", "11112",
                 "--holdings-account", "sy",
                 "--confirm",
             ],
@@ -522,6 +531,9 @@ def test_agent_launcher_edit_account_updates_type_and_mappings() -> None:
         assert payload["data"]["account_type"] == "futu"
         assert payload["data"]["holdings_account"] == "sy"
         assert current["account_settings"]["ext1"]["type"] == "futu"
+        assert current["account_settings"]["ext1"]["futu"]["account_id"] == "381756479859383816"
+        assert current["account_settings"]["ext1"]["futu"]["host"] == "127.0.0.1"
+        assert current["account_settings"]["ext1"]["futu"]["port"] == 11112
         assert current["account_settings"]["ext1"]["holdings_account"] == "sy"
         assert current["trade_intake"]["account_mapping"]["futu"]["381756479859383816"] == "ext1"
         assert current["portfolio"]["source_by_account"]["ext1"] == "futu"
@@ -543,6 +555,8 @@ def test_agent_launcher_remove_account_updates_runtime_config() -> None:
                 "--account-label", "sy",
                 "--account-type", "futu",
                 "--futu-acc-id", "381756479859383816",
+                "--futu-host", "127.0.0.1",
+                "--futu-port", "11112",
                 "--confirm",
             ],
             cwd=str(base), capture_output=True, text=True, check=True, env=write_env,

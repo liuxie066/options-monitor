@@ -219,6 +219,7 @@ def _projection_line(projection: dict[str, Any]) -> str:
 
 def _trade_intake_line(trade: dict[str, Any]) -> str:
     summary = _dict(trade.get("summary"))
+    sources = _trade_intake_sources_value(trade)
     return (
         "trade intake: "
         f"enabled={_yes_no(trade.get('enabled'))} "
@@ -230,7 +231,24 @@ def _trade_intake_line(trade: dict[str, Any]) -> str:
         f"receipts={_int_value(summary.get('receipt_count'))} "
         f"confirmed={_int_value(summary.get('receipt_confirmed_count'))} "
         f"receipt_failed={_int_value(summary.get('receipt_failed_count'))}"
+        + (f" sources={sources}" if sources else "")
     )
+
+
+def _trade_intake_sources_value(trade: dict[str, Any]) -> str:
+    items: list[str] = []
+    for source in _list(trade.get("sources")):
+        item = _dict(source)
+        if not item:
+            continue
+        label = str(item.get("account") or item.get("id") or "source").strip()
+        summary = _dict(item.get("summary"))
+        listener = str(summary.get("listener_status") or "").strip() or "unknown"
+        host = str(item.get("host") or "").strip()
+        port = str(item.get("port") or "").strip()
+        endpoint = f"@{host}:{port}" if host and port else ""
+        items.append(f"{label}:{listener}{endpoint}")
+    return _csv(items)
 
 
 def _prefetch_line(label: str, prefetch: dict[str, Any]) -> str:

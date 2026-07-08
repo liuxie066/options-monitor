@@ -218,6 +218,131 @@ def test_auto_trade_intake_once_accepts_explicit_runtime_root_over_env(tmp_path:
     assert payload["status_path"] == str((explicit_runtime_root / "output_shared" / "state" / "auto_trade_intake_status.json").resolve())
 
 
+def test_auto_trade_intake_once_reports_multiple_account_sources(tmp_path: Path) -> None:
+    user_path = tmp_path / "user.us.json"
+    user_path.write_text(
+        json.dumps(
+            {
+                "account_settings": {
+                    "lx": {
+                        "type": "futu",
+                        "futu": {"account_id": "REAL_12345678", "host": "127.0.0.1", "port": 11111},
+                    },
+                    "sy": {
+                        "type": "futu",
+                        "futu": {"account_id": "REAL_87654321", "host": "127.0.0.1", "port": 11112},
+                    },
+                },
+                "symbols": [{"symbol": "NVDA", "sell_put": {"max_strike": 160}}],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    cfg, _meta = build_layered_runtime_config(repo_root=BASE, market="us", user_config_path=user_path)
+    config_path = tmp_path / "config.us.json"
+    config_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    runtime_root = tmp_path / "runtime"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "src.application.trades.auto_intake",
+            "--config",
+            str(config_path),
+            "--runtime-root",
+            str(runtime_root),
+            "--once",
+        ],
+        cwd=str(BASE),
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=AUTO_INTAKE_CLI_TIMEOUT_SEC,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    payload = json.loads(result.stdout)
+    assert [item["id"] for item in payload["sources"]] == ["lx", "sy"]
+    assert [item["port"] for item in payload["sources"]] == [11111, 11112]
+    assert payload["sources"][0]["state_path"] == str((runtime_root / "output_shared/state/trade_intake/lx/state.json").resolve())
+    assert payload["sources"][1]["status_path"] == str((runtime_root / "output_shared/state/trade_intake/sy/status.json").resolve())
+
+
+def test_deal_json_source_selection_uses_payload_futu_account_id() -> None:
+    from src.application.trades.auto_intake import _select_source_for_payload
+
+    sources = [
+        {
+            "id": "lx",
+            "account": "lx",
+            "host": "127.0.0.1",
+            "port": 11111,
+            "account_mapping": {"REAL_12345678": "lx"},
+            "futu_account_ids": ["REAL_12345678"],
+        },
+        {
+            "id": "sy",
+            "account": "sy",
+            "host": "127.0.0.1",
+            "port": 11112,
+            "account_mapping": {"REAL_87654321": "sy"},
+            "futu_account_ids": ["REAL_87654321"],
+        },
+    ]
+
+    selected = _select_source_for_payload(
+        sources,
+        payload={"deal_id": "deal-sy-1", "futu_account_id": "REAL_87654321"},
+        account_mapping={"REAL_12345678": "lx", "REAL_87654321": "sy"},
+        require_match=True,
+    )
+
+    assert selected["id"] == "sy"
+    assert selected["port"] == 11112
+
+
+def test_deal_json_apply_requires_source_match_when_multiple_sources() -> None:
+    import pytest
+
+    from src.application.trades.auto_intake import _select_source_for_payload
+
+    sources = [
+        {"id": "lx", "account": "lx", "futu_account_ids": ["REAL_12345678"]},
+        {"id": "sy", "account": "sy", "futu_account_ids": ["REAL_87654321"]},
+    ]
+
+    with pytest.raises(SystemExit, match="requires payload futu_account_id/account"):
+        _select_source_for_payload(
+            sources,
+            payload={"deal_id": "deal-no-account"},
+            account_mapping={"REAL_12345678": "lx", "REAL_87654321": "sy"},
+            require_match=True,
+        )
+
+
+def test_deal_json_source_selection_rejects_account_mapping_conflict() -> None:
+    import pytest
+
+    from src.application.trades.auto_intake import _select_source_for_payload
+
+    sources = [
+        {"id": "lx", "account": "lx", "futu_account_ids": ["REAL_12345678"]},
+        {"id": "sy", "account": "sy", "futu_account_ids": ["REAL_87654321"]},
+    ]
+
+    with pytest.raises(SystemExit, match="account conflicts"):
+        _select_source_for_payload(
+            sources,
+            payload={"deal_id": "deal-conflict", "account": "lx", "futu_account_id": "REAL_87654321"},
+            account_mapping={"REAL_12345678": "lx", "REAL_87654321": "sy"},
+            require_match=True,
+        )
+
+
 def test_auto_trade_intake_open_dry_run_accepts_futu_option_code_with_lookup_fields(tmp_path: Path) -> None:
     config_path = _write_runtime_config(tmp_path)
     payload_path = None

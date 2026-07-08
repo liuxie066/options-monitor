@@ -130,6 +130,46 @@ def test_reconcile_trade_intake_state_marks_ledger_recorded_failed_deal_processe
     assert processed["diagnostics"]["reconciled_ledger_event_type"] == "expire_close"
 
 
+def test_reconcile_trade_intake_state_ignores_same_deal_id_for_different_account(tmp_path: Path) -> None:
+    state_path = tmp_path / "auto_trade_intake_state.json"
+    write_trade_intake_state(
+        state_path,
+        {
+            "processed_deal_ids": {},
+            "failed_deal_ids": {
+                "same-deal-id": {
+                    "status": "failed",
+                    "action": "open",
+                    "account": "lx",
+                    "reason": "projection_verification_failed",
+                }
+            },
+            "unresolved_deal_ids": {},
+        },
+    )
+    repo = FakeRepo(
+        [
+            {
+                "event_id": "futu:sy:281756479859383817:same-deal-id",
+                "event_type": "open",
+                "account": "sy",
+                "raw_payload": {
+                    "source": "api",
+                    "source_deal_id": "same-deal-id",
+                    "futu_account_id": "281756479859383817",
+                },
+            }
+        ]
+    )
+
+    out = reconcile_trade_intake_state(state_path=state_path, repo=repo, apply_changes=True)
+    state = load_trade_intake_state(state_path)
+
+    assert out["actions"][0]["action"] == "keep_pending"
+    assert "same-deal-id" in state["failed_deal_ids"]
+    assert "same-deal-id" not in state["processed_deal_ids"]
+
+
 def test_reconcile_trade_intake_state_uses_lifecycle_stock_settlement_source_event(tmp_path: Path) -> None:
     state_path = tmp_path / "auto_trade_intake_state.json"
     write_trade_intake_state(

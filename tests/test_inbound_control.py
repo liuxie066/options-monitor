@@ -2423,6 +2423,7 @@ def test_inbound_symbol_setting_writes_yaml_and_rebuilds_runtime(monkeypatch: py
 accounts:
   lx:
     type: futu
+    futu_account_id: "REAL_12345678"
 markets:
   us:
     accounts: [lx]
@@ -2491,6 +2492,7 @@ def test_inbound_symbol_setting_writes_yaml_sell_put_max_strike(monkeypatch: pyt
 accounts:
   lx:
     type: futu
+    futu_account_id: "REAL_12345678"
 markets:
   us:
     accounts: [lx]

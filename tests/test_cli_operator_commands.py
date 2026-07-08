@@ -1534,6 +1534,7 @@ def test_config_build_defaults_to_yaml_source(capsys, tmp_path: Path) -> None:
 accounts:
   lx:
     type: futu
+    futu_account_id: "REAL_12345678"
 markets:
   us:
     accounts: [lx]
@@ -1592,6 +1593,7 @@ def test_config_validate_rejects_runtime_flags_with_yaml_source(capsys, tmp_path
 accounts:
   lx:
     type: futu
+    futu_account_id: "REAL_12345678"
 markets:
   us:
     accounts: [lx]

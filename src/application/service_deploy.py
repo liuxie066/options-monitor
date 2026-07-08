@@ -10,7 +10,8 @@ from json import JSONDecodeError
 from pathlib import Path
 from typing import Any, Callable, Literal, cast
 
-from src.application.config_yaml import resolve_yaml_assistant_config
+from src.application.account_config import build_account_runtime_plan
+from src.application.config_yaml import resolve_yaml_assistant_config, resolve_yaml_runtime_config
 from src.application.platform_profile import default_runtime_root_for_service_target
 from src.application.settings import build_effective_env
 
@@ -57,6 +58,15 @@ class RenderedServiceFile:
         if include_content:
             out["content"] = self.content
         return out
+
+
+@dataclass(frozen=True)
+class OpendServicePlan:
+    account: str | None
+    systemd_service_name: str
+    launchd_label: str
+    root: Path
+    executable: Path
 
 
 def normalize_target(value: str) -> ServiceTarget:
@@ -174,6 +184,12 @@ def default_opend_root(*, deploy_home: Path | None = None) -> Path:
     return (deploy_home or Path.home()) / "apps" / "futu-opend" / "current"
 
 
+def _service_slug(value: str) -> str:
+    raw = str(value or "").strip().lower()
+    slug = "".join(ch if ("a" <= ch <= "z" or "0" <= ch <= "9") else "-" for ch in raw).strip("-")
+    return slug or "account"
+
+
 def _resolve_path(value: str | Path | None, *, base: Path, default: Path) -> Path:
     raw = str(value or "").strip()
     if not raw:
@@ -189,6 +205,139 @@ def _absolute_path_preserve_symlink(value: str | Path, *, base: Path | None = No
     if path.is_absolute():
         return path
     return (base or Path.cwd()) / path
+
+
+def _read_json_config(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except JSONDecodeError as exc:
+        raise ValueError(f"failed to parse service config JSON: {path}:{exc.lineno}:{exc.colno}") from exc
+    except Exception as exc:
+        raise ValueError(f"failed to read service config JSON: {path}: {type(exc).__name__}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"service config JSON must be an object: {path}")
+    return data if isinstance(data, dict) else {}
+
+
+def _first_existing_config(config_by_market: dict[str, Path], market_values: list[str]) -> dict[str, Any]:
+    for market in market_values:
+        path = config_by_market.get(market)
+        if path is not None and path.exists():
+            cfg = _read_json_config(path)
+            if cfg:
+                return cfg
+    return {}
+
+
+def _first_yaml_runtime_config(*, repo_root: Path, config_yaml_path: Path, market_values: list[str]) -> dict[str, Any]:
+    for market in market_values:
+        cfg, _meta = resolve_yaml_runtime_config(
+            repo_root=repo_root,
+            market=market,
+            config_path=config_yaml_path,
+        )
+        if cfg:
+            return cfg
+    return {}
+
+
+def _opend_service_plans_from_authoring_config(
+    *,
+    repo_root: Path,
+    config_yaml_path: Path | None,
+    config_by_market: dict[str, Path],
+    market_values: list[str],
+    accounts: list[str],
+    executable: str | Path,
+) -> list[OpendServicePlan]:
+    config = (
+        _first_yaml_runtime_config(repo_root=repo_root, config_yaml_path=config_yaml_path, market_values=market_values)
+        if config_yaml_path is not None
+        else _first_existing_config(config_by_market, market_values)
+    )
+    return _opend_service_plans_from_config(
+        config=config,
+        repo_root=repo_root,
+        accounts=accounts,
+        executable=executable,
+    )
+
+
+def _opend_executable_path(root: Path, executable: str | Path) -> Path:
+    raw = Path(str(executable or DEFAULT_OPEND_EXECUTABLE).strip() or DEFAULT_OPEND_EXECUTABLE).expanduser()
+    return raw if raw.is_absolute() else root / raw
+
+
+def _opend_service_plans_from_config(
+    *,
+    config: dict[str, Any],
+    repo_root: Path,
+    accounts: list[str],
+    executable: str | Path,
+) -> list[OpendServicePlan]:
+    candidates: list[tuple[str, Path]] = []
+    for account in accounts:
+        runtime_plan = build_account_runtime_plan(config, account=account)
+        if runtime_plan.account_type != "futu":
+            continue
+        if not runtime_plan.futu_opend_root:
+            continue
+        candidates.append((runtime_plan.account, _absolute_path_preserve_symlink(runtime_plan.futu_opend_root, base=repo_root)))
+
+    if not candidates:
+        return []
+
+    multi = len(candidates) > 1
+    plans: list[OpendServicePlan] = []
+    for account, root in candidates:
+        slug = _service_slug(account)
+        systemd_name = f"options-monitor-opend-{slug}.service" if multi else "options-monitor-opend.service"
+        launchd_label = f"com.options-monitor.opend.{slug}" if multi else "com.options-monitor.opend"
+        plans.append(
+            OpendServicePlan(
+                account=account,
+                systemd_service_name=systemd_name,
+                launchd_label=launchd_label,
+                root=root,
+                executable=_opend_executable_path(root, executable),
+            )
+        )
+    return plans
+
+
+def _legacy_opend_service_plan(*, root: Path, executable: str | Path) -> OpendServicePlan:
+    return OpendServicePlan(
+        account=None,
+        systemd_service_name="options-monitor-opend.service",
+        launchd_label="com.options-monitor.opend",
+        root=root,
+        executable=_opend_executable_path(root, executable),
+    )
+
+
+def _opend_profile(target: ServiceTarget, plans: list[OpendServicePlan]) -> dict[str, Any] | None:
+    if not plans:
+        return None
+    services = [
+        {
+            **({"account": item.account} if item.account else {}),
+            "root": str(item.root),
+            "executable": str(item.executable),
+            "service_name": item.systemd_service_name if target == "systemd" else item.launchd_label,
+        }
+        for item in plans
+    ]
+    profile: dict[str, Any] = {
+        "enabled": True,
+        "services": services,
+    }
+    if len(services) == 1:
+        profile.update({
+            "root": services[0]["root"],
+            "executable": services[0]["executable"],
+            "service_name": services[0]["service_name"],
+        })
+    return profile
 
 
 def _config_path_for_market(
@@ -499,20 +648,7 @@ def render_service_bundle(
     systemd_home = default_systemd_deploy_home(systemd_user) if target_key == "systemd" and systemd_user else None
     if deploy_home is not None and str(deploy_home).strip():
         systemd_home = Path(deploy_home).expanduser()
-    opend_root_path = (
-        _resolve_path(
-            opend_root,
-            base=repo,
-            default=default_opend_root(deploy_home=systemd_home),
-        )
-        if include_opend
-        else None
-    )
     opend_executable_value = str(opend_executable or DEFAULT_OPEND_EXECUTABLE).strip() or DEFAULT_OPEND_EXECUTABLE
-    opend_executable_path = None
-    if opend_root_path is not None:
-        raw_opend_executable = Path(opend_executable_value).expanduser()
-        opend_executable_path = raw_opend_executable if raw_opend_executable.is_absolute() else opend_root_path / raw_opend_executable
     account_values = normalize_accounts(accounts)
     market_values = normalize_markets(markets)
     recorder_source = normalize_strategy_lab_recorder_source(strategy_lab_recorder_source)
@@ -542,6 +678,25 @@ def render_service_bundle(
         if config_yaml_path is not None
         else None
     )
+    explicit_opend_root = opend_root is not None and str(opend_root).strip() != ""
+    opend_service_plans: list[OpendServicePlan] = []
+    if include_opend and not explicit_opend_root:
+        opend_service_plans = _opend_service_plans_from_authoring_config(
+            repo_root=repo,
+            config_yaml_path=config_yaml_path,
+            config_by_market=config_by_market,
+            market_values=market_values,
+            accounts=account_values,
+            executable=opend_executable_value,
+        )
+    if include_opend and not opend_service_plans:
+        opend_root_path = _resolve_path(
+            opend_root,
+            base=repo,
+            default=default_opend_root(deploy_home=systemd_home),
+        )
+        opend_service_plans = [_legacy_opend_service_plan(root=opend_root_path, executable=opend_executable_value)]
+
     om = str(repo / "om")
     om_agent = str(repo / "om-agent")
     lock_root = runtime / "locks"
@@ -721,27 +876,29 @@ def render_service_bundle(
             service_name=verify_timer,
         )
 
-        opend_service = "options-monitor-opend.service"
-        if include_opend:
-            assert opend_root_path is not None
-            assert opend_executable_path is not None
+        opend_dependency_units = [item.systemd_service_name for item in opend_service_plans]
+        for opend_plan in opend_service_plans:
             add(
-                f"systemd/{opend_service}",
+                f"systemd/{opend_plan.systemd_service_name}",
                 _systemd_unit(
-                    description="Futu OpenD gateway for Options Monitor",
+                    description=(
+                        f"Futu OpenD gateway for Options Monitor ({opend_plan.account})"
+                        if opend_plan.account
+                        else "Futu OpenD gateway for Options Monitor"
+                    ),
                     repo_root=repo,
                     runtime_root=runtime,
                     deploy_user=systemd_user,
                     deploy_home=systemd_home,
-                    working_directory=opend_root_path,
-                    exec_args=[str(opend_executable_path)],
+                    working_directory=opend_plan.root,
+                    exec_args=[str(opend_plan.executable)],
                     service_type="simple",
                     restart="always",
                     before=["options-monitor-trade-intake.service"],
                 ),
-                install_path=f"/etc/systemd/system/{opend_service}",
+                install_path=f"/etc/systemd/system/{opend_plan.systemd_service_name}",
                 kind="systemd_service",
-                service_name=opend_service,
+                service_name=opend_plan.systemd_service_name,
             )
 
         trade_market = "us" if "us" in config_by_market else market_values[0]
@@ -768,8 +925,8 @@ def render_service_bundle(
                 exec_args=trade_args,
                 service_type="simple",
                 restart="always",
-                after=[opend_service] if include_opend else None,
-                wants=[opend_service] if include_opend else None,
+                after=opend_dependency_units or None,
+                wants=opend_dependency_units or None,
             ),
             install_path=f"/etc/systemd/system/{trade_service}",
             kind="systemd_service",
@@ -893,8 +1050,8 @@ def render_service_bundle(
                     deploy_user=systemd_user,
                     deploy_home=systemd_home,
                     exec_args=recorder_sample_args,
-                    after=[opend_service] if include_opend and recorder_source == "opend" else None,
-                    wants=[opend_service] if include_opend and recorder_source == "opend" else None,
+                    after=opend_dependency_units if recorder_source == "opend" else None,
+                    wants=opend_dependency_units if recorder_source == "opend" else None,
                 ),
                 install_path=f"/etc/systemd/system/{recorder_sample_service}",
                 kind="systemd_service",
@@ -1175,24 +1332,21 @@ def render_service_bundle(
             service_name=verify_label,
         )
 
-        opend_label = "com.options-monitor.opend"
-        if include_opend:
-            assert opend_root_path is not None
-            assert opend_executable_path is not None
+        for opend_plan in opend_service_plans:
             add(
-                f"launchd/{opend_label}.plist",
+                f"launchd/{opend_plan.launchd_label}.plist",
                 _launchd_plist(
-                    label=opend_label,
+                    label=opend_plan.launchd_label,
                     repo_root=repo,
                     runtime_root=runtime,
-                    program_args=[str(opend_executable_path)],
+                    program_args=[str(opend_plan.executable)],
                     log_root=log_root,
-                    working_directory=opend_root_path,
+                    working_directory=opend_plan.root,
                     keep_alive=True,
                 ),
-                install_path=f"~/Library/LaunchAgents/{opend_label}.plist",
+                install_path=f"~/Library/LaunchAgents/{opend_plan.launchd_label}.plist",
                 kind="launchd_plist",
-                service_name=opend_label,
+                service_name=opend_plan.launchd_label,
             )
 
         trade_market = "us" if "us" in config_by_market else market_values[0]
@@ -1480,12 +1634,7 @@ def render_service_bundle(
         deploy_user=systemd_user,
         deploy_home=systemd_home,
         auto_upgrade_enabled=bool(include_auto_upgrade),
-        opend={
-            "enabled": True,
-            "root": str(opend_root_path),
-            "executable": str(opend_executable_path),
-            "service_name": "options-monitor-opend.service" if target_key == "systemd" else "com.options-monitor.opend",
-        } if include_opend and opend_root_path is not None and opend_executable_path is not None else None,
+        opend=_opend_profile(target_key, opend_service_plans),
         feishu_ws={
             "enabled": True,
             "config_key": feishu_ws_config_key_value,
@@ -1531,17 +1680,7 @@ def render_service_bundle(
         **({"env_file": str(env_file_path)} if env_file_path is not None else {}),
         **({"deploy_user": str(systemd_user)} if systemd_user else {}),
         **({"deploy_home": str(systemd_home)} if systemd_home is not None else {}),
-        **(
-            {
-                "opend": {
-                    "enabled": True,
-                    "root": str(opend_root_path),
-                    "executable": str(opend_executable_path),
-                }
-            }
-            if include_opend and opend_root_path is not None and opend_executable_path is not None
-            else {}
-        ),
+        **({"opend": _opend_profile(target_key, opend_service_plans)} if opend_service_plans else {}),
         "accounts": account_values,
         "markets": market_values,
         "files": [item.to_dict(include_content=include_content) for item in files],

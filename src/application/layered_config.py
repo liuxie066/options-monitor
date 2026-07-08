@@ -234,6 +234,8 @@ def _derive_trade_intake(cfg: dict[str, Any], *, accounts: list[str]) -> None:
         setting = raw_setting if isinstance(raw_setting, dict) else {}
         if str(setting.get("type") or ACCOUNT_TYPE_FUTU).strip().lower() != ACCOUNT_TYPE_FUTU:
             continue
+        if setting.get("trade_intake_enabled") is False:
+            continue
         raw_futu_cfg = setting.get("futu")
         futu_cfg = raw_futu_cfg if isinstance(raw_futu_cfg, dict) else {}
         account_id = str(futu_cfg.get("account_id") or "").strip()

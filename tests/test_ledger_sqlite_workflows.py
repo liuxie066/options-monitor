@@ -643,7 +643,7 @@ def test_canonical_seed_lot_survives_later_trade_event_projection(tmp_path: Path
     lots = repo.list_position_lots()
     record_ids = {row["record_id"] for row in lots}
     assert "rec_sy_seed" in record_ids
-    assert "lot_deal-open-2" in record_ids
+    assert "lot_futu:lx:REAL_1:deal-open-2" in record_ids
 
 
 def test_load_option_positions_repo_supports_sqlite_only_mode(tmp_path: Path) -> None:
@@ -860,17 +860,20 @@ def test_persist_trade_event_builds_position_lots_projection(tmp_path: Path) -> 
     assert first["created"] is True
     assert second["created"] is True
     events = repo.list_trade_events()
-    assert [row["event_id"] for row in events] == ["deal-open-1", "deal-close-1"]
+    open_event_id = "futu:lx:REAL_1:deal-open-1"
+    close_event_id = "futu:lx:REAL_1:deal-close-1"
+    assert [row["event_id"] for row in events] == [open_event_id, close_event_id]
+    assert [row["raw_payload"]["source_deal_id"] for row in events] == ["deal-open-1", "deal-close-1"]
 
     lots = repo.list_position_lots()
     assert len(lots) == 1
     fields = lots[0]["fields"]
-    assert fields["source_event_id"] == "deal-open-1"
+    assert fields["source_event_id"] == open_event_id
     assert fields["contracts"] == 2
     assert fields["contracts_open"] == 1
     assert fields["contracts_closed"] == 1
     assert fields["status"] == "open"
-    assert fields["last_close_event_id"] == "deal-close-1"
+    assert fields["last_close_event_id"] == close_event_id
     assert fields["strike"] == 480.0
     assert fields["expiration"] == 1777420800000
     assert fields["multiplier"] == 100
@@ -883,6 +886,53 @@ def test_persist_trade_event_builds_position_lots_projection(tmp_path: Path) -> 
     assert row["expiration"] == 1777420800000
     assert row["strike"] == 480.0
     assert row["multiplier"] == 100.0
+
+
+def test_persist_trade_event_keys_api_deals_by_account_and_futu_account(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    from src.application.trades.normalizer import NormalizedTradeDeal
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    base_deal = NormalizedTradeDeal(
+        broker="富途",
+        futu_account_id="REAL_1",
+        internal_account="lx",
+        deal_id="same-deal-id",
+        order_id="order-1",
+        symbol="NVDA",
+        option_type="put",
+        side="sell",
+        position_effect="open",
+        contracts=1,
+        price=1.2,
+        strike=100.0,
+        multiplier=100,
+        multiplier_source="payload",
+        expiration_ymd="2026-06-19",
+        currency="USD",
+        trade_time_ms=1000,
+        raw_payload={"deal_id": "same-deal-id"},
+    )
+
+    ledger_writer.persist_trade_event(repo, base_deal)
+    ledger_writer.persist_trade_event(
+        repo,
+        replace(
+            base_deal,
+            futu_account_id="REAL_2",
+            internal_account="sy",
+            order_id="order-2",
+            trade_time_ms=2000,
+        ),
+    )
+
+    events = repo.list_trade_events()
+    assert [item["event_id"] for item in events] == [
+        "futu:lx:REAL_1:same-deal-id",
+        "futu:sy:REAL_2:same-deal-id",
+    ]
+    assert {item["raw_payload"]["source_deal_id"] for item in events} == {"same-deal-id"}
 
 
 def test_sqlite_repo_migrates_and_backfills_position_lot_contract_columns(tmp_path: Path) -> None:

@@ -24,6 +24,7 @@ from domain.domain.ledger.position_fields import (
 )
 from src.application.ledger.errors import LedgerPreflightError
 from src.application.ledger.event_codec import import_stored_trade_events, stored_trade_event_to_ledger_event
+from src.application.ledger.external_event_key import broker_external_event_key
 from src.application.ledger.results import LedgerPreflightResult, ManualAdjustPreflightResult
 
 
@@ -780,7 +781,7 @@ def _trade_open_ledger_inputs(deal: Any) -> tuple[Any, dict[str, Any], TradeEven
     fields = build_position_lot_fields(command).to_dict()
     fields.update(strategy_metadata_fields_from_payload(getattr(resolved_deal, "raw_payload", None)))
     contract_key = _contract_key_from_fields(fields)
-    event_id = str(getattr(resolved_deal, "deal_id", "") or "").strip()
+    event_id = broker_external_event_key(resolved_deal)
     event = TradeEvent(
         event_id=event_id,
         event_type="open",

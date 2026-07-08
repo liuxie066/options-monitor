@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 1.2.362 - 2026-07-08
+
+### Added
+- Added per-account Futu OpenD runtime plans so each Futu account can carry its own account id, host, ports, trade intake source, and service deployment profile.
+- Added account-aware trade-intake source routing, runtime status reporting, and service bundle rendering for multi-OpenD deployments.
+
+### Changed
+- Treated Futu portfolio and API trade data as a single account runtime source while keeping external holdings/manual trade accounts explicit.
+- Keyed broker trade events by account and Futu account id so assigned-stock and option lifecycle reconciliation stay separated across accounts.
+
+### Fixed
+- Rejected invalid OpenD service config JSON instead of silently falling back to a legacy single OpenD service.
+- Required single-deal trade replay in apply mode to match the payload's account or Futu account id when multiple trade-intake sources are configured.
+- Kept `om-agent` and `om accounts` Futu account mutations valid by writing explicit OpenD host/port into account settings.
+
 ## 1.2.361 - 2026-07-07
 
 ### Fixed

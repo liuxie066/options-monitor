@@ -16,6 +16,8 @@ def add_account_commands(subparsers: Any) -> None:
     add.add_argument("--account-type", required=True, choices=("futu", "external_holdings"))
     add.add_argument("--config-path", default=None)
     add.add_argument("--futu-acc-id", default=None)
+    add.add_argument("--futu-host", default=None)
+    add.add_argument("--futu-port", type=int, default=None)
     add.add_argument("--holdings-account", default=None)
     edit = account_sub.add_parser("edit", help="edit account")
     edit.add_argument("--market", required=True, choices=("us", "hk"))
@@ -23,6 +25,8 @@ def add_account_commands(subparsers: Any) -> None:
     edit.add_argument("--config-path", default=None)
     edit.add_argument("--account-type", choices=("futu", "external_holdings"), default=None)
     edit.add_argument("--futu-acc-id", default=None)
+    edit.add_argument("--futu-host", default=None)
+    edit.add_argument("--futu-port", type=int, default=None)
     edit.add_argument("--holdings-account", default=None)
     edit.add_argument("--clear-holdings-account", action="store_true")
     remove = account_sub.add_parser("remove", help="remove account")
@@ -48,6 +52,8 @@ def handle_account_command(
                 account_type=args.account_type,
                 config_path=args.config_path,
                 futu_acc_id=args.futu_acc_id,
+                futu_host=args.futu_host,
+                futu_port=args.futu_port,
                 holdings_account=args.holdings_account,
             ),
         )
@@ -62,6 +68,8 @@ def handle_account_command(
                 config_path=args.config_path,
                 account_type=args.account_type,
                 futu_acc_id=args.futu_acc_id,
+                futu_host=args.futu_host,
+                futu_port=args.futu_port,
                 holdings_account=args.holdings_account,
                 clear_holdings_account=bool(args.clear_holdings_account),
             ),
