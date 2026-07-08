@@ -4017,7 +4017,30 @@ def test_cli_run_trade_intake_delegates_to_application(monkeypatch) -> None:
     ])
 
     assert rc == 0
-    assert calls == [["--config", "config.us.json", "--mode", "apply", "--host", "127.0.0.1", "--port", "11111", "--once"]]
+    assert calls == [["--config", "config.us.json", "--mode", "apply", "--once"]]
+
+
+def test_cli_run_trade_intake_delegates_explicit_host_port(monkeypatch) -> None:
+    import src.application.trades.auto_intake as auto_intake
+    from src.interfaces.cli.main import main
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(auto_intake, "main", lambda argv: calls.append(list(argv)) or 0)
+
+    rc = main([
+        "run",
+        "trade-intake",
+        "--config",
+        "config.us.json",
+        "--host",
+        "127.0.0.2",
+        "--port",
+        "22222",
+        "--once",
+    ])
+
+    assert rc == 0
+    assert calls == [["--config", "config.us.json", "--host", "127.0.0.2", "--port", "22222", "--once"]]
 
 
 def test_cli_run_trade_intake_delegates_reconcile_state_flags(monkeypatch) -> None:
@@ -4043,10 +4066,6 @@ def test_cli_run_trade_intake_delegates_reconcile_state_flags(monkeypatch) -> No
         [
             "--config",
             "config.us.json",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            "11111",
             "--reconcile-state",
             "--deal-id",
             "deal-1",
@@ -4083,10 +4102,6 @@ def test_cli_run_trade_intake_delegates_runtime_root(monkeypatch, tmp_path: Path
             "config.us.json",
             "--runtime-root",
             str(runtime_root),
-            "--host",
-            "127.0.0.1",
-            "--port",
-            "11111",
             "--reconcile-state",
             "--deal-id",
             "deal-1",
