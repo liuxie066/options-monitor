@@ -15,6 +15,7 @@ repo_base = Path(__file__).resolve().parents[3]
 if str(repo_base) not in sys.path:
     sys.path.insert(0, str(repo_base))
 
+from domain.domain.trade_account_identity import extract_primary_account_id
 from src.application.config_loader import load_config
 from src.application.trades.futu_detail_lookup import enrich_trade_push_payload_with_account_id
 from src.application.trades.account_mapping import resolve_trade_intake_config
@@ -49,8 +50,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--state-path", default=None)
     ap.add_argument("--audit-path", default=None)
     ap.add_argument("--status-path", default=None)
-    ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--port", type=int, default=11111)
+    ap.add_argument("--host", default=None)
+    ap.add_argument("--port", type=int, default=None)
     ap.add_argument("--once", action="store_true", help="Validate config and exit")
     ap.add_argument("--deal-json", default=None, help="Replay a single normalized/raw deal payload from a JSON file")
     ap.add_argument("--retry-failed", action="store_true", help="Allow --deal-json replay of a previously failed deal_id")
@@ -154,6 +155,10 @@ def main(argv: list[str] | None = None) -> int:
         audit_path_override=args.audit_path,
         status_path_override=args.status_path,
     )
+    if args.host or args.port:
+        sources = _legacy_override_sources(intake_cfg, host=args.host, port=args.port)
+    else:
+        sources = list(intake_cfg.get("sources") or [])
     state_path = intake_cfg["state_path"]
     audit_path = intake_cfg["audit_path"]
     status_path = intake_cfg["status_path"]
@@ -163,14 +168,15 @@ def main(argv: list[str] | None = None) -> int:
         audit_path = (runtime_root / audit_path).resolve()
     if not status_path.is_absolute():
         status_path = (runtime_root / status_path).resolve()
+    sources = [_resolve_source_paths(source, runtime_root=runtime_root) for source in sources]
     status_base = _status_base_payload(
         cfg_path=cfg_path,
         intake_cfg=intake_cfg,
         state_path=state_path,
         audit_path=audit_path,
         status_path=status_path,
-        host=args.host,
-        port=args.port,
+        host=str(args.host or "127.0.0.1"),
+        port=int(args.port or 11111),
         runtime_root=runtime_root,
         runtime_root_source=runtime_resolution.source,
     )
@@ -228,6 +234,7 @@ def main(argv: list[str] | None = None) -> int:
                     "receipt": dict(intake_cfg["receipt"]),
                     "backfill": dict(intake_cfg["backfill"]),
                     "mapped_accounts": sorted(intake_cfg["account_mapping"].values()),
+                    "sources": [_source_status_payload(source) for source in sources],
                 },
                 ensure_ascii=False,
             )
@@ -252,6 +259,16 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.deal_json:
         payload = json.loads(Path(args.deal_json).read_text(encoding="utf-8"))
+        manual_source = _select_source_for_payload(
+            sources,
+            payload=payload,
+            account_mapping=intake_cfg["account_mapping"],
+            require_match=bool(apply_changes),
+        )
+        manual_host = str(args.host or manual_source.get("host") or "127.0.0.1")
+        manual_port = int(args.port or manual_source.get("port") or 11111)
+        manual_account_mapping = dict(manual_source.get("account_mapping") or intake_cfg["account_mapping"])
+        manual_futu_account_ids = list(manual_source.get("futu_account_ids") or intake_cfg["futu_account_ids"])
         with contextlib.redirect_stdout(sys.stderr):
             if apply_changes:
                 _data_config, repo = open_position_ledger_from_runtime_config(base=runtime_root, cfg=cfg, data_config=args.data_config)
@@ -262,11 +279,11 @@ def main(argv: list[str] | None = None) -> int:
                 repo=repo,
                 state_path=state_path,
                 audit_path=audit_path,
-                account_mapping=intake_cfg["account_mapping"],
-                futu_account_ids=intake_cfg["futu_account_ids"],
+                account_mapping=manual_account_mapping,
+                futu_account_ids=manual_futu_account_ids,
                 apply_changes=apply_changes,
-                host=args.host,
-                port=args.port,
+                host=manual_host,
+                port=manual_port,
                 config=cfg,
                 config_path=cfg_path,
                 runtime_root=runtime_root,
@@ -296,14 +313,246 @@ def main(argv: list[str] | None = None) -> int:
     _data_config, repo = open_position_ledger_from_runtime_config(base=runtime_root, cfg=cfg, data_config=args.data_config)
 
     if not bool(intake_cfg["enabled"]):
-        _write_listener_status(status_path, status_base, status="error", stage="config", last_error="trade_intake.enabled=false")
+        for source in sources:
+            _write_listener_status(
+                source["status_path"],
+                _status_base_for_source(
+                    cfg_path=cfg_path,
+                    intake_cfg=intake_cfg,
+                    source=source,
+                    runtime_root=runtime_root,
+                    runtime_root_source=runtime_resolution.source,
+                ),
+                status="error",
+                stage="config",
+                last_error="trade_intake.enabled=false",
+            )
         raise SystemExit("trade_intake.enabled=false; refusing to start listener")
 
-    status_state = dict(status_base)
     process_lock = threading.RLock()
+    if len(sources) == 1:
+        return _run_listener_source_loop(
+            source=sources[0],
+            repo=repo,
+            cfg=cfg,
+            cfg_path=cfg_path,
+            runtime_root=runtime_root,
+            runtime_root_source=runtime_resolution.source,
+            intake_cfg=intake_cfg,
+            apply_changes=apply_changes,
+            receipt_callback=receipt_callback,
+            process_lock=process_lock,
+        )
+
+    stop_event = threading.Event()
+    threads = [
+        threading.Thread(
+            target=_run_listener_source_loop,
+            kwargs={
+                "source": source,
+                "repo": repo,
+                "cfg": cfg,
+                "cfg_path": cfg_path,
+                "runtime_root": runtime_root,
+                "runtime_root_source": runtime_resolution.source,
+                "intake_cfg": intake_cfg,
+                "apply_changes": apply_changes,
+                "receipt_callback": receipt_callback,
+                "process_lock": process_lock,
+                "stop_event": stop_event,
+            },
+            name=f"trade-intake-{source.get('id')}",
+            daemon=False,
+        )
+        for source in sources
+    ]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    except KeyboardInterrupt:
+        stop_event.set()
+        for thread in threads:
+            thread.join(timeout=5)
+        return 0
+    return 0
+
+
+def _build_receipt_callback(
+    *,
+    base: Path,
+    cfg: dict[str, Any],
+    receipt_config: dict[str, Any],
+) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    def _callback(context: dict[str, Any]) -> dict[str, Any]:
+        return send_trade_intake_receipt(
+            base=base,
+            config=cfg,
+            receipt_config=receipt_config,
+            apply_changes=bool(context.get("apply_changes")),
+            state=context.get("state") if isinstance(context.get("state"), dict) else {},
+            deal=context.get("deal"),
+            result=dict(context.get("result") or {}),
+            payload=context.get("effective_payload") if isinstance(context.get("effective_payload"), dict) else {},
+        )
+
+    return _callback
+
+
+def _select_source_for_payload(
+    sources: list[dict[str, Any]],
+    *,
+    payload: dict[str, Any],
+    account_mapping: dict[str, str],
+    require_match: bool,
+) -> dict[str, Any]:
+    if not sources:
+        return {}
+    if len(sources) == 1:
+        return sources[0]
+
+    futu_account_id = extract_primary_account_id(payload) or ""
+    account = str(payload.get("account") or payload.get("internal_account") or "").strip().lower()
+    mapped_account = str(account_mapping.get(futu_account_id) or "").strip().lower() if futu_account_id else ""
+    if account and mapped_account and account != mapped_account:
+        raise SystemExit("deal-json payload account conflicts with futu_account_id mapping; pass a consistent payload or --host/--port")
+    if not account and mapped_account:
+        account = mapped_account
+
+    matches: list[dict[str, Any]] = []
+    for source in sources:
+        source_account = str(source.get("account") or "").strip().lower()
+        source_account_ids = {str(item or "").strip() for item in list(source.get("futu_account_ids") or [])}
+        account_matches = bool(account and source_account and account == source_account)
+        futu_account_matches = bool(futu_account_id and futu_account_id in source_account_ids)
+        if account and futu_account_id:
+            if account_matches and futu_account_matches:
+                matches.append(source)
+            continue
+        if account_matches:
+            matches.append(source)
+            continue
+        if futu_account_matches:
+            matches.append(source)
+
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise SystemExit("deal-json payload matches multiple trade-intake sources; pass --host/--port explicitly")
+    if require_match:
+        raise SystemExit("deal-json apply mode with multiple trade-intake sources requires payload futu_account_id/account or explicit --host/--port")
+    return sources[0]
+
+
+def _legacy_override_sources(intake_cfg: dict[str, Any], *, host: str | None, port: int | None) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": "legacy",
+            "account": None,
+            "enabled": bool(intake_cfg.get("enabled", True)),
+            "mode": str(intake_cfg.get("mode") or "dry-run"),
+            "host": str(host or "127.0.0.1"),
+            "port": int(port or 11111),
+            "state_path": intake_cfg["state_path"],
+            "audit_path": intake_cfg["audit_path"],
+            "status_path": intake_cfg["status_path"],
+            "reconnect_sec": int(intake_cfg.get("reconnect_sec") or 5),
+            "receipt": dict(intake_cfg.get("receipt") or {}),
+            "backfill": dict(intake_cfg.get("backfill") or {}),
+            "account_mapping": dict(intake_cfg.get("account_mapping") or {}),
+            "futu_account_ids": list(intake_cfg.get("futu_account_ids") or []),
+        }
+    ]
+
+
+def _resolve_source_paths(source: dict[str, Any], *, runtime_root: Path) -> dict[str, Any]:
+    out = dict(source)
+    for key in ("state_path", "audit_path", "status_path"):
+        path = out.get(key)
+        resolved = path if isinstance(path, Path) else Path(str(path or ""))
+        if not resolved.is_absolute():
+            resolved = (runtime_root / resolved).resolve()
+        out[key] = resolved
+    return out
+
+
+def _source_status_payload(source: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": source.get("id"),
+        "account": source.get("account"),
+        "enabled": bool(source.get("enabled", True)),
+        "host": source.get("host"),
+        "port": source.get("port"),
+        "state_path": str(source.get("state_path")),
+        "audit_path": str(source.get("audit_path")),
+        "status_path": str(source.get("status_path")),
+        "mapped_accounts": sorted(dict(source.get("account_mapping") or {}).values()),
+        "futu_account_ids": list(source.get("futu_account_ids") or []),
+    }
+
+
+def _status_base_for_source(
+    *,
+    cfg_path: Path,
+    intake_cfg: dict[str, Any],
+    source: dict[str, Any],
+    runtime_root: Path,
+    runtime_root_source: str,
+) -> dict[str, Any]:
+    source_cfg = dict(intake_cfg)
+    source_cfg["account_mapping"] = dict(source.get("account_mapping") or {})
+    source_cfg["futu_account_ids"] = list(source.get("futu_account_ids") or [])
+    source_cfg["receipt"] = dict(source.get("receipt") or intake_cfg.get("receipt") or {})
+    source_cfg["backfill"] = dict(source.get("backfill") or intake_cfg.get("backfill") or {})
+    out = _status_base_payload(
+        cfg_path=cfg_path,
+        intake_cfg=source_cfg,
+        state_path=source["state_path"],
+        audit_path=source["audit_path"],
+        status_path=source["status_path"],
+        host=str(source.get("host") or "127.0.0.1"),
+        port=int(source.get("port") or 11111),
+        runtime_root=runtime_root,
+        runtime_root_source=runtime_root_source,
+    )
+    out["source_id"] = source.get("id")
+    if source.get("account"):
+        out["account"] = source.get("account")
+    return out
+
+
+def _run_listener_source_loop(
+    *,
+    source: dict[str, Any],
+    repo: Any,
+    cfg: dict[str, Any],
+    cfg_path: Path,
+    runtime_root: Path,
+    runtime_root_source: str,
+    intake_cfg: dict[str, Any],
+    apply_changes: bool,
+    receipt_callback: Callable[[dict[str, Any]], dict[str, Any]],
+    process_lock: threading.RLock,
+    stop_event: threading.Event | None = None,
+) -> int:
+    state_path = source["state_path"]
+    audit_path = source["audit_path"]
+    status_path = source["status_path"]
+    host = str(source.get("host") or "127.0.0.1")
+    port = int(source.get("port") or 11111)
+    account_mapping = dict(source.get("account_mapping") or {})
+    futu_account_ids = list(source.get("futu_account_ids") or [])
+    status_state = _status_base_for_source(
+        cfg_path=cfg_path,
+        intake_cfg=intake_cfg,
+        source=source,
+        runtime_root=runtime_root,
+        runtime_root_source=runtime_root_source,
+    )
+    stop = stop_event or threading.Event()
 
     def _on_deal(payload: dict[str, Any]) -> None:
-        nonlocal status_state
         push_received_at = utc_now()
         with process_lock:
             result = _process_payload(
@@ -311,11 +560,11 @@ def main(argv: list[str] | None = None) -> int:
                 repo=repo,
                 state_path=state_path,
                 audit_path=audit_path,
-                account_mapping=intake_cfg["account_mapping"],
-                futu_account_ids=intake_cfg["futu_account_ids"],
+                account_mapping=account_mapping,
+                futu_account_ids=futu_account_ids,
                 apply_changes=apply_changes,
-                host=args.host,
-                port=args.port,
+                host=host,
+                port=port,
                 config=cfg,
                 config_path=cfg_path,
                 runtime_root=runtime_root,
@@ -330,42 +579,30 @@ def main(argv: list[str] | None = None) -> int:
                 "last_receipt_result": _receipt_summary(result.get("receipt")),
             }
         )
-        _write_listener_status(
-            status_path,
-            status_state,
-            status="listening",
-            stage="deal_processed",
-        )
+        _write_listener_status(status_path, status_state, status="listening", stage="deal_processed")
         _log(_format_result_summary(result))
 
-    listener = OpenDTradePushListener(
-        host=args.host,
-        port=args.port,
-        on_deal=_on_deal,
-    )
+    listener = OpenDTradePushListener(host=host, port=port, on_deal=_on_deal)
     restart_count = 0
     last_backfill_monotonic: float | None = None
-    backfill_cfg = dict(intake_cfg.get("backfill") or {})
-    while True:
+    backfill_cfg = dict(source.get("backfill") or intake_cfg.get("backfill") or {})
+    reconnect_sec = int(source.get("reconnect_sec") or intake_cfg.get("reconnect_sec") or 5)
+    while not stop.is_set():
         try:
             _write_listener_status(status_path, status_state, status="starting", stage="listener_start", restart_count=restart_count)
             listener.start()
-            _log("[OK] auto trade intake listener started")
+            _log(f"[OK] auto trade intake listener started source={source.get('id')} {host}:{port}")
             _write_listener_status(status_path, status_state, status="listening", stage="listener_started", restart_count=restart_count)
             if bool(backfill_cfg.get("enabled", True)) and not bool(backfill_cfg.get("startup_check", True)) and last_backfill_monotonic is None:
                 last_backfill_monotonic = time.monotonic()
-            while True:
+            while not stop.is_set():
                 should_backfill = bool(backfill_cfg.get("enabled", True))
                 now_mono = time.monotonic()
                 if should_backfill:
                     interval_sec = int(backfill_cfg.get("interval_sec") or 300)
                     startup_check = bool(backfill_cfg.get("startup_check", True))
-                    due = (
-                        last_backfill_monotonic is None
-                        and startup_check
-                    ) or (
-                        last_backfill_monotonic is not None
-                        and now_mono - last_backfill_monotonic >= interval_sec
+                    due = (last_backfill_monotonic is None and startup_check) or (
+                        last_backfill_monotonic is not None and now_mono - last_backfill_monotonic >= interval_sec
                     )
                     if due:
                         try:
@@ -373,11 +610,11 @@ def main(argv: list[str] | None = None) -> int:
                                 repo=repo,
                                 state_path=state_path,
                                 audit_path=audit_path,
-                                account_mapping=intake_cfg["account_mapping"],
-                                futu_account_ids=intake_cfg["futu_account_ids"],
+                                account_mapping=account_mapping,
+                                futu_account_ids=futu_account_ids,
                                 apply_changes=apply_changes,
-                                host=args.host,
-                                port=args.port,
+                                host=host,
+                                port=port,
                                 config=cfg,
                                 config_path=cfg_path,
                                 runtime_root=runtime_root,
@@ -407,11 +644,13 @@ def main(argv: list[str] | None = None) -> int:
                                 },
                             )
                         last_backfill_monotonic = time.monotonic()
-                        status_state = _update_status_from_backfill(status_state, result)
+                        status_state.update(_update_status_from_backfill(status_state, result))
                         _write_listener_status(status_path, status_state, status="listening", stage="backfill_check", restart_count=restart_count)
                 _write_listener_status(status_path, status_state, status="listening", stage="heartbeat", restart_count=restart_count)
-                time.sleep(60)
+                if stop.wait(60):
+                    break
         except KeyboardInterrupt:
+            stop.set()
             listener.close()
             _write_listener_status(status_path, status_state, status="stopped", stage="keyboard_interrupt", restart_count=restart_count)
             return 0
@@ -427,29 +666,12 @@ def main(argv: list[str] | None = None) -> int:
                 restart_count=restart_count,
                 last_error=f"{type(exc).__name__}: {exc}",
             )
-            _log(f"[WARN] listener exited: {exc}; retry in {int(intake_cfg['reconnect_sec'])} sec")
-            time.sleep(int(intake_cfg["reconnect_sec"]))
-
-
-def _build_receipt_callback(
-    *,
-    base: Path,
-    cfg: dict[str, Any],
-    receipt_config: dict[str, Any],
-) -> Callable[[dict[str, Any]], dict[str, Any]]:
-    def _callback(context: dict[str, Any]) -> dict[str, Any]:
-        return send_trade_intake_receipt(
-            base=base,
-            config=cfg,
-            receipt_config=receipt_config,
-            apply_changes=bool(context.get("apply_changes")),
-            state=context.get("state") if isinstance(context.get("state"), dict) else {},
-            deal=context.get("deal"),
-            result=dict(context.get("result") or {}),
-            payload=context.get("effective_payload") if isinstance(context.get("effective_payload"), dict) else {},
-        )
-
-    return _callback
+            _log(f"[WARN] listener source={source.get('id')} exited: {exc}; retry in {reconnect_sec} sec")
+            if stop.wait(reconnect_sec):
+                break
+    listener.close()
+    _write_listener_status(status_path, status_state, status="stopped", stage="stop_event", restart_count=restart_count)
+    return 0
 
 
 def _status_base_payload(

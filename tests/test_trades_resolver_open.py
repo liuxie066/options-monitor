@@ -227,7 +227,7 @@ def test_resolve_trade_open_apply_uses_ledger_preflight_with_sqlite(tmp_path: Pa
     assert result.status == "applied"
     operation = result.operations[0]
     assert operation["action"] == "open"
-    assert operation["event_id"] == "deal-open-1"
+    assert operation["event_id"] == "futu:lx:REAL_1:deal-open-1"
     assert operation["ledger_preflight"]["status"] == "ok"
     assert operation["ledger_preflight"]["event_type"] == "open"
     assert operation["ledger_preflight"]["target_lot_id"] == operation["result"]["record_id"]

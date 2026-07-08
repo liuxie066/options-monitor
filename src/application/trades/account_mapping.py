@@ -7,7 +7,9 @@ from src.application.account_config import (
     ACCOUNT_TYPE_FUTU,
     account_settings_from_config,
     accounts_from_config,
+    build_account_runtime_plan,
     normalize_accounts,
+    resolve_account_trade_intake_enabled,
     resolve_account_type,
 )
 
@@ -40,6 +42,19 @@ def resolve_trade_intake_config(
     backfill_cfg = resolve_trade_intake_backfill_config(ti.get("backfill"))
     account_mapping = resolve_futu_account_mapping(src)
     futu_lookup_account_ids = resolve_futu_lookup_account_ids(src, account_mapping=account_mapping)
+    sources = resolve_trade_intake_sources(
+        src,
+        mode=mode,
+        enabled=enabled,
+        receipt=receipt_cfg,
+        backfill=backfill_cfg,
+        reconnect_sec=reconnect_sec,
+        fallback_state_path=state_path,
+        fallback_audit_path=audit_path,
+        fallback_status_path=status_path,
+        fallback_account_mapping=account_mapping,
+        fallback_futu_account_ids=futu_lookup_account_ids,
+    )
 
     return {
         "enabled": enabled,
@@ -52,6 +67,7 @@ def resolve_trade_intake_config(
         "backfill": backfill_cfg,
         "account_mapping": account_mapping,
         "futu_account_ids": futu_lookup_account_ids,
+        "sources": sources,
     }
 
 
@@ -131,6 +147,19 @@ def resolve_futu_account_mapping(cfg: dict[str, Any] | None) -> dict[str, str]:
                 f"trade_intake.account_mapping.futu[{key}]={value} is not a futu account in top-level accounts/account_settings"
             )
         out[key] = value
+
+    settings = account_settings_from_config(src)
+    for account in accounts_from_config(src):
+        if resolve_account_type(src, account=account) != ACCOUNT_TYPE_FUTU:
+            continue
+        if not resolve_account_trade_intake_enabled(src, account=account):
+            continue
+        futu_cfg = settings.get(account, {}).get("futu") if isinstance(settings.get(account), dict) else None
+        if not isinstance(futu_cfg, dict):
+            continue
+        account_id = str(futu_cfg.get("account_id") or "").strip()
+        if account_id:
+            out.setdefault(account_id, account)
     return out
 
 
@@ -168,6 +197,8 @@ def resolve_futu_lookup_account_ids(
     for account in accounts_from_config(src):
         if resolve_account_type(src, account=account) != ACCOUNT_TYPE_FUTU:
             continue
+        if not resolve_account_trade_intake_enabled(src, account=account):
+            continue
         futu_cfg = settings.get(account, {}).get("futu") if isinstance(settings.get(account), dict) else None
         if not isinstance(futu_cfg, dict):
             continue
@@ -176,6 +207,87 @@ def resolve_futu_lookup_account_ids(
             seen.add(account_id)
             out.append(account_id)
     return out
+
+
+def resolve_trade_intake_sources(
+    cfg: dict[str, Any] | None,
+    *,
+    mode: str | None = None,
+    enabled: bool | None = None,
+    receipt: dict[str, Any] | None = None,
+    backfill: dict[str, Any] | None = None,
+    reconnect_sec: int | None = None,
+    fallback_state_path: str | Path | None = None,
+    fallback_audit_path: str | Path | None = None,
+    fallback_status_path: str | Path | None = None,
+    fallback_account_mapping: dict[str, str] | None = None,
+    fallback_futu_account_ids: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    src = cfg if isinstance(cfg, dict) else {}
+    base_mode = str(mode or "dry-run")
+    base_enabled = True if enabled is None else bool(enabled)
+    base_receipt = dict(receipt or {})
+    base_backfill = dict(backfill or {})
+    base_reconnect_sec = int(reconnect_sec or 5)
+    base_state_path = Path(fallback_state_path or "output_shared/state/auto_trade_intake_state.json")
+    base_audit_path = Path(fallback_audit_path or "output_shared/state/auto_trade_intake_audit.jsonl")
+    base_status_path = Path(fallback_status_path or "output_shared/state/auto_trade_intake_status.json")
+    base_mapping = dict(fallback_account_mapping or resolve_futu_account_mapping(src))
+    base_account_ids = list(fallback_futu_account_ids or resolve_futu_lookup_account_ids(src, account_mapping=base_mapping))
+
+    account_sources: list[dict[str, Any]] = []
+    for account in accounts_from_config(src):
+        plan = build_account_runtime_plan(src, account=account)
+        if plan.account_type != ACCOUNT_TYPE_FUTU or not plan.trade_intake_enabled:
+            continue
+        if not plan.futu_account_id or not plan.futu_host or not plan.futu_port:
+            continue
+        account_sources.append(
+            {
+                "id": account,
+                "account": account,
+                "enabled": base_enabled,
+                "mode": base_mode,
+                "host": plan.futu_host,
+                "port": int(plan.futu_port),
+                "state_path": Path(f"output_shared/state/trade_intake/{account}/state.json"),
+                "audit_path": Path(f"output_shared/state/trade_intake/{account}/audit.jsonl"),
+                "status_path": Path(f"output_shared/state/trade_intake/{account}/status.json"),
+                "reconnect_sec": base_reconnect_sec,
+                "receipt": base_receipt,
+                "backfill": base_backfill,
+                "account_mapping": {plan.futu_account_id: account},
+                "futu_account_ids": [plan.futu_account_id],
+            }
+        )
+
+    if len(account_sources) == 1:
+        source = dict(account_sources[0])
+        source["state_path"] = base_state_path
+        source["audit_path"] = base_audit_path
+        source["status_path"] = base_status_path
+        return [source]
+    if account_sources:
+        return account_sources
+
+    return [
+        {
+            "id": "legacy",
+            "account": None,
+            "enabled": base_enabled,
+            "mode": base_mode,
+            "host": "127.0.0.1",
+            "port": 11111,
+            "state_path": base_state_path,
+            "audit_path": base_audit_path,
+            "status_path": base_status_path,
+            "reconnect_sec": base_reconnect_sec,
+            "receipt": base_receipt,
+            "backfill": base_backfill,
+            "account_mapping": base_mapping,
+            "futu_account_ids": base_account_ids,
+        }
+    ]
 
 
 def resolve_recognized_accounts(cfg: dict[str, Any] | None) -> list[str]:

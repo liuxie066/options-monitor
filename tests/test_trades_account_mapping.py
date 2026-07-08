@@ -5,6 +5,7 @@ from src.application.trades.account_mapping import (
     resolve_futu_lookup_account_ids,
     resolve_internal_account,
     resolve_trade_intake_config,
+    resolve_trade_intake_sources,
 )
 from domain.domain.trade_account_identity import extract_primary_account_id, extract_visible_account_fields
 
@@ -173,6 +174,79 @@ def test_resolve_futu_lookup_account_ids_merges_account_settings_account_id() ->
     out = resolve_futu_lookup_account_ids(cfg)
 
     assert out == ["111", "222"]
+
+
+def test_resolve_futu_account_mapping_derives_from_enabled_account_settings() -> None:
+    cfg = {
+        "accounts": ["lx", "sy"],
+        "account_settings": {
+            "lx": {"type": "futu", "futu": {"account_id": "111"}},
+            "sy": {"type": "futu", "trade_intake_enabled": False, "futu": {"account_id": "222"}},
+        },
+    }
+
+    assert resolve_futu_account_mapping(cfg) == {"111": "lx"}
+    assert resolve_futu_lookup_account_ids(cfg) == ["111"]
+
+
+def test_resolve_trade_intake_sources_uses_account_opend_settings_for_multiple_accounts() -> None:
+    cfg = {
+        "accounts": ["lx", "sy"],
+        "account_settings": {
+            "lx": {
+                "type": "futu",
+                "futu": {"account_id": "111", "host": "127.0.0.1", "port": 11111},
+            },
+            "sy": {
+                "type": "futu",
+                "futu": {"account_id": "222", "host": "127.0.0.1", "port": 11112},
+            },
+        },
+    }
+
+    out = resolve_trade_intake_sources(
+        cfg,
+        mode="apply",
+        enabled=True,
+        receipt={"enabled": False},
+        backfill={"enabled": False},
+        reconnect_sec=7,
+        fallback_state_path="legacy/state.json",
+        fallback_audit_path="legacy/audit.jsonl",
+        fallback_status_path="legacy/status.json",
+    )
+
+    assert [item["id"] for item in out] == ["lx", "sy"]
+    assert [item["port"] for item in out] == [11111, 11112]
+    assert out[0]["account_mapping"] == {"111": "lx"}
+    assert out[1]["account_mapping"] == {"222": "sy"}
+    assert str(out[0]["state_path"]) == "output_shared/state/trade_intake/lx/state.json"
+    assert str(out[1]["status_path"]) == "output_shared/state/trade_intake/sy/status.json"
+
+
+def test_resolve_trade_intake_sources_keeps_legacy_paths_for_single_source() -> None:
+    cfg = {
+        "accounts": ["lx"],
+        "account_settings": {
+            "lx": {
+                "type": "futu",
+                "futu": {"account_id": "111", "host": "127.0.0.1", "port": 11111},
+            },
+        },
+    }
+
+    out = resolve_trade_intake_sources(
+        cfg,
+        fallback_state_path="legacy/state.json",
+        fallback_audit_path="legacy/audit.jsonl",
+        fallback_status_path="legacy/status.json",
+    )
+
+    assert len(out) == 1
+    assert out[0]["id"] == "lx"
+    assert str(out[0]["state_path"]) == "legacy/state.json"
+    assert str(out[0]["audit_path"]) == "legacy/audit.jsonl"
+    assert str(out[0]["status_path"]) == "legacy/status.json"
 
 
 def test_extract_primary_account_id_prefers_canonical_priority_order() -> None:

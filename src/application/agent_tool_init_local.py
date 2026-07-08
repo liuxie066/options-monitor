@@ -150,6 +150,8 @@ def init_local_config(
         "type": ACCOUNT_TYPE_FUTU,
         "futu": {
             "account_id": normalized_acc_id,
+            "host": opend_host_value,
+            "port": opend_port_value,
         },
     }
     if str(holdings_account or "").strip():
@@ -269,6 +271,56 @@ def _resolve_futu_mapping(runtime_cfg: dict[str, Any]) -> tuple[dict[str, Any], 
     return trade_intake, account_mapping, futu_mapping
 
 
+def _legacy_futu_connection(runtime_cfg: dict[str, Any]) -> tuple[str | None, int | None]:
+    portfolio = runtime_cfg.get("portfolio")
+    futu_cfg = portfolio.get("futu") if isinstance(portfolio, dict) else None
+    if not isinstance(futu_cfg, dict):
+        return None, None
+    host = str(futu_cfg.get("host") or "").strip() or None
+    raw_port = futu_cfg.get("port")
+    if raw_port in (None, ""):
+        return host, None
+    try:
+        port = int(raw_port)
+    except Exception:
+        port = None
+    return host, port
+
+
+def _backfill_legacy_futu_connection_settings(runtime_cfg: dict[str, Any], account_settings: dict[str, Any]) -> None:
+    host, port = _legacy_futu_connection(runtime_cfg)
+    if not host and port is None:
+        return
+    for raw_setting in account_settings.values():
+        if not isinstance(raw_setting, dict):
+            continue
+        if str(raw_setting.get("type") or "").strip().lower() != ACCOUNT_TYPE_FUTU:
+            continue
+        raw_futu = raw_setting.get("futu")
+        futu_cfg = raw_futu if isinstance(raw_futu, dict) else {}
+        merged_futu = dict(futu_cfg)
+        if host and not str(merged_futu.get("host") or "").strip():
+            merged_futu["host"] = host
+        if port is not None and merged_futu.get("port") in (None, ""):
+            merged_futu["port"] = port
+        if merged_futu:
+            raw_setting["futu"] = merged_futu
+
+
+def _futu_accounts_from_settings(account_settings: dict[str, Any], *, exclude: str | None = None) -> list[str]:
+    excluded = str(exclude or "").strip().lower()
+    out: list[str] = []
+    for account, raw_setting in account_settings.items():
+        account_key = str(account or "").strip().lower()
+        if excluded and account_key == excluded:
+            continue
+        if not isinstance(raw_setting, dict):
+            continue
+        if str(raw_setting.get("type") or "").strip().lower() == ACCOUNT_TYPE_FUTU:
+            out.append(account_key)
+    return out
+
+
 def add_account_to_local_config(
     *,
     repo_root: Path,
@@ -305,6 +357,7 @@ def add_account_to_local_config(
     account_settings = runtime_cfg.get("account_settings")
     if not isinstance(account_settings, dict):
         account_settings = {}
+    _backfill_legacy_futu_connection_settings(runtime_cfg, account_settings)
     setting: dict[str, Any] = {"type": normalized_type}
     normalized_market_label = str(market_label or normalized_market).strip().lower()
     if normalized_market_label in {"us", "hk"}:
@@ -323,15 +376,23 @@ def add_account_to_local_config(
             )
     if holdings_value:
         setting["holdings_account"] = holdings_value
+    normalized_acc_id: str | None = None
     if normalized_type == ACCOUNT_TYPE_FUTU:
+        normalized_acc_id = _normalize_futu_acc_id(futu_acc_id)
+        existing_futu_accounts = _futu_accounts_from_settings(account_settings)
+        if existing_futu_accounts and (not str(futu_host or "").strip() or futu_port in (None, "")):
+            raise AgentToolError(
+                code="INPUT_ERROR",
+                message="futu_host and futu_port are required when adding a Futu account to a config that already has Futu accounts",
+                hint="Run a separate OpenD for the new Futu account and pass its host/port explicitly.",
+            )
         futu_cfg: dict[str, Any] = {}
         host = str(futu_host or "").strip()
         if host:
             futu_cfg["host"] = host
         if futu_port not in (None, ""):
             futu_cfg["port"] = int(futu_port)
-        if futu_acc_id is not None and str(futu_acc_id).strip():
-            futu_cfg["account_id"] = str(futu_acc_id).strip()
+        futu_cfg["account_id"] = normalized_acc_id
         if futu_cfg:
             setting["futu"] = futu_cfg
     else:
@@ -362,7 +423,6 @@ def add_account_to_local_config(
     trade_intake, account_mapping, futu_mapping = _resolve_futu_mapping(runtime_cfg)
 
     if normalized_type == ACCOUNT_TYPE_FUTU:
-        normalized_acc_id = _normalize_futu_acc_id(futu_acc_id)
         if normalized_acc_id in futu_mapping:
             raise AgentToolError(
                 code="INPUT_ERROR",
@@ -421,6 +481,7 @@ def edit_account_in_local_config(
     account_settings = runtime_cfg.get("account_settings")
     if not isinstance(account_settings, dict):
         account_settings = {}
+    _backfill_legacy_futu_connection_settings(runtime_cfg, account_settings)
     current_setting = account_settings.get(normalized_account)
     if not isinstance(current_setting, dict):
         current_setting = {"type": ACCOUNT_TYPE_FUTU}
@@ -473,6 +534,13 @@ def edit_account_in_local_config(
             merged_futu["port"] = int(futu_port)
         if futu_acc_id is not None and str(futu_acc_id).strip():
             merged_futu["account_id"] = str(futu_acc_id).strip()
+        other_futu_accounts = _futu_accounts_from_settings(account_settings, exclude=normalized_account)
+        if other_futu_accounts and (not str(merged_futu.get("host") or "").strip() or merged_futu.get("port") in (None, "")):
+            raise AgentToolError(
+                code="INPUT_ERROR",
+                message="futu_host and futu_port are required when editing an account to Futu in a config that already has Futu accounts",
+                hint="Run a separate OpenD for this Futu account and pass its host/port explicitly.",
+            )
         if merged_futu:
             setting["futu"] = merged_futu
     else:

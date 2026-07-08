@@ -5,7 +5,7 @@ def _base_cfg() -> dict:
     # Minimal valid runtime config skeleton; mirrors test_validate_config_notifications._base_cfg.
     return {
         "accounts": ["user1"],
-        "account_settings": {"user1": {"type": "futu"}},
+        "account_settings": {"user1": {"type": "futu", "futu": {"account_id": "REAL_12345678"}}},
         "portfolio": {
             "broker": "富途",
             "account": "user1",

@@ -49,7 +49,7 @@ def reconcile_trade_intake_state(
             )
             continue
 
-        ledger_events = ledger_by_deal.get(deal_id) or []
+        ledger_events = _filter_evidence_for_state_item(ledger_by_deal.get(deal_id) or [], state_item=item)
         if ledger_events:
             payload = _processed_payload_from_ledger(
                 deal_id=deal_id,
@@ -72,7 +72,7 @@ def reconcile_trade_intake_state(
             new_state = upsert_deal_state(new_state, bucket="processed_deal_ids", deal_id=deal_id, payload=payload)
             continue
 
-        assigned_stock_events = assigned_stock_by_deal.get(deal_id) or []
+        assigned_stock_events = _filter_evidence_for_state_item(assigned_stock_by_deal.get(deal_id) or [], state_item=item)
         if assigned_stock_events:
             payload = _processed_payload_from_assigned_stock_event(
                 deal_id=deal_id,
@@ -94,7 +94,7 @@ def reconcile_trade_intake_state(
             new_state = upsert_deal_state(new_state, bucket="processed_deal_ids", deal_id=deal_id, payload=payload)
             continue
 
-        lifecycle_entries = lifecycle_by_deal.get(deal_id) or []
+        lifecycle_entries = _filter_evidence_for_state_item(lifecycle_by_deal.get(deal_id) or [], state_item=item)
         if lifecycle_entries:
             payload = _processed_payload_from_lifecycle(
                 deal_id=deal_id,
@@ -211,6 +211,61 @@ def _ledger_events_by_deal(repo: Any) -> dict[str, list[dict[str, Any]]]:
         for deal_id in _deal_ids_from_ledger_event(event):
             out.setdefault(deal_id, []).append(event)
     return out
+
+
+def _filter_evidence_for_state_item(events: list[dict[str, Any]], *, state_item: dict[str, Any]) -> list[dict[str, Any]]:
+    return [event for event in events if _evidence_matches_state_item(event, state_item=state_item)]
+
+
+def _evidence_matches_state_item(event: dict[str, Any], *, state_item: dict[str, Any]) -> bool:
+    state_account = str(state_item.get("account") or "").strip().lower()
+    state_source = str(state_item.get("source") or "").strip().lower()
+    event_account = _evidence_account(event)
+    event_source = _evidence_source(event)
+    if state_account and event_account and state_account != event_account:
+        return False
+    if state_source and event_source and state_source != event_source:
+        return False
+    return True
+
+
+def _evidence_account(event: dict[str, Any]) -> str:
+    values: list[Any] = [event.get("account"), event.get("internal_account")]
+    raw = event.get("raw_payload")
+    raw_payload = raw if isinstance(raw, dict) else {}
+    values.extend([raw_payload.get("account"), raw_payload.get("internal_account")])
+    case = event.get("case")
+    if isinstance(case, dict):
+        values.extend([case.get("account"), case.get("internal_account")])
+    evidence = event.get("evidence")
+    if isinstance(evidence, dict):
+        values.extend([evidence.get("account"), evidence.get("internal_account")])
+        nested_raw = evidence.get("raw")
+        if isinstance(nested_raw, dict):
+            values.extend([nested_raw.get("account"), nested_raw.get("internal_account")])
+    for value in values:
+        text = str(value or "").strip().lower()
+        if text:
+            return text
+    return ""
+
+
+def _evidence_source(event: dict[str, Any]) -> str:
+    values: list[Any] = [event.get("source")]
+    raw = event.get("raw_payload")
+    raw_payload = raw if isinstance(raw, dict) else {}
+    values.extend([raw_payload.get("source"), raw_payload.get("trade_source")])
+    evidence = event.get("evidence")
+    if isinstance(evidence, dict):
+        values.append(evidence.get("source"))
+        nested_raw = evidence.get("raw")
+        if isinstance(nested_raw, dict):
+            values.extend([nested_raw.get("source"), nested_raw.get("trade_source")])
+    for value in values:
+        text = str(value or "").strip().lower()
+        if text:
+            return text
+    return ""
 
 
 def _deal_ids_from_ledger_event(event: dict[str, Any]) -> list[str]:

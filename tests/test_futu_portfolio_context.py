@@ -209,6 +209,51 @@ def test_fetch_futu_portfolio_context_filters_rows_by_mapped_account_ids() -> No
     assert fake_gateway.position_calls == [int(FAKE_FUTU_ACC_ID_LX_PRIMARY)]
 
 
+def test_fetch_futu_portfolio_context_uses_account_settings_account_id_without_trade_mapping() -> None:
+    import src.application.futu_portfolio_context as fc
+
+    captured: dict[str, list] = {"balance": [], "positions": []}
+
+    class _FakeGateway:
+        def get_account_balance(self, **kwargs):
+            captured["balance"].append(dict(kwargs))
+            return [{"currency": "USD", "us_cash": 2500}]
+
+        def get_positions(self, **kwargs):
+            captured["positions"].append(dict(kwargs))
+            return [{"code": "US.NVDA", "qty": 10, "cost_price": 120, "currency": "USD"}]
+
+        def close(self):
+            return None
+
+    old_build_gateway = fc.build_ready_futu_gateway
+    try:
+        fc.build_ready_futu_gateway = lambda **_kwargs: _FakeGateway()  # type: ignore[assignment]
+        out = fc.fetch_futu_portfolio_context(
+            cfg={
+                "accounts": ["lx"],
+                "account_settings": {
+                    "lx": {
+                        "type": "futu",
+                        "futu": {
+                            "account_id": FAKE_FUTU_ACC_ID_LX_PRIMARY,
+                            "host": "127.0.0.1",
+                            "port": 11111,
+                        },
+                    }
+                },
+            },
+            account="lx",
+        )
+    finally:
+        fc.build_ready_futu_gateway = old_build_gateway  # type: ignore[assignment]
+
+    assert captured["balance"] == [{"acc_id": int(FAKE_FUTU_ACC_ID_LX_PRIMARY), "trd_env": "REAL"}]
+    assert captured["positions"] == [{"acc_id": int(FAKE_FUTU_ACC_ID_LX_PRIMARY), "trd_env": "REAL"}]
+    assert out["cash_by_currency"] == {"USD": 2500.0}
+    assert sorted(out["stocks_by_symbol"].keys()) == ["NVDA"]
+
+
 def test_fetch_futu_portfolio_context_rejects_non_numeric_mapped_account_id() -> None:
     import pytest
 
