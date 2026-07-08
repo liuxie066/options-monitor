@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 1.2.363 - 2026-07-08
+## 1.2.364 - 2026-07-08
 
 ### Fixed
 - Stopped `om run trade-intake` from forwarding default `--host 127.0.0.1 --port 11111`, so multi-account Futu configs start per-account trade-intake sources instead of falling back to the legacy single OpenD listener.
