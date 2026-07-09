@@ -138,7 +138,8 @@ healthcheck 会额外给出本地 `ledger_store` 和 `option_positions_bootstrap
 ## 8. 下一步看哪里
 
 - 本地 agent 任务手册：[`AGENT_WIKI.md`](AGENT_WIKI.md)
-- 当前架构术语：[`OM_ASSISTANT_ARCHITECTURE.md`](OM_ASSISTANT_ARCHITECTURE.md)
+- 当前架构边界：[`ARCHITECTURE.md`](ARCHITECTURE.md)
+- Inbound 控制面：[`INBOUND_CONTROL.md`](INBOUND_CONTROL.md)
 - Tool Gateway JSON 合同：[`AGENT_INTEGRATION.md`](AGENT_INTEGRATION.md)
 - 工具说明：[`TOOL_REFERENCE.md`](TOOL_REFERENCE.md)
 - Linux / Mac 服务化部署：[`DEPLOY_LINUX_MAC.md`](DEPLOY_LINUX_MAC.md)

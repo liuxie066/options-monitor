@@ -14,8 +14,9 @@
 ## Tool Gateway / Inbound Assistant
 - [../AGENTS.md](../AGENTS.md)：本地 agent 首屏说明书、安全红线、入口层级、模块归属（静态前缀，Prompt Cache 友好）
 - [../CLAUDE.md](../CLAUDE.md)：Claude 特有补充指令
-- [OM_ASSISTANT_ARCHITECTURE.md](OM_ASSISTANT_ARCHITECTURE.md)：当前权威术语和架构边界；说明 `./om-agent` 与 `./om assistant` 的职责
-- [OM_COPILOT_V2_DESIGN.md](OM_COPILOT_V2_DESIGN.md)：下一代自由问答 Copilot v2 任务系统设计；当前仅为设计目标，尚未启用
+- [ARCHITECTURE.md](ARCHITECTURE.md)：当前系统架构和入口边界；说明 CLI、Tool Gateway、Inbound Assistant 的职责
+- [INBOUND_CONTROL.md](INBOUND_CONTROL.md)：`./om assistant handle` 远程消息入口的安全控制层
+- [OM_COPILOT_V2_DESIGN.md](OM_COPILOT_V2_DESIGN.md)：下一代自由问答 Copilot v2 任务系统设计和本地 Phase 1/2 验证入口
 - [AGENT_INTEGRATION.md](AGENT_INTEGRATION.md)：`./om-agent` Tool Gateway JSON 集成合同
 - [AGENT_GETTING_STARTED.md](AGENT_GETTING_STARTED.md)：本地 Tool Gateway 工具快速开始
 - [AGENT_WIKI.md](AGENT_WIKI.md)：本地 agent 任务手册（工具选择、Research / Shadow Replay 侧线、排障 playbook、模块地图、验证矩阵）
@@ -26,10 +27,10 @@
 ### 历史设计参考
 
 以下文档保留为历史设计和阶段性路线图，不作为当前架构或术语权威。当前命名和边界以
-[OM_ASSISTANT_ARCHITECTURE.md](OM_ASSISTANT_ARCHITECTURE.md) 为准。
+[ARCHITECTURE.md](ARCHITECTURE.md) 和 [INBOUND_CONTROL.md](INBOUND_CONTROL.md) 为准。
 
 - `OM_ASSISTANT_TOOL_CALLING_V2_SYSTEM_DESIGN.md` / `OM_ASSISTANT_TOOL_LOOP_COMPLETION_PLAN.md` 已删除；旧 provider tool-calling loop 不再是当前架构或迁移目标
-- `OM_AGENT_COMPLETION_DESIGN.md` / `OM_AGENT_INTELLIGENCE_UPGRADE_PLAN.md` / `AGENT_RELIABILITY_P0_P2_DESIGN.md` / `SQLITE_TOOL_OS_EXPANSION_DESIGN.md` 已删除；旧 AgentLoop/Copilot 路线图不再是当前架构或迁移目标
+- `OM_AGENT_COMPLETION_DESIGN.md` / `OM_AGENT_INTELLIGENCE_UPGRADE_PLAN.md` / `AGENT_RELIABILITY_P0_P2_DESIGN.md` / `SQLITE_TOOL_OS_EXPANSION_DESIGN.md` 已删除；旧自由问答路线图不再是当前架构或迁移目标
 - `OM_ASSISTANT_CONVERSATION_CONTEXT_DESIGN.md` / `OM_ASSISTANT_CONTEXT_EVAL_PLAN.md` / `OM_ASSISTANT_CONTEXT_IMPLEMENTATION_PLAN.md` / `OM_ASSISTANT_CONTEXT_PROJECTION_CONTRACT.md` / `OM_ASSISTANT_CONTEXT_VALIDATION_CONTRACT.md` 已删除；旧上下文 projection/validation 不再作为当前任务系统基础
 
 ## 运行与运维
