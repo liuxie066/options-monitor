@@ -935,6 +935,7 @@ def _assistant_settings(*, assistant_config_path: str | None = None) -> Any:
             enabled=configured.enabled,
             context_window_messages=configured.context_window_messages,
             default_market_scope=configured.default_market_scope,
+            copilot=configured.copilot,
             llm=configured.llm,
         )
     return AssistantSettings()

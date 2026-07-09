@@ -20,9 +20,21 @@ Current behavior:
 
 - slash commands execute deterministic command contracts;
 - permission replies operate on pending previews;
-- unsupported natural-language text returns `NATURAL_LANGUAGE_REBUILDING`;
-- unsupported text does not call tools, does not synthesize an answer, and does
-  not fall back to generic LLM chat.
+- unsupported natural-language text returns `NATURAL_LANGUAGE_REBUILDING` by
+  default;
+- if `assistant.copilot.enabled=true` is explicitly configured, unsupported
+  natural-language text enters the Copilot channel gate, but a scene still must
+  be channel-ready and explicitly allowlisted in
+  `assistant.copilot.channel_scenes`; no business scene is channel-ready in the
+  current slice, and future channel execution will still require explicit
+  assistant model configuration before any tool call;
+- Copilot channel execution admits one run per channel conversation in the
+  current service process. A concurrent same-conversation request returns
+  controlled `not_ready` instead of starting a second analysis run;
+- Host-backed Copilot channel runs persist a sanitized event summary in inbound
+  audit so success and failure can be inspected without storing raw tool data;
+- unsupported text does not call old planner tools, does not synthesize an
+  answer through generic chat, and does not fall back to generic LLM chat.
 
 ## Supported Inputs
 
@@ -66,8 +78,10 @@ or broker-facing state. Confirmation is required before an apply path runs.
 ## Reply Contract
 
 Channel adapters may send the rendered `response_text` even when the inbound
-result is not successful. For example, `NATURAL_LANGUAGE_REBUILDING` is an
-assistant error but should still reply to the user with the rebuilding message.
+result is not successful or not ready. For example,
+`NATURAL_LANGUAGE_REBUILDING` is an assistant error but should still reply to
+the user with the rebuilding message; explicit Copilot gate `not_ready` should
+also reply with its controlled not-ready text.
 
 Permission-denied handling remains special:
 
@@ -82,6 +96,13 @@ Relevant assistant config:
 - `assistant.default_market_scope`: default market for commands that need one;
 - `assistant.context_window_messages`: retained for trace/session context and
   future rebuild work;
+- `assistant.copilot.enabled`: disabled-by-default entry into the Copilot
+  channel gate;
+- `assistant.copilot.channel_scenes`: explicit channel scene allowlist; no
+  business scene is channel-ready in the current slice;
+- `assistant.copilot.human_review`: when true, Host-backed Copilot channel
+  answers are held for manual review; the audit keeps the sanitized Copilot
+  trace/event summary, but the channel reply does not expose the model answer;
 - `assistant.llm`, `assistant.models`, `assistant.active_model`: model config and
   diagnostics only in the current runtime.
 

@@ -31,13 +31,19 @@ Entrypoint rule:
   read-first diagnostics.
 - Use `./om assistant handle` for local or remote messages. This is the
   Inbound Assistant surface.
-- Free-form natural-language execution is currently disabled. Non-slash,
-  non-permission messages return `NATURAL_LANGUAGE_REBUILDING`.
+- Free-form natural-language execution is disabled by default. Non-slash,
+  non-permission messages return `NATURAL_LANGUAGE_REBUILDING` unless the
+  explicit `assistant.copilot.enabled` gate is enabled. That gate still requires
+  a scene allowlist in `assistant.copilot.channel_scenes` and explicit assistant
+  model configuration before any future channel-ready scene can run. No business
+  scene is channel-ready in the current slice.
+  `assistant.copilot.human_review=true` holds Host-backed channel answers for
+  manual review while retaining sanitized audit summaries.
 
-For the canonical terminology and dimension boundary, see
-[OM_ASSISTANT_ARCHITECTURE.md](OM_ASSISTANT_ARCHITECTURE.md). For capability
-boundaries, risk classes, Inbound Assistant exposure, and verification maps,
-see [OM_AGENT_CAPABILITY_MAP.md](OM_AGENT_CAPABILITY_MAP.md).
+For the canonical entry and layer boundaries, see
+[ARCHITECTURE.md](ARCHITECTURE.md) and [INBOUND_CONTROL.md](INBOUND_CONTROL.md).
+For capability boundaries, risk classes, Inbound Assistant exposure, and
+verification maps, see [OM_AGENT_CAPABILITY_MAP.md](OM_AGENT_CAPABILITY_MAP.md).
 
 ## 2. First Five Minutes
 
@@ -447,7 +453,8 @@ For type checking, prefer the narrow touched path first. Use broad checks when t
 
 - `AGENTS.md`: compact, stable, high-signal context for agents.
 - `docs/AGENT_WIKI.md`: this task manual and code ownership map.
-- `docs/OM_ASSISTANT_ARCHITECTURE.md`: current terminology and architecture dimension boundary.
+- `docs/ARCHITECTURE.md`: current system architecture and entry boundaries.
+- `docs/INBOUND_CONTROL.md`: controlled channel message entry boundary.
 - `docs/TOOL_REFERENCE.md`: public `om-agent` Tool Gateway contract and examples.
 - `docs/AGENT_INTEGRATION.md`: Tool Gateway JSON envelope and integration contract.
 - `README.md`: human-facing product overview plus common operator commands.

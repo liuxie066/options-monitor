@@ -13,7 +13,7 @@ ASSISTANT_TURN_RESULT_SCHEMA_VERSION = "om-assistant-turn-result-v1"
 
 AssistantSafetyClass = Literal["read", "write_preview", "write_apply", "admin_preview", "local"]
 ReasoningStatus = Literal["supported", "preview_required", "unsupported", "clarify", "denied", "failed"]
-ActionKind = Literal["tool", "operation", "pending", "local_response", "none"]
+ActionKind = Literal["tool", "operation", "pending", "local_response", "copilot", "none"]
 
 
 @dataclass(frozen=True)

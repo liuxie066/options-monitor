@@ -1,0 +1,30 @@
+{
+  "kind": "finish",
+  "tool_name": null,
+  "reason": "bad eval action: no recommendation",
+  "answer_report": {
+    "conclusion": "结论（eval-only）：6月样例显示 0700.HK 暴露集中。",
+    "attempted_checks": [
+      "analysis_catalog",
+      "analysis_query",
+      "monthly_income_report",
+      "option_positions_read",
+      "close_advice_read"
+    ],
+    "findings": [
+      {
+        "summary": "0700.HK 有 assignment 和开放 short put 暴露。",
+        "evidence_refs": [
+          "obs_2",
+          "obs_4"
+        ]
+      }
+    ],
+    "recommendations": [],
+    "missing_data": [],
+    "evidence_refs": [
+      "obs_2",
+      "obs_4"
+    ]
+  }
+}

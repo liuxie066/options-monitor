@@ -1,0 +1,34 @@
+{
+  "kind": "finish",
+  "tool_name": null,
+  "reason": "explicit close-advice notification diagnostics eval action",
+  "answer_report": {
+    "conclusion": "结论（eval-only）：夹具显示当前 close advice 没有可通知行，runtime_status 也显示没有账号通知内容且没有发送尝试。",
+    "attempted_checks": [
+      "runtime_status",
+      "close_advice_read"
+    ],
+    "findings": [
+      {
+        "summary": "runtime_status 的 notification_diagnosis 显示 no_notification_content，账号通知内容为 0，发送尝试为 0，确认发送为 0。",
+        "evidence_refs": [
+          "obs_1"
+        ]
+      },
+      {
+        "summary": "close_advice_read 返回 row_count、matched_count 和 returned_count 都为 0，表示当前 close advice 只读快照没有可通知行。",
+        "evidence_refs": [
+          "obs_2"
+        ]
+      }
+    ],
+    "recommendations": [],
+    "missing_data": [
+      "fixture observations are not production evidence"
+    ],
+    "evidence_refs": [
+      "obs_1",
+      "obs_2"
+    ]
+  }
+}

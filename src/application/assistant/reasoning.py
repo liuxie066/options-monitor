@@ -40,6 +40,17 @@ def resolve_reasoning(perception: PerceptionResult, *, request: AssistantRequest
             action_kind="local_response",
             reason="local_help",
         )
+    if perception.intent_name == "copilot_freeform":
+        return ReasoningResolution(
+            status="supported",
+            intent_name=perception.intent_name,
+            arguments=dict(perception.arguments),
+            safety_class="read",
+            action_kind="copilot",
+            read_only=True,
+            requires_confirmation=False,
+            reason="copilot_channel_gate",
+        )
     spec = _COMMAND_SPECS_BY_INTENT.get(perception.intent_name)
     if spec is None:
         return _unsupported(perception, reason="unknown_capability")

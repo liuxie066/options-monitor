@@ -72,6 +72,7 @@ def _assistant_settings_for_cli(
             enabled=configured.enabled if force_enabled is None else bool(force_enabled),
             context_window_messages=configured.context_window_messages,
             default_market_scope=configured.default_market_scope,
+            copilot=configured.copilot,
             planner=configured.planner,
             llm=configured.llm,
         )
@@ -573,6 +574,7 @@ def handle_assistant_command(
             config_key=args.config_key,
             config_path=args.config_path,
             audit_db=args.audit_db,
+            assistant_config_path=args.assistant_config,
         )
         turn = handle_assistant_turn_fn(request, settings=assistant_settings)
         out = build_response(

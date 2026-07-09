@@ -105,6 +105,31 @@ class PerceptionEngine:
             return permission_perception
 
         del parser_now_fn
+        if self._settings.copilot.enabled:
+            result = PerceptionResult(
+                intent_name="copilot_freeform",
+                arguments={
+                    "text": text,
+                    "channel_scenes": list(self._settings.copilot.channel_scenes),
+                    "human_review": bool(self._settings.copilot.human_review),
+                },
+                source="copilot_gate",
+                confidence=1.0,
+            )
+            self.route = "copilot"
+            self.llm_trace = skipped_llm_trace(self._settings.llm, reason="copilot_gate")
+            self.trace = build_perception_trace(
+                decision="copilot_selected",
+                selected_source="copilot",
+                selected_perception=result,
+                candidates=[
+                    skipped_candidate("command", "not_command"),
+                    skipped_candidate("permission_response", "not_permission_response"),
+                    accepted_candidate("copilot", result),
+                ],
+            )
+            return result
+
         err = natural_language_rebuilding_error()
         self.route = "natural_language_rebuilding"
         self.llm_trace = skipped_llm_trace(self._settings.llm, reason="natural_language_rebuilding")
