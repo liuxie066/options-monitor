@@ -1234,6 +1234,7 @@ def test_copilot_model_decider_has_no_live_provider_dependency() -> None:
     assert "openai" not in decider_text.lower()
     assert "urllib" not in decider_text
     assert "requests" not in decider_text
+    assert '"scene"' not in decider_text
     assert '"scene_name"' not in decider_text
     assert '"task_guidance": _model_task_guidance(state.manifest.task_guidance)' in decider_text
     assert "def _model_task_guidance(" in decider_text
@@ -1257,6 +1258,8 @@ def test_copilot_model_decider_has_no_live_provider_dependency() -> None:
     assert '"summary": item.get("summary")' not in decider_text
     assert '"output_contract": _model_output_contract(item.get("output_contract"))' in decider_text
     assert "static_payload_keys" not in decider_text
+    assert "required_scene_fields" not in decider_text
+    assert "payload_fields" not in decider_text
     assert "def _model_output_contract(" in decider_text
     assert "MAX_MODEL_SUMMARY_CHARS" in decider_text
     assert '"tool_name": "required when kind=tool; null when kind=finish"' in decider_text

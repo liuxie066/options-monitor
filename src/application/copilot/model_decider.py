@@ -163,8 +163,6 @@ def _model_tool_descriptions(value: Any, allowed_tools: list[str]) -> list[dict[
                 "name": name,
                 "description": _model_summary(item.get("description")),
                 "capabilities": _model_string_list(item.get("capabilities")),
-                "required_scene_fields": _model_string_list(item.get("required_scene_fields")),
-                "payload_fields": _model_string_map(item.get("payload_fields")),
                 "evidence_context": _model_string_map(item.get("evidence_context")),
                 "input_fields": _model_string_list(item.get("input_fields")),
                 "output_contract": _model_output_contract(item.get("output_contract")),
@@ -262,7 +260,6 @@ def _model_task_guidance(value: Any) -> dict[str, Any]:
             if text:
                 instructions.append(text)
     return {
-        "scene": str(value.get("scene") or ""),
         "instructions": instructions,
         "answer_dimensions": _model_string_list(value.get("answer_dimensions")),
         "requires_answer_synthesis": bool(value.get("requires_answer_synthesis") is True),
