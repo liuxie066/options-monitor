@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.365 - 2026-07-10
+
+### Fixed
+- Let `close_advice_read` derive runtime run/report roots from an explicit runtime `config_path`, so remote release trees can read `/var/lib/options-monitor/output_runs` reports without requiring `runs_root`.
+
 ## 1.2.364 - 2026-07-08
 
 ### Fixed

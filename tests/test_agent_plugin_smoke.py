@@ -3250,6 +3250,52 @@ def test_close_advice_read_respects_config_market_when_selecting_latest_run(tmp_
     assert out["data"]["rows"][0]["realized_if_close"] == 100
 
 
+def test_close_advice_read_derives_runs_root_from_explicit_config_path(tmp_path: Path) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    runtime_root = tmp_path / "runtime"
+    cfg_path = runtime_root / "config.us.json"
+    cfg_path.parent.mkdir(parents=True)
+    cfg_path.write_text(json.dumps(_minimal_cfg(market="us"), ensure_ascii=False, indent=2), encoding="utf-8")
+
+    report_dir = runtime_root / "output_runs" / "run-1" / "accounts" / "lx"
+    report_dir.mkdir(parents=True)
+    (report_dir / "config.override.json").write_text(
+        json.dumps(_minimal_cfg(market="us"), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    pd.DataFrame(
+        [
+            {
+                "account": "lx",
+                "symbol": "NVDA",
+                "option_type": "call",
+                "position_side": "long",
+                "expiration": "2026-08-21",
+                "strike": 100,
+                "evaluation_status": "priced",
+                "close_action": "hold_call",
+                "tier": "none",
+                "realized_if_close": 100,
+            }
+        ]
+    ).to_csv(report_dir / "close_advice.csv", index=False)
+
+    out = run_tool(
+        "close_advice_read",
+        {
+            "config_path": str(cfg_path),
+            "run_id": "run-1",
+            "query": {"option_type": "call", "side": "long"},
+        },
+    )
+
+    assert out["ok"] is True
+    assert out["data"]["source"]["run_id"] == "run-1"
+    assert out["data"]["row_count"] == 1
+    assert out["data"]["rows"][0]["symbol"] == "NVDA"
+
+
 def test_close_advice_read_default_agent_report_prefers_runtime_root(monkeypatch, tmp_path: Path) -> None:
     from src.application.agent_tool_close_advice_read import close_advice_read_tool
 
