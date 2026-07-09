@@ -41,6 +41,7 @@ def close_advice_read_tool(
     sources = _resolve_sources(
         payload,
         base=base,
+        config_path=config_path,
         query=query,
         desired_market=desired_market,
         resolve_output_root=resolve_output_root,
@@ -113,6 +114,7 @@ def _resolve_sources(
     payload: dict[str, Any],
     *,
     base: Path,
+    config_path: Path | None,
     query: PositionQuery,
     desired_market: str | None,
     resolve_output_root: Callable[[Any], Path],
@@ -128,7 +130,7 @@ def _resolve_sources(
             )
         return [_Source(explicit, source_type="explicit")]
 
-    run_sources = _run_sources(payload, base=base, query=query, desired_market=desired_market)
+    run_sources = _run_sources(payload, base=base, config_path=config_path, query=query, desired_market=desired_market)
     if run_sources:
         return run_sources
     if str(payload.get("run_id") or "").strip():
@@ -141,6 +143,7 @@ def _resolve_sources(
     report_sources = _agent_tool_report_sources(
         payload,
         base=base,
+        config_path=config_path,
         desired_market=desired_market,
         resolve_output_root=resolve_output_root,
     )
@@ -166,10 +169,11 @@ def _run_sources(
     payload: dict[str, Any],
     *,
     base: Path,
+    config_path: Path | None,
     query: PositionQuery,
     desired_market: str | None,
 ) -> list[_Source]:
-    root = _runs_root(payload, base=base)
+    root = _runs_root(payload, base=base, config_path=config_path)
     if not root.exists() or not root.is_dir():
         return []
     requested_run = str(payload.get("run_id") or "").strip()
@@ -211,12 +215,20 @@ def _latest_run_sources_across_markets(run_dirs: list[Path], *, query: PositionQ
     return sources_out or unknown_sources
 
 
-def _runs_root(payload: dict[str, Any], *, base: Path) -> Path:
+def _runtime_root(*, base: Path, config_path: Path | None) -> Path:
+    runtime_root = resolve_runtime_root(repo_root=base).runtime_root
+    if runtime_root.resolve() != base.resolve():
+        return runtime_root
+    if config_path is not None:
+        return config_path.expanduser().resolve().parent
+    return runtime_root
+
+
+def _runs_root(payload: dict[str, Any], *, base: Path, config_path: Path | None) -> Path:
     raw = payload.get("runs_root")
     if raw is not None and str(raw).strip():
         return _resolve_path(raw, base=base)
-    runtime_root = resolve_runtime_root(repo_root=base).runtime_root
-    return (runtime_root / "output_runs").resolve()
+    return (_runtime_root(base=base, config_path=config_path) / "output_runs").resolve()
 
 
 def _latest_run_dirs(root: Path) -> list[Path]:
@@ -253,6 +265,7 @@ def _agent_tool_report_sources(
     payload: dict[str, Any],
     *,
     base: Path,
+    config_path: Path | None,
     desired_market: str | None,
     resolve_output_root: Callable[[Any], Path],
 ) -> list[_Source]:
@@ -260,7 +273,7 @@ def _agent_tool_report_sources(
     if payload.get("output_dir"):
         roots.append(resolve_output_root(payload.get("output_dir")).resolve())
     else:
-        runtime_root = resolve_runtime_root(repo_root=base).runtime_root
+        runtime_root = _runtime_root(base=base, config_path=config_path)
         roots.append((runtime_root / "output_shared" / "agent_tools").resolve())
         default_output_root = resolve_output_root(None).resolve()
         if not _is_repo_default_agent_output(default_output_root, base=base, runtime_root=runtime_root):
