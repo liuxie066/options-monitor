@@ -87,6 +87,7 @@ def _assistant_settings(
             enabled=configured.enabled,
             context_window_messages=configured.context_window_messages,
             default_market_scope=configured.default_market_scope,
+            copilot=configured.copilot,
             planner=configured.planner,
             llm=configured.llm,
         )

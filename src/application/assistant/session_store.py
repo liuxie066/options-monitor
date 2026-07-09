@@ -539,7 +539,6 @@ _DISPLAY_HOOKS = {
     "action_lifecycle",
     "operation_identity",
     "final_status",
-    "answer_guard",
     "final_response",
 }
 
@@ -585,8 +584,6 @@ def _trace_final_text(answer: dict[str, Any]) -> str:
 
 
 def _trace_final_route(answer: dict[str, Any]) -> str:
-    guard = answer.get("answer_guard") if isinstance(answer.get("answer_guard"), dict) else {}
-    guard_status = str(guard.get("status") or "").strip()
     response_status = str(answer.get("response_status") or "").strip()
     synthesis_reason = str(answer.get("synthesis_reason") or "").strip()
     fallback = str(answer.get("fallback") or "").strip()
@@ -594,9 +591,7 @@ def _trace_final_route(answer: dict[str, Any]) -> str:
         return "ask"
     if response_status in {"pending_permission", "preview"}:
         return "preview"
-    if guard_status == "failed_then_rewritten":
-        return "rewrite->pass"
-    if guard_status == "failed_then_fallback" or fallback or "fallback" in synthesis_reason:
+    if fallback or "fallback" in synthesis_reason:
         return "fallback"
     if response_status in {"synthesized", "rendered"}:
         return "pass"
@@ -606,23 +601,17 @@ def _trace_final_route(answer: dict[str, Any]) -> str:
 
 
 def _friendly_final_reason(answer: dict[str, Any]) -> str:
-    guard = answer.get("answer_guard") if isinstance(answer.get("answer_guard"), dict) else {}
-    guard_status = str(guard.get("status") or "").strip()
     synthesis_reason = str(answer.get("synthesis_reason") or "").strip()
     fallback = str(answer.get("fallback") or "").strip()
     response_reason = str(answer.get("response_reason") or "").strip()
-    if guard_status == "failed_then_rewritten":
-        return "重写后通过证据校验"
-    if guard_status == "failed_then_fallback":
-        return "证据校验失败后使用保底回答"
     if fallback == "task_contract" or synthesis_reason == "task_contract_fallback":
         return "使用任务形状保底"
     if fallback == "analysis_result_renderer" or synthesis_reason == "analysis_result_fallback":
         return "使用分析结果保底"
     if fallback == "canonical_renderer" or synthesis_reason == "agent_renderer_fallback":
         return "使用确定性 renderer"
-    if synthesis_reason in {"agent_composed_response", "synthesized", "synthesized_after_answer_guard"}:
-        return "LLM 回答通过证据校验"
+    if synthesis_reason in {"agent_composed_response", "synthesized"}:
+        return "模型回答已生成"
     if response_reason:
         return _clip(response_reason, 80)
     return _clip(synthesis_reason, 80)
@@ -682,7 +671,6 @@ def _trace_from_row(row: dict[str, Any], *, include_snapshot: bool) -> dict[str,
             "clarification_reason": answer_trace.get("clarification_reason"),
             "loop_stop_reason": answer_trace.get("loop_stop_reason") or event_loop_trace.get("loop_stop_reason"),
             "continuation_count": _safe_int(event_loop_trace.get("continuation_count")),
-            "answer_guard": synthesis.get("answer_guard") if isinstance(synthesis.get("answer_guard"), dict) else None,
             "clarification_request": _compact_clarification_request(final_response.get("clarification_request")),
             "hook_results": _compact_hook_results(final_response.get("hook_results") or synthesis.get("hook_results")),
             "response_text_chars": len(str(row.get("response_text") or "")),

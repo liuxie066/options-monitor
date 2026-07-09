@@ -5,8 +5,9 @@ The public Tool Gateway launcher is `./om-agent`.
 `./om-agent` is a structured local tool-call entrypoint for external agents,
 scripts, Codex, or operators. It is not OM's autonomous/project
 Agent, and it should not own multi-step planning or message conversation
-state. Current terminology is defined in
-[OM_ASSISTANT_ARCHITECTURE.md](OM_ASSISTANT_ARCHITECTURE.md).
+state. Current entry and layer terminology is defined in
+[ARCHITECTURE.md](ARCHITECTURE.md); channel message handling is defined in
+[INBOUND_CONTROL.md](INBOUND_CONTROL.md).
 
 It exposes a stable JSON contract intended for local machine usage:
 
@@ -157,8 +158,14 @@ operation-alias handling, sender allowlist checks, message idempotency, SQLite
 audit, and then calls an allowlisted tool or creates a pending preview through
 the existing operation path. The current `./om assistant ...` CLI namespace and
 `assistant` config keys remain compatibility names. Free-form natural-language
-execution is currently disabled and returns `NATURAL_LANGUAGE_REBUILDING`;
-confirm/cancel/apply remains deterministic-only.
+execution is disabled by default and returns `NATURAL_LANGUAGE_REBUILDING`;
+the explicit `assistant.copilot.enabled` gate only enters the Copilot channel
+facade. No business scene is channel-ready in the current slice. Future channel
+execution will require a channel-ready scene allowlisted in
+`assistant.copilot.channel_scenes` plus explicit assistant model configuration
+before any tool call. `assistant.copilot.human_review=true` holds Host-backed
+Copilot answers at the channel boundary while retaining sanitized audit
+summaries. Confirm/cancel/apply remains deterministic-only.
 
 Remote channels require:
 

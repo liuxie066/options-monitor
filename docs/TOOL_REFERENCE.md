@@ -7,14 +7,14 @@
 
 如果你只想跑产品，先看根目录 [README.md](../README.md)。
 
-术语和架构边界统一维护在
-[OM_ASSISTANT_ARCHITECTURE.md](OM_ASSISTANT_ARCHITECTURE.md)。Tool Gateway 与
-Inbound Assistant 的能力边界、LLM 暴露面和验证方式统一维护在
+入口和架构边界统一维护在 [ARCHITECTURE.md](ARCHITECTURE.md) 和
+[INBOUND_CONTROL.md](INBOUND_CONTROL.md)。Tool Gateway 与 Inbound Assistant
+的能力边界、LLM 暴露面和验证方式统一维护在
 [OM_AGENT_CAPABILITY_MAP.md](OM_AGENT_CAPABILITY_MAP.md)。这里不再复制能力地图。
 
 ---
 
-## 1. 两套入口的区别
+## 1. Tool Gateway 与人工 CLI 的区别
 
 | 入口 | 面向对象 | 典型用途 |
 |---|---|---|
@@ -125,11 +125,18 @@ om assistant model check --active
 它不是 `om-agent` manifest 里的工具，也不是 shell bridge。`inbound feishu`
 只解析 Feishu 事件 payload，然后进入同一条 sender allowlist、message_id
 幂等、SQLite audit 和工具白名单路径。Inbound command facade 默认开启；
-当前 `assistant` config 只保留模型/profile 诊断和 legacy 兼容字段；自由问答执行
-已禁用，不会触发工具调用、planner 或普通 LLM fallback。当前可见和可执行能力用
-`om assistant capabilities` 查看；术语边界以
-[OM_ASSISTANT_ARCHITECTURE.md](OM_ASSISTANT_ARCHITECTURE.md) 为准，能力边界以
-[OM_AGENT_CAPABILITY_MAP.md](OM_AGENT_CAPABILITY_MAP.md) 为准。完整远程控制契约见
+当前 `assistant` config 保留模型/profile 诊断、legacy 兼容字段，以及默认关闭的
+`assistant.copilot.enabled` gate；自由问答默认禁用，不会触发工具调用、planner
+或普通 LLM fallback。显式开启 gate 后，还必须在
+`assistant.copilot.channel_scenes` 放行 channel-ready 场景；当前没有业务场景
+开放到渠道，并且未来开放仍要求显式 assistant 模型配置。
+`assistant.copilot.human_review=true` 会把 Host-backed 渠道答案保留到人工复核，
+同时继续写入脱敏审计摘要。
+当前可见和可执行能力用
+`om assistant capabilities` 查看；入口和运行时边界以
+[ARCHITECTURE.md](ARCHITECTURE.md) 和 [INBOUND_CONTROL.md](INBOUND_CONTROL.md)
+为准，能力边界以 [OM_AGENT_CAPABILITY_MAP.md](OM_AGENT_CAPABILITY_MAP.md)
+为准。完整远程控制契约见
 [INBOUND_CONTROL.md](INBOUND_CONTROL.md)。
 
 ### Tick 入口关系
@@ -627,10 +634,10 @@ om-agent run --tool monthly_income_report --input-json '{"config_key":"us","acco
 - 口径：`assigned_stock_unrealized_pnl` 和 `assigned_stock_realized_pnl` 是正股自身
   PnL，不含 Sell Put 权利金；`assignment_lifecycle_pnl` 才包含权利金归因。
   `stock_cost_per_share` 按真实交割价记录，不扣除权利金。
-- 用户回执：自然语言入口由 Agent Composer 基于工具证据生成简洁摘要，并由系统追加
-  deterministic 数据来源/口径；deterministic assigned-stock renderer 作为 LLM 不可用
-  或 answer guard 不通过时的 fallback。正常 `fresh` 报价不逐行重复展示；缺价或异常
-  quote 状态必须在回答、fallback 明细、`检查提示` 或 provenance 中显式出现。
+- 用户回执：当前 Inbound slash 命令走确定性只读渲染；Copilot v2 若在本地/eval 场景
+  使用该工具，必须基于工具 observation 回答，且不能在缺价时编造浮盈亏。正常
+  `fresh` 报价不逐行重复展示；缺价或异常 quote 状态必须在回答、检查提示或
+  provenance 中显式出现。
 
 示例：
 
@@ -679,7 +686,7 @@ om option-positions assigned-stock-sale --target-stock-lot-id assigned-stock-ass
 - 输出包含 `columns`、`rows`、`cell_refs`、`views_used`、`source_label` 和
   `fallback_text`。`cell_refs` 和 `evidence` 是只读查询结果的结构化证据。
 - 当前 Inbound Assistant 不会自动为开放式自然语言调用 `analysis_query` 或合成答案；
-  这些 view 仍作为 Tool Gateway / 显式命令 / 未来任务系统的只读证据基础。
+  这些 view 同时作为 Tool Gateway、显式命令和本地 Copilot v2 只读 scene 的证据基础。
 - 对诊断 view，`evidence.diagnostics` 会区分 observed rejection、
   no matching rows、diagnostic missing、empty artifact、read error、runtime
   skip/failure、quote freshness gap 等状态；缺失或无匹配诊断不能被回答成
@@ -708,18 +715,15 @@ P2 诊断 view 读取已有本地 artifact 或只读状态面。缺失 artifact 
 当前约束：
 - 显式工具调用仍必须遵守 SELECT-only、白名单 view、只读 artifact 读取和数据新鲜度
   边界。
-- 自由问答重建前，不新增硬编码自然语言触发、业务模板或隐式 follow-up 规则。
+- 不新增硬编码自然语言触发、业务模板或隐式 follow-up 规则；自然语言任务由
+  `./om copilot run|eval` 的 Service 选择声明式 scene，再由 Host 限定只读工具。
 - 当 `analysis_query` preflight 返回 `UNKNOWN_COLUMN` / `UNKNOWN_VIEW` 且包含
-  catalog 建议时，Agent 可以用建议字段或建议 view 做一次只读修复查询；原失败
-  observation 会保留在 trace，正常回执不展示内部 SQL 修复细节。
-- 当 follow-up 判定账户、月份、标的、market 或 run 范围无法安全推断时，
-  Agent 会以 `ask_clarification` 停止并向用户提出一个简短问题。
-- follow-up 只能使用 `analysis_catalog` / `analysis_query`，且必须命中 evidence gap
-  建议的 view；不允许借 follow-up 扩大到写工具或生产操作。
-- follow-up 决策会以 `om-agent-loop-followup-decision-v1` 写入
-  `assistant.tool_loop.followup_decisions` 和
-  `AgentSession.answer_trace.followup_decisions`，记录
-  `call_tool`、`stop_with_gap`、rejected duplicate 等状态。
+  catalog 建议时，Copilot Agent 可以在 Host 预算内用建议字段或建议 view 做只读修复
+  查询；原失败 observation 保留在 Copilot event log，正常回执不展示内部 SQL 修复细节。
+- 当账户、月份、标的、market 或 run 范围无法安全推断时，Copilot Service 返回
+  `needs_clarification`，而不是让工具层猜测范围。
+- Copilot 工具循环只能调用 scene allowlist 中的只读工具；不允许借修复查询或追问扩大到
+  写工具、通知发送、broker 操作或生产服务变更。
 
 示例：
 
@@ -1082,7 +1086,8 @@ Tool Gateway 工具输入统一使用 `broker`。数据表里的 `market` 字段
 
 ## 9. 相关文档
 
-- 当前架构术语：[`OM_ASSISTANT_ARCHITECTURE.md`](OM_ASSISTANT_ARCHITECTURE.md)
+- 当前架构边界：[`ARCHITECTURE.md`](ARCHITECTURE.md)
+- Inbound 控制面：[`INBOUND_CONTROL.md`](INBOUND_CONTROL.md)
 - Tool Gateway 合同：[`AGENT_INTEGRATION.md`](AGENT_INTEGRATION.md)
 - 快速开始：[`GETTING_STARTED.md`](GETTING_STARTED.md)
 - Tool Gateway 快速开始：[`AGENT_GETTING_STARTED.md`](AGENT_GETTING_STARTED.md)

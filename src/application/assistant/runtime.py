@@ -447,11 +447,12 @@ def _with_assistant_meta(
     assistant_meta = {
         "enabled": bool(settings.enabled),
         "freeform_runtime": {**settings.freeform_runtime.public_payload(), "execution_enabled": False},
+        "copilot": settings.copilot.public_payload(),
         "planner": settings.planner.public_payload(),
         "route": route,
         "llm": llm_meta,
         "context": dict(context_meta) if isinstance(context_meta, dict) else {"provided": False},
-        "freeform_execution": "disabled",
+        "freeform_execution": "copilot_gate" if settings.copilot.enabled else "disabled",
     }
     if perception_trace is not None:
         assistant_meta["perception_trace"] = perception_trace.public_payload()
