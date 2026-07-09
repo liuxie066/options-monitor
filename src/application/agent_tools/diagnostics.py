@@ -264,7 +264,7 @@ ASSISTANT_TRACE_TOOL = build_agent_tool(
     name="assistant_trace",
     description=(
         "Read durable Assistant session snapshots from inbound SQLite to explain recent assistant plans, tool calls, "
-        "evidence counts, answer guard/fallback decisions, and permission state."
+        "evidence counts, answer-route decisions, and permission state."
     ),
     requires=("inbound_audit_db",),
     capabilities=("assistant_trace", "assistant_diagnostics", "read_only"),
