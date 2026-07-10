@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 from src.application.copilot.agent import AgentState
@@ -235,6 +236,28 @@ def test_eval_monthly_option_review_recommendation_needs_requested_period_basis(
     assert result.answer_report.recommendations == []
 
 
+def test_eval_monthly_option_review_recommendation_needs_allowed_answer_dimension() -> None:
+    raw = json.loads(_model_action_fixture("june_option_review_model_action.json"))
+    raw["answer_report"]["recommendations"][0]["answer_dimension"] = "当前快照建议"
+
+    result = run_local_request(
+        _request(
+            "分析6月的期权操作有没有不合理，需要优化的地方",
+            month="2026-06",
+            environment="eval",
+            scene="monthly_option_review",
+            fixture="june_option_review_model_ready",
+        ),
+        reference_year=2026,
+        model_action_json=json.dumps(raw, ensure_ascii=False),
+    )
+
+    assert result.status == "insufficient_evidence"
+    assert "recommendation answer dimension" in result.answer_report.missing_data
+    assert "model_synthesis_invalid_action" in result.answer_report.missing_data
+    assert result.answer_report.recommendations == []
+
+
 def test_eval_monthly_option_review_missing_monthly_evidence_only_reports_partial_context() -> None:
     result = render_user_response(
         run_local_request(
@@ -349,6 +372,174 @@ def test_cli_copilot_run_uses_local_tools(monkeypatch) -> None:
     assert calls == ["runtime_status"]
     assert payload["status"] == "answered"
     assert payload["ok"] is True
+
+
+def test_cli_copilot_run_assistant_config_uses_model_synthesis(monkeypatch, tmp_path: Path) -> None:
+    from src.application.copilot import local_harness
+    from src.application.copilot import tools as copilot_tools
+    from src.application.copilot.model_client import CopilotModelSettings
+
+    assistant_config = tmp_path / "config.assistant.json"
+    assistant_config.write_text(
+        json.dumps(
+            {
+                "assistant": {
+                    "enabled": True,
+                    "llm": {
+                        "provider": "openai",
+                        "model": "gpt-test",
+                        "api_key_env": "OM_TEST_KEY",
+                    },
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OM_TEST_KEY", "sk-test")
+    model_requests: list[dict] = []
+    tool_calls: list[str] = []
+
+    def fake_build_action_model(settings: CopilotModelSettings):
+        assert settings.provider == "openai"
+        assert settings.model == "gpt-test"
+        assert settings.api_key_env == "OM_TEST_KEY"
+
+        def model(request: dict) -> dict:
+            model_requests.append(request)
+            missing = request["finish_conditions"]["unattempted_tools_without_evidence"]
+            if missing:
+                return {"kind": "tool", "tool_name": missing[0], "reason": "need runtime evidence", "answer_report": None}
+            return {
+                "kind": "finish",
+                "tool_name": None,
+                "reason": "runtime evidence is enough",
+                "answer_report": {
+                    "conclusion": "结论：本地模型已基于 runtime_status 形成只读回答。",
+                    "attempted_checks": ["runtime_status"],
+                    "findings": [{"summary": "runtime_status 显示运行状态为 ok。", "evidence_refs": ["obs_1"]}],
+                    "recommendations": [],
+                    "missing_data": [],
+                    "evidence_refs": ["obs_1"],
+                },
+            }
+
+        return model
+
+    def fake_call(tool_name: str, payload: dict, *, allowed_tools: tuple[str, ...]) -> dict:
+        assert tool_name in allowed_tools
+        tool_calls.append(tool_name)
+        return {"tool_name": tool_name, "ok": True, "data": {"status": "ok", "freshness": {"status": "fresh"}}}
+
+    monkeypatch.setattr(local_harness, "build_action_model", fake_build_action_model)
+    monkeypatch.setattr(copilot_tools, "call_read_tool", fake_call)
+
+    payload = handle_copilot_command(
+        argparse.Namespace(
+            copilot_command="run",
+            text="运行健康度怎么样",
+            config_key="us",
+            symbol=None,
+            month=None,
+            include_events=False,
+            model_config_json=None,
+            assistant_config=str(assistant_config),
+        )
+    )
+
+    assert tool_calls == ["runtime_status"]
+    assert len(model_requests) == 2
+    assert payload["status"] == "answered"
+    assert payload["ok"] is True
+    assert "本地模型已基于 runtime_status" in payload["user_response"]
+
+
+def test_cli_copilot_run_rejects_invalid_model_synthesis(monkeypatch) -> None:
+    from src.application.copilot import local_harness
+    from src.application.copilot import tools as copilot_tools
+
+    monkeypatch.setenv("OM_TEST_KEY", "sk-test")
+
+    def fake_build_action_model(_settings):
+        def model(request: dict) -> dict:
+            missing = request["finish_conditions"]["unattempted_tools_without_evidence"]
+            if missing:
+                return {"kind": "tool", "tool_name": missing[0], "reason": "need runtime evidence", "answer_report": None}
+            return {
+                "kind": "finish",
+                "tool_name": None,
+                "reason": "invalid report without cited findings",
+                "answer_report": {
+                    "conclusion": "结论：运行正常。",
+                    "attempted_checks": ["runtime_status"],
+                    "findings": [],
+                    "recommendations": [],
+                    "missing_data": [],
+                    "evidence_refs": [],
+                },
+            }
+
+        return model
+
+    def fake_call(tool_name: str, payload: dict, *, allowed_tools: tuple[str, ...]) -> dict:
+        return {"tool_name": tool_name, "ok": True, "data": {"status": "ok", "freshness": {"status": "fresh"}}}
+
+    monkeypatch.setattr(local_harness, "build_action_model", fake_build_action_model)
+    monkeypatch.setattr(copilot_tools, "call_read_tool", fake_call)
+
+    payload = handle_copilot_command(
+        argparse.Namespace(
+            copilot_command="run",
+            text="运行健康度怎么样",
+            config_key="us",
+            symbol=None,
+            month=None,
+            include_events=False,
+            model_config_json=json.dumps(
+                {"provider": "openai", "model": "gpt-test", "api_key_env": "OM_TEST_KEY"},
+                ensure_ascii=False,
+            ),
+            assistant_config=None,
+        )
+    )
+
+    assert payload["status"] == "insufficient_evidence"
+    assert payload["ok"] is True
+    assert "cited findings" in payload["answer_report"]["missing_data"]
+
+
+def test_cli_copilot_run_missing_model_key_fails_before_tools(monkeypatch) -> None:
+    from src.application.copilot import tools as copilot_tools
+
+    monkeypatch.delenv("OM_MISSING_TEST_KEY", raising=False)
+    tool_calls: list[str] = []
+
+    def fake_call(tool_name: str, payload: dict, *, allowed_tools: tuple[str, ...]) -> dict:
+        tool_calls.append(tool_name)
+        return {"tool_name": tool_name, "ok": True, "data": {"status": "ok"}}
+
+    monkeypatch.setattr(copilot_tools, "call_read_tool", fake_call)
+
+    payload = handle_copilot_command(
+        argparse.Namespace(
+            copilot_command="run",
+            text="运行健康度怎么样",
+            config_key="us",
+            symbol=None,
+            month=None,
+            include_events=False,
+            model_config_json=json.dumps(
+                {"provider": "openai", "model": "gpt-test", "api_key_env": "OM_MISSING_TEST_KEY"},
+                ensure_ascii=False,
+            ),
+            assistant_config=None,
+        )
+    )
+
+    assert tool_calls == []
+    assert payload["status"] == "failed"
+    assert payload["ok"] is False
+    assert payload["answer_report"]["missing_data"] == ["model_api_key_missing"]
 
 
 def test_copilot_code_does_not_reintroduce_marker_based_answer_guard() -> None:
