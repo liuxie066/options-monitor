@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.369 - 2026-07-10
+
+### Added
+- Strengthened the OM Copilot monthly option review answer-quality eval with production-shaped evidence, recommendations, and missing-data assertions.
+
 ## 1.2.368 - 2026-07-10
 
 ### Fixed
