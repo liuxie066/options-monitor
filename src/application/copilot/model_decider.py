@@ -56,6 +56,7 @@ class ModelActionDecider:
                 attempted_tools=state.attempted_tools,
                 execution_environment=state.manifest.execution_environment,
                 requires_recommendations=_requires_recommendations(state),
+                answer_dimensions=_answer_dimensions(state),
             )
             if action:
                 return action
@@ -315,6 +316,13 @@ def _requires_recommendations(state: AgentState) -> bool:
     return isinstance(guidance, dict) and guidance.get("requires_recommendations") is True
 
 
+def _answer_dimensions(state: AgentState) -> list[str]:
+    guidance = state.manifest.task_guidance
+    if not isinstance(guidance, dict):
+        return []
+    return _model_string_list(guidance.get("answer_dimensions"))
+
+
 def _evidence_ok_tools(observations: list[dict[str, Any]]) -> set[str]:
     return {
         str(item.get("tool_name"))
@@ -498,6 +506,7 @@ def _parse_model_action(
     attempted_tools: list[str] | None = None,
     execution_environment: str = "",
     requires_recommendations: bool = False,
+    answer_dimensions: list[str] | None = None,
 ) -> tuple[AgentAction | None, str]:
     if not isinstance(raw, dict):
         return None, "model response must be an object"
@@ -527,13 +536,17 @@ def _parse_model_action(
             return None, "finish action requires missing evidence"
         if missing_allowed_tool_evidence and _has_recommendation_entries(final_report):
             return None, "finish action requires recommendations empty when evidence missing"
+        if requires_recommendations and not missing_allowed_tool_evidence and answer_dimensions:
+            if not _recommendations_have_allowed_dimensions(final_report, answer_dimensions):
+                return None, "finish action requires recommendation answer dimension"
         if requires_recommendations and not missing_allowed_tool_evidence and not _has_recommendations(
             final_report,
             claimable_refs=claimable_refs,
+            answer_dimensions=answer_dimensions,
         ):
             return None, "finish action requires recommendations"
         if requires_recommendations and not missing_allowed_tool_evidence:
-            if not _recommendations_are_supported_by_findings(final_report):
+            if not _recommendations_are_supported_by_findings(final_report, answer_dimensions=answer_dimensions):
                 return None, "finish action requires recommendation finding support"
             if requested_scope_refs and not _recommendations_cite_any(final_report, requested_scope_refs):
                 return None, "finish action requires requested-period recommendation evidence"
@@ -586,7 +599,12 @@ def _has_findings(final_report: dict[str, Any], *, claimable_refs: list[str] | N
     return False
 
 
-def _has_recommendations(final_report: dict[str, Any], *, claimable_refs: list[str] | None = None) -> bool:
+def _has_recommendations(
+    final_report: dict[str, Any],
+    *,
+    claimable_refs: list[str] | None = None,
+    answer_dimensions: list[str] | None = None,
+) -> bool:
     recommendations = final_report.get("recommendations")
     if not isinstance(recommendations, list) or not recommendations:
         return False
@@ -596,11 +614,21 @@ def _has_recommendations(final_report: dict[str, Any], *, claimable_refs: list[s
     for item in recommendations:
         if not isinstance(item, dict):
             continue
-        if not _valid_recommendation_shape(item):
+        if not _valid_recommendation_shape(item, answer_dimensions=answer_dimensions):
             continue
         if claimable_refs is None or any(ref in allowed_refs for ref in _model_string_list(item.get("basis_refs"))):
             return True
     return False
+
+
+def _recommendations_have_allowed_dimensions(final_report: dict[str, Any], answer_dimensions: list[str]) -> bool:
+    recommendations = final_report.get("recommendations")
+    if not isinstance(recommendations, list) or not recommendations:
+        return True
+    return all(
+        isinstance(item, dict) and _recommendation_dimension_allowed(item, answer_dimensions)
+        for item in recommendations
+    )
 
 
 def _has_recommendation_entries(final_report: dict[str, Any]) -> bool:
@@ -618,13 +646,21 @@ def _has_recommendation_entries(final_report: dict[str, Any]) -> bool:
     return False
 
 
-def _valid_recommendation_shape(item: dict[str, Any]) -> bool:
+def _valid_recommendation_shape(item: dict[str, Any], *, answer_dimensions: list[str] | None = None) -> bool:
     return (
         _non_empty_string(item.get("summary"))
         and _non_empty_string(item.get("action"))
         and _non_empty_string(item.get("target_scope"))
+        and _recommendation_dimension_allowed(item, answer_dimensions)
         and bool(_model_string_list(item.get("basis_refs")))
     )
+
+
+def _recommendation_dimension_allowed(item: dict[str, Any], answer_dimensions: list[str] | None) -> bool:
+    allowed = {str(value).strip() for value in answer_dimensions or [] if str(value).strip()}
+    if not allowed:
+        return True
+    return str(item.get("answer_dimension") or "").strip() in allowed
 
 
 def _all_report_refs_are_claimable(final_report: dict[str, Any], claimable_refs: list[str]) -> bool:
@@ -702,13 +738,19 @@ def _looks_like_key_value_listing(text: str) -> bool:
     return pairs >= 5
 
 
-def _recommendations_are_supported_by_findings(final_report: dict[str, Any]) -> bool:
+def _recommendations_are_supported_by_findings(
+    final_report: dict[str, Any],
+    *,
+    answer_dimensions: list[str] | None = None,
+) -> bool:
     finding_refs = _finding_ref_sets(final_report)
     recommendations = final_report.get("recommendations")
     if not isinstance(recommendations, list) or not recommendations:
         return False
     for item in recommendations:
         if not isinstance(item, dict):
+            return False
+        if not _valid_recommendation_shape(item, answer_dimensions=answer_dimensions):
             return False
         refs = set(_model_string_list(item.get("basis_refs")))
         if not refs:

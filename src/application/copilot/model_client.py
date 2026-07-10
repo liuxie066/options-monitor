@@ -122,7 +122,7 @@ Use finish_conditions.claimable_refs_by_tool to choose refs from the tool observ
 Use finish_conditions.claimable_ref_context to check each cited ref's tool, time scope, record type, and non-use boundary.
 Use finish_conditions.requested_scope_refs for scoped evidence and finish_conditions.current_context_refs only for current/latest context.
 If an observation has facts_omitted, do not make only/no other/all-style exhaustive claims from that ref.
-When recommendations are useful, include answer_report.recommendations with action, target_scope, summary, and basis_refs; include answer_dimension only when task_guidance.answer_dimensions is present.
+When recommendations are useful, include answer_report.recommendations with action, target_scope, summary, and basis_refs; include answer_dimension only when task_guidance.answer_dimensions is present, and then it must exactly equal one of those values.
 If execution_environment is "eval", the conclusion must say it is eval-only and answer_report.missing_data must include "fixture observations are not production evidence".
 Do not claim writes, notifications, broker actions, config changes, deployments, or service changes."""
 
