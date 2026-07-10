@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from src.application.assistant.manual_trade_parser import build_manual_trade_draft
+from src.application.assistant.manual_trade_parser import build_manual_expiry_drafts, build_manual_trade_draft
 from src.application.multiplier_cache import save_cache
 
 
@@ -282,6 +282,74 @@ def test_manual_trade_draft_parses_futu_expiry_notice(tmp_path: Path) -> None:
     assert diagnostics["trade_side_raw"] == -1
     assert diagnostics["position_side"] == "short"
     assert diagnostics["missing_fields"] == []
+
+
+def test_manual_expiry_drafts_parse_all_contracts_in_futu_notice(tmp_path: Path) -> None:
+    message = (
+        "到期未指派平仓，lx，衍生品提醒: 期权到期失效通知: 您的保证金综合账户(7973) - "
+        "证券所持有的-1张腾讯 260710 490.00 购, -2张美团 260710 65.00 沽, "
+        "-1张腾讯 260710 410.00 沽期权已到期失效，详情请查看持仓情况。【富途证券(香港)】"
+    )
+
+    drafts = build_manual_expiry_drafts(
+        raw_text=message,
+        accounts=("lx", "sy"),
+        config_key="hk",
+        config_path=None,
+        runtime_config=_runtime_config(),
+        repo_base=tmp_path,
+        allow_opend_refresh=False,
+    )
+
+    assert [draft["arguments"] for draft in drafts] == [
+        {
+            "broker": "富途",
+            "account": "lx",
+            "symbol": "0700.HK",
+            "option_type": "call",
+            "position_side": "short",
+            "contracts_to_close": 1,
+            "strike": 490.0,
+            "expiration_ymd": "2026-07-10",
+            "close_reason": "expired_unassigned",
+        },
+        {
+            "broker": "富途",
+            "account": "lx",
+            "symbol": "3690.HK",
+            "option_type": "put",
+            "position_side": "short",
+            "contracts_to_close": 2,
+            "strike": 65.0,
+            "expiration_ymd": "2026-07-10",
+            "close_reason": "expired_unassigned",
+        },
+        {
+            "broker": "富途",
+            "account": "lx",
+            "symbol": "0700.HK",
+            "option_type": "put",
+            "position_side": "short",
+            "contracts_to_close": 1,
+            "strike": 410.0,
+            "expiration_ymd": "2026-07-10",
+            "close_reason": "expired_unassigned",
+        },
+    ]
+    assert [draft["diagnostics"]["batch_index"] for draft in drafts] == [1, 2, 3]
+    assert {draft["diagnostics"]["batch_size"] for draft in drafts} == {3}
+
+    with pytest.raises(ValueError, match="multiple expiry contracts"):
+        build_manual_trade_draft(
+            "manual_expiry",
+            raw_text=message,
+            accounts=("lx", "sy"),
+            config_key="hk",
+            config_path=None,
+            runtime_config=_runtime_config(),
+            repo_base=tmp_path,
+            allow_opend_refresh=False,
+        )
 
 
 def test_manual_trade_draft_reports_missing_multiplier(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

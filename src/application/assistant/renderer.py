@@ -104,6 +104,7 @@ def _pending_operation_label(operation_type: str) -> str:
     return {
         "manual_open": "交易开仓",
         "manual_close": "交易平仓",
+        "manual_expiry": "期权到期失效",
         "symbol_add": "监控新增",
         "symbol_edit": "监控修改",
         "symbol_remove": "监控删除",

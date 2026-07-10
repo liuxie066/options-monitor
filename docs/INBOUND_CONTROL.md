@@ -43,7 +43,8 @@ Use `/help` as the user-facing catalog. The stable categories are:
 
 - status and diagnostics: `/status`, `/health`, `/trace`;
 - read operations: `/income`, `/positions`, `/cash`, model/config inspection;
-- write previews: symbol/trade/upgrade commands that create pending operations;
+- write previews: symbol/trade/upgrade commands that create pending operations,
+  including `/record-expiry <富途期权到期失效通知>`;
 - confirmation flow: `/confirm ...`, `/cancel ...`, and bound channel replies.
 
 Channel wrappers should call only `./om assistant handle` or the equivalent
@@ -75,6 +76,9 @@ explicit command
 
 The preview does not mutate live config, positions, trade events, notifications,
 or broker-facing state. Confirmation is required before an apply path runs.
+When one expiry notice contains multiple contracts, `/record-expiry` creates one
+pending operation per contract. Each operation must be confirmed separately by
+its explicit `/confirm trade <operation_id>` command.
 
 ## Reply Contract
 

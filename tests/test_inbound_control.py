@@ -437,6 +437,15 @@ def test_inbound_parser_maps_manual_trade_and_symbol_operations() -> None:
         "raw_text": "记录平仓 sy 0700.HK short put strike 450 exp 2026-05-28 2张 close 1.2",
     }
 
+    expiry_intent = parse_assistant_command(
+        "/record-expiry lx 期权到期失效通知: 证券所持有的-1张腾讯 260710 490.00 购期权已到期失效"
+    )
+    assert expiry_intent is not None
+    assert expiry_intent.intent_name == "manual_expiry"
+    assert expiry_intent.arguments == {
+        "raw_text": "记录到期失效 lx 期权到期失效通知: 证券所持有的-1张腾讯 260710 490.00 购期权已到期失效",
+    }
+
     confirm_intent = parse_assistant_command("/confirm trade in_abc123")
     assert confirm_intent is not None
     assert confirm_intent.arguments == {
@@ -609,6 +618,128 @@ def test_inbound_manual_trade_preview_and_confirm_open(monkeypatch: pytest.Monke
     assert "receipt_not_observed" in timeline["warnings"]
     assert "phase=verify" in timeline_out["data"]["response_text"]
     assert "verify=verified_applied" in timeline_out["data"]["response_text"]
+
+
+def test_inbound_record_expiry_creates_independent_previews_and_confirms_one(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.ledger.repository as ledger_repository
+    from src.application.assistant.operation_store import InboundOperationStore
+    from src.application.positions.workflows import execute_manual_open
+
+    _enable_inbound_trade_write(monkeypatch)
+    cfg_path, sqlite_path = _write_inbound_runtime_config(tmp_path)
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    cfg["_generated"]["market"] = "hk"
+    cfg["_resolved"]["market"] = "hk"
+    cfg["accounts"] = ["lx"]
+    cfg["portfolio"]["account"] = "lx"
+    cfg_path = tmp_path / "config.hk.json"
+    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    audit_db = tmp_path / "inbound.sqlite3"
+    repo = ledger_repository.SQLiteOptionPositionsRepository(sqlite_path)
+
+    for symbol, option_type, strike, contracts in (
+        ("0700.HK", "call", 490.0, 1),
+        ("3690.HK", "put", 65.0, 2),
+        ("0700.HK", "put", 410.0, 1),
+    ):
+        execute_manual_open(
+            repo,
+            broker="富途",
+            account="lx",
+            symbol=symbol,
+            option_type=option_type,
+            side="short",
+            contracts=contracts,
+            currency="HKD",
+            strike=strike,
+            multiplier=100,
+            expiration_ymd="2026-07-10",
+            premium_per_share=1.0,
+            underlying_share_locked=100 if option_type == "call" else None,
+            note=None,
+            dry_run=False,
+        )
+
+    initial_events = repo.list_trade_events()
+    notice = (
+        "到期未指派平仓，lx，衍生品提醒: 期权到期失效通知: 您的保证金综合账户(7973) - "
+        "证券所持有的-1张腾讯 260710 490.00 购, -2张美团 260710 65.00 沽, "
+        "-1张腾讯 260710 410.00 沽期权已到期失效，详情请查看持仓情况。【富途证券(香港)】"
+    )
+    preview = handle_assistant_request(
+        AssistantRequest(
+            text=f"/record-expiry {notice}",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_expiry_batch_preview",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert preview["ok"] is True, json.dumps(preview, ensure_ascii=False, default=str, indent=2)
+    assert preview["data"]["preview_count"] == 3
+    operation_ids = preview["data"]["operation_ids"]
+    assert operation_ids == [f"{preview['data']['command_id']}:{index}" for index in (1, 2, 3)]
+    operation_args = [item["payload"]["arguments"] for item in preview["data"]["operations"]]
+    assert [
+        (
+            args["account"],
+            args["symbol"],
+            args["expiration_ymd"],
+            args["strike"],
+            args["option_type"],
+            args["position_side"],
+            args["contracts_to_close"],
+        )
+        for args in operation_args
+    ] == [
+        ("lx", "0700.HK", "2026-07-10", 490.0, "call", "short", 1),
+        ("lx", "3690.HK", "2026-07-10", 65.0, "put", "short", 2),
+        ("lx", "0700.HK", "2026-07-10", 410.0, "put", "short", 1),
+    ]
+    assert repo.list_trade_events() == initial_events
+    assert all(f"/confirm trade {operation_id}" in preview["data"]["response_text"] for operation_id in operation_ids)
+
+    pending = handle_assistant_request(
+        AssistantRequest(
+            text="/pending",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_expiry_batch_pending",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+    assert pending["data"]["pending_count"] == 3
+    assert "期权到期失效" in pending["data"]["response_text"]
+    assert "lx 0700.HK 2026-07-10 490.0C short 1张" in pending["data"]["response_text"]
+    assert "lx 3690.HK 2026-07-10 65.0P short 2张" in pending["data"]["response_text"]
+
+    confirmed = handle_assistant_request(
+        AssistantRequest(
+            text=f"/confirm trade {operation_ids[1]}",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_expiry_batch_confirm_one",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert confirmed["ok"] is True
+    assert confirmed["data"]["operation_id"] == operation_ids[1]
+    expire_events = [item for item in repo.list_trade_events() if item.get("event_type") == "expire_close"]
+    assert len(expire_events) == 1
+    assert expire_events[0]["symbol"] == "3690.HK"
+    remaining = InboundOperationStore(audit_db).list_pending_operations(channel="feishu", sender_id="ou_1")
+    assert {item["operation_id"] for item in remaining} == {operation_ids[0], operation_ids[2]}
 
 
 def test_operation_timeline_reports_audit_only_operation_when_store_missing(tmp_path: Path) -> None:

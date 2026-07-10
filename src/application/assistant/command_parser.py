@@ -89,6 +89,14 @@ def parse_assistant_command(text: str, *, now_fn: Callable[[], date] | None = No
             action_prefix="记录平仓",
             hint="格式：/record-close record_id=<record_id> <张数>张 close <平仓价>。",
         )
+    if command in _COMMANDS["manual_expiry"]:
+        return _parse_manual_trade_preview_command(
+            command,
+            args,
+            intent_name="manual_expiry",
+            action_prefix="记录到期失效",
+            hint="格式：/record-expiry <富途期权到期失效通知>。",
+        )
     if command in _COMMANDS["manual_trade_update"]:
         return _parse_manual_trade_update_command(command, args)
     if command in _COMMANDS["manual_trade_confirm"]:
