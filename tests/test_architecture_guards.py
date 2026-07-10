@@ -298,13 +298,10 @@ def test_copilot_phase2_answer_synthesis_is_not_monthly_review_only() -> None:
 
     scenes = {scene.name: scene for scene in SCENE_CATALOG}
     synthesis_scenes = {name for name, scene in scenes.items() if scene.requires_answer_synthesis}
-    non_review_synthesis_scenes = synthesis_scenes - {"monthly_option_review"}
 
-    assert "monthly_option_review" in synthesis_scenes
-    assert {"monthly_income_attribution", "current_option_exposure"} <= non_review_synthesis_scenes
-    assert len(non_review_synthesis_scenes) >= 2
-    assert scenes["monthly_option_review"].requires_recommendations is True
-    assert all(not scene.requires_recommendations for name, scene in scenes.items() if name != "monthly_option_review")
+    assert "monthly_option_review" not in scenes
+    assert {"monthly_income_attribution", "current_option_exposure"} <= synthesis_scenes
+    assert all(not scene.requires_recommendations for scene in scenes.values())
     assert scenes["operations_diagnostics"].fixture_ids
     assert not scenes["operations_diagnostics"].requires_recommendations
 
@@ -519,7 +516,7 @@ def test_copilot_tools_do_not_define_parallel_tool_allowlist() -> None:
     assert "def fixture_observations(" not in scene_text
     assert "eval-only 月度复盘发现" not in scene_text
     assert "def fixture_observations(" in fixtures_text
-    assert "june_option_review_basic" in fixtures_text
+    assert "june_option_review_basic" not in fixtures_text
     assert "from src.application.copilot.eval_fixtures import" not in host_text
     assert "fixture_observations_loader" in host_text
     assert "fixture_synthesis_policy" in host_text
@@ -1437,17 +1434,15 @@ def test_capability_map_presents_copilot_as_multi_scene_surface() -> None:
         "operations diagnostics",
         "income attribution",
         "current exposure",
-        "monthly option-review benchmarks",
     ):
         assert token in normalized
     for token in (
         "--scene current_option_exposure",
         "--scene monthly_income_attribution",
-        "--scene monthly_option_review",
     ):
         assert token in text
 
-    assert text.index("--scene current_option_exposure") < text.index("--scene monthly_option_review")
+    assert "monthly_option_review" not in text
 
 
 def test_readme_presents_local_copilot_as_multi_scene_surface() -> None:
@@ -1458,40 +1453,28 @@ def test_readme_presents_local_copilot_as_multi_scene_surface() -> None:
         "诊断",
         "收益归因",
         "当前暴露",
-        "月度期权复盘 benchmark",
         "--scene current_option_exposure",
         "--scene monthly_income_attribution",
-        "--scene monthly_option_review",
     ):
         assert token in normalized
 
-    assert text.index("--scene current_option_exposure") < text.index("--scene monthly_option_review")
+    assert "monthly_option_review" not in text
 
 
-def test_copilot_scene_catalog_orders_monthly_review_as_benchmark_not_default() -> None:
+def test_copilot_scene_catalog_has_no_dedicated_monthly_option_review() -> None:
     from src.application.copilot.scene import SCENE_CATALOG
 
     scene_names = [scene.name for scene in SCENE_CATALOG]
 
-    assert scene_names.index("operations_diagnostics") < scene_names.index("monthly_option_review")
-    assert scene_names.index("monthly_income_attribution") < scene_names.index("monthly_option_review")
-    assert scene_names.index("current_option_exposure") < scene_names.index("monthly_option_review")
+    assert "monthly_option_review" not in scene_names
 
 
 def test_phase2_design_requires_non_review_lanes_before_monthly_benchmark() -> None:
     text = (ROOT / "docs" / "OM_COPILOT_V2_DESIGN.md").read_text(encoding="utf-8")
     normalized = " ".join(text.split())
 
-    required = (
-        "diagnostics first, income attribution second, current exposure third, "
-        "monthly option review last as the benchmark"
-    )
-    assert required in normalized
-    assert (
-        "no additional monthly-review-only fixture, quality rule, or prompt constraint "
-        "is accepted unless the existing diagnostics, income attribution, and current "
-        "exposure lanes still pass through the same shared loop"
-    ) in normalized
+    assert "monthly_option_review" not in text
+    assert "monthly option review last as the benchmark" not in normalized
 
 
 def test_phase1_design_main_blueprint_is_lane_based_not_monthly_command_dump() -> None:
@@ -1504,12 +1487,10 @@ def test_phase1_design_main_blueprint_is_lane_based_not_monthly_command_dump() -
         "| Close-advice notification diagnosis |",
         "| Monthly income attribution |",
         "| Current exposure analysis |",
-        "| Monthly option-review benchmark |",
     ):
         assert lane in main_table
 
-    assert main_table.count("monthly_option_review") == 1
-    assert main_table.index("Current exposure analysis") < main_table.index("Monthly option-review benchmark")
+    assert "monthly_option_review" not in main_table
 
 
 def test_phase2_design_does_not_make_monthly_review_rules_the_runtime_blueprint() -> None:
@@ -1537,7 +1518,6 @@ def test_copilot_phase2_completion_checklist_has_test_evidence() -> None:
         "Diagnostics",
         "Income attribution",
         "Current exposure",
-        "Monthly option review",
         "Missing/stale evidence",
         "Shared runtime boundary",
         "Channel boundary",
@@ -1549,8 +1529,7 @@ def test_copilot_phase2_completion_checklist_has_test_evidence() -> None:
         "test_write_like_request_is_refused_before_host",
         "test_channel_environment_has_no_executable_freeform_scene",
         "test_local_runtime_question_runs_service_host_agent_loop",
-        "test_eval_monthly_option_review_accepts_model_report_with_refs",
-        "test_eval_model_report_with_non_claimable_ref_is_not_admitted",
+        "test_monthly_option_review_is_not_a_dedicated_copilot_capability",
         "test_model_decider_falls_back_to_default_tool_collection_on_model_error",
         "test_result_admission_rejects_external_action_claim",
         "test_cli_copilot_eval_accepts_model_action_file",
@@ -1564,7 +1543,6 @@ def test_copilot_phase2_completion_checklist_has_test_evidence() -> None:
         "close_advice_notification_diagnostics_model_action.json",
         "june_income_attribution_model_action.json",
         "current_option_exposure_model_action.json",
-        "june_option_review_model_action.json",
     ):
         assert (fixture_root / action_fixture).is_file(), action_fixture
 

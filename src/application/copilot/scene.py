@@ -10,17 +10,6 @@ from src.application.copilot.contracts import (
     SceneManifest,
 )
 
-MONTHLY_REVIEW_ANALYSIS_VIEWS = (
-    "account_monthly_performance",
-    "account_monthly_income_components",
-    "monthly_income_summary",
-    "symbol_income_attribution",
-    "trade_events",
-    "open_option_exposure",
-    "expiration_risk_buckets",
-    "close_advice_snapshot",
-)
-
 MONTHLY_INCOME_ATTRIBUTION_ANALYSIS_VIEWS = (
     "account_monthly_performance",
     "account_monthly_income_components",
@@ -185,78 +174,6 @@ SCENE_CATALOG: tuple[SceneDefinition, ...] = (
             "analysis_catalog": {"views": list(CURRENT_EXPOSURE_ANALYSIS_VIEWS)},
             "analysis_query": {"views": list(CURRENT_EXPOSURE_ANALYSIS_VIEWS), "limit": 200},
             "option_positions_read": {"action": "list", "status": "open", "limit": 200},
-        },
-    ),
-    SceneDefinition(
-        name="monthly_option_review",
-        capabilities=("monthly_option_review",),
-        required_scope=("config_key", "month"),
-        allowed_tools=(
-            "analysis_catalog",
-            "analysis_query",
-            "monthly_income_report",
-            "option_positions_read",
-            "close_advice_read",
-        ),
-        environments=("local", "eval"),
-        phase_readiness="local_only",
-        requires_answer_synthesis=True,
-        requires_recommendations=True,
-        allow_mock_observations=True,
-        mock_environments=("eval",),
-        fixture_ids=(
-            "june_option_review_basic",
-            "june_option_review_model_ready",
-            "june_option_review_close_advice_missing",
-            "june_option_review_income_missing_current_exposure",
-            "june_option_review_snapshot_only",
-        ),
-        task_guidance=(
-            "Review monthly option operations from income attribution, open exposure, and close-advice observations.",
-            "Check requested-month trade events before drawing an operation-quality conclusion.",
-            "Check premium, realized P/L, assignment lifecycle, and monthly income attribution before drawing an operation-quality conclusion.",
-            "Check open option exposure by symbol, currency, option type, side, and expiration bucket before describing concentration.",
-            "Use close-advice action, tier, and evaluation counts as review signals, not as standalone proof.",
-            "Any next-step item must be supported by income, exposure, and close-advice refs when those observations are claimable.",
-            "Structure the review around profit quality, assignment cash outlay, open-exposure concentration, current close-advice signals, and evidence gaps.",
-            "Use current snapshots and latest signal snapshots only as current context, not as proof of requested-month transactions.",
-            "When requested-period refs are available, basis_refs for operator next steps must include at least one requested-period ref.",
-            "Evaluate concerns only when supported by observations.",
-            "If income, position, or close-advice evidence is missing or weak, make missing_data explicit instead of completing the review.",
-            "Do not turn grouped rows into the final response.",
-        ),
-        answer_dimensions=(
-            "profit quality",
-            "assignment cash outlay",
-            "open-exposure concentration",
-            "current close-advice signals",
-            "evidence gaps",
-        ),
-        capability_hints=(
-            CapabilityHintDefinition(
-                capability="monthly_option_review",
-                activation_terms=(
-                    ("期权", "复盘"),
-                    ("期权", "操作"),
-                    ("期权", "review"),
-                    ("期权", "分析"),
-                ),
-                activation_reason="scene_monthly_option_review_hint",
-                tools=(
-                    "analysis_catalog",
-                    "analysis_query",
-                    "monthly_income_report",
-                    "option_positions_read",
-                    "close_advice_read",
-                ),
-            ),
-        ),
-        tool_static_payloads={
-            "analysis_catalog": {"views": list(MONTHLY_REVIEW_ANALYSIS_VIEWS)},
-            "analysis_query": {"views": list(MONTHLY_REVIEW_ANALYSIS_VIEWS), "limit": 200},
-            "monthly_income_report": {"include_rows": True},
-            "option_positions_read": {"action": "list", "status": "open", "limit": 200},
-            "close_advice_read": {"market_scope": "all", "query": {"limit": 200}},
         },
     ),
 )
