@@ -39,7 +39,21 @@ def resolve_runtime_config_path(
             message="config_key must be us or hk when config_path is omitted",
         )
 
+    runtime_root = _runtime_root_from_env()
+    if runtime_root is not None:
+        return (runtime_root / DEFAULT_CONFIGS[key]).resolve()
+
     return (repo_base() / DEFAULT_CONFIGS[key]).resolve()
+
+
+def _runtime_root_from_env() -> Path | None:
+    raw = str(build_effective_env().get("OM_RUNTIME_ROOT") or "").strip()
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = path.resolve()
+    return path
 
 def load_runtime_config(
     *,
@@ -54,7 +68,7 @@ def load_runtime_config(
         raise AgentToolError(
             code="CONFIG_ERROR",
             message=f"runtime config not found: {path.name}",
-            hint="Create the repo-local config file or pass config_path explicitly.",
+            hint="Create the repo-local config file, set OM_RUNTIME_ROOT, or pass config_path explicitly.",
         )
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))

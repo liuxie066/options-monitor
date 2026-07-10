@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.367 - 2026-07-10
+
+### Changed
+- Tightened OM Copilot model answer admission so qualitative recommendations must be supported by claimable findings and requested-period evidence.
+- Validated the local Copilot model synthesis path against explicit assistant model config without enabling channel free-form answers.
+
+### Fixed
+- Let `config_key`-based agent tools resolve runtime configs from `OM_RUNTIME_ROOT`, so release-tree Copilot runs can read production `/var/lib/options-monitor` evidence instead of failing with repo-local `CONFIG_ERROR`.
+
 ## 1.2.366 - 2026-07-10
 
 ### Added
