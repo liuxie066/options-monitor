@@ -722,6 +722,78 @@ def test_auto_close_expired_positions_skips_when_lifecycle_assignment_pending(tm
     assert repo.get_record_fields("lot_tigr_put_6_20260522")["status"] == "open"
 
 
+def test_auto_close_expired_positions_records_lifecycle_expire_close_for_otm_pending_case(tmp_path: Path) -> None:
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    _seed_open_lot_event(
+        repo,
+        record_id="lot_tigr_put_6_20260522",
+        account="lx",
+        symbol="TIGR",
+        option_type="put",
+        side="short",
+        contracts=10,
+        currency="USD",
+        strike=6,
+        multiplier=100,
+        expiration_ymd="2026-05-22",
+        opened_at_ms=1000,
+    )
+    repo.upsert_trade_lifecycle_case(
+        {
+            "case_id": "lc_tigr_expire",
+            "case_key": "富途|lx|TIGR|put|short|6|2026-05-22",
+            "account": "lx",
+            "symbol": "TIGR",
+            "option_type": "put",
+            "position_side": "short",
+            "strike": 6,
+            "expiration_ymd": "2026-05-22",
+            "contracts": 10,
+            "status": "waiting_settlement_evidence",
+            "decision_type": "needs_review",
+            "target_lot_ids": [],
+        }
+    )
+    repo.upsert_trade_lifecycle_evidence(
+        {
+            "evidence_id": "ev_tigr_zero_close",
+            "case_id": "lc_tigr_expire",
+            "source_type": "opend_deal",
+            "source_event_id": "deal-zero-close",
+            "evidence_type": "option_zero_price_close",
+            "account": "lx",
+            "symbol": "TIGR",
+        }
+    )
+    as_of_ms = parse_exp_to_ms("2026-05-25")
+    assert as_of_ms is not None
+    positions = [dict(item["fields"], record_id=item["record_id"]) for item in repo.list_position_lots()]
+    positions[0]["_auto_close_underlying_spot"] = 7
+
+    decisions, applied, errors = _auto_close_payloads(
+        repo,
+        positions,
+        as_of_ms=as_of_ms,
+        grace_days=1,
+        max_close=5,
+    )
+
+    assert errors == []
+    assert len(applied) == 1
+    assert decisions[0]["should_close"] is True
+    assert repo.get_record_fields("lot_tigr_put_6_20260522")["status"] == "close"
+    events = [item for item in repo.list_trade_events() if item["event_type"] == "expire_close"]
+    assert len(events) == 1
+    assert events[0]["source"] == "option_lifecycle_decision"
+    assert events[0]["raw_payload"]["case_id"] == "lc_tigr_expire"
+    assert events[0]["raw_payload"]["evidence_ids"] == ["ev_tigr_zero_close"]
+    case = repo.get_trade_lifecycle_case("lc_tigr_expire")
+    assert case is not None
+    assert case["status"] == "ledger_written"
+    assert case["decision_type"] == "expire_close"
+    assert case["target_lot_ids"] == ["lot_tigr_put_6_20260522"]
+
+
 def test_auto_close_expired_positions_skips_when_exercise_stock_evidence_seen(tmp_path: Path) -> None:
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     _seed_open_lot_event(

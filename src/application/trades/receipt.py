@@ -137,9 +137,21 @@ def decide_trade_intake_receipt(
     if status == "applied":
         return {"should_send": bool(cfg.get("notify_applied", True)), "reason": "applied"}
     if status == "unresolved":
-        return {"should_send": bool(cfg.get("notify_unresolved", True)), "reason": "unresolved"}
+        if not bool(cfg.get("notify_unresolved", True)):
+            return {"should_send": False, "reason": "unresolved_disabled"}
+        if _receipt_delivered(state, deal_id):
+            return {"should_send": False, "reason": "skipped_unresolved_already_notified"}
+        if _receipt_needs_retry(state, deal_id):
+            return {"should_send": True, "reason": "unresolved_retry_unconfirmed_receipt"}
+        return {"should_send": True, "reason": "unresolved"}
     if status == "failed":
-        return {"should_send": bool(cfg.get("notify_failed", True)), "reason": "failed"}
+        if not bool(cfg.get("notify_failed", True)):
+            return {"should_send": False, "reason": "failed_disabled"}
+        if _receipt_delivered(state, deal_id):
+            return {"should_send": False, "reason": "skipped_failed_already_notified"}
+        if _receipt_needs_retry(state, deal_id):
+            return {"should_send": True, "reason": "failed_retry_unconfirmed_receipt"}
+        return {"should_send": True, "reason": "failed"}
     if status == "skipped" and reason == "not_option_deal":
         return {"should_send": False, "reason": "skipped_not_option_deal"}
     if status == "skipped" and reason == "duplicate_deal_id":
@@ -252,6 +264,22 @@ def _receipt_needs_retry(state: dict[str, Any] | None, deal_id: str | None) -> b
         if not isinstance(receipt, dict):
             return True
         return not bool(receipt.get("delivery_confirmed"))
+    return False
+
+
+def _receipt_delivered(state: dict[str, Any] | None, deal_id: str | None) -> bool:
+    key = str(deal_id or "").strip()
+    if not key or not isinstance(state, dict):
+        return False
+    for bucket_name in ("processed_deal_ids", "failed_deal_ids", "unresolved_deal_ids"):
+        bucket = state.get(bucket_name)
+        if not isinstance(bucket, dict):
+            continue
+        item = bucket.get(key)
+        if not isinstance(item, dict):
+            continue
+        receipt = item.get("receipt")
+        return isinstance(receipt, dict) and bool(receipt.get("delivery_confirmed"))
     return False
 
 

@@ -517,7 +517,14 @@ def test_process_payload_records_retryable_unresolved_diagnostics(tmp_path: Path
     initial_state = {
         "processed_deal_ids": {},
         "failed_deal_ids": {},
-        "unresolved_deal_ids": {"deal-retry-1": {"status": "unresolved", "retryable": True, "attempt_count": 2}},
+        "unresolved_deal_ids": {
+            "deal-retry-1": {
+                "status": "unresolved",
+                "retryable": True,
+                "attempt_count": 2,
+                "receipt": {"status": "sent", "delivery_confirmed": True},
+            }
+        },
     }
 
     out = process_trade_payload(
@@ -541,6 +548,7 @@ def test_process_payload_records_retryable_unresolved_diagnostics(tmp_path: Path
     assert state_item["retryable"] is True
     assert state_item["attempt_count"] == 3
     assert state_item["diagnostics"]["missing_fields"] == ["multiplier"]
+    assert state_item["receipt"] == {"status": "sent", "delivery_confirmed": True}
     assert any(event.get("phase") == "resolved" and event.get("diagnostics", {}).get("retryable") is True for event in events)
 
 

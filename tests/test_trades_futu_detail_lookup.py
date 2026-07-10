@@ -96,6 +96,36 @@ def test_enrich_trade_push_payload_resolves_account_id_via_deal_lookup(monkeypat
     assert out.diagnostics["matched_via"] == "deal_lookup_by_acc_id"
 
 
+def test_enrich_trade_push_payload_filters_deals_locally_for_sdk_without_deal_id_kwarg(monkeypatch) -> None:
+    calls: list[dict] = []
+
+    class FakeGateway:
+        def get_order_list(self, **kwargs):
+            return []
+
+        def get_deal_list(self, **kwargs):
+            calls.append(dict(kwargs))
+            if "deal_id" in kwargs or "order_id" in kwargs:
+                raise TypeError("deal_list_query() got an unexpected keyword argument 'deal_id'")
+            return [{"deal_id": "deal-2", "trd_acc_id": "333"}]
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("src.application.trades.futu_detail_lookup.build_futu_gateway", lambda **kwargs: FakeGateway())
+    out = enrich_trade_push_payload_with_account_id(
+        {"deal_id": "deal-2"},
+        host="127.0.0.1",
+        port=11111,
+        futu_account_ids=["333"],
+    )
+
+    assert calls == [{"acc_id": 333}]
+    assert out.payload["futu_account_id"] == "333"
+    assert out.diagnostics["matched_via"] == "deal_lookup_by_acc_id"
+    assert out.diagnostics["tried_queries"][-1]["filter_deal_id"] == "deal-2"
+
+
 def test_enrich_trade_push_payload_falls_back_to_lookup_without_acc_id(monkeypatch) -> None:
     class FakeGateway:
         def get_order_list(self, **kwargs):
