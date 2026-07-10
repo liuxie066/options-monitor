@@ -35,6 +35,44 @@ def test_receipt_decision_defaults_send_unresolved_and_failed() -> None:
         assert out == {"should_send": True, "reason": status}
 
 
+def test_receipt_decision_skips_repeated_confirmed_unresolved() -> None:
+    out = decide_trade_intake_receipt(
+        receipt_config={},
+        apply_changes=True,
+        state={
+            "unresolved_deal_ids": {
+                "deal-1": {
+                    "status": "unresolved",
+                    "receipt": {"status": "sent", "delivery_confirmed": True},
+                }
+            }
+        },
+        deal_id="deal-1",
+        result={"status": "unresolved", "reason": "waiting_settlement_evidence"},
+    )
+
+    assert out == {"should_send": False, "reason": "skipped_unresolved_already_notified"}
+
+
+def test_receipt_decision_retries_unconfirmed_unresolved() -> None:
+    out = decide_trade_intake_receipt(
+        receipt_config={},
+        apply_changes=True,
+        state={
+            "unresolved_deal_ids": {
+                "deal-1": {
+                    "status": "unresolved",
+                    "receipt": {"status": "failed", "delivery_confirmed": False},
+                }
+            }
+        },
+        deal_id="deal-1",
+        result={"status": "unresolved", "reason": "waiting_settlement_evidence"},
+    )
+
+    assert out == {"should_send": True, "reason": "unresolved_retry_unconfirmed_receipt"}
+
+
 def test_receipt_decision_skips_dry_run() -> None:
     out = decide_trade_intake_receipt(
         receipt_config={},

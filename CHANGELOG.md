@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.2.374 - 2026-07-10
+
+### Fixed
+- Stopped repeated trade-intake receipts for the same unresolved or failed deal after a confirmed notification has already been sent.
+- Made Futu deal lookups compatible with SDK builds whose `deal_list_query` does not accept `deal_id` or `order_id` filters by querying supported account-scoped data and filtering locally.
+- Let expired OTM lifecycle-pending zero-price option closes write `expire_close` after the existing auto-close grace window when no matching stock settlement evidence exists.
+
 ## 1.2.373 - 2026-07-10
 
 ### Added

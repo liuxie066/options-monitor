@@ -63,21 +63,41 @@ def _record_failed_deal_state(
     deal_id = str(result_dict.get("deal_id") or "").strip()
     if not deal_id:
         return state
+    prior_receipt = _prior_receipt(state, deal_id)
+    payload = {
+        "status": "failed",
+        "action": result_dict.get("action"),
+        "account": result_dict.get("account"),
+        "applied_record_ids": [],
+        "reason": result_dict.get("reason"),
+        "diagnostics": dict(result_dict.get("diagnostics") or {}),
+    }
+    if prior_receipt:
+        payload["receipt"] = prior_receipt
     state = upsert_deal_state_fn(
         state,
         bucket="failed_deal_ids",
         deal_id=deal_id,
-        payload={
-            "status": "failed",
-            "action": result_dict.get("action"),
-            "account": result_dict.get("account"),
-            "applied_record_ids": [],
-            "reason": result_dict.get("reason"),
-            "diagnostics": dict(result_dict.get("diagnostics") or {}),
-        },
+        payload=payload,
     )
     write_trade_intake_state_fn(state_path, state)
     return state
+
+
+def _prior_receipt(state: dict[str, Any] | None, deal_id: str | None) -> dict[str, Any]:
+    key = str(deal_id or "").strip()
+    if not key or not isinstance(state, dict):
+        return {}
+    for bucket_name in ("processed_deal_ids", "failed_deal_ids", "unresolved_deal_ids"):
+        bucket = state.get(bucket_name)
+        if not isinstance(bucket, dict):
+            continue
+        item = bucket.get(key)
+        if not isinstance(item, dict):
+            continue
+        receipt = item.get("receipt")
+        return dict(receipt) if isinstance(receipt, dict) else {}
+    return {}
 
 
 def _ledger_store_from_repo(repo: Any) -> dict[str, Any] | None:
@@ -497,35 +517,43 @@ def process_trade_payload(
                 prior = {}
             diagnostics = dict(result_dict.get("diagnostics") or {})
             retryable = bool(diagnostics.get("retryable"))
+            payload = {
+                "status": "unresolved",
+                "action": result.action,
+                "account": result.account,
+                "applied_record_ids": [],
+                "reason": result.reason,
+                "retryable": retryable,
+                "attempt_count": int(prior.get("attempt_count") or 0) + 1,
+                "diagnostics": diagnostics,
+            }
+            prior_receipt = _prior_receipt(state, deal.deal_id)
+            if prior_receipt:
+                payload["receipt"] = prior_receipt
             state = upsert_deal_state_fn(
                 state,
                 bucket="unresolved_deal_ids",
                 deal_id=deal.deal_id,
-                payload={
-                    "status": "unresolved",
-                    "action": result.action,
-                    "account": result.account,
-                    "applied_record_ids": [],
-                    "reason": result.reason,
-                    "retryable": retryable,
-                    "attempt_count": int(prior.get("attempt_count") or 0) + 1,
-                    "diagnostics": diagnostics,
-                },
+                payload=payload,
             )
             write_trade_intake_state_fn(state_path, state)
         elif result.status == "failed":
+            prior_receipt = _prior_receipt(state, deal.deal_id)
+            payload = {
+                "status": "failed",
+                "action": result.action,
+                "account": result.account,
+                "applied_record_ids": [],
+                "reason": result.reason,
+                "diagnostics": dict(result_dict.get("diagnostics") or {}),
+            }
+            if prior_receipt:
+                payload["receipt"] = prior_receipt
             state = upsert_deal_state_fn(
                 state,
                 bucket="failed_deal_ids",
                 deal_id=deal.deal_id,
-                payload={
-                    "status": "failed",
-                    "action": result.action,
-                    "account": result.account,
-                    "applied_record_ids": [],
-                    "reason": result.reason,
-                    "diagnostics": dict(result_dict.get("diagnostics") or {}),
-                },
+                payload=payload,
             )
             write_trade_intake_state_fn(state_path, state)
     return _finalize_trade_payload_result(

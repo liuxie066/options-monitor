@@ -245,9 +245,17 @@ def enrich_trade_push_payload_with_account_id(
                         diagnostics["matched_via"] = "order_lookup_by_acc_id"
                         return TradePushAccountLookupResult(payload=enriched, diagnostics=diagnostics)
             if deal_id:
-                query_kwargs = {"acc_id": numeric_acc_id, "deal_id": deal_id, "order_id": order_id or None}
+                query_kwargs = {"acc_id": numeric_acc_id}
                 rows, error = _query_rows(gateway, "get_deal_list", **query_kwargs)
-                diagnostics["tried_queries"].append({"method": "get_deal_list", **query_kwargs, "rows": len(rows)})
+                diagnostics["tried_queries"].append(
+                    {
+                        "method": "get_deal_list",
+                        **query_kwargs,
+                        "filter_deal_id": deal_id,
+                        "filter_order_id": order_id or None,
+                        "rows": len(rows),
+                    }
+                )
                 if error:
                     diagnostics["query_errors"].append({"method": "get_deal_list", **query_kwargs, "error": error})
                 for row in rows:
@@ -269,9 +277,16 @@ def enrich_trade_push_payload_with_account_id(
                         diagnostics["matched_via"] = "order_lookup_without_acc_id"
                         return TradePushAccountLookupResult(payload=enriched, diagnostics=diagnostics)
         if deal_id:
-            query_kwargs = {"deal_id": deal_id, "order_id": order_id or None}
+            query_kwargs: dict[str, Any] = {}
             rows, error = _query_rows(gateway, "get_deal_list", **query_kwargs)
-            diagnostics["tried_queries"].append({"method": "get_deal_list", **query_kwargs, "rows": len(rows)})
+            diagnostics["tried_queries"].append(
+                {
+                    "method": "get_deal_list",
+                    "filter_deal_id": deal_id,
+                    "filter_order_id": order_id or None,
+                    "rows": len(rows),
+                }
+            )
             if error:
                 diagnostics["query_errors"].append({"method": "get_deal_list", **query_kwargs, "error": error})
             for row in rows:
