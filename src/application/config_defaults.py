@@ -135,6 +135,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "assistant": {
             "enabled": True,
             "context_window_messages": 8,
+            "copilot": {
+                "enabled": False,
+                "channel_scenes": [],
+                "human_review": False,
+            },
             "planner": {
                 "enabled": False,
             },

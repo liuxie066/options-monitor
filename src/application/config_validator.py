@@ -102,6 +102,7 @@ ASSISTANT_CONFIG_KEYS = {
     'active_model',
     'agent_loop',
     'context_window_messages',
+    'copilot',
     'default_market_scope',
     'enabled',
     'llm',
@@ -281,6 +282,17 @@ def _validate_assistant_config(cfg: dict) -> None:
         die('assistant.planner must be an object')
     if isinstance(planner, dict) and 'enabled' in planner and planner.get('enabled') is not None and not isinstance(planner.get('enabled'), bool):
         die('assistant.planner.enabled must be a boolean')
+    copilot = assistant.get('copilot') or {}
+    if copilot and not isinstance(copilot, dict):
+        die('assistant.copilot must be an object')
+    if isinstance(copilot, dict):
+        for key in ('enabled', 'human_review'):
+            if key in copilot and copilot.get(key) is not None and not isinstance(copilot.get(key), bool):
+                die(f'assistant.copilot.{key} must be a boolean')
+        if 'channel_scenes' in copilot and copilot.get('channel_scenes') is not None:
+            scenes = copilot.get('channel_scenes')
+            if not isinstance(scenes, list) or any(not isinstance(item, str) for item in scenes):
+                die('assistant.copilot.channel_scenes must be a list of strings')
     agent_loop = assistant.get('agent_loop') or {}
     if agent_loop and not isinstance(agent_loop, dict):
         die('assistant.agent_loop must be an object')

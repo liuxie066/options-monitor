@@ -10,6 +10,7 @@ from src.application.assistant.audit import InboundAuditStore, inbound_sqlite_er
 from src.application.assistant.operation_lifecycle import build_action_lifecycle
 from src.application.assistant.operation_store import InboundOperationStore
 from src.application.assistant.renderer import render_pending_operations
+from src.application.assistant.turn_result import copilot_events_from_response_data, copilot_trace_from_response_data
 
 
 OPERATION_TIMELINE_SCHEMA_VERSION = "operation-timeline-v1"
@@ -263,6 +264,15 @@ def format_recent_audit(rows: list[dict[str, Any]], *, filters: dict[str, Any]) 
         error_code = str(row.get("error_code") or "").strip()
         if error_code:
             lines.append(f"  error: {error_code}")
+        copilot = row.get("copilot") if isinstance(row.get("copilot"), dict) else {}
+        if copilot:
+            parts = [f"{key}={value}" for key, value in copilot.items() if value]
+            if parts:
+                lines.append("  copilot: " + " ".join(parts))
+        copilot_events = row.get("copilot_events") if isinstance(row.get("copilot_events"), dict) else {}
+        failures = copilot_events.get("failure_reasons") if isinstance(copilot_events.get("failure_reasons"), list) else []
+        if failures:
+            lines.append("  copilot_events: failures=" + ",".join(str(item) for item in failures if str(item).strip()))
         duplicate_count = int(row.get("duplicate_count") or 0)
         if duplicate_count:
             lines.append(f"  duplicates: {duplicate_count}")
@@ -273,7 +283,7 @@ def _audit_row_summary(row: dict[str, Any]) -> dict[str, Any]:
     response = _loads(row.get("response_json"))
     data = _dict(response.get("data"))
     error = _dict(response.get("error"))
-    return {
+    summary = {
         "command_id": row.get("command_id"),
         "channel": row.get("channel"),
         "sender_id": row.get("sender_id"),
@@ -299,6 +309,13 @@ def _audit_row_summary(row: dict[str, Any]) -> dict[str, Any]:
         "last_duplicate_sender_id": row.get("last_duplicate_sender_id"),
         "last_duplicate_decision": row.get("last_duplicate_decision"),
     }
+    copilot = copilot_trace_from_response_data(data)
+    if copilot:
+        summary["copilot"] = copilot
+    copilot_events = copilot_events_from_response_data(data)
+    if copilot_events:
+        summary["copilot_events"] = copilot_events
+    return summary
 
 
 def _connect_existing_sqlite(path: Path) -> sqlite3.Connection:
