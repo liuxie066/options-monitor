@@ -5,7 +5,11 @@ from pathlib import Path
 from src.application.ledger.store_resolution import LedgerStoreResolution
 from src.application.trades.normalizer import NormalizedTradeDeal
 from src.application.trades.state import upsert_deal_state
-from src.application.trades.intake import build_trade_intake_audit_event, process_trade_payload
+from src.application.trades.intake import (
+    _attach_receipt_state,
+    build_trade_intake_audit_event,
+    process_trade_payload,
+)
 
 
 def test_build_audit_event_promotes_multiplier_source_to_top_level() -> None:
@@ -550,6 +554,42 @@ def test_process_payload_records_retryable_unresolved_diagnostics(tmp_path: Path
     assert state_item["diagnostics"]["missing_fields"] == ["multiplier"]
     assert state_item["receipt"] == {"status": "sent", "delivery_confirmed": True}
     assert any(event.get("phase") == "resolved" and event.get("diagnostics", {}).get("retryable") is True for event in events)
+
+
+def test_attach_receipt_state_preserves_confirmed_receipt_on_unresolved_skip() -> None:
+    state = {
+        "processed_deal_ids": {},
+        "failed_deal_ids": {},
+        "unresolved_deal_ids": {
+            "deal-retry-1": {
+                "status": "unresolved",
+                "receipt": {
+                    "status": "sent",
+                    "delivery_confirmed": True,
+                    "message_id": "msg-confirmed",
+                    "attempt_count": 1,
+                },
+            }
+        },
+    }
+
+    out = _attach_receipt_state(
+        state,
+        deal_id="deal-retry-1",
+        result_dict={"status": "unresolved", "reason": "waiting_settlement_evidence"},
+        receipt_result={
+            "status": "skipped",
+            "reason": "skipped_unresolved_already_notified",
+            "delivery_confirmed": False,
+        },
+    )
+
+    assert out is state
+    receipt = out["unresolved_deal_ids"]["deal-retry-1"]["receipt"]
+    assert receipt["status"] == "sent"
+    assert receipt["delivery_confirmed"] is True
+    assert receipt["message_id"] == "msg-confirmed"
+    assert receipt["attempt_count"] == 1
 
 
 def test_process_payload_passes_retry_failed_to_resolver(tmp_path: Path) -> None:

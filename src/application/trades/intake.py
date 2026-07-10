@@ -222,7 +222,6 @@ def _attach_receipt_state(
     prior_receipt = item.get("receipt") if isinstance(item.get("receipt"), dict) else {}
     if (
         str(receipt.get("status") or "").strip().lower() == "skipped"
-        and str(receipt.get("reason") or "").strip().lower() == "skipped_duplicate"
         and prior_receipt
     ):
         return state
