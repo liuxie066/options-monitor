@@ -52,6 +52,7 @@ class ModelActionDecider:
                     state.observations,
                     state.manifest.allowed_tools,
                 ),
+                requested_scope_refs=_claimable_refs_by_context(state.observations, _requested_scope_context),
                 attempted_tools=state.attempted_tools,
                 execution_environment=state.manifest.execution_environment,
                 requires_recommendations=_requires_recommendations(state),
@@ -493,6 +494,7 @@ def _parse_model_action(
     claimable_refs: list[str] | None = None,
     unattempted_tools_without_evidence: list[str] | None = None,
     missing_allowed_tool_evidence: list[dict[str, Any]] | None = None,
+    requested_scope_refs: list[str] | None = None,
     attempted_tools: list[str] | None = None,
     execution_environment: str = "",
     requires_recommendations: bool = False,
@@ -519,6 +521,8 @@ def _parse_model_action(
             return None, "finish action requires cited findings"
         if claimable_refs is not None and not _all_report_refs_are_claimable(final_report, claimable_refs):
             return None, "finish action uses non-claimable evidence refs"
+        if _has_unsynthesized_detail_listing(final_report):
+            return None, "finish action requires synthesized summaries"
         if missing_allowed_tool_evidence and not _reports_missing_tool_evidence(final_report, missing_allowed_tool_evidence):
             return None, "finish action requires missing evidence"
         if missing_allowed_tool_evidence and _has_recommendation_entries(final_report):
@@ -528,6 +532,11 @@ def _parse_model_action(
             claimable_refs=claimable_refs,
         ):
             return None, "finish action requires recommendations"
+        if requires_recommendations and not missing_allowed_tool_evidence:
+            if not _recommendations_are_supported_by_findings(final_report):
+                return None, "finish action requires recommendation finding support"
+            if requested_scope_refs and not _recommendations_cite_any(final_report, requested_scope_refs):
+                return None, "finish action requires requested-period recommendation evidence"
         return AgentAction(
             kind="finish",
             reason=reason or "model requested finish",
@@ -660,6 +669,82 @@ def _reports_missing_tool_evidence(final_report: dict[str, Any], missing_tools: 
             continue
         return False
     return True
+
+
+def _has_unsynthesized_detail_listing(final_report: dict[str, Any]) -> bool:
+    findings = final_report.get("findings")
+    if not isinstance(findings, list):
+        return False
+    for item in findings:
+        if not isinstance(item, dict):
+            continue
+        if _looks_like_key_value_listing(str(item.get("summary") or "")):
+            return True
+    return False
+
+
+def _looks_like_key_value_listing(text: str) -> bool:
+    normalized = " ".join(text.split())
+    if not normalized:
+        return False
+    pairs = 0
+    for token in normalized.replace("，", " ").replace(",", " ").replace("；", " ").split():
+        if "=" not in token:
+            continue
+        key, value = token.split("=", 1)
+        if key.strip() and value.strip():
+            pairs += 1
+    if pairs < 3:
+        return False
+    prefix = normalized.split(None, 1)[0].rstrip(".、")
+    if prefix.isdigit():
+        return True
+    return pairs >= 5
+
+
+def _recommendations_are_supported_by_findings(final_report: dict[str, Any]) -> bool:
+    finding_refs = _finding_ref_sets(final_report)
+    recommendations = final_report.get("recommendations")
+    if not isinstance(recommendations, list) or not recommendations:
+        return False
+    for item in recommendations:
+        if not isinstance(item, dict):
+            return False
+        refs = set(_model_string_list(item.get("basis_refs")))
+        if not refs:
+            return False
+        if not any(refs.intersection(finding) for finding in finding_refs):
+            return False
+    return True
+
+
+def _finding_ref_sets(final_report: dict[str, Any]) -> list[set[str]]:
+    findings = final_report.get("findings")
+    if not isinstance(findings, list):
+        return []
+    refs: list[set[str]] = []
+    for item in findings:
+        if not isinstance(item, dict):
+            continue
+        item_refs = {ref for ref in _model_string_list(item.get("evidence_refs")) if ref}
+        if item_refs:
+            refs.append(item_refs)
+    return refs
+
+
+def _recommendations_cite_any(final_report: dict[str, Any], refs: list[str]) -> bool:
+    required = {ref for ref in refs if ref}
+    if not required:
+        return True
+    recommendations = final_report.get("recommendations")
+    if not isinstance(recommendations, list):
+        return False
+    for item in recommendations:
+        if not isinstance(item, dict):
+            continue
+        if required.intersection(_model_string_list(item.get("basis_refs"))):
+            return True
+    return False
 
 
 def _non_empty_string(value: Any) -> bool:
