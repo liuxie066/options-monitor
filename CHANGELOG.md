@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.370 - 2026-07-10
+
+### Removed
+- Removed the dedicated `monthly_option_review` Copilot scene and its June option-review eval fixtures so local Copilot keeps only generic diagnostics, income attribution, and current exposure lanes.
+
 ## 1.2.369 - 2026-07-10
 
 ### Added
