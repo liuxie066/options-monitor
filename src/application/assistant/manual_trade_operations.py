@@ -8,7 +8,7 @@ from domain.domain.symbol_identity import canonical_symbol
 from src.application.agent_tool_config import load_runtime_config, repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_response, mask_path
 from src.application.assistant.contracts import AssistantRequest, PerceptionResult
-from src.application.assistant.manual_trade_parser import build_manual_trade_draft
+from src.application.assistant.manual_trade_parser import build_manual_expiry_drafts, build_manual_trade_draft
 from src.application.assistant.operation_lifecycle import (
     build_cancelled_operation_response,
     build_previewed_operation_response,
@@ -195,8 +195,7 @@ def handle_manual_trade_operation(
         return _preview_and_save(payload, request=request, command_id=command_id, store=store, ttl_seconds=policy.confirm_ttl_seconds)
     if intent.intent_name == "manual_expiry":
         config_path, cfg = _load_runtime_config_for_request(request)
-        draft = build_manual_trade_draft(
-            "manual_expiry",
+        drafts = build_manual_expiry_drafts(
             raw_text=_manual_trade_raw_text(intent, request),
             accounts=_accounts_from_runtime_config(cfg),
             config_key=request.config_key,
@@ -205,22 +204,40 @@ def handle_manual_trade_operation(
             repo_base=repo_base(),
             allow_opend_refresh=False,
         )
-        payload = _build_operation_payload(
-            "manual_expiry",
-            _manual_expiry_args(
-                _with_model_trade_fields(
-                    "manual_expiry",
-                    draft["arguments"],
-                    intent.arguments,
-                    runtime_config=cfg,
-                    diagnostics=draft["diagnostics"],
-                )
-            ),
+        model_args = intent.arguments if len(drafts) == 1 else {}
+        payloads = [
+            _build_operation_payload(
+                "manual_expiry",
+                _manual_expiry_args(
+                    _with_model_trade_fields(
+                        "manual_expiry",
+                        draft["arguments"],
+                        model_args,
+                        runtime_config=cfg,
+                        diagnostics=draft["diagnostics"],
+                    )
+                ),
+                request=request,
+                config_path=config_path,
+                diagnostics=draft["diagnostics"],
+            )
+            for draft in drafts
+        ]
+        if len(payloads) == 1:
+            return _preview_and_save(
+                payloads[0],
+                request=request,
+                command_id=command_id,
+                store=store,
+                ttl_seconds=policy.confirm_ttl_seconds,
+            )
+        return _preview_and_save_expiry_batch(
+            payloads,
             request=request,
-            config_path=config_path,
-            diagnostics=draft["diagnostics"],
+            command_id=command_id,
+            store=store,
+            ttl_seconds=policy.confirm_ttl_seconds,
         )
-        return _preview_and_save(payload, request=request, command_id=command_id, store=store, ttl_seconds=policy.confirm_ttl_seconds)
     if intent.intent_name == "manual_trade_confirm":
         return _confirm_operation(operation_id=_optional_text(intent.arguments.get("operation_id")), request=request, store=store)
     if intent.intent_name == "manual_trade_cancel":
@@ -243,12 +260,39 @@ def _preview_and_save(
     store: InboundOperationStore,
     ttl_seconds: int,
 ) -> dict[str, Any]:
+    payload, preview = _prepare_operation_preview(payload)
+    return _save_prepared_preview(
+        payload,
+        preview,
+        request=request,
+        operation_id=command_id,
+        command_id=command_id,
+        store=store,
+        ttl_seconds=ttl_seconds,
+    )
+
+
+def _prepare_operation_preview(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     preview = _preview_operation(payload)
     payload = _payload_with_preview_locked_values(payload, preview)
     preview = _preview_operation(payload)
+    return payload, preview
+
+
+def _save_prepared_preview(
+    payload: dict[str, Any],
+    preview: dict[str, Any],
+    *,
+    request: AssistantRequest,
+    operation_id: str,
+    command_id: str,
+    store: InboundOperationStore,
+    ttl_seconds: int,
+) -> dict[str, Any]:
     return build_previewed_operation_response(
         tool_name="inbound.manual_trade",
-        operation_id=command_id,
+        operation_id=operation_id,
+        command_id=command_id,
         request=request,
         store=store,
         payload=payload,
@@ -256,11 +300,50 @@ def _preview_and_save(
         ttl_seconds=ttl_seconds,
         response_text=lambda operation: render_manual_trade_response(
             "previewed",
-            command_id,
+            operation_id,
             payload,
             preview=preview,
             expires_at=str(operation.get("expires_at") or ""),
         ),
+    )
+
+
+def _preview_and_save_expiry_batch(
+    payloads: list[dict[str, Any]],
+    *,
+    request: AssistantRequest,
+    command_id: str,
+    store: InboundOperationStore,
+    ttl_seconds: int,
+) -> dict[str, Any]:
+    prepared = [_prepare_operation_preview(payload) for payload in payloads]
+    operations: list[dict[str, Any]] = []
+    for index, (payload, preview) in enumerate(prepared, start=1):
+        operation_id = f"{command_id}:{index}"
+        response = _save_prepared_preview(
+            payload,
+            preview,
+            request=request,
+            operation_id=operation_id,
+            command_id=command_id,
+            store=store,
+            ttl_seconds=ttl_seconds,
+        )
+        operations.append(dict(response.get("data") or {}))
+    operation_ids = [str(item["operation_id"]) for item in operations]
+    return build_response(
+        tool_name="inbound.manual_trade",
+        ok=True,
+        data={
+            "command_id": command_id,
+            "operation_ids": operation_ids,
+            "operation_type": "manual_expiry",
+            "status": "previewed",
+            "preview_count": len(operations),
+            "operations": operations,
+            "response_text": render_manual_expiry_batch_response(operations),
+        },
+        meta={"audit_db": mask_path(store.path)},
     )
 
 
@@ -801,6 +884,30 @@ def _manual_expiry_args(args: dict[str, Any]) -> dict[str, Any]:
         "event_time_ms": _optional_positive_int(args.get("event_time_ms") or args.get("as_of_ms"), "event_time_ms"),
         "close_reason": str(args.get("close_reason") or "expired_unassigned"),
     }
+
+
+def render_manual_expiry_batch_response(operations: list[dict[str, Any]]) -> str:
+    lines = [f"交易记录预览：到期失效（{len(operations)} 笔）", "以下每笔独立确认，当前均未写入账本。"]
+    for index, operation in enumerate(operations, start=1):
+        payload = operation.get("payload") if isinstance(operation.get("payload"), dict) else {}
+        args = payload.get("arguments") if isinstance(payload.get("arguments"), dict) else {}
+        option_type = str(args.get("option_type") or "").lower()
+        option_suffix = "P" if option_type == "put" else "C" if option_type == "call" else option_type
+        strike = args.get("strike")
+        strike_text = f"{float(strike):g}" if isinstance(strike, (int, float)) else str(strike or "-")
+        operation_id = str(operation.get("operation_id") or "")
+        lines.extend(
+            [
+                "",
+                f"{index}. {args.get('account') or '-'} | {args.get('symbol') or '-'} "
+                f"{args.get('expiration_ymd') or '-'} {strike_text}{option_suffix} | "
+                f"{args.get('position_side') or '-'} {args.get('contracts_to_close') or '-'}张",
+                f"   确认：/confirm trade {operation_id}",
+                f"   取消：/cancel trade {operation_id}",
+            ]
+        )
+    lines.extend(["", "请按 operation_id 逐笔确认；不会一次写入全部合约。"])
+    return "\n".join(lines)
 
 
 def render_manual_trade_response(

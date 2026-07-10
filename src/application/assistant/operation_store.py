@@ -681,6 +681,8 @@ def _operation_summary_text(operation_type: str, operation: dict[str, Any]) -> s
         return _manual_open_summary(args)
     if operation_type == "manual_close":
         return _manual_close_summary(args)
+    if operation_type == "manual_expiry":
+        return _manual_expiry_summary(args)
     if operation_type.startswith("symbol_"):
         return _symbol_operation_summary(operation_type, args, operation)
     if operation_type == "upgrade_now":
@@ -720,6 +722,18 @@ def _manual_close_summary(args: dict[str, Any]) -> str:
         if part
     )
     return f"{base} close {args.get('contracts_to_close') or '-'}张 @ {args.get('close_price') if args.get('close_price') is not None else '-'}"
+
+
+def _manual_expiry_summary(args: dict[str, Any]) -> str:
+    return " ".join(
+        (
+            str(args.get("account") or "-"),
+            str(args.get("symbol") or "-"),
+            _option_contract_text(args),
+            str(args.get("position_side") or "-"),
+            f"{args.get('contracts_to_close') or '-'}张",
+        )
+    )
 
 
 def _option_contract_text(args: dict[str, Any]) -> str:

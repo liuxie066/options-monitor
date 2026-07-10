@@ -143,6 +143,7 @@ def build_previewed_operation_response(
     *,
     tool_name: str,
     operation_id: str,
+    command_id: str | None = None,
     request: AssistantRequest,
     store: InboundOperationStore,
     payload: dict[str, Any],
@@ -153,7 +154,7 @@ def build_previewed_operation_response(
     payload_hash = hash_operation_payload(payload)
     operation = store.save_preview(
         operation_id=operation_id,
-        command_id=operation_id,
+        command_id=command_id or operation_id,
         channel=request.channel,
         sender_id=request.sender_id,
         conversation_id=request.conversation_id,
