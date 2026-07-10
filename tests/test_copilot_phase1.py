@@ -123,6 +123,10 @@ def test_channel_environment_prepares_monthly_income_attribution() -> None:
     assert prepared.input["month"] == "2026-07"
     assert prepared.decision_trace["requested_capabilities"] == ["monthly_income_attribution"]
     assert prepared.decision_trace["scope_sources"]["month"] == "message.month"
+    manifest = build_scene_manifest(prepared, "run_test")
+    assert manifest.limits["max_model_turns"] == 16
+    assert manifest.limits["max_tool_calls"] == 3
+    assert manifest.limits["timeout_seconds"] == 0
 
 
 def test_monthly_option_review_is_not_a_dedicated_copilot_capability() -> None:
@@ -165,8 +169,12 @@ def test_local_runtime_question_runs_service_host_agent_loop(monkeypatch) -> Non
     assert result.user_response.startswith("结论")
 
 
-def test_model_decider_falls_back_to_default_tool_collection_on_model_error() -> None:
+def test_model_decider_collects_required_tools_before_calling_model() -> None:
+    called = False
+
     def broken_model(_request: dict) -> dict:
+        nonlocal called
+        called = True
         raise RuntimeError("model unavailable")
 
     manifest = SceneManifest(
@@ -183,7 +191,107 @@ def test_model_decider_falls_back_to_default_tool_collection_on_model_error() ->
 
     assert action.kind == "tool"
     assert action.tool_name == "runtime_status"
+    assert action.error_code is None
+    assert called is False
+
+
+def test_model_decider_degrades_after_required_tool_evidence_is_collected() -> None:
+    def broken_model(_request: dict) -> dict:
+        raise RuntimeError("model unavailable")
+
+    manifest = SceneManifest(
+        run_id="run_test",
+        scene_name="operations_diagnostics",
+        execution_environment="local",
+        messages=[{"role": "user", "content": "运行健康度怎么样"}],
+        allowed_tools=["runtime_status"],
+        limits={"max_model_turns": 16, "max_tool_calls": 1, "timeout_seconds": 0},
+        output_schema={"type": "AnswerReport"},
+    )
+
+    action = ModelActionDecider(broken_model)(
+        AgentState(
+            manifest=manifest,
+            observations=[
+                {
+                    "ref": "obs_1",
+                    "tool_name": "runtime_status",
+                    "ok": True,
+                    "evidence_ok": True,
+                    "claimable": True,
+                }
+            ],
+            attempted_tools=["runtime_status"],
+            tool_calls=1,
+        )
+    )
+
+    assert action.kind == "finish"
     assert action.error_code == "MODEL_ERROR"
+
+
+def test_monthly_income_model_error_still_collects_all_required_evidence(monkeypatch) -> None:
+    from src.application.copilot import tools as copilot_tools
+
+    calls: list[str] = []
+
+    def broken_model(_request: dict) -> dict:
+        raise RuntimeError("model unavailable")
+
+    def fake_call(tool_name: str, payload: dict, *, allowed_tools: tuple[str, ...]) -> dict:
+        assert tool_name in allowed_tools
+        calls.append(tool_name)
+        if tool_name == "analysis_catalog":
+            return {
+                "tool_name": tool_name,
+                "ok": True,
+                "data": {
+                    "view_count": 4,
+                    "view_names": [
+                        "account_monthly_performance",
+                        "account_monthly_income_components",
+                        "monthly_income_summary",
+                        "symbol_income_attribution",
+                    ],
+                    "sql_rules": {"writes_allowed": False, "allowed_statements": ["SELECT"]},
+                },
+            }
+        if tool_name == "analysis_query":
+            return {
+                "tool_name": tool_name,
+                "ok": True,
+                "data": {
+                    "row_count": 1,
+                    "views_used": ["monthly_income_summary"],
+                    "rows": [{"month": "2026-07", "currency": "CNY", "net_income": 4680}],
+                },
+            }
+        if tool_name == "monthly_income_report":
+            return {
+                "tool_name": tool_name,
+                "ok": True,
+                "data": {
+                    "summary": [{"month": "2026-07", "currency": "CNY", "net_income": 4680}],
+                    "premium_rows": [{"account": "lx", "symbol": "NVDA", "premium": 1200}],
+                    "realized_rows": [{"account": "lx", "symbol": "NVDA", "realized": 199}],
+                },
+            }
+        raise AssertionError(tool_name)
+
+    monkeypatch.setattr(copilot_tools, "call_read_tool", fake_call)
+    prepared = prepare_contract(_request("7月收益", environment="channel"), reference_year=2026)
+    assert not isinstance(prepared, AppResult)
+
+    result = run_contract(prepared, decide_next_action=ModelActionDecider(broken_model))
+
+    assert calls == ["analysis_catalog", "analysis_query", "monthly_income_report"]
+    assert result.status == "insufficient_evidence"
+    assert result.answer_report is not None
+    assert "model_synthesis_unavailable" in result.answer_report.missing_data
+    assert not any(
+        event.type == "budget_exhausted" and event.payload.get("limit") == "timeout_seconds"
+        for event in result.events
+    )
 
 
 def test_result_admission_rejects_external_action_claim() -> None:
@@ -333,7 +441,8 @@ def test_cli_copilot_run_assistant_config_uses_model_synthesis(monkeypatch, tmp_
     )
 
     assert tool_calls == ["runtime_status"]
-    assert len(model_requests) == 2
+    assert len(model_requests) == 1
+    assert model_requests[0]["attempted_tools"] == ["runtime_status"]
     assert payload["status"] == "answered"
     assert payload["ok"] is True
     assert "本地模型已基于 runtime_status" in payload["user_response"]

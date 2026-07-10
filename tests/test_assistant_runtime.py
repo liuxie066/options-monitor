@@ -267,7 +267,9 @@ def test_assistant_turn_channel_copilot_runs_operations_diagnostics_with_model_c
     assert copilot["decision_trace"]["selected_scene"] == "operations_diagnostics"
     assert copilot["decision_trace"]["selection_environment"] == "channel"
     assert tool_calls == ["runtime_status", "close_advice_read"]
-    assert len(model_requests) >= 2
+    assert len(model_requests) == 1
+    assert model_requests[0]["attempted_tools"] == ["runtime_status", "close_advice_read"]
+    assert model_requests[0]["finish_conditions"]["unattempted_tools_without_evidence"] == []
     assert "结论：最近 close advice 没有通知" in result.response_text
 
     audit = collect_recent_audit(audit_db=str(tmp_path / "assistant_audit.db"), channel="test", sender_id="u_runtime")
@@ -460,7 +462,13 @@ def test_assistant_turn_channel_copilot_runs_monthly_income_with_model_config(
     assert [name for name, _payload in tool_calls] == ["analysis_catalog", "analysis_query", "monthly_income_report"]
     assert tool_calls[1][1]["month"] == "2026-07"
     assert tool_calls[2][1]["month"] == "2026-07"
-    assert len(model_requests) >= 3
+    assert len(model_requests) == 1
+    assert model_requests[0]["attempted_tools"] == [
+        "analysis_catalog",
+        "analysis_query",
+        "monthly_income_report",
+    ]
+    assert model_requests[0]["finish_conditions"]["unattempted_tools_without_evidence"] == []
     assert "结论：7月收益主要来自权利金收入" in result.response_text
 
     audit = collect_recent_audit(audit_db=str(tmp_path / "assistant_audit.db"), channel="test", sender_id="u_runtime")

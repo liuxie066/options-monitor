@@ -23,6 +23,8 @@ class ModelActionDecider:
     _model_disabled: bool = field(default=False, init=False, repr=False)
 
     def __call__(self, state: AgentState) -> AgentAction:
+        if _unattempted_tools_without_evidence(state):
+            return default_action_decider(state)
         if self._model_disabled:
             return default_action_decider(state)
 
