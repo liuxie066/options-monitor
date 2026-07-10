@@ -30,6 +30,7 @@ from domain.domain.ledger.position_fields import (
 from domain.domain.symbol_identity import symbol_market
 from domain.domain.trade_contract_identity import canonical_contract_symbol
 from src.application.ledger.errors import LedgerPreflightError
+from src.application.ledger.lifecycle import persist_expire_close_events
 from src.application.ledger.lot_resolver import LotCloseResolutionError, resolve_explicit_close_target
 from src.application.ledger.repository import (
     require_option_positions_event_write_repo,
@@ -654,35 +655,47 @@ def _stock_evidence_matches_lifecycle_lot(
     return abs(price - strike) <= tolerance
 
 
-def _lifecycle_auto_close_blocker(
+def _lifecycle_auto_close_case(repo: Any, fields: dict[str, Any]) -> dict[str, Any] | None:
+    list_cases = getattr(repo, "list_trade_lifecycle_cases", None)
+    if not callable(list_cases):
+        return None
+    try:
+        for case in list_cases():
+            if not isinstance(case, dict):
+                continue
+            status = str(case.get("status") or "").strip().lower()
+            if status not in {"pending", "waiting_settlement_evidence", "needs_review"}:
+                continue
+            if _same_lifecycle_contract(fields, case):
+                return dict(case)
+    except Exception:
+        return None
+    return None
+
+
+def _conflicting_lifecycle_case(repo: Any, fields: dict[str, Any]) -> dict[str, Any] | None:
+    list_cases = getattr(repo, "list_trade_lifecycle_cases", None)
+    if not callable(list_cases):
+        return None
+    try:
+        for case in list_cases():
+            if not isinstance(case, dict):
+                continue
+            if str(case.get("status") or "").strip().lower() != "conflict":
+                continue
+            if _same_lifecycle_contract(fields, case):
+                return dict(case)
+    except Exception:
+        return None
+    return None
+
+
+def _matching_lifecycle_stock_evidence(
     repo: Any,
     *,
-    record_id: str,
     fields: dict[str, Any],
     contracts_to_close: int,
 ) -> dict[str, Any] | None:
-    list_cases = getattr(repo, "list_trade_lifecycle_cases", None)
-    if callable(list_cases):
-        try:
-            for case in list_cases():
-                if not isinstance(case, dict):
-                    continue
-                status = str(case.get("status") or "").strip().lower()
-                if status not in {"pending", "waiting_settlement_evidence", "needs_review", "conflict"}:
-                    continue
-                if _same_lifecycle_contract(fields, case):
-                    return {
-                        "skip_reason": "lifecycle_assignment_pending",
-                        "reason": (
-                            "assignment/exercise lifecycle evidence is pending; "
-                            f"case_id={case.get('case_id') or '-'} status={status}"
-                        ),
-                        "case_id": case.get("case_id"),
-                        "status": status,
-                    }
-        except Exception:
-            return None
-
     list_evidence = getattr(repo, "list_trade_lifecycle_evidence", None)
     if callable(list_evidence):
         try:
@@ -698,17 +711,116 @@ def _lifecycle_auto_close_blocker(
                     evidence,
                     contracts_to_close=int(contracts_to_close),
                 ):
-                    return {
-                        "skip_reason": "lifecycle_stock_settlement_evidence_seen",
-                        "reason": (
-                            "stock settlement evidence may indicate assignment/exercise; "
-                            f"evidence_id={evidence.get('evidence_id') or '-'}"
-                        ),
-                        "evidence_id": evidence.get("evidence_id"),
-                    }
+                    return dict(evidence)
         except Exception:
             return None
     return None
+
+
+def _first_lifecycle_option_evidence(repo: Any, case_id: Any) -> dict[str, Any] | None:
+    case_key = str(case_id or "").strip()
+    if not case_key:
+        return None
+    list_evidence = getattr(repo, "list_trade_lifecycle_evidence", None)
+    if not callable(list_evidence):
+        return None
+    try:
+        for evidence in list_evidence(case_id=case_key):
+            if not isinstance(evidence, dict):
+                continue
+            if str(evidence.get("evidence_type") or "") == "option_zero_price_close":
+                return dict(evidence)
+    except Exception:
+        return None
+    return None
+
+
+def _lifecycle_auto_close_blocker(
+    repo: Any,
+    *,
+    fields: dict[str, Any],
+    contracts_to_close: int,
+) -> dict[str, Any] | None:
+    stock_evidence = _matching_lifecycle_stock_evidence(
+        repo,
+        fields=fields,
+        contracts_to_close=contracts_to_close,
+    )
+    if stock_evidence is not None:
+        return {
+            "skip_reason": "lifecycle_stock_settlement_evidence_seen",
+            "reason": (
+                "stock settlement evidence may indicate assignment/exercise; "
+                f"evidence_id={stock_evidence.get('evidence_id') or '-'}"
+            ),
+            "evidence_id": stock_evidence.get("evidence_id"),
+        }
+    conflict = _conflicting_lifecycle_case(repo, fields)
+    if conflict is not None:
+        status = str(conflict.get("status") or "").strip().lower()
+        return {
+            "skip_reason": "lifecycle_assignment_pending",
+            "reason": (
+                "assignment/exercise lifecycle evidence is pending; "
+                f"case_id={conflict.get('case_id') or '-'} status={status}"
+            ),
+            "case_id": conflict.get("case_id"),
+            "status": status,
+        }
+    case = _lifecycle_auto_close_case(repo, fields)
+    if case is not None and _first_lifecycle_option_evidence(repo, case.get("case_id")) is None:
+        return {
+            "skip_reason": "lifecycle_assignment_pending",
+            "reason": (
+                "assignment/exercise lifecycle evidence is pending but option zero-price evidence is missing; "
+                f"case_id={case.get('case_id') or '-'}"
+            ),
+            "case_id": case.get("case_id"),
+            "status": case.get("status"),
+            "evidence_missing": True,
+        }
+    return None
+
+
+def _mark_lifecycle_expire_close_written(
+    repo: Any,
+    *,
+    case: dict[str, Any],
+    target_lot_ids: list[str],
+) -> None:
+    upsert_case = getattr(repo, "upsert_trade_lifecycle_case", None)
+    if not callable(upsert_case):
+        return
+    updated = dict(case)
+    updated["status"] = "ledger_written"
+    updated["decision_type"] = "expire_close"
+    updated["target_lot_ids"] = list(target_lot_ids)
+    upsert_case(updated)
+
+
+def _persist_lifecycle_auto_expire_close_event(
+    repo: Any,
+    *,
+    case: dict[str, Any],
+    option_evidence: dict[str, Any],
+    close_target_resolution: Any,
+    contracts_to_close: int,
+    event_time_ms: int,
+) -> LedgerWriteResult:
+    evidence_id = str(option_evidence.get("evidence_id") or "").strip()
+    writes = persist_expire_close_events(
+        repo,
+        close_target_resolution=close_target_resolution,
+        contracts_to_close=int(contracts_to_close),
+        event_time_ms=int(event_time_ms),
+        case_id=str(case.get("case_id") or ""),
+        evidence_ids=[evidence_id] if evidence_id else [],
+        close_reason="expired_unassigned",
+    )
+    target_lot_ids = [str(write.operation.record_id) for write in writes if write.operation.record_id]
+    _mark_lifecycle_expire_close_written(repo, case=case, target_lot_ids=target_lot_ids)
+    result = writes[-1].operation.result if writes else None
+    return result if isinstance(result, LedgerWriteResult) else LedgerWriteResult()
 
 
 def _ledger_preflight_error_payload(exc: Exception) -> dict[str, Any]:
@@ -795,7 +907,6 @@ def auto_close_expired_positions(
                 continue
             lifecycle_blocker = _lifecycle_auto_close_blocker(
                 repo,
-                record_id=record_id,
                 fields=fields,
                 contracts_to_close=contracts_to_close,
             )
@@ -829,17 +940,39 @@ def auto_close_expired_positions(
             )
             decision = decision.with_ledger_preflight(ledger_preflight)
             decisions[index] = decision
-            result = persist_expire_auto_close_event(
-                repo,
-                record_id=record_id,
-                fields=close_target_resolution.single_candidate.raw_fields,
-                contracts_to_close=contracts_to_close,
-                close_reason="expired",
-                as_of_ms=int(ledger_preflight["event_time_ms"]),
-                exp_source=str(decision.effective_exp_source or ""),
-                grace_days=grace_days,
-                close_target_resolution=close_target_resolution.to_dict(),
-            )
+            lifecycle_case = _lifecycle_auto_close_case(repo, fields)
+            if lifecycle_case is not None:
+                option_evidence = _first_lifecycle_option_evidence(repo, lifecycle_case.get("case_id"))
+                if option_evidence is None:
+                    decisions[index] = replace(
+                        decision.with_skip(
+                            reason="lifecycle case has no option zero-price evidence",
+                            skip_reason="lifecycle_option_evidence_missing",
+                            contracts_open=contracts_to_close,
+                        ),
+                        details={**decision.details, "lifecycle_case_id": lifecycle_case.get("case_id")},
+                    )
+                    continue
+                result = _persist_lifecycle_auto_expire_close_event(
+                    repo,
+                    case=lifecycle_case,
+                    option_evidence=option_evidence,
+                    close_target_resolution=close_target_resolution,
+                    contracts_to_close=contracts_to_close,
+                    event_time_ms=int(ledger_preflight["event_time_ms"]),
+                )
+            else:
+                result = persist_expire_auto_close_event(
+                    repo,
+                    record_id=record_id,
+                    fields=close_target_resolution.single_candidate.raw_fields,
+                    contracts_to_close=contracts_to_close,
+                    close_reason="expired",
+                    as_of_ms=int(ledger_preflight["event_time_ms"]),
+                    exp_source=str(decision.effective_exp_source or ""),
+                    grace_days=grace_days,
+                    close_target_resolution=close_target_resolution.to_dict(),
+                )
             updated_fields = repo.get_record_fields(record_id)
             if effective_contracts_open(updated_fields) > 0 or normalize_status(updated_fields.get("status")) != "close":
                 errors.append(f"{record_id} {decision.position_id}: auto-close event did not close target lot")
