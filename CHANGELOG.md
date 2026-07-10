@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 1.2.366 - 2026-07-10
+
+### Added
+- Added the OM Copilot v2 Service + Host + Agent runtime, local harness, model boundary, trace store, and Phase 1/2 answer-quality fixtures.
+
+### Changed
+- Reset Assistant free-form handling to a deterministic command core while moving new free-form Copilot behavior into `src/application/copilot/`.
+- Removed obsolete Assistant planner/evidence/context modules and stale architecture documents that no longer describe the active runtime.
+
+### Fixed
+- Kept Copilot model requests inside the allowed prompt boundary and removed stale answer-guard wording from the assistant trace manifest.
+
 ## 1.2.365 - 2026-07-10
 
 ### Fixed
