@@ -568,7 +568,7 @@ time, but the contracts must already leave room for Dayu-style governance.
 | Session | `session_key` exists in `host_policy`; local CLI uses one ephemeral session | in-memory or local record only |
 | Run lifecycle | run id, terminal status, failure class, result | one synchronous local run |
 | Events | append-only `AppEvent` stream with model/tool/budget/result events | in-memory local event log; JSONL persistence is later |
-| Timeout/cancel | timeout and cancellation intent are represented in `host_policy` | per-run timeout and Engine pre-action cancel check |
+| Timeout/cancel | timeout and cancellation intent are represented in `host_policy` | cancellation pre-action check; core run timeout is optional and may be disabled while model/tool calls keep their own timeouts |
 | Concurrency | lane fields exist but may default to single local lane | no channel concurrency yet |
 | Resume | explicit non-goal for Phase 1 runtime, but contract has `resumable` | disabled unless a later phase enables session memory |
 | Reply outbox | not used by local CLI | deferred until channel rollout |
@@ -930,10 +930,12 @@ Host prepares SceneManifest and Host-supplied tool interfaces
 The Phase 1 default action decider is deterministic and selects from manifest
 tools only. It is an explicit replacement point for a later model-backed
 decision boundary; it must not import the old assistant runtime, tool registry,
-or OM business strategy logic. Once Host supplies a custom or model-backed
-decider, Engine must not fall back to the default decider for budget or finish
-decisions; any remaining-work check is mechanical over the `SceneManifest` and
-Agent state.
+or OM business strategy logic. Model-backed deciders may still use the same
+deterministic manifest-tool collection before the first model synthesis call.
+That is the Dayu-style scene execution contract, not a provider fallback or
+generic chat path. Engine itself must not silently replace a supplied decider;
+any remaining-work check is mechanical over the `SceneManifest` and Agent
+state.
 
 Phase 1 also defines a `ModelActionDecider` protocol wrapper. It accepts an
 injected structured-action model callable, builds a compact action request from
@@ -1726,10 +1728,16 @@ Agent/action loop requirements:
 
 - action turns must be bounded and at least cover the projected manifest tools;
 - tool calls must be bounded and at least cover the projected manifest tools;
+- default scene policy gives Agent enough iterations for a channel run
+  (`max_model_turns=16`) and keeps core run timeout disabled unless a specific
+  caller sets one; model-call and tool-call timeouts stay at their owning
+  boundaries;
 - no provider fallback chat;
 - default local execution uses deterministic tool selection unless the local
   harness can construct a model action decider from explicit JSON or an explicit
   assistant config path;
+- model-backed local/channel execution collects required manifest tool evidence
+  deterministically before asking the model to synthesize an answer;
 - model-backed action deciders, when introduced, get at most one
   structured-output repair attempt;
 - model provider failures may fall back to deterministic read-only tool

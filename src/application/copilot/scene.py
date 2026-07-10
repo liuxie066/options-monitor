@@ -22,6 +22,9 @@ CURRENT_EXPOSURE_ANALYSIS_VIEWS = (
     "expiration_risk_buckets",
 )
 
+DEFAULT_AGENT_MAX_ITERATIONS = 16
+DEFAULT_CORE_TIMEOUT_SECONDS = 0
+
 SCENE_CATALOG: tuple[SceneDefinition, ...] = (
     SceneDefinition(
         name="operations_diagnostics",
@@ -368,9 +371,9 @@ def policy_for_scene(scene: SceneDefinition) -> dict[str, Any]:
         "allow_mock_observations": bool(scene.allow_mock_observations),
         "requires_answer_synthesis": bool(scene.requires_answer_synthesis),
         "requires_recommendations": bool(scene.requires_recommendations),
-        "max_model_turns": max(3, len(scene.allowed_tools) + 1),
-        "max_tool_calls": max(3, len(scene.allowed_tools)),
-        "timeout_seconds": 30,
+        "max_model_turns": DEFAULT_AGENT_MAX_ITERATIONS,
+        "max_tool_calls": max(1, len(scene.allowed_tools)),
+        "timeout_seconds": DEFAULT_CORE_TIMEOUT_SECONDS,
     }
 
 
@@ -388,9 +391,9 @@ def build_scene_manifest(contract: ExecutionContract, run_id: str) -> SceneManif
         ],
         allowed_tools=allowed_tools,
         limits={
-            "max_model_turns": int(policy.get("max_model_turns") or 3),
-            "max_tool_calls": int(policy.get("max_tool_calls") or 3),
-            "timeout_seconds": int(policy.get("timeout_seconds") or 30),
+            "max_model_turns": _policy_int(policy, "max_model_turns", DEFAULT_AGENT_MAX_ITERATIONS),
+            "max_tool_calls": _policy_int(policy, "max_tool_calls", max(1, len(allowed_tools))),
+            "timeout_seconds": _policy_int(policy, "timeout_seconds", DEFAULT_CORE_TIMEOUT_SECONDS),
         },
         output_schema=_scene_output_schema(scene),
         task_guidance={
@@ -402,6 +405,17 @@ def build_scene_manifest(contract: ExecutionContract, run_id: str) -> SceneManif
         },
         tool_static_payloads=_tool_static_payloads(scene, allowed_tools),
     )
+
+
+def _policy_int(policy: dict[str, Any], key: str, default: int) -> int:
+    raw = policy.get(key)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
 
 def _scene_by_name(scene_name: str) -> SceneDefinition | None:
     return next((item for item in SCENE_CATALOG if item.name == scene_name), None)
